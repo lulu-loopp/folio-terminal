@@ -52425,12 +52425,10 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             // list is a fact about the machine and any of them may be showing a
             // picker drawn from it.
             AppEvent::HandoffAnswered => self.answer_handoffs(),
-            // **Every window takes what the clipboard answered it** (`clipboard_lane`): each
-            // request is held by the window that asked, so a window with nothing owed costs a
-            // look at two empty slots.
-            AppEvent::ClipboardAnswered => {
-                self.for_each_window(|runtime| runtime.settle_clipboard(Instant::now()))
-            }
+            // **Every window takes what the clipboard answered it, in admission order across
+            // the windows** (`clipboard_lane`): each request is held by the window that asked,
+            // so a window with nothing owed costs a look at two empty slots.
+            AppEvent::ClipboardAnswered => self.answer_clipboard(Instant::now()),
             //
             // An answer older than the list on screen is dropped inside
             // `adopt_scanned_families` (ticket 50) and reads here as "nothing

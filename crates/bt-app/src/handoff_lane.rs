@@ -368,23 +368,26 @@ impl<D> Pending<D> {
 
 /// **Every window's answers, in press order across the windows** — what each window `K` took from
 /// its own [`Pending`], merged by the id the ledger minted, which is the order the presses were
-/// made in and the one worker ran them in. The application answers them in this order, each in
-/// the window that asked.
+/// made in and the one worker ran them in (the seam's [`lane::in_admission_order`]). The
+/// application answers them in this order, each in the window that asked.
 pub(crate) fn in_press_order<K, D>(
     per_window: impl IntoIterator<Item = (K, Vec<(HandoffId, Answer, D)>)>,
 ) -> Vec<(K, HandoffId, Answer, D)>
 where
     K: Copy,
 {
-    let mut all: Vec<(K, HandoffId, Answer, D)> = per_window
-        .into_iter()
-        .flat_map(|(window, answers)| {
-            answers
-                .into_iter()
-                .map(move |(id, answer, duty)| (window, id, answer, duty))
-        })
-        .collect();
-    all.sort_by_key(|(_, id, _, _)| *id);
+    let mut keyed = Vec::new();
+    for (window, answers) in per_window {
+        let mut owed = Vec::new();
+        for (id, answer, duty) in answers {
+            owed.push((id, (answer, duty)));
+        }
+        keyed.push((window, owed));
+    }
+    let mut all = Vec::new();
+    for (window, id, (answer, duty)) in lane::in_admission_order(keyed) {
+        all.push((window, id, answer, duty));
+    }
     all
 }
 
@@ -591,8 +594,8 @@ pub(crate) fn files_program_refused_notice() -> &'static str {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex, mpsc};
-    use std::time::{Duration, Instant};
 
     use super::*;
     use crate::lane::Gate;
@@ -662,8 +665,9 @@ mod tests {
     /// the windows' answers are taken the way `FolioApp::answer_handoffs` takes them, and come
     /// out in press order — not one window's and then the other's.
     ///
-    /// MUTATION: drop the sort in [`in_press_order`] (each window's answers then follow the
-    /// other's), and the answers come out by window.
+    /// MUTATION: drop the sort in [`lane::in_admission_order`], which [`in_press_order`] merges
+    /// through (each window's answers then follow the other's), and the answers come out by
+    /// window.
     #[test]
     fn handoffs_complete_in_press_order() {
         let gate = Arc::new(Gate::default());
@@ -1282,10 +1286,13 @@ mod tests {
     /// The window thread may not block on the lane. With the door held, the ledger fills to
     /// [`BOUND`] — the one running and [`CAPACITY`] behind it — and every press past that is
     /// refused at once, with [`LANE_FULL`] as its terminal; each admitted press is its own request
-    /// with its own id, so nothing is merged to make room.
+    /// with its own id, so nothing is merged to make room. "At once" is the flood coming back while
+    /// the door is still held, awaited within the lane suite's patience — not a measured time.
     ///
     /// MUTATION: build the lane's ledger with no bound (`None` for `Some(BOUND)` in
-    /// `HandoffLane::start`), and no press is refused.
+    /// `HandoffLane::start`), and no press is refused. Or make the lane's queue a rendezvous
+    /// (`mpsc::sync_channel(0)` for `mpsc::channel()` in `HandoffLane::start`), and the second
+    /// press waits for the held worker.
     #[test]
     fn a_flood_of_presses_is_refused_rather_than_waited_on() {
         let gate = Arc::new(Mutex::new(()));
@@ -1298,14 +1305,27 @@ mod tests {
                 Ok(())
             },
         );
-        let started = Instant::now();
-        let presses: Vec<Result<HandoffRequest, Declined>> = (0..BOUND + 3)
-            .map(|at| lane.submit(window(), Handoff::Open(PathBuf::from(format!("{at}")))))
-            .collect();
-        assert!(
-            started.elapsed() < Duration::from_secs(2),
-            "the press never waits"
-        );
+        // The flood runs on its own thread so that this one can ask whether it came back while the
+        // door was still held. The door is let go and the verdict asserted before the flood is
+        // joined, so a press that waits for the worker is red here and never a hang: a failed
+        // verdict leaves the thread detached, and a flood that came back has only returned left.
+        let lane = Arc::new(lane);
+        let returned = Arc::new(AtomicBool::new(false));
+        let flood = {
+            let lane = Arc::clone(&lane);
+            let returned = Arc::clone(&returned);
+            std::thread::spawn(move || {
+                let presses: Vec<Result<HandoffRequest, Declined>> = (0..BOUND + 3)
+                    .map(|at| lane.submit(window(), Handoff::Open(PathBuf::from(format!("{at}")))))
+                    .collect();
+                returned.store(true, Ordering::SeqCst);
+                presses
+            })
+        };
+        let while_held = lane::within_patience(|| returned.load(Ordering::SeqCst));
+        drop(held);
+        assert!(while_held, "the press never waits");
+        let presses = flood.join().expect("the flood's thread");
         let ids: Vec<HandoffId> = presses
             .iter()
             .filter_map(|press| press.as_ref().ok().map(lane::Request::id))
@@ -1323,7 +1343,6 @@ mod tests {
             vec![&Declined::LaneFull; 3],
             "the presses past the bound are refused at the door"
         );
-        drop(held);
     }
 
     /// RED (S-5; D-71) — **the hand-off lane refuses synchronously above its bound**, and its

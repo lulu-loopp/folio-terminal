@@ -1710,10 +1710,10 @@ impl<B: Backend> Runtime<'_, B> {
         self.apply_folder_pick_result()?;
         self.apply_image_pick_result()?;
         self.apply_save_pick_result()?;
-        // **What the clipboard lane answered this window, and the pastes it no longer wants**
-        // (`clipboard_lane`): before the drain, so a paste that has landed goes to its shell ahead
-        // of the turn's output; and on every turn, so a lost wake loses no answer and a paste's
-        // deadline is kept on the turn it falls in.
+        // **The pastes the window no longer wants, and what its holds can spend**
+        // (`clipboard_lane`): on every turn, so a paste's deadline is kept on the turn it falls
+        // in. The lane's answers are taken on its wake's turn, for every window at once
+        // (`FolioApp::answer_clipboard`), never here.
         hang_watch::during(hang_watch::Station::ClipboardRead, || {
             self.settle_clipboard(now)
         })?;
