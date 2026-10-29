@@ -1989,8 +1989,13 @@ fn a_tabs_shells_and_its_terminal_leaves_are_one_set() {
 /// and the second assertion becomes the first.
 #[test]
 fn every_pane_the_present_painted_is_square_with_its_shell() {
-    let claim =
-        |tab: &TabState| fleet_claim(tab.sessions.values().map(|leaf| leaf.session_facts(false)));
+    let claim = |tab: &TabState| {
+        fleet_claim(
+            tab.sessions
+                .values()
+                .map(|leaf| leaf.session.session_facts(false)),
+        )
+    };
     let mut tab = cross_tab(1, &["LEFT", "RIGHT"]);
     for (_, leaf) in tab.leaves_mut() {
         leaf.output_revision = output_revision(leaf.output_revision, true, false);
@@ -2042,33 +2047,33 @@ fn every_pane_the_present_painted_is_square_with_its_shell() {
 #[test]
 fn a_view_reports_seen_and_unread_never_goes_back() {
     let mut leaf = leaf_saying("构建完成 build ok — 下一步 next\r\n");
-    leaf.output_revision = output_revision(leaf.output_revision, true, false);
-    leaf.output_revision = output_revision(leaf.output_revision, true, false);
-    assert_eq!(leaf.output_revision, 2, "two drains heard output");
+    leaf.session.output_revision = output_revision(leaf.session.output_revision, true, false);
+    leaf.session.output_revision = output_revision(leaf.session.output_revision, true, false);
+    assert_eq!(leaf.session.output_revision, 2, "two drains heard output");
     assert!(
-        leaf.session_facts(false).has_unseen_output(),
+        leaf.session.session_facts(false).has_unseen_output(),
         "nothing has been seen yet"
     );
 
-    leaf.mark_seen(2);
-    assert!(!leaf.session_facts(false).has_unseen_output());
+    leaf.session.mark_seen(2);
+    assert!(!leaf.session.session_facts(false).has_unseen_output());
 
     // A stale report: a view that last painted the first drain's frame.
-    leaf.mark_seen(1);
+    leaf.session.mark_seen(1);
     assert_eq!(
-        leaf.last_seen_revision, 2,
+        leaf.session.last_seen_revision, 2,
         "a stale report is not a step back"
     );
     assert!(
-        !leaf.session_facts(false).has_unseen_output(),
+        !leaf.session.session_facts(false).has_unseen_output(),
         "output already seen stays seen"
     );
 
     // And the next thing the shell says still counts.
-    leaf.output_revision = output_revision(leaf.output_revision, true, false);
-    assert!(leaf.session_facts(false).has_unseen_output());
-    mark_leaf_painted(&mut leaf);
-    assert_eq!(leaf.last_seen_revision, 3);
+    leaf.session.output_revision = output_revision(leaf.session.output_revision, true, false);
+    assert!(leaf.session.session_facts(false).has_unseen_output());
+    mark_leaf_painted(&mut leaf.session);
+    assert_eq!(leaf.session.last_seen_revision, 3);
 }
 
 /// RED (T-FRESH-FACTS) — **each thing a window's settings ear hears wakes the loop for its own

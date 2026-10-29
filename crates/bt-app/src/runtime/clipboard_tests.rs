@@ -130,8 +130,9 @@ fn the_edit_menus_clipboard_verbs_land_where_the_keystrokes_do() {
     let mut folio = HeadlessFolio::with_tabs("headless-menu-term", vec![tab_holding(leaf)], 0);
     let select = |folio: &mut HeadlessFolio| {
         let mut runtime = folio.runtime();
-        let leaf = runtime.focused_mut().expect("the shell");
+        let leaf = runtime.focused_pane_mut().expect("the shell");
         let frame = leaf
+            .session
             .session
             .viewport_frame(&mut leaf.view.projection)
             .expect("a frame");
@@ -142,7 +143,9 @@ fn the_edit_menus_clipboard_verbs_land_where_the_keystrokes_do() {
                 .unwrap(),
             end: frame.anchor_at(0, 6, bt_doc::Bias::After).unwrap().unwrap(),
         };
-        leaf.session.set_view_selection(Some(selection.clone()));
+        leaf.session
+            .session
+            .set_view_selection(Some(selection.clone()));
         leaf.view.projection.set_selection(Some(selection));
     };
     select(&mut folio);
@@ -497,9 +500,9 @@ fn recording_lane(folio: &mut HeadlessFolio, executor: &crate::lane::Executor) -
 
 /// A shell whose pseudoconsole is still being born: what is offered to it is held, in order, in
 /// its birth's queue — which is what the test reads back as what the shell was sent.
-fn a_shell_being_born() -> crate::ShellSession {
+fn a_shell_being_born() -> crate::TerminalPane {
     let mut leaf = leaf_saying("SHELL 外壳");
-    leaf.life.begin_birth(crate::PaneBirth {
+    leaf.session.life.begin_birth(crate::PaneBirth {
         seed: crate::LeafSeed {
             profile: crate::profiles::DEFAULT_IDENTITY.to_owned(),
             ..crate::LeafSeed::default()
@@ -529,7 +532,14 @@ fn sent_to_the_shell(folio: &mut HeadlessFolio, tab: usize) -> String {
         .values()
         .next()
         .expect("the shell");
-    let typed = leaf.life.birth().expect("in birth").typed.borrow().clone();
+    let typed = leaf
+        .session
+        .life
+        .birth()
+        .expect("in birth")
+        .typed
+        .borrow()
+        .clone();
     String::from_utf8(typed).expect("UTF-8 was sent")
 }
 
@@ -1071,8 +1081,9 @@ fn the_copy_writes_refusal_is_said_once() {
     );
     {
         let mut runtime = folio.runtime();
-        let leaf = runtime.focused_mut().expect("the shell");
+        let leaf = runtime.focused_pane_mut().expect("the shell");
         let frame = leaf
+            .session
             .session
             .viewport_frame(&mut leaf.view.projection)
             .expect("a frame");
@@ -1083,7 +1094,9 @@ fn the_copy_writes_refusal_is_said_once() {
                 .unwrap(),
             end: frame.anchor_at(0, 6, bt_doc::Bias::After).unwrap().unwrap(),
         };
-        leaf.session.set_view_selection(Some(selection.clone()));
+        leaf.session
+            .session
+            .set_view_selection(Some(selection.clone()));
         leaf.view.projection.set_selection(Some(selection));
     }
     folio.window.window.clipboard.refuse_opens(5);

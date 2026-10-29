@@ -2,6 +2,7 @@
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
 use crate::TermViewPorts;
+use crate::TerminalPane;
 use crate::input::Keystroke;
 use crate::runtime::frame::dispatch_tab_decoration_tasks;
 use crate::runtime::panes::rail_overlay_layer;
@@ -113,7 +114,7 @@ impl<B: Backend> Runtime<'_, B> {
     pub(crate) fn search_hit_line_text(&self, hit: usize) -> Option<String> {
         let seat = self.window.search.seat()?;
         let line = self.window.search.hits().get(hit)?.line;
-        let leaf = self.sessions.get(&seat)?;
+        let TerminalPane { session: leaf, .. } = self.sessions.get(&seat)?;
         match line {
             bt_viewport::SearchLine::History(id) => {
                 let frozen = leaf.session.transcript().frozen();
@@ -912,7 +913,9 @@ impl<B: Backend> Runtime<'_, B> {
             let Some(index) = self.window.tabs.iter().position(|tab| tab.id == leaf.tab) else {
                 continue;
             };
-            let Some(session) = self.window.tabs[index].sessions.get_mut(&leaf.seat) else {
+            let Some(TerminalPane { session, .. }) =
+                self.window.tabs[index].sessions.get_mut(&leaf.seat)
+            else {
                 continue;
             };
             let Some((answer_changed, follow_up)) =
@@ -1360,7 +1363,9 @@ impl<B: Backend> Runtime<'_, B> {
         let Some(index) = self.live_paste_target(target) else {
             return;
         };
-        if let Some(leaf) = self.window.tabs[index].sessions.get_mut(&target.seat) {
+        if let Some(TerminalPane { session: leaf, .. }) =
+            self.window.tabs[index].sessions.get_mut(&target.seat)
+        {
             leaf.session
                 .port_math_toggle_presentation(Some(presentation));
         }
@@ -2162,6 +2167,7 @@ impl<B: Backend> Runtime<'_, B> {
         let index = self.live_paste_target(target)?;
         let leaf = self.window.tabs[index].sessions.get(&target.seat)?;
         leaf.session
+            .session
             .math_toggle_faces(&leaf.view.projection, anchor)
     }
 
@@ -2182,6 +2188,7 @@ impl<B: Backend> Runtime<'_, B> {
         let index = self.live_paste_target(target)?;
         let leaf = self.window.tabs[index].sessions.get(&target.seat)?;
         leaf.session
+            .session
             .math_toggle_heights(&leaf.view.projection, anchor)
     }
 
@@ -2269,7 +2276,9 @@ impl<B: Backend> Runtime<'_, B> {
             // presented at any height is the artifact one, so this direction switches at the near
             // end and is then presented at the rows' own height on this very frame — which is the
             // same identity the other direction gets at the far end, read from the other side.
-            let Some(leaf) = self.window.tabs[index].sessions.get_mut(&seat) else {
+            let Some(TerminalPane { session: leaf, .. }) =
+                self.window.tabs[index].sessions.get_mut(&seat)
+            else {
                 return Ok(());
             };
             if !leaf.session.port_toggle_math_source(anchor) {
@@ -2302,7 +2311,9 @@ impl<B: Backend> Runtime<'_, B> {
         let seat = target.seat;
         // `math_hit()` answered, so a shell drew the block that was clicked, and it drew it in this
         // seat's pane rather than in whichever pane holds the keyboard (§7.1.6h).
-        let Some(leaf) = self.window.tabs[index].sessions.get_mut(&seat) else {
+        let Some(TerminalPane { session: leaf, .. }) =
+            self.window.tabs[index].sessions.get_mut(&seat)
+        else {
             return Ok(());
         };
         if leaf.session.port_toggle_math_source(anchor) {
@@ -2336,7 +2347,9 @@ impl<B: Backend> Runtime<'_, B> {
                     face_milli: flight.face_milli(now, motion),
                     source_width_cells: flight.source_width_cells(),
                 });
-        let Some(leaf) = self.window.tabs[index].sessions.get_mut(&seat) else {
+        let Some(TerminalPane { session: leaf, .. }) =
+            self.window.tabs[index].sessions.get_mut(&seat)
+        else {
             return Ok(());
         };
         // **A turn that would draw the frame already on the glass asks for nothing.** `turn` runs
@@ -2380,13 +2393,17 @@ impl<B: Backend> Runtime<'_, B> {
         if self.math_toggle_heights(target, flight.anchor()).is_none() {
             // The owner still exists but its block vanished or changed. Release only that
             // owner's presentation; equal anchors in other panes do not belong to this flight.
-            if let Some(leaf) = self.window.tabs[index].sessions.get_mut(&seat) {
+            if let Some(TerminalPane { session: leaf, .. }) =
+                self.window.tabs[index].sessions.get_mut(&seat)
+            {
                 leaf.session.port_math_toggle_presentation(None);
             }
             return Ok(());
         }
         let switched = flight.switch_owed();
-        if let Some(leaf) = self.window.tabs[index].sessions.get_mut(&seat) {
+        if let Some(TerminalPane { session: leaf, .. }) =
+            self.window.tabs[index].sessions.get_mut(&seat)
+        {
             leaf.session.port_math_toggle_presentation(None);
             if switched {
                 leaf.session.port_toggle_math_source(flight.anchor());
@@ -2619,9 +2636,9 @@ impl<B: Backend> Runtime<'_, B> {
         let font_rev = self.window.renderer.font_revision();
         let line_wrapping = self.app.settings_store.loaded().line_wrapping;
         for tab in self.window.tabs.iter_mut() {
-            for (_, leaf) in tab.leaves_mut() {
-                leaf.propose_layout(window_layout_key(
-                    nonzero_u32(leaf.grid.columns.get()),
+            for (_, leaf) in tab.panes_mut() {
+                leaf.session.propose_layout(window_layout_key(
+                    nonzero_u32(leaf.session.grid.columns.get()),
                     dpi_milli,
                     // **The size is each pane's own too** (ticket 37): the face this leaf was
                     // last applied at, so a pane at 150 % keys its bands at its own em.
@@ -2954,7 +2971,7 @@ fn leaf_session_mut(
     tabs[index]
         .sessions
         .get_mut(&seat)
-        .map(|leaf| &mut leaf.session)
+        .map(|leaf| &mut leaf.session.session)
 }
 
 /// **Take one window's answers out of the batch, and leave every other window's

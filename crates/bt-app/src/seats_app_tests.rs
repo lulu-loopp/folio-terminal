@@ -414,6 +414,7 @@ fn a_wheel_reads_the_hovered_panes_own_shell_and_not_the_keyboards() {
     tab.sessions
         .get_mut(&hovered)
         .expect("the hovered seat holds a session")
+        .session
         .grid
         .rows = std::num::NonZeroU16::new(17).expect("a nonzero row count");
 
@@ -484,6 +485,7 @@ fn the_breath_stands_down_on_the_alternate_screen() {
             .get_mut(&seat)
             .expect("the tab's one shell")
             .session
+            .session
             .feed(bytes)
             .expect("the fixture's bytes parse");
     };
@@ -532,7 +534,7 @@ fn the_breath_stands_down_on_the_alternate_screen() {
     );
     feed(&mut tab, b"\x1b]9;4;0\x07\x07");
     assert!(
-        tab.sessions[&seat].session.status().bell_latched(),
+        tab.sessions[&seat].session.session.status().bell_latched(),
         "and a bell rung from the alternate screen is still a bell"
     );
 
@@ -567,16 +569,24 @@ fn a_command_on_the_primary_screen_breathes_from_c_to_d() {
         .get_mut(&seat)
         .expect("the tab's one shell")
         .session
+        .session
         .feed(b"\x1b]133;A\x07PS> \x1b]133;B\x07cargo build\x1b]133;C\x07")
         .expect("the fixture's bytes parse");
     assert!(tab.fleet_working());
-    assert!(!tab.sessions[&seat].session.status().alternate_screen);
+    assert!(
+        !tab.sessions[&seat]
+            .session
+            .session
+            .status()
+            .alternate_screen
+    );
 
     // Output for a while — the breath is the command's, not the bytes'.
     for _ in 0..8 {
         tab.sessions
             .get_mut(&seat)
             .expect("the tab's one shell")
+            .session
             .session
             .feed(b"   Compiling bt-app v0.0.0\r\n")
             .expect("the fixture's bytes parse");
@@ -592,6 +602,7 @@ fn a_command_on_the_primary_screen_breathes_from_c_to_d() {
     tab.sessions
         .get_mut(&seat)
         .expect("the tab's one shell")
+        .session
         .session
         .feed(b"\x1b]133;D;0\x07")
         .expect("the fixture's bytes parse");
@@ -747,7 +758,7 @@ fn a_waiting_tabs_pulse_is_one_reading_of_one_clock() {
 }
 
 fn ticket_at(tab: &TabState, seat: SeatId) -> Option<u64> {
-    tab.sessions[&seat].attention.ledger.ticket()
+    tab.sessions[&seat].session.attention.ledger.ticket()
 }
 
 /// PIN (`attention` plan §4 B2, user ruling 2026-08-25) — **a bell takes no place, anywhere.**
@@ -782,7 +793,11 @@ fn a_bell_takes_no_place_wherever_it_rings() {
             assert_eq!(next.issued(), 0, "and spent no serial");
             let watched = tab_is_active && window_is_focused;
             assert_eq!(
-                tabs[0].sessions[&seat].session.status().bell_latched(),
+                tabs[0].sessions[&seat]
+                    .session
+                    .session
+                    .status()
+                    .bell_latched(),
                 !watched,
                 "the latch is spent by a look and by nothing else"
             );
@@ -4135,6 +4150,7 @@ fn a_pane_carries_its_profile_by_id_so_a_table_move_cannot_move_it() {
         tab.sessions
             .get_mut(&seat)
             .expect("the fixture files a session under every terminal")
+            .session
             .launch
             .profile = id.to_owned();
     }
@@ -4172,6 +4188,7 @@ fn a_pane_carries_its_profile_by_id_so_a_table_move_cannot_move_it() {
     tab.sessions
         .get_mut(&left)
         .expect("the left pane")
+        .session
         .launch
         .profile = "a-row-nobody-has".to_owned();
     assert!(!profiles::has_id("a-row-nobody-has"));

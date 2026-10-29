@@ -3,6 +3,7 @@
 
 use crate::PtyTarget;
 use crate::TermViewPorts;
+use crate::TerminalPane;
 use crate::runtime::files::{files_row_activation, press_files_node};
 use crate::runtime::panes::risen_frame;
 use crate::runtime::preview::crumb_segments;
@@ -211,7 +212,9 @@ impl<B: Backend> Runtime<'_, B> {
                     kind,
                     tab.sessions
                         .get(&seat)
-                        .map(|leaf| profiles::identity_mark(&leaf.launch.profile)),
+                        .map(|TerminalPane { session: leaf, .. }| {
+                            profiles::identity_mark(&leaf.launch.profile)
+                        }),
                     palette,
                 );
                 // The dragged seat's own name, by id — the ghost and the
@@ -1568,10 +1571,10 @@ impl<B: Backend> Runtime<'_, B> {
         }
         self.pending_keyboard_at = Some(Instant::now());
         let active = self.window.active_tab;
-        let pty = self.window.tabs[active]
-            .sessions
-            .get(&seat)
-            .map_or(PtyTarget::Nowhere, |leaf| leaf.person_input_target());
+        let pty = self.window.tabs[active].sessions.get(&seat).map_or(
+            PtyTarget::Nowhere,
+            |TerminalPane { session: leaf, .. }| leaf.person_input_target(),
+        );
         write_pty_input(pty, bytes, context)
     }
 
@@ -5228,7 +5231,7 @@ impl<B: Backend> Runtime<'_, B> {
             && let Some(modes) = self
                 .sessions
                 .get(&hit_seat)
-                .map(|leaf| leaf.session.terminal_modes())
+                .map(|TerminalPane { session: leaf, .. }| leaf.session.terminal_modes())
             && right_press_raises_terminal_menu(modes, self.window.modifiers)
         {
             return self.open_term_menu_at(hit_seat, position);
@@ -5951,7 +5954,7 @@ impl<B: Backend> Runtime<'_, B> {
         };
         let (cell_subpixels, target_rows) = (
             target_leaf.view.projection.cell_height_subpixels().get() as f64,
-            target_leaf.grid.rows.get() as f64,
+            target_leaf.session.grid.rows.get() as f64,
         );
         // Scrolling moves the content the flyout was anchored to; the transient peek dissolves.
         self.dismiss_peek()?;
@@ -5968,7 +5971,7 @@ impl<B: Backend> Runtime<'_, B> {
                 tab: self.window.tabs[self.window.active_tab].id,
                 seat: target_seat,
             };
-            let rung = self.leaf(target_seat).view.text_scale;
+            let rung = self.pane(target_seat).view.text_scale;
             let (step, count) = TextSizeAim::notch(
                 text_size_carry,
                 &mut self.window.text_size_aim,
@@ -6045,7 +6048,7 @@ impl<B: Backend> Runtime<'_, B> {
             if self.window.tabs[active]
                 .sessions
                 .get_mut(&target_seat)
-                .is_some_and(|leaf| {
+                .is_some_and(|TerminalPane { session: leaf, .. }| {
                     leaf.session
                         .port_scroll_math_block(&math_hit.anchor, horizontal, vertical)
                 })
@@ -6061,7 +6064,7 @@ impl<B: Backend> Runtime<'_, B> {
             }
         }
         let modes = self.leaf_terminal_modes(target_seat);
-        let target_is_scrolled = self.leaf(target_seat).view.projection.is_scrolled();
+        let target_is_scrolled = self.pane(target_seat).view.projection.is_scrolled();
         let route = wheel_route(self.window.modifiers.shift_key(), modes, target_is_scrolled);
         // **The last word on this notch** (`BT_MOUSE_TRACE`, §7.60), written
         // above the four arms rather than inside them: what a reader is asking
@@ -6177,7 +6180,7 @@ impl<B: Backend> Runtime<'_, B> {
                 self.window.pixel_wheel_remainder += position.y;
                 // The addressed pane's own row (ticket 37): a pane at 150 % owes a line of
                 // arrows for every 150 %-tall row of travel, not for every window-sized one.
-                let cell_px = self.leaf(seat).view.metrics.cell_height_px as f64;
+                let cell_px = self.pane(seat).view.metrics.cell_height_px as f64;
                 drain_whole_units(&mut self.window.pixel_wheel_remainder, cell_px) as i32
             }
         }
@@ -6215,7 +6218,7 @@ impl<B: Backend> Runtime<'_, B> {
             }
             MouseScrollDelta::PixelDelta(position) => {
                 self.window.pixel_wheel_remainder += position.y;
-                let cell_px = self.leaf(seat).view.metrics.cell_height_px as f64;
+                let cell_px = self.pane(seat).view.metrics.cell_height_px as f64;
                 drain_whole_units(&mut self.window.pixel_wheel_remainder, cell_px) as i32
             }
         }
@@ -6244,7 +6247,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// small reports, and rounding each of them alone throws the whole detent
     /// away a sixth at a time.
     fn wheel_columns(&mut self, seat: SeatId, delta: MouseScrollDelta) -> Option<i32> {
-        let axis = self.leaf(seat).view.projection.horizontal();
+        let axis = self.pane(seat).view.projection.horizontal();
         // A report the platform put on the x axis says what it means, and
         // [`wheel_points_sideways`] is where this window decides that — the
         // sentence about a hand not being straight now governs both arms of the
@@ -6256,7 +6259,7 @@ impl<B: Backend> Runtime<'_, B> {
         // to `Shift` and to nothing else; on the primary screen they are a plain
         // notch away and the key is free to name the other axis.
         let shift_only_rows = self.leaf_terminal_modes(seat).alternate_screen
-            && self.leaf(seat).view.projection.has_displaced_rows();
+            && self.pane(seat).view.projection.has_displaced_rows();
         if wheel_axis(
             self.window.modifiers.shift_key(),
             sideways,
@@ -6267,7 +6270,7 @@ impl<B: Backend> Runtime<'_, B> {
             return None;
         }
         // The pane's own cell (ticket 37): a column is as wide as this pane draws it.
-        let metrics = self.leaf(seat).view.metrics;
+        let metrics = self.pane(seat).view.metrics;
         let cell_width = f64::from(metrics.cell_width_px).max(1.0);
         let travel = match delta {
             MouseScrollDelta::LineDelta(x, y) => {
@@ -6727,7 +6730,7 @@ impl<B: Backend> Runtime<'_, B> {
         else {
             return;
         };
-        if let Some(leaf) = self.sessions.get_mut(&seat) {
+        if let Some(TerminalPane { session: leaf, .. }) = self.sessions.get_mut(&seat) {
             leaf.session.ask_about_link_target(path);
         }
     }

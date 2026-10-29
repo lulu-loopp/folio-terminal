@@ -369,7 +369,7 @@ impl<B: Backend> Runtime<'_, B> {
         let panes = self
             .sessions
             .values()
-            .filter(|leaf| leaf.launch.profile == subject)
+            .filter(|crate::TerminalPane { session: leaf, .. }| leaf.launch.profile == subject)
             .count();
         let Some(removed) = profiles::delete(index) else {
             return Ok(());
@@ -983,7 +983,7 @@ impl<B: Backend> Runtime<'_, B> {
             .terminals()
             .iter()
             .filter_map(|seat| tab.sessions.get(seat))
-            .filter_map(|leaf: &ShellSession| leaf.folder(door).into_folder())
+            .filter_map(|pane: &crate::TerminalPane| pane.session.folder(door).into_folder())
             .map(|cwd| cwd.display().to_string())
             .collect()
     }
