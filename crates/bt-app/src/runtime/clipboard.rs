@@ -609,13 +609,17 @@ impl<B: Backend> Runtime<'_, B> {
         match answered {
             Answered::Copy { effect, ended } => self.answer_copy(effect, ended),
             Answered::Paste { ended } => {
-                let at = self
+                let Some(at) = self
                     .window
                     .clipboard
                     .pastes
                     .iter()
                     .position(|owed| owed.id == id)
-                    .expect("a paste the window took an answer for is owed until it is answered");
+                else {
+                    unreachable!(
+                        "a paste the window took an answer for is owed until it is answered"
+                    )
+                };
                 match self.window.clipboard.pastes[at].into {
                     PasteInto::Terminal(target) => {
                         self.window.clipboard.pastes[at].ended = Some(ended);
