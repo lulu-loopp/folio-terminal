@@ -299,6 +299,16 @@ winit = { version = "0.30.13", default-features = false, features = ["rwh_06"] }
 # the budgets it turns red are not ours to loosen. Re-measure before changing this line.
 [profile.test]
 opt-level = 1
+# **Line tables, not full debug info** (plan row 73, 2026-10-29; measured once, cold,
+# `cargo test -p bt-app --no-run`, `-j 6`, on the development machine): the PDBs of bt-app's
+# graph go from 3226 MiB to 1429 MiB (the harness's 905 -> 272 MiB, the bin's 671 -> 196 MiB),
+# the harness unit from 265 s to 226 s, the executables not at all. A panic report still
+# resolves every frame to its function, file and line, and
+# `tests::a_contained_panics_report_names_this_crates_frame_by_file_and_line` is what holds
+# that (bt-app-split §4.4a). The cost, accepted: the `target/debug/folio.exe` a gate leaves
+# behind is this profile's bin, so a debugger attached to it sees no locals or types; build
+# with `cargo build` (the dev profile, full debug info) to debug one.
+debug = "line-tables-only"
 
 # **The build people download.** Measured before it was written; the numbers are
 # in `docs/DESIGN.md` §12.4 and the short version is here, because a profile
