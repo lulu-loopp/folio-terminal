@@ -97,6 +97,10 @@ jobs:
           tap="$(brew --repository local/folio-audit)"
           mkdir -p "$tap/Casks"
           cp packaging/homebrew/folio.rb "$tap/Casks/folio.rb"
+          # Homebrew refuses to load a cask from a tap it has not been told to
+          # trust (seen 2026-10-29: "Refusing to load cask local/folio-audit/folio
+          # from untrusted tap"). The throwaway tap holds one file we just wrote.
+          brew trust local/folio-audit
           brew style --cask local/folio-audit/folio
           brew audit --cask --strict --online --new local/folio-audit/folio
           brew livecheck --cask local/folio-audit/folio
