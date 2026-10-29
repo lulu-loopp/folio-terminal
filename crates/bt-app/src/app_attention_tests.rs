@@ -78,6 +78,7 @@ fn a_waits_ten_minutes_are_armed_on_arrival_forgotten_on_its_clear_and_spent_whe
         .sessions
         .get_mut(&seat)
         .expect("the fixture's seat holds a shell")
+        .session
         .attention
         .capability
         .clone_from(&capability);
@@ -139,7 +140,7 @@ fn a_waits_ten_minutes_are_armed_on_arrival_forgotten_on_its_clear_and_spent_whe
         start + WAIT_TTL - Duration::from_secs(1),
     );
     assert_ne!(
-        tabs[0].sessions[&seat].attention.ledger.state(),
+        tabs[0].sessions[&seat].session.attention.ledger.state(),
         attention::State::Idle,
         "a second before the ten minutes are up, the pane is still asking"
     );
@@ -150,7 +151,7 @@ fn a_waits_ten_minutes_are_armed_on_arrival_forgotten_on_its_clear_and_spent_whe
         "a clock that ran out is spent, not repeated"
     );
     assert_eq!(
-        tabs[0].sessions[&seat].attention.ledger.state(),
+        tabs[0].sessions[&seat].session.attention.ledger.state(),
         attention::State::Idle,
         "and the wait it stood for is over"
     );
@@ -165,6 +166,7 @@ fn a_window_of_two_asking_panes() -> (Vec<TabState>, attention::Places) {
         .sessions
         .get_mut(&in_birth)
         .expect("the fixture's seat holds a pane")
+        .session
         .life
         .begin_birth(PaneBirth {
             seed: LeafSeed::default(),
@@ -273,7 +275,7 @@ fn every_road_that_ends_a_pane_emits_leaf_gone_once() {
         "(iii) the tab in flight is not ending"
     );
     assert_ne!(
-        tabs[1].sessions[&moved].attention.ledger.state(),
+        tabs[1].sessions[&moved].session.attention.ledger.state(),
         attention::State::Idle,
         "(iii) and still holds its request"
     );
@@ -302,6 +304,7 @@ fn every_road_that_ends_a_pane_emits_leaf_gone_once() {
         .sessions
         .get_mut(&seat)
         .expect("the placeholder's pane")
+        .session
         .life
         .land(Some(shell));
     request_attention(&mut placeholder, seat, "yes");
@@ -316,7 +319,7 @@ fn every_road_that_ends_a_pane_emits_leaf_gone_once() {
         "the placeholder's pane ends once"
     );
     assert!(
-        tabs[0].sessions[&seat].life.pty().is_none(),
+        tabs[0].sessions[&seat].session.life.pty().is_none(),
         "and its shell is retired"
     );
     drop(tabs);

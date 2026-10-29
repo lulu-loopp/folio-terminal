@@ -1642,7 +1642,7 @@ fn reopened_from_recent(
         account,
     )
     .expect("a pane with no shell behind it is born");
-    (leaf, place.working_directory)
+    (leaf.session, place.working_directory)
 }
 
 /// The reopened pane stands in the entry's folder for the files card, and its program was asked
@@ -1766,7 +1766,7 @@ fn the_files_card_opens_on_the_process_folder_or_says_the_folder_is_unknown() {
         answer: Ok(moved.clone()),
         asked: std::cell::Cell::new(0),
     };
-    let card = card_of(&silent.session, &door, &account);
+    let card = card_of(&silent.session.session, &door, &account);
     assert_eq!(card, FilesRoot::known(moved.display().to_string()));
     assert_eq!(door.asked.get(), 1, "the process is asked once");
     let state = seats::FilesLeafState {
@@ -1784,7 +1784,7 @@ fn the_files_card_opens_on_the_process_folder_or_says_the_folder_is_unknown() {
         answer: Err(bt_platform::process_folder::FolderRefusal::NoAccess),
         asked: std::cell::Cell::new(0),
     };
-    let card = card_of(&silent.session, &door, &account);
+    let card = card_of(&silent.session.session, &door, &account);
     assert_eq!(
         card,
         FilesRoot {
@@ -1819,7 +1819,7 @@ fn the_files_card_opens_on_the_process_folder_or_says_the_folder_is_unknown() {
         asked: std::cell::Cell::new(0),
     };
     assert_eq!(
-        card_of(&reported.session, &door, &account),
+        card_of(&reported.session.session, &door, &account),
         FilesRoot::known(host_path(r"D:\reported").display().to_string())
     );
     assert_eq!(door.asked.get(), 0, "a shell that reported is never read");

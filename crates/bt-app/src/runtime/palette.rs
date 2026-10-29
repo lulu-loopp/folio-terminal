@@ -1,6 +1,7 @@
 //! `palette` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
+use crate::TerminalPane;
 use crate::input::Keystroke;
 use crate::window_seam::prelude::*;
 use crate::{
@@ -512,7 +513,9 @@ impl<B: Backend> Runtime<'_, B> {
                 // it takes the pane's ring: the reader was still moved to a
                 // pane, and saying nothing at all after a keypress is the one
                 // answer this whole slice exists to stop giving.
-                let Some(leaf) = self.window.tabs[index].sessions.get(&seat) else {
+                let Some(TerminalPane { session: leaf, .. }) =
+                    self.window.tabs[index].sessions.get(&seat)
+                else {
                     return Ok(());
                 };
                 let running = leaf
@@ -600,7 +603,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// front of them.
     fn push_place_candidates(&self, into: &mut Vec<palette::Candidate>) {
         for tab in &self.window.tabs {
-            for (seat, leaf) in &tab.sessions {
+            for (seat, TerminalPane { session: leaf, .. }) in &tab.sessions {
                 let label = tab
                     .terminal_name(*seat)
                     .unwrap_or_else(|| tab.display_title());
@@ -645,7 +648,7 @@ impl<B: Backend> Runtime<'_, B> {
     fn push_command_candidates(&self, into: &mut Vec<palette::Candidate>) {
         let mut found: Vec<(Option<Instant>, palette::Candidate)> = Vec::new();
         for tab in &self.window.tabs {
-            for (seat, leaf) in &tab.sessions {
+            for (seat, TerminalPane { session: leaf, .. }) in &tab.sessions {
                 let pane = tab
                     .terminal_name(*seat)
                     .unwrap_or_else(|| tab.display_title());

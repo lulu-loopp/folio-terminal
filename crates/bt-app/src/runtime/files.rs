@@ -15,7 +15,7 @@ use crate::{
     TabClick, TabRename, files, float, git_panel, hang_watch, home_shortened_path, i18n, marks,
     palette_index, path_opens_as_a_page, preview, profiles, seats, settings, toast, webnav,
 };
-use crate::{FilesRoot, TabState, pane_folder};
+use crate::{FilesRoot, TabState, TerminalPane, pane_folder};
 use anyhow::Result;
 use bt_layout::{SeatId, SeatLayout};
 use std::collections::{BTreeMap, BTreeSet};
@@ -796,7 +796,9 @@ impl<B: Backend> Runtime<'_, B> {
         files_root_of(
             self.sessions
                 .get(&self.focused_leaf)
-                .map(|leaf| leaf.folder(&crate::pane_folder::SystemProcessFolders)),
+                .map(|TerminalPane { session: leaf, .. }| {
+                    leaf.folder(&crate::pane_folder::SystemProcessFolders)
+                }),
             &bt_pty::SystemShellEnvironment,
         )
     }

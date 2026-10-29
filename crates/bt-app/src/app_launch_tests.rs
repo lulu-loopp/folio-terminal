@@ -339,17 +339,17 @@ fn a_pane_born_in_a_named_folder_starts_its_next_shells_there_whatever_the_profi
     let born_in = PathBuf::from(r"D:\项目\clicked");
     let named = {
         let mut leaf = leaf_saying("no report from this shell");
-        leaf.launch.spawn_place = Some(born_in.clone());
-        leaf.launch.born_named = true;
+        leaf.session.launch.spawn_place = Some(born_in.clone());
+        leaf.session.launch.born_named = true;
         leaf
     };
     let carried = {
         let mut leaf = leaf_saying("no report from this shell either");
-        leaf.launch.spawn_place = Some(born_in.clone());
+        leaf.session.launch.spawn_place = Some(born_in.clone());
         leaf
     };
     let fixed = profiles::StartAt::Fixed(PathBuf::from(r"E:\固定"));
-    let restarted_in = |leaf: &ShellSession| {
+    let restarted_in = |leaf: &TerminalPane| {
         struct Nowhere;
         impl bt_pty::ShellEnvironment for Nowhere {
             fn var_os(&self, _: &str) -> Option<std::ffi::OsString> {
@@ -363,18 +363,22 @@ fn a_pane_born_in_a_named_folder_starts_its_next_shells_there_whatever_the_profi
             &fixed,
             &profiles::StartingDir::AccountHome,
             profiles::PathNamespace::Windows,
-            restart_seed(&leaf.launch.profile, leaf.seed_place_for_a_new_shell()).cwd,
+            restart_seed(
+                &leaf.session.launch.profile,
+                leaf.session.seed_place_for_a_new_shell(),
+            )
+            .cwd,
             &Nowhere,
         )
         .working_directory
     };
     assert_eq!(
-        named.seed_place_for_a_new_shell(),
+        named.session.seed_place_for_a_new_shell(),
         Some(profiles::SeedPlace::Named(born_in.clone()))
     );
     assert_eq!(restarted_in(&named), Some(born_in.clone()));
     assert_eq!(
-        carried.seed_place_for_a_new_shell(),
+        carried.session.seed_place_for_a_new_shell(),
         Some(profiles::SeedPlace::Carried(born_in))
     );
     assert_eq!(
@@ -390,12 +394,12 @@ fn a_pane_born_in_a_named_folder_starts_its_next_shells_there_whatever_the_profi
             "\u{1b}]7;file://localhost{}\u{7}",
             host_uri_path(r"D:\Developer\elsewhere")
         ));
-        leaf.launch.spawn_place = Some(PathBuf::from(r"D:\项目\clicked"));
-        leaf.launch.born_named = true;
+        leaf.session.launch.spawn_place = Some(PathBuf::from(r"D:\项目\clicked"));
+        leaf.session.launch.born_named = true;
         leaf
     };
     assert_eq!(
-        reported.place_for_a_new_tab_beside(),
+        reported.session.place_for_a_new_tab_beside(),
         Some(profiles::SeedPlace::Carried(host_path(
             r"D:\Developer\elsewhere"
         ))),
@@ -409,11 +413,15 @@ fn a_pane_that_never_reported_a_folder_is_started_again_where_it_was_born() {
 
     let silent = {
         let mut leaf = leaf_saying("no report from this shell");
-        leaf.launch.spawn_place = Some(born_in.clone());
+        leaf.session.launch.spawn_place = Some(born_in.clone());
         leaf
     };
     assert_eq!(
-        restart_seed(&silent.launch.profile, silent.seed_place_for_a_new_shell()).cwd,
+        restart_seed(
+            &silent.session.launch.profile,
+            silent.session.seed_place_for_a_new_shell()
+        )
+        .cwd,
         Some(profiles::SeedPlace::Carried(born_in.clone())),
         "the folder the pane was born in, not the profile's default"
     );
@@ -423,11 +431,11 @@ fn a_pane_that_never_reported_a_folder_is_started_again_where_it_was_born() {
             "\u{1b}]7;file://localhost{}\u{7}",
             host_uri_path(r"D:\Developer\folio-terminal")
         ));
-        leaf.launch.spawn_place = Some(born_in.clone());
+        leaf.session.launch.spawn_place = Some(born_in.clone());
         leaf
     };
     assert_eq!(
-        reported.place_for_a_new_shell(),
+        reported.session.place_for_a_new_shell(),
         Some(host_path(r"D:\Developer\folio-terminal")),
         "a report is the first rung and beats where the shell was born"
     );
@@ -436,10 +444,13 @@ fn a_pane_that_never_reported_a_folder_is_started_again_where_it_was_born() {
     // place equal to the home mark as the shell's home (round 2), pinned in `profiles::tests`.
     let at_home = {
         let mut leaf = leaf_saying("no report from this shell either");
-        leaf.launch.spawn_place = Some(PathBuf::from("~"));
+        leaf.session.launch.spawn_place = Some(PathBuf::from("~"));
         leaf
     };
-    assert_eq!(at_home.place_for_a_new_shell(), Some(PathBuf::from("~")));
+    assert_eq!(
+        at_home.session.place_for_a_new_shell(),
+        Some(PathBuf::from("~"))
+    );
 }
 
 /// RED (F-SWEEP-2-048, owner ruling 2026-10-05) — **`folio --with-environment .` opens its pane

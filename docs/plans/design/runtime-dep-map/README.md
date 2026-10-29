@@ -76,11 +76,12 @@ exact count of what it does see.
     `runtime/tabs.rs` (118), `runtime/floats.rs` (95), `runtime/keyboard.rs` (93),
     `runtime/windows.rs` (90) and `runtime/frame.rs` (81).
   - The `runtime/*` topics call each other along 372 edges (2,782 sites).
-- **doors.tsv**: 317 doors at O-5a (2026-10-27; 334 at O-1). 221 are on
-  `WindowRuntime`, 55 on `App`, 19 on `TabState`, 9 on `ShellSession`, 7 on
-  `LaunchFacts` and 6 on `TermView`. `PreviewBuffer`, `PreviewPane`,
-  `DocumentView` and `PictureView` have none: O-7 and O-8 put their writes inside
-  their own types.
+- **doors.tsv**: 317 doors at O-5a (2026-10-27; 334 at O-1) and at O-5b
+  (2026-10-28). 221 are on `WindowRuntime`, 55 on `App`, 19 on `TabState`, 9 on
+  `ShellSession`, 7 on `LaunchFacts` and 6 on `TermView`. `PreviewBuffer`,
+  `PreviewPane`, `DocumentView`, `PictureView` and `TerminalPane` have none: O-7
+  and O-8 put their writes inside their own types, and the pane's writes are its
+  own methods (O-5b).
 - **unclassified.tsv**: **275 items, 241 free functions and 34 `Runtime`
   methods**, still in `main.rs` (at K2 batch 24's head; 285, 241 and 44 before it,
   at plan row 59's head: K2 batch 23's 284 and row 66's `say_in_a_box_or_on_stderr`;
@@ -185,7 +186,8 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
    (O-5a, the contract's M8 rename): the two facts are `ShellSession.life` (O-4b folded `birth` into it) and
    `ShellSession.grid`, and `grid`'s other writer is `ShellSession::propose_size`, the session's own method in
    `main.rs`; the hold stands (G3, ruling E12: it closes only by a ruling that absorbs the release into
-   `ShellSession`).
+   `ShellSession`). Re-cited 2026-10-28 (O-5b): both facts are still the record's and keep these writers (the
+   pane's map value changes neither), so G3's seven rows stay held.
 
    **A fact with no census owner moves with all its writers to the first caller's module, never one writer alone**
    (ruled at batch 21). Moving one of its writers would leave the fact written from two modules with no owner to
@@ -536,7 +538,8 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
      both facts keep their writers in `runtime/panes.rs` and `runtime/terminal.rs`, so it stays held.
      `runtime/mouse.rs`'s `send_user_input` calls it at the root, a private method its descendant can call.
      Re-cited 2026-10-27 (O-5a): the second fact is `ShellSession.session` by the M8 rename; both facts keep their
-     writers, so it stays held (ruling E12).
+     writers, so it stays held (ruling E12). Re-cited 2026-10-28 (O-5b): it reaches both through the pane
+     (`TabState::shell_pane_mut`, ruling E4), and both facts keep their writers, so it stays held.
    - `strip_insert_slot`, `solve_seats`, `presentation_physical_size` and `pane_can_become_a_tab` (batch 16) — their
      `called_from` home is `runtime/tabs.rs` (tied with `main.rs` for the last), but `cli_tab_slot`,
      `create_tab_state` and `Runtime::create`, `Runtime::create`, and `plan_for` at the root call them in the
@@ -552,10 +555,15 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
      owner and would make `runtime/tabs.rs` a new writer of some: `pane_into_tab` of panes' (`focused_leaf`,
      `seats`, `seat_layout`, `seat_overflow`) and preview's (`preview_views`); `absorb_tab_sessions` of panes',
      tabs' (`pinned`) and preview's; `pane_into_new_tab` of files', git's and preview's. Held for a ruling (the
-     two-owners clause above).
+     two-owners clause above). Re-cited 2026-10-28 (O-5b, G5 of T-CONTRACT-M8): M8 changed only
+     `TabState.sessions`' value type, and the `TabState` facts these write keep their writers, so they stay held
+     for a tab-transfer ruling (E12), with `move_seat_content` and `forget_work_in_flight_for_seat` (O-5b
+     re-paths both, and each gains only a lend of `TerminalPane.session`, which has no census owner) and
+     `closing_this_pane_closes_the_tab` (its root caller is `pane_into_tab`).
    - `Runtime::toggle_pin` (batch 16) — tied `runtime/mouse.rs` / `runtime/tabs.rs`; it writes `TabState.pinned`,
      whose other writer, `absorb_tab_sessions`, is held at the root, so moving it would make that fact a new
-     two-module one (the census rule above). It moves with `absorb_tab_sessions`.
+     two-module one (the census rule above). It moves with `absorb_tab_sessions`. Re-cited 2026-10-28 (O-5b,
+     G15): unchanged; it waits for G5's ruling.
    - `Runtime::scroll_settings`, `Runtime::settings_mouse_input` and `Runtime::open_settings_on_row` (batch 17) —
      their `called_from` home is `runtime/mouse.rs`, but each writes `WindowRuntime.settings_scroll`, whose census
      owner is `main[settings]` and whose writers are the root, `runtime/keyboard.rs` and `runtime/profiles.rs`;
@@ -900,6 +908,20 @@ measured. "Sites" counts every use of the field (all kinds). The doors come from
     O-4b (ruling D4), and the eight membership items are `TabState.sessions`'
     writers, not new owners (the contract's §3.3 note of 2026-10-27). O-5b is
     `TerminalPane`.
+  - **O-5b done** 2026-10-28 (T-CONTRACT-M8, rulings E2–E7, E10, E14):
+    `TabState.sessions` holds `TerminalPane { session, view, successor }`, the
+    census's eleventh struct, so the map stays a hub. `ShellSession.view` and
+    `ShellSession.successor` are `TerminalPane.view` and `TerminalPane.successor`,
+    with the same writers (the successor's three moves are the pane's methods,
+    E5), and `TerminalPane.session` is a hub lent by 35 functions. The session
+    accessors keep their names and answer the session (E4); `TabState.sessions`'
+    two raw lends move from `focused_mut` and `leaves_mut` to `focused_pane_mut`
+    and `panes_mut`. `TermView.card_skip`'s one writer is
+    `TerminalPane::aim_card_skip` (E14; it was `aim_card_window`'s lend). The
+    census's unattributed reads stay 182 and its unknowns do not change. The K2
+    rows still held are the fifteen O-5a left (G2's `return_to_live_for_input`,
+    G3's seven, G5's six, G15's one), each re-cited above with its reason at
+    O-5b's head; none is released.
 
 ## The note's §1.2 lexical counts, measured
 

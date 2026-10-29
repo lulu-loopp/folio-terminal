@@ -11,43 +11,43 @@ use crate::test_support::leaf_saying;
 #[test]
 fn an_addressed_foreground_answer_stores_unknown_and_preserves_an_unlisted_local_name() {
     let mut leaf = leaf_saying("foreground answer");
-    let incarnation = leaf.incarnation;
+    let incarnation = leaf.session.incarnation;
     assert_eq!(
         foreground_program::apply_answer(
-            &mut leaf,
+            &mut leaf.session,
             incarnation,
             bt_platform::foreground_program::ForegroundProgram::Unknown,
         ),
         Some((false, false))
     );
     assert_eq!(
-        leaf.session.foreground_program(),
+        leaf.session.session.foreground_program(),
         &bt_detect::ForegroundProgram::Unknown
     );
 
     assert_eq!(
         foreground_program::apply_answer(
-            &mut leaf,
+            &mut leaf.session,
             incarnation,
             bt_platform::foreground_program::ForegroundProgram::Known("powershell".to_owned()),
         ),
         Some((true, false))
     );
     assert_eq!(
-        leaf.session.foreground_program(),
+        leaf.session.session.foreground_program(),
         &bt_detect::ForegroundProgram::known("powershell")
     );
 
     assert_eq!(
         foreground_program::apply_answer(
-            &mut leaf,
+            &mut leaf.session,
             incarnation + 1,
             bt_platform::foreground_program::ForegroundProgram::Unknown,
         ),
         None
     );
     assert_eq!(
-        leaf.session.foreground_program(),
+        leaf.session.session.foreground_program(),
         &bt_detect::ForegroundProgram::known("powershell")
     );
 }

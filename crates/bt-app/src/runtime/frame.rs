@@ -222,20 +222,20 @@ impl<B: Backend> Runtime<'_, B> {
             // `lines_measured` is exactly that number. Off unless the switch is set,
             // and the reading costs one `u64` load when it is not.
             let trace_perf = self.app.trace_perf;
-            let measurements_before = self.shell().view.projection.line_text_measurements();
+            let measurements_before = self.shell_pane().view.projection.line_text_measurements();
             // **Which road the projection took**, beside how many lines it measured
             // (T-MATH-MARKS-IN-SOURCE-FACE). A frame of a change of face measures no
             // lines at all either way — the cache answers for every one of them — so
             // `lines_measured` alone cannot tell a band moved where it stands from a
             // band that made the whole document be pushed through two trees again.
-            let rebuilds_before = self.shell().view.projection.rebuilds();
-            let bands_moved_before = self.shell().view.projection.bands_moved();
+            let rebuilds_before = self.shell_pane().view.projection.rebuilds();
+            let bands_moved_before = self.shell_pane().view.projection.bands_moved();
             let projected = {
                 // Bound once, to the focused leaf: `session` and `projection` are
                 // two fields of one shell, and reaching each through its own deref
                 // would be two borrows of the tab rather than one borrow of the
                 // leaf.
-                let leaf = self.window.tabs[active].shell_mut();
+                let leaf = self.window.tabs[active].shell_pane_mut();
                 let projection_started_at = trace_perf.then(Instant::now);
                 // The frame, and the paths it drew that nobody has answered for yet
                 // (§7.1.5j): `bt_compose::project` files those as the session's
@@ -243,7 +243,7 @@ impl<B: Backend> Runtime<'_, B> {
                 // every line and the session is what owns a worker. It schedules
                 // nothing: the hold below decides first.
                 let projected = bt_compose::project(bt_compose::Pane {
-                    session: &mut leaf.session,
+                    session: &mut leaf.session.session,
                     view: &mut leaf.view.projection,
                 })
                 .context("project terminal grid into viewport frame")?;
@@ -294,8 +294,13 @@ impl<B: Backend> Runtime<'_, B> {
                     crate::diagnostics::stderr_line(format!(
                         "BT_PERF_TRACE hold=presentation source={:?} review={} exact_source={}",
                         trigger.source,
-                        u8::from(self.shell().view.projection.review_hold()),
-                        u8::from(self.shell().view.projection.exact_source_reprint_hold()),
+                        u8::from(self.shell_pane().view.projection.review_hold()),
+                        u8::from(
+                            self.shell_pane()
+                                .view
+                                .projection
+                                .exact_source_reprint_hold()
+                        ),
                     ));
                 }
                 return Ok(false);
@@ -326,7 +331,7 @@ impl<B: Backend> Runtime<'_, B> {
                 columns: terminal_frame.columns.get(),
                 references: self.shell().session.frame_image_references(&terminal_frame),
             };
-            self.shell_mut().view.frame_image_references = scan;
+            self.shell_pane_mut().view.frame_image_references = scan;
             // The pointer's marks, but only if the pointer is standing in *this* pane. The link's
             // underline and the verified reference's solid underline both follow the pointer
             // immediately; only what a hover *reveals* — a tooltip there, a thumbnail here — waits out
@@ -1251,7 +1256,7 @@ impl<B: Backend> Runtime<'_, B> {
                     path_work_filed,
                     ..
                 } = bt_compose::project(bt_compose::Pane {
-                    session: &mut leaf.session,
+                    session: &mut leaf.session.session,
                     view: &mut leaf.view.projection,
                 })
                 .context("project an unfocused pane's grid into a viewport frame")?;
@@ -1260,7 +1265,7 @@ impl<B: Backend> Runtime<'_, B> {
                 // No hold is read here: a pane the user is not typing in holds nothing, and
                 // the hold is the focused leaf's, decided in `publish_frame_inner`.
                 owes_the_engine |= hang_watch::during(hang_watch::Station::DetectionPass, || {
-                    bt_compose::schedule(&mut leaf.session, &projected)
+                    bt_compose::schedule(&mut leaf.session.session, &projected)
                 }) != 0;
                 if hover_pane == Some(pane.seat) {
                     apply_hover_marks(
@@ -1505,12 +1510,12 @@ impl<B: Backend> Runtime<'_, B> {
                     {
                         if let Some(leaf) = self.window.tabs[active].sessions.get_mut(&pane.seat) {
                             leaf.view.commit_presented(projected, *metrics);
-                            mark_leaf_painted(leaf);
+                            mark_leaf_painted(&mut leaf.session);
                         }
                     }
                     if let Some(leaf) = self.window.tabs[active].sessions.get_mut(&focused_leaf) {
                         leaf.view.commit_presented(frame.clone(), frame_metrics[0]);
-                        mark_leaf_painted(leaf);
+                        mark_leaf_painted(&mut leaf.session);
                     }
                     self.window.last_presented_frame = Some(frame);
                     // The pane under the pointer just drew new cells, so the list its pointer verbs
@@ -2741,7 +2746,7 @@ impl<B: Backend> Runtime<'_, B> {
             .iter()
             .filter(|(seat, leaf)| {
                 leaf.view.projection.scroll_extent_subpixels() > 0
-                    && !leaf.session.terminal_modes().alternate_screen
+                    && !leaf.session.session.terminal_modes().alternate_screen
                     && !leaf.view.projection.is_scrolled()
                     && self.terminal_thumb_hover != Some(**seat)
                     && self
@@ -2760,7 +2765,7 @@ impl<B: Backend> Runtime<'_, B> {
                     .iter()
                     .filter(|(seat, leaf)| {
                         leaf.view.projection.horizontal().max_x_origin().0 > 0
-                            && !leaf.session.terminal_modes().alternate_screen
+                            && !leaf.session.session.terminal_modes().alternate_screen
                             && !leaf.view.projection.horizontal().is_scrolled()
                             && self
                                 .held_terminal_column_drag()

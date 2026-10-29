@@ -11,7 +11,7 @@ use crate::headless::HeadlessFolio;
 use crate::test_support::{self, leaf_saying, tab_holding};
 use crate::{
     BirthDeathFallback, BirthDecision, BirthWait, LeafSeed, PaneBirth, Phase, ShellLanding,
-    ShellLife, ShellSession, Started, pty_door,
+    ShellLife, Started, TerminalPane, pty_door,
 };
 use bt_pty::PtySession;
 use std::num::NonZeroU16;
@@ -349,17 +349,21 @@ fn every_life_transition_is_one_method_and_no_other() {
     let mut tab = crate::test_support::cross_tab(2, &["终了 ended", "未尽 draining", "诞生 born"]);
     let seats = tab.seats.terminals();
     let (ended, draining, born) = (seats[0], seats[1], seats[2]);
-    fn leaf(tab: &mut crate::TabState, seat: crate::SeatId) -> &mut ShellSession {
+    fn leaf(tab: &mut crate::TabState, seat: crate::SeatId) -> &mut TerminalPane {
         tab.sessions.get_mut(&seat).expect("the pane")
     }
     leaf(&mut tab, ended)
+        .session
         .life
         .land(Some(fake(Duration::from_secs(60), b"", true)));
     let unread = vec![b'x'; bt_pty::TERM_READ_QUANTUM.get() + 1];
-    leaf(&mut tab, draining)
-        .life
-        .land(Some(fake(Duration::from_millis(400), &unread, true)));
+    leaf(&mut tab, draining).session.life.land(Some(fake(
+        Duration::from_millis(400),
+        &unread,
+        true,
+    )));
     leaf(&mut tab, born)
+        .session
         .life
         .begin_birth(birth(BirthWait::Locale));
     let mut folio = HeadlessFolio::with_tabs(
@@ -369,7 +373,8 @@ fn every_life_transition_is_one_method_and_no_other() {
     );
     let mut runtime = folio.runtime();
     let phases = |runtime: &crate::Runtime<'_, crate::headless::Headless>| {
-        [ended, draining, born].map(|seat| name_of(&runtime.window.tabs[1].sessions[&seat].life))
+        [ended, draining, born]
+            .map(|seat| name_of(&runtime.window.tabs[1].sessions[&seat].session.life))
     };
     runtime
         .reap_exited_tabs(Instant::now())
@@ -380,11 +385,16 @@ fn every_life_transition_is_one_method_and_no_other() {
         "the first pass"
     );
     assert!(
-        runtime.window.tabs[1].sessions[&ended].life.pty().is_some(),
+        runtime.window.tabs[1].sessions[&ended]
+            .session
+            .life
+            .pty()
+            .is_some(),
         "an exited shell keeps its pseudoconsole"
     );
     let pane = &runtime.window.tabs[1].sessions[&draining];
     let pty = pane
+        .session
         .life
         .pty()
         .expect("a draining shell keeps its pseudoconsole");
@@ -415,6 +425,7 @@ fn an_exited_shell_keeps_its_pty_until_the_tab_ends() {
     tab.sessions
         .get_mut(&ended)
         .expect("the pane")
+        .session
         .life
         .land(Some(fake(
             Duration::from_secs(60),
@@ -424,6 +435,7 @@ fn an_exited_shell_keeps_its_pty_until_the_tab_ends() {
     tab.sessions
         .get_mut(&born)
         .expect("the pane")
+        .session
         .life
         .begin_birth(birth(BirthWait::Locale));
     let mut folio = HeadlessFolio::with_tabs(
@@ -436,12 +448,12 @@ fn an_exited_shell_keeps_its_pty_until_the_tab_ends() {
         runtime
             .reap_exited_tabs(Instant::now())
             .expect("the reaper takes its turn");
-        let life = &runtime.window.tabs[1].sessions[&ended].life;
+        let life = &runtime.window.tabs[1].sessions[&ended].session.life;
         assert_eq!(name_of(life), Name::Exited, "pass {pass}");
         assert!(life.pty().is_some(), "pass {pass}: the shell is kept");
     }
     runtime.window.tabs[1].retire_all_shells();
-    let life = &runtime.window.tabs[1].sessions[&ended].life;
+    let life = &runtime.window.tabs[1].sessions[&ended].session.life;
     assert_eq!(name_of(life), Name::Released, "the tab's end retires it");
     assert!(life.pty().is_none());
 }
@@ -479,15 +491,21 @@ fn the_exit_line_is_said_once_across_exited_falling_back_and_kept() {
 /// A pane in `name`, alone in the window's one tab.
 fn window_with(tag: &str, name: Name) -> HeadlessFolio {
     let mut leaf = leaf_saying("旧壳 old shell");
-    leaf.life = life_in(name);
+    leaf.session.life = life_in(name);
     HeadlessFolio::with_tabs(tag, vec![tab_holding(leaf)], 0)
 }
 
 /// A replacement whose shell has answered: in birth for it (Bearing), what was typed held.
-fn answered_successor() -> Box<ShellSession> {
+fn answered_successor() -> Box<crate::TerminalPane> {
     let mut next = leaf_saying("");
-    crate::await_shell(&mut next, answered(), decision(), &LeafSeed::default());
-    next.life
+    crate::await_shell(
+        &mut next.session,
+        answered(),
+        decision(),
+        &LeafSeed::default(),
+    );
+    next.session
+        .life
         .birth()
         .expect("in birth")
         .hold("dir 目录\r".as_bytes())
@@ -517,7 +535,7 @@ fn a_restart_replaces_the_record_from_every_phase() {
             "{name:?}: a restart is brought up"
         );
         assert_eq!(
-            name_of(&pane.life),
+            name_of(&pane.session.life),
             name,
             "{name:?}: the pane stays as it was"
         );
@@ -527,7 +545,12 @@ fn a_restart_replaces_the_record_from_every_phase() {
         let pane = runtime.sessions.get_mut(&seat).expect("the pane");
         pane.take_successor().expect("the replacement");
         pane.await_successor(answered_successor());
-        let born = pane.successor.as_deref().expect("waiting").incarnation;
+        let born = pane
+            .successor
+            .as_deref()
+            .expect("waiting")
+            .session
+            .incarnation;
         let crate::SuccessorLanding::Landed(landed) =
             crate::runtime::panes::land_successor(pane, |line| panic!("nothing dropped: {line}"))
                 .expect("the landing")
@@ -535,7 +558,7 @@ fn a_restart_replaces_the_record_from_every_phase() {
             panic!("{name:?}: the replacement lands over the pane");
         };
         assert_eq!(
-            name_of(&pane.life),
+            name_of(&pane.session.life),
             name,
             "{name:?}: the landing leaves the pane as it was"
         );
@@ -544,10 +567,14 @@ fn a_restart_replaces_the_record_from_every_phase() {
             .expect("the replacement takes the seat");
         let pane = &runtime.sessions[&seat];
         assert_eq!(
-            pane.incarnation, born,
+            pane.session.incarnation, born,
             "{name:?}: the replacement is the pane"
         );
-        assert_eq!(name_of(&pane.life), Name::Live, "{name:?}: with its shell");
+        assert_eq!(
+            name_of(&pane.session.life),
+            Name::Live,
+            "{name:?}: with its shell"
+        );
         assert!(!pane.restart_in_flight());
     }
 }
@@ -569,7 +596,7 @@ fn a_kept_pane_restarts_into_a_live_shell() {
     pane.take_successor().expect("the replacement");
     pane.await_successor(answered_successor());
     runtime.land_births().expect("the landing");
-    let life = &runtime.sessions[&seat].life;
+    let life = &runtime.sessions[&seat].session.life;
     assert_eq!(
         name_of(life),
         Name::Live,
@@ -595,6 +622,7 @@ fn a_second_restart_while_one_is_in_birth_is_ignored() {
         .successor
         .as_deref()
         .expect("in birth beside the pane")
+        .session
         .incarnation;
     runtime
         .restart_shell(seat)
@@ -602,7 +630,11 @@ fn a_second_restart_while_one_is_in_birth_is_ignored() {
     let pane = &runtime.sessions[&seat];
     assert!(pane.restart_in_flight());
     assert_eq!(
-        pane.successor.as_deref().expect("still beside").incarnation,
+        pane.successor
+            .as_deref()
+            .expect("still beside")
+            .session
+            .incarnation,
         first,
         "the replacement in birth is the one"
     );
@@ -622,7 +654,8 @@ fn a_restart_over_a_pending_birth_abandons_the_old_birth() {
     let (shell, _heard) = asked(Arc::clone(&gate));
     let generation = shell.generation();
     let mut leaf = leaf_saying("诞生中 being born");
-    leaf.life
+    leaf.session
+        .life
         .begin_birth(birth(BirthWait::Shell(landing(shell))));
     let mut folio = HeadlessFolio::with_tabs("life-pending-restart", vec![tab_holding(leaf)], 0);
     let mut runtime = folio.runtime();
@@ -633,7 +666,7 @@ fn a_restart_over_a_pending_birth_abandons_the_old_birth() {
         .expect("the pane")
         .await_successor(answered_successor());
     runtime.land_births().expect("the landing");
-    assert_eq!(name_of(&runtime.sessions[&seat].life), Name::Live);
+    assert_eq!(name_of(&runtime.sessions[&seat].session.life), Name::Live);
     assert!(
         pty_door::holds(generation),
         "the old birth's number is abandoned, not forgotten"

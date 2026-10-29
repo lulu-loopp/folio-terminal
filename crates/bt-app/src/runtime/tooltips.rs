@@ -727,7 +727,7 @@ impl<B: Backend> Runtime<'_, B> {
         let cache = self.window.command_rails.get(&seat)?;
         let tick = cache.rail().ticks.get(index).copied()?;
         let host = cmdrail::peek_host(cache.rail(), index)?;
-        let leaf = self.sessions.get(&seat)?;
+        let crate::TerminalPane { session: leaf, .. } = self.sessions.get(&seat)?;
         // The matched line's own text, for a tick the search put there —
         // read once, here, because it is the only place a rail ever needs a
         // line rather than a command.
