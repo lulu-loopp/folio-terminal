@@ -13,9 +13,9 @@ use crate::{
     PresentIntent, PreviewSurface, Runtime, STARTUP_PTY_POLL_INTERVAL, ScaleWorkerRequest,
     SearchRefresh, ShellAddress, TabPress, TabState, cmdrail, computation_lane,
     disable_math_worker_state, files, foreground_program, git, handoff_lane, hang_watch,
-    hyperlink_activation, i18n, ime_outbound, lane, mark_leaf_painted, notify, pace,
-    present_diagnostics, present_gate, preview, seats, settings, settling, taskbar_lane,
-    termscroll, toast, update, webhost,
+    hyperlink_activation, i18n, ime_outbound, lane, notify, pace, present_diagnostics,
+    present_gate, preview, seats, settings, settling, taskbar_lane, termscroll, toast, update,
+    webhost,
 };
 use crate::{ShellSession, TermView, TermViewPorts};
 use anyhow::Context;
@@ -3025,6 +3025,55 @@ impl<B: Backend> Runtime<'_, B> {
             seats::preview_play_button_sprites(body, hovered, scale, &bt_render::chrome_palette());
         self.window.chrome_marks.resolve(&sprites)
     }
+}
+
+/// How much of a shell the user has seen, one present on.
+///
+/// **Painting is seeing.** The ledger is squared against [`super::terminal::output_revision`] at
+/// the exact moment this leaf's cells go to the glass, and at no other moment —
+/// which makes "seen" a fact about pixels rather than a fact about which tab
+/// held the keyboard.
+///
+/// The rule this replaces was "the active tab's ledger keeps up", advanced once
+/// per event-loop turn. It was wrong in both directions at once. Forward: the
+/// pass ran *after* the switch had already changed the active tab, so anything
+/// published between the previous turn and the switch was stranded behind a tab
+/// that had just gone quiet, and the tab the user had been reading lit up behind
+/// them for output that never existed. Backward: a pane that is on screen but
+/// not holding the keyboard never publishes at all, so a tab could go on saying
+/// nothing while a shell inside it talked.
+///
+/// Both disappear here. A leaf that was painted owes nothing, whichever pane of
+/// whichever tab it is; a leaf that was not painted keeps its backlog, including
+/// output that arrived in the same turn as the switch away and never reached the
+/// glass. That last case is the one worth stating: it is *correctly* unread.
+pub(crate) fn seen_revision(previous_seen: u64, output: u64, leaf_was_painted: bool) -> u64 {
+    if leaf_was_painted {
+        output
+    } else {
+        previous_seen
+    }
+}
+
+/// This leaf's cells have just gone to the glass.
+///
+/// One function so that the two halves of the present — the pane holding the
+/// keyboard and every pane beside it — cannot answer the question differently.
+/// They are written separately in [`Runtime::redraw`] only because the borrow
+/// checker sees one `&mut` tab and a list taken by value; nothing about the rule
+/// distinguishes them, and a rule that lived in two places is how a sibling pane
+/// ends up owing a debt it paid in plain sight.
+///
+/// Unlike [`crate::mark_leaf_seen`] this retires no latch. A bell that rings while you
+/// are looking is answered by [`crate::attention_is_consumed`], which asks about the
+/// *window's* focus as well — being painted into a window nobody has in front of
+/// them is not hearing it.
+pub(crate) fn mark_leaf_painted(leaf: &mut ShellSession) {
+    leaf.mark_seen(seen_revision(
+        leaf.last_seen_revision,
+        leaf.output_revision,
+        true,
+    ));
 }
 
 /// **The computation lane's request door for a pane's decoration work** (C1): the task goes to

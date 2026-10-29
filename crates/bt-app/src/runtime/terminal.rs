@@ -4,6 +4,7 @@
 use crate::PtyTarget;
 use crate::runtime::attention::deliver_osc_attention;
 use crate::runtime::clipboard::input_line_needs_a_space_first;
+use crate::runtime::clipboard::offer_pty_input;
 use crate::runtime::clipboard::paste_text;
 use crate::runtime::mouse::drain_whole_units;
 use crate::runtime::mouse::link_target_to_ask_about;
@@ -13,13 +14,13 @@ use crate::{
     FlashBand, FormulaSwitches, LeafId, LocalImageActivation, MouseRoute, PasteTarget,
     RailJumpLanding, ReferenceCard, RowHost, Runtime, SelectionDrag, SelectionDragMode,
     ShellSession, Step, TerminalReference, UserInputKind, apply_stored_terminal_font,
-    attention_trace, born_in_tab, cmdrail, coalesce, create_leaf_session, cubic_bezier, files,
-    hang_watch, input, marks, mouse_trace, presentation_physical_size, scrollback_quota, seats,
-    shell_literal, termscroll, toast, write_pty_input,
+    attention_trace, born_in_tab, cmdrail, coalesce, create_leaf_session, cubic_bezier,
+    diagnostics, files, hang_watch, input, marks, mouse_trace, presentation_physical_size, quake,
+    scrollback_quota, seats, shell_literal, termscroll, toast,
 };
 use crate::{
     ClickIntent, DRAIN_SLICES_PER_TURN, DRAIN_TURN_BUDGET, HyperlinkActivation, LeafSeed, TabState,
-    TextScale, drain_leaf_pty, hyperlink_activation, profiles,
+    TextScale, hyperlink_activation, profiles,
 };
 use crate::{LeafView, TextStep, pane_cell_metrics};
 use anyhow::Context;
@@ -27,7 +28,8 @@ use anyhow::Result;
 use bt_doc::Bias;
 use bt_layout::SeatId;
 use bt_render::motion::EASE;
-use bt_render::{FrameSource, FrameTrigger};
+use bt_render::{FrameSource, FrameTrigger, background_rgb, foreground_rgb, scheme_in_force};
+use bt_term::{TerminalCanvas, TerminalPalette};
 use bt_viewport::{HyperlinkHit, ViewSelection};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -1877,6 +1879,396 @@ impl<B: Backend> Runtime<'_, B> {
             leaf.view.thumb_awake = Instant::now();
         }
     }
+}
+
+/// **The one door every byte this window sends a child goes through** (window-thread
+/// unbounded-call sweep, 2026-08-24).
+///
+/// Every caller of this is on the window thread — a keystroke, a mouse report, an IME commit, a
+/// terminal reply the program asked for, a paste, the PSReadLine anchor chord. Until this
+/// existed each of them reached `PtySession::write` on its own, and that call was a `write_all`
+/// straight onto the ConPTY input pipe: it blocks when the pipe is full, and the pipe is full
+/// exactly when conhost has stopped draining it, which is the state a flooding pane puts conhost
+/// in. `bt_pty::InputRing` is where that wait went and why; what belongs here is the other half
+/// of the contract — **what a window does about a child that has stopped listening.**
+///
+/// Not an error, and the distinction is the whole reason this is a function. A refusal is a fact
+/// about one shell; `?`-ing it out of a keystroke handler would reach `App::fail` and end a
+/// process holding every other pane in the window. So it is said and the window carries on, with
+/// the numbers in the line, because a shell sitting on a megabyte of unread input is a thing the
+/// reader may want to know about the shell rather than a thing to be silent about.
+///
+/// A leaf with no child at all (`BT_PROBE_INPUT`, a restored pane whose shell is gone) is not a
+/// refusal and not an error: there is nowhere for the bytes to go and never was.
+///
+/// A leaf whose shell is being born keeps them for that shell ([`crate::PaneBirth`]).
+pub(crate) fn write_pty_input(pty: PtyTarget<'_>, bytes: &[u8], what: &'static str) -> Result<()> {
+    offer_pty_input(pty, bytes, what).map(drop)
+}
+
+/// How much this shell has *said*, one drain on.
+///
+/// This is the number "unread" is measured against, and what it counts is the
+/// only thing a badge asking for attention can honestly mean: **the program
+/// wrote something into this pane.** It is deliberately not the session's
+/// `published_revision`, which counts frames put on the glass — a cursor blink,
+/// a hovered link, a chrome repaint and a tab switch all publish frames while
+/// the shell sits in silence, and every one of them used to read as news.
+///
+/// The one exclusion is a reprint *we* asked for. Between the moment a leaf is
+/// told its new size and the moment its resize transaction goes quiescent, the
+/// bytes coming back are the shell answering our question — a prompt redrawn at
+/// a new width is not the program speaking. Bounding the exemption by the
+/// transaction rather than by a timer is what keeps it from swallowing anything
+/// else: outside that window every byte counts again.
+///
+/// The tradeoff is stated rather than hidden: real output that a background
+/// shell happens to print *inside* its own resize window is not counted, so a
+/// tab that prints only during those few hundred milliseconds keeps a clean
+/// badge. That is the honest price of not lighting every tab on every window
+/// resize, and it is the smaller of the two errors — the exemption is bounded by
+/// a transaction the user themselves started.
+pub(crate) fn output_revision(
+    previous: u64,
+    output_arrived: bool,
+    resize_transaction_open: bool,
+) -> u64 {
+    if output_arrived && !resize_transaction_open {
+        previous.saturating_add(1)
+    } else {
+        previous
+    }
+}
+
+/// The colours a program inside any pane of this process is standing on.
+///
+/// Nineteen colours and the canvas they make, assembled here because this is the
+/// only crate that can see both halves: `bt-render` owns the scheme and the one
+/// luma threshold that sorts dark from light, `bt-term` owns the escape-code
+/// contract that spells the answer. Neither can reach the other, and neither
+/// should — a terminal that derived its own dark/light verdict would be a second
+/// threshold waiting to disagree with the one the window paints by.
+///
+/// The background and the ink are read from the *painted* canvas rather than off
+/// the scheme, because a `BT_BG` override moves the glass without moving the
+/// settings, and what a program asks about is the glass.
+fn terminal_palette_in_force() -> TerminalPalette {
+    terminal_palette(scheme_in_force(), background_rgb(), foreground_rgb())
+}
+
+/// The mapping alone, so it can be pinned without moving process-wide state.
+pub(crate) fn terminal_palette(
+    scheme: bt_render::ColourScheme,
+    background: [u8; 3],
+    foreground: [u8; 3],
+) -> TerminalPalette {
+    TerminalPalette {
+        canvas: if bt_render::background_is_light(background) {
+            TerminalCanvas::Light
+        } else {
+            TerminalCanvas::Dark
+        },
+        background,
+        foreground,
+        cursor: scheme.cursor,
+        ansi: scheme.ansi,
+    }
+}
+
+/// **Did this pane commit a synchronized update while it was being fed?**
+///
+/// `before` is [`bt_term::DualPlaneSession::synchronized_update_commits`] read on the near side of
+/// the feed. A counter and not the deadline, and the difference is a whole class of block: one
+/// that opens *and* commits inside a single `read(2)` — `BSU`, a screenful, `ESU`, all under the
+/// pty's 1,024-byte cap — leaves the deadline `None` on both sides of that feed, so a drain
+/// sampling the deadline sees nothing happen and makes a completed frame wait. The count cannot
+/// fall between two samples.
+///
+/// A named function rather than a comparison written in place, so that this is one thing a test
+/// can put a real session through — see `coalesce::session_tests`.
+pub(crate) fn synchronized_update_committed(
+    before: u64,
+    session: &bt_term::DualPlaneSession,
+) -> bool {
+    session.synchronized_update_commits() != before
+}
+
+/// Drain one shell's pipe into its own screen.
+///
+/// "Name" and not "title", and the difference was a live bug. This used to watch
+/// `window_title` alone, which is one of the two things [`crate::resolve_title`] reads
+/// off a shell; the other is the folder it reported over OSC 7, and that is the
+/// layer that names most tabs most of the time. A `cd` therefore moved a tab's
+/// name without marking the chrome for redrawing, and the strip went on showing
+/// the previous folder until some unrelated event — a click, a resize, a tab
+/// switch — repainted it. Measured on a Command Prompt pane: `cd` into
+/// `C:\Program Files` left the tab reading `BetterTerminal` while the prompt one
+/// line below it read `C:\Program Files>`, and it stayed that way indefinitely.
+///
+/// It was invisible while `window_title` was the layer that named things, and
+/// every profile has it: a PowerShell tab is folder-named too. What made it
+/// surface now is Command Prompt, whose only report *is* the folder.
+///
+/// `holds_the_keyboard` is [`seat_holds_the_keyboard`] already answered for this
+/// pane — the four bits are the window's and the tab's, and a leaf can supply
+/// none of them about itself.
+pub(crate) fn drain_leaf_pty(
+    leaf: &mut ShellSession,
+    holds_the_keyboard: bool,
+) -> Result<DrainOutcome> {
+    if leaf.life.pty().is_none() {
+        return Ok(DrainOutcome::default());
+    }
+    let name_before = leaf.name_evidence();
+    // Told on every turn rather than at each of the half-dozen places a theme,
+    // a scheme or a scheme *file* can change, because a list of those places is
+    // a list somebody has to remember to extend. The call is a comparison and a
+    // nineteen-colour copy; it queues bytes only when the canvas actually moved
+    // and only for a pane that asked to hear about it (DEC 2031).
+    hang_watch::during(hang_watch::Station::DrainPalette, || {
+        leaf.session.set_color_palette(terminal_palette_in_force())
+    });
+    let mut changed = false;
+    // **One slice, and then back to the caller that is holding the clock.**
+    //
+    // This was `loop { read; if empty { break } ; feed }`, and the exit it named
+    // is one a busy pane never reaches. The read is
+    // [`bt_pty::OutputRing::try_pop`] over a one-MiB ring that a *reader thread*
+    // refills while this runs, so "the ring is empty" is a question about one
+    // instant, and while the child prints at least as fast as `feed_at` absorbs
+    // it that instant never arrives. Measured on 2026-08-24, release build, one
+    // pane running `for(;;){ [Console]::Out.WriteLine('x'*4000) }` and nothing
+    // else — no second pane, no page, nobody touching the frame: the window
+    // stopped answering **two seconds** after launch and never answered again,
+    // one core burned flat, ~35 MB/s of memory on top, `IsHungAppWindow` true
+    // and the window thread `Running` — not blocked on anything, simply never
+    // returning. That is the whole of the "drag it bigger and the program dies"
+    // report: hosting a page takes a frame from 26 ms to 50 ms, so a pane that
+    // stays just ahead of the terminal at rest falls behind while the frame is
+    // being dragged, and once it is behind the loop stops terminating.
+    //
+    // The budget is not a number invented here. [`bt_pty::TERM_READ_QUANTUM`] is
+    // *already* "the serialized Term actor quantum" of `DESIGN.md` §1.3 — the
+    // unit of output one turn is meant to carry — and `try_pop` already takes at
+    // most one of them. So the fix is to stop asking for a second one on the
+    // same turn, and to say out loud that more is owed.
+    //
+    // Nothing is dropped and nothing waits on a clock: the leftover is answered
+    // on the very next turn, which [`Runtime::drain_pty`] guarantees by raising
+    // the wake. A pane that outruns the window is throttled by the ring and the
+    // pipe behind it, which is what backpressure is for and what the ring was
+    // built to do.
+    //
+    // **What T-DRAIN-BURST changed is the size of the ask, and nothing else in
+    // this function.** A quantum bounds a turn in *bytes*, and the owner's
+    // diagnostics log says what that is worth: holds of 4386, 2791, 1862 and
+    // 3112 ms charged to `drain_pty`, page faults near zero beside them, while
+    // a pane printed a build log. A number of bytes is not a length of time,
+    // because the time a quantum costs is the time its *lines* cost — see
+    // [`DRAIN_TURN_BUDGET`] for the account. So the read is a
+    // [`bt_pty::TERM_READ_SLICE`] now, and the quantum is spent a slice at a
+    // time by [`Runtime::drain_pty`], which looks at the clock in between. One
+    // read per call is unchanged and load-bearing: the caller cannot stop a call
+    // it is already inside, so the loop that repeats this one lives up there,
+    // where the deadline is.
+    let slice = hang_watch::during(hang_watch::Station::DrainRingRead, || {
+        leaf.life
+            .pty()
+            .expect("PTY mode checked above")
+            .read_output_slice()
+    });
+    let bytes = slice.bytes;
+    hang_watch::counters(bytes.len(), 0, 0);
+    // **Was this pane's picture under the program's own control across this slice?**
+    //
+    // A *counter* and not the deadline, and the difference was a defect: a 1,024-byte capped read
+    // holding `BSU … ESU` whole opens and commits a block inside one feed, so the deadline is
+    // `None` on both sides of it and a completed frame would have waited three milliseconds for
+    // nothing. What is compared is how many updates this pane has committed — a question that
+    // cannot fall between two samples. [`crate::coalesce`] declines to wait on either answer.
+    let sync_commits_before = leaf.session.synchronized_update_commits();
+    if !bytes.is_empty() {
+        debug_assert!(bytes.len() <= bt_pty::TERM_READ_SLICE.get());
+        // The drain brackets all of its slices with begin/end_feed_turn, so a
+        // repaint's proven records stay protected until the whole turn settles.
+        hang_watch::during(hang_watch::Station::DrainFeed, || {
+            leaf.session
+                .feed_at(&bytes, Instant::now())
+                .context("apply PTY output")
+        })?;
+        hang_watch::during(hang_watch::Station::DrainReplies, || -> Result<()> {
+            for reply in hang_watch::during(hang_watch::Station::DrainChannel, || {
+                leaf.session.take_pty_writes()
+            }) {
+                write_pty_input(
+                    leaf.input_target(),
+                    &reply,
+                    "return terminal protocol reply to PTY",
+                )?;
+            }
+            Ok(())
+        })?;
+        changed = true;
+    }
+    // Asked of the ring itself rather than guessed from the chunk's length: a
+    // pop that happened to return exactly one quantum may have emptied it, and a
+    // pop that returned less may already have been overtaken by the reader.
+    let pending = hang_watch::during(hang_watch::Station::DrainRingStats, || {
+        leaf.life
+            .pty()
+            .expect("PTY mode checked above")
+            .ring_stats()
+            .current_bytes
+            > 0
+    });
+    // **Where the keyboard is, told to whoever subscribed to hear it** (DEC
+    // 1004; attention plan slice A0.5). Told on every turn for the palette's
+    // reason one screen up — the answer is four facts a window can move in a
+    // dozen places — and the call is a comparison that queues bytes only when
+    // the answer actually changed and only for a pane that asked.
+    //
+    // **After the feed and not beside the palette**, because the bit it consults
+    // is written by the bytes just fed: ConPTY sends `\e[?1004h` ahead of the
+    // first program, so a pane subscribes on the very turn it is born, and a
+    // reconciliation that ran before the feed would owe that pane its opening
+    // report until something else happened to wake the loop.
+    hang_watch::during(hang_watch::Station::DrainKeyboardFocus, || {
+        leaf.report_keyboard_focus(holds_the_keyboard)
+    });
+    // A canvas notification, a focus report, and any colour answer queued behind
+    // them, are owed to a child that has said nothing — so the reply channel is
+    // drained once more outside the read above, which only feeds when the child
+    // speaks.
+    hang_watch::during(hang_watch::Station::DrainReplies, || -> Result<()> {
+        for reply in hang_watch::during(hang_watch::Station::DrainChannel, || {
+            leaf.session.take_pty_writes()
+        }) {
+            write_pty_input(
+                leaf.input_target(),
+                &reply,
+                "return terminal protocol reply to PTY",
+            )?;
+        }
+        Ok(())
+    })?;
+    // The one place a shell is heard to speak. Every leaf of every tab passes
+    // through here on every turn of the loop, which is what lets a pane nobody
+    // is watching keep an honest account of itself — the frame path cannot, and
+    // never could: it runs for the focused pane of the tab on screen and for
+    // nothing else.
+    let outcome_parent = hang_watch::enter(hang_watch::Station::DrainMarks);
+    let outcome = (|| {
+        leaf.output_revision = output_revision(
+            leaf.output_revision,
+            changed,
+            leaf.session.resize_finish_deadline().is_some(),
+        );
+        // **And the one line a restored pane is owed, typed at the moment there is a
+        // prompt to type it at** (§7.54e ④ and ⑤).
+        //
+        // Here for the reason the command ledger below is here: this is the one place
+        // every leaf of every tab passes through on every turn, so a pane nobody is
+        // looking at is served too — and the fact this waits on is read off that very
+        // ledger. **An open mark with nothing executed is a shell reading a line**
+        // (`OSC 133;B` seen, no `C`), which is precisely "there is a prompt and the
+        // cursor is on it"; writing before that would put the command inside a login
+        // banner, or hand it to a shell still sourcing its profile.
+        //
+        // Taken rather than read, so one prompt receives it once.
+        if leaf
+            .session
+            .command_marks()
+            .last()
+            .is_some_and(|mark| mark.executed.is_none() && mark.finished.is_none())
+            && let Some((command, submit)) = leaf.take_typing()
+        {
+            let bytes = quake::typed_into_a_prompt(&command, submit);
+            if !bytes.is_empty() {
+                write_pty_input(
+                    leaf.input_target(),
+                    &bytes,
+                    "type a restored command at the prompt",
+                )?;
+            }
+        }
+        // **A command ending is heard here or nowhere.** The ledger is the shell's
+        // own account of itself (`OSC 133;D`), and this is the one place every leaf's
+        // bytes pass through — so a `git commit` finished in a pane behind a Git page
+        // is noticed whether or not that pane is the focused one.
+        let finished = leaf
+            .session
+            .command_marks()
+            .iter()
+            .rev()
+            .find(|mark| mark.finished.is_some())
+            .map(|mark| mark.id);
+        let ended = finished > leaf.last_finished_command;
+        if ended {
+            leaf.last_finished_command = finished;
+        }
+        // **And the first mark is heard here too**, for the same reason: it is
+        // what gives this pane a rail, and a pane behind another tab earns one at
+        // its first prompt exactly as the pane on screen does.
+        let rail_began = leaf.hear_first_mark();
+        let name_after = leaf.name_evidence();
+        // **A keyboard flag a program asked for and Folio does not honour** is written to the
+        // log the first time this session sees it (T-KEYBOARD-PROTOCOL, design note §3) — here,
+        // because every leaf's bytes pass through here, the pane on screen or not.
+        for line in leaf.session.take_keyboard_protocol_notes() {
+            diagnostics::note(&line);
+        }
+        // **A pane whose PSReadLine is not Folio's after its profile ran** says so once, in the
+        // log and nowhere else (T-INTEGRATION-INJECT-2-BUILD round 2), on the same road.
+        for line in leaf.session.take_line_editor_notes() {
+            diagnostics::note(&line);
+        }
+        Ok(DrainOutcome {
+            // Taken here because this is the one place every leaf of every tab
+            // passes through on every turn, which is the same sentence
+            // `output_revision` and the command ledger above are written under: a
+            // pane nobody is watching is exactly the pane whose notification matters.
+            // The seat is filled in by `drain_tab_pty`, which is the level that knows
+            // it.
+            notifications: leaf
+                .session
+                .take_notifications()
+                .into_iter()
+                .map(|notification| (SeatId(0), notification))
+                .collect(),
+            command_ends: leaf
+                .session
+                .working_directory()
+                .filter(|_| ended)
+                .map(Path::to_path_buf)
+                .into_iter()
+                .collect(),
+            arrived: changed,
+            pending,
+            // **Bytes arrived and the transport did not say there was more**, folded here because a
+            // slice's read boundary is visible nowhere else — see [`crate::coalesce`]. A pane whose
+            // slice ended on a whole capped read is a pane a millisecond ahead of the rest of a
+            // burst; a pane whose slice ended anywhere else has nothing to wait for, and says so.
+            arrived_uncapped: changed && !slice.ends_capped,
+            bytes: bytes.len(),
+            // **The program named its own frame's end during this turn.** That frame is complete and
+            // must not be made to wait behind a timer — however far inside one read the naming fell.
+            sync_bracket_closed: synchronized_update_committed(sync_commits_before, &leaf.session),
+            // **A block is open on this pane.** Asked of every pane and not only the one the frame
+            // path composes: a sibling holding a block open is a sibling whose bytes the parser is
+            // withholding, and a window that waited on its account would be waiting for a program
+            // that has already said where its frame ends.
+            sync_open: leaf.session.synchronized_update_deadline().is_some(),
+            // A leaf cannot know whether it is the one the frame path will compose;
+            // that is a fact about the tab, and [`drain_tab_pty`] is where it is
+            // known and where this is filled in.
+            arrived_off_focus: false,
+            renamed: name_after != name_before,
+            moved: name_after.1 != name_before.1,
+            rail_began,
+        })
+    })();
+    hang_watch::at(outcome_parent);
+    outcome
 }
 
 /// **Whether one seat's shell is, right now, the true owner of the keyboard** —

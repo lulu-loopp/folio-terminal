@@ -4,6 +4,7 @@
 use super::pointer::{Ending, Gone, Leaving, OwnerGone};
 use crate::input::Keystroke;
 use crate::runtime::mouse::recoverable_wheel_scroll_amount;
+use crate::runtime::panes::apply_owed_shell_resize;
 use crate::runtime::panes::end_leaves_of;
 use crate::runtime::panes::tear_pane_into_tab;
 use crate::runtime::windows::dirty_gate_names;
@@ -12,18 +13,20 @@ use crate::{
     BlankPage, BlankPageReturn, Drag, DragCarry, DragHandover, DragSource, DropLanding, Fading,
     FolderPick, FormulaSwitches, HandoverInto, LeafId, LeafSeed, MathHoverExit, MenuPaint,
     NewWindowPlan, PaneArrival, PaneMotion, Popup, PreviewRestore, PreviewSurface, RenameExit,
-    RenameSubject, RowPayload, RowPayloadKind, Runtime, TabCarry, TabClick, TabCloseAction, TabId,
-    TabMenuState, TabPress, TabRename, TabSeed, TabState, TabSurface, TablePaint, TearOut,
-    absorb_tab_sessions, attention_trace, banner_line, create_tab_state, diagnostics,
-    exit_diagnostics, float, notify, pane_into_new_tab, pane_into_tab, partition_clamped,
-    presentation_physical_size, preview, profiles, pty_door, restore, scrollback_quota, seats,
-    seed, settle_pin_partition, settling, solve_seats, strip_insert_slot, webnav,
+    RenameSubject, RowPayload, RowPayloadKind, Runtime, ShellLanding, TabCarry, TabClick,
+    TabCloseAction, TabId, TabMenuState, TabPress, TabRename, TabSeed, TabState, TabSurface,
+    TablePaint, TearOut, TerminalPane, absorb_tab_sessions, attention_trace, banner_line,
+    create_tab_state, diagnostics, exit_diagnostics, finish_leaf_birth, float, notify,
+    pane_into_new_tab, pane_into_tab, partition_clamped, presentation_physical_size, preview,
+    profiles, pty_door, restore, scrollback_quota, seats, seed, settle_pin_partition, settling,
+    solve_seats, strip_insert_slot, webnav,
 };
 use crate::{LeafView, TextScale, webhost};
 use anyhow::Context;
 use anyhow::Result;
 use bt_layout::{SeatId, SeatLayout};
 use bt_math::{MathRaster, MathRenderError};
+use bt_pty::PtySession;
 use bt_render::{FrameSource, FrameTrigger, Travel};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -151,7 +154,7 @@ pub(super) fn land_birth_death_fallback(
     match answer.session {
         Ok(pty) => {
             let crate::BirthDeathFallback { landing, exit } = pending;
-            crate::land_birth_death_fallback_shell(leaf, pty, landing)?;
+            land_birth_death_fallback_shell(leaf, pty, landing)?;
             Ok(BirthDeathLanding::FellBack(exit))
         }
         Err(error) => {
@@ -3999,6 +4002,36 @@ impl<B: Backend> Runtime<'_, B> {
     }
 }
 
+/// **A silent birth death's last-resort shell takes its pane on the birth road**
+/// (T-SHELL-BIRTH-DEATH). The pane is finished from it exactly as a pane whose own program would
+/// not start is ([`finish_leaf_birth`] over a session carrying bt-pty's fallback record): the same
+/// banner under the profile that was asked for, the profile, program, place, paste recipient and
+/// integration of the shell that started. The decision is the dead shell's own, read back from the
+/// pane it was landed on. The record's diagnostics line is not owed here — the birth death's own
+/// exit line names the fallback — so it is spent with the landing.
+fn land_birth_death_fallback_shell(
+    leaf: &mut TerminalPane,
+    pty: PtySession,
+    landing: ShellLanding,
+) -> Result<()> {
+    let ShellLanding {
+        decision,
+        born_grid,
+        owed_physical,
+        ..
+    } = landing;
+    let seed = LeafSeed {
+        profile: leaf.session.launch.profile.clone(),
+        ..LeafSeed::default()
+    };
+    finish_leaf_birth(leaf, Some(pty), &decision, &seed, None, false)?;
+    // The stale spawn record goes before the apply can fail: a fallback that landed but could
+    // not be resized is still a landed fallback, not one still pending.
+    leaf.session.life.take_spawn_fallback();
+    apply_owed_shell_resize(&mut leaf.session, born_grid, owed_physical)?;
+    Ok(())
+}
+
 /// **Which panes may become a tab of their own, stated once and asked in two
 /// places.**
 ///
@@ -4791,7 +4824,7 @@ mod birth_death_tests {
         };
         wait_for_answer(&landing.shell, &heard);
         assert!(
-            crate::land_shell_birth(&mut leaf, |_| {})
+            crate::runtime::panes::land_shell_birth(&mut leaf, |_| {})
                 .expect("the fresh birth lands")
                 .is_none()
         );

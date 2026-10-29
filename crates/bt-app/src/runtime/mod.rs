@@ -46,12 +46,13 @@ pub(crate) use windows::{
 #[cfg(test)]
 pub(crate) use attention::{
     answer_attention_in, merge_notice_card, next_attention_stop, raise_cancelled_quit_card_on,
+    settle_attention,
 };
 #[cfg(test)]
 pub(crate) use clipboard::{
     clear_copied_selection, clipboard_focus_of, glass_allows_a_text_write,
-    input_line_needs_a_space_first, paste_answer_text, paste_body, paste_card_step,
-    paste_offer_is_kept, paste_target_is_live, paste_text, pending_paste_in,
+    input_line_needs_a_space_first, offer_pty_input, paste_answer_text, paste_body,
+    paste_card_step, paste_offer_is_kept, paste_target_is_live, paste_text, pending_paste_in,
     prepare_clipboard_paste, prepare_dropped_paste, selection_to_copy, stage_paste,
     take_pending_paste, text_field_holding,
 };
@@ -77,9 +78,10 @@ pub(crate) use floats::{
 pub(crate) use frame::{
     a_bare_redraw_still_owes_a_present, advance_periodic_deadline, attention_ledger_deadline,
     chrome_over, chrome_tick_reuses_picture, dispatch_decoration_task, dispatch_pending_math_tasks,
-    dispatch_tab_decoration_tasks, earliest_named_deadline, math_worker_stopped_notice,
-    pty_drain_says_nothing_new, pty_frame_is_unchanged, startup_poll_delay,
-    take_math_worker_notice, verified_target_of, window_is_exposed, window_is_hidden,
+    dispatch_tab_decoration_tasks, earliest_named_deadline, mark_leaf_painted,
+    math_worker_stopped_notice, pty_drain_says_nothing_new, pty_frame_is_unchanged, seen_revision,
+    startup_poll_delay, take_math_worker_notice, verified_target_of, window_is_exposed,
+    window_is_hidden,
 };
 #[cfg(test)]
 pub(crate) use git::{
@@ -114,11 +116,11 @@ pub(crate) use palette::recall_flash;
 #[cfg(test)]
 pub(crate) use panes::{
     aim_card_window, animated_pane_viewports, births_due, card_picture_in, clamp_into_body,
-    column_notch, end_leaves_of, frame_row_of_anchor, gate_title_over, host_screen_after,
-    land_successor, landed_source, leaf_resize_plan, pages_that_move_with_their_panes,
-    pane_fade_veil_layers, panel_opacity, popup_owner, rail_change_strands_its_popups,
-    rail_is_searching, rail_overlay_layer, rail_zone_wants_open, restated_scroll, row_arrival_seat,
-    size_authority_for_rectangle, tear_pane_into_tab,
+    column_notch, deliver_held_input, end_leaves_of, frame_row_of_anchor, gate_title_over,
+    host_screen_after, land_shell_birth, land_successor, landed_source, leaf_resize_plan,
+    pages_that_move_with_their_panes, pane_fade_veil_layers, panel_opacity, popup_owner,
+    rail_change_strands_its_popups, rail_is_searching, rail_overlay_layer, rail_zone_wants_open,
+    restated_scroll, row_arrival_seat, size_authority_for_rectangle, tear_pane_into_tab,
 };
 #[cfg(test)]
 pub(crate) use peek::{
@@ -177,9 +179,9 @@ pub(crate) use tabs::{
 #[cfg(test)]
 pub(crate) use terminal::{
     apply_leaf_metrics, drain_may_take_another_slice, in_drain_feed_turn, local_image_activation,
-    reference_card, reference_run_rect, restart_seed, seat_holds_the_keyboard,
+    output_revision, reference_card, reference_run_rect, restart_seed, seat_holds_the_keyboard,
     should_copy_on_select_release, step_leaf_text_scale, stepped_command_mark,
-    terminal_link_answers_a_press,
+    synchronized_update_committed, terminal_link_answers_a_press, terminal_palette,
 };
 #[cfg(test)]
 pub(crate) use tooltips::{tab_surface_tip_boxes, tooltip_anchor_for};
