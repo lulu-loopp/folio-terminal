@@ -8,14 +8,15 @@ use crate::runtime::frame::trace_unchanged_present;
 use crate::runtime::preview::picture_channel_owner;
 use crate::runtime::preview::preview_image_placement;
 use crate::runtime::tabs::pane_can_become_a_tab;
+use crate::runtime::terminal::write_pty_input;
 use crate::runtime::windows::dirty_gate_names;
 use crate::window_seam::prelude::*;
 use crate::{
     BirthAt, BirthDue, BirthWait, EASE, HoverFloat, LeafResizeTarget, LeafSeed, LeafView,
-    PaneBirth, PaneMotion, PlanInputs, SuccessorLanding, TextScale, born_in_tab, cardhint,
-    conpty_source_of, cubic_bezier, decided_birth, deliver_held_input, diagnostics,
-    exit_diagnostics, i18n, icons, land_shell_birth, pane_into_new_tab, resolved_birth_seed, seed,
-    split_axis, tabs_a_close_loses, toast,
+    PaneBirth, PaneMotion, PlanInputs, PtyTarget, SuccessorLanding, TextScale, born_in_tab,
+    cardhint, conpty_source_of, cubic_bezier, decided_birth, diagnostics, exit_diagnostics,
+    finish_leaf_birth, i18n, icons, pane_into_new_tab, profile_banner_name, pty_door, pty_size,
+    resolved_birth_seed, seed, split_axis, tabs_a_close_loses, toast,
 };
 use crate::{
     CardAim, ColumnNotch, CommandFlash, DividerDrag, DividerGrip, Drag, DragCarry, DragHandover,
@@ -36,6 +37,7 @@ use anyhow::Context;
 use anyhow::{Result, anyhow};
 use bt_layout::{Axis, SeatId, SeatKind, SeatLayout, SeatMetrics, SizePolicy};
 use bt_persist::LayoutNodeV1;
+use bt_platform::admission::doors;
 use bt_render::{
     ChromePalette, FrameSource, FrameTrigger, GridSize, PresentOutcome, PresentPhase, Travel,
 };
@@ -6735,6 +6737,103 @@ impl<B: Backend> Runtime<'_, B> {
         self.mark_session_dirty(now);
         Ok(true)
     }
+}
+
+/// **A pane's held bytes, delivered to what it was born as** — the shell, or, for a pane born with
+/// no shell (a program this machine does not have, `Started::Nothing`, or a shell that did not
+/// start), nowhere: then the bytes are dropped and `note` is told once how many.
+pub(crate) fn deliver_held_input(
+    birth: &PaneBirth,
+    target: PtyTarget<'_>,
+    mut note: impl FnMut(&str),
+) -> Result<()> {
+    birth.deliver(|held| match target {
+        PtyTarget::Nowhere => {
+            note(&format!(
+                "a pane born with no shell (no program here, or its shell did not start) dropped \
+                 the {} byte(s) typed into it while it waited",
+                held.len()
+            ));
+            Ok(())
+        }
+        target => write_pty_input(
+            target,
+            held,
+            "deliver what was typed while the shell was being born",
+        ),
+    })
+}
+
+/// Tell a shell that has just landed the last pane size released after its birth was asked for.
+/// Both an ordinary pane birth and a birth-death fallback spend [`crate::ShellLanding::owed_physical`]
+/// here, through the same admitted PTY-resize door.
+pub(crate) fn apply_owed_shell_resize(
+    leaf: &mut ShellSession,
+    born_grid: GridSize,
+    owed_physical: Option<PhysicalSize<u32>>,
+) -> Result<()> {
+    if let (Some(pty), Some(physical)) = (leaf.life.pty_mut(), owed_physical)
+        && leaf.conpty_grid != born_grid
+    {
+        // The same admitted door every released resize takes (`doors::PtyResize`, row 12).
+        let grid = leaf.conpty_grid;
+        bt_platform::admission::admitted::<doors::PtyResize, _>(|token| {
+            pty_door::resize(token, pty, pty_size(grid, physical)).map_err(anyhow::Error::from)
+        })
+        .unwrap_or_else(|refused| Err(anyhow::Error::from(refused)))
+        .context("tell a landed shell the grid its pane moved to while it was being born")?;
+    }
+    Ok(())
+}
+
+/// **A pane's shell has answered: land it** (T-BIRTH-OFF-WINDOW). The pane's birth is finished
+/// from the answer exactly as a pane with its shell in hand is ([`finish_leaf_birth`]); a resize
+/// released while the shell was being born is told to it; what was typed meanwhile is written to
+/// it first, in order. Answers the refusal to say when the birth failed — the pane is then a pane
+/// with no shell, and what was typed into it is said dropped. `None` and nothing changed while
+/// the shell has not answered.
+pub(crate) fn land_shell_birth(
+    leaf: &mut TerminalPane,
+    mut note: impl FnMut(&str),
+) -> Result<Option<anyhow::Error>> {
+    let Some(mut held) = leaf.session.life.take_birth() else {
+        return Ok(None);
+    };
+    let BirthWait::Shell(landing) = &mut held.waiting else {
+        leaf.session.life.begin_birth(held);
+        return Ok(None);
+    };
+    let Some(pty_door::Born {
+        session: answer,
+        folder_gone,
+    }) = landing.shell.take()
+    else {
+        leaf.session.life.begin_birth(held);
+        return Ok(None);
+    };
+    // Read off the birth that has left the pane; it is spent only below, in the delivery of what
+    // it holds, so nothing a birth carries can be dropped on the way.
+    let decision = if folder_gone {
+        landing.decision.clone().with_folder_gone(&mut note)
+    } else {
+        landing.decision.clone()
+    };
+    let (born_grid, owed_physical) = (landing.born_grid, landing.owed_physical);
+    let (pty, refusal) = match answer {
+        Ok(pty) => (Some(pty), None),
+        Err(error) => (
+            None,
+            Some(anyhow::Error::from(error).context(format!(
+                "spawn the {} profile in ConPTY",
+                profile_banner_name(&decision.spawn_profile)
+            ))),
+        ),
+    };
+    let seed = held.seed.clone();
+    finish_leaf_birth(leaf, pty, &decision, &seed, None, false)?;
+    apply_owed_shell_resize(&mut leaf.session, born_grid, owed_physical)?;
+    deliver_held_input(&held, leaf.session.input_target(), note)?;
+    Ok(refusal)
 }
 
 /// Apply the whole rows spent by `CardAim` to the leaf's card window.

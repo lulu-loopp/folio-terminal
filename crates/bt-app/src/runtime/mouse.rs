@@ -8,6 +8,7 @@ use crate::runtime::files::{files_row_activation, press_files_node};
 use crate::runtime::panes::risen_frame;
 use crate::runtime::preview::crumb_segments;
 use crate::runtime::preview::image_zoom_notch;
+use crate::runtime::terminal::write_pty_input;
 use crate::window_seam::prelude::*;
 use crate::{
     ApplicationChange, BrokerAim, DividerDrag, DividerGrip, Drag, DragBroker, DragCarry, DragGuard,
@@ -21,7 +22,7 @@ use crate::{
     TerminalReference, TerminalThumbDrag, UserInputKind, WebHeadVerb, WheelAxis, WheelBurst,
     WheelRoute, files, first_run, float, formula_tools, hang_watch, input, marks, mouse_trace,
     palette, profiles, restore, seats, settings, settling, toast, tooltip, update, websheet,
-    wheel_zoom_notches, write_pty_input,
+    wheel_zoom_notches,
 };
 use crate::{TextSizeAim, TextStep};
 use anyhow::Context;
