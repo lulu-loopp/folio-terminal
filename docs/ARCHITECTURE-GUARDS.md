@@ -1288,8 +1288,9 @@ product by its own gate (the guard read `UseRecord::variant` itself until plan r
 `runtime::` inside a body, a path into a topic whose head is not `crate`, `self` or
 `super` (in a path, a module-level `use` and a body group alike), a comment inside a
 path into a topic (the search compares the path's bytes), and a path under a `#[cfg]` on
-a statement or a match arm inside an item (no grain reads that gate; a field's gate is
-the field item's own and is read). The road itself is read too: a `use` in
+a statement or a match arm inside an item that a product build may compile (a test-only
+one is out of the product by the query's gate grain since plan row 77, 2026-10-29; a
+field's gate is the field item's own and is read). The road itself is read too: a `use` in
 `runtime/mod.rs` that re-exports a module (`pub(crate) use pointer::touch;`), or any glob
 there, would open a module under a new name and is refused by its line; an item
 re-export is the road (ruled 2026-10-27, the row's review, F4). There is no allow list. Its fixture (`tests/fixtures/root_topic_paths/`) plants

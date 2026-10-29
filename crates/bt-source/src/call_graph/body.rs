@@ -1737,4 +1737,3 @@ fn flatten_use(
         }
     }
 }
-

@@ -93,7 +93,10 @@ impl Gates<'_> {
             .min()
             .unwrap_or(range.start);
         let end = range.end.max(start);
-        self.gates.push(Span::new(at_union(self.base, start), at_union(self.base, end)));
+        self.gates.push(Span::new(
+            at_union(self.base, start),
+            at_union(self.base, end),
+        ));
         true
     }
 

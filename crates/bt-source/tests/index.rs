@@ -24,8 +24,7 @@ use std::sync::Arc;
 use bt_source::{
     DiskScope, Index, ItemKind, ItemQuery, ModuleSpec, Needle, Package, Pattern, QueryFailure,
     Rejection, ResolveCutoff, Scope, Search, Span, TargetId, TargetKind, TargetRoot, TraitId,
-    TraitResolver,
-    Universe, Vendor, View, Workspace, report, universes,
+    TraitResolver, Universe, Vendor, View, Workspace, report, universes,
 };
 use syn::parse::Parser as _;
 
@@ -759,9 +758,9 @@ fn what_a_product_build_contains_is_answered_at_the_file_and_at_the_item() {
 ///
 /// Before the row the three grains read none of these gates — no item and no inline module holds
 /// a `use`, a `const` or an `impl` header, and the `let`, the expression and the arm sit in a
-/// product function — so every gated line counted as product (13 of 13, not 5).
+/// product function — so every gated line counted as product (14 of 14, not 5).
 ///
-/// MUTATION: drop the gate grain from `Occurrence::in_the_product` — the eight gated lines count;
+/// MUTATION: drop the gate grain from `Occurrence::in_the_product` — the nine gated lines count;
 /// stop descending into function bodies in `crate::gates` — the `let`, the expression and the arm
 /// do.
 #[test]
@@ -791,7 +790,7 @@ fn a_cfg_is_read_wherever_it_stands() {
             wrong.push(format!("{}: {line}", at.line));
         }
     }
-    assert_eq!((found.len(), gated), (13, 8), "the fixture's needles");
+    assert_eq!((found.len(), gated), (14, 9), "the fixture's needles");
     assert!(
         wrong.is_empty(),
         "read with the wrong verdict:\n  {}",

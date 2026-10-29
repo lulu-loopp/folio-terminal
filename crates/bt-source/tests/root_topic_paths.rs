@@ -304,8 +304,9 @@ fn read(index: &Index) -> Reading {
             }
             if under_a_statement_gate(index, &masks, tokens, at) {
                 reading.refused.push(format!(
-                    "{}: `runtime::{topic}` under a statement's own `#[cfg]`, a gate the guard \
-                     does not read; gate the item, or spell the path through `runtime/mod.rs`",
+                    "{}: `runtime::{topic}` under a statement's own `#[cfg]`, which this guard \
+                     refuses rather than judges; gate the item, or spell the path through \
+                     `runtime/mod.rs`",
                     where_is(index, start)
                 ));
                 continue;
@@ -528,12 +529,13 @@ fn named(lines: &[String], needle: &str) -> usize {
 /// a private topic), one arm of a group (T5), a field type, an `impl` header and UFCS in another
 /// module (T6), a path among a macro's arguments (T9), a glob into a topic and a nested module's
 /// `use super::runtime::…` (F2); it plants a rename of `runtime` and a glob over it (T7), a path
-/// under a statement's own gate (T8), a group, a glob and a rename in a body (F2), a foreign head
+/// under a statement's own platform gate (T8b), a group, a glob and a rename in a body (F2), a foreign head
 /// in a module-level `use`, a body group and a path (F1), a comment inside a path (F3) and a
 /// module re-exported by `runtime/mod.rs` (F4), each refused. A test-gated `use` (T3), the
 /// re-export road as a `use` and as a path (T4, and `runtime/mod.rs`'s item re-export), a doc
 /// link and a string (T10), a sibling's path inside `runtime/` (T11), a file reached by
-/// `#[cfg(test)] mod t;` (T12), a field gated to tests and a test module pass.
+/// `#[cfg(test)] mod t;` (T12), a statement gated to tests (T8, out of the product by the query's
+/// gate grain since plan row 77), a field gated to tests and a test module pass.
 ///
 /// Every row is checked before the test fails, so a red run names each plant it misses.
 #[test]
@@ -578,7 +580,7 @@ fn every_path_into_a_runtime_topic_from_outside_is_named() {
     let refused: &[(&str, usize, &str)] = &[
         ("`use … runtime as rt`", 1, "T7, the rename"),
         ("`use crate::runtime::*`", 1, "T7, the glob"),
-        ("under a statement's own `#[cfg]`", 1, "T8"),
+        ("under a statement's own `#[cfg]`", 1, "T8b"),
         ("`runtime::{…}` in a body", 1, "F2, a group in a body"),
         ("`runtime::*` in a body", 1, "F2, a glob in a body"),
         (
