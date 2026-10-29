@@ -1000,7 +1000,7 @@ fn fixture_walk(registry: &str, door: &str) -> Judged {
     let resolver = Resolver::new(&[(FIXTURE_HOME, &index)], Arms::product())
         .unwrap_or_else(|refusals| panic!("{refusals:?}"));
     let by_key = keyed(&resolver);
-    let read = read_registry(&resolver, &by_key, registry, FIXTURE_HOME);
+    let read = read_registry(&resolver, registry, FIXTURE_HOME);
     assert!(read.refused.is_empty(), "{:?}", read.refused);
     let reviewed = fixture_reviewed();
     let root = workspace_root()
@@ -1048,8 +1048,7 @@ fn fixture_refusals(registry: &str) -> Vec<String> {
     let index = fixture_index("request_doors");
     let resolver = Resolver::new(&[(FIXTURE_HOME, &index)], Arms::product())
         .unwrap_or_else(|refusals| panic!("{refusals:?}"));
-    let by_key = keyed(&resolver);
-    read_registry(&resolver, &by_key, registry, FIXTURE_HOME).refused
+    read_registry(&resolver, registry, FIXTURE_HOME).refused
 }
 
 /// The number of items the fixture's key `key` names, or why it is refused.
@@ -1387,6 +1386,74 @@ fn the_registry_refuses_a_key_on_two_modules_and_a_path_naming_nothing() {
     );
 }
 
+/// RED (plan row 76) — **an `# effects` row names one item of its arm, or is refused by its
+/// line**: a key that names no item (a door body moved or renamed, as K2 batch 22's
+/// `crate::read_video_glance` was), a key on two arms of one module path read under `-` or under
+/// an arm it does not stand on, a key naming two items on one arm, and a kind off the registry's
+/// closed list are each refused naming `window_waits.tsv:<line>`; the arm the item stands on is
+/// admitted. Before the row, the loader looked a row up by its first-path key string and
+/// inserted what it found: the stale key, the wrong arm and the unknown kind all came back with
+/// no refusal, and a two-arm key kept whichever item the map's order put last.
+///
+/// MUTATIONS: drop the empty refusal in [`effect_item`] — the stale key passes; stop reading the
+/// arm — `-` names `media::quiet` again; drop the kind check — `worker-door-bdy` passes.
+#[test]
+fn an_effects_row_names_one_item_of_its_arm_or_is_refused_by_its_line() {
+    let registry = fixture_registry();
+    let header = "crate\tarm\titem\teffects\tkind\tauthority\tdoor\n";
+    let line = registry
+        .lines()
+        .position(|line| line == header.trim_end())
+        .expect("the fixture has an `# effects` header")
+        + 2;
+    let planted = |row: &str| registry.replacen(header, &format!("{header}{row}\n"), 1);
+
+    assert_eq!(
+        fixture_refusals(&planted("bt-rd\t-\tcrate::Lane::serve_gone\tworks\tworker-door-body\tthe worker\t")),
+        [format!(
+            "window_waits.tsv:{line}: `# effects` `bt-rd crate::Lane::serve_gone` (arm `-`) names no \
+             item of the product"
+        )]
+    );
+    assert_eq!(
+        fixture_refusals(&planted("bt-rd\t[windows]\tcrate::media::quiet\tquiets\towner-door-body\tthe window\t")),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        fixture_refusals(&planted("bt-rd\t[not(windows)]\tcrate::media::quiet\tquiets\towner-door-body\tthe window\t")),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        fixture_refusals(&planted("bt-rd\t-\tcrate::media::quiet\tquiets\towner-door-body\tthe window\t")),
+        [format!(
+            "window_waits.tsv:{line}: `# effects` `bt-rd crate::media::quiet` (arm `-`) names no item \
+             on that arm; the item stands on [not(windows)], [windows]"
+        )]
+    );
+    assert_eq!(
+        fixture_refusals(&planted("bt-rd\t[unix]\tcrate::media::quiet\tquiets\towner-door-body\tthe window\t")),
+        [format!(
+            "window_waits.tsv:{line}: `# effects` `bt-rd crate::media::quiet` (arm `[unix]`) names no \
+             item on that arm; the item stands on [not(windows)], [windows]"
+        )]
+    );
+    assert_eq!(
+        fixture_refusals(&planted("bt-rd\t-\tcrate::Pair::get\tgets\tworker-door-body\tthe worker\t")),
+        [format!(
+            "window_waits.tsv:{line}: `# effects` `bt-rd crate::Pair::get` (arm `-`) names 2 items on \
+             that arm"
+        )]
+    );
+    assert_eq!(
+        fixture_refusals(&planted("bt-rd\t-\tcrate::Lane::serve\tworks\tworker-door-bdy\tthe worker\t")),
+        [format!(
+            "window_waits.tsv:{line}: `# effects` `bt-rd crate::Lane::serve`'s kind `worker-door-bdy` \
+             is not one of owner-door-body, interim-owner, worker-door-body, transport, \
+             drop-exception, shared-body, emergency"
+        )]
+    );
+}
+
 /// RED — **the list refuses what it may not excuse**: a `Cutoff` row, and a door-level or effect
 /// row whose verdict is not `violation`.
 ///
@@ -1470,26 +1537,117 @@ fn real_tree() -> Vec<(String, Arc<Index>)> {
 
 /// One section of the registry: its rows' cells, the header checked.
 fn section<'r>(registry: &'r str, name: &str, columns: &[&str]) -> Vec<Vec<&'r str>> {
+    numbered_section(registry, name, columns)
+        .into_iter()
+        .map(|(_, cells)| cells)
+        .collect()
+}
+
+/// One section of the registry: each row's one-based line in the registry and its cells, the
+/// header checked — for a refusal that names the row by its line.
+fn numbered_section<'r>(
+    registry: &'r str,
+    name: &str,
+    columns: &[&str],
+) -> Vec<(usize, Vec<&'r str>)> {
     let marker = format!("# {name}");
     let mut lines = registry
         .lines()
-        .skip_while(|line| *line != marker)
+        .enumerate()
+        .skip_while(|(_, line)| *line != marker)
         .skip(1)
-        .take_while(|line| !line.starts_with("# "))
-        .filter(|line| !line.is_empty() && !line.starts_with("##"));
+        .take_while(|(_, line)| !line.starts_with("# "))
+        .filter(|(_, line)| !line.is_empty() && !line.starts_with("##"));
     let header: Vec<&str> = lines
         .next()
         .unwrap_or_else(|| panic!("the registry has a `{marker}` section"))
+        .1
         .split('\t')
         .collect();
     assert_eq!(header, columns, "`{marker}`'s columns");
     lines
-        .map(|line| {
+        .map(|(at, line)| {
             let cells: Vec<&str> = line.split('\t').collect();
             assert_eq!(cells.len(), columns.len(), "`{marker}`: {line}");
-            cells
+            (at + 1, cells)
         })
         .collect()
+}
+
+/// The kinds an `# effects` row may carry — `window_waits_tests::EFFECT_KINDS`, the registry's
+/// own closed list. The first three are stops of the walk (a door body the walk reports and does
+/// not enter); the rest are read by bt-app's tests and not by the walk.
+const EFFECT_KINDS: [&str; 7] = [
+    "owner-door-body",
+    "interim-owner",
+    "worker-door-body",
+    "transport",
+    "drop-exception",
+    "shared-body",
+    "emergency",
+];
+
+/// The item an `# effects` row names (plan row 76): the admitted callable of `package` with an
+/// identity in the product whose spelling is `item` — its module path, then `Owner::`,
+/// `<Owner as Trait>::` or `Trait::`, then the name (`crate::git::GitLocation::located`) — and
+/// whose arm is `arm`: `-` for an identity on no predicate, else each predicate of the identity
+/// (the declarations that reach the file, then the ones inside it) as `[predicate]`, joined by a
+/// space (`[windows]`, `[not(windows)] [target_os = "macos"]`), as
+/// `window_waits_tests::item_and_arm` spells a row. Every module path an item answers to is read,
+/// not only the first. A row that names no item, or two on its arm, is refused: the walk's stop
+/// would be lost, or would stop at whichever of the two the order put first.
+fn effect_item(resolver: &Resolver<'_>, package: &str, arm: &str, item: &str) -> Result<ItemId, String> {
+    let mut found: Vec<ItemId> = Vec::new();
+    let mut elsewhere: BTreeSet<String> = BTreeSet::new();
+    for id in resolver.callables(package) {
+        if !resolver.admitted(id) {
+            continue;
+        }
+        for identity in resolver.record(id).identities() {
+            if !identity.variant.permits_product() {
+                continue;
+            }
+            let mut spelled = format!("{}::", identity.module_path);
+            match (&identity.type_owner, &identity.trait_name) {
+                (Some(owner), Some(trait_name)) => {
+                    spelled.push_str(&format!("<{owner} as {trait_name}>::"));
+                }
+                (Some(owner), None) => spelled.push_str(&format!("{owner}::")),
+                (None, Some(trait_name)) => spelled.push_str(&format!("{trait_name}::")),
+                (None, None) => {}
+            }
+            spelled.push_str(&identity.name);
+            if spelled != item {
+                continue;
+            }
+            let predicates = identity.variant.predicates();
+            let on = if predicates.is_empty() {
+                "-".to_owned()
+            } else {
+                predicates
+                    .iter()
+                    .map(|predicate| format!("[{predicate}]"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            };
+            if on == arm {
+                if !found.contains(&id) {
+                    found.push(id);
+                }
+            } else {
+                elsewhere.insert(on);
+            }
+        }
+    }
+    match found.as_slice() {
+        [one] => Ok(*one),
+        [] if elsewhere.is_empty() => Err("names no item of the product".to_owned()),
+        [] => Err(format!(
+            "names no item on that arm; the item stands on {}",
+            elsewhere.into_iter().collect::<Vec<_>>().join(", ")
+        )),
+        two => Err(format!("names {} items on that arm", two.len())),
+    }
 }
 
 /// A ledger key read as `window_waits_tests::door_key` reads it: an optional crate (`bt_…::`, else
@@ -1693,7 +1851,6 @@ struct Registry {
 /// `# completions`, `# request-doors`) read over `resolver`; a key without a crate is `home`'s.
 fn read_registry(
     resolver: &Resolver<'_>,
-    by_key: &BTreeMap<String, ItemId>,
     registry: &str,
     home: &str,
 ) -> Registry {
@@ -1735,7 +1892,7 @@ fn read_registry(
                 .insert(id, format!("entrance {} ({})", cells[0], cells[1]));
         }
     }
-    let effects = section(
+    let effects = numbered_section(
         registry,
         "effects",
         &[
@@ -1748,28 +1905,39 @@ fn read_registry(
             "door",
         ],
     );
-    for cells in &effects {
+    for (line, cells) in &effects {
         let wanted = format!("{} {}", cells[0], cells[2]);
-        let items: Vec<ItemId> = by_key
-            .iter()
-            .filter(|(key, _)| **key == wanted)
-            .map(|(_, id)| *id)
-            .collect();
+        if !EFFECT_KINDS.contains(&cells[4]) {
+            refused.push(format!(
+                "window_waits.tsv:{line}: `# effects` `{wanted}`'s kind `{}` is not one of {}",
+                cells[4],
+                EFFECT_KINDS.join(", ")
+            ));
+            continue;
+        }
+        let id = match effect_item(resolver, cells[0], cells[1], cells[2]) {
+            Ok(id) => id,
+            Err(why) => {
+                refused.push(format!(
+                    "window_waits.tsv:{line}: `# effects` `{wanted}` (arm `{}`) {why}",
+                    cells[1]
+                ));
+                continue;
+            }
+        };
         let label = if cells[6].is_empty() {
-            wanted.clone()
+            wanted
         } else {
             format!("{wanted} ({})", cells[6])
         };
-        for id in items {
-            match cells[4] {
-                "owner-door-body" | "interim-owner" => {
-                    rules.owner_bodies.insert(id, label.clone());
-                }
-                "worker-door-body" => {
-                    rules.worker_bodies.insert(id, label.clone());
-                }
-                _ => {}
+        match cells[4] {
+            "owner-door-body" | "interim-owner" => {
+                rules.owner_bodies.insert(id, label);
             }
+            "worker-door-body" => {
+                rules.worker_bodies.insert(id, label);
+            }
+            _ => {}
         }
     }
 
@@ -1962,7 +2130,7 @@ fn every_request_door_returns_at_once() {
         specs,
         not_walked,
         refused,
-    } = read_registry(&resolver, &by_key, &registry, "bt-app");
+    } = read_registry(&resolver, &registry, "bt-app");
     assert!(
         refused.is_empty(),
         "the registry's request doors are not read:\n  {}",
