@@ -715,30 +715,52 @@ fn a_pan_discarded_under_a_held_gesture_says_so_once() {
     );
 
     let mut folio = a_window("held-pan-said");
-    let mut runtime = folio.runtime();
-    let hand = PhysicalPosition::new(300.0, 300.0);
-    runtime.pointer_moved(hand).expect("the move is answered");
-    a_tab_press(&mut runtime, hand);
-    runtime
-        .spend_parked_pans()
-        .expect("nothing parked is nothing spent");
-    assert!(
-        !runtime.app.said_a_pan_was_discarded,
-        "a turn with no pan parked discards nothing"
+    let said_lines = |folio: &HeadlessFolio| -> Vec<String> {
+        folio
+            .ledger
+            .take()
+            .into_iter()
+            .filter_map(|effect| match effect {
+                crate::headless::WindowEffect::Noted(line) if line.contains("touch pan") => {
+                    Some(line)
+                }
+                _ => None,
+            })
+            .collect()
+    };
+    let pan = bt_platform::PanStep {
+        began_at: Some((600, 500)),
+        travel: (0, 40),
+    };
+    {
+        let mut runtime = folio.runtime();
+        let hand = PhysicalPosition::new(300.0, 300.0);
+        runtime.pointer_moved(hand).expect("the move is answered");
+        a_tab_press(&mut runtime, hand);
+        runtime
+            .spend_parked_pans()
+            .expect("nothing parked is nothing spent");
+    }
+    assert_eq!(
+        said_lines(&folio),
+        Vec::<String>::new(),
+        "a turn with no pan parked discards nothing and says nothing"
     );
-    runtime
-        .window
-        .parked_pans
-        .borrow_mut()
-        .push(bt_platform::PanStep {
-            began_at: Some((600, 500)),
-            travel: (0, 40),
-        });
-    runtime
-        .spend_parked_pans()
-        .expect("the parked pans are spent");
-    assert!(
-        runtime.app.said_a_pan_was_discarded,
-        "the discard under the held press is said"
-    );
+    for expected in [
+        vec!["a touch pan was discarded under a held gesture (owner=TabPress)".to_owned()],
+        Vec::new(),
+    ] {
+        {
+            let mut runtime = folio.runtime();
+            runtime.window.parked_pans.borrow_mut().push(pan);
+            runtime
+                .spend_parked_pans()
+                .expect("the parked pans are spent");
+        }
+        assert_eq!(
+            said_lines(&folio),
+            expected,
+            "the first discard under the held press is said, and the second is not"
+        );
+    }
 }

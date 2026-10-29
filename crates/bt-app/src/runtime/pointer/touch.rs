@@ -153,7 +153,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// §7, cut 6, cell B19): its opening point is a pointer move, which would
     /// drag the held owner to the finger, and a second pointer is not something
     /// the capture has. The first discard in the process says so, once
-    /// ([`a_discarded_pan_said_once`]).
+    /// ([`a_discarded_pan_said_once`]), through the window's door.
     pub(crate) fn spend_parked_pans(&mut self) -> Result<()> {
         let steps = std::mem::take(&mut *self.window.parked_pans.borrow_mut());
         if let Some(capture) = self.app.pointer_capture.as_ref() {
@@ -163,7 +163,7 @@ impl<B: Backend> Runtime<'_, B> {
                     capture.owner.name(),
                 )
             {
-                diagnostics::note(&line);
+                self.window.window.note(&line);
             }
             return Ok(());
         }
