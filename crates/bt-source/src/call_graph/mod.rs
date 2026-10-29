@@ -294,6 +294,24 @@ pub enum Unresolved {
     },
 }
 
+impl Unresolved {
+    /// **The one item an untyped receiver's call can reach**, when exactly one first-party method
+    /// has its name: an [`Unresolved::Ambiguous`] edge with one candidate (a binding of a `?`'s
+    /// value, a box bound by a pattern — receivers the rules do not type). The edge is still not
+    /// followed: `docs/plans/UNFOLLOWED-EDGES.tsv` lists only edges with other than one candidate
+    /// and counts these in its header, and a guard that names a callee's callers counts such an
+    /// edge as a call of its one candidate (T-CENSUS-FOLLOWS-ASSOCIATED-TYPE-CALLS, the O-4b
+    /// review's F5: a rename to a name only one item has moves an edge off the list, and the
+    /// header count is where that shows). `None` for every other edge.
+    #[must_use]
+    pub fn sole_candidate(&self) -> Option<ItemId> {
+        match self {
+            Self::Ambiguous { candidates, .. } if candidates.len() == 1 => Some(candidates[0]),
+            _ => None,
+        }
+    }
+}
+
 /// One call edge.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Edge {
