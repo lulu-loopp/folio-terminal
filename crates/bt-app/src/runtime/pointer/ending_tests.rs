@@ -386,6 +386,32 @@ fn each_door_ends_a_held_capture() {
         (Some("Divider"), Vec::new()),
         "a capture whose sample still holds is a hand still on it"
     );
+    let _ = application.runtime().app.pointer_capture.take();
+
+    // The button came up and its release never reached the program (0.4.9 plan row 107): the
+    // same door, with the system's sample unchanged and the platform saying the button is up.
+    // Every owner lasts while its button is down, so every one is cancelled.
+    let buttons = |application: &mut HeadlessApplication, down: bool| {
+        let runtime = application.runtime();
+        let mut answers = runtime.window.window.answers.get();
+        answers.buttons_down = down;
+        runtime.window.window.answers.set(answers);
+    };
+    each_owner_against(
+        &mut application,
+        "the resize door, the button up",
+        "cancel",
+        &all,
+        |runtime| every_owner(on_pane(runtime, 0)),
+        |application| {
+            buttons(application, false);
+            application
+                .runtime()
+                .flush_pending_pty_resize(Instant::now())
+                .expect("the turn's resize door runs");
+            buttons(application, true);
+        },
+    );
 
     // A scale change: the owners holding a pixel quantity taken at the press.
     each_owner_against(

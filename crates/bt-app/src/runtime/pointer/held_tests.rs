@@ -486,3 +486,259 @@ fn a_gesture_held_in_one_window_leaves_another_windows_page_deaf_to_the_wheel() 
         );
     }
 }
+
+// ── 0.4.9 plan row 107: a capture whose button came up does not swallow the finger ──
+
+/// What the platform says about every button, as the window's seam answers it.
+fn the_buttons_are(runtime: &Runtime<'_, Headless>, down: bool) {
+    let mut answers = runtime.window.window.answers.get();
+    answers.buttons_down = down;
+    runtime.window.window.answers.set(answers);
+}
+
+/// Window `id`'s second shell, given two hundred lines to scroll back through and drawn, and a point
+/// well inside it in the window's client pixels.
+fn a_shell_with_history(
+    application: &mut crate::headless::HeadlessApplication,
+    id: u64,
+) -> (SeatId, (i32, i32)) {
+    let mut runtime = window(application, id);
+    let seat = *runtime.sessions.keys().nth(1).expect("two shells");
+    let text: String = (0..200).map(|line| format!("line {line}\r\n")).collect();
+    runtime
+        .sessions
+        .get_mut(&seat)
+        .expect("the shell")
+        .session
+        .session
+        .feed(text.as_bytes())
+        .expect("the shell prints");
+    runtime
+        .publish_frame(bt_render::FrameTrigger {
+            occurred_at: Instant::now(),
+            source: bt_render::FrameSource::Expose,
+        })
+        .expect("a headless frame composes");
+    runtime.redraw().expect("and reaches the glass");
+    let corner = first_point(&mut runtime, |runtime, point| {
+        seats::pane_at(&runtime.seat_layout, point.x, point.y) == Some(seat)
+    });
+    (seat, (corner.x as i32 + 100, corner.y as i32 + 300))
+}
+
+/// A pan parked on window `id` at `at`, one opening step and then `steps` of `travel` each.
+fn a_pan_parked(
+    application: &mut crate::headless::HeadlessApplication,
+    id: u64,
+    at: (i32, i32),
+    steps: usize,
+    travel: i32,
+) {
+    let runtime = window(application, id);
+    let mut parked = runtime.window.parked_pans.borrow_mut();
+    parked.push(bt_platform::PanStep {
+        began_at: Some(at),
+        travel: (0, 0),
+    });
+    parked.extend((0..steps).map(|_| bt_platform::PanStep {
+        began_at: None,
+        travel: (0, travel),
+    }));
+}
+
+/// The pans spent the way the loop spends them, and the wheel burst they made spent too, as the
+/// turn's end spends it; then how far window `id`'s `seat` has scrolled back, in subpixels.
+fn spent_and_scrolled(
+    application: &mut crate::headless::HeadlessApplication,
+    id: u64,
+    seat: SeatId,
+) -> i64 {
+    application
+        .folio
+        .spend_touch_pans()
+        .expect("the parked pans are spent");
+    let mut runtime = window(application, id);
+    runtime.flush_wheel().expect("the wheel burst is spent");
+    runtime.pane(seat).view.projection.scroll_offset_subpixels()
+}
+
+/// RED (0.4.9 plan row 107, T-TOUCH-DOES-NOTHING-ON-WINDOWS; R8, R9) — **a pan in one window
+/// scrolls the pane under the finger when a press in another window lost its release**: window 1
+/// holds a tab press whose button the platform says is up, and a 400-pixel downward pan parked
+/// on window 2 over a shell with history scrolls that shell back, ending window 1's stale
+/// capture first (`cancel`). With the button still down the same pan is discarded and window 1's
+/// press stays held — B19 across windows. And twenty steps of 20 pixels scroll exactly as far as
+/// one step of 400, so the pan road loses nothing to its step size.
+///
+/// RED on 340917494: the slot is the application's and B19 discards every parked pan while it
+/// holds anything, so window 2's shell does not move.
+///
+/// MUTATION: drop the button test from `end_a_capture_that_lost_its_pointer` — window 1's press
+/// stays held and the pan is discarded; drop `end_the_capture_that_lost_its_pointer` from
+/// `spend_touch_pans` — the same.
+#[test]
+fn a_pan_after_a_press_in_another_window_lost_its_release_scrolls_the_pane_under_the_finger() {
+    let mut scrolled_by = Vec::new();
+    for (down, steps, travel) in [(true, 20, 20), (false, 20, 20), (false, 1, 400)] {
+        let mut application = two_windows("lost-release-across");
+        let (seat, at) = a_shell_with_history(&mut application, 2);
+        {
+            let mut first = window(&mut application, 1);
+            let hand = PhysicalPosition::new(300.0, 300.0);
+            first.pointer_moved(hand).expect("the move is answered");
+            a_tab_press(&mut first, hand);
+            the_buttons_are(&first, down);
+            first.app.capture_endings.clear();
+        }
+        a_pan_parked(&mut application, 2, at, steps, travel);
+        let offset = spent_and_scrolled(&mut application, 2, seat);
+        let second = window(&mut application, 2);
+        let held = second
+            .app
+            .pointer_capture
+            .as_ref()
+            .map(|capture| capture.owner.name());
+        let endings = second.app.capture_endings.clone();
+        if down {
+            assert_eq!(offset, 0, "a pan under a press still held scrolls nothing");
+            assert_eq!(
+                (held, endings),
+                (Some("TabPress"), Vec::new()),
+                "and the held press is left alone"
+            );
+        } else {
+            assert!(
+                offset > 0,
+                "a pan after a lost release scrolls window 2's shell back ({steps} × {travel})"
+            );
+            assert_eq!(
+                (held, endings),
+                (None, vec![("TabPress", "cancel")]),
+                "window 1's stale press is cancelled first"
+            );
+            scrolled_by.push(offset);
+        }
+    }
+    assert_eq!(
+        scrolled_by[0], scrolled_by[1],
+        "twenty steps of 20 px scroll as far as one of 400 px"
+    );
+}
+
+/// RED (0.4.9 plan row 107; R8) — **the same in one window**: a tab press held in the window the
+/// finger pans, whose button the platform says is up, is cancelled and the pan scrolls the shell
+/// under the finger.
+///
+/// RED on 340917494: B19 discards the pan; the system's capture sample still reads "held".
+///
+/// MUTATION: drop the button test from `end_a_capture_that_lost_its_pointer` — nothing scrolls.
+#[test]
+fn a_pan_after_a_press_in_its_own_window_lost_its_release_scrolls_the_pane_under_the_finger() {
+    let mut application = two_windows("lost-release-own");
+    let (seat, at) = a_shell_with_history(&mut application, 2);
+    {
+        let mut second = window(&mut application, 2);
+        let hand = PhysicalPosition::new(300.0, 300.0);
+        second.pointer_moved(hand).expect("the move is answered");
+        a_tab_press(&mut second, hand);
+        the_buttons_are(&second, false);
+    }
+    a_pan_parked(&mut application, 2, at, 20, 20);
+    let offset = spent_and_scrolled(&mut application, 2, seat);
+    assert!(offset > 0, "the pan scrolls the shell under the finger");
+    assert!(
+        window(&mut application, 2).app.pointer_capture.is_none(),
+        "and the stale press is gone"
+    );
+}
+
+/// RED (0.4.9 plan row 107; R8) — **the per-turn check alone ends a capture whose button came
+/// up**, with no pan and no press to prove it: the turn's resize door asks the platform, and a
+/// tab press whose button is up is cancelled (`cancel`, in the endings ledger), while one whose
+/// button is down is left held. The system's own capture sample is unchanged in both, so the
+/// button is the only thing that differs.
+///
+/// RED on 340917494: the door compared only the system's capture, which a lost release leaves
+/// where winit put it.
+///
+/// MUTATION: drop the button test from `end_a_capture_that_lost_its_pointer` — the press whose
+/// button is up stays held.
+#[test]
+fn a_capture_whose_button_came_up_is_ended_by_the_next_turn() {
+    for down in [true, false] {
+        let mut folio = a_window("lost-release-turn");
+        let mut runtime = folio.runtime();
+        let hand = PhysicalPosition::new(300.0, 300.0);
+        runtime.pointer_moved(hand).expect("the move is answered");
+        a_tab_press(&mut runtime, hand);
+        the_buttons_are(&runtime, down);
+        runtime.app.capture_endings.clear();
+        runtime
+            .flush_pending_pty_resize(Instant::now())
+            .expect("the turn's resize door runs");
+        let held = runtime
+            .app
+            .pointer_capture
+            .as_ref()
+            .map(|capture| capture.owner.name());
+        let expected = if down {
+            (Some("TabPress"), Vec::new())
+        } else {
+            (None, vec![("TabPress", "cancel")])
+        };
+        assert_eq!(
+            (held, runtime.app.capture_endings.clone()),
+            expected,
+            "the turn with the button down: {down}"
+        );
+    }
+}
+
+/// RED (0.4.9 plan row 107; R2's third line) — **a pan discarded under a held gesture says so
+/// once in the process**: the first discard writes the line naming the gesture, and every later
+/// one writes nothing; a turn with no pan parked discards nothing and says nothing.
+///
+/// MUTATION: drop the line from `spend_parked_pans` — the process never learns a discard
+/// happened; drop the `said` memory — every discard writes it again.
+#[test]
+fn a_pan_discarded_under_a_held_gesture_says_so_once() {
+    let mut said = false;
+    assert_eq!(
+        crate::runtime::pointer::touch::a_discarded_pan_said_once(&mut said, "TabPress"),
+        Some("a touch pan was discarded under a held gesture (owner=TabPress)".to_owned()),
+        "the first discard is said, with its owner"
+    );
+    assert_eq!(
+        crate::runtime::pointer::touch::a_discarded_pan_said_once(&mut said, "TabPress"),
+        None,
+        "and no later one"
+    );
+
+    let mut folio = a_window("held-pan-said");
+    let mut runtime = folio.runtime();
+    let hand = PhysicalPosition::new(300.0, 300.0);
+    runtime.pointer_moved(hand).expect("the move is answered");
+    a_tab_press(&mut runtime, hand);
+    runtime
+        .spend_parked_pans()
+        .expect("nothing parked is nothing spent");
+    assert!(
+        !runtime.app.said_a_pan_was_discarded,
+        "a turn with no pan parked discards nothing"
+    );
+    runtime
+        .window
+        .parked_pans
+        .borrow_mut()
+        .push(bt_platform::PanStep {
+            began_at: Some((600, 500)),
+            travel: (0, 40),
+        });
+    runtime
+        .spend_parked_pans()
+        .expect("the parked pans are spent");
+    assert!(
+        runtime.app.said_a_pan_was_discarded,
+        "the discard under the held press is said"
+    );
+}

@@ -27,6 +27,7 @@
 //! |---|---|
 //! | `Runtime::window_blurred` | cancel |
 //! | `Runtime::flush_pending_pty_resize`, through `end_a_capture_that_lost_its_pointer` | cancel |
+//! | `FolioApp::spend_touch_pans`, through the same check on the owner's window, before any pan is spent | cancel |
 //! | `Runtime::scale_factor_changed`, its first statement | cancel, for pixel-quantity owners |
 //! | `Runtime::hide_quake_window` | cancel |
 //! | `Runtime::close_window` | cancel |
@@ -48,8 +49,8 @@
 
 use crate::window_seam::prelude::*;
 use crate::{
-    FloatDragKind, LeafId, MouseRoute, PasteTarget, PreviewSurface, RowHost, RowMiddlePress,
-    RowPress, Runtime, TabId, UserInputKind, VideoPicturePress, float, input,
+    FloatDragKind, FolioApp, LeafId, MouseRoute, PasteTarget, PreviewSurface, RowHost,
+    RowMiddlePress, RowPress, Runtime, TabId, UserInputKind, VideoPicturePress, float, input,
 };
 use anyhow::Result;
 use bt_layout::SeatId;
@@ -188,6 +189,43 @@ impl CaptureEnding for OwnerGone {
 }
 
 impl CaptureOwner {
+    /// **Whether the gesture is over once the button that latched it is up** (0.4.9 plan
+    /// row 107), the grammar of [`Runtime::end_a_capture_that_lost_its_pointer`]'s button test,
+    /// one arm per owner.
+    ///
+    /// Every owner today is a hand holding its button down: each is latched by a press of the
+    /// button it records and ends at that button's release (R-6), and none is carried past it —
+    /// a float carry, a tab, pane or row in the hand and a promoted peek all travel under the
+    /// press that began them. An owner that is meant to outlive its button (a click-to-carry, a
+    /// keyboard-begun move) answers `false` here and keeps the system-capture test alone; a new
+    /// owner is a compile error until it says which it is.
+    pub(crate) fn lasts_while_its_button_is_down(&self) -> bool {
+        match self {
+            Self::Divider(_)
+            | Self::TabPress(_)
+            | Self::PanePress(..)
+            | Self::RowPress(_)
+            | Self::Drag(_)
+            | Self::FloatHeadPress(_)
+            | Self::FloatDrag(_)
+            | Self::GlanceHeadPress(_)
+            | Self::GlanceThumb(_)
+            | Self::VideoBar(_)
+            | Self::PreviewBodyThumb(..)
+            | Self::BlockThumb(..)
+            | Self::PicturePan(..)
+            | Self::EditSelection(..)
+            | Self::RenderedSelection(..)
+            | Self::TerminalThumb(..)
+            | Self::TerminalFootMark(..)
+            | Self::Route(_)
+            | Self::SettingsSlider(_)
+            | Self::SettingsMenuBar(_)
+            | Self::VideoPicture(_)
+            | Self::RowMiddlePress(_) => true,
+        }
+    }
+
     /// **The gesture's name**, as a trace line and a test say it.
     pub(crate) fn name(&self) -> &'static str {
         match self {
@@ -443,13 +481,43 @@ impl<B: Backend> Runtime<'_, B> {
     /// ([`crate::runtime::pointer::PointerCapture::os`]) against the one taken now, only while
     /// this window holds a capture — one `GetCapture` a turn while a gesture is in the air, and
     /// none at all otherwise. The whole of the test is [`a_capture_still_holds_its_pointer`].
+    ///
+    /// **And a gesture whose button has come up** (0.4.9 plan row 107): a release that never
+    /// reached this program leaves the system's capture where winit put it — winit gives it back
+    /// only when its own count of presses returns to zero — so the sample above goes on reading
+    /// "still held" while no hand holds anything. The button is asked of the platform
+    /// ([`bt_platform::mouse_button_down`], through the window's seam), which says up only when
+    /// no release of it can still be on its way, under every name the platform may give the
+    /// press ([`input::reported_buttons_of`]). An owner that outlives its button keeps the first
+    /// test alone ([`CaptureOwner::lasts_while_its_button_is_down`]).
     pub(crate) fn end_a_capture_that_lost_its_pointer(&mut self) -> Result<bool> {
-        let Some(at_the_press) = self.own_capture().map(|capture| capture.os) else {
+        let Some((at_the_press, button, by_its_button)) = self.own_capture().map(|capture| {
+            (
+                capture.os,
+                capture.button,
+                capture.owner.lasts_while_its_button_is_down(),
+            )
+        }) else {
             return Ok(false);
         };
-        if a_capture_still_holds_its_pointer(at_the_press, bt_platform::thread_mouse_capture()) {
+        let pointer_held =
+            a_capture_still_holds_its_pointer(at_the_press, bt_platform::thread_mouse_capture());
+        let button_held = !by_its_button
+            || input::reported_buttons_of(button, bt_platform::host_platform())
+                .any(|reported| self.window.window.mouse_button_down(reported));
+        if pointer_held && button_held {
             return Ok(false);
         }
+        self.mouse_trace(|| {
+            format!(
+                "capture lost its pointer by={}",
+                if pointer_held {
+                    "button up"
+                } else {
+                    "system capture"
+                }
+            )
+        });
         self.end_capture(Ending::Cancel)?;
         Ok(true)
     }
@@ -606,6 +674,33 @@ impl<B: Backend> Runtime<'_, B> {
         });
         self.answer_attention(owner.seat, UserInputKind::MouseButton);
         self.send_mouse_input_to(owner.seat, &bytes, "forward mouse button release to PTY")
+    }
+}
+
+impl<B: Backend> FolioApp<B> {
+    /// **The application's capture, checked on its owner's window** (0.4.9 plan row 107, R9):
+    /// the per-turn check of [`Runtime::end_a_capture_that_lost_its_pointer`], asked of whichever
+    /// window latched the slot, for a door that is about to act on another window under it. The
+    /// slot is the application's, so its clean-up is too: a capture whose window has gone is
+    /// owed nothing and is let go.
+    pub(crate) fn end_the_capture_that_lost_its_pointer(&mut self) -> Result<()> {
+        let Some(owner) = self
+            .app
+            .as_ref()
+            .and_then(|app| app.pointer_capture.as_ref())
+            .map(|capture| capture.window)
+        else {
+            return Ok(());
+        };
+        match self.runtime(owner) {
+            Some(mut window) => window.end_a_capture_that_lost_its_pointer().map(drop),
+            None => {
+                if let Some(app) = self.app.as_mut() {
+                    let _ = app.take_capture_where(|capture| capture.window == owner);
+                }
+                Ok(())
+            }
+        }
     }
 }
 

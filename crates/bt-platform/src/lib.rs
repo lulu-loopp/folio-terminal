@@ -289,6 +289,23 @@ pub enum WheelScrollAmount {
     Page,
 }
 
+/// **A mouse button, as [`mouse_button_down`] is asked about it** (0.4.9 plan row 107,
+/// T-TOUCH-DOES-NOTHING-ON-WINDOWS): the *logical* button the application was told about, the
+/// one a window's press and release messages name. The door maps it to whatever physical
+/// button the platform reads, so a caller never learns that the two can differ.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PointerButton {
+    Left,
+    Right,
+    Middle,
+    /// The first extra button, `XBUTTON1` on Windows.
+    Back,
+    /// The second extra button, `XBUTTON2` on Windows.
+    Forward,
+    /// Any other button, by the platform's own number for it.
+    Other(u16),
+}
+
 /// Geometry consumed by the pure half of the Win32 `WM_NCHITTEST` bridge.
 /// All values are physical pixels; callers derive them from the live window DPI.
 ///
@@ -9482,12 +9499,15 @@ mod windows_impl {
                     CPS_CANCEL, ImmGetContext, ImmNotifyIME, ImmReleaseContext, NI_COMPOSITIONSTR,
                 },
                 KeyboardAndMouse::{
-                    GetCapture, GetKeyState, GetKeyboardLayout, MAPVK_VK_TO_CHAR,
+                    GetAsyncKeyState, GetCapture, GetKeyState, GetKeyboardLayout, MAPVK_VK_TO_CHAR,
                     MAPVK_VSC_TO_VK_EX, MapVirtualKeyW, SetFocus, TME_LEAVE, TME_NONCLIENT,
                     TRACKMOUSEEVENT, TRACKMOUSEEVENT_FLAGS, TrackMouseEvent, VIRTUAL_KEY,
                     VK_CONTROL, VK_LBUTTON, VK_MBUTTON, VK_RBUTTON, VK_SHIFT, VK_XBUTTON1,
                     VK_XBUTTON2, VkKeyScanW,
                 },
+                // Whether a contact the touch door saw go down is still on the glass — see
+                // [`mouse_button_down`].
+                Pointer::{GetPointerInfo, POINTER_FLAG_INCONTACT, POINTER_INFO},
                 // One call that undoes one winit makes, and the four that answer
                 // the system's pan gesture — see
                 // [`let_the_system_translate_touch`].
@@ -9511,15 +9531,16 @@ mod windows_impl {
                 AppendMenuW, CreateCaret, CreatePopupMenu, DefWindowProcW, DestroyCaret,
                 DestroyMenu, FLASHW_STOP, FLASHW_TIMERNOFG, FLASHW_TRAY, FLASHWINFO, FlashWindowEx,
                 GA_ROOT, GCLP_HBRBACKGROUND, GF_BEGIN, GF_END, GetAncestor, GetClientRect,
-                GetCursorPos, GetSystemMetrics, GetWindowRect, HTBOTTOM, HTBOTTOMLEFT,
-                HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTMAXBUTTON, HTRIGHT, HTTOP, HTTOPLEFT,
-                HTTOPRIGHT, HWND_NOTOPMOST, HWND_TOPMOST, IsIconic, IsZoomed, MB_ICONINFORMATION,
-                MB_OK, MB_SETFOREGROUND, MF_STRING, MINMAXINFO, NCCALCSIZE_PARAMS, PostMessageW,
-                RegisterWindowMessageW, SM_CXFRAME, SM_CXPADDEDBORDER, SM_CXVIRTUALSCREEN,
-                SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
-                SPI_GETCLIENTAREAANIMATION, SPI_GETWHEELSCROLLLINES, SWP_FRAMECHANGED,
-                SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetCaretPos,
-                SetClassLongPtrW, SetWindowPos, SystemParametersInfoW, TPM_RETURNCMD,
+                GetCursorPos, GetQueueStatus, GetSystemMetrics, GetWindowRect, HTBOTTOM,
+                HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTMAXBUTTON, HTRIGHT,
+                HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_NOTOPMOST, HWND_TOPMOST, IsIconic, IsZoomed,
+                MB_ICONINFORMATION, MB_OK, MB_SETFOREGROUND, MF_STRING, MINMAXINFO,
+                NCCALCSIZE_PARAMS, PostMessageW, QS_MOUSEBUTTON, QS_POINTER, QS_TOUCH,
+                QUEUE_STATUS_FLAGS, RegisterWindowMessageW, SM_CXFRAME, SM_CXPADDEDBORDER,
+                SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_SWAPBUTTON, SM_XVIRTUALSCREEN,
+                SM_YVIRTUALSCREEN, SPI_GETCLIENTAREAANIMATION, SPI_GETWHEELSCROLLLINES,
+                SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+                SetCaretPos, SetClassLongPtrW, SetWindowPos, SystemParametersInfoW, TPM_RETURNCMD,
                 TPM_RIGHTBUTTON, TrackPopupMenu, WINDOWPOS, WM_APP, WM_CLOSE, WM_DEVICECHANGE,
                 WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_GESTURE,
                 WM_GETMINMAXINFO, WM_INPUTLANGCHANGE, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
@@ -9537,8 +9558,8 @@ mod windows_impl {
     use super::{
         CustomFrameGeometry, CustomFrameHit, CustomFrameMetrics, GroundBand,
         INSERT_ABOVE_REFERENCE, NativeWindow, PageVisual, PanStep, PanTrack, PendingWindowPos,
-        PlatformChrome, TaskbarProgress, TaskbarProgressState, ThreadPriority, TitleBarBox,
-        VisualLayer, WheelScrollAmount, WindowRect, composition_visual_offset,
+        PlatformChrome, PointerButton, TaskbarProgress, TaskbarProgressState, ThreadPriority,
+        TitleBarBox, VisualLayer, WheelScrollAmount, WindowRect, composition_visual_offset,
         custom_frame_hit_test, hold_pending_pos_to, logical_px_for_dpi, window_skirt,
     };
     use crate::admission::{WaitToken, WorkerCtx, doors};
@@ -12090,6 +12111,7 @@ mod windows_impl {
         // above, and this procedure runs on the thread that owns the window.
         let state = unsafe { &*(reference_data as *const TouchToTheSystem) };
         state.arrived();
+        CONTACTS_DOWN.with_borrow_mut(|contacts| note_a_contact(contacts, message, wparam));
         // **`DefWindowProcW` and not `DefSubclassProc`, and that is the whole
         // ticket**: the default handling runs now and winit's window procedure
         // never sees the message, so the system translates it instead of
@@ -15175,6 +15197,115 @@ mod windows_impl {
         NativeWindow::from_hwnd(held)
     }
 
+    /// **Whether a hand may still be holding `button`** (0.4.9 plan row 107,
+    /// T-TOUCH-DOES-NOTHING-ON-WINDOWS): `false` only when the button is up and no
+    /// release of it can still be on its way to this thread.
+    ///
+    /// The question a held gesture's per-turn check asks, because the capture
+    /// sample beside it ([`thread_mouse_capture`]) cannot see a release that was
+    /// lost: winit counts its presses and gives the capture back only when the
+    /// count returns to zero, so a lost button-up leaves its `SetCapture` standing
+    /// and the sample reads "still held" for as long as no other window takes it.
+    /// Three readings make the answer, and each closes a road the others leave
+    /// open:
+    ///
+    /// 1. **The button itself**, `GetAsyncKeyState`. It reads *"the physical mouse
+    ///    buttons, not the logical mouse buttons that the physical buttons are
+    ///    mapped to"* and names `GetSystemMetrics(SM_SWAPBUTTON)` as the way to
+    ///    map them
+    ///    (<https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getasynckeystate>),
+    ///    so a logical left on a swapped mouse is read on `VK_RBUTTON`.
+    /// 2. **A button or pointer message still in this thread's queue**,
+    ///    `GetQueueStatus`'s high word, *"the types of messages currently in the
+    ///    queue"*
+    ///    (<https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getqueuestatus>).
+    ///    The button can come up before its release is read — a quick click
+    ///    whose two messages arrive together — and such a release is not lost:
+    ///    it will reach the gesture that is waiting for it.
+    /// 3. **A finger or a pen this thread saw go down and still on the glass**,
+    ///    for the left and the right buttons, which are the two a contact is
+    ///    promoted to. The touch door's subclass writes down each contact a
+    ///    `WM_POINTERDOWN` opens and crosses it off at its `WM_POINTERUP`, and
+    ///    each one left is asked of `GetPointerInfo`, which answers from this
+    ///    thread's own pointer messages; a contact it no longer knows, or knows
+    ///    out of contact, is crossed off too. So a contact whose up never came is
+    ///    forgotten, and a press promoted from a contact still down is held
+    ///    whatever the mouse buttons' state says about it.
+    ///
+    /// A button Windows has no virtual key for ([`PointerButton::Other`]) is
+    /// held: there is nothing to read, and a held gesture keeps the rule it had
+    /// before this door.
+    #[must_use]
+    pub fn mouse_button_down(button: PointerButton) -> bool {
+        // SAFETY: a read-only query over a system index; it takes no pointers.
+        let swapped = unsafe { GetSystemMetrics(SM_SWAPBUTTON) } != 0;
+        let Some(key) = button_key(button, swapped) else {
+            return true;
+        };
+        // SAFETY: a read-only query over a virtual-key number; the high bit of
+        // the answer is "down now".
+        let down = unsafe { GetAsyncKeyState(i32::from(key.0)) } < 0;
+        if down {
+            return true;
+        }
+        let waiting = QUEUE_STATUS_FLAGS(QS_MOUSEBUTTON.0 | QS_POINTER | QS_TOUCH);
+        // SAFETY: a read-only query of this thread's own queue; it takes no pointers.
+        if (unsafe { GetQueueStatus(waiting) } >> 16) != 0 {
+            return true;
+        }
+        matches!(button, PointerButton::Left | PointerButton::Right) && a_contact_is_down()
+    }
+
+    /// **The virtual key a logical button is read on**, given whether the
+    /// system swaps the primary and secondary buttons; `None` for a button no
+    /// virtual key names.
+    pub(super) fn button_key(button: PointerButton, swapped: bool) -> Option<VIRTUAL_KEY> {
+        Some(match (button, swapped) {
+            (PointerButton::Left, false) | (PointerButton::Right, true) => VK_LBUTTON,
+            (PointerButton::Right, false) | (PointerButton::Left, true) => VK_RBUTTON,
+            (PointerButton::Middle, _) => VK_MBUTTON,
+            (PointerButton::Back, _) => VK_XBUTTON1,
+            (PointerButton::Forward, _) => VK_XBUTTON2,
+            (PointerButton::Other(_), _) => return None,
+        })
+    }
+
+    thread_local! {
+        /// **The contacts this thread's touch door saw go down and not yet come
+        /// up**, by pointer id — see [`mouse_button_down`]'s third reading. The
+        /// window thread's own, as every window of this program is.
+        static CONTACTS_DOWN: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// **One pointer message, written down**: a down opens its contact, an up
+    /// crosses it off, and every other message leaves the list alone. The
+    /// pointer id is `wParam`'s low word (`GET_POINTERID_WPARAM`,
+    /// <https://learn.microsoft.com/en-us/windows/win32/inputmsg/wm-pointerdown>).
+    pub(super) fn note_a_contact(contacts: &mut Vec<u32>, message: u32, wparam: WPARAM) {
+        let id = (wparam.0 & 0xFFFF) as u32;
+        match message {
+            WM_POINTERDOWN if !contacts.contains(&id) => contacts.push(id),
+            WM_POINTERUP => contacts.retain(|held| *held != id),
+            _ => {}
+        }
+    }
+
+    /// Whether any contact written down is, by this thread's own pointer
+    /// messages, still on the glass; the ones that are not are crossed off.
+    fn a_contact_is_down() -> bool {
+        CONTACTS_DOWN.with_borrow_mut(|contacts| {
+            contacts.retain(|id| {
+                let mut info = POINTER_INFO::default();
+                // SAFETY: `info` is a live, exclusively borrowed `POINTER_INFO`
+                // for the call to fill; an id the system no longer knows is
+                // refused, and refused is "not down".
+                unsafe { GetPointerInfo(*id, &mut info) }.is_ok()
+                    && info.pointerFlags.contains(POINTER_FLAG_INCONTACT)
+            });
+            !contacts.is_empty()
+        })
+    }
+
     /// **The whole virtual desktop, in physical pixels** (multiwindow slice
     /// F2/F4).
     ///
@@ -16881,16 +17012,91 @@ mod windows_impl {
         use super::{
             CLIPBOARD_OPEN_RETRY_DELAYS, FolderPickerState, ImagePickerState, MathMenuState,
             SaveFilePickerState, ShellPickKind, TOUCH_GOES_TO_THE_SYSTEM, TouchToTheSystem,
-            compositor_failure, let_the_system_translate_touch, newest_live_owner,
-            pan_gesture_configuration, retry_open_clipboard, the_system_s_gesture_is_answered_here,
-            touch_goes_to_the_system, wide_null,
+            button_key, compositor_failure, let_the_system_translate_touch, newest_live_owner,
+            note_a_contact, pan_gesture_configuration, retry_open_clipboard,
+            the_system_s_gesture_is_answered_here, touch_goes_to_the_system, wide_null,
         };
         use crate::handoff::{validate_local_image_path, validate_openable_path};
-        use crate::{NativeWindow, PanStep, PanTrack};
+        use crate::{NativeWindow, PanStep, PanTrack, PointerButton};
         use std::cell::Cell;
         use std::cell::RefCell;
         use std::path::{Path, PathBuf};
         use std::rc::Rc;
+        use windows::Win32::Foundation::WPARAM;
+
+        /// RED (0.4.9 plan row 107) — **a logical button is read on the physical key it is
+        /// mapped to**: `GetAsyncKeyState` reads physical buttons, so with the buttons swapped
+        /// the logical left is `VK_RBUTTON` and the logical right is `VK_LBUTTON`; the middle and
+        /// the two extra buttons do not swap, and a button no virtual key names is not read.
+        ///
+        /// MUTATION: ignore `swapped` — a left-handed mouse reads its held left as up, and a
+        /// held gesture is cancelled under the hand.
+        #[test]
+        fn a_logical_button_is_read_on_the_key_it_is_mapped_to() {
+            let keys = |swapped| {
+                [
+                    PointerButton::Left,
+                    PointerButton::Right,
+                    PointerButton::Middle,
+                    PointerButton::Back,
+                    PointerButton::Forward,
+                    PointerButton::Other(7),
+                ]
+                .map(|button| button_key(button, swapped).map(|key| key.0))
+            };
+            assert_eq!(
+                keys(false),
+                [
+                    Some(0x01),
+                    Some(0x02),
+                    Some(0x04),
+                    Some(0x05),
+                    Some(0x06),
+                    None
+                ],
+                "unswapped: VK_LBUTTON, VK_RBUTTON, VK_MBUTTON, VK_XBUTTON1, VK_XBUTTON2"
+            );
+            assert_eq!(
+                keys(true),
+                [
+                    Some(0x02),
+                    Some(0x01),
+                    Some(0x04),
+                    Some(0x05),
+                    Some(0x06),
+                    None
+                ],
+                "swapped: the primary and secondary trade keys, nothing else moves"
+            );
+        }
+
+        /// RED (0.4.9 plan row 107) — **a contact is written down at its down and crossed off at
+        /// its up, by its own id**: two fingers down and one lifted leave the other; a second
+        /// down of an id already written is one entry; a move, or any other message, changes
+        /// nothing. The id is `wParam`'s low word, whatever the high word carries.
+        ///
+        /// MUTATION: cross off every contact at any up — the second finger, still down, is
+        /// forgotten; read the id from the whole `wParam` — the flags in the high word make an
+        /// up that crosses nothing off.
+        #[test]
+        fn a_contact_is_written_down_at_its_down_and_crossed_off_at_its_up() {
+            let (down, update, up) = (0x0246_u32, 0x0245_u32, 0x0247_u32);
+            let with_flags = |id: usize| WPARAM((0x0006 << 16) | id);
+            let mut contacts = Vec::new();
+            note_a_contact(&mut contacts, down, with_flags(3));
+            note_a_contact(&mut contacts, down, with_flags(9));
+            note_a_contact(&mut contacts, down, with_flags(3));
+            note_a_contact(&mut contacts, update, with_flags(3));
+            assert_eq!(contacts, [3, 9], "two contacts down, each once");
+            note_a_contact(&mut contacts, up, with_flags(3));
+            assert_eq!(
+                contacts,
+                [9],
+                "the lifted one is crossed off, the other stays"
+            );
+            note_a_contact(&mut contacts, 0x0201, with_flags(9));
+            assert_eq!(contacts, [9], "a mouse message is not a contact");
+        }
 
         /// **The four messages taken away from winit, and no fifth** (the touch
         /// ruling of 2026-09-21).
@@ -19653,8 +19859,8 @@ pub use windows_impl::{
     get_work_area, hide_every_window_of_this_process, install_console_ctrl_handler,
     install_context_menu, install_window_class_background, is_window_cloaked, is_window_minimized,
     keyboard_layout_shift_table, keyboard_layouts, leave_process, let_the_system_translate_touch,
-    message_box, monitor_id_at, monospace_family_named, monospace_font_families, os_ui_language,
-    pointer_position, pointer_position_in_window, read_context_menu, recycle,
+    message_box, monitor_id_at, monospace_family_named, monospace_font_families, mouse_button_down,
+    os_ui_language, pointer_position, pointer_position_in_window, read_context_menu, recycle,
     redirect_std_streams_to_file, register_clipboard_owner, remove_context_menu,
     request_window_close, set_clipboard_text, set_current_thread_priority, set_system_backdrop,
     set_window_dark_mode, set_window_outer_rect, set_window_topmost, silence_std_streams,
@@ -19683,10 +19889,11 @@ pub use portable_impl::{
     adopt_parent_console, announce_explorer_menu_change, detach_console, directory_folds_case,
     hide_every_window_of_this_process, install_console_ctrl_handler, install_context_menu,
     is_window_cloaked, keyboard_layout_shift_table, keyboard_layouts, leave_process,
-    let_the_system_translate_touch, read_context_menu, redirect_std_streams_to_file,
-    register_clipboard_owner, remove_context_menu, set_system_backdrop, silence_std_streams,
-    system_backdrop_available, thread_mouse_capture, virtual_key_for_character,
-    virtual_key_is_dead, virtual_key_of_scan_code, write_std_error, write_to_console,
+    let_the_system_translate_touch, mouse_button_down, read_context_menu,
+    redirect_std_streams_to_file, register_clipboard_owner, remove_context_menu,
+    set_system_backdrop, silence_std_streams, system_backdrop_available, thread_mouse_capture,
+    virtual_key_for_character, virtual_key_is_dead, virtual_key_of_scan_code, write_std_error,
+    write_to_console,
 };
 
 /// **The window's composition, on a platform that has none** (M4-1).
