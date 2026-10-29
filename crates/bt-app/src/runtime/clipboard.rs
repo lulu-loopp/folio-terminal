@@ -12,9 +12,9 @@ use crate::runtime::keyboard::ime_owner;
 use crate::window_seam::prelude::*;
 use crate::{
     ClipboardWriteEffect, Drag, DropLanding, PasteAnswer, PasteBody, PasteCardKey, PasteOffer,
-    PasteTarget, PreparedClipboardPaste, PreviewSurface, Runtime, ShellSession, StagedPaste,
-    TextFieldSeat, UserInputKind, i18n, menubar, offer_pty_input, profile_banner_name, restore,
-    seats, text_field, toast,
+    PasteTarget, PreparedClipboardPaste, PreviewSurface, PtyInput, Runtime, ShellSession,
+    StagedPaste, TerminalPane, TextFieldSeat, UserInputKind, hang_watch, i18n, menubar,
+    profile_banner_name, restore, seats, text_field, toast,
 };
 use crate::{
     GlassHere, ImeOwner, PasteFacts, PasteRoad, PendingPaste, TabId, TabState, input, quit,
@@ -22,7 +22,7 @@ use crate::{
 };
 use anyhow::Result;
 use bt_layout::SeatId;
-use bt_pty::PSREADLINE_PASTE_INPUT;
+use bt_pty::{PSREADLINE_PASTE_INPUT, PtyError};
 use bt_render::{FrameSource, FrameTrigger};
 use bt_term::DualPlaneSession;
 use bt_viewport::{MathBlockAnchor, ViewportProjection};
@@ -141,7 +141,7 @@ impl<B: Backend> Runtime<'_, B> {
         let Some(source) = self.window.tabs[index]
             .sessions
             .get(&target.seat)
-            .and_then(|leaf| leaf.session.math_source(anchor))
+            .and_then(|TerminalPane { session: leaf, .. }| leaf.session.math_source(anchor))
             .map(str::to_owned)
         else {
             return Ok(());
@@ -175,7 +175,11 @@ impl<B: Backend> Runtime<'_, B> {
                 let Some(leaf) = self.window.tabs[index].sessions.get_mut(&target.seat) else {
                     return Ok(());
                 };
-                if !clear_copied_selection(&mut leaf.session, &mut leaf.view.projection, &copied) {
+                if !clear_copied_selection(
+                    &mut leaf.session.session,
+                    &mut leaf.view.projection,
+                    &copied,
+                ) {
                     return Ok(());
                 }
                 self.publish_interaction_frame()
@@ -276,7 +280,9 @@ impl<B: Backend> Runtime<'_, B> {
     pub(in crate::runtime) fn copy_selection(&mut self) -> Result<()> {
         let active = self.window.active_tab;
         let focused = self.window.tabs[active].focused_leaf;
-        let Some(leaf) = self.window.tabs[active].sessions.get(&focused) else {
+        let Some(TerminalPane { session: leaf, .. }) =
+            self.window.tabs[active].sessions.get(&focused)
+        else {
             return Ok(());
         };
         let Some(text) = selection_to_copy(&leaf.session, false) else {
@@ -308,7 +314,7 @@ impl<B: Backend> Runtime<'_, B> {
         let Some(text) = self
             .sessions
             .get(&seat)
-            .and_then(|leaf| selection_to_copy(&leaf.session, true))
+            .and_then(|TerminalPane { session: leaf, .. }| selection_to_copy(&leaf.session, true))
         else {
             return Ok(());
         };
@@ -468,7 +474,8 @@ impl<B: Backend> Runtime<'_, B> {
             return Ok(());
         }
         let active = self.window.active_tab;
-        let Some(leaf) = self.window.tabs[active].sessions.get(&seat) else {
+        let Some(TerminalPane { session: leaf, .. }) = self.window.tabs[active].sessions.get(&seat)
+        else {
             return Ok(());
         };
         // Named now, while the gesture is happening, because the answer is spent on a later
@@ -606,12 +613,14 @@ impl<B: Backend> Runtime<'_, B> {
             .flat_map(|tab| {
                 tab.sessions
                     .iter()
-                    .filter(|(_, leaf)| leaf.paste_hold.is_some())
-                    .map(move |(seat, leaf)| PasteTarget {
-                        tab: tab.id,
-                        seat: *seat,
-                        incarnation: leaf.incarnation,
-                    })
+                    .filter(|(_, TerminalPane { session: leaf, .. })| leaf.paste_hold.is_some())
+                    .map(
+                        move |(seat, TerminalPane { session: leaf, .. })| PasteTarget {
+                            tab: tab.id,
+                            seat: *seat,
+                            incarnation: leaf.incarnation,
+                        },
+                    )
             })
             .collect();
         for target in holding {
@@ -631,7 +640,7 @@ impl<B: Backend> Runtime<'_, B> {
     fn places_held(&self) -> Vec<crate::clipboard_lane::ClipboardId> {
         let mut held = Vec::new();
         for tab in &self.window.tabs {
-            for leaf in tab.sessions.values() {
+            for TerminalPane { session: leaf, .. } in tab.sessions.values() {
                 if let Some(hold) = &leaf.paste_hold {
                     held.extend(hold.pastes());
                 }
@@ -796,7 +805,8 @@ impl<B: Backend> Runtime<'_, B> {
             .find(|tab| tab.id == target.tab)?
             .sessions
             .get_mut(&target.seat)
-            .filter(|leaf| leaf.incarnation == target.incarnation)
+            .filter(|pane| pane.session.incarnation == target.incarnation)
+            .map(|pane| &mut pane.session)
     }
 
     /// **"The clipboard was busy", said once on screen** — for a terminal paste only: a field and
@@ -824,7 +834,9 @@ impl<B: Backend> Runtime<'_, B> {
         let Some(active) = self.live_paste_target(target) else {
             return Ok(());
         };
-        let Some(leaf) = self.window.tabs[active].sessions.get(&target.seat) else {
+        let Some(TerminalPane { session: leaf, .. }) =
+            self.window.tabs[active].sessions.get(&target.seat)
+        else {
             return Ok(());
         };
         let recipient = leaf.launch.paste_recipient.clone();
@@ -895,7 +907,7 @@ impl<B: Backend> Runtime<'_, B> {
         let Some(index) = self.live_paste_target(target) else {
             return Ok(false);
         };
-        let leaf = &self.window.tabs[index].sessions[&target.seat];
+        let TerminalPane { session: leaf, .. } = &self.window.tabs[index].sessions[&target.seat];
         let recipient = leaf.launch.paste_recipient.clone();
         let leading_space = input_line_needs_a_space_first(&leaf.session);
         let prepared = prepare_dropped_paste(paths, &recipient, leading_space);
@@ -911,7 +923,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// than a guess.
     pub(crate) fn paste_target(&self, seat: SeatId) -> Option<PasteTarget> {
         let tab = self.window.tabs.get(self.window.active_tab)?;
-        let leaf = tab.sessions.get(&seat)?;
+        let TerminalPane { session: leaf, .. } = tab.sessions.get(&seat)?;
         Some(PasteTarget {
             tab: tab.id,
             seat,
@@ -940,7 +952,10 @@ impl<B: Backend> Runtime<'_, B> {
     pub(in crate::runtime) fn live_paste_target(&self, target: PasteTarget) -> Option<usize> {
         let index = self.window.active_tab;
         let tab = self.window.tabs.get(index)?;
-        let standing = tab.sessions.get(&target.seat).map(|leaf| leaf.incarnation);
+        let standing = tab
+            .sessions
+            .get(&target.seat)
+            .map(|TerminalPane { session: leaf, .. }| leaf.incarnation);
         paste_target_is_live(tab.id, standing, target).then_some(index)
     }
 
@@ -1026,11 +1041,15 @@ impl<B: Backend> Runtime<'_, B> {
             return Ok(false);
         };
         let seat = target.seat;
-        let Some(ShellSession {
-            life,
-            session,
+        let Some(TerminalPane {
+            session:
+                ShellSession {
+                    life,
+                    session,
+                    paste_hold,
+                    ..
+                },
             view: crate::TermView { projection, .. },
-            paste_hold,
             ..
         }) = self.window.tabs[active].sessions.get_mut(&seat)
         else {
@@ -1101,7 +1120,7 @@ impl<B: Backend> Runtime<'_, B> {
         let Some(pending) = self.window.tabs[active]
             .sessions
             .values_mut()
-            .find_map(|leaf| leaf.pending_paste.as_mut())
+            .find_map(|TerminalPane { session: leaf, .. }| leaf.pending_paste.as_mut())
         else {
             return Ok(());
         };
@@ -1171,7 +1190,7 @@ impl<B: Backend> Runtime<'_, B> {
     pub(in crate::runtime) fn paste_card_layout(&mut self) -> Option<restore::PasteCardLayout> {
         let tab = self.window.tabs.get(self.window.active_tab)?;
         let (seat, pending) = pending_paste_in(tab)?;
-        let shell = profile_banner_name(&tab.sessions.get(&seat)?.launch.profile);
+        let shell = profile_banner_name(&tab.sessions.get(&seat)?.session.launch.profile);
         let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
         let (width, height) = (width as f32, height as f32);
         let scale = self.window.renderer.scale_factor() as f32;
@@ -1239,6 +1258,62 @@ impl<B: Backend> Runtime<'_, B> {
                 .settings
                 .focus()
                 .is_some_and(|target| self.window.settings.text_field(target).is_some())
+    }
+}
+
+/// **What became of the bytes** — the same door, for the callers that have to
+/// know (review 2026-09-17 P2-a).
+///
+/// [`super::terminal::write_pty_input`] swallows a refusal on purpose and always will: a shell
+/// sitting on a megabyte of unread input is a fact about that shell, not an
+/// error for the window to die of. But "swallowed" and "delivered" are two
+/// different things to a caller that is about to **move the keyboard** on the
+/// strength of it, and the drop roads are exactly that caller: a path the ring
+/// turned away, or a pane with no child behind it, must not take the reader's
+/// keyboard to a shell that received nothing and must not bring the window
+/// forward for it.
+///
+/// **[`PtyInput::Queued`] means queued, and no more than that.** The bytes are
+/// on `bt_pty::InputRing` and the writer thread will hand them to the child;
+/// whether the program on the other end reads them, and what it makes of them,
+/// is its own business and nothing this process can report. A drop's focus move
+/// is answering "did this window send it", which is the question this answers.
+pub(crate) fn offer_pty_input(
+    pty: PtyTarget<'_>,
+    bytes: &[u8],
+    what: &'static str,
+) -> Result<PtyInput> {
+    let pty = match pty {
+        PtyTarget::Shell(pty) => pty,
+        PtyTarget::Birth(birth) => {
+            return match birth.hold(bytes) {
+                Ok(()) => Ok(PtyInput::HeldForBirth),
+                // Said as the shell's own refusal is said, and for its reason.
+                Err(refused) => {
+                    crate::diagnostics::stderr_line(format!("{what}: {refused}"));
+                    Ok(PtyInput::Refused)
+                }
+            };
+        }
+        PtyTarget::BehindAPaste(hold) => {
+            hold.hold(bytes);
+            return Ok(PtyInput::HeldForPaste);
+        }
+        PtyTarget::Nowhere => return Ok(PtyInput::NoChild),
+    };
+    match hang_watch::during(hang_watch::Station::PtyInput, || {
+        let result = pty.write_with_reason(bytes, what);
+        hang_watch::counters(bytes.len(), if result.is_ok() { bytes.len() } else { 0 }, 1);
+        result
+    }) {
+        Ok(()) => Ok(PtyInput::Queued),
+        Err(refused @ PtyError::InputRefused { .. }) => {
+            hang_watch::during(hang_watch::Station::DiagnosticWrite, || {
+                crate::diagnostics::stderr_line(format!("{what}: {refused}"));
+            });
+            Ok(PtyInput::Refused)
+        }
+        Err(error) => Err(anyhow::Error::new(error).context(what)),
     }
 }
 
@@ -1519,7 +1594,7 @@ pub(crate) fn stage_paste(
     host: bt_platform::HostPlatform,
     context: &'static str,
 ) -> StagedPaste {
-    let Some(leaf) = tab.sessions.get(&target.seat) else {
+    let Some(TerminalPane { session: leaf, .. }) = tab.sessions.get(&target.seat) else {
         return StagedPaste::Send(text);
     };
     let mark = line_continuation_mark(leaf.launch.paste_recipient.encoder.grammar);
@@ -1527,10 +1602,10 @@ pub(crate) fn stage_paste(
         PasteRoad::AsTyped => StagedPaste::Send(text),
         PasteRoad::InputLine => StagedPaste::InputLine(powershell_input_line(&text)),
         PasteRoad::Ask { lines } => {
-            for leaf in tab.sessions.values_mut() {
+            for TerminalPane { session: leaf, .. } in tab.sessions.values_mut() {
                 leaf.pending_paste = None;
             }
-            if let Some(leaf) = tab.sessions.get_mut(&target.seat) {
+            if let Some(TerminalPane { session: leaf, .. }) = tab.sessions.get_mut(&target.seat) {
                 let continued = mark.filter(|mark| input::continued_by(&text, *mark));
                 leaf.pending_paste = Some(PendingPaste {
                     target,
@@ -1550,7 +1625,9 @@ pub(crate) fn stage_paste(
 pub(crate) fn pending_paste_in(tab: &TabState) -> Option<(SeatId, &PendingPaste)> {
     tab.sessions
         .iter()
-        .find_map(|(seat, leaf)| leaf.pending_paste.as_ref().map(|pending| (*seat, pending)))
+        .find_map(|(seat, TerminalPane { session: leaf, .. })| {
+            leaf.pending_paste.as_ref().map(|pending| (*seat, pending))
+        })
 }
 
 /// Take the waiting paste out of this tab, which is what every answer does first — `Cancel`
@@ -1558,7 +1635,7 @@ pub(crate) fn pending_paste_in(tab: &TabState) -> Option<(SeatId, &PendingPaste)
 pub(crate) fn take_pending_paste(tab: &mut TabState) -> Option<PendingPaste> {
     tab.sessions
         .values_mut()
-        .find_map(|leaf| leaf.pending_paste.take())
+        .find_map(|TerminalPane { session: leaf, .. }| leaf.pending_paste.take())
 }
 
 /// **What a spent answer writes**, or nothing for `Cancel`.

@@ -9,6 +9,7 @@ use crate::ime_outbound::{
 };
 use crate::input::Keystroke;
 use crate::runtime::floats::file_menu_powers;
+use crate::runtime::terminal::write_pty_input;
 use crate::window_seam::prelude::*;
 use crate::{
     Composing, ComposingAfter, ComposingEvent, CompositionOrigin, CompositionRuling,
@@ -16,7 +17,7 @@ use crate::{
     PasteCardKey, Popup, PopupsUp, PreviewSurface, RenameClipboard, RenameExit, RenameVerdict,
     Runtime, Step, TabRename, TextFieldSeat, UserInputKind, git_graph, hang_watch, ime_outbound,
     ime_report, input, keyhint, marks, menubar, profiles, quit, restore, settings, shortcuts,
-    text_field, toast, write_pty_input,
+    text_field, toast,
 };
 use anyhow::Result;
 use bt_layout::{Axis, SeatId};
@@ -839,7 +840,7 @@ impl<B: Backend> Runtime<'_, B> {
             // `grid` is the focused pane's frame, composed this pass at that pane's own metrics
             // (ticket 37), so the caret rectangle is measured in the same cells.
             ImeCaretSource::TerminalCursor => grid
-                .zip(self.focused().map(|leaf| leaf.view.metrics))
+                .zip(self.focused_pane().map(|leaf| leaf.view.metrics))
                 .map(|(frame, metrics)| {
                     terminal_ime_cursor_area(&self.window.renderer, metrics, frame)
                 }),
@@ -1961,12 +1962,12 @@ impl<B: Backend> Runtime<'_, B> {
                     return self.scroll_view(-page);
                 }
                 Key::Named(NamedKey::Home) if self.window.modifiers == ModifiersState::CONTROL => {
-                    self.shell_mut().view.projection.scroll_to_top();
+                    self.shell_pane_mut().view.projection.scroll_to_top();
                     self.woke_terminal_thumb(self.focused_leaf)?;
                     return self.publish_interaction_frame();
                 }
                 Key::Named(NamedKey::End) if self.window.modifiers == ModifiersState::CONTROL => {
-                    self.shell_mut().view.projection.scroll_to_bottom();
+                    self.shell_pane_mut().view.projection.scroll_to_bottom();
                     self.woke_terminal_thumb(self.focused_leaf)?;
                     return self.publish_interaction_frame();
                 }
@@ -1975,13 +1976,13 @@ impl<B: Backend> Runtime<'_, B> {
         } else if matches!(&event.logical_key, Key::Named(NamedKey::End))
             && self.window.modifiers == ModifiersState::CONTROL
             && self
-                .focused()
+                .focused_pane()
                 .is_some_and(|leaf| leaf.view.projection.is_scrolled())
         {
             // The application's own jump-to-bottom binding: also return the projection-local
             // overflow review to rest so both scroll layers land at the bottom together. The
             // bytes still reach the application below.
-            self.shell_mut().view.projection.scroll_to_bottom();
+            self.shell_pane_mut().view.projection.scroll_to_bottom();
             self.publish_interaction_frame()?;
         }
 
@@ -2931,7 +2932,7 @@ impl<B: Backend> Runtime<'_, B> {
             return;
         };
         // The focused pane's frame, at that pane's own metrics (ticket 37).
-        let Some(metrics) = self.focused().map(|leaf| leaf.view.metrics) else {
+        let Some(metrics) = self.focused_pane().map(|leaf| leaf.view.metrics) else {
             return;
         };
         let area = terminal_ime_cursor_area(&self.window.renderer, metrics, frame);

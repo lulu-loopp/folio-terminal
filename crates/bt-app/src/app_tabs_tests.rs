@@ -2277,7 +2277,7 @@ fn a_restored_expansion_comes_back_as_questions_and_not_as_rows() {
         }));
     let terminals = seats.terminals();
     let focused = terminals[0];
-    let sessions: BTreeMap<SeatId, ShellSession> = terminals
+    let sessions: BTreeMap<SeatId, TerminalPane> = terminals
         .iter()
         .map(|s| (*s, leaf_saying("SHELL")))
         .collect();

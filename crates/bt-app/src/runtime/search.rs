@@ -341,7 +341,11 @@ impl<B: Backend> Runtime<'_, B> {
         };
 
         let revision = self.window.search_revision;
-        let leaf = self.sessions.get(&seat).expect("the seat was just checked");
+        let crate::TerminalPane {
+            session: leaf,
+            view,
+            ..
+        } = self.sessions.get(&seat).expect("the seat was just checked");
         // **The pattern over the transcript, under its own name** (T-STATION-SPLIT) — see
         // [`hang_watch::Station::SearchScan`]. Bracketed around the scan itself and not around
         // this function, which leaves through eight doors; there is no early return between
@@ -381,8 +385,7 @@ impl<B: Backend> Runtime<'_, B> {
         // Where the eye is: the viewport's own anchor when the pane has been scrolled, and nothing
         // when it is riding the live bottom — where "the first match at or below the top" is the
         // first match of all.
-        let from = leaf
-            .view
+        let from = view
             .projection
             .scroll_anchor()
             .map(|anchor| anchor.source.clone());

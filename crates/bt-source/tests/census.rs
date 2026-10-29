@@ -54,11 +54,16 @@ const FIXTURE_STRUCTS: [&str; 4] = ["App", "WindowRuntime", "TabState", "LeafSes
 /// with the rename and replaced the old one, and the count stays ten. M7's
 /// `AttentionAccount` is not declared: its nest, `ShellSession.attention`, is the
 /// fact, as the contract's §3.3 counts it; M6's `ShellLife` (ticket O-4b) is not
-/// declared either, for the same reason.
-const STRUCTS: [&str; 10] = [
+/// declared either, for the same reason. M8's second half (ticket O-5b,
+/// 2026-10-28, ruling E2) adds the pane, `TerminalPane`: `TabState.sessions`
+/// holds panes, and the session and the view are two fields of each, so the
+/// pane is declared for the map to stay a hub and the two halves to be facts —
+/// eleven.
+const STRUCTS: [&str; 11] = [
     "App",
     "WindowRuntime",
     "TabState",
+    "TerminalPane",
     "ShellSession",
     "TermView",
     "LaunchFacts",
@@ -799,15 +804,15 @@ fn every_field_of_the_declared_structs_has_an_inventory_row() {
     assert_eq!(facts, declared);
 }
 
-/// RED (O-2, O-3) — **the nine view fields M1–M4 moved are `TermView`'s, nested
-/// in `ShellSession` with its lifetime, and their writers are the ones they had.**
+/// RED (O-2, O-3, O-5b) — **the nine view fields M1–M4 moved are `TermView`'s, nested
+/// in the pane beside the session record, and their writers are the ones they had.**
 ///
 /// The ownership contract's M1 (§3.3) moves `thumb_awake`, `column_awake`, `card_skip`,
 /// `presented_metrics` and `frame_image_references` under `ShellSession.view: TermView`, and M2–M4
 /// move `text_scale`, `metrics`, `last_presented_frame` and `projection` after them; no writer
 /// changes module (§3.4: the rows' functions stay equal, only the fact column moves). So each is a
-/// fact of `TermView` and none of `ShellSession`; `ShellSession.view` is the one field of the leaf
-/// whose type is `TermView`, and it is written nowhere after construction (two destructures lend
+/// fact of `TermView` and none of `ShellSession`; the nest (`ShellSession.view` until O-5b,
+/// `TerminalPane.view` since) is the one field whose type is `TermView`, and it is written nowhere after construction (two destructures lend
 /// it, to reach the projection); and each moved field's proven writes and lends are exactly the
 /// items that wrote and lent it on the leaf, by item and whatever module K2 puts the item in. Its
 /// reads are not pinned: they move with K2's batches and are held by the runtime dependency map's
@@ -818,11 +823,19 @@ fn every_field_of_the_declared_structs_has_an_inventory_row() {
 /// the view's own `TermView::commit_presented` (in `runtime::frame`, the module
 /// `Runtime::redraw` wrote it from), which `redraw` calls.
 ///
+/// Since O-5b (M8's second half, 2026-10-28, rulings E2 and E14) the nest is
+/// `TerminalPane.view`, the session record's sibling under `TabState.sessions`,
+/// and is lent by the same two destructures. `card_skip` has one door, the
+/// pane's `TerminalPane::aim_card_skip`, which lends it to
+/// `focus_thumb::aim_card_skip`; `aim_card_window` calls the door and lends
+/// nothing (E14).
+///
 /// MUTATION: leave `card_skip` or `projection` on `ShellSession`, and the first
 /// assertion names it; drop `wake_terminal_column`'s write, write `leaf.view`
 /// whole, write `leaf.view.last_presented_frame` in `redraw` beside the commit,
-/// or give `runtime::clipboard` a write of `projection` (pass the view to
-/// `paste_spelled`), and the writer sets differ.
+/// give `runtime::clipboard` a write of `projection` (pass the view to
+/// `paste_spelled`), or lend `&mut leaf.view.card_skip` from `aim_card_window`
+/// again (observed red at O-5b), and the writer sets differ.
 #[test]
 fn the_view_fields_are_term_views() {
     let census = the_census();
@@ -841,10 +854,10 @@ fn the_view_fields_are_term_views() {
     let nests: Vec<&str> = census
         .facts()
         .iter()
-        .filter(|fact| fact.fact.starts_with("ShellSession.") && fact.declared.contains("TermView"))
+        .filter(|fact| fact.fact.starts_with("TerminalPane.") && fact.declared.contains("TermView"))
         .map(|fact| fact.fact.as_str())
         .collect();
-    assert_eq!(nests, ["ShellSession.view"], "one nest");
+    assert_eq!(nests, ["TerminalPane.view"], "one nest");
     let writers = |fact: &str| -> Vec<(&'static str, String)> {
         let mut out: Vec<(&'static str, String)> = census
             .rows()
@@ -866,7 +879,7 @@ fn the_view_fields_are_term_views() {
     // (`view: TermView { projection, .. }`): the census counts every step of a
     // struct pattern, so those two lend the nest as well as `TermView.projection`.
     assert_eq!(
-        writers("ShellSession.view"),
+        writers("TerminalPane.view"),
         expected(&[
             ("access", "Runtime::insert_path_into_terminal"),
             ("access", "Runtime::send_paste"),
@@ -883,7 +896,7 @@ fn the_view_fields_are_term_views() {
     );
     assert_eq!(
         writers("TermView.card_skip"),
-        expected(&[("access", "aim_card_window")])
+        expected(&[("access", "TerminalPane::aim_card_skip")])
     );
     assert_eq!(
         writers("TermView.presented_metrics"),
@@ -1073,7 +1086,8 @@ const LIFE_TRANSITIONS: [&str; 13] = [
     "retire",
 ];
 
-/// The `ShellSession` record's methods that move a *Restart shell* successor (O-4b, ruling E5).
+/// The methods that move a *Restart shell* successor (O-4b, ruling E5): the session record's
+/// until O-5b, the pane's since (`TerminalPane.successor` is a whole pane, E5).
 const SUCCESSOR_MOVES: [&str; 3] = ["await_successor", "successor_mut", "take_successor"];
 
 /// RED (O-4b; the ownership contract's M6, rulings D2, D5, D9 and E5) — **the shell's life is
@@ -1085,8 +1099,8 @@ const SUCCESSOR_MOVES: [&str; 3] = ["await_successor", "successor_mut", "take_su
 /// every access row is one of today's lends kept as they stood: `pty_mut` in the reaper and the two
 /// resize roads, and the two destructures of the input roads. The functions that touch it other
 /// than by reading are these sixteen (§2's 20 → 16: D10 folded the owed-resize roads; E5 kept the
-/// successor's three on the record). And `ShellSession.successor`'s every non-read site is in the
-/// record's three methods that move it.
+/// successor's three on the record). And `TerminalPane.successor`'s every non-read site is in the
+/// pane's three methods that move it (the record's until O-5b moved the successor to the pane).
 ///
 /// MUTATION: `leaf.life.phase = Phase::Kept` written in `keep_birth_death_face` (an assign row);
 /// `match &mut leaf.life.phase` in the reaper (an unlisted access row); `leaf.successor =
@@ -1173,20 +1187,20 @@ fn the_shell_life_is_one_fact_written_only_by_its_transitions() {
         writers,
         BTreeSet::from([
             ("crate", "TabState::retire_all_shells"),
-            ("crate", "apply_owed_shell_resize"),
             ("crate", "await_shell"),
             ("crate", "create_leaf_session"),
             ("crate", "finish_leaf_birth"),
-            ("crate", "land_birth_death_fallback_shell"),
-            ("crate", "land_shell_birth"),
             ("crate", "release_due_leaf_resize"),
             ("crate::runtime::clipboard", "Runtime::send_paste"),
             ("crate::runtime::panes", "Runtime::land_own_shell"),
             ("crate::runtime::panes", "Runtime::land_restart"),
+            ("crate::runtime::panes", "apply_owed_shell_resize"),
             ("crate::runtime::panes", "end_leaves_of"),
+            ("crate::runtime::panes", "land_shell_birth"),
             ("crate::runtime::tabs", "Runtime::reap_exited_tabs"),
             ("crate::runtime::tabs", "keep_birth_death_face"),
             ("crate::runtime::tabs", "land_birth_death_fallback"),
+            ("crate::runtime::tabs", "land_birth_death_fallback_shell"),
             (
                 "crate::runtime::terminal",
                 "Runtime::insert_path_into_terminal"
@@ -1197,12 +1211,12 @@ fn the_shell_life_is_one_fact_written_only_by_its_transitions() {
     let moves: BTreeSet<&str> = census
         .rows()
         .iter()
-        .filter(|row| row.fact == "ShellSession.successor")
+        .filter(|row| row.fact == "TerminalPane.successor")
         .map(|row| row.function.as_str())
         .collect();
     let expected: BTreeSet<String> = SUCCESSOR_MOVES
         .iter()
-        .map(|name| format!("ShellSession::{name}"))
+        .map(|name| format!("TerminalPane::{name}"))
         .collect();
     assert_eq!(
         moves,
@@ -1219,7 +1233,7 @@ fn the_shell_life_is_one_fact_written_only_by_its_transitions() {
 /// parameter, computed by the caller (the future `report_keyboard_focus`
 /// door), so the census has no row of any column — read, write, access,
 /// membership or inner — of any `TermView` fact whose function is the drain,
-/// nor of the nest `ShellSession.view` itself: a drain that handed the whole
+/// nor of the nest `TerminalPane.view` itself: a drain that handed the whole
 /// view to a helper (`&leaf.view`) would show only as a row of the nest.
 /// The assertion grows with `TermView`: every field O-3 moves under it is
 /// covered without an edit here. Since O-3 the drain reports through
@@ -1237,7 +1251,7 @@ fn the_drain_reads_no_view_field() {
     let census = the_census();
     let name = |function: &str| function.split(' ').next().unwrap_or_default().to_owned();
     let is_drain = |function: &str| DRAIN.contains(&name(function).as_str());
-    let is_view = |fact: &str| fact.starts_with("TermView.") || fact == "ShellSession.view";
+    let is_view = |fact: &str| fact.starts_with("TermView.") || fact == "TerminalPane.view";
     let all = || census.rows().iter().chain(census.reads());
     for drain in DRAIN {
         assert!(
@@ -1257,11 +1271,54 @@ fn the_drain_reads_no_view_field() {
     );
 }
 
+/// RED (O-5b, ruling E10; the census half of the ownership contract's pin 1) — **a session ends
+/// without reading its view.**
+///
+/// The three roads that end a pane's shell — `end_leaves_of` (a close: the attention it held
+/// expired, its shell retired), `expire_leaf_attention` (that expiry, per leaf) and
+/// `TabState::retire_all_shells` (a window's teardown) — are the session's turn and nobody
+/// else's: they walk the record through the session accessors (`leaves_mut`, one leaf lent), so
+/// the census has no row of any column of any `TermView` fact, nor of the nest
+/// `TerminalPane.view`, whose function is one of them. A road that took the pane to end it
+/// (`panes_mut`) and read what the view holds would show as such a row. Each road's own rows are
+/// asserted present, so a renamed road cannot pass by matching nothing. The behaviour half — the
+/// view's ending observed from a running pane — is O-6's.
+///
+/// MUTATION (observed red): have `end_leaves_of` walk `tab.panes_mut()` and read
+/// `pane.view.card_skip` beside the retire, and its row is named.
+#[test]
+fn a_session_ends_without_reading_its_view() {
+    const ENDINGS: [&str; 3] = [
+        "end_leaves_of",
+        "expire_leaf_attention",
+        "TabState::retire_all_shells",
+    ];
+    let census = the_census();
+    let name = |function: &str| function.split(' ').next().unwrap_or_default().to_owned();
+    let is_view = |fact: &str| fact.starts_with("TermView.") || fact == "TerminalPane.view";
+    let all = || census.rows().iter().chain(census.reads());
+    for ending in ENDINGS {
+        assert!(
+            all().any(|row| name(&row.function) == ending && row.fact.starts_with("ShellSession.")),
+            "`{ending}` is found by its name"
+        );
+    }
+    let touched: Vec<String> = all()
+        .filter(|row| ENDINGS.contains(&name(&row.function).as_str()) && is_view(&row.fact))
+        .map(|row| format!("{} {} {}", row.function, row.fact, row.column.name()))
+        .collect();
+    assert!(
+        touched.is_empty(),
+        "a session's ending touches its view: {touched:?}"
+    );
+}
+
 // ── the session record's name and its doors (O-5a) ─────────────────────────
 
-/// The fields of the session record at O-5a (2026-10-27): the 22 fields `LeafSession` had at
-/// O-4b's head, each now `ShellSession`'s by the contract's M8 rename.
-const SHELL_SESSION_FIELDS: [&str; 22] = [
+/// The fields of the session record: the 22 fields `LeafSession` had at O-4b's head, each
+/// `ShellSession`'s by the contract's M8 rename (O-5a, 2026-10-27), less the two O-5b moved to
+/// the pane (2026-10-28, rulings E2 and E5): `view` and `successor`. Twenty.
+const SHELL_SESSION_FIELDS: [&str; 20] = [
     "attention",
     "attention_ended",
     "conpty_grid",
@@ -1281,10 +1338,12 @@ const SHELL_SESSION_FIELDS: [&str; 22] = [
     "pending_typing",
     "process_folder",
     "session",
-    "successor",
-    "view",
     "wake",
 ];
+
+/// The pane's fields (O-5b, ruling E2): the session record, its view, and a *Restart shell*
+/// successor, which is a whole pane (E5).
+const TERMINAL_PANE_FIELDS: [&str; 3] = ["session", "successor", "view"];
 
 /// The proven writes and lends (every row that is not a read) of one census fact, sorted, as
 /// `(column, function)`.
@@ -1299,8 +1358,9 @@ fn non_read_rows(census: &FieldCensus, fact: &str) -> Vec<(&'static str, String)
     out
 }
 
-/// RED (O-5a, ruling E1) — **the session record is `ShellSession`: the M8 rename moved every
-/// fact of `LeafSession` to the same field of `ShellSession` and changed no writer.**
+/// RED (O-5a, ruling E1; O-5b, E2) — **the session record is `ShellSession`: the M8 rename moved
+/// every fact of `LeafSession` to the same field of `ShellSession` and changed no writer — and
+/// the pane, `TerminalPane`, holds the record, its view and its successor.**
 ///
 /// The ownership contract's M8 (§3.3) renames the struct and §3.4 asks that the census differ
 /// only in the `fact` column. So no `LeafSession.*` fact is left, the record's facts are exactly
@@ -1319,9 +1379,16 @@ fn non_read_rows(census: &FieldCensus, fact: &str) -> Vec<(&'static str, String)
 /// `fact` column only; O-5a's report §2), and the runtime dependency map's guard holds them
 /// since.
 ///
+/// O-5b (2026-10-28) took two fields off the record: `view` and `successor` are the pane's
+/// (E2, E5), so the record's facts are twenty and the pane's are exactly its three; the
+/// successor's three moves are the pane's methods now, and its rows are asserted under
+/// `TerminalPane.successor`. `session`'s writer functions are the ones they were but for the
+/// re-pathing O-5b did (the list below).
+///
 /// MUTATION (observed red): keep the old name on the struct, and the first assertion names every
 /// field; drop `keep_birth_death_face`'s `leaf.wake = None`, and `wake`'s rows differ; write
-/// `leaf.has_rail = true` in `drain_leaf_pty`, and `has_rail`'s rows differ.
+/// `leaf.has_rail = true` in `drain_leaf_pty`, and `has_rail`'s rows differ; leave `view` on
+/// `ShellSession` beside the pane's (O-5b), and the record's facts differ.
 #[test]
 fn the_session_record_is_shell_session() {
     let census = the_census();
@@ -1342,6 +1409,13 @@ fn the_session_record_is_shell_session() {
         .collect();
     fields.sort_unstable();
     assert_eq!(fields, SHELL_SESSION_FIELDS, "the record's facts");
+    let mut pane_fields: Vec<&str> = census
+        .facts()
+        .iter()
+        .filter_map(|fact| fact.fact.strip_prefix("TerminalPane."))
+        .collect();
+    pane_fields.sort_unstable();
+    assert_eq!(pane_fields, TERMINAL_PANE_FIELDS, "the pane's facts");
 
     let expected = |pairs: &[(&'static str, &str)]| -> Vec<(&'static str, String)> {
         let mut out: Vec<(&'static str, String)> = pairs
@@ -1351,7 +1425,7 @@ fn the_session_record_is_shell_session() {
         out.sort();
         out
     };
-    let table: [(&str, Vec<(&'static str, String)>); 17] = [
+    let table: [(&str, Vec<(&'static str, String)>); 16] = [
         ("attention_ended", expected(&[("write", "end_leaves_of")])),
         (
             "conpty_grid",
@@ -1427,14 +1501,6 @@ fn the_session_record_is_shell_session() {
         ),
         ("process_folder", expected(&[])),
         (
-            "successor",
-            expected(&[
-                ("access", "ShellSession::successor_mut"),
-                ("membership", "ShellSession::await_successor"),
-                ("membership", "ShellSession::take_successor"),
-            ]),
-        ),
-        (
             "wake",
             expected(&[
                 ("write", "finish_leaf_birth"),
@@ -1449,6 +1515,16 @@ fn the_session_record_is_shell_session() {
             "`ShellSession.{field}`'s writes and lends"
         );
     }
+    // The successor's three moves, the pane's since O-5b (E5).
+    assert_eq!(
+        non_read_rows(census, "TerminalPane.successor"),
+        expected(&[
+            ("access", "TerminalPane::successor_mut"),
+            ("membership", "TerminalPane::await_successor"),
+            ("membership", "TerminalPane::take_successor"),
+        ]),
+        "`TerminalPane.successor`'s writes and lends"
+    );
     // The hub's writes and lends: the 47 functions it had at O-4b's head (49 rows; two write
     // and lend it both).
     assert_eq!(
@@ -1563,6 +1639,9 @@ struct Unfollowed {
     what: String,
     candidates: Vec<String>,
     spelled: Vec<String>,
+    /// The edge's one candidate by the call graph's sole-candidate rule
+    /// (`Unresolved::sole_candidate`), keyed.
+    sole: Option<String>,
 }
 
 /// The last `::` segment of a key or a written path: the name an edge spells.
@@ -1660,6 +1739,7 @@ fn bt_app_callers() -> Callers {
                 spelled: vec![edge.site.name.clone(), what.clone()],
                 what,
                 candidates: candidates.iter().map(|id| resolver.key(*id)).collect(),
+                sole: unresolved.sole_candidate().map(|id| resolver.key(id)),
             });
         }
     }
@@ -1921,7 +2001,11 @@ fn the_keyboard_focus_is_one_report() {
     let setter = term("set_keyboard_focus");
     let door = app("ShellSession::report_keyboard_focus");
     assert_eq!(callers.of(&setter), std::slice::from_ref(&door), "one door");
-    assert_eq!(callers.of(&door), [app("drain_leaf_pty")], "one reporter");
+    assert_eq!(
+        callers.of(&door),
+        [app("runtime::terminal::drain_leaf_pty")],
+        "one reporter"
+    );
     let unfollowed = callers.unfollowed_into(&[setter.as_str(), door.as_str()]);
     assert!(
         unfollowed.is_empty(),
@@ -1936,21 +2020,23 @@ fn life(name: &str) -> String {
     app(&format!("ShellLife::{name}"))
 }
 
-/// `bt-app`'s `ShellSession::name`, keyed as the call graph keys it.
-fn record(name: &str) -> String {
-    app(&format!("ShellSession::{name}"))
+/// `bt-app`'s `TerminalPane::name`, keyed as the call graph keys it: the successor's methods,
+/// which O-5b moved from the session record to the pane (ruling E5).
+fn pane(name: &str) -> String {
+    app(&format!("TerminalPane::{name}"))
 }
 
 impl Callers {
     /// The callers of `callee`, sorted, counting an edge the graph could not follow when its one
-    /// candidate is `callee`: a method call through a receiver the rules do not type (a binding
-    /// of a `?`'s value, a box bound by a pattern) whose name only `callee` declares.
+    /// candidate is `callee` by the call graph's own rule (`Unresolved::sole_candidate`): a method
+    /// call through a receiver the rules do not type (a binding of a `?`'s value, a box bound by a
+    /// pattern) whose name only `callee` declares.
     fn of_counting_sole(&self, callee: &str) -> Vec<String> {
         let mut out: BTreeSet<String> = self.of(callee).into_iter().collect();
         out.extend(
             self.unfollowed
                 .iter()
-                .filter(|edge| edge.candidates == [callee])
+                .filter(|edge| edge.sole.as_deref() == Some(callee))
                 .map(|edge| edge.caller.clone()),
         );
         out.into_iter().collect()
@@ -1968,8 +2054,8 @@ impl Callers {
         out.extend(
             self.unfollowed
                 .iter()
-                .filter(|edge| edge.caller == caller && edge.candidates.len() == 1)
-                .map(|edge| edge.candidates[0].clone()),
+                .filter(|edge| edge.caller == caller)
+                .filter_map(|edge| edge.sole.clone()),
         );
         out.into_iter().collect()
     }
@@ -1980,7 +2066,10 @@ impl Callers {
         self.unfollowed
             .iter()
             .filter(|edge| {
-                !(edge.candidates.len() == 1 && callees.contains(&edge.candidates[0].as_str()))
+                !edge
+                    .sole
+                    .as_deref()
+                    .is_some_and(|sole| callees.contains(&sole))
             })
             .filter(|edge| {
                 edge.candidates
@@ -2016,14 +2105,18 @@ fn each_life_transition_has_its_callers() {
         (life("shellless"), &["bare_leaf"]),
         (
             life("begin_birth"),
-            &["await_shell", "create_leaf_session", "land_shell_birth"],
+            &[
+                "await_shell",
+                "create_leaf_session",
+                "runtime::panes::land_shell_birth",
+            ],
         ),
-        (life("take_birth"), &["land_shell_birth"]),
+        (life("take_birth"), &["runtime::panes::land_shell_birth"]),
         (life("record_spawn_fallback"), &["finish_leaf_birth"]),
         (
             life("take_spawn_fallback"),
             &[
-                "land_birth_death_fallback_shell",
+                "runtime::tabs::land_birth_death_fallback_shell",
                 "runtime::panes::Runtime::land_own_shell",
                 "runtime::panes::Runtime::land_restart",
             ],
@@ -2053,17 +2146,14 @@ fn each_life_transition_has_its_callers() {
             ],
         ),
         (
-            record("await_successor"),
+            pane("await_successor"),
             &[
                 "runtime::panes::Runtime::land_pane_birth",
                 "runtime::terminal::Runtime::restart_shell",
             ],
         ),
-        (record("successor_mut"), &["runtime::panes::land_successor"]),
-        (
-            record("take_successor"),
-            &["runtime::panes::land_successor"],
-        ),
+        (pane("successor_mut"), &["runtime::panes::land_successor"]),
+        (pane("take_successor"), &["runtime::panes::land_successor"]),
     ];
     let mut every: Vec<String> = Vec::new();
     for (callee, expected) in table {
@@ -2085,10 +2175,11 @@ fn each_life_transition_has_its_callers() {
 }
 
 /// RED (O-4b; the ownership contract's M6, ruling D9) — **a life transition performs no
-/// effect**: no method of `ShellLife`, and none of the record's successor moves, calls any item of
-/// the workspace but `ShellLife`'s own — so none reaches `bt_pty::retire_session`, `pty_door`,
-/// `DualPlaneSession::feed` or any effect of `window_waits.tsv`. Those stay on the roads that take
-/// the edge, in the order they had. Nor does any of them make a call the graph cannot follow.
+/// effect**: no method of `ShellLife`, and none of the successor moves (the pane's since O-5b),
+/// calls any item of the workspace but `ShellLife`'s own — so none reaches
+/// `bt_pty::retire_session`, `pty_door`, `DualPlaneSession::feed` or any effect of
+/// `window_waits.tsv`. Those stay on the roads that take the edge, in the order they had. Nor does
+/// any of them make a call the graph cannot follow.
 ///
 /// MUTATION: move `bt_pty::retire_session(pty)` into `ShellLife::retire`; move the
 /// `pty_door::request` into `fall_back` — each is named.
@@ -2099,7 +2190,7 @@ fn a_life_transition_performs_no_effect() {
         key.starts_with(&life(""))
             || SUCCESSOR_MOVES
                 .iter()
-                .any(|name| key == record(name).as_str())
+                .any(|name| key == pane(name).as_str())
     };
     let mut reached: Vec<String> = Vec::new();
     let mut walked = 0;
@@ -2136,10 +2227,10 @@ fn a_life_transition_performs_no_effect() {
 }
 
 /// RED (O-4b; the ownership contract's (c)3, ruling E5) — **a restart asks only whether one is in
-/// flight**: of the record's successor methods, `restart_shell` calls only `restart_in_flight`
-/// and `await_successor`, and of `ShellLife` only `birth` — the replacement's question, whether it
-/// waits — never a phase of the pane it replaces; `land_pane_birth`'s successor road asks the same
-/// of the replacement it made.
+/// flight**: of the successor methods (the pane's since O-5b), `restart_shell` calls only
+/// `restart_in_flight` and `await_successor`, and of `ShellLife` only `birth` — the replacement's
+/// question, whether it waits — never a phase of the pane it replaces; `land_pane_birth`'s
+/// successor road asks the same of the replacement it made.
 ///
 /// The graph cannot tell the replacement's life from the old pane's, so a restart that asked the
 /// old pane's phase through `birth` would pass; one that asks it through any other read or
@@ -2167,7 +2258,7 @@ fn a_restart_asks_only_whether_one_is_in_flight() {
                     "birth_at",
                 ]
                 .iter()
-                .any(|name| callee.as_str() == record(name))
+                .any(|name| callee.as_str() == pane(name))
             })
             .cloned()
             .collect();
@@ -2177,7 +2268,7 @@ fn a_restart_asks_only_whether_one_is_in_flight() {
         asked("runtime::terminal::Runtime::restart_shell"),
         (
             vec![life("birth")],
-            vec![record("await_successor"), record("restart_in_flight")]
+            vec![pane("await_successor"), pane("restart_in_flight")]
         ),
         "a restart asks the record whether one is in flight, and the replacement whether it waits"
     );

@@ -4,7 +4,7 @@
 # removed by scripts/generate-ownership-census.ps1; a row is added by hand
 # only, and only with a reason.
 site	module	function	reason	sites
-?.attention	crate	settle_attention	call `claim_episode` through a receiver that does not resolve: a closure parameter without a type	1
+?.attention	crate::runtime::attention	settle_attention	call `claim_episode` through a receiver that does not resolve: a closure parameter without a type	1
 ?.files	crate::git_graph	build	call `get` through a receiver that does not resolve: what `as_ref` returns: the value of a block, a branch or a loop	1
 ?.files	crate::git_graph	build	call `len` through a receiver that does not resolve: a closure parameter without a type	1
 ?.files	crate::runtime::floats	Runtime::expand_float_commit	call `as_deref` through a receiver that does not resolve: what `and_then` returns	1

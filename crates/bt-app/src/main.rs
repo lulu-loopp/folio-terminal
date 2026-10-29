@@ -293,7 +293,11 @@ use bt_doc::Bias;
 #[cfg(test)]
 use bt_persist::WindowStateV1;
 use bt_platform::admission::doors;
-use bt_pty::{OutputWake, PSREADLINE_INVOKE_PROMPT_INPUT, PtyError, PtySession, PtySize};
+#[cfg(test)]
+use bt_pty::PtyError;
+use bt_pty::{OutputWake, PSREADLINE_INVOKE_PROMPT_INPUT, PtySession, PtySize};
+#[cfg(test)]
+use bt_render::foreground_rgb;
 use bt_render::{
     ChromePalette, CursorStyle, DEVICE_REBUILD_ATTEMPTS, DeviceLossPilot, Flight, FrameSource,
     FrameTrigger, GpuContext, GridSize, ImeCursorArea, LatestFrameSlot, LostDevice,
@@ -301,14 +305,16 @@ use bt_render::{
     Travel, WINDOW_TAB_BREATHE_MIN_OPACITY, WINDOW_TAB_BREATHE_PERIOD_MS,
     WINDOW_TAB_BREATHE_REDUCED_OPACITY, WINDOW_TAB_PIN_FADE_MS, WINDOW_TAB_PIN_REVEAL_MS,
     WINDOW_TAB_RING_INDETERMINATE_TURNS, WINDOW_TAB_RING_SPIN_PERIOD_MS,
-    WINDOW_TAB_RING_SWEEP_TRANSITION_MS, background_rgb, current_cursor_style, foreground_rgb,
-    gpu_power_request, scheme_in_force, set_cursor_style, set_theme, theme_revision,
+    WINDOW_TAB_RING_SWEEP_TRANSITION_MS, background_rgb, current_cursor_style, gpu_power_request,
+    set_cursor_style, set_theme, theme_revision,
 };
 #[cfg(test)]
 use bt_term::MouseTracking;
+#[cfg(test)]
+use bt_term::TerminalCanvas;
 use bt_term::{
     DualPlaneSession, MathLayoutOptions, ProgressState, SessionDecorationTask, SessionMathTask,
-    SessionStatus, TerminalCanvas, TerminalModes, TerminalPalette, normalized_local_image_path_key,
+    SessionStatus, TerminalModes, normalized_local_image_path_key,
 };
 use bt_transcript::DEFAULT_STAGING_QUOTA;
 #[cfg(test)]
@@ -356,7 +362,7 @@ use runtime::{
     chrome_tick_reuses_picture, claimed_by, clamp_into_body, clear_copied_selection,
     clipboard_focus_of, column_keyboard, column_notch, columns_wanting_git, composing_event_of,
     composition_outlived_its_field, composition_ruling, crumb_segments, crumb_segments_on,
-    deliver_clipboard_picture, dirty_gate_names, dispatch_decoration_task,
+    deliver_clipboard_picture, deliver_held_input, dirty_gate_names, dispatch_decoration_task,
     dispatch_pending_math_tasks, dispatch_tab_decoration_tasks, document_formulas,
     documents_held_in, documents_held_mut_in, drain_may_take_another_slice, drain_whole_units,
     dropped_files_seat_at, dwm_dark_mode_owed, earliest_named_deadline, end_leaves_of,
@@ -373,26 +379,26 @@ use runtime::{
     image_destination, image_is_pannable, image_meta_sentence, image_pan_key, image_raster_cap,
     image_zoom_caption, image_zoom_key, image_zoom_notch, image_zoom_settles, image_zoom_toggled,
     ime_caret_source, ime_commit_bytes, ime_cursor_area_of, ime_owner, in_drain_feed_turn,
-    input_line_needs_a_space_first, keyboard_owner_is_a_shell, land_successor, landed_source,
-    landing_for_aim, leaf_resize_plan, let_go_unnamed_peek_records, lines_phrase,
-    link_target_to_ask_about, live_viewport_mouse_hit, local_image_activation,
+    input_line_needs_a_space_first, keyboard_owner_is_a_shell, land_shell_birth, land_successor,
+    landed_source, landing_for_aim, leaf_resize_plan, let_go_unnamed_peek_records, lines_phrase,
+    link_target_to_ask_about, live_viewport_mouse_hit, local_image_activation, mark_leaf_painted,
     markdown_chip_ground, markdown_empty_page_offset, markdown_prose_paragraphs,
     markdown_source_cell, markdown_source_offset_at, math_copy_window, math_worker_stopped_notice,
     merge_notice_card, new_tab_cwd, new_tab_leaf_seed, new_tab_tip, next_attention_stop,
-    over_home_ground, owe_sharpened_rasters, page_address_hand_off, page_destination,
-    page_foot_flash, page_foot_lead, page_source_file, pages_that_move_with_their_panes,
-    pane_can_become_a_tab, pane_fade_veil_layers, pane_strip_landing, panel_opacity,
-    paste_answer_text, paste_body, paste_card_key, paste_card_step, paste_offer_is_kept,
-    paste_target_is_live, paste_text, peek_awaits, peek_body_kind, peek_cache_key_for_decode,
-    peek_card_opened, peek_files_named, peek_foot_press, peek_page_texture_key,
-    peek_reads_the_file, peek_scale_task, pending_paste_in, persisted_window_bounds,
-    picture_errand, picture_files_of, pictures_awaited_by, pictures_need_handing_over,
-    pointer_cursor, popup_owner, popup_takes_the_key, preedit_caret_byte, prepare_clipboard_paste,
-    prepare_dropped_paste, press_after_blur, press_belongs_to_the_window, press_files_node,
-    press_pins_a_peek, press_reaches_no_grid, press_spends_itself_closing, pressed_row_identity,
-    preview_block_bar_at, preview_block_wheel, preview_body_bar, preview_caret_row,
-    preview_copies_on_select, preview_document_height, preview_document_key,
-    preview_document_max_scroll, preview_edit_bands, preview_image_placement,
+    offer_pty_input, output_revision, over_home_ground, owe_sharpened_rasters,
+    page_address_hand_off, page_destination, page_foot_flash, page_foot_lead, page_source_file,
+    pages_that_move_with_their_panes, pane_can_become_a_tab, pane_fade_veil_layers,
+    pane_strip_landing, panel_opacity, paste_answer_text, paste_body, paste_card_key,
+    paste_card_step, paste_offer_is_kept, paste_target_is_live, paste_text, peek_awaits,
+    peek_body_kind, peek_cache_key_for_decode, peek_card_opened, peek_files_named, peek_foot_press,
+    peek_page_texture_key, peek_reads_the_file, peek_scale_task, pending_paste_in,
+    persisted_window_bounds, picture_errand, picture_files_of, pictures_awaited_by,
+    pictures_need_handing_over, pointer_cursor, popup_owner, popup_takes_the_key,
+    preedit_caret_byte, prepare_clipboard_paste, prepare_dropped_paste, press_after_blur,
+    press_belongs_to_the_window, press_files_node, press_pins_a_peek, press_reaches_no_grid,
+    press_spends_itself_closing, pressed_row_identity, preview_block_bar_at, preview_block_wheel,
+    preview_body_bar, preview_caret_row, preview_copies_on_select, preview_document_height,
+    preview_document_key, preview_document_max_scroll, preview_edit_bands, preview_image_placement,
     preview_link_activation, preview_link_answers_a_press, preview_opened_label,
     preview_page_browser_hand_off, preview_page_hand_off, preview_press_opens_its_link,
     preview_rail_tip_text, preview_selection_bands, preview_source_of_recent,
@@ -405,15 +411,16 @@ use runtime::{
     resize_worth_solving, resolve_document_pictures, resolved_theme_change, restart_seed,
     restated_scroll, retire_spent_math_copy, revived_page_of, right_press_raises_terminal_menu,
     route_forwarded_mouse_button, route_forwarded_mouse_motion, row_arrival_seat,
-    row_strip_landing, scale_ppm, seat_holds_the_keyboard, seeded_tab, selection_to_copy,
-    should_copy_on_select_release, size_authority_for_rectangle, source_opens_as_a_page,
-    stage_paste, startup_poll_delay, step_leaf_text_scale, step_preview_caret_by_row,
-    stepped_command_mark, stepped_tab, strip_animation_tick_is_due, surface_pixels,
-    surface_subject_of, surface_takes_image_zoom, surfaces_reading, switcher_pin_is_allowed,
-    switcher_row_destination, switcher_rows, tab_close_action, tab_surface, tab_surface_tip_boxes,
+    row_strip_landing, scale_ppm, seat_holds_the_keyboard, seeded_tab, seen_revision,
+    selection_to_copy, settle_attention, should_copy_on_select_release,
+    size_authority_for_rectangle, source_opens_as_a_page, stage_paste, startup_poll_delay,
+    step_leaf_text_scale, step_preview_caret_by_row, stepped_command_mark, stepped_tab,
+    strip_animation_tick_is_due, surface_pixels, surface_subject_of, surface_takes_image_zoom,
+    surfaces_reading, switcher_pin_is_allowed, switcher_row_destination, switcher_rows,
+    synchronized_update_committed, tab_close_action, tab_surface, tab_surface_tip_boxes,
     tab_trailing_targets, take_math_worker_notice, take_pending_paste,
     take_psreadline_resize_reanchor_input, tear_out_rect, tear_pane_into_tab,
-    terminal_ime_cursor_area, terminal_link_answers_a_press, text_field_holding,
+    terminal_ime_cursor_area, terminal_link_answers_a_press, terminal_palette, text_field_holding,
     tick_owes_a_present, tooltip_anchor_for, two_tabs_mut, upright_wheel, verified_target_of,
     video_frame_texture_key, video_still_destination, viewport_of_rect, wheel_axis,
     wheel_points_sideways, wheel_route, wheel_steps_text_size, window_ime_cursor_area,
@@ -7494,11 +7501,6 @@ struct ShellSession {
     /// a silent birth death, kept with its face, or none. Written only by its transitions. See
     /// [`ShellLife`].
     life: ShellLife,
-    /// **The shell *Restart shell* is bringing up in this pane's place** (T-BIRTH-OFF-WINDOW), in
-    /// birth beside the shell it replaces: this pane goes on being the one typed into until the
-    /// successor lands, and a successor whose birth fails leaves it exactly as it was. `None` on
-    /// every pane not being restarted.
-    successor: Option<Box<ShellSession>>,
     foreground_program_cadence: foreground_program::Cadence,
     /// **This shell's last process folder read** (T-CWD-FROM-PROCESS), and the moment it was made
     /// at — read on an ask when the shell has reported no folder, and asked again only after the
@@ -7553,7 +7555,7 @@ struct ShellSession {
     /// its profile. `OSC 133;B` is the shell saying *I am reading a line now*, which is exactly the
     /// moment this is for, and it is why the third rung needs shell integration at all.
     ///
-    /// Spent once, by [`drain_leaf_pty`]: a second write would be a second copy of the command.
+    /// Spent once, by [`runtime::terminal::drain_leaf_pty`]: a second write would be a second copy of the command.
     /// Written only through [`Self::queue_typing`] and [`Self::take_typing`].
     pending_typing: Option<(String, bool)>,
     session: DualPlaneSession,
@@ -7571,10 +7573,6 @@ struct ShellSession {
     /// [`attention::Event::LeafGone`] silently, so only this tells the second walk that the pane
     /// has already ended.
     attention_ended: bool,
-    /// **This pane's view of its shell**: the facts of the ownership contract's view owner (M1–M4,
-    /// tickets O-2 and O-3). Nested, so it has the leaf's own lifetime and travels with it exactly
-    /// as the fields did when they stood here.
-    view: TermView,
     grid: GridSize,
     conpty_grid: GridSize,
     pending_pty_resize: Option<PendingPtyResize>,
@@ -7621,11 +7619,11 @@ struct ShellSession {
     /// grid it always had. A pane is born `false`: the ledger is not restored,
     /// so a revived pane earns its rail at its first prompt like any other.
     ///
-    /// One owner: [`ShellSession::hear_first_mark`], asked in [`drain_leaf_pty`]
+    /// One owner: [`ShellSession::hear_first_mark`], asked in [`runtime::terminal::drain_leaf_pty`]
     /// where every leaf's bytes pass. It travels with the struct, so a pane torn
     /// out into its own tab keeps it.
     has_rail: bool,
-    /// How much this shell has said, counted by [`output_revision`].
+    /// How much this shell has said, counted by [`runtime::terminal::output_revision`].
     ///
     /// Kept here rather than read off the session because the question is
     /// bt-app's, not bt-term's: the session counts the frames it published, and
@@ -7733,8 +7731,9 @@ impl TermViewPorts for DualPlaneSession {
 }
 
 /// **A terminal pane's view of its shell** — the ownership contract's view owner
-/// (`docs/plans/design/ownership-contract-2026-10-11.md` §2.1), nested in [`ShellSession`] as
-/// [`ShellSession::view`] with the leaf's own lifetime.
+/// (`docs/plans/design/ownership-contract-2026-10-11.md` §2.1), nested in [`TerminalPane`] as
+/// [`TerminalPane::view`], beside the session record and with the pane's lifetime (ticket O-5b;
+/// it was nested in [`ShellSession`] until then).
 ///
 /// M1 (ticket O-2) moved the fade clocks, the card skip, the presented metrics and the image
 /// references here; M2–M4 (ticket O-3) moved the text size, the metrics, the last presented
@@ -7770,6 +7769,8 @@ struct TermView {
     column_awake: Instant,
     /// Rows skipped above the card tail, carried with this leaf on tear-out
     /// and persisted in session.json. Drawing and whole wheel notches clamp it.
+    /// After the pane is built its one writer is the pane's door,
+    /// [`TerminalPane::aim_card_skip`] (ticket O-5b, ruling E14).
     card_skip: usize,
     /// **The metrics [`Self::last_presented_frame`] was drawn at** — an observation, paired
     /// with that frame and written in the same breath as it ([`Self::commit_presented`]).
@@ -7819,6 +7820,29 @@ struct TermView {
     /// over the right-hand pane be answered by the right-hand pane's cells
     /// instead of by whichever pane happens to hold the keyboard.
     last_presented_frame: Option<ViewportFrame>,
+}
+
+/// **One terminal pane: its shell and its view of that shell** — the ownership contract's M8
+/// (`docs/plans/design/ownership-contract-2026-10-11.md` §3.3; ticket O-5b, rulings E2–E5), the
+/// value [`TabState::sessions`] holds per seat.
+///
+/// The session and the view keep one lifetime here: they are born together
+/// (`create_leaf_session`) and dropped together (the seat's entry leaving the map), and a
+/// *Restart shell* successor is a whole pane, because the new shell's view starts at its own
+/// scrollback, not at the old one's (E5). The 0.5 registry (O-6) is the first ticket that lets a
+/// session outlive a view. Plain data, apart from the successor's five methods and the card
+/// window's aim, the one write that needs both halves ([`Self::aim_card_skip`]).
+struct TerminalPane {
+    /// **The shell** — its process, screen, attention account and owed input.
+    session: ShellSession,
+    /// **This pane's view of its shell**: the facts of the ownership contract's view owner (M1–M4,
+    /// tickets O-2 and O-3).
+    view: TermView,
+    /// **The pane *Restart shell* is bringing up in this one's place** (T-BIRTH-OFF-WINDOW), in
+    /// birth beside the shell it replaces: this pane goes on being the one typed into until the
+    /// successor lands, and a successor whose birth fails leaves it exactly as it was. `None` on
+    /// every pane not being restarted.
+    successor: Option<Box<TerminalPane>>,
 }
 
 /// **What a terminal pane's shell was launched as** — the ownership contract's M5
@@ -7991,9 +8015,9 @@ struct AttentionAccount {
 /// done by the road that takes the edge, where and in the order it was done before. Called in a
 /// phase its doc does not name, a transition leaves the phase as it was.
 ///
-/// The shell *Restart shell* brings up in this pane's place stays on the leaf
-/// ([`ShellSession::successor`]), as the leaf's wake-up does: a successor is a whole pane beside
-/// this one, not a phase of it.
+/// The shell *Restart shell* brings up in this pane's place stays on the pane
+/// ([`TerminalPane::successor`], since O-5b): a successor is a whole pane beside this one, not a
+/// phase of it.
 struct ShellLife {
     phase: Phase,
     /// A spawn-time fallback record waiting for the runtime, which knows this pane's seat: written
@@ -8100,7 +8124,7 @@ impl ShellLife {
 
     /// **Shellless or Released → InBirth**: the pane is to be born ([`create_leaf_session`],
     /// [`await_shell`]), or a birth whose shell has not answered goes back to it
-    /// ([`land_shell_birth`]). A debug build refuses any other phase, whose caller would drop the
+    /// ([`runtime::panes::land_shell_birth`]). A debug build refuses any other phase, whose caller would drop the
     /// birth.
     fn begin_birth(&mut self, birth: PaneBirth) {
         debug_assert!(self.has_no_shell());
@@ -8109,7 +8133,7 @@ impl ShellLife {
         }
     }
 
-    /// **InBirth → Shellless**: the birth leaves the pane, to be landed ([`land_shell_birth`]).
+    /// **InBirth → Shellless**: the birth leaves the pane, to be landed ([`runtime::panes::land_shell_birth`]).
     fn take_birth(&mut self) -> Option<PaneBirth> {
         match std::mem::replace(&mut self.phase, Phase::Shellless) {
             Phase::InBirth(birth) => Some(birth),
@@ -8144,7 +8168,7 @@ impl ShellLife {
 
     /// **The pending landing is owed `physical`**: a resize released while the pane's shell
     /// (Bearing) or its last-resort shell (FallingBack) is being born, which the landing tells it
-    /// ([`apply_owed_shell_resize`]). No phase changes.
+    /// ([`runtime::panes::apply_owed_shell_resize`]). No phase changes.
     fn owe_landing_size(&mut self, physical: PhysicalSize<u32>) {
         let landing = match &mut self.phase {
             Phase::InBirth(PaneBirth {
@@ -8389,31 +8413,6 @@ impl PaneBirth {
     }
 }
 
-/// **A pane's held bytes, delivered to what it was born as** — the shell, or, for a pane born with
-/// no shell (a program this machine does not have, `Started::Nothing`, or a shell that did not
-/// start), nowhere: then the bytes are dropped and `note` is told once how many.
-fn deliver_held_input(
-    birth: &PaneBirth,
-    target: PtyTarget<'_>,
-    mut note: impl FnMut(&str),
-) -> Result<()> {
-    birth.deliver(|held| match target {
-        PtyTarget::Nowhere => {
-            note(&format!(
-                "a pane born with no shell (no program here, or its shell did not start) dropped \
-                 the {} byte(s) typed into it while it waited",
-                held.len()
-            ));
-            Ok(())
-        }
-        target => write_pty_input(
-            target,
-            held,
-            "deliver what was typed while the shell was being born",
-        ),
-    })
-}
-
 struct TabState {
     id: TabId,
     /// This tab's shells, one per Terminal leaf, keyed by the seat they draw
@@ -8437,7 +8436,7 @@ struct TabState {
     /// is paid — [`TabState::focused`] answers `Option`, and every reader that
     /// meant "the active tab's shell" now has to say what it means when there
     /// isn't one.
-    sessions: BTreeMap<SeatId, ShellSession>,
+    sessions: BTreeMap<SeatId, TerminalPane>,
     /// This tab's files columns, one per Files leaf, keyed by the seat they draw
     /// into — the exact sibling of [`Self::sessions`], and deliberately a second
     /// table rather than a second variant inside the first.
@@ -14492,7 +14491,7 @@ impl TabState {
             cwd: self
                 .sessions
                 .get(&seat)
-                .and_then(ShellSession::place_for_a_new_shell)
+                .and_then(|TerminalPane { session: leaf, .. }| leaf.place_for_a_new_shell())
                 .map(|path| path.to_string_lossy().into_owned())
                 .unwrap_or_default(),
             manual_name: self.manual_name.clone(),
@@ -14528,7 +14527,7 @@ impl TabState {
             last_command: if remember_the_command {
                 self.sessions
                     .get(&seat)
-                    .and_then(|leaf| {
+                    .and_then(|TerminalPane { session: leaf, .. }| {
                         leaf.session
                             .command_marks()
                             .iter()
@@ -14560,7 +14559,7 @@ impl TabState {
     fn leaf_profile(&self, seat: SeatId) -> String {
         self.sessions.get(&seat).map_or_else(
             || profiles::fallback_profile_id().to_owned(),
-            |leaf| leaf.launch.profile.clone(),
+            |TerminalPane { session: leaf, .. }| leaf.launch.profile.clone(),
         )
     }
 
@@ -14579,7 +14578,9 @@ impl TabState {
     fn leaf_marks(&self) -> BTreeMap<SeatId, marks::ChromeMark> {
         self.sessions
             .iter()
-            .map(|(seat, leaf)| (*seat, profiles::identity_mark(&leaf.launch.profile)))
+            .map(|(seat, TerminalPane { session: leaf, .. })| {
+                (*seat, profiles::identity_mark(&leaf.launch.profile))
+            })
             .collect()
     }
 
@@ -15437,10 +15438,21 @@ impl TabState {
     /// "there is nothing here to do", written out as an early return so the
     /// difference is visible in the text rather than hidden in a deref.
     fn focused(&self) -> Option<&ShellSession> {
-        self.sessions.get(&self.focused_leaf)
+        self.focused_pane().map(|pane| &pane.session)
     }
 
     fn focused_mut(&mut self) -> Option<&mut ShellSession> {
+        self.focused_pane_mut().map(|pane| &mut pane.session)
+    }
+
+    /// **The focused terminal pane, session and view together** (ticket O-5b, ruling E4) — for
+    /// the code that reads or writes the view, or both halves at once. [`Self::focused`] is the
+    /// shell alone.
+    fn focused_pane(&self) -> Option<&TerminalPane> {
+        self.sessions.get(&self.focused_leaf)
+    }
+
+    fn focused_pane_mut(&mut self) -> Option<&mut TerminalPane> {
         self.sessions.get_mut(&self.focused_leaf)
     }
 
@@ -15509,6 +15521,17 @@ impl TabState {
 
     fn shell_mut(&mut self) -> &mut ShellSession {
         self.focused_mut()
+            .expect("a guard a few lines up returned early for a tab with no shell")
+    }
+
+    /// [`Self::shell`]'s pane, session and view together (ruling E4), under the same guard.
+    fn shell_pane(&self) -> &TerminalPane {
+        self.focused_pane()
+            .expect("a guard a few lines up returned early for a tab with no shell")
+    }
+
+    fn shell_pane_mut(&mut self) -> &mut TerminalPane {
+        self.focused_pane_mut()
             .expect("a guard a few lines up returned early for a tab with no shell")
     }
 
@@ -15821,7 +15844,7 @@ impl TabState {
             SeatKind::Terminal => {
                 let leaf = self.sessions.get(&seat)?;
                 Some(focus_thumb::SeatSource::Terminal {
-                    session: &leaf.session,
+                    session: &leaf.session.session,
                     // Numeric distance above the tail; the draw walk clamps it.
                     skip: leaf.view.card_skip,
                 })
@@ -15903,6 +15926,11 @@ impl TabState {
     }
 
     fn leaves(&self) -> impl Iterator<Item = (&SeatId, &ShellSession)> {
+        self.panes().map(|(seat, pane)| (seat, &pane.session))
+    }
+
+    /// Every terminal pane of this tab, session and view together, in seat order (ruling E4).
+    fn panes(&self) -> impl Iterator<Item = (&SeatId, &TerminalPane)> {
         self.sessions.iter()
     }
 
@@ -15915,6 +15943,12 @@ impl TabState {
     /// `focused` does: a Terminal seat and a session are created and destroyed
     /// together, so a seat that named a session still names it.
     fn leaf(&self, seat: SeatId) -> &ShellSession {
+        &self.pane(seat).session
+    }
+
+    /// One named terminal pane, session and view together (ruling E4); the `expect` is
+    /// [`Self::leaf`]'s.
+    fn pane(&self, seat: SeatId) -> &TerminalPane {
         self.sessions
             .get(&seat)
             .expect("a terminal seat and its session are created and destroyed together")
@@ -15950,6 +15984,12 @@ impl TabState {
 
     /// Every leaf of this tab, focused one included, in seat order.
     fn leaves_mut(&mut self) -> impl Iterator<Item = (&SeatId, &mut ShellSession)> {
+        self.panes_mut()
+            .map(|(seat, pane)| (seat, &mut pane.session))
+    }
+
+    /// Every terminal pane of this tab, session and view together, in seat order (ruling E4).
+    fn panes_mut(&mut self) -> impl Iterator<Item = (&SeatId, &mut TerminalPane)> {
         self.sessions.iter_mut()
     }
 
@@ -16002,7 +16042,7 @@ impl TabState {
                 self.clear_leaf_selection(other);
             }
         }
-        let Some(leaf) = self.sessions.get_mut(&seat) else {
+        let Some(TerminalPane { session: leaf, .. }) = self.sessions.get_mut(&seat) else {
             return;
         };
         leaf.session.port_set_selection(selection);
@@ -16018,7 +16058,7 @@ impl TabState {
         let Some(leaf) = self.sessions.get_mut(&seat) else {
             return;
         };
-        leaf.session.port_clear_selection();
+        leaf.session.session.port_clear_selection();
         leaf.view.projection.set_selection(None);
     }
 
@@ -16040,7 +16080,7 @@ impl TabState {
     /// turns it into the kind's own name where the caption is drawn. Nothing is
     /// invented here: a name a shell did not say is a name nobody said.
     fn terminal_name(&self, seat: SeatId) -> Option<String> {
-        let leaf = self.sessions.get(&seat)?;
+        let TerminalPane { session: leaf, .. } = self.sessions.get(&seat)?;
         pane_head_title(
             leaf.announced_title(),
             leaf.standing_in(),
@@ -16192,8 +16232,8 @@ impl ShellSession {
     /// **At this pane's own metrics** (ticket 37) — [`TermView::metrics`], derived from its rung —
     /// and never the window's: two panes of one window at two sizes are two grids for two equal
     /// rectangles.
-    fn grid_for(&self, body: SeatViewport) -> GridSize {
-        cmdrail::terminal_grid_for(&self.view.metrics, body, self.has_rail)
+    fn grid_for(&self, cell: &bt_render::CellMetrics, body: SeatViewport) -> GridSize {
+        cmdrail::terminal_grid_for(cell, body, self.has_rail)
     }
 
     /// The title this pane's program **announced**, as opposed to one it merely
@@ -17353,31 +17393,6 @@ fn replace_psreadline_resize_reanchor_debt(
         psreadline_resize_repaint_input(reanchor.integration, prompt_the_shell_opened).is_some();
 }
 
-/// **The one door every byte this window sends a child goes through** (window-thread
-/// unbounded-call sweep, 2026-08-24).
-///
-/// Every caller of this is on the window thread — a keystroke, a mouse report, an IME commit, a
-/// terminal reply the program asked for, a paste, the PSReadLine anchor chord. Until this
-/// existed each of them reached `PtySession::write` on its own, and that call was a `write_all`
-/// straight onto the ConPTY input pipe: it blocks when the pipe is full, and the pipe is full
-/// exactly when conhost has stopped draining it, which is the state a flooding pane puts conhost
-/// in. `bt_pty::InputRing` is where that wait went and why; what belongs here is the other half
-/// of the contract — **what a window does about a child that has stopped listening.**
-///
-/// Not an error, and the distinction is the whole reason this is a function. A refusal is a fact
-/// about one shell; `?`-ing it out of a keystroke handler would reach `App::fail` and end a
-/// process holding every other pane in the window. So it is said and the window carries on, with
-/// the numbers in the line, because a shell sitting on a megabyte of unread input is a thing the
-/// reader may want to know about the shell rather than a thing to be silent about.
-///
-/// A leaf with no child at all (`BT_PROBE_INPUT`, a restored pane whose shell is gone) is not a
-/// refusal and not an error: there is nowhere for the bytes to go and never was.
-///
-/// A leaf whose shell is being born keeps them for that shell ([`PaneBirth`]).
-fn write_pty_input(pty: PtyTarget<'_>, bytes: &[u8], what: &'static str) -> Result<()> {
-    offer_pty_input(pty, bytes, what).map(drop)
-}
-
 /// **Where a pane's input goes**: its shell's ring, the queue of a shell being born, or nowhere.
 #[derive(Clone, Copy)]
 enum PtyTarget<'a> {
@@ -17417,7 +17432,7 @@ impl ShellSession {
     }
 
     /// Whether this pane is in birth for its shell and the shell has answered — the landing is
-    /// due ([`land_shell_birth`]).
+    /// due ([`runtime::panes::land_shell_birth`]).
     fn shell_answered(&self) -> bool {
         matches!(
             self.life.birth().map(|birth| &birth.waiting),
@@ -17426,59 +17441,7 @@ impl ShellSession {
     }
 }
 
-/// **What became of the bytes** — the same door, for the callers that have to
-/// know (review 2026-09-17 P2-a).
-///
-/// [`write_pty_input`] swallows a refusal on purpose and always will: a shell
-/// sitting on a megabyte of unread input is a fact about that shell, not an
-/// error for the window to die of. But "swallowed" and "delivered" are two
-/// different things to a caller that is about to **move the keyboard** on the
-/// strength of it, and the drop roads are exactly that caller: a path the ring
-/// turned away, or a pane with no child behind it, must not take the reader's
-/// keyboard to a shell that received nothing and must not bring the window
-/// forward for it.
-///
-/// **[`PtyInput::Queued`] means queued, and no more than that.** The bytes are
-/// on `bt_pty::InputRing` and the writer thread will hand them to the child;
-/// whether the program on the other end reads them, and what it makes of them,
-/// is its own business and nothing this process can report. A drop's focus move
-/// is answering "did this window send it", which is the question this answers.
-fn offer_pty_input(pty: PtyTarget<'_>, bytes: &[u8], what: &'static str) -> Result<PtyInput> {
-    let pty = match pty {
-        PtyTarget::Shell(pty) => pty,
-        PtyTarget::Birth(birth) => {
-            return match birth.hold(bytes) {
-                Ok(()) => Ok(PtyInput::HeldForBirth),
-                // Said as the shell's own refusal is said, and for its reason.
-                Err(refused) => {
-                    crate::diagnostics::stderr_line(format!("{what}: {refused}"));
-                    Ok(PtyInput::Refused)
-                }
-            };
-        }
-        PtyTarget::BehindAPaste(hold) => {
-            hold.hold(bytes);
-            return Ok(PtyInput::HeldForPaste);
-        }
-        PtyTarget::Nowhere => return Ok(PtyInput::NoChild),
-    };
-    match hang_watch::during(hang_watch::Station::PtyInput, || {
-        let result = pty.write_with_reason(bytes, what);
-        hang_watch::counters(bytes.len(), if result.is_ok() { bytes.len() } else { 0 }, 1);
-        result
-    }) {
-        Ok(()) => Ok(PtyInput::Queued),
-        Err(refused @ PtyError::InputRefused { .. }) => {
-            hang_watch::during(hang_watch::Station::DiagnosticWrite, || {
-                crate::diagnostics::stderr_line(format!("{what}: {refused}"));
-            });
-            Ok(PtyInput::Refused)
-        }
-        Err(error) => Err(anyhow::Error::new(error).context(what)),
-    }
-}
-
-/// What [`offer_pty_input`] found at the other end.
+/// What [`runtime::clipboard::offer_pty_input`] found at the other end.
 ///
 /// Three answers and not a `bool`, because the two that are not `Queued` are
 /// different facts and a reader of the log needs to be able to tell them apart:
@@ -17649,7 +17612,7 @@ impl ShellSession {
     /// The window and the view compute the truth — window focus, the active tab, the focused
     /// seat ([`runtime::seat_holds_the_keyboard`]) — and the session consumes it: bt-term keeps
     /// the DEC 1004 focus-reporting state and queues the `CSI I` / `CSI O` the child is owed.
-    /// Asked once per drain, by [`drain_leaf_pty`] alone, after the child's bytes are fed (they
+    /// Asked once per drain, by [`runtime::terminal::drain_leaf_pty`] alone, after the child's bytes are fed (they
     /// may be what switched the reports on) and before the replies are collected.
     fn report_keyboard_focus(&mut self, holds: bool) {
         self.session.set_keyboard_focus(holds);
@@ -17669,7 +17632,7 @@ impl ShellSession {
     }
 
     /// **Queue a line to be typed at this shell's next prompt** (§7.54e ⑤), replacing any line
-    /// still queued; [`drain_leaf_pty`] spends it through [`Self::take_typing`].
+    /// still queued; [`runtime::terminal::drain_leaf_pty`] spends it through [`Self::take_typing`].
     fn queue_typing(&mut self, text: String, submit: bool) {
         self.pending_typing = Some((text, submit));
     }
@@ -22224,7 +22187,7 @@ impl StatusClaim {
 #[derive(Clone, Copy, Debug)]
 struct SessionFacts {
     status: SessionStatus,
-    /// How much this shell has said — [`output_revision`]'s count, and the only
+    /// How much this shell has said — [`runtime::terminal::output_revision`]'s count, and the only
     /// number "unread" is measured against.
     ///
     /// Deliberately *not* `status.published_revision`. That one counts frames,
@@ -22295,64 +22258,6 @@ impl SessionFacts {
         } else {
             StatusClaim::Silent
         }
-    }
-}
-
-/// How much this shell has *said*, one drain on.
-///
-/// This is the number "unread" is measured against, and what it counts is the
-/// only thing a badge asking for attention can honestly mean: **the program
-/// wrote something into this pane.** It is deliberately not the session's
-/// `published_revision`, which counts frames put on the glass — a cursor blink,
-/// a hovered link, a chrome repaint and a tab switch all publish frames while
-/// the shell sits in silence, and every one of them used to read as news.
-///
-/// The one exclusion is a reprint *we* asked for. Between the moment a leaf is
-/// told its new size and the moment its resize transaction goes quiescent, the
-/// bytes coming back are the shell answering our question — a prompt redrawn at
-/// a new width is not the program speaking. Bounding the exemption by the
-/// transaction rather than by a timer is what keeps it from swallowing anything
-/// else: outside that window every byte counts again.
-///
-/// The tradeoff is stated rather than hidden: real output that a background
-/// shell happens to print *inside* its own resize window is not counted, so a
-/// tab that prints only during those few hundred milliseconds keeps a clean
-/// badge. That is the honest price of not lighting every tab on every window
-/// resize, and it is the smaller of the two errors — the exemption is bounded by
-/// a transaction the user themselves started.
-fn output_revision(previous: u64, output_arrived: bool, resize_transaction_open: bool) -> u64 {
-    if output_arrived && !resize_transaction_open {
-        previous.saturating_add(1)
-    } else {
-        previous
-    }
-}
-
-/// How much of a shell the user has seen, one present on.
-///
-/// **Painting is seeing.** The ledger is squared against [`output_revision`] at
-/// the exact moment this leaf's cells go to the glass, and at no other moment —
-/// which makes "seen" a fact about pixels rather than a fact about which tab
-/// held the keyboard.
-///
-/// The rule this replaces was "the active tab's ledger keeps up", advanced once
-/// per event-loop turn. It was wrong in both directions at once. Forward: the
-/// pass ran *after* the switch had already changed the active tab, so anything
-/// published between the previous turn and the switch was stranded behind a tab
-/// that had just gone quiet, and the tab the user had been reading lit up behind
-/// them for output that never existed. Backward: a pane that is on screen but
-/// not holding the keyboard never publishes at all, so a tab could go on saying
-/// nothing while a shell inside it talked.
-///
-/// Both disappear here. A leaf that was painted owes nothing, whichever pane of
-/// whichever tab it is; a leaf that was not painted keeps its backlog, including
-/// output that arrived in the same turn as the switch away and never reached the
-/// glass. That last case is the one worth stating: it is *correctly* unread.
-fn seen_revision(previous_seen: u64, output: u64, leaf_was_painted: bool) -> u64 {
-    if leaf_was_painted {
-        output
-    } else {
-        previous_seen
     }
 }
 
@@ -22475,190 +22380,6 @@ struct TabTriggerHand {
 // program can **withdraw**, and the bell keeps exactly the claim it always honestly had:
 // [`StatusClaim::Bell`], a flat dot that a look spends. `attention_is_consumed` stays where it is —
 // the latches it retires are still latches, and red line 4 forbids it a third parameter.
-
-/// The pane a tab's `Awaiting` is about: **the oldest place it holds.**
-///
-/// The one the queue would send you to ([`runtime::attention::next_attention_stop`]'s 先到先服务), which
-/// is what makes it the honest answer to "which request is this dot reporting" — a tab is a lid
-/// over panes, and the claim it wears is the loudest of theirs.
-fn tab_queue_leader(tab: &TabState) -> Option<SeatId> {
-    tab.sessions
-        .iter()
-        .filter_map(|(seat, leaf)| leaf.attention.ledger.ticket().map(|ticket| (ticket, *seat)))
-        .min_by_key(|(ticket, _)| *ticket)
-        .map(|(_, seat)| seat)
-}
-
-/// **One turn of the attention queue, for every shell in this window** (`attention` plan §11.1.4;
-/// §7.1.5b P1-8).
-///
-/// **What "asking" means, said out loud, and it is not what it was.** The queue's members used to
-/// be the sessions whose bell was latched, because a `BEL` was the only byte a program could send
-/// this terminal that meant *I want you*. Four recordings of a real Claude Code (`attention` plan
-/// §2) established that a bell rings when a **turn ends**, which is an event, and that a badge
-/// meaning "it is standing there waiting for you" is a state — so the badge lit when it should not,
-/// could not be put out, and could not say why. A2 takes the bell out of this door entirely. What
-/// comes in now is a credential the program can **withdraw** ([`attention::AttentionLedger`]), and
-/// the bell keeps the claim it always honestly had: a flat dot a look spends.
-///
-/// **A place is taken once and only once.** The ledger's own guard is that a held place is never
-/// re-stamped, and the difference matters at the other end: the bell latch retires when the tab is
-/// *looked at* ([`attention_is_consumed`]), while a place retires only when it is *answered*.
-/// Re-stamping would hand a shell that asks twice while unanswered a younger place than one that
-/// asked once and waited, and 先到先服务 would quietly become last-come-first.
-///
-/// **Everything a frame can decide, in one pass over one leaf at a time**, which is the shape the
-/// fix of 2026-08-21 left behind and A2 keeps. Four decisions, in the one order that is not
-/// arbitrary:
-///
-/// 1. **the timers that came due** — a credential that ran out this instant is not one to hand a
-///    place to, and the other way round would put an `admit` and a `withdraw` for the same episode
-///    in the file one line apart;
-/// 2. **a bell that has not been announced** — read here because the step below spends the latch it
-///    is read from. It takes no place and mints nothing (red line 14): the end of a turn reaches
-///    the desktop on its own lane and never through the queue;
-/// 3. **the queue's own pass** — which admits a request nobody is looking at and refuses one they
-///    are;
-/// 4. **the look** — watching is consuming, so the bell and failure latches retire on the tab that
-///    is both on screen *and* in a focused window. Both go together because `bt-term` retires them
-///    together, and because "the user has seen this" is one fact and not two.
-///
-/// **No unread ledger arithmetic here, and its absence is load-bearing.** This runs once per turn
-/// of the loop and *after* the turn's tab switch has already been paid, so a ledger advanced from
-/// `tab_is_active` squares the tab that arrived and strands the tab that left one revision behind —
-/// a permanent dot on a tab whose shell never spoke. Seeing is painting, and painting is answered
-/// where the painting happens ([`Runtime::redraw`]).
-// Seven, and each is a different question about one pass: where the panes are, which of them the
-// reader is looking at, where this window is with respect to the reader's eyes, what serial to
-// draw a place from, when now is, where the lines go, and where the interruptions the ledger
-// allows are collected. A struct would move the list rather than shorten it — `place` is not that
-// struct, it is the third question, which happens to take three bits to ask.
-#[allow(clippy::too_many_arguments)]
-fn settle_attention(
-    tabs: &mut [TabState],
-    active_tab: usize,
-    place: notify::WindowPlace,
-    switches: attention::NotificationSwitches,
-    next_place: &mut attention::Places,
-    now: Instant,
-    trace: Option<&attention_trace::Trace>,
-    raised: &mut Vec<AttentionDelivery>,
-) {
-    let traced = trace.is_some();
-    for (index, tab) in tabs.iter_mut().enumerate() {
-        let tab_is_active = index == active_tab;
-        let consumed = attention_is_consumed(tab_is_active, place.focused);
-        let reach = notify::desktop_reach(tab_is_active, place);
-        let tab_id = tab.id;
-        // Only computed when someone is reading: the claim is a fold over every shell in the tab,
-        // and this pass runs on every turn of the event loop. The leader is sampled beside it,
-        // because a dot that goes *out* this turn is reported by the pane that was holding it.
-        let was = traced.then(|| tab.fleet_claim_for(tab_is_active));
-        let leader_before = traced.then(|| tab_queue_leader(tab)).flatten();
-        // Collected while the tab is held mutably and turned into deliveries below, because the
-        // title's three-layer chain reads the pane's own name and its profile's — both facts of
-        // this tab, and both out of reach while its leaves are borrowed.
-        let mut allowed: Vec<(SeatId, attention::Raised)> = Vec::new();
-        for (seat, leaf) in tab.leaves_mut() {
-            let at = attention::Site {
-                tab: index,
-                seat: *seat,
-            };
-            for expired in leaf.attention.clock.due(now) {
-                let outcome = leaf
-                    .attention
-                    .ledger
-                    .apply(at, reach, expired, next_place, now);
-                emit_attention_lines(trace, outcome.lines);
-                allowed.extend(outcome.raised.map(|one| (*seat, one)));
-            }
-            // **The weak tier, which is a level on a status snapshot and has to become an edge.**
-            // `bt-term` mints a generation on the `None → Some` rise of `RequestAttention=yes` and
-            // clears the live value on `=no`; the translation is the ledger's own, next to the
-            // mirror it compares against, so no call site keeps a second copy of what was last
-            // seen. A program restating `yes` every second produces no edge and therefore no line.
-            //
-            // One snapshot for both this and the bell below: `status()` is a coherent reading of
-            // the session, and asking twice would let two decisions in one turn be taken from two
-            // readings of one shell.
-            let reported = leaf.session.status();
-            if let Some(edge) = leaf.attention.ledger.weak_edge(reported.attention_request) {
-                let outcome = leaf
-                    .attention
-                    .ledger
-                    .apply(at, reach, edge, next_place, now);
-                emit_attention_lines(trace, outcome.lines);
-                allowed.extend(outcome.raised.map(|one| (*seat, one)));
-            }
-            if let Some(rang) = reported.bell.filter(|_| !leaf.attention.bell_reported) {
-                leaf.attention.bell_reported = true;
-                // **Neither ringer carries a sentence**, which is the whole of what is wrong with
-                // reading a bell as "it is waiting for you" — so the interruption this raises is
-                // worded from the i18n table rather than quoted from anybody. What the two *do*
-                // differ in is how they arrived, and §13.2.2 is emphatic that only a literal
-                // `0x07` may be recorded as a bell: a `RequestAttention=once` written down by a
-                // program that has found this terminal is a different fact from a program that has
-                // fallen back to the oldest byte there is, and recording them alike makes "is the
-                // far end reaching us over OSC?" unanswerable.
-                let (source, via) = attention_map::bell_provenance(rang);
-                let outcome = leaf
-                    .attention
-                    .ledger
-                    .announce_turn_end(at, reach, switches, source, via, None);
-                emit_attention_lines(trace, outcome.lines);
-                allowed.extend(outcome.raised.map(|one| (*seat, one)));
-            }
-            let settle = attention::Event::Settle {
-                active: tab_is_active,
-                focused: place.focused,
-            };
-            let outcome = leaf
-                .attention
-                .ledger
-                .apply(at, reach, settle, next_place, now);
-            emit_attention_lines(trace, outcome.lines);
-            allowed.extend(outcome.raised.map(|one| (*seat, one)));
-            if consumed {
-                leaf.session.clear_attention();
-            }
-            // Whatever spent the latch — this look, or `mark_seen` on the way in — re-arms the
-            // edge, so the next turn that ends is announced instead of being read as this one.
-            leaf.attention.bell_reported = leaf.session.status().bell_latched();
-        }
-        for (seat, one) in allowed {
-            raised.push(attention_delivery(tab, tab_id, seat, None, one));
-        }
-        if let Some(was) = was {
-            let now_claim = tab.fleet_claim_for(tab_is_active);
-            if now_claim != was {
-                // §13.2.1: the request this change is about, when it is about one at all. The third
-                // branch is the common one — most claim changes are unread, bell or work in flight,
-                // and none of those belongs to a request.
-                let leader = if now_claim == StatusClaim::Awaiting {
-                    tab_queue_leader(tab)
-                } else {
-                    leader_before
-                };
-                let episode = leader
-                    .and_then(|seat| tab.sessions.get(&seat))
-                    .and_then(|leaf| {
-                        leaf.attention.ledger.claim_episode(
-                            was == StatusClaim::Awaiting,
-                            now_claim == StatusClaim::Awaiting,
-                        )
-                    });
-                attention_trace::emit(trace, || {
-                    attention::claim_line(
-                        index,
-                        episode,
-                        &format!("{was:?}"),
-                        &format!("{now_claim:?}"),
-                    )
-                });
-            }
-        }
-    }
-}
 
 fn emit_attention_lines(trace: Option<&attention_trace::Trace>, lines: Vec<String>) {
     for line in lines {
@@ -28391,7 +28112,7 @@ impl TabState {
     fn fleet_working(&self) -> bool {
         self.sessions
             .values()
-            .any(|leaf| session_is_breathing(leaf.session.status()))
+            .any(|TerminalPane { session: leaf, .. }| session_is_breathing(leaf.session.status()))
     }
 
     /// The progress reading the ring shows: the first one reported, in seat
@@ -28409,7 +28130,7 @@ impl TabState {
     fn fleet_progress(&self) -> Option<ProgressState> {
         self.sessions
             .values()
-            .find_map(|leaf| leaf.session.status().progress)
+            .find_map(|TerminalPane { session: leaf, .. }| leaf.session.status().progress)
     }
 
     /// Mark this tab as read, and retire the attention it had **latched**.
@@ -28591,13 +28312,13 @@ impl TabState {
     ///
     /// One function because two readers ask it: the mark the strip draws
     /// ([`TabState::mark_state`]) and the before/after either side of
-    /// [`settle_attention`]'s pass, which is how `BT_ATTENTION_TRACE` reports a
+    /// [`runtime::attention::settle_attention`]'s pass, which is how `BT_ATTENTION_TRACE` reports a
     /// claim change without inventing a second opinion about what the claim is.
     fn fleet_claim_for(&self, tab_is_active: bool) -> StatusClaim {
         fleet_claim(
             self.sessions
                 .values()
-                .map(|leaf| leaf.session_facts(tab_is_active)),
+                .map(|TerminalPane { session: leaf, .. }| leaf.session_facts(tab_is_active)),
         )
     }
 
@@ -28616,7 +28337,7 @@ impl TabState {
     fn fleet_awaiting(&self) -> bool {
         self.sessions
             .values()
-            .any(|leaf| leaf.attention.ledger.ticket().is_some())
+            .any(|TerminalPane { session: leaf, .. }| leaf.attention.ledger.ticket().is_some())
     }
 
     /// Whether anything in this tab's mark slot is moving under its own steam,
@@ -31872,18 +31593,18 @@ mod shell_birth_tests {
                 &environment,
             );
             assert_eq!(
-                leaf.session.printed_path_namespace(),
+                leaf.session.session.printed_path_namespace(),
                 expected,
                 "{started:?}: the pane reads its shell's spelling"
             );
             assert_eq!(
-                leaf.launch.paste_recipient.namespace, expected,
+                leaf.session.launch.paste_recipient.namespace, expected,
                 "{started:?}: and a path pasted into it is written in that spelling"
             );
         }
     }
 
-    fn bare(decision: &BirthDecision, seed: &LeafSeed) -> ShellSession {
+    fn bare(decision: &BirthDecision, seed: &LeafSeed) -> TerminalPane {
         bare_leaf(
             view(),
             grid(),
@@ -32113,18 +31834,27 @@ mod shell_birth_tests {
             wake,
         )
         .expect("a birth worker");
-        await_shell(&mut leaf, shell, decision, &seed);
+        await_shell(&mut leaf.session, shell, decision, &seed);
 
         assert_eq!(asked_about(&asked), share, "the birth asks the disk");
-        assert!(!leaf.shell_answered(), "and waits on it, not the window");
-        assert_eq!(leaf.launch.spawn_place.as_ref(), Some(&share));
+        assert!(
+            !leaf.session.shell_answered(),
+            "and waits on it, not the window"
+        );
+        assert_eq!(leaf.session.launch.spawn_place.as_ref(), Some(&share));
         let frame = leaf
+            .session
             .session
             .viewport_frame(&mut leaf.view.projection)
             .expect("the pane draws while its folder is asked about");
-        assert!(frame_matches_grid(&frame, leaf.grid));
+        assert!(frame_matches_grid(&frame, leaf.session.grid));
         assert_eq!(
-            offer_pty_input(leaf.input_target(), "echo 共享\r".as_bytes(), "typed").expect("held"),
+            offer_pty_input(
+                leaf.session.input_target(),
+                "echo 共享\r".as_bytes(),
+                "typed"
+            )
+            .expect("held"),
             PtyInput::HeldForBirth
         );
 
@@ -32134,9 +31864,9 @@ mod shell_birth_tests {
         let refusal =
             land_shell_birth(&mut leaf, |line| notes.push(line.to_owned())).expect("the landing");
         assert!(refusal.is_none(), "{refusal:?}");
-        assert!(leaf.life.pty().is_some(), "the shell started");
+        assert!(leaf.session.life.pty().is_some(), "the shell started");
         assert_eq!(
-            leaf.launch.spawn_place, gone.place.directory,
+            leaf.session.launch.spawn_place, gone.place.directory,
             "where no folder would have put it"
         );
         assert_eq!(notes.len(), 1, "{notes:?}");
@@ -32189,32 +31919,37 @@ mod shell_birth_tests {
         let (kept, hygiene) = mpsc::channel();
         let (wake, heard) = waking();
         let shell = pty_door::request(shell_once(gate, kept), wake).expect("a birth worker");
-        await_shell(&mut leaf, shell, decision, &seed);
+        await_shell(&mut leaf.session, shell, decision, &seed);
 
         assert!(
-            leaf.life.pty().is_none() && !leaf.shell_answered(),
+            leaf.session.life.pty().is_none() && !leaf.session.shell_answered(),
             "nothing is born yet"
         );
         let frame = leaf
             .session
+            .session
             .viewport_frame(&mut leaf.view.projection)
             .expect("a pane in birth projects a frame");
-        assert!(frame_matches_grid(&frame, leaf.grid), "of its own grid");
+        assert!(
+            frame_matches_grid(&frame, leaf.session.grid),
+            "of its own grid"
+        );
         for line in ["echo 第一-first\r", "echo 第二-second\r"] {
             assert_eq!(
-                offer_pty_input(leaf.input_target(), line.as_bytes(), "typed").expect("held"),
+                offer_pty_input(leaf.session.input_target(), line.as_bytes(), "typed")
+                    .expect("held"),
                 PtyInput::HeldForBirth
             );
         }
 
         open.send(()).expect("the worker waits at the gate");
         woken_by_a_shell(&heard);
-        assert!(leaf.shell_answered());
+        assert!(leaf.session.shell_answered());
         let refusal = land_shell_birth(&mut leaf, |line| panic!("nothing is dropped: {line}"))
             .expect("the landing writes what was held");
         assert!(refusal.is_none(), "{refusal:?}");
-        assert!(leaf.life.birth().is_none());
-        let pty = leaf.life.pty().expect("the pane has its shell");
+        assert!(leaf.session.life.birth().is_none());
+        let pty = leaf.session.life.pty().expect("the pane has its shell");
         read_until(pty, &["第一-first", "第二-second"]);
         drop(leaf);
         drop(hygiene.recv().expect("the shell's directory"));
@@ -32242,8 +31977,13 @@ mod shell_birth_tests {
             wake,
         )
         .expect("a birth worker");
-        await_shell(&mut leaf, shell, decision, &seed);
-        offer_pty_input(leaf.input_target(), "dir 目录\r".as_bytes(), "typed").expect("held");
+        await_shell(&mut leaf.session, shell, decision, &seed);
+        offer_pty_input(
+            leaf.session.input_target(),
+            "dir 目录\r".as_bytes(),
+            "typed",
+        )
+        .expect("held");
         open.send(()).expect("the worker waits at the gate");
         woken(&heard);
         let mut notes = Vec::new();
@@ -32255,7 +31995,11 @@ mod shell_birth_tests {
             said.contains("ConPTY") && said.contains("CreatePseudoConsole refused: 找不到"),
             "{said}"
         );
-        assert!(leaf.life.pty().is_none() && leaf.life.birth().is_none() && leaf.wake.is_none());
+        assert!(
+            leaf.session.life.pty().is_none()
+                && leaf.session.life.birth().is_none()
+                && leaf.session.wake.is_none()
+        );
         assert_eq!(notes.len(), 1, "{notes:?}");
         assert!(notes[0].contains(&format!("{} byte(s)", "dir 目录\r".len())));
     }
@@ -32282,7 +32026,7 @@ mod shell_birth_tests {
                 Arc::clone(&wake),
             )
             .expect("a birth worker");
-            await_shell(&mut leaf, shell, decision.clone(), &seed);
+            await_shell(&mut leaf.session, shell, decision.clone(), &seed);
             panes.push((pane, leaf, open));
         }
         for (_, _, open) in panes.iter().rev() {
@@ -32290,7 +32034,7 @@ mod shell_birth_tests {
             woken(&heard);
         }
         for (pane, leaf, _) in panes.iter_mut().rev() {
-            assert!(leaf.shell_answered());
+            assert!(leaf.session.shell_answered());
             let said = format!(
                 "{:#}",
                 land_shell_birth(leaf, |_| {})
@@ -32340,36 +32084,36 @@ mod shell_birth_tests {
     }
 
     /// The facts of a landed pane a reader can see, and the session's own.
-    fn landed_facts(leaf: &ShellSession) -> String {
+    fn landed_facts(leaf: &TerminalPane) -> String {
         format!(
             "{:#?}",
             (
                 (
-                    &leaf.launch.profile,
-                    &leaf.launch.program,
-                    &leaf.launch.spawn_place,
-                    leaf.launch.born_named,
-                    leaf.launch.integration,
-                    leaf.wake.is_some(),
-                    leaf.life.pty().map(PtySession::conpty_kind),
-                    leaf.life.birth().is_some(),
+                    &leaf.session.launch.profile,
+                    &leaf.session.launch.program,
+                    &leaf.session.launch.spawn_place,
+                    leaf.session.launch.born_named,
+                    leaf.session.launch.integration,
+                    leaf.session.wake.is_some(),
+                    leaf.session.life.pty().map(PtySession::conpty_kind),
+                    leaf.session.life.birth().is_some(),
                     leaf.successor.is_some(),
                 ),
                 (
-                    leaf.grid,
-                    leaf.conpty_grid,
+                    leaf.session.grid,
+                    leaf.session.conpty_grid,
                     leaf.view.text_scale,
                     leaf.view.metrics,
                     leaf.view.card_skip,
-                    &leaf.pending_typing,
-                    &leaf.attention.capability,
-                    leaf.has_rail,
+                    &leaf.session.pending_typing,
+                    &leaf.session.attention.capability,
+                    leaf.session.has_rail,
                 ),
                 (
-                    leaf.session.terminal().visible_text(),
-                    leaf.session.reference_directory(),
-                    leaf.session.pty_transport(),
-                    leaf.session.layout_key(),
+                    leaf.session.session.terminal().visible_text(),
+                    leaf.session.session.reference_directory(),
+                    leaf.session.session.pty_transport(),
+                    leaf.session.session.layout_key(),
                 ),
             )
         )
@@ -32409,7 +32153,7 @@ mod shell_birth_tests {
         let (kept, hygiene) = mpsc::channel();
         let (wake, heard) = waking();
         let shell = pty_door::request(shell_once(gate, kept), wake).expect("a birth worker");
-        await_shell(&mut later, shell, decision.clone(), &seed);
+        await_shell(&mut later.session, shell, decision.clone(), &seed);
         open.send(()).expect("the worker waits at the gate");
         woken_by_a_shell(&heard);
         assert!(
@@ -32440,7 +32184,7 @@ mod shell_birth_tests {
         let (wake, heard) = waking();
         let shell = pty_door::request(|_| -> pty_door::Born { panic!("举手-planted") }, wake)
             .expect("a birth worker");
-        await_shell(&mut leaf, shell, decision, &seed);
+        await_shell(&mut leaf.session, shell, decision, &seed);
         woken(&heard);
         let said = format!(
             "{:#}",
@@ -32453,7 +32197,7 @@ mod shell_birth_tests {
             !said.contains("举手-planted"),
             "the payload is not the pane's: {said}"
         );
-        assert!(leaf.life.birth().is_none() && leaf.life.pty().is_none());
+        assert!(leaf.session.life.birth().is_none() && leaf.session.life.pty().is_none());
     }
 
     /// RED (round 2, B2) — **a *Restart shell* successor that waits on an unknown row lands once
@@ -32470,7 +32214,7 @@ mod shell_birth_tests {
         let mut leaf = bare(&decision, &seed);
         finish_leaf_birth(&mut leaf, None, &decision, &seed, None, false).expect("the old pane");
         let mut waiting = bare(&decision, &seed);
-        waiting.life.begin_birth(PaneBirth {
+        waiting.session.life.begin_birth(PaneBirth {
             seed: seed_of(profiles::DEFAULT_IDENTITY),
             probe_input: None,
             typed: std::cell::RefCell::default(),
@@ -32498,7 +32242,7 @@ mod shell_birth_tests {
         let (wake, heard) = waking();
         let mut remade = bare(&decision, &seed);
         let shell = pty_door::request(shell_once(gate, kept), wake).expect("a birth worker");
-        await_shell(&mut remade, shell, decision, &seed);
+        await_shell(&mut remade.session, shell, decision, &seed);
         leaf.await_successor(Box::new(remade));
         open.send(()).expect("the worker waits at the gate");
         woken_by_a_shell(&heard);
@@ -32511,7 +32255,7 @@ mod shell_birth_tests {
         else {
             panic!("the successor's shell was born");
         };
-        assert!(successor.life.pty().is_some() && successor.life.birth().is_none());
+        assert!(successor.session.life.pty().is_some() && successor.session.life.birth().is_none());
         assert!(!leaf.restart_in_flight(), "the menu row is offered again");
         drop((leaf, successor));
         drop(hygiene.recv().expect("the shell's directory"));
@@ -32529,7 +32273,7 @@ mod shell_birth_tests {
         let seed = seed_of(profiles::fallback_profile_id());
         let mut leaf = bare(&decision, &seed);
         finish_leaf_birth(&mut leaf, None, &decision, &seed, None, true).expect("a pane in birth");
-        leaf.life.begin_birth(PaneBirth {
+        leaf.session.life.begin_birth(PaneBirth {
             seed: seed.clone(),
             probe_input: None,
             typed: std::cell::RefCell::default(),
@@ -32537,12 +32281,17 @@ mod shell_birth_tests {
         });
         let frame = leaf
             .session
+            .session
             .viewport_frame(&mut leaf.view.projection)
             .expect("a pane in birth projects a frame");
-        assert!(frame_matches_grid(&frame, leaf.grid), "of its own grid");
+        assert!(
+            frame_matches_grid(&frame, leaf.session.grid),
+            "of its own grid"
+        );
         for line in ["echo 区域-region\r", "ls 目录\r"] {
             assert_eq!(
-                offer_pty_input(leaf.input_target(), line.as_bytes(), "typed").expect("held"),
+                offer_pty_input(leaf.session.input_target(), line.as_bytes(), "typed")
+                    .expect("held"),
                 PtyInput::HeldForBirth
             );
         }
@@ -32557,7 +32306,8 @@ mod shell_birth_tests {
             "a reading finished: the pane is made again, asking for its shell"
         );
         let mut delivered = Vec::new();
-        leaf.life
+        leaf.session
+            .life
             .birth()
             .expect("still in birth")
             .deliver(|held| {
@@ -32582,7 +32332,7 @@ mod shell_birth_tests {
         let (wake, heard) = waking();
         let shell = pty_door::request(|_| Err(PtyError::Backend("没有控制台".into())), wake)
             .expect("a birth worker");
-        await_shell(&mut leaf, shell, decision, &seed);
+        await_shell(&mut leaf.session, shell, decision, &seed);
         woken(&heard);
         let refusal = land_shell_birth(&mut leaf, |_| {}).expect("landed");
         let mut shells = StartupShells {
@@ -32595,7 +32345,7 @@ mod shell_birth_tests {
             startup: None,
             phase_started: Instant::now(),
         };
-        let source = landed_source(&leaf, refusal.is_some()).expect("a source");
+        let source = landed_source(&leaf.session, refusal.is_some()).expect("a source");
         shells.born(TabId(2), SeatId(0), source);
         assert_eq!(
             shells.lines_if_born(),
@@ -32685,7 +32435,7 @@ fn create_leaf_session(
     // **The machine a shell is composed for**: its variables and its files, as the place, the
     // command line and the paste recipient read them — the system's own in the product.
     environment: &dyn bt_pty::ShellEnvironment,
-) -> Result<ShellSession> {
+) -> Result<TerminalPane> {
     // **Born without a rail**: a shell that has not started has sent no mark, and
     // [`ShellSession::has_rail`] is turned on only by one (owner, 2026-09-23).
     let LeafView {
@@ -32932,13 +32682,13 @@ fn create_leaf_session(
         // **Born later, standing where its shell will stand.** The place is said now, from the
         // decision, so a pane split off or restarted from this one while it is being born is put
         // down where this one will be; the landing says it again for the shell that started.
-        Some(shell) => await_shell(&mut leaf, shell, decision, seed),
+        Some(shell) => await_shell(&mut leaf.session, shell, decision, seed),
         // No shell to wait for — no program on this machine, the probe's direct input, or a rule
         // that waits on a row: what is said about the pane is said now.
         None => {
             finish_leaf_birth(&mut leaf, None, &decision, seed, probe_input, in_birth)?;
             if in_birth {
-                leaf.life.begin_birth(PaneBirth {
+                leaf.session.life.begin_birth(PaneBirth {
                     seed: asked_seed.clone(),
                     probe_input: probe_input.map(<[u8]>::to_vec),
                     typed: std::cell::RefCell::default(),
@@ -32972,7 +32722,7 @@ fn bare_leaf(
     scrollback: NonZeroUsize,
     line_wrapping: bool,
     environment: &dyn bt_pty::ShellEnvironment,
-) -> ShellSession {
+) -> TerminalPane {
     let LeafView {
         text_scale,
         metrics,
@@ -33008,40 +32758,54 @@ fn bare_leaf(
         line_wrapping,
     ));
     let projection = session.new_projection(session.layout_key());
-    ShellSession {
-        incarnation: next_incarnation(),
-        wake,
-        life: ShellLife::shellless(),
-        foreground_program_cadence: foreground_program::Cadence::default(),
-        process_folder: pane_folder::ProcessFolderMemo::default(),
-        launch: LaunchFacts {
-            paste_recipient: profiles::paste_recipient(
-                profiles::index_of_id(&decision.spawn_profile),
-                &decision.program_kind,
-                environment,
-            ),
-            integration: profiles::row_of(&decision.spawn_profile)
-                .map_or(profiles::Integration::None, |row| {
-                    profiles::door_of(&row, &decision.program_kind)
-                }),
-            profile: decision.spawn_profile.clone(),
-            program: decision.program.clone(),
-            program_kind: decision.program_kind.clone(),
-            born_named: false,
-            spawn_place: None,
+    TerminalPane {
+        session: ShellSession {
+            incarnation: next_incarnation(),
+            wake,
+            life: ShellLife::shellless(),
+            foreground_program_cadence: foreground_program::Cadence::default(),
+            process_folder: pane_folder::ProcessFolderMemo::default(),
+            launch: LaunchFacts {
+                paste_recipient: profiles::paste_recipient(
+                    profiles::index_of_id(&decision.spawn_profile),
+                    &decision.program_kind,
+                    environment,
+                ),
+                integration: profiles::row_of(&decision.spawn_profile)
+                    .map_or(profiles::Integration::None, |row| {
+                        profiles::door_of(&row, &decision.program_kind)
+                    }),
+                profile: decision.spawn_profile.clone(),
+                program: decision.program.clone(),
+                program_kind: decision.program_kind.clone(),
+                born_named: false,
+                spawn_place: None,
+            },
+            // **What this pane is owed at its first prompt** (§7.54e ④). `None` for every pane in the
+            // product except a pinned tab of a restored summoned terminal — see `LeafSeed::prefill`.
+            pending_typing: seed.prefill.clone().map(|command| (command, false)),
+            session,
+            attention: AttentionAccount {
+                // Nobody has asked for anything yet.
+                ledger: attention::AttentionLedger::default(),
+                bell_reported: false,
+                clock: attention_wire::WaitClock::default(),
+                capability,
+            },
+            attention_ended: false,
+            grid,
+            conpty_grid: grid,
+            pending_pty_resize: None,
+            pending_psreadline_resize_reanchor: false,
+            last_finished_command: None,
+            // Its shell has not said anything yet, let alone marked a prompt.
+            has_rail: false,
+            output_revision: 0,
+            last_seen_revision: 0,
+            // Nothing has been pasted into a shell that has just started.
+            pending_paste: None,
+            paste_hold: None,
         },
-        // **What this pane is owed at its first prompt** (§7.54e ④). `None` for every pane in the
-        // product except a pinned tab of a restored summoned terminal — see `LeafSeed::prefill`.
-        pending_typing: seed.prefill.clone().map(|command| (command, false)),
-        session,
-        attention: AttentionAccount {
-            // Nobody has asked for anything yet.
-            ledger: attention::AttentionLedger::default(),
-            bell_reported: false,
-            clock: attention_wire::WaitClock::default(),
-            capability,
-        },
-        attention_ended: false,
         view: TermView {
             projection,
             text_scale,
@@ -33056,25 +32820,13 @@ fn bare_leaf(
             presented_metrics: metrics,
             frame_image_references: FrameImageReferences::default(),
         },
-        grid,
-        conpty_grid: grid,
-        pending_pty_resize: None,
-        pending_psreadline_resize_reanchor: false,
-        last_finished_command: None,
-        // Its shell has not said anything yet, let alone marked a prompt.
-        has_rail: false,
-        output_revision: 0,
-        last_seen_revision: 0,
-        // Nothing has been pasted into a shell that has just started.
-        pending_paste: None,
-        paste_hold: None,
         successor: None,
     }
 }
 
 /// **A pane waits for the shell asked for it**: put down where the decision says it will stand —
 /// so a pane split off or restarted from it while it is being born starts there — and in birth on
-/// `shell`, at the grid the shell is being born at, until [`land_shell_birth`].
+/// `shell`, at the grid the shell is being born at, until [`runtime::panes::land_shell_birth`].
 fn await_shell(
     leaf: &mut ShellSession,
     shell: pty_door::ShellBirth,
@@ -33105,13 +32857,14 @@ fn await_shell(
 /// on a row, or a birth that failed). `in_birth` is a pane still waiting on a row, about which
 /// nothing is said yet.
 fn finish_leaf_birth(
-    leaf: &mut ShellSession,
+    pane: &mut TerminalPane,
     pty: Option<PtySession>,
     decision: &BirthDecision,
     seed: &LeafSeed,
     probe_input: Option<&[u8]>,
     in_birth: bool,
 ) -> Result<()> {
+    let leaf = &mut pane.session;
     let mut pty = pty;
     let shell_fallback = pty.as_mut().and_then(PtySession::take_shell_fallback);
     leaf.life.record_spawn_fallback(shell_fallback.clone());
@@ -33230,7 +32983,7 @@ fn finish_leaf_birth(
             bt_pty::ConPtyKind::NotConPty => bt_term::PtyTransport::Unix,
         },
     );
-    leaf.view.projection = leaf.session.new_projection(leaf.session.layout_key());
+    pane.view.projection = leaf.session.new_projection(leaf.session.layout_key());
     // A wake-up is the other end of a reader thread, and there is no thread
     // when there is no ConPTY — see the field.
     if pty.is_none() {
@@ -33251,58 +33004,6 @@ fn finish_leaf_birth(
     leaf.launch.profile = profile;
     leaf.launch.program = resolved_program;
     leaf.life.land(pty);
-    Ok(())
-}
-
-/// **A silent birth death's last-resort shell takes its pane on the birth road**
-/// (T-SHELL-BIRTH-DEATH). The pane is finished from it exactly as a pane whose own program would
-/// not start is ([`finish_leaf_birth`] over a session carrying bt-pty's fallback record): the same
-/// banner under the profile that was asked for, the profile, program, place, paste recipient and
-/// integration of the shell that started. The decision is the dead shell's own, read back from the
-/// pane it was landed on. The record's diagnostics line is not owed here — the birth death's own
-/// exit line names the fallback — so it is spent with the landing.
-fn land_birth_death_fallback_shell(
-    leaf: &mut ShellSession,
-    pty: PtySession,
-    landing: ShellLanding,
-) -> Result<()> {
-    let ShellLanding {
-        decision,
-        born_grid,
-        owed_physical,
-        ..
-    } = landing;
-    let seed = LeafSeed {
-        profile: leaf.launch.profile.clone(),
-        ..LeafSeed::default()
-    };
-    finish_leaf_birth(leaf, Some(pty), &decision, &seed, None, false)?;
-    // The stale spawn record goes before the apply can fail: a fallback that landed but could
-    // not be resized is still a landed fallback, not one still pending.
-    leaf.life.take_spawn_fallback();
-    apply_owed_shell_resize(leaf, born_grid, owed_physical)?;
-    Ok(())
-}
-
-/// Tell a shell that has just landed the last pane size released after its birth was asked for.
-/// Both an ordinary pane birth and a birth-death fallback spend [`ShellLanding::owed_physical`]
-/// here, through the same admitted PTY-resize door.
-fn apply_owed_shell_resize(
-    leaf: &mut ShellSession,
-    born_grid: GridSize,
-    owed_physical: Option<PhysicalSize<u32>>,
-) -> Result<()> {
-    if let (Some(pty), Some(physical)) = (leaf.life.pty_mut(), owed_physical)
-        && leaf.conpty_grid != born_grid
-    {
-        // The same admitted door every released resize takes (`doors::PtyResize`, row 12).
-        let grid = leaf.conpty_grid;
-        bt_platform::admission::admitted::<doors::PtyResize, _>(|token| {
-            pty_door::resize(token, pty, pty_size(grid, physical)).map_err(anyhow::Error::from)
-        })
-        .unwrap_or_else(|refused| Err(anyhow::Error::from(refused)))
-        .context("tell a landed shell the grid its pane moved to while it was being born")?;
-    }
     Ok(())
 }
 
@@ -33346,56 +33047,6 @@ fn place_leaf(leaf: &mut ShellSession, decision: &BirthDecision, profile: &str, 
     leaf.launch.spawn_place = spawn_place.filter(|_| !in_birth);
 }
 
-/// **A pane's shell has answered: land it** (T-BIRTH-OFF-WINDOW). The pane's birth is finished
-/// from the answer exactly as a pane with its shell in hand is ([`finish_leaf_birth`]); a resize
-/// released while the shell was being born is told to it; what was typed meanwhile is written to
-/// it first, in order. Answers the refusal to say when the birth failed — the pane is then a pane
-/// with no shell, and what was typed into it is said dropped. `None` and nothing changed while
-/// the shell has not answered.
-fn land_shell_birth(
-    leaf: &mut ShellSession,
-    mut note: impl FnMut(&str),
-) -> Result<Option<anyhow::Error>> {
-    let Some(mut held) = leaf.life.take_birth() else {
-        return Ok(None);
-    };
-    let BirthWait::Shell(landing) = &mut held.waiting else {
-        leaf.life.begin_birth(held);
-        return Ok(None);
-    };
-    let Some(pty_door::Born {
-        session: answer,
-        folder_gone,
-    }) = landing.shell.take()
-    else {
-        leaf.life.begin_birth(held);
-        return Ok(None);
-    };
-    // Read off the birth that has left the pane; it is spent only below, in the delivery of what
-    // it holds, so nothing a birth carries can be dropped on the way.
-    let decision = if folder_gone {
-        landing.decision.clone().with_folder_gone(&mut note)
-    } else {
-        landing.decision.clone()
-    };
-    let (born_grid, owed_physical) = (landing.born_grid, landing.owed_physical);
-    let (pty, refusal) = match answer {
-        Ok(pty) => (Some(pty), None),
-        Err(error) => (
-            None,
-            Some(anyhow::Error::from(error).context(format!(
-                "spawn the {} profile in ConPTY",
-                profile_banner_name(&decision.spawn_profile)
-            ))),
-        ),
-    };
-    let seed = held.seed.clone();
-    finish_leaf_birth(leaf, pty, &decision, &seed, None, false)?;
-    apply_owed_shell_resize(leaf, born_grid, owed_physical)?;
-    deliver_held_input(&held, leaf.input_target(), note)?;
-    Ok(refusal)
-}
-
 /// **Where a pane's birth sits**: the pane's own, or a *Restart shell* successor's beside it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BirthAt {
@@ -33405,22 +33056,22 @@ enum BirthAt {
 
 /// **What a due birth is due for**: its rows or its locale answered (made again through
 /// `create_leaf_session`, asking for its shell), or its shell answered (landed,
-/// [`land_shell_birth`]).
+/// [`runtime::panes::land_shell_birth`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BirthDue {
     Rows,
     Shell,
 }
 
-impl ShellSession {
+impl TerminalPane {
     /// The birth at `at`, if there is one.
     fn birth_at(&self, at: BirthAt) -> Option<&PaneBirth> {
         match at {
-            BirthAt::Pane => self.life.birth(),
+            BirthAt::Pane => self.session.life.birth(),
             BirthAt::Successor => self
                 .successor
                 .as_deref()
-                .and_then(|successor: &ShellSession| successor.life.birth()),
+                .and_then(|successor: &TerminalPane| successor.session.life.birth()),
         }
     }
 
@@ -33432,18 +33083,32 @@ impl ShellSession {
 
     /// **A replacement in birth waits beside this pane's shell** until its own lands
     /// ([`runtime::panes::land_successor`]).
-    fn await_successor(&mut self, next: Box<ShellSession>) {
+    fn await_successor(&mut self, next: Box<TerminalPane>) {
         self.successor = Some(next);
     }
 
     /// The replacement in birth, lent for its landing.
-    fn successor_mut(&mut self) -> Option<&mut ShellSession> {
+    fn successor_mut(&mut self) -> Option<&mut TerminalPane> {
         self.successor.as_deref_mut()
     }
 
     /// The replacement, leaving this pane: landed, or refused.
-    fn take_successor(&mut self) -> Option<Box<ShellSession>> {
+    fn take_successor(&mut self) -> Option<Box<TerminalPane>> {
         self.successor.take()
+    }
+
+    /// **Aim this pane's card window by `steps` notches of `rows` rows** (ruling E14): the card
+    /// skip is the view's, and where it may stand is read off the session's scrollback, so the one
+    /// write that needs both halves is the pane's. `site` names the card for `BT_CARD_TRACE`.
+    /// Whether the aim moved — see `focus_thumb::aim_card_skip`.
+    fn aim_card_skip(&mut self, rows: usize, steps: i32, site: card_trace::Card) -> bool {
+        focus_thumb::aim_card_skip(
+            &self.session.session,
+            &mut self.view.card_skip,
+            rows,
+            steps,
+            site,
+        )
     }
 }
 
@@ -33454,7 +33119,7 @@ enum SuccessorLanding {
     /// Its birth failed; the pane keeps the shell it has.
     Refused(anyhow::Error),
     /// It was born and is taken off the pane, to take the pane's place.
-    Landed(Box<ShellSession>),
+    Landed(Box<TerminalPane>),
 }
 
 /// **A terminal pane's metrics for a test**, measured once per (scale, size) per process by the
@@ -33661,8 +33326,12 @@ fn create_tab_state<G: Glass>(
     // by the probe instead of by a pipe", which is a different fact (§7.1.6h).
     // A tab whose identity shell is in birth has no source yet; its launch holds the line
     // ([`StartupShells`]), and every other caller ignores it.
-    let conpty_source =
-        conpty_source_of(sessions.get(&terminal_seat_id)).unwrap_or_else(|| "in-birth".to_owned());
+    let conpty_source = conpty_source_of(
+        sessions
+            .get(&terminal_seat_id)
+            .map(|TerminalPane { session, .. }| session),
+    )
+    .unwrap_or_else(|| "in-birth".to_owned());
     // Built off the *tree* and not off the caller's map, so the table is total
     // over this tab's Files leaves by construction — the same invariant the loop
     // above gives `sessions`, reached the same way. A seat the caller said
@@ -33785,7 +33454,7 @@ fn create_tab_state<G: Glass>(
 #[allow(clippy::too_many_arguments)]
 fn assemble_tab_state(
     id: TabId,
-    sessions: BTreeMap<SeatId, ShellSession>,
+    sessions: BTreeMap<SeatId, TerminalPane>,
     files: BTreeMap<SeatId, seats::FilesLeafState>,
     preview_pool: preview::PreviewPool,
     preview_panes: PreviewPanes,
@@ -33885,27 +33554,6 @@ fn assemble_tab_state(
 fn mark_leaf_seen(leaf: &mut ShellSession) {
     leaf.mark_seen(leaf.output_revision);
     leaf.session.clear_attention();
-}
-
-/// This leaf's cells have just gone to the glass.
-///
-/// One function so that the two halves of the present — the pane holding the
-/// keyboard and every pane beside it — cannot answer the question differently.
-/// They are written separately in [`Runtime::redraw`] only because the borrow
-/// checker sees one `&mut` tab and a list taken by value; nothing about the rule
-/// distinguishes them, and a rule that lived in two places is how a sibling pane
-/// ends up owing a debt it paid in plain sight.
-///
-/// Unlike [`mark_leaf_seen`] this retires no latch. A bell that rings while you
-/// are looking is answered by [`attention_is_consumed`], which asks about the
-/// *window's* focus as well — being painted into a window nobody has in front of
-/// them is not hearing it.
-fn mark_leaf_painted(leaf: &mut ShellSession) {
-    leaf.mark_seen(seen_revision(
-        leaf.last_seen_revision,
-        leaf.output_revision,
-        true,
-    ));
 }
 
 /// **Stand a pane up as a tab of its own, carrying its shell across.**
@@ -34114,7 +33762,7 @@ fn move_seat_content(
 ) {
     if let Some(mut leaf) = source.sessions.remove(&was) {
         if watched {
-            mark_leaf_seen(&mut leaf);
+            mark_leaf_seen(&mut leaf.session);
         }
         let displaced = target.sessions.insert(now, leaf);
         debug_assert!(
@@ -34256,7 +33904,7 @@ fn move_seat_content(
 /// **The seat given here is the one it landed under**, never the one it left:
 /// the whole point is to reach the tables *after* they have been re-keyed.
 fn forget_work_in_flight_for_seat(tab: &mut TabState, seat: SeatId) {
-    if let Some(leaf) = tab.sessions.get_mut(&seat) {
+    if let Some(TerminalPane { session: leaf, .. }) = tab.sessions.get_mut(&seat) {
         leaf.session.forget_work_in_flight();
     }
     if let Some(cache) = tab.file_trees.get_mut(&seat) {
@@ -34729,7 +34377,7 @@ struct DrainOutcome {
     arrived: bool,
     /// **A pane's ring still held bytes when its turn was over.**
     ///
-    /// The turn is bounded — [`drain_leaf_pty`] takes one
+    /// The turn is bounded — [`runtime::terminal::drain_leaf_pty`] takes one
     /// [`bt_pty::TERM_READ_SLICE`] out of a pane and returns, and
     /// [`Runtime::drain_pty`] stops going round at [`DRAIN_TURN_BUDGET`] or
     /// [`DRAIN_SLICES_PER_TURN`], whichever comes first — so the loop has to be
@@ -34823,331 +34471,6 @@ impl DrainOutcome {
         self.command_ends.extend(other.command_ends);
         self.notifications.extend(other.notifications);
     }
-}
-
-/// The colours a program inside any pane of this process is standing on.
-///
-/// Nineteen colours and the canvas they make, assembled here because this is the
-/// only crate that can see both halves: `bt-render` owns the scheme and the one
-/// luma threshold that sorts dark from light, `bt-term` owns the escape-code
-/// contract that spells the answer. Neither can reach the other, and neither
-/// should — a terminal that derived its own dark/light verdict would be a second
-/// threshold waiting to disagree with the one the window paints by.
-///
-/// The background and the ink are read from the *painted* canvas rather than off
-/// the scheme, because a `BT_BG` override moves the glass without moving the
-/// settings, and what a program asks about is the glass.
-fn terminal_palette_in_force() -> TerminalPalette {
-    terminal_palette(scheme_in_force(), background_rgb(), foreground_rgb())
-}
-
-/// The mapping alone, so it can be pinned without moving process-wide state.
-fn terminal_palette(
-    scheme: bt_render::ColourScheme,
-    background: [u8; 3],
-    foreground: [u8; 3],
-) -> TerminalPalette {
-    TerminalPalette {
-        canvas: if bt_render::background_is_light(background) {
-            TerminalCanvas::Light
-        } else {
-            TerminalCanvas::Dark
-        },
-        background,
-        foreground,
-        cursor: scheme.cursor,
-        ansi: scheme.ansi,
-    }
-}
-
-/// Drain one shell's pipe into its own screen.
-///
-/// "Name" and not "title", and the difference was a live bug. This used to watch
-/// `window_title` alone, which is one of the two things [`resolve_title`] reads
-/// off a shell; the other is the folder it reported over OSC 7, and that is the
-/// layer that names most tabs most of the time. A `cd` therefore moved a tab's
-/// name without marking the chrome for redrawing, and the strip went on showing
-/// the previous folder until some unrelated event — a click, a resize, a tab
-/// switch — repainted it. Measured on a Command Prompt pane: `cd` into
-/// `C:\Program Files` left the tab reading `BetterTerminal` while the prompt one
-/// line below it read `C:\Program Files>`, and it stayed that way indefinitely.
-///
-/// It was invisible while `window_title` was the layer that named things, and
-/// every profile has it: a PowerShell tab is folder-named too. What made it
-/// surface now is Command Prompt, whose only report *is* the folder.
-///
-/// `holds_the_keyboard` is [`runtime::terminal::seat_holds_the_keyboard`] already answered for this
-/// pane — the four bits are the window's and the tab's, and a leaf can supply
-/// none of them about itself.
-/// **Did this pane commit a synchronized update while it was being fed?**
-///
-/// `before` is [`bt_term::DualPlaneSession::synchronized_update_commits`] read on the near side of
-/// the feed. A counter and not the deadline, and the difference is a whole class of block: one
-/// that opens *and* commits inside a single `read(2)` — `BSU`, a screenful, `ESU`, all under the
-/// pty's 1,024-byte cap — leaves the deadline `None` on both sides of that feed, so a drain
-/// sampling the deadline sees nothing happen and makes a completed frame wait. The count cannot
-/// fall between two samples.
-///
-/// A named function rather than a comparison written in place, so that this is one thing a test
-/// can put a real session through — see `coalesce::session_tests`.
-fn synchronized_update_committed(before: u64, session: &bt_term::DualPlaneSession) -> bool {
-    session.synchronized_update_commits() != before
-}
-
-fn drain_leaf_pty(leaf: &mut ShellSession, holds_the_keyboard: bool) -> Result<DrainOutcome> {
-    if leaf.life.pty().is_none() {
-        return Ok(DrainOutcome::default());
-    }
-    let name_before = leaf.name_evidence();
-    // Told on every turn rather than at each of the half-dozen places a theme,
-    // a scheme or a scheme *file* can change, because a list of those places is
-    // a list somebody has to remember to extend. The call is a comparison and a
-    // nineteen-colour copy; it queues bytes only when the canvas actually moved
-    // and only for a pane that asked to hear about it (DEC 2031).
-    hang_watch::during(hang_watch::Station::DrainPalette, || {
-        leaf.session.set_color_palette(terminal_palette_in_force())
-    });
-    let mut changed = false;
-    // **One slice, and then back to the caller that is holding the clock.**
-    //
-    // This was `loop { read; if empty { break } ; feed }`, and the exit it named
-    // is one a busy pane never reaches. The read is
-    // [`bt_pty::OutputRing::try_pop`] over a one-MiB ring that a *reader thread*
-    // refills while this runs, so "the ring is empty" is a question about one
-    // instant, and while the child prints at least as fast as `feed_at` absorbs
-    // it that instant never arrives. Measured on 2026-08-24, release build, one
-    // pane running `for(;;){ [Console]::Out.WriteLine('x'*4000) }` and nothing
-    // else — no second pane, no page, nobody touching the frame: the window
-    // stopped answering **two seconds** after launch and never answered again,
-    // one core burned flat, ~35 MB/s of memory on top, `IsHungAppWindow` true
-    // and the window thread `Running` — not blocked on anything, simply never
-    // returning. That is the whole of the "drag it bigger and the program dies"
-    // report: hosting a page takes a frame from 26 ms to 50 ms, so a pane that
-    // stays just ahead of the terminal at rest falls behind while the frame is
-    // being dragged, and once it is behind the loop stops terminating.
-    //
-    // The budget is not a number invented here. [`bt_pty::TERM_READ_QUANTUM`] is
-    // *already* "the serialized Term actor quantum" of `DESIGN.md` §1.3 — the
-    // unit of output one turn is meant to carry — and `try_pop` already takes at
-    // most one of them. So the fix is to stop asking for a second one on the
-    // same turn, and to say out loud that more is owed.
-    //
-    // Nothing is dropped and nothing waits on a clock: the leftover is answered
-    // on the very next turn, which [`Runtime::drain_pty`] guarantees by raising
-    // the wake. A pane that outruns the window is throttled by the ring and the
-    // pipe behind it, which is what backpressure is for and what the ring was
-    // built to do.
-    //
-    // **What T-DRAIN-BURST changed is the size of the ask, and nothing else in
-    // this function.** A quantum bounds a turn in *bytes*, and the owner's
-    // diagnostics log says what that is worth: holds of 4386, 2791, 1862 and
-    // 3112 ms charged to `drain_pty`, page faults near zero beside them, while
-    // a pane printed a build log. A number of bytes is not a length of time,
-    // because the time a quantum costs is the time its *lines* cost — see
-    // [`DRAIN_TURN_BUDGET`] for the account. So the read is a
-    // [`bt_pty::TERM_READ_SLICE`] now, and the quantum is spent a slice at a
-    // time by [`Runtime::drain_pty`], which looks at the clock in between. One
-    // read per call is unchanged and load-bearing: the caller cannot stop a call
-    // it is already inside, so the loop that repeats this one lives up there,
-    // where the deadline is.
-    let slice = hang_watch::during(hang_watch::Station::DrainRingRead, || {
-        leaf.life
-            .pty()
-            .expect("PTY mode checked above")
-            .read_output_slice()
-    });
-    let bytes = slice.bytes;
-    hang_watch::counters(bytes.len(), 0, 0);
-    // **Was this pane's picture under the program's own control across this slice?**
-    //
-    // A *counter* and not the deadline, and the difference was a defect: a 1,024-byte capped read
-    // holding `BSU … ESU` whole opens and commits a block inside one feed, so the deadline is
-    // `None` on both sides of it and a completed frame would have waited three milliseconds for
-    // nothing. What is compared is how many updates this pane has committed — a question that
-    // cannot fall between two samples. [`crate::coalesce`] declines to wait on either answer.
-    let sync_commits_before = leaf.session.synchronized_update_commits();
-    if !bytes.is_empty() {
-        debug_assert!(bytes.len() <= bt_pty::TERM_READ_SLICE.get());
-        // The drain brackets all of its slices with begin/end_feed_turn, so a
-        // repaint's proven records stay protected until the whole turn settles.
-        hang_watch::during(hang_watch::Station::DrainFeed, || {
-            leaf.session
-                .feed_at(&bytes, Instant::now())
-                .context("apply PTY output")
-        })?;
-        hang_watch::during(hang_watch::Station::DrainReplies, || -> Result<()> {
-            for reply in hang_watch::during(hang_watch::Station::DrainChannel, || {
-                leaf.session.take_pty_writes()
-            }) {
-                write_pty_input(
-                    leaf.input_target(),
-                    &reply,
-                    "return terminal protocol reply to PTY",
-                )?;
-            }
-            Ok(())
-        })?;
-        changed = true;
-    }
-    // Asked of the ring itself rather than guessed from the chunk's length: a
-    // pop that happened to return exactly one quantum may have emptied it, and a
-    // pop that returned less may already have been overtaken by the reader.
-    let pending = hang_watch::during(hang_watch::Station::DrainRingStats, || {
-        leaf.life
-            .pty()
-            .expect("PTY mode checked above")
-            .ring_stats()
-            .current_bytes
-            > 0
-    });
-    // **Where the keyboard is, told to whoever subscribed to hear it** (DEC
-    // 1004; attention plan slice A0.5). Told on every turn for the palette's
-    // reason one screen up — the answer is four facts a window can move in a
-    // dozen places — and the call is a comparison that queues bytes only when
-    // the answer actually changed and only for a pane that asked.
-    //
-    // **After the feed and not beside the palette**, because the bit it consults
-    // is written by the bytes just fed: ConPTY sends `\e[?1004h` ahead of the
-    // first program, so a pane subscribes on the very turn it is born, and a
-    // reconciliation that ran before the feed would owe that pane its opening
-    // report until something else happened to wake the loop.
-    hang_watch::during(hang_watch::Station::DrainKeyboardFocus, || {
-        leaf.report_keyboard_focus(holds_the_keyboard)
-    });
-    // A canvas notification, a focus report, and any colour answer queued behind
-    // them, are owed to a child that has said nothing — so the reply channel is
-    // drained once more outside the read above, which only feeds when the child
-    // speaks.
-    hang_watch::during(hang_watch::Station::DrainReplies, || -> Result<()> {
-        for reply in hang_watch::during(hang_watch::Station::DrainChannel, || {
-            leaf.session.take_pty_writes()
-        }) {
-            write_pty_input(
-                leaf.input_target(),
-                &reply,
-                "return terminal protocol reply to PTY",
-            )?;
-        }
-        Ok(())
-    })?;
-    // The one place a shell is heard to speak. Every leaf of every tab passes
-    // through here on every turn of the loop, which is what lets a pane nobody
-    // is watching keep an honest account of itself — the frame path cannot, and
-    // never could: it runs for the focused pane of the tab on screen and for
-    // nothing else.
-    let outcome_parent = hang_watch::enter(hang_watch::Station::DrainMarks);
-    let outcome = (|| {
-        leaf.output_revision = output_revision(
-            leaf.output_revision,
-            changed,
-            leaf.session.resize_finish_deadline().is_some(),
-        );
-        // **And the one line a restored pane is owed, typed at the moment there is a
-        // prompt to type it at** (§7.54e ④ and ⑤).
-        //
-        // Here for the reason the command ledger below is here: this is the one place
-        // every leaf of every tab passes through on every turn, so a pane nobody is
-        // looking at is served too — and the fact this waits on is read off that very
-        // ledger. **An open mark with nothing executed is a shell reading a line**
-        // (`OSC 133;B` seen, no `C`), which is precisely "there is a prompt and the
-        // cursor is on it"; writing before that would put the command inside a login
-        // banner, or hand it to a shell still sourcing its profile.
-        //
-        // Taken rather than read, so one prompt receives it once.
-        if leaf
-            .session
-            .command_marks()
-            .last()
-            .is_some_and(|mark| mark.executed.is_none() && mark.finished.is_none())
-            && let Some((command, submit)) = leaf.take_typing()
-        {
-            let bytes = quake::typed_into_a_prompt(&command, submit);
-            if !bytes.is_empty() {
-                write_pty_input(
-                    leaf.input_target(),
-                    &bytes,
-                    "type a restored command at the prompt",
-                )?;
-            }
-        }
-        // **A command ending is heard here or nowhere.** The ledger is the shell's
-        // own account of itself (`OSC 133;D`), and this is the one place every leaf's
-        // bytes pass through — so a `git commit` finished in a pane behind a Git page
-        // is noticed whether or not that pane is the focused one.
-        let finished = leaf
-            .session
-            .command_marks()
-            .iter()
-            .rev()
-            .find(|mark| mark.finished.is_some())
-            .map(|mark| mark.id);
-        let ended = finished > leaf.last_finished_command;
-        if ended {
-            leaf.last_finished_command = finished;
-        }
-        // **And the first mark is heard here too**, for the same reason: it is
-        // what gives this pane a rail, and a pane behind another tab earns one at
-        // its first prompt exactly as the pane on screen does.
-        let rail_began = leaf.hear_first_mark();
-        let name_after = leaf.name_evidence();
-        // **A keyboard flag a program asked for and Folio does not honour** is written to the
-        // log the first time this session sees it (T-KEYBOARD-PROTOCOL, design note §3) — here,
-        // because every leaf's bytes pass through here, the pane on screen or not.
-        for line in leaf.session.take_keyboard_protocol_notes() {
-            diagnostics::note(&line);
-        }
-        // **A pane whose PSReadLine is not Folio's after its profile ran** says so once, in the
-        // log and nowhere else (T-INTEGRATION-INJECT-2-BUILD round 2), on the same road.
-        for line in leaf.session.take_line_editor_notes() {
-            diagnostics::note(&line);
-        }
-        Ok(DrainOutcome {
-            // Taken here because this is the one place every leaf of every tab
-            // passes through on every turn, which is the same sentence
-            // `output_revision` and the command ledger above are written under: a
-            // pane nobody is watching is exactly the pane whose notification matters.
-            // The seat is filled in by `drain_tab_pty`, which is the level that knows
-            // it.
-            notifications: leaf
-                .session
-                .take_notifications()
-                .into_iter()
-                .map(|notification| (SeatId(0), notification))
-                .collect(),
-            command_ends: leaf
-                .session
-                .working_directory()
-                .filter(|_| ended)
-                .map(Path::to_path_buf)
-                .into_iter()
-                .collect(),
-            arrived: changed,
-            pending,
-            // **Bytes arrived and the transport did not say there was more**, folded here because a
-            // slice's read boundary is visible nowhere else — see [`crate::coalesce`]. A pane whose
-            // slice ended on a whole capped read is a pane a millisecond ahead of the rest of a
-            // burst; a pane whose slice ended anywhere else has nothing to wait for, and says so.
-            arrived_uncapped: changed && !slice.ends_capped,
-            bytes: bytes.len(),
-            // **The program named its own frame's end during this turn.** That frame is complete and
-            // must not be made to wait behind a timer — however far inside one read the naming fell.
-            sync_bracket_closed: synchronized_update_committed(sync_commits_before, &leaf.session),
-            // **A block is open on this pane.** Asked of every pane and not only the one the frame
-            // path composes: a sibling holding a block open is a sibling whose bytes the parser is
-            // withholding, and a window that waited on its account would be waiting for a program
-            // that has already said where its frame ends.
-            sync_open: leaf.session.synchronized_update_deadline().is_some(),
-            // A leaf cannot know whether it is the one the frame path will compose;
-            // that is a fact about the tab, and [`drain_tab_pty`] is where it is
-            // known and where this is filled in.
-            arrived_off_focus: false,
-            renamed: name_after != name_before,
-            moved: name_after.1 != name_before.1,
-            rail_began,
-        })
-    })();
-    hang_watch::at(outcome_parent);
-    outcome
 }
 
 /// **Everything a window is born with that is not the same in every window.**
@@ -36744,7 +36067,15 @@ impl Runtime<'_, Native> {
             .iter()
             .map(|tab: &TabState| {
                 let seat = tab.seats.identity();
-                (tab.id, seat, conpty_source_of(tab.sessions.get(&seat)))
+                (
+                    tab.id,
+                    seat,
+                    conpty_source_of(
+                        tab.sessions
+                            .get(&seat)
+                            .map(|TerminalPane { session, .. }| session),
+                    ),
+                )
             })
             .collect();
         let startup_shells = ((trace_startup || trace_resize)
@@ -37051,7 +36382,7 @@ impl<B: Backend> Runtime<'_, B> {
             return;
         };
         let focused = tab.focused_leaf;
-        if let Some(leaf) = tab.sessions.get_mut(&focused) {
+        if let Some(TerminalPane { session: leaf, .. }) = tab.sessions.get_mut(&focused) {
             leaf.queue_typing(text, submit);
         }
     }
@@ -38094,12 +37425,12 @@ impl<B: Backend> Runtime<'_, B> {
         if self.focused().is_none() {
             return false;
         }
-        let leaf = self.shell_mut();
-        let changed = leaf.session.view_selection().is_some()
+        let leaf = self.shell_pane_mut();
+        let changed = leaf.session.session.view_selection().is_some()
             || leaf.view.projection.is_scrolled()
-            || leaf.session.port_release_presentation_hold();
+            || leaf.session.session.port_release_presentation_hold();
         self.clear_selection();
-        self.shell_mut().view.projection.scroll_to_bottom();
+        self.shell_pane_mut().view.projection.scroll_to_bottom();
         changed
     }
 
@@ -42654,7 +41985,12 @@ mod formula_tool_seat_tests {
                 < copy.find("self.submit_clipboard_write(").unwrap()
         );
         let validate = method_body("Runtime", "live_paste_target");
-        assert!(validate.contains("tab.sessions.get(&target.seat)"));
+        assert!(
+            validate
+                .split_whitespace()
+                .collect::<String>()
+                .contains("tab.sessions.get(&target.seat)")
+        );
         assert!(validate.contains("paste_target_is_live(tab.id, standing, target)"));
     }
 
@@ -46588,7 +45924,7 @@ mod pty_drain_budget_tests {
             sync.contains("self.window.tabs.iter_mut()"),
             "every tab, because a background tab is switched to and not rebuilt"
         );
-        assert!(sync.contains("leaves_mut()"), "and every leaf of each");
+        assert!(sync.contains("panes_mut()"), "and every pane of each");
         for focused_only in ["self.shell_mut()", "self.shell()", "self.focused()"] {
             assert!(
                 !sync.contains(focused_only),
@@ -46596,7 +45932,7 @@ mod pty_drain_budget_tests {
             );
         }
         assert!(
-            sync.contains("leaf.grid.columns"),
+            sync.contains("leaf.session.grid.columns"),
             "and each pane's key carries that pane's own width"
         );
     }
@@ -47714,7 +47050,7 @@ impl<B: Backend> FolioApp<B> {
                 target.web_thumbs.put(*leaf, picture);
             }
         }
-        for (_seat, leaf) in carried.leaves_mut() {
+        for (_seat, leaf) in carried.panes_mut() {
             // **The wake-up is re-pointed here and nowhere else** — see
             // [`LeafWake`] for what a shell nudging the bit of a window that has
             // closed costs, which is silence rather than a wrong picture.
@@ -47722,8 +47058,11 @@ impl<B: Backend> FolioApp<B> {
             let successor_wake = leaf
                 .successor
                 .as_deref()
-                .and_then(|successor: &ShellSession| successor.wake.as_ref());
-            for wake in [leaf.wake.as_ref(), successor_wake].into_iter().flatten() {
+                .and_then(|successor: &TerminalPane| successor.session.wake.as_ref());
+            for wake in [leaf.session.wake.as_ref(), successor_wake]
+                .into_iter()
+                .flatten()
+            {
                 wake.rebind(&target.pty_wake);
                 debug_assert!(
                     Arc::ptr_eq(&wake.bit(), &target.pty_wake.raised),
@@ -47735,6 +47074,7 @@ impl<B: Backend> FolioApp<B> {
             // are untouched, so a pane that is still asking is admitted again, with a place drawn
             // from the serial of the window it arrived in.
             let lines = leaf
+                .session
                 .attention
                 .ledger
                 .surrender_place(attention::Site {

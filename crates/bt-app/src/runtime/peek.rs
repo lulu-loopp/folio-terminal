@@ -3,6 +3,7 @@
 
 use super::pointer::CaptureOwner;
 use super::pointer::{Gone, OwnerGone};
+use crate::TerminalPane;
 use crate::computation_lane::Asking;
 use crate::runtime::git::git_document_question;
 use crate::runtime::panes::risen_frame;
@@ -243,7 +244,8 @@ impl<B: Backend> Runtime<'_, B> {
                 // loudest claim of its fleet, and the schematic says which pane
                 // is making it.
                 let session = tab.sessions.get(&seat.id);
-                let status = session.map(|leaf| leaf.session.status());
+                let status =
+                    session.map(|TerminalPane { session: leaf, .. }| leaf.session.status());
                 // No tween: a tab's arc eases toward a new reading because it
                 // has somewhere to ease *from*, and that memory is per tab. The
                 // peek has no per-leaf memory to ease from and, being a snapshot
@@ -254,7 +256,9 @@ impl<B: Backend> Runtime<'_, B> {
                 // and folding the fleet a second time is how the two start
                 // disagreeing (§7.1.6b′: 不新写第二套聚合).
                 let claim = session
-                    .map(|leaf| leaf.session_facts(tab_is_active).claim())
+                    .map(|TerminalPane { session: leaf, .. }| {
+                        leaf.session_facts(tab_is_active).claim()
+                    })
                     .unwrap_or_default();
                 let ring = status.and_then(|status| status.progress).map(|state| {
                     let arc = ring_arc(state, None, elapsed, motion, &palette);
@@ -269,7 +273,9 @@ impl<B: Backend> Runtime<'_, B> {
                     // This leaf's own shell, off the session that is running in
                     // it — the same map every other per-seat fact in this frame
                     // comes from.
-                    profile_mark: session.map(|leaf| profiles::identity_mark(&leaf.launch.profile)),
+                    profile_mark: session.map(|TerminalPane { session: leaf, .. }| {
+                        profiles::identity_mark(&leaf.launch.profile)
+                    }),
                     // The short name, and C28's own two lengths are why. A pane
                     // head has a whole bar and answers "where is this" with the
                     // place entire; this popup is a 210px thumbnail whose names
@@ -2638,7 +2644,7 @@ impl<B: Backend> Runtime<'_, B> {
             .as_ref()?
             .anchor_at(hit.row, hit.column, Bias::Before)
             .ok()??;
-        if !leaf.session.peek_admits_at(&anchor) {
+        if !leaf.session.session.peek_admits_at(&anchor) {
             return None;
         }
         leaf.view
@@ -2647,6 +2653,7 @@ impl<B: Backend> Runtime<'_, B> {
             .map(|reference| PeekSubject::from_path(reference.path.clone()))
             .or_else(|| {
                 leaf.session
+                    .session
                     .inline_image_payload_peek_at(&anchor)
                     .map(PeekSubject::from_content_key)
             })

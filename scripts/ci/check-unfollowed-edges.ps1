@@ -79,6 +79,22 @@ function Read-UnfollowedEdges([string[]]$lines, [string]$where) {
     return $rows
 }
 
+# The header's count of Ambiguous calls with exactly one candidate (bt_source::call_graph's
+# `Unresolved::sole_candidate`; plan row 84), which the list does not carry by site: `$null` when
+# the list has no such line, refused when the line is there but its count is not a non-negative
+# integer or the line is there twice. bt-source's call_graph test holds the count to the tree;
+# this reads it so a change shows here, and refuses a list that drops a line its baseline had.
+$solePrefix = "# Ambiguous calls with exactly one candidate"
+function Read-SoleCount([string[]]$lines, [string]$where) {
+    $found = @($lines | Where-Object { $_.StartsWith($solePrefix) })
+    if ($found.Count -eq 0) { return $null }
+    if ($found.Count -gt 1) { throw "$where carries the one-candidate count on $($found.Count) lines" }
+    if ($found[0] -cnotmatch '\): (?<count>\d+)\. ') {
+        throw "$where has a one-candidate count line whose count is not a non-negative integer: $($found[0])"
+    }
+    return [int]$Matches['count']
+}
+
 function Format-Key([string]$key) {
     $columns = $key.Split("`t")
     return "$($columns[2]) $($columns[3]) in $($columns[1]) ($($columns[0]))"
@@ -93,8 +109,12 @@ function Test-Dated([string]$reason) {
 }
 
 if ($ListPath) {
-    $now = Read-UnfollowedEdges ([IO.File]::ReadAllLines($ListPath)) $ListPath
-    $before = Read-UnfollowedEdges ([IO.File]::ReadAllLines($BaselinePath)) $BaselinePath
+    $nowLines = [IO.File]::ReadAllLines($ListPath)
+    $beforeLines = [IO.File]::ReadAllLines($BaselinePath)
+    $now = Read-UnfollowedEdges $nowLines $ListPath
+    $before = Read-UnfollowedEdges $beforeLines $BaselinePath
+    $soleNow = Read-SoleCount $nowLines $ListPath
+    $soleBefore = Read-SoleCount $beforeLines $BaselinePath
     $from = "the baseline $BaselinePath"
 } else {
     $list = Join-Path $repo $relative
@@ -103,7 +123,9 @@ if ($ListPath) {
     }
     Push-Location $repo
     try {
-        $now = Read-UnfollowedEdges ([IO.File]::ReadAllLines($list)) "$relative (working tree)"
+        $nowLines = [IO.File]::ReadAllLines($list)
+        $now = Read-UnfollowedEdges $nowLines "$relative (working tree)"
+        $soleNow = Read-SoleCount $nowLines "$relative (working tree)"
         $base = $null
         & git rev-parse --verify --quiet refs/remotes/origin/main *> $null
         if ($LASTEXITCODE -eq 0) {
@@ -127,7 +149,9 @@ if ($ListPath) {
             }
             $from = "the seed $($seed.Substring(0, 12))"
         }
-        $before = Read-UnfollowedEdges ($text -split "`r?`n") "$relative at $from"
+        $beforeLines = $text -split "`r?`n"
+        $before = Read-UnfollowedEdges $beforeLines "$relative at $from"
+        $soleBefore = Read-SoleCount $beforeLines "$relative at $from"
     } finally {
         Pop-Location
     }
@@ -156,6 +180,13 @@ foreach ($key in $now.Keys) {
     } else {
         $refused += "    $(Format-Key $key): $change, reason '$($row.Reason)'"
     }
+}
+if ($null -ne $soleBefore -and $null -eq $soleNow) {
+    $refused += "    the one-candidate count line ($soleBefore at ${from}) is gone: regenerate the list"
+}
+if ($null -ne $soleNow) {
+    $was = if ($null -eq $soleBefore) { "none" } else { "$soleBefore" }
+    Write-Host "Ambiguous calls with exactly one candidate, not listed by site: $was at ${from} -> $soleNow."
 }
 $removed = @($before.Keys | Where-Object { -not $now.ContainsKey($_) }).Count
 Write-Host ("$relative against ${from}: $($before.Count) keys -> $($now.Count), " +
