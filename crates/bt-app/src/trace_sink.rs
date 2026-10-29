@@ -602,7 +602,9 @@ impl StalledWriter {
     /// Start one, and answer only once the writer is actually inside a write.
     ///
     /// The wait is the whole value of the helper: a test that began offering
-    /// before the stall would be timing a working sink for its first lines.
+    /// before the stall would be testing a working sink for its first lines.
+    /// It is the lane suite's patience, so a writer that never reaches its
+    /// write fails the test by name rather than hanging it.
     pub(crate) fn start() -> Self {
         let (lines, waiting) = sync_channel(QUEUE_DEPTH);
         let (release, held) = sync_channel::<()>(0);
@@ -617,9 +619,7 @@ impl StalledWriter {
             destination: Destination::Stderr,
             text: "the line that parks the writer".to_owned(),
         });
-        arrived
-            .recv_timeout(Duration::from_secs(5))
-            .expect("the writer reached its write");
+        crate::lane::receive(&arrived, "the writer reaching its write");
         Self {
             queue,
             release: Some(release),
@@ -763,6 +763,13 @@ mod tests {
         producer.join().unwrap();
     }
 
+    /// A producer that finds the sender lock taken drops its line at once. The
+    /// verdict is the offer coming back while the lock is still held, within
+    /// the lane suite's patience: a producer that waited a bounded while for
+    /// the lock, shorter than that patience, is not caught here.
+    ///
+    /// MUTATION: `lock()` for `try_lock()` in `Queue::offer`; the producer
+    /// does not come back while the lock is held.
     #[test]
     fn a_busy_producer_lock_drops_instead_of_waiting() {
         let (lines, _waiting) = sync_channel(2);
@@ -1025,12 +1032,14 @@ mod tests {
 
     /// **An orderly exit does not wait for a writer stuck in its write**: the
     /// flush gives up at its own budget, while the writer is still stalled, and
-    /// leaves the writer detached.
+    /// leaves the writer detached. The verdict is the flush coming back while
+    /// the writer is still stalled, within the lane suite's patience: a flush
+    /// that ignored its budget but gave up within that patience is not caught
+    /// here.
     ///
     /// MUTATION: in `flush_sink`, join the writer's handle whether or not it
-    /// has finished (or `recv()` for the `recv_timeout`); the flush does not
-    /// come back while the writer is stalled, and once it is let go the test is
-    /// red.
+    /// has finished; the flush does not come back while the writer is stalled,
+    /// and once it is let go the test is red.
     #[test]
     fn shutdown_does_not_wait_forever_for_a_stalled_writer() {
         let (lines, _waiting) = sync_channel(2);
