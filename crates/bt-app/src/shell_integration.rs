@@ -12492,13 +12492,15 @@ mod tests {
         .unwrap();
         let (pty, hygiene) = shell.into_session();
         let mut leaf = crate::test_support::leaf_saying("");
-        leaf.session.set_spawn_directory(Some(start.clone()));
-        leaf.launch.spawn_place = Some(start.clone());
-        leaf.life.land(Some(pty));
+        leaf.session
+            .session
+            .set_spawn_directory(Some(start.clone()));
+        leaf.session.launch.spawn_place = Some(start.clone());
+        leaf.session.life.land(Some(pty));
         let door = crate::pane_folder::SystemProcessFolders;
 
-        feed_leaf_until(&mut leaf, &wakes, "start>");
-        match leaf.folder(&door) {
+        feed_leaf_until(&mut leaf.session, &wakes, "start>");
+        match leaf.session.folder(&door) {
             crate::pane_folder::PaneFolder::Process(folder) => assert!(
                 bt_platform::same_file(&folder, &start),
                 "at the first prompt the process stands in {folder:?}, not {start:?}"
@@ -12506,9 +12508,18 @@ mod tests {
             other => panic!("at the first prompt: {other:?}"),
         }
 
-        leaf.life.pty().unwrap().write(b"cd moved-here\r").unwrap();
-        feed_leaf_until(&mut leaf, &wakes, "moved-here>");
-        assert_eq!(leaf.session.working_directory(), None, "no report was made");
+        leaf.session
+            .life
+            .pty()
+            .unwrap()
+            .write(b"cd moved-here\r")
+            .unwrap();
+        feed_leaf_until(&mut leaf.session, &wakes, "moved-here>");
+        assert_eq!(
+            leaf.session.session.working_directory(),
+            None,
+            "no report was made"
+        );
 
         // **A folder nobody can say keeps today's behaviour**: with the process refusing, the
         // verbs start where the pane was opened and a new tab beside carries nothing.
@@ -12522,40 +12533,40 @@ mod tests {
             }
         }
         assert_eq!(
-            leaf.seed_place_for_a_new_shell_through(&Refusing),
+            leaf.session.seed_place_for_a_new_shell_through(&Refusing),
             Some(profiles::SeedPlace::Carried(start.clone())),
             "an unknown folder: a shell is started where the pane was opened, as before"
         );
         assert_eq!(
-            leaf.place_for_a_new_tab_beside_through(&Refusing),
+            leaf.session.place_for_a_new_tab_beside_through(&Refusing),
             None,
             "an unknown folder: a new tab beside carries nothing, as before"
         );
         // That refusal is this moment's read; one more prompt is a new moment for the real door.
-        leaf.life.pty().unwrap().write(b"\r").unwrap();
-        feed_leaf_until(&mut leaf, &wakes, "moved-here>");
-        match leaf.folder(&door) {
+        leaf.session.life.pty().unwrap().write(b"\r").unwrap();
+        feed_leaf_until(&mut leaf.session, &wakes, "moved-here>");
+        match leaf.session.folder(&door) {
             crate::pane_folder::PaneFolder::Process(folder) => assert!(
                 bt_platform::same_file(&folder, &moved),
                 "after cd the process stands in {folder:?}, not {moved:?}"
             ),
             other => panic!("after cd: {other:?}"),
         }
-        match leaf.seed_place_for_a_new_shell() {
+        match leaf.session.seed_place_for_a_new_shell() {
             Some(profiles::SeedPlace::Carried(folder)) => assert!(
                 bt_platform::same_file(&folder, &moved),
                 "after cd a split, a duplicate or a restart starts in {folder:?}, not {moved:?}"
             ),
             other => panic!("after cd, the place a shell is started in: {other:?}"),
         }
-        match leaf.place_for_a_new_tab_beside() {
+        match leaf.session.place_for_a_new_tab_beside() {
             Some(profiles::SeedPlace::Carried(folder)) => assert!(
                 bt_platform::same_file(&folder, &moved),
                 "after cd a new tab beside carries {folder:?}, not {moved:?}"
             ),
             other => panic!("after cd, what a new tab beside carries: {other:?}"),
         }
-        let mut pty = leaf.life.retire().unwrap();
+        let mut pty = leaf.session.life.retire().unwrap();
         pty.write(b"exit\r").unwrap();
         pty.shutdown().unwrap();
         drop(pty);

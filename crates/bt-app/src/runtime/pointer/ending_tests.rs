@@ -11,8 +11,8 @@ use crate::test_support::{buffer_saying, cross_tab, host_spelling, seat_of, tab_
 use crate::{
     DividerDrag, DividerGrip, Drag, DragCarry, DragLatch, DragSource, FilePeekPress, FloatDrag,
     FloatHeadPress, ImageDrag, LocalImageActivation, PanePress, PreviewBlockDrag, PreviewBodyDrag,
-    PreviewTextDrag, RowMiddlePress, RowPress, SelectionDrag, SelectionDragMode, ShellSession,
-    SpringGate, TabCarry, TabPress, TerminalColumnDrag, TerminalThumbDrag, VideoPicturePress,
+    PreviewTextDrag, RowMiddlePress, RowPress, SelectionDrag, SelectionDragMode, SpringGate,
+    TabCarry, TabPress, TerminalColumnDrag, TerminalPane, TerminalThumbDrag, VideoPicturePress,
     preview, settings,
 };
 use bt_doc::Bias;
@@ -215,7 +215,7 @@ fn two_tabs(tag: &str) -> HeadlessApplication {
 
 /// The pane of the tab in front at `index` among its shells, as the shell a press is handed to.
 fn shell(runtime: &Runtime<'_, Headless>, index: usize) -> PasteTarget {
-    let (seat, leaf): (&SeatId, &ShellSession) = runtime
+    let (seat, leaf): (&SeatId, &TerminalPane) = runtime
         .sessions
         .iter()
         .nth(index)
@@ -223,7 +223,7 @@ fn shell(runtime: &Runtime<'_, Headless>, index: usize) -> PasteTarget {
     PasteTarget {
         tab: runtime.id,
         seat: *seat,
-        incarnation: leaf.incarnation,
+        incarnation: leaf.session.incarnation,
     }
 }
 
@@ -788,9 +788,9 @@ fn a_new_parse_lets_go_of_the_block_thumb_and_keeps_the_selection() {
 }
 
 /// A shell still being born, which keeps what it is sent (`PaneBirth::typed`).
-fn a_shell_being_born() -> ShellSession {
+fn a_shell_being_born() -> TerminalPane {
     let mut leaf = crate::test_support::leaf_saying("SHELL");
-    leaf.life.begin_birth(crate::PaneBirth {
+    leaf.session.life.begin_birth(crate::PaneBirth {
         seed: crate::LeafSeed {
             profile: crate::profiles::DEFAULT_IDENTITY.to_owned(),
             ..crate::LeafSeed::default()
@@ -851,8 +851,16 @@ fn a_forwarded_press_is_told_its_button_came_up_from_its_last_report() {
             .values()
             .next()
             .expect("the shell");
-        let typed = String::from_utf8(leaf.life.birth().expect("in birth").typed.borrow().clone())
-            .expect("UTF-8 was sent");
+        let typed = String::from_utf8(
+            leaf.session
+                .life
+                .birth()
+                .expect("in birth")
+                .typed
+                .borrow()
+                .clone(),
+        )
+        .expect("UTF-8 was sent");
         assert_eq!(
             typed, "\x1b[<0;3;2m",
             "{door}: the program hears its button come up"

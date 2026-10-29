@@ -32,6 +32,7 @@ fn a_typeset_formula(tag: &str) -> (HeadlessFolio, PasteTarget, MathBlockAnchor)
     for _ in 0..8 {
         if !folio.runtime().sessions[&seat]
             .session
+            .session
             .resize_transaction_open()
         {
             break;
@@ -48,9 +49,15 @@ fn a_typeset_formula(tag: &str) -> (HeadlessFolio, PasteTarget, MathBlockAnchor)
         let pane = runtime.sessions.get_mut(&seat).expect("the shell");
         let mut printed = b"\r\n$$x^2+y^2=z^2$$\r\n".to_vec();
         printed.extend(b"\r\n".repeat(64));
-        pane.session.feed(&printed).expect("the formula is printed");
-        pane.session.refresh_projection(&mut pane.view.projection);
         pane.session
+            .session
+            .feed(&printed)
+            .expect("the formula is printed");
+        pane.session
+            .session
+            .refresh_projection(&mut pane.view.projection);
+        pane.session
+            .session
             .viewport_frame(&mut pane.view.projection)
             .expect("the pane projects");
         pane.view.projection.scroll_to_top();
@@ -74,6 +81,7 @@ fn a_typeset_formula(tag: &str) -> (HeadlessFolio, PasteTarget, MathBlockAnchor)
             .sessions
             .get_mut(&seat)
             .expect("the shell")
+            .session
             .session
             .complete_worker_result(task, result),
         "the fixture's own precondition: the session takes the formula's picture"
@@ -172,6 +180,7 @@ fn a_frame_composed_for_any_reason_carries_the_formula_flight_it_is_built_from()
         .expect("the frame is composed");
     runtime.redraw().expect("and reaches the glass");
     let carried = runtime.sessions[&target.seat]
+        .session
         .session
         .math_toggle_presentation()
         .expect("the compose carried the flight into the session")

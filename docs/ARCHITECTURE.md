@@ -1009,7 +1009,7 @@ startup trace. A birth that fails lands as an error toast over a pane with no
 shell; an answer whose pane has gone (`ShellBirth` dropped) is retired off the
 window thread; a worker that panics answers the panic as a failed birth.
 *Restart shell* keeps the old shell until its successor lands
-(`ShellSession::successor`); one landing pass (`Runtime::land_births`,
+(`TerminalPane::successor`, a whole pane); one landing pass (`Runtime::land_births`,
 `births_due`) scans both places a birth can sit — a pane's own and a
 successor's — in both of its waits. A restored session's panes are born by
 as many workers at once, each below normal and gone after its one birth.

@@ -999,45 +999,52 @@ fn an_unfocused_leaf_resize_reaches_the_quiescence_that_pays_its_reanchor_debt()
 fn a_drag_that_ends_where_the_child_already_is_settles_without_telling_it() {
     let start = Instant::now();
     let mut leaf = leaf_saying("one two three four");
-    leaf.launch.integration = profiles::Integration::PowerShellOptIn;
+    leaf.session.launch.integration = profiles::Integration::PowerShellOptIn;
     leaf.session
+        .session
         .feed_at(b"\x1b]133;A\x07PS> \x1b]133;B\x07", start)
         .unwrap();
     assert!(
-        leaf.session.shell_input_region_open(),
+        leaf.session.session.shell_input_region_open(),
         "the fixture has to leave a prompt open, or the silence proves nothing"
     );
-    let _ = leaf.session.take_pty_writes();
+    let _ = leaf.session.session.take_pty_writes();
     let physical = PhysicalSize::new(400, 96);
-    let step = |leaf: &mut ShellSession, grid, at| {
-        leaf.propose_size(GridChange {
-            next: grid,
-            physical,
-            observed_at: at,
-            on_stage: LeafOnStage::Shown,
-            context: "drag",
-            pane: card_trace::Pane::untraced(),
-        })
-        .unwrap()
+    let step = |leaf: &mut TerminalPane, grid, at| {
+        leaf.session
+            .propose_size(GridChange {
+                next: grid,
+                physical,
+                observed_at: at,
+                on_stage: LeafOnStage::Shown,
+                context: "drag",
+                pane: card_trace::Pane::untraced(),
+            })
+            .unwrap()
     };
 
     // One ordinary gesture, released and settled: the child now holds 44x4.
     let settled = grid_of(44, 4);
     assert!(step(&mut leaf, settled, start));
     let released_at = start + WINDOW_RESIZE_QUIET;
-    let (commit, _) = release_due_leaf_resize(&mut leaf, released_at, false).unwrap();
+    let (commit, _) = release_due_leaf_resize(&mut leaf.session, released_at, false).unwrap();
     let commit = commit.expect("a drag onto a new width owes its child one notification");
     assert!(commit.told_the_child);
-    assert_eq!(leaf.conpty_grid, settled);
-    let deadline = leaf.session.resize_finish_deadline().unwrap();
-    assert!(leaf.session.finish_resize_if_quiescent(deadline).unwrap());
+    assert_eq!(leaf.session.conpty_grid, settled);
+    let deadline = leaf.session.session.resize_finish_deadline().unwrap();
+    assert!(
+        leaf.session
+            .session
+            .finish_resize_if_quiescent(deadline)
+            .unwrap()
+    );
     assert!(
         take_psreadline_resize_reanchor_input(
             ResizeReanchor {
-                pending: &mut leaf.pending_psreadline_resize_reanchor,
-                integration: leaf.launch.integration,
+                pending: &mut leaf.session.pending_psreadline_resize_reanchor,
+                integration: leaf.session.launch.integration,
             },
-            leaf.session.shell_input_region_open(),
+            leaf.session.session.shell_input_region_open(),
         )
         .is_some(),
         "that one reflowed the child's screen buffer, so it owes the anchor repair"
@@ -1052,7 +1059,7 @@ fn a_drag_that_ends_where_the_child_already_is_settles_without_telling_it() {
         wobble_at + Duration::from_millis(17)
     ));
     let released_at = wobble_at + Duration::from_millis(17) + WINDOW_RESIZE_QUIET;
-    let (commit, _) = release_due_leaf_resize(&mut leaf, released_at, false).unwrap();
+    let (commit, _) = release_due_leaf_resize(&mut leaf.session, released_at, false).unwrap();
     let commit = commit.expect(
         "the end of a gesture is released whether or not it moved the \
                                     child",
@@ -1065,29 +1072,33 @@ fn a_drag_that_ends_where_the_child_already_is_settles_without_telling_it() {
         commit.reconciled,
         "and the transaction is settled all the same"
     );
-    assert_eq!(leaf.session.live_dimensions().0.get(), 44);
+    assert_eq!(leaf.session.session.live_dimensions().0.get(), 44);
 
     let deadline = leaf
+        .session
         .session
         .resize_finish_deadline()
         .expect("a settled gesture arms a quiescence deadline, whichever ending it had");
     assert!(
-        leaf.session.finish_resize_if_quiescent(deadline).unwrap(),
+        leaf.session
+            .session
+            .finish_resize_if_quiescent(deadline)
+            .unwrap(),
         "and closes at it, which is what lets this pane scan for formulas again"
     );
     assert_eq!(
         take_psreadline_resize_reanchor_input(
             ResizeReanchor {
-                pending: &mut leaf.pending_psreadline_resize_reanchor,
-                integration: leaf.launch.integration,
+                pending: &mut leaf.session.pending_psreadline_resize_reanchor,
+                integration: leaf.session.launch.integration,
             },
-            leaf.session.shell_input_region_open(),
+            leaf.session.session.shell_input_region_open(),
         ),
         None,
         "conhost never reflowed, so PSReadLine's anchor is right and owes no repair"
     );
     assert_eq!(
-        leaf.session.take_pty_writes(),
+        leaf.session.session.take_pty_writes(),
         Vec::<Vec<u8>>::new(),
         "not one private byte is written to a shell that was told nothing"
     );
@@ -1114,35 +1125,37 @@ fn a_drag_that_ends_where_the_child_already_is_settles_without_telling_it() {
 fn a_repair_owed_before_a_wobble_is_still_owed_after_it_and_paid_once() {
     let start = Instant::now();
     let mut leaf = leaf_saying("one two three four");
-    leaf.launch.integration = profiles::Integration::PowerShellOptIn;
+    leaf.session.launch.integration = profiles::Integration::PowerShellOptIn;
     leaf.session
+        .session
         .feed_at(b"\x1b]133;A\x07PS> \x1b]133;B\x07", start)
         .unwrap();
-    assert!(leaf.session.shell_input_region_open());
+    assert!(leaf.session.session.shell_input_region_open());
     let physical = PhysicalSize::new(400, 96);
-    let step = |leaf: &mut ShellSession, grid, at| {
-        leaf.propose_size(GridChange {
-            next: grid,
-            physical,
-            observed_at: at,
-            on_stage: LeafOnStage::Shown,
-            context: "drag",
-            pane: card_trace::Pane::untraced(),
-        })
-        .unwrap()
+    let step = |leaf: &mut TerminalPane, grid, at| {
+        leaf.session
+            .propose_size(GridChange {
+                next: grid,
+                physical,
+                observed_at: at,
+                on_stage: LeafOnStage::Shown,
+                context: "drag",
+                pane: card_trace::Pane::untraced(),
+            })
+            .unwrap()
     };
 
     // A real gesture onto a new width: the child is told and the repair is banked.
     let settled = grid_of(44, 4);
     assert!(step(&mut leaf, settled, start));
     let at = start + WINDOW_RESIZE_QUIET;
-    let commit = release_due_leaf_resize(&mut leaf, at, false)
+    let commit = release_due_leaf_resize(&mut leaf.session, at, false)
         .unwrap()
         .0
         .expect("a drag onto a new width is released");
     assert!(commit.told_the_child);
     assert!(
-        leaf.pending_psreadline_resize_reanchor,
+        leaf.session.pending_psreadline_resize_reanchor,
         "conhost reflowed this shell's screen buffer, so a repair is owed"
     );
 
@@ -1156,27 +1169,33 @@ fn a_repair_owed_before_a_wobble_is_still_owed_after_it_and_paid_once() {
         wobble_at + Duration::from_millis(17)
     ));
     let released_at = wobble_at + Duration::from_millis(17) + WINDOW_RESIZE_QUIET;
-    let commit = release_due_leaf_resize(&mut leaf, released_at, false)
+    let commit = release_due_leaf_resize(&mut leaf.session, released_at, false)
         .unwrap()
         .0
         .expect("the end of the wobble is released");
     assert!(!commit.told_the_child, "and tells the child nothing");
     assert!(
-        leaf.pending_psreadline_resize_reanchor,
+        leaf.session.pending_psreadline_resize_reanchor,
         "so the repair the first gesture banked is still the only one owed"
     );
 
     let deadline = leaf
         .session
+        .session
         .resize_finish_deadline()
         .expect("the settlement arms the quiescence that pays it");
-    assert!(leaf.session.finish_resize_if_quiescent(deadline).unwrap());
-    let reanchor = |leaf: &mut ShellSession| {
-        let integration = leaf.launch.integration;
-        let open = leaf.session.shell_input_region_open();
+    assert!(
+        leaf.session
+            .session
+            .finish_resize_if_quiescent(deadline)
+            .unwrap()
+    );
+    let reanchor = |leaf: &mut TerminalPane| {
+        let integration = leaf.session.launch.integration;
+        let open = leaf.session.session.shell_input_region_open();
         take_psreadline_resize_reanchor_input(
             ResizeReanchor {
-                pending: &mut leaf.pending_psreadline_resize_reanchor,
+                pending: &mut leaf.session.pending_psreadline_resize_reanchor,
                 integration,
             },
             open,
@@ -1247,55 +1266,64 @@ fn every_gesture_that_lands_back_on_the_childs_grid_settles_whatever_moved_it() 
         for stage in [LeafOnStage::Shown, LeafOnStage::Behind] {
             let start = Instant::now();
             let mut leaf = leaf_saying("one two three four");
-            leaf.launch.integration = profiles::Integration::PowerShellOptIn;
+            leaf.session.launch.integration = profiles::Integration::PowerShellOptIn;
             leaf.session
+                .session
                 .feed_at(b"\x1b]133;A\x07PS> \x1b]133;B\x07", start)
                 .unwrap();
-            let _ = leaf.session.take_pty_writes();
+            let _ = leaf.session.session.take_pty_writes();
 
             // The pane and its child both start settled at the same grid.
-            leaf.propose_size(GridChange {
-                next: child,
-                physical: child_physical,
-                observed_at: start,
-                on_stage: LeafOnStage::Shown,
-                context: "settle",
-                pane: card_trace::Pane::untraced(),
-            })
-            .unwrap();
+            leaf.session
+                .propose_size(GridChange {
+                    next: child,
+                    physical: child_physical,
+                    observed_at: start,
+                    on_stage: LeafOnStage::Shown,
+                    context: "settle",
+                    pane: card_trace::Pane::untraced(),
+                })
+                .unwrap();
             let at = start + WINDOW_RESIZE_QUIET;
-            release_due_leaf_resize(&mut leaf, at, false)
+            release_due_leaf_resize(&mut leaf.session, at, false)
                 .unwrap()
                 .0
                 .expect("the fixture's own first gesture");
-            let deadline = leaf.session.resize_finish_deadline().unwrap();
-            assert!(leaf.session.finish_resize_if_quiescent(deadline).unwrap());
+            let deadline = leaf.session.session.resize_finish_deadline().unwrap();
+            assert!(
+                leaf.session
+                    .session
+                    .finish_resize_if_quiescent(deadline)
+                    .unwrap()
+            );
             let _ = take_psreadline_resize_reanchor_input(
                 ResizeReanchor {
-                    pending: &mut leaf.pending_psreadline_resize_reanchor,
-                    integration: leaf.launch.integration,
+                    pending: &mut leaf.session.pending_psreadline_resize_reanchor,
+                    integration: leaf.session.launch.integration,
                 },
-                leaf.session.shell_input_region_open(),
+                leaf.session.session.shell_input_region_open(),
             );
-            assert_eq!(leaf.conpty_grid, child);
+            assert_eq!(leaf.session.conpty_grid, child);
 
             // Out, and back to the grid the child already holds.
             let mut at = deadline + Duration::from_millis(100);
             for (grid, physical) in [(*away, *away_physical), (child, child_physical)] {
-                leaf.propose_size(GridChange {
-                    next: grid,
-                    physical,
-                    observed_at: at,
-                    on_stage: stage,
-                    context: "wobble",
-                    pane: card_trace::Pane::untraced(),
-                })
-                .unwrap();
+                leaf.session
+                    .propose_size(GridChange {
+                        next: grid,
+                        physical,
+                        observed_at: at,
+                        on_stage: stage,
+                        context: "wobble",
+                        pane: card_trace::Pane::untraced(),
+                    })
+                    .unwrap();
                 at += Duration::from_millis(17);
             }
 
             let released_at = at + WINDOW_RESIZE_QUIET;
-            let (commit, _) = release_due_leaf_resize(&mut leaf, released_at, false).unwrap();
+            let (commit, _) =
+                release_due_leaf_resize(&mut leaf.session, released_at, false).unwrap();
             if stage == LeafOnStage::Behind {
                 let commit = commit.expect("a release is due either way");
                 assert_eq!(
@@ -1305,12 +1333,12 @@ fn every_gesture_that_lands_back_on_the_childs_grid_settles_whatever_moved_it() 
                          nothing reflowed, nothing is told and nothing is settled"
                 );
                 assert_eq!(
-                    leaf.conpty_grid, child,
+                    leaf.session.conpty_grid, child,
                     "{gesture}, behind another tab: and the release carries the last grid it \
                          was solved to, never the width the hand passed through"
                 );
                 assert!(
-                    !leaf.session.resize_transaction_open(),
+                    !leaf.session.session.resize_transaction_open(),
                     "{gesture}, behind another tab: no transaction was ever opened"
                 );
                 continue;
@@ -1326,26 +1354,33 @@ fn every_gesture_that_lands_back_on_the_childs_grid_settles_whatever_moved_it() 
                 commit.reconciled,
                 "{gesture}: and the transaction is settled"
             );
-            let deadline = leaf.session.resize_finish_deadline().unwrap_or_else(|| {
-                panic!("{gesture}: a settled gesture arms a quiescence deadline")
-            });
+            let deadline = leaf
+                .session
+                .session
+                .resize_finish_deadline()
+                .unwrap_or_else(|| {
+                    panic!("{gesture}: a settled gesture arms a quiescence deadline")
+                });
             assert!(
-                leaf.session.finish_resize_if_quiescent(deadline).unwrap(),
+                leaf.session
+                    .session
+                    .finish_resize_if_quiescent(deadline)
+                    .unwrap(),
                 "{gesture}: and closes at it"
             );
             assert_eq!(
                 take_psreadline_resize_reanchor_input(
                     ResizeReanchor {
-                        pending: &mut leaf.pending_psreadline_resize_reanchor,
-                        integration: leaf.launch.integration,
+                        pending: &mut leaf.session.pending_psreadline_resize_reanchor,
+                        integration: leaf.session.launch.integration,
                     },
-                    leaf.session.shell_input_region_open(),
+                    leaf.session.session.shell_input_region_open(),
                 ),
                 None,
                 "{gesture}: conhost never reflowed, so no anchor repair is owed"
             );
             assert_eq!(
-                leaf.session.take_pty_writes(),
+                leaf.session.session.take_pty_writes(),
                 Vec::<Vec<u8>>::new(),
                 "{gesture}: and not one byte reaches a shell that was told nothing"
             );
@@ -1376,7 +1411,7 @@ fn every_gesture_that_lands_back_on_the_childs_grid_settles_whatever_moved_it() 
 fn a_pane_without_the_keyboard_coalesces_a_drag_into_one_conpty_notification() {
     let start = Instant::now();
     let mut leaf = leaf_saying("sibling");
-    let born = leaf.grid;
+    let born = leaf.session.grid;
 
     // One second of a live drag, at the rate an OS resize loop delivers.
     const EVENTS: u32 = 60;
@@ -1389,26 +1424,27 @@ fn a_pane_without_the_keyboard_coalesces_a_drag_into_one_conpty_notification() {
         let next = grid_of(41 + u16::try_from(step).unwrap(), 4);
         let physical = PhysicalSize::new(u32::from(next.columns.get()) * 8, 88);
         assert!(
-            leaf.propose_size(GridChange {
-                next,
-                physical,
-                observed_at: at,
-                on_stage: LeafOnStage::Shown,
-                context: "drag",
-                pane: card_trace::Pane::untraced(),
-            })
-            .unwrap(),
+            leaf.session
+                .propose_size(GridChange {
+                    next,
+                    physical,
+                    observed_at: at,
+                    on_stage: LeafOnStage::Shown,
+                    context: "drag",
+                    pane: card_trace::Pane::untraced(),
+                })
+                .unwrap(),
             "every one of these rectangles is a new one, so every one is a reflow"
         );
         assert_eq!(
-            leaf.grid, next,
+            leaf.session.grid, next,
             "the picture is not debounced: the actor holds the size solved this turn"
         );
         assert_eq!(
-            leaf.conpty_grid, born,
+            leaf.session.conpty_grid, born,
             "and the child has heard nothing yet — it is the notification that waits"
         );
-        let (commit, wake) = release_due_leaf_resize(&mut leaf, at, false).unwrap();
+        let (commit, wake) = release_due_leaf_resize(&mut leaf.session, at, false).unwrap();
         assert!(
             commit.is_none(),
             "mid-drag there is nothing due: every event pushed the quiet boundary out"
@@ -1422,14 +1458,14 @@ fn a_pane_without_the_keyboard_coalesces_a_drag_into_one_conpty_notification() {
     }
 
     let quiet = start + FRAME * (EVENTS - 1) + WINDOW_RESIZE_QUIET;
-    let (commit, wake) = release_due_leaf_resize(&mut leaf, quiet, false).unwrap();
+    let (commit, wake) = release_due_leaf_resize(&mut leaf.session, quiet, false).unwrap();
     let commit = commit.expect("the quiet boundary releases the one notification a drag owes");
     assert!(
         !commit.reflowed,
         "our own actor was never behind, so the release defers no reflow to here"
     );
     assert_eq!(
-        leaf.conpty_grid, last,
+        leaf.session.conpty_grid, last,
         "the child hears the last word of the gesture and none of the sixty before it"
     );
     assert_eq!(
@@ -1438,7 +1474,7 @@ fn a_pane_without_the_keyboard_coalesces_a_drag_into_one_conpty_notification() {
     );
 
     let (again, _) =
-        release_due_leaf_resize(&mut leaf, quiet + WINDOW_RESIZE_QUIET, false).unwrap();
+        release_due_leaf_resize(&mut leaf.session, quiet + WINDOW_RESIZE_QUIET, false).unwrap();
     assert!(
         again.is_none(),
         "one drag is one notification; a second turn finds the queue empty"
@@ -1474,9 +1510,9 @@ fn a_drag_rewraps_the_pane_on_the_glass_and_reflows_a_hidden_pane_once() {
     let printed = "#".repeat(197);
     let mut shown = leaf_saying(&printed);
     let mut behind = leaf_saying(&printed);
-    let born = shown.grid;
+    let born = shown.session.grid;
     assert_eq!(
-        behind.grid, born,
+        behind.session.grid, born,
         "both fixtures start where the other does"
     );
 
@@ -1490,6 +1526,7 @@ fn a_drag_rewraps_the_pane_on_the_glass_and_reflows_a_hidden_pane_once() {
 
         assert!(
             shown
+                .session
                 .propose_size(GridChange {
                     next,
                     physical,
@@ -1504,11 +1541,12 @@ fn a_drag_rewraps_the_pane_on_the_glass_and_reflows_a_hidden_pane_once() {
         // The two lines the window runs between the solve and the frame:
         // `sync_math_layout_key` amends the key with the width that moved,
         // and the projection is taken against it.
-        let mut key = shown.session.layout_key();
+        let mut key = shown.session.session.layout_key();
         key.width_cells = nonzero_u32(next.columns.get());
-        shown.session.set_layout_key(key);
-        shown.view.projection = shown.session.new_projection(key);
+        shown.session.session.set_layout_key(key);
+        shown.view.projection = shown.session.session.new_projection(key);
         let frame = shown
+            .session
             .session
             .viewport_frame(&mut shown.view.projection)
             .expect("project the pane on the glass between two steps of the drag");
@@ -1521,6 +1559,7 @@ fn a_drag_rewraps_the_pane_on_the_glass_and_reflows_a_hidden_pane_once() {
 
         assert!(
             !behind
+                .session
                 .propose_size(GridChange {
                     next,
                     physical,
@@ -1533,37 +1572,37 @@ fn a_drag_rewraps_the_pane_on_the_glass_and_reflows_a_hidden_pane_once() {
             "a pane behind another tab reports no reflow, because it did none"
         );
         assert_eq!(
-            behind.session.live_dimensions().0.get(),
+            behind.session.session.live_dimensions().0.get(),
             u32::from(born.columns.get()),
             "and its actor is where it was: the window thread spent nothing on a picture \
                  nobody can see"
         );
         assert_eq!(
-            behind.grid, born,
+            behind.session.grid, born,
             "the shadow follows the actor, so it has not moved either"
         );
         last = next;
     }
 
     let quiet = start + FRAME * (EVENTS - 1) + WINDOW_RESIZE_QUIET;
-    let (commit, _) = release_due_leaf_resize(&mut behind, quiet, false).unwrap();
+    let (commit, _) = release_due_leaf_resize(&mut behind.session, quiet, false).unwrap();
     let commit = commit.expect("the quiet boundary releases what the hidden pane owes");
     assert!(
         commit.reflowed,
         "and the one reflow a hidden pane owes a gesture lands here"
     );
     assert_eq!(
-        behind.session.live_dimensions().0.get(),
+        behind.session.session.live_dimensions().0.get(),
         u32::from(last.columns.get()),
         "at the last width of the gesture, not at an intermediate one"
     );
-    assert_eq!(behind.grid, last, "with the shadow caught up");
+    assert_eq!(behind.session.grid, last, "with the shadow caught up");
     assert_eq!(
-        behind.conpty_grid, last,
+        behind.session.conpty_grid, last,
         "in the same breath as the notification its child was waiting for"
     );
 
-    let (commit, _) = release_due_leaf_resize(&mut shown, quiet, false).unwrap();
+    let (commit, _) = release_due_leaf_resize(&mut shown.session, quiet, false).unwrap();
     let commit = commit.expect("the pane on the glass owes its child the same notification");
     assert!(
         !commit.reflowed,
@@ -1861,13 +1900,15 @@ fn a_drag_reflows_at_once_while_the_shell_holds_typed_input() {
 /// RED (T-RESTART-CWD round 2, finding 3) — **the session save writes the one ladder**, the
 /// one every shell started in a pane's place reads.
 ///
+/// Since 2026-10-28 (T-CONTRACT-M8, O-5b) the save takes the pane off the map and calls the
+/// ladder on its session, so the pin matches that call.
+///
 /// MUTATION, observed red: write `working_directory().or(spawn_place)` inline again.
 #[test]
 fn the_session_save_writes_the_one_ladder() {
     let save = method_body("TabState", "term_leaf");
     assert!(
-        save.contains(".and_then(ShellSession::place_for_a_new_shell)")
-            && !save.contains("spawn_place"),
+        save.contains("leaf.place_for_a_new_shell()") && !save.contains("spawn_place"),
         "{save}"
     );
 }
