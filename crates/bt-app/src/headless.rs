@@ -1534,7 +1534,9 @@ impl HeadlessFolio {
     /// lane suite's patience, until the application's drain of the lane's wake
     /// (`FolioApp::answer_clipboard`, for this one window: the earliest request still owed read
     /// once, the window's answers below it taken and answered in order, then the window settled)
-    /// finds nothing owed.
+    /// finds nothing owed. It runs that pass's steps for its one window rather than calling it
+    /// because a `HeadlessFolio` holds its window outside a `FolioApp`; the pass itself, and its
+    /// merge across windows, are driven through [`HeadlessApplication`].
     ///
     /// The turn's clock is held at the moment the owed paste was asked, so the paste's deadline
     /// never falls inside the wait: a test that means the deadline passes its own clock to

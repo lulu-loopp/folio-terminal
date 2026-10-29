@@ -1217,3 +1217,203 @@ fn the_clipboards_answers_are_spent_in_the_order_they_were_asked() {
         "nothing is left owed"
     );
 }
+
+/// What the shell in window `id`'s first tab has been sent, in order.
+fn sent_to_the_shell_of(application: &mut HeadlessApplication, id: WindowId) -> String {
+    let runtime = application.folio.runtime(id).expect("the window is open");
+    let leaf = runtime.window.tabs[0]
+        .sessions
+        .values()
+        .next()
+        .expect("the shell");
+    let typed = leaf
+        .session
+        .life
+        .birth()
+        .expect("in birth")
+        .typed
+        .borrow()
+        .clone();
+    String::from_utf8(typed).expect("UTF-8 was sent")
+}
+
+/// RED (T-CLIPBOARD-ORDER-HOLDS-BY-SPEED review F1) — **a copy a newer one replaces after it has
+/// landed says so in its turn, not on the press**: the window pastes (the clipboard refuses its
+/// five opens, so the paste says the read-failed notice) and copies, and both end; then it copies
+/// again, which replaces the first copy and finds it landed. The drain answers the paste, then the
+/// first copy, then the second. No timing decides it: every request has ended before the drain.
+///
+/// MUTATION: answer the replaced copy's terminal on the press, as `submit_clipboard_write` did
+/// (pop it and `answer_copy` at once) — the first copy says it landed before the paste's notice.
+#[test]
+fn a_replaced_copy_that_had_landed_says_so_after_the_paste_asked_before_it() {
+    let folio = a_window_pasting("clipboard-supersede-in-order", "粘贴 never");
+    let door = folio.window.window.clipboard.clone();
+    let one = folio.window.window.id;
+    let mut application = HeadlessApplication::of(folio);
+    let toast = |text: &str| crate::ClipboardWriteEffect::Toast {
+        anchor: crate::toast::ToastAnchor::Window,
+        text: text.to_owned(),
+    };
+    let all_ended = |application: &HeadlessApplication| {
+        application
+            .folio
+            .app
+            .as_ref()
+            .is_some_and(|app| app.clipboard_lane.earliest_owed().is_none())
+    };
+
+    door.worker_hold().hold();
+    door.refuse_opens(5);
+    application
+        .runtime()
+        .paste_from_clipboard()
+        .expect("the window pastes");
+    door.worker_hold()
+        .wait_standing("the paste on the clipboard lane's worker");
+    application
+        .runtime()
+        .submit_clipboard_write("一 first".to_owned(), "the first copy", toast("一 copied"))
+        .expect("the window copies");
+    door.worker_hold().release();
+    crate::lane::wait_until("the paste and the first copy ended", || {
+        all_ended(&application)
+    });
+    application
+        .runtime()
+        .submit_clipboard_write(
+            "二 second".to_owned(),
+            "the second copy",
+            toast("二 copied"),
+        )
+        .expect("the window copies again");
+    crate::lane::wait_until("the second copy ended", || all_ended(&application));
+
+    application
+        .folio
+        .answer_clipboard(Instant::now())
+        .expect("the drain answers the window");
+    assert_eq!(
+        notices_of(&mut application, one),
+        [
+            crate::i18n::Text::PasteClipboardRead.text().to_owned(),
+            "一 copied".to_owned(),
+            "二 copied".to_owned()
+        ],
+        "the paste's notice comes before the copy asked after it, replaced or not"
+    );
+    assert!(
+        application.runtime().window.clipboard.is_empty(),
+        "nothing is left owed"
+    );
+}
+
+/// RED (T-CLIPBOARD-ORDER-HOLDS-BY-SPEED review F2 and N3) — **one drain spends each answer in
+/// its own turn, across the windows**: window 1 pastes into its shell, window 2 copies, window 1
+/// pastes into the same shell again; all three end before the drain. The drain's answers
+/// (`FolioApp::clipboard_answers`) come window 1, window 2, window 1, and answered one at a time
+/// as `FolioApp::answer_clipboard` answers them, the first paste's answer writes the first paste
+/// alone: the second waits in the pane's hold until its own turn, after window 2's copy has said
+/// it landed. No timing decides it: every request has ended before the drain.
+///
+/// MUTATION (F2): mark every paste ended when the drain takes it (`ClipboardAsks::answered`), as
+/// before the fold — the first answer writes both pastes, ahead of window 2's copy. MUTATION
+/// (N3): answer window by window instead of merging (`lane::in_admission_order` dropped) — window
+/// 1's two pastes come before window 2's copy.
+#[test]
+fn each_answer_of_a_drain_is_spent_in_its_own_turn_across_the_windows() {
+    let folio = a_window_pasting("clipboard-each-in-its-turn", "一 first");
+    let door = folio.window.window.clipboard.clone();
+    let second = headless_window(
+        &folio.app,
+        HeadlessParts::new(&folio.app.gpu, 2, (1200, 800), 1.0, &folio.ledger),
+        vec![tab_holding(leaf_saying("SECOND 第二"))],
+        0,
+    );
+    let one = folio.window.window.id;
+    let two = WindowId::from(2);
+    let mut application = HeadlessApplication::of(folio);
+    application.folio.windows.insert(two, second);
+
+    door.worker_hold().hold();
+    application
+        .runtime()
+        .paste_from_clipboard()
+        .expect("window 1 pastes");
+    door.worker_hold()
+        .wait_standing("window 1's paste on the clipboard lane's worker");
+    application
+        .folio
+        .runtime(two)
+        .expect("window 2 is open")
+        .submit_clipboard_write(
+            "二 second".to_owned(),
+            "window 2's copy",
+            crate::ClipboardWriteEffect::Toast {
+                anchor: crate::toast::ToastAnchor::Window,
+                text: "二 copied".to_owned(),
+            },
+        )
+        .expect("window 2 copies");
+    application
+        .runtime()
+        .paste_from_clipboard()
+        .expect("window 1 pastes again");
+    door.worker_hold().release();
+    crate::lane::wait_until("every request ended", || {
+        application
+            .folio
+            .app
+            .as_ref()
+            .is_some_and(|app| app.clipboard_lane.earliest_owed().is_none())
+    });
+
+    let answers = application.folio.clipboard_answers();
+    let order: Vec<(WindowId, &str)> = answers
+        .iter()
+        .map(|(index, _, answered)| {
+            let window = application
+                .folio
+                .windows
+                .key_at(*index)
+                .expect("the window is open");
+            let kind = match answered {
+                crate::clipboard_lane::Answered::Copy { .. } => "copy",
+                crate::clipboard_lane::Answered::Paste { .. } => "paste",
+            };
+            (window, kind)
+        })
+        .collect();
+    assert_eq!(
+        order,
+        [(one, "paste"), (two, "copy"), (one, "paste")],
+        "the drain's answers are in the order they were asked, across the windows"
+    );
+
+    let mut seen = Vec::new();
+    for (index, id, answered) in answers {
+        application
+            .folio
+            .runtime_at(index)
+            .expect("the window is open")
+            .answer_clipboard_request(id, answered)
+            .expect("the answer is answered");
+        let pasted = sent_to_the_shell_of(&mut application, one)
+            .matches("一 first")
+            .count();
+        seen.push((pasted, notices_of(&mut application, two).len()));
+    }
+    assert_eq!(
+        seen,
+        [(1, 0), (1, 1), (2, 1)],
+        "window 1's second paste reaches its shell after window 2's copy, not with its first"
+    );
+    application
+        .folio
+        .answer_clipboard(Instant::now())
+        .expect("the windows settle");
+    assert!(
+        application.runtime().window.clipboard.is_empty(),
+        "nothing is left owed"
+    );
+}

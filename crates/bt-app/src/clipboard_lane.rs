@@ -34,7 +34,9 @@
 //!   they are put back in the order the ledger minted them before any is answered
 //!   (`lane::in_admission_order`; `FolioApp::answer_clipboard`). A request that ends while the
 //!   windows are being read waits for the next drain, so no later answer is taken before it,
-//!   however slow the drain is beside the worker.
+//!   however slow the drain is beside the worker. A copy a newer one replaces keeps its terminal
+//!   in the asks for that drain ([`OwedCopy::ended`]), and a paste is marked ended only when its
+//!   own answer comes up ([`Answered::Paste`]), so no answer is spent on another's turn.
 //! * **Start.** The worker is started by the first request; a start the thread door refuses
 //!   refuses that request alone, at the door ([`Declined::NotStarted`], said once by the ledger),
 //!   and the next request starts it again.
@@ -440,10 +442,11 @@ pub(crate) enum PasteInto {
     Preview(PreviewSurface),
 }
 
-/// **A paste a window is owed**: its identity, its request until its terminal is in hand, where
-/// it goes, and when it was asked (the deadline's clock). A terminal paste's answer is spent only
-/// when it reaches the front of its pane's [`PasteHold`], so an answer can be in hand and wait
-/// behind an earlier paste of the same pane.
+/// **A paste a window is owed**: its identity, its request until its terminal is taken, where it
+/// goes, and when it was asked (the deadline's clock). `ended` is set when the drain answers it in
+/// its turn (`Runtime::answer_clipboard_request`), or when the window withdraws it. A terminal
+/// paste's answer is spent only when it reaches the front of its pane's [`PasteHold`], so an
+/// answer can be in hand and wait behind an earlier paste of the same pane.
 pub(crate) struct OwedPaste {
     pub(crate) id: ClipboardId,
     pub(crate) request: Option<ClipboardRequest>,
@@ -459,10 +462,27 @@ impl OwedPaste {
     }
 }
 
-/// **A copy a window is owed**: its request, and what the window says once it has landed.
+/// **A copy a window is owed**: its identity, its request until a newer copy replaces it, the
+/// terminal that replacement found ([`ClipboardLane::supersede`]: `Superseded`, or its own when it
+/// had ended first) — answered by the drain in its turn like every other, never on the press —
+/// and what the window says once it has landed.
 pub(crate) struct OwedCopy {
-    pub(crate) request: ClipboardRequest,
+    pub(crate) id: ClipboardId,
+    pub(crate) request: Option<ClipboardRequest>,
+    pub(crate) ended: Option<ClipboardTerminal>,
     pub(crate) effect: ClipboardWriteEffect,
+}
+
+impl OwedCopy {
+    /// A copy just admitted: owed, with `effect` to apply once it has landed.
+    pub(crate) fn asked(request: ClipboardRequest, effect: ClipboardWriteEffect) -> Self {
+        Self {
+            id: request.id(),
+            request: Some(request),
+            ended: None,
+            effect,
+        }
+    }
 }
 
 /// **What one window owes the clipboard's answers** — its pastes and its copies, each in the
@@ -494,20 +514,23 @@ impl ClipboardAsks {
     /// **Take every answer below `owed`** — the lane's [`ClipboardLane::earliest_owed`], read once
     /// for every window of one drain — in the order the lane minted the requests, copies and
     /// pastes together, without waiting for one; each request's terminal taken once. A copy's
-    /// leaves the asks with what the window says once it has landed; a paste's is put in its
-    /// [`OwedPaste::ended`], to be spent where the paste was aimed. A request at or past `owed` is
-    /// left for the next drain even when it has ended since, so that no window takes an answer
-    /// before an earlier one another window has not been asked for yet.
+    /// leaves the asks with what the window says once it has landed; a paste's goes with its
+    /// answer, and the paste stays owed until that answer is handled in its turn, so an earlier
+    /// paste's answer does not spend it from its pane's hold ahead of a request between them. A
+    /// request at or past `owed` is left for the next drain even when it has ended since, so that
+    /// no window takes an answer before an earlier one another window has not been asked for yet.
     pub(crate) fn answered(&mut self, owed: Option<ClipboardId>) -> Vec<(ClipboardId, Answered)> {
         let mut taken = Vec::new();
         let mut at = 0;
         while at < self.copies.len() {
             let copy = &mut self.copies[at];
-            let id = copy.request.id();
-            let ended = if below(id, owed) {
-                copy.request.take()
-            } else {
+            let id = copy.id;
+            let ended = if !below(id, owed) {
                 None
+            } else if copy.ended.is_some() {
+                copy.ended.take()
+            } else {
+                copy.request.as_mut().and_then(ClipboardRequest::take)
             };
             let Some(ended) = ended else {
                 at += 1;
@@ -521,9 +544,8 @@ impl ClipboardAsks {
                 && below(paste.id, owed)
                 && let Some(ended) = paste.request.as_mut().and_then(ClipboardRequest::take)
             {
-                paste.ended = Some(ended);
                 paste.request = None;
-                taken.push((paste.id, Answered::Paste));
+                taken.push((paste.id, Answered::Paste { ended }));
             }
         }
         taken.sort_by_key(|(id, _)| *id);
@@ -547,9 +569,9 @@ pub(crate) enum Answered {
         effect: ClipboardWriteEffect,
         ended: ClipboardTerminal,
     },
-    /// A paste's terminal, now in its [`OwedPaste::ended`]: spent where the paste was aimed — a
-    /// terminal's from the front of its pane's hold.
-    Paste,
+    /// A paste's terminal, put in its [`OwedPaste::ended`] when it is answered and spent where
+    /// the paste was aimed — a terminal's from the front of its pane's hold.
+    Paste { ended: ClipboardTerminal },
 }
 
 /// One thing a pane holds, in the order the person offered it.
@@ -773,10 +795,7 @@ pub(crate) mod contract_adapter {
                         .entry(target)
                         .or_default()
                         .copies
-                        .push(OwedCopy {
-                            request,
-                            effect: ClipboardWriteEffect::None,
-                        });
+                        .push(OwedCopy::asked(request, ClipboardWriteEffect::None));
                     Admission {
                         ticket: Some(id.number()),
                         question,
@@ -805,9 +824,11 @@ pub(crate) mod contract_adapter {
                 .copies;
             let at = copies
                 .iter()
-                .position(|copy| copy.request.id() == ClipboardId(ticket))
+                .position(|copy| copy.id == ClipboardId(ticket))
                 .expect("the suite withdraws a request it holds");
-            self.lane.withdraw(copies.remove(at).request);
+            let request = copies.remove(at).request;
+            self.lane
+                .withdraw(request.expect("the suite withdraws a copy still owed"));
         }
 
         /// `FolioApp::answer_clipboard`: the lane's earliest request still owed, read once; every
@@ -1053,10 +1074,7 @@ mod tests {
                 .submit(Arc::clone(&door), Ask::Write("复制 copied".to_owned()))
                 .expect("the lane admits it");
             let id = request.id();
-            let owed = OwedCopy {
-                request,
-                effect: ClipboardWriteEffect::None,
-            };
+            let owed = OwedCopy::asked(request, ClipboardWriteEffect::None);
             if into_a {
                 a.copies.push(owed);
             } else {
