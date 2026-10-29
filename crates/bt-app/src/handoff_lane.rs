@@ -368,24 +368,26 @@ impl<D> Pending<D> {
 
 /// **Every window's answers, in press order across the windows** — what each window `K` took from
 /// its own [`Pending`], merged by the id the ledger minted, which is the order the presses were
-/// made in and the one worker ran them in. The application answers them in this order, each in
-/// the window that asked.
+/// made in and the one worker ran them in (the seam's [`lane::in_admission_order`]). The
+/// application answers them in this order, each in the window that asked.
 pub(crate) fn in_press_order<K, D>(
     per_window: impl IntoIterator<Item = (K, Vec<(HandoffId, Answer, D)>)>,
 ) -> Vec<(K, HandoffId, Answer, D)>
 where
     K: Copy,
 {
-    let mut all: Vec<(K, HandoffId, Answer, D)> = per_window
-        .into_iter()
-        .flat_map(|(window, answers)| {
+    lane::in_admission_order(per_window.into_iter().map(|(window, answers)| {
+        (
+            window,
             answers
                 .into_iter()
-                .map(move |(id, answer, duty)| (window, id, answer, duty))
-        })
-        .collect();
-    all.sort_by_key(|(_, id, _, _)| *id);
-    all
+                .map(|(id, answer, duty)| (id, (answer, duty)))
+                .collect(),
+        )
+    }))
+    .into_iter()
+    .map(|(window, id, (answer, duty))| (window, id, answer, duty))
+    .collect()
 }
 
 /// **What one window owes one of its hand-offs' answers** — the refusal's words, and what a
@@ -662,8 +664,9 @@ mod tests {
     /// the windows' answers are taken the way `FolioApp::answer_handoffs` takes them, and come
     /// out in press order — not one window's and then the other's.
     ///
-    /// MUTATION: drop the sort in [`in_press_order`] (each window's answers then follow the
-    /// other's), and the answers come out by window.
+    /// MUTATION: drop the sort in [`lane::in_admission_order`], which [`in_press_order`] merges
+    /// through (each window's answers then follow the other's), and the answers come out by
+    /// window.
     #[test]
     fn handoffs_complete_in_press_order() {
         let gate = Arc::new(Gate::default());

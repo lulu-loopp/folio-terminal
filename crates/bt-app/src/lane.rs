@@ -1329,6 +1329,31 @@ pub(crate) fn answer_of<Id, T, E>(terminal: Terminal<Id, T, E>) -> Option<T> {
     }
 }
 
+/// **Every target's answers, in admission order across the targets** — what each target `K` took
+/// below the drain's mark ([`Ledger::earliest_owed`], read once for the whole drain), merged by
+/// the identity the ledger minted, which is the order the requests were admitted in and, on a lane
+/// with one worker and one line, the order they ended in. The consumer answers them in this
+/// order, each in the target that asked: a drain that answered one target's and then the next's
+/// would raise a later answer before an earlier one another target holds.
+pub(crate) fn in_admission_order<K, Id, T>(
+    per_target: impl IntoIterator<Item = (K, Vec<(Id, T)>)>,
+) -> Vec<(K, Id, T)>
+where
+    K: Copy,
+    Id: Ord + Copy,
+{
+    let mut all: Vec<(K, Id, T)> = per_target
+        .into_iter()
+        .flat_map(|(target, answers)| {
+            answers
+                .into_iter()
+                .map(move |(id, answer)| (target, id, answer))
+        })
+        .collect();
+    all.sort_by_key(|(_, id, _)| *id);
+    all
+}
+
 /// Where a task begins, outside its panic catch: the suite's gate holds it here, or ends the
 /// worker here, on a worker the suite's executor started.
 fn arrive() {
