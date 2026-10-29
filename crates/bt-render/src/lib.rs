@@ -96,7 +96,7 @@ pub use motion::{
 use rounded_rect::{
     rounded_rect_coverage, rounded_rect_halo_coverage, rounded_rect_shadow_coverage,
 };
-pub use scheme::{ColourScheme, FOLIO_DARK, FOLIO_LIGHT, selection_from_accent};
+pub use scheme::{ColourScheme, FOLIO_DARK, FOLIO_LIGHT, SystemContrast, selection_from_accent};
 pub use theme::{
     CURSOR_BAR_WIDTH_LOGICAL_PX, ChromePalette, CursorStyle, DARK_CHROME, DEFAULT_BACKGROUND_RGB,
     DEFAULT_FOCUS_MINI_HEIGHT_LOGICAL_PX, DOCK_DASH_RATIO, DOCK_PREVIEW_BORDER_LOGICAL_PX,
@@ -175,9 +175,13 @@ use theme::{
     CURSOR_UNDERLINE_HEIGHT_LOGICAL_PX, DEFAULT_DIM_FOREGROUND_RGB, ansi_16_rgb, cursor_rgb,
     unfocused_cursor_rgb,
 };
-pub use theme::{background_is_light, ink_over_bp, scheme_in_force, schemes_in_force, set_schemes};
+pub use theme::{
+    background_is_light, high_contrast_in_force, ink_over_bp, scheme_in_force, schemes_in_force,
+    set_high_contrast, set_schemes,
+};
 use theme::{
     search_current_ink_rgb, search_current_rgb, search_match_rgb, selection_background_rgb,
+    selection_ink_rgb,
 };
 pub use video::{VideoFrameUpload, VideoLayer, VideoStage, video_fit_extent, video_frame_rect};
 
@@ -15161,19 +15165,31 @@ fn prepare_chrome_text_atlas(
 /// A free function rather than the closure it used to be, because
 /// [`grid_text_areas`] hands its iterator back to two callers and an iterator
 /// cannot borrow a local of the function that built it.
+///
+/// **And a selected cell's ink under a Windows contrast theme** (T-HIGH-CONTRAST,
+/// owner ruling 2026-10-28, row 90 ⑤): `selected_ink` is Selected text's ink while
+/// a theme is on and `None` otherwise, so off a theme this is the function it was.
+/// It reaches a selected cell that no search hit is drawn over, because a hit's
+/// ground is drawn over the selection's and the cell then stands on the hit.
 fn grid_glyph_ink(
     frame: &ViewportFrame,
     current_ink: Option<Color>,
+    selected_ink: Option<Color>,
     row: usize,
     column: usize,
     resting: Color,
 ) -> Color {
+    let within = |spans: &[SelectionSpan]| {
+        spans.iter().any(|span| {
+            span.row as usize == row
+                && (span.start_column as usize..span.end_column as usize).contains(&column)
+        })
+    };
     current_ink
-        .filter(|_| {
-            frame.current_search_spans.iter().any(|span| {
-                span.row as usize == row
-                    && (span.start_column as usize..span.end_column as usize).contains(&column)
-            })
+        .filter(|_| within(&frame.current_search_spans))
+        .or_else(|| {
+            selected_ink
+                .filter(|_| within(&frame.selection_spans) && !within(&frame.search_spans))
         })
         .unwrap_or(resting)
 }
@@ -15233,6 +15249,9 @@ fn grid_cell_areas<'a>(
         let ink = search_current_ink_rgb();
         Color::rgb(ink[0], ink[1], ink[2])
     });
+    let selected_ink = selection_ink_rgb()
+        .filter(|_| !frame.selection_spans.is_empty())
+        .map(|ink| Color::rgb(ink[0], ink[1], ink[2]));
     let narrow_text_areas = text_rows
         .iter()
         .enumerate()
@@ -15258,6 +15277,7 @@ fn grid_cell_areas<'a>(
                         default_color: grid_glyph_ink(
                             frame,
                             current_ink,
+                            selected_ink,
                             row,
                             glyph.column,
                             glyph.color,
@@ -15290,6 +15310,7 @@ fn grid_cell_areas<'a>(
                         default_color: grid_glyph_ink(
                             frame,
                             current_ink,
+                            selected_ink,
                             row,
                             wide.column,
                             wide.color,
@@ -30554,6 +30575,50 @@ mod tests {
     }
 
     /// A bare grid of blank cells at [`fade_metrics`], `rows` tall, for reading a wash out of.
+    /// RED (T-HIGH-CONTRAST, owner ruling 2026-10-28, row 90 ⑤) — **under a contrast theme a
+    /// selected cell's words are Selected text's ink; a cell a search hit is drawn over keeps
+    /// the hit's rule; and with no theme nothing is recoloured.**
+    ///
+    /// Row 0 is selected across columns 0..4 with an ordinary hit at 2..3; row 1 holds the
+    /// current hit at 0..2 inside a selection.
+    ///
+    /// MUTATION (observed red): drop the `selected_ink` arm from `grid_glyph_ink` — a selected
+    /// cell under a contrast theme keeps the program's ink on the theme's Selected-text
+    /// ground, which nothing promises is legible.
+    #[test]
+    fn a_selected_cell_wears_selected_text_ink_under_a_contrast_theme_and_nothing_else_moves() {
+        let mut frame = wash_frame(8, 2);
+        let span = |row, start_column, end_column| SelectionSpan {
+            row,
+            start_column,
+            end_column,
+        };
+        frame.selection_spans = vec![span(0, 0, 4), span(1, 0, 4)];
+        frame.search_spans = vec![span(0, 2, 3)];
+        frame.current_search_spans = vec![span(1, 0, 2)];
+        let resting = Color::rgb(0x10, 0x20, 0x30);
+        let selected = Color::rgb(0x2b, 0x2b, 0x2b);
+        let current = Color::rgb(0x01, 0x02, 0x03);
+        let ink = |selected_ink, row, column| {
+            grid_glyph_ink(&frame, Some(current), selected_ink, row, column, resting)
+        };
+        assert_eq!(ink(Some(selected), 0, 0), selected, "a selected cell");
+        assert_eq!(ink(Some(selected), 0, 3), selected);
+        assert_eq!(ink(Some(selected), 0, 2), resting, "under an ordinary hit");
+        assert_eq!(ink(Some(selected), 0, 4), resting, "outside the selection");
+        assert_eq!(ink(Some(selected), 1, 1), current, "the current hit's rule stands");
+        assert_eq!(ink(Some(selected), 1, 2), selected);
+        for row in 0..2 {
+            for column in 0..8 {
+                let off = ink(None, row, column);
+                assert!(
+                    off == resting || off == current,
+                    "no theme, no recolour but the current hit's ({row}, {column})"
+                );
+            }
+        }
+    }
+
     fn wash_frame(columns: u32, rows: u32) -> ViewportFrame {
         let metrics = fade_metrics();
         let cells = (columns * rows) as usize;

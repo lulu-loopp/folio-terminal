@@ -20,6 +20,61 @@ fn theme_changed_is_ignored_by_explicit_modes_and_resolved_by_system() {
     assert_eq!(resolved_theme_change(Dark, OsLight), None);
 }
 
+/// RED (T-HIGH-CONTRAST, owner rulings 2026-10-28, row 90 ⑥ and ⑦) — **while a Windows
+/// contrast theme is on, its Background decides the canvas whatever the Theme row says, and
+/// the window's ground holds no picture and lets nothing through; off, both are what the row
+/// and the file say again.**
+///
+/// The two decisions a theme makes outside the palette, each a pure function of the row's
+/// own answer and the reading. Night sky is dark and Desert light, so each overrides the row
+/// that names the other canvas.
+///
+/// MUTATION (observed red): return `resolved` from `theme_under_contrast` whatever the reading
+/// — a Light window under Night sky draws Night sky's black under a light canvas's readers; or
+/// return `ground` from `ground_under_contrast` — a background picture stays under a contrast
+/// theme's text.
+#[test]
+fn a_contrast_theme_decides_the_canvas_and_clears_the_ground_while_it_is_on() {
+    use crate::runtime::{ground_under_contrast, theme_under_contrast};
+    let night_sky = bt_render::SystemContrast {
+        window: [0x00, 0x00, 0x00],
+        window_text: [0xff, 0xff, 0xff],
+        highlight: [0xd6, 0xb4, 0xfd],
+        highlight_text: [0x2b, 0x2b, 0x2b],
+        gray_text: [0xa6, 0xa6, 0xa6],
+    };
+    let desert = bt_render::SystemContrast {
+        window: [0xff, 0xfa, 0xef],
+        window_text: [0x3d, 0x3d, 0x3d],
+        highlight: [0x90, 0x39, 0x09],
+        highlight_text: [0xff, 0xf5, 0xe3],
+        gray_text: [0x67, 0x67, 0x67],
+    };
+    assert_eq!(theme_under_contrast(Theme::Light, Some(night_sky)), Theme::Dark);
+    assert_eq!(theme_under_contrast(Theme::Dark, Some(desert)), Theme::Light);
+    assert_eq!(theme_under_contrast(Theme::Light, None), Theme::Light);
+    assert_eq!(theme_under_contrast(Theme::Dark, None), Theme::Dark);
+
+    let picture = std::sync::Arc::new(bt_render::BackgroundImage {
+        key: "wallpaper".to_owned(),
+        rgba: std::sync::Arc::from(vec![0_u8; 4]),
+        width_px: 1,
+        height_px: 1,
+    });
+    let stored = bt_render::WindowGround {
+        image: Some(picture),
+        fit: bt_render::BackgroundFit::Tile,
+        image_opacity: 0.4,
+        alpha: 0.6,
+    };
+    let under = ground_under_contrast(stored.clone(), true);
+    assert_eq!(under.image, None, "no picture under a contrast theme's text");
+    assert_eq!(under.alpha, 1.0, "and nothing showing through it");
+    assert_eq!(under.fit, stored.fit, "the rest is the file's, for when it goes off");
+    assert_eq!(under.image_opacity, stored.image_opacity);
+    assert_eq!(ground_under_contrast(stored.clone(), false), stored);
+}
+
 /// RED (49) — **A title that did not change is never written to the OS again.**
 ///
 /// A shell that sets the title on every prompt (OSC 0/2) makes the drain say

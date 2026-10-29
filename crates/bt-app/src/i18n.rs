@@ -3259,6 +3259,11 @@ text_entries! {
     UpdateFailedUndone,
     /// Its detail; `{version}` is the version whose changes were not kept (0.4.8 E5).
     UpdateCardUndone,
+    /// The Theme row's sentence while a Windows contrast theme is on (T-HIGH-CONTRAST,
+    /// DESIGN §7.1.6): what is in force, and when the row's own choice takes over again.
+    DescThemeHighContrast,
+    /// The same for the Light scheme and Dark scheme rows.
+    DescSchemeHighContrast,
 }
 
 impl Text {
@@ -6352,6 +6357,16 @@ impl Text {
                 "Changes made in Folio {version} were not kept.",
                 "在 Folio {version} 中所做的更改没有保留。",
             ),
+            Self::DescThemeHighContrast => pick(
+                lang,
+                "A Windows contrast theme is on, and Folio uses its colours. This choice applies once the contrast theme is off.",
+                "Windows 对比度主题已开启，Folio 使用其颜色。关闭对比度主题后，此处的选择生效。",
+            ),
+            Self::DescSchemeHighContrast => pick(
+                lang,
+                "A Windows contrast theme is on, and Folio uses its colours. This scheme applies once the contrast theme is off.",
+                "Windows 对比度主题已开启，Folio 使用其颜色。关闭对比度主题后，此配色生效。",
+            ),
             Self::UpdateCardRestartMissed => {
                 pick(lang, "The restart did not happen.", "未能重启。")
             }
@@ -6517,6 +6532,10 @@ impl Text {
         Self::LegacyPsReadLineRemovedToast,
         // Only the Windows PowerShell discovery worker can emit this refusal.
         Self::ShellProfileProbeFailed,
+        // — the Theme and scheme rows' sentences while a Windows contrast theme is on, which
+        //   only the Windows reader of `SPI_GETHIGHCONTRAST` can put in force (T-HIGH-CONTRAST)
+        Self::DescThemeHighContrast,
+        Self::DescSchemeHighContrast,
         // — the Acrylic row's reason, which only a Windows with no backdrop
         //   reads: off Windows this build has no backdrop to ask for and
         //   `settings::visible_rows_for` does not offer the row at all (§13.32

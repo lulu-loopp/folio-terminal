@@ -1327,6 +1327,10 @@ impl<B: Backend> Runtime<'_, B> {
     /// repaint. Every caller here (a row, a chooser, startup) goes through this,
     /// which is what keeps "what is stored" and "what is drawn" one reading
     /// rather than four that have to agree.
+    ///
+    /// **Under a Windows contrast theme, an opaque ground with no picture** (owner ruling
+    /// 2026-10-28, row 90 ⑦; [`ground_under_contrast`]). The file keeps what it says, and the
+    /// ground it describes is back the moment the theme goes off.
     pub(crate) fn apply_window_ground(&mut self) -> Result<bool> {
         let stored = self.app.settings_store.loaded();
         let ground = bt_render::WindowGround {
@@ -1347,6 +1351,7 @@ impl<B: Backend> Runtime<'_, B> {
                 1.0
             },
         };
+        let ground = ground_under_contrast(ground, bt_render::high_contrast_in_force().is_some());
         if bt_render::set_window_ground(ground) == bt_render::ThemeChange::Unchanged {
             return Ok(false);
         }
@@ -2927,6 +2932,29 @@ pub(crate) fn preview_source_of_recent(
     match row {
         bt_persist::RecentPreviewV1::File(path) => preview::PreviewSource::file(path),
         bt_persist::RecentPreviewV1::Page { url } => preview::PreviewSource::Web(url.clone()),
+    }
+}
+
+/// **The ground a window wears under a Windows contrast theme** (T-HIGH-CONTRAST, owner ruling
+/// 2026-10-28, row 90 ⑦): opaque and with no picture, whatever the file says.
+///
+/// A picture under text and a desktop showing through it are the two things a contrast theme
+/// cannot promise legible: the theme names the colour behind every word, and either one puts
+/// something else there. The fit and the picture's own opacity are kept, so the value that
+/// comes back when the theme goes off is the one the file describes. The system's blur needs
+/// nothing of its own: it is seen only through a translucent ground.
+pub(crate) fn ground_under_contrast(
+    ground: bt_render::WindowGround,
+    contrast_on: bool,
+) -> bt_render::WindowGround {
+    if contrast_on {
+        bt_render::WindowGround {
+            image: None,
+            alpha: 1.0,
+            ..ground
+        }
+    } else {
+        ground
     }
 }
 

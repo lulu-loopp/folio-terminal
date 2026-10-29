@@ -19,6 +19,7 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- On Windows, Folio follows a contrast theme (Settings > Accessibility > Contrast themes): while one is on, the terminal and the window use its colours, and turning it off brings back your own scheme. <!-- zh: 在 Windows 上，Folio 跟随对比度主题（设置 > 辅助功能 > 对比度主题）：开启时，终端与窗口使用该主题的颜色；关闭后恢复你自己的配色。 -->
 - On Windows, Folio comes back with its windows after Windows restarts for an update, or at sign-in when "Restart apps" is on in Settings, and it now closes when an installer asks it to instead of staying open. <!-- zh: pending T-RESTART-REGISTRATION -->
 - On Windows, Folio now tells the system where the text cursor is on every keyboard layout, not only while typing Chinese, so tools that follow the text cursor, such as Magnifier and the emoji panel (Win+.), have a place to follow. <!-- zh: pending T-CARET-EVERY-LAYOUT -->
 - The previous and next buttons at the sides of a picture preview now light up when the pointer is over them, and the pointer shows a pointing hand there even when the picture is zoomed in. <!-- zh: pending T-PREVIEW-NEIGHBOUR-BUTTON-HOVER -->

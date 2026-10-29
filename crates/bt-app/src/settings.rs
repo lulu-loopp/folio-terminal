@@ -4291,6 +4291,10 @@ impl SettingsRow {
             // did not have; System shipped, and the note outlived the fact —
             // leaving the one line a user reads to find out what the picker
             // offers naming two of its three items.
+            // **What is in force replaces the sentence while a Windows contrast
+            // theme is on** (T-HIGH-CONTRAST, owner ruling 2026-10-28, row 90 ⑧),
+            // the dialog's idiom for a row whose choice is not the one on screen.
+            Self::Theme if values.high_contrast => Text::DescThemeHighContrast.text(),
             Self::Theme => Text::DescTheme.text(),
             Self::Cursor => Text::DescCursor.text(),
             // What Off does and, just as much, what it does not do: the line has
@@ -4444,6 +4448,10 @@ impl SettingsRow {
             Self::TerminalCjkFont => Text::DescTerminalCjkFont.text(),
             Self::FontSize => Text::DescFontSize.text(),
             // The folder is named on the dark half alone — see the two strings.
+            // Under a contrast theme both say the theme is in force, as `Theme` does.
+            Self::LightScheme | Self::DarkScheme if values.high_contrast => {
+                Text::DescSchemeHighContrast.text()
+            }
             Self::LightScheme => Text::DescLightScheme.text(),
             Self::DarkScheme => Text::DescDarkScheme.text(),
             // **A refusal replaces the sentence**, which is this dialog's own
@@ -6491,6 +6499,11 @@ impl SettingsContent<'_> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SettingsValues {
     pub theme: ThemeModeV1,
+    /// **Whether a Windows contrast theme is in force** (T-HIGH-CONTRAST): its colours are on
+    /// screen, and the Theme row and the two scheme rows say so in place of their own
+    /// sentences. The rows still take a choice; it is the window's again when the theme goes
+    /// off.
+    pub high_contrast: bool,
     pub cursor: CursorStyle,
     pub tab_layout: TabLayoutMode,
     pub sidebar: RailMode,
@@ -6807,6 +6820,7 @@ impl SettingsValues {
     pub fn sample() -> Self {
         Self {
             theme: ThemeModeV1::Dark,
+            high_contrast: false,
             cursor: CursorStyle::Bar,
             tab_layout: TabLayoutMode::Horizontal,
             focus_mode: false,
@@ -19908,7 +19922,7 @@ mod tests {
     /// string read off this machine, so its length is a fact about the machine
     /// rather than about the copy. What is held here instead is the entry it
     /// falls back to when there is no version to name.
-    const OTHERWISE: [(SettingsRow, Text, bt_platform::HostPlatform); 22] = {
+    const OTHERWISE: [(SettingsRow, Text, bt_platform::HostPlatform); 24] = {
         use bt_platform::HostPlatform::{MacOs, Windows};
         [
             // The other end of a value the fixture had to pick one end of.
@@ -19997,6 +20011,10 @@ mod tests {
             // The folder a reader's own schemes go in, which is a different
             // folder on each machine (0.4.4 ticket 07).
             (SettingsRow::DarkScheme, Text::DescDarkScheme, MacOs),
+            // What the Theme row and the two scheme rows say while a Windows contrast
+            // theme is on (T-HIGH-CONTRAST).
+            (SettingsRow::Theme, Text::DescThemeHighContrast, Windows),
+            (SettingsRow::DarkScheme, Text::DescSchemeHighContrast, Windows),
             // What the `Program` row says in place of its own sentence while it is
             // refusing a command line (0.4.6 ticket 74).
             (
@@ -30686,6 +30704,49 @@ mod tests {
                 row.description(&dark),
                 "{row:?} has no line that follows a value yet, and does not pretend to"
             );
+        }
+    }
+
+    /// RED (T-HIGH-CONTRAST, owner ruling 2026-10-28, row 90 ⑧) — **while a Windows contrast
+    /// theme is on, the Theme row and the two scheme rows say the theme's colours are in
+    /// force, and every other row says what it always says.** Off, the three say their own
+    /// sentences again. The rows stay rows: they keep their options, and the choice ticked is
+    /// the stored one.
+    ///
+    /// MUTATION (observed red): drop the `if values.high_contrast` arms from
+    /// `literal_description` — the Settings page goes on describing a scheme the window is not
+    /// wearing.
+    #[test]
+    fn a_contrast_theme_replaces_the_theme_and_scheme_sentences_and_no_other() {
+        let off = values();
+        let on = SettingsValues {
+            high_contrast: true,
+            ..values()
+        };
+        for row in visible_rows(TabLayoutMode::Vertical) {
+            let expected_on = match row {
+                SettingsRow::Theme => Some(Text::DescThemeHighContrast.text()),
+                SettingsRow::LightScheme | SettingsRow::DarkScheme => {
+                    Some(Text::DescSchemeHighContrast.text())
+                }
+                _ => None,
+            };
+            match expected_on {
+                Some(sentence) => {
+                    assert_eq!(row.description(&on), sentence, "{row:?} under a theme");
+                    assert_ne!(row.description(&off), sentence, "{row:?} off a theme");
+                    assert_eq!(
+                        row.selected_index(&on),
+                        row.selected_index(&off),
+                        "{row:?} ticks the stored choice either way"
+                    );
+                }
+                None => assert_eq!(
+                    row.description(&on),
+                    row.description(&off),
+                    "{row:?} is not about the canvas"
+                ),
+            }
         }
     }
 

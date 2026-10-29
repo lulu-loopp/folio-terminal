@@ -9528,7 +9528,8 @@ mod windows_impl {
                 WM_NCMBUTTONDOWN, WM_NCMBUTTONUP, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE,
                 WM_NCRBUTTONDBLCLK, WM_NCRBUTTONDOWN, WM_NCRBUTTONUP, WM_NCXBUTTONDBLCLK,
                 WM_NCXBUTTONDOWN, WM_NCXBUTTONUP, WM_POINTERDOWN, WM_POINTERUP, WM_POINTERUPDATE,
-                WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_THEMECHANGED, WM_TOUCH,
+                WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_SYSCOLORCHANGE, WM_THEMECHANGED,
+                WM_TOUCH,
                 WM_WINDOWPOSCHANGING, WM_XBUTTONDOWN, WM_XBUTTONUP, WindowFromPoint,
             },
         },
@@ -12450,6 +12451,10 @@ mod windows_impl {
     ) -> Option<crate::SystemNews> {
         match message {
             WM_SETTINGCHANGE | WM_THEMECHANGED => Some(crate::SystemNews::Preferences),
+            // **A contrast theme's colours edited in place** (T-HIGH-CONTRAST): Windows
+            // says so to every top-level window with this message, and the colours the
+            // product follows under high contrast are exactly the ones it announces.
+            WM_SYSCOLORCHANGE => Some(crate::SystemNews::Preferences),
             WM_DISPLAYCHANGE => Some(crate::SystemNews::Display),
             WM_INPUTLANGCHANGE => Some(crate::SystemNews::InputLanguage),
             WM_DEVICECHANGE
@@ -13358,6 +13363,87 @@ mod windows_impl {
             format!("SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION) failed: {error}")
         })?;
         Ok(enabled != 0)
+    }
+
+    /// **The colours of the Windows contrast theme in force, or `None` while none is**
+    /// (T-HIGH-CONTRAST, `docs/DESIGN.md` §7.1.6: 「高对比度模式跟随系统调色」).
+    ///
+    /// `SystemParametersInfoW(SPI_GETHIGHCONTRAST)` says whether a contrast theme is on
+    /// (`HCF_HIGHCONTRASTON`); `GetSysColor` then answers that theme's own colours, which is
+    /// the reading Microsoft names for a Win32 program under high contrast. They are read
+    /// every time rather than known: the four themes Windows 11 ships (Aquatic, Desert, Dusk,
+    /// Night sky) are each editable by their owner, so no palette here could be right.
+    ///
+    /// Read on the window thread at start and on the preferences ear's notice, beside
+    /// [`client_area_animation_enabled`]: one `SystemParametersInfoW` and, only while a theme
+    /// is on, five `GetSysColor` reads, none of which waits on anything. A failed first call
+    /// reads as "no contrast theme" — the machine did not say one is on, and inventing one
+    /// would repaint the window in colours nobody chose.
+    #[must_use]
+    pub fn system_high_contrast() -> Option<crate::HighContrastColours> {
+        use windows::Win32::Graphics::Gdi::{
+            COLOR_GRAYTEXT, COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT, COLOR_WINDOW, COLOR_WINDOWTEXT,
+            GetSysColor,
+        };
+        use windows::Win32::UI::Accessibility::HIGHCONTRASTW;
+        use windows::Win32::UI::WindowsAndMessaging::SPI_GETHIGHCONTRAST;
+
+        let mut reading = HIGHCONTRASTW {
+            cbSize: u32::try_from(size_of::<HIGHCONTRASTW>()).unwrap_or(0),
+            ..HIGHCONTRASTW::default()
+        };
+        // SAFETY: SPI_GETHIGHCONTRAST writes one HIGHCONTRASTW, whose `cbSize` is set, to the
+        // live stack value it is given; `uiParam` is that size, as the call documents.
+        let read = unsafe {
+            SystemParametersInfoW(
+                SPI_GETHIGHCONTRAST,
+                reading.cbSize,
+                Some((&mut reading as *mut HIGHCONTRASTW).cast()),
+                Default::default(),
+            )
+        };
+        let colours = [
+            COLOR_WINDOW,
+            COLOR_WINDOWTEXT,
+            COLOR_HIGHLIGHT,
+            COLOR_HIGHLIGHTTEXT,
+            COLOR_GRAYTEXT,
+        ];
+        high_contrast_of(read.is_ok() && high_contrast_is_on(reading.dwFlags.0), || {
+            // SAFETY: `GetSysColor` reads a process-wide table and takes no pointer.
+            colours.map(|index| unsafe { GetSysColor(index) })
+        })
+    }
+
+    /// Whether `HIGHCONTRASTW.dwFlags` says a contrast theme is on — `HCF_HIGHCONTRASTON`,
+    /// and none of the hot-key or availability bits beside it.
+    pub(super) fn high_contrast_is_on(flags: u32) -> bool {
+        flags & windows::Win32::UI::Accessibility::HCF_HIGHCONTRASTON.0 != 0
+    }
+
+    /// **The pure half of [`system_high_contrast`]**: nothing while the theme is off, and the
+    /// five `COLORREF`s (`0x00BBGGRR`) as sRGB bytes while it is on, in
+    /// [`crate::HighContrastColours`]' own field order. The colours are asked for only when
+    /// they are going to be used.
+    pub(super) fn high_contrast_of(
+        on: bool,
+        colours: impl FnOnce() -> [u32; 5],
+    ) -> Option<crate::HighContrastColours> {
+        if !on {
+            return None;
+        }
+        let rgb = |colour: u32| {
+            let [red, green, blue, _] = colour.to_le_bytes();
+            [red, green, blue]
+        };
+        let [window, window_text, highlight, highlight_text, gray_text] = colours().map(rgb);
+        Some(crate::HighContrastColours {
+            window,
+            window_text,
+            highlight,
+            highlight_text,
+            gray_text,
+        })
     }
 
     /// **The clipboard's one declared contention wait** (side-effects contract C5 rule 3,
@@ -19616,13 +19702,34 @@ pub const fn program_names_carry_their_kind() -> bool {
     }
 }
 
+/// **The colours of the Windows contrast theme in force** — what
+/// `system_high_contrast` reads (T-HIGH-CONTRAST), as sRGB bytes.
+///
+/// Named after the `GetSysColor` index each one is, and they are the pairs of Windows' own
+/// contrast-theme editor that the product draws with: Background and Text (`COLOR_WINDOW`,
+/// `COLOR_WINDOWTEXT`), Selected text (`COLOR_HIGHLIGHT`, `COLOR_HIGHLIGHTTEXT`) and
+/// Inactive text (`COLOR_GRAYTEXT`). Hyperlink and Button text are not read: links keep the
+/// accent (owner ruling 2026-10-28, row 90 ⑤), which is the selected-text colour here, and
+/// the product draws no system button. The renderer has its own type for the same five and
+/// the application translates, for `MinimumContrast`'s reason: this crate does not depend on
+/// the renderer.
+#[cfg(windows)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HighContrastColours {
+    pub window: [u8; 3],
+    pub window_text: [u8; 3],
+    pub highlight: [u8; 3],
+    pub highlight_text: [u8; 3],
+    pub gray_text: [u8; 3],
+}
+
 /// **What a window's system-settings ear heard** ([`SystemSettingsWatch`]), so the loop
 /// re-reads the one fact it is about (T-FRESH-FACTS).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SystemNews {
     /// A system-wide preference may have moved: `WM_SETTINGCHANGE` (the `Environment`
-    /// broadcast among them) and `WM_THEMECHANGED` on Windows; the appearance and the
-    /// accessibility display options on macOS.
+    /// broadcast among them), `WM_THEMECHANGED` and `WM_SYSCOLORCHANGE` on Windows; the
+    /// appearance and the accessibility display options on macOS.
     Preferences,
     /// A display's mode or the set of displays changed: `WM_DISPLAYCHANGE` on Windows,
     /// `NSApplicationDidChangeScreenParametersNotification` on macOS.
@@ -19659,7 +19766,7 @@ pub use windows_impl::{
     request_window_close, set_clipboard_text, set_current_thread_priority, set_system_backdrop,
     set_window_dark_mode, set_window_outer_rect, set_window_topmost, silence_std_streams,
     stand_window_at, standalone_alert, std_error_is_console, stop_flashing_window,
-    system_backdrop_available, system_uses_light_apps, take_keyboard_focus,
+    system_backdrop_available, system_high_contrast, system_uses_light_apps, take_keyboard_focus,
     taskbar_auto_hidden_from_state, taskbar_is_auto_hidden, thread_mouse_capture,
     top_level_window_at, virtual_key_for_character, virtual_key_is_dead, virtual_key_of_scan_code,
     virtual_screen_rect, wheel_scroll_amount, window_is_exposed, work_area_at, write_std_error,
@@ -23794,12 +23901,14 @@ mod apartment_order_tests {
 /// forward; this is the part with an opinion in it.
 #[cfg(all(test, windows))]
 mod system_preference_message_tests {
-    use super::windows_impl::{DeviceHeader, device_header, system_news_of};
-    use crate::SystemNews;
+    use super::windows_impl::{
+        DeviceHeader, device_header, high_contrast_is_on, high_contrast_of, system_news_of,
+    };
+    use crate::{HighContrastColours, SystemNews};
     use windows::Win32::Foundation::{LPARAM, WPARAM};
     use windows::Win32::UI::WindowsAndMessaging::{
-        WM_DEVICECHANGE, WM_DISPLAYCHANGE, WM_INPUTLANGCHANGE, WM_MOUSEMOVE, WM_NCHITTEST,
-        WM_SETTINGCHANGE, WM_THEMECHANGED,
+        SPI_SETHIGHCONTRAST, WM_DEVICECHANGE, WM_DISPLAYCHANGE, WM_INPUTLANGCHANGE, WM_MOUSEMOVE,
+        WM_NCHITTEST, WM_SETTINGCHANGE, WM_SYSCOLORCHANGE, WM_THEMECHANGED,
     };
 
     const DBT_DEVICEARRIVAL: usize = 0x8000;
@@ -23836,6 +23945,65 @@ mod system_preference_message_tests {
         );
         assert_eq!(system_news_of(WM_MOUSEMOVE, WPARAM(0), None), None);
         assert_eq!(system_news_of(WM_NCHITTEST, WPARAM(0), None), None);
+    }
+
+    /// RED (T-HIGH-CONTRAST) — **a contrast theme turned on or off, or its colours edited in
+    /// place, is heard as a preference.** The toggle arrives as `WM_SETTINGCHANGE` with
+    /// `wParam = SPI_SETHIGHCONTRAST` (the arm reads no `wParam`, so it is the same arm as every
+    /// other setting); an edit of the theme's colours is `WM_SYSCOLORCHANGE`.
+    ///
+    /// MUTATION: drop the `WM_SYSCOLORCHANGE` arm from `system_news_of` — an owner who edits
+    /// Aquatic's background while it is on keeps the old colours in Folio until something else
+    /// wakes the loop.
+    #[test]
+    fn a_contrast_theme_toggled_or_edited_is_a_preference() {
+        assert_eq!(
+            system_news_of(
+                WM_SETTINGCHANGE,
+                WPARAM(SPI_SETHIGHCONTRAST.0 as usize),
+                None
+            ),
+            Some(SystemNews::Preferences)
+        );
+        assert_eq!(
+            system_news_of(WM_SYSCOLORCHANGE, WPARAM(0), None),
+            Some(SystemNews::Preferences)
+        );
+    }
+
+    /// RED (T-HIGH-CONTRAST) — **no contrast theme reads as nothing, and one in force reads as
+    /// its five colours, each in its own place.** `HCF_HIGHCONTRASTON` is the one bit that
+    /// says so: `HCF_AVAILABLE` (2) and the hot-key bits are set on machines where nothing is
+    /// on. A `COLORREF` is `0x00BBGGRR`.
+    ///
+    /// MUTATION: read the colours whatever the flag says (`high_contrast_of` ignoring `on`), or
+    /// test `dwFlags != 0` — a machine with no contrast theme is repainted in its system
+    /// colours.
+    #[test]
+    fn no_contrast_theme_reads_as_none_and_one_in_force_as_its_colours() {
+        assert!(!high_contrast_is_on(0b10), "HCF_AVAILABLE alone is not on");
+        assert!(!high_contrast_is_on(0b100_0100), "nor are the hot-key bits");
+        assert!(high_contrast_is_on(0b11));
+        let mut asked = false;
+        assert_eq!(
+            high_contrast_of(false, || {
+                asked = true;
+                [0; 5]
+            }),
+            None
+        );
+        assert!(!asked, "the colours are not read while no theme is on");
+        let colours = [0x0000_0000, 0x00FF_FFFF, 0x00FF_FF00, 0x0000_0000, 0x0000_FF3F];
+        assert_eq!(
+            high_contrast_of(true, || colours),
+            Some(HighContrastColours {
+                window: [0x00, 0x00, 0x00],
+                window_text: [0xFF, 0xFF, 0xFF],
+                highlight: [0x00, 0xFF, 0xFF],
+                highlight_text: [0x00, 0x00, 0x00],
+                gray_text: [0x3F, 0xFF, 0x00],
+            })
+        );
     }
 
     /// RED (T-FRESH-FACTS) — **a display mode change and a keyboard layout change

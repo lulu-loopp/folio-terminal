@@ -9,7 +9,7 @@ use std::{
     },
 };
 
-use crate::scheme::{ColourScheme, FOLIO_DARK, FOLIO_LIGHT};
+use crate::scheme::{ColourScheme, FOLIO_DARK, FOLIO_LIGHT, SystemContrast};
 
 /// The product's terminal defaults, from `docs/design/ui-mockup.html` (the approved
 /// styling): dark `--termbg #1B1B1B`, ink `rgba(255,255,255,.87)` composited
@@ -382,8 +382,27 @@ pub(crate) fn search_current_rgb() -> [u8; 3] {
 
 /// The current hit's **ink** — `var(--termbg)`, which is to say the canvas
 /// itself, whatever a `BT_BG` override has made it.
+///
+/// **Under a contrast theme, Selected text's ink** (owner ruling 2026-10-28, row
+/// 90 ⑤): the hit's ground there is the theme's Selected-text ground, and the
+/// theme names the one ink that is legible on it.
 pub(crate) fn search_current_ink_rgb() -> [u8; 3] {
-    background_rgb()
+    selection_ink_rgb().unwrap_or_else(background_rgb)
+}
+
+/// **The ink of a selected cell, when it is not the cell's own** — Selected
+/// text's ink while a contrast theme is on, and `None` otherwise (owner ruling
+/// 2026-10-28, row 90 ⑤).
+///
+/// `None` is the scheme's rule as it stands: a selection is a ground, and the
+/// text on it keeps the colours the program wrote. A contrast theme names the
+/// pair (Selected-text ground and ink) and only the pair is promised legible, so
+/// while one is on the ink is recoloured at the draw, where the current search
+/// hit's already is.
+pub(crate) fn selection_ink_rgb() -> Option<[u8; 3]> {
+    active_schemes()
+        .high_contrast
+        .map(|system| system.highlight_text)
 }
 
 // ---------------------------------------------------------------------------
@@ -2185,8 +2204,21 @@ fn chrome_palette_for_background(background: [u8; 3]) -> ChromePalette {
 // frame to produce the same answer.
 // ---------------------------------------------------------------------------
 
+/// The pair in force, what each canvas wears, and the chrome each derives.
+///
+/// **Two pairs and not one** since T-HIGH-CONTRAST: `stored_*` is the pair
+/// [`set_schemes`] was handed, and `light`/`dark` are what the canvases wear. The
+/// two are the same pair until a contrast theme is on, and then the canvases
+/// wear the theme's colours while the stored pair waits, unchanged, for the theme
+/// to go off. Keeping it is what makes "off gives back your scheme" a fact about
+/// a field rather than a second reading of the settings file, and it is why
+/// [`schemes_in_force`] (the folder watcher's "the colours do not move") still
+/// answers the reader's own pair.
 #[derive(Clone, Copy)]
 struct ActiveSchemes {
+    stored_light: ColourScheme,
+    stored_dark: ColourScheme,
+    high_contrast: Option<SystemContrast>,
     light: ColourScheme,
     dark: ColourScheme,
     light_chrome: ChromePalette,
@@ -2195,12 +2227,53 @@ struct ActiveSchemes {
 
 impl ActiveSchemes {
     fn new(light: ColourScheme, dark: ColourScheme) -> Self {
-        Self {
-            light,
-            dark,
-            light_chrome: ChromePalette::derive(&light),
-            dark_chrome: ChromePalette::derive(&dark),
+        Self::under(light, dark, None)
+    }
+
+    /// The pair `light`/`dark`, under the contrast theme `high_contrast` or none.
+    ///
+    /// `None` is the road every build before this one took, field for field: the
+    /// canvases wear the pair and each derives its own chrome.
+    fn under(
+        light: ColourScheme,
+        dark: ColourScheme,
+        high_contrast: Option<SystemContrast>,
+    ) -> Self {
+        match high_contrast {
+            None => Self {
+                stored_light: light,
+                stored_dark: dark,
+                high_contrast,
+                light,
+                dark,
+                light_chrome: ChromePalette::derive(&light),
+                dark_chrome: ChromePalette::derive(&dark),
+            },
+            Some(system) => {
+                let worn = system.scheme_over(&light, &dark);
+                let chrome = ChromePalette::derive_high_contrast(&worn, &system);
+                Self {
+                    stored_light: light,
+                    stored_dark: dark,
+                    high_contrast,
+                    light: worn,
+                    dark: worn,
+                    light_chrome: chrome,
+                    dark_chrome: chrome,
+                }
+            }
         }
+    }
+
+    /// The same pair under a new reading of the contrast theme, or `None` when the
+    /// reading is the one already in force.
+    ///
+    /// Compared on all five colours and not on "is a theme on": an owner who edits
+    /// Aquatic's Background while it is on sends the same "on" with a new colour,
+    /// and that edit is the notice this exists to take.
+    fn with_high_contrast(&self, reading: Option<SystemContrast>) -> Option<Self> {
+        (self.high_contrast != reading)
+            .then(|| Self::under(self.stored_light, self.stored_dark, reading))
     }
 }
 
@@ -2264,10 +2337,52 @@ pub fn scheme_in_force() -> ColourScheme {
 /// colours on screen do not move — and "do not move" can only be said by handing
 /// the same colours back to [`set_schemes`], because the other canvas may well
 /// have changed in the same rescan and the pair goes in together.
+///
+/// **The stored pair, under a contrast theme too** (T-HIGH-CONTRAST): what goes
+/// back into [`set_schemes`] is the reader's own pair, never the theme's colours,
+/// or a rescan made while the theme was on would keep the theme after it went off.
 #[must_use]
 pub fn schemes_in_force() -> (ColourScheme, ColourScheme) {
     let schemes = active_schemes();
-    (schemes.light, schemes.dark)
+    (schemes.stored_light, schemes.stored_dark)
+}
+
+/// **Put a reading of the Windows contrast theme in force, or take it away**
+/// (T-HIGH-CONTRAST, `docs/DESIGN.md` §7.1.6: 「高对比度模式跟随系统调色」).
+///
+/// `Some` while a contrast theme is on: both canvases wear its colours
+/// ([`SystemContrast::scheme_over`]), the chrome is
+/// [`ChromePalette::derive_high_contrast`], and the contrast floor is at least
+/// 4.5:1. `None` gives back the stored pair, its own derivation and the reader's
+/// own floor, to the byte. Nothing is persisted: the reading is the system's,
+/// asked again at start and on every preference notice.
+///
+/// Returns [`ThemeChange::Unchanged`] when the reading is the one in force, so a
+/// broadcast that moved something else costs nothing. A `BT_BG` override keeps its
+/// canvas, as it does through [`set_schemes`].
+pub fn set_high_contrast(reading: Option<SystemContrast>) -> ThemeChange {
+    {
+        let mut schemes = process_schemes()
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(next) = schemes.with_high_contrast(reading) else {
+            return ThemeChange::Unchanged;
+        };
+        *schemes = next;
+    }
+    crate::contrast::set_high_contrast_floor(reading.is_some());
+    process_theme().refresh();
+    ThemeChange::Changed
+}
+
+/// The reading of the contrast theme in force, or `None` while none is.
+///
+/// For the readers outside this crate that answer to the theme rather than to
+/// a colour: which canvas the window resolves to, whether its ground may hold a
+/// picture, and what the Settings rows say.
+#[must_use]
+pub fn high_contrast_in_force() -> Option<SystemContrast> {
+    active_schemes().high_contrast
 }
 
 /// Put a pair of schemes in force and bump [`theme_revision`].
@@ -2286,10 +2401,10 @@ pub fn set_schemes(light: ColourScheme, dark: ColourScheme) -> ThemeChange {
         let mut schemes = process_schemes()
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if schemes.light == light && schemes.dark == dark {
+        if schemes.stored_light == light && schemes.stored_dark == dark {
             return ThemeChange::Unchanged;
         }
-        *schemes = ActiveSchemes::new(light, dark);
+        *schemes = ActiveSchemes::under(light, dark, schemes.high_contrast);
     }
     process_theme().refresh();
     ThemeChange::Changed
@@ -5097,6 +5212,105 @@ mod tests {
         assert_eq!(schemes.light_chrome, LIGHT_CHROME);
         assert_ne!(schemes.dark_chrome, DARK_CHROME);
     }
+
+    /// RED (T-HIGH-CONTRAST) — **a contrast theme in force puts its colours on both
+    /// canvases, and keeps the reader's pair untouched beside them.**
+    ///
+    /// Both canvases, because the theme decides the canvas (ruling ⑥) and a Theme row set to
+    /// the other one must not show the reader's scheme. Background, Text, the selection and
+    /// the accent are the theme's; the ANSI sixteen are the reader's own, from the stored
+    /// scheme whose canvas the theme stands on. The stored pair is what `schemes_in_force`
+    /// hands back to the folder watcher.
+    ///
+    /// MUTATION (observed red): make `ActiveSchemes::under`'s `Some` arm the `None` arm — a
+    /// contrast theme on leaves the scheme on screen untouched.
+    #[test]
+    fn a_contrast_theme_in_force_puts_its_colours_on_both_canvases() {
+        use crate::scheme::contrast_themes::{DESERT, NIGHT_SKY};
+        let nord = ColourScheme {
+            background: [0x2e, 0x34, 0x40],
+            ..FOLIO_DARK
+        };
+        for (system, ansi) in [(NIGHT_SKY, FOLIO_DARK.ansi), (DESERT, FOLIO_LIGHT.ansi)] {
+            let schemes = ActiveSchemes::under(FOLIO_LIGHT, nord, Some(system));
+            for worn in [schemes.light, schemes.dark] {
+                assert_eq!(worn.background, system.window);
+                assert_eq!(worn.foreground, system.window_text);
+                assert_eq!(worn.cursor, system.window_text);
+                assert_eq!(worn.selection, system.highlight);
+                assert_eq!(worn.accent, system.highlight);
+                assert_eq!(worn.ansi, ansi, "the reader's own sixteen, from the matching canvas");
+            }
+            let chrome = ChromePalette::derive_high_contrast(&schemes.dark, &system);
+            assert_eq!(schemes.light_chrome, chrome);
+            assert_eq!(schemes.dark_chrome, chrome);
+            assert_eq!(schemes.stored_light, FOLIO_LIGHT, "the reader's pair waits");
+            assert_eq!(schemes.stored_dark, nord);
+            assert_eq!(schemes.high_contrast, Some(system));
+        }
+    }
+
+    /// RED (T-HIGH-CONTRAST) — **a contrast theme turned off gives back the reader's pair and
+    /// its own derivation to the byte, and a theme whose colours were edited in place is a new
+    /// reading.**
+    ///
+    /// The off road is the road every build before this one took: `ActiveSchemes::new` (the
+    /// `None` arm) is held field for field to the pair and to `derive` of each half, and
+    /// coming back from a theme lands on exactly that value. The second half is the notice an
+    /// owner's edit sends: the same "on" with another Background, which has to move the
+    /// overlay rather than be taken for the reading already in force.
+    ///
+    /// MUTATION (observed red): have `with_high_contrast(None)` keep the worn pair (`Self {
+    /// high_contrast: None, ..*self }`) — off does not restore; or compare only
+    /// `is_some()` in `with_high_contrast` — an edit to Aquatic is ignored.
+    #[test]
+    fn a_contrast_theme_off_restores_the_pair_and_an_edit_is_a_new_reading() {
+        use crate::scheme::contrast_themes::AQUATIC;
+        let nord = ColourScheme {
+            background: [0x2e, 0x34, 0x40],
+            ..FOLIO_DARK
+        };
+        let off = ActiveSchemes::new(FOLIO_LIGHT, nord);
+        let assert_off = |schemes: &ActiveSchemes| {
+            assert_eq!(schemes.high_contrast, None);
+            assert_eq!(schemes.light, FOLIO_LIGHT);
+            assert_eq!(schemes.dark, nord);
+            assert_eq!(schemes.stored_light, FOLIO_LIGHT);
+            assert_eq!(schemes.stored_dark, nord);
+            assert_eq!(schemes.light_chrome, ChromePalette::derive(&FOLIO_LIGHT));
+            assert_eq!(schemes.light_chrome, LIGHT_CHROME, "the struck table, to the byte");
+            assert_eq!(schemes.dark_chrome, ChromePalette::derive(&nord));
+        };
+        assert_off(&off);
+        assert!(
+            off.with_high_contrast(None).is_none(),
+            "no theme over no theme is no change"
+        );
+
+        let on = off
+            .with_high_contrast(Some(AQUATIC))
+            .expect("a theme turned on is a change");
+        assert!(
+            on.with_high_contrast(Some(AQUATIC)).is_none(),
+            "the same reading again costs nothing"
+        );
+        let edited = AQUATIC_EDITED;
+        let moved = on
+            .with_high_contrast(Some(edited))
+            .expect("an edited theme is a new reading");
+        assert_eq!(moved.dark.background, edited.window);
+
+        let back = moved
+            .with_high_contrast(None)
+            .expect("a theme turned off is a change");
+        assert_off(&back);
+    }
+
+    /// Aquatic with its Background edited, which is the notice `WM_SYSCOLORCHANGE` carries.
+    const AQUATIC_EDITED: SystemContrast = SystemContrast {
+        window: [0x10, 0x18, 0x28],
+        ..crate::scheme::contrast_themes::AQUATIC
+    };
 
     #[test]
     fn runtime_switch_changes_all_readings_and_revision_is_monotonic() {
