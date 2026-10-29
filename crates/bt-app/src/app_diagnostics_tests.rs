@@ -330,6 +330,55 @@ fn a_stop_notice_a_box_would_show_is_raised_and_not_queued() {
     assert_eq!(boxes.lines, Vec::<String>::new(), "nothing is queued");
 }
 
+/// RED (T-FRAME-SHAPE-STOP-BOX-QUERY, 0.4.9 plan row 79) — **a frame-shape stop's alert that no
+/// box would show is one queued `stderr` line, and no box is called**: the name and the alert,
+/// handed to the run's `stderr` road as one entry, where the panic hook's box fell back to two
+/// lines written synchronously on the window thread.
+///
+/// MUTATION: the owed arm of `say_the_stop_alert` drops the alert (`if let … {}`) — no line.
+/// (`FolioApp::fail` handing the old `announce_panic` back its closure is the static walk's
+/// RED: `every_request_door_returns_at_once` against the committed `REQUEST-DOOR-SITES.tsv`.)
+#[test]
+fn a_frame_shape_stop_no_box_would_show_queues_its_alert_on_stderr() {
+    let alert = panic_alert_text(&std::env::temp_dir().join(PANIC_LOG_FILENAME));
+    let mut boxes = ToldBoxes::answering(false);
+    say_the_stop_alert(Some(PanicAlert::Owed(alert.clone())), &mut boxes);
+    assert_eq!(boxes.raised, Vec::<String>::new(), "no box is called");
+    assert_eq!(boxes.lines, [format!("{APP_NAME}\n{alert}")]);
+}
+
+/// RED (T-FRAME-SHAPE-STOP-BOX-QUERY) — **a frame-shape stop's alert a box would show is raised
+/// in the box, and nothing goes to `stderr`.**
+///
+/// MUTATION: the owed arm hands the alert to `boxes.line` whatever the answer — no box.
+#[test]
+fn a_frame_shape_stop_a_box_would_show_raises_its_alert() {
+    let alert = panic_alert_text(&std::env::temp_dir().join(PANIC_LOG_FILENAME));
+    let mut boxes = ToldBoxes::answering(true);
+    say_the_stop_alert(Some(PanicAlert::Owed(alert.clone())), &mut boxes);
+    assert_eq!(boxes.raised, [alert]);
+    assert_eq!(boxes.lines, Vec::<String>::new(), "nothing is queued");
+}
+
+/// RED (T-FRAME-SHAPE-STOP-BOX-QUERY) — **the one alert stays one**: a stop whose alert was
+/// already written to a watching console, or whose claim another caller (a panic) already
+/// made, says nothing more — neither a box nor a line.
+///
+/// MUTATION: `say_the_stop_alert` says something for every claim (`Some(_)` / `None` →
+/// `say_in_a_box_or_on_stderr(boxes, "")`) — a box or a line appears.
+#[test]
+fn a_frame_shape_stop_whose_alert_was_said_says_nothing_more() {
+    let claims: [fn() -> Option<PanicAlert>; 2] = [|| Some(PanicAlert::Spoken), || None];
+    for claim in claims {
+        for seen in [false, true] {
+            let mut boxes = ToldBoxes::answering(seen);
+            say_the_stop_alert(claim(), &mut boxes);
+            assert_eq!(boxes.raised, Vec::<String>::new(), "no box (seen: {seen})");
+            assert_eq!(boxes.lines, Vec::<String>::new(), "no line (seen: {seen})");
+        }
+    }
+}
+
 /// A folder for one test, and a settings store in it owing a change of the terminal face
 /// whose write is on a worker that never answers — the stop comes before it does.
 fn a_stop_with_an_owed_settings_change(

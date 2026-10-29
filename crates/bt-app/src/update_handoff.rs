@@ -1032,8 +1032,9 @@ mod tests {
         }
         // **Every caller of the application's box, each with why it may raise one** — the box
         // is the product's one modal, allowed only where there is no window to put a card on. A
-        // controlled stop's lost-change notice is not here: it asks `a_box_would_be_seen` first
-        // and raises a `SeenBox` (T-STOP-NOTICE-BOX-QUERY-MACOS).
+        // controlled stop's lost-change notice and a frame-shape stop's crash alert
+        // (`announce_frame_shape_stop`) are not here: each asks `a_box_would_be_seen` first and
+        // raises a `SeenBox` (T-STOP-NOTICE-BOX-QUERY-MACOS, T-FRAME-SHAPE-STOP-BOX-QUERY).
         let allowed = [
             (
                 "crate::announce_panic",
