@@ -156,6 +156,7 @@ mod census;
 mod declarations;
 mod dep_map;
 mod enumerate;
+mod gates;
 mod index;
 mod lower;
 mod manifest;

@@ -472,6 +472,98 @@ pub(crate) fn cfg_predicates(attrs: &[syn::Attribute], source: &str) -> (Vec<Str
     (predicates, compilation)
 }
 
+/// The attributes written on an expression — the call graph's statement gates and the index's
+/// gated regions (plan row 77) read them through this one match.
+pub(crate) fn expr_attrs(expr: &syn::Expr) -> &[syn::Attribute] {
+    match expr {
+        syn::Expr::Array(it) => &it.attrs,
+        syn::Expr::Assign(it) => &it.attrs,
+        syn::Expr::Async(it) => &it.attrs,
+        syn::Expr::Await(it) => &it.attrs,
+        syn::Expr::Binary(it) => &it.attrs,
+        syn::Expr::Block(it) => &it.attrs,
+        syn::Expr::Break(it) => &it.attrs,
+        syn::Expr::Call(it) => &it.attrs,
+        syn::Expr::Cast(it) => &it.attrs,
+        syn::Expr::Closure(it) => &it.attrs,
+        syn::Expr::Const(it) => &it.attrs,
+        syn::Expr::Continue(it) => &it.attrs,
+        syn::Expr::Field(it) => &it.attrs,
+        syn::Expr::ForLoop(it) => &it.attrs,
+        syn::Expr::Group(it) => &it.attrs,
+        syn::Expr::If(it) => &it.attrs,
+        syn::Expr::Index(it) => &it.attrs,
+        syn::Expr::Infer(it) => &it.attrs,
+        syn::Expr::Let(it) => &it.attrs,
+        syn::Expr::Lit(it) => &it.attrs,
+        syn::Expr::Loop(it) => &it.attrs,
+        syn::Expr::Macro(it) => &it.attrs,
+        syn::Expr::Match(it) => &it.attrs,
+        syn::Expr::MethodCall(it) => &it.attrs,
+        syn::Expr::Paren(it) => &it.attrs,
+        syn::Expr::Path(it) => &it.attrs,
+        syn::Expr::Range(it) => &it.attrs,
+        syn::Expr::RawAddr(it) => &it.attrs,
+        syn::Expr::Reference(it) => &it.attrs,
+        syn::Expr::Repeat(it) => &it.attrs,
+        syn::Expr::Return(it) => &it.attrs,
+        syn::Expr::Struct(it) => &it.attrs,
+        syn::Expr::Try(it) => &it.attrs,
+        syn::Expr::TryBlock(it) => &it.attrs,
+        syn::Expr::Tuple(it) => &it.attrs,
+        syn::Expr::Unary(it) => &it.attrs,
+        syn::Expr::Unsafe(it) => &it.attrs,
+        syn::Expr::While(it) => &it.attrs,
+        syn::Expr::Yield(it) => &it.attrs,
+        _ => &[],
+    }
+}
+
+/// Whether a `#[cfg(…)]` is one the three-valued reading reads (plan row 77): its argument is one
+/// predicate — a name (`test`, `windows`), a name-value (`target_os = "macos"`), or `all(…)`,
+/// `any(…)` or `not(…)` of readable predicates, `not` of exactly one. Anything else is not a
+/// predicate `rustc` accepts, and [`cfg_compilation`] would read it as "decided elsewhere" — a
+/// guess that it may be product — so the index refuses it instead.
+pub(crate) fn cfg_is_readable(attribute: &syn::Attribute) -> bool {
+    fn readable(meta: &syn::Meta) -> bool {
+        match meta {
+            syn::Meta::Path(path) => path.get_ident().is_some(),
+            syn::Meta::NameValue(value) => value.path.get_ident().is_some(),
+            syn::Meta::List(list) => {
+                let combinator = ["all", "any", "not"]
+                    .iter()
+                    .any(|name| list.path.is_ident(name));
+                let Ok(children) = list.parse_args_with(
+                    syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+                ) else {
+                    return false;
+                };
+                combinator
+                    && (!list.path.is_ident("not") || children.len() == 1)
+                    && children.iter().all(readable)
+            }
+        }
+    }
+    attribute
+        .parse_args::<syn::Meta>()
+        .is_ok_and(|meta| readable(&meta))
+}
+
+/// Whether a `#[cfg_attr(…)]` writes a `cfg` — a gate that holds only under another predicate,
+/// which the three-valued reading does not evaluate (the reason [`Rejection::ConditionalDeclarationAttribute`]
+/// refuses one on a `mod` declaration; plan row 77 refuses it everywhere else).
+pub(crate) fn cfg_attr_writes_a_cfg(attribute: &syn::Attribute) -> bool {
+    fn names_cfg(tokens: proc_macro2::TokenStream) -> bool {
+        tokens.into_iter().any(|tree| match tree {
+            proc_macro2::TokenTree::Ident(name) => name == "cfg",
+            proc_macro2::TokenTree::Group(group) => names_cfg(group.stream()),
+            _ => false,
+        })
+    }
+    attribute.path().is_ident("cfg_attr")
+        && matches!(&attribute.meta, syn::Meta::List(list) if names_cfg(list.tokens.clone()))
+}
+
 /// What stands on a `mod` declaration, read against the text of the file it is
 /// written in.
 fn read_declaration(item: &syn::ItemMod, source: &str) -> Declaration {

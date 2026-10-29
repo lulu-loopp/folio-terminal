@@ -77,6 +77,7 @@ pub(crate) fn build(universe: &Universe) -> Result<Index, Vec<Rejection>> {
     let mut modules = Vec::new();
     let mut macros = Vec::new();
     let mut shapes = Vec::new();
+    let mut gates = Vec::new();
     let mut rejections = Vec::new();
 
     for path in &paths {
@@ -202,6 +203,9 @@ pub(crate) fn build(universe: &Universe) -> Result<Index, Vec<Rejection>> {
                     &mut Vec::new(),
                     Compilation::AlwaysInProduct,
                 );
+                // The fourth grain of `in_the_product` (plan row 77): what a `cfg` written on
+                // anything keeps out of the product, items included.
+                crate::gates::read(&parsed, &text, base, path, &mut gates, &mut rejections);
             }
             Err(error) => rejections.push(Rejection::UnparsableFile {
                 file: path.clone(),
@@ -231,6 +235,8 @@ pub(crate) fn build(universe: &Universe) -> Result<Index, Vec<Rejection>> {
     macros.shrink_to_fit();
     macros.sort_by_key(|record| (record.tokens.start(), record.tokens.end()));
     shapes.shrink_to_fit();
+    gates.shrink_to_fit();
+    gates.sort_by_key(|gate: &Span| (gate.start(), gate.end()));
     union.shrink_to_fit();
     // Every fact in the index is asked for by span, so the ones a query looks
     // up by position are held in union order.
@@ -252,6 +258,7 @@ pub(crate) fn build(universe: &Universe) -> Result<Index, Vec<Rejection>> {
         literals,
         comments,
         macros,
+        gates,
         cross_check: enumeration.cross_check().clone(),
         macro_shapes: shapes,
     })
@@ -262,7 +269,7 @@ pub(crate) fn build(universe: &Universe) -> Result<Index, Vec<Rejection>> {
 /// # Panics
 ///
 /// Never: the caller has already refused a union that would not fit a `u32`.
-fn at_union(base: usize, offset: usize) -> u32 {
+pub(crate) fn at_union(base: usize, offset: usize) -> u32 {
     u32::try_from(base + offset).expect("the union was measured before it was built")
 }
 

@@ -27,11 +27,12 @@
 //! | G5 | Doc comments and string literals | not code, not read: the identifier view masks them |
 //!
 //! **Product** is [`Occurrence::in_the_product`] (the file, the innermost item, the innermost
-//! inline module) and, for a module-level `use`, **that `use`'s own `cfg`**
-//! ([`bt_source::UseRecord::variant`]): a `use` stands in no item, so the item grain cannot see
-//! its gate (plan row 77), and this guard reads the gate itself. A field's gate is the field
-//! item's own. What no grain reads is a `#[cfg]` on a statement or a match arm inside a body: a
-//! path under one is refused by kind — gate the item, or spell the path through `runtime/mod.rs`.
+//! inline module, and since plan row 77 on 2026-10-29 the gate written on any node — so a
+//! module-level `#[cfg(test)] use` is out of the product by its own `cfg`; until then this guard
+//! read [`bt_source::UseRecord::variant`] itself). A field's gate is the field item's own. A
+//! `#[cfg]` on a statement or a match arm inside a body is still refused here by kind, as before
+//! the gate grain read it (ruled 2026-10-29: the guard's own refusal is kept) — gate the item, or
+//! spell the path through `runtime/mod.rs`.
 //!
 //! The fixture under `tests/fixtures/root_topic_paths/` plants each shape; the last test holds
 //! `bt-app` itself.
@@ -49,16 +50,6 @@ use bt_source::{
 struct Reading {
     findings: Vec<String>,
     refused: Vec<String>,
-}
-
-/// How the product is decided — the guard's own reading, and the variant-blind one that row 77
-/// describes, kept so that the planted test-gated `use` proves the difference.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum UseGate {
-    /// The `use`'s own `cfg` is read.
-    Read,
-    /// Only [`Occurrence::in_the_product`]: a `#[cfg(test)] use` at the root counts as product.
-    Blind,
 }
 
 const RUNTIME: &str = "crate::runtime";
@@ -275,7 +266,7 @@ fn in_a_use(index: &Index, span: Span) -> bool {
 }
 
 /// **The reading of one package.**
-fn read(index: &Index, gate: UseGate) -> Reading {
+fn read(index: &Index) -> Reading {
     let topics = topics(index);
     let modules: BTreeSet<String> = index
         .modules()
@@ -394,8 +385,7 @@ fn read(index: &Index, gate: UseGate) -> Reading {
             span: record.whole(),
             certainty: Certainty::Resolved,
         }
-        .in_the_product(index)
-            && (gate == UseGate::Blind || record.variant().permits_product());
+        .in_the_product(index);
         if !product {
             continue;
         }
@@ -549,7 +539,7 @@ fn named(lines: &[String], needle: &str) -> usize {
 #[test]
 fn every_path_into_a_runtime_topic_from_outside_is_named() {
     let index = fixture();
-    let reading = read(&index, UseGate::Read);
+    let reading = read(&index);
     let findings: &[(&str, usize, &str)] = &[
         (
             "lib.rs:23:1: `use runtime::clipboard::copy`",
@@ -656,26 +646,21 @@ fn every_path_into_a_runtime_topic_from_outside_is_named() {
     assert!(missed.is_empty(), "{}\n{reading:#?}", missed.join("\n"));
 }
 
-/// RED (planted, T3) — **the test-gated `use` is out of the product only because the guard reads
-/// the `use`'s own gate.** Read the way [`Occurrence::in_the_product`] alone reads it (plan row
-/// 77: a `use` stands in no item), the root's `#[cfg(test)] use runtime::clipboard::paste;` is a
-/// finding — the false one this guard does not inherit.
+/// PLANTED (T3) — **the test-gated `use` is out of the product by its own gate**: the root's
+/// `#[cfg(test)] use runtime::clipboard::paste;` is no finding. Until plan row 77 the guard read
+/// the `use`'s own variant beside [`Occurrence::in_the_product`], which counted a `use` standing
+/// in no item as product; the query reads the gate itself since (its gate grain, 2026-10-29), and
+/// the guard reads the query alone. The RED for the shape is bt-source's
+/// `a_cfg_is_read_wherever_it_stands`.
 #[test]
 fn a_test_gated_use_is_out_of_the_product_by_its_own_gate() {
     let index = fixture();
-    let blind = read(&index, UseGate::Blind);
+    let reading = read(&index);
     assert_eq!(
-        named(&blind.findings, "`use runtime::clipboard::paste`"),
-        1,
-        "the variant-blind reading counts the gated `use`: {:#?}",
-        blind.findings
-    );
-    let read_ = read(&index, UseGate::Read);
-    assert_eq!(
-        named(&read_.findings, "paste"),
+        named(&reading.findings, "paste"),
         0,
-        "the guard's reading does not: {:#?}",
-        read_.findings
+        "the gated `use` is no finding: {:#?}",
+        reading.findings
     );
 }
 
@@ -687,7 +672,7 @@ fn a_test_gated_use_is_out_of_the_product_by_its_own_gate() {
 #[test]
 fn bt_app_reaches_runtime_topics_only_through_the_re_exports() {
     let index = Index::of_package("bt-app");
-    let reading = read(index, UseGate::Read);
+    let reading = read(index);
     assert!(
         reading.findings.is_empty() && reading.refused.is_empty(),
         "{}",

@@ -88,6 +88,28 @@ pub enum Rejection {
         /// The `cfg_attr`'s own spelling, so the message names what was written.
         spelling: String,
     },
+    /// A `#[cfg(…)]` whose argument is not a predicate the three-valued reading reads (plan row
+    /// 77): not one name, name-value, or `all`/`any`/`not` of those. Reading it as "decided
+    /// elsewhere" would be a guess that the bytes under it may be product.
+    UnreadableCfg {
+        file: PathBuf,
+        at: Position,
+        /// The `cfg`'s own spelling, between its parentheses.
+        spelling: String,
+    },
+    /// A `#[cfg_attr(…)]` that writes a `cfg` on anything but a `mod` declaration (which is
+    /// [`Rejection::ConditionalDeclarationAttribute`]): a gate that holds only under a predicate
+    /// the reading does not evaluate (plan row 77).
+    ConditionalCfg {
+        file: PathBuf,
+        at: Position,
+        /// The `cfg_attr`'s own spelling, between its parentheses.
+        spelling: String,
+    },
+    /// A `#[cfg(…)]` written where the index reads no gate (plan row 77): the bytes under it
+    /// would be counted whatever it says. Every position a gate can be read at is named in
+    /// `crate::lower`'s gate walk; a new one is added there, never passed.
+    UnplacedCfg { file: PathBuf, at: Position },
     /// A file the walk reached could not be read as text.
     UnreadableFile { file: PathBuf, reason: String },
     /// A directory inside a disk scope could not be listed.
@@ -183,6 +205,25 @@ impl fmt::Display for Rejection {
                 "{}:{at}: `mod {module};` carries `#[cfg_attr({spelling})]`, which decides the \
                  file or the gate by a predicate this reading is blind to on purpose",
                 declared_in.display()
+            ),
+            Self::UnreadableCfg { file, at, spelling } => write!(
+                formatter,
+                "{}:{at}: `#[cfg({spelling})]` is not a predicate this reading reads (a name, a \
+                 name-value, or `all`/`any`/`not` of them), and it will not guess whether the \
+                 bytes under it are product",
+                file.display()
+            ),
+            Self::ConditionalCfg { file, at, spelling } => write!(
+                formatter,
+                "{}:{at}: `#[cfg_attr({spelling})]` writes a `cfg` that holds under a predicate \
+                 this reading is blind to on purpose; write the `cfg` itself",
+                file.display()
+            ),
+            Self::UnplacedCfg { file, at } => write!(
+                formatter,
+                "{}:{at}: a `#[cfg]` where the index reads no gate, so the bytes under it would \
+                 be counted whatever it says",
+                file.display()
             ),
             Self::UnreadableFile { file, reason } => {
                 write!(formatter, "{}: cannot be read: {reason}", file.display())

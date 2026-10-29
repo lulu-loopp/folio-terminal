@@ -255,6 +255,14 @@ the per-door arm tests in `bt-platform`. When it is red, move the platform fact
 behind the platform crate/module boundary or update the declared arm and its
 cross-platform contract together; never scatter a new local cfg to silence it.
 
+What every source guard calls product is `bt_source::Occurrence::in_the_product`. Since
+2026-10-29 (T-CFG-TEST-USE-IS-NOT-PRODUCT, plan row 77) it reads, beside the file, the item and
+the inline module, the `cfg` written on any node (`Index::test_gates`: a `use`, a `const`, an
+`impl` header, a macro, a `let`, an expression, a match arm, a parameter), and the index refuses
+a `cfg` whose predicate is not a name, a name-value or `all`/`any`/`not` of them, a `cfg_attr`
+that writes a `cfg`, and a `cfg` where it reads no gate (`tests/index.rs`
+`a_cfg_is_read_wherever_it_stands`, `a_cfg_the_reading_cannot_read_is_refused_by_its_line`).
+
 ## Ownership census
 
 The rule: the asking/telling fields of `Runtime`, `App`, `WindowState`, and
@@ -700,6 +708,11 @@ in `HandoffLane::submit` and requires each refused by file, site and door. When 
 door from reaching it, or correct the row's cells (a hand-over call the boundary misses walks a
 worker's closure as the door's), and regenerate with `scripts/generate-request-door-sites.ps1`,
 reading each new site and dating its reason.
+Since 2026-10-29 (T-WINDOW-WAITS-STALE-KEY-REFUSED, plan row 76) the walk's registry reader
+refuses, by `window_waits.tsv:<line>`, an `# effects` row whose `crate`, `arm` and `item` name no
+admitted item of the product or two, and a `kind` off the registry's closed list, before any walk
+(`an_effects_row_names_one_item_of_its_arm_or_is_refused_by_its_line`); a moved or renamed door
+body is re-keyed in the move commit, or the reader stops the list.
 
 ## Lane contract and the completion seam
 
@@ -1265,10 +1278,9 @@ are none. The shapes read: a path in an expression, a type, a pattern, an `impl`
 or a generic argument (G1); a module-level `use` in any tree shape, by its
 `bt_source::UseRecord` names and globs (G2); a `use` inside a body (G3); a macro's
 arguments, counted with their candidate certainty (G4). Doc comments and literals are
-not code and not read (G5). Product is `Occurrence::in_the_product` and, for a
-module-level `use`, the `use`'s own `cfg` (`UseRecord::variant`), so a
-`#[cfg(test)] use` at the root is out of the product by its own gate (plan row 77's
-blind spot is not inherited). Refused by their line, never passed: a `use` that names
+not code and not read (G5). Product is `Occurrence::in_the_product`, whose gate grain
+reads a module-level `use`'s own `cfg`, so a `#[cfg(test)] use` at the root is out of the
+product by its own gate (the guard read `UseRecord::variant` itself until plan row 77, 2026-10-29). Refused by their line, never passed: a `use` that names
 `runtime` under another name or opens it by a glob, a group, glob or rename after
 `runtime::` inside a body, a path into a topic whose head is not `crate`, `self` or
 `super` (in a path, a module-level `use` and a body group alike), a comment inside a

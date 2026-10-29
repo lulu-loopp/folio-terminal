@@ -23,7 +23,8 @@ use std::sync::Arc;
 
 use bt_source::{
     DiskScope, Index, ItemKind, ItemQuery, ModuleSpec, Needle, Package, Pattern, QueryFailure,
-    ResolveCutoff, Scope, Search, Span, TargetId, TargetKind, TargetRoot, TraitId, TraitResolver,
+    Rejection, ResolveCutoff, Scope, Search, Span, TargetId, TargetKind, TargetRoot, TraitId,
+    TraitResolver,
     Universe, Vendor, View, Workspace, report, universes,
 };
 use syn::parse::Parser as _;
@@ -743,6 +744,92 @@ fn what_a_product_build_contains_is_answered_at_the_file_and_at_the_item() {
         product.report(&index).contains("in the product"),
         "{}",
         product.report(&index)
+    );
+}
+
+// ── the gate grain (plan row 77) ──────────────────────────────────────────
+
+/// RED (T-CFG-TEST-USE-IS-NOT-PRODUCT, plan row 77) — **a `cfg` is read wherever it stands**:
+/// a module-level `#[cfg(test)] use`, `#[cfg(all(test, windows))] const`, `#[cfg(test)] static`
+/// and `type`, a `#[cfg(test)] impl`'s header, a `#[cfg(test)] macro_rules!`, and a `let`, an
+/// expression statement and a match arm under `#[cfg(test)]` inside a product function are out
+/// of the product; `#[cfg(not(test))]` and `#[cfg(any(test, windows))]` are not gates, and the
+/// ungated needles stay counted. Each line of the fixture says which it is (`// counted`,
+/// `// gated`).
+///
+/// Before the row the three grains read none of these gates — no item and no inline module holds
+/// a `use`, a `const` or an `impl` header, and the `let`, the expression and the arm sit in a
+/// product function — so every gated line counted as product (13 of 13, not 5).
+///
+/// MUTATION: drop the gate grain from `Occurrence::in_the_product` — the eight gated lines count;
+/// stop descending into function bodies in `crate::gates` — the `let`, the expression and the arm
+/// do.
+#[test]
+fn a_cfg_is_read_wherever_it_stands() {
+    let index = Index::shared(&fixture_universe("gated_regions")).expect("the fixture lowers");
+    let found = index
+        .search(&Search::new(
+            Needle::new(Pattern::text("the_gated_needle")),
+            View::CodeKeepingLiterals,
+        ))
+        .unwrap_or_else(|failure| panic!("{failure}"));
+    let lines: Vec<&str> = index.union().lines().collect();
+    let mut wrong = Vec::new();
+    let mut gated = 0;
+    for occurrence in found.occurrences() {
+        let at = index
+            .locate(occurrence.span.start())
+            .expect("an occurrence is in a file");
+        let line = lines[at.line - 1];
+        let counted = line.ends_with("// counted");
+        assert!(
+            counted || line.ends_with("// gated"),
+            "every needle line says which it is: {line}"
+        );
+        gated += usize::from(!counted);
+        if occurrence.in_the_product(&index) != counted {
+            wrong.push(format!("{}: {line}", at.line));
+        }
+    }
+    assert_eq!((found.len(), gated), (13, 8), "the fixture's needles");
+    assert!(
+        wrong.is_empty(),
+        "read with the wrong verdict:\n  {}",
+        wrong.join("\n  ")
+    );
+    assert_eq!(found.in_the_product(&index).len(), 5);
+}
+
+/// RED (plan row 77) — **a `cfg` the reading cannot read, place or evaluate is refused by its
+/// line**, never read as "decided elsewhere": a predicate that is no predicate
+/// (`all(test windows)`), a `cfg_attr` that writes a `cfg`, and a `cfg` on a closure's parameter,
+/// a position the gate walk does not read.
+///
+/// MUTATION: drop `cfg_is_readable` — the first is guessed product; drop `cfg_attr_writes_a_cfg`
+/// — the second passes; drop the unplaced refusal in `crate::gates`' attribute visit — the third
+/// passes.
+#[test]
+fn a_cfg_the_reading_cannot_read_is_refused_by_its_line() {
+    let refused = Index::shared(&fixture_universe("gated_unreadable"))
+        .expect_err("the fixture is built to be refused");
+    let said: Vec<String> = refused
+        .iter()
+        .map(|rejection| match rejection {
+            Rejection::UnreadableCfg { at, spelling, .. } => format!("unreadable {at} {spelling}"),
+            Rejection::ConditionalCfg { at, spelling, .. } => {
+                format!("conditional {at} {spelling}")
+            }
+            Rejection::UnplacedCfg { at, .. } => format!("unplaced {at}"),
+            other => format!("{other}"),
+        })
+        .collect();
+    assert_eq!(
+        said,
+        [
+            "unreadable 4:1 all(test windows)",
+            "conditional 7:1 test, cfg(any())",
+            "unplaced 11:17",
+        ]
     );
 }
 
