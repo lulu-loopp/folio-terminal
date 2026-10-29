@@ -10,7 +10,7 @@ use crate::test_support::{leaf_saying, method_body};
 /// A shell-less pane whose history holds `lines` generated lines, each narrow enough never to
 /// wrap on the fixture's forty columns; `name(index)` writes line `index`. Generated, not
 /// recorded (standing rules: fixtures).
-fn pane_with_history(lines: usize, name: impl Fn(usize) -> String) -> ShellSession {
+fn pane_with_history(lines: usize, name: impl Fn(usize) -> String) -> TerminalPane {
     let mut text = String::with_capacity(lines * 24);
     for index in 0..lines {
         text.push_str(&name(index));
@@ -22,9 +22,9 @@ fn pane_with_history(lines: usize, name: impl Fn(usize) -> String) -> ShellSessi
 /// The history hits of a whole-plane scan, as the set of `(line, start, end)` a hit is known by.
 fn whole_answer(
     compiled: &bt_transcript::search::CompiledSearch,
-    leaf: &ShellSession,
+    leaf: &TerminalPane,
 ) -> std::collections::BTreeSet<(bt_viewport::SearchLine, u32, u32)> {
-    search::scan_history(compiled, leaf.session.transcript())
+    search::scan_history(compiled, leaf.session.session.transcript())
         .iter()
         .map(|hit| (hit.line, hit.start, hit.end))
         .collect()
@@ -47,7 +47,7 @@ fn whole_answer(
 #[test]
 fn a_keystroke_in_the_find_box_reads_at_most_one_slice_of_history() {
     let leaf = pane_with_history(100_000, |index| format!("worker {index} ok"));
-    let frozen = leaf.session.transcript().frozen().len();
+    let frozen = leaf.session.session.transcript().frozen().len();
     assert!(
         frozen > 4 * search::SEARCH_HISTORY_SLICE,
         "the history is long enough to need a walk: {frozen} lines"
@@ -55,8 +55,15 @@ fn a_keystroke_in_the_find_box_reads_at_most_one_slice_of_history() {
     let compiled = search::engine(search::SearchFlags::default(), "worker 9").unwrap();
     let seat = SeatId(1);
 
-    let asked =
-        rescan_leaf_for_search(&compiled, &leaf, seat, 1, None, SearchRefresh::Asked, false);
+    let asked = rescan_leaf_for_search(
+        &compiled,
+        &leaf.session,
+        seat,
+        1,
+        None,
+        SearchRefresh::Asked,
+        false,
+    );
     assert!(
         asked.lines_scanned <= search::SEARCH_HISTORY_SLICE,
         "the keystroke read {} of {frozen} lines",
@@ -68,7 +75,7 @@ fn a_keystroke_in_the_find_box_reads_at_most_one_slice_of_history() {
     // A frame published after the keystroke carries the answer and reads no slice of it.
     let published = rescan_leaf_for_search(
         &compiled,
-        &leaf,
+        &leaf.session,
         seat,
         1,
         Some(&asked.cache),
@@ -87,7 +94,7 @@ fn a_keystroke_in_the_find_box_reads_at_most_one_slice_of_history() {
     while cache.walking() {
         let walked = rescan_leaf_for_search(
             &compiled,
-            &leaf,
+            &leaf.session,
             seat,
             1,
             Some(&cache),
@@ -131,8 +138,15 @@ fn the_search_walk_stops_when_the_allowance_is_spent_and_resumes_next_turn() {
     });
     let compiled = search::engine(search::SearchFlags::default(), "worker 1").unwrap();
     let seat = SeatId(1);
-    let asked =
-        rescan_leaf_for_search(&compiled, &leaf, seat, 1, None, SearchRefresh::Asked, false);
+    let asked = rescan_leaf_for_search(
+        &compiled,
+        &leaf.session,
+        seat,
+        1,
+        None,
+        SearchRefresh::Asked,
+        false,
+    );
     let heart = hang_watch::Heartbeat::on_test_clock();
     let mut cache = asked.cache;
     let (mut walked, mut yielded) = (0, 0);
@@ -147,7 +161,7 @@ fn the_search_walk_stops_when_the_allowance_is_spent_and_resumes_next_turn() {
         match heart.deferrable(|| {
             rescan_leaf_for_search(
                 &compiled,
-                &leaf,
+                &leaf.session,
                 seat,
                 1,
                 Some(&cache),
@@ -175,7 +189,7 @@ fn the_search_walk_stops_when_the_allowance_is_spent_and_resumes_next_turn() {
         heart.park(hang_watch::Park::Indefinite);
         turn_ns += 100_000_000;
     }
-    let frozen = leaf.session.transcript().frozen().len();
+    let frozen = leaf.session.session.transcript().frozen().len();
     assert_eq!(walked, (frozen - 1) / search::SEARCH_HISTORY_SLICE);
     assert_eq!(yielded, walked, "every other turn yielded");
     let found: std::collections::BTreeSet<_> = cache
@@ -215,14 +229,22 @@ fn a_new_question_abandons_the_walk_of_the_old_one() {
     });
     let seat = SeatId(1);
     let ab = search::engine(search::SearchFlags::default(), "ab").unwrap();
-    let old = rescan_leaf_for_search(&ab, &leaf, seat, 1, None, SearchRefresh::Asked, false);
+    let old = rescan_leaf_for_search(
+        &ab,
+        &leaf.session,
+        seat,
+        1,
+        None,
+        SearchRefresh::Asked,
+        false,
+    );
     assert!(old.cache.walking(), "the old question is mid-walk");
 
     let abc = search::engine(search::SearchFlags::default(), "abc").unwrap();
     let allowed = whole_answer(&abc, &leaf);
     let mut rescan = rescan_leaf_for_search(
         &abc,
-        &leaf,
+        &leaf.session,
         seat,
         2,
         Some(&old.cache),
@@ -242,7 +264,7 @@ fn a_new_question_abandons_the_walk_of_the_old_one() {
         }
         rescan = rescan_leaf_for_search(
             &abc,
-            &leaf,
+            &leaf.session,
             seat,
             2,
             Some(&rescan.cache),

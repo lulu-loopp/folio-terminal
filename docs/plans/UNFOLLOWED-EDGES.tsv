@@ -2106,7 +2106,6 @@ crates/bt-app/src/main.rs	bt-app crate::ShellSession::announced_title	Ambiguous	
 crates/bt-app/src/main.rs	bt-app crate::ShellSession::announced_title	Ambiguous	strip_prefix	1	2026-10-27: T-CONTRACT-M8 (O-5a); re-keyed from crate::LeafSession::announced_title, the same site: the type is renamed LeafSession -> ShellSession (the ownership contract's M8)
 crates/bt-app/src/main.rs	bt-app crate::ShellSession::announced_title	Ambiguous	then_some	1	2026-10-27: T-CONTRACT-M8 (O-5a); re-keyed from crate::LeafSession::announced_title, the same site: the type is renamed LeafSession -> ShellSession (the ownership contract's M8)
 crates/bt-app/src/main.rs	bt-app crate::ShellSession::announced_title	Ambiguous	to_string_lossy	1	2026-10-27: T-CONTRACT-M8 (O-5a); re-keyed from crate::LeafSession::announced_title, the same site: the type is renamed LeafSession -> ShellSession (the ownership contract's M8)
-crates/bt-app/src/main.rs	bt-app crate::ShellSession::birth_at	Ambiguous	and_then	1	2026-10-27: T-CONTRACT-M8 (O-5a); re-keyed from crate::LeafSession::birth_at, the same site: the type is renamed LeafSession -> ShellSession (the ownership contract's M8)
 crates/bt-app/src/main.rs	bt-app crate::ShellSession::place_for_a_new_shell	Ambiguous	or_else	1	2026-10-27: T-CONTRACT-M8 (O-5a); re-keyed from crate::LeafSession::place_for_a_new_shell, the same site: the type is renamed LeafSession -> ShellSession (the ownership contract's M8)
 crates/bt-app/src/main.rs	bt-app crate::ShellSession::shell_answered	Ambiguous	answered	1	2026-10-27: T-CONTRACT-M8 (O-5a); re-keyed from crate::LeafSession::shell_answered, the same site: the type is renamed LeafSession -> ShellSession (the ownership contract's M8)
 crates/bt-app/src/main.rs	bt-app crate::SourceBlocks::get	Ambiguous	map	1	
@@ -2150,6 +2149,7 @@ crates/bt-app/src/main.rs	bt-app crate::TabState::tooltip_text	Ambiguous	into_ow
 crates/bt-app/src/main.rs	bt-app crate::TaskbarFlash::replaced	Ambiguous	collect	1	
 crates/bt-app/src/main.rs	bt-app crate::TaskbarFlash::replaced	Ambiguous	filter_map	1	
 crates/bt-app/src/main.rs	bt-app crate::TaskbarFlash::replaced	Dynamic	standing	1	
+crates/bt-app/src/main.rs	bt-app crate::TerminalPane::birth_at	Ambiguous	and_then	1	2026-10-27: T-CONTRACT-M8 (O-5a); re-keyed from crate::LeafSession::birth_at, the same site: the type is renamed LeafSession -> ShellSession (the ownership contract's M8); 2026-10-28: T-CONTRACT-M8 (O-5b); re-keyed from crate::ShellSession::birth_at, the same site: the successor's methods move from the session record to the pane, TerminalPane (ruling E5, the ownership contract's M8)
 crates/bt-app/src/main.rs	bt-app crate::TextSizeAim::notch	Ambiguous	fold	1	
 crates/bt-app/src/main.rs	bt-app crate::TextSizeAim::notch	Ambiguous	stepped	2	
 crates/bt-app/src/main.rs	bt-app crate::TextSizeAim::spend	Ambiguous	unwrap_or_else	1	

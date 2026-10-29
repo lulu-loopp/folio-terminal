@@ -4,9 +4,10 @@
 use crate::window_seam::prelude::*;
 use crate::{
     AttentionDelivery, Motion, NoticeHost, NoticeStrip, OVER_IN_PANE_TOP_FIRST, OverInPane,
-    PointerTarget, PreviewSurface, Runtime, ShellSession, TabState, TaskbarFlash, UserInputKind,
-    WindowRuntime, attention, attention_trace, document_request, emit_attention_lines, float, i18n,
-    marks, notice, notify, profiles, quit, seats, taskbar_lane, toast,
+    PointerTarget, PreviewSurface, Runtime, ShellSession, TabState, TaskbarFlash, TerminalPane,
+    UserInputKind, WindowRuntime, attention, attention_trace, document_request,
+    emit_attention_lines, float, i18n, marks, notice, notify, profiles, quit, seats, taskbar_lane,
+    toast,
 };
 use crate::{attention_delivery, attention_map, hang_watch};
 use anyhow::Result;
@@ -1144,19 +1145,21 @@ impl<B: Backend> Runtime<'_, B> {
             .iter()
             .enumerate()
             .flat_map(|(index, tab)| {
-                tab.sessions.iter().filter_map(move |(seat, leaf)| {
-                    leaf.attention
-                        .ledger
-                        .ticket()
-                        .map(|ticket| ((index, *seat), ticket))
-                })
+                tab.sessions
+                    .iter()
+                    .filter_map(move |(seat, TerminalPane { session: leaf, .. })| {
+                        leaf.attention
+                            .ledger
+                            .ticket()
+                            .map(|ticket| ((index, *seat), ticket))
+                    })
             })
             .collect();
         let active = self.window.active_tab;
         let standing_on = self.window.tabs[active]
             .sessions
             .get(&self.focused_leaf)
-            .and_then(|leaf| leaf.attention.ledger.ticket());
+            .and_then(|TerminalPane { session: leaf, .. }| leaf.attention.ledger.ticket());
         let waiting = queue.len();
         let Some((tab, seat)) = next_attention_stop(&queue, standing_on) else {
             attention_trace::line(|| format!("jump queue={waiting} from=none to=none"));
@@ -1293,7 +1296,7 @@ pub(crate) fn deliver_osc_attention(
             {
                 continue;
             }
-            let Some(leaf) = tab.sessions.get_mut(seat) else {
+            let Some(TerminalPane { session: leaf, .. }) = tab.sessions.get_mut(seat) else {
                 continue;
             };
             let words = attention_map::announced_words(notification);
@@ -1435,7 +1438,7 @@ pub(crate) fn answer_attention_in(
     let Some(answered) = by.answer_kind() else {
         return;
     };
-    let Some(leaf) = tab.sessions.get_mut(&seat) else {
+    let Some(TerminalPane { session: leaf, .. }) = tab.sessions.get_mut(&seat) else {
         return;
     };
     let lines = leaf

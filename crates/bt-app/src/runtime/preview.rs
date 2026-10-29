@@ -11422,7 +11422,7 @@ impl<B: Backend> Runtime<'_, B> {
             // (§7.1.6h). `false` is the reading that lets a folder tab's chrome
             // tick reuse the picture, which is the only kind of frame it has.
             presentation_hold: self
-                .focused()
+                .focused_pane()
                 .is_some_and(|leaf| leaf.view.projection.presentation_hold()),
             content_revision: self.window.terminal_content_revision,
             presented_revision: self.window.presented_picture_revision,
@@ -13016,7 +13016,9 @@ impl<B: Backend> Runtime<'_, B> {
                 .tabs
                 .iter()
                 .flat_map(|tab| tab.sessions.values())
-                .filter_map(|leaf| leaf.session.status().progress),
+                .filter_map(|crate::TerminalPane { session: leaf, .. }| {
+                    leaf.session.status().progress
+                }),
         );
         // Borrowed apart rather than through `self`, because the mirror is a
         // field of the same window whose `window` handle it needs.

@@ -64,8 +64,9 @@ impl<B: Backend> Runtime<'_, B> {
         };
         let Some(anchor) = leaf
             .session
+            .session
             .command_mark(mark)
-            .and_then(|mark| leaf.session.command_mark_anchor(mark.start))
+            .and_then(|mark| leaf.session.session.command_mark_anchor(mark.start))
             .cloned()
         else {
             return Ok(None);
@@ -92,7 +93,7 @@ impl<B: Backend> Runtime<'_, B> {
             let unclamped = leaf
                 .view
                 .projection
-                .scroll_y(leaf.session.document())
+                .scroll_y(leaf.session.session.document())
                 .ok()
                 .flatten();
             RailJumpLanding {
@@ -141,7 +142,7 @@ impl<B: Backend> Runtime<'_, B> {
         let Some(leaf) = self.sessions.get(&seat) else {
             return Ok(());
         };
-        let marks = leaf.session.command_marks();
+        let marks = leaf.session.session.command_marks();
         if marks.is_empty() {
             return Ok(());
         }
@@ -154,7 +155,7 @@ impl<B: Backend> Runtime<'_, B> {
             .scroll_anchor()
             .map(|anchor| anchor.source.clone());
         let at = match &here {
-            Some(anchor) => leaf.session.command_mark_at_or_before(anchor),
+            Some(anchor) => leaf.session.session.command_mark_at_or_before(anchor),
             None => marks.last().map(|mark| mark.id),
         };
         let index = at.and_then(|id| marks.iter().position(|mark| mark.id == id));
@@ -319,7 +320,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// `vim` is drawing, and a lane that took presses over somebody else's
     /// canvas would scroll a document that is not on screen.
     fn terminal_scroll_body(&self, seat: SeatId) -> Option<[f32; 4]> {
-        let leaf = self.sessions.get(&seat)?;
+        let crate::TerminalPane { session: leaf, .. } = self.sessions.get(&seat)?;
         if leaf.session.terminal_modes().alternate_screen {
             return None;
         }
@@ -447,7 +448,7 @@ impl<B: Backend> Runtime<'_, B> {
             .filter_map(|(seat, leaf)| {
                 let situation = termscroll::ThumbSituation {
                     has_history: leaf.view.projection.scroll_extent_subpixels() > 0,
-                    alternate_screen: leaf.session.terminal_modes().alternate_screen,
+                    alternate_screen: leaf.session.session.terminal_modes().alternate_screen,
                     scrolled: leaf.view.projection.is_scrolled(),
                     near: self.terminal_thumb_hover == Some(*seat),
                     held: self
@@ -640,7 +641,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// carries its bytes, told when the pane was spawned, says which modes the
     /// transport keeps (focus reporting under ConPTY).
     pub(in crate::runtime) fn reset_terminal_modes(&mut self, seat: SeatId) -> Result<()> {
-        let Some(leaf) = self.sessions.get_mut(&seat) else {
+        let Some(crate::TerminalPane { session: leaf, .. }) = self.sessions.get_mut(&seat) else {
             return Ok(());
         };
         let transport = leaf.session.pty_transport();
@@ -669,7 +670,7 @@ impl<B: Backend> Runtime<'_, B> {
     ///
     /// The old shell dies when its `ShellSession` is dropped — `PtySession::drop`
     /// runs `shutdown`, which kills the child and joins its reader — and the new
-    /// one is born **first**, beside it (`ShellSession::successor`), so a ConPTY
+    /// one is born **first**, beside it (`TerminalPane::successor`), so a ConPTY
     /// that cannot be created leaves the pane exactly as it was rather than empty.
     /// That is the reason this cannot half-succeed.
     ///
@@ -690,7 +691,10 @@ impl<B: Backend> Runtime<'_, B> {
         // **A Restart shell is born in its tab** (coordinator's ruling 2026-10-09): what a launch
         // carried into the tab, it is born with again.
         let seed = born_in_tab(
-            restart_seed(&leaf.launch.profile, leaf.seed_place_for_a_new_shell()),
+            restart_seed(
+                &leaf.session.launch.profile,
+                leaf.session.seed_place_for_a_new_shell(),
+            ),
             self.window.tabs[self.window.active_tab]
                 .carried_environment
                 .as_ref(),
@@ -731,7 +735,7 @@ impl<B: Backend> Runtime<'_, B> {
         // the old shell goes on being the one typed into until the new one lands
         // (`Runtime::land_births`), and a birth that fails leaves it as it was. A replacement
         // with no shell to wait for replaces it now.
-        if spawned.life.birth().is_some() {
+        if spawned.session.life.birth().is_some() {
             if let Some(leaf) = self.sessions.get_mut(&seat) {
                 leaf.await_successor(Box::new(spawned));
             }
@@ -748,7 +752,7 @@ impl<B: Backend> Runtime<'_, B> {
     pub(crate) fn replace_restarted_shell(
         &mut self,
         seat: SeatId,
-        spawned: ShellSession,
+        spawned: crate::TerminalPane,
     ) -> Result<()> {
         self.sessions.insert(seat, spawned);
         // **The window's frame slot held the pane that is gone.** `focus_pane_at`
@@ -855,13 +859,17 @@ impl<B: Backend> Runtime<'_, B> {
             self.mark_session_dirty(Instant::now());
         }
 
-        let ShellSession {
-            life,
-            session,
+        let crate::TerminalPane {
+            session:
+                ShellSession {
+                    life,
+                    session,
+                    paste_hold,
+                    ..
+                },
             view: crate::TermView { projection, .. },
-            paste_hold,
             ..
-        } = self.window.tabs[active].shell_mut();
+        } = self.window.tabs[active].shell_pane_mut();
         // The person's own gesture, so it waits behind a paste the shell is still owed, in order
         // (`clipboard_lane`), as a keystroke does.
         let target = match paste_hold {
@@ -1308,9 +1316,11 @@ impl<B: Backend> Runtime<'_, B> {
     /// nobody is looking at owes the glass nothing, and the frame drawn when
     /// that tab is switched to asks its own questions.
     fn command_marks_watermark(&self) -> u64 {
-        self.sessions.values().fold(0u64, |sum, leaf| {
-            sum.wrapping_add(leaf.session.command_marks_revision())
-        })
+        self.sessions
+            .values()
+            .fold(0u64, |sum, crate::TerminalPane { session: leaf, .. }| {
+                sum.wrapping_add(leaf.session.command_marks_revision())
+            })
     }
 
     pub(in crate::runtime) fn hyperlink_hit(
@@ -1338,7 +1348,7 @@ impl<B: Backend> Runtime<'_, B> {
         // motions on one surface is not what the ruling asked for, and the end state is what a
         // change is carried into a new view as.
         self.settle_math_toggle()?;
-        let leaf = self.shell_mut();
+        let leaf = self.shell_pane_mut();
         let subpixels =
             i64::from(rows).saturating_mul(leaf.view.projection.cell_height_subpixels().get());
         leaf.view.projection.scroll_by_subpixels(subpixels);
@@ -1744,7 +1754,7 @@ impl<B: Backend> Runtime<'_, B> {
             // pane whose widest line fits across it has nothing to be a picture
             // of, exactly as a pane with no scrollback has nothing above it.
             has_history: leaf.view.projection.horizontal().max_x_origin().0 > 0,
-            alternate_screen: leaf.session.terminal_modes().alternate_screen,
+            alternate_screen: leaf.session.session.terminal_modes().alternate_screen,
             scrolled: leaf.view.projection.horizontal().is_scrolled(),
             near: self.terminal_column_hover == Some(seat),
             held: self
@@ -1770,7 +1780,7 @@ impl<B: Backend> Runtime<'_, B> {
         else {
             return;
         };
-        if let Some(leaf) = self.sessions.get_mut(&seat) {
+        if let Some(crate::TerminalPane { session: leaf, .. }) = self.sessions.get_mut(&seat) {
             leaf.session.re_ask_about_link_target(path);
         }
     }
@@ -1832,7 +1842,9 @@ impl<B: Backend> Runtime<'_, B> {
     /// fact about a command that such a program cannot produce.
     pub(crate) fn note_user_typing(&mut self, seat: SeatId) {
         let active = self.window.active_tab;
-        if let Some(leaf) = self.window.tabs[active].sessions.get_mut(&seat) {
+        if let Some(crate::TerminalPane { session: leaf, .. }) =
+            self.window.tabs[active].sessions.get_mut(&seat)
+        {
             leaf.session.note_user_input();
         }
     }
@@ -1930,13 +1942,18 @@ pub(crate) fn seat_holds_the_keyboard(
 /// Writers of the rung: `Runtime::step_pane_text_scale` (the door) and construction. Readers:
 /// [`pane_cell_metrics`] and the pane head's indicator. Clearers: none — a view that ends takes
 /// its rung with it.
-pub(crate) fn apply_leaf_metrics(leaf: &mut ShellSession, metrics: bt_render::CellMetrics) -> bool {
+pub(crate) fn apply_leaf_metrics(
+    leaf: &mut crate::TerminalPane,
+    metrics: bt_render::CellMetrics,
+) -> bool {
     if leaf.view.metrics == metrics {
         return false;
     }
     leaf.view.metrics = metrics;
-    leaf.propose_cell(metrics);
-    leaf.session.refresh_projection(&mut leaf.view.projection);
+    leaf.session.propose_cell(metrics);
+    leaf.session
+        .session
+        .refresh_projection(&mut leaf.view.projection);
     true
 }
 
@@ -2195,7 +2212,7 @@ pub(crate) fn terminal_link_answers_a_press(
 /// else has been touched. The rung itself moves even then: the indicator shows the requested
 /// rung, and a pane at the floor of a base-10 face still says it is at 50 %.
 pub(crate) fn step_leaf_text_scale(
-    leaf: &mut ShellSession,
+    leaf: &mut crate::TerminalPane,
     step: TextStep,
     count: u32,
     derive: impl FnOnce(TextScale) -> Result<bt_render::CellMetrics>,

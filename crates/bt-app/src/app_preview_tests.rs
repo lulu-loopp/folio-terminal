@@ -3567,35 +3567,49 @@ fn two_surfaces_of_one_buffer_hold_their_own_zoom() {
 #[test]
 fn everything_a_tab_is_named_from_is_watched_for_change() {
     let mut leaf = leaf_saying("x");
-    let start = leaf.name_evidence();
+    let start = leaf.session.name_evidence();
 
     // The folder layer — the one that names most tabs, and the one that was
     // not being watched.
-    leaf.session.feed(b"\x1b]7;file:///D:\\src\x1b\\").unwrap();
-    let moved = leaf.name_evidence();
+    leaf.session
+        .session
+        .feed(b"\x1b]7;file:///D:\\src\x1b\\")
+        .unwrap();
+    let moved = leaf.session.name_evidence();
     assert_ne!(moved, start, "an OSC 7 report moves the name");
     leaf.session
+        .session
         .feed(b"\x1b]7;file:///D:\\other\x1b\\")
         .unwrap();
-    assert_ne!(leaf.name_evidence(), moved, "and so does the next one");
+    assert_ne!(
+        leaf.session.name_evidence(),
+        moved,
+        "and so does the next one"
+    );
 
     // The title layer, still watched.
-    let before_title = leaf.name_evidence();
-    leaf.session.feed(b"\x1b]0;vim main.rs\x07").unwrap();
-    assert_ne!(leaf.name_evidence(), before_title);
+    let before_title = leaf.session.name_evidence();
+    leaf.session
+        .session
+        .feed(b"\x1b]0;vim main.rs\x07")
+        .unwrap();
+    assert_ne!(leaf.session.name_evidence(), before_title);
 
     // And ordinary output moves neither, so this does not relabel the strip
     // on every byte a shell prints.
-    let quiet = leaf.name_evidence();
-    leaf.session.feed(b"hello\r\nworld\r\n").unwrap();
-    assert_eq!(leaf.name_evidence(), quiet);
+    let quiet = leaf.session.name_evidence();
+    leaf.session.session.feed(b"hello\r\nworld\r\n").unwrap();
+    assert_eq!(leaf.session.name_evidence(), quiet);
 
     // The two halves are told apart, because they drive different machines:
     // a title relabels chrome that is not written down, a folder is a field
     // of this leaf in `session.json` and has to reach the file.
-    let (title_before, place_before) = leaf.name_evidence();
-    leaf.session.feed(b"\x1b]0;vim other.rs\x07").unwrap();
-    let (title_after, place_after) = leaf.name_evidence();
+    let (title_before, place_before) = leaf.session.name_evidence();
+    leaf.session
+        .session
+        .feed(b"\x1b]0;vim other.rs\x07")
+        .unwrap();
+    let (title_after, place_after) = leaf.session.name_evidence();
     assert_ne!(title_after, title_before, "the title moved");
     assert_eq!(place_after, place_before, "and the folder did not");
 }
