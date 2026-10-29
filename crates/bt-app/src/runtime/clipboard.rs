@@ -4,17 +4,17 @@
 use crate::PtyTarget;
 use crate::TermViewPorts;
 use crate::clipboard_lane::{
-    Ask, ClipboardRequest, ClipboardTerminal, Declined, Held, OwedCopy, OwedPaste, PASTES_OWED,
-    PasteHold, PasteInto, Reply,
+    Answered, Ask, ClipboardId, ClipboardRequest, ClipboardTerminal, Declined, Held, OwedCopy,
+    OwedPaste, PASTES_OWED, PasteHold, PasteInto, Reply,
 };
-use crate::lane::Terminal;
+use crate::lane::{self, Terminal};
 use crate::runtime::keyboard::ime_owner;
 use crate::window_seam::prelude::*;
 use crate::{
-    ClipboardWriteEffect, Drag, DropLanding, PasteAnswer, PasteBody, PasteCardKey, PasteOffer,
-    PasteTarget, PreparedClipboardPaste, PreviewSurface, PtyInput, Runtime, ShellSession,
-    StagedPaste, TerminalPane, TextFieldSeat, UserInputKind, hang_watch, i18n, menubar,
-    profile_banner_name, restore, seats, text_field, toast,
+    ClipboardWriteEffect, Drag, DropLanding, FolioApp, PasteAnswer, PasteBody, PasteCardKey,
+    PasteOffer, PasteTarget, PreparedClipboardPaste, PreviewSurface, PtyInput, Runtime,
+    ShellSession, StagedPaste, TerminalPane, TextFieldSeat, UserInputKind, hang_watch, i18n,
+    menubar, profile_banner_name, restore, seats, text_field, toast,
 };
 use crate::{
     GlassHere, ImeOwner, PasteFacts, PasteRoad, PendingPaste, TabId, TabState, input, quit,
@@ -29,6 +29,55 @@ use bt_viewport::{MathBlockAnchor, ViewportProjection};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 use winit::event::Ime;
+
+impl<B: Backend> FolioApp<B> {
+    /// **Every window takes what the clipboard lane answered it, in admission order across the
+    /// windows** — on the turn the lane's wake brings (`AppEvent::ClipboardAnswered`), the one
+    /// place its answers are taken (`clipboard_lane`'s *Ordering*).
+    ///
+    /// The lane's earliest request still owed is read once, before any window is read; each open
+    /// window takes the answers its requests hold below it ([`Runtime::take_clipboard_answers`]);
+    /// they are merged by the identity the lane minted (`lane::in_admission_order`) and answered in
+    /// that order, each in its own window ([`Runtime::answer_clipboard_request`]). A request that
+    /// ends while the windows are being read is left for the next wake's drain, so a window read
+    /// later never takes an answer ahead of an earlier one a window read before it did not find
+    /// ended.
+    /// Then every open window settles what it owes at `now` ([`Runtime::settle_clipboard`]).
+    ///
+    /// An answer whose handling fails stops the drain there, as `answer_handoffs` does: those
+    /// failures are the window's fatal ones, and the answers taken after it go with it.
+    pub(crate) fn answer_clipboard(&mut self, now: Instant) -> Result<()> {
+        for (index, id, answered) in self.clipboard_answers() {
+            if let Some(mut runtime) = self.runtime_at(index) {
+                runtime.answer_clipboard_request(id, answered)?;
+            }
+        }
+        self.for_each_window(|runtime| runtime.settle_clipboard(now))
+    }
+
+    /// **One drain's answers, every window's, in admission order** — what
+    /// [`Self::answer_clipboard`] answers: the lane's earliest request still owed, read once; each
+    /// open window's answers below it; merged by the identity the lane minted, each with the index
+    /// of the window that holds it.
+    pub(crate) fn clipboard_answers(&mut self) -> Vec<(usize, ClipboardId, Answered)> {
+        let Some(owed) = self
+            .app
+            .as_ref()
+            .map(|app| app.clipboard_lane.earliest_owed())
+        else {
+            return Vec::new();
+        };
+        let mut held = Vec::new();
+        for index in 0..self.windows.len() {
+            if let Some(mut runtime) = self.runtime_at(index)
+                && runtime.window.leaving.is_none()
+            {
+                held.push((index, runtime.take_clipboard_answers(owed)));
+            }
+        }
+        lane::in_admission_order(held)
+    }
+}
 
 impl<B: Backend> Runtime<'_, B> {
     /// **`Copy` on a row whose execution policy the user can change**: put the command on the
@@ -50,7 +99,9 @@ impl<B: Backend> Runtime<'_, B> {
     /// A newer copy replaces the window's last copy not yet answered, which ends `Superseded` — the
     /// clipboard ends holding the newer either way, and only the newer says it landed — **unless a
     /// paste was asked after that copy**, in any window: a paste reads the clipboard as it stood at
-    /// its press, so the newer copy then queues behind the paste instead.
+    /// its press, so the newer copy then queues behind the paste instead. The replaced copy's
+    /// terminal stays in the window's asks for the lane's drain ([`OwedCopy::ended`]): one that had
+    /// landed before the newer was asked still says so, in its turn after every earlier answer.
     ///
     /// A copy the lane refuses at its door is said once, through the window's door
     /// (`WindowHost::note`, `diagnostics.log` in the product), with `action`; one the clipboard
@@ -74,20 +125,20 @@ impl<B: Backend> Runtime<'_, B> {
         };
         let newer = request.id();
         let replaces = self.window.clipboard.copies.last().is_some_and(|older| {
-            !self
-                .app
-                .clipboard_lane
-                .a_paste_was_asked_after(older.request.id())
+            older.request.is_some() && !self.app.clipboard_lane.a_paste_was_asked_after(older.id)
         });
-        if replaces && let Some(older) = self.window.clipboard.copies.pop() {
-            // An answer that came before the newer copy was asked is the older copy's own.
-            let ended = self.app.clipboard_lane.supersede(older.request, newer);
-            self.answer_copy(older.effect, ended)?;
+        if replaces
+            && let Some(older) = self.window.clipboard.copies.last_mut()
+            && let Some(replaced) = older.request.take()
+        {
+            // An answer that came before the newer copy was asked is the older copy's own; it is
+            // answered by the drain, in its turn.
+            older.ended = Some(self.app.clipboard_lane.supersede(replaced, newer));
         }
         self.window
             .clipboard
             .copies
-            .push(OwedCopy { request, effect });
+            .push(OwedCopy::asked(request, effect));
         Ok(true)
     }
 
@@ -490,12 +541,12 @@ impl<B: Backend> Runtime<'_, B> {
 
     /// **One paste asked of the clipboard lane**, aimed at `into`.
     ///
-    /// An earlier paste's answer that has come is spent first. A paste still owed is never
-    /// replaced by a later one: this one queues behind it — both read the clipboard, in order — and
-    /// a terminal's pane holds this paste's place behind whatever it already holds ([`PasteHold`]),
-    /// so `Ctrl+V`, `k`, `Ctrl+V` reaches the shell as the first paste, `k`, the second. A window
-    /// owes at most [`PASTES_OWED`]; a paste past that desk, or one the lane refuses at its door,
-    /// is said once in the log and, for a terminal, once on screen.
+    /// What the window owes is settled first ([`Self::settle_clipboard`]). A paste still owed is
+    /// never replaced by a later one: this one queues behind it — both read the clipboard, in
+    /// order — and a terminal's pane holds this paste's place behind whatever it already holds
+    /// ([`PasteHold`]), so `Ctrl+V`, `k`, `Ctrl+V` reaches the shell as the first paste, `k`, the
+    /// second. A window owes at most [`PASTES_OWED`]; a paste past that desk, or one the lane
+    /// refuses at its door, is said once in the log and, for a terminal, once on screen.
     pub(in crate::runtime) fn ask_for_a_paste(&mut self, into: PasteInto, ask: Ask) -> Result<()> {
         let now = Instant::now();
         self.settle_clipboard(now)?;
@@ -534,39 +585,69 @@ impl<B: Backend> Runtime<'_, B> {
         Ok(())
     }
 
-    /// **Take what the clipboard lane has answered this window, withdraw what it no longer
-    /// wants, and spend what can be spent** — on the turn its wake brings
-    /// (`AppEvent::ClipboardAnswered`), on every turn of the window's (so a lost wake loses no
-    /// answer), and before a new paste is asked.
-    ///
-    /// A copy that landed applies its effect. Every paste's terminal is taken as it comes. A paste
-    /// still owed is withdrawn — ended `Cancelled`, its terminal to the lane's sink, a line in
-    /// `diagnostics.log` saying why — when its pane closed, was restarted or left the front, when
-    /// its field or page let the keyboard go, when it has been owed for
-    /// [`crate::clipboard_lane::PASTE_DEADLINE`], or when what its pane holds has passed the cap;
-    /// the last two also say once on screen that the clipboard was busy. A field's or a page's
-    /// paste is spent as soon as it has ended; a terminal's when it reaches the front of its pane's
-    /// hold ([`Self::advance_the_hold`]). `now` is the turn's clock, read once by the caller.
-    pub(crate) fn settle_clipboard(&mut self, now: Instant) -> Result<()> {
-        // The copies end in the order they were asked (one worker, first in first out); each that
-        // has is answered, in that order.
-        let mut at = 0;
-        while at < self.window.clipboard.copies.len() {
-            let Some(ended) = self.window.clipboard.copies[at].request.take() else {
-                at += 1;
-                continue;
-            };
-            let owed = self.window.clipboard.copies.remove(at);
-            self.answer_copy(owed.effect, ended)?;
-        }
-        for owed in &mut self.window.clipboard.pastes {
-            if owed.ended.is_none()
-                && let Some(ended) = owed.request.as_mut().and_then(ClipboardRequest::take)
-            {
-                owed.ended = Some(ended);
-                owed.request = None;
+    /// **Take every answer this window's clipboard requests hold below `owed`** (the lane's
+    /// earliest request still owed, read once for the whole drain), without answering them — the
+    /// application answers every window's in admission order across the windows
+    /// ([`FolioApp::answer_clipboard`]).
+    pub(crate) fn take_clipboard_answers(
+        &mut self,
+        owed: Option<ClipboardId>,
+    ) -> Vec<(ClipboardId, Answered)> {
+        self.window.clipboard.answered(owed)
+    }
+
+    /// **Answer one request of this window's** that [`Self::take_clipboard_answers`] took: a copy
+    /// that landed applies its effect; a field's or a page's paste is spent now; a terminal's is
+    /// marked ended and goes on from the front of its pane's hold ([`Self::advance_the_hold`]),
+    /// which spends it once every earlier paste of that pane has been. Only here is a paste marked
+    /// ended, so an earlier paste's answer stops at it in the hold until its own turn.
+    pub(crate) fn answer_clipboard_request(
+        &mut self,
+        id: ClipboardId,
+        answered: Answered,
+    ) -> Result<()> {
+        match answered {
+            Answered::Copy { effect, ended } => self.answer_copy(effect, ended),
+            Answered::Paste { ended } => {
+                let Some(at) = self
+                    .window
+                    .clipboard
+                    .pastes
+                    .iter()
+                    .position(|owed| owed.id == id)
+                else {
+                    unreachable!(
+                        "a paste the window took an answer for is owed until it is answered"
+                    )
+                };
+                match self.window.clipboard.pastes[at].into {
+                    PasteInto::Terminal(target) => {
+                        self.window.clipboard.pastes[at].ended = Some(ended);
+                        self.advance_the_hold(target)
+                    }
+                    PasteInto::Field(_) | PasteInto::Preview(_) => {
+                        let owed = self.window.clipboard.pastes.remove(at);
+                        self.spend_paste(owed.into, ended)
+                    }
+                }
             }
         }
+    }
+
+    /// **Withdraw what the window no longer wants from the clipboard lane, and spend what can be
+    /// spent** — after the answers of the lane's wake ([`FolioApp::answer_clipboard`]), on every
+    /// turn of the window's (so a paste's deadline is kept on the turn it falls in), and before a
+    /// new paste is asked. It takes no answer from the lane: those are taken for every window at
+    /// once, so that none is answered ahead of an earlier one in another window.
+    ///
+    /// A paste still owed is withdrawn — ended `Cancelled`, its terminal to the lane's sink, a
+    /// line in `diagnostics.log` saying why — when its pane closed, was restarted or left the
+    /// front, when its field or page let the keyboard go, when it has been owed for
+    /// [`crate::clipboard_lane::PASTE_DEADLINE`], or when what its pane holds has passed the cap;
+    /// the last two also say once on screen that the clipboard was busy. A field's or a page's
+    /// paste that has ended is spent; a terminal's when it reaches the front of its pane's hold
+    /// ([`Self::advance_the_hold`]). `now` is the turn's clock, read once by the caller.
+    pub(crate) fn settle_clipboard(&mut self, now: Instant) -> Result<()> {
         let mut busy = None;
         for at in 0..self.window.clipboard.pastes.len() {
             let owed = &self.window.clipboard.pastes[at];

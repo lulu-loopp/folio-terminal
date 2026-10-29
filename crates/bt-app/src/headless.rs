@@ -1538,8 +1538,12 @@ impl HeadlessFolio {
 
     /// **Every clipboard request the window has made, answered and spent** (T-CLIPBOARD-LANE):
     /// the clipboard lane's worker serves them on its own thread, so the test waits, within the
-    /// lane suite's patience, until the window's turn — which takes each answer as the loop's wake
-    /// would bring it — finds nothing owed.
+    /// lane suite's patience, until the application's drain of the lane's wake
+    /// (`FolioApp::answer_clipboard`, for this one window: the earliest request still owed read
+    /// once, the window's answers below it taken and answered in order, then the window settled)
+    /// finds nothing owed. It runs that pass's steps for its one window rather than calling it
+    /// because a `HeadlessFolio` holds its window outside a `FolioApp`; the pass itself, and its
+    /// merge across windows, are driven through [`HeadlessApplication`].
     ///
     /// The turn's clock is held at the moment the owed paste was asked, so the paste's deadline
     /// never falls inside the wait: a test that means the deadline passes its own clock to
@@ -1555,6 +1559,12 @@ impl HeadlessFolio {
                 .map(|owed| owed.asked_at)
                 .min()
                 .unwrap_or_else(Instant::now);
+            let owed = runtime.app.clipboard_lane.earliest_owed();
+            for (id, answered) in runtime.take_clipboard_answers(owed) {
+                runtime
+                    .answer_clipboard_request(id, answered)
+                    .expect("the clipboard's answer is answered");
+            }
             runtime
                 .settle_clipboard(now)
                 .expect("the clipboard's answers are spent");

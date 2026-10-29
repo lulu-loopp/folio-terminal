@@ -1314,10 +1314,6 @@ crates/bt-app/src/handoff_lane.rs	bt-app crate::handoff_lane::Pending::answered	
 crates/bt-app/src/handoff_lane.rs	bt-app crate::handoff_lane::Pending::answered	Ambiguous	filter_map	1	
 crates/bt-app/src/handoff_lane.rs	bt-app crate::handoff_lane::abandoned	Dynamic	say	1	
 crates/bt-app/src/handoff_lane.rs	bt-app crate::handoff_lane::files_program_refused_notice	Ambiguous	text	1	2026-10-26: T-SPLIT-2B batch 22; the same site, moved by K2 batch 22 with `files_program_refused_notice` from main.rs into handoff_lane.rs: K2 moves the item, not the call
-crates/bt-app/src/handoff_lane.rs	bt-app crate::handoff_lane::in_press_order	Ambiguous	collect	1	
-crates/bt-app/src/handoff_lane.rs	bt-app crate::handoff_lane::in_press_order	Ambiguous	flat_map	1	
-crates/bt-app/src/handoff_lane.rs	bt-app crate::handoff_lane::in_press_order	Ambiguous	into_iter	1	
-crates/bt-app/src/handoff_lane.rs	bt-app crate::handoff_lane::in_press_order	Ambiguous	map	1	
 crates/bt-app/src/handoff_lane.rs	bt-app crate::handoff_lane::run_handoff_lane	Dynamic	execute	1	
 crates/bt-app/src/handoff_lane.rs	bt-app crate::handoff_lane::run_handoff_lane	Dynamic	wake	1	
 crates/bt-app/src/hang_watch.rs	bt-app crate::hang_watch::HangWatch::new	Ambiguous	unwrap_or	2	
