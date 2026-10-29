@@ -591,8 +591,8 @@ pub(crate) fn files_program_refused_notice() -> &'static str {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex, mpsc};
-    use std::time::{Duration, Instant};
 
     use super::*;
     use crate::lane::Gate;
@@ -1282,10 +1282,13 @@ mod tests {
     /// The window thread may not block on the lane. With the door held, the ledger fills to
     /// [`BOUND`] — the one running and [`CAPACITY`] behind it — and every press past that is
     /// refused at once, with [`LANE_FULL`] as its terminal; each admitted press is its own request
-    /// with its own id, so nothing is merged to make room.
+    /// with its own id, so nothing is merged to make room. "At once" is the flood coming back while
+    /// the door is still held, awaited within the lane suite's patience — not a measured time.
     ///
     /// MUTATION: build the lane's ledger with no bound (`None` for `Some(BOUND)` in
-    /// `HandoffLane::start`), and no press is refused.
+    /// `HandoffLane::start`), and no press is refused. Or make the lane's queue a rendezvous
+    /// (`mpsc::sync_channel(0)` for `mpsc::channel()` in `HandoffLane::start`), and the second
+    /// press waits for the held worker.
     #[test]
     fn a_flood_of_presses_is_refused_rather_than_waited_on() {
         let gate = Arc::new(Mutex::new(()));
@@ -1298,14 +1301,23 @@ mod tests {
                 Ok(())
             },
         );
-        let started = Instant::now();
-        let presses: Vec<Result<HandoffRequest, Declined>> = (0..BOUND + 3)
-            .map(|at| lane.submit(window(), Handoff::Open(PathBuf::from(format!("{at}")))))
-            .collect();
-        assert!(
-            started.elapsed() < Duration::from_secs(2),
-            "the press never waits"
-        );
+        // The flood runs on its own thread so that this one can ask whether it came back while the
+        // door was still held; the door is let go before anything is asserted, so a press that
+        // waits for the worker is red here, never a hang.
+        let returned = AtomicBool::new(false);
+        let (presses, while_held) = std::thread::scope(|scope| {
+            let flood = scope.spawn(|| {
+                let presses: Vec<Result<HandoffRequest, Declined>> = (0..BOUND + 3)
+                    .map(|at| lane.submit(window(), Handoff::Open(PathBuf::from(format!("{at}")))))
+                    .collect();
+                returned.store(true, Ordering::SeqCst);
+                presses
+            });
+            let while_held = lane::within_patience(|| returned.load(Ordering::SeqCst));
+            drop(held);
+            (flood.join().expect("the flood's thread"), while_held)
+        });
+        assert!(while_held, "the press never waits");
         let ids: Vec<HandoffId> = presses
             .iter()
             .filter_map(|press| press.as_ref().ok().map(lane::Request::id))
@@ -1323,7 +1335,6 @@ mod tests {
             vec![&Declined::LaneFull; 3],
             "the presses past the bound are refused at the door"
         );
-        drop(held);
     }
 
     /// RED (S-5; D-71) — **the hand-off lane refuses synchronously above its bound**, and its

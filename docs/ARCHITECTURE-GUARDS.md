@@ -907,6 +907,12 @@ read and paused on `update_apply::WaitClock` (`Leaving::leave_on`; `leave` hands
 so a test counts its pauses with `CountedClock`; a road with no clock (a lock only tried, a mark
 only read) is proven by a signal awaited within the suite's patience, or by the state it leaves.
 
+2026-10-29 (T-ELAPSED-BOUNDS-ON-FLOODS-AND-TRACE-SINK): a bounded wait whose subject is that it
+gives up (`trace_sink::flush_sink` at its own budget) is proven the same way: by its return while
+the thread it would wait for is still held, awaited within the suite's patience, with the holder let
+go before the verdict — never by timing it. The hand-off lane's flood and the trace sink's producers
+are read the same way, so a press, an offer or a writer that waits is red, not a hang.
+
 ## Test order and shared fixtures
 
 The rule: a test's verdict does not hang on a file another build step made, on the
