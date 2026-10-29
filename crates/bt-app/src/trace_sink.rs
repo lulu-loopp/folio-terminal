@@ -758,8 +758,9 @@ mod tests {
             assert!(held.try_recv().is_err());
         }
         drop(held);
-        producer.join().unwrap();
+        // The verdict before the join: a producer still waiting is red, never a hang.
         assert!(completed, "a producer blocked on a full queue");
+        producer.join().unwrap();
     }
 
     #[test]
@@ -776,8 +777,9 @@ mod tests {
         // Came back while the lock was still held, within the lane suite's patience.
         let completed = crate::lane::within_patience(|| finished.try_recv().is_ok());
         drop(guard);
-        producer.join().unwrap();
+        // The verdict before the join: a producer still waiting is red, never a hang.
         assert!(completed, "a producer waited for the sender lock");
+        producer.join().unwrap();
         assert_eq!(queue.dropped.load(Ordering::Relaxed), 1);
     }
 
@@ -845,25 +847,27 @@ mod tests {
         sink.fill();
         let release = sink.take_release();
         let dropped_before = sink.dropped();
-        let returned = AtomicBool::new(false);
-        let while_parked = std::thread::scope(|scope| {
-            let offered = &sink;
-            scope.spawn(|| {
+        let sink = Arc::new(sink);
+        let returned = Arc::new(AtomicBool::new(false));
+        let producer = {
+            let sink = Arc::clone(&sink);
+            let returned = Arc::clone(&returned);
+            std::thread::spawn(move || {
                 for index in 0..1000 {
-                    offered.offer(&format!("frame={index}"));
+                    sink.offer(&format!("frame={index}"));
                 }
                 returned.store(true, Ordering::SeqCst);
-            });
-            let while_parked = crate::lane::within_patience(|| returned.load(Ordering::SeqCst));
-            // Let the writer out before the verdict: a producer waiting in `send` then gets its
-            // room, and the scope's join returns.
-            drop(release);
-            while_parked
-        });
+            })
+        };
+        let while_parked = crate::lane::within_patience(|| returned.load(Ordering::SeqCst));
+        // The writer is let out and the verdict asserted before the producer is joined: a
+        // producer still waiting is red, never a hang.
+        drop(release);
         assert!(
             while_parked,
             "a thousand offers to a stalled sink did not come back while it was stalled"
         );
+        producer.join().unwrap();
         assert_eq!(
             sink.dropped(),
             dropped_before + 1000,
@@ -915,11 +919,12 @@ mod tests {
         let ended = crate::lane::within_patience(|| finished.try_recv().is_ok());
         drop(release);
         holder.join().unwrap();
-        writer.join().unwrap();
+        // The verdict before the writer's join: a writer still waiting is red, never a hang.
         assert!(
             ended,
             "the writer waited for a lock another thread was holding"
         );
+        writer.join().unwrap();
     }
 
     /// RED (B-TRACE-STDERR) — **a trace file that cannot be opened is reported
@@ -974,11 +979,12 @@ mod tests {
         let ended = crate::lane::within_patience(|| finished.try_recv().is_ok());
         drop(release);
         holder.join().unwrap();
-        writer.join().unwrap();
+        // The verdict before the writer's join: a writer still waiting is red, never a hang.
         assert!(
             ended,
             "the failed open's report waited for a lock another thread was holding"
         );
+        writer.join().unwrap();
 
         let failing = Arc::new(TraceFile::new(&folder, Some("# header")));
         let (lines, waiting) = sync_channel(QUEUE_DEPTH);
@@ -1036,27 +1042,29 @@ mod tests {
             drop(done);
             let _ = returned.send(());
         });
-        let sink = Sink {
+        let sink = Arc::new(Sink {
             queue: Queue::new(lines, Arc::new(AtomicU64::new(0))),
             writer: Mutex::new(Some(writer)),
             finished: Mutex::new(finished),
-        };
-        // The flush runs on its own thread so that this one can ask whether it came back while the
-        // writer was still stalled; the writer is let go before the verdict, so a flush that waits
-        // for it is red, never a hang. The 20 ms is the flush's own budget, and nothing here
-        // measures it.
-        let returned = AtomicBool::new(false);
-        let while_stalled = std::thread::scope(|scope| {
-            scope.spawn(|| {
-                flush_sink(&sink, Duration::from_millis(20));
-                returned.store(true, Ordering::SeqCst);
-            });
-            let while_stalled = crate::lane::within_patience(|| returned.load(Ordering::SeqCst));
-            release.send(()).unwrap();
-            while_stalled
         });
-        crate::lane::receive(&observed, "the released writer's return");
+        // The flush runs on its own thread so that this one can ask whether it came back while the
+        // writer was still stalled. The writer is let go and the verdict asserted before the flush
+        // is joined, so a flush that waits for it is red, never a hang. The 20 ms is the flush's
+        // own budget, and nothing here measures it.
+        let flushed = Arc::new(AtomicBool::new(false));
+        let flush = {
+            let sink = Arc::clone(&sink);
+            let flushed = Arc::clone(&flushed);
+            std::thread::spawn(move || {
+                flush_sink(&sink, Duration::from_millis(20));
+                flushed.store(true, Ordering::SeqCst);
+            })
+        };
+        let while_stalled = crate::lane::within_patience(|| flushed.load(Ordering::SeqCst));
+        release.send(()).unwrap();
         assert!(while_stalled, "shutdown waited for a stalled writer");
+        flush.join().unwrap();
+        crate::lane::receive(&observed, "the released writer's return");
         assert!(
             lock(&sink.writer).is_none(),
             "stalled writer was not detached"

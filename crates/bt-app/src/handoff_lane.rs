@@ -1302,22 +1302,26 @@ mod tests {
             },
         );
         // The flood runs on its own thread so that this one can ask whether it came back while the
-        // door was still held; the door is let go before anything is asserted, so a press that
-        // waits for the worker is red here, never a hang.
-        let returned = AtomicBool::new(false);
-        let (presses, while_held) = std::thread::scope(|scope| {
-            let flood = scope.spawn(|| {
+        // door was still held. The door is let go and the verdict asserted before the flood is
+        // joined, so a press that waits for the worker is red here and never a hang: a failed
+        // verdict leaves the thread detached, and a flood that came back has only returned left.
+        let lane = Arc::new(lane);
+        let returned = Arc::new(AtomicBool::new(false));
+        let flood = {
+            let lane = Arc::clone(&lane);
+            let returned = Arc::clone(&returned);
+            std::thread::spawn(move || {
                 let presses: Vec<Result<HandoffRequest, Declined>> = (0..BOUND + 3)
                     .map(|at| lane.submit(window(), Handoff::Open(PathBuf::from(format!("{at}")))))
                     .collect();
                 returned.store(true, Ordering::SeqCst);
                 presses
-            });
-            let while_held = lane::within_patience(|| returned.load(Ordering::SeqCst));
-            drop(held);
-            (flood.join().expect("the flood's thread"), while_held)
-        });
+            })
+        };
+        let while_held = lane::within_patience(|| returned.load(Ordering::SeqCst));
+        drop(held);
         assert!(while_held, "the press never waits");
+        let presses = flood.join().expect("the flood's thread");
         let ids: Vec<HandoffId> = presses
             .iter()
             .filter_map(|press| press.as_ref().ok().map(lane::Request::id))
