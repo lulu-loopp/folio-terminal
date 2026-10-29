@@ -1916,20 +1916,19 @@ pub fn leave_process(code: i32) -> ! {
 /// it is on the main thread and an application exists, and says exactly this
 /// when it is not, because a panic hook runs on whichever thread panicked and a
 /// refused launch runs before there is any application at all. A controlled
-/// stop's lost configuration change (T-QUIT-DOCUMENTS) is not said here: it asks
-/// [`a_box_would_be_seen`] first, which answers no on this arm, and says its
-/// notice on `bt-app`'s queued `stderr` road (T-STOP-NOTICE-BOX-QUERY-MACOS).
+/// stop's lost configuration change (T-QUIT-DOCUMENTS) and a frame-shape stop's
+/// crash alert are not said here: each asks [`a_box_would_be_seen`] first, which
+/// answers no on this arm, and says its text on `bt-app`'s queued `stderr` road
+/// (T-STOP-NOTICE-BOX-QUERY-MACOS, T-FRAME-SHAPE-STOP-BOX-QUERY).
 #[cfg(not(any(windows, target_os = "macos")))]
 #[expect(
     clippy::print_stderr,
     reason = "the last-resort fault report, written where it is said, for its two callers: \
               bt-app's announce_panic (the panic hook, after the panic road's fence, where a \
-              queued line would leave with the process; and FolioApp::fail's frame-shape stop on \
-              the window thread, where the synchronous write beside the queue is a known limit, \
-              T-STOP-NOTICE-BOX-QUERY-MACOS report D8) and say_at_the_front_door, before the \
-              resident run has a queue; the stop's lost configuration change asks \
-              a_box_would_be_seen first and says the unseen case through stderr_line \
-              (T-STOP-NOTICE-BOX-QUERY-MACOS)"
+              queued line would leave with the process) and say_at_the_front_door, before the \
+              resident run has a queue; the stop's lost configuration change and the \
+              frame-shape stop's alert ask a_box_would_be_seen first and say the unseen case \
+              through stderr_line (T-STOP-NOTICE-BOX-QUERY-MACOS, T-FRAME-SHAPE-STOP-BOX-QUERY)"
 )]
 pub fn message_box(title: &str, text: &str) {
     eprintln!("{title}");
