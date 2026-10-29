@@ -293,7 +293,11 @@ use bt_doc::Bias;
 #[cfg(test)]
 use bt_persist::WindowStateV1;
 use bt_platform::admission::doors;
-use bt_pty::{OutputWake, PSREADLINE_INVOKE_PROMPT_INPUT, PtyError, PtySession, PtySize};
+#[cfg(test)]
+use bt_pty::PtyError;
+use bt_pty::{OutputWake, PSREADLINE_INVOKE_PROMPT_INPUT, PtySession, PtySize};
+#[cfg(test)]
+use bt_render::foreground_rgb;
 use bt_render::{
     ChromePalette, CursorStyle, DEVICE_REBUILD_ATTEMPTS, DeviceLossPilot, Flight, FrameSource,
     FrameTrigger, GpuContext, GridSize, ImeCursorArea, LatestFrameSlot, LostDevice,
@@ -301,14 +305,16 @@ use bt_render::{
     Travel, WINDOW_TAB_BREATHE_MIN_OPACITY, WINDOW_TAB_BREATHE_PERIOD_MS,
     WINDOW_TAB_BREATHE_REDUCED_OPACITY, WINDOW_TAB_PIN_FADE_MS, WINDOW_TAB_PIN_REVEAL_MS,
     WINDOW_TAB_RING_INDETERMINATE_TURNS, WINDOW_TAB_RING_SPIN_PERIOD_MS,
-    WINDOW_TAB_RING_SWEEP_TRANSITION_MS, background_rgb, current_cursor_style, foreground_rgb,
-    gpu_power_request, scheme_in_force, set_cursor_style, set_theme, theme_revision,
+    WINDOW_TAB_RING_SWEEP_TRANSITION_MS, background_rgb, current_cursor_style, gpu_power_request,
+    set_cursor_style, set_theme, theme_revision,
 };
 #[cfg(test)]
 use bt_term::MouseTracking;
+#[cfg(test)]
+use bt_term::TerminalCanvas;
 use bt_term::{
     DualPlaneSession, MathLayoutOptions, ProgressState, SessionDecorationTask, SessionMathTask,
-    SessionStatus, TerminalCanvas, TerminalModes, TerminalPalette, normalized_local_image_path_key,
+    SessionStatus, TerminalModes, normalized_local_image_path_key,
 };
 use bt_transcript::DEFAULT_STAGING_QUOTA;
 #[cfg(test)]
@@ -356,7 +362,7 @@ use runtime::{
     chrome_tick_reuses_picture, claimed_by, clamp_into_body, clear_copied_selection,
     clipboard_focus_of, column_keyboard, column_notch, columns_wanting_git, composing_event_of,
     composition_outlived_its_field, composition_ruling, crumb_segments, crumb_segments_on,
-    deliver_clipboard_picture, dirty_gate_names, dispatch_decoration_task,
+    deliver_clipboard_picture, deliver_held_input, dirty_gate_names, dispatch_decoration_task,
     dispatch_pending_math_tasks, dispatch_tab_decoration_tasks, document_formulas,
     documents_held_in, documents_held_mut_in, drain_may_take_another_slice, drain_whole_units,
     dropped_files_seat_at, dwm_dark_mode_owed, earliest_named_deadline, end_leaves_of,
@@ -373,26 +379,26 @@ use runtime::{
     image_destination, image_is_pannable, image_meta_sentence, image_pan_key, image_raster_cap,
     image_zoom_caption, image_zoom_key, image_zoom_notch, image_zoom_settles, image_zoom_toggled,
     ime_caret_source, ime_commit_bytes, ime_cursor_area_of, ime_owner, in_drain_feed_turn,
-    input_line_needs_a_space_first, keyboard_owner_is_a_shell, land_successor, landed_source,
-    landing_for_aim, leaf_resize_plan, let_go_unnamed_peek_records, lines_phrase,
-    link_target_to_ask_about, live_viewport_mouse_hit, local_image_activation,
+    input_line_needs_a_space_first, keyboard_owner_is_a_shell, land_shell_birth, land_successor,
+    landed_source, landing_for_aim, leaf_resize_plan, let_go_unnamed_peek_records, lines_phrase,
+    link_target_to_ask_about, live_viewport_mouse_hit, local_image_activation, mark_leaf_painted,
     markdown_chip_ground, markdown_empty_page_offset, markdown_prose_paragraphs,
     markdown_source_cell, markdown_source_offset_at, math_copy_window, math_worker_stopped_notice,
     merge_notice_card, new_tab_cwd, new_tab_leaf_seed, new_tab_tip, next_attention_stop,
-    over_home_ground, owe_sharpened_rasters, page_address_hand_off, page_destination,
-    page_foot_flash, page_foot_lead, page_source_file, pages_that_move_with_their_panes,
-    pane_can_become_a_tab, pane_fade_veil_layers, pane_strip_landing, panel_opacity,
-    paste_answer_text, paste_body, paste_card_key, paste_card_step, paste_offer_is_kept,
-    paste_target_is_live, paste_text, peek_awaits, peek_body_kind, peek_cache_key_for_decode,
-    peek_card_opened, peek_files_named, peek_foot_press, peek_page_texture_key,
-    peek_reads_the_file, peek_scale_task, pending_paste_in, persisted_window_bounds,
-    picture_errand, picture_files_of, pictures_awaited_by, pictures_need_handing_over,
-    pointer_cursor, popup_owner, popup_takes_the_key, preedit_caret_byte, prepare_clipboard_paste,
-    prepare_dropped_paste, press_after_blur, press_belongs_to_the_window, press_files_node,
-    press_pins_a_peek, press_reaches_no_grid, press_spends_itself_closing, pressed_row_identity,
-    preview_block_bar_at, preview_block_wheel, preview_body_bar, preview_caret_row,
-    preview_copies_on_select, preview_document_height, preview_document_key,
-    preview_document_max_scroll, preview_edit_bands, preview_image_placement,
+    offer_pty_input, output_revision, over_home_ground, owe_sharpened_rasters,
+    page_address_hand_off, page_destination, page_foot_flash, page_foot_lead, page_source_file,
+    pages_that_move_with_their_panes, pane_can_become_a_tab, pane_fade_veil_layers,
+    pane_strip_landing, panel_opacity, paste_answer_text, paste_body, paste_card_key,
+    paste_card_step, paste_offer_is_kept, paste_target_is_live, paste_text, peek_awaits,
+    peek_body_kind, peek_cache_key_for_decode, peek_card_opened, peek_files_named, peek_foot_press,
+    peek_page_texture_key, peek_reads_the_file, peek_scale_task, pending_paste_in,
+    persisted_window_bounds, picture_errand, picture_files_of, pictures_awaited_by,
+    pictures_need_handing_over, pointer_cursor, popup_owner, popup_takes_the_key,
+    preedit_caret_byte, prepare_clipboard_paste, prepare_dropped_paste, press_after_blur,
+    press_belongs_to_the_window, press_files_node, press_pins_a_peek, press_reaches_no_grid,
+    press_spends_itself_closing, pressed_row_identity, preview_block_bar_at, preview_block_wheel,
+    preview_body_bar, preview_caret_row, preview_copies_on_select, preview_document_height,
+    preview_document_key, preview_document_max_scroll, preview_edit_bands, preview_image_placement,
     preview_link_activation, preview_link_answers_a_press, preview_opened_label,
     preview_page_browser_hand_off, preview_page_hand_off, preview_press_opens_its_link,
     preview_rail_tip_text, preview_selection_bands, preview_source_of_recent,
@@ -405,15 +411,16 @@ use runtime::{
     resize_worth_solving, resolve_document_pictures, resolved_theme_change, restart_seed,
     restated_scroll, retire_spent_math_copy, revived_page_of, right_press_raises_terminal_menu,
     route_forwarded_mouse_button, route_forwarded_mouse_motion, row_arrival_seat,
-    row_strip_landing, scale_ppm, seat_holds_the_keyboard, seeded_tab, selection_to_copy,
-    should_copy_on_select_release, size_authority_for_rectangle, source_opens_as_a_page,
-    stage_paste, startup_poll_delay, step_leaf_text_scale, step_preview_caret_by_row,
-    stepped_command_mark, stepped_tab, strip_animation_tick_is_due, surface_pixels,
-    surface_subject_of, surface_takes_image_zoom, surfaces_reading, switcher_pin_is_allowed,
-    switcher_row_destination, switcher_rows, tab_close_action, tab_surface, tab_surface_tip_boxes,
+    row_strip_landing, scale_ppm, seat_holds_the_keyboard, seeded_tab, seen_revision,
+    selection_to_copy, settle_attention, should_copy_on_select_release,
+    size_authority_for_rectangle, source_opens_as_a_page, stage_paste, startup_poll_delay,
+    step_leaf_text_scale, step_preview_caret_by_row, stepped_command_mark, stepped_tab,
+    strip_animation_tick_is_due, surface_pixels, surface_subject_of, surface_takes_image_zoom,
+    surfaces_reading, switcher_pin_is_allowed, switcher_row_destination, switcher_rows,
+    synchronized_update_committed, tab_close_action, tab_surface, tab_surface_tip_boxes,
     tab_trailing_targets, take_math_worker_notice, take_pending_paste,
     take_psreadline_resize_reanchor_input, tear_out_rect, tear_pane_into_tab,
-    terminal_ime_cursor_area, terminal_link_answers_a_press, text_field_holding,
+    terminal_ime_cursor_area, terminal_link_answers_a_press, terminal_palette, text_field_holding,
     tick_owes_a_present, tooltip_anchor_for, two_tabs_mut, upright_wheel, verified_target_of,
     video_frame_texture_key, video_still_destination, viewport_of_rect, wheel_axis,
     wheel_points_sideways, wheel_route, wheel_steps_text_size, window_ime_cursor_area,
@@ -8404,31 +8411,6 @@ impl PaneBirth {
         self.typed.borrow_mut().clear();
         Ok(())
     }
-}
-
-/// **A pane's held bytes, delivered to what it was born as** — the shell, or, for a pane born with
-/// no shell (a program this machine does not have, `Started::Nothing`, or a shell that did not
-/// start), nowhere: then the bytes are dropped and `note` is told once how many.
-fn deliver_held_input(
-    birth: &PaneBirth,
-    target: PtyTarget<'_>,
-    mut note: impl FnMut(&str),
-) -> Result<()> {
-    birth.deliver(|held| match target {
-        PtyTarget::Nowhere => {
-            note(&format!(
-                "a pane born with no shell (no program here, or its shell did not start) dropped \
-                 the {} byte(s) typed into it while it waited",
-                held.len()
-            ));
-            Ok(())
-        }
-        target => write_pty_input(
-            target,
-            held,
-            "deliver what was typed while the shell was being born",
-        ),
-    })
 }
 
 struct TabState {
@@ -17411,31 +17393,6 @@ fn replace_psreadline_resize_reanchor_debt(
         psreadline_resize_repaint_input(reanchor.integration, prompt_the_shell_opened).is_some();
 }
 
-/// **The one door every byte this window sends a child goes through** (window-thread
-/// unbounded-call sweep, 2026-08-24).
-///
-/// Every caller of this is on the window thread — a keystroke, a mouse report, an IME commit, a
-/// terminal reply the program asked for, a paste, the PSReadLine anchor chord. Until this
-/// existed each of them reached `PtySession::write` on its own, and that call was a `write_all`
-/// straight onto the ConPTY input pipe: it blocks when the pipe is full, and the pipe is full
-/// exactly when conhost has stopped draining it, which is the state a flooding pane puts conhost
-/// in. `bt_pty::InputRing` is where that wait went and why; what belongs here is the other half
-/// of the contract — **what a window does about a child that has stopped listening.**
-///
-/// Not an error, and the distinction is the whole reason this is a function. A refusal is a fact
-/// about one shell; `?`-ing it out of a keystroke handler would reach `App::fail` and end a
-/// process holding every other pane in the window. So it is said and the window carries on, with
-/// the numbers in the line, because a shell sitting on a megabyte of unread input is a thing the
-/// reader may want to know about the shell rather than a thing to be silent about.
-///
-/// A leaf with no child at all (`BT_PROBE_INPUT`, a restored pane whose shell is gone) is not a
-/// refusal and not an error: there is nowhere for the bytes to go and never was.
-///
-/// A leaf whose shell is being born keeps them for that shell ([`PaneBirth`]).
-fn write_pty_input(pty: PtyTarget<'_>, bytes: &[u8], what: &'static str) -> Result<()> {
-    offer_pty_input(pty, bytes, what).map(drop)
-}
-
 /// **Where a pane's input goes**: its shell's ring, the queue of a shell being born, or nowhere.
 #[derive(Clone, Copy)]
 enum PtyTarget<'a> {
@@ -17481,58 +17438,6 @@ impl ShellSession {
             self.life.birth().map(|birth| &birth.waiting),
             Some(BirthWait::Shell(landing)) if landing.shell.answered()
         )
-    }
-}
-
-/// **What became of the bytes** — the same door, for the callers that have to
-/// know (review 2026-09-17 P2-a).
-///
-/// [`write_pty_input`] swallows a refusal on purpose and always will: a shell
-/// sitting on a megabyte of unread input is a fact about that shell, not an
-/// error for the window to die of. But "swallowed" and "delivered" are two
-/// different things to a caller that is about to **move the keyboard** on the
-/// strength of it, and the drop roads are exactly that caller: a path the ring
-/// turned away, or a pane with no child behind it, must not take the reader's
-/// keyboard to a shell that received nothing and must not bring the window
-/// forward for it.
-///
-/// **[`PtyInput::Queued`] means queued, and no more than that.** The bytes are
-/// on `bt_pty::InputRing` and the writer thread will hand them to the child;
-/// whether the program on the other end reads them, and what it makes of them,
-/// is its own business and nothing this process can report. A drop's focus move
-/// is answering "did this window send it", which is the question this answers.
-fn offer_pty_input(pty: PtyTarget<'_>, bytes: &[u8], what: &'static str) -> Result<PtyInput> {
-    let pty = match pty {
-        PtyTarget::Shell(pty) => pty,
-        PtyTarget::Birth(birth) => {
-            return match birth.hold(bytes) {
-                Ok(()) => Ok(PtyInput::HeldForBirth),
-                // Said as the shell's own refusal is said, and for its reason.
-                Err(refused) => {
-                    crate::diagnostics::stderr_line(format!("{what}: {refused}"));
-                    Ok(PtyInput::Refused)
-                }
-            };
-        }
-        PtyTarget::BehindAPaste(hold) => {
-            hold.hold(bytes);
-            return Ok(PtyInput::HeldForPaste);
-        }
-        PtyTarget::Nowhere => return Ok(PtyInput::NoChild),
-    };
-    match hang_watch::during(hang_watch::Station::PtyInput, || {
-        let result = pty.write_with_reason(bytes, what);
-        hang_watch::counters(bytes.len(), if result.is_ok() { bytes.len() } else { 0 }, 1);
-        result
-    }) {
-        Ok(()) => Ok(PtyInput::Queued),
-        Err(refused @ PtyError::InputRefused { .. }) => {
-            hang_watch::during(hang_watch::Station::DiagnosticWrite, || {
-                crate::diagnostics::stderr_line(format!("{what}: {refused}"));
-            });
-            Ok(PtyInput::Refused)
-        }
-        Err(error) => Err(anyhow::Error::new(error).context(what)),
     }
 }
 
@@ -22356,64 +22261,6 @@ impl SessionFacts {
     }
 }
 
-/// How much this shell has *said*, one drain on.
-///
-/// This is the number "unread" is measured against, and what it counts is the
-/// only thing a badge asking for attention can honestly mean: **the program
-/// wrote something into this pane.** It is deliberately not the session's
-/// `published_revision`, which counts frames put on the glass — a cursor blink,
-/// a hovered link, a chrome repaint and a tab switch all publish frames while
-/// the shell sits in silence, and every one of them used to read as news.
-///
-/// The one exclusion is a reprint *we* asked for. Between the moment a leaf is
-/// told its new size and the moment its resize transaction goes quiescent, the
-/// bytes coming back are the shell answering our question — a prompt redrawn at
-/// a new width is not the program speaking. Bounding the exemption by the
-/// transaction rather than by a timer is what keeps it from swallowing anything
-/// else: outside that window every byte counts again.
-///
-/// The tradeoff is stated rather than hidden: real output that a background
-/// shell happens to print *inside* its own resize window is not counted, so a
-/// tab that prints only during those few hundred milliseconds keeps a clean
-/// badge. That is the honest price of not lighting every tab on every window
-/// resize, and it is the smaller of the two errors — the exemption is bounded by
-/// a transaction the user themselves started.
-fn output_revision(previous: u64, output_arrived: bool, resize_transaction_open: bool) -> u64 {
-    if output_arrived && !resize_transaction_open {
-        previous.saturating_add(1)
-    } else {
-        previous
-    }
-}
-
-/// How much of a shell the user has seen, one present on.
-///
-/// **Painting is seeing.** The ledger is squared against [`output_revision`] at
-/// the exact moment this leaf's cells go to the glass, and at no other moment —
-/// which makes "seen" a fact about pixels rather than a fact about which tab
-/// held the keyboard.
-///
-/// The rule this replaces was "the active tab's ledger keeps up", advanced once
-/// per event-loop turn. It was wrong in both directions at once. Forward: the
-/// pass ran *after* the switch had already changed the active tab, so anything
-/// published between the previous turn and the switch was stranded behind a tab
-/// that had just gone quiet, and the tab the user had been reading lit up behind
-/// them for output that never existed. Backward: a pane that is on screen but
-/// not holding the keyboard never publishes at all, so a tab could go on saying
-/// nothing while a shell inside it talked.
-///
-/// Both disappear here. A leaf that was painted owes nothing, whichever pane of
-/// whichever tab it is; a leaf that was not painted keeps its backlog, including
-/// output that arrived in the same turn as the switch away and never reached the
-/// glass. That last case is the one worth stating: it is *correctly* unread.
-fn seen_revision(previous_seen: u64, output: u64, leaf_was_painted: bool) -> u64 {
-    if leaf_was_painted {
-        output
-    } else {
-        previous_seen
-    }
-}
-
 /// Whether this one shell is something for the mark to breathe about.
 ///
 /// **The verdict is UI-UX §8's and is not touched**: 运行中 = OSC 133 `C` 来了、
@@ -22533,192 +22380,6 @@ struct TabTriggerHand {
 // program can **withdraw**, and the bell keeps exactly the claim it always honestly had:
 // [`StatusClaim::Bell`], a flat dot that a look spends. `attention_is_consumed` stays where it is —
 // the latches it retires are still latches, and red line 4 forbids it a third parameter.
-
-/// The pane a tab's `Awaiting` is about: **the oldest place it holds.**
-///
-/// The one the queue would send you to ([`runtime::attention::next_attention_stop`]'s 先到先服务), which
-/// is what makes it the honest answer to "which request is this dot reporting" — a tab is a lid
-/// over panes, and the claim it wears is the loudest of theirs.
-fn tab_queue_leader(tab: &TabState) -> Option<SeatId> {
-    tab.sessions
-        .iter()
-        .filter_map(|(seat, TerminalPane { session: leaf, .. })| {
-            leaf.attention.ledger.ticket().map(|ticket| (ticket, *seat))
-        })
-        .min_by_key(|(ticket, _)| *ticket)
-        .map(|(_, seat)| seat)
-}
-
-/// **One turn of the attention queue, for every shell in this window** (`attention` plan §11.1.4;
-/// §7.1.5b P1-8).
-///
-/// **What "asking" means, said out loud, and it is not what it was.** The queue's members used to
-/// be the sessions whose bell was latched, because a `BEL` was the only byte a program could send
-/// this terminal that meant *I want you*. Four recordings of a real Claude Code (`attention` plan
-/// §2) established that a bell rings when a **turn ends**, which is an event, and that a badge
-/// meaning "it is standing there waiting for you" is a state — so the badge lit when it should not,
-/// could not be put out, and could not say why. A2 takes the bell out of this door entirely. What
-/// comes in now is a credential the program can **withdraw** ([`attention::AttentionLedger`]), and
-/// the bell keeps the claim it always honestly had: a flat dot a look spends.
-///
-/// **A place is taken once and only once.** The ledger's own guard is that a held place is never
-/// re-stamped, and the difference matters at the other end: the bell latch retires when the tab is
-/// *looked at* ([`attention_is_consumed`]), while a place retires only when it is *answered*.
-/// Re-stamping would hand a shell that asks twice while unanswered a younger place than one that
-/// asked once and waited, and 先到先服务 would quietly become last-come-first.
-///
-/// **Everything a frame can decide, in one pass over one leaf at a time**, which is the shape the
-/// fix of 2026-08-21 left behind and A2 keeps. Four decisions, in the one order that is not
-/// arbitrary:
-///
-/// 1. **the timers that came due** — a credential that ran out this instant is not one to hand a
-///    place to, and the other way round would put an `admit` and a `withdraw` for the same episode
-///    in the file one line apart;
-/// 2. **a bell that has not been announced** — read here because the step below spends the latch it
-///    is read from. It takes no place and mints nothing (red line 14): the end of a turn reaches
-///    the desktop on its own lane and never through the queue;
-/// 3. **the queue's own pass** — which admits a request nobody is looking at and refuses one they
-///    are;
-/// 4. **the look** — watching is consuming, so the bell and failure latches retire on the tab that
-///    is both on screen *and* in a focused window. Both go together because `bt-term` retires them
-///    together, and because "the user has seen this" is one fact and not two.
-///
-/// **No unread ledger arithmetic here, and its absence is load-bearing.** This runs once per turn
-/// of the loop and *after* the turn's tab switch has already been paid, so a ledger advanced from
-/// `tab_is_active` squares the tab that arrived and strands the tab that left one revision behind —
-/// a permanent dot on a tab whose shell never spoke. Seeing is painting, and painting is answered
-/// where the painting happens ([`Runtime::redraw`]).
-// Seven, and each is a different question about one pass: where the panes are, which of them the
-// reader is looking at, where this window is with respect to the reader's eyes, what serial to
-// draw a place from, when now is, where the lines go, and where the interruptions the ledger
-// allows are collected. A struct would move the list rather than shorten it — `place` is not that
-// struct, it is the third question, which happens to take three bits to ask.
-#[allow(clippy::too_many_arguments)]
-fn settle_attention(
-    tabs: &mut [TabState],
-    active_tab: usize,
-    place: notify::WindowPlace,
-    switches: attention::NotificationSwitches,
-    next_place: &mut attention::Places,
-    now: Instant,
-    trace: Option<&attention_trace::Trace>,
-    raised: &mut Vec<AttentionDelivery>,
-) {
-    let traced = trace.is_some();
-    for (index, tab) in tabs.iter_mut().enumerate() {
-        let tab_is_active = index == active_tab;
-        let consumed = attention_is_consumed(tab_is_active, place.focused);
-        let reach = notify::desktop_reach(tab_is_active, place);
-        let tab_id = tab.id;
-        // Only computed when someone is reading: the claim is a fold over every shell in the tab,
-        // and this pass runs on every turn of the event loop. The leader is sampled beside it,
-        // because a dot that goes *out* this turn is reported by the pane that was holding it.
-        let was = traced.then(|| tab.fleet_claim_for(tab_is_active));
-        let leader_before = traced.then(|| tab_queue_leader(tab)).flatten();
-        // Collected while the tab is held mutably and turned into deliveries below, because the
-        // title's three-layer chain reads the pane's own name and its profile's — both facts of
-        // this tab, and both out of reach while its leaves are borrowed.
-        let mut allowed: Vec<(SeatId, attention::Raised)> = Vec::new();
-        for (seat, leaf) in tab.leaves_mut() {
-            let at = attention::Site {
-                tab: index,
-                seat: *seat,
-            };
-            for expired in leaf.attention.clock.due(now) {
-                let outcome = leaf
-                    .attention
-                    .ledger
-                    .apply(at, reach, expired, next_place, now);
-                emit_attention_lines(trace, outcome.lines);
-                allowed.extend(outcome.raised.map(|one| (*seat, one)));
-            }
-            // **The weak tier, which is a level on a status snapshot and has to become an edge.**
-            // `bt-term` mints a generation on the `None → Some` rise of `RequestAttention=yes` and
-            // clears the live value on `=no`; the translation is the ledger's own, next to the
-            // mirror it compares against, so no call site keeps a second copy of what was last
-            // seen. A program restating `yes` every second produces no edge and therefore no line.
-            //
-            // One snapshot for both this and the bell below: `status()` is a coherent reading of
-            // the session, and asking twice would let two decisions in one turn be taken from two
-            // readings of one shell.
-            let reported = leaf.session.status();
-            if let Some(edge) = leaf.attention.ledger.weak_edge(reported.attention_request) {
-                let outcome = leaf
-                    .attention
-                    .ledger
-                    .apply(at, reach, edge, next_place, now);
-                emit_attention_lines(trace, outcome.lines);
-                allowed.extend(outcome.raised.map(|one| (*seat, one)));
-            }
-            if let Some(rang) = reported.bell.filter(|_| !leaf.attention.bell_reported) {
-                leaf.attention.bell_reported = true;
-                // **Neither ringer carries a sentence**, which is the whole of what is wrong with
-                // reading a bell as "it is waiting for you" — so the interruption this raises is
-                // worded from the i18n table rather than quoted from anybody. What the two *do*
-                // differ in is how they arrived, and §13.2.2 is emphatic that only a literal
-                // `0x07` may be recorded as a bell: a `RequestAttention=once` written down by a
-                // program that has found this terminal is a different fact from a program that has
-                // fallen back to the oldest byte there is, and recording them alike makes "is the
-                // far end reaching us over OSC?" unanswerable.
-                let (source, via) = attention_map::bell_provenance(rang);
-                let outcome = leaf
-                    .attention
-                    .ledger
-                    .announce_turn_end(at, reach, switches, source, via, None);
-                emit_attention_lines(trace, outcome.lines);
-                allowed.extend(outcome.raised.map(|one| (*seat, one)));
-            }
-            let settle = attention::Event::Settle {
-                active: tab_is_active,
-                focused: place.focused,
-            };
-            let outcome = leaf
-                .attention
-                .ledger
-                .apply(at, reach, settle, next_place, now);
-            emit_attention_lines(trace, outcome.lines);
-            allowed.extend(outcome.raised.map(|one| (*seat, one)));
-            if consumed {
-                leaf.session.clear_attention();
-            }
-            // Whatever spent the latch — this look, or `mark_seen` on the way in — re-arms the
-            // edge, so the next turn that ends is announced instead of being read as this one.
-            leaf.attention.bell_reported = leaf.session.status().bell_latched();
-        }
-        for (seat, one) in allowed {
-            raised.push(attention_delivery(tab, tab_id, seat, None, one));
-        }
-        if let Some(was) = was {
-            let now_claim = tab.fleet_claim_for(tab_is_active);
-            if now_claim != was {
-                // §13.2.1: the request this change is about, when it is about one at all. The third
-                // branch is the common one — most claim changes are unread, bell or work in flight,
-                // and none of those belongs to a request.
-                let leader = if now_claim == StatusClaim::Awaiting {
-                    tab_queue_leader(tab)
-                } else {
-                    leader_before
-                };
-                let episode = leader.and_then(|seat| tab.sessions.get(&seat)).and_then(
-                    |TerminalPane { session: leaf, .. }| {
-                        leaf.attention.ledger.claim_episode(
-                            was == StatusClaim::Awaiting,
-                            now_claim == StatusClaim::Awaiting,
-                        )
-                    },
-                );
-                attention_trace::emit(trace, || {
-                    attention::claim_line(
-                        index,
-                        episode,
-                        &format!("{was:?}"),
-                        &format!("{now_claim:?}"),
-                    )
-                });
-            }
-        }
-    }
-}
 
 fn emit_attention_lines(trace: Option<&attention_trace::Trace>, lines: Vec<String>) {
     for line in lines {
@@ -33346,58 +33007,6 @@ fn finish_leaf_birth(
     Ok(())
 }
 
-/// **A silent birth death's last-resort shell takes its pane on the birth road**
-/// (T-SHELL-BIRTH-DEATH). The pane is finished from it exactly as a pane whose own program would
-/// not start is ([`finish_leaf_birth`] over a session carrying bt-pty's fallback record): the same
-/// banner under the profile that was asked for, the profile, program, place, paste recipient and
-/// integration of the shell that started. The decision is the dead shell's own, read back from the
-/// pane it was landed on. The record's diagnostics line is not owed here — the birth death's own
-/// exit line names the fallback — so it is spent with the landing.
-fn land_birth_death_fallback_shell(
-    leaf: &mut TerminalPane,
-    pty: PtySession,
-    landing: ShellLanding,
-) -> Result<()> {
-    let ShellLanding {
-        decision,
-        born_grid,
-        owed_physical,
-        ..
-    } = landing;
-    let seed = LeafSeed {
-        profile: leaf.session.launch.profile.clone(),
-        ..LeafSeed::default()
-    };
-    finish_leaf_birth(leaf, Some(pty), &decision, &seed, None, false)?;
-    // The stale spawn record goes before the apply can fail: a fallback that landed but could
-    // not be resized is still a landed fallback, not one still pending.
-    leaf.session.life.take_spawn_fallback();
-    apply_owed_shell_resize(&mut leaf.session, born_grid, owed_physical)?;
-    Ok(())
-}
-
-/// Tell a shell that has just landed the last pane size released after its birth was asked for.
-/// Both an ordinary pane birth and a birth-death fallback spend [`ShellLanding::owed_physical`]
-/// here, through the same admitted PTY-resize door.
-fn apply_owed_shell_resize(
-    leaf: &mut ShellSession,
-    born_grid: GridSize,
-    owed_physical: Option<PhysicalSize<u32>>,
-) -> Result<()> {
-    if let (Some(pty), Some(physical)) = (leaf.life.pty_mut(), owed_physical)
-        && leaf.conpty_grid != born_grid
-    {
-        // The same admitted door every released resize takes (`doors::PtyResize`, row 12).
-        let grid = leaf.conpty_grid;
-        bt_platform::admission::admitted::<doors::PtyResize, _>(|token| {
-            pty_door::resize(token, pty, pty_size(grid, physical)).map_err(anyhow::Error::from)
-        })
-        .unwrap_or_else(|refused| Err(anyhow::Error::from(refused)))
-        .context("tell a landed shell the grid its pane moved to while it was being born")?;
-    }
-    Ok(())
-}
-
 /// **Where a pane stands, said for the profile it is (or will be) running** — the spawn's place
 /// crossed into `profile`'s namespace after a fallback (`birth_place_of_the_started_shell`), told
 /// to the session as the second rung of §7.1.4's ladder, and kept on the leaf. A pane still waiting
@@ -33436,56 +33045,6 @@ fn place_leaf(leaf: &mut ShellSession, decision: &BirthDecision, profile: &str, 
     leaf.launch.born_named = !in_birth && decision.named && spawn_place.is_some();
     // A pane in birth was never put down anywhere yet; its seed still says where it will be.
     leaf.launch.spawn_place = spawn_place.filter(|_| !in_birth);
-}
-
-/// **A pane's shell has answered: land it** (T-BIRTH-OFF-WINDOW). The pane's birth is finished
-/// from the answer exactly as a pane with its shell in hand is ([`finish_leaf_birth`]); a resize
-/// released while the shell was being born is told to it; what was typed meanwhile is written to
-/// it first, in order. Answers the refusal to say when the birth failed — the pane is then a pane
-/// with no shell, and what was typed into it is said dropped. `None` and nothing changed while
-/// the shell has not answered.
-fn land_shell_birth(
-    leaf: &mut TerminalPane,
-    mut note: impl FnMut(&str),
-) -> Result<Option<anyhow::Error>> {
-    let Some(mut held) = leaf.session.life.take_birth() else {
-        return Ok(None);
-    };
-    let BirthWait::Shell(landing) = &mut held.waiting else {
-        leaf.session.life.begin_birth(held);
-        return Ok(None);
-    };
-    let Some(pty_door::Born {
-        session: answer,
-        folder_gone,
-    }) = landing.shell.take()
-    else {
-        leaf.session.life.begin_birth(held);
-        return Ok(None);
-    };
-    // Read off the birth that has left the pane; it is spent only below, in the delivery of what
-    // it holds, so nothing a birth carries can be dropped on the way.
-    let decision = if folder_gone {
-        landing.decision.clone().with_folder_gone(&mut note)
-    } else {
-        landing.decision.clone()
-    };
-    let (born_grid, owed_physical) = (landing.born_grid, landing.owed_physical);
-    let (pty, refusal) = match answer {
-        Ok(pty) => (Some(pty), None),
-        Err(error) => (
-            None,
-            Some(anyhow::Error::from(error).context(format!(
-                "spawn the {} profile in ConPTY",
-                profile_banner_name(&decision.spawn_profile)
-            ))),
-        ),
-    };
-    let seed = held.seed.clone();
-    finish_leaf_birth(leaf, pty, &decision, &seed, None, false)?;
-    apply_owed_shell_resize(&mut leaf.session, born_grid, owed_physical)?;
-    deliver_held_input(&held, leaf.session.input_target(), note)?;
-    Ok(refusal)
 }
 
 /// **Where a pane's birth sits**: the pane's own, or a *Restart shell* successor's beside it.
@@ -33995,27 +33554,6 @@ fn assemble_tab_state(
 fn mark_leaf_seen(leaf: &mut ShellSession) {
     leaf.mark_seen(leaf.output_revision);
     leaf.session.clear_attention();
-}
-
-/// This leaf's cells have just gone to the glass.
-///
-/// One function so that the two halves of the present — the pane holding the
-/// keyboard and every pane beside it — cannot answer the question differently.
-/// They are written separately in [`Runtime::redraw`] only because the borrow
-/// checker sees one `&mut` tab and a list taken by value; nothing about the rule
-/// distinguishes them, and a rule that lived in two places is how a sibling pane
-/// ends up owing a debt it paid in plain sight.
-///
-/// Unlike [`mark_leaf_seen`] this retires no latch. A bell that rings while you
-/// are looking is answered by [`attention_is_consumed`], which asks about the
-/// *window's* focus as well — being painted into a window nobody has in front of
-/// them is not hearing it.
-fn mark_leaf_painted(leaf: &mut ShellSession) {
-    leaf.mark_seen(seen_revision(
-        leaf.last_seen_revision,
-        leaf.output_revision,
-        true,
-    ));
 }
 
 /// **Stand a pane up as a tab of its own, carrying its shell across.**
@@ -34933,331 +34471,6 @@ impl DrainOutcome {
         self.command_ends.extend(other.command_ends);
         self.notifications.extend(other.notifications);
     }
-}
-
-/// The colours a program inside any pane of this process is standing on.
-///
-/// Nineteen colours and the canvas they make, assembled here because this is the
-/// only crate that can see both halves: `bt-render` owns the scheme and the one
-/// luma threshold that sorts dark from light, `bt-term` owns the escape-code
-/// contract that spells the answer. Neither can reach the other, and neither
-/// should — a terminal that derived its own dark/light verdict would be a second
-/// threshold waiting to disagree with the one the window paints by.
-///
-/// The background and the ink are read from the *painted* canvas rather than off
-/// the scheme, because a `BT_BG` override moves the glass without moving the
-/// settings, and what a program asks about is the glass.
-fn terminal_palette_in_force() -> TerminalPalette {
-    terminal_palette(scheme_in_force(), background_rgb(), foreground_rgb())
-}
-
-/// The mapping alone, so it can be pinned without moving process-wide state.
-fn terminal_palette(
-    scheme: bt_render::ColourScheme,
-    background: [u8; 3],
-    foreground: [u8; 3],
-) -> TerminalPalette {
-    TerminalPalette {
-        canvas: if bt_render::background_is_light(background) {
-            TerminalCanvas::Light
-        } else {
-            TerminalCanvas::Dark
-        },
-        background,
-        foreground,
-        cursor: scheme.cursor,
-        ansi: scheme.ansi,
-    }
-}
-
-/// Drain one shell's pipe into its own screen.
-///
-/// "Name" and not "title", and the difference was a live bug. This used to watch
-/// `window_title` alone, which is one of the two things [`resolve_title`] reads
-/// off a shell; the other is the folder it reported over OSC 7, and that is the
-/// layer that names most tabs most of the time. A `cd` therefore moved a tab's
-/// name without marking the chrome for redrawing, and the strip went on showing
-/// the previous folder until some unrelated event — a click, a resize, a tab
-/// switch — repainted it. Measured on a Command Prompt pane: `cd` into
-/// `C:\Program Files` left the tab reading `BetterTerminal` while the prompt one
-/// line below it read `C:\Program Files>`, and it stayed that way indefinitely.
-///
-/// It was invisible while `window_title` was the layer that named things, and
-/// every profile has it: a PowerShell tab is folder-named too. What made it
-/// surface now is Command Prompt, whose only report *is* the folder.
-///
-/// `holds_the_keyboard` is [`runtime::terminal::seat_holds_the_keyboard`] already answered for this
-/// pane — the four bits are the window's and the tab's, and a leaf can supply
-/// none of them about itself.
-/// **Did this pane commit a synchronized update while it was being fed?**
-///
-/// `before` is [`bt_term::DualPlaneSession::synchronized_update_commits`] read on the near side of
-/// the feed. A counter and not the deadline, and the difference is a whole class of block: one
-/// that opens *and* commits inside a single `read(2)` — `BSU`, a screenful, `ESU`, all under the
-/// pty's 1,024-byte cap — leaves the deadline `None` on both sides of that feed, so a drain
-/// sampling the deadline sees nothing happen and makes a completed frame wait. The count cannot
-/// fall between two samples.
-///
-/// A named function rather than a comparison written in place, so that this is one thing a test
-/// can put a real session through — see `coalesce::session_tests`.
-fn synchronized_update_committed(before: u64, session: &bt_term::DualPlaneSession) -> bool {
-    session.synchronized_update_commits() != before
-}
-
-fn drain_leaf_pty(leaf: &mut ShellSession, holds_the_keyboard: bool) -> Result<DrainOutcome> {
-    if leaf.life.pty().is_none() {
-        return Ok(DrainOutcome::default());
-    }
-    let name_before = leaf.name_evidence();
-    // Told on every turn rather than at each of the half-dozen places a theme,
-    // a scheme or a scheme *file* can change, because a list of those places is
-    // a list somebody has to remember to extend. The call is a comparison and a
-    // nineteen-colour copy; it queues bytes only when the canvas actually moved
-    // and only for a pane that asked to hear about it (DEC 2031).
-    hang_watch::during(hang_watch::Station::DrainPalette, || {
-        leaf.session.set_color_palette(terminal_palette_in_force())
-    });
-    let mut changed = false;
-    // **One slice, and then back to the caller that is holding the clock.**
-    //
-    // This was `loop { read; if empty { break } ; feed }`, and the exit it named
-    // is one a busy pane never reaches. The read is
-    // [`bt_pty::OutputRing::try_pop`] over a one-MiB ring that a *reader thread*
-    // refills while this runs, so "the ring is empty" is a question about one
-    // instant, and while the child prints at least as fast as `feed_at` absorbs
-    // it that instant never arrives. Measured on 2026-08-24, release build, one
-    // pane running `for(;;){ [Console]::Out.WriteLine('x'*4000) }` and nothing
-    // else — no second pane, no page, nobody touching the frame: the window
-    // stopped answering **two seconds** after launch and never answered again,
-    // one core burned flat, ~35 MB/s of memory on top, `IsHungAppWindow` true
-    // and the window thread `Running` — not blocked on anything, simply never
-    // returning. That is the whole of the "drag it bigger and the program dies"
-    // report: hosting a page takes a frame from 26 ms to 50 ms, so a pane that
-    // stays just ahead of the terminal at rest falls behind while the frame is
-    // being dragged, and once it is behind the loop stops terminating.
-    //
-    // The budget is not a number invented here. [`bt_pty::TERM_READ_QUANTUM`] is
-    // *already* "the serialized Term actor quantum" of `DESIGN.md` §1.3 — the
-    // unit of output one turn is meant to carry — and `try_pop` already takes at
-    // most one of them. So the fix is to stop asking for a second one on the
-    // same turn, and to say out loud that more is owed.
-    //
-    // Nothing is dropped and nothing waits on a clock: the leftover is answered
-    // on the very next turn, which [`Runtime::drain_pty`] guarantees by raising
-    // the wake. A pane that outruns the window is throttled by the ring and the
-    // pipe behind it, which is what backpressure is for and what the ring was
-    // built to do.
-    //
-    // **What T-DRAIN-BURST changed is the size of the ask, and nothing else in
-    // this function.** A quantum bounds a turn in *bytes*, and the owner's
-    // diagnostics log says what that is worth: holds of 4386, 2791, 1862 and
-    // 3112 ms charged to `drain_pty`, page faults near zero beside them, while
-    // a pane printed a build log. A number of bytes is not a length of time,
-    // because the time a quantum costs is the time its *lines* cost — see
-    // [`DRAIN_TURN_BUDGET`] for the account. So the read is a
-    // [`bt_pty::TERM_READ_SLICE`] now, and the quantum is spent a slice at a
-    // time by [`Runtime::drain_pty`], which looks at the clock in between. One
-    // read per call is unchanged and load-bearing: the caller cannot stop a call
-    // it is already inside, so the loop that repeats this one lives up there,
-    // where the deadline is.
-    let slice = hang_watch::during(hang_watch::Station::DrainRingRead, || {
-        leaf.life
-            .pty()
-            .expect("PTY mode checked above")
-            .read_output_slice()
-    });
-    let bytes = slice.bytes;
-    hang_watch::counters(bytes.len(), 0, 0);
-    // **Was this pane's picture under the program's own control across this slice?**
-    //
-    // A *counter* and not the deadline, and the difference was a defect: a 1,024-byte capped read
-    // holding `BSU … ESU` whole opens and commits a block inside one feed, so the deadline is
-    // `None` on both sides of it and a completed frame would have waited three milliseconds for
-    // nothing. What is compared is how many updates this pane has committed — a question that
-    // cannot fall between two samples. [`crate::coalesce`] declines to wait on either answer.
-    let sync_commits_before = leaf.session.synchronized_update_commits();
-    if !bytes.is_empty() {
-        debug_assert!(bytes.len() <= bt_pty::TERM_READ_SLICE.get());
-        // The drain brackets all of its slices with begin/end_feed_turn, so a
-        // repaint's proven records stay protected until the whole turn settles.
-        hang_watch::during(hang_watch::Station::DrainFeed, || {
-            leaf.session
-                .feed_at(&bytes, Instant::now())
-                .context("apply PTY output")
-        })?;
-        hang_watch::during(hang_watch::Station::DrainReplies, || -> Result<()> {
-            for reply in hang_watch::during(hang_watch::Station::DrainChannel, || {
-                leaf.session.take_pty_writes()
-            }) {
-                write_pty_input(
-                    leaf.input_target(),
-                    &reply,
-                    "return terminal protocol reply to PTY",
-                )?;
-            }
-            Ok(())
-        })?;
-        changed = true;
-    }
-    // Asked of the ring itself rather than guessed from the chunk's length: a
-    // pop that happened to return exactly one quantum may have emptied it, and a
-    // pop that returned less may already have been overtaken by the reader.
-    let pending = hang_watch::during(hang_watch::Station::DrainRingStats, || {
-        leaf.life
-            .pty()
-            .expect("PTY mode checked above")
-            .ring_stats()
-            .current_bytes
-            > 0
-    });
-    // **Where the keyboard is, told to whoever subscribed to hear it** (DEC
-    // 1004; attention plan slice A0.5). Told on every turn for the palette's
-    // reason one screen up — the answer is four facts a window can move in a
-    // dozen places — and the call is a comparison that queues bytes only when
-    // the answer actually changed and only for a pane that asked.
-    //
-    // **After the feed and not beside the palette**, because the bit it consults
-    // is written by the bytes just fed: ConPTY sends `\e[?1004h` ahead of the
-    // first program, so a pane subscribes on the very turn it is born, and a
-    // reconciliation that ran before the feed would owe that pane its opening
-    // report until something else happened to wake the loop.
-    hang_watch::during(hang_watch::Station::DrainKeyboardFocus, || {
-        leaf.report_keyboard_focus(holds_the_keyboard)
-    });
-    // A canvas notification, a focus report, and any colour answer queued behind
-    // them, are owed to a child that has said nothing — so the reply channel is
-    // drained once more outside the read above, which only feeds when the child
-    // speaks.
-    hang_watch::during(hang_watch::Station::DrainReplies, || -> Result<()> {
-        for reply in hang_watch::during(hang_watch::Station::DrainChannel, || {
-            leaf.session.take_pty_writes()
-        }) {
-            write_pty_input(
-                leaf.input_target(),
-                &reply,
-                "return terminal protocol reply to PTY",
-            )?;
-        }
-        Ok(())
-    })?;
-    // The one place a shell is heard to speak. Every leaf of every tab passes
-    // through here on every turn of the loop, which is what lets a pane nobody
-    // is watching keep an honest account of itself — the frame path cannot, and
-    // never could: it runs for the focused pane of the tab on screen and for
-    // nothing else.
-    let outcome_parent = hang_watch::enter(hang_watch::Station::DrainMarks);
-    let outcome = (|| {
-        leaf.output_revision = output_revision(
-            leaf.output_revision,
-            changed,
-            leaf.session.resize_finish_deadline().is_some(),
-        );
-        // **And the one line a restored pane is owed, typed at the moment there is a
-        // prompt to type it at** (§7.54e ④ and ⑤).
-        //
-        // Here for the reason the command ledger below is here: this is the one place
-        // every leaf of every tab passes through on every turn, so a pane nobody is
-        // looking at is served too — and the fact this waits on is read off that very
-        // ledger. **An open mark with nothing executed is a shell reading a line**
-        // (`OSC 133;B` seen, no `C`), which is precisely "there is a prompt and the
-        // cursor is on it"; writing before that would put the command inside a login
-        // banner, or hand it to a shell still sourcing its profile.
-        //
-        // Taken rather than read, so one prompt receives it once.
-        if leaf
-            .session
-            .command_marks()
-            .last()
-            .is_some_and(|mark| mark.executed.is_none() && mark.finished.is_none())
-            && let Some((command, submit)) = leaf.take_typing()
-        {
-            let bytes = quake::typed_into_a_prompt(&command, submit);
-            if !bytes.is_empty() {
-                write_pty_input(
-                    leaf.input_target(),
-                    &bytes,
-                    "type a restored command at the prompt",
-                )?;
-            }
-        }
-        // **A command ending is heard here or nowhere.** The ledger is the shell's
-        // own account of itself (`OSC 133;D`), and this is the one place every leaf's
-        // bytes pass through — so a `git commit` finished in a pane behind a Git page
-        // is noticed whether or not that pane is the focused one.
-        let finished = leaf
-            .session
-            .command_marks()
-            .iter()
-            .rev()
-            .find(|mark| mark.finished.is_some())
-            .map(|mark| mark.id);
-        let ended = finished > leaf.last_finished_command;
-        if ended {
-            leaf.last_finished_command = finished;
-        }
-        // **And the first mark is heard here too**, for the same reason: it is
-        // what gives this pane a rail, and a pane behind another tab earns one at
-        // its first prompt exactly as the pane on screen does.
-        let rail_began = leaf.hear_first_mark();
-        let name_after = leaf.name_evidence();
-        // **A keyboard flag a program asked for and Folio does not honour** is written to the
-        // log the first time this session sees it (T-KEYBOARD-PROTOCOL, design note §3) — here,
-        // because every leaf's bytes pass through here, the pane on screen or not.
-        for line in leaf.session.take_keyboard_protocol_notes() {
-            diagnostics::note(&line);
-        }
-        // **A pane whose PSReadLine is not Folio's after its profile ran** says so once, in the
-        // log and nowhere else (T-INTEGRATION-INJECT-2-BUILD round 2), on the same road.
-        for line in leaf.session.take_line_editor_notes() {
-            diagnostics::note(&line);
-        }
-        Ok(DrainOutcome {
-            // Taken here because this is the one place every leaf of every tab
-            // passes through on every turn, which is the same sentence
-            // `output_revision` and the command ledger above are written under: a
-            // pane nobody is watching is exactly the pane whose notification matters.
-            // The seat is filled in by `drain_tab_pty`, which is the level that knows
-            // it.
-            notifications: leaf
-                .session
-                .take_notifications()
-                .into_iter()
-                .map(|notification| (SeatId(0), notification))
-                .collect(),
-            command_ends: leaf
-                .session
-                .working_directory()
-                .filter(|_| ended)
-                .map(Path::to_path_buf)
-                .into_iter()
-                .collect(),
-            arrived: changed,
-            pending,
-            // **Bytes arrived and the transport did not say there was more**, folded here because a
-            // slice's read boundary is visible nowhere else — see [`crate::coalesce`]. A pane whose
-            // slice ended on a whole capped read is a pane a millisecond ahead of the rest of a
-            // burst; a pane whose slice ended anywhere else has nothing to wait for, and says so.
-            arrived_uncapped: changed && !slice.ends_capped,
-            bytes: bytes.len(),
-            // **The program named its own frame's end during this turn.** That frame is complete and
-            // must not be made to wait behind a timer — however far inside one read the naming fell.
-            sync_bracket_closed: synchronized_update_committed(sync_commits_before, &leaf.session),
-            // **A block is open on this pane.** Asked of every pane and not only the one the frame
-            // path composes: a sibling holding a block open is a sibling whose bytes the parser is
-            // withholding, and a window that waited on its account would be waiting for a program
-            // that has already said where its frame ends.
-            sync_open: leaf.session.synchronized_update_deadline().is_some(),
-            // A leaf cannot know whether it is the one the frame path will compose;
-            // that is a fact about the tab, and [`drain_tab_pty`] is where it is
-            // known and where this is filled in.
-            arrived_off_focus: false,
-            renamed: name_after != name_before,
-            moved: name_after.1 != name_before.1,
-            rail_began,
-        })
-    })();
-    hang_watch::at(outcome_parent);
-    outcome
 }
 
 /// **Everything a window is born with that is not the same in every window.**

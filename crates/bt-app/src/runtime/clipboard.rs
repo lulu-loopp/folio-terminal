@@ -12,8 +12,8 @@ use crate::runtime::keyboard::ime_owner;
 use crate::window_seam::prelude::*;
 use crate::{
     ClipboardWriteEffect, Drag, DropLanding, PasteAnswer, PasteBody, PasteCardKey, PasteOffer,
-    PasteTarget, PreparedClipboardPaste, PreviewSurface, Runtime, ShellSession, StagedPaste,
-    TerminalPane, TextFieldSeat, UserInputKind, i18n, menubar, offer_pty_input,
+    PasteTarget, PreparedClipboardPaste, PreviewSurface, PtyInput, Runtime, ShellSession,
+    StagedPaste, TerminalPane, TextFieldSeat, UserInputKind, hang_watch, i18n, menubar,
     profile_banner_name, restore, seats, text_field, toast,
 };
 use crate::{
@@ -22,7 +22,7 @@ use crate::{
 };
 use anyhow::Result;
 use bt_layout::SeatId;
-use bt_pty::PSREADLINE_PASTE_INPUT;
+use bt_pty::{PSREADLINE_PASTE_INPUT, PtyError};
 use bt_render::{FrameSource, FrameTrigger};
 use bt_term::DualPlaneSession;
 use bt_viewport::{MathBlockAnchor, ViewportProjection};
@@ -1258,6 +1258,62 @@ impl<B: Backend> Runtime<'_, B> {
                 .settings
                 .focus()
                 .is_some_and(|target| self.window.settings.text_field(target).is_some())
+    }
+}
+
+/// **What became of the bytes** — the same door, for the callers that have to
+/// know (review 2026-09-17 P2-a).
+///
+/// [`write_pty_input`] swallows a refusal on purpose and always will: a shell
+/// sitting on a megabyte of unread input is a fact about that shell, not an
+/// error for the window to die of. But "swallowed" and "delivered" are two
+/// different things to a caller that is about to **move the keyboard** on the
+/// strength of it, and the drop roads are exactly that caller: a path the ring
+/// turned away, or a pane with no child behind it, must not take the reader's
+/// keyboard to a shell that received nothing and must not bring the window
+/// forward for it.
+///
+/// **[`PtyInput::Queued`] means queued, and no more than that.** The bytes are
+/// on `bt_pty::InputRing` and the writer thread will hand them to the child;
+/// whether the program on the other end reads them, and what it makes of them,
+/// is its own business and nothing this process can report. A drop's focus move
+/// is answering "did this window send it", which is the question this answers.
+pub(crate) fn offer_pty_input(
+    pty: PtyTarget<'_>,
+    bytes: &[u8],
+    what: &'static str,
+) -> Result<PtyInput> {
+    let pty = match pty {
+        PtyTarget::Shell(pty) => pty,
+        PtyTarget::Birth(birth) => {
+            return match birth.hold(bytes) {
+                Ok(()) => Ok(PtyInput::HeldForBirth),
+                // Said as the shell's own refusal is said, and for its reason.
+                Err(refused) => {
+                    crate::diagnostics::stderr_line(format!("{what}: {refused}"));
+                    Ok(PtyInput::Refused)
+                }
+            };
+        }
+        PtyTarget::BehindAPaste(hold) => {
+            hold.hold(bytes);
+            return Ok(PtyInput::HeldForPaste);
+        }
+        PtyTarget::Nowhere => return Ok(PtyInput::NoChild),
+    };
+    match hang_watch::during(hang_watch::Station::PtyInput, || {
+        let result = pty.write_with_reason(bytes, what);
+        hang_watch::counters(bytes.len(), if result.is_ok() { bytes.len() } else { 0 }, 1);
+        result
+    }) {
+        Ok(()) => Ok(PtyInput::Queued),
+        Err(refused @ PtyError::InputRefused { .. }) => {
+            hang_watch::during(hang_watch::Station::DiagnosticWrite, || {
+                crate::diagnostics::stderr_line(format!("{what}: {refused}"));
+            });
+            Ok(PtyInput::Refused)
+        }
+        Err(error) => Err(anyhow::Error::new(error).context(what)),
     }
 }
 

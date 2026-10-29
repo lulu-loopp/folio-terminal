@@ -2159,7 +2159,7 @@ then a mark.
 | hop | crate | entry | carries | lane |
 |---|---|---|---|---|
 | escape sequence (weak tier) | `bt-term` | `inline_image::parse_request_attention` → `AdapterEvent::AttentionRequest` → `lifecycle::classify` → `DualPlaneSession::apply_attention_request` | `session::AttentionRequest`; the level `SessionStatus::attention_request` | window thread, inside the feed (`bt_app::Runtime::drain_pty`) |
-| level to edge | `bt-app` | `runtime::attention::deliver_osc_attention` (from `Runtime::drain_pty`) and `settle_attention` (from `Runtime::advance_strip_animation`), each through `bt_workbench::attention::AttentionLedger::weak_edge` | `AttentionDelivery` | window thread |
+| level to edge | `bt-app` | `runtime::attention::deliver_osc_attention` (from `Runtime::drain_pty`) and `runtime::attention::settle_attention` (from `Runtime::advance_strip_animation`), each through `bt_workbench::attention::AttentionLedger::weak_edge` | `AttentionDelivery` | window thread |
 | the verb (folio attention, family and event) | `bt-app` | `cli::attention` → `attention_wire::run_verb` → `bt_platform::attention_pipe::send_line` | `cli::AttentionCall`, one line of JSON (`attention_wire::Message`) | the verb's own process, which builds no window |
 | endpoint (strong tier) | `bt-platform` | `attention_pipe::AttentionPipe::start`; its listener hands each line to the closure it was given | one line of text | `folio-attention-endpoint` |
 | park and wake | `bt-app` | `attention_wire::open` → `attention_wire::park` (a bounded inbox, the oldest line dropped) → `AppEvent::AttentionSpoke` | one line of text | parked on `folio-attention-endpoint`; the event wakes the window thread |
@@ -2206,8 +2206,8 @@ A new size reaches a pane's grid at once and its shell at the quiet boundary.
 | release | `bt-app` | `Runtime::turn` → `Runtime::flush_pending_pty_resize` → `release_due_leaf_resize` → `service_pending_pty_resize` (`take_due_pty_resize`, `pty_resize_wake_deadline`) | `PendingPtyResize` | window thread, once per turn, after every other task that can change a session |
 | commit | `bt-app` | `commit_leaf_resize` → `pty_size` → `pty_door::resize`, then `bt_term::DualPlaneSession::mark_pty_resize_requested_at` (or, with nothing to tell, `bt_term::DualPlaneSession::mark_resize_settled_unchanged_at`); `replace_psreadline_resize_reanchor_debt` | `bt_pty::PtySize` | window thread, admitted as the PtyResize door (§5.3 row 12) |
 | pseudoconsole | `bt-pty` | `PtySession::resize` | `PtySize` | window thread, synchronous: the ResizePseudoConsole round trip into conhost |
-| close | `bt-app` | `Runtime::finish_resize_if_quiescent` → `bt_term::DualPlaneSession::finish_resize_if_quiescent`; an owed PSReadLine repair through `runtime::dpi::take_psreadline_resize_reanchor_input` → `write_pty_input` | the repair's bytes | window thread, a later turn (it runs before the release in `Runtime::turn`) |
-| a birth's missed size | `bt-app` | `Runtime::land_births` → `Runtime::land_own_shell` (or, for a restart's successor, `Runtime::land_restart` → `runtime::panes::land_successor`) → `land_shell_birth` → `apply_owed_shell_resize` → `pty_door::resize`; a silent birth death's last-resort shell through `Runtime::land_birth_death_fallback` → `runtime::tabs::land_birth_death_fallback` → `land_birth_death_fallback_shell` → `apply_owed_shell_resize` | `bt_pty::PtySize` | window thread, when the `bt-pty-birth` worker's shell lands |
+| close | `bt-app` | `Runtime::finish_resize_if_quiescent` → `bt_term::DualPlaneSession::finish_resize_if_quiescent`; an owed PSReadLine repair through `runtime::dpi::take_psreadline_resize_reanchor_input` → `runtime::terminal::write_pty_input` | the repair's bytes | window thread, a later turn (it runs before the release in `Runtime::turn`) |
+| a birth's missed size | `bt-app` | `Runtime::land_births` → `Runtime::land_own_shell` (or, for a restart's successor, `Runtime::land_restart` → `runtime::panes::land_successor`) → `runtime::panes::land_shell_birth` → `runtime::panes::apply_owed_shell_resize` → `pty_door::resize`; a silent birth death's last-resort shell through `Runtime::land_birth_death_fallback` → `runtime::tabs::land_birth_death_fallback` → `runtime::tabs::land_birth_death_fallback_shell` → `runtime::panes::apply_owed_shell_resize` | `bt_pty::PtySize` | window thread, when the `bt-pty-birth` worker's shell lands |
 
 The free functions and the one method that sequence it, in call order:
 `resize_worth_solving`, `size_authority_for_rectangle`, `solve_seats`,
@@ -2219,7 +2219,9 @@ The free functions and the one method that sequence it, in call order:
 `take_psreadline_resize_reanchor_input`, and at a birth's landing `land_shell_birth`,
 `land_birth_death_fallback_shell` and `apply_owed_shell_resize`. All are in `main.rs`
 except `resize_worth_solving` and `take_psreadline_resize_reanchor_input`, which K2
-batch 3 (T-SPLIT-2B) moved into `runtime/dpi.rs` beside their callers. The `Runtime` methods around them (`resize`,
+batch 3 (T-SPLIT-2B) moved into `runtime/dpi.rs` beside their callers, and the three landing
+functions, which K2 batch 25 moved beside theirs: `land_shell_birth` and `apply_owed_shell_resize`
+into `runtime/panes.rs`, `land_birth_death_fallback_shell` into `runtime/tabs.rs`. The `Runtime` methods around them (`resize`,
 `resolve_seat_layout`, `resize_leaves_to_layout`, `flush_pending_pty_resize`,
 `finish_resize_if_quiescent`) are in `runtime/dpi.rs`, `runtime/panes.rs` and
 `runtime/diagnostics.rs`.
@@ -2243,7 +2245,7 @@ A paste gesture becomes bytes on the pane's writer thread.
 | prepare | `bt-app` | `runtime::clipboard::prepare_clipboard_paste` (paths through `shell_literal::paths_text`) | `PreparedClipboardPaste` | window thread |
 | convergence | `bt-app` | `Runtime::deliver_paste` → `runtime::clipboard::stage_paste` → `runtime::clipboard::paste_road` (send, the PowerShell input line, or held behind the multi-line card until `Runtime::answer_paste_card`) | `StagedPaste`, `PendingPaste` | window thread |
 | spend | `bt-app` | `Runtime::send_paste` → `runtime::clipboard::paste_body` → `runtime::clipboard::paste_text` (or `runtime::clipboard::paste_spelled` for the input line) → `input::paste_bytes` (bracketed when the pane set mode 2004) | the paste's bytes | window thread |
-| offer | `bt-app` | `offer_pty_input` (a pane in birth holds the bytes instead) | `PtyInput` | window thread |
+| offer | `bt-app` | `runtime::clipboard::offer_pty_input` (a pane in birth holds the bytes instead) | `PtyInput` | window thread |
 | the ring | `bt-pty` | `PtySession::write_with_reason` → `InputRing::try_push` | the paste's bytes, one write | window thread, one lock |
 | the write | `bt-pty` | `pump_pty_input` | the paste's bytes | the pane's writer thread (unnamed, bt-pty's own spawn; outside the thread door, §5.1) |
 

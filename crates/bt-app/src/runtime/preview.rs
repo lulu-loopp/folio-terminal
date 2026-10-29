@@ -7,6 +7,7 @@ use crate::input::Keystroke;
 use crate::preview_viewport::{
     Build, GeometryCost, Layout, Realize, Reconcile, RuntimeMeasure, State, View, capture,
 };
+use crate::runtime::attention::settle_attention;
 use crate::runtime::floats::float_dock_label;
 use crate::runtime::git::graph_key_of;
 use crate::runtime::handoff::{open_local_path_ask, reveal_ask};
@@ -55,8 +56,7 @@ use crate::{
     preview_live, preview_open_lane, preview_press, preview_provenance, preview_select,
     preview_text, preview_trace, preview_viewport, preview_watch, preview_wrap, printable_address,
     profiles, push_markdown_table, reference_activation, scrollback_quota, seats, settings,
-    settle_attention, tab_owes_frame, table_block, text_field, toast, tooltip, video_seat, webhost,
-    webnav,
+    tab_owes_frame, table_block, text_field, toast, tooltip, video_seat, webhost, webnav,
 };
 use crate::{LeafView, TextScale};
 use anyhow::Context;
