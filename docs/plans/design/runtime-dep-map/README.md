@@ -24,7 +24,7 @@ name. They are prose, and nothing holds them. The files are the authority.
 A **topic** is a file under `crates/bt-app/src/`: `main.rs`, `runtime/panes.rs`,
 `preview.rs`. An **item** is a callable named as the census names it: the declaring
 module, then the label (`crate::runtime::panes::Runtime::close_pane`,
-`crate::drain_leaf_pty`, `crate::<Runtime as Deref>::deref`). A `cfg` variant counts
+`crate::mark_leaf_seen`, `crate::<Runtime as Deref>::deref`). A `cfg` variant counts
 as the same item.
 
 | file | one row is | columns |
