@@ -795,14 +795,16 @@ unsafe extern "C" {
 /// anchored at the surface the news is about, and a program that has drawn
 /// nothing — or whose windows are being taken down — has nothing to put a card
 /// on. Its two callers are `bt_app::announce_panic` — the panic hook, when the
-/// resident run has no console to write to, and `FolioApp::fail`'s frame-shape
-/// stop on the window thread — and `say_at_the_front_door`, which
+/// resident run has no console to write to — and `say_at_the_front_door`, which
 /// is a launch that is about to exit. A controlled stop saying, before its
 /// windows close, the configuration changes it could keep nowhere
-/// (T-QUIT-DOCUMENTS; `bt_app`'s `SystemBox::say`) does not come here: it asks
+/// (T-QUIT-DOCUMENTS; `bt_app`'s `SystemBox::say`) does not come here, and
+/// neither does `FolioApp::fail`'s frame-shape stop announcing its crash report
+/// on the window thread (`bt_app`'s `announce_frame_shape_stop`): each asks
 /// [`crate::a_box_would_be_seen`] first and raises the box through the
 /// [`crate::SeenBox`] it answers, so a stop nobody would see a box for says its
-/// notice on the run's `stderr` road and not here (T-STOP-NOTICE-BOX-QUERY-MACOS).
+/// text on the run's `stderr` road and not here (T-STOP-NOTICE-BOX-QUERY-MACOS,
+/// T-FRAME-SHAPE-STOP-BOX-QUERY).
 ///
 /// **Two conditions, and the fallback below them is not a degradation.**
 /// `-[NSAlert runModal]` may only be called on the main thread, and it needs a
@@ -914,12 +916,10 @@ pub(crate) fn an_alert_would_be_seen(mtm: MainThreadMarker) -> bool {
     clippy::print_stderr,
     reason = "the last-resort fault report, written where it is said, for its two callers: \
               bt-app's announce_panic (the panic hook, after the panic road's fence, where a \
-              queued line would leave with the process; and FolioApp::fail's frame-shape stop on \
-              the window thread, where the synchronous write beside the queue is a known limit, \
-              T-STOP-NOTICE-BOX-QUERY-MACOS report D8) and say_at_the_front_door, before the \
-              resident run has a queue; the stop's lost configuration change asks \
-              a_box_would_be_seen first and says the unseen case through stderr_line \
-              (T-STOP-NOTICE-BOX-QUERY-MACOS)"
+              queued line would leave with the process) and say_at_the_front_door, before the \
+              resident run has a queue; the stop's lost configuration change and the \
+              frame-shape stop's alert ask a_box_would_be_seen first and say the unseen case \
+              through stderr_line (T-STOP-NOTICE-BOX-QUERY-MACOS, T-FRAME-SHAPE-STOP-BOX-QUERY)"
 )]
 fn say_to_stderr(title: &str, text: &str) {
     eprintln!("{title}");
