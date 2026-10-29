@@ -176,6 +176,131 @@ fn hostile_math_is_refused_and_the_real_decoration_worker_survives() {
     assert_eq!(fatal_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
 
+/// The first line of [`the_frame_a_panic_report_names`]'s span, and below it the last: the
+/// location a backtrace gives for that frame has to fall between them.
+const NAMED_FRAME_FIRST_LINE: u32 = line!();
+/// A function of this crate the panic report's backtrace has to name, with its file and a line
+/// inside it. Never inlined, so its frame is on the stack when the hook captures it.
+#[inline(never)]
+fn the_frame_a_panic_report_names() -> u8 {
+    panic!("scripted: the frame a panic report names")
+}
+const NAMED_FRAME_LAST_LINE: u32 = line!();
+
+/// RED (plan row 73, bt-app-split §4.4a) — **a contained panic's report resolves a frame of this
+/// crate to its function, its file and a line inside it.**
+///
+/// The panic hook writes `Backtrace::force_capture()` into the report (`panic_report`), and until
+/// this test nothing read what that backtrace says: the panic tests above assert the `panic:` line
+/// or the word `backtrace:`, which a report with an empty, unresolved or useless backtrace passes.
+/// So a change to the profiles' `debug` setting could cost every report its frames, silently.
+/// This test is the guard that change needs first: the production hook (only its final action
+/// replaced), a panic inside [`contained_panic::contain`] — the boundary every worker's unit of
+/// work runs in — and then the report read back: a frame named
+/// `<this crate>::tests::the_frame_a_panic_report_names`, and under it an `at` location in this
+/// file whose line lies inside that function. A name alone would not tell line tables that are
+/// there from line tables that are useless.
+///
+/// What it holds is what the test profile is built with (`debug = "line-tables-only"` since plan
+/// row 73; the dev profile's `debug = 2` keeps more, release's is the same setting). The hang
+/// sample needs no test of its own here: it never symbolises in-process — it records module-relative
+/// addresses (`bt_platform::hang`) that are read offline against the PDB of the build that wrote
+/// them, the shipped one's release PDB.
+///
+/// It runs in a child process, as the hostile-math test above does, because the hook stays
+/// installed for the rest of the process once set.
+///
+/// RED: `CARGO_PROFILE_TEST_DEBUG=false cargo test -p bt-app --bin folio
+/// tests::a_contained_panics_report_names_this_crates_frame_by_file_and_line` — no PDB, the frame
+/// is `<unknown>` and has no location.
+#[test]
+fn a_contained_panics_report_names_this_crates_frame_by_file_and_line() {
+    const CHILD: &str = "BT_BACKTRACE_REPORT_TEST_CHILD";
+    const SELECTOR: &str =
+        "tests::a_contained_panics_report_names_this_crates_frame_by_file_and_line";
+    if std::env::var_os(CHILD).is_none() {
+        let output = bt_platform::quiet_command(std::env::current_exe().unwrap())
+            .args(["--exact", SELECTOR, "--nocapture", "--test-threads=1"])
+            .env(CHILD, "1")
+            .output()
+            .expect("the harness runs its own test");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "the child failed ({}):\n{stdout}{stderr}",
+            output.status
+        );
+        // A selector that names no test is `running 0 tests` and exit 0; the child's own line is
+        // the proof that it ran this body.
+        assert!(
+            stdout
+                .lines()
+                .any(|line| line == "the named frame resolved"),
+            "the child exited 0 without running `{SELECTOR}`:\n{stdout}{stderr}"
+        );
+        return;
+    }
+    let log = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target")
+        .join(bt_testpath::unique_name("backtrace-report-test"))
+        .with_extension("log");
+    std::fs::write(&log, "").unwrap();
+    let fatal_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let calls = fatal_calls.clone();
+    install_panic_log_hook_at(log.clone(), move |_| {
+        calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    });
+    assert!(contained_panic::contain(the_frame_a_panic_report_names).is_err());
+    assert_eq!(
+        fatal_calls.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "a contained panic is logged, never fatal"
+    );
+    let report = std::fs::read_to_string(&log).unwrap();
+    let (_, backtrace) = report
+        .split_once("\nbacktrace:\n")
+        .expect("the report has a backtrace section");
+    let frame = concat!(
+        env!("CARGO_CRATE_NAME"),
+        "::tests::the_frame_a_panic_report_names"
+    );
+    let lines: Vec<&str> = backtrace.lines().map(str::trim).collect();
+    let named = lines
+        .iter()
+        .position(|line| line.contains(frame))
+        .unwrap_or_else(|| panic!("no frame of the backtrace is named `{frame}`:\n{backtrace}"));
+    let location = lines
+        .get(named + 1)
+        .and_then(|line| line.strip_prefix("at "))
+        .unwrap_or_else(|| panic!("`{frame}` has no source location under it:\n{backtrace}"));
+    // `<path>:<line>:<column>`, or `<path>:<line>` where the symboliser knows no column; a drive
+    // letter's colon is followed by no number, so it stays in the path.
+    let (mut path, mut numbers) = (location, Vec::new());
+    while let Some((head, tail)) = path.rsplit_once(':') {
+        let Ok(number) = tail.parse::<u32>() else {
+            break;
+        };
+        numbers.push(number);
+        path = head;
+    }
+    let line = *numbers
+        .last()
+        .unwrap_or_else(|| panic!("`{frame}`'s location `{location}` has no line:\n{backtrace}"));
+    let file: Vec<&str> = path.split(['/', '\\']).collect();
+    assert!(
+        file.ends_with(&["bt-app", "src", "tests.rs"]),
+        "`{frame}` is located in `{path}`, not in this file:\n{backtrace}"
+    );
+    assert!(
+        NAMED_FRAME_FIRST_LINE < line && line < NAMED_FRAME_LAST_LINE,
+        "`{frame}` is located at line {line}, outside its own lines \
+         {NAMED_FRAME_FIRST_LINE}-{NAMED_FRAME_LAST_LINE}:\n{backtrace}"
+    );
+    std::fs::remove_file(&log).unwrap();
+    println!("the named frame resolved");
+}
+
 /// RED (ticket 14) — **a share handed over meets the same program list a local file meets.**
 ///
 /// The share arm leaves through the files column's door (`Handoff::Open`), which reads
