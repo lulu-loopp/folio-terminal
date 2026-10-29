@@ -7555,7 +7555,7 @@ struct ShellSession {
     /// its profile. `OSC 133;B` is the shell saying *I am reading a line now*, which is exactly the
     /// moment this is for, and it is why the third rung needs shell integration at all.
     ///
-    /// Spent once, by [`drain_leaf_pty`]: a second write would be a second copy of the command.
+    /// Spent once, by [`runtime::terminal::drain_leaf_pty`]: a second write would be a second copy of the command.
     /// Written only through [`Self::queue_typing`] and [`Self::take_typing`].
     pending_typing: Option<(String, bool)>,
     session: DualPlaneSession,
@@ -7619,11 +7619,11 @@ struct ShellSession {
     /// grid it always had. A pane is born `false`: the ledger is not restored,
     /// so a revived pane earns its rail at its first prompt like any other.
     ///
-    /// One owner: [`ShellSession::hear_first_mark`], asked in [`drain_leaf_pty`]
+    /// One owner: [`ShellSession::hear_first_mark`], asked in [`runtime::terminal::drain_leaf_pty`]
     /// where every leaf's bytes pass. It travels with the struct, so a pane torn
     /// out into its own tab keeps it.
     has_rail: bool,
-    /// How much this shell has said, counted by [`output_revision`].
+    /// How much this shell has said, counted by [`runtime::terminal::output_revision`].
     ///
     /// Kept here rather than read off the session because the question is
     /// bt-app's, not bt-term's: the session counts the frames it published, and
@@ -8124,7 +8124,7 @@ impl ShellLife {
 
     /// **Shellless or Released → InBirth**: the pane is to be born ([`create_leaf_session`],
     /// [`await_shell`]), or a birth whose shell has not answered goes back to it
-    /// ([`land_shell_birth`]). A debug build refuses any other phase, whose caller would drop the
+    /// ([`runtime::panes::land_shell_birth`]). A debug build refuses any other phase, whose caller would drop the
     /// birth.
     fn begin_birth(&mut self, birth: PaneBirth) {
         debug_assert!(self.has_no_shell());
@@ -8133,7 +8133,7 @@ impl ShellLife {
         }
     }
 
-    /// **InBirth → Shellless**: the birth leaves the pane, to be landed ([`land_shell_birth`]).
+    /// **InBirth → Shellless**: the birth leaves the pane, to be landed ([`runtime::panes::land_shell_birth`]).
     fn take_birth(&mut self) -> Option<PaneBirth> {
         match std::mem::replace(&mut self.phase, Phase::Shellless) {
             Phase::InBirth(birth) => Some(birth),
@@ -8168,7 +8168,7 @@ impl ShellLife {
 
     /// **The pending landing is owed `physical`**: a resize released while the pane's shell
     /// (Bearing) or its last-resort shell (FallingBack) is being born, which the landing tells it
-    /// ([`apply_owed_shell_resize`]). No phase changes.
+    /// ([`runtime::panes::apply_owed_shell_resize`]). No phase changes.
     fn owe_landing_size(&mut self, physical: PhysicalSize<u32>) {
         let landing = match &mut self.phase {
             Phase::InBirth(PaneBirth {
@@ -17432,7 +17432,7 @@ impl ShellSession {
     }
 
     /// Whether this pane is in birth for its shell and the shell has answered — the landing is
-    /// due ([`land_shell_birth`]).
+    /// due ([`runtime::panes::land_shell_birth`]).
     fn shell_answered(&self) -> bool {
         matches!(
             self.life.birth().map(|birth| &birth.waiting),
@@ -17441,7 +17441,7 @@ impl ShellSession {
     }
 }
 
-/// What [`offer_pty_input`] found at the other end.
+/// What [`runtime::clipboard::offer_pty_input`] found at the other end.
 ///
 /// Three answers and not a `bool`, because the two that are not `Queued` are
 /// different facts and a reader of the log needs to be able to tell them apart:
@@ -17612,7 +17612,7 @@ impl ShellSession {
     /// The window and the view compute the truth — window focus, the active tab, the focused
     /// seat ([`runtime::seat_holds_the_keyboard`]) — and the session consumes it: bt-term keeps
     /// the DEC 1004 focus-reporting state and queues the `CSI I` / `CSI O` the child is owed.
-    /// Asked once per drain, by [`drain_leaf_pty`] alone, after the child's bytes are fed (they
+    /// Asked once per drain, by [`runtime::terminal::drain_leaf_pty`] alone, after the child's bytes are fed (they
     /// may be what switched the reports on) and before the replies are collected.
     fn report_keyboard_focus(&mut self, holds: bool) {
         self.session.set_keyboard_focus(holds);
@@ -17632,7 +17632,7 @@ impl ShellSession {
     }
 
     /// **Queue a line to be typed at this shell's next prompt** (§7.54e ⑤), replacing any line
-    /// still queued; [`drain_leaf_pty`] spends it through [`Self::take_typing`].
+    /// still queued; [`runtime::terminal::drain_leaf_pty`] spends it through [`Self::take_typing`].
     fn queue_typing(&mut self, text: String, submit: bool) {
         self.pending_typing = Some((text, submit));
     }
@@ -22187,7 +22187,7 @@ impl StatusClaim {
 #[derive(Clone, Copy, Debug)]
 struct SessionFacts {
     status: SessionStatus,
-    /// How much this shell has said — [`output_revision`]'s count, and the only
+    /// How much this shell has said — [`runtime::terminal::output_revision`]'s count, and the only
     /// number "unread" is measured against.
     ///
     /// Deliberately *not* `status.published_revision`. That one counts frames,
@@ -28312,7 +28312,7 @@ impl TabState {
     ///
     /// One function because two readers ask it: the mark the strip draws
     /// ([`TabState::mark_state`]) and the before/after either side of
-    /// [`settle_attention`]'s pass, which is how `BT_ATTENTION_TRACE` reports a
+    /// [`runtime::attention::settle_attention`]'s pass, which is how `BT_ATTENTION_TRACE` reports a
     /// claim change without inventing a second opinion about what the claim is.
     fn fleet_claim_for(&self, tab_is_active: bool) -> StatusClaim {
         fleet_claim(
@@ -32826,7 +32826,7 @@ fn bare_leaf(
 
 /// **A pane waits for the shell asked for it**: put down where the decision says it will stand —
 /// so a pane split off or restarted from it while it is being born starts there — and in birth on
-/// `shell`, at the grid the shell is being born at, until [`land_shell_birth`].
+/// `shell`, at the grid the shell is being born at, until [`runtime::panes::land_shell_birth`].
 fn await_shell(
     leaf: &mut ShellSession,
     shell: pty_door::ShellBirth,
@@ -33056,7 +33056,7 @@ enum BirthAt {
 
 /// **What a due birth is due for**: its rows or its locale answered (made again through
 /// `create_leaf_session`, asking for its shell), or its shell answered (landed,
-/// [`land_shell_birth`]).
+/// [`runtime::panes::land_shell_birth`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BirthDue {
     Rows,
@@ -34377,7 +34377,7 @@ struct DrainOutcome {
     arrived: bool,
     /// **A pane's ring still held bytes when its turn was over.**
     ///
-    /// The turn is bounded — [`drain_leaf_pty`] takes one
+    /// The turn is bounded — [`runtime::terminal::drain_leaf_pty`] takes one
     /// [`bt_pty::TERM_READ_SLICE`] out of a pane and returns, and
     /// [`Runtime::drain_pty`] stops going round at [`DRAIN_TURN_BUDGET`] or
     /// [`DRAIN_SLICES_PER_TURN`], whichever comes first — so the loop has to be

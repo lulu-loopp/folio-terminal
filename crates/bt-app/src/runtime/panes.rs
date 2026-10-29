@@ -6765,7 +6765,7 @@ pub(crate) fn deliver_held_input(
 }
 
 /// Tell a shell that has just landed the last pane size released after its birth was asked for.
-/// Both an ordinary pane birth and a birth-death fallback spend [`ShellLanding::owed_physical`]
+/// Both an ordinary pane birth and a birth-death fallback spend [`crate::ShellLanding::owed_physical`]
 /// here, through the same admitted PTY-resize door.
 pub(crate) fn apply_owed_shell_resize(
     leaf: &mut ShellSession,

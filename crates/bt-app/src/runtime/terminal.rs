@@ -1901,7 +1901,7 @@ impl<B: Backend> Runtime<'_, B> {
 /// A leaf with no child at all (`BT_PROBE_INPUT`, a restored pane whose shell is gone) is not a
 /// refusal and not an error: there is nowhere for the bytes to go and never was.
 ///
-/// A leaf whose shell is being born keeps them for that shell ([`PaneBirth`]).
+/// A leaf whose shell is being born keeps them for that shell ([`crate::PaneBirth`]).
 pub(crate) fn write_pty_input(pty: PtyTarget<'_>, bytes: &[u8], what: &'static str) -> Result<()> {
     offer_pty_input(pty, bytes, what).map(drop)
 }
@@ -1975,25 +1975,6 @@ pub(crate) fn terminal_palette(
     }
 }
 
-/// Drain one shell's pipe into its own screen.
-///
-/// "Name" and not "title", and the difference was a live bug. This used to watch
-/// `window_title` alone, which is one of the two things [`resolve_title`] reads
-/// off a shell; the other is the folder it reported over OSC 7, and that is the
-/// layer that names most tabs most of the time. A `cd` therefore moved a tab's
-/// name without marking the chrome for redrawing, and the strip went on showing
-/// the previous folder until some unrelated event — a click, a resize, a tab
-/// switch — repainted it. Measured on a Command Prompt pane: `cd` into
-/// `C:\Program Files` left the tab reading `BetterTerminal` while the prompt one
-/// line below it read `C:\Program Files>`, and it stayed that way indefinitely.
-///
-/// It was invisible while `window_title` was the layer that named things, and
-/// every profile has it: a PowerShell tab is folder-named too. What made it
-/// surface now is Command Prompt, whose only report *is* the folder.
-///
-/// `holds_the_keyboard` is [`runtime::terminal::seat_holds_the_keyboard`] already answered for this
-/// pane — the four bits are the window's and the tab's, and a leaf can supply
-/// none of them about itself.
 /// **Did this pane commit a synchronized update while it was being fed?**
 ///
 /// `before` is [`bt_term::DualPlaneSession::synchronized_update_commits`] read on the near side of
@@ -2012,7 +1993,29 @@ pub(crate) fn synchronized_update_committed(
     session.synchronized_update_commits() != before
 }
 
-fn drain_leaf_pty(leaf: &mut ShellSession, holds_the_keyboard: bool) -> Result<DrainOutcome> {
+/// Drain one shell's pipe into its own screen.
+///
+/// "Name" and not "title", and the difference was a live bug. This used to watch
+/// `window_title` alone, which is one of the two things [`crate::resolve_title`] reads
+/// off a shell; the other is the folder it reported over OSC 7, and that is the
+/// layer that names most tabs most of the time. A `cd` therefore moved a tab's
+/// name without marking the chrome for redrawing, and the strip went on showing
+/// the previous folder until some unrelated event — a click, a resize, a tab
+/// switch — repainted it. Measured on a Command Prompt pane: `cd` into
+/// `C:\Program Files` left the tab reading `BetterTerminal` while the prompt one
+/// line below it read `C:\Program Files>`, and it stayed that way indefinitely.
+///
+/// It was invisible while `window_title` was the layer that named things, and
+/// every profile has it: a PowerShell tab is folder-named too. What made it
+/// surface now is Command Prompt, whose only report *is* the folder.
+///
+/// `holds_the_keyboard` is [`seat_holds_the_keyboard`] already answered for this
+/// pane — the four bits are the window's and the tab's, and a leaf can supply
+/// none of them about itself.
+pub(crate) fn drain_leaf_pty(
+    leaf: &mut ShellSession,
+    holds_the_keyboard: bool,
+) -> Result<DrainOutcome> {
     if leaf.life.pty().is_none() {
         return Ok(DrainOutcome::default());
     }

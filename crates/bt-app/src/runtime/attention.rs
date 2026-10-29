@@ -1191,7 +1191,7 @@ impl<B: Backend> Runtime<'_, B> {
 
 /// The pane a tab's `Awaiting` is about: **the oldest place it holds.**
 ///
-/// The one the queue would send you to ([`runtime::attention::next_attention_stop`]'s 先到先服务), which
+/// The one the queue would send you to ([`next_attention_stop`]'s 先到先服务), which
 /// is what makes it the honest answer to "which request is this dot reporting" — a tab is a lid
 /// over panes, and the claim it wears is the loudest of theirs.
 fn tab_queue_leader(tab: &TabState) -> Option<SeatId> {

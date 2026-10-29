@@ -3029,7 +3029,7 @@ impl<B: Backend> Runtime<'_, B> {
 
 /// How much of a shell the user has seen, one present on.
 ///
-/// **Painting is seeing.** The ledger is squared against [`output_revision`] at
+/// **Painting is seeing.** The ledger is squared against [`super::terminal::output_revision`] at
 /// the exact moment this leaf's cells go to the glass, and at no other moment —
 /// which makes "seen" a fact about pixels rather than a fact about which tab
 /// held the keyboard.
@@ -3064,8 +3064,8 @@ pub(crate) fn seen_revision(previous_seen: u64, output: u64, leaf_was_painted: b
 /// distinguishes them, and a rule that lived in two places is how a sibling pane
 /// ends up owing a debt it paid in plain sight.
 ///
-/// Unlike [`mark_leaf_seen`] this retires no latch. A bell that rings while you
-/// are looking is answered by [`attention_is_consumed`], which asks about the
+/// Unlike [`crate::mark_leaf_seen`] this retires no latch. A bell that rings while you
+/// are looking is answered by [`crate::attention_is_consumed`], which asks about the
 /// *window's* focus as well — being painted into a window nobody has in front of
 /// them is not hearing it.
 pub(crate) fn mark_leaf_painted(leaf: &mut ShellSession) {

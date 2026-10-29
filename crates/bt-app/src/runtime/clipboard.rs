@@ -1264,7 +1264,7 @@ impl<B: Backend> Runtime<'_, B> {
 /// **What became of the bytes** — the same door, for the callers that have to
 /// know (review 2026-09-17 P2-a).
 ///
-/// [`write_pty_input`] swallows a refusal on purpose and always will: a shell
+/// [`super::terminal::write_pty_input`] swallows a refusal on purpose and always will: a shell
 /// sitting on a megabyte of unread input is a fact about that shell, not an
 /// error for the window to die of. But "swallowed" and "delivered" are two
 /// different things to a caller that is about to **move the keyboard** on the
