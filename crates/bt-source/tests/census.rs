@@ -1187,20 +1187,20 @@ fn the_shell_life_is_one_fact_written_only_by_its_transitions() {
         writers,
         BTreeSet::from([
             ("crate", "TabState::retire_all_shells"),
-            ("crate", "apply_owed_shell_resize"),
             ("crate", "await_shell"),
             ("crate", "create_leaf_session"),
             ("crate", "finish_leaf_birth"),
-            ("crate", "land_birth_death_fallback_shell"),
-            ("crate", "land_shell_birth"),
             ("crate", "release_due_leaf_resize"),
             ("crate::runtime::clipboard", "Runtime::send_paste"),
             ("crate::runtime::panes", "Runtime::land_own_shell"),
             ("crate::runtime::panes", "Runtime::land_restart"),
+            ("crate::runtime::panes", "apply_owed_shell_resize"),
             ("crate::runtime::panes", "end_leaves_of"),
+            ("crate::runtime::panes", "land_shell_birth"),
             ("crate::runtime::tabs", "Runtime::reap_exited_tabs"),
             ("crate::runtime::tabs", "keep_birth_death_face"),
             ("crate::runtime::tabs", "land_birth_death_fallback"),
+            ("crate::runtime::tabs", "land_birth_death_fallback_shell"),
             (
                 "crate::runtime::terminal",
                 "Runtime::insert_path_into_terminal"
@@ -2001,7 +2001,11 @@ fn the_keyboard_focus_is_one_report() {
     let setter = term("set_keyboard_focus");
     let door = app("ShellSession::report_keyboard_focus");
     assert_eq!(callers.of(&setter), std::slice::from_ref(&door), "one door");
-    assert_eq!(callers.of(&door), [app("drain_leaf_pty")], "one reporter");
+    assert_eq!(
+        callers.of(&door),
+        [app("runtime::terminal::drain_leaf_pty")],
+        "one reporter"
+    );
     let unfollowed = callers.unfollowed_into(&[setter.as_str(), door.as_str()]);
     assert!(
         unfollowed.is_empty(),
@@ -2101,14 +2105,18 @@ fn each_life_transition_has_its_callers() {
         (life("shellless"), &["bare_leaf"]),
         (
             life("begin_birth"),
-            &["await_shell", "create_leaf_session", "land_shell_birth"],
+            &[
+                "await_shell",
+                "create_leaf_session",
+                "runtime::panes::land_shell_birth",
+            ],
         ),
-        (life("take_birth"), &["land_shell_birth"]),
+        (life("take_birth"), &["runtime::panes::land_shell_birth"]),
         (life("record_spawn_fallback"), &["finish_leaf_birth"]),
         (
             life("take_spawn_fallback"),
             &[
-                "land_birth_death_fallback_shell",
+                "runtime::tabs::land_birth_death_fallback_shell",
                 "runtime::panes::Runtime::land_own_shell",
                 "runtime::panes::Runtime::land_restart",
             ],
