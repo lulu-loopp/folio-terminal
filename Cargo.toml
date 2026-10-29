@@ -140,6 +140,10 @@ gif = { version = "=0.14.2", default-features = false, features = ["std", "color
 # *enforced* (`vendor/mitex-parser/src/depth.rs`). A 0.2.x out-resolving the
 # local patch would take that enforcement out of the build and put a stack
 # overflow — which no `catch_unwind` contains — back behind `cat evil.md`.
+# **On a bump of mitex, mitex-parser or any typst crate below** (plan row 74, 2026-10-29): the
+# renderer's frames are what `bt_math::MATH_WORKER_STACK_BYTES` was measured against, so run
+# `CARGO_PROFILE_TEST_OPT_LEVEL=0 cargo test -p bt-math --lib every_recursive_shape` (the
+# unoptimised build `cargo run` makes, on the worker's whole stack) as well as the ordinary suite.
 mitex = "=0.2.4"
 mitex-parser = "=0.2.4"
 mitex-spec-gen = { version = "=0.2.4", features = ["prebuilt"] }
@@ -230,6 +234,7 @@ two-face = { version = "0.4", default-features = false, features = ["syntect-fan
 # (typst-assets' seventeen faces, 9,683,068 bytes); a wasm32 build takes neither, compiles no
 # face in, and is handed its faces by the host (`bt_math::MathEngine::with_faces`). Resolver 3
 # does not unify a target-specific feature across targets, so the split holds.
+# On a bump: the opt-level 0 check written above `mitex` (plan row 74, 2026-10-29).
 typst-as-lib = "=0.16.0"
 typst-layout = "=0.15.0"
 typst-library = "=0.15.0"
