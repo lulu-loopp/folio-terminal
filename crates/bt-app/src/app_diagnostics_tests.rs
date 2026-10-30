@@ -640,6 +640,20 @@ impl SystemBoxes for AStopsBox {
     }
 }
 
+/// What a child says if the panic hook raised a crash box: in a test, its own (review N2).
+const A_CRASH_BOX: &str = "the panic hook raised a crash box";
+
+/// **The panic hook's box in a process of its own** (review N2): the hook's end is installed
+/// with this box, never the system's, so a regression of the alert's table (a panic that finds
+/// the stop's claim and speaks anyway) says a line here instead of raising a real message box.
+struct NoCrashBox;
+
+impl CrashBox for NoCrashBox {
+    fn say_the_crash(&mut self, _text: &str) {
+        println!("\n{A_CRASH_BOX}");
+    }
+}
+
 /// An uncontained panic on a worker, and the worker joined: with the hook's end installed,
 /// the panic is the process's end, or its thread's only.
 fn a_worker_panics() {
@@ -654,8 +668,9 @@ fn a_worker_panics() {
 /// **The child's half**: the production hook (its report and its end, [`the_panic_hooks_end`])
 /// installed over a log of the test's own; a frame-shape stop reported and announced through
 /// [`announce_frame_shape_stop`] with the stop's box above; then `after`, which plants the
-/// second panic. Nothing here raises a real box: a watching console (the child's piped
-/// standard output) takes the alert, or, in a run nobody watches, the box above does.
+/// second panic. Nothing here raises a real box, whatever the tables answer: a watching
+/// console (the child's piped standard output) takes the alert, or, in a run nobody watches,
+/// the box above does; and the hook's own box is [`NoCrashBox`].
 fn a_stop_then_a_panic(case: &str, while_up: fn(), after: impl FnOnce()) {
     let log = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../target")
@@ -665,7 +680,7 @@ fn a_stop_then_a_panic(case: &str, while_up: fn(), after: impl FnOnce()) {
     // The log's name on the child's first line, so the parent reads the very file.
     println!("\nthe log: {}", log.display());
     install_panic_log_hook_at(log.clone(), |path| {
-        the_panic_hooks_end(path);
+        the_panic_hooks_end(path, &mut NoCrashBox);
     });
     let error = anyhow::Error::new(bt_viewport::FrameProjectionError::FrameShape(
         bt_viewport::FrameShapeError::MathBlockBandTop {
@@ -722,6 +737,10 @@ fn the_child_left_by_the_panic_road(output: &std::process::Output, alerts: impl 
         "the second panic's report, once:\n{report}"
     );
     assert_eq!(alerts(&stdout), 1, "the one alert, said once {said}");
+    assert!(
+        !stdout.lines().any(|line| line == A_CRASH_BOX),
+        "the panic hook raised a second alert {said}"
+    );
     std::fs::remove_file(log).unwrap();
 }
 
@@ -793,6 +812,43 @@ fn a_panic_while_a_stops_box_is_up_ends_the_process_when_it_closes() {
         None => {
             diagnostics::as_a_resident_run_nobody_watches();
             a_stop_then_a_panic("panic-during-stop-box", a_worker_panics, || {});
+        }
+        Some(output) => the_child_left_by_the_panic_road(&output, |stdout| {
+            stdout
+                .lines()
+                .filter(|line| *line == THE_STOPS_ALERT)
+                .count()
+        }),
+    }
+}
+
+/// RED (row 102, review F1) — **a panic on the stop's own thread while its alert is up still
+/// ends the process by the panic road.**
+///
+/// The window thread's form of a panic during the stop's alert: one in the alert's own code
+/// (winit buffers every other event while a box pumps). The hook owes its leave to the stop's
+/// thread and returns, and that thread then unwinds out of the alert: the said step, taken
+/// only on a return, never ran, and the panic left by the harness here — by winit and the
+/// loader's teardown in the product. The step is a guard's drop, taken on the way out of the
+/// alert whichever way it is left.
+///
+/// The child is a run nobody watches, so the stop's alert is owed to its box; the box, while
+/// up, panics on its own thread.
+///
+/// MUTATION (observed red): take the said step after the alert instead of in the guard — the
+/// harness catches the panic and prints its summary, and no footer is written.
+#[test]
+fn a_panic_on_the_stops_own_thread_while_its_box_is_up_ends_the_process() {
+    const SELECTOR: &str =
+        "app_diagnostics_tests::a_panic_on_the_stops_own_thread_while_its_box_is_up_ends_the_process";
+    match crate::test_support::a_process_of_its_own(SELECTOR, b"") {
+        None => {
+            diagnostics::as_a_resident_run_nobody_watches();
+            a_stop_then_a_panic(
+                "panic-in-stop-box-own-thread",
+                || panic!("{THE_SECOND_PANIC}"),
+                || {},
+            );
         }
         Some(output) => the_child_left_by_the_panic_road(&output, |stdout| {
             stdout
