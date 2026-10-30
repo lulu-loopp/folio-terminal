@@ -276,11 +276,14 @@ fn the_theme_a_window_opens_in_is_the_one_the_settings_file_names() {
 /// at exactly the moment the first pane is about to be asked what colour it
 /// is standing on.
 ///
-/// The order inside the settling — the contrast theme, the stored pair, the
-/// floor, the theme — is held by what it leaves in force:
+/// What the settling leaves in force — the contrast theme's canvas, else the
+/// stored pair's — is held by
 /// `the_first_canvas_is_settled_from_the_contrast_theme_and_the_stored_pair`
 /// (T-HIGH-CONTRAST, 2026-10-29, where the steps moved into
-/// `settle_the_first_canvas` from this body).
+/// `settle_the_first_canvas` from this body). The text order this test used to
+/// read there (the pair before `set_theme`) is not a hazard: `set_schemes`
+/// refreshes the theme's cached background (observed 2026-10-29, a mutation
+/// moving the pair below `set_theme` stays green).
 ///
 /// Mutation: move `settle_the_first_canvas` back below `create_window`, or
 /// resolve from the window again.

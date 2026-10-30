@@ -54036,10 +54036,9 @@ fn install_minimum_contrast(floor: bt_persist::MinimumContrastV1) -> bool {
 ///   overlay decides both the scheme each canvas wears and the canvas itself, so a window opened
 ///   under one is in its colours from its first frame rather than from the first preference
 ///   notice;
-/// - **the stored pair before `set_theme`**: the theme's own atomic caches the background it
-///   resolves to, and that background is a colour of the scheme rather than a constant, so a
-///   pair adopted afterwards would leave the first frame painted on the canvas of whichever
-///   scheme the process was born with;
+/// - **the stored pair**, whose canvases the theme then resolves among (the theme's atomic
+///   caches the background it resolves to, and `set_schemes` refreshes it, so the pair is in
+///   force on the first frame either way; observed 2026-10-29);
 /// - **the floor beside the schemes**, for their reason: it is read on every cell of the first
 ///   frame, so a file that asks for one is obeyed before that frame is drawn rather than at the
 ///   first press of the row;

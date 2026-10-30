@@ -255,9 +255,9 @@ fn the_preference_notice_puts_the_contrast_theme_in_force_each_time_it_moves() {
 /// `runtime::read_high_contrast`. Run alone in a process of its own, for the process theme.
 ///
 /// MUTATION (observed red): drop the contrast read from `settle_the_first_canvas`, or move it
-/// below `set_theme` — the first frame opens on the row's light canvas under Night sky; or
-/// move `adopt_stored_schemes` below `set_theme` — the first frame's ground is the scheme the
-/// process was born with.
+/// below `set_theme` — the first frame opens on the row's light canvas under Night sky.
+/// (Moving `adopt_stored_schemes` below `set_theme` stays green, observed 2026-10-29:
+/// `set_schemes` refreshes the theme's cached background, so that order is not a hazard.)
 #[test]
 fn the_first_canvas_is_settled_from_the_contrast_theme_and_the_stored_pair() {
     if !crate::test_support::alone_in_a_process(
