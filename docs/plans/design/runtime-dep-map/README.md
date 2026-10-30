@@ -105,7 +105,7 @@ exact count of what it does see.
   `PreviewPane`, `DocumentView`, `PictureView` and `TerminalPane` have none: O-7
   and O-8 put their writes inside their own types, and the pane's writes are its
   own methods (O-5b).
-- **unclassified.tsv**: **261 items, 229 free functions and 32 `Runtime`
+- **unclassified.tsv**: **263 items, 231 free functions and 32 `Runtime`
   methods**, still in `main.rs` (at plan row 102's head, whose alert state splits
   `claim_the_alert` into `the_alert_on_a_watching_console` and adds `a_panics_turn`,
   `a_stops_claim`, `a_stops_alert_said`, their three steps, `the_panic_hooks_end` and
