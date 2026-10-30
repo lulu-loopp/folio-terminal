@@ -2,6 +2,7 @@
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
 use crate::PtyTarget;
+use crate::TermViewPorts;
 use crate::runtime::attention::deliver_osc_attention;
 use crate::runtime::clipboard::input_line_needs_a_space_first;
 use crate::runtime::clipboard::offer_pty_input;
@@ -1878,6 +1879,21 @@ impl<B: Backend> Runtime<'_, B> {
         if let Some(leaf) = self.window.tabs[active].sessions.get_mut(&seat) {
             leaf.view.thumb_awake = Instant::now();
         }
+    }
+
+    /// A tab with no shell has no live view to return to and no selection to
+    /// drop: nothing here is true of it, so nothing changed (§7.1.6h).
+    pub(crate) fn return_to_live_for_input(&mut self) -> bool {
+        if self.focused().is_none() {
+            return false;
+        }
+        let leaf = self.shell_pane_mut();
+        let changed = leaf.session.session.view_selection().is_some()
+            || leaf.view.projection.is_scrolled()
+            || leaf.session.session.port_release_presentation_hold();
+        self.clear_selection();
+        self.shell_pane_mut().view.projection.scroll_to_bottom();
+        changed
     }
 }
 

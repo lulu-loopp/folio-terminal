@@ -8,6 +8,7 @@ use crate::runtime::frame::trace_unchanged_present;
 use crate::runtime::preview::picture_channel_owner;
 use crate::runtime::preview::preview_image_placement;
 use crate::runtime::tabs::pane_can_become_a_tab;
+use crate::runtime::tabs::{closing_this_pane_closes_the_tab, pane_into_new_tab};
 use crate::runtime::terminal::write_pty_input;
 use crate::runtime::windows::dirty_gate_names;
 use crate::window_seam::prelude::*;
@@ -15,8 +16,8 @@ use crate::{
     BirthAt, BirthDue, BirthWait, EASE, HoverFloat, LeafResizeTarget, LeafSeed, LeafView,
     PaneBirth, PaneMotion, PlanInputs, PtyTarget, SuccessorLanding, TextScale, born_in_tab,
     cardhint, conpty_source_of, cubic_bezier, decided_birth, diagnostics, exit_diagnostics,
-    finish_leaf_birth, i18n, icons, pane_into_new_tab, profile_banner_name, pty_door, pty_size,
-    resolved_birth_seed, seed, split_axis, tabs_a_close_loses, toast,
+    finish_leaf_birth, i18n, icons, profile_banner_name, pty_door, pty_size, resolved_birth_seed,
+    seed, split_axis, tabs_a_close_loses, toast,
 };
 use crate::{
     CardAim, ColumnNotch, CommandFlash, DividerDrag, DividerGrip, Drag, DragCarry, DragHandover,
@@ -27,11 +28,10 @@ use crate::{
     PreviewSurface, RAIL_TEXT_FADE, RAIL_TEXT_FADE_OPEN_DELAY, RAIL_TRANSITION, RevealTween,
     RowHost, RowPayload, RowPayloadKind, RowVerb, Runtime, ShellSession, SplitSeed, TabId,
     TabState, TabSurface, TearOut, TerminalPane, attention_trace, auto_split_axis, card_trace,
-    closing_this_pane_closes_the_tab, cmdrail, create_leaf_session, files, float, focus_thumb,
-    glyph_trace, hang_watch, marks, mouse_trace, notice, notify, palette, present_diagnostics,
-    presentation_physical_size, preview, preview_trace, profiles, restore, restore_row_seed,
-    row_verb, scrollback_quota, seats, solve_seats, solve_tree, trace, video_seat, web_thumb,
-    webhost, wheel_zoom_notches,
+    cmdrail, create_leaf_session, files, float, focus_thumb, glyph_trace, hang_watch, marks,
+    mouse_trace, notice, notify, palette, present_diagnostics, presentation_physical_size, preview,
+    preview_trace, profiles, restore, restore_row_seed, row_verb, scrollback_quota, seats,
+    solve_seats, solve_tree, trace, video_seat, web_thumb, webhost, wheel_zoom_notches,
 };
 use anyhow::Context;
 use anyhow::{Result, anyhow};
