@@ -5108,11 +5108,18 @@ mod tests {
     /// report file appears, and the line about it reaches `diagnostics.log` by
     /// the road that owns no lock.
     ///
-    /// The work runs on a second thread only so that this one can put a deadline
-    /// on it: a regression here does not fail an assertion, it stops.
+    /// A test binary opens no process sink (`trace_sink::start` is `main`'s alone), so the
+    /// report's road cannot reach the stalled one: the sink is the state the console would be in,
+    /// and the half the road can meet is the `stderr` lock.
     ///
-    /// MUTATION: put the `eprintln!` back in `write_report`; the report is never
-    /// written and the deadline expires.
+    /// The work runs on a second thread only so that this one can await it within the lane
+    /// suite's patience, with the lock's holder let go before the verdict: a regression here does
+    /// not stop the suite, it is red. The "one more" offer to the full sink is made the same way,
+    /// so an offer that waits for room is red, never a hang.
+    ///
+    /// MUTATION: put the `eprintln!` back in `write_report`; the report does not come back while
+    /// the lock is held. Give `trace_sink::Queue::offer` a `send` in place of its `try_send`; the
+    /// "one more" offer does not come back while the writer is stalled.
     #[test]
     fn a_report_and_its_line_do_not_wait_for_the_console() {
         let private = bt_testpath::temp_path("folio-hang-stalled");
@@ -5121,12 +5128,37 @@ mod tests {
         let reports = private.join("hang-reports");
         let log = private.join(crate::diagnostics::LOG_FILENAME);
 
-        let sink = crate::trace_sink::StalledWriter::start();
+        let mut sink = crate::trace_sink::StalledWriter::start();
         sink.fill();
+        let mut writer_release = sink.take_release();
+        let sink = std::sync::Arc::new(sink);
+        let (answered, answer) = std::sync::mpsc::channel::<bool>();
+        let offering = {
+            let sink = std::sync::Arc::clone(&sink);
+            std::thread::spawn(move || {
+                let _ = answered.send(sink.offer("one more"));
+            })
+        };
+        let mut one_more = None;
+        let came_back = crate::lane::within_patience(|| {
+            one_more = answer.try_recv().ok();
+            one_more.is_some()
+        });
+        if !came_back {
+            // The writer is let out before the verdict: an offer still waiting for room is red,
+            // never a hang.
+            drop(writer_release.take());
+        }
         assert!(
-            !sink.offer("one more"),
+            came_back,
+            "an offer to the stalled, full sink waited for room"
+        );
+        assert_eq!(
+            one_more,
+            Some(false),
             "the sink under test is supposed to be full"
         );
+        offering.join().unwrap();
         let (release, released) = std::sync::mpsc::sync_channel::<()>(0);
         let (locked, holding) = std::sync::mpsc::sync_channel::<()>(1);
         let holder = std::thread::spawn(move || {
@@ -5134,9 +5166,7 @@ mod tests {
             let _ = locked.send(());
             let _ = released.recv();
         });
-        holding
-            .recv_timeout(Duration::from_secs(5))
-            .expect("the holder took the process lock");
+        crate::lane::receive(&holding, "the holder taking the process lock");
 
         let (done, finished) = std::sync::mpsc::sync_channel::<bool>(1);
         let worker = {
@@ -5163,17 +5193,24 @@ mod tests {
                 let _ = done.send(reported.path.is_some() && noted);
             })
         };
-        let completed = finished.recv_timeout(Duration::from_secs(10));
+        // Came back while the lock was still held, within the lane suite's patience.
+        let mut completed = None;
+        let _ = crate::lane::within_patience(|| {
+            completed = finished.try_recv().ok();
+            completed.is_some()
+        });
         drop(release);
         holder.join().unwrap();
-        worker.join().unwrap();
-        drop(sink);
-
+        // The verdict before the worker's join: a report still waiting is red, never a hang.
         assert_eq!(
             completed,
-            Ok(true),
+            Some(true),
             "the report path waited for a console it must not touch"
         );
+        worker.join().unwrap();
+        drop(writer_release);
+        drop(sink);
+
         let written: Vec<PathBuf> = std::fs::read_dir(&reports)
             .expect("the reports directory was created")
             .filter_map(Result::ok)

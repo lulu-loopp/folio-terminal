@@ -1207,17 +1207,35 @@ mod tests {
     /// like one that finds it full, and both are counted. The count reaches the log on the next
     /// line the watchdog writes, once.
     ///
-    /// MUTATION: drop the `lost` count from `Accounts::offer`'s refusal arm and nothing is counted.
+    /// The turn that meets the held ring runs on a thread of its own, its return awaited within
+    /// the lane suite's patience while this thread holds the ring, which is let go before the
+    /// verdict: a push that waits for the ring is red, never a hang.
+    ///
+    /// MUTATION: drop the `lost` count from `Accounts::offer`'s refusal arm and nothing is counted;
+    /// take the ring with `lock()` for `try_lock()` and the turn does not come back while it is
+    /// held.
     #[test]
     fn a_full_ring_counts_losses_and_keeps_the_summary() {
-        let heart = heart();
+        let heart = std::sync::Arc::new(heart());
         for turn in 0..BUDGET_LINES_KEPT as u64 + 3 {
             one_line_turn(&heart, turn * 2_000 * MS);
         }
-        {
-            let _held = heart.accounts.ring().lock().expect("the ring");
-            one_line_turn(&heart, 100_000 * MS);
-        }
+        let held = heart.accounts.ring().lock().expect("the ring");
+        let returned = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let turn = {
+            let heart = std::sync::Arc::clone(&heart);
+            let returned = std::sync::Arc::clone(&returned);
+            std::thread::spawn(move || {
+                one_line_turn(&heart, 100_000 * MS);
+                returned.store(true, std::sync::atomic::Ordering::SeqCst);
+            })
+        };
+        let while_held =
+            crate::lane::within_patience(|| returned.load(std::sync::atomic::Ordering::SeqCst));
+        drop(held);
+        // The verdict before the join: a turn still waiting for the ring is red, never a hang.
+        assert!(while_held, "a turn waited for the ring the watchdog holds");
+        turn.join().unwrap();
         let (taken, lost) = heart.accounts.take_lines();
         assert_eq!((taken.len(), lost), (BUDGET_LINES_KEPT, 4));
         let mut printed = 0;

@@ -1014,14 +1014,38 @@ mod tests {
         let _ = std::fs::remove_dir(&folder);
     }
 
+    /// **The writer says how many lines it lost, and puts out what it has, when its queue lets
+    /// go.** The three offers into a queue of two are made on a thread of their own, and their
+    /// return is awaited within the lane suite's patience while nothing drains the queue; the
+    /// receiver is the holder, let go before the verdict, so an offer that waits for room is red,
+    /// never a hang.
+    ///
+    /// MUTATION: give `Queue::offer` a `send` in place of its `try_send`; the third offer does
+    /// not come back while nothing drains the queue, and the test is red.
     #[test]
     fn the_writer_reports_drops_and_flushes_on_disconnect() {
         let (lines, waiting) = sync_channel(2);
-        let queue = Queue::new(lines, Arc::new(AtomicU64::new(0)));
-        queue.offer(stderr_line("first"));
-        queue.offer(stderr_line("second"));
-        queue.offer(stderr_line("lost"));
-        assert!(queue.close());
+        let queue = Arc::new(Queue::new(lines, Arc::new(AtomicU64::new(0))));
+        let returned = Arc::new(AtomicBool::new(false));
+        let producer = {
+            let queue = Arc::clone(&queue);
+            let returned = Arc::clone(&returned);
+            std::thread::spawn(move || {
+                queue.offer(stderr_line("first"));
+                queue.offer(stderr_line("second"));
+                queue.offer(stderr_line("lost"));
+                returned.store(true, Ordering::SeqCst);
+                queue.close()
+            })
+        };
+        let offered = crate::lane::within_patience(|| returned.load(Ordering::SeqCst));
+        if !offered {
+            // The release: an offer still waiting for room meets a receiver that is gone, and
+            // returns; the producer is left where it stands.
+            drop(waiting);
+            panic!("an offer to a full queue waited for room");
+        }
+        assert!(producer.join().unwrap(), "the queue let its sender go");
         let mut output = Vec::new();
         run_to(&waiting, &queue.dropped, &mut output);
         assert_eq!(

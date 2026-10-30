@@ -1244,6 +1244,30 @@ mod tests {
         })
     }
 
+    /// [`settled`], asked while the test's writer is still held: the settle runs on a thread of
+    /// its own and its answer is awaited within the lane suite's patience. Answers that answer,
+    /// `None` if it did not come in that patience, and the settling thread — which the test joins
+    /// only after it has let the writer go and given its verdict, so a settle that waits past its
+    /// bound for the held writer is red, never a hang.
+    fn settled_while_held(
+        queue: &std::sync::Arc<Queue>,
+        within: Duration,
+    ) -> (Option<Settled>, std::thread::JoinHandle<()>) {
+        let (said, heard) = std::sync::mpsc::channel();
+        let settling = {
+            let queue = std::sync::Arc::clone(queue);
+            std::thread::spawn(move || {
+                let _ = said.send(settled(&queue, within));
+            })
+        };
+        let mut answer = None;
+        let _ = crate::lane::within_patience(|| {
+            answer = heard.try_recv().ok();
+            answer.is_some()
+        });
+        (answer, settling)
+    }
+
     fn lines_of(log: &Path) -> Vec<String> {
         std::fs::read_to_string(log)
             .unwrap_or_default()
@@ -1481,21 +1505,34 @@ mod tests {
     ///
     /// MUTATION: make `Queue::settle` answer without waiting for the fence and the first
     /// assertion goes red.
+    ///
+    /// The settle with the writer held runs on a thread of its own ([`settled_while_held`]), so
+    /// a settle that waits past its bound — `recv()` for `recv_timeout(within)` in
+    /// `Queue::settle` — is red, never a hang.
     #[test]
     fn the_settle_answers_only_once_every_earlier_line_is_on_the_disk() {
         let directory = a_reports_directory("settle");
         let log = directory.join(super::LOG_FILENAME);
         let (queue, drain) = Queue::new(log.clone());
+        let queue = std::sync::Arc::new(queue);
         let (go, writer) = a_held_writer(drain);
         assert!(queue.offer("the first".to_owned()));
         assert!(queue.offer("the second".to_owned()));
+        let (held, settling) = settled_while_held(&queue, Duration::from_millis(50));
+        let unwritten = lines_of(&log).is_empty();
+        go.send(()).expect("the writer is waiting");
+        // The verdict after the writer is let go and before the settle is joined.
+        assert!(
+            held.is_some(),
+            "the settle waited past its bound for a held writer"
+        );
         assert_eq!(
-            settled(&queue, Duration::from_millis(50)),
-            Settled::OutOfTime,
+            held,
+            Some(Settled::OutOfTime),
             "a settle was answered with nothing written"
         );
-        assert!(lines_of(&log).is_empty());
-        go.send(()).expect("the writer is waiting");
+        assert!(unwritten);
+        settling.join().expect("the settling thread returned");
         assert_eq!(settled(&queue, Duration::from_secs(5)), Settled::Written);
         assert_eq!(lines_of(&log), ["the first", "the second"]);
         assert_eq!(
@@ -1545,11 +1582,16 @@ mod tests {
     ///
     /// MUTATION: size the channel at the lines' depth alone (no `FENCE_ROOM`) and the
     /// settle with the writer held is `Unanswered`, not `OutOfTime`.
+    ///
+    /// The settle with the writer held runs on a thread of its own ([`settled_while_held`]), so
+    /// a settle that waits past its bound — `recv()` for `recv_timeout(within)` in
+    /// `Queue::settle` — is red, never a hang.
     #[test]
     fn a_full_queue_still_takes_the_fence_and_the_loss_is_written_above_it() {
         let directory = a_reports_directory("full-fence");
         let log = directory.join(super::LOG_FILENAME);
         let (queue, drain) = Queue::with_depth(log.clone(), 2);
+        let queue = std::sync::Arc::new(queue);
         let (go, writer) = a_held_writer(drain);
         assert!(queue.offer("one".to_owned()));
         assert!(queue.offer("two".to_owned()));
@@ -1557,12 +1599,19 @@ mod tests {
             !queue.offer("three".to_owned()),
             "a full queue refuses a line"
         );
+        let (held, settling) = settled_while_held(&queue, Duration::from_millis(50));
+        go.send(()).expect("the writer is waiting");
+        // The verdict after the writer is let go and before the settle is joined.
+        assert!(
+            held.is_some(),
+            "the settle waited past its bound for a held writer"
+        );
         assert_eq!(
-            settled(&queue, Duration::from_millis(50)),
-            Settled::OutOfTime,
+            held,
+            Some(Settled::OutOfTime),
             "the fence did not get in behind a full queue"
         );
-        go.send(()).expect("the writer is waiting");
+        settling.join().expect("the settling thread returned");
         assert_eq!(settled(&queue, Duration::from_secs(5)), Settled::Written);
         assert_eq!(lines_of(&log), ["one", "two", &super::lost_line(1)]);
         drop(queue);
