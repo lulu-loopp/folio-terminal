@@ -323,7 +323,7 @@ fn the_judge_is_red_on_an_unexpected_pass_a_different_failure_a_skipped_lane_and
         "{unexpected_pass:?}"
     );
     let different = planted(&|verdict| {
-        verdict.result = Err(Failure::SubmissionWaited { longest_ms: 5_000 });
+        verdict.result = Err(Failure::SubmissionWaited { lapses: 1 });
     });
     assert!(
         different.len() == 1 && different[0].contains("different failure"),
@@ -1033,6 +1033,9 @@ enum Planted {
     /// The worker publishes a request's answer while its work still holds the file it took,
     /// and lets the file go after.
     PublishesBeforeLettingGo,
+    /// The asker's admission does not return until the worker has taken the job it queued: a
+    /// press on a busy lane waits for the worker.
+    AdmissionWaitsForTheWorker,
 }
 
 /// How many identities the FIFO scripted lane's ledger owes at most.
@@ -1107,6 +1110,8 @@ impl Queue {
         let mut jobs = locked(&self.jobs);
         loop {
             if let Some(job) = jobs.waiting.pop_front() {
+                // An asker planted to wait for its job to be taken hears it here.
+                self.more.notify_all();
                 return Some(job);
             }
             if jobs.closed {
@@ -1119,6 +1124,16 @@ impl Queue {
     fn close(&self) {
         locked(&self.jobs).closed = true;
         self.more.notify_all();
+    }
+
+    /// **The planted asker's wait**: until the worker has taken `job` from the line (or the lane
+    /// closed). It ends only when the worker moves, which the suite's held [`Gate`] allows only
+    /// once its cap has run out.
+    fn await_taken(&self, job: (u64, u64)) {
+        let mut jobs = locked(&self.jobs);
+        while !jobs.closed && jobs.waiting.contains(&job) {
+            jobs = self.more.wait(jobs).unwrap_or_else(PoisonError::into_inner);
+        }
     }
 }
 
@@ -1257,6 +1272,14 @@ impl Drop for ScriptedLane {
 }
 
 impl ScriptedLane {
+    /// Put `job` in line for the worker — and, on the lane planted so, wait until it is taken.
+    fn enqueue(&self, job: (u64, u64)) {
+        self.queue.push(job);
+        if self.planted == Planted::AdmissionWaitsForTheWorker {
+            self.queue.await_taken(job);
+        }
+    }
+
     fn owe(&self, question: u64) -> Owe {
         Owe {
             kept: Arc::clone(&self.kept),
@@ -1277,7 +1300,7 @@ impl ScriptedLane {
                 let request = self.ledger.admit(self.owe(question))?;
                 self.ledger
                     .publish(twin, Terminal::Superseded { by: request.id() });
-                self.queue.push((request.id(), question));
+                self.enqueue((request.id(), question));
                 Ok(request)
             }
             (Policy::Fifo, Some(twin)) => {
@@ -1286,12 +1309,12 @@ impl ScriptedLane {
                     joined => return joined,
                 }
                 let request = self.ledger.admit(self.owe(question))?;
-                self.queue.push((request.id(), question));
+                self.enqueue((request.id(), question));
                 Ok(request)
             }
             (Policy::Fifo, None) => {
                 let request = self.ledger.admit(self.owe(question))?;
-                self.queue.push((request.id(), question));
+                self.enqueue((request.id(), question));
                 Ok(request)
             }
             (Policy::Latest, _) => {
@@ -1504,6 +1527,41 @@ fn a_lane_built_on_the_seam_keeps_every_claim() {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// RED (T-LANE-CONTRACT-PROMPT-BOUND, plan row 103) — **A full lane answers without waiting, and
+/// an admission that waits for the worker is red** — by the gate's count, not by a clock.
+///
+/// The FIFO scripted lane keeps the claim under the suite's own cap. The same lane planted so that
+/// an admission returns only once the worker has taken its job cannot return while the executor
+/// is held: its flood comes back only because the gate lets go on its own, and that lapse is the
+/// verdict (`SubmissionWaited`). The plant lapses once whatever the cap is, so the test gives the
+/// gate a short one; nothing it asserts reads the time.
+///
+/// MUTATION: drop the `lapses > 0` checks in `full_lane_answers_without_waiting` and `check` —
+/// the planted lane admits the whole flood (`BoundBroken`), and the test is red. Or count no lapse
+/// in `Gate::arrive` — the same. Or let `Gate::arrive` hold without a cap — the planted flood
+/// never returns: the hang the cap turns into this failure.
+#[test]
+fn a_full_lane_answers_without_waiting_and_an_admission_waiting_for_the_worker_is_red() {
+    let claim = Claim::FullLaneAnswersWithoutWaiting;
+    assert_eq!(
+        on_scripted(&SCRIPTED_FIFO, Policy::Fifo, Planted::Nothing, claim),
+        Ok(())
+    );
+    let mut lane = scripted_lane(
+        &SCRIPTED_FIFO,
+        Policy::Fifo,
+        Planted::AdmissionWaitsForTheWorker,
+    );
+    lane.gate.lapse_after(std::time::Duration::from_millis(50));
+    let (requests, waited) = check(&mut lane, claim);
+    assert!(requests > 0, "the claim asked the planted lane nothing");
+    assert_eq!(
+        waited,
+        Err(Failure::SubmissionWaited { lapses: 1 }),
+        "an admission that waits for the worker is a submission that waited"
+    );
 }
 
 /// RED (T-CLIPBOARD-ORDER-HOLDS-BY-SPEED, plan row 72) — **a lane built on the seam takes only

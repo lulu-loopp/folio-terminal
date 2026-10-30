@@ -1878,8 +1878,9 @@ pub(crate) enum Failure {
     NeverStarted,
     /// An answer that should have arrived within the suite's patience did not.
     NoAnswer,
-    /// A submission blocked the asker.
-    SubmissionWaited { longest_ms: u128 },
+    /// A call of the asker's waited on the held executor: the [`Gate`] let go on its own, its cap
+    /// run out, `lapses` times before the claim was done with it.
+    SubmissionWaited { lapses: usize },
     /// The lane admitted or ran more (or fewer) than its declared bound.
     BoundBroken { declared: usize, observed: usize },
     /// A lane with no admission bound took every request of the flood and refused none.
@@ -2098,7 +2099,8 @@ pub(crate) trait LaneUnderTest {
     /// event loop.
     fn probe(&self) -> &WakeProbe;
     /// Put request `question` on the lane for `target` through the lane's own admission. Returns
-    /// at once — how long it took is the suite's to measure.
+    /// at once — whether it waited is the suite's to see: a call that blocks on the held executor
+    /// comes back only when the [`Gate`] lets go on its own, and the gate counts that.
     fn submit(&mut self, target: u32, question: u64) -> Admission;
     /// The target incarnation `target` goes (a window closes, a tab closes).
     fn close_target(&mut self, target: u32);
@@ -2331,16 +2333,14 @@ impl Hold {
 /// How long it watches before concluding that something does not happen.
 #[cfg(test)]
 const QUIET: Duration = Duration::from_millis(300);
-/// A submission slower than this made the asker wait.
-#[cfg(test)]
-const PROMPT: Duration = Duration::from_secs(1);
-/// A held executor lets go after this on its own, so a submission that blocks on it comes back
-/// (slow, and caught) instead of hanging the suite.
-#[cfg(test)]
-const HOLD_LIMIT: Duration = Duration::from_secs(5);
-
 /// **The executor's gate**: the suite holds it, counts what passed it, and can make the worker die
 /// in it.
+///
+/// A held gate is a cap, never a pass condition: a worker held in it longer than the gate's cap
+/// ([`PATIENCE`] unless [`Gate::lapse_after`] says otherwise) lets go on its own, once, and the
+/// gate counts it ([`Gate::lapses`]). Only a call that waited on the held worker can need that
+/// release to come back, so a count above zero is the asker having waited — read as state, and a
+/// call blocked on the executor turns into a failure rather than a hang.
 #[cfg(test)]
 #[derive(Default)]
 pub(crate) struct Gate {
@@ -2367,6 +2367,10 @@ struct GateState {
     taken: usize,
     /// Whether the suite has looked at the lent file since the last lend.
     looked: bool,
+    /// How long a worker stays held before the gate lets go on its own; `None` is [`PATIENCE`].
+    cap: Option<Duration>,
+    /// How many times the gate let go on its own, its cap run out while still held.
+    lapses: usize,
 }
 
 /// **What one execution holds of the file the suite lent it** ([`Gate::lend`]): the file, opened
@@ -2391,16 +2395,24 @@ pub(crate) const REFUSED_START: &str = "the lane contract suite refuses this thr
 #[cfg(test)]
 impl Gate {
     /// **Called by the seam's scripted worker where a task begins**, outside the task's panic
-    /// catch ([`task`]): counted, held, and the worker ended here when the suite asks.
+    /// catch ([`task`]): counted, held, and the worker ended here when the suite asks. A hold that
+    /// outlasts the gate's cap is let go here, once, and counted as a lapse.
     pub(crate) fn arrive(&self) {
         let mut state = lock(&self.state);
         state.entered += 1;
         self.changed.notify_all();
+        let cap = state.cap.unwrap_or(PATIENCE);
         let since = Instant::now();
-        while state.held && since.elapsed() < HOLD_LIMIT {
+        while state.held {
+            if since.elapsed() >= cap {
+                state.held = false;
+                state.lapses += 1;
+                self.changed.notify_all();
+                break;
+            }
             state = self
                 .changed
-                .wait_timeout(state, HOLD_LIMIT)
+                .wait_timeout(state, cap)
                 .unwrap_or_else(PoisonError::into_inner)
                 .0;
         }
@@ -2507,6 +2519,19 @@ impl Gate {
 
     pub(crate) fn entered(&self) -> usize {
         lock(&self.state).entered
+    }
+
+    /// How many times the gate let go on its own because a hold outlasted its cap: each one is a
+    /// call that waited on the held worker.
+    pub(crate) fn lapses(&self) -> usize {
+        lock(&self.state).lapses
+    }
+
+    /// **For a planted lane only**: the gate lets go on its own after `cap` instead of
+    /// [`PATIENCE`]. A lane that cannot return before its worker moves lapses once under any cap,
+    /// so a short one only spares the test the wait.
+    pub(crate) fn lapse_after(&self, cap: Duration) {
+        lock(&self.state).cap = Some(cap);
     }
 
     fn executed(&self) -> Vec<u64> {
@@ -2652,11 +2677,9 @@ impl Run<'_> {
         self.lane.contract()
     }
 
-    fn submit(&mut self, target: u32, question: u64) -> (Admission, Duration) {
+    fn submit(&mut self, target: u32, question: u64) -> Admission {
         self.requests += 1;
-        let started = Instant::now();
-        let admission = self.lane.submit(target, question);
-        (admission, started.elapsed())
+        self.lane.submit(target, question)
     }
 
     /// Drain until `done` holds for everything found so far, or [`PATIENCE`] runs out.
@@ -2708,7 +2731,7 @@ impl Run<'_> {
     /// Hold the executor and put request `0` on it, waiting until it has started.
     fn hold_one(&mut self) -> Result<Admission, Failure> {
         self.lane.gate().hold();
-        let (first, _) = self.submit(0, 0);
+        let first = self.submit(0, 0);
         if self.lane.gate().wait_entered(1) {
             Ok(first)
         } else {
@@ -2750,20 +2773,17 @@ fn full_lane_answers_without_waiting(run: &mut Run<'_>) -> Result<(), Failure> {
         Bound::Unbounded => 64,
     };
     let mut admissions = vec![first];
-    let mut longest = Duration::ZERO;
     for question in 1..=flood as u64 {
-        let (admission, took) = run.submit(0, question);
-        longest = longest.max(took);
-        admissions.push(admission);
+        admissions.push(run.submit(0, question));
     }
     // What the consumer hears while the executor is still held: the refusals, if the lane gives
     // them.
     let while_held = run.lane.drain();
+    // The flood returned while the executor was held, unless the gate had to let go for it.
+    let lapses = run.lane.gate().lapses();
     run.lane.gate().release();
-    if longest > PROMPT {
-        return Err(Failure::SubmissionWaited {
-            longest_ms: longest.as_millis(),
-        });
+    if lapses > 0 {
+        return Err(Failure::SubmissionWaited { lapses });
     }
     let mut found = while_held;
     match contract.replacement {
@@ -2819,8 +2839,8 @@ fn full_lane_answers_without_waiting(run: &mut Run<'_>) -> Result<(), Failure> {
 
 #[cfg(test)]
 fn every_request_has_its_own_identity(run: &mut Run<'_>) -> Result<(), Failure> {
-    let (first, _) = run.submit(0, 7);
-    let (second, _) = run.submit(0, 7);
+    let first = run.submit(0, 7);
+    let second = run.submit(0, 7);
     let mut found = Vec::new();
     let settled = match run.contract().replacement {
         Replacement::LatestValue => {
@@ -2870,7 +2890,7 @@ fn order_is_as_declared(run: &mut Run<'_>) -> Result<(), Failure> {
             Replacement::LatestValue => 0,
             Replacement::Fifo => (question % 2) as u32,
         };
-        admissions.push(run.submit(target, question).0);
+        admissions.push(run.submit(target, question));
     }
     run.lane.gate().release();
     let mut found = Vec::new();
@@ -2961,7 +2981,7 @@ fn an_abandoned_or_older_answer(run: &mut Run<'_>) -> Result<(), Failure> {
     match run.contract().cancellation {
         Cancellation::Abandon => {
             let gone = run.hold_one()?;
-            let (kept, _) = run.submit(1, 1);
+            let kept = run.submit(1, 1);
             run.lane.close_target(0);
             run.lane.gate().release();
             let mut found = Vec::new();
@@ -2990,12 +3010,12 @@ fn an_abandoned_or_older_answer(run: &mut Run<'_>) -> Result<(), Failure> {
             Ok(())
         }
         Cancellation::Never => {
-            let (older, _) = run.submit(0, 0);
+            let older = run.submit(0, 0);
             let mut found = Vec::new();
             if !run.settle(&mut found, |found| has_key(found, older.key())) {
                 return Err(Failure::NoAnswer);
             }
-            let (newer, _) = run.submit(0, 1);
+            let newer = run.submit(0, 1);
             if !run.settle(&mut found, |found| has_key(found, newer.key())) {
                 return Err(Failure::NoAnswer);
             }
@@ -3017,7 +3037,7 @@ fn every_request_ends_exactly_once(run: &mut Run<'_>) -> Result<(), Failure> {
     let first = run.hold_one()?;
     let mut admissions = vec![first];
     for question in 1..=5 {
-        admissions.push(run.submit(0, question).0);
+        admissions.push(run.submit(0, question));
     }
     run.lane.gate().release();
     let mut found = Vec::new();
@@ -3079,7 +3099,7 @@ fn every_request_ends_exactly_once(run: &mut Run<'_>) -> Result<(), Failure> {
 fn the_wake_follows_the_publication(run: &mut Run<'_>) -> Result<(), Failure> {
     // The worker parks inside its wake; what the consumer drains then was published before it.
     run.lane.probe().arm_rendezvous();
-    let (first, _) = run.submit(0, 0);
+    let first = run.submit(0, 0);
     if !run.lane.probe().wait_parked() {
         run.lane.probe().let_go();
         return Err(Failure::NoWake);
@@ -3092,7 +3112,7 @@ fn the_wake_follows_the_publication(run: &mut Run<'_>) -> Result<(), Failure> {
     // A wake that reaches nobody: the next drain, whatever brings it, still finds the answer.
     run.lane.probe().lose_wakes();
     let before = run.lane.probe().wakes();
-    let (second, _) = run.submit(0, 1);
+    let second = run.submit(0, 1);
     if !run.lane.probe().wait_wakes_past(before) {
         return Err(Failure::NoWake);
     }
@@ -3112,7 +3132,7 @@ fn answers_held_are_bounded(run: &mut Run<'_>) -> Result<(), Failure> {
     };
     for question in 0..asked as u64 {
         let before = run.lane.probe().wakes();
-        let (admission, _) = run.submit(0, question);
+        let admission = run.submit(0, question);
         // A request refused at the door has its terminal in hand, and nothing to wake for.
         if admission.refused.is_none() && !run.lane.probe().wait_wakes_past(before) {
             return Err(Failure::NoWake);
@@ -3135,7 +3155,7 @@ fn a_dead_worker_is_observable(run: &mut Run<'_>) -> Result<(), Failure> {
     let first = run.hold_one()?;
     let mut admissions = vec![first];
     for question in 1..=2 {
-        admissions.push(run.submit(0, question).0);
+        admissions.push(run.submit(0, question));
     }
     let before = run.lane.probe().wakes();
     run.lane.gate().kill();
@@ -3184,7 +3204,7 @@ fn a_superseded_request_says_so(run: &mut Run<'_>) -> Result<(), Failure> {
     let first = run.hold_one()?;
     let mut admissions = vec![first];
     for question in 1..=3 {
-        admissions.push(run.submit(0, question).0);
+        admissions.push(run.submit(0, question));
     }
     run.lane.gate().release();
     let newest = admissions.last().map_or(0, Admission::key);
@@ -3226,7 +3246,7 @@ fn a_joined_request_carries_its_twin(run: &mut Run<'_>) -> Result<(), Failure> {
     // One running, and the same question asked twice behind it.
     const TWIN: u64 = 7;
     run.hold_one()?;
-    let twins = [run.submit(0, TWIN).0, run.submit(0, TWIN).0];
+    let twins = [run.submit(0, TWIN), run.submit(0, TWIN)];
     run.lane.gate().release();
     let keys = [twins[0].key(), twins[1].key()];
     let mut found = Vec::new();
@@ -3308,7 +3328,7 @@ fn a_failure_is_said_once(run: &mut Run<'_>) -> Result<(), Failure> {
         run.lane.gate().hold();
         let mut asked = Vec::new();
         for (at, (question, fails)) in round.iter().enumerate() {
-            asked.push((run.submit(0, *question).0, *fails));
+            asked.push((run.submit(0, *question), *fails));
             if at == 0 && !run.lane.gate().wait_entered(entered + 1) {
                 run.lane.gate().release();
                 return Err(Failure::NeverStarted);
@@ -3357,7 +3377,7 @@ fn an_orphaned_answer_reaches_its_sink(run: &mut Run<'_>) -> Result<(), Failure>
     match run.contract().cancellation {
         Cancellation::Abandon => {
             let gone = run.hold_one()?;
-            let (kept, _) = run.submit(1, 1);
+            let kept = run.submit(1, 1);
             run.lane.close_target(0);
             run.lane.gate().release();
             let mut found = Vec::new();
@@ -3386,7 +3406,7 @@ fn an_orphaned_answer_reaches_its_sink(run: &mut Run<'_>) -> Result<(), Failure>
         }
         Cancellation::Never => {
             // The application asked, does not go, and holds the answer: it is the sink.
-            let (asked, _) = run.submit(0, 0);
+            let asked = run.submit(0, 0);
             let mut found = Vec::new();
             if !run.settle(&mut found, |found| has_key(found, asked.key())) {
                 return Err(Failure::NoAnswer);
@@ -3399,7 +3419,7 @@ fn an_orphaned_answer_reaches_its_sink(run: &mut Run<'_>) -> Result<(), Failure>
 #[cfg(test)]
 fn a_withdrawn_request_ends_cancelled_once(run: &mut Run<'_>) -> Result<(), Failure> {
     let first = run.hold_one()?;
-    let (second, _) = run.submit(0, 1);
+    let second = run.submit(0, 1);
     match run.contract().withdrawal {
         Withdrawal::Never => {
             // Nothing is withdrawn here, so nothing may end `Cancelled`.
@@ -3426,7 +3446,7 @@ fn a_withdrawn_request_ends_cancelled_once(run: &mut Run<'_>) -> Result<(), Fail
         }
         Withdrawal::ByTheAsker => {
             // One running, the one to withdraw waiting behind it, and one more behind that.
-            let (kept, _) = run.submit(0, 2);
+            let kept = run.submit(0, 2);
             let Some(ticket) = second.ticket else {
                 run.lane.gate().release();
                 return Err(Failure::IdentityAmbiguous { answers: 0 });
@@ -3489,7 +3509,7 @@ fn a_withdrawn_request_leaves_the_line(run: &mut Run<'_>) -> Result<(), Failure>
                 Bound::Unbounded => 64,
             };
             for question in 1..=rounds as u64 {
-                let (asked, _) = run.submit(0, question);
+                let asked = run.submit(0, question);
                 let Some(ticket) = asked.ticket else {
                     run.lane.gate().release();
                     return Err(Failure::RefusedAfterWithdrawals {
@@ -3522,7 +3542,7 @@ fn an_answer_is_published_after_its_resources_are_released(
     let file = crate::test_support::ScratchFile(bt_testpath::temp_path("lane-suite-lent"));
     std::fs::write(&file.0, b"held by the work while it runs").expect("the suite's own file");
     run.lane.gate().lend(file.0.clone());
-    let (asked, _) = run.submit(0, 0);
+    let asked = run.submit(0, 0);
     let mut found = Vec::new();
     let answered =
         asked.refused.is_none() && run.settle(&mut found, |found| has_key(found, asked.key()));
@@ -3545,11 +3565,22 @@ fn an_answer_is_published_after_its_resources_are_released(
 
 /// **Run one claim on one lane**: how many requests it asked, and what it found. Whatever the
 /// claim left held is let go after it.
+///
+/// A gate that let go on its own during the claim ([`Gate::lapses`]) is
+/// [`Failure::SubmissionWaited`] whatever the claim found: one of the suite's calls — a
+/// submission, a drain, a withdrawal, none of which may wait — waited on the held executor, and
+/// the claim read a hold that had already broken.
 #[cfg(test)]
 pub(crate) fn check(lane: &mut dyn LaneUnderTest, claim: Claim) -> (usize, Result<(), Failure>) {
     let mut run = Run { lane, requests: 0 };
-    let result = claim.check(&mut run);
+    let found = claim.check(&mut run);
     let requests = run.requests;
+    let lapses = run.lane.gate().lapses();
+    let result = if lapses > 0 {
+        Err(Failure::SubmissionWaited { lapses })
+    } else {
+        found
+    };
     run.lane.gate().release();
     run.lane.probe().let_go();
     (requests, result)
