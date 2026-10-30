@@ -12697,6 +12697,23 @@ impl Drop for PlantedFolder {
 /// `rest`, written to a scratch folder, indexed, and read as the window-waits guard reads the
 /// product's packages ([`World::over`]).
 fn planted_world(tag: &str, rest: &str) -> World {
+    let index: &'static Index = Box::leak(Box::new(
+        planted_index(tag, rest)
+            .unwrap_or_else(|rejections| panic!("{}", bt_source::report(&rejections))),
+    ));
+    World::over(
+        vec![Src {
+            package: "planted",
+            index,
+            features: Box::leak(Box::default()),
+        }],
+        &[BTreeSet::new()],
+    )
+}
+
+/// The planted crate of [`planted_world`] indexed, or what the index refuses in it — for a plant
+/// the index itself refuses (a `cfg_attr` that writes a `cfg`, plan row 77).
+fn planted_index(tag: &str, rest: &str) -> Result<Index, Vec<bt_source::Rejection>> {
     let folder = PlantedFolder(bt_testpath::temp_path(tag));
     let directory = &folder.0;
     std::fs::create_dir_all(directory).expect("a scratch folder");
@@ -12717,19 +12734,17 @@ fn planted_world(tag: &str, rest: &str) -> World {
         bt_source::Vendor::Excluded,
     )
     .expect("the planted crate is where it was written");
-    let index: &'static Index = Box::leak(Box::new(
-        Index::build(&universe)
-            .unwrap_or_else(|rejections| panic!("{}", bt_source::report(&rejections))),
-    ));
+    let index = Index::build(&universe);
     drop(folder);
-    World::over(
-        vec![Src {
-            package: "planted",
-            index,
-            features: Box::leak(Box::default()),
-        }],
-        &[BTreeSet::new()],
-    )
+    index
+}
+
+/// What the index refuses in the planted crate of [`planted_world`], one refusal a line.
+fn planted_refusals(tag: &str, rest: &str) -> String {
+    match planted_index(tag, rest) {
+        Ok(_) => String::new(),
+        Err(rejections) => bt_source::report(&rejections),
+    }
 }
 
 /// RED (T-WINDOW-WAITS-RESOLVER-CUTOFF) — **a receiver's trait chained past the resolver's hop
@@ -13764,13 +13779,18 @@ fn a_use_bound_is_no_use_declaration() {
     );
 }
 
-/// RED (T-DOOR-PINS-BY-DOOR review, H4) — **a pinned door's call under a statement's `#[cfg…]` is
-/// refused**: the index reads a file's, an item's and a module's `cfg` but no statement's, so a
-/// gated settle or flush after `run_app` would meet the tail's pin on a build it is not in. A
-/// gated statement that holds no pinned call (as `main`'s `with_default_menu`) changes nothing.
+/// RED (T-DOOR-PINS-BY-DOOR review, H4; split by the gate's kind by plan row 77, 2026-10-29) —
+/// **a pinned door's call under a statement's platform or feature `#[cfg…]` is refused**: the
+/// index keeps such a statement in the product (some product build compiles it), so a gated settle
+/// or flush after `run_app` would meet the tail's pin on a build it is not in. A statement gated to
+/// tests, or to nothing (`any()`), is out of the product by the index's gate grain: its call is not
+/// in the product, so the tail's pin is "not there" and nothing is refused for the statement. A
+/// `cfg_attr` that writes a `cfg` is the index's own refusal. A gated statement that holds no
+/// pinned call (as `main`'s `with_default_menu`) changes nothing.
 ///
-/// MUTATION: make [`gated`] answer `None` — the gated calls meet their pins and the cases are
-/// green.
+/// MUTATION: make [`gated`] answer `None` — the platform-gated calls meet their pins and those
+/// cases are green; drop the gate grain from `Occurrence::in_the_product` — the test-gated calls
+/// reach [`gated`] and are refused for their statement instead of being "not there".
 #[test]
 fn a_pinned_call_under_a_statement_cfg_is_refused() {
     assert_eq!(
@@ -13786,25 +13806,20 @@ fn a_pinned_call_under_a_statement_cfg_is_refused() {
     for (tag, tail) in [
         (
             "ww-doors-cfg-block",
-            "#[cfg(any())] { gate::admitted::<gate::doors::DiagnosticsSettle, _>(|| ()); }",
+            "#[cfg(feature = \"menu\")] { gate::admitted::<gate::doors::DiagnosticsSettle, _>(|| ()); }",
         ),
         (
             "ww-doors-cfg-statement",
-            "#[cfg(test)] gate::admitted::<gate::doors::DiagnosticsSettle, _>(|| ());",
-        ),
-        (
-            "ww-doors-cfg-attr",
-            "#[cfg_attr(test, cfg(any()))] \
-             gate::admitted::<gate::doors::DiagnosticsSettle, _>(|| ());",
+            "#[cfg(feature = \"menu\")] gate::admitted::<gate::doors::DiagnosticsSettle, _>(|| ());",
         ),
         (
             "ww-doors-cfg-inner",
-            "{ #![cfg(test)] gate::admitted::<gate::doors::DiagnosticsSettle, _>(|| ()); }",
+            "{ #![cfg(feature = \"trace\")] gate::admitted::<gate::doors::DiagnosticsSettle, _>(|| ()); }",
         ),
         (
             "ww-doors-cfg-road",
             "gate::admitted::<gate::doors::DiagnosticsSettle, _>(|| ()); \
-             #[cfg(test)] trace_shutdown.flush_through_its_door();",
+             #[cfg(feature = \"menu\")] trace_shutdown.flush_through_its_door();",
         ),
     ] {
         let failures = planted_door_failures(tag, "", tail, "");
@@ -13815,6 +13830,53 @@ fn a_pinned_call_under_a_statement_cfg_is_refused() {
             "{tag}: refused, once: {failures:?}"
         );
     }
+    let not_there = "the pinned call `admitted::<doors::DiagnosticsSettle, _>` in `planted \
+                     crate::main` after `run_app` is not there";
+    for (tag, tail) in [
+        (
+            "ww-doors-test-block",
+            "#[cfg(any())] { gate::admitted::<gate::doors::DiagnosticsSettle, _>(|| ()); }",
+        ),
+        (
+            "ww-doors-test-statement",
+            "#[cfg(test)] gate::admitted::<gate::doors::DiagnosticsSettle, _>(|| ());",
+        ),
+        (
+            "ww-doors-test-inner",
+            "{ #![cfg(test)] gate::admitted::<gate::doors::DiagnosticsSettle, _>(|| ()); }",
+        ),
+    ] {
+        assert_eq!(
+            planted_door_failures(tag, "", tail, ""),
+            [not_there],
+            "{tag}: the test-gated settle is not in the product"
+        );
+    }
+    assert_eq!(
+        planted_door_failures(
+            "ww-doors-test-road",
+            "",
+            "gate::admitted::<gate::doors::DiagnosticsSettle, _>(|| ()); \
+             #[cfg(test)] trace_shutdown.flush_through_its_door();",
+            "",
+        ),
+        Vec::<String>::new(),
+        "a test-gated flush beside the settle is not in the product, and the settle meets its pin"
+    );
+    let main = PLANTED_DOOR_MAIN
+        .replace(
+            "{tail}",
+            "#[cfg_attr(test, cfg(any()))] gate::admitted::<gate::doors::DiagnosticsSettle, _>(|| ());",
+        )
+        .replace("{more}", "");
+    let refused = planted_refusals(
+        "ww-doors-cfg-attr",
+        &format!("{PLANTED_LANDMARK_ITEMS}{PLANTED_DOOR_ITEMS}{main}"),
+    );
+    assert!(
+        refused.contains("`#[cfg_attr(test, cfg(any()))]` writes a `cfg`"),
+        "a `cfg_attr` that writes a `cfg` is the index's refusal: {refused}"
+    );
 }
 
 /// A planted `main` for the writer table's statement-`cfg` cases, after [`PLANTED_LANDMARK_ITEMS`]:
@@ -13846,15 +13908,20 @@ fn planted_tail_exiting(tag: &str, tail: &str) -> (Vec<String>, String) {
     )
 }
 
-/// RED (T-WINDOW-WAITS-STATEMENT-CFG) — **a pinned writer's call under a statement's `#[cfg…]` is
-/// refused**, as the door table's is: the index reads a file's, an item's and a module's `cfg` but
-/// no statement's, so `#[cfg(test)] admission::exiting();` after `run_app` would meet the tail's
-/// pin on a build it is not in. Refused once, by call, line and owner, for the gated statement,
-/// a gated block, a `cfg_attr`, an inner `#![cfg]`, a match arm, and a gated second call beside
-/// the real one (refused, not a surplus); a gated statement holding no pinned call changes nothing.
+/// RED (T-WINDOW-WAITS-STATEMENT-CFG; split by the gate's kind by plan row 77, 2026-10-29) — **a
+/// pinned writer's call under a statement's platform or feature `#[cfg…]` is refused**, as the
+/// door table's is: the index keeps such a statement in the product, so `#[cfg(feature = "menu")]
+/// admission::exiting();` after `run_app` would meet the tail's pin on a build it is not in.
+/// Refused once, by call, line and owner, for the gated statement, a gated block, an inner
+/// `#![cfg]`, a match arm, and a gated second call beside the real one (refused, not a surplus); a
+/// gated statement holding no pinned call changes nothing. Gated to tests, the same shapes are out
+/// of the product by the index's gate grain: alone the pin is "not there", beside the real call it
+/// is met; a `cfg_attr` that writes a `cfg` is the index's refusal.
 ///
-/// MUTATION: drop the [`gated`] check of [`pinned_writer_failures`]' writer calls — the gated
-/// calls meet the pin (`[]`) and the second call beside the real one is a surplus.
+/// MUTATION: drop the [`gated`] check of [`pinned_writer_failures`]' writer calls — the
+/// platform-gated calls meet the pin (`[]`) and the second call beside the real one is a surplus;
+/// drop the gate grain from `Occurrence::in_the_product` — the test-gated calls are refused for
+/// their statement instead.
 #[test]
 fn a_pinned_writer_call_under_a_statement_cfg_is_refused() {
     for (tag, tail) in [
@@ -13862,6 +13929,10 @@ fn a_pinned_writer_call_under_a_statement_cfg_is_refused() {
         (
             "ww-writer-cfg-elsewhere",
             "admission::exiting(); #[cfg(feature = \"menu\")] { let _menu = 0; }",
+        ),
+        (
+            "ww-writer-test-beside",
+            "admission::exiting();\n#[cfg(test)] admission::exiting();",
         ),
     ] {
         assert_eq!(
@@ -13873,27 +13944,23 @@ fn a_pinned_writer_call_under_a_statement_cfg_is_refused() {
     for (tag, tail) in [
         (
             "ww-writer-cfg-statement",
-            "#[cfg(test)] admission::exiting();",
+            "#[cfg(feature = \"menu\")] admission::exiting();",
         ),
         (
             "ww-writer-cfg-block",
-            "#[cfg(any())] { admission::exiting(); }",
-        ),
-        (
-            "ww-writer-cfg-attr",
-            "#[cfg_attr(test, cfg(any()))] admission::exiting();",
+            "#[cfg(feature = \"trace\")] { admission::exiting(); }",
         ),
         (
             "ww-writer-cfg-inner",
-            "{ #![cfg(test)] admission::exiting(); }",
+            "{ #![cfg(feature = \"menu\")] admission::exiting(); }",
         ),
         (
             "ww-writer-cfg-arm",
-            "match 0 { #[cfg(test)] _ => admission::exiting(), _ => {} }",
+            "match 0 { #[cfg(feature = \"menu\")] _ => admission::exiting(), _ => {} }",
         ),
         (
             "ww-writer-cfg-beside",
-            "admission::exiting();\n#[cfg(test)] admission::exiting();",
+            "admission::exiting();\n#[cfg(feature = \"menu\")] admission::exiting();",
         ),
     ] {
         let (failures, main) = planted_tail_exiting(tag, tail);
@@ -13906,15 +13973,55 @@ fn a_pinned_writer_call_under_a_statement_cfg_is_refused() {
             "{tag}: refused at line {line}, once: {failures:?}"
         );
     }
+    let not_there = "the pinned call `admission::exiting` in `planted crate::main` after `run_app` is not there";
+    for (tag, tail) in [
+        (
+            "ww-writer-test-statement",
+            "#[cfg(test)] admission::exiting();",
+        ),
+        (
+            "ww-writer-test-block",
+            "#[cfg(any())] { admission::exiting(); }",
+        ),
+        (
+            "ww-writer-test-inner",
+            "{ #![cfg(test)] admission::exiting(); }",
+        ),
+        (
+            "ww-writer-test-arm",
+            "match 0 { #[cfg(test)] _ => admission::exiting(), _ => {} }",
+        ),
+    ] {
+        assert_eq!(
+            planted_tail_exiting(tag, tail).0,
+            [not_there],
+            "{tag}: the test-gated `exiting` is not in the product"
+        );
+    }
+    let main = PLANTED_WRITER_MAIN.replace(
+        "{tail}",
+        "#[cfg_attr(test, cfg(any()))] admission::exiting();",
+    );
+    let refused = planted_refusals(
+        "ww-writer-cfg-attr",
+        &format!("{PLANTED_LANDMARK_ITEMS}{main}"),
+    );
+    assert!(
+        refused.contains("`#[cfg_attr(test, cfg(any()))]` writes a `cfg`"),
+        "a `cfg_attr` that writes a `cfg` is the index's refusal: {refused}"
+    );
 }
 
-/// RED (T-WINDOW-WAITS-STATEMENT-CFG) — **a pinned callback entry under a statement's `#[cfg…]`
-/// is refused**: `enter_callback`'s calls are counted by the writer table's own finder, so a gated
-/// entry would make up its pinned count on a build it is not in. Refused once — the entry is not
-/// also "not there" or miscounted; a gated entry beside the real one is refused, not counted.
+/// RED (T-WINDOW-WAITS-STATEMENT-CFG; split by the gate's kind by plan row 77, 2026-10-29) — **a
+/// pinned callback entry under a statement's platform or feature `#[cfg…]` is refused**:
+/// `enter_callback`'s calls are counted by the writer table's own finder, so a gated entry would
+/// make up its pinned count on a build it is not in. Refused once — the entry is not also "not
+/// there" or miscounted; a gated entry beside the real one is refused, not counted. Gated to tests,
+/// the entry is out of the product by the index's gate grain: alone it is "not there", beside the
+/// real one it is not counted.
 ///
-/// MUTATION: count a gated `enter_callback` again (drop its [`gated`] check) — the gated entry
-/// meets the pinned count (`[]`), and beside the real one it is "called 2×".
+/// MUTATION: count a gated `enter_callback` again (drop its [`gated`] check) — the
+/// platform-gated entry meets the pinned count (`[]`), and beside the real one it is "called 2×".
 #[test]
 fn a_callback_entry_under_a_statement_cfg_is_refused() {
     let entry = [("planted", "crate", "planted-cb", 1)];
@@ -13933,12 +14040,12 @@ fn a_callback_entry_under_a_statement_cfg_is_refused() {
     for (tag, body) in [
         (
             "ww-callback-cfg-statement",
-            "#[cfg(test)] admission::enter_callback(\"planted-cb\", || ());",
+            "#[cfg(feature = \"menu\")] admission::enter_callback(\"planted-cb\", || ());",
         ),
         (
             "ww-callback-cfg-beside",
             "admission::enter_callback(\"planted-cb\", || ()); \
-             #[cfg(test)] { admission::enter_callback(\"planted-cb\", || ()); }",
+             #[cfg(feature = \"menu\")] { admission::enter_callback(\"planted-cb\", || ()); }",
         ),
     ] {
         let failures = failures(tag, body);
@@ -13950,6 +14057,25 @@ fn a_callback_entry_under_a_statement_cfg_is_refused() {
             "{tag}: refused, once: {failures:?}"
         );
     }
+    assert_eq!(
+        failures(
+            "ww-callback-test-statement",
+            "#[cfg(test)] admission::enter_callback(\"planted-cb\", || ());"
+        ),
+        [
+            "the pinned callback entry `enter_callback(\"planted-cb\")` in `planted crate` is not there"
+        ],
+        "the test-gated entry is not in the product"
+    );
+    assert_eq!(
+        failures(
+            "ww-callback-test-beside",
+            "admission::enter_callback(\"planted-cb\", || ()); \
+             #[cfg(test)] { admission::enter_callback(\"planted-cb\", || ()); }"
+        ),
+        Vec::<String>::new(),
+        "a test-gated entry beside the real one is not counted"
+    );
 }
 
 /// RED (T-WINDOW-WAITS-STATEMENT-CFG) — **a landmark under a statement's `#[cfg…]` is refused**:
@@ -14017,13 +14143,17 @@ fn a_landmark_under_a_statement_cfg_is_refused() {
     );
 }
 
-/// RED (T-WINDOW-WAITS-STATEMENT-CFG, ruling D3) — **a remover helper's call under a statement's
-/// `#[cfg…]` is refused**: the remover-effect doors' callers are counted by owner, so a gated call
-/// from another function would be counted on a build it is not in — or, inside the road, make up
-/// the road's one call. Refused once; its helper's callers are not also compared.
+/// RED (T-WINDOW-WAITS-STATEMENT-CFG, ruling D3; split by the gate's kind by plan row 77,
+/// 2026-10-29) — **a remover helper's call under a statement's platform or feature `#[cfg…]` is
+/// refused**: the remover-effect doors' callers are counted by owner, so a gated call from another
+/// function would be counted on a build it is not in — or, inside the road, make up the road's one
+/// call. Refused once; its helper's callers are not also compared. Gated to tests, the call is out
+/// of the product by the index's gate grain: from another function it is not counted, and in the
+/// road it leaves the road without its call.
 ///
-/// MUTATION: drop the [`gated`] check of [`remover_door_failures`] — the gated caller is counted
-/// (a second owner in "found"), and the gated call in the road meets the road's count (`[]`).
+/// MUTATION: drop the [`gated`] check of [`remover_door_failures`] — the platform-gated caller is
+/// counted (a second owner in "found"), and the gated call in the road meets the road's count
+/// (`[]`).
 #[test]
 fn a_remover_helper_call_under_a_statement_cfg_is_refused() {
     let failures = |tag: &str, schedule: &str, other: &str| {
@@ -14048,9 +14178,13 @@ fn a_remover_helper_call_under_a_statement_cfg_is_refused() {
         (
             "ww-remover-cfg-elsewhere",
             "copy_new();",
-            "#[cfg(test)] copy_new();",
+            "#[cfg(feature = \"menu\")] copy_new();",
         ),
-        ("ww-remover-cfg-road", "#[cfg(any())] { copy_new(); }", ""),
+        (
+            "ww-remover-cfg-road",
+            "#[cfg(feature = \"trace\")] { copy_new(); }",
+            "",
+        ),
     ] {
         let failures = failures(tag, schedule, other);
         assert!(
@@ -14060,6 +14194,23 @@ fn a_remover_helper_call_under_a_statement_cfg_is_refused() {
             "{tag}: refused, once: {failures:?}"
         );
     }
+    assert_eq!(
+        failures(
+            "ww-remover-test-elsewhere",
+            "copy_new();",
+            "#[cfg(test)] copy_new();"
+        ),
+        Vec::<String>::new(),
+        "a test-gated caller elsewhere is not in the product, so not counted"
+    );
+    assert_eq!(
+        failures("ww-remover-test-road", "#[cfg(any())] { copy_new(); }", ""),
+        [
+            "`deferred_removal::copy_new` is called only by its pinned worker road; found {}, \
+             wanted {\"planted crate::deferred_removal::schedule\": 1}"
+        ],
+        "a test-gated call in the road leaves the road without its call"
+    );
 }
 
 /// RED (T-DOOR-PINS-BY-DOOR review, H5) — **outside every body the index records, a token is read

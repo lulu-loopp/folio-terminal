@@ -1161,6 +1161,9 @@ pub struct Index {
     pub(crate) literals: Vec<LiteralRecord>,
     pub(crate) comments: Vec<CommentRecord>,
     pub(crate) macros: Vec<MacroRecord>,
+    /// Every stretch of bytes whose own `#[cfg]`s keep it out of every product build, in union
+    /// order (plan row 77; `crate::gates`).
+    pub(crate) gates: Vec<Span>,
     pub(crate) cross_check: FileSetDiff,
     pub(crate) macro_shapes: Vec<UnsupportedMacroShape>,
 }
@@ -1284,6 +1287,20 @@ impl Index {
     #[must_use]
     pub fn values(&self) -> &[ValueRecord] {
         &self.values
+    }
+
+    /// **Every stretch of bytes a `#[cfg]` keeps out of every product build** (plan row 77):
+    /// one span per node — an item, an `impl`, `trait` or foreign item, a `use`, a `let`, an
+    /// expression, a match arm, a field initialiser, a field, a variant, a parameter, a
+    /// generic parameter, the file itself — whose own `cfg`s say no product build compiles it,
+    /// attributes included, in union order. [`crate::Occurrence::in_the_product`]'s fourth
+    /// grain; a `cfg` on a parsed node the index could not place or read refused the index
+    /// instead. Not read: a `cfg` inside a macro invocation's tokens, which `syn` does not parse
+    /// — the bytes under it are counted as product (today `crates/bt-app/src/i18n.rs:355`
+    /// and `:357`, two `#[cfg(test)]` variants inside `text_entries! { … }`).
+    #[must_use]
+    pub fn test_gates(&self) -> &[Span] {
+        &self.gates
     }
 
     /// Every type alias written directly in a module ([`AliasRecord`]), in union order.

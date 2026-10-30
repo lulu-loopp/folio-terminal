@@ -14,7 +14,7 @@ use super::decls::{Answer, Tables, trait_self};
 use super::names::Named;
 use super::{CallSite, Edge, Enclosing, Handed, ItemId, Node, Target, Unresolved, ValueId, Via};
 use crate::census::types::{Receiver, Std, Ty, Written, option_of, std_named};
-use crate::declarations::cfg_predicates;
+use crate::declarations::{cfg_predicates, expr_attrs};
 use crate::index::{ConditionalVariant, DeclarationPath, ItemKind, Span};
 
 /// One lexical scope: its bindings, the `fn` items written in it, and its `use` items.
@@ -1735,51 +1735,5 @@ fn flatten_use(
                 flatten_use(tree, prefix, names, globs);
             }
         }
-    }
-}
-
-/// The attributes written on an expression statement.
-fn expr_attrs(expr: &syn::Expr) -> &[syn::Attribute] {
-    match expr {
-        syn::Expr::Array(it) => &it.attrs,
-        syn::Expr::Assign(it) => &it.attrs,
-        syn::Expr::Async(it) => &it.attrs,
-        syn::Expr::Await(it) => &it.attrs,
-        syn::Expr::Binary(it) => &it.attrs,
-        syn::Expr::Block(it) => &it.attrs,
-        syn::Expr::Break(it) => &it.attrs,
-        syn::Expr::Call(it) => &it.attrs,
-        syn::Expr::Cast(it) => &it.attrs,
-        syn::Expr::Closure(it) => &it.attrs,
-        syn::Expr::Const(it) => &it.attrs,
-        syn::Expr::Continue(it) => &it.attrs,
-        syn::Expr::Field(it) => &it.attrs,
-        syn::Expr::ForLoop(it) => &it.attrs,
-        syn::Expr::Group(it) => &it.attrs,
-        syn::Expr::If(it) => &it.attrs,
-        syn::Expr::Index(it) => &it.attrs,
-        syn::Expr::Infer(it) => &it.attrs,
-        syn::Expr::Let(it) => &it.attrs,
-        syn::Expr::Lit(it) => &it.attrs,
-        syn::Expr::Loop(it) => &it.attrs,
-        syn::Expr::Macro(it) => &it.attrs,
-        syn::Expr::Match(it) => &it.attrs,
-        syn::Expr::MethodCall(it) => &it.attrs,
-        syn::Expr::Paren(it) => &it.attrs,
-        syn::Expr::Path(it) => &it.attrs,
-        syn::Expr::Range(it) => &it.attrs,
-        syn::Expr::RawAddr(it) => &it.attrs,
-        syn::Expr::Reference(it) => &it.attrs,
-        syn::Expr::Repeat(it) => &it.attrs,
-        syn::Expr::Return(it) => &it.attrs,
-        syn::Expr::Struct(it) => &it.attrs,
-        syn::Expr::Try(it) => &it.attrs,
-        syn::Expr::TryBlock(it) => &it.attrs,
-        syn::Expr::Tuple(it) => &it.attrs,
-        syn::Expr::Unary(it) => &it.attrs,
-        syn::Expr::Unsafe(it) => &it.attrs,
-        syn::Expr::While(it) => &it.attrs,
-        syn::Expr::Yield(it) => &it.attrs,
-        _ => &[],
     }
 }

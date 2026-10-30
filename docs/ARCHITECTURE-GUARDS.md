@@ -255,6 +255,18 @@ the per-door arm tests in `bt-platform`. When it is red, move the platform fact
 behind the platform crate/module boundary or update the declared arm and its
 cross-platform contract together; never scatter a new local cfg to silence it.
 
+What every source guard calls product is `bt_source::Occurrence::in_the_product`. Since
+2026-10-29 (T-CFG-TEST-USE-IS-NOT-PRODUCT, plan row 77) it reads, beside the file, the item and
+the inline module, the `cfg` written on any node (`Index::test_gates`: a `use`, a `const`, an
+`impl` header, a macro, a `let`, an expression, a match arm, a parameter), and the index refuses
+a `cfg` whose predicate is not a name, a name-value or `all`/`any`/`not` of them, a `cfg_attr`
+that writes a `cfg`, and a `cfg` on a parsed node where it reads no gate (`tests/index.rs`
+`a_cfg_is_read_wherever_it_stands`, `a_cfg_the_reading_cannot_read_is_refused_by_its_line`); the
+literal `cfg(true)` and `cfg(false)` are refused as unreadable. The limit (the review of plan row
+77): a `cfg` inside a macro invocation's tokens is not read, since `syn` does not parse an
+invocation, and the bytes under it count as product; the tree's present cases are
+`crates/bt-app/src/i18n.rs:355` and `:357`, two `#[cfg(test)]` variants inside `text_entries!`.
+
 ## Ownership census
 
 The rule: the asking/telling fields of `Runtime`, `App`, `WindowState`, and
@@ -496,14 +508,21 @@ had. A pin is one call: the calls are counted per (writer, owner, landmark), and
 a second call matching a pin already met is reported as a surplus
 (`a_second_call_matching_a_pin_is_a_surplus`).
 
-A statement's `cfg` is refused, not read (T-WINDOW-WAITS-STATEMENT-CFG,
-2026-10-26). The index reads a file's, an item's and a module's `cfg`, never a
-statement's, so a gated call would count on a build it is not in:
-`#[cfg(test)] admission::exiting();` after `run_app` would meet the tail's pin.
-One reader (`window_waits_tests::under_statement_cfg`) serves every pin table:
-a call or a landmark that stands under a `#[cfg…]` or `#[cfg_attr(…)]` — the
-statement, block, match arm or list element an outer one governs, or the block an
-inner `#![…]` one opens — is refused by what is called, line and owner. That
+A statement's platform or feature `cfg` is refused, not read
+(T-WINDOW-WAITS-STATEMENT-CFG, 2026-10-26). Since 2026-10-29
+(T-CFG-TEST-USE-IS-NOT-PRODUCT, plan row 77) the index reads a `cfg` wherever it
+stands, and a statement gated to tests or to nothing (`#[cfg(test)]`,
+`#[cfg(any())]`, an inner `#![cfg(test)]`, a test-gated match arm) is out of the
+product: its call is not counted, so alone it leaves its pin "not there" and
+beside the real call it is no surplus; a `cfg_attr` that writes a `cfg` is the
+index's own refusal. A statement under a platform or feature `cfg` stays in the
+product, since some product build compiles it, so a gated call would count on a
+build it is not in: `#[cfg(windows)] admission::exiting();` after `run_app` would
+meet the tail's pin. One reader (`window_waits_tests::under_statement_cfg`)
+serves every pin table: a call that stands under such a `#[cfg…]` or
+`#[cfg_attr(…)]`, or a landmark under any (a landmark is read from the text) —
+the statement, block, match arm or list element an outer one governs, or the
+block an inner `#![…]` one opens — is refused by what is called, line and owner. That
 covers a pinned writer's call, an `enter_callback` entry, a remover helper's call
 (`deferred_removal::copy_new`, `failure_without_plan`), a pinned door's call
 (below), and a landmark of `LANDMARKS`. A gated landmark is refused through the
@@ -560,11 +579,12 @@ inside a macro's arguments or a nested `fn`, and a rename `admitted as …` in a
 on the pin's receiver, matched by spelling — a same-name method of another type
 called through a rebound `trace_shutdown` would count as the road — outside any
 macro's arguments and nested `fn`. A pinned door's call that stands under a
-statement's `#[cfg…]` or `#[cfg_attr(…)]` (the statement or block an outer one
-governs, or the block an inner `#![…]` one opens) is refused: the index reads a
-file's, an item's and a module's `cfg` but never a statement's, so a gated call
-would meet its pin on a build it is not in — the same reader, and the same
-refusal, as the writer table's and the landmarks' (above). Not read: closures
+statement's platform or feature `#[cfg…]` (the statement or block an outer one
+governs, or the block an inner `#![…]` one opens) is refused: some product build
+compiles the statement, so the call would meet its pin on a build it is not in —
+the same reader, and the same refusal, as the writer table's and the landmarks'
+(above); one gated to tests is out of the product (plan row 77, above), so its
+pin is "not there". Not read: closures
 and run-time-dead branches — a call in a closure's body, or in a branch that
 never runs (`if cfg!(…)`, `if false`), is placed where it is written, as a
 landmark is, and is still in the build, so a closure written after `run_app`
@@ -1282,16 +1302,16 @@ are none. The shapes read: a path in an expression, a type, a pattern, an `impl`
 or a generic argument (G1); a module-level `use` in any tree shape, by its
 `bt_source::UseRecord` names and globs (G2); a `use` inside a body (G3); a macro's
 arguments, counted with their candidate certainty (G4). Doc comments and literals are
-not code and not read (G5). Product is `Occurrence::in_the_product` and, for a
-module-level `use`, the `use`'s own `cfg` (`UseRecord::variant`), so a
-`#[cfg(test)] use` at the root is out of the product by its own gate (plan row 77's
-blind spot is not inherited). Refused by their line, never passed: a `use` that names
+not code and not read (G5). Product is `Occurrence::in_the_product`, whose gate grain
+reads a module-level `use`'s own `cfg`, so a `#[cfg(test)] use` at the root is out of the
+product by its own gate (the guard read `UseRecord::variant` itself until plan row 77, 2026-10-29). Refused by their line, never passed: a `use` that names
 `runtime` under another name or opens it by a glob, a group, glob or rename after
 `runtime::` inside a body, a path into a topic whose head is not `crate`, `self` or
 `super` (in a path, a module-level `use` and a body group alike), a comment inside a
 path into a topic (the search compares the path's bytes), and a path under a `#[cfg]` on
-a statement or a match arm inside an item (no grain reads that gate; a field's gate is
-the field item's own and is read). The road itself is read too: a `use` in
+a statement or a match arm inside an item that a product build may compile (a test-only
+one is out of the product by the query's gate grain since plan row 77, 2026-10-29; a
+field's gate is the field item's own and is read). The road itself is read too: a `use` in
 `runtime/mod.rs` that re-exports a module (`pub(crate) use pointer::touch;`), or any glob
 there, would open a module under a new name and is refused by its line; an item
 re-export is the road (ruled 2026-10-27, the row's review, F4). There is no allow list. Its fixture (`tests/fixtures/root_topic_paths/`) plants

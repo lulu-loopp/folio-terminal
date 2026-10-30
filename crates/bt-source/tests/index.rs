@@ -23,8 +23,8 @@ use std::sync::Arc;
 
 use bt_source::{
     DiskScope, Index, ItemKind, ItemQuery, ModuleSpec, Needle, Package, Pattern, QueryFailure,
-    ResolveCutoff, Scope, Search, Span, TargetId, TargetKind, TargetRoot, TraitId, TraitResolver,
-    Universe, Vendor, View, Workspace, report, universes,
+    Rejection, ResolveCutoff, Scope, Search, Span, TargetId, TargetKind, TargetRoot, TraitId,
+    TraitResolver, Universe, Vendor, View, Workspace, report, universes,
 };
 use syn::parse::Parser as _;
 
@@ -743,6 +743,102 @@ fn what_a_product_build_contains_is_answered_at_the_file_and_at_the_item() {
         product.report(&index).contains("in the product"),
         "{}",
         product.report(&index)
+    );
+}
+
+// ── the gate grain (plan row 77) ──────────────────────────────────────────
+
+/// RED (T-CFG-TEST-USE-IS-NOT-PRODUCT, plan row 77) — **a `cfg` is read wherever it stands**:
+/// a module-level `#[cfg(test)] use`, `#[cfg(all(test, windows))] const`, `#[cfg(test)] static`
+/// and `type`, a `#[cfg(test)] impl`'s header, a `#[cfg(test)] macro_rules!`, and a `let`, an
+/// expression statement and a match arm under `#[cfg(test)]` inside a product function are out
+/// of the product; `#[cfg(not(test))]` and `#[cfg(any(test, windows))]` are not gates, and the
+/// ungated needles stay counted. The review's fold (F5) adds a line for each other position the
+/// walk reads — a field, a variant, a fn parameter, a generic parameter, an `extern crate`, a
+/// foreign item, an `impl` item, a `trait` item and a file's own `#![cfg(test)]` (`gated_file.rs`)
+/// — and one for the stated limit (F1): a `cfg` inside a macro invocation's tokens is not read, so
+/// its needle counts. Each line of the fixture says which it is (`// counted`, `// gated`).
+///
+/// Before the row the three grains read none of the first nine gates — no item and no inline
+/// module holds a `use`, a `const` or an `impl` header, and the `let`, the expression and the arm
+/// sit in a product function — so every gated line counted as product (14 of 14, not 5).
+///
+/// MUTATION: drop the gate grain from `Occurrence::in_the_product` — the gated lines count;
+/// stop descending into function bodies in `crate::gates` — the `let`, the expression and the arm
+/// do.
+#[test]
+fn a_cfg_is_read_wherever_it_stands() {
+    let index = Index::shared(&fixture_universe("gated_regions")).expect("the fixture lowers");
+    let found = index
+        .search(&Search::new(
+            Needle::new(Pattern::text("the_gated_needle")),
+            View::CodeKeepingLiterals,
+        ))
+        .unwrap_or_else(|failure| panic!("{failure}"));
+    let union = index.union();
+    let mut wrong = Vec::new();
+    let mut gated = 0;
+    for occurrence in found.occurrences() {
+        let offset = occurrence.span.start();
+        let at = index.locate(offset).expect("an occurrence is in a file");
+        let from = union[..offset].rfind('\n').map_or(0, |at| at + 1);
+        let to = union[offset..]
+            .find('\n')
+            .map_or(union.len(), |at| offset + at);
+        let line = union[from..to].trim_end_matches('\r');
+        let counted = line.ends_with("// counted");
+        assert!(
+            counted || line.ends_with("// gated"),
+            "every needle line says which it is: {line}"
+        );
+        gated += usize::from(!counted);
+        if occurrence.in_the_product(&index) != counted {
+            wrong.push(format!("{}: {line}", at.line));
+        }
+    }
+    assert_eq!((found.len(), gated), (25, 18), "the fixture's needles");
+    assert!(
+        wrong.is_empty(),
+        "read with the wrong verdict:\n  {}",
+        wrong.join("\n  ")
+    );
+    assert_eq!(found.in_the_product(&index).len(), 7);
+}
+
+/// RED (plan row 77) — **a `cfg` the reading cannot read, place or evaluate is refused by its
+/// line**, never read as "decided elsewhere": a predicate that is no predicate
+/// (`all(test windows)`), a `cfg_attr` that writes a `cfg`, a `cfg` on a closure's parameter,
+/// a position the gate walk does not read, and the literal `cfg(false)` and `cfg(true)` (the
+/// review, F3).
+///
+/// MUTATION: drop the `cfg_is_readable` refusal in `crate::gates` — the first and the last two
+/// are read as "decided elsewhere"; drop `cfg_attr_writes_a_cfg` — the second passes; drop the
+/// unplaced refusal in `crate::gates`' attribute visit — the third passes. (No check of `true` or
+/// `false` of its own: `syn` refuses both before `cfg_is_readable` reads a path.)
+#[test]
+fn a_cfg_the_reading_cannot_read_is_refused_by_its_line() {
+    let refused = Index::shared(&fixture_universe("gated_unreadable"))
+        .expect_err("the fixture is built to be refused");
+    let said: Vec<String> = refused
+        .iter()
+        .map(|rejection| match rejection {
+            Rejection::UnreadableCfg { at, spelling, .. } => format!("unreadable {at} {spelling}"),
+            Rejection::ConditionalCfg { at, spelling, .. } => {
+                format!("conditional {at} {spelling}")
+            }
+            Rejection::UnplacedCfg { at, .. } => format!("unplaced {at}"),
+            other => format!("{other}"),
+        })
+        .collect();
+    assert_eq!(
+        said,
+        [
+            "unreadable 4:1 all(test windows)",
+            "conditional 7:1 test, cfg(any())",
+            "unplaced 11:17",
+            "unreadable 15:1 false",
+            "unreadable 18:1 true",
+        ]
     );
 }
 
