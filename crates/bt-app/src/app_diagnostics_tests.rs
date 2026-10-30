@@ -87,6 +87,218 @@ fn a_contrast_theme_decides_the_canvas_and_clears_the_ground_while_it_is_on() {
     assert_eq!(ground_under_contrast(stored.clone(), false), stored);
 }
 
+/// Windows' **Night sky** contrast theme, as `GetSysColor` answers it (a dark canvas).
+const NIGHT_SKY: bt_render::SystemContrast = bt_render::SystemContrast {
+    window: [0x00, 0x00, 0x00],
+    window_text: [0xff, 0xff, 0xff],
+    highlight: [0xd6, 0xb4, 0xfd],
+    highlight_text: [0x2b, 0x2b, 0x2b],
+    gray_text: [0xa6, 0xa6, 0xa6],
+};
+
+/// Night sky after its owner edited Background in Windows' contrast-theme editor.
+const NIGHT_SKY_EDITED: bt_render::SystemContrast = bt_render::SystemContrast {
+    window: [0x10, 0x18, 0x28],
+    ..NIGHT_SKY
+};
+
+/// The window's questions to the system answering `contrast` for the contrast theme.
+fn contrast_answered(
+    window: &crate::headless::HeadlessWindow,
+    contrast: Option<bt_render::SystemContrast>,
+) {
+    window.answers.set(crate::headless::PlatformAnswers {
+        high_contrast: contrast,
+        ..crate::headless::PlatformAnswers::default()
+    });
+}
+
+/// RED (T-HIGH-CONTRAST, review F1, 2026-10-29) — **a contrast theme read through the window
+/// is put in force on the window: on, the ground holds no picture and is opaque, a Light row
+/// draws on Night sky's dark canvas, and the Settings page knows; off, the picture, the Light
+/// canvas and the page's own sentences come back.**
+///
+/// Run alone in a process of its own: the overlay, the ground and the theme are the process's,
+/// and the other tests of this binary read them.
+///
+/// MUTATION (observed red): drop `apply_window_ground` from `Runtime::adopt_high_contrast` —
+/// the picture stays under the theme's text; or drop its `apply_theme` — a Light row keeps the
+/// light canvas under Night sky.
+#[test]
+fn a_contrast_theme_read_through_the_window_is_put_in_force_on_it_and_taken_off_again() {
+    if !crate::test_support::alone_in_a_process(
+        "app_diagnostics_tests::a_contrast_theme_read_through_the_window_is_put_in_force_on_it_and_taken_off_again",
+        b"",
+    ) {
+        return;
+    }
+    let mut folio = crate::headless::HeadlessFolio::with_tabs(
+        "contrast-window",
+        vec![crate::test_support::tab_holding(
+            crate::test_support::leaf_saying("contrast"),
+        )],
+        0,
+    );
+    let mut settings = folio.app.settings_store.loaded().clone();
+    settings.theme_mode = bt_persist::ThemeModeV1::Light;
+    assert!(folio.app.settings_store.store(settings));
+    folio.window.background_picture = Some(Arc::new(bt_render::BackgroundImage {
+        key: "wallpaper".to_owned(),
+        rgba: Arc::from(vec![0_u8; 4]),
+        width_px: 1,
+        height_px: 1,
+    }));
+    folio
+        .runtime()
+        .apply_theme(Theme::Light)
+        .expect("the row's canvas");
+    folio
+        .runtime()
+        .apply_window_ground()
+        .expect("the file's ground");
+    assert!(
+        bt_render::window_ground().image.is_some(),
+        "the picture is up"
+    );
+
+    contrast_answered(&folio.window.window, Some(NIGHT_SKY));
+    assert!(
+        folio.runtime().adopt_high_contrast().expect("on"),
+        "the reading moved the overlay"
+    );
+    assert_eq!(bt_render::high_contrast_in_force(), Some(NIGHT_SKY));
+    let ground = bt_render::window_ground();
+    assert_eq!(
+        ground.image, None,
+        "no picture under a contrast theme's text"
+    );
+    assert_eq!(ground.alpha, 1.0, "and nothing showing through it");
+    assert_eq!(
+        bt_render::current_theme(),
+        Theme::Dark,
+        "Night sky's canvas, whatever the row says"
+    );
+    assert!(
+        folio.runtime().settings_values().high_contrast,
+        "the Settings page says the theme's colours are in force"
+    );
+
+    contrast_answered(&folio.window.window, None);
+    assert!(
+        folio.runtime().adopt_high_contrast().expect("off"),
+        "turning it off moves the overlay"
+    );
+    assert_eq!(bt_render::high_contrast_in_force(), None);
+    assert!(
+        bt_render::window_ground().image.is_some(),
+        "the file's picture is back"
+    );
+    assert_eq!(
+        bt_render::current_theme(),
+        Theme::Light,
+        "the row's canvas is back"
+    );
+    assert!(!folio.runtime().settings_values().high_contrast);
+}
+
+/// RED (T-HIGH-CONTRAST, review F1, 2026-10-29) — **the preference notice puts the contrast
+/// theme the window reads in force, every time it moves: on, edited in place, and off.**
+///
+/// `AppEvent::SystemPreferencesChanged` runs `FolioApp::adopt_system_canvas` (held by
+/// `the_system_preference_event_re_reads_the_desktops_canvas`); this drives that function over
+/// a headless application whose window answers what the test scripts. Run alone in a process of
+/// its own, for the process overlay.
+///
+/// MUTATION (observed red): drop `adopt_high_contrast` from `FolioApp::adopt_system_canvas` —
+/// the notice is heard and the theme Windows put on is never worn.
+#[test]
+fn the_preference_notice_puts_the_contrast_theme_in_force_each_time_it_moves() {
+    if !crate::test_support::alone_in_a_process(
+        "app_diagnostics_tests::the_preference_notice_puts_the_contrast_theme_in_force_each_time_it_moves",
+        b"",
+    ) {
+        return;
+    }
+    let folio = crate::headless::HeadlessFolio::with_tabs(
+        "contrast-notice",
+        vec![crate::test_support::tab_holding(
+            crate::test_support::leaf_saying("notice"),
+        )],
+        0,
+    );
+    let mut application = crate::headless::HeadlessApplication::of(folio);
+    for (reading, what) in [
+        (Some(NIGHT_SKY), "turned on"),
+        (Some(NIGHT_SKY_EDITED), "its Background edited in place"),
+        (None, "turned off"),
+    ] {
+        contrast_answered(&application.runtime().window.window, reading);
+        application
+            .folio
+            .adopt_system_canvas()
+            .expect("the notice is adopted");
+        assert_eq!(
+            bt_render::high_contrast_in_force(),
+            reading,
+            "the contrast theme {what} is the one in force"
+        );
+    }
+}
+
+/// RED (T-HIGH-CONTRAST, review F1, 2026-10-29) — **the first window's canvas is settled from
+/// the contrast theme before the stored pair and the theme: under Night sky a Light row opens
+/// on Night sky's ground, and with no theme on it opens on the stored light scheme's.**
+///
+/// [`settle_the_first_canvas`] is what `Runtime::create` runs before it creates the window
+/// (`the_canvas_is_in_force_before_the_window_is_made`), so what it leaves in force is what the
+/// first frame is painted on. The reader is injected; the boot hands it
+/// `runtime::read_high_contrast`. Run alone in a process of its own, for the process theme.
+///
+/// MUTATION (observed red): drop the contrast read from `settle_the_first_canvas`, or move it
+/// below `set_theme` — the first frame opens on the row's light canvas under Night sky; or
+/// move `adopt_stored_schemes` below `set_theme` — the first frame's ground is the scheme the
+/// process was born with.
+#[test]
+fn the_first_canvas_is_settled_from_the_contrast_theme_and_the_stored_pair() {
+    if !crate::test_support::alone_in_a_process(
+        "app_diagnostics_tests::the_first_canvas_is_settled_from_the_contrast_theme_and_the_stored_pair",
+        b"",
+    ) {
+        return;
+    }
+    let settings = bt_persist::SettingsV1 {
+        light_scheme: "Solarized Light".to_owned(),
+        ..bt_persist::SettingsV1::default()
+    };
+    let mut asked = 0;
+    let theme = settle_the_first_canvas(
+        || {
+            asked += 1;
+            Some(NIGHT_SKY)
+        },
+        &settings,
+        bt_persist::ThemeModeV1::Light,
+    );
+    assert_eq!(asked, 1, "the boot asks the system once");
+    assert_eq!(theme, Theme::Dark, "Night sky decides a Light row's canvas");
+    assert_eq!(bt_render::current_theme(), Theme::Dark);
+    assert_eq!(
+        bt_render::background_rgb(),
+        NIGHT_SKY.window,
+        "the first frame stands on the theme's Background"
+    );
+
+    let theme = settle_the_first_canvas(|| None, &settings, bt_persist::ThemeModeV1::Light);
+    assert_eq!(theme, Theme::Light);
+    assert_eq!(
+        bt_render::background_rgb(),
+        schemes::catalogue()
+            .resolve("Solarized Light", true)
+            .background,
+        "with no theme on, the first frame stands on the stored light scheme"
+    );
+}
+
 /// RED (49) — **A title that did not change is never written to the OS again.**
 ///
 /// A shell that sets the title on every prompt (OSC 0/2) makes the drain say

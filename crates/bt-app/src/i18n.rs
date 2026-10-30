@@ -591,6 +591,9 @@ text_entries! {
     RowFontSize,
 
     DescTheme,
+    /// The Theme row's sentence while a Windows contrast theme is on (T-HIGH-CONTRAST,
+    /// DESIGN §7.1.6): what is in force, and when the row's own choice takes over again.
+    DescThemeHighContrast,
     DescCursor,
     DescFormulas,
     DescInlineFormulas,
@@ -1096,6 +1099,9 @@ text_entries! {
     RowDarkScheme,
     DescLightScheme,
     DescDarkScheme,
+    /// The Light scheme and Dark scheme rows' sentence while a Windows contrast theme is on
+    /// (T-HIGH-CONTRAST), as [`Self::DescThemeHighContrast`] is the Theme row's.
+    DescSchemeHighContrast,
     /// The title of the card raised for a scheme file that would not parse. Its
     /// body names the file and the reason and is therefore a value-carrying
     /// string — see [`scheme_file_skipped`].
@@ -3259,11 +3265,6 @@ text_entries! {
     UpdateFailedUndone,
     /// Its detail; `{version}` is the version whose changes were not kept (0.4.8 E5).
     UpdateCardUndone,
-    /// The Theme row's sentence while a Windows contrast theme is on (T-HIGH-CONTRAST,
-    /// DESIGN §7.1.6): what is in force, and when the row's own choice takes over again.
-    DescThemeHighContrast,
-    /// The same for the Light scheme and Dark scheme rows.
-    DescSchemeHighContrast,
 }
 
 impl Text {
@@ -3485,6 +3486,11 @@ impl Text {
                 "Light, dark, or follow your system setting",
                 "浅色、深色，或跟随系统设置",
             ),
+            Self::DescThemeHighContrast => pick(
+                lang,
+                "A Windows contrast theme is in use. Your choice applies once it is off.",
+                "正在使用 Windows 对比度主题。关闭后，此处的选择生效。",
+            ),
             Self::DescCursor => pick(
                 lang,
                 "The shape the cursor takes in the pane you are typing in.",
@@ -3648,6 +3654,11 @@ impl Text {
                 "深色窗口使用的配色。自定义配色文件放在 %APPDATA%\\Folio\\schemes。",
                 "The same for a dark window. Your own schemes go in ~/Library/Application Support/Folio/schemes.",
                 "深色窗口使用的配色。自定义配色文件放在 ~/Library/Application Support/Folio/schemes。",
+            ),
+            Self::DescSchemeHighContrast => pick(
+                lang,
+                "A Windows contrast theme is in use. This scheme applies once it is off.",
+                "正在使用 Windows 对比度主题。关闭后，此配色生效。",
             ),
             Self::SchemeFileSkipped => pick(lang, "Colour scheme skipped", "配色文件已跳过"),
 
@@ -6356,16 +6367,6 @@ impl Text {
                 lang,
                 "Changes made in Folio {version} were not kept.",
                 "在 Folio {version} 中所做的更改没有保留。",
-            ),
-            Self::DescThemeHighContrast => pick(
-                lang,
-                "A Windows contrast theme is in use. Your choice applies once it is off.",
-                "正在使用 Windows 对比度主题。关闭后，此处的选择生效。",
-            ),
-            Self::DescSchemeHighContrast => pick(
-                lang,
-                "A Windows contrast theme is in use. This scheme applies once it is off.",
-                "正在使用 Windows 对比度主题。关闭后，此配色生效。",
             ),
             Self::UpdateCardRestartMissed => {
                 pick(lang, "The restart did not happen.", "未能重启。")

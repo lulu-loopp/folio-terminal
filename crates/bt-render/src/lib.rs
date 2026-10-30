@@ -15171,9 +15171,17 @@ fn prepare_chrome_text_atlas(
 /// a theme is on and `None` otherwise, so off a theme this is the function it was.
 /// It reaches a selected cell that no search hit is drawn over, because a hit's
 /// ground is drawn over the selection's and the cell then stands on the hit.
+///
+/// **And a cell under an ordinary hit, under a contrast theme** (review F2,
+/// 2026-10-29): `hit_ground` is that hit's ground while a theme is on and `None`
+/// otherwise. The cell's ink was held to the floor against the cell's own
+/// background, and the hit is drawn on another (30 % of Selected text's ground
+/// over Background), so its ink is held to the floor again against the ground it
+/// is printed on.
 fn grid_glyph_ink(
     frame: &ViewportFrame,
     current_ink: Option<Color>,
+    hit_ground: Option<[u8; 3]>,
     selected_ink: Option<Color>,
     row: usize,
     column: usize,
@@ -15187,6 +15195,15 @@ fn grid_glyph_ink(
     };
     current_ink
         .filter(|_| within(&frame.current_search_spans))
+        .or_else(|| {
+            hit_ground
+                .filter(|_| within(&frame.search_spans))
+                .map(|ground| {
+                    let [r, g, b] =
+                        contrast::raise_to_floor([resting.r(), resting.g(), resting.b()], ground);
+                    Color::rgba(r, g, b, resting.a())
+                })
+        })
         .or_else(|| {
             selected_ink.filter(|_| within(&frame.selection_spans) && !within(&frame.search_spans))
         })
@@ -15251,6 +15268,9 @@ fn grid_cell_areas<'a>(
     let selected_ink = selection_ink_rgb()
         .filter(|_| !frame.selection_spans.is_empty())
         .map(|ink| Color::rgb(ink[0], ink[1], ink[2]));
+    let hit_ground = high_contrast_in_force()
+        .filter(|_| !frame.search_spans.is_empty())
+        .map(|_| search_match_rgb());
     let narrow_text_areas = text_rows
         .iter()
         .enumerate()
@@ -15276,6 +15296,7 @@ fn grid_cell_areas<'a>(
                         default_color: grid_glyph_ink(
                             frame,
                             current_ink,
+                            hit_ground,
                             selected_ink,
                             row,
                             glyph.column,
@@ -15309,6 +15330,7 @@ fn grid_cell_areas<'a>(
                         default_color: grid_glyph_ink(
                             frame,
                             current_ink,
+                            hit_ground,
                             selected_ink,
                             row,
                             wide.column,
@@ -30573,17 +30595,19 @@ mod tests {
         assert!((outermost.0[2] - right).abs() <= 0.01);
     }
 
-    /// A bare grid of blank cells at [`fade_metrics`], `rows` tall, for reading a wash out of.
-    /// RED (T-HIGH-CONTRAST, owner ruling 2026-10-28, row 90 ⑤) — **under a contrast theme a
-    /// selected cell's words are Selected text's ink; a cell a search hit is drawn over keeps
-    /// the hit's rule; and with no theme nothing is recoloured.**
+    /// RED (T-HIGH-CONTRAST, owner ruling 2026-10-28, row 90 ⑤; review F2, 2026-10-29) —
+    /// **under a contrast theme a selected cell's words are Selected text's ink; a cell an
+    /// ordinary hit is drawn over is held to the theme's 4.5:1 against the hit's ground; the
+    /// current hit keeps its rule; and with no theme nothing is recoloured.**
     ///
     /// Row 0 is selected across columns 0..4 with an ordinary hit at 2..3; row 1 holds the
-    /// current hit at 0..2 inside a selection.
+    /// current hit at 0..2 inside a selection. The hit's ground is a mid grey the resting ink
+    /// stands at about 2:1 on.
     ///
     /// MUTATION (observed red): drop the `selected_ink` arm from `grid_glyph_ink` — a selected
     /// cell under a contrast theme keeps the program's ink on the theme's Selected-text
-    /// ground, which nothing promises is legible.
+    /// ground, which nothing promises is legible; or drop the `hit_ground` arm — a cell under
+    /// an ordinary hit keeps an ink floored against a ground it is not printed on.
     #[test]
     fn a_selected_cell_wears_selected_text_ink_under_a_contrast_theme_and_nothing_else_moves() {
         let mut frame = wash_frame(8, 2);
@@ -30598,22 +30622,35 @@ mod tests {
         let resting = Color::rgb(0x10, 0x20, 0x30);
         let selected = Color::rgb(0x2b, 0x2b, 0x2b);
         let current = Color::rgb(0x01, 0x02, 0x03);
-        let ink = |selected_ink, row, column| {
-            grid_glyph_ink(&frame, Some(current), selected_ink, row, column, resting)
+        let hit = [0x50, 0x58, 0x60];
+        let floor = crate::contrast::FloorGuard::take();
+        crate::contrast::set_high_contrast_floor(true);
+        let on = |row, column| {
+            grid_glyph_ink(
+                &frame,
+                Some(current),
+                Some(hit),
+                Some(selected),
+                row,
+                column,
+                resting,
+            )
         };
-        assert_eq!(ink(Some(selected), 0, 0), selected, "a selected cell");
-        assert_eq!(ink(Some(selected), 0, 3), selected);
-        assert_eq!(ink(Some(selected), 0, 2), resting, "under an ordinary hit");
-        assert_eq!(ink(Some(selected), 0, 4), resting, "outside the selection");
-        assert_eq!(
-            ink(Some(selected), 1, 1),
-            current,
-            "the current hit's rule stands"
+        assert_eq!(on(0, 0), selected, "a selected cell");
+        assert_eq!(on(0, 3), selected);
+        let under_hit = on(0, 2);
+        assert!(
+            contrast_ratio([under_hit.r(), under_hit.g(), under_hit.b()], hit) >= 4.5,
+            "under an ordinary hit, held to 4.5:1 against the hit's ground: {under_hit:?}"
         );
-        assert_eq!(ink(Some(selected), 1, 2), selected);
+        assert_ne!(under_hit, selected, "and not given the selection's ink");
+        assert_eq!(on(0, 4), resting, "outside the selection");
+        assert_eq!(on(1, 1), current, "the current hit's rule stands");
+        assert_eq!(on(1, 2), selected);
+        drop(floor);
         for row in 0..2 {
             for column in 0..8 {
-                let off = ink(None, row, column);
+                let off = grid_glyph_ink(&frame, Some(current), None, None, row, column, resting);
                 assert!(
                     off == resting || off == current,
                     "no theme, no recolour but the current hit's ({row}, {column})"
@@ -30622,6 +30659,7 @@ mod tests {
         }
     }
 
+    /// A bare grid of blank cells at [`fade_metrics`], `rows` tall, for reading a wash out of.
     fn wash_frame(columns: u32, rows: u32) -> ViewportFrame {
         let metrics = fade_metrics();
         let cells = (columns * rows) as usize;

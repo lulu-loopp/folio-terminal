@@ -13388,7 +13388,7 @@ mod windows_impl {
         use windows::Win32::UI::WindowsAndMessaging::SPI_GETHIGHCONTRAST;
 
         let mut reading = HIGHCONTRASTW {
-            cbSize: u32::try_from(size_of::<HIGHCONTRASTW>()).unwrap_or(0),
+            cbSize: size_of::<HIGHCONTRASTW>() as u32,
             ..HIGHCONTRASTW::default()
         };
         // SAFETY: SPI_GETHIGHCONTRAST writes one HIGHCONTRASTW, whose `cbSize` is set, to the

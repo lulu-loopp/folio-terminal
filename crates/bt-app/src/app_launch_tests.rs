@@ -276,24 +276,23 @@ fn the_theme_a_window_opens_in_is_the_one_the_settings_file_names() {
 /// at exactly the moment the first pane is about to be asked what colour it
 /// is standing on.
 ///
-/// Mutation: move `set_theme` back below `create_window`, or resolve from the
-/// window again.
+/// The order inside the settling — the contrast theme, the stored pair, the
+/// floor, the theme — is held by what it leaves in force:
+/// `the_first_canvas_is_settled_from_the_contrast_theme_and_the_stored_pair`
+/// (T-HIGH-CONTRAST, 2026-10-29, where the steps moved into
+/// `settle_the_first_canvas` from this body).
+///
+/// Mutation: move `settle_the_first_canvas` back below `create_window`, or
+/// resolve from the window again.
 #[test]
 fn the_canvas_is_in_force_before_the_window_is_made() {
     let body = method_body("Runtime", "create");
     let themed = body
-        .find("set_theme(resolved_theme)")
+        .find("settle_the_first_canvas(")
         .expect("`Runtime::create` puts a canvas in force");
     let made = body
         .find("create_window(")
         .expect("`Runtime::create` creates the window");
-    let schemes = body
-        .find("adopt_stored_schemes(")
-        .expect("`Runtime::create` adopts the stored scheme pair");
-    assert!(
-        schemes < themed,
-        "the pair is adopted before the theme picks one of it"
-    );
     assert!(
         themed < made,
         "the canvas is settled before the window exists, or the first frame is \

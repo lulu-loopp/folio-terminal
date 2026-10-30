@@ -38,9 +38,10 @@ impl<B: Backend> Runtime<'_, B> {
         self.apply_theme(theme)
     }
 
-    /// **A reading of the Windows contrast theme, put in force** (T-HIGH-CONTRAST,
-    /// `docs/DESIGN.md` §7.1.6: 「高对比度模式跟随系统调色」) — at start, and on every
-    /// preference notice with the system canvas beside it.
+    /// **The Windows contrast theme as this window's question to the system answers it, put in
+    /// force** (T-HIGH-CONTRAST, `docs/DESIGN.md` §7.1.6: 「高对比度模式跟随系统调色」) — on every
+    /// preference notice with the system canvas beside it (the boot reads it before there is a
+    /// window, `settle_the_first_canvas`).
     ///
     /// `set_high_contrast` answers `Unchanged` when the reading is the one in force, which is
     /// every notice but the one that moved it, and every window after the first: the overlay
@@ -50,8 +51,10 @@ impl<B: Backend> Runtime<'_, B> {
     /// What moves with it, in this window: the ground (no picture and no translucency while a
     /// theme is on, ruling ⑦), the canvas (ruling ⑥), and the palette, which every one of the
     /// three re-derives through the one [`Self::adopt_new_palette`].
-    pub(crate) fn adopt_high_contrast(&mut self, reading: Option<SystemContrast>) -> Result<bool> {
-        if bt_render::set_high_contrast(reading) == ThemeChange::Unchanged {
+    pub(crate) fn adopt_high_contrast(&mut self) -> Result<bool> {
+        if bt_render::set_high_contrast(self.window.window.high_contrast())
+            == ThemeChange::Unchanged
+        {
             return Ok(false);
         }
         let ground_moved = self.apply_window_ground()?;

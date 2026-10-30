@@ -367,6 +367,8 @@ pub(crate) struct PlatformAnswers {
     pub(crate) takes_the_foreground: bool,
     /// `WindowHost::present_facts`: every fact unread.
     pub(crate) present_facts: bt_platform::NativePresentFacts,
+    /// `WindowHost::high_contrast`: `None`, no contrast theme on.
+    pub(crate) high_contrast: Option<bt_render::SystemContrast>,
 }
 
 impl Default for PlatformAnswers {
@@ -383,6 +385,7 @@ impl Default for PlatformAnswers {
             holds_the_foreground: false,
             takes_the_foreground: true,
             present_facts: bt_platform::NativePresentFacts::default(),
+            high_contrast: None,
         }
     }
 }
@@ -491,6 +494,9 @@ impl WindowHost for HeadlessWindow {
     }
     fn holds_the_foreground(&self, _holder: bt_platform::hotkey::Foreground) -> bool {
         self.answers.get().holds_the_foreground
+    }
+    fn high_contrast(&self) -> Option<bt_render::SystemContrast> {
+        self.answers.get().high_contrast
     }
     fn set_backdrop(&self, acrylic: bool) -> Result<(), String> {
         self.ledger.record(WindowEffect::Backdrop(acrylic));
