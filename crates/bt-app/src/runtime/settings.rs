@@ -13,8 +13,8 @@ use crate::{
     Announce, ApplicationChange, FilePick, RAIL_TRANSITION, RevealTween, Runtime,
     attention_copilot, attention_wire, block_max_height_px, cardhint, context_menu, explorer_menu,
     handoff_lane, hang_watch, i18n, install_minimum_contrast, marks, preview, profiles,
-    programs_lane, psreadline, rail_state_for, resolve_theme_mode, schemes, seats, settings,
-    shell_integration, shortcuts, system_os_theme, text_field, toast, update, update_card,
+    programs_lane, psreadline, rail_state_for, schemes, seats, settings, shell_integration,
+    shortcuts, text_field, toast, update, update_card,
 };
 use anyhow::Result;
 use bt_persist::ThemeModeV1;
@@ -1292,7 +1292,7 @@ impl<B: Backend> Runtime<'_, B> {
         let mut settings = self.app.settings_store.loaded().clone();
         settings.theme_mode = mode;
         let mode_changed = self.app.settings_store.store(settings);
-        let theme_changed = self.apply_theme(resolve_theme_mode(mode, system_os_theme()))?;
+        let theme_changed = self.apply_theme(super::theme_in_force(mode))?;
         if mode_changed && !theme_changed && self.refresh_overlay() {
             self.present_chrome_change()?;
         }
@@ -2449,6 +2449,7 @@ impl<B: Backend> Runtime<'_, B> {
     pub(crate) fn settings_values(&self) -> settings::SettingsValues {
         settings::SettingsValues {
             theme: self.app.settings_store.loaded().theme_mode,
+            high_contrast: bt_render::high_contrast_in_force().is_some(),
             cursor: current_cursor_style(),
             tab_layout: self.window.rail.layout,
             sidebar: self.window.rail.mode,

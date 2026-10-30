@@ -34812,23 +34812,11 @@ impl Runtime<'_, Native> {
                     // pane, and the `OSC 11` that pane answers — happens on the canvas
                     // decided here, and there is no earlier one for anything to be painted
                     // in by mistake.
-                    //
-                    // **Before `set_theme`**, which is the whole of why it is here: the
-                    // theme's own atomic caches the background it resolves to, and that
-                    // background is now a colour of the scheme rather than a constant. A
-                    // pair adopted afterwards would leave the first frame painted on the
-                    // canvas of whichever scheme the process was born with.
-                    adopt_stored_schemes(settings_store.loaded());
-                    // Beside the schemes and for their reason: the floor is read on every cell of the
-                    // first frame, so a file that asks for one must be obeyed before that frame is drawn
-                    // rather than at the first press of the row.
-                    install_minimum_contrast(settings_store.loaded().minimum_contrast);
-                    let resolved_theme = resolve_theme_mode(theme_mode, system_os_theme());
-                    if set_theme(resolved_theme) == ThemeChange::LockedByEnvironment {
-                        crate::diagnostics::stderr_line(format!(
-                            "BT_THEME persisted_mode={theme_mode:?} resolved_theme={resolved_theme:?} ignored_for_runtime=true reason=BT_BG"
-                        ));
-                    }
+                    settle_the_first_canvas(
+                        runtime::read_high_contrast,
+                        settings_store.loaded(),
+                        theme_mode,
+                    );
                     let restored = restore_window_placement(event_loop, &opening);
                     // Titled from whatever the walk has answered so far; the active tab's own title replaces
                     // it before the first paint either way.
@@ -46782,8 +46770,18 @@ impl<B: Backend> FolioApp<B> {
     /// asks [`system_os_theme`] and applies nothing when the answer is the one
     /// already in force. A window whose theme mode is not `System` answers the
     /// same way for a second reason.
+    ///
+    /// **And a Windows contrast theme is the system canvas too** (T-HIGH-CONTRAST, DESIGN
+    /// §7.1.6): turning one on or off, or editing its colours, arrives on this same notice
+    /// (`WM_SETTINGCHANGE` with `SPI_SETHIGHCONTRAST`, `WM_SYSCOLORCHANGE`). Each window asks
+    /// and puts it in force before the light/dark reading, which then answers from it; the
+    /// overlay is the process's, so only the first window's reading moves it and the others
+    /// answer `Unchanged` (a read is one `SystemParametersInfoW` and five `GetSysColor`).
     fn adopt_system_canvas(&mut self) -> Result<()> {
-        self.for_each_window(|runtime| runtime.os_theme_changed().map(|_| ()))
+        self.for_each_window(|runtime| {
+            runtime.adopt_high_contrast()?;
+            runtime.os_theme_changed().map(|_| ())
+        })
     }
 
     /// **The platform has taken its own window buttons off a window, or given
@@ -53276,6 +53274,39 @@ fn install_minimum_contrast(floor: bt_persist::MinimumContrastV1) -> bool {
         bt_persist::MinimumContrastV1::Ratio3 => bt_render::MinimumContrast::Ratio3,
         bt_persist::MinimumContrastV1::Ratio45 => bt_render::MinimumContrast::Ratio45,
     })
+}
+
+/// **The first window's canvas, put in force before the window exists** (§7.46 ②), and the
+/// theme it resolved to.
+///
+/// In this order, each for its reason:
+///
+/// - **a Windows contrast theme first** (T-HIGH-CONTRAST), read through `read_contrast`: the
+///   overlay decides both the scheme each canvas wears and the canvas itself, so a window opened
+///   under one is in its colours from its first frame rather than from the first preference
+///   notice;
+/// - **the stored pair**, whose canvases the theme then resolves among (the theme's atomic
+///   caches the background it resolves to, and `set_schemes` refreshes it, so the pair is in
+///   force on the first frame either way; observed 2026-10-29);
+/// - **the floor beside the schemes**, for their reason: it is read on every cell of the first
+///   frame, so a file that asks for one is obeyed before that frame is drawn rather than at the
+///   first press of the row;
+/// - **the theme last**, from the row and the contrast theme ([`runtime::theme_in_force`]).
+fn settle_the_first_canvas(
+    read_contrast: impl FnOnce() -> Option<bt_render::SystemContrast>,
+    settings: &bt_persist::SettingsV1,
+    theme_mode: bt_persist::ThemeModeV1,
+) -> Theme {
+    let _ = bt_render::set_high_contrast(read_contrast());
+    adopt_stored_schemes(settings);
+    install_minimum_contrast(settings.minimum_contrast);
+    let resolved_theme = runtime::theme_in_force(theme_mode);
+    if set_theme(resolved_theme) == ThemeChange::LockedByEnvironment {
+        crate::diagnostics::stderr_line(format!(
+            "BT_THEME persisted_mode={theme_mode:?} resolved_theme={resolved_theme:?} ignored_for_runtime=true reason=BT_BG"
+        ));
+    }
+    resolved_theme
 }
 
 fn adopt_stored_schemes(settings: &bt_persist::SettingsV1) -> ThemeChange {

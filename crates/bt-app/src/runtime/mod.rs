@@ -34,12 +34,15 @@ pub(crate) mod search;
 mod settings;
 pub(crate) mod tabs;
 pub(crate) use windows::AfterTheWait;
+// The contrast theme's two readers outside this module: the boot's first reading and the
+// preference notice's (T-HIGH-CONTRAST).
+pub(crate) use diagnostics::{read_high_contrast, theme_in_force};
 #[cfg(test)]
 pub(crate) use windows::{
     answer_an_exit_over, broker_verdict, dirty_gate_names, dwm_dark_mode_owed, focus_leaf_index,
-    lines_phrase, persisted_window_bounds, preview_source_of_recent, raise_dirty_gate_over,
-    recent_term_leaf_seed, recorded_window_placement, seeded_tab, tear_out_rect,
-    window_minimum_changed,
+    ground_under_contrast, lines_phrase, persisted_window_bounds, preview_source_of_recent,
+    raise_dirty_gate_over, recent_term_leaf_seed, recorded_window_placement, seeded_tab,
+    tear_out_rect, window_minimum_changed,
 };
 // K2 (T-SPLIT-2B): the free functions moved out of `main.rs`, named at the crate root again by
 // its `use runtime::{…}` lines so that no caller changes.
@@ -57,7 +60,7 @@ pub(crate) use clipboard::{
     take_pending_paste, text_field_holding,
 };
 #[cfg(test)]
-pub(crate) use diagnostics::resolved_theme_change;
+pub(crate) use diagnostics::{resolved_theme_change, theme_under_contrast};
 #[cfg(test)]
 pub(crate) use dpi::{
     apply_tabs_leaf_metrics, resize_worth_solving, take_psreadline_resize_reanchor_input,

@@ -591,6 +591,9 @@ text_entries! {
     RowFontSize,
 
     DescTheme,
+    /// The Theme row's sentence while a Windows contrast theme is on (T-HIGH-CONTRAST,
+    /// DESIGN §7.1.6): what is in force, and when the row's own choice takes over again.
+    DescThemeHighContrast,
     DescCursor,
     DescFormulas,
     DescInlineFormulas,
@@ -1096,6 +1099,9 @@ text_entries! {
     RowDarkScheme,
     DescLightScheme,
     DescDarkScheme,
+    /// The Light scheme and Dark scheme rows' sentence while a Windows contrast theme is on
+    /// (T-HIGH-CONTRAST), as [`Self::DescThemeHighContrast`] is the Theme row's.
+    DescSchemeHighContrast,
     /// The title of the card raised for a scheme file that would not parse. Its
     /// body names the file and the reason and is therefore a value-carrying
     /// string — see [`scheme_file_skipped`].
@@ -3480,6 +3486,11 @@ impl Text {
                 "Light, dark, or follow your system setting",
                 "浅色、深色，或跟随系统设置",
             ),
+            Self::DescThemeHighContrast => pick(
+                lang,
+                "A Windows contrast theme is in use. Your choice applies once it is off.",
+                "正在使用 Windows 对比度主题。关闭后，此处的选择生效。",
+            ),
             Self::DescCursor => pick(
                 lang,
                 "The shape the cursor takes in the pane you are typing in.",
@@ -3643,6 +3654,11 @@ impl Text {
                 "深色窗口使用的配色。自定义配色文件放在 %APPDATA%\\Folio\\schemes。",
                 "The same for a dark window. Your own schemes go in ~/Library/Application Support/Folio/schemes.",
                 "深色窗口使用的配色。自定义配色文件放在 ~/Library/Application Support/Folio/schemes。",
+            ),
+            Self::DescSchemeHighContrast => pick(
+                lang,
+                "A Windows contrast theme is in use. This scheme applies once it is off.",
+                "正在使用 Windows 对比度主题。关闭后，此配色生效。",
             ),
             Self::SchemeFileSkipped => pick(lang, "Colour scheme skipped", "配色文件已跳过"),
 
@@ -6517,6 +6533,10 @@ impl Text {
         Self::LegacyPsReadLineRemovedToast,
         // Only the Windows PowerShell discovery worker can emit this refusal.
         Self::ShellProfileProbeFailed,
+        // — the Theme and scheme rows' sentences while a Windows contrast theme is on, which
+        //   only the Windows reader of `SPI_GETHIGHCONTRAST` can put in force (T-HIGH-CONTRAST)
+        Self::DescThemeHighContrast,
+        Self::DescSchemeHighContrast,
         // — the Acrylic row's reason, which only a Windows with no backdrop
         //   reads: off Windows this build has no backdrop to ask for and
         //   `settings::visible_rows_for` does not offer the row at all (§13.32
