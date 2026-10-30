@@ -415,9 +415,8 @@ fn file_of(resolver: &Resolver<'_>, node: Node, at: usize, root: &Path) -> Strin
 struct Judge<'g, 'r, 'i> {
     graph: &'g CallGraph<'r, 'i>,
     rules: &'g Rules,
-    reviewed: &'g BTreeMap<SiteKey, (Verdict, String)>,
-    /// Every callable by its key, for `follows`.
-    by_key: &'g BTreeMap<String, ItemId>,
+    /// The items each reviewed `follows` row names ([`followed`]), which the walk then follows.
+    follows: &'g BTreeMap<SiteKey, Vec<ItemId>>,
     root: PathBuf,
 }
 
@@ -675,8 +674,8 @@ impl Judge<'_, '_, '_> {
                             _ => edge.site.name.clone(),
                         };
                         let found = finding(kind, &name);
-                        if let Some((Verdict::Follows(keys), _)) = self.reviewed.get(&found.key) {
-                            next.extend(keys.iter().filter_map(|key| self.by_key.get(key)));
+                        if let Some(items) = self.follows.get(&found.key) {
+                            next.extend(items.iter().copied());
                         }
                         judged.findings.push(found);
                     }
@@ -743,7 +742,7 @@ type Site = (Option<(Node, Span)>, Option<SiteKey>);
 /// kind does not admit — an `Implicit` row by the kinds behind it (`under`).
 fn list_failures(
     tree: &BTreeMap<SiteKey, usize>,
-    list: &BTreeMap<SiteKey, (usize, Verdict, String)>,
+    list: &ListRows,
     doors: &BTreeMap<SiteKey, BTreeSet<String>>,
     under: &BTreeMap<SiteKey, BTreeSet<String>>,
 ) -> Vec<String> {
@@ -802,11 +801,16 @@ fn list_failures(
     failures
 }
 
-/// The list's text read: `file item kind name sites verdict reason`.
-fn read_list(text: &str) -> Result<BTreeMap<SiteKey, (usize, Verdict, String)>, String> {
+/// A list's rows by key: `sites`, the verdict and the reason.
+type ListRows = BTreeMap<SiteKey, (usize, Verdict, String)>;
+
+/// The list's text read: `file item kind name sites verdict reason`, and each row's one-based
+/// line, for a refusal that names the row.
+fn read_list(text: &str) -> Result<(ListRows, BTreeMap<SiteKey, usize>), String> {
     let mut rows = BTreeMap::new();
+    let mut lines = BTreeMap::new();
     let mut header = false;
-    for line in text.lines() {
+    for (at, line) in text.lines().enumerate() {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
@@ -837,11 +841,12 @@ fn read_list(text: &str) -> Result<BTreeMap<SiteKey, (usize, Verdict, String)>, 
         {
             return Err(format!("{key:?} on two rows; each key has one row"));
         }
+        lines.insert(key, at + 1);
     }
     if !header {
         return Err("the list has no header".to_owned());
     }
-    Ok(rows)
+    Ok((rows, lines))
 }
 
 const LIST_HEADER: &str = "file\titem\tkind\tname\tsites\tverdict\treason";
@@ -881,15 +886,64 @@ fn fixture_index(directory: &str) -> Arc<Index> {
     Index::shared(&universe).unwrap_or_else(|rejections| panic!("{}", report(&rejections)))
 }
 
-/// Every callable of `resolver`, by its key.
-fn keyed(resolver: &Resolver<'_>) -> BTreeMap<String, ItemId> {
-    resolver
-        .packages()
-        .iter()
-        .flat_map(|package| resolver.callables(package))
-        .filter(|id| resolver.admitted(*id))
-        .map(|id| (resolver.key(id), id))
-        .collect()
+/// Every callable of `resolver`, by its key ([`Resolver::key`]): one key may name several items
+/// (one module path on two `cfg` arms, two `impl` blocks of one type).
+fn keyed(resolver: &Resolver<'_>) -> BTreeMap<String, Vec<ItemId>> {
+    let mut keyed: BTreeMap<String, Vec<ItemId>> = BTreeMap::new();
+    for package in resolver.packages() {
+        for id in resolver.callables(package) {
+            if resolver.admitted(id) {
+                keyed.entry(resolver.key(id)).or_default().push(id);
+            }
+        }
+    }
+    keyed
+}
+
+/// The items every reviewed row's `follows <key>; …` names, by the row's key (the review of plan
+/// row 76, F1); `place` names a row for a refusal (the list's `REQUEST-DOOR-SITES.tsv:<line>`).
+/// A key is [`Resolver::key`]'s spelling of an admitted callable and names one item per `cfg` arm
+/// ([`arm_of`]), each followed. A key that names no item, or two items on one arm, is refused:
+/// the walk would lose the callee's road with no word, or follow two items where the row read
+/// one. Before the review, the walk looked each key up in a map of one item per key and dropped
+/// a key it did not find.
+fn followed(
+    resolver: &Resolver<'_>,
+    reviewed: &BTreeMap<SiteKey, (Verdict, String)>,
+    place: impl Fn(&SiteKey) -> String,
+) -> (BTreeMap<SiteKey, Vec<ItemId>>, Vec<String>) {
+    let by_key = keyed(resolver);
+    let mut follows = BTreeMap::new();
+    let mut refused = Vec::new();
+    for (row, (verdict, _)) in reviewed {
+        let Verdict::Follows(keys) = verdict else {
+            continue;
+        };
+        let mut items = Vec::new();
+        for key in keys {
+            let Some(found) = by_key.get(key) else {
+                refused.push(format!(
+                    "{}: `follows {key}` names no item of the product",
+                    place(row)
+                ));
+                continue;
+            };
+            let mut arms: BTreeMap<String, usize> = BTreeMap::new();
+            for id in found {
+                *arms.entry(arm_of(resolver, *id)).or_default() += 1;
+            }
+            if let Some(two) = arms.values().find(|count| **count > 1) {
+                refused.push(format!(
+                    "{}: `follows {key}` names {two} items on one `cfg` arm",
+                    place(row)
+                ));
+                continue;
+            }
+            items.extend(found.iter().copied());
+        }
+        follows.insert(row.clone(), items);
+    }
+    (follows, refused)
 }
 
 /// The fixture's registry, in `window_waits.tsv`'s shape: its rows are the fixture's doors.
@@ -996,13 +1050,28 @@ fn fixture_reviewed() -> BTreeMap<SiteKey, (Verdict, String)> {
 
 /// The fixture's door `door` walked under `registry` (the fixture's own, or a planted copy).
 fn fixture_walk(registry: &str, door: &str) -> Judged {
+    fixture_walk_under(registry, door, &fixture_reviewed())
+        .unwrap_or_else(|refused| panic!("the fixture's reviewed rows are not read: {refused:?}"))
+}
+
+/// The fixture's door `door` walked under `registry` and the reviewed rows `reviewed`, or what
+/// [`followed`] refuses of their `follows` rows.
+fn fixture_walk_under(
+    registry: &str,
+    door: &str,
+    reviewed: &BTreeMap<SiteKey, (Verdict, String)>,
+) -> Result<Judged, Vec<String>> {
     let index = fixture_index("request_doors");
     let resolver = Resolver::new(&[(FIXTURE_HOME, &index)], Arms::product())
         .unwrap_or_else(|refusals| panic!("{refusals:?}"));
-    let by_key = keyed(&resolver);
     let read = read_registry(&resolver, registry, FIXTURE_HOME);
     assert!(read.refused.is_empty(), "{:?}", read.refused);
-    let reviewed = fixture_reviewed();
+    let (follows, refused) = followed(&resolver, reviewed, |row| {
+        format!("the reviewed row {row:?}")
+    });
+    if !refused.is_empty() {
+        return Err(refused);
+    }
     let root = workspace_root()
         .canonicalize()
         .expect("the workspace root resolves");
@@ -1010,8 +1079,7 @@ fn fixture_walk(registry: &str, door: &str) -> Judged {
     let judge = Judge {
         graph: &graph,
         rules: &read.rules,
-        reviewed: &reviewed,
-        by_key: &by_key,
+        follows: &follows,
         root,
     };
     let spec = read
@@ -1019,15 +1087,21 @@ fn fixture_walk(registry: &str, door: &str) -> Judged {
         .iter()
         .find(|spec| spec.key == door)
         .unwrap_or_else(|| panic!("`{door}` is a door of the fixture's registry"));
-    judge.walk(spec, false)
+    Ok(judge.walk(spec, false))
 }
 
 /// The fixture's door `door` judged: its findings' kinds and names that no reviewed row reads,
 /// sorted.
 fn judge_fixture(door: &str) -> Vec<String> {
-    let judged = fixture_walk(&fixture_registry(), door);
+    unread(
+        &fixture_walk(&fixture_registry(), door),
+        &fixture_reviewed(),
+    )
+}
+
+/// The findings of `judged` that no row of `reviewed` reads, as `kind name`, sorted.
+fn unread(judged: &Judged, reviewed: &BTreeMap<SiteKey, (Verdict, String)>) -> Vec<String> {
     assert!(judged.refused.is_empty(), "{:?}", judged.refused);
-    let reviewed = fixture_reviewed();
     let mut found: Vec<String> = judged
         .findings
         .iter()
@@ -1358,7 +1432,7 @@ fn the_registry_refuses_a_key_on_two_modules_and_a_path_naming_nothing() {
     );
     assert_eq!(
         fixture_refusals(&planted),
-        ["the vocabulary path `bt_rd::nothing_here` names no item"]
+        ["window_waits.tsv:5: the vocabulary path `bt_rd::nothing_here` names no item"]
     );
     let past = registry.replacen(
         "submit_with_voice\twindow\tspawn_with@1",
@@ -1380,9 +1454,68 @@ fn the_registry_refuses_a_key_on_two_modules_and_a_path_naming_nothing() {
     assert_eq!(
         fixture_refusals(&foreign),
         [
-            "`submit`: `std::sync::Condvar::notify_one@0` names an argument of a foreign callee, \
-             whose signature the guard does not read"
+            "window_waits.tsv:24: `submit`: `std::sync::Condvar::notify_one@0` names an \
+             argument of a foreign callee, whose signature the guard does not read"
         ]
+    );
+}
+
+/// RED (the review of plan row 76, F1) — **a `follows` row names the items it follows, or is
+/// refused by its row**: the fixture's stored hook `on_full`, met on `submit`'s road, read as
+/// `follows <key>; …`. A key naming one item is followed (`record`'s file write is met), a key
+/// naming one item per arm follows both (`media::quiet`); a key that names nothing (a callee
+/// moved or renamed) and a key naming two items on one arm (`Pair::get`, two `impl` blocks) are
+/// refused by the row, the other keys of the row read as written. Before the review, the walk
+/// looked each key up in a map of one item per key: the stale key was dropped with no word (the
+/// hook's road lost), and `Pair::get` followed whichever impl the map kept.
+///
+/// MUTATIONS: drop the empty refusal in [`followed`] — the stale key passes and `record` alone is
+/// met; drop its arm count — `Pair::get` is followed.
+#[test]
+fn a_follows_row_names_its_items_or_is_refused_by_its_row() {
+    let row: SiteKey = (
+        FIXTURE_LIB.to_owned(),
+        format!("{FIXTURE_HOME} crate::Lane::offer"),
+        "Dynamic".to_owned(),
+        "on_full".to_owned(),
+    );
+    let planted = |verdict: &str| -> Result<Vec<String>, Vec<String>> {
+        let mut reviewed = fixture_reviewed();
+        reviewed.insert(
+            row.clone(),
+            (
+                Verdict::read(verdict).expect("a planted verdict reads"),
+                "2026-10-29: planted".to_owned(),
+            ),
+        );
+        let judged = fixture_walk_under(&fixture_registry(), "submit", &reviewed)?;
+        Ok(unread(&judged, &reviewed))
+    };
+    let place = format!("the reviewed row {row:?}");
+    assert_eq!(planted("std"), Ok(Vec::new()), "the fixture's own reading");
+    assert_eq!(
+        planted("follows bt-rd crate::record"),
+        Ok(vec!["Effect std::fs::write".to_owned()]),
+        "the followed item's write is met"
+    );
+    assert_eq!(
+        planted("follows bt-rd crate::media::quiet"),
+        Ok(Vec::new()),
+        "one item per arm, both followed"
+    );
+    assert_eq!(
+        planted("follows bt-rd crate::record; bt-rd crate::recorded"),
+        Err(vec![format!(
+            "{place}: `follows bt-rd crate::recorded` names no item of the product"
+        )]),
+        "a stale key is refused by its row"
+    );
+    assert_eq!(
+        planted("follows bt-rd crate::Pair::get"),
+        Err(vec![format!(
+            "{place}: `follows bt-rd crate::Pair::get` names 2 items on one `cfg` arm"
+        )]),
+        "two items on one arm are refused"
     );
 }
 
@@ -1546,14 +1679,6 @@ fn real_tree() -> Vec<(String, Arc<Index>)> {
                 .unwrap_or_else(|rejections| panic!("{}", report(&rejections)));
             (package.name().to_owned(), index)
         })
-        .collect()
-}
-
-/// One section of the registry: its rows' cells, the header checked.
-fn section<'r>(registry: &'r str, name: &str, columns: &[&str]) -> Vec<Vec<&'r str>> {
-    numbered_section(registry, name, columns)
-        .into_iter()
-        .map(|(_, cells)| cells)
         .collect()
 }
 
@@ -1870,20 +1995,23 @@ struct Registry {
 /// `# completions`, `# request-doors`) read over `resolver`; a key without a crate is `home`'s.
 fn read_registry(resolver: &Resolver<'_>, registry: &str, home: &str) -> Registry {
     let mut refused: Vec<String> = Vec::new();
-    let resolve = |key: &str, refused: &mut Vec<String>| -> BTreeSet<ItemId> {
+    let resolve = |line: usize, key: &str, refused: &mut Vec<String>| -> BTreeSet<ItemId> {
         key_items(resolver, home, key).unwrap_or_else(|why| {
-            refused.push(why);
+            refused.push(format!("window_waits.tsv:{line}: {why}"));
             BTreeSet::new()
         })
     };
 
     // The rules, from the registry.
     let mut rules = Rules::default();
-    for cells in section(registry, "vocabulary", &["path", "targets", "reason"]) {
+    for (line, cells) in numbered_section(registry, "vocabulary", &["path", "targets", "reason"]) {
         match exported_items(resolver, cells[0]) {
             Some(items) => {
                 if items.is_empty() {
-                    refused.push(format!("the vocabulary path `{}` names no item", cells[0]));
+                    refused.push(format!(
+                        "window_waits.tsv:{line}: the vocabulary path `{}` names no item",
+                        cells[0]
+                    ));
                 }
                 for id in items {
                     rules
@@ -1896,10 +2024,13 @@ fn read_registry(resolver: &Resolver<'_>, registry: &str, home: &str) -> Registr
             }
         }
     }
-    for cells in section(registry, "entrances", &["path", "door"]) {
+    for (line, cells) in numbered_section(registry, "entrances", &["path", "door"]) {
         let items = exported_items(resolver, cells[0]).unwrap_or_default();
         if items.is_empty() {
-            refused.push(format!("the entrance `{}` names no item", cells[0]));
+            refused.push(format!(
+                "window_waits.tsv:{line}: the entrance `{}` names no item",
+                cells[0]
+            ));
         }
         for id in items {
             rules
@@ -1957,10 +2088,10 @@ fn read_registry(resolver: &Resolver<'_>, registry: &str, home: &str) -> Registr
     }
 
     // The ledger's doors and the request doors' rows.
-    let completions = section(registry, "completions", &COMPLETION_COLUMNS);
-    let rows = section(registry, "request-doors", &REQUEST_DOOR_COLUMNS);
-    let request_doors: BTreeSet<&str> = rows.iter().map(|cells| cells[0]).collect();
-    for cells in &completions {
+    let completions = numbered_section(registry, "completions", &COMPLETION_COLUMNS);
+    let rows = numbered_section(registry, "request-doors", &REQUEST_DOOR_COLUMNS);
+    let request_doors: BTreeSet<&str> = rows.iter().map(|(_, cells)| cells[0]).collect();
+    for (line, cells) in &completions {
         let threads: Vec<&str> = cells[2]
             .split(", ")
             .map(|part| part.split_once(" (row ").map_or(part, |(thread, _)| thread))
@@ -1975,11 +2106,11 @@ fn read_registry(resolver: &Resolver<'_>, registry: &str, home: &str) -> Registr
         };
         if !owner && !request_doors.contains(cells[1]) {
             refused.push(format!(
-                "`{}` runs on `{}` and has no `# request-doors` row",
+                "window_waits.tsv:{line}: `{}` runs on `{}` and has no `# request-doors` row",
                 cells[1], cells[2]
             ));
         }
-        for id in resolve(cells[1], &mut refused) {
+        for id in resolve(*line, cells[1], &mut refused) {
             // A door on several rows keeps its strictest standing.
             let entry = rules
                 .doors
@@ -1992,19 +2123,22 @@ fn read_registry(resolver: &Resolver<'_>, registry: &str, home: &str) -> Registr
     }
     let mut specs: Vec<DoorSpec> = Vec::new();
     let mut not_walked: Vec<String> = Vec::new();
-    for cells in &rows {
+    for (line, cells) in &rows {
         match cells[1] {
             "window" => {}
             "main (before the loop)" | "door process" => {
                 let label = format!("{} ({})", cells[0], cells[1]);
-                for id in resolve(cells[0], &mut refused) {
+                for id in resolve(*line, cells[0], &mut refused) {
                     rules.not_walked.insert(id, label.clone());
                 }
                 not_walked.push(label);
                 continue;
             }
             other => {
-                refused.push(format!("`{}`: `asked on` is `{other}`", cells[0]));
+                refused.push(format!(
+                    "window_waits.tsv:{line}: `{}`: `asked on` is `{other}`",
+                    cells[0]
+                ));
                 continue;
             }
         }
@@ -2015,7 +2149,7 @@ fn read_registry(resolver: &Resolver<'_>, registry: &str, home: &str) -> Registr
                     Ok(at) => (written, Some(at)),
                     Err(_) => {
                         refused.push(format!(
-                            "`{}`: `{spelled}`'s argument is not a number",
+                            "window_waits.tsv:{line}: `{}`: `{spelled}`'s argument is not a number",
                             cells[0]
                         ));
                         continue;
@@ -2029,7 +2163,7 @@ fn read_registry(resolver: &Resolver<'_>, registry: &str, home: &str) -> Registr
                 // the review, R3).
                 if worker.is_some() {
                     refused.push(format!(
-                        "`{}`: `{spelled}` names an argument of a foreign callee, whose signature \
+                        "window_waits.tsv:{line}: `{}`: `{spelled}` names an argument of a foreign callee, whose signature \
                          the guard does not read",
                         cells[0]
                     ));
@@ -2037,12 +2171,12 @@ fn read_registry(resolver: &Resolver<'_>, registry: &str, home: &str) -> Registr
                 }
                 Callee::Foreign(written.to_owned())
             } else {
-                let items = resolve(written, &mut refused);
+                let items = resolve(*line, written, &mut refused);
                 for id in items.iter().filter(|_| worker.is_some()) {
                     let count = signature(resolver, *id).as_ref().map(argument_count);
                     if count.is_none_or(|count| worker.is_some_and(|at| at >= count)) {
                         refused.push(format!(
-                            "`{}`: `{spelled}` names argument {}, and `{}` takes {}",
+                            "window_waits.tsv:{line}: `{}`: `{spelled}` names argument {}, and `{}` takes {}",
                             cells[0],
                             worker.unwrap_or_default(),
                             resolver.key(*id),
@@ -2064,11 +2198,14 @@ fn read_registry(resolver: &Resolver<'_>, registry: &str, home: &str) -> Registr
         // `—`: the door hands nothing to another thread (it arms a wait, or answers from what it
         // holds); its walk is judged all the same.
         if boundary.is_empty() && cells[2] != "—" {
-            refused.push(format!("`{}` names no boundary", cells[0]));
+            refused.push(format!(
+                "window_waits.tsv:{line}: `{}` names no boundary",
+                cells[0]
+            ));
         }
         let mailbox: BTreeSet<ItemId> = cell_list(cells[4])
             .into_iter()
-            .flat_map(|key| resolve(key, &mut refused))
+            .flat_map(|key| resolve(*line, key, &mut refused))
             .collect();
         let mut lock_helpers = BTreeSet::new();
         for id in &mailbox {
@@ -2079,12 +2216,12 @@ fn read_registry(resolver: &Resolver<'_>, registry: &str, home: &str) -> Registr
                     }
                 }
                 (None, _) => refused.push(format!(
-                    "`{}`: the mailbox item `{}` has no signature the guard reads",
+                    "window_waits.tsv:{line}: `{}`: the mailbox item `{}` has no signature the guard reads",
                     cells[0],
                     resolver.key(*id)
                 )),
                 (Some(_), Err(unread)) => refused.push(format!(
-                    "`{}`: the mailbox item `{}`'s argument types are not all placed: {}",
+                    "window_waits.tsv:{line}: `{}`: the mailbox item `{}`'s argument types are not all placed: {}",
                     cells[0],
                     resolver.key(*id),
                     unread.join("; ")
@@ -2093,11 +2230,11 @@ fn read_registry(resolver: &Resolver<'_>, registry: &str, home: &str) -> Registr
         }
         specs.push(DoorSpec {
             key: cells[0].to_owned(),
-            roots: resolve(cells[0], &mut refused).into_iter().collect(),
+            roots: resolve(*line, cells[0], &mut refused).into_iter().collect(),
             boundary,
             handed: cell_list(cells[3])
                 .into_iter()
-                .flat_map(|key| resolve(key, &mut refused))
+                .flat_map(|key| resolve(*line, key, &mut refused))
                 .collect(),
             mailbox,
             lock_helpers,
@@ -2139,7 +2276,6 @@ fn every_request_door_returns_at_once() {
         .collect();
     let resolver =
         Resolver::new(&packages, Arms::product()).unwrap_or_else(|refusals| panic!("{refusals:?}"));
-    let by_key = keyed(&resolver);
     let Registry {
         rules,
         specs,
@@ -2155,11 +2291,20 @@ fn every_request_door_returns_at_once() {
     // The list.
     let committed = std::fs::read_to_string(sites_list())
         .expect("docs/plans/REQUEST-DOOR-SITES.tsv, the committed list");
-    let list = read_list(&committed).unwrap_or_else(|why| panic!("REQUEST-DOOR-SITES.tsv: {why}"));
+    let (list, lines) =
+        read_list(&committed).unwrap_or_else(|why| panic!("REQUEST-DOOR-SITES.tsv: {why}"));
     let reviewed: BTreeMap<SiteKey, (Verdict, String)> = list
         .iter()
         .map(|(key, (_, verdict, reason))| (key.clone(), (verdict.clone(), reason.clone())))
         .collect();
+    let (follows, unfollowed) = followed(&resolver, &reviewed, |row| {
+        format!("REQUEST-DOOR-SITES.tsv:{}", lines[row])
+    });
+    assert!(
+        unfollowed.is_empty(),
+        "the list's `follows` rows are not read:\n  {}",
+        unfollowed.join("\n  ")
+    );
     let root = workspace_root()
         .canonicalize()
         .expect("the workspace root resolves");
@@ -2167,8 +2312,7 @@ fn every_request_door_returns_at_once() {
     let judge = Judge {
         graph: &graph,
         rules: &rules,
-        reviewed: &reviewed,
-        by_key: &by_key,
+        follows: &follows,
         root,
     };
 

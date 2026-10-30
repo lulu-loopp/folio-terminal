@@ -12,7 +12,8 @@ the ownership census gate uses, over the same structs (`App`, `WindowRuntime`,
   the four files and the `# measured at <commit>` line under each header).
 - Guard: `crates/bt-source/tests/census.rs`
   `the_committed_runtime_dep_map_is_the_code`. Every line of the four files must be
-  the code's at this tree, except the `# measured at` line. A hand edit fails it, and
+  the code's at this tree, except the `# measured at` line, which
+  `scripts/ci/check-generated-stamps.ps1` reads instead. A hand edit fails it, and
   so does any change to the code that moves a row. Nothing here is edited by hand.
 - The rules: `crates/bt-source/tests/dep_map.rs`, one fixture each.
 

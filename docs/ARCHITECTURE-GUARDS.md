@@ -690,6 +690,12 @@ behind it takes only `violation`). A `const`'s and a plain `static`'s initialize
 `LazyLock`'s or `OnceLock`'s is. A key in any cell names one item per `cfg` arm (one per
 platform's module); two items on one arm (a bare name two modules declare) are refused, and so is
 a first-party `# vocabulary` or `# entrances` path naming nothing.
+Since 2026-10-29 (T-WINDOW-WAITS-STALE-KEY-REFUSED, plan row 76, and its review) an `# effects`
+row names exactly one item on its arm (`-` for an item on no predicate, else its predicates as
+`[p]` joined by a space) with a kind from the registry's closed list, and each key of a `follows`
+verdict in the list names one item per `cfg` arm; a key that names nothing, or two items on one
+arm, is refused by its row's line (`window_waits.tsv:<line>`, `REQUEST-DOOR-SITES.tsv:<line>`),
+as every other refusal of the registry's cells is.
 
 **The sites, by site.** `docs/plans/REQUEST-DOOR-SITES.tsv` lists every failure keyed by file,
 item, kind and name (no line), with `sites`, a verdict and a reason: `std` or `follows <key>; …`
@@ -937,6 +943,14 @@ the whole road is never that verdict.
 read and paused on `update_apply::WaitClock` (`Leaving::leave_on`; `leave` hands it `WallClock`),
 so a test counts its pauses with `CountedClock`; a road with no clock (a lock only tried, a mark
 only read) is proven by a signal awaited within the suite's patience, or by the state it leaves.
+
+2026-10-29 (T-ELAPSED-BOUNDS-ON-FLOODS-AND-TRACE-SINK): a bounded wait whose subject is that it
+gives up (`trace_sink::flush_sink` at its own budget) is proven the same way: by its return while
+the thread it would wait for is still held, awaited within the suite's patience, with the holder let
+go before the verdict — never by timing it. The hand-off lane's flood and the trace sink's producers
+are read the same way, so in these tests a press, an offer or a writer that waits is red, not a hang
+(the sink's two other full-queue offers on a test thread are plan row 106). What such a verdict does
+not catch is a bounded wait, or a give-up that ignores its budget, shorter than the suite's patience.
 
 ## Test order and shared fixtures
 

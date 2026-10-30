@@ -602,7 +602,9 @@ impl StalledWriter {
     /// Start one, and answer only once the writer is actually inside a write.
     ///
     /// The wait is the whole value of the helper: a test that began offering
-    /// before the stall would be timing a working sink for its first lines.
+    /// before the stall would be testing a working sink for its first lines.
+    /// It is the lane suite's patience, so a writer that never reaches its
+    /// write fails the test by name rather than hanging it.
     pub(crate) fn start() -> Self {
         let (lines, waiting) = sync_channel(QUEUE_DEPTH);
         let (release, held) = sync_channel::<()>(0);
@@ -617,9 +619,7 @@ impl StalledWriter {
             destination: Destination::Stderr,
             text: "the line that parks the writer".to_owned(),
         });
-        arrived
-            .recv_timeout(Duration::from_secs(5))
-            .expect("the writer reached its write");
+        crate::lane::receive(&arrived, "the writer reaching its write");
         Self {
             queue,
             release: Some(release),
@@ -638,6 +638,14 @@ impl StalledWriter {
     /// How many lines this sink has lost.
     pub(crate) fn dropped(&self) -> u64 {
         self.queue.dropped.load(Ordering::Relaxed)
+    }
+
+    /// **The writer's release, handed to the test**, for a test that has to let the writer out
+    /// of its write while another thread still borrows this sink — a producer that waits for it
+    /// is red, and must not be a hang. Dropping what this returns is the release; this sink's own
+    /// drop then finds it already gone.
+    pub(crate) fn take_release(&mut self) -> Option<SyncSender<()>> {
+        self.release.take()
     }
 
     /// Fill the queue, so that the next offer meets a full one.
@@ -706,6 +714,7 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::sync::atomic::AtomicBool;
 
     use super::*;
 
@@ -739,18 +748,28 @@ mod tests {
             }
             let _ = done.send(());
         });
-        let completed = finished.recv_timeout(Duration::from_secs(1));
-        if completed.is_ok() {
+        // Came back while the queue was still full, within the lane suite's patience; the queue is
+        // let go before the verdict, so a producer that waits for room is red, never a hang.
+        let completed = crate::lane::within_patience(|| finished.try_recv().is_ok());
+        if completed {
             assert_eq!(queue.dropped.load(Ordering::Relaxed), 1000);
             assert_eq!(held.try_recv().unwrap().text, "first");
             assert_eq!(held.try_recv().unwrap().text, "second");
             assert!(held.try_recv().is_err());
         }
         drop(held);
+        // The verdict before the join: a producer still waiting is red, never a hang.
+        assert!(completed, "a producer blocked on a full queue");
         producer.join().unwrap();
-        assert!(completed.is_ok(), "a producer blocked on a full queue");
     }
 
+    /// A producer that finds the sender lock taken drops its line at once. The
+    /// verdict is the offer coming back while the lock is still held, within
+    /// the lane suite's patience: a producer that waited a bounded while for
+    /// the lock, shorter than that patience, is not caught here.
+    ///
+    /// MUTATION: `lock()` for `try_lock()` in `Queue::offer`; the producer
+    /// does not come back while the lock is held.
     #[test]
     fn a_busy_producer_lock_drops_instead_of_waiting() {
         let (lines, _waiting) = sync_channel(2);
@@ -762,10 +781,12 @@ mod tests {
             offered.offer(stderr_line("contended"));
             let _ = done.send(());
         });
-        let completed = finished.recv_timeout(Duration::from_secs(1));
+        // Came back while the lock was still held, within the lane suite's patience.
+        let completed = crate::lane::within_patience(|| finished.try_recv().is_ok());
         drop(guard);
+        // The verdict before the join: a producer still waiting is red, never a hang.
+        assert!(completed, "a producer waited for the sender lock");
         producer.join().unwrap();
-        assert!(completed.is_ok(), "a producer waited for the sender lock");
         assert_eq!(queue.dropped.load(Ordering::Relaxed), 1);
     }
 
@@ -819,22 +840,41 @@ mod tests {
     /// that offers a line gets on with its frame, and the recording says how
     /// much of itself is missing.
     ///
+    /// "Gets on with its frame" is the thousand offers coming back while the
+    /// writer is still parked, awaited within the lane suite's patience — not a
+    /// measured time. A producer that waited a bounded while per line, short
+    /// enough that a thousand of them fit in that patience, is not caught here.
+    ///
     /// MUTATION: give `Queue::offer` a `send` in place of its `try_send`; the
-    /// producer never returns and the timeout fails the test.
+    /// producer does not come back while the writer is parked, and once the
+    /// writer is let go the test is red.
     #[test]
     fn a_stalled_writer_never_delays_a_producer_and_the_count_grows() {
-        let sink = StalledWriter::start();
+        let mut sink = StalledWriter::start();
         sink.fill();
+        let release = sink.take_release();
         let dropped_before = sink.dropped();
-        let started = Instant::now();
-        for index in 0..1000 {
-            sink.offer(&format!("frame={index}"));
-        }
-        let elapsed = started.elapsed();
+        let sink = Arc::new(sink);
+        let returned = Arc::new(AtomicBool::new(false));
+        let producer = {
+            let sink = Arc::clone(&sink);
+            let returned = Arc::clone(&returned);
+            std::thread::spawn(move || {
+                for index in 0..1000 {
+                    sink.offer(&format!("frame={index}"));
+                }
+                returned.store(true, Ordering::SeqCst);
+            })
+        };
+        let while_parked = crate::lane::within_patience(|| returned.load(Ordering::SeqCst));
+        // The writer is let out and the verdict asserted before the producer is joined: a
+        // producer still waiting is red, never a hang.
+        drop(release);
         assert!(
-            elapsed < Duration::from_secs(1),
-            "a thousand offers to a stalled sink took {elapsed:?}"
+            while_parked,
+            "a thousand offers to a stalled sink did not come back while it was stalled"
         );
+        producer.join().unwrap();
         assert_eq!(
             sink.dropped(),
             dropped_before + 1000,
@@ -858,7 +898,7 @@ mod tests {
     /// on the real `stderr` on its way there says why it is in the output.
     ///
     /// MUTATION: put `std::io::stderr()` back in `run`'s hand; the writer waits
-    /// for the holder and the body does not finish inside the deadline.
+    /// for the holder and the body does not finish while the lock is held.
     #[test]
     fn the_writer_does_not_wait_for_the_process_stderr_lock() {
         let (release, released) = sync_channel::<()>(0);
@@ -868,9 +908,7 @@ mod tests {
             let _ = locked.send(());
             let _ = released.recv();
         });
-        holding
-            .recv_timeout(Duration::from_secs(5))
-            .expect("the holder took the process lock");
+        crate::lane::receive(&holding, "the holder taking the process lock");
         let (lines, waiting) = sync_channel(QUEUE_DEPTH);
         let dropped = Arc::new(AtomicU64::new(0));
         let counted = Arc::clone(&dropped);
@@ -884,14 +922,16 @@ mod tests {
             "bt-app trace_sink test: one line written past a held stderr lock, on purpose",
         ));
         assert!(queue.close());
-        let ended = finished.recv_timeout(Duration::from_secs(5));
+        // The body's end while the lock is still held, within the lane suite's patience.
+        let ended = crate::lane::within_patience(|| finished.try_recv().is_ok());
         drop(release);
         holder.join().unwrap();
-        writer.join().unwrap();
+        // The verdict before the writer's join: a writer still waiting is red, never a hang.
         assert!(
-            ended.is_ok(),
+            ended,
             "the writer waited for a lock another thread was holding"
         );
+        writer.join().unwrap();
     }
 
     /// RED (B-TRACE-STDERR) — **a trace file that cannot be opened is reported
@@ -901,15 +941,15 @@ mod tests {
     /// The error road of the test above. A directory given as the trace file
     /// fails to open on every platform. First the production body — [`run`],
     /// with the real [`ProcessStderr`] — while another thread holds Rust's
-    /// `Stderr` lock: the writer has to reach the end of its body inside the
-    /// shutdown bound, which it cannot if the report takes that lock. Then the
+    /// `Stderr` lock: the writer has to reach the end of its body while that
+    /// lock is still held, which it cannot if the report takes that lock. Then the
     /// same body with a writer the test can read: the report arrives there,
     /// exactly once for two lines (the failure is remembered), and nothing is
     /// written to the directory's name.
     ///
     /// MUTATION: in `TraceFile::open`, write the report to `std::io::stderr()`
-    /// instead of `report`; the writer waits for the holder past
-    /// [`FLUSH_TIMEOUT`], and the captured output holds no report.
+    /// instead of `report`; the writer waits for the holder, and the captured
+    /// output holds no report.
     #[test]
     fn a_failed_trace_open_reports_without_the_process_stderr_lock() {
         let folder = bt_testpath::temp_path("bt-sink-a-folder-not-a-file");
@@ -930,9 +970,7 @@ mod tests {
             let _ = locked.send(());
             let _ = released.recv();
         });
-        holding
-            .recv_timeout(Duration::from_secs(5))
-            .expect("the holder took the process lock");
+        crate::lane::receive(&holding, "the holder taking the process lock");
         let failing = Arc::new(TraceFile::new(&folder, Some("# header")));
         let (lines, waiting) = sync_channel(QUEUE_DEPTH);
         let dropped = Arc::new(AtomicU64::new(0));
@@ -945,14 +983,15 @@ mod tests {
         let queue = Queue::new(lines, dropped);
         offer_two(&queue, &failing);
         assert!(queue.close());
-        let ended = finished.recv_timeout(FLUSH_TIMEOUT);
+        let ended = crate::lane::within_patience(|| finished.try_recv().is_ok());
         drop(release);
         holder.join().unwrap();
-        writer.join().unwrap();
+        // The verdict before the writer's join: a writer still waiting is red, never a hang.
         assert!(
-            ended.is_ok(),
+            ended,
             "the failed open's report waited for a lock another thread was holding"
         );
+        writer.join().unwrap();
 
         let failing = Arc::new(TraceFile::new(&folder, Some("# header")));
         let (lines, waiting) = sync_channel(QUEUE_DEPTH);
@@ -991,6 +1030,16 @@ mod tests {
         );
     }
 
+    /// **An orderly exit does not wait for a writer stuck in its write**: the
+    /// flush gives up at its own budget, while the writer is still stalled, and
+    /// leaves the writer detached. The verdict is the flush coming back while
+    /// the writer is still stalled, within the lane suite's patience: a flush
+    /// that ignored its budget but gave up within that patience is not caught
+    /// here.
+    ///
+    /// MUTATION: in `flush_sink`, join the writer's handle whether or not it
+    /// has finished; the flush does not come back while the writer is stalled,
+    /// and once it is let go the test is red.
     #[test]
     fn shutdown_does_not_wait_forever_for_a_stalled_writer() {
         let (lines, _waiting) = sync_channel(2);
@@ -1002,20 +1051,29 @@ mod tests {
             drop(done);
             let _ = returned.send(());
         });
-        let sink = Sink {
+        let sink = Arc::new(Sink {
             queue: Queue::new(lines, Arc::new(AtomicU64::new(0))),
             writer: Mutex::new(Some(writer)),
             finished: Mutex::new(finished),
+        });
+        // The flush runs on its own thread so that this one can ask whether it came back while the
+        // writer was still stalled. The writer is let go and the verdict asserted before the flush
+        // is joined, so a flush that waits for it is red, never a hang. The 20 ms is the flush's
+        // own budget, and nothing here measures it.
+        let flushed = Arc::new(AtomicBool::new(false));
+        let flush = {
+            let sink = Arc::clone(&sink);
+            let flushed = Arc::clone(&flushed);
+            std::thread::spawn(move || {
+                flush_sink(&sink, Duration::from_millis(20));
+                flushed.store(true, Ordering::SeqCst);
+            })
         };
-        let started = Instant::now();
-        flush_sink(&sink, Duration::from_millis(20));
-        let elapsed = started.elapsed();
+        let while_stalled = crate::lane::within_patience(|| flushed.load(Ordering::SeqCst));
         release.send(()).unwrap();
-        observed.recv_timeout(Duration::from_secs(1)).unwrap();
-        assert!(
-            elapsed < Duration::from_secs(1),
-            "shutdown took {elapsed:?}"
-        );
+        assert!(while_stalled, "shutdown waited for a stalled writer");
+        flush.join().unwrap();
+        crate::lane::receive(&observed, "the released writer's return");
         assert!(
             lock(&sink.writer).is_none(),
             "stalled writer was not detached"
