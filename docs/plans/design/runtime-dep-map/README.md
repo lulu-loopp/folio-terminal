@@ -103,9 +103,11 @@ exact count of what it does see.
   `PreviewPane`, `DocumentView`, `PictureView` and `TerminalPane` have none: O-7
   and O-8 put their writes inside their own types, and the pane's writes are its
   own methods (O-5b).
-- **unclassified.tsv**: **252 items, 220 free functions and 32 `Runtime`
-  methods**, still in `main.rs` (at K2 batch 26's head; 260, 226 and 34 before it,
-  at batch 25's head; 275, 241 and 34 before batch 25,
+- **unclassified.tsv**: **255 items, 223 free functions and 32 `Runtime`
+  methods**, still in `main.rs` (at K2 batch 26's head; 263, 229 and 34 before it,
+  at main `799ac8592`: batch 25's 260 and plan row 79's three root functions
+  `announce_frame_shape_stop`, `say_the_stop_alert` and `claim_the_alert`;
+  260, 226 and 34 at batch 25's head; 275, 241 and 34 before batch 25,
   at batch 24's head; 285, 241 and 44 before batch 24,
   at plan row 59's head: K2 batch 23's 284 and row 66's `say_in_a_box_or_on_stderr`;
   329, 242 and 87 before batch 23,
