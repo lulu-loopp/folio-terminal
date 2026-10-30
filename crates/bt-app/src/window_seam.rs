@@ -278,6 +278,12 @@ pub(crate) trait WindowHost {
     /// **Whether a remembered foreground holder is this window** —
     /// `bt_platform::hotkey::Foreground::is_window`; `false` without a handle.
     fn holds_the_foreground(&self, holder: bt_platform::hotkey::Foreground) -> bool;
+    /// **The Windows contrast theme in force** (T-HIGH-CONTRAST) —
+    /// [`crate::runtime::read_high_contrast`], one `SystemParametersInfoW` and, while a theme is
+    /// on, five `GetSysColor`; `None` with none on, and on every other platform. A fact of the
+    /// machine rather than of this window, asked through the window that heard the notice
+    /// announcing it, as the window's other questions to the system are.
+    fn high_contrast(&self) -> Option<bt_render::SystemContrast>;
     /// The system's own blur behind the window's ground — `bt_platform::set_system_backdrop`.
     fn set_backdrop(&self, acrylic: bool) -> Result<(), String>;
     /// Whether the window stays above other windows — `bt_platform::set_window_topmost`.
@@ -465,6 +471,9 @@ impl WindowHost for Arc<Window> {
     }
     fn holds_the_foreground(&self, holder: bt_platform::hotkey::Foreground) -> bool {
         crate::native_window_of(self).is_ok_and(|native| holder.is_window(native))
+    }
+    fn high_contrast(&self) -> Option<bt_render::SystemContrast> {
+        crate::runtime::read_high_contrast()
     }
     fn set_backdrop(&self, acrylic: bool) -> Result<(), String> {
         bt_platform::set_system_backdrop(native_or_say(self)?, acrylic)

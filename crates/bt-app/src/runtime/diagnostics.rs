@@ -8,7 +8,7 @@ use crate::{
 };
 use anyhow::Result;
 use bt_persist::ThemeModeV1;
-use bt_render::{GridSize, Theme};
+use bt_render::{GridSize, SystemContrast, Theme, ThemeChange};
 use std::time::Instant;
 use winit::dpi::PhysicalSize;
 use winit::window::Theme as OsTheme;
@@ -22,14 +22,48 @@ impl<B: Backend> Runtime<'_, B> {
     /// setting are two chances to disagree about it, and the one this process
     /// already trusts is the one that decided the canvas its window opened in.
     pub(crate) fn os_theme_changed(&mut self) -> Result<bool> {
+        let mode = self.app.settings_store.loaded().theme_mode;
+        // **A contrast theme decides the canvas while it is on** (owner ruling 2026-10-28,
+        // row 90 ⑥), whatever the Theme row says and whatever Windows' light/dark switch
+        // says beside it.
+        if bt_render::high_contrast_in_force().is_some() {
+            return self.apply_theme(theme_in_force(mode));
+        }
         let Some(os_theme) = system_os_theme() else {
             return Ok(false);
         };
-        let mode = self.app.settings_store.loaded().theme_mode;
         let Some(theme) = resolved_theme_change(mode, os_theme) else {
             return Ok(false);
         };
         self.apply_theme(theme)
+    }
+
+    /// **The Windows contrast theme as this window's question to the system answers it, put in
+    /// force** (T-HIGH-CONTRAST, `docs/DESIGN.md` §7.1.6: 「高对比度模式跟随系统调色」) — on every
+    /// preference notice with the system canvas beside it (the boot reads it before there is a
+    /// window, `settle_the_first_canvas`).
+    ///
+    /// `set_high_contrast` answers `Unchanged` when the reading is the one in force, which is
+    /// every notice but the one that moved it, and every window after the first: the overlay
+    /// is the process's, so the first window to hear the change puts it in force, re-derives,
+    /// and records the change for the others ([`Self::adopt_new_palette`]).
+    ///
+    /// What moves with it, in this window: the ground (no picture and no translucency while a
+    /// theme is on, ruling ⑦), the canvas (ruling ⑥), and the palette, which every one of the
+    /// three re-derives through the one [`Self::adopt_new_palette`].
+    pub(crate) fn adopt_high_contrast(&mut self) -> Result<bool> {
+        if bt_render::set_high_contrast(self.window.window.high_contrast())
+            == ThemeChange::Unchanged
+        {
+            return Ok(false);
+        }
+        let ground_moved = self.apply_window_ground()?;
+        let theme_moved =
+            self.apply_theme(theme_in_force(self.app.settings_store.loaded().theme_mode))?;
+        if !ground_moved && !theme_moved {
+            self.adopt_new_palette()?;
+        }
+        Ok(true)
     }
 
     /// Record that the application moved under its windows. See
@@ -159,6 +193,45 @@ impl<B: Backend> Runtime<'_, B> {
         })?;
         Ok(())
     }
+}
+
+/// **The canvas a window resolves to, with the contrast theme in it** — every resolution
+/// after the boot's first reading of the machine goes through here, so the Theme row, the
+/// desktop's light/dark switch and a contrast theme cannot disagree about one window.
+pub(crate) fn theme_in_force(mode: ThemeModeV1) -> Theme {
+    theme_under_contrast(
+        resolve_theme_mode(mode, system_os_theme()),
+        bt_render::high_contrast_in_force(),
+    )
+}
+
+/// **A contrast theme's canvas outranks the Theme row while it is on** (owner ruling
+/// 2026-10-28, row 90 ⑥): the theme's Background decides light or dark at the one threshold,
+/// and `resolved` (the row's own answer) is the canvas again the moment it goes off. The row
+/// keeps its value throughout, because nothing here writes it.
+pub(crate) fn theme_under_contrast(resolved: Theme, contrast: Option<SystemContrast>) -> Theme {
+    contrast.map_or(resolved, |system| {
+        if bt_render::background_is_light(system.window) {
+            Theme::Light
+        } else {
+            Theme::Dark
+        }
+    })
+}
+
+/// **What this machine's contrast theme is right now**, in the renderer's vocabulary, or
+/// `None` while none is on.
+///
+/// Windows alone has one; `bt_platform::system_high_contrast` answers `None` everywhere
+/// else, so the overlay is never set there.
+pub(crate) fn read_high_contrast() -> Option<SystemContrast> {
+    bt_platform::system_high_contrast().map(|colours| SystemContrast {
+        window: colours.window,
+        window_text: colours.window_text,
+        highlight: colours.highlight,
+        highlight_text: colours.highlight_text,
+        gray_text: colours.gray_text,
+    })
 }
 
 pub(crate) fn resolved_theme_change(mode: ThemeModeV1, os_theme: OsTheme) -> Option<Theme> {
