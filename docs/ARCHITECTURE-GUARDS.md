@@ -319,6 +319,13 @@ the rules on a fixture. When red, regenerate with
 `target/depmap/`) and commit the files with the change that moved them; never
 edit a row. A header count that grows (reads not attributed, calls not
 followed) means the map sees less; the change that regenerates it says why.
+Since 2026-10-29 (T-GENERATED-STAMP-REFUSES-DIRTY-TREES, plan row 99)
+`scripts/ci/check-generated-stamps.ps1` (CI `logic`; its cases in
+`check-generated-stamps-tests.ps1`) reads the `# measured at <sha>` line the
+test skips and refuses a file without exactly one, a line off the grammar, the
+` with uncommitted changes` suffix, a sha that is no commit or not an ancestor
+of HEAD, and four files naming different commits; a shallow clone exits 2.
+When red: commit everything, run the generator, commit its output.
 
 ## Call graph
 
@@ -667,6 +674,12 @@ behind it takes only `violation`). A `const`'s and a plain `static`'s initialize
 `LazyLock`'s or `OnceLock`'s is. A key in any cell names one item per `cfg` arm (one per
 platform's module); two items on one arm (a bare name two modules declare) are refused, and so is
 a first-party `# vocabulary` or `# entrances` path naming nothing.
+Since 2026-10-29 (T-WINDOW-WAITS-STALE-KEY-REFUSED, plan row 76, and its review) an `# effects`
+row names exactly one item on its arm (`-` for an item on no predicate, else its predicates as
+`[p]` joined by a space) with a kind from the registry's closed list, and each key of a `follows`
+verdict in the list names one item per `cfg` arm; a key that names nothing, or two items on one
+arm, is refused by its row's line (`window_waits.tsv:<line>`, `REQUEST-DOOR-SITES.tsv:<line>`),
+as every other refusal of the registry's cells is.
 
 **The sites, by site.** `docs/plans/REQUEST-DOOR-SITES.tsv` lists every failure keyed by file,
 item, kind and name (no line), with `sites`, a verdict and a reason: `std` or `follows <key>; …`

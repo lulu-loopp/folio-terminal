@@ -329,6 +329,30 @@ pub mod elsewhere {
     pub fn armed() {}
 }
 
+/// Plan row 76: one module path on two arms (bt-platform's `video` and its `#[path]` portable
+/// twin): an `# effects` row names the item of the arm it writes, and `-` names neither.
+#[cfg(windows)]
+pub mod media {
+    pub fn quiet() {}
+}
+
+#[cfg(not(windows))]
+pub mod media {
+    pub fn quiet() {}
+}
+
+/// Plan row 76: two `impl` blocks of one type, one method name, one arm — a row naming
+/// `Pair::get` names two items and is refused.
+pub struct Pair<T>(pub T);
+
+impl Pair<u8> {
+    pub fn get(&self) {}
+}
+
+impl Pair<u16> {
+    pub fn get(&self) {}
+}
+
 /// Nit 5: a Win32 file-system function, a Win32 type's constructor (not a call of the module), a
 /// path's question to the disk, and a park.
 pub fn submit_asks_the_disk(lane: &'static Lane, job: u32) {
