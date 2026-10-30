@@ -118,8 +118,8 @@ crates/bt-platform/src/macos_update_mount_tests.rs:26 recorded `hdiutil` output:
 crates/bt-platform/src/macos_update_mount_tests.rs:141 recorded `hdiutil` output: its columns as the tool prints them
 crates/bt-platform/tests/macos_services.rs:230 the probe's listing: each path indented under the line that counts them
 crates/bt-pty/src/lib.rs:4188 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-source/src/declarations.rs:757 the spacing inside the predicate is the input under test
-crates/bt-source/src/declarations.rs:758 the spacing inside the predicate is the input under test
+crates/bt-source/src/declarations.rs:760 the spacing inside the predicate is the input under test
+crates/bt-source/src/declarations.rs:761 the spacing inside the predicate is the input under test
 crates/bt-source/src/manifest.rs:643 a manifest fixture: a trailing comment set off by spaces
 crates/bt-source/src/manifest.rs:688 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-source/src/query.rs:902 the display form's second line, indented under the first after an escaped line break
@@ -127,7 +127,7 @@ crates/bt-source/tests/contract.rs:385 code sample: the indentation after an esc
 crates/bt-source/tests/contract.rs:397 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-source/tests/index.rs:458 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-source/tests/index.rs:487 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-source/tests/index.rs:1182 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-source/tests/index.rs:1192 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-source/tests/tripwire.rs:9035 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-source/tests/tripwire.rs:9417 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-term/src/session.rs:22477 recorded terminal byte stream: the blank cells a repaint wrote
