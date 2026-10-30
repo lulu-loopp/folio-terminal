@@ -4,7 +4,7 @@
 # name) with the number of calls behind it. Held equal to the tree by bt-source's call_graph test;
 # shrink-only against the merge base by scripts/ci/check-unfollowed-edges.ps1 - a key added or grown
 # carries a reason 'YYYY-MM-DD: <why>'. Never edit a key or a count by hand.
-# Ambiguous calls with exactly one candidate, not listed by site above or below (bt_source::call_graph::Unresolved::sole_candidate; a guard naming a callee's callers counts each as a call of its one candidate): 1765. A call whose name is renamed to one only one item declares leaves the list and is counted here.
+# Ambiguous calls with exactly one candidate, not listed by site above or below (bt_source::call_graph::Unresolved::sole_candidate; a guard naming a callee's callers counts each as a call of its one candidate): 1766. A call whose name is renamed to one only one item declares leaves the list and is counted here.
 file	item	kind	name	sites	reason
 crates/bt-app/src/animation.rs	bt-app crate::animation::<FileAnimationSource as Read>::read	Ambiguous	unwrap_or	1	
 crates/bt-app/src/animation.rs	bt-app crate::animation::AnimationCursor::start_again	Ambiguous	into_inner	1	
@@ -4215,6 +4215,8 @@ crates/bt-app/src/runtime/pointer/capture.rs	bt-app crate::runtime::pointer::cap
 crates/bt-app/src/runtime/pointer/capture.rs	bt-app crate::runtime::pointer::capture::Runtime::capture_where_mut	Dynamic	predicate	1	
 crates/bt-app/src/runtime/pointer/capture.rs	bt-app crate::runtime::pointer::capture::cancel_then_route	Dynamic	cancel_owner	1	
 crates/bt-app/src/runtime/pointer/capture.rs	bt-app crate::runtime::pointer::capture::cancel_then_route	Dynamic	route_press	1	
+crates/bt-app/src/runtime/pointer/ending.rs	bt-app crate::runtime::pointer::ending::FolioApp::end_the_capture_that_lost_its_pointer	Ambiguous	map	1	2026-10-29: T-TOUCH-DOES-NOTHING-ON-WINDOWS, Option::map reading the slot's window id (review F3 removed the window-gone arm and its Result::map(drop)); a std combinator
+crates/bt-app/src/runtime/pointer/ending.rs	bt-app crate::runtime::pointer::ending::a_capture_ended_by_its_button_said_once	Ambiguous	then	1	2026-10-29: T-TOUCH-DOES-NOTHING-ON-WINDOWS review fold, bool::then building the once-per-process line (F7); a std combinator
 crates/bt-app/src/runtime/pointer/mod.rs	bt-app crate::runtime::pointer::Runtime::page_under_the_hand	Dynamic	inside	1	2026-10-21: T-POINTER-CAPTURE cut 6; moved unchanged out of `web_page_at`: `inside`, a local closure over a rectangle, which calls no door
 crates/bt-app/src/runtime/pointer/mod.rs	bt-app crate::runtime::pointer::Runtime::plane_at	Ambiguous	map	1	
 crates/bt-app/src/runtime/pointer/mod.rs	bt-app crate::runtime::pointer::Runtime::plane_at	Ambiguous	or_else	2	
@@ -4224,6 +4226,8 @@ crates/bt-app/src/runtime/pointer/router.rs	bt-app crate::runtime::pointer::rout
 crates/bt-app/src/runtime/pointer/router.rs	bt-app crate::runtime::pointer::router::overlay_layer_at	Ambiguous	map	8	
 crates/bt-app/src/runtime/pointer/router.rs	bt-app crate::runtime::pointer::router::walk_pointer_layers	Dynamic	plane	1	
 crates/bt-app/src/runtime/pointer/row_middle.rs	bt-app crate::runtime::pointer::row_middle::Runtime::press_files_row_middle	Ambiguous	is_some_and	1	2026-10-23: T-FILES-MIDDLE-CLICK-OPENS-BESIDE; Option::is_some_and over the column's pending-entry box (FilesRowEdit), comparing its row index, which reaches no door
+crates/bt-app/src/runtime/pointer/touch.rs	bt-app crate::runtime::pointer::touch::Runtime::spend_parked_pans	Ambiguous	is_empty	1	2026-10-29: T-TOUCH-DOES-NOTHING-ON-WINDOWS, Vec::is_empty on the parked steps, asked before the once-per-process line; a std read
+crates/bt-app/src/runtime/pointer/touch.rs	bt-app crate::runtime::pointer::touch::a_discarded_pan_said_once	Ambiguous	then	1	2026-10-29: T-TOUCH-DOES-NOTHING-ON-WINDOWS, bool::then building the line once; a std combinator
 crates/bt-app/src/runtime/pointer/touch.rs	bt-app crate::runtime::pointer::touch::let_the_system_translate_touch	Ambiguous	borrow_mut	1	
 crates/bt-app/src/runtime/pointer/touch.rs	bt-app crate::runtime::pointer::touch::let_the_system_translate_touch	Ambiguous	push	1	
 crates/bt-app/src/runtime/pointer/touch.rs	bt-app crate::runtime::pointer::touch::let_the_system_translate_touch	Ambiguous	send_event	1	
@@ -8871,6 +8875,10 @@ crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::Taskbar::new	Ambi
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::Taskbar::new	Ambiguous	map_err	2	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::TaskbarState::apply	Ambiguous	map_err	2	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::TouchToTheSystem::pan_moved	Dynamic	(value)	1	
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::a_latched_contact_is_down	Ambiguous	contains	1	2026-10-29: T-TOUCH-DOES-NOTHING-ON-WINDOWS review fold, POINTER_FLAGS::contains on GetPointerInfo's answer, a windows-crate bit test (was a_contact_is_down's, renamed by F1)
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::a_latched_contact_is_down	Ambiguous	is_ok	1	2026-10-29: T-TOUCH-DOES-NOTHING-ON-WINDOWS review fold, Result::is_ok on GetPointerInfo's answer; a std read (was a_contact_is_down's)
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::a_latched_contact_is_down	Ambiguous	retain	1	2026-10-29: T-TOUCH-DOES-NOTHING-ON-WINDOWS review fold, Vec::retain crossing off contacts no longer in contact; a std method (was a_contact_is_down's)
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::a_latched_contact_is_down	Ambiguous	with_borrow_mut	1	2026-10-29: T-TOUCH-DOES-NOTHING-ON-WINDOWS review fold, LocalKey::with_borrow_mut on the thread-local contact list; a std method (was a_contact_is_down's)
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::active_keyboard_layout	Ambiguous	ok	2	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::active_keyboard_layout	Ambiguous	unwrap_or	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::adopt_parent_console	Ambiguous	collect	1	
@@ -8916,6 +8924,7 @@ crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::collect_cjk_famil
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::collect_cjk_families	Ambiguous	is_err	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::collect_monospace_families	Ambiguous	GetFontFamily	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::collect_monospace_families	Ambiguous	GetFontFamilyCount	1	
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::contacts_seen	Ambiguous	with_borrow	1	2026-10-29: T-TOUCH-DOES-NOTHING-ON-WINDOWS review fold, LocalKey::with_borrow reading the thread-local contact count for the latch's mark (F1); a std method
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::current_user_registry_subkeys	Ambiguous	is_err	2	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::custom_frame_subclass	Ambiguous	as_bool	2	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::custom_frame_subclass	Ambiguous	contains	2	
@@ -9158,6 +9167,7 @@ crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::taskbar_is_auto_h
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::taskbar_subclass	Ambiguous	apply	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::taskbar_subclass	Ambiguous	is_null	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::touch_to_the_system_subclass	Ambiguous	arrived	1	
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::touch_to_the_system_subclass	Ambiguous	with_borrow_mut	1	2026-10-29: T-TOUCH-DOES-NOTHING-ON-WINDOWS, LocalKey::with_borrow_mut writing a pointer message into the thread-local contact list; a std method
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::track_math_context_menu	Ambiguous	map_err	4	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::virtual_key_of_scan_code	Ambiguous	ok	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::virtual_screen_rect	Ambiguous	saturating_add	2	

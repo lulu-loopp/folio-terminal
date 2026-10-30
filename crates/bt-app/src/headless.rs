@@ -361,6 +361,9 @@ pub(crate) struct PlatformAnswers {
     pub(crate) glass: crate::GlassHere,
     /// `WindowHost::pointer_in_window`: `None`.
     pub(crate) pointer: Option<(i32, i32)>,
+    /// `WindowHost::mouse_button_down`, for every button: `true` — the hand still holds
+    /// whatever it pressed, so a test that latches a gesture keeps it until it says otherwise.
+    pub(crate) buttons_down: bool,
     /// `WindowHost::holds_the_foreground`, for every holder: `false`.
     pub(crate) holds_the_foreground: bool,
     /// `WindowHost::take_foreground`: `true`, the system lets it.
@@ -380,6 +383,7 @@ impl Default for PlatformAnswers {
             work_area: None,
             glass: crate::GlassHere::Unknown,
             pointer: None,
+            buttons_down: true,
             holds_the_foreground: false,
             takes_the_foreground: true,
             present_facts: bt_platform::NativePresentFacts::default(),
@@ -485,6 +489,13 @@ impl WindowHost for HeadlessWindow {
     }
     fn pointer_in_window(&self) -> Option<(i32, i32)> {
         self.answers.get().pointer
+    }
+    fn mouse_button_down(
+        &self,
+        _button: bt_platform::PointerButton,
+        _latched: bt_platform::ContactMark,
+    ) -> bool {
+        self.answers.get().buttons_down
     }
     fn present_facts(&self) -> bt_platform::NativePresentFacts {
         self.answers.get().present_facts
