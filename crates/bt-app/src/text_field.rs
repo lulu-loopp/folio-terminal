@@ -208,6 +208,23 @@ impl TextField {
         std::borrow::Cow::Owned(composed)
     }
 
+    /// **The selection as it stands in [`Self::composed`]** — what a painter that
+    /// draws the composed string draws the selection and the caret from
+    /// (T-SETTINGS-FIELDS-IME-POSITION).
+    ///
+    /// [`Self::selection`] while nothing is being composed. During a composition it
+    /// is a bare caret just past the pre-edit: the letters being composed push the
+    /// caret along and are not a selection, and the selection they will replace on
+    /// commit is not shown over the composed string it no longer lines up with.
+    #[must_use]
+    pub fn composed_selection(&self) -> std::ops::Range<usize> {
+        if self.preedit.is_empty() {
+            return self.selection();
+        }
+        let caret = self.caret + self.preedit.len();
+        caret..caret
+    }
+
     /// What the IME is composing right now, or nothing when it has finished.
     pub fn set_preedit(&mut self, text: &str) {
         self.preedit.clear();
