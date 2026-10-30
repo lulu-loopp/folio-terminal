@@ -20,15 +20,15 @@ All notable changes to Folio are recorded here. The format follows
 ### Fixed
 
 - On Windows, Folio follows a contrast theme (Settings > Accessibility > Contrast themes): while one is on, the terminal and the window use its colours, and turning it off brings back your own scheme. <!-- zh: 在 Windows 上，Folio 跟随对比度主题（设置 > 辅助功能 > 对比度主题）：开启时，终端与窗口使用该主题的颜色；关闭后恢复你自己的配色。 -->
-- On Windows, Folio comes back with its windows after Windows restarts for an update, or at sign-in when "Restart apps" is on in Settings, and it now closes when an installer asks it to instead of staying open. <!-- zh: pending T-RESTART-REGISTRATION -->
-- On Windows, Folio now tells the system where the text cursor is on every keyboard layout, not only while typing Chinese, so tools that follow the text cursor, such as Magnifier and the emoji panel (Win+.), have a place to follow. <!-- zh: pending T-CARET-EVERY-LAYOUT -->
-- The previous and next buttons at the sides of a picture preview now light up when the pointer is over them, and the pointer shows a pointing hand there even when the picture is zoomed in. <!-- zh: pending T-PREVIEW-NEIGHBOUR-BUTTON-HOVER -->
-- On Windows 11, resting the pointer on the maximize button opens the snap layouts, and Win+Z shows them over the button. <!-- zh: pending T-SNAP-LAYOUTS-MAXBUTTON -->
+- On Windows, Folio comes back with its windows after Windows restarts for an update, or at sign-in when "Restart apps" is on in Settings, and it now closes when an installer asks it to instead of staying open. <!-- zh: 在 Windows 上，Windows 因更新而重启后，或在设置中开启“重启应用”时登录后，Folio 会带着它的窗口重新打开；安装程序要求它关闭时，Folio 现在会关闭，不再保持打开。 -->
+- On Windows, Folio now tells the system where the text cursor is on every keyboard layout, not only while typing Chinese, so tools that follow the text cursor, such as Magnifier and the emoji panel (Win+.), have a place to follow. <!-- zh: 在 Windows 上，Folio 现在在所有键盘布局下都向系统报告文本光标的位置，而不只在输入中文时，因此放大镜和表情面板（Win+.）等跟随文本光标的工具有了可以跟随的位置。 -->
+- The previous and next buttons at the sides of a picture preview now light up when the pointer is over them, and the pointer shows a pointing hand there even when the picture is zoomed in. <!-- zh: 图片预览两侧的上一张和下一张按钮现在会在指针悬停时亮起；即使图片已放大，指针在那里也显示为手形。 -->
+- On Windows 11, resting the pointer on the maximize button opens the snap layouts, and Win+Z shows them over the button. <!-- zh: 在 Windows 11 上，指针停在最大化按钮上会打开贴靠布局，按 Win+Z 时贴靠布局显示在该按钮上方。 -->
 - On Windows 10 machines without a graphics driver, Folio no longer closes at its first start or when Settings opens. <!-- zh: 在没有显卡驱动的 Windows 10 电脑上，Folio 不再在首次启动或打开设置时关闭。 -->
-- A PDF opened from a web address that does not end in `.pdf` is no longer drawn stretched on a 125 %, 150 % or 175 % display, and a web page at an address ending in `.pdf` is no longer drawn too large. <!-- zh: pending T-PDF-CONTENT-TYPE -->
+- A PDF opened from a web address that does not end in `.pdf` is no longer drawn stretched on a 125 %, 150 % or 175 % display, and a web page at an address ending in `.pdf` is no longer drawn too large. <!-- zh: 从不以 `.pdf` 结尾的网址打开的 PDF，在缩放为 125%、150% 或 175% 的显示器上不再被拉伸显示；网址以 `.pdf` 结尾的网页也不再显示得过大。 -->
 - On Windows, when an update cannot be verified because there is no network, the update card says so instead of only "The update is not verified." <!-- zh: 在 Windows 上，因没有网络而无法验证更新时，更新卡片会说明这一点，而不只是显示“更新未通过验证。” -->
-- When answers from the clipboard arrive together, Folio now handles them in the order you asked, so a paste's text or notice no longer comes after a copy you made after it. <!-- zh: pending T-CLIPBOARD-ORDER-HOLDS-BY-SPEED -->
-- On Windows, a one-finger swipe scrolls a pane again after a mouse or touch release was lost (for example when a window moved between displays while a finger was down); before, a held press that never ended made every swipe do nothing until the next click. <!-- zh: pending T-TOUCH-DOES-NOTHING-ON-WINDOWS -->
+- When answers from the clipboard arrive together, Folio now handles them in the order you asked, so a paste's text or notice no longer comes after a copy you made after it. <!-- zh: 剪贴板的多个应答同时到达时，Folio 现在按你请求的顺序处理，粘贴的文字或提示不会再排到你随后所做的复制之后。 -->
+- On Windows, a one-finger swipe scrolls a pane again after a mouse or touch release was lost (for example when a window moved between displays while a finger was down); before, a held press that never ended made every swipe do nothing until the next click. <!-- zh: 在 Windows 上，鼠标或触摸的松开丢失后（例如手指按住时窗口移到了另一台显示器），单指滑动又能滚动窗格了；以前，一次始终没有结束的按住会让之后的每次滑动都不起作用，直到下一次单击。 -->
 
 ## 0.4.8-preview — 2026-10-23
 
