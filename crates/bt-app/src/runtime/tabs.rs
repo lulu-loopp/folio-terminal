@@ -4036,8 +4036,8 @@ pub(crate) fn closing_this_pane_closes_the_tab(panes: usize) -> bool {
 /// `from`'s tree, or about to be.
 ///
 /// **The session travels; it is never killed and never respawned.** The
-/// [`ShellSession`] is *moved* out of `from.sessions` and into the new tab's — the
-/// ConPTY, the [`DualPlaneSession`], the scrollback, the ledger and the pending
+/// [`crate::ShellSession`] is *moved* out of `from.sessions` and into the new tab's — the
+/// ConPTY, the [`bt_term::DualPlaneSession`], the scrollback, the ledger and the pending
 /// resize are the same objects on both sides of the gesture. Spawning a fresh
 /// shell in the new tab and shutting the old one down would be a gesture that
 /// looks identical and throws the user's work away, and there is no way to tell
@@ -4369,7 +4369,7 @@ fn move_seat_content(
 /// asking ask again under the leaf the pane now is.
 ///
 /// **The pane's repository cache is not among them.** Its questions are owed to
-/// the cache's own identity ([`git::GitCacheId`]), never to the leaf, so they
+/// the cache's own identity ([`crate::git::GitCacheId`]), never to the leaf, so they
 /// reach it under the leaf it lands under and its dimmed rows and its running
 /// checkout stay held until git's receipt says otherwise.
 ///
@@ -4398,8 +4398,8 @@ fn forget_work_in_flight_for_seat(tab: &mut TabState, seat: SeatId) {
 /// **§7.1.6k (user ruling, 2026-08-20) — move one pane into another tab, at the
 /// place the gesture aimed at.**
 ///
-/// A free function over two [`TabState`]s for the reason [`runtime::panes::tear_pane_into_tab`]
-/// and [`runtime::tabs::absorb_tab_into_layout`] are: everything this gesture *decides* is a
+/// A free function over two [`TabState`]s for the reason [`super::panes::tear_pane_into_tab`]
+/// and [`absorb_tab_into_layout`] are: everything this gesture *decides* is a
 /// fact about two tabs, and the only thing the window contributes is the solved
 /// rectangles and the strip surgery. Those are arguments here.
 ///
@@ -4415,13 +4415,13 @@ fn forget_work_in_flight_for_seat(tab: &mut TabState, seat: SeatId) {
 /// [`seats::Seats::add_files_pane`]'s own argument read for a different kind of
 /// leaf: however many panes the target already holds, "append" means beside all
 /// of them, and only the root has an edge that means that (G82/G83). Which side
-/// is the end is [`trailing_edge`]'s, off the window's `Split direction`. That
+/// is the end is [`crate::trailing_edge`]'s, off the window's `Split direction`. That
 /// is the tab list's door; the stage's says which pane and which side outright.
 ///
 /// **A centre evicts, and the eviction is this function's** (N161). An arriving
 /// *subtree* takes the target pane's slot, so the target pane leaves for the
 /// strip as a tab of its own — [`pane_into_new_tab`], the very call
-/// [`runtime::tabs::absorb_tab_into_layout`] makes for a merging tab, with the host's pin
+/// [`absorb_tab_into_layout`] makes for a merging tab, with the host's pin
 /// (N160②). It is done here rather than by the window because it is a fact about
 /// the two trees; what the window does with the tab that comes back is the
 /// window's.
@@ -4445,7 +4445,7 @@ fn forget_work_in_flight_for_seat(tab: &mut TabState, seat: SeatId) {
 ///
 /// `None` when the seat is not in `from`'s tree, when the target's tree cannot
 /// take the pane at this aim (H93), or when a centre would evict a pane the
-/// strip cannot hold ([`runtime::tabs::pane_can_become_a_tab`], the third place M147 can act on
+/// strip cannot hold ([`pane_can_become_a_tab`], the third place M147 can act on
 /// that one answer). Nothing is mutated on any of those paths: the plan is built
 /// and judged before the first edit, so a refusal leaves both tabs exactly as
 /// they were and the gesture goes home (J120).

@@ -33554,7 +33554,7 @@ fn mark_leaf_seen(leaf: &mut ShellSession) {
 }
 
 /// **Where an arriving pane lands, and against what** — the window's facts that
-/// [`pane_into_tab`] needs and cannot ask for itself.
+/// [`runtime::tabs::pane_into_tab`] needs and cannot ask for itself.
 ///
 /// One argument rather than four because they travel together and always will:
 /// the metrics and the viewport are the pair every edit in this program is
@@ -33571,7 +33571,7 @@ struct PaneArrival<'a> {
     aim: seats::LayoutAim,
 }
 
-/// What [`pane_into_tab`] did, for the window to finish.
+/// What [`runtime::tabs::pane_into_tab`] did, for the window to finish.
 ///
 /// **A plain record again since B4** (2026-08-25). It carried a whole `TabState`
 /// while a centre evicted the pane it landed on; the ruling made the centre a
@@ -33587,7 +33587,7 @@ struct PaneMove {
     /// one that displaces anybody.
     traded: Option<SeatId>,
     /// The tab it left held nothing else, so that tab is now an empty tree with
-    /// no content: its strip entry has to go. See [`pane_into_tab`] for why this
+    /// no content: its strip entry has to go. See [`runtime::tabs::pane_into_tab`] for why this
     /// is not `close_tab`.
     ///
     /// Never true of a trade: the tab the traveller left is holding the pane it
