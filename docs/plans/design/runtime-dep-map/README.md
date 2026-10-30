@@ -105,8 +105,11 @@ exact count of what it does see.
   `PreviewPane`, `DocumentView`, `PictureView` and `TerminalPane` have none: O-7
   and O-8 put their writes inside their own types, and the pane's writes are its
   own methods (O-5b).
-- **unclassified.tsv**: **255 items, 223 free functions and 32 `Runtime`
-  methods**, still in `main.rs` (at plan row 105's head, which made the free function
+- **unclassified.tsv**: **261 items, 229 free functions and 32 `Runtime`
+  methods**, still in `main.rs` (at plan row 102's head, whose alert state splits
+  `claim_the_alert` into `the_alert_on_a_watching_console` and adds `move_the_alert`,
+  `a_panics_turn`, `a_stops_claim`, `a_stops_alert_said`, `the_panic_hooks_end` and
+  `leave_by_the_panic_road`; 255, 223 and 32 before it, at plan row 105's head, which made the free function
   `release_due_leaf_resize` the method `ShellSession::release_due_size`; 256, 224 and 32
   before it, at plan row 90's head, whose `settle_the_first_canvas` is a new root function;
   255, 223 and 32 at K2 batch 26's head; 263, 229 and 34 before it,
