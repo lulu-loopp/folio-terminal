@@ -603,6 +603,238 @@ fn a_frame_shape_stop_whose_alert_was_said_says_nothing_more() {
     }
 }
 
+// ── a panic after a frame-shape stop (T-PANIC-ANNOUNCED-ONCE-FLAG-REVIEW, 0.4.9 plan row 102)
+
+/// The second fault each process of its own plants, by name, so the log can be counted for it.
+const THE_SECOND_PANIC: &str = "scripted: the second panic after a stop";
+
+/// What a child says on its standard output when the planted panic did not end it.
+const OUTLIVED: &str = "the process outlived the panic";
+
+/// What a child says, through the stop's box, when the stop's alert is owed to a box.
+const THE_STOPS_ALERT: &str = "the stop's alert was said in its box";
+
+/// **The stop's box in a process of its own**: never seen, so the alert is a line; the child
+/// says so on its standard output, then runs `while_up` — the moment the stop's box is up.
+struct AStopsBox {
+    while_up: fn(),
+}
+
+impl SystemBoxes for AStopsBox {
+    type Seen = ();
+
+    fn would_be_seen(&mut self) -> Option<()> {
+        None
+    }
+
+    fn raise(&mut self, (): (), _text: &str) {
+        // Only an answer of `would_be_seen` can raise a box, and it answers that none would be
+        // seen; the arm is the trait's.
+        println!("\n{THE_STOPS_ALERT}");
+        (self.while_up)();
+    }
+
+    fn line(&mut self, _text: String) {
+        println!("\n{THE_STOPS_ALERT}");
+        (self.while_up)();
+    }
+}
+
+/// An uncontained panic on a worker, and the worker joined: with the hook's end installed,
+/// the panic is the process's end, or its thread's only.
+fn a_worker_panics() {
+    let joined = std::thread::Builder::new()
+        .name("row-102-worker".to_owned())
+        .spawn(|| panic!("{THE_SECOND_PANIC}"))
+        .expect("the worker starts")
+        .join();
+    assert!(joined.is_err(), "the worker panicked");
+}
+
+/// **The child's half**: the production hook (its report and its end, [`the_panic_hooks_end`])
+/// installed over a log of the test's own; a frame-shape stop reported and announced through
+/// [`announce_frame_shape_stop`] with the stop's box above; then `after`, which plants the
+/// second panic. Nothing here raises a real box: a watching console (the child's piped
+/// standard output) takes the alert, or, in a run nobody watches, the box above does.
+fn a_stop_then_a_panic(case: &str, while_up: fn(), after: impl FnOnce()) {
+    let log = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target")
+        .join(bt_testpath::unique_name(case))
+        .with_extension("log");
+    std::fs::write(&log, "").unwrap();
+    // The log's name on the child's first line, so the parent reads the very file.
+    println!("\nthe log: {}", log.display());
+    install_panic_log_hook_at(log.clone(), |path| {
+        the_panic_hooks_end(path);
+    });
+    let error = anyhow::Error::new(bt_viewport::FrameProjectionError::FrameShape(
+        bt_viewport::FrameShapeError::MathBlockBandTop {
+            expected: 643_072,
+            actual: 688_128,
+        },
+    ))
+    .context("project terminal grid into viewport frame");
+    report_frame_shape_stop(&error, &log, |path| {
+        announce_frame_shape_stop(path, &mut AStopsBox { while_up });
+    });
+    after();
+    println!("\n{OUTLIVED}");
+}
+
+/// **The parent's half**: the child's way out, read. It left by the panic road — exit 101, the
+/// run's footer once on its standard error and no summary of the harness's (which a panic the
+/// harness caught would have printed) — and its log has the stop's report and the second
+/// panic's, each once. `alerts` reads, in the child's standard output, how many times the
+/// alert was said.
+fn the_child_left_by_the_panic_road(output: &std::process::Output, alerts: impl Fn(&str) -> usize) {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let said = format!("({})\n{stdout}\n{stderr}", output.status);
+    assert!(
+        !stdout.lines().any(|line| line == OUTLIVED),
+        "the planted panic did not end the process {said}"
+    );
+    assert_eq!(output.status.code(), Some(PANIC_EXIT_CODE), "{said}");
+    assert!(
+        !stdout.contains("test result:"),
+        "the harness caught the panic, so the process did not leave from the hook {said}"
+    );
+    let footers = stderr
+        .lines()
+        .filter(|line| {
+            line.contains("run ended") && line.contains(&format!("exit {PANIC_EXIT_CODE},"))
+        })
+        .count();
+    assert_eq!(footers, 1, "the panic road's footer, once {said}");
+    let log = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("the log: "))
+        .unwrap_or_else(|| panic!("the child named no log {said}"));
+    let report = std::fs::read_to_string(log).unwrap();
+    assert_eq!(
+        report.matches("\nstopped: ").count(),
+        1,
+        "the stop's report, once:\n{report}"
+    );
+    assert_eq!(
+        report.matches(THE_SECOND_PANIC).count(),
+        1,
+        "the second panic's report, once:\n{report}"
+    );
+    assert_eq!(alerts(&stdout), 1, "the one alert, said once {said}");
+    std::fs::remove_file(log).unwrap();
+}
+
+/// How many times the alert was said on the child's console (its piped standard output): the
+/// alert names the log.
+fn alerts_on_the_console(stdout: &str) -> usize {
+    let log = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("the log: "))
+        .expect("the child named its log");
+    stdout.lines().filter(|line| line.contains(log)).count() - 1
+}
+
+/// RED (T-PANIC-ANNOUNCED-ONCE-FLAG-REVIEW, 0.4.9 plan row 102) — **a worker's panic after a
+/// frame-shape stop has said its alert ends the process, by the panic road, with no second
+/// alert.**
+///
+/// Until row 102 the stop and the panic hook shared one bit, "said", which the hook read as
+/// "another panic is leaving": the hook wrote the report and returned, the worker's thread
+/// ended, and the process went on.
+///
+/// MUTATION (observed red): `a_panics_turn` answers `Return` for `StopSpoken` (the shared bit) —
+/// the child prints that it outlived the panic and exits 0.
+#[test]
+fn a_workers_panic_after_a_stop_ends_the_process_once() {
+    const SELECTOR: &str =
+        "app_diagnostics_tests::a_workers_panic_after_a_stop_ends_the_process_once";
+    match crate::test_support::a_process_of_its_own(SELECTOR, b"") {
+        None => a_stop_then_a_panic("panic-after-stop-worker", || {}, a_worker_panics),
+        Some(output) => the_child_left_by_the_panic_road(&output, alerts_on_the_console),
+    }
+}
+
+/// RED (row 102) — **a panic after a frame-shape stop on the stop's own thread ends the
+/// process from the hook**, the window thread's case: there winit catches the panic and
+/// resumes it past `main`'s way out, into the loader's teardown (§7.35); here the harness
+/// catches it, and a process the hook did not end prints the harness's summary.
+///
+/// MUTATION (observed red): `a_panics_turn` answers `Return` for `StopSpoken` — the harness
+/// reports the test failed, and no footer is written.
+#[test]
+fn a_panic_after_a_stop_on_its_own_thread_ends_the_process_once() {
+    const SELECTOR: &str =
+        "app_diagnostics_tests::a_panic_after_a_stop_on_its_own_thread_ends_the_process_once";
+    match crate::test_support::a_process_of_its_own(SELECTOR, b"") {
+        None => a_stop_then_a_panic(
+            "panic-after-stop-same-thread",
+            || {},
+            || panic!("{THE_SECOND_PANIC}"),
+        ),
+        Some(output) => the_child_left_by_the_panic_road(&output, alerts_on_the_console),
+    }
+}
+
+/// RED (row 102) — **a panic while the stop's box is up does not take the box off the screen,
+/// and the process ends by the panic road once the box is closed.**
+///
+/// The child is a run nobody watches, so the stop's alert is owed to its box; the box, while
+/// up, has a worker panic. The hook owes its leave to the stop's thread and returns; the stop,
+/// with its alert said, takes the panic road.
+///
+/// MUTATION (observed red): `a_stops_alert_said` answers `false` for `LeaveOwed` — the stop
+/// goes on to its orderly way out, and the child outlives the panic.
+#[test]
+fn a_panic_while_a_stops_box_is_up_ends_the_process_when_it_closes() {
+    const SELECTOR: &str =
+        "app_diagnostics_tests::a_panic_while_a_stops_box_is_up_ends_the_process_when_it_closes";
+    match crate::test_support::a_process_of_its_own(SELECTOR, b"") {
+        None => {
+            diagnostics::as_a_resident_run_nobody_watches();
+            a_stop_then_a_panic("panic-during-stop-box", a_worker_panics, || {});
+        }
+        Some(output) => the_child_left_by_the_panic_road(&output, |stdout| {
+            stdout
+                .lines()
+                .filter(|line| *line == THE_STOPS_ALERT)
+                .count()
+        }),
+    }
+}
+
+/// PIN (row 102) — **the alert's table**: a panic speaks only when nobody has, leaves after a
+/// stop's alert, owes its leave while the stop's alert is up, and returns behind another
+/// panic; a stop claims only an unclaimed alert, and takes the panic road after its alert
+/// only when a leave was owed.
+#[test]
+fn the_alerts_table_leaves_once_and_never_under_an_alert() {
+    use AlertState::{LeaveOwed, PanicLeaving, StopSpeaking, StopSpoken, Unclaimed};
+    assert_eq!(
+        a_panics_turn(Unclaimed),
+        (PanicLeaving, PanicTurn::SpeakAndLeave)
+    );
+    assert_eq!(a_panics_turn(StopSpeaking), (LeaveOwed, PanicTurn::Owe));
+    assert_eq!(a_panics_turn(StopSpoken), (PanicLeaving, PanicTurn::Leave));
+    assert_eq!(a_panics_turn(LeaveOwed), (LeaveOwed, PanicTurn::Return));
+    assert_eq!(
+        a_panics_turn(PanicLeaving),
+        (PanicLeaving, PanicTurn::Return)
+    );
+    assert_eq!(a_stops_claim(Unclaimed), (StopSpeaking, true));
+    for state in [StopSpeaking, StopSpoken, LeaveOwed, PanicLeaving] {
+        assert_eq!(a_stops_claim(state), (state, false));
+    }
+    assert_eq!(a_stops_alert_said(StopSpeaking), (StopSpoken, false));
+    assert_eq!(a_stops_alert_said(LeaveOwed), (PanicLeaving, true));
+    for state in [Unclaimed, StopSpoken, PanicLeaving] {
+        assert_eq!(a_stops_alert_said(state), (state, false));
+    }
+    for state in [Unclaimed, StopSpeaking, StopSpoken, LeaveOwed, PanicLeaving] {
+        assert_eq!(AlertState::stored(state as u8), state);
+    }
+}
+
 /// A folder for one test, and a settings store in it owing a change of the terminal face
 /// whose write is on a worker that never answers — the stop comes before it does.
 fn a_stop_with_an_owed_settings_change(

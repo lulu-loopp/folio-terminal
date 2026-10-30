@@ -36,7 +36,7 @@ use std::{
     rc::Rc,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU8, Ordering},
         mpsc,
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -50226,7 +50226,7 @@ impl<B: Backend> FolioApp<B> {
         }
         crate::diagnostics::stderr_line(format!("{APP_NAME} stopped: {error:#}"));
         report_frame_shape_stop(&error, &panic_log_path(), |path| {
-            announce_frame_shape_stop(path);
+            announce_frame_shape_stop(path, &mut SystemBox);
         });
         let had_windows = !self.windows.is_empty();
         let failure = format!("{error:#}");
@@ -55209,41 +55209,58 @@ mod floated_page_tests {
     /// goes through the system's own enumeration and not through `FolioApp`,
     /// because what has just failed is the application.
     ///
+    /// The road is one function, `leave_by_the_panic_road` (row 102): the hook's end takes it,
+    /// and so does a frame-shape stop a panic owed its leave to. So the order is read there,
+    /// and the hook's end is read for asking before it takes it.
+    ///
     /// MUTATIONS: drop the `leave_process` call and the first assertion goes red
     /// (the hook returns and the unwind takes the old road); drop the hide and
     /// the second does; put the hide *after* the exit and the third does — a
     /// window hidden after `TerminateProcess` is a window never hidden.
     #[test]
     fn a_panic_leaves_by_the_same_road_as_a_shut() {
-        let hook = free_fn_body("install_panic_log_hook");
-        let leaves = hook
+        let road = free_fn_body("leave_by_the_panic_road");
+        let hook = free_fn_body("the_panic_hooks_end");
+        assert!(
+            free_fn_body("install_panic_log_hook").contains("the_panic_hooks_end(path)"),
+            "the resident hook no longer ends by the panic road's end"
+        );
+        let leaves = road
             .find(concat!("bt_platform::leave_", "process(PANIC_EXIT_CODE)"))
             .unwrap_or_else(|| {
                 panic!(
                     "a panic still walks out through the loader's teardown, which \
-                     is where a WebView2 host stops:\n{hook}"
+                     is where a WebView2 host stops:\n{road}"
                 )
             });
-        let hides = hook
+        let hides = road
             .find(concat!(
                 "bt_platform::hide_every_",
                 "window_of_this_process()"
             ))
             .unwrap_or_else(|| {
-                panic!("a crash leaves its windows on the screen to be ghosted:\n{hook}")
+                panic!("a crash leaves its windows on the screen to be ghosted:\n{road}")
             });
         assert!(
             hides < leaves,
             "the windows are hidden after the process has been told to stop, \
-             which is to say never:\n{hook}"
+             which is to say never:\n{road}"
         );
         // And the alert still gets to be read: whichever panic spoke is the one
         // that closes the process, so a second fault in the same second cannot
         // take the first one's message box off the screen.
+        let asks = hook.find("if !announce_panic(path) {").unwrap_or_else(|| {
+            panic!(
+                "every panic now ends the process, so two faults in one second race \
+                 to cut each other's alert off:\n{hook}"
+            )
+        });
+        let takes = hook.find("leave_by_the_panic_road()").unwrap_or_else(|| {
+            panic!("the hook's end no longer leaves by the panic road:\n{hook}")
+        });
         assert!(
-            hook.contains("if !announce_panic(path) {"),
-            "every panic now ends the process, so two faults in one second race \
-             to cut each other's alert off:\n{hook}"
+            asks < takes,
+            "the hook leaves before it asks whether it is the panic that may:\n{hook}"
         );
         // The exit code is the one a caller already reads.
         //
@@ -56607,26 +56624,46 @@ fn probe_input(value: Option<std::ffi::OsString>) -> Result<Option<Vec<u8>>> {
 /// the screen before it could be read — so whichever panic raised the alert is
 /// the one that closes the process, and any other returns and lets its own
 /// thread unwind into the moment or two it has left.
+///
+/// **A frame-shape stop's alert is not a panic that leaves** (T-PANIC-ANNOUNCED-ONCE-FLAG-REVIEW,
+/// 0.4.9 plan row 102): the stop says the one alert and then takes the orderly way out, so a
+/// panic after it still leaves here, without a second alert — and one during it is owed to the
+/// stop's thread, which leaves by this road once its alert is read ([`THE_ALERT`]).
 fn install_panic_log_hook() {
     install_panic_log_hook_at(panic_log_path(), |path| {
-        if !announce_panic(path) {
-            return;
-        }
-        // The count is for a test of the hide itself; nothing here reads it,
-        // because the next two statements end the process whether one window
-        // was hidden or none.
-        let _ = bt_platform::hide_every_window_of_this_process();
-        // **An update's exit guard runs on this road too** (U-34): a panic after
-        // the hand-over leaves the applier or starts Folio again, as the
-        // process's ordinary end does.
-        let _ = update_handoff::leave_in_panic();
-        diagnostics::on_the_panic_road(&diagnostics::run_footer(
-            &hang_watch::utc_timestamp(std::time::SystemTime::now()),
-            PANIC_EXIT_CODE,
-            bt_platform::admission::refusals(),
-        ));
-        bt_platform::leave_process(PANIC_EXIT_CODE)
+        the_panic_hooks_end(path);
     });
+}
+
+/// **The resident hook's last act, after the report**: the panic that may leave leaves
+/// ([`announce_panic`] answers which), every other returns. Named, so a test in a process of
+/// its own can install the very end the product installs.
+fn the_panic_hooks_end(path: &Path) {
+    if !announce_panic(path) {
+        return;
+    }
+    leave_by_the_panic_road()
+}
+
+/// **The panic road's way out** (§7.43): every window off the screen, then the process
+/// terminated — `main`'s tail, in its order. Taken by the panic hook, and by a frame-shape
+/// stop that a panic owed its leave to while the stop's alert was up
+/// ([`announce_frame_shape_stop`]).
+fn leave_by_the_panic_road() -> ! {
+    // The count is for a test of the hide itself; nothing here reads it,
+    // because the next two statements end the process whether one window
+    // was hidden or none.
+    let _ = bt_platform::hide_every_window_of_this_process();
+    // **An update's exit guard runs on this road too** (U-34): a panic after
+    // the hand-over leaves the applier or starts Folio again, as the
+    // process's ordinary end does.
+    let _ = update_handoff::leave_in_panic();
+    diagnostics::on_the_panic_road(&diagnostics::run_footer(
+        &hang_watch::utc_timestamp(std::time::SystemTime::now()),
+        PANIC_EXIT_CODE,
+        bt_platform::admission::refusals(),
+    ));
+    bt_platform::leave_process(PANIC_EXIT_CODE)
 }
 
 /// **The update doors' panic hook** (0.4.6 U-34): the report is written to the
@@ -56847,7 +56884,98 @@ static SURFACE_SELFTEST_SPENT: AtomicBool = AtomicBool::new(false);
 /// none: the user dismisses two of them without reading and the third is the one
 /// with the path in it. The file still records every panic — this bounds only
 /// what is *raised*.
-static PANIC_ANNOUNCED: AtomicBool = AtomicBool::new(false);
+///
+/// **And who leaves** (T-PANIC-ANNOUNCED-ONCE-FLAG-REVIEW, 0.4.9 plan row 102). The alert has
+/// two claimants, and only one of them ends the process where it claims: a panic leaves from
+/// its hook, while a frame-shape stop says the alert and then takes the orderly way out. Until
+/// row 102 this was one bit, "said", which the hook read as "another panic is leaving" — so a
+/// panic after a stop returned from its hook, and on the window thread it was resumed past
+/// `main`'s way out into the loader's teardown (§7.35). What the alert's [`AlertState`] keeps
+/// instead is each claimant's own state, so a panic that is not contained leaves exactly once,
+/// and never while an alert is still up. Moved only by [`move_the_alert`].
+static THE_ALERT: AtomicU8 = AtomicU8::new(AlertState::Unclaimed as u8);
+
+/// **Where the one alert stands** ([`THE_ALERT`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+enum AlertState {
+    /// Nobody has said it.
+    Unclaimed,
+    /// A frame-shape stop claimed it and is saying it (its box may be up).
+    StopSpeaking,
+    /// A frame-shape stop said it; the stop's thread is on the orderly way out.
+    StopSpoken,
+    /// A panic came while the stop's alert was up: the stop's thread leaves by the panic
+    /// road once its alert is read.
+    LeaveOwed,
+    /// A panic claimed the leave: it is ending the process.
+    PanicLeaving,
+}
+
+impl AlertState {
+    /// The state [`THE_ALERT`] holds: only [`move_the_alert`] stores, and it stores only
+    /// an `AlertState`.
+    fn stored(value: u8) -> Self {
+        [
+            Self::Unclaimed,
+            Self::StopSpeaking,
+            Self::StopSpoken,
+            Self::LeaveOwed,
+            Self::PanicLeaving,
+        ][usize::from(value)]
+    }
+}
+
+/// **One step of the alert, atomically**: `turn` answers, for the state it finds, the state
+/// that follows and what the caller does. The step is taken against the state it was computed
+/// from (`fetch_update` retries on a race), so the answer is the one for the state replaced.
+fn move_the_alert<T>(turn: impl Fn(AlertState) -> (AlertState, T)) -> T {
+    let (Ok(was) | Err(was)) = THE_ALERT.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |now| {
+        Some(turn(AlertState::stored(now)).0 as u8)
+    });
+    turn(AlertState::stored(was)).1
+}
+
+/// **What a panic's hook does with the alert**, by where it stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PanicTurn {
+    /// Nobody said it: say it, then leave (today's first panic).
+    SpeakAndLeave,
+    /// A stop said it and is on its orderly way out: leave, without a second alert.
+    Leave,
+    /// A stop's alert is up: the leave is owed to the stop's thread, which leaves once its
+    /// alert is read — leaving here would take its box off the screen.
+    Owe,
+    /// Another panic is leaving, or a leave is already owed: return.
+    Return,
+}
+
+/// [`PanicTurn`]'s table: the step [`announce_panic`] takes.
+fn a_panics_turn(state: AlertState) -> (AlertState, PanicTurn) {
+    match state {
+        AlertState::Unclaimed => (AlertState::PanicLeaving, PanicTurn::SpeakAndLeave),
+        AlertState::StopSpoken => (AlertState::PanicLeaving, PanicTurn::Leave),
+        AlertState::StopSpeaking => (AlertState::LeaveOwed, PanicTurn::Owe),
+        AlertState::LeaveOwed | AlertState::PanicLeaving => (state, PanicTurn::Return),
+    }
+}
+
+/// A frame-shape stop's claim: the alert is the stop's to say only when nobody has said it.
+fn a_stops_claim(state: AlertState) -> (AlertState, bool) {
+    match state {
+        AlertState::Unclaimed => (AlertState::StopSpeaking, true),
+        _ => (state, false),
+    }
+}
+
+/// A frame-shape stop's alert, said: whether a panic owed its leave to this thread meanwhile.
+fn a_stops_alert_said(state: AlertState) -> (AlertState, bool) {
+    match state {
+        AlertState::StopSpeaking => (AlertState::StopSpoken, false),
+        AlertState::LeaveOwed => (AlertState::PanicLeaving, true),
+        _ => (state, false),
+    }
+}
 
 /// Put the crash where the person who caused it will see it.
 ///
@@ -56866,21 +56994,25 @@ static PANIC_ANNOUNCED: AtomicBool = AtomicBool::new(false);
 /// precisely the resident run it exists for. See
 /// [`diagnostics::a_screen_is_watching`].
 ///
-/// Answers whether this call is the one that spoke, which is what decides which
-/// panic gets to end the process (§7.43): the alert is raised once, and the
-/// thread that raised it is the one whose reader has now seen it.
+/// Answers whether this panic is the one that ends the process (§7.43): the alert is
+/// raised once, and the thread that raised it is the one whose reader has now seen it. A
+/// frame-shape stop's alert, already said and read, is no reason for a panic to stay
+/// ([`PanicTurn::Leave`]); one still up is ([`PanicTurn::Owe`]) — row 102.
 fn announce_panic(path: &std::path::Path) -> bool {
-    let Some(alert) = claim_the_alert(path) else {
-        return false;
-    };
-    if let PanicAlert::Owed(text) = alert {
-        bt_platform::message_box(APP_NAME, &text);
+    match move_the_alert(a_panics_turn) {
+        PanicTurn::SpeakAndLeave => {
+            if let PanicAlert::Owed(text) = the_alert_on_a_watching_console(path) {
+                bt_platform::message_box(APP_NAME, &text);
+            }
+            true
+        }
+        PanicTurn::Leave => true,
+        PanicTurn::Owe | PanicTurn::Return => false,
     }
-    true
 }
 
 /// **Where the one alert stands once this caller has claimed it** — what
-/// [`claim_the_alert`] answers when it was not already spoken.
+/// [`the_alert_on_a_watching_console`] answers.
 enum PanicAlert {
     /// Written to the console that is watching this run; nothing more is owed.
     Spoken,
@@ -56889,35 +57021,41 @@ enum PanicAlert {
     Owed(String),
 }
 
-/// **The alert's first two steps, shared by the panic hook and a frame-shape stop**
-/// (T-FRAME-SHAPE-STOP-BOX-QUERY, 0.4.9 plan row 79): the once-per-process claim
-/// ([`PANIC_ANNOUNCED`]) and the console, asked before it is written to. `None` when another
-/// caller already spoke. What is owed after that is each caller's own: the panic hook raises
-/// [`bt_platform::message_box`] ([`announce_panic`]); a frame-shape stop asks whether a box
-/// would be seen first ([`announce_frame_shape_stop`]).
-fn claim_the_alert(path: &std::path::Path) -> Option<PanicAlert> {
-    if PANIC_ANNOUNCED.swap(true, Ordering::SeqCst) {
-        return None;
-    }
+/// **The alert's console step, shared by the panic hook and a frame-shape stop**
+/// (T-FRAME-SHAPE-STOP-BOX-QUERY, 0.4.9 plan row 79): the console, asked before it is
+/// written to, by a caller that has claimed the alert ([`THE_ALERT`], row 102). What is owed
+/// after that is each caller's own: the panic hook raises [`bt_platform::message_box`]
+/// ([`announce_panic`]); a frame-shape stop asks whether a box would be seen first
+/// ([`announce_frame_shape_stop`]).
+fn the_alert_on_a_watching_console(path: &std::path::Path) -> PanicAlert {
     let text = panic_alert_text(path);
     let said = diagnostics::a_screen_is_watching(diagnostics::resident_channel())
         && bt_platform::write_to_console(&format!("{text}\n"));
-    Some(if said {
+    if said {
         PanicAlert::Spoken
     } else {
         PanicAlert::Owed(text)
-    })
+    }
 }
 
 /// **A frame-shape stop's alert, said where it would be read** (T-FRAME-SHAPE-STOP-BOX-QUERY,
-/// 0.4.9 plan row 79): the same claim and console as a panic's ([`claim_the_alert`]), then the
-/// box only when a box would be seen, and the run's queued `stderr` road when it would not.
-/// `FolioApp::fail` runs it on the window thread *before* the way out, so — unlike the panic
-/// hook, which ends the process after its box — a queued line here is inside the way out's
-/// fence, and the box's synchronous fallback (two lines into `diagnostics.log` beside the
-/// writer's queue) has no reason to be taken.
-fn announce_frame_shape_stop(path: &std::path::Path) {
-    say_the_stop_alert(claim_the_alert(path), &mut SystemBox);
+/// 0.4.9 plan row 79): the alert claimed for the stop ([`a_stops_claim`]) and the same console
+/// as a panic's ([`the_alert_on_a_watching_console`]), then the box only when a box would be
+/// seen, and the run's queued `stderr` road when it would not. `FolioApp::fail` runs it on the
+/// window thread *before* the way out, so — unlike the panic hook, which ends the process after
+/// its box — a queued line here is inside the way out's fence, and the box's synchronous
+/// fallback (two lines into `diagnostics.log` beside the writer's queue) has no reason to be
+/// taken. `boxes` is the platform's box ([`SystemBox`]) in the product, a test's own in a test.
+///
+/// **And then the leave a panic owed it** (row 102): a panic that was not contained while this
+/// alert was up returned from its hook so as not to take the box off the screen
+/// ([`PanicTurn::Owe`]); with the alert read, this thread ends the process by the panic's road.
+fn announce_frame_shape_stop(path: &std::path::Path, boxes: &mut impl SystemBoxes) {
+    let alert = move_the_alert(a_stops_claim).then(|| the_alert_on_a_watching_console(path));
+    say_the_stop_alert(alert, boxes);
+    if move_the_alert(a_stops_alert_said) {
+        leave_by_the_panic_road()
+    }
 }
 
 /// What [`announce_frame_shape_stop`] does with its claim, with the platform's box handed in
