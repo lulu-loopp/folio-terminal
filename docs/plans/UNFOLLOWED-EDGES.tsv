@@ -2257,9 +2257,6 @@ crates/bt-app/src/main.rs	bt-app crate::opening_window_attributes	Ambiguous	with
 crates/bt-app/src/main.rs	bt-app crate::opening_window_attributes	Ambiguous	with_title	1	
 crates/bt-app/src/main.rs	bt-app crate::opening_window_attributes	Ambiguous	with_transparent	1	
 crates/bt-app/src/main.rs	bt-app crate::opening_window_attributes	Ambiguous	with_visible	1	
-crates/bt-app/src/main.rs	bt-app crate::pane_into_new_tab	Ambiguous	unwrap_or_default	6	
-crates/bt-app/src/main.rs	bt-app crate::pane_into_new_tab	Dynamic	solve	1	
-crates/bt-app/src/main.rs	bt-app crate::pane_into_tab	Dynamic	solve	2	
 crates/bt-app/src/main.rs	bt-app crate::panic_alert_text	Ambiguous	to_string	1	
 crates/bt-app/src/main.rs	bt-app crate::panic_log_path	Ambiguous	join	1	
 crates/bt-app/src/main.rs	bt-app crate::panic_selftest_if_due	Ambiguous	elapsed	1	
@@ -4670,6 +4667,9 @@ crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::keep_birth_death_
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::keep_birth_death_face	Ambiguous	map_or_else	1	
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::keep_birth_death_face	Ambiguous	text	1	
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::keep_birth_death_face	Ambiguous	to_string_lossy	1	
+crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::pane_into_new_tab	Ambiguous	unwrap_or_default	6	2026-10-29: T-SPLIT-2B batch 26; the same site, moved by K2 batch 26 with `pane_into_new_tab` from main.rs into runtime/tabs.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::pane_into_new_tab	Dynamic	solve	1	2026-10-29: T-SPLIT-2B batch 26; the same site, moved by K2 batch 26 with `pane_into_new_tab` from main.rs into runtime/tabs.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::pane_into_tab	Dynamic	solve	2	2026-10-29: T-SPLIT-2B batch 26; the same site, moved by K2 batch 26 with `pane_into_tab` from main.rs into runtime/tabs.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::pane_strip_landing	Ambiguous	flatten	1	2026-10-26: T-SPLIT-2B batch 16; the same site, moved by K2 batch 16 with `pane_strip_landing` from main.rs into runtime/tabs.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::pane_strip_landing	Ambiguous	map	1	2026-10-26: T-SPLIT-2B batch 16; the same site, moved by K2 batch 16 with `pane_strip_landing` from main.rs into runtime/tabs.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/terminal.rs	bt-app crate::runtime::terminal::Runtime::begin_local_selection	Ambiguous	clone	3	
