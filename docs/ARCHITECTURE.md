@@ -2203,17 +2203,17 @@ A new size reaches a pane's grid at once and its shell at the quiet boundary.
 | per-leaf plan | `bt-app` | `Runtime::resize_leaves_to_layout` (refused while the DPI rectangle may not cut a grid) → `runtime::panes::leaf_resize_plan` → `ShellSession::grid_for` | `LeafResizeTarget` | window thread |
 | schedule | `bt-app` | `ShellSession::propose_size` (the focused leaf last, through `Runtime::schedule_grid_change`) → `plan_grid_change` → `coalesce_pty_resize_on_grid_change` → `coalesce_pty_resize` | `PendingPtyResize`, the newest grid with the quiet deadline | window thread |
 | reflow | `bt-term` | `DualPlaneSession::resize_at` → `lifecycle::plan_resize` → `TerminalAdapter::resize` | `lifecycle::ResizePlan` | window thread: in the same turn for a shown pane, at the release for a hidden one |
-| release | `bt-app` | `Runtime::turn` → `Runtime::flush_pending_pty_resize` → `release_due_leaf_resize` → `service_pending_pty_resize` (`take_due_pty_resize`, `pty_resize_wake_deadline`) | `PendingPtyResize` | window thread, once per turn, after every other task that can change a session |
+| release | `bt-app` | `Runtime::turn` → `Runtime::flush_pending_pty_resize` → `ShellSession::release_due_size` → `service_pending_pty_resize` (`take_due_pty_resize`, `pty_resize_wake_deadline`) | `PendingPtyResize` | window thread, once per turn, after every other task that can change a session |
 | commit | `bt-app` | `commit_leaf_resize` → `pty_size` → `pty_door::resize`, then `bt_term::DualPlaneSession::mark_pty_resize_requested_at` (or, with nothing to tell, `bt_term::DualPlaneSession::mark_resize_settled_unchanged_at`); `replace_psreadline_resize_reanchor_debt` | `bt_pty::PtySize` | window thread, admitted as the PtyResize door (§5.3 row 12) |
 | pseudoconsole | `bt-pty` | `PtySession::resize` | `PtySize` | window thread, synchronous: the ResizePseudoConsole round trip into conhost |
 | close | `bt-app` | `Runtime::finish_resize_if_quiescent` → `bt_term::DualPlaneSession::finish_resize_if_quiescent`; an owed PSReadLine repair through `runtime::dpi::take_psreadline_resize_reanchor_input` → `runtime::terminal::write_pty_input` | the repair's bytes | window thread, a later turn (it runs before the release in `Runtime::turn`) |
 | a birth's missed size | `bt-app` | `Runtime::land_births` → `Runtime::land_own_shell` (or, for a restart's successor, `Runtime::land_restart` → `runtime::panes::land_successor`) → `runtime::panes::land_shell_birth` → `runtime::panes::apply_owed_shell_resize` → `pty_door::resize`; a silent birth death's last-resort shell through `Runtime::land_birth_death_fallback` → `runtime::tabs::land_birth_death_fallback` → `runtime::tabs::land_birth_death_fallback_shell` → `runtime::panes::apply_owed_shell_resize` | `bt_pty::PtySize` | window thread, when the `bt-pty-birth` worker's shell lands |
 
-The free functions and the one method that sequence it, in call order:
+The free functions and the two methods that sequence it, in call order:
 `resize_worth_solving`, `size_authority_for_rectangle`, `solve_seats`,
 `leaf_resize_plan`, `ShellSession::propose_size`, `plan_grid_change`,
 `coalesce_pty_resize_on_grid_change`, `coalesce_pty_resize`,
-`release_due_leaf_resize`, `service_pending_pty_resize`, `take_due_pty_resize`,
+`ShellSession::release_due_size`, `service_pending_pty_resize`, `take_due_pty_resize`,
 `pty_resize_wake_deadline`, `commit_leaf_resize`, `pty_size`,
 `replace_psreadline_resize_reanchor_debt`,
 `take_psreadline_resize_reanchor_input`, and at a birth's landing `land_shell_birth`,
@@ -2813,7 +2813,7 @@ rows its own methods reach. Counts are the census of §0.1, 2026-09-23, plus the
 
 **Still in `main.rs`** — the free functions and `Runtime` methods that
 `docs/plans/design/runtime-dep-map/unclassified.tsv` lists, which K2 (T-SPLIT-2B) moves
-into their topics batch by batch: 255 (223 free functions, 32 methods) after batch 26. The table of
+into their topics batch by batch: 254 (222 free functions, 32 methods) after batch 26 and plan row 105. The table of
 the 2026-09-21 manifest's sort (201 methods then left) is retired (2026-10-27, plan row 59): since K2,
 `docs/plans/design/runtime-dep-map/unclassified.tsv` is the list, and each item's topic is decided by
 its batch (`runtime-dep-map/README.md`).
