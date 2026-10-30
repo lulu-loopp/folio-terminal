@@ -753,14 +753,17 @@ fn what_a_product_build_contains_is_answered_at_the_file_and_at_the_item() {
 /// and `type`, a `#[cfg(test)] impl`'s header, a `#[cfg(test)] macro_rules!`, and a `let`, an
 /// expression statement and a match arm under `#[cfg(test)]` inside a product function are out
 /// of the product; `#[cfg(not(test))]` and `#[cfg(any(test, windows))]` are not gates, and the
-/// ungated needles stay counted. Each line of the fixture says which it is (`// counted`,
-/// `// gated`).
+/// ungated needles stay counted. The review's fold (F5) adds a line for each other position the
+/// walk reads — a field, a variant, a fn parameter, a generic parameter, an `extern crate`, a
+/// foreign item, an `impl` item, a `trait` item and a file's own `#![cfg(test)]` (`gated_file.rs`)
+/// — and one for the stated limit (F1): a `cfg` inside a macro invocation's tokens is not read, so
+/// its needle counts. Each line of the fixture says which it is (`// counted`, `// gated`).
 ///
-/// Before the row the three grains read none of these gates — no item and no inline module holds
-/// a `use`, a `const` or an `impl` header, and the `let`, the expression and the arm sit in a
-/// product function — so every gated line counted as product (14 of 14, not 5).
+/// Before the row the three grains read none of the first nine gates — no item and no inline
+/// module holds a `use`, a `const` or an `impl` header, and the `let`, the expression and the arm
+/// sit in a product function — so every gated line counted as product (14 of 14, not 5).
 ///
-/// MUTATION: drop the gate grain from `Occurrence::in_the_product` — the nine gated lines count;
+/// MUTATION: drop the gate grain from `Occurrence::in_the_product` — the gated lines count;
 /// stop descending into function bodies in `crate::gates` — the `let`, the expression and the arm
 /// do.
 #[test]
@@ -772,14 +775,17 @@ fn a_cfg_is_read_wherever_it_stands() {
             View::CodeKeepingLiterals,
         ))
         .unwrap_or_else(|failure| panic!("{failure}"));
-    let lines: Vec<&str> = index.union().lines().collect();
+    let union = index.union();
     let mut wrong = Vec::new();
     let mut gated = 0;
     for occurrence in found.occurrences() {
-        let at = index
-            .locate(occurrence.span.start())
-            .expect("an occurrence is in a file");
-        let line = lines[at.line - 1];
+        let offset = occurrence.span.start();
+        let at = index.locate(offset).expect("an occurrence is in a file");
+        let from = union[..offset].rfind('\n').map_or(0, |at| at + 1);
+        let to = union[offset..]
+            .find('\n')
+            .map_or(union.len(), |at| offset + at);
+        let line = union[from..to].trim_end_matches('\r');
         let counted = line.ends_with("// counted");
         assert!(
             counted || line.ends_with("// gated"),
@@ -790,21 +796,23 @@ fn a_cfg_is_read_wherever_it_stands() {
             wrong.push(format!("{}: {line}", at.line));
         }
     }
-    assert_eq!((found.len(), gated), (14, 9), "the fixture's needles");
+    assert_eq!((found.len(), gated), (25, 18), "the fixture's needles");
     assert!(
         wrong.is_empty(),
         "read with the wrong verdict:\n  {}",
         wrong.join("\n  ")
     );
-    assert_eq!(found.in_the_product(&index).len(), 5);
+    assert_eq!(found.in_the_product(&index).len(), 7);
 }
 
 /// RED (plan row 77) — **a `cfg` the reading cannot read, place or evaluate is refused by its
 /// line**, never read as "decided elsewhere": a predicate that is no predicate
-/// (`all(test windows)`), a `cfg_attr` that writes a `cfg`, and a `cfg` on a closure's parameter,
-/// a position the gate walk does not read.
+/// (`all(test windows)`), a `cfg_attr` that writes a `cfg`, a `cfg` on a closure's parameter,
+/// a position the gate walk does not read, and the literal `cfg(false)` and `cfg(true)` (the
+/// review, F3).
 ///
-/// MUTATION: drop `cfg_is_readable` — the first is guessed product; drop `cfg_attr_writes_a_cfg`
+/// MUTATION: drop `cfg_is_readable` — the first is guessed product; read `true`/`false` as names
+/// again — the last two pass as "decided elsewhere"; drop `cfg_attr_writes_a_cfg`
 /// — the second passes; drop the unplaced refusal in `crate::gates`' attribute visit — the third
 /// passes.
 #[test]
@@ -828,6 +836,8 @@ fn a_cfg_the_reading_cannot_read_is_refused_by_its_line() {
             "unreadable 4:1 all(test windows)",
             "conditional 7:1 test, cfg(any())",
             "unplaced 11:17",
+            "unreadable 15:1 false",
+            "unreadable 18:1 true",
         ]
     );
 }

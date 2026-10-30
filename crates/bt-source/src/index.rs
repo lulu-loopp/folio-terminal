@@ -1294,7 +1294,9 @@ impl Index {
     /// expression, a match arm, a field initialiser, a field, a variant, a parameter, a
     /// generic parameter, the file itself — whose own `cfg`s say no product build compiles it,
     /// attributes included, in union order. [`crate::Occurrence::in_the_product`]'s fourth
-    /// grain; a `cfg` the index could not place or read refused the index instead.
+    /// grain; a `cfg` on a parsed node the index could not place or read refused the index
+    /// instead. Not read: a `cfg` inside a macro invocation's tokens, which `syn` does not parse
+    /// — the bytes under it are counted as product (today `crates/bt-app/src/i18n.rs:355` and `:357`, two `#[cfg(test)]` variants inside `text_entries! { … }`).
     #[must_use]
     pub fn test_gates(&self) -> &[Span] {
         &self.gates

@@ -50,3 +50,46 @@ pub fn product_body(value: u8) {
         _ => {}
     }
 }
+
+// The review of plan row 77 (F5): the positions the walk reads that had no line.
+pub struct WithFields {
+    #[cfg(test)]
+    gated_field: the_gated_needle, // gated
+    product_field: the_gated_needle, // counted
+}
+
+pub enum WithVariants {
+    #[cfg(test)]
+    Gated(the_gated_needle), // gated
+    Product,
+}
+
+pub fn with_parameter(#[cfg(test)] gated: the_gated_needle, value: u8) {} // gated
+
+pub fn with_generic<#[cfg(test)] T: the_gated_needle, U>() {} // gated
+
+#[cfg(test)]
+extern crate the_gated_needle; // gated
+
+unsafe extern "C" {
+    #[cfg(test)]
+    fn the_gated_needle(); // gated
+}
+
+impl Holder {
+    #[cfg(test)]
+    fn gated_method() -> fn() { needles::the_gated_needle } // gated
+}
+
+pub trait WithItems {
+    #[cfg(test)]
+    fn gated_item() -> fn() { needles::the_gated_needle } // gated
+}
+
+pub mod gated_file;
+
+// The limit (F1): a `cfg` inside a macro invocation's tokens is not read, so its needle counts.
+some_list! {
+    #[cfg(test)]
+    the_gated_needle, // counted
+}

@@ -17,11 +17,20 @@
 //! * every generic parameter.
 //!
 //! A gated node's bytes are the gate, attributes included, and nothing inside it is read again
-//! (no product build compiles any of it). A `cfg` anywhere else is refused
-//! ([`Rejection::UnplacedCfg`]), so a position this walk does not know is a refusal and never a
-//! silent product count; so is a `cfg` whose predicate the three-valued reading cannot read
-//! ([`Rejection::UnreadableCfg`]) and a `cfg_attr` that writes a `cfg`
-//! ([`Rejection::ConditionalCfg`]).
+//! (no product build compiles any of it). A `cfg` on any other node `syn` parses is refused
+//! ([`Rejection::UnplacedCfg`]), so a parsed position this walk does not know is a refusal and
+//! never a silent product count; so is a `cfg` whose predicate the three-valued reading cannot
+//! read ([`Rejection::UnreadableCfg`]: a malformed predicate, or the literal `true` or `false`)
+//! and a `cfg_attr` that writes a `cfg` ([`Rejection::ConditionalCfg`]).
+//!
+//! **The limit (the review of plan row 77, F1): a `cfg` written inside a macro invocation's
+//! tokens is not read.** `syn` does not parse an invocation's tokens (`foo! { #[cfg(test)] X, }`,
+//! `thread_local! { #[cfg(test)] static … }`, `vec![#[cfg(x)] a]`), so such a `cfg` reaches
+//! neither this walk nor its attribute visit, and the bytes under it are counted as product
+//! whatever it says. The tree's present cases are `crates/bt-app/src/i18n.rs:355` and `:357`,
+//! the two `#[cfg(test)]` variants inside `text_entries! { … }` (the macro's shape is §2.7's
+//! `ItemConstructingArm`, already reported). Refusing the position would refuse the tree; reading
+//! known invocation bodies is a later row.
 
 use std::collections::BTreeSet;
 use std::path::Path;

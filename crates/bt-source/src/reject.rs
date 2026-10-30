@@ -89,17 +89,18 @@ pub enum Rejection {
         spelling: String,
     },
     /// A `#[cfg(…)]` whose argument is not a predicate the three-valued reading reads (plan row
-    /// 77): not one name, name-value, or `all`/`any`/`not` of those. Reading it as "decided
-    /// elsewhere" would be a guess that the bytes under it may be product.
+    /// 77): not one name, name-value, or `all`/`any`/`not` of those, or the literal `true` or
+    /// `false`. Reading it as "decided elsewhere" would be a guess that the bytes under it may be
+    /// product.
     UnreadableCfg {
         file: PathBuf,
         at: Position,
         /// The `cfg`'s own spelling, between its parentheses.
         spelling: String,
     },
-    /// A `#[cfg_attr(…)]` that writes a `cfg` on anything but a `mod` declaration (which is
-    /// [`Rejection::ConditionalDeclarationAttribute`]): a gate that holds only under a predicate
-    /// the reading does not evaluate (plan row 77).
+    /// A `#[cfg_attr(…)]` that writes a `cfg`, wherever it stands: a gate that holds only under a
+    /// predicate the reading does not evaluate (plan row 77). On a `mod` declaration it is also
+    /// [`Rejection::ConditionalDeclarationAttribute`], so such a declaration is refused twice.
     ConditionalCfg {
         file: PathBuf,
         at: Position,
@@ -108,7 +109,7 @@ pub enum Rejection {
     },
     /// A `#[cfg(…)]` written where the index reads no gate (plan row 77): the bytes under it
     /// would be counted whatever it says. Every position a gate can be read at is named in
-    /// `crate::lower`'s gate walk; a new one is added there, never passed.
+    /// `crate::gates`' walk; a new one is added there, never passed.
     UnplacedCfg { file: PathBuf, at: Position },
     /// A file the walk reached could not be read as text.
     UnreadableFile { file: PathBuf, reason: String },

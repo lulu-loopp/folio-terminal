@@ -522,8 +522,10 @@ pub(crate) fn expr_attrs(expr: &syn::Expr) -> &[syn::Attribute] {
 /// Whether a `#[cfg(…)]` is one the three-valued reading reads (plan row 77): its argument is one
 /// predicate — a name (`test`, `windows`), a name-value (`target_os = "macos"`), or `all(…)`,
 /// `any(…)` or `not(…)` of readable predicates, `not` of exactly one. Anything else is not a
-/// predicate `rustc` accepts, and [`cfg_compilation`] would read it as "decided elsewhere" — a
-/// guess that it may be product — so the index refuses it instead.
+/// predicate the reading evaluates, and [`cfg_compilation`] would read it as "decided elsewhere"
+/// — a guess that it may be product — so the index refuses it instead. That includes the literal
+/// `cfg(true)` and `cfg(false)` (stable since Rust 1.88): `syn` reads a literal, not a meta path,
+/// so it fails the parse below (the review of plan row 77, F3; `gated_unreadable` holds both).
 pub(crate) fn cfg_is_readable(attribute: &syn::Attribute) -> bool {
     fn readable(meta: &syn::Meta) -> bool {
         match meta {
@@ -551,7 +553,8 @@ pub(crate) fn cfg_is_readable(attribute: &syn::Attribute) -> bool {
 
 /// Whether a `#[cfg_attr(…)]` writes a `cfg` — a gate that holds only under another predicate,
 /// which the three-valued reading does not evaluate (the reason [`Rejection::ConditionalDeclarationAttribute`]
-/// refuses one on a `mod` declaration; plan row 77 refuses it everywhere else).
+/// refuses one on a `mod` declaration; plan row 77 refuses it wherever it stands, so a `mod`
+/// declaration carrying one earns both refusals).
 pub(crate) fn cfg_attr_writes_a_cfg(attribute: &syn::Attribute) -> bool {
     fn names_cfg(tokens: proc_macro2::TokenStream) -> bool {
         tokens.into_iter().any(|tree| match tree {

@@ -260,8 +260,12 @@ What every source guard calls product is `bt_source::Occurrence::in_the_product`
 the inline module, the `cfg` written on any node (`Index::test_gates`: a `use`, a `const`, an
 `impl` header, a macro, a `let`, an expression, a match arm, a parameter), and the index refuses
 a `cfg` whose predicate is not a name, a name-value or `all`/`any`/`not` of them, a `cfg_attr`
-that writes a `cfg`, and a `cfg` where it reads no gate (`tests/index.rs`
-`a_cfg_is_read_wherever_it_stands`, `a_cfg_the_reading_cannot_read_is_refused_by_its_line`).
+that writes a `cfg`, and a `cfg` on a parsed node where it reads no gate (`tests/index.rs`
+`a_cfg_is_read_wherever_it_stands`, `a_cfg_the_reading_cannot_read_is_refused_by_its_line`); the
+literal `cfg(true)` and `cfg(false)` are refused as unreadable. The limit (the review of plan row
+77): a `cfg` inside a macro invocation's tokens is not read, since `syn` does not parse an
+invocation, and the bytes under it count as product; the tree's present cases are
+`crates/bt-app/src/i18n.rs:355` and `:357`, two `#[cfg(test)]` variants inside `text_entries!`.
 
 ## Ownership census
 
@@ -725,11 +729,6 @@ in `HandoffLane::submit` and requires each refused by file, site and door. When 
 door from reaching it, or correct the row's cells (a hand-over call the boundary misses walks a
 worker's closure as the door's), and regenerate with `scripts/generate-request-door-sites.ps1`,
 reading each new site and dating its reason.
-Since 2026-10-29 (T-WINDOW-WAITS-STALE-KEY-REFUSED, plan row 76) the walk's registry reader
-refuses, by `window_waits.tsv:<line>`, an `# effects` row whose `crate`, `arm` and `item` name no
-admitted item of the product or two, and a `kind` off the registry's closed list, before any walk
-(`an_effects_row_names_one_item_of_its_arm_or_is_refused_by_its_line`); a moved or renamed door
-body is re-keyed in the move commit, or the reader stops the list.
 
 ## Lane contract and the completion seam
 

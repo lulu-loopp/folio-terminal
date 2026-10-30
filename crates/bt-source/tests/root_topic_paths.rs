@@ -30,9 +30,10 @@
 //! inline module, and since plan row 77 on 2026-10-29 the gate written on any node — so a
 //! module-level `#[cfg(test)] use` is out of the product by its own `cfg`; until then this guard
 //! read [`bt_source::UseRecord::variant`] itself). A field's gate is the field item's own. A
-//! `#[cfg]` on a statement or a match arm inside a body is still refused here by kind, as before
-//! the gate grain read it (ruled 2026-10-29: the guard's own refusal is kept) — gate the item, or
-//! spell the path through `runtime/mod.rs`.
+//! platform or feature `#[cfg]` on a statement or a match arm inside a body — one a product
+//! build may compile — is still refused here by kind (ruled 2026-10-29: the guard's own refusal
+//! is kept) — gate the item, or spell the path through `runtime/mod.rs`; a statement gated to
+//! tests is out of the product by the gate grain and never reaches the refusal.
 //!
 //! The fixture under `tests/fixtures/root_topic_paths/` plants each shape; the last test holds
 //! `bt-app` itself.
