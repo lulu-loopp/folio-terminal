@@ -1229,7 +1229,7 @@ impl<'d> Resolver<'d> {
                     {
                         return Err(fail(
                             format!(
-                                "`{}` is not the standard `{}`: a path the census places in no                                  crate it knows",
+                                "`{}` is not the standard `{}`: its crate is none the census knows",
                                 spelled(&named).join("::"),
                                 named.name
                             ),
