@@ -197,9 +197,18 @@ fn the_frame_a_panic_report_names() -> u8 {
 /// This test is the guard that change needs first: the production hook (only its final action
 /// replaced), a panic inside [`contained_panic::contain`] — the boundary every worker's unit of
 /// work runs in — and then the report read back: a frame named
-/// `<this crate>::tests::the_frame_a_panic_report_names`, and under it an `at` location in this
-/// file whose line lies inside that function. A name alone would not tell line tables that are
-/// there from line tables that are useless.
+/// `<this crate>::tests::the_frame_a_panic_report_names`, or by the bare
+/// `the_frame_a_panic_report_names`, and under it an `at` location in this file whose line lies
+/// inside that function. A name alone would not tell line tables that are there from line tables
+/// that are useless.
+///
+/// **Two spellings of one name, by platform** (the Mac gate, 2026-10-30). Under
+/// `line-tables-only` the Windows PDB keeps a function's qualified name, while the DWARF a macOS
+/// build carries keeps only its bare name (LLVM's minimal debug info writes no linkage name), and
+/// std's symbolizer prints what it finds: `10: the_frame_a_panic_report_names` /
+/// `at ./src/tests.rs:187:5`. The shipped Mac release, built with the same setting, reports its
+/// frames the same way. The name is matched as the whole symbol, never as a substring, and the
+/// location is what proves the frame is this crate's.
 ///
 /// What it holds is what the test profile is built with (`debug = "line-tables-only"` since plan
 /// row 73; the dev profile's `debug = 2` keeps more, release's is the same setting). The hang
@@ -266,11 +275,20 @@ fn a_contained_panics_report_names_this_crates_frame_by_file_and_line() {
         env!("CARGO_CRATE_NAME"),
         "::tests::the_frame_a_panic_report_names"
     );
+    let bare = "the_frame_a_panic_report_names";
     let lines: Vec<&str> = backtrace.lines().map(str::trim).collect();
+    // A frame line is `<index>: <symbol>`; the symbol has to be one of the two spellings whole.
     let named = lines
         .iter()
-        .position(|line| line.contains(frame))
-        .unwrap_or_else(|| panic!("no frame of the backtrace is named `{frame}`:\n{backtrace}"));
+        .position(|line| {
+            line.split_once(": ").is_some_and(|(index, symbol)| {
+                index.bytes().all(|byte| byte.is_ascii_digit())
+                    && (symbol == frame || symbol == bare)
+            })
+        })
+        .unwrap_or_else(|| {
+            panic!("no frame of the backtrace is named `{frame}` or `{bare}`:\n{backtrace}")
+        });
     let location = lines
         .get(named + 1)
         .and_then(|line| line.strip_prefix("at "))
