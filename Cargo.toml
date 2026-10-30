@@ -304,7 +304,9 @@ opt-level = 1
 # `cargo test -p bt-app --no-run`, `-j 6`, on the development machine): the PDBs of bt-app's
 # graph go from 3226 MiB to 1429 MiB (the harness's 905 -> 272 MiB, the bin's 671 -> 196 MiB),
 # the harness unit from 265 s to 226 s, the executables not at all. A panic report still
-# resolves every frame to its function, file and line, and
+# resolves every frame to its function, file and line (on macOS the function by its bare name:
+# the DWARF of this setting carries no linkage name, as the shipped Mac release already shows;
+# the Windows PDB keeps the qualified one), and
 # `tests::a_contained_panics_report_names_this_crates_frame_by_file_and_line` is what holds
 # that (bt-app-split §4.4a). The cost, accepted: the `target/debug/folio.exe` a gate leaves
 # behind is this profile's bin, so a debugger attached to it sees no locals or types; build

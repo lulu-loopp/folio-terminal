@@ -390,6 +390,7 @@ version = "0.4.8"
 dependencies = [
  "bt-doc",
  "bt-effects",
+ "bt-platform",
  "bt-testpath",
  "mitex",
  "mitex-lexer",

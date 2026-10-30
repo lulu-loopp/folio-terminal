@@ -1679,7 +1679,7 @@ mod tests {
             let children: Vec<_> = batch
                 .iter()
                 .map(|&index| {
-                    let child = std::process::Command::new(&exe)
+                    let child = bt_platform::quiet_command(&exe)
                         .args(["--exact", selector, "--nocapture", "--test-threads=1"])
                         .env(STACK_CHILD, format!("{index}:{stack}"))
                         .stdout(std::process::Stdio::piped())
