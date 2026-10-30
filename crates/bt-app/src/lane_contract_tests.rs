@@ -1539,9 +1539,10 @@ fn a_lane_built_on_the_seam_keeps_every_claim() {
 /// gate a short one; nothing it asserts reads the time.
 ///
 /// MUTATION: drop the `lapses > 0` checks in `full_lane_answers_without_waiting` and `check` —
-/// the planted lane admits the whole flood (`BoundBroken`), and the test is red. Or count no lapse
-/// in `Gate::arrive` — the same. Or let `Gate::arrive` hold without a cap — the planted flood
-/// never returns: the hang the cap turns into this failure.
+/// the planted lane keeps the rest of the claim (its ledger still refuses past its bound), so the
+/// claim passes and the test is red. Or count no lapse in `Gate::arrive` — the same. Or let
+/// `Gate::arrive` hold without a cap — the planted flood never returns: the hang the cap turns
+/// into this failure.
 #[test]
 fn a_full_lane_answers_without_waiting_and_an_admission_waiting_for_the_worker_is_red() {
     let claim = Claim::FullLaneAnswersWithoutWaiting;
