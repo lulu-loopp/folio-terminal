@@ -2153,7 +2153,6 @@ crates/bt-app/src/main.rs	bt-app crate::TransferRefusal::notice	Ambiguous	text	2
 crates/bt-app/src/main.rs	bt-app crate::TransferRefusal::notice	Ambiguous	to_owned	2	
 crates/bt-app/src/main.rs	bt-app crate::Windows::in_order_mut	Ambiguous	collect	1	
 crates/bt-app/src/main.rs	bt-app crate::Windows::in_order_mut	Ambiguous	map	2	
-crates/bt-app/src/main.rs	bt-app crate::announce_frame_shape_stop	Ambiguous	then	1	
 crates/bt-app/src/main.rs	bt-app crate::append_panic_report	Ambiguous	append	1	
 crates/bt-app/src/main.rs	bt-app crate::append_panic_report	Ambiguous	open	1	
 crates/bt-app/src/main.rs	bt-app crate::apply_stored_terminal_font	Ambiguous	as_micros	1	
@@ -2247,7 +2246,6 @@ crates/bt-app/src/main.rs	bt-app crate::measure_markdown_block	Dynamic	measure	6
 crates/bt-app/src/main.rs	bt-app crate::measure_markdown_local	Ambiguous	collect	1	
 crates/bt-app/src/main.rs	bt-app crate::measure_markdown_local	Ambiguous	map	1	
 crates/bt-app/src/main.rs	bt-app crate::measure_markdown_local	Dynamic	measure	1	
-crates/bt-app/src/main.rs	bt-app crate::move_the_alert	Dynamic	turn	2	
 crates/bt-app/src/main.rs	bt-app crate::native_window_of	Ambiguous	as_raw	1	
 crates/bt-app/src/main.rs	bt-app crate::native_window_of	Ambiguous	context	1	
 crates/bt-app/src/main.rs	bt-app crate::new_window_runtime	Ambiguous	send_event	2	
