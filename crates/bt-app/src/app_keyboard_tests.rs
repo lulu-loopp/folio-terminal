@@ -750,6 +750,7 @@ fn only_a_shell_with_the_keyboard_gets_a_blinking_caret() {
         preview: false,
         menu_or_dialog: false,
         palette: false,
+        settings_field: false,
     }));
 }
 
@@ -876,6 +877,23 @@ fn a_composition_goes_where_the_keyboard_is_and_only_the_shell_has_a_pty() {
         ImeCaretSource::Field,
         "so its candidate list hangs off its own caret"
     );
+    // **And so does a settings field** (T-SETTINGS-FIELDS-IME-POSITION): the dialog is a modal
+    // and a field of it is a text field, and the field wins — before this rung a composition
+    // typed into one was swallowed with the dialog's switches.
+    assert_eq!(
+        ime_owner(KeyboardOwner {
+            settings_field: true,
+            menu_or_dialog: true,
+            ..KeyboardOwner::default()
+        }),
+        ImeOwner::SettingsField,
+        "a settings field is a modal's and a text field, and the field wins"
+    );
+    assert_eq!(
+        ime_caret_source(ImeOwner::SettingsField),
+        ImeCaretSource::Field,
+        "so its candidate list hangs off its own caret"
+    );
     assert_eq!(
         ime_owner(KeyboardOwner {
             rename: true,
@@ -915,6 +933,7 @@ fn a_composition_goes_where_the_keyboard_is_and_only_the_shell_has_a_pty() {
             search: true,
             preview: true,
             palette: true,
+            settings_field: true,
         }),
         ImeOwner::Rename,
         "and the editor is the topmost of all of them"
@@ -967,11 +986,12 @@ fn a_composition_goes_where_the_keyboard_is_and_only_the_shell_has_a_pty() {
 
     // **The whole of "zero PTY writes", stated as a property.**
     //
-    // Seven bits since the search capsule joined the ladder (§7.1.5d): the
-    // sweep is over every combination there is, so a rung added without a
+    // Nine bits since the palette and the settings field joined the ladder
+    // (the search capsule made it seven, §7.1.5d): the sweep is over every
+    // combination there is, so a rung added without a
     // matching arm in `keyboard_owner_is_a_shell` fails here rather than in
     // a screenshot of a query appearing at somebody's prompt.
-    for bits in 0..256u16 {
+    for bits in 0..512u16 {
         let owner = KeyboardOwner {
             rename: bits & 1 != 0,
             menu_or_dialog: bits & 2 != 0,
@@ -981,6 +1001,7 @@ fn a_composition_goes_where_the_keyboard_is_and_only_the_shell_has_a_pty() {
             git_prompt: bits & 32 != 0,
             search: bits & 64 != 0,
             palette: bits & 128 != 0,
+            settings_field: bits & 256 != 0,
         };
         assert_eq!(
             matches!(ime_owner(owner), ImeOwner::Shell),
@@ -1114,7 +1135,8 @@ fn every_rung_of_the_ime_ladder_says_where_its_caret_comes_from() {
             | ImeOwner::GitPrompt
             | ImeOwner::Preview
             | ImeOwner::Search
-            | ImeOwner::Palette => ImeCaretSource::Field,
+            | ImeOwner::Palette
+            | ImeOwner::SettingsField => ImeCaretSource::Field,
         };
         assert_eq!(
             source, expected,
@@ -1129,10 +1151,10 @@ fn every_rung_of_the_ime_ladder_says_where_its_caret_comes_from() {
         ImeCaretSource::Field,
         "a query composed in the capsule is composed in the capsule"
     );
-    // Seven bits, exactly as the sweep above: every rung the ladder can
+    // Nine bits, exactly as the sweep above: every rung the ladder can
     // reach has to be in the table this test walks, or the table is proving
     // something about a smaller ladder than the one that ships.
-    for bits in 0..256u16 {
+    for bits in 0..512u16 {
         let owner = ime_owner(KeyboardOwner {
             rename: bits & 1 != 0,
             menu_or_dialog: bits & 2 != 0,
@@ -1142,6 +1164,7 @@ fn every_rung_of_the_ime_ladder_says_where_its_caret_comes_from() {
             git_prompt: bits & 32 != 0,
             search: bits & 64 != 0,
             palette: bits & 128 != 0,
+            settings_field: bits & 256 != 0,
         });
         assert!(
             ImeOwner::ALL.contains(&owner),
