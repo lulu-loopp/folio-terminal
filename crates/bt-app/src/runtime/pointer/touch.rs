@@ -9,7 +9,7 @@
 
 use crate::window_seam::LoopProxy;
 use crate::window_seam::prelude::*;
-use crate::{AppEvent, Runtime, diagnostics};
+use crate::{AppEvent, FolioApp, Runtime, diagnostics};
 use anyhow::Result;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -107,6 +107,34 @@ pub(crate) fn pan_on_the_wheel_road(
     (pointer, wheel)
 }
 
+/// **The line a discarded pan writes, the first time one is discarded in this process** (0.4.9
+/// plan row 107; `docs/CONVENTIONS.md` §十 rule 2), naming the gesture that held the pointer;
+/// nothing on every later discard, which `said` remembers.
+///
+/// A pan discarded under a held gesture is a finger that did nothing, and nothing else says so:
+/// the wheel goes on scrolling under the same gesture, so "touch does nothing" and "a gesture is
+/// held" were one report with no line between them. Once per process, because the slot is the
+/// process's; the owner's name and nothing about where the finger was.
+pub(crate) fn a_discarded_pan_said_once(said: &mut bool, owner: &str) -> Option<String> {
+    (!std::mem::replace(said, true))
+        .then(|| format!("a touch pan was discarded under a held gesture (owner={owner})"))
+}
+
+impl<B: Backend> FolioApp<B> {
+    /// **The pans every window's touch door parked, spent** (0.4.4 ticket 11), after the
+    /// application's capture has been asked whether a hand still holds it (0.4.9 plan row 107,
+    /// R9): a gesture whose button came up without its release reaching this program would
+    /// otherwise discard every pan in every window until the next press of that button, while the
+    /// wheel scrolls on — the pan asks the slot, the wheel over a pane does not.
+    ///
+    /// Every window, on this family's standing reason: a window whose finger did nothing has
+    /// nothing parked, and the walk costs a `RefCell` borrow each.
+    pub(crate) fn spend_touch_pans(&mut self) -> Result<()> {
+        self.end_the_capture_that_lost_its_pointer()?;
+        self.for_each_window(|runtime| runtime.spend_parked_pans())
+    }
+}
+
 impl<B: Backend> Runtime<'_, B> {
     /// **The pans the touch door parked, put on the wheel's road** (0.4.4
     /// ticket 11).
@@ -124,10 +152,19 @@ impl<B: Backend> Runtime<'_, B> {
     /// **Under a held gesture a parked pan is discarded** (T-POINTER-CAPTURE
     /// §7, cut 6, cell B19): its opening point is a pointer move, which would
     /// drag the held owner to the finger, and a second pointer is not something
-    /// the capture has.
+    /// the capture has. The first discard in the process says so, once
+    /// ([`a_discarded_pan_said_once`]), through the window's door.
     pub(crate) fn spend_parked_pans(&mut self) -> Result<()> {
         let steps = std::mem::take(&mut *self.window.parked_pans.borrow_mut());
-        if self.app.pointer_capture.is_some() {
+        if let Some(capture) = self.app.pointer_capture.as_ref() {
+            if !steps.is_empty()
+                && let Some(line) = a_discarded_pan_said_once(
+                    &mut self.app.said_a_pan_was_discarded,
+                    capture.owner.name(),
+                )
+            {
+                self.window.window.note(&line);
+            }
             return Ok(());
         }
         for step in steps {
