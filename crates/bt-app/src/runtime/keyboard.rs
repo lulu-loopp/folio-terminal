@@ -2524,12 +2524,30 @@ impl<B: Backend> Runtime<'_, B> {
     /// float closing are all one fact by the time this runs — the rung holding
     /// the keyboard is not the rung the letters were typed into.
     ///
+    /// **And between two fields of the settings dialog**, which are one rung
+    /// ([`ImeOwner::SettingsField`]) and several fields: a press or `Tab` from
+    /// the program to the arguments leaves the rung where it was, so the kinds
+    /// alone would let the letters typed for the program stand drawn there
+    /// while the candidate list follows the caret, and the composition carried
+    /// on would commit into the arguments (review of
+    /// T-SETTINGS-FIELDS-IME-POSITION, F1). The composition remembers its field
+    /// ([`CompositionOrigin::Settings`]); when that is not the focused one, the
+    /// field it began in has gone, which is the same sentence — the hole
+    /// [`Self::take_keyboard_into`] closes for two panes, closed here because
+    /// the dialog's focus moves by `Tab`, a press and an open on a row, and
+    /// this is where all of them have happened.
+    ///
     /// Costs a comparison of two enums on the passes where nothing is being
     /// composed, which is all of them but the ones a reader is typing Chinese
     /// on.
     pub(crate) fn settle_composition_owner(&mut self) -> Result<()> {
         let holds_the_keyboard = ime_owner(self.keyboard_owner());
-        if !composition_outlived_its_field(self.window.composing, holds_the_keyboard) {
+        let moved_to_another_field = self.window.composing == Some(ImeOwner::SettingsField)
+            && holds_the_keyboard == ImeOwner::SettingsField
+            && self.window.composing_in.origin() != Some(&self.composition_origin_now());
+        if !(composition_outlived_its_field(self.window.composing, holds_the_keyboard)
+            || moved_to_another_field)
+        {
             return Ok(());
         }
         let Some(started_in) = self.window.composing.take() else {
