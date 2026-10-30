@@ -174,10 +174,10 @@ pub(crate) use profiles::profile_menu_anchor;
 pub(crate) use search::rescan_leaf_for_search;
 #[cfg(test)]
 pub(crate) use tabs::{
-    absorb_tab_into_layout, absorb_tab_into_strip, blank_page_return,
-    exited_tabs_the_loop_may_close, grabbed_offset, new_tab_cwd, new_tab_leaf_seed,
-    pane_can_become_a_tab, pane_strip_landing, row_strip_landing, stepped_tab, tab_close_action,
-    tab_surface, two_tabs_mut,
+    absorb_tab_into_layout, absorb_tab_into_strip, absorb_tab_sessions, blank_page_return,
+    closing_this_pane_closes_the_tab, exited_tabs_the_loop_may_close, grabbed_offset, new_tab_cwd,
+    new_tab_leaf_seed, pane_can_become_a_tab, pane_into_tab, pane_strip_landing, row_strip_landing,
+    stepped_tab, tab_close_action, tab_surface, two_tabs_mut,
 };
 #[cfg(test)]
 pub(crate) use terminal::{

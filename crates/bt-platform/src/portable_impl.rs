@@ -1149,6 +1149,28 @@ pub fn thread_mouse_capture() -> Option<NativeWindow> {
     None
 }
 
+/// **Whether a hand may still be holding a button** — always yes here (0.4.9 plan row 107).
+///
+/// The question is "the button is up and no release of it can still be on its way", and off
+/// Windows nothing answers its second half. On macOS `NSEvent.pressedMouseButtons` is the
+/// hardware's state, which runs ahead of the event stream: winit's quiet point is the run loop's
+/// before-waiting moment, when an event already in the application's port has not been read
+/// yet, so a quick click's own release would be read as lost and its gesture cancelled under
+/// it. AppKit also has no per-thread capture to lose a release to, and a release that never came
+/// is proved stale by the next press of the same button (T-POINTER-CAPTURE R-5 rule 2), which
+/// is the rule a held gesture keeps here.
+#[must_use]
+pub fn mouse_button_down(_button: crate::PointerButton, _latched: crate::ContactMark) -> bool {
+    true
+}
+
+/// **The mark a gesture takes when it latches** — the empty one here: no contact is written down
+/// off Windows ([`crate::ContactMark`]).
+#[must_use]
+pub fn contacts_seen() -> crate::ContactMark {
+    crate::ContactMark::default()
+}
+
 /// **Let the system translate touch into the mouse** — and off Windows there
 /// is nothing to let (N, a harmless no-op; owner ruling 2026-09-21).
 ///
