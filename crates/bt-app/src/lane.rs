@@ -2339,8 +2339,9 @@ const QUIET: Duration = Duration::from_millis(300);
 /// A held gate is a cap, never a pass condition: a worker held in it longer than the gate's cap
 /// ([`PATIENCE`] unless [`Gate::lapse_after`] says otherwise) lets go on its own, once, and the
 /// gate counts it ([`Gate::lapses`]). Only a call that waited on the held worker can need that
-/// release to come back, so a count above zero is the asker having waited — read as state, and a
-/// call blocked on the executor turns into a failure rather than a hang.
+/// release to come back (or the suite itself holding the gate past its cap, which a passing claim
+/// never does), so a count above zero is the asker having waited — read as state, and a call
+/// blocked on the executor turns into a failure rather than a hang.
 #[cfg(test)]
 #[derive(Default)]
 pub(crate) struct Gate {
@@ -2410,9 +2411,12 @@ impl Gate {
                 self.changed.notify_all();
                 break;
             }
+            // What is left of the cap, not the whole cap again: a wake of the gate's condvar (an
+            // entry, an execution, a release elsewhere) does not restart it.
+            let left = cap.saturating_sub(since.elapsed());
             state = self
                 .changed
-                .wait_timeout(state, cap)
+                .wait_timeout(state, left)
                 .unwrap_or_else(PoisonError::into_inner)
                 .0;
         }
@@ -3566,20 +3570,20 @@ fn an_answer_is_published_after_its_resources_are_released(
 /// **Run one claim on one lane**: how many requests it asked, and what it found. Whatever the
 /// claim left held is let go after it.
 ///
-/// A gate that let go on its own during the claim ([`Gate::lapses`]) is
-/// [`Failure::SubmissionWaited`] whatever the claim found: one of the suite's calls — a
-/// submission, a drain, a withdrawal, none of which may wait — waited on the held executor, and
-/// the claim read a hold that had already broken.
+/// A claim that passed while its gate let go on its own ([`Gate::lapses`]) is
+/// [`Failure::SubmissionWaited`]: one of the suite's calls — a submission, a drain, a withdrawal,
+/// none of which may wait — waited on the held executor, and the claim passed on a hold that had
+/// already broken. A claim that failed keeps its own failure: it names what the lane did, which is
+/// what a declared failure pins by kind, and a lapse beside it only makes the run red twice over.
 #[cfg(test)]
 pub(crate) fn check(lane: &mut dyn LaneUnderTest, claim: Claim) -> (usize, Result<(), Failure>) {
     let mut run = Run { lane, requests: 0 };
     let found = claim.check(&mut run);
     let requests = run.requests;
     let lapses = run.lane.gate().lapses();
-    let result = if lapses > 0 {
-        Err(Failure::SubmissionWaited { lapses })
-    } else {
-        found
+    let result = match found {
+        Ok(()) if lapses > 0 => Err(Failure::SubmissionWaited { lapses }),
+        found => found,
     };
     run.lane.gate().release();
     run.lane.probe().let_go();

@@ -1127,12 +1127,22 @@ impl Queue {
     }
 
     /// **The planted asker's wait**: until the worker has taken `job` from the line (or the lane
-    /// closed). It ends only when the worker moves, which the suite's held [`Gate`] allows only
-    /// once its cap has run out.
+    /// closed). It ends when the worker moves, which the suite's held [`Gate`] allows only once
+    /// its cap has run out — and, should no gate cap ever let it, at the suite's patience, so a
+    /// missing cap is a red rather than a hang.
     fn await_taken(&self, job: (u64, u64)) {
         let mut jobs = locked(&self.jobs);
+        let since = std::time::Instant::now();
         while !jobs.closed && jobs.waiting.contains(&job) {
-            jobs = self.more.wait(jobs).unwrap_or_else(PoisonError::into_inner);
+            let left = crate::lane::PATIENCE.saturating_sub(since.elapsed());
+            if left.is_zero() {
+                return;
+            }
+            jobs = self
+                .more
+                .wait_timeout(jobs, left)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
         }
     }
 }
@@ -1538,11 +1548,18 @@ fn a_lane_built_on_the_seam_keeps_every_claim() {
 /// verdict (`SubmissionWaited`). The plant lapses once whatever the cap is, so the test gives the
 /// gate a short one; nothing it asserts reads the time.
 ///
-/// MUTATION: drop the `lapses > 0` checks in `full_lane_answers_without_waiting` and `check` —
-/// the planted lane keeps the rest of the claim (its ledger still refuses past its bound), so the
-/// claim passes and the test is red. Or count no lapse in `Gate::arrive` — the same. Or let
-/// `Gate::arrive` hold without a cap — the planted flood never returns: the hang the cap turns
-/// into this failure.
+/// The same plant under a claim with no lapse check of its own (`EveryRequestEndsExactlyOnce`,
+/// whose first submission after `hold_one` waits for the worker) passes that claim's own checks
+/// once the gate has let go; only `check`'s fold makes it red.
+///
+/// MUTATION: drop the `lapses > 0` check in `full_lane_answers_without_waiting` — the planted lane
+/// keeps the rest of the claim (its ledger still refuses past its bound), and `check`'s fold is
+/// what still says `SubmissionWaited`; drop both, and the first half is red.
+/// MUTATION: drop the fold in `check` (the claim's own result, lapse or not) — the second half
+/// passes as `Ok(())`, and the test is red.
+/// MUTATION: count no lapse in `Gate::arrive` — both halves are red. Or let `Gate::arrive` hold
+/// without a cap — the planted admissions give up at the suite's patience with no lapse counted,
+/// and the test is red rather than hung.
 #[test]
 fn a_full_lane_answers_without_waiting_and_an_admission_waiting_for_the_worker_is_red() {
     let claim = Claim::FullLaneAnswersWithoutWaiting;
@@ -1562,6 +1579,20 @@ fn a_full_lane_answers_without_waiting_and_an_admission_waiting_for_the_worker_i
         waited,
         Err(Failure::SubmissionWaited { lapses: 1 }),
         "an admission that waits for the worker is a submission that waited"
+    );
+
+    let mut lane = scripted_lane(
+        &SCRIPTED_FIFO,
+        Policy::Fifo,
+        Planted::AdmissionWaitsForTheWorker,
+    );
+    lane.gate.lapse_after(std::time::Duration::from_millis(50));
+    let (requests, waited) = check(&mut lane, Claim::EveryRequestEndsExactlyOnce);
+    assert!(requests > 0, "the claim asked the planted lane nothing");
+    assert_eq!(
+        waited,
+        Err(Failure::SubmissionWaited { lapses: 1 }),
+        "a lapse is red in a claim that does not read the gate itself"
     );
 }
 
