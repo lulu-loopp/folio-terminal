@@ -227,7 +227,11 @@ pub const MATH_WORKER_STACK_BYTES: usize = 16 * 1024 * 1024;
 /// measured need there (1.76 MiB) is under half of that quarter, so a change that grows the
 /// renderer's frames — an upstream bump, a new recursive walk — goes red here before a reader's
 /// worker could overflow. An unoptimised build needs more than the quarter (6.16 MiB) and less than
-/// the whole; it is not what ships and not what the suite runs.
+/// the whole; it is not what ships and not what the suite runs, but it is what `cargo run` builds,
+/// on this same stack. So an unoptimised build is held to the whole stack instead
+/// (`every_recursive_shape_renders_at_the_limit_on_the_whole_worker_stack`, which the Mac gate and
+/// every typst / mitex bump run at `opt-level = 0`; plan row 74, 2026-10-29), and each shape is
+/// drawn in a child process, so a breach fails one named test rather than ending the test binary.
 pub const MATH_STACK_HEADROOM: usize = 4;
 pub const VERTICAL_PADDING_LOGICAL_PX: u32 = 8;
 /// CPU raster budget. Wide display math is tiled to the GPU's per-axis texture limit later, so
@@ -1599,83 +1603,188 @@ mod tests {
     /// What a stack level costs is measured by overflowing, which takes a process rather than a
     /// test, so the measurement behind [`MATH_WORKER_STACK_BYTES`] was made in child processes and
     /// is written there. What the suite holds the code to is the margin that measurement leaves:
-    /// for each shape this finds the deepest formula the guard accepts, and draws it on a thread
-    /// given a [`MATH_STACK_HEADROOM`]th of the worker's stack. One level more is refused by the
-    /// guard, through the same `render` a reader's formula takes, with the formula's own reason —
-    /// the guard answers before it descends, so no deep recursion happened to produce the refusal.
+    /// for each shape the deepest formula the guard accepts is drawn on a thread given a
+    /// [`MATH_STACK_HEADROOM`]th of the worker's stack (see [`every_shape_drawn_in_children`]).
+    ///
+    /// **An unoptimised build is not held to the quarter.** It needs 6.16 MiB, more than the
+    /// quarter's four, and that is a fact about frame sizes, not a defect; the stack it does owe
+    /// is the whole one, which
+    /// `every_recursive_shape_renders_at_the_limit_on_the_whole_worker_stack` holds at every
+    /// level. So at `opt-level = 0` this test says so and returns.
+    #[test]
+    fn every_recursive_shape_renders_at_the_limit_on_a_quarter_of_the_worker_stack() {
+        const SELECTOR: &str =
+            "tests::every_recursive_shape_renders_at_the_limit_on_a_quarter_of_the_worker_stack";
+        if BUILT_AT_OPT_LEVEL == "0" {
+            eprintln!(
+                "opt-level 0: an unoptimised build needs more than a quarter of the worker's \
+                 stack; the whole stack is held by \
+                 every_recursive_shape_renders_at_the_limit_on_the_whole_worker_stack"
+            );
+            return;
+        }
+        every_shape_drawn_in_children(SELECTOR, MATH_WORKER_STACK_BYTES / MATH_STACK_HEADROOM);
+    }
+
+    /// **The stack the product's worker has, held at whatever level this build was compiled at**
+    /// (plan row 74). `bt-math-worker` runs on [`MATH_WORKER_STACK_BYTES`] in every build — the
+    /// release, and also the dev-profile `cargo run` build, which is unoptimised and needs
+    /// 6.16 MiB of those 16 (the stack is 2.6 times its need). The suite runs at `opt-level = 1`,
+    /// where the quarter test above is the stricter claim; this one is the check that matters
+    /// when the crate is built unoptimised, which the Mac gate, a Windows lane and every typst /
+    /// mitex bump run
+    /// (`CARGO_PROFILE_TEST_OPT_LEVEL=0 cargo test -p bt-math --lib every_recursive_shape`).
+    #[test]
+    fn every_recursive_shape_renders_at_the_limit_on_the_whole_worker_stack() {
+        const SELECTOR: &str =
+            "tests::every_recursive_shape_renders_at_the_limit_on_the_whole_worker_stack";
+        every_shape_drawn_in_children(SELECTOR, MATH_WORKER_STACK_BYTES);
+    }
+
+    /// The optimisation level this crate was compiled at, as Cargo told `build.rs`.
+    const BUILT_AT_OPT_LEVEL: &str = env!("BT_MATH_OPT_LEVEL");
+
+    /// The child-process marker of [`every_shape_drawn_in_children`]: `<shape index>:<stack bytes>`.
+    const STACK_CHILD: &str = "BT_MATH_STACK_CHILD";
+
+    /// **Each shape's deepest admitted formula, drawn in a process of its own on `stack` bytes.**
+    ///
+    /// A stack overflow is not a panic. Drawn on a thread of this process, a formula that needs
+    /// more than its thread has ends the whole test binary: every later test unrun, no shape named,
+    /// exit `0xc00000fd` (T-CI-LOGIC-TEST-COMPILE's opt-0 run, 2026-10-26: 9225 tests passed of
+    /// 9286, then the binary died). In a child it ends the child, and the parent names the shape
+    /// and the stack it was given, and the rest of the binary runs on.
+    ///
+    /// The test that calls this is run again as each child, by `selector`, with [`STACK_CHILD`]
+    /// set; the child draws its one shape and prints `drawn <index>`. A child that exits 0 without
+    /// that line ran nothing (a selector that names no test is `running 0 tests` and exit 0), and
+    /// is refused as well.
+    fn every_shape_drawn_in_children(selector: &str, stack: usize) {
+        if let Some(order) = std::env::var_os(STACK_CHILD) {
+            let order = order.into_string().expect("the order is ASCII");
+            let (index, bytes) = order.split_once(':').expect("the order is <shape>:<stack>");
+            let index: usize = index.parse().expect("a shape index");
+            let bytes: usize = bytes.parse().expect("a stack size");
+            assert_eq!(bytes, stack, "the child is the same test as its parent");
+            let (name, build) = shapes()[index];
+            draw_the_deepest_formula(name, build, stack);
+            // On a line of its own: libtest has written `test <name> ... ` without a newline.
+            println!("\ndrawn {index}");
+            return;
+        }
+        let exe = std::env::current_exe().expect("the test binary knows its own path");
+        let shapes = shapes();
+        // A few at a time: each child holds a Typst engine of its own.
+        for batch in (0..shapes.len()).collect::<Vec<_>>().chunks(4) {
+            let children: Vec<_> = batch
+                .iter()
+                .map(|&index| {
+                    let child = std::process::Command::new(&exe)
+                        .args(["--exact", selector, "--nocapture", "--test-threads=1"])
+                        .env(STACK_CHILD, format!("{index}:{stack}"))
+                        .stdout(std::process::Stdio::piped())
+                        .stderr(std::process::Stdio::piped())
+                        .spawn()
+                        .expect("start the child");
+                    (index, child)
+                })
+                .collect();
+            for (index, child) in children {
+                let name = shapes[index].0;
+                let output = child.wait_with_output().expect("the child's output");
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                assert!(
+                    output.status.success(),
+                    "{name}: the deepest admitted formula did not come back from a thread of {} \
+                     KiB, built at opt-level {BUILT_AT_OPT_LEVEL} ({}); the child said:\n{stderr}",
+                    stack / 1024,
+                    output.status,
+                );
+                assert!(
+                    stdout.lines().any(|line| line == format!("drawn {index}")),
+                    "{name}: the child exited 0 without drawing; `{selector}` must name the test \
+                     that runs it. Its output:\n{stdout}{stderr}"
+                );
+            }
+        }
+    }
+
+    /// One shape's deepest admitted formula, drawn on a thread of `stack` bytes, and one level more
+    /// refused for its nesting.
     ///
     /// The outcome of the draw is allowed to be a refusal — a formula nested two hundred levels can
     /// exceed the raster budget, and Typst's own parser stops at a depth of its own and says so —
     /// but it is never allowed to be a panic, and the thread is never allowed not to come back.
-    /// That, and not the picture, is what the limit and the stack owe each other.
-    #[test]
-    fn every_recursive_shape_renders_at_the_limit_on_a_quarter_of_the_worker_stack() {
-        for (name, build) in shapes() {
-            let deepest = deepest_accepted(build);
-            assert!(
-                !accepted(&build(deepest + 1)),
-                "{name}: {} levels must be refused, so {deepest} really is the edge",
+    /// That, and not the picture, is what the limit and the stack owe each other. One level more is
+    /// refused by the guard, through the same `render` a reader's formula takes, with the formula's
+    /// own reason — the guard answers before it descends, so no deep recursion happened to produce
+    /// the refusal.
+    fn draw_the_deepest_formula(name: &str, build: fn(usize) -> String, stack: usize) {
+        let deepest = deepest_accepted(build);
+        assert!(
+            !accepted(&build(deepest + 1)),
+            "{name}: {} levels must be refused, so {deepest} really is the edge",
+            deepest + 1
+        );
+        assert!(
+            deepest >= 60,
+            "{name}: the limit must admit a formula deep enough to be worth drawing, not {deepest}"
+        );
+        // The deepest one that also fits the source budget, so `render` can be asked at all.
+        let mut drawable = deepest;
+        while build(drawable).len() > MAX_SOURCE_BYTES {
+            drawable -= 1;
+        }
+        let source = build(drawable);
+        // One past the edge, when the budget lets it be asked: the reader's road refuses it by
+        // the nesting, not by its length.
+        let past = (drawable == deepest)
+            .then(|| build(deepest + 1))
+            .filter(|past| past.len() <= MAX_SOURCE_BYTES);
+        // The conversion is the walk Folio owns, so it has to *succeed* at this depth — a
+        // refusal further on is somebody's graceful limit and is reported below, but it must
+        // not be what saved this run.
+        let converted = convert_math(&source);
+        assert!(
+            converted.is_ok(),
+            "{name}: {drawable} levels must convert, not merely escape the depth guard: \
+             {converted:?}"
+        );
+        let (outcome, refused) = std::thread::Builder::new()
+            .name(format!("{name} on {} KiB", stack / 1024))
+            .stack_size(stack)
+            .spawn(move || {
+                let engine = MathEngine::with_system_fonts(false);
+                (
+                    engine.render(&source, key()).err(),
+                    past.map(|past| engine.render(&past, key())),
+                )
+            })
+            .expect("spawn the drawing thread")
+            .join()
+            .unwrap_or_else(|_| {
+                panic!("{name}: the deepest accepted formula must not take the thread with it")
+            });
+        eprintln!("{name}: accepted to {deepest}, drawn at {drawable} -> {outcome:?}");
+        assert!(
+            !matches!(outcome, Some(MathRenderError::Aborted)),
+            "{name}: at {drawable} levels the render panicked somewhere inside itself"
+        );
+        if let Some(refused) = refused {
+            assert_eq!(
+                refused.map(|raster| raster.width_px),
+                Err(MathRenderError::NestingTooDeep),
+                "{name}: {} levels are refused for their nesting",
                 deepest + 1
             );
-            assert!(
-                deepest >= 60,
-                "{name}: the limit must admit a formula deep enough to be worth drawing, not \
-                 {deepest}"
-            );
-            // The deepest one that also fits the source budget, so `render` can be asked at all.
-            let mut drawable = deepest;
-            while build(drawable).len() > MAX_SOURCE_BYTES {
-                drawable -= 1;
-            }
-            let source = build(drawable);
-            // One past the edge, when the budget lets it be asked: the reader's road refuses it by
-            // the nesting, not by its length.
-            let past = (drawable == deepest)
-                .then(|| build(deepest + 1))
-                .filter(|past| past.len() <= MAX_SOURCE_BYTES);
-            // The conversion is the walk Folio owns, so it has to *succeed* at this depth — a
-            // refusal further on is somebody's graceful limit and is reported below, but it must
-            // not be what saved this run.
-            let converted = convert_math(&source);
-            assert!(
-                converted.is_ok(),
-                "{name}: {drawable} levels must convert, not merely escape the depth guard: \
-                 {converted:?}"
-            );
-            let (outcome, refused) = std::thread::Builder::new()
-                .stack_size(MATH_WORKER_STACK_BYTES / MATH_STACK_HEADROOM)
-                .spawn(move || {
-                    let engine = MathEngine::with_system_fonts(false);
-                    (
-                        engine.render(&source, key()).err(),
-                        past.map(|past| engine.render(&past, key())),
-                    )
-                })
-                .expect("spawn a thread with a quarter of the worker's stack")
-                .join()
-                .unwrap_or_else(|_| {
-                    panic!("{name}: the deepest accepted formula must not take the thread with it")
-                });
-            eprintln!("{name}: accepted to {deepest}, drawn at {drawable} -> {outcome:?}");
-            assert!(
-                !matches!(outcome, Some(MathRenderError::Aborted)),
-                "{name}: at {drawable} levels the render panicked somewhere inside itself"
-            );
-            if let Some(refused) = refused {
-                assert_eq!(
-                    refused.map(|raster| raster.width_px),
-                    Err(MathRenderError::NestingTooDeep),
-                    "{name}: {} levels are refused for their nesting",
-                    deepest + 1
-                );
-            }
         }
     }
 
     /// The limit, the stack and the margin are one decision, so they are written down together; the
     /// measurement that chose them is on [`MATH_WORKER_STACK_BYTES`], and
     /// `every_recursive_shape_renders_at_the_limit_on_a_quarter_of_the_worker_stack` holds the
-    /// margin.
+    /// margin, `every_recursive_shape_renders_at_the_limit_on_the_whole_worker_stack` the stack.
     #[test]
     fn the_limit_and_the_worker_stack_are_one_pair() {
         assert_eq!(MAX_NESTING_DEPTH, 256);

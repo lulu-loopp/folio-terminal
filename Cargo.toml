@@ -140,6 +140,11 @@ gif = { version = "=0.14.2", default-features = false, features = ["std", "color
 # *enforced* (`vendor/mitex-parser/src/depth.rs`). A 0.2.x out-resolving the
 # local patch would take that enforcement out of the build and put a stack
 # overflow — which no `catch_unwind` contains — back behind `cat evil.md`.
+# **On a bump of mitex, mitex-parser or any typst crate below** (plan row 74, 2026-10-29): the
+# renderer's frames are what `bt_math::MATH_WORKER_STACK_BYTES` was measured against, so run
+# `CARGO_PROFILE_TEST_OPT_LEVEL=0 cargo test -p bt-math --lib every_recursive_shape` (the
+# unoptimised build `cargo run` makes, on the worker's whole stack) as well as the ordinary suite,
+# on Windows and on the Mac: the frames and the stack overflow differ by platform.
 mitex = "=0.2.4"
 mitex-parser = "=0.2.4"
 mitex-spec-gen = { version = "=0.2.4", features = ["prebuilt"] }
@@ -230,6 +235,7 @@ two-face = { version = "0.4", default-features = false, features = ["syntect-fan
 # (typst-assets' seventeen faces, 9,683,068 bytes); a wasm32 build takes neither, compiles no
 # face in, and is handed its faces by the host (`bt_math::MathEngine::with_faces`). Resolver 3
 # does not unify a target-specific feature across targets, so the split holds.
+# On a bump: the opt-level 0 check written above `mitex` (plan row 74, 2026-10-29).
 typst-as-lib = "=0.16.0"
 typst-layout = "=0.15.0"
 typst-library = "=0.15.0"
@@ -294,6 +300,16 @@ winit = { version = "0.30.13", default-features = false, features = ["rwh_06"] }
 # the budgets it turns red are not ours to loosen. Re-measure before changing this line.
 [profile.test]
 opt-level = 1
+# **Line tables, not full debug info** (plan row 73, 2026-10-29; measured once, cold,
+# `cargo test -p bt-app --no-run`, `-j 6`, on the development machine): the PDBs of bt-app's
+# graph go from 3226 MiB to 1429 MiB (the harness's 905 -> 272 MiB, the bin's 671 -> 196 MiB),
+# the harness unit from 265 s to 226 s, the executables not at all. A panic report still
+# resolves every frame to its function, file and line, and
+# `tests::a_contained_panics_report_names_this_crates_frame_by_file_and_line` is what holds
+# that (bt-app-split §4.4a). The cost, accepted: the `target/debug/folio.exe` a gate leaves
+# behind is this profile's bin, so a debugger attached to it sees no locals or types; build
+# with `cargo build` (the dev profile, full debug info) to debug one.
+debug = "line-tables-only"
 
 # **The build people download.** Measured before it was written; the numbers are
 # in `docs/DESIGN.md` §12.4 and the short version is here, because a profile
