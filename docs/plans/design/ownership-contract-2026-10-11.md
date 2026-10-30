@@ -203,7 +203,7 @@ M8 still keeps session and view in one map entry with one lifetime: **no behavio
 **Note, 2026-10-29 (plan row 105, T-SHELL-SESSION-RELEASE-DUE-SIZE; K2 batch 26 ruling 4).** One of §3.1 item 3's doors already present, `release_due_leaf_resize`, becomes a method on its owner, as that item asks: it is `ShellSession::release_due_size`, beside `ShellSession::propose_size`.
 - `ShellSession.grid` is written by that pair alone and `conpty_grid` by the release alone; `pending_pty_resize` is lent by the pair, and `pending_psreadline_resize_reanchor` by the release and dpi's `Runtime::finish_resize_if_quiescent` (bt-source `the_resize_grids_are_written_by_the_session_alone`).
 - No behaviour changes: the body is the free function's with `leaf` read as `self`.
-- Its six helpers stay free functions at the root: each takes a part of the session (the owed resize, the `DualPlaneSession` and the pty, the reanchor debt), not the session, and has no field site of its own.
+- Its six helpers stay free functions at the root. Five take a part of the session, not the session, and have no field site of their own: `service_pending_pty_resize`, `take_due_pty_resize` and `pty_resize_wake_deadline` the owed resize, `commit_leaf_resize` the `DualPlaneSession` and the pty, and `replace_psreadline_resize_reanchor_debt` the reanchor debt. The sixth, `psreadline_resize_repaint_input`, takes the launch's integration and a bool; it is a main/dpi tie (its callers are `replace_psreadline_resize_reanchor_debt` and dpi's `Runtime::finish_resize_if_quiescent`) and stays beside its root caller.
 
 ### 3.4 What must read the same after each move, and what pins it
 

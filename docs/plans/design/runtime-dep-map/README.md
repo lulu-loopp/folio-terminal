@@ -895,9 +895,12 @@ measured. "Sites" counts every use of the field (all kinds). The doors come from
     - `mark_leaf_seen` / `mark_leaf_painted` (`last_seen_revision`)
     - `stage_paste` / `take_pending_paste` (`pending_paste`)
     - `release_due_leaf_resize` / `LeafSession::propose_size` (`grid`; `conpty_grid`
-      alone; the second was `schedule_leaf_grid_change` until O-3, and the first is
-      `ShellSession::release_due_size` since plan row 105, 2026-10-29)
+      alone; the second was `schedule_leaf_grid_change` until O-3)
     - `finish_leaf_birth` / `keep_birth_death_face` (`wake`)
+
+    2026-10-29 (plan row 105): the `grid` / `conpty_grid` pair left this list. The
+    release is `ShellSession::release_due_size`, so both facts' writers are the
+    session's own methods, and `doors.tsv` dropped both rows.
   - `TabState.sessions` changes membership in eight items:
     - `move_seat_content`, `pane_into_new_tab`
     - `runtime::panes::Runtime::{close_pane, land_pane_birth, land_restart, split_seat}`
