@@ -107,8 +107,8 @@ exact count of what it does see.
   own methods (O-5b).
 - **unclassified.tsv**: **261 items, 229 free functions and 32 `Runtime`
   methods**, still in `main.rs` (at plan row 102's head, whose alert state splits
-  `claim_the_alert` into `the_alert_on_a_watching_console` and adds `move_the_alert`,
-  `a_panics_turn`, `a_stops_claim`, `a_stops_alert_said`, `the_panic_hooks_end` and
+  `claim_the_alert` into `the_alert_on_a_watching_console` and adds `a_panics_turn`,
+  `a_stops_claim`, `a_stops_alert_said`, their three steps, `the_panic_hooks_end` and
   `leave_by_the_panic_road`; 255, 223 and 32 before it, at plan row 105's head, which made the free function
   `release_due_leaf_resize` the method `ShellSession::release_due_size`; 256, 224 and 32
   before it, at plan row 90's head, whose `settle_the_first_canvas` is a new root function;

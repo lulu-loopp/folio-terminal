@@ -56892,7 +56892,8 @@ static SURFACE_SELFTEST_SPENT: AtomicBool = AtomicBool::new(false);
 /// panic after a stop returned from its hook, and on the window thread it was resumed past
 /// `main`'s way out into the loader's teardown (§7.35). What the alert's [`AlertState`] keeps
 /// instead is each claimant's own state, so a panic that is not contained leaves exactly once,
-/// and never while an alert is still up. Moved only by [`move_the_alert`].
+/// and never while an alert is still up. Moved only by its three steps
+/// ([`a_panic_moves_the_alert`], [`a_stop_claims_the_alert`], [`a_stop_has_said_the_alert`]).
 static THE_ALERT: AtomicU8 = AtomicU8::new(AlertState::Unclaimed as u8);
 
 /// **Where the one alert stands** ([`THE_ALERT`]).
@@ -56913,7 +56914,7 @@ enum AlertState {
 }
 
 impl AlertState {
-    /// The state [`THE_ALERT`] holds: only [`move_the_alert`] stores, and it stores only
+    /// The state [`THE_ALERT`] holds: only the three steps store, and they store only
     /// an `AlertState`.
     fn stored(value: u8) -> Self {
         [
@@ -56926,14 +56927,34 @@ impl AlertState {
     }
 }
 
-/// **One step of the alert, atomically**: `turn` answers, for the state it finds, the state
-/// that follows and what the caller does. The step is taken against the state it was computed
-/// from (`fetch_update` retries on a race), so the answer is the one for the state replaced.
-fn move_the_alert<T>(turn: impl Fn(AlertState) -> (AlertState, T)) -> T {
+/// **A panic's step of the alert, atomically**: [`a_panics_turn`] answers, for the state it
+/// finds, the state that follows and what the hook does. The step is taken against the state it
+/// was computed from (`fetch_update` retries on a race), so the answer is the one for the state
+/// replaced. Each of the three steps names its table in its own body, so the door reach follows
+/// it (a table handed in would be a call it cannot see through).
+fn a_panic_moves_the_alert() -> PanicTurn {
     let (Ok(was) | Err(was)) = THE_ALERT.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |now| {
-        Some(turn(AlertState::stored(now)).0 as u8)
+        Some(a_panics_turn(AlertState::stored(now)).0 as u8)
     });
-    turn(AlertState::stored(was)).1
+    a_panics_turn(AlertState::stored(was)).1
+}
+
+/// A frame-shape stop's claim of the alert, atomically ([`a_stops_claim`]; the step as
+/// [`a_panic_moves_the_alert`] takes it).
+fn a_stop_claims_the_alert() -> bool {
+    let (Ok(was) | Err(was)) = THE_ALERT.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |now| {
+        Some(a_stops_claim(AlertState::stored(now)).0 as u8)
+    });
+    a_stops_claim(AlertState::stored(was)).1
+}
+
+/// A frame-shape stop's alert, said, atomically ([`a_stops_alert_said`]; the step as
+/// [`a_panic_moves_the_alert`] takes it): whether a panic owed its leave to this thread.
+fn a_stop_has_said_the_alert() -> bool {
+    let (Ok(was) | Err(was)) = THE_ALERT.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |now| {
+        Some(a_stops_alert_said(AlertState::stored(now)).0 as u8)
+    });
+    a_stops_alert_said(AlertState::stored(was)).1
 }
 
 /// **What a panic's hook does with the alert**, by where it stands.
@@ -56999,7 +57020,7 @@ fn a_stops_alert_said(state: AlertState) -> (AlertState, bool) {
 /// frame-shape stop's alert, already said and read, is no reason for a panic to stay
 /// ([`PanicTurn::Leave`]); one still up is ([`PanicTurn::Owe`]) — row 102.
 fn announce_panic(path: &std::path::Path) -> bool {
-    match move_the_alert(a_panics_turn) {
+    match a_panic_moves_the_alert() {
         PanicTurn::SpeakAndLeave => {
             if let PanicAlert::Owed(text) = the_alert_on_a_watching_console(path) {
                 bt_platform::message_box(APP_NAME, &text);
@@ -57051,9 +57072,13 @@ fn the_alert_on_a_watching_console(path: &std::path::Path) -> PanicAlert {
 /// alert was up returned from its hook so as not to take the box off the screen
 /// ([`PanicTurn::Owe`]); with the alert read, this thread ends the process by the panic's road.
 fn announce_frame_shape_stop(path: &std::path::Path, boxes: &mut impl SystemBoxes) {
-    let alert = move_the_alert(a_stops_claim).then(|| the_alert_on_a_watching_console(path));
+    let alert = if a_stop_claims_the_alert() {
+        Some(the_alert_on_a_watching_console(path))
+    } else {
+        None
+    };
     say_the_stop_alert(alert, boxes);
-    if move_the_alert(a_stops_alert_said) {
+    if a_stop_has_said_the_alert() {
         leave_by_the_panic_road()
     }
 }
