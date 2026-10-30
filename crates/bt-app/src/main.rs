@@ -9403,6 +9403,14 @@ struct App<B: Backend = Native> {
     /// in whichever window it arrives and even after the capture has ended.
     /// See [`runtime::pointer::ButtonSet`].
     swallowed: runtime::ButtonSet,
+    /// **Whether a touch pan has been discarded under a held gesture yet** in this process
+    /// (0.4.9 plan row 107): the first discard writes a line, every later one nothing. See
+    /// [`runtime::pointer::touch::a_discarded_pan_said_once`].
+    said_a_pan_was_discarded: bool,
+    /// Whether a held gesture has been ended because its button was up, in this process (0.4.9
+    /// plan row 107, review F7): the line says so once
+    /// (`a_capture_ended_by_its_button_said_once`, in `runtime::pointer::ending`).
+    said_a_capture_ended_by_its_button: bool,
     /// Every capture a lifecycle door ended (T-POINTER-CAPTURE R-9), by its owner's name and the
     /// ending's, for a test to read which ending each door ran.
     #[cfg(test)]
@@ -9717,6 +9725,8 @@ impl<B: Backend> App<B> {
             drag_broker: None,
             pointer_capture: None,
             swallowed: runtime::ButtonSet::default(),
+            said_a_pan_was_discarded: false,
+            said_a_capture_ended_by_its_button: false,
             #[cfg(test)]
             capture_endings: Vec::new(),
             pending_handover: None,
@@ -51826,10 +51836,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 Ok(())
             }
             AppEvent::WindowChromeChanged => self.adopt_platform_chrome(),
-            // Every window, on this family's standing reason: a window whose
-            // finger did nothing has nothing parked, and the walk costs a
-            // `RefCell` borrow each.
-            AppEvent::TouchPanned => self.for_each_window(|runtime| runtime.spend_parked_pans()),
+            AppEvent::TouchPanned => self.spend_touch_pans(),
             AppEvent::NotificationClicked => self.route_clicked_notifications(),
             // Every window, on this family's standing reason: an answer carries
             // its own address and a window with no page finds nothing to read.

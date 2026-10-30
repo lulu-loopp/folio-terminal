@@ -819,6 +819,7 @@ fn a_capture(
         button,
         started: None,
         os: None,
+        contacts: bt_platform::ContactMark::default(),
         last: None,
     }
 }
@@ -1447,8 +1448,16 @@ fn every_lifecycle_door_ends_the_capture() {
     );
     assert_eq!(
         product_callers("Runtime", "end_a_capture_that_lost_its_pointer"),
-        BTreeMap::from([("Runtime::flush_pending_pty_resize".to_owned(), 1)]),
-        "the resize door is the one turn-by-turn sample of the system's capture"
+        BTreeMap::from([
+            (
+                "FolioApp::end_the_capture_that_lost_its_pointer".to_owned(),
+                1
+            ),
+            ("Runtime::flush_pending_pty_resize".to_owned(), 1),
+        ]),
+        "the resize door is the one turn-by-turn sample of the system's capture and the \
+         button, and the application asks it of the owner's window before a pan is spent \
+         (0.4.9 plan row 107)"
     );
 
     // The settings sheet's closers.

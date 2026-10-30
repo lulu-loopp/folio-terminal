@@ -1190,6 +1190,11 @@ windows = { version = "0.62.2", features = [
     # the way it does for every other program (`let_the_system_translate_touch`).
     # A feature and not a package, for `Win32_UI_Input_Ime`'s reason above.
     "Win32_UI_Input_Touch",
+    # `GetPointerInfo`: whether a finger or a pen this thread saw go down is
+    # still on the glass, as this thread's own pointer messages last said
+    # (`mouse_button_down`, 0.4.9 plan row 107). A feature and not a package,
+    # for `Win32_UI_Input_Ime`'s reason above.
+    "Win32_UI_Input_Pointer",
     "Win32_UI_Shell",
     # `COMDLG_FILTERSPEC` and therefore `IFileDialog::SetFileTypes`, which is
     # what filters the picture chooser to the formats the decoder honours.
