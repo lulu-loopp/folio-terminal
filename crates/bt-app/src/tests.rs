@@ -287,9 +287,14 @@ fn a_contained_panics_report_names_this_crates_frame_by_file_and_line() {
     let line = *numbers
         .last()
         .unwrap_or_else(|| panic!("`{frame}`'s location `{location}` has no line:\n{backtrace}"));
-    let file: Vec<&str> = path.split(['/', '\\']).collect();
-    assert!(
-        file.ends_with(&["bt-app", "src", "tests.rs"]),
+    // The symboliser writes the path as the compiler was handed it: relative to this package
+    // (`.\src\tests.rs` from Cargo) or absolute; either way it has to be this very file.
+    let this_file = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src")
+        .join("tests.rs");
+    assert_eq!(
+        std::fs::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).join(path)).ok(),
+        std::fs::canonicalize(&this_file).ok(),
         "`{frame}` is located in `{path}`, not in this file:\n{backtrace}"
     );
     let here: u32 = report
