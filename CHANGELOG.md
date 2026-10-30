@@ -28,6 +28,7 @@ All notable changes to Folio are recorded here. The format follows
 - A PDF opened from a web address that does not end in `.pdf` is no longer drawn stretched on a 125 %, 150 % or 175 % display, and a web page at an address ending in `.pdf` is no longer drawn too large. <!-- zh: pending T-PDF-CONTENT-TYPE -->
 - On Windows, when an update cannot be verified because there is no network, the update card says so instead of only "The update is not verified." <!-- zh: 在 Windows 上，因没有网络而无法验证更新时，更新卡片会说明这一点，而不只是显示“更新未通过验证。” -->
 - When answers from the clipboard arrive together, Folio now handles them in the order you asked, so a paste's text or notice no longer comes after a copy you made after it. <!-- zh: pending T-CLIPBOARD-ORDER-HOLDS-BY-SPEED -->
+- On Windows, a one-finger swipe scrolls a pane again after a mouse or touch release was lost (for example when a window moved between displays while a finger was down); before, a held press that never ended made every swipe do nothing until the next click. <!-- zh: pending T-TOUCH-DOES-NOTHING-ON-WINDOWS -->
 
 ## 0.4.8-preview — 2026-10-23
 
