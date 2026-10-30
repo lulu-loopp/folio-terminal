@@ -1629,9 +1629,10 @@ mod tests {
     /// **The stack the product's worker has, held at whatever level this build was compiled at**
     /// (plan row 74). `bt-math-worker` runs on [`MATH_WORKER_STACK_BYTES`] in every build — the
     /// release, and also the dev-profile `cargo run` build, which is unoptimised and needs
-    /// 2.6 times less than that. The suite runs at `opt-level = 1`, where the quarter test above
-    /// is the stricter claim; this one is the check that matters when the crate is built
-    /// unoptimised, which the Mac gate and every typst / mitex bump run
+    /// 6.16 MiB of those 16 (the stack is 2.6 times its need). The suite runs at `opt-level = 1`,
+    /// where the quarter test above is the stricter claim; this one is the check that matters
+    /// when the crate is built unoptimised, which the Mac gate, a Windows lane and every typst /
+    /// mitex bump run
     /// (`CARGO_PROFILE_TEST_OPT_LEVEL=0 cargo test -p bt-math --lib every_recursive_shape`).
     #[test]
     fn every_recursive_shape_renders_at_the_limit_on_the_whole_worker_stack() {

@@ -143,7 +143,8 @@ gif = { version = "=0.14.2", default-features = false, features = ["std", "color
 # **On a bump of mitex, mitex-parser or any typst crate below** (plan row 74, 2026-10-29): the
 # renderer's frames are what `bt_math::MATH_WORKER_STACK_BYTES` was measured against, so run
 # `CARGO_PROFILE_TEST_OPT_LEVEL=0 cargo test -p bt-math --lib every_recursive_shape` (the
-# unoptimised build `cargo run` makes, on the worker's whole stack) as well as the ordinary suite.
+# unoptimised build `cargo run` makes, on the worker's whole stack) as well as the ordinary suite,
+# on Windows and on the Mac: the frames and the stack overflow differ by platform.
 mitex = "=0.2.4"
 mitex-parser = "=0.2.4"
 mitex-spec-gen = { version = "=0.2.4", features = ["prebuilt"] }

@@ -211,8 +211,9 @@ fn the_frame_a_panic_report_names() -> u8 {
 /// installed for the rest of the process once set.
 ///
 /// RED: `CARGO_PROFILE_TEST_DEBUG=false cargo test -p bt-app --bin folio
-/// tests::a_contained_panics_report_names_this_crates_frame_by_file_and_line` — no PDB, the frame
-/// is `<unknown>` and has no location.
+/// tests::a_contained_panics_report_names_this_crates_frame_by_file_and_line` — the frame is
+/// still named (the MSVC linker writes a PDB with its public symbols either way), but it has no
+/// file and no line under it, which is what a name alone could not tell apart.
 #[test]
 fn a_contained_panics_report_names_this_crates_frame_by_file_and_line() {
     const CHILD: &str = "BT_BACKTRACE_REPORT_TEST_CHILD";
