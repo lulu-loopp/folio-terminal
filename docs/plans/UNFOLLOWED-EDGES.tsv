@@ -4,6 +4,7 @@
 # name) with the number of calls behind it. Held equal to the tree by bt-source's call_graph test;
 # shrink-only against the merge base by scripts/ci/check-unfollowed-edges.ps1 - a key added or grown
 # carries a reason 'YYYY-MM-DD: <why>'. Never edit a key or a count by hand.
+# Ambiguous calls with exactly one candidate, not listed by site above or below (bt_source::call_graph::Unresolved::sole_candidate; a guard naming a callee's callers counts each as a call of its one candidate): 1765. A call whose name is renamed to one only one item declares leaves the list and is counted here.
 file	item	kind	name	sites	reason
 crates/bt-app/src/animation.rs	bt-app crate::animation::<FileAnimationSource as Read>::read	Ambiguous	unwrap_or	1	
 crates/bt-app/src/animation.rs	bt-app crate::animation::AnimationCursor::start_again	Ambiguous	into_inner	1	
@@ -1313,10 +1314,6 @@ crates/bt-app/src/handoff_lane.rs	bt-app crate::handoff_lane::Pending::answered	
 crates/bt-app/src/handoff_lane.rs	bt-app crate::handoff_lane::Pending::answered	Ambiguous	filter_map	1	
 crates/bt-app/src/handoff_lane.rs	bt-app crate::handoff_lane::abandoned	Dynamic	say	1	
 crates/bt-app/src/handoff_lane.rs	bt-app crate::handoff_lane::files_program_refused_notice	Ambiguous	text	1	2026-10-26: T-SPLIT-2B batch 22; the same site, moved by K2 batch 22 with `files_program_refused_notice` from main.rs into handoff_lane.rs: K2 moves the item, not the call
-crates/bt-app/src/handoff_lane.rs	bt-app crate::handoff_lane::in_press_order	Ambiguous	collect	1	
-crates/bt-app/src/handoff_lane.rs	bt-app crate::handoff_lane::in_press_order	Ambiguous	flat_map	1	
-crates/bt-app/src/handoff_lane.rs	bt-app crate::handoff_lane::in_press_order	Ambiguous	into_iter	1	
-crates/bt-app/src/handoff_lane.rs	bt-app crate::handoff_lane::in_press_order	Ambiguous	map	1	
 crates/bt-app/src/handoff_lane.rs	bt-app crate::handoff_lane::run_handoff_lane	Dynamic	execute	1	
 crates/bt-app/src/handoff_lane.rs	bt-app crate::handoff_lane::run_handoff_lane	Dynamic	wake	1	
 crates/bt-app/src/hang_watch.rs	bt-app crate::hang_watch::HangWatch::new	Ambiguous	unwrap_or	2	

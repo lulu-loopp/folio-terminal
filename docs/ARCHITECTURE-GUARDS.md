@@ -319,6 +319,13 @@ the rules on a fixture. When red, regenerate with
 `target/depmap/`) and commit the files with the change that moved them; never
 edit a row. A header count that grows (reads not attributed, calls not
 followed) means the map sees less; the change that regenerates it says why.
+Since 2026-10-29 (T-GENERATED-STAMP-REFUSES-DIRTY-TREES, plan row 99)
+`scripts/ci/check-generated-stamps.ps1` (CI `logic`; its cases in
+`check-generated-stamps-tests.ps1`) reads the `# measured at <sha>` line the
+test skips and refuses a file without exactly one, a line off the grammar, the
+` with uncommitted changes` suffix, a sha that is no commit or not an ancestor
+of HEAD, and four files naming different commits; a shallow clone exits 2.
+When red: commit everything, run the generator, commit its output.
 
 ## Call graph
 
@@ -366,7 +373,10 @@ and their methods are reachable only as `Ambiguous` candidates.
 **The unfollowed edges, by site.** `docs/plans/UNFOLLOWED-EDGES.tsv` lists every `Dynamic` edge
 and every `Ambiguous` edge with other than one candidate met walking from every product callable
 of bt-app — the calls the door reach does not follow — keyed by file, item, kind and the call's
-name, with `sites` (the calls behind the key) and a `reason`.
+name, with `sites` (the calls behind the key) and a `reason`. Since 2026-10-28 (plan row 84) its
+header also states how many `Ambiguous` calls have exactly one candidate
+(`Unresolved::sole_candidate`, the rule the census test's callers count by), held equal to the tree
+by the same test, so a rename that takes an edge off the list moves that count.
 `the_unfollowed_edges_are_the_committed_list` holds the list equal to the tree;
 `scripts/ci/check-unfollowed-edges.ps1` holds it to the merge base's, refusing a key added or
 grown unless its reason is `YYYY-MM-DD: <why>` — for a grown key, a reason other than the one the
@@ -664,6 +674,12 @@ behind it takes only `violation`). A `const`'s and a plain `static`'s initialize
 `LazyLock`'s or `OnceLock`'s is. A key in any cell names one item per `cfg` arm (one per
 platform's module); two items on one arm (a bare name two modules declare) are refused, and so is
 a first-party `# vocabulary` or `# entrances` path naming nothing.
+Since 2026-10-29 (T-WINDOW-WAITS-STALE-KEY-REFUSED, plan row 76, and its review) an `# effects`
+row names exactly one item on its arm (`-` for an item on no predicate, else its predicates as
+`[p]` joined by a space) with a kind from the registry's closed list, and each key of a `follows`
+verdict in the list names one item per `cfg` arm; a key that names nothing, or two items on one
+arm, is refused by its row's line (`window_waits.tsv:<line>`, `REQUEST-DOOR-SITES.tsv:<line>`),
+as every other refusal of the registry's cells is.
 
 **The sites, by site.** `docs/plans/REQUEST-DOOR-SITES.tsv` lists every failure keyed by file,
 item, kind and name (no line), with `sites`, a verdict and a reason: `std` or `follows <key>; …`
@@ -906,6 +922,14 @@ the whole road is never that verdict.
 read and paused on `update_apply::WaitClock` (`Leaving::leave_on`; `leave` hands it `WallClock`),
 so a test counts its pauses with `CountedClock`; a road with no clock (a lock only tried, a mark
 only read) is proven by a signal awaited within the suite's patience, or by the state it leaves.
+
+2026-10-29 (T-ELAPSED-BOUNDS-ON-FLOODS-AND-TRACE-SINK): a bounded wait whose subject is that it
+gives up (`trace_sink::flush_sink` at its own budget) is proven the same way: by its return while
+the thread it would wait for is still held, awaited within the suite's patience, with the holder let
+go before the verdict — never by timing it. The hand-off lane's flood and the trace sink's producers
+are read the same way, so in these tests a press, an offer or a writer that waits is red, not a hang
+(the sink's two other full-queue offers on a test thread are plan row 106). What such a verdict does
+not catch is a bounded wait, or a give-up that ignores its budget, shorter than the suite's patience.
 
 ## Test order and shared fixtures
 

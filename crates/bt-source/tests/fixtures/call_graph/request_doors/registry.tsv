@@ -11,8 +11,8 @@ bt_rd::Lane::poke	the poke door
 
 # effects
 crate	arm	item	effects	kind	authority	door
-bt-rd	all	crate::present	draws	owner-door-body	the window	Present
-bt-rd	all	crate::Lane::serve	works	worker-door-body	the worker	
+bt-rd	-	crate::present	draws	owner-door-body	the window	Present
+bt-rd	-	crate::Lane::serve	works	worker-door-body	the worker	
 
 # completions
 class	door	thread	signal	failure	supersession	sink	status

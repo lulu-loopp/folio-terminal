@@ -97,6 +97,10 @@ jobs:
           tap="$(brew --repository local/folio-audit)"
           mkdir -p "$tap/Casks"
           cp packaging/homebrew/folio.rb "$tap/Casks/folio.rb"
+          # Homebrew refuses to load a cask from a tap it has not been told to
+          # trust (seen 2026-10-29: "Refusing to load cask local/folio-audit/folio
+          # from untrusted tap"). The throwaway tap holds one file we just wrote.
+          brew trust local/folio-audit
           brew style --cask local/folio-audit/folio
           brew audit --cask --strict --online --new local/folio-audit/folio
           brew livecheck --cask local/folio-audit/folio
@@ -1238,6 +1242,16 @@ jobs:
         run: |
           ./scripts/ci/check-pointer-debt-tests.ps1
           ./scripts/ci/check-pointer-debt.ps1
+
+      # The runtime dependency map's four `# measured at` lines (T-GENERATED-STAMP-REFUSES-DIRTY-TREES,
+      # plan row 99): each names one clean commit, the same for all four, and an ancestor of this
+      # checkout. Here and not in `licensing` because the ancestry needs the whole history, which this
+      # job's checkout fetches; a shallow clone exits 2, never 0. Its scratch-repository suite runs first.
+      - name: the dependency map was measured on a committed ancestor
+        shell: pwsh
+        run: |
+          ./scripts/ci/check-generated-stamps-tests.ps1
+          ./scripts/ci/check-generated-stamps.ps1
 
       # `docs/plans/ENV-DOORS.tsv` (T-DIAGNOSTIC-DOORS-AT-THE-ENTRY): the product items that read
       # the environment outside the program's entry. The bt-source test `env_doors` holds it to

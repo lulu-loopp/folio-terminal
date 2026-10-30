@@ -52,6 +52,24 @@ try {
     Invoke-Case "swapped-same-count" @($header, "crates/a/src/lib.rs`ta crate::f`tAmbiguous`tlen`t2`t", "crates/a/src/lib.rs`ta crate::k`tDynamic`t(value)`t1`t") $false
     Invoke-Case "bad-kind" @($header, "crates/a/src/lib.rs`ta crate::f`tPath`tlen`t2`t") $false
     Invoke-Case "duplicate-key" @($header, $base[2], $base[2]) $false
+    # The header's one-candidate count (plan row 84): read, a malformed or doubled line refused,
+    # and a line the baseline had refused when it is gone.
+    $sole = "# Ambiguous calls with exactly one candidate, not listed by site above or below (x): 7. More."
+    Invoke-Case "sole-count-new" (@($sole) + $base) $true
+    Invoke-Case "sole-count-malformed" (@("# Ambiguous calls with exactly one candidate (x): seven. More.") + $base) $false
+    Invoke-Case "sole-count-twice" (@($sole, $sole) + $base) $false
+    $soleBase = @($sole) + $base
+    $listPath = Join-Path $scratch "sole-count-dropped.now.tsv"
+    $basePath = Join-Path $scratch "sole-count-dropped.base.tsv"
+    [IO.File]::WriteAllLines($listPath, $base)
+    [IO.File]::WriteAllLines($basePath, $soleBase)
+    & pwsh -NoProfile -File $gate -ListPath $listPath -BaselinePath $basePath *> $null
+    if ($LASTEXITCODE -eq 0) { throw "case 'sole-count-dropped': a list without the count its baseline had passed" }
+    Write-Host "ok  sole-count-dropped"
+    [IO.File]::WriteAllLines($listPath, @("# Ambiguous calls with exactly one candidate, not listed by site above or below (x): 9. More.") + $base)
+    & pwsh -NoProfile -File $gate -ListPath $listPath -BaselinePath $basePath *> $null
+    if ($LASTEXITCODE -ne 0) { throw "case 'sole-count-changed': a changed count was refused" }
+    Write-Host "ok  sole-count-changed"
     # The git road, in a scratch repository.
     $repo = Join-Path $scratch "repo"
     New-Item -ItemType Directory -Path (Join-Path $repo "docs/plans") | Out-Null

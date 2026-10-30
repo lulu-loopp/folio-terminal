@@ -1639,6 +1639,9 @@ struct Unfollowed {
     what: String,
     candidates: Vec<String>,
     spelled: Vec<String>,
+    /// The edge's one candidate by the call graph's sole-candidate rule
+    /// (`Unresolved::sole_candidate`), keyed.
+    sole: Option<String>,
 }
 
 /// The last `::` segment of a key or a written path: the name an edge spells.
@@ -1736,6 +1739,7 @@ fn bt_app_callers() -> Callers {
                 spelled: vec![edge.site.name.clone(), what.clone()],
                 what,
                 candidates: candidates.iter().map(|id| resolver.key(*id)).collect(),
+                sole: unresolved.sole_candidate().map(|id| resolver.key(id)),
             });
         }
     }
@@ -2024,14 +2028,15 @@ fn pane(name: &str) -> String {
 
 impl Callers {
     /// The callers of `callee`, sorted, counting an edge the graph could not follow when its one
-    /// candidate is `callee`: a method call through a receiver the rules do not type (a binding
-    /// of a `?`'s value, a box bound by a pattern) whose name only `callee` declares.
+    /// candidate is `callee` by the call graph's own rule (`Unresolved::sole_candidate`): a method
+    /// call through a receiver the rules do not type (a binding of a `?`'s value, a box bound by a
+    /// pattern) whose name only `callee` declares.
     fn of_counting_sole(&self, callee: &str) -> Vec<String> {
         let mut out: BTreeSet<String> = self.of(callee).into_iter().collect();
         out.extend(
             self.unfollowed
                 .iter()
-                .filter(|edge| edge.candidates == [callee])
+                .filter(|edge| edge.sole.as_deref() == Some(callee))
                 .map(|edge| edge.caller.clone()),
         );
         out.into_iter().collect()
@@ -2049,8 +2054,8 @@ impl Callers {
         out.extend(
             self.unfollowed
                 .iter()
-                .filter(|edge| edge.caller == caller && edge.candidates.len() == 1)
-                .map(|edge| edge.candidates[0].clone()),
+                .filter(|edge| edge.caller == caller)
+                .filter_map(|edge| edge.sole.clone()),
         );
         out.into_iter().collect()
     }
@@ -2061,7 +2066,10 @@ impl Callers {
         self.unfollowed
             .iter()
             .filter(|edge| {
-                !(edge.candidates.len() == 1 && callees.contains(&edge.candidates[0].as_str()))
+                !edge
+                    .sole
+                    .as_deref()
+                    .is_some_and(|sole| callees.contains(&sole))
             })
             .filter(|edge| {
                 edge.candidates

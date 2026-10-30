@@ -12,7 +12,8 @@ the ownership census gate uses, over the same structs (`App`, `WindowRuntime`,
   the four files and the `# measured at <commit>` line under each header).
 - Guard: `crates/bt-source/tests/census.rs`
   `the_committed_runtime_dep_map_is_the_code`. Every line of the four files must be
-  the code's at this tree, except the `# measured at` line. A hand edit fails it, and
+  the code's at this tree, except the `# measured at` line, which
+  `scripts/ci/check-generated-stamps.ps1` reads instead. A hand edit fails it, and
   so does any change to the code that moves a row. Nothing here is edited by hand.
 - The rules: `crates/bt-source/tests/dep_map.rs`, one fixture each.
 
@@ -38,29 +39,49 @@ as the same item.
 guessed. A read through a receiver the census rules do not type is not attributed:
 182 sites. A call is not followed through a trait object, a stored closure, a
 function value, or a receiver the rules do not type. The counts below were read at
-plan row 83 (2026-10-27); the header is the authority:
+plan row 84 (2026-10-28); the header is the authority:
 
-- 2,290 sites call a method name only the package has, through an untyped receiver.
+- 2,288 sites call a method name only the package has, through an untyped receiver.
   The largest share is `i18n::Text::X.text()`: the receiver is an enum variant's
   path, and the census does not type a path value.
-- 4,318 sites call a method name that a standard type also has.
+- 4,315 sites call a method name that a standard type also has.
 - 301 sites reach more than one item, for example two types of the same name in two
   modules.
-- 566 sites call through an associated type of a generic (`B::Glass`,
-  `B::Compositor`), and 19 through a generic's trait by its path (`T::from_bytes`):
-  each reaches whichever implementation the argument names. The census reads what the
-  call does from the bound's declaration and follows it to no implementation (listed
-  since row 83, silent before; following them is plan row 84).
-- 27 sites call a method that only other types of the receiver's name declare (the
-  receiver's own reaches it some other way, a deref for one), and 21 call a type's
-  path whose function the rules do not resolve (`Window::set_title` on a type the
-  rules place at a workspace `Window`). Both were silent before row 83.
+- A call through an associated type of a generic (`B::Glass`, `B::Window`, `G::Device`)
+  is followed to the bound trait's impl on the one type the product impls bind it to:
+  the window seam's forwards in `window_seam.rs`, never the bound type's own inherent
+  method (row 84: the 567 sites row 83 listed are the `<topic> → window_seam.rs` rows,
+  31 of them new). Bindings that differ, a binding to the impl's own generic, no
+  product binding, or bindings the rules cannot compare are listed by kind: none at
+  row 84.
+- 21 sites call through a generic's trait by its path (`T::from_bytes`,
+  `B::open_window`): each reaches whichever implementation the argument names, and the
+  census follows it to none (plan row 84 left this class as it was).
+- 27 sites call a method that only other types of the receiver's name declare, and
+  21 call a type's path whose function the rules do not resolve (`Window::set_title` on
+  a type the rules place at a workspace `Window`). Both were silent before row 83. Where
+  the receiver's type has a `Deref` target, such a call goes on to the target (row 84):
+  none of the 27 at row 84 has one.
+- 2 sites call a type outside the workspace by its path where a workspace trait
+  implements the function on it (`ActiveEventLoop::exit(self)` in the window seam): the
+  language picks the outside type's own function first, which the census does not read
+  (row 84; dropped before). A method call on an outside type still takes the workspace
+  trait's impl without that check: the same blind spot, not measured.
 - 1 site calls through a qualified path (`<T as Trait>::f`), and 1 through a path
   the module's declarations and `use` items do not reach.
 - A trait method the subject implements on another package's type is followed to the
   impl when the impl's self type is placed for sure at the receiver's type (declared in
-  the impl's own module, a path to one declaration, or a name the workspace declares
-  once), and listed as not followed otherwise: none at row 83.
+  the impl's own module or where its path says, a path rooted at a named workspace
+  crate to one declaration, or a name the workspace declares once), and listed as not
+  followed otherwise: none at row 84. A limit: a path's module part is matched by its
+  ending, so `use term as t; impl X for t::Session` is placed exactly when some module
+  whose path ends in `::t` happens to declare a `Session` (a coincidence of names the
+  rules do not tell from a real path; none at row 84).
+- The call graph's `Ambiguous` calls with exactly one candidate (every call through an
+  untyped receiver whose name one item declares; a rename to such a name is one way an
+  edge gets here) are not listed by site in `docs/plans/UNFOLLOWED-EDGES.tsv`; its header
+  counts them (row 84: 1,765), the call graph test holds the count to the tree, and
+  `check-unfollowed-edges.ps1` reads it and reports its change against the merge base.
 
 These are S-2a's call graph's to close. The map is a lower bound on edges and an
 exact count of what it does see.

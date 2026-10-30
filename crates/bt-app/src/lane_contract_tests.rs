@@ -1143,6 +1143,9 @@ struct ScriptedLane {
     kept: Arc<Kept>,
     asked: Vec<Asked>,
     fault_seen: bool,
+    /// What the suite runs once inside the next drain, between its read of the first request and
+    /// of the rest — the moment a worker can end requests while the consumer is reading them.
+    between_reads: Option<Box<dyn FnOnce()>>,
 }
 
 fn scripted_lane(contract: &'static Contract, policy: Policy, planted: Planted) -> ScriptedLane {
@@ -1243,6 +1246,7 @@ fn scripted_lane(contract: &'static Contract, policy: Policy, planted: Planted) 
         kept,
         asked: Vec::new(),
         fault_seen: false,
+        between_reads: None,
     }
 }
 
@@ -1364,17 +1368,37 @@ impl LaneUnderTest for ScriptedLane {
                 outcome: Outcome::Fault(end.to_string()),
             });
         }
-        self.asked.retain_mut(|asked| match asked.request.take() {
-            Some(terminal) => {
-                found.push(Delivered {
-                    target: Some(asked.target),
-                    ticket: Some(asked.request.id()),
-                    question: Some(asked.question),
-                    outcome: outcome(terminal),
-                });
-                false
+        // The drain's mark (`Ledger::earliest_owed`), read once before any request is, on a lane
+        // that delivers in admission order: every request below it has ended, so what is taken is
+        // a prefix of the admissions, and a request that ends while the rest are being read waits
+        // for the next drain. A latest-value lane's consumer keeps its order by adoption instead
+        // (`Delivery::NewestAdopted`), and takes whatever has ended.
+        let owed = match self.contract.delivery {
+            Delivery::Submission => self.ledger.earliest_owed(),
+            Delivery::NewestAdopted => None,
+        };
+        let mut between = self.between_reads.take();
+        self.asked.retain_mut(|asked| {
+            let id = asked.request.id();
+            let terminal = owed
+                .is_none_or(|owed| id < owed)
+                .then(|| asked.request.take())
+                .flatten();
+            if let Some(step) = between.take() {
+                step();
             }
-            None => true,
+            match terminal {
+                Some(terminal) => {
+                    found.push(Delivered {
+                        target: Some(asked.target),
+                        ticket: Some(id),
+                        question: Some(asked.question),
+                        outcome: outcome(terminal),
+                    });
+                    false
+                }
+                None => true,
+            }
         });
         found
     }
@@ -1480,6 +1504,47 @@ fn a_lane_built_on_the_seam_keeps_every_claim() {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// RED (T-CLIPBOARD-ORDER-HOLDS-BY-SPEED, plan row 72) — **a lane built on the seam takes only
+/// what ended before its drain began**, so a request that ends while the drain is reading the
+/// requests waits for the next drain, and the declared order holds however slow the drain is
+/// beside the worker.
+///
+/// The worker holds request 0 while 1 and 2 wait. The drain reads 0 (not ended), and then — at
+/// the moment a slow drain gives a fast worker — the worker is let go and every request ends
+/// before the drain reads 1 and 2. That drain takes nothing; the next takes 0, 1 and 2. No timing
+/// decides it: the step runs inside the drain, between two reads.
+///
+/// MUTATION: take every ended request whatever the mark (`owed` ignored in
+/// `ScriptedLane::drain`), and the first drain takes 1 and 2, before 0 (2026-10-28: this test's
+/// neighbour `a_lane_built_on_the_seam_keeps_every_claim` failed so, under load, once).
+#[test]
+fn a_request_that_ends_while_the_drain_reads_waits_for_the_next_drain() {
+    let mut lane = scripted_lane(&SCRIPTED_FIFO, Policy::Fifo, Planted::Nothing);
+    let gate = Arc::clone(&lane.gate);
+    gate.hold();
+    lane.submit(0, 0);
+    assert!(gate.wait_entered(1), "the worker holds request 0");
+    lane.submit(0, 1);
+    lane.submit(0, 2);
+    let ledger = Arc::clone(&lane.ledger);
+    lane.between_reads = Some(Box::new(move || {
+        gate.release();
+        crate::lane::wait_until("every request ended", || ledger.earliest_owed().is_none());
+    }));
+    let first = lane.drain();
+    let second = lane.drain();
+    let delivered: Vec<u64> = first
+        .iter()
+        .chain(&second)
+        .filter_map(|delivered| delivered.question)
+        .collect();
+    assert!(
+        first.is_empty(),
+        "the first drain takes nothing that ended after it began: {first:?}"
+    );
+    assert_eq!(delivered, [0, 1, 2], "delivered in the declared order");
 }
 
 /// RED (T-CLIPBOARD-LANE) — **A withdrawn request ends `Cancelled` once**: the FIFO lane on the
