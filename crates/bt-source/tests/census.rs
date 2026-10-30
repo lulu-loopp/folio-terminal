@@ -1960,8 +1960,8 @@ fn each_view_state_port_is_the_only_road_to_its_setter() {
         (
             "port_release_presentation_hold",
             &[
-                "Runtime::return_to_live_for_input",
                 "runtime::frame::Runtime::publish_frame_inner",
+                "runtime::terminal::Runtime::return_to_live_for_input",
             ],
         ),
     ];
