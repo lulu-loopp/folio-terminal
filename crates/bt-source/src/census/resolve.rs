@@ -6,9 +6,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::Callable;
 use super::types::{
-    Binding, Callees, Class, Declarations, FnDecl, Method, MethodDecl, Named, Place, Receiver, Std,
-    Ty, TypeDecl, builds_itself, closures_by_position, entry_method, external_method,
-    iterator_method, prelude_method, std_kind, std_method,
+    Binding, Callees, Class, Declarations, FnDecl, Method, MethodDecl, Named, Place,
+    RESULT_ALIASES, Receiver, Std, Ty, TypeDecl, builds_itself, closures_by_position, entry_method,
+    external_method, iterator_method, prelude_method, result_alias, std_kind, std_method,
 };
 
 /// One field of the four: where it is declared and whether it is a hub.
@@ -194,6 +194,10 @@ impl<'d> Resolver<'d> {
             let Ty::Named(named) = &ty else {
                 return ty;
             };
+            if let Some(target) = self.result_alias(named) {
+                ty = target;
+                continue;
+            }
             if matches!(named.krate.as_deref(), Some("std" | "core" | "alloc")) {
                 return ty;
             }
@@ -250,6 +254,40 @@ impl<'d> Resolver<'d> {
                 .unwrap_or_else(|| Ty::unknown("no alias"));
         }
         ty
+    }
+
+    /// **The census's reading of the foreign `Result` alias table** ([`RESULT_ALIASES`], plan
+    /// row 101, ruling R3): a path written with its module whose spelling is a row's — the whole
+    /// row when it is rooted at `std`/`core`/`alloc`, the row's ending otherwise (the census's
+    /// module-ending rule: `io::Result`, `anyhow::Result`) — and that names no workspace type.
+    /// A bare `Result` is the standard one: the census reads no `use` item, so it cannot tell
+    /// `use anyhow::Result` from the prelude's; both give the value `?` takes out, and the error
+    /// stays the one written.
+    fn result_alias(&self, named: &Named) -> Option<Ty> {
+        if named.krate.is_none() && named.prefix.is_empty() {
+            return None;
+        }
+        if !matches!(self.kind(named), Kind::Std(_) | Kind::External(_)) {
+            return None;
+        }
+        let spelled: Vec<&str> = named
+            .krate
+            .iter()
+            .chain(&named.prefix)
+            .chain(std::iter::once(&named.name))
+            .map(String::as_str)
+            .collect();
+        let rooted = matches!(named.krate.as_deref(), Some("std" | "core" | "alloc"));
+        RESULT_ALIASES
+            .iter()
+            .find(|row| {
+                if rooted {
+                    **row == spelled.as_slice()
+                } else {
+                    row.ends_with(&spelled)
+                }
+            })
+            .and_then(|row| result_alias(row, &named.args))
     }
 
     pub(crate) fn kind(&self, named: &Named) -> Kind<'d> {

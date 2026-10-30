@@ -517,6 +517,46 @@ fn each_receiver_shape_is_resolved_or_listed_unknown() {
     );
 }
 
+/// RED (T-CALL-GRAPH-TYPES-QUESTION-MARK-BINDINGS, plan row 101, ruling R3) — **the census reads
+/// `?` and `Ok`/`Err` by what a type resolves to, never by the bare name `Result`**: the standard
+/// `Result`'s `Ok` and a `?` on `std::io::Result` (an alias on the table) give the window,
+/// so their title writes are rows; a workspace enum called `Result` is that enum — its `Ok`
+/// holds a number (no write: `title` on a number is an unknown site), its `Err` the window (a
+/// write) — and a `?` on it is no standard `?`, so the field it spells is an unknown site, never
+/// attributed.
+///
+/// RED before: the bare name `Result` made the workspace enum's `Ok` the window (a write by
+/// `named_ok`) and its `?` the window too (a write by `named_try`).
+/// MUTATION: in `Walk::variant_fields`, match the standard enums by `named.name` again —
+/// `named_ok` writes the title.
+#[test]
+fn the_standard_result_is_read_by_what_the_type_resolves_to() {
+    let census = census_of("named_result");
+    let mut writers = functions(&rows(&census, "WindowRuntime.title", Column::Write));
+    writers.sort();
+    // `retitle` is the shared fixture's own writer.
+    assert_eq!(
+        writers,
+        ["named_err", "retitle", "spelled_try", "standard_ok"]
+    );
+    let unknown: Vec<(&str, &str)> = census
+        .unknowns()
+        .iter()
+        .map(|row| (row.site.as_str(), row.function.as_str()))
+        .collect();
+    assert_eq!(
+        unknown,
+        // `untyped` is the shared fixture's own; `named_ok` spells `title` on a number.
+        [
+            ("?.title", "named_ok"),
+            ("?.title", "named_try"),
+            ("?.title", "untyped")
+        ],
+        "{:#?}",
+        census.unknowns()
+    );
+}
+
 /// RED (census-1) — **`Runtime.{app, window}` are the runtime's own fields,
 /// looked up before its `Deref` to `TabState`.**
 ///
