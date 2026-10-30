@@ -3938,9 +3938,9 @@ crates/bt-app/src/runtime/math.rs	bt-app crate::runtime::math::Runtime::refresh_
 crates/bt-app/src/runtime/math.rs	bt-app crate::runtime::math::Runtime::refresh_overlay_with_formula	Ambiguous	as_deref	1	
 crates/bt-app/src/runtime/math.rs	bt-app crate::runtime::math::Runtime::refresh_overlay_with_formula	Ambiguous	as_slice	1	
 crates/bt-app/src/runtime/math.rs	bt-app crate::runtime::math::Runtime::refresh_overlay_with_formula	Ambiguous	clone	2	
-crates/bt-app/src/runtime/math.rs	bt-app crate::runtime::math::Runtime::refresh_overlay_with_formula	Ambiguous	map	3	
+crates/bt-app/src/runtime/math.rs	bt-app crate::runtime::math::Runtime::refresh_overlay_with_formula	Ambiguous	map	3	2026-10-30: T-SETTINGS-FIELDS-IME-POSITION (plan row 98); grown 3 -> 4: the painter now hands EditorInk the fields' composed text (TextField::composed, the pre-edit spliced at the caret) where it handed the stored text, and the summon command is read through text_field(QuakeCommand).map(composed).unwrap_or_default(): Cow and Option reads on the window's own thread, no new door
 crates/bt-app/src/runtime/math.rs	bt-app crate::runtime::math::Runtime::refresh_overlay_with_formula	Ambiguous	to_vec	1	
-crates/bt-app/src/runtime/math.rs	bt-app crate::runtime::math::Runtime::refresh_overlay_with_formula	Ambiguous	unwrap_or_default	4	
+crates/bt-app/src/runtime/math.rs	bt-app crate::runtime::math::Runtime::refresh_overlay_with_formula	Ambiguous	unwrap_or_default	4	2026-10-30: T-SETTINGS-FIELDS-IME-POSITION (plan row 98); grown 4 -> 5: the painter now hands EditorInk the fields' composed text (TextField::composed, the pre-edit spliced at the caret) where it handed the stored text, and the summon command is read through text_field(QuakeCommand).map(composed).unwrap_or_default(): Cow and Option reads on the window's own thread, no new door
 crates/bt-app/src/runtime/math.rs	bt-app crate::runtime::math::Runtime::search_hit_line_text	Ambiguous	ok	1	
 crates/bt-app/src/runtime/math.rs	bt-app crate::runtime::math::Runtime::tab_surface_tip_text	Ambiguous	text	4	
 crates/bt-app/src/runtime/math.rs	bt-app crate::runtime::math::Runtime::tab_surface_tip_text	Ambiguous	to_owned	3	
@@ -4558,6 +4558,7 @@ crates/bt-app/src/runtime/settings.rs	bt-app crate::runtime::settings::Runtime::
 crates/bt-app/src/runtime/settings.rs	bt-app crate::runtime::settings::Runtime::settings_content	Ambiguous	collect	1	2026-10-27: T-SPLIT-2B batch 24; the same site, moved by K2 batch 24 with `settings_content` from main.rs into runtime/settings.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/settings.rs	bt-app crate::runtime::settings::Runtime::settings_content	Ambiguous	map	1	2026-10-27: T-SPLIT-2B batch 24; the same site, moved by K2 batch 24 with `settings_content` from main.rs into runtime/settings.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/settings.rs	bt-app crate::runtime::settings::Runtime::settings_content	Ambiguous	to_owned	2	2026-10-27: T-SPLIT-2B batch 24; the same site, moved by K2 batch 24 with `settings_content` from main.rs into runtime/settings.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/settings.rs	bt-app crate::runtime::settings::Runtime::settings_field_caret_line	Ambiguous	len	1	2026-10-30: T-SETTINGS-FIELDS-IME-POSITION (plan row 98); added: the settings field's caret for the input method and the system caret: the composed text's length and the caret clamped to it (len, min on a String), on the window's own thread, no new door
 crates/bt-app/src/runtime/settings.rs	bt-app crate::runtime::settings::Runtime::settings_layout	Ambiguous	as_micros	4	2026-10-27: T-SPLIT-2B batch 24; the same site, moved by K2 batch 24 with `settings_layout` from main.rs into runtime/settings.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/settings.rs	bt-app crate::runtime::settings::Runtime::settings_layout	Ambiguous	elapsed	4	2026-10-27: T-SPLIT-2B batch 24; the same site, moved by K2 batch 24 with `settings_layout` from main.rs into runtime/settings.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/settings.rs	bt-app crate::runtime::settings::Runtime::settings_layout	Ambiguous	map	1	2026-10-27: T-SPLIT-2B batch 24; the same site, moved by K2 batch 24 with `settings_layout` from main.rs into runtime/settings.rs: K2 moves the item, not the call
@@ -5093,6 +5094,8 @@ crates/bt-app/src/settings.rs	bt-app crate::settings::SettingsContent::nav_items
 crates/bt-app/src/settings.rs	bt-app crate::settings::SettingsContent::page_rows	Ambiguous	category	1	
 crates/bt-app/src/settings.rs	bt-app crate::settings::SettingsContent::page_rows	Ambiguous	collect	1	
 crates/bt-app/src/settings.rs	bt-app crate::settings::SettingsLayout::move_menu_to	Ambiguous	is_some	1	
+crates/bt-app/src/settings.rs	bt-app crate::settings::SettingsLayout::text_field_box	Ambiguous	map	2	2026-10-30: T-SETTINGS-FIELDS-IME-POSITION (plan row 98); added: the field's box on the laid-out dialog for the caret: the env row closure (the profile editor's laid-out env lines, a local closure over the layout) and Option::map over its lines, pure reads of the layout, no new door
+crates/bt-app/src/settings.rs	bt-app crate::settings::SettingsLayout::text_field_box	Dynamic	env_row	2	2026-10-30: T-SETTINGS-FIELDS-IME-POSITION (plan row 98); added: the field's box on the laid-out dialog for the caret: the env row closure (the profile editor's laid-out env lines, a local closure over the layout) and Option::map over its lines, pure reads of the layout, no new door
 crates/bt-app/src/settings.rs	bt-app crate::settings::SettingsPanel::activate	Ambiguous	find	1	
 crates/bt-app/src/settings.rs	bt-app crate::settings::SettingsPanel::activate	Ambiguous	is_some	1	
 crates/bt-app/src/settings.rs	bt-app crate::settings::SettingsPanel::activate	Ambiguous	map	1	
@@ -5179,6 +5182,10 @@ crates/bt-app/src/settings.rs	bt-app crate::settings::everyday_cap	Ambiguous	int
 crates/bt-app/src/settings.rs	bt-app crate::settings::everyday_cap	Ambiguous	map	1	
 crates/bt-app/src/settings.rs	bt-app crate::settings::family_index	Ambiguous	or_else	1	
 crates/bt-app/src/settings.rs	bt-app crate::settings::family_index	Ambiguous	unwrap_or	1	
+crates/bt-app/src/settings.rs	bt-app crate::settings::field_caret_line	Dynamic	measure	1	2026-10-30: T-SETTINGS-FIELDS-IME-POSITION (plan row 98); added: the one caret rectangle the painter and the input method share: the text before the caret measured through the caller's measure closure (the chrome text measure the painter already called), no new door
+crates/bt-app/src/settings.rs	bt-app crate::settings::field_run	Ambiguous	map_or	1	2026-10-30: T-SETTINGS-FIELDS-IME-POSITION (plan row 98); added: the field's text run (font, left and right edges, scroll offset) pulled out of push_field so the painter and the caret share it: the same filter, map_or, measure and px calls push_field made, moved with their sites, no new door
+crates/bt-app/src/settings.rs	bt-app crate::settings::field_run	Dynamic	measure	1	2026-10-30: T-SETTINGS-FIELDS-IME-POSITION (plan row 98); added: the field's text run (font, left and right edges, scroll offset) pulled out of push_field so the painter and the caret share it: the same filter, map_or, measure and px calls push_field made, moved with their sites, no new door
+crates/bt-app/src/settings.rs	bt-app crate::settings::field_run	Dynamic	px	3	2026-10-30: T-SETTINGS-FIELDS-IME-POSITION (plan row 98); added: the field's text run (font, left and right edges, scroll offset) pulled out of push_field so the painter and the caret share it: the same filter, map_or, measure and px calls push_field made, moved with their sites, no new door
 crates/bt-app/src/settings.rs	bt-app crate::settings::font_size_index	Ambiguous	unwrap_or	1	
 crates/bt-app/src/settings.rs	bt-app crate::settings::font_size_index	Ambiguous	unwrap_or_else	1	
 crates/bt-app/src/settings.rs	bt-app crate::settings::held_ghosts	Ambiguous	find	1	
@@ -5252,6 +5259,7 @@ crates/bt-app/src/settings.rs	bt-app crate::settings::push_editor_page	Ambiguous
 crates/bt-app/src/settings.rs	bt-app crate::settings::push_editor_page	Ambiguous	text	7	
 crates/bt-app/src/settings.rs	bt-app crate::settings::push_editor_page	Ambiguous	unwrap_or_default	2	
 crates/bt-app/src/settings.rs	bt-app crate::settings::push_editor_page	Dynamic	px	1	
+crates/bt-app/src/settings.rs	bt-app crate::settings::push_field	Ambiguous	map	1	2026-10-30: T-SETTINGS-FIELDS-IME-POSITION (plan row 98); added: push_field now asks field_run and field_caret_line; its one Option::map is the caret's selection range read, no new door
 crates/bt-app/src/settings.rs	bt-app crate::settings::push_field	Ambiguous	map_or	1	
 crates/bt-app/src/settings.rs	bt-app crate::settings::push_field	Dynamic	measure	4	
 crates/bt-app/src/settings.rs	bt-app crate::settings::push_field	Dynamic	px	6	
