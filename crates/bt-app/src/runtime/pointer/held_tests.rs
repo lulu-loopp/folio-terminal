@@ -797,7 +797,9 @@ fn a_capture_ended_because_its_button_was_up_says_so_once() {
             .take()
             .into_iter()
             .filter_map(|effect| match effect {
-                crate::headless::WindowEffect::Noted(line) if line.contains("held gesture was ended") => {
+                crate::headless::WindowEffect::Noted(line)
+                    if line.contains("held gesture was ended") =>
+                {
                     Some(line)
                 }
                 _ => None,
@@ -806,11 +808,7 @@ fn a_capture_ended_because_its_button_was_up_says_so_once() {
     };
     let said_line =
         vec!["a held gesture was ended because its button was up (owner=TabPress)".to_owned()];
-    for (down, expected) in [
-        (true, Vec::new()),
-        (false, said_line),
-        (false, Vec::new()),
-    ] {
+    for (down, expected) in [(true, Vec::new()), (false, said_line), (false, Vec::new())] {
         {
             let mut runtime = folio.runtime();
             let hand = PhysicalPosition::new(300.0, 300.0);
