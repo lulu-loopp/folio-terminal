@@ -579,16 +579,16 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
      root) stays with them: its root caller is `Runtime::open_settings_on_row`, and it writes `settings_scroll` too.
      Batch 23 moved all four to `runtime/settings.rs` (2026-10-26, above).
    - `restore_row_seed`, `Runtime::append_edge`, `decided_birth`, `create_leaf_session`,
-     `Runtime::focus_rail_geometry_now` and `solve_tree` (batch 18) — their
-     `called_from` home is `runtime/panes.rs` (tied with `main.rs` for the last), but
-     `FolioApp::settle_restore_answer`, `FolioApp::settle_arrival`, `birth_here`, `create_tab_state`,
-     `Runtime::card_mini_size` and `Runtime::refresh_focus_thumbnails`, and `solve_seats` at the root
-     call them in the product (the rule above). `closing_this_pane_closes_the_tab`, held here until its root
-     caller `pane_into_tab` moved, went with it to `runtime/tabs.rs` in batch 26 (2026-10-29, above). Batch 22 moved `Runtime::refresh_focus_thumbnails` to
+     `Runtime::focus_rail_geometry_now` and `solve_tree` (batch 18) — their `called_from` home is
+     `runtime/panes.rs` (tied with `main.rs` for the last), but `FolioApp::settle_restore_answer`,
+     `FolioApp::settle_arrival`, `birth_here`, `create_tab_state`, `Runtime::card_mini_size` and
+     `Runtime::refresh_focus_thumbnails`, and `solve_seats` at the root call them in the product (the rule above).
+     `closing_this_pane_closes_the_tab`, held here until its root caller `pane_into_tab` moved, went with it to
+     `runtime/tabs.rs` in batch 26 (2026-10-29, above). Batch 22 moved `Runtime::refresh_focus_thumbnails` to
      `runtime/panes.rs`; `Runtime::focus_rail_geometry_now`'s root caller is now `Runtime::card_mini_size` alone.
-     Their ties wait with them: `auto_split_axis` behind `Runtime::append_edge`,
-     `resolved_birth_seed` behind `decided_birth`, `born_in_tab` behind `create_leaf_session` and
-     `Runtime::focus_rail_geometry_at` behind `Runtime::focus_rail_geometry_now`.
+     Their ties wait with them: `auto_split_axis` behind `Runtime::append_edge`, `resolved_birth_seed` behind
+     `decided_birth`, `born_in_tab` behind `create_leaf_session` and `Runtime::focus_rail_geometry_at` behind
+     `Runtime::focus_rail_geometry_now`.
    - `schedule_leaf_grid_change` (batch 18) — its `called_from` home was `runtime/panes.rs`, but it is
      `LeafSession.grid`'s single-writer road, which stays with that fact, as `release_due_leaf_resize` does. O-3
      (2026-10-27) made it `LeafSession::propose_size`, the session's own method beside its struct in `main.rs`, which
