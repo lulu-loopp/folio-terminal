@@ -15188,8 +15188,7 @@ fn grid_glyph_ink(
     current_ink
         .filter(|_| within(&frame.current_search_spans))
         .or_else(|| {
-            selected_ink
-                .filter(|_| within(&frame.selection_spans) && !within(&frame.search_spans))
+            selected_ink.filter(|_| within(&frame.selection_spans) && !within(&frame.search_spans))
         })
         .unwrap_or(resting)
 }
@@ -30606,7 +30605,11 @@ mod tests {
         assert_eq!(ink(Some(selected), 0, 3), selected);
         assert_eq!(ink(Some(selected), 0, 2), resting, "under an ordinary hit");
         assert_eq!(ink(Some(selected), 0, 4), resting, "outside the selection");
-        assert_eq!(ink(Some(selected), 1, 1), current, "the current hit's rule stands");
+        assert_eq!(
+            ink(Some(selected), 1, 1),
+            current,
+            "the current hit's rule stands"
+        );
         assert_eq!(ink(Some(selected), 1, 2), selected);
         for row in 0..2 {
             for column in 0..8 {

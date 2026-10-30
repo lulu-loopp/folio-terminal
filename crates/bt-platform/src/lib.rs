@@ -9529,8 +9529,7 @@ mod windows_impl {
                 WM_NCRBUTTONDBLCLK, WM_NCRBUTTONDOWN, WM_NCRBUTTONUP, WM_NCXBUTTONDBLCLK,
                 WM_NCXBUTTONDOWN, WM_NCXBUTTONUP, WM_POINTERDOWN, WM_POINTERUP, WM_POINTERUPDATE,
                 WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_SYSCOLORCHANGE, WM_THEMECHANGED,
-                WM_TOUCH,
-                WM_WINDOWPOSCHANGING, WM_XBUTTONDOWN, WM_XBUTTONUP, WindowFromPoint,
+                WM_TOUCH, WM_WINDOWPOSCHANGING, WM_XBUTTONDOWN, WM_XBUTTONUP, WindowFromPoint,
             },
         },
     };
@@ -13409,10 +13408,13 @@ mod windows_impl {
             COLOR_HIGHLIGHTTEXT,
             COLOR_GRAYTEXT,
         ];
-        high_contrast_of(read.is_ok() && high_contrast_is_on(reading.dwFlags.0), || {
-            // SAFETY: `GetSysColor` reads a process-wide table and takes no pointer.
-            colours.map(|index| unsafe { GetSysColor(index) })
-        })
+        high_contrast_of(
+            read.is_ok() && high_contrast_is_on(reading.dwFlags.0),
+            || {
+                // SAFETY: `GetSysColor` reads a process-wide table and takes no pointer.
+                colours.map(|index| unsafe { GetSysColor(index) })
+            },
+        )
     }
 
     /// Whether `HIGHCONTRASTW.dwFlags` says a contrast theme is on — `HCF_HIGHCONTRASTON`,
@@ -19712,8 +19714,7 @@ pub const fn program_names_carry_their_kind() -> bool {
 /// accent (owner ruling 2026-10-28, row 90 ⑤), which is the selected-text colour here, and
 /// the product draws no system button. The renderer has its own type for the same five and
 /// the application translates, for `MinimumContrast`'s reason: this crate does not depend on
-/// the renderer.
-#[cfg(windows)]
+/// the renderer. Off Windows the type exists and `system_high_contrast` never makes one.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HighContrastColours {
     pub window: [u8; 3],
@@ -19792,8 +19793,9 @@ pub use portable_impl::{
     is_window_cloaked, keyboard_layout_shift_table, keyboard_layouts, leave_process,
     let_the_system_translate_touch, read_context_menu, redirect_std_streams_to_file,
     register_clipboard_owner, remove_context_menu, set_system_backdrop, silence_std_streams,
-    system_backdrop_available, thread_mouse_capture, virtual_key_for_character,
-    virtual_key_is_dead, virtual_key_of_scan_code, write_std_error, write_to_console,
+    system_backdrop_available, system_high_contrast, thread_mouse_capture,
+    virtual_key_for_character, virtual_key_is_dead, virtual_key_of_scan_code, write_std_error,
+    write_to_console,
 };
 
 /// **The window's composition, on a platform that has none** (M4-1).
@@ -23952,7 +23954,7 @@ mod system_preference_message_tests {
     /// `wParam = SPI_SETHIGHCONTRAST` (the arm reads no `wParam`, so it is the same arm as every
     /// other setting); an edit of the theme's colours is `WM_SYSCOLORCHANGE`.
     ///
-    /// MUTATION: drop the `WM_SYSCOLORCHANGE` arm from `system_news_of` — an owner who edits
+    /// MUTATION (observed red): drop the `WM_SYSCOLORCHANGE` arm from `system_news_of` — an owner who edits
     /// Aquatic's background while it is on keeps the old colours in Folio until something else
     /// wakes the loop.
     #[test]
@@ -23976,7 +23978,7 @@ mod system_preference_message_tests {
     /// says so: `HCF_AVAILABLE` (2) and the hot-key bits are set on machines where nothing is
     /// on. A `COLORREF` is `0x00BBGGRR`.
     ///
-    /// MUTATION: read the colours whatever the flag says (`high_contrast_of` ignoring `on`), or
+    /// MUTATION (observed red): read the colours whatever the flag says (`high_contrast_of` ignoring `on`), or
     /// test `dwFlags != 0` — a machine with no contrast theme is repainted in its system
     /// colours.
     #[test]
@@ -23993,7 +23995,13 @@ mod system_preference_message_tests {
             None
         );
         assert!(!asked, "the colours are not read while no theme is on");
-        let colours = [0x0000_0000, 0x00FF_FFFF, 0x00FF_FF00, 0x0000_0000, 0x0000_FF3F];
+        let colours = [
+            0x0000_0000,
+            0x00FF_FFFF,
+            0x00FF_FF00,
+            0x0000_0000,
+            0x0000_FF3F,
+        ];
         assert_eq!(
             high_contrast_of(true, || colours),
             Some(HighContrastColours {

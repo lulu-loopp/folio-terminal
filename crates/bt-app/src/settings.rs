@@ -20014,7 +20014,11 @@ mod tests {
             // What the Theme row and the two scheme rows say while a Windows contrast
             // theme is on (T-HIGH-CONTRAST).
             (SettingsRow::Theme, Text::DescThemeHighContrast, Windows),
-            (SettingsRow::DarkScheme, Text::DescSchemeHighContrast, Windows),
+            (
+                SettingsRow::DarkScheme,
+                Text::DescSchemeHighContrast,
+                Windows,
+            ),
             // What the `Program` row says in place of its own sentence while it is
             // refusing a command line (0.4.6 ticket 74).
             (

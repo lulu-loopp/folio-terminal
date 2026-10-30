@@ -40,10 +40,9 @@ pub(crate) use diagnostics::{read_high_contrast, theme_in_force};
 #[cfg(test)]
 pub(crate) use windows::{
     answer_an_exit_over, broker_verdict, dirty_gate_names, dwm_dark_mode_owed, focus_leaf_index,
-    ground_under_contrast,
-    lines_phrase, persisted_window_bounds, preview_source_of_recent, raise_dirty_gate_over,
-    recent_term_leaf_seed, recorded_window_placement, seeded_tab, tear_out_rect,
-    window_minimum_changed,
+    ground_under_contrast, lines_phrase, persisted_window_bounds, preview_source_of_recent,
+    raise_dirty_gate_over, recent_term_leaf_seed, recorded_window_placement, seeded_tab,
+    tear_out_rect, window_minimum_changed,
 };
 // K2 (T-SPLIT-2B): the free functions moved out of `main.rs`, named at the crate root again by
 // its `use runtime::{…}` lines so that no caller changes.

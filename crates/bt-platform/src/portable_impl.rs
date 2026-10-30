@@ -1266,6 +1266,16 @@ pub fn system_backdrop_available(window: NativeWindow) -> bool {
     false
 }
 
+/// **The contrast theme in force: none, off Windows** (T-HIGH-CONTRAST).
+///
+/// A contrast theme is Windows' own. A Mac's Increase Contrast is an accessibility display
+/// option of another kind, which no reader asks for yet, so this answers `None` and the
+/// renderer's overlay is never set here.
+#[must_use]
+pub fn system_high_contrast() -> Option<crate::HighContrastColours> {
+    None
+}
+
 /// The window's backing colour before the first present. On Windows this is a
 /// class brush and it is step 2 of the startup path; on macOS it is
 /// `contentView.layer.backgroundColor`, which is M1-3's.

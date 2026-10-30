@@ -5239,7 +5239,10 @@ mod tests {
                 assert_eq!(worn.cursor, system.window_text);
                 assert_eq!(worn.selection, system.highlight);
                 assert_eq!(worn.accent, system.highlight);
-                assert_eq!(worn.ansi, ansi, "the reader's own sixteen, from the matching canvas");
+                assert_eq!(
+                    worn.ansi, ansi,
+                    "the reader's own sixteen, from the matching canvas"
+                );
             }
             let chrome = ChromePalette::derive_high_contrast(&schemes.dark, &system);
             assert_eq!(schemes.light_chrome, chrome);
@@ -5278,7 +5281,10 @@ mod tests {
             assert_eq!(schemes.stored_light, FOLIO_LIGHT);
             assert_eq!(schemes.stored_dark, nord);
             assert_eq!(schemes.light_chrome, ChromePalette::derive(&FOLIO_LIGHT));
-            assert_eq!(schemes.light_chrome, LIGHT_CHROME, "the struck table, to the byte");
+            assert_eq!(
+                schemes.light_chrome, LIGHT_CHROME,
+                "the struck table, to the byte"
+            );
             assert_eq!(schemes.dark_chrome, ChromePalette::derive(&nord));
         };
         assert_off(&off);

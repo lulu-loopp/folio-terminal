@@ -968,14 +968,31 @@ mod tests {
         assert!(contrast_ratio(raised, SOLARIZED_GROUND) >= 4.5);
 
         floor.set(MinimumContrast::Ratio2);
-        assert_eq!(floor_in_force(), MinimumContrast::Ratio45, "the higher of the two");
+        assert_eq!(
+            floor_in_force(),
+            MinimumContrast::Ratio45,
+            "the higher of the two"
+        );
         set_high_contrast_floor(false);
-        assert_eq!(floor_in_force(), MinimumContrast::Ratio2, "the reader's own again");
-        let ratio = contrast_ratio(raise_to_floor(SOLARIZED_BLACK, SOLARIZED_GROUND), SOLARIZED_GROUND);
-        assert!((2.0..4.5).contains(&ratio), "held to 2:1 and no further: {ratio:.2}");
+        assert_eq!(
+            floor_in_force(),
+            MinimumContrast::Ratio2,
+            "the reader's own again"
+        );
+        let ratio = contrast_ratio(
+            raise_to_floor(SOLARIZED_BLACK, SOLARIZED_GROUND),
+            SOLARIZED_GROUND,
+        );
+        assert!(
+            (2.0..4.5).contains(&ratio),
+            "held to 2:1 and no further: {ratio:.2}"
+        );
 
         floor.set(MinimumContrast::Off);
-        assert_eq!(raise_to_floor(SOLARIZED_BLACK, SOLARIZED_GROUND), SOLARIZED_BLACK);
+        assert_eq!(
+            raise_to_floor(SOLARIZED_BLACK, SOLARIZED_GROUND),
+            SOLARIZED_BLACK
+        );
     }
 
     /// The bound that lets [`raise_against`] be total, checked rather than asserted in prose.

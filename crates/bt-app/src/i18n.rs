@@ -6359,13 +6359,13 @@ impl Text {
             ),
             Self::DescThemeHighContrast => pick(
                 lang,
-                "A Windows contrast theme is on, and Folio uses its colours. This choice applies once the contrast theme is off.",
-                "Windows 对比度主题已开启，Folio 使用其颜色。关闭对比度主题后，此处的选择生效。",
+                "A Windows contrast theme is in use. Your choice applies once it is off.",
+                "正在使用 Windows 对比度主题。关闭后，此处的选择生效。",
             ),
             Self::DescSchemeHighContrast => pick(
                 lang,
-                "A Windows contrast theme is on, and Folio uses its colours. This scheme applies once the contrast theme is off.",
-                "Windows 对比度主题已开启，Folio 使用其颜色。关闭对比度主题后，此配色生效。",
+                "A Windows contrast theme is in use. This scheme applies once it is off.",
+                "正在使用 Windows 对比度主题。关闭后，此配色生效。",
             ),
             Self::UpdateCardRestartMissed => {
                 pick(lang, "The restart did not happen.", "未能重启。")

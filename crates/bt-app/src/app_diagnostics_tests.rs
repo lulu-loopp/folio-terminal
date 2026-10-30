@@ -50,8 +50,14 @@ fn a_contrast_theme_decides_the_canvas_and_clears_the_ground_while_it_is_on() {
         highlight_text: [0xff, 0xf5, 0xe3],
         gray_text: [0x67, 0x67, 0x67],
     };
-    assert_eq!(theme_under_contrast(Theme::Light, Some(night_sky)), Theme::Dark);
-    assert_eq!(theme_under_contrast(Theme::Dark, Some(desert)), Theme::Light);
+    assert_eq!(
+        theme_under_contrast(Theme::Light, Some(night_sky)),
+        Theme::Dark
+    );
+    assert_eq!(
+        theme_under_contrast(Theme::Dark, Some(desert)),
+        Theme::Light
+    );
     assert_eq!(theme_under_contrast(Theme::Light, None), Theme::Light);
     assert_eq!(theme_under_contrast(Theme::Dark, None), Theme::Dark);
 
@@ -68,9 +74,15 @@ fn a_contrast_theme_decides_the_canvas_and_clears_the_ground_while_it_is_on() {
         alpha: 0.6,
     };
     let under = ground_under_contrast(stored.clone(), true);
-    assert_eq!(under.image, None, "no picture under a contrast theme's text");
+    assert_eq!(
+        under.image, None,
+        "no picture under a contrast theme's text"
+    );
     assert_eq!(under.alpha, 1.0, "and nothing showing through it");
-    assert_eq!(under.fit, stored.fit, "the rest is the file's, for when it goes off");
+    assert_eq!(
+        under.fit, stored.fit,
+        "the rest is the file's, for when it goes off"
+    );
     assert_eq!(under.image_opacity, stored.image_opacity);
     assert_eq!(ground_under_contrast(stored.clone(), false), stored);
 }

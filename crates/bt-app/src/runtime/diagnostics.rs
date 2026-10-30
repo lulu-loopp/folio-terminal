@@ -55,9 +55,8 @@ impl<B: Backend> Runtime<'_, B> {
             return Ok(false);
         }
         let ground_moved = self.apply_window_ground()?;
-        let theme_moved = self.apply_theme(theme_in_force(
-            self.app.settings_store.loaded().theme_mode,
-        ))?;
+        let theme_moved =
+            self.apply_theme(theme_in_force(self.app.settings_store.loaded().theme_mode))?;
         if !ground_moved && !theme_moved {
             self.adopt_new_palette()?;
         }
@@ -220,10 +219,8 @@ pub(crate) fn theme_under_contrast(resolved: Theme, contrast: Option<SystemContr
 /// **What this machine's contrast theme is right now**, in the renderer's vocabulary, or
 /// `None` while none is on.
 ///
-/// Windows alone has one (`bt_platform::system_high_contrast`). A Mac's Increase Contrast is
-/// an accessibility display option of another kind and is not read here, so every other
-/// platform answers `None` and the overlay is never set there.
-#[cfg(windows)]
+/// Windows alone has one; `bt_platform::system_high_contrast` answers `None` everywhere
+/// else, so the overlay is never set there.
 pub(crate) fn read_high_contrast() -> Option<SystemContrast> {
     bt_platform::system_high_contrast().map(|colours| SystemContrast {
         window: colours.window,
@@ -232,12 +229,6 @@ pub(crate) fn read_high_contrast() -> Option<SystemContrast> {
         highlight_text: colours.highlight_text,
         gray_text: colours.gray_text,
     })
-}
-
-/// See the Windows arm: no other platform has a contrast theme to read.
-#[cfg(not(windows))]
-pub(crate) fn read_high_contrast() -> Option<SystemContrast> {
-    None
 }
 
 pub(crate) fn resolved_theme_change(mode: ThemeModeV1, os_theme: OsTheme) -> Option<Theme> {
