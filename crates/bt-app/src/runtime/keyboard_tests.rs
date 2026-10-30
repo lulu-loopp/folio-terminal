@@ -781,3 +781,532 @@ fn the_system_caret_is_fed_on_windows_alone() {
         "the system caret is fed on Windows and nowhere else"
     );
 }
+
+// ── T-SETTINGS-FIELDS-IME-POSITION: the settings dialog's text fields ─────────────────────────
+
+/// The settings target of the summoned terminal's startup-command row — the one field the
+/// dialog has outside the profile editor.
+fn quake_command_field() -> crate::settings::SettingsTarget {
+    crate::settings::SettingsTarget::Field(crate::settings::SettingsRow::QuakeCommand)
+}
+
+/// The text `target`'s field holds, and the composition standing in it.
+fn field_text(folio: &HeadlessFolio, target: crate::settings::SettingsTarget) -> (String, String) {
+    let field = folio
+        .window
+        .settings
+        .text_field(target)
+        .expect("the fixture's field");
+    (field.text().to_owned(), field.preedit().to_owned())
+}
+
+/// A window with the profile editor up on profile 0, its Advanced group open (the arguments and
+/// the environment table are in it), holding one environment row of the reader's own, and the
+/// focus on `focus`.
+fn editor_on(tag: &str, focus: crate::settings::SettingsTarget) -> HeadlessFolio {
+    use crate::settings::SettingsCategory;
+    use crate::text_field::TextField;
+    let mut folio = HeadlessFolio::with_tabs(tag, vec![tab_holding(leaf_saying("PS> "))], 0);
+    {
+        let mut runtime = folio.runtime();
+        let mut stored = runtime.app.settings_store.loaded().clone();
+        stored.advanced_open = vec![SettingsCategory::Profiles.key().to_owned()];
+        runtime.app.settings_store.store(stored);
+        runtime.toggle_settings_panel().expect("the sheet opens");
+        runtime
+            .window
+            .settings
+            .select_category(SettingsCategory::Profiles);
+        runtime
+            .window
+            .settings
+            .open_editor(crate::settings::ProfileEditor {
+                index: 0,
+                name: TextField::holding("Shell"),
+                program: TextField::holding("pwsh.exe"),
+                args: TextField::holding("-NoLogo"),
+                env: vec![(TextField::holding("NAME"), TextField::holding("value"))],
+                refusal: None,
+                program_refusal: None,
+            });
+        runtime.window.settings.press(focus);
+    }
+    assert!(
+        folio.runtime().settings_field_holds_the_keyboard(),
+        "the fixture's own precondition: {focus:?} holds the keyboard"
+    );
+    folio
+}
+
+/// The carets the frame's overlay struck inside `target`'s field box: one-physical-pixel accent
+/// bars, read off what the headless glass was handed — the painter's picture, not a second
+/// derivation of it.
+#[cfg(windows)]
+fn painted_carets(
+    folio: &mut HeadlessFolio,
+    target: crate::settings::SettingsTarget,
+) -> Vec<[f32; 4]> {
+    let mut runtime = folio.runtime();
+    let layout = runtime.settings_layout().expect("the dialog is up");
+    let (field, _) = layout
+        .text_field_box(target)
+        .expect("the layout placed the field");
+    let thickness = layout.scale().round().max(1.0);
+    let field_band_slack = 8.0 * layout.scale();
+    let accent = bt_render::chrome_palette().accent;
+    runtime
+        .window
+        .renderer
+        .overlay
+        .0
+        .iter()
+        .flat_map(|layer| layer.quads.iter())
+        .filter(|quad| {
+            quad.color == accent
+                && (quad.alpha - 1.0).abs() < f32::EPSILON
+                && ((quad.rect[2] - quad.rect[0]) - thickness).abs() < 0.01
+                && quad.rect[0] > field[0]
+                && quad.rect[2] < field[2]
+                // A bar and not a pixel: a switch's rounded corners strike one-pixel accent
+                // squares too. Within the field's band, give or take the arrival's travel.
+                && quad.rect[3] - quad.rect[1] > field_band_slack
+                && quad.rect[1] >= field[1] - field_band_slack
+                && quad.rect[3] <= field[3] + field_band_slack
+        })
+        .map(|quad| quad.rect)
+        .collect()
+}
+
+/// The `x` of the caret the frame struck in `target`'s field, rounded as `ime_cursor_area_of`
+/// rounds a corner. Only the `x`: the dialog's arrival travels its layers four pixels down, so
+/// the frame's `y` is the layout's only once the arrival is over.
+#[cfg(windows)]
+fn the_painted_caret_x(folio: &mut HeadlessFolio, target: crate::settings::SettingsTarget) -> i32 {
+    let painted = painted_carets(folio, target);
+    let [caret] = painted.as_slice() else {
+        panic!("one caret struck in {target:?}: {painted:?}");
+    };
+    caret[0].round() as i32
+}
+
+/// Whether `(x, y)` lies in `target`'s field box as the layout placed it.
+#[cfg(windows)]
+fn inside_the_field(
+    folio: &mut HeadlessFolio,
+    target: crate::settings::SettingsTarget,
+    (x, y): (i32, i32),
+) -> bool {
+    let layout = folio.runtime().settings_layout().expect("the dialog is up");
+    let (field, _) = layout.text_field_box(target).expect("the field's box");
+    let (x, y) = (x as f32, y as f32);
+    x > field[0] && x < field[2] && y > field[1] && y < field[3]
+}
+
+/// RED (T-SETTINGS-FIELDS-IME-POSITION ①) — **a composition in a settings field is drawn there,
+/// and its commit is stored**.
+///
+/// Before the ticket the dialog's fields were the `Modal` rung, which swallows every composition:
+/// the pre-edit was never drawn and the commit — which winit delivers only as `Ime::Commit`, no
+/// `WM_CHAR` following it — was dropped, so Chinese could not be typed into Settings at all. Now
+/// the pre-edit stands in the field and is drawn spliced in at the caret, and the commit is an
+/// insert written through to `settings.json` as a typed character is.
+///
+/// MUTATION (observed red): make `Runtime::ime_input`'s `ImeOwner::SettingsField` arm
+/// `return Ok(())` without calling `settings_field_ime` — no pre-edit, no commit; or hand the
+/// painter `quake_command()` instead of the field's `composed()` in `runtime/math.rs` — the
+/// pre-edit is not drawn.
+#[test]
+fn a_composition_in_a_settings_field_is_drawn_there_and_its_commit_is_stored() {
+    let mut folio = HeadlessFolio::with_tabs(
+        "settings-field-ime-text",
+        vec![tab_holding(leaf_saying("PS> "))],
+        0,
+    );
+    folio
+        .runtime()
+        .open_settings_on_row(crate::settings::SettingsRow::QuakeCommand)
+        .expect("the dialog opens on the field");
+    let target = quake_command_field();
+    let (before, _) = field_text(&folio, target);
+    assert_eq!(
+        crate::runtime::keyboard::ime_owner(folio.runtime().keyboard_owner()),
+        crate::ImeOwner::SettingsField,
+        "a settings field holding the keyboard is its own rung"
+    );
+
+    let mut runtime = folio.runtime();
+    runtime
+        .ime_input(Ime::Enabled)
+        .expect("a start is answered");
+    runtime
+        .ime_input(Ime::Preedit("ni".to_owned(), Some((2, 2))))
+        .expect("a pre-edit is answered");
+    assert_eq!(
+        field_text(&folio, target),
+        (before.clone(), "ni".to_owned()),
+        "the pre-edit stands in the field and is not in its text"
+    );
+    paint_and_turn(&mut folio.runtime(), Instant::now());
+    let drawn = format!("{before}ni");
+    assert!(
+        folio
+            .runtime()
+            .window
+            .renderer
+            .overlay
+            .0
+            .iter()
+            .flat_map(|layer| layer.labels.iter())
+            .any(|label| label.text == drawn),
+        "the field draws its text with the pre-edit spliced in at the caret: {drawn:?}"
+    );
+
+    let mut runtime = folio.runtime();
+    runtime
+        .ime_input(Ime::Preedit(String::new(), None))
+        .expect("the clearing pre-edit is answered");
+    runtime
+        .ime_input(Ime::Commit("你".to_owned()))
+        .expect("a commit is answered");
+    runtime
+        .ime_input(Ime::Disabled)
+        .expect("an end is answered");
+    let committed = format!("{before}你");
+    assert_eq!(
+        field_text(&folio, target),
+        (committed.clone(), String::new()),
+        "the commit is in the field and the pre-edit is gone"
+    );
+    assert_eq!(
+        folio
+            .runtime()
+            .app
+            .settings_store
+            .loaded()
+            .quake_startup_command,
+        committed,
+        "and it is stored, as a typed character is"
+    );
+}
+
+/// RED (T-SETTINGS-FIELDS-IME-POSITION ②) — **a settings field holding the keyboard tells its
+/// caret to both takers**: the system caret leaves the prompt for the very bar the painter
+/// struck in the field, and a composition opening there tells the input method the same corner.
+///
+/// MUTATION (observed red): answer `ImeCaretSource::Nowhere` for `ImeOwner::SettingsField` in
+/// `ime_caret_source` — the caret is taken down and no area is told.
+#[test]
+#[cfg(windows)]
+fn a_settings_field_holding_the_keyboard_tells_its_caret_to_both_takers() {
+    let mut folio = HeadlessFolio::with_tabs(
+        "settings-field-ime-caret",
+        vec![tab_holding(leaf_saying("PS> "))],
+        0,
+    );
+    let mut turns = Turns::start();
+    paint_and_turn(&mut folio.runtime(), turns.next());
+    let at_the_prompt = the_one_caret(&caret_effects(&folio.ledger));
+
+    folio
+        .runtime()
+        .open_settings_on_row(crate::settings::SettingsRow::QuakeCommand)
+        .expect("the dialog opens on the field");
+    paint_and_turn(&mut folio.runtime(), turns.next());
+    paint_and_turn(&mut folio.runtime(), turns.next());
+    let target = quake_command_field();
+    let in_the_field = the_one_caret(&caret_effects(&folio.ledger));
+    assert_ne!(in_the_field, at_the_prompt, "the caret left the prompt");
+    assert_eq!(
+        in_the_field.0,
+        the_painted_caret_x(&mut folio, target),
+        "the caret stands on the bar the painter struck"
+    );
+    assert!(
+        inside_the_field(&mut folio, target, in_the_field),
+        "and inside the field's box: {in_the_field:?}"
+    );
+
+    folio
+        .runtime()
+        .ime_input(Ime::Enabled)
+        .expect("a start is answered");
+    let started = caret_effects(&folio.ledger);
+    let Some(WindowEffect::ImeArea([x, y, _, _])) = started.first() else {
+        panic!("a composition in the field tells its area: {started:?}");
+    };
+    assert_eq!(
+        (*x, *y),
+        in_the_field,
+        "the composition is placed where the caret stands"
+    );
+}
+
+/// RED (T-SETTINGS-FIELDS-IME-POSITION ③) — **typing in a settings field moves the caret, and
+/// `Home` brings it back**, each time onto the bar the painter struck.
+///
+/// MUTATION (observed red): in `Runtime::settings_field_caret_line` measure the field's whole
+/// shown text rather than what stands in front of the caret — after `Home` the caret stays at
+/// the end of the text.
+#[test]
+#[cfg(windows)]
+fn typing_in_a_settings_field_moves_the_caret_and_home_brings_it_back() {
+    use crate::headless::key_down;
+    use winit::keyboard::{Key, KeyCode, NamedKey};
+    let mut folio = HeadlessFolio::with_tabs(
+        "settings-field-ime-typing",
+        vec![tab_holding(leaf_saying("PS> "))],
+        0,
+    );
+    let mut turns = Turns::start();
+    folio
+        .runtime()
+        .open_settings_on_row(crate::settings::SettingsRow::QuakeCommand)
+        .expect("the dialog opens on the field");
+    paint_and_turn(&mut folio.runtime(), turns.next());
+    paint_and_turn(&mut folio.runtime(), turns.next());
+    let target = quake_command_field();
+    let opened = the_one_caret(&caret_effects(&folio.ledger));
+
+    for _ in 0..3 {
+        folio
+            .runtime()
+            .keyboard_input(
+                &key_down(Key::Character("a".into()), KeyCode::KeyA, Some("a")),
+                false,
+            )
+            .expect("a letter is answered");
+    }
+    paint_and_turn(&mut folio.runtime(), turns.next());
+    let typed = the_one_caret(&caret_effects(&folio.ledger));
+    assert!(
+        typed.0 > opened.0,
+        "three letters move the caret right: {opened:?} {typed:?}"
+    );
+    assert_eq!(typed.1, opened.1, "along the line");
+    assert_eq!(typed.0, the_painted_caret_x(&mut folio, target));
+
+    folio
+        .runtime()
+        .keyboard_input(
+            &key_down(Key::Named(NamedKey::Home), KeyCode::Home, None),
+            false,
+        )
+        .expect("Home is answered");
+    paint_and_turn(&mut folio.runtime(), turns.next());
+    let home = the_one_caret(&caret_effects(&folio.ledger));
+    assert!(home.0 < typed.0, "Home moves it left: {home:?} {typed:?}");
+    assert!(
+        home.0 <= opened.0,
+        "to the start of the text: {home:?} {opened:?}"
+    );
+    assert_eq!(home.0, the_painted_caret_x(&mut folio, target));
+}
+
+/// RED (T-SETTINGS-FIELDS-IME-POSITION ④) — **a field losing the keyboard to a control that is
+/// not a field takes the caret down; closing the dialog hands it back to the prompt** (ruling
+/// 2026-10-30: the terminal does not hold the keyboard while the dialog is up, so the caret
+/// stands nowhere until it closes — T-CARET-EVERY-LAYOUT ③'s rule).
+///
+/// MUTATION (observed red): drop the `text_field(target).is_some()` clause from
+/// `Runtime::settings_field_holds_the_keyboard` — the control after the field keeps the caret.
+#[test]
+#[cfg(windows)]
+fn leaving_the_field_takes_the_caret_down_and_closing_the_dialog_hands_it_to_the_prompt() {
+    use crate::headless::key_down;
+    use winit::keyboard::{Key, KeyCode, NamedKey};
+    let mut folio = HeadlessFolio::with_tabs(
+        "settings-field-ime-leave",
+        vec![tab_holding(leaf_saying("PS> "))],
+        0,
+    );
+    let mut turns = Turns::start();
+    paint_and_turn(&mut folio.runtime(), turns.next());
+    let at_the_prompt = the_one_caret(&caret_effects(&folio.ledger));
+
+    folio
+        .runtime()
+        .open_settings_on_row(crate::settings::SettingsRow::QuakeCommand)
+        .expect("the dialog opens on the field");
+    paint_and_turn(&mut folio.runtime(), turns.next());
+    let in_the_field = the_one_caret(&caret_effects(&folio.ledger));
+    assert_ne!(in_the_field, at_the_prompt);
+
+    folio
+        .runtime()
+        .keyboard_input(
+            &key_down(Key::Named(NamedKey::Tab), KeyCode::Tab, None),
+            false,
+        )
+        .expect("Tab is answered");
+    let walked_to = folio.window.settings.focus();
+    assert!(
+        walked_to.is_some_and(|target| folio.window.settings.text_field(target).is_none()),
+        "the fixture's own precondition: Tab walked to a control that is not a field: {walked_to:?}"
+    );
+    for _ in 0..3 {
+        paint_and_turn(&mut folio.runtime(), turns.next());
+    }
+    assert_eq!(
+        caret_effects(&folio.ledger),
+        vec![WindowEffect::ImeCaretDestroyed],
+        "the control took the caret down, once"
+    );
+
+    folio
+        .runtime()
+        .toggle_settings_panel()
+        .expect("the sheet closes");
+    paint_and_turn(&mut folio.runtime(), turns.next());
+    assert_eq!(
+        the_one_caret(&caret_effects(&folio.ledger)),
+        at_the_prompt,
+        "the dialog closing hands the caret back to the prompt"
+    );
+}
+
+/// RED (T-SETTINGS-FIELDS-IME-POSITION ⑤) — **a composition carried from one settings field to
+/// another lands in neither** (§7.1.5a″): begun in the profile's program, its field left for the
+/// arguments by a press, its ending arriving there — the commit belongs to the field it began
+/// in, which no longer holds the keyboard, and the letters drawn in the program are taken off.
+///
+/// MUTATION (observed red): compose `CompositionOrigin::Settings(None)` in
+/// `Runtime::composition_origin_now` — two fields compare equal and the commit lands in the
+/// arguments.
+#[test]
+fn a_composition_carried_from_one_settings_field_to_another_lands_in_neither() {
+    use crate::settings::{SettingsRow, SettingsTarget};
+    let program = SettingsTarget::Field(SettingsRow::ProfileProgram);
+    let args = SettingsTarget::Field(SettingsRow::ProfileArgs);
+    let mut folio = editor_on("settings-field-ime-carried", program);
+
+    let mut runtime = folio.runtime();
+    runtime
+        .ime_input(Ime::Enabled)
+        .expect("a start is answered");
+    runtime
+        .ime_input(Ime::Preedit("ni".to_owned(), Some((2, 2))))
+        .expect("a pre-edit is answered");
+    assert_eq!(
+        field_text(&folio, program).1,
+        "ni",
+        "composing in the program"
+    );
+
+    folio.window.settings.press(args);
+    let mut runtime = folio.runtime();
+    runtime
+        .ime_input(Ime::Preedit(String::new(), None))
+        .expect("the clearing pre-edit is answered");
+    runtime
+        .ime_input(Ime::Commit("你".to_owned()))
+        .expect("the late commit is answered");
+    assert_eq!(
+        field_text(&folio, args),
+        ("-NoLogo".to_owned(), String::new()),
+        "the commit did not land in the field the composition did not begin in"
+    );
+    assert_eq!(
+        field_text(&folio, program),
+        ("pwsh.exe".to_owned(), String::new()),
+        "nor in the one it left, whose letters are off the glass"
+    );
+}
+
+/// RED (T-SETTINGS-FIELDS-IME-POSITION ⑥) — **every field of the profile editor tells its caret**:
+/// the name, the program and the arguments (a row's field) and an environment row's two cells
+/// (the table's) — each onto the bar the painter struck in that box.
+///
+/// MUTATION (observed red): answer `None` for `EnvName` / `EnvValue` in
+/// `SettingsLayout::text_field_box` — the environment cells move no caret.
+#[test]
+#[cfg(windows)]
+fn every_field_kind_of_the_profile_editor_has_its_caret() {
+    use crate::settings::{SettingsRow, SettingsTarget};
+    let targets = [
+        SettingsTarget::Field(SettingsRow::ProfileName),
+        SettingsTarget::Field(SettingsRow::ProfileProgram),
+        SettingsTarget::Field(SettingsRow::ProfileArgs),
+        SettingsTarget::EnvName(0),
+        SettingsTarget::EnvValue(0),
+    ];
+    let mut folio = editor_on("settings-field-ime-kinds", targets[0]);
+    let mut turns = Turns::start();
+    let mut seen = Vec::new();
+    for target in targets {
+        // The press, and the chrome rebuilt as the pointer's road rebuilds it.
+        folio.window.settings.press(target);
+        folio.runtime().refresh_chrome();
+        paint_and_turn(&mut folio.runtime(), turns.next());
+        let effects = caret_effects(&folio.ledger);
+        let caret = the_one_caret(&effects);
+        assert!(
+            inside_the_field(&mut folio, target, caret),
+            "{target:?}: the caret {caret:?} is in its own box"
+        );
+        assert_eq!(
+            caret.0,
+            the_painted_caret_x(&mut folio, target),
+            "{target:?}: on the bar the painter struck"
+        );
+        seen.push(caret);
+    }
+    seen.dedup();
+    assert_eq!(
+        seen.len(),
+        targets.len(),
+        "five fields, five places: {seen:?}"
+    );
+}
+
+/// RED (T-SETTINGS-FIELDS-IME-POSITION ⑦) — **a card over the dialog takes its field off the
+/// rung**: with the uninstaller's card up, the keys are the card's, so the caret is taken down
+/// and a composition's commit reaches neither the field nor the shell behind the dialog.
+///
+/// MUTATION (observed red): drop `card_above` from `Runtime::settings_field_holds_the_keyboard` —
+/// the field keeps the caret and takes the commit under the card.
+#[test]
+#[cfg(windows)]
+fn a_card_over_the_dialog_takes_the_field_off_the_rung() {
+    let mut folio = HeadlessFolio::with_tabs(
+        "settings-field-ime-card",
+        vec![tab_holding(leaf_saying("PS> "))],
+        0,
+    );
+    let mut turns = Turns::start();
+    folio
+        .runtime()
+        .open_settings_on_row(crate::settings::SettingsRow::QuakeCommand)
+        .expect("the dialog opens on the field");
+    paint_and_turn(&mut folio.runtime(), turns.next());
+    the_one_caret(&caret_effects(&folio.ledger));
+    let target = quake_command_field();
+    let (before, _) = field_text(&folio, target);
+
+    folio.window.settings.raise_uninstall_card();
+    for _ in 0..2 {
+        paint_and_turn(&mut folio.runtime(), turns.next());
+    }
+    assert_eq!(
+        caret_effects(&folio.ledger),
+        vec![WindowEffect::ImeCaretDestroyed],
+        "the card took the caret down"
+    );
+    let mut runtime = folio.runtime();
+    runtime
+        .ime_input(Ime::Enabled)
+        .expect("a start is answered");
+    runtime
+        .ime_input(Ime::Preedit("ni".to_owned(), Some((2, 2))))
+        .expect("a pre-edit is answered");
+    runtime
+        .ime_input(Ime::Preedit(String::new(), None))
+        .expect("the clearing pre-edit is answered");
+    runtime
+        .ime_input(Ime::Commit("你".to_owned()))
+        .expect("a commit is answered");
+    assert_eq!(
+        field_text(&folio, target),
+        (before, String::new()),
+        "the field under the card took nothing"
+    );
+}
