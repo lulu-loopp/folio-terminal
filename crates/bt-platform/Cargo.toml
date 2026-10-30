@@ -1169,6 +1169,10 @@ windows = { version = "0.62.2", features = [
     # `docs/DESIGN.md` §8's bar.
     "Wdk_Foundation",
     "Wdk_Storage_FileSystem",
+    # `HIGHCONTRASTW` and `HCF_HIGHCONTRASTON`: whether a Windows contrast theme
+    # is on (`system_high_contrast`, T-HIGH-CONTRAST, DESIGN §7.1.6). A feature,
+    # not a package, for `Win32_UI_Input_Ime`'s reason below.
+    "Win32_UI_Accessibility",
     # `WM_MOUSELEAVE`, which the `windows` crate files with the common controls:
     # the custom frame says it to the application when the pointer comes off the
     # maximize button it answered `HTMAXBUTTON` for (`window_button_passage`,
