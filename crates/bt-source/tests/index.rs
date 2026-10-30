@@ -811,10 +811,10 @@ fn a_cfg_is_read_wherever_it_stands() {
 /// a position the gate walk does not read, and the literal `cfg(false)` and `cfg(true)` (the
 /// review, F3).
 ///
-/// MUTATION: drop `cfg_is_readable` — the first is guessed product; read `true`/`false` as names
-/// again — the last two pass as "decided elsewhere"; drop `cfg_attr_writes_a_cfg`
-/// — the second passes; drop the unplaced refusal in `crate::gates`' attribute visit — the third
-/// passes.
+/// MUTATION: drop the `cfg_is_readable` refusal in `crate::gates` — the first and the last two
+/// are read as "decided elsewhere"; drop `cfg_attr_writes_a_cfg` — the second passes; drop the
+/// unplaced refusal in `crate::gates`' attribute visit — the third passes. (No check of `true` or
+/// `false` of its own: `syn` refuses both before `cfg_is_readable` reads a path.)
 #[test]
 fn a_cfg_the_reading_cannot_read_is_refused_by_its_line() {
     let refused = Index::shared(&fixture_universe("gated_unreadable"))

@@ -524,8 +524,8 @@ pub(crate) fn expr_attrs(expr: &syn::Expr) -> &[syn::Attribute] {
 /// `any(…)` or `not(…)` of readable predicates, `not` of exactly one. Anything else is not a
 /// predicate the reading evaluates, and [`cfg_compilation`] would read it as "decided elsewhere"
 /// — a guess that it may be product — so the index refuses it instead. That includes the literal
-/// `cfg(true)` and `cfg(false)` (stable since Rust 1.88): `syn` reads a literal, not a meta path,
-/// so it fails the parse below (the review of plan row 77, F3; `gated_unreadable` holds both).
+/// `cfg(true)` and `cfg(false)` (Rust 1.88): `syn`'s path parser refuses the keyword as an
+/// identifier (`Meta`'s parser, `attr.rs`, syn 2.0.119), so the parse below fails (review F3).
 pub(crate) fn cfg_is_readable(attribute: &syn::Attribute) -> bool {
     fn readable(meta: &syn::Meta) -> bool {
         match meta {
