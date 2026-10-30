@@ -37,15 +37,16 @@ as the same item.
 
 **What the map does not see** is printed as a count in each header. Nothing is
 guessed. A read through a receiver the census rules do not type is not attributed:
-179 sites. A call is not followed through a trait object, a stored closure, a
+180 sites. A call is not followed through a trait object, a stored closure, a
 function value, or a receiver the rules do not type. The counts below were read at
-plan row 101 (2026-10-30; the class counts not named here are row 84's, unchanged);
+plan row 101 on top of row 98 (2026-10-30; the class counts not named here are row
+84's, unchanged);
 the header is the authority:
 
-- 2,270 sites call a method name only the package has, through an untyped receiver.
+- 2,271 sites call a method name only the package has, through an untyped receiver.
   The largest share is `i18n::Text::X.text()`: the receiver is an enum variant's
   path, and the census does not type a path value.
-- 4,296 sites call a method name that a standard type also has.
+- 4,301 sites call a method name that a standard type also has.
 - A `?` value and an `Ok`/`Err` binding are typed by what the type resolves to: the
   standard `Option`/`Result`, or a foreign `Result` alias on a fixed table
   (`std::io::Result`, `std::fmt::Result`, `std::thread::Result`, `anyhow::Result`,
@@ -93,7 +94,7 @@ the header is the authority:
 - The call graph's `Ambiguous` calls with exactly one candidate (every call through an
   untyped receiver whose name one item declares; a rename to such a name is one way an
   edge gets here) are not listed by site in `docs/plans/UNFOLLOWED-EDGES.tsv`; its header
-  counts them (row 84: 1,765; row 101: 1,723, after `?` values, variant patterns and
+  counts them (row 84: 1,765; row 101 on top of row 98: 1,728, after `?` values, variant patterns and
   the adapters that keep a value were typed), the call graph test holds the count to the tree, and
   `check-unfollowed-edges.ps1` reads it and reports its change against the merge base.
 
