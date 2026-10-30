@@ -4,7 +4,7 @@
 # name) with the number of calls behind it. Held equal to the tree by bt-source's call_graph test;
 # shrink-only against the merge base by scripts/ci/check-unfollowed-edges.ps1 - a key added or grown
 # carries a reason 'YYYY-MM-DD: <why>'. Never edit a key or a count by hand.
-# Ambiguous calls with exactly one candidate, not listed by site above or below (bt_source::call_graph::Unresolved::sole_candidate; a guard naming a callee's callers counts each as a call of its one candidate): 1766. A call whose name is renamed to one only one item declares leaves the list and is counted here.
+# Ambiguous calls with exactly one candidate, not listed by site above or below (bt_source::call_graph::Unresolved::sole_candidate; a guard naming a callee's callers counts each as a call of its one candidate): 1767. A call whose name is renamed to one only one item declares leaves the list and is counted here.
 file	item	kind	name	sites	reason
 crates/bt-app/src/animation.rs	bt-app crate::animation::<FileAnimationSource as Read>::read	Ambiguous	unwrap_or	1	
 crates/bt-app/src/animation.rs	bt-app crate::animation::AnimationCursor::start_again	Ambiguous	into_inner	1	
@@ -2297,6 +2297,7 @@ crates/bt-app/src/main.rs	bt-app crate::revive_plan	Ambiguous	zip	2
 crates/bt-app/src/main.rs	bt-app crate::session_title	Ambiguous	or_else	1	
 crates/bt-app/src/main.rs	bt-app crate::sessions_match_terminals	Ambiguous	sort_unstable	2	
 crates/bt-app/src/main.rs	bt-app crate::settle_pin_partition	Ambiguous	unwrap_or	1	
+crates/bt-app/src/main.rs	bt-app crate::settle_the_first_canvas	Dynamic	read_contrast	1	2026-10-29: T-HIGH-CONTRAST (plan row 90), review F1: the injected contrast reader (`runtime::read_high_contrast` at boot, a fixture in the test), one SystemParametersInfoW and five GetSysColor that return at once; no door
 crates/bt-app/src/main.rs	bt-app crate::start_video_prewarm	Dynamic	prewarm	1	
 crates/bt-app/src/main.rs	bt-app crate::start_video_prewarm	Dynamic	say	1	
 crates/bt-app/src/main.rs	bt-app crate::startable_profile	Dynamic	available	1	
@@ -9163,9 +9164,8 @@ crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::std_handle_is_con
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::stop_flashing_window	Ambiguous	unwrap_or	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::system_backdrop_available	Ambiguous	cast	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::system_backdrop_available	Ambiguous	is_ok	1	
-crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::system_high_contrast	Ambiguous	cast	1	2026-10-29: T-HIGH-CONTRAST (plan row 90): standard methods on the SPI_GETHIGHCONTRAST call (`Result::is_ok`, `u32::try_from(..).unwrap_or`, the colour-index cast); no door
-crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::system_high_contrast	Ambiguous	is_ok	1	2026-10-29: T-HIGH-CONTRAST (plan row 90): standard methods on the SPI_GETHIGHCONTRAST call (`Result::is_ok`, `u32::try_from(..).unwrap_or`, the colour-index cast); no door
-crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::system_high_contrast	Ambiguous	unwrap_or	1	2026-10-29: T-HIGH-CONTRAST (plan row 90): standard methods on the SPI_GETHIGHCONTRAST call (`Result::is_ok`, `u32::try_from(..).unwrap_or`, the colour-index cast); no door
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::system_high_contrast	Ambiguous	cast	1	2026-10-29: T-HIGH-CONTRAST (plan row 90): standard methods on the SPI_GETHIGHCONTRAST call (`Result::is_ok`, the HIGHCONTRASTW pointer cast `(&mut reading as *mut HIGHCONTRASTW).cast()`); no door
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::system_high_contrast	Ambiguous	is_ok	1	2026-10-29: T-HIGH-CONTRAST (plan row 90): standard methods on the SPI_GETHIGHCONTRAST call (`Result::is_ok`, the HIGHCONTRASTW pointer cast `(&mut reading as *mut HIGHCONTRASTW).cast()`); no door
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::system_settings_subclass	Ambiguous	is_null	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::system_settings_subclass	Dynamic	(value)	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::taskbar_is_auto_hidden	Ambiguous	unwrap_or	1	
@@ -10786,7 +10786,7 @@ crates/bt-render/src/lib.rs	bt-render crate::glyph_ink_bounds	Ambiguous	physical
 crates/bt-render/src/lib.rs	bt-render crate::glyph_ink_bounds	Ambiguous	then_some	1	
 crates/bt-render/src/lib.rs	bt-render crate::grid_cell_areas	Ambiguous	then	1	
 crates/bt-render/src/lib.rs	bt-render crate::grid_glyph_ink	Ambiguous	contains	1	
-crates/bt-render/src/lib.rs	bt-render crate::grid_glyph_ink	Dynamic	within	3	2026-10-29: T-HIGH-CONTRAST (plan row 90): the local closure `within` over the frame's selection and search span slices; a span lookup that reaches no door
+crates/bt-render/src/lib.rs	bt-render crate::grid_glyph_ink	Dynamic	within	4	2026-10-29: T-HIGH-CONTRAST (plan row 90): the local closure `within` over the frame's selection and search span slices; a span lookup that reaches no door; 2026-10-29: T-HIGH-CONTRAST (plan row 90); grown 3 -> 4 by the review fold (F2): the ordinary hit's arm asks the same span lookup
 crates/bt-render/src/lib.rs	bt-render crate::inline_box_placeholder_em	Ambiguous	fold	1	
 crates/bt-render/src/lib.rs	bt-render crate::inline_box_placeholder_em	Ambiguous	map	1	
 crates/bt-render/src/lib.rs	bt-render crate::inline_run_at	Ambiguous	total_cmp	1	
