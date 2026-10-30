@@ -4,7 +4,7 @@
 # name) with the number of calls behind it. Held equal to the tree by bt-source's call_graph test;
 # shrink-only against the merge base by scripts/ci/check-unfollowed-edges.ps1 - a key added or grown
 # carries a reason 'YYYY-MM-DD: <why>'. Never edit a key or a count by hand.
-# Ambiguous calls with exactly one candidate, not listed by site above or below (bt_source::call_graph::Unresolved::sole_candidate; a guard naming a callee's callers counts each as a call of its one candidate): 1765. A call whose name is renamed to one only one item declares leaves the list and is counted here.
+# Ambiguous calls with exactly one candidate, not listed by site above or below (bt_source::call_graph::Unresolved::sole_candidate; a guard naming a callee's callers counts each as a call of its one candidate): 1766. A call whose name is renamed to one only one item declares leaves the list and is counted here.
 file	item	kind	name	sites	reason
 crates/bt-app/src/animation.rs	bt-app crate::animation::<FileAnimationSource as Read>::read	Ambiguous	unwrap_or	1	
 crates/bt-app/src/animation.rs	bt-app crate::animation::AnimationCursor::start_again	Ambiguous	into_inner	1	
@@ -5167,7 +5167,7 @@ crates/bt-app/src/settings.rs	bt-app crate::settings::SettingsPanel::step_in	Amb
 crates/bt-app/src/settings.rs	bt-app crate::settings::SettingsPanel::step_nav	Ambiguous	unwrap_or	1	
 crates/bt-app/src/settings.rs	bt-app crate::settings::SettingsPanel::toggle	Ambiguous	flatten	1	
 crates/bt-app/src/settings.rs	bt-app crate::settings::SettingsRow::control	Ambiguous	unwrap_or	1	
-crates/bt-app/src/settings.rs	bt-app crate::settings::SettingsRow::literal_description	Ambiguous	text	73	2026-10-20: T-INTEGRATION-INJECT-2-BUILD (Folio's PSReadLine per pane, the 5.1 language question, the earlier copy's removal row), written before the call graph landed: standard, collection and string methods and same-named methods of this branch's own types the grammar does not resolve by receiver; none is a door, and every worker door body they sit beside is reached from its completions row
+crates/bt-app/src/settings.rs	bt-app crate::settings::SettingsRow::literal_description	Ambiguous	text	75	2026-10-20: T-INTEGRATION-INJECT-2-BUILD (Folio's PSReadLine per pane, the 5.1 language question, the earlier copy's removal row), written before the call graph landed: standard, collection and string methods and same-named methods of this branch's own types the grammar does not resolve by receiver; none is a door, and every worker door body they sit beside is reached from its completions row; 2026-10-29: T-HIGH-CONTRAST (plan row 90): grown 73 -> 75: the Theme and scheme rows' two contrast-theme sentences (`Text::DescThemeHighContrast` / `DescSchemeHighContrast`), a string-table lookup
 crates/bt-app/src/settings.rs	bt-app crate::settings::SettingsRow::literal_description	Ambiguous	unwrap_or_default	1	
 crates/bt-app/src/settings.rs	bt-app crate::settings::SettingsRow::literal_description	Ambiguous	unwrap_or_else	2	
 crates/bt-app/src/settings.rs	bt-app crate::settings::SettingsRow::menu_action	Ambiguous	text	3	
@@ -8979,6 +8979,8 @@ crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::frame_hit_at	Ambi
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::get_window_rect	Ambiguous	map_err	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::get_work_area	Ambiguous	as_bool	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::hide_every_window_of_this_process	Ambiguous	as_bool	1	
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::high_contrast_of	Ambiguous	map	1	2026-10-29: T-HIGH-CONTRAST (plan row 90): `[u32; 5]::map` over the five colour answers and the injected reader closure (`GetSysColor` in production, a fixture in the test); array arithmetic and five GetSysColor reads that return at once, no door
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::high_contrast_of	Dynamic	colours	1	2026-10-29: T-HIGH-CONTRAST (plan row 90): `[u32; 5]::map` over the five colour answers and the injected reader closure (`GetSysColor` in production, a fixture in the test); array arithmetic and five GetSysColor reads that return at once, no door
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::image_picker_subclass	Ambiguous	complete	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::image_picker_subclass	Ambiguous	is_null	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::install_console_ctrl_handler	Ambiguous	is_ok	1	
@@ -9152,6 +9154,9 @@ crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::std_handle_is_con
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::stop_flashing_window	Ambiguous	unwrap_or	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::system_backdrop_available	Ambiguous	cast	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::system_backdrop_available	Ambiguous	is_ok	1	
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::system_high_contrast	Ambiguous	cast	1	2026-10-29: T-HIGH-CONTRAST (plan row 90): standard methods on the SPI_GETHIGHCONTRAST call (`Result::is_ok`, `u32::try_from(..).unwrap_or`, the colour-index cast); no door
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::system_high_contrast	Ambiguous	is_ok	1	2026-10-29: T-HIGH-CONTRAST (plan row 90): standard methods on the SPI_GETHIGHCONTRAST call (`Result::is_ok`, `u32::try_from(..).unwrap_or`, the colour-index cast); no door
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::system_high_contrast	Ambiguous	unwrap_or	1	2026-10-29: T-HIGH-CONTRAST (plan row 90): standard methods on the SPI_GETHIGHCONTRAST call (`Result::is_ok`, `u32::try_from(..).unwrap_or`, the colour-index cast); no door
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::system_settings_subclass	Ambiguous	is_null	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::system_settings_subclass	Dynamic	(value)	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::taskbar_is_auto_hidden	Ambiguous	unwrap_or	1	
@@ -10771,6 +10776,7 @@ crates/bt-render/src/lib.rs	bt-render crate::glyph_ink_bounds	Ambiguous	physical
 crates/bt-render/src/lib.rs	bt-render crate::glyph_ink_bounds	Ambiguous	then_some	1	
 crates/bt-render/src/lib.rs	bt-render crate::grid_cell_areas	Ambiguous	then	1	
 crates/bt-render/src/lib.rs	bt-render crate::grid_glyph_ink	Ambiguous	contains	1	
+crates/bt-render/src/lib.rs	bt-render crate::grid_glyph_ink	Dynamic	within	3	2026-10-29: T-HIGH-CONTRAST (plan row 90): the local closure `within` over the frame's selection and search span slices; a span lookup that reaches no door
 crates/bt-render/src/lib.rs	bt-render crate::inline_box_placeholder_em	Ambiguous	fold	1	
 crates/bt-render/src/lib.rs	bt-render crate::inline_box_placeholder_em	Ambiguous	map	1	
 crates/bt-render/src/lib.rs	bt-render crate::inline_run_at	Ambiguous	total_cmp	1	
@@ -10936,14 +10942,14 @@ crates/bt-render/src/procedural.rs	bt-render crate::procedural::supports_text	Am
 crates/bt-render/src/rounded_rect.rs	bt-render crate::rounded_rect::disc_area_in_box	Dynamic	arc_at	2	
 crates/bt-render/src/rounded_rect.rs	bt-render crate::rounded_rect::push_row	Dynamic	coverage	1	
 crates/bt-render/src/rounded_rect.rs	bt-render crate::rounded_rect::rounded_rect_shadow_coverage	Ambiguous	map	1	
-crates/bt-render/src/scheme.rs	bt-render crate::scheme::ChromePalette::derive	Dynamic	active	10	
-crates/bt-render/src/scheme.rs	bt-render crate::scheme::ChromePalette::derive	Dynamic	border	4	
-crates/bt-render/src/scheme.rs	bt-render crate::scheme::ChromePalette::derive	Dynamic	border_soft	5	
-crates/bt-render/src/scheme.rs	bt-render crate::scheme::ChromePalette::derive	Dynamic	hover	7	
-crates/bt-render/src/scheme.rs	bt-render crate::scheme::ChromePalette::derive	Dynamic	ink	25	2026-10-27: grown 24 -> 25 by T-PREVIEW-NEIGHBOUR-BUTTON-HOVER: the derivation's local closure ink (ink_over of a ground, the scheme's ink source and its alpha), colour arithmetic that reaches no door, called once more for preview_nav_glyph_on_pill
-crates/bt-render/src/scheme.rs	bt-render crate::scheme::ChromePalette::derive	Dynamic	ink2	19	
-crates/bt-render/src/scheme.rs	bt-render crate::scheme::ChromePalette::derive	Dynamic	ink3	25	
-crates/bt-render/src/scheme.rs	bt-render crate::scheme::ChromePalette::derive	Dynamic	ring	5	
+crates/bt-render/src/scheme.rs	bt-render crate::scheme::ChromePalette::derive_on	Dynamic	active	10	2026-10-29: T-HIGH-CONTRAST (plan row 90); re-keyed from crate::scheme::ChromePalette::derive, the same sites: the derivation's body moved into derive_on, which derive (no contrast theme) and derive_high_contrast both call; the local closures are colour arithmetic that reaches no door
+crates/bt-render/src/scheme.rs	bt-render crate::scheme::ChromePalette::derive_on	Dynamic	border	4	2026-10-29: T-HIGH-CONTRAST (plan row 90); re-keyed from crate::scheme::ChromePalette::derive, the same sites: the derivation's body moved into derive_on, which derive (no contrast theme) and derive_high_contrast both call; the local closures are colour arithmetic that reaches no door
+crates/bt-render/src/scheme.rs	bt-render crate::scheme::ChromePalette::derive_on	Dynamic	border_soft	5	2026-10-29: T-HIGH-CONTRAST (plan row 90); re-keyed from crate::scheme::ChromePalette::derive, the same sites: the derivation's body moved into derive_on, which derive (no contrast theme) and derive_high_contrast both call; the local closures are colour arithmetic that reaches no door
+crates/bt-render/src/scheme.rs	bt-render crate::scheme::ChromePalette::derive_on	Dynamic	hover	7	2026-10-29: T-HIGH-CONTRAST (plan row 90); re-keyed from crate::scheme::ChromePalette::derive, the same sites: the derivation's body moved into derive_on, which derive (no contrast theme) and derive_high_contrast both call; the local closures are colour arithmetic that reaches no door
+crates/bt-render/src/scheme.rs	bt-render crate::scheme::ChromePalette::derive_on	Dynamic	ink	25	2026-10-27: grown 24 -> 25 by T-PREVIEW-NEIGHBOUR-BUTTON-HOVER: the derivation's local closure ink (ink_over of a ground, the scheme's ink source and its alpha), colour arithmetic that reaches no door, called once more for preview_nav_glyph_on_pill; 2026-10-29: T-HIGH-CONTRAST (plan row 90); re-keyed from crate::scheme::ChromePalette::derive, the same sites: the derivation's body moved into derive_on, which derive (no contrast theme) and derive_high_contrast both call; the local closures are colour arithmetic that reaches no door
+crates/bt-render/src/scheme.rs	bt-render crate::scheme::ChromePalette::derive_on	Dynamic	ink2	19	2026-10-29: T-HIGH-CONTRAST (plan row 90); re-keyed from crate::scheme::ChromePalette::derive, the same sites: the derivation's body moved into derive_on, which derive (no contrast theme) and derive_high_contrast both call; the local closures are colour arithmetic that reaches no door
+crates/bt-render/src/scheme.rs	bt-render crate::scheme::ChromePalette::derive_on	Dynamic	ink3	25	2026-10-29: T-HIGH-CONTRAST (plan row 90); re-keyed from crate::scheme::ChromePalette::derive, the same sites: the derivation's body moved into derive_on, which derive (no contrast theme) and derive_high_contrast both call; the local closures are colour arithmetic that reaches no door
+crates/bt-render/src/scheme.rs	bt-render crate::scheme::ChromePalette::derive_on	Dynamic	ring	5	2026-10-29: T-HIGH-CONTRAST (plan row 90); re-keyed from crate::scheme::ChromePalette::derive, the same sites: the derivation's body moved into derive_on, which derive (no contrast theme) and derive_high_contrast both call; the local closures are colour arithmetic that reaches no door
 crates/bt-render/src/synthetic_bold.rs	bt-render crate::synthetic_bold::SyntheticBoldGlyphs::raster	Ambiguous	map_err	1	
 crates/bt-render/src/synthetic_bold.rs	bt-render crate::synthetic_bold::SyntheticBoldGlyphs::raster	Ambiguous	unwrap_or_default	1	
 crates/bt-render/src/synthetic_bold.rs	bt-render crate::synthetic_bold::embolden_contour	Ambiguous	length	1	
@@ -10990,6 +10996,7 @@ crates/bt-render/src/theme.rs	bt-render crate::theme::parse_background_rgb	Ambig
 crates/bt-render/src/theme.rs	bt-render crate::theme::parse_background_rgb	Ambiguous	len	1	
 crates/bt-render/src/theme.rs	bt-render crate::theme::parse_background_rgb	Ambiguous	ok	3	
 crates/bt-render/src/theme.rs	bt-render crate::theme::process_theme	Ambiguous	as_deref	1	
+crates/bt-render/src/theme.rs	bt-render crate::theme::set_high_contrast	Ambiguous	unwrap_or_else	1	2026-10-29: T-HIGH-CONTRAST (plan row 90): `unwrap_or_else(PoisonError::into_inner)` on the scheme store's write lock, the store's read-through rule; std
 crates/bt-render/src/theme.rs	bt-render crate::theme::set_schemes	Ambiguous	unwrap_or_else	1	
 crates/bt-term/src/adapter.rs	bt-term crate::adapter::<BoundaryPerformer as Perform>::csi_dispatch	Ambiguous	and_then	1	
 crates/bt-term/src/adapter.rs	bt-term crate::adapter::<BoundaryPerformer as Perform>::csi_dispatch	Ambiguous	unwrap_or	1	
