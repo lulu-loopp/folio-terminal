@@ -1160,8 +1160,15 @@ pub fn thread_mouse_capture() -> Option<NativeWindow> {
 /// is proved stale by the next press of the same button (T-POINTER-CAPTURE R-5 rule 2), which
 /// is the rule a held gesture keeps here.
 #[must_use]
-pub fn mouse_button_down(_button: crate::PointerButton) -> bool {
+pub fn mouse_button_down(_button: crate::PointerButton, _latched: crate::ContactMark) -> bool {
     true
+}
+
+/// **The mark a gesture takes when it latches** — the empty one here: no contact is written down
+/// off Windows ([`crate::ContactMark`]).
+#[must_use]
+pub fn contacts_seen() -> crate::ContactMark {
+    crate::ContactMark::default()
 }
 
 /// **Let the system translate touch into the mouse** — and off Windows there

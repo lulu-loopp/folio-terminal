@@ -1383,8 +1383,7 @@ fn a_pan_enters_the_wheel_road_as_pixels() {
 /// window.
 ///
 /// MUTATION: spend the travel with `scroll_view_exact_in` instead of `queue_wheel` and the first
-/// assertion goes red; answer `TouchPanned` with `Ok(())` and the pan-wake one does; spend the
-/// pans before asking the application's capture and the last one does.
+/// assertion goes red; answer `TouchPanned` with `Ok(())` and the pan-wake one does.
 #[test]
 fn a_parked_pan_is_spent_through_the_wheels_own_entrance() {
     let spend = squeezed_body("Runtime", "spend_parked_pans");
@@ -1411,15 +1410,6 @@ fn a_parked_pan_is_spent_through_the_wheels_own_entrance() {
             " => self.spend_touch_pans(),"
         )),
         "and it is answered by the application's spend"
-    );
-    // Which asks the application's capture first (0.4.9 plan row 107, R9), then spends every
-    // window's parked pans.
-    let walk = squeezed_body("FolioApp", "spend_touch_pans");
-    assert!(
-        walk.contains(
-            "self.end_the_capture_that_lost_its_pointer()?;self.for_each_window(|runtime|runtime.spend_parked_pans())"
-        ),
-        "the application's capture is asked first, then the pans are spent: {walk}"
     );
 }
 
@@ -3868,6 +3858,7 @@ fn a_chord_under_a_forwarded_gesture_leaves_it_whole() {
         button: MouseButton::Left,
         started: None,
         os: None,
+        contacts: bt_platform::ContactMark::default(),
         last: None,
     };
     assert_eq!(

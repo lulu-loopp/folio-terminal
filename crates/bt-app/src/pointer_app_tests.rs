@@ -819,6 +819,7 @@ fn a_capture(
         button,
         started: None,
         os: None,
+        contacts: bt_platform::ContactMark::default(),
         last: None,
     }
 }

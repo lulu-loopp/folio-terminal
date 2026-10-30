@@ -265,8 +265,13 @@ pub(crate) trait WindowHost {
     /// `bt_platform::pointer_position_in_window`; `None` where the platform will not say.
     fn pointer_in_window(&self) -> Option<(i32, i32)>;
     /// **Whether a hand may still be holding `button`** — `bt_platform::mouse_button_down`:
-    /// `false` only when it is up and no release of it can still be on its way.
-    fn mouse_button_down(&self, button: bt_platform::PointerButton) -> bool;
+    /// `false` only when it is up and no release of it can still be on its way, counting only the
+    /// touch contacts that were down at the gesture's `latched` mark.
+    fn mouse_button_down(
+        &self,
+        button: bt_platform::PointerButton,
+        latched: bt_platform::ContactMark,
+    ) -> bool;
     /// The platform's present facts about this window, for a diagnostic line —
     /// `bt_platform::native_present_facts`; every field unread where there is no handle.
     fn present_facts(&self) -> bt_platform::NativePresentFacts;
@@ -445,8 +450,12 @@ impl WindowHost for Arc<Window> {
             .ok()
             .and_then(crate::runtime::pointer_in_native_window)
     }
-    fn mouse_button_down(&self, button: bt_platform::PointerButton) -> bool {
-        bt_platform::mouse_button_down(button)
+    fn mouse_button_down(
+        &self,
+        button: bt_platform::PointerButton,
+        latched: bt_platform::ContactMark,
+    ) -> bool {
+        bt_platform::mouse_button_down(button, latched)
     }
     fn present_facts(&self) -> bt_platform::NativePresentFacts {
         crate::native_window_of(self)

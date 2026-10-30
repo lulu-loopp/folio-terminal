@@ -9406,6 +9406,10 @@ struct App<B: Backend = Native> {
     /// (0.4.9 plan row 107): the first discard writes a line, every later one nothing. See
     /// [`runtime::pointer::touch::a_discarded_pan_said_once`].
     said_a_pan_was_discarded: bool,
+    /// Whether a held gesture has been ended because its button was up, in this process (0.4.9
+    /// plan row 107, review F7): the line says so once
+    /// (`a_capture_ended_by_its_button_said_once`, in `runtime::pointer::ending`).
+    said_a_capture_ended_by_its_button: bool,
     /// Every capture a lifecycle door ended (T-POINTER-CAPTURE R-9), by its owner's name and the
     /// ending's, for a test to read which ending each door ran.
     #[cfg(test)]
@@ -9721,6 +9725,7 @@ impl<B: Backend> App<B> {
             pointer_capture: None,
             swallowed: runtime::ButtonSet::default(),
             said_a_pan_was_discarded: false,
+            said_a_capture_ended_by_its_button: false,
             #[cfg(test)]
             capture_endings: Vec::new(),
             pending_handover: None,

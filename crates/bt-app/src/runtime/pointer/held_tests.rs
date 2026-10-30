@@ -764,3 +764,69 @@ fn a_pan_discarded_under_a_held_gesture_says_so_once() {
         );
     }
 }
+
+/// RED (0.4.9 plan row 107, review F7) — **a gesture ended because its button was up says so
+/// once in the process**: the first such ending writes the line naming the gesture, a gesture
+/// whose button is still down writes nothing, and a second gesture ended the same way writes
+/// nothing either.
+///
+/// MUTATION: drop the line from `end_a_capture_that_lost_its_pointer` — the owner's log never
+/// shows that a release was lost; drop the `said` memory — every ending writes it again.
+#[test]
+fn a_capture_ended_because_its_button_was_up_says_so_once() {
+    let mut said = false;
+    assert_eq!(
+        crate::runtime::pointer::ending::a_capture_ended_by_its_button_said_once(
+            &mut said, "TabPress"
+        ),
+        Some("a held gesture was ended because its button was up (owner=TabPress)".to_owned()),
+        "the first ending is said, with its owner"
+    );
+    assert_eq!(
+        crate::runtime::pointer::ending::a_capture_ended_by_its_button_said_once(
+            &mut said, "TabPress"
+        ),
+        None,
+        "and no later one"
+    );
+
+    let mut folio = a_window("ended-by-its-button-said");
+    let said_lines = |folio: &HeadlessFolio| -> Vec<String> {
+        folio
+            .ledger
+            .take()
+            .into_iter()
+            .filter_map(|effect| match effect {
+                crate::headless::WindowEffect::Noted(line) if line.contains("held gesture was ended") => {
+                    Some(line)
+                }
+                _ => None,
+            })
+            .collect()
+    };
+    let said_line =
+        vec!["a held gesture was ended because its button was up (owner=TabPress)".to_owned()];
+    for (down, expected) in [
+        (true, Vec::new()),
+        (false, said_line),
+        (false, Vec::new()),
+    ] {
+        {
+            let mut runtime = folio.runtime();
+            let hand = PhysicalPosition::new(300.0, 300.0);
+            runtime.pointer_moved(hand).expect("the move is answered");
+            if runtime.app.pointer_capture.is_none() {
+                a_tab_press(&mut runtime, hand);
+            }
+            the_buttons_are(&runtime, down);
+            runtime
+                .flush_pending_pty_resize(Instant::now())
+                .expect("the turn's resize door runs");
+        }
+        assert_eq!(
+            said_lines(&folio),
+            expected,
+            "the turn with the button down: {down}"
+        );
+    }
+}

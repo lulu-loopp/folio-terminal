@@ -489,16 +489,23 @@ impl<B: Backend> Runtime<'_, B> {
     /// "still held" while no hand holds anything. The button is asked of the platform
     /// ([`bt_platform::mouse_button_down`], through the window's seam), which says up only when
     /// no release of it can still be on its way, under every name the platform may give the
-    /// press ([`reported_buttons_of`]). An owner that outlives its button keeps the first
-    /// test alone ([`CaptureOwner::lasts_while_its_button_is_down`]).
+    /// press ([`reported_buttons_of`]), counting only the touch contacts that were down when the
+    /// gesture latched ([`PointerCapture::contacts`]). An owner that outlives its button keeps
+    /// the first test alone ([`CaptureOwner::lasts_while_its_button_is_down`]). The first
+    /// gesture in the process ended because its button was up says so, once
+    /// ([`a_capture_ended_by_its_button_said_once`]), through the window's door.
     pub(crate) fn end_a_capture_that_lost_its_pointer(&mut self) -> Result<bool> {
-        let Some((at_the_press, button, by_its_button)) = self.own_capture().map(|capture| {
-            (
-                capture.os,
-                capture.button,
-                capture.owner.lasts_while_its_button_is_down(),
-            )
-        }) else {
+        let Some((at_the_press, latched, button, by_its_button, owner)) =
+            self.own_capture().map(|capture| {
+                (
+                    capture.os,
+                    capture.contacts,
+                    capture.button,
+                    capture.owner.lasts_while_its_button_is_down(),
+                    capture.owner.name(),
+                )
+            })
+        else {
             return Ok(false);
         };
         let pointer_held =
@@ -507,10 +514,18 @@ impl<B: Backend> Runtime<'_, B> {
             || reported_buttons_of(button, bt_platform::host_platform()).any(|reported| {
                 self.window
                     .window
-                    .mouse_button_down(platform_button(reported))
+                    .mouse_button_down(platform_button(reported), latched)
             });
         if pointer_held && button_held {
             return Ok(false);
+        }
+        if pointer_held
+            && let Some(line) = a_capture_ended_by_its_button_said_once(
+                &mut self.app.said_a_capture_ended_by_its_button,
+                owner,
+            )
+        {
+            self.window.window.note(&line);
         }
         self.mouse_trace(|| {
             format!(
@@ -685,8 +700,8 @@ impl<B: Backend> FolioApp<B> {
     /// **The application's capture, checked on its owner's window** (0.4.9 plan row 107, R9):
     /// the per-turn check of [`Runtime::end_a_capture_that_lost_its_pointer`], asked of whichever
     /// window latched the slot, for a door that is about to act on another window under it. The
-    /// slot is the application's, so its clean-up is too: a capture whose window has gone is
-    /// owed nothing and is let go.
+    /// slot is the application's, so its clean-up is too. A window leaves the registry only after
+    /// its close has ended its capture, so the owner's window is always there to ask.
     pub(crate) fn end_the_capture_that_lost_its_pointer(&mut self) -> Result<()> {
         let Some(owner) = self
             .app
@@ -696,16 +711,26 @@ impl<B: Backend> FolioApp<B> {
         else {
             return Ok(());
         };
-        match self.runtime(owner) {
-            Some(mut window) => window.end_a_capture_that_lost_its_pointer().map(drop),
-            None => {
-                if let Some(app) = self.app.as_mut() {
-                    let _ = app.take_capture_where(|capture| capture.window == owner);
-                }
-                Ok(())
-            }
+        if let Some(mut window) = self.runtime(owner) {
+            window.end_a_capture_that_lost_its_pointer()?;
         }
+        Ok(())
     }
+}
+
+/// **The line a gesture ended because its button was up writes, the first time in this
+/// process** (0.4.9 plan row 107, review F7; `docs/CONVENTIONS.md` §十 rule 2), naming the
+/// gesture; nothing on every later one, which `said` remembers.
+///
+/// It is the event the lost release leaves behind — a held gesture that no hand was holding —
+/// and with this fix it is answered before anything is swallowed, so without the line the
+/// owner's log would not show that a release was ever lost. The owner's name and nothing else.
+pub(crate) fn a_capture_ended_by_its_button_said_once(
+    said: &mut bool,
+    owner: &str,
+) -> Option<String> {
+    (!std::mem::replace(said, true))
+        .then(|| format!("a held gesture was ended because its button was up (owner={owner})"))
 }
 
 /// **[`input::pressed_button`]'s inverse**: every button the platform may have reported for a

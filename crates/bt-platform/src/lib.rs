@@ -306,6 +306,15 @@ pub enum PointerButton {
     Other(u16),
 }
 
+/// **Which touch and pen contacts a held gesture may count as its own** (0.4.9 plan row 107,
+/// review F1): a mark of this thread's contacts, taken by [`contacts_seen`] when the gesture
+/// latches and handed back to [`mouse_button_down`]. A contact that went down after the mark is
+/// another hand's — the finger doing a pan, say — and does not hold the gesture; one that was
+/// already down is the one a touch-promoted press came from, and does. Off Windows no contact is
+/// ever written down, and the mark is the empty one.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ContactMark(u64);
+
 /// Geometry consumed by the pure half of the Win32 `WM_NCHITTEST` bridge.
 /// All values are physical pixels; callers derive them from the live window DPI.
 ///
@@ -9535,8 +9544,8 @@ mod windows_impl {
                 HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTMAXBUTTON, HTRIGHT,
                 HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_NOTOPMOST, HWND_TOPMOST, IsIconic, IsZoomed,
                 MB_ICONINFORMATION, MB_OK, MB_SETFOREGROUND, MF_STRING, MINMAXINFO,
-                NCCALCSIZE_PARAMS, PostMessageW, QS_MOUSEBUTTON, QS_POINTER, QS_TOUCH,
-                QUEUE_STATUS_FLAGS, RegisterWindowMessageW, SM_CXFRAME, SM_CXPADDEDBORDER,
+                NCCALCSIZE_PARAMS, PostMessageW, QS_MOUSEBUTTON,
+                RegisterWindowMessageW, SM_CXFRAME, SM_CXPADDEDBORDER,
                 SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_SWAPBUTTON, SM_XVIRTUALSCREEN,
                 SM_YVIRTUALSCREEN, SPI_GETCLIENTAREAANIMATION, SPI_GETWHEELSCROLLLINES,
                 SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
@@ -9558,7 +9567,7 @@ mod windows_impl {
     use super::{
         CustomFrameGeometry, CustomFrameHit, CustomFrameMetrics, GroundBand,
         INSERT_ABOVE_REFERENCE, NativeWindow, PageVisual, PanStep, PanTrack, PendingWindowPos,
-        PlatformChrome, PointerButton, TaskbarProgress, TaskbarProgressState, ThreadPriority,
+        ContactMark, PlatformChrome, PointerButton, TaskbarProgress, TaskbarProgressState, ThreadPriority,
         TitleBarBox, VisualLayer, WheelScrollAmount, WindowRect, composition_visual_offset,
         custom_frame_hit_test, hold_pending_pos_to, logical_px_for_dpi, window_skirt,
     };
@@ -12111,7 +12120,7 @@ mod windows_impl {
         // above, and this procedure runs on the thread that owns the window.
         let state = unsafe { &*(reference_data as *const TouchToTheSystem) };
         state.arrived();
-        CONTACTS_DOWN.with_borrow_mut(|contacts| note_a_contact(contacts, message, wparam));
+        CONTACTS.with_borrow_mut(|contacts| note_a_contact(contacts, message, wparam));
         // **`DefWindowProcW` and not `DefSubclassProc`, and that is the whole
         // ticket**: the default handling runs now and winit's window procedure
         // never sees the message, so the system translates it instead of
@@ -15215,28 +15224,36 @@ mod windows_impl {
     ///    map them
     ///    (<https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getasynckeystate>),
     ///    so a logical left on a swapped mouse is read on `VK_RBUTTON`.
-    /// 2. **A button or pointer message still in this thread's queue**,
-    ///    `GetQueueStatus`'s high word, *"the types of messages currently in the
-    ///    queue"*
+    /// 2. **A mouse-button message still in this thread's queue**,
+    ///    `GetQueueStatus(QS_MOUSEBUTTON)`'s high word, *"the types of messages
+    ///    currently in the queue"*
     ///    (<https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getqueuestatus>).
     ///    The button can come up before its release is read — a quick click
-    ///    whose two messages arrive together — and such a release is not lost:
-    ///    it will reach the gesture that is waiting for it.
-    /// 3. **A finger or a pen this thread saw go down and still on the glass**,
-    ///    for the left and the right buttons, which are the two a contact is
-    ///    promoted to. The touch door's subclass writes down each contact a
-    ///    `WM_POINTERDOWN` opens and crosses it off at its `WM_POINTERUP`, and
-    ///    each one left is asked of `GetPointerInfo`, which answers from this
-    ///    thread's own pointer messages; a contact it no longer knows, or knows
-    ///    out of contact, is crossed off too. So a contact whose up never came is
-    ///    forgotten, and a press promoted from a contact still down is held
-    ///    whatever the mouse buttons' state says about it.
+    ///    whose two messages arrive together, or a touch-promoted tap, whose
+    ///    mouse messages follow its contact's up — and such a release is not
+    ///    lost: it will reach the gesture that is waiting for it. Pointer and
+    ///    touch messages are not asked here (review F1): a pan's own frames are
+    ///    queued for as long as its finger moves, and a contact the gesture
+    ///    counts is answered by the third reading, whose `GetPointerInfo` goes on
+    ///    reporting it in contact until its up has been read.
+    /// 3. **A finger or a pen that was already on the glass when the gesture
+    ///    latched, and still is**, for the left and the right buttons, which are
+    ///    the two a contact is promoted to. The touch door's subclass writes down
+    ///    each contact a `WM_POINTERDOWN` opens, numbered in the order they went
+    ///    down, and crosses it off at its `WM_POINTERUP`; the gesture's `latched`
+    ///    mark ([`contacts_seen`], taken at its latch) says which numbers came
+    ///    before it. Each one left is asked of `GetPointerInfo`, which answers
+    ///    from this thread's own pointer messages; a contact it no longer knows,
+    ///    or knows out of contact, is crossed off too. So a press promoted from a
+    ///    contact still down is held whatever the mouse buttons' state says
+    ///    about it, and a finger that touched down later — the one doing a pan —
+    ///    holds nothing.
     ///
     /// A button Windows has no virtual key for ([`PointerButton::Other`]) is
     /// held: there is nothing to read, and a held gesture keeps the rule it had
     /// before this door.
     #[must_use]
-    pub fn mouse_button_down(button: PointerButton) -> bool {
+    pub fn mouse_button_down(button: PointerButton, latched: ContactMark) -> bool {
         // SAFETY: a read-only query over a system index; it takes no pointers.
         let swapped = unsafe { GetSystemMetrics(SM_SWAPBUTTON) } != 0;
         let Some(key) = button_key(button, swapped) else {
@@ -15248,12 +15265,12 @@ mod windows_impl {
         if down {
             return true;
         }
-        let waiting = QUEUE_STATUS_FLAGS(QS_MOUSEBUTTON.0 | QS_POINTER | QS_TOUCH);
         // SAFETY: a read-only query of this thread's own queue; it takes no pointers.
-        if (unsafe { GetQueueStatus(waiting) } >> 16) != 0 {
+        if (unsafe { GetQueueStatus(QS_MOUSEBUTTON) } >> 16) != 0 {
             return true;
         }
-        matches!(button, PointerButton::Left | PointerButton::Right) && a_contact_is_down()
+        matches!(button, PointerButton::Left | PointerButton::Right)
+            && a_latched_contact_is_down(latched)
     }
 
     /// **The virtual key a logical button is read on**, given whether the
@@ -15270,31 +15287,66 @@ mod windows_impl {
         })
     }
 
-    thread_local! {
-        /// **The contacts this thread's touch door saw go down and not yet come
-        /// up**, by pointer id — see [`mouse_button_down`]'s third reading. The
-        /// window thread's own, as every window of this program is.
-        static CONTACTS_DOWN: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
+    /// **The contacts this thread's touch door saw go down and not yet come
+    /// up** — see [`mouse_button_down`]'s third reading.
+    #[derive(Debug, Default)]
+    pub(super) struct Contacts {
+        /// Each contact still down: its pointer id, and its number in the
+        /// order the contacts went down.
+        down: Vec<(u32, u64)>,
+        /// How many contacts have gone down so far: the last number given.
+        seen: u64,
     }
 
-    /// **One pointer message, written down**: a down opens its contact, an up
-    /// crosses it off, and every other message leaves the list alone. The
-    /// pointer id is `wParam`'s low word (`GET_POINTERID_WPARAM`,
+    thread_local! {
+        /// The window thread's own contacts, as every window of this program is
+        /// the loop thread's.
+        static CONTACTS: RefCell<Contacts> = const {
+            RefCell::new(Contacts {
+                down: Vec::new(),
+                seen: 0,
+            })
+        };
+    }
+
+    /// **The mark a gesture takes when it latches** ([`ContactMark`]): how many
+    /// contacts this thread has seen go down so far.
+    #[must_use]
+    pub fn contacts_seen() -> ContactMark {
+        CONTACTS.with_borrow(|contacts| ContactMark(contacts.seen))
+    }
+
+    /// **One pointer message, written down**: a down opens its contact under
+    /// the next number, an up crosses it off, and every other message leaves
+    /// the list alone. A down of an id still written is a new contact under
+    /// that id (its up was never seen), so it takes the new number. The pointer
+    /// id is `wParam`'s low word (`GET_POINTERID_WPARAM`,
     /// <https://learn.microsoft.com/en-us/windows/win32/inputmsg/wm-pointerdown>).
-    pub(super) fn note_a_contact(contacts: &mut Vec<u32>, message: u32, wparam: WPARAM) {
+    pub(super) fn note_a_contact(contacts: &mut Contacts, message: u32, wparam: WPARAM) {
         let id = (wparam.0 & 0xFFFF) as u32;
         match message {
-            WM_POINTERDOWN if !contacts.contains(&id) => contacts.push(id),
-            WM_POINTERUP => contacts.retain(|held| *held != id),
+            WM_POINTERDOWN => {
+                contacts.seen += 1;
+                contacts.down.retain(|(held, _)| *held != id);
+                contacts.down.push((id, contacts.seen));
+            }
+            WM_POINTERUP => contacts.down.retain(|(held, _)| *held != id),
             _ => {}
         }
     }
 
-    /// Whether any contact written down is, by this thread's own pointer
-    /// messages, still on the glass; the ones that are not are crossed off.
-    fn a_contact_is_down() -> bool {
-        CONTACTS_DOWN.with_borrow_mut(|contacts| {
-            contacts.retain(|id| {
+    /// Whether a contact written down went down no later than the gesture's
+    /// `latched` mark — the only contacts that can be the gesture's own.
+    pub(super) fn holds_the_latch(contacts: &Contacts, latched: ContactMark) -> bool {
+        contacts.down.iter().any(|(_, number)| *number <= latched.0)
+    }
+
+    /// Whether a contact that was down at the gesture's latch is, by this
+    /// thread's own pointer messages, still on the glass; every contact that is
+    /// not is crossed off.
+    fn a_latched_contact_is_down(latched: ContactMark) -> bool {
+        CONTACTS.with_borrow_mut(|contacts| {
+            contacts.down.retain(|(id, _)| {
                 let mut info = POINTER_INFO::default();
                 // SAFETY: `info` is a live, exclusively borrowed `POINTER_INFO`
                 // for the call to fill; an id the system no longer knows is
@@ -15302,7 +15354,7 @@ mod windows_impl {
                 unsafe { GetPointerInfo(*id, &mut info) }.is_ok()
                     && info.pointerFlags.contains(POINTER_FLAG_INCONTACT)
             });
-            !contacts.is_empty()
+            holds_the_latch(contacts, latched)
         })
     }
 
@@ -17013,11 +17065,11 @@ mod windows_impl {
             CLIPBOARD_OPEN_RETRY_DELAYS, FolderPickerState, ImagePickerState, MathMenuState,
             SaveFilePickerState, ShellPickKind, TOUCH_GOES_TO_THE_SYSTEM, TouchToTheSystem,
             button_key, compositor_failure, let_the_system_translate_touch, newest_live_owner,
-            note_a_contact, pan_gesture_configuration, retry_open_clipboard,
+            Contacts, holds_the_latch, note_a_contact, pan_gesture_configuration, retry_open_clipboard,
             the_system_s_gesture_is_answered_here, touch_goes_to_the_system, wide_null,
         };
         use crate::handoff::{validate_local_image_path, validate_openable_path};
-        use crate::{NativeWindow, PanStep, PanTrack, PointerButton};
+        use crate::{ContactMark, NativeWindow, PanStep, PanTrack, PointerButton};
         use std::cell::Cell;
         use std::cell::RefCell;
         use std::path::{Path, PathBuf};
@@ -17072,8 +17124,9 @@ mod windows_impl {
 
         /// RED (0.4.9 plan row 107) — **a contact is written down at its down and crossed off at
         /// its up, by its own id**: two fingers down and one lifted leave the other; a second
-        /// down of an id already written is one entry; a move, or any other message, changes
-        /// nothing. The id is `wParam`'s low word, whatever the high word carries.
+        /// down of an id already written is one entry, under the new number; a move, or any
+        /// other message, changes nothing. The id is `wParam`'s low word, whatever the high word
+        /// carries.
         ///
         /// MUTATION: cross off every contact at any up — the second finger, still down, is
         /// forgotten; read the id from the whole `wParam` — the flags in the high word make an
@@ -17082,20 +17135,60 @@ mod windows_impl {
         fn a_contact_is_written_down_at_its_down_and_crossed_off_at_its_up() {
             let (down, update, up) = (0x0246_u32, 0x0245_u32, 0x0247_u32);
             let with_flags = |id: usize| WPARAM((0x0006 << 16) | id);
-            let mut contacts = Vec::new();
+            let mut contacts = Contacts::default();
             note_a_contact(&mut contacts, down, with_flags(3));
             note_a_contact(&mut contacts, down, with_flags(9));
             note_a_contact(&mut contacts, down, with_flags(3));
             note_a_contact(&mut contacts, update, with_flags(3));
-            assert_eq!(contacts, [3, 9], "two contacts down, each once");
+            assert_eq!(
+                contacts.down,
+                [(9, 2), (3, 3)],
+                "two contacts down, each once, the re-opened one under its new number"
+            );
             note_a_contact(&mut contacts, up, with_flags(3));
             assert_eq!(
-                contacts,
-                [9],
+                contacts.down,
+                [(9, 2)],
                 "the lifted one is crossed off, the other stays"
             );
             note_a_contact(&mut contacts, 0x0201, with_flags(9));
-            assert_eq!(contacts, [9], "a mouse message is not a contact");
+            assert_eq!(contacts.down, [(9, 2)], "a mouse message is not a contact");
+        }
+
+        /// RED (0.4.9 plan row 107, review F1) — **a contact that went down after the gesture
+        /// latched does not hold it**: a finger on the glass at the latch holds the gesture
+        /// until it lifts; a finger that touches down later — the one doing a pan — holds
+        /// nothing, alone or after the first has lifted; and a gesture latched with no contact
+        /// down is held by none.
+        ///
+        /// MUTATION: count every contact still down — the pan's own finger holds a stale
+        /// capture for as long as it is on the glass, and the pan is discarded.
+        #[test]
+        fn a_contact_that_went_down_after_the_gesture_latched_does_not_hold_it() {
+            let (down, up) = (0x0246_u32, 0x0247_u32);
+            let id = |id: usize| WPARAM(id);
+            let mut contacts = Contacts::default();
+            let before_any = ContactMark(contacts.seen);
+            note_a_contact(&mut contacts, down, id(4));
+            let at_the_press = ContactMark(contacts.seen);
+            assert!(
+                holds_the_latch(&contacts, at_the_press),
+                "the finger a press was promoted from holds its gesture"
+            );
+            assert!(
+                !holds_the_latch(&contacts, before_any),
+                "a gesture latched with no finger down is not held by one that came later"
+            );
+            note_a_contact(&mut contacts, down, id(5));
+            assert!(
+                holds_the_latch(&contacts, at_the_press),
+                "a second finger leaves the first one holding"
+            );
+            note_a_contact(&mut contacts, up, id(4));
+            assert!(
+                !holds_the_latch(&contacts, at_the_press),
+                "the pan's finger, down after the latch, holds nothing"
+            );
         }
 
         /// **The four messages taken away from winit, and no fifth** (the touch
@@ -19859,7 +19952,7 @@ pub use windows_impl::{
     get_work_area, hide_every_window_of_this_process, install_console_ctrl_handler,
     install_context_menu, install_window_class_background, is_window_cloaked, is_window_minimized,
     keyboard_layout_shift_table, keyboard_layouts, leave_process, let_the_system_translate_touch,
-    message_box, monitor_id_at, monospace_family_named, monospace_font_families, mouse_button_down,
+    message_box, monitor_id_at, monospace_family_named, monospace_font_families, mouse_button_down, contacts_seen,
     os_ui_language, pointer_position, pointer_position_in_window, read_context_menu, recycle,
     redirect_std_streams_to_file, register_clipboard_owner, remove_context_menu,
     request_window_close, set_clipboard_text, set_current_thread_priority, set_system_backdrop,
@@ -19889,7 +19982,7 @@ pub use portable_impl::{
     adopt_parent_console, announce_explorer_menu_change, detach_console, directory_folds_case,
     hide_every_window_of_this_process, install_console_ctrl_handler, install_context_menu,
     is_window_cloaked, keyboard_layout_shift_table, keyboard_layouts, leave_process,
-    let_the_system_translate_touch, mouse_button_down, read_context_menu,
+    let_the_system_translate_touch, mouse_button_down, contacts_seen, read_context_menu,
     redirect_std_streams_to_file, register_clipboard_owner, remove_context_menu,
     set_system_backdrop, silence_std_streams, system_backdrop_available, thread_mouse_capture,
     virtual_key_for_character, virtual_key_is_dead, virtual_key_of_scan_code, write_std_error,
