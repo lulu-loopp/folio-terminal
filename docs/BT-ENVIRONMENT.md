@@ -235,7 +235,12 @@ half reads them, and it writes one line into that file. `BT_ELEVATED_PIPE_VM_ROW
 `observe`), the guest folder its `row.txt` (and for `observe`, `line.txt`) is written to,
 and the `folio.exe` the `launch` row starts, for `bt-platform`'s ignored
 `elevated_pipe::tests::vm_row`, which only the clean-VM harness runs: it performs a real
-`runas` launch.
+`runas` launch. `BT_MATH_STACK_CHILD` carries `<shape index>:<stack bytes>` to the copy of
+`bt-math`'s own test binary that `tests::every_recursive_shape_renders_at_the_limit_on_a_quarter_of_the_worker_stack`
+and its whole-stack twin start once per shape (plan row 74), and `BT_BACKTRACE_REPORT_TEST_CHILD`
+marks the copy of `bt-app`'s test binary that `tests::a_contained_panics_report_names_this_crates_frame_by_file_and_line`
+starts to install the panic hook in (plan row 73); only those tests' child halves read them, and the
+second writes one panic report under `target/`, which it removes.
 
 | Variable | Value | What it does | What can end up in the file | Default |
 | --- | --- | --- | --- | --- |
@@ -267,6 +272,10 @@ at all.)
 
 **Half of a name, spelled in two pieces** so that a test asserting the name's
 absence is not its own counter-example: `BT_APP_`, `BT_TRANSFER`.
+
+**A compile-time value, not a variable of any process**: `BT_MATH_OPT_LEVEL`, which
+`crates/bt-math/build.rs` hands `rustc` (`cargo::rustc-env`) as the optimisation level the
+crate is built at, and which only its test module reads, through `env!` (plan row 74).
 
 **Fixture strings and markers** written by tests into a terminal or a probe and
 matched back out: `BT_APP_INPUT_OK`, `BT_FILL_080_XXXXXXXXXXXXXXXXXXXXXXXX`,

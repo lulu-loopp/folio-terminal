@@ -6,6 +6,8 @@
 //! build to the whole of it, so it has to know which one it is; no `cfg` says so, and Cargo hands
 //! the level to a build script only. A product build reads nothing of this.
 
+#![allow(clippy::disallowed_methods)]
+
 fn main() {
     let level = std::env::var("OPT_LEVEL").expect("Cargo sets OPT_LEVEL for every build script");
     println!("cargo::rustc-env=BT_MATH_OPT_LEVEL={level}");
