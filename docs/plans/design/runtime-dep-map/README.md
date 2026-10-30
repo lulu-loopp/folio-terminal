@@ -50,8 +50,9 @@ the header is the authority:
   standard `Option`/`Result`, or a foreign `Result` alias on a fixed table
   (`std::io::Result`, `std::fmt::Result`, `std::thread::Result`, `anyhow::Result`,
   `windows::core::Result`, each the standard `Result` it names, its error type
-  included), never by the bare name `Result` nor by the last segment of a path whose
-  crate the census does not know (`syn::Result`); and the adapters that keep the value
+  included), never by the bare name `Result`; and for `?`, `Ok`/`Err` and the
+  standard `Option`/`Result` methods, never by the last segment of a path whose crate
+  the census does not know (`syn::Result`); and the adapters that keep the value
   (`ok_or`, `ok_or_else`, `map_err`, `or_else`, `inspect`, `inspect_err`, anyhow's
   `context` / `with_context`) keep its type (row 101: 20 + 20 sites left the two
   counts above, 5 left the 184 unattributed reads, and 12 call sites became topic
