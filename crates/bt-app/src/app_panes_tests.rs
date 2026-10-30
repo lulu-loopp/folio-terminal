@@ -1027,7 +1027,7 @@ fn a_drag_that_ends_where_the_child_already_is_settles_without_telling_it() {
     let settled = grid_of(44, 4);
     assert!(step(&mut leaf, settled, start));
     let released_at = start + WINDOW_RESIZE_QUIET;
-    let (commit, _) = release_due_leaf_resize(&mut leaf.session, released_at, false).unwrap();
+    let (commit, _) = leaf.session.release_due_size(released_at, false).unwrap();
     let commit = commit.expect("a drag onto a new width owes its child one notification");
     assert!(commit.told_the_child);
     assert_eq!(leaf.session.conpty_grid, settled);
@@ -1059,7 +1059,7 @@ fn a_drag_that_ends_where_the_child_already_is_settles_without_telling_it() {
         wobble_at + Duration::from_millis(17)
     ));
     let released_at = wobble_at + Duration::from_millis(17) + WINDOW_RESIZE_QUIET;
-    let (commit, _) = release_due_leaf_resize(&mut leaf.session, released_at, false).unwrap();
+    let (commit, _) = leaf.session.release_due_size(released_at, false).unwrap();
     let commit = commit.expect(
         "the end of a gesture is released whether or not it moved the \
                                     child",
@@ -1149,7 +1149,9 @@ fn a_repair_owed_before_a_wobble_is_still_owed_after_it_and_paid_once() {
     let settled = grid_of(44, 4);
     assert!(step(&mut leaf, settled, start));
     let at = start + WINDOW_RESIZE_QUIET;
-    let commit = release_due_leaf_resize(&mut leaf.session, at, false)
+    let commit = leaf
+        .session
+        .release_due_size(at, false)
         .unwrap()
         .0
         .expect("a drag onto a new width is released");
@@ -1169,7 +1171,9 @@ fn a_repair_owed_before_a_wobble_is_still_owed_after_it_and_paid_once() {
         wobble_at + Duration::from_millis(17)
     ));
     let released_at = wobble_at + Duration::from_millis(17) + WINDOW_RESIZE_QUIET;
-    let commit = release_due_leaf_resize(&mut leaf.session, released_at, false)
+    let commit = leaf
+        .session
+        .release_due_size(released_at, false)
         .unwrap()
         .0
         .expect("the end of the wobble is released");
@@ -1285,7 +1289,8 @@ fn every_gesture_that_lands_back_on_the_childs_grid_settles_whatever_moved_it() 
                 })
                 .unwrap();
             let at = start + WINDOW_RESIZE_QUIET;
-            release_due_leaf_resize(&mut leaf.session, at, false)
+            leaf.session
+                .release_due_size(at, false)
                 .unwrap()
                 .0
                 .expect("the fixture's own first gesture");
@@ -1322,8 +1327,7 @@ fn every_gesture_that_lands_back_on_the_childs_grid_settles_whatever_moved_it() 
             }
 
             let released_at = at + WINDOW_RESIZE_QUIET;
-            let (commit, _) =
-                release_due_leaf_resize(&mut leaf.session, released_at, false).unwrap();
+            let (commit, _) = leaf.session.release_due_size(released_at, false).unwrap();
             if stage == LeafOnStage::Behind {
                 let commit = commit.expect("a release is due either way");
                 assert_eq!(
@@ -1444,7 +1448,7 @@ fn a_pane_without_the_keyboard_coalesces_a_drag_into_one_conpty_notification() {
             leaf.session.conpty_grid, born,
             "and the child has heard nothing yet — it is the notification that waits"
         );
-        let (commit, wake) = release_due_leaf_resize(&mut leaf.session, at, false).unwrap();
+        let (commit, wake) = leaf.session.release_due_size(at, false).unwrap();
         assert!(
             commit.is_none(),
             "mid-drag there is nothing due: every event pushed the quiet boundary out"
@@ -1458,7 +1462,7 @@ fn a_pane_without_the_keyboard_coalesces_a_drag_into_one_conpty_notification() {
     }
 
     let quiet = start + FRAME * (EVENTS - 1) + WINDOW_RESIZE_QUIET;
-    let (commit, wake) = release_due_leaf_resize(&mut leaf.session, quiet, false).unwrap();
+    let (commit, wake) = leaf.session.release_due_size(quiet, false).unwrap();
     let commit = commit.expect("the quiet boundary releases the one notification a drag owes");
     assert!(
         !commit.reflowed,
@@ -1473,8 +1477,10 @@ fn a_pane_without_the_keyboard_coalesces_a_drag_into_one_conpty_notification() {
         "nothing is owed, so nothing has to be woken for"
     );
 
-    let (again, _) =
-        release_due_leaf_resize(&mut leaf.session, quiet + WINDOW_RESIZE_QUIET, false).unwrap();
+    let (again, _) = leaf
+        .session
+        .release_due_size(quiet + WINDOW_RESIZE_QUIET, false)
+        .unwrap();
     assert!(
         again.is_none(),
         "one drag is one notification; a second turn finds the queue empty"
@@ -1585,7 +1591,7 @@ fn a_drag_rewraps_the_pane_on_the_glass_and_reflows_a_hidden_pane_once() {
     }
 
     let quiet = start + FRAME * (EVENTS - 1) + WINDOW_RESIZE_QUIET;
-    let (commit, _) = release_due_leaf_resize(&mut behind.session, quiet, false).unwrap();
+    let (commit, _) = behind.session.release_due_size(quiet, false).unwrap();
     let commit = commit.expect("the quiet boundary releases what the hidden pane owes");
     assert!(
         commit.reflowed,
@@ -1602,7 +1608,7 @@ fn a_drag_rewraps_the_pane_on_the_glass_and_reflows_a_hidden_pane_once() {
         "in the same breath as the notification its child was waiting for"
     );
 
-    let (commit, _) = release_due_leaf_resize(&mut shown.session, quiet, false).unwrap();
+    let (commit, _) = shown.session.release_due_size(quiet, false).unwrap();
     let commit = commit.expect("the pane on the glass owes its child the same notification");
     assert!(
         !commit.reflowed,

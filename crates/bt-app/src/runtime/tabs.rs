@@ -5351,11 +5351,11 @@ mod birth_death_tests {
             })
             .expect("the pane reflows")
         );
-        let commit =
-            crate::release_due_leaf_resize(leaf, started + crate::WINDOW_RESIZE_QUIET, false)
-                .expect("the resize is released")
-                .0
-                .expect("the child is owed a resize");
+        let commit = leaf
+            .release_due_size(started + crate::WINDOW_RESIZE_QUIET, false)
+            .expect("the resize is released")
+            .0
+            .expect("the child is owed a resize");
         assert!(commit.told_the_child);
     }
 

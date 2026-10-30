@@ -5,7 +5,7 @@
 //! and real tabs — the real `step_leaf_text_scale` (the one mutation door's core), the real
 //! `apply_leaf_metrics`, the real `pane_cell_metrics`-shaped derivation through the production
 //! measuring service (`bt_render::CellMetrics::measure_at` behind `bt_render::CellMetricsMemo`),
-//! the real `ShellSession::propose_size` / `release_due_leaf_resize` transaction, and frames the
+//! the real `ShellSession::propose_size` / `release_due_size` transaction, and frames the
 //! leaves' own sessions compose. Where the claim is about the window's own wiring — which rung
 //! the wheel reaches first, which metrics a hit test reads, who may write the rung — it is
 //! pinned on the item bodies through `bt_source`.
@@ -76,7 +76,8 @@ fn resolve(leaf: &mut TerminalPane, at: Instant) -> bool {
 
 /// Release whatever the leaf owes its child, as the loop does past the quiet boundary.
 fn settle(leaf: &mut TerminalPane, at: Instant) -> Option<LeafResizeCommit> {
-    release_due_leaf_resize(&mut leaf.session, at, false)
+    leaf.session
+        .release_due_size(at, false)
         .expect("a shell-less leaf commits")
         .0
 }
@@ -164,7 +165,7 @@ fn stepping_one_pane_changes_its_metrics_and_leaves_its_neighbour_byte_identical
 ///
 /// Driven the way the wheel drives it: reports turned into rungs by the rung's own carry
 /// ([`TextSizeAim::notch`]), each spend applied through the door's core and re-solved through
-/// `ShellSession::propose_size`, and the child released by `release_due_leaf_resize` exactly as
+/// `ShellSession::propose_size`, and the child released by `release_due_size` exactly as
 /// the loop releases it. `told_the_child` is the commit's own record of whether
 /// `PtySession::resize` — `ResizePseudoConsole` — is called; the fixture has no ConPTY, so this
 /// counts the decision and not the syscall.

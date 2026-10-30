@@ -1578,7 +1578,7 @@ impl ResizeGateHarness {
             at,
         )
         .unwrap();
-        // Exactly what `release_due_leaf_resize` writes back.
+        // Exactly what `ShellSession::release_due_size` writes back.
         self.grid = pending.grid;
         self.conpty = pending.grid;
         if commit.told_the_child {

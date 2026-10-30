@@ -1122,7 +1122,7 @@ fn the_shell_life_is_one_fact_written_only_by_its_transitions() {
     ];
     const LENDS: [(&str, &str); 5] = [
         ("apply_owed_shell_resize", "call:pty_mut"),
-        ("release_due_leaf_resize", "call:pty_mut"),
+        ("ShellSession::release_due_size", "call:pty_mut"),
         ("Runtime::reap_exited_tabs", "call:pty_mut"),
         ("Runtime::send_paste", "pattern"),
         ("Runtime::insert_path_into_terminal", "pattern"),
@@ -1190,7 +1190,7 @@ fn the_shell_life_is_one_fact_written_only_by_its_transitions() {
             ("crate", "await_shell"),
             ("crate", "create_leaf_session"),
             ("crate", "finish_leaf_birth"),
-            ("crate", "release_due_leaf_resize"),
+            ("crate", "ShellSession::release_due_size"),
             ("crate::runtime::clipboard", "Runtime::send_paste"),
             ("crate::runtime::panes", "Runtime::land_own_shell"),
             ("crate::runtime::panes", "Runtime::land_restart"),
@@ -1385,6 +1385,9 @@ fn non_read_rows(census: &FieldCensus, fact: &str) -> Vec<(&'static str, String)
 /// `TerminalPane.successor`. `session`'s writer functions are the ones they were but for the
 /// re-pathing O-5b did (the list below).
 ///
+/// Row 105 (2026-10-29) made the session's release of a resize its own method: the rows the free
+/// function `release_due_leaf_resize` had are `ShellSession::release_due_size`'s, unchanged.
+///
 /// MUTATION (observed red): keep the old name on the struct, and the first assertion names every
 /// field; drop `keep_birth_death_face`'s `leaf.wake = None`, and `wake`'s rows differ; write
 /// `leaf.has_rail = true` in `drain_leaf_pty`, and `has_rail`'s rows differ; leave `view` on
@@ -1429,7 +1432,7 @@ fn the_session_record_is_shell_session() {
         ("attention_ended", expected(&[("write", "end_leaves_of")])),
         (
             "conpty_grid",
-            expected(&[("write", "release_due_leaf_resize")]),
+            expected(&[("write", "ShellSession::release_due_size")]),
         ),
         (
             "foreground_program_cadence",
@@ -1443,7 +1446,7 @@ fn the_session_record_is_shell_session() {
             "grid",
             expected(&[
                 ("write", "ShellSession::propose_size"),
-                ("write", "release_due_leaf_resize"),
+                ("write", "ShellSession::release_due_size"),
             ]),
         ),
         (
@@ -1482,14 +1485,14 @@ fn the_session_record_is_shell_session() {
             "pending_psreadline_resize_reanchor",
             expected(&[
                 ("access", "Runtime::finish_resize_if_quiescent"),
-                ("access", "release_due_leaf_resize"),
+                ("access", "ShellSession::release_due_size"),
             ]),
         ),
         (
             "pending_pty_resize",
             expected(&[
                 ("access", "ShellSession::propose_size"),
-                ("access", "release_due_leaf_resize"),
+                ("access", "ShellSession::release_due_size"),
             ]),
         ),
         (
@@ -1539,7 +1542,7 @@ fn the_session_record_is_shell_session() {
             ("access", "dispatch_tab_decoration_tasks"),
             ("access", "finish_leaf_birth"),
             ("access", "leaf_session_mut"),
-            ("access", "release_due_leaf_resize"),
+            ("access", "ShellSession::release_due_size"),
             ("write", "Runtime::apply_block_max_height"),
             ("write", "Runtime::apply_display_formulas"),
             ("write", "Runtime::apply_inline_formulas"),
@@ -1768,7 +1771,7 @@ fn app(path: &str) -> String {
 /// - **The census**: every proven write of `ShellSession.session` that calls one
 ///   of the session's sizing setters is in a stage, and `ShellSession.grid`'s
 ///   writers (and `pending_pty_resize`'s lenders) are the grid stage and the
-///   session's own release, `release_due_leaf_resize`.
+///   session's own release, `ShellSession::release_due_size` (a method since row 105).
 /// - **The call graph**, which also sees a call on a `&mut DualPlaneSession`
 ///   handed to a helper (no field site at all): in `bt-app`'s product the
 ///   setters' callers are the stages and the constructor, `bare_leaf`, which
@@ -1831,12 +1834,18 @@ fn every_sizing_write_is_a_size_proposal() {
     };
     assert_eq!(
         functions("ShellSession.grid", "write"),
-        ["ShellSession::propose_size", "release_due_leaf_resize"],
+        [
+            "ShellSession::propose_size",
+            "ShellSession::release_due_size"
+        ],
         "the grid moves by the grid stage and the session's release"
     );
     assert_eq!(
         functions("ShellSession.pending_pty_resize", "access"),
-        ["ShellSession::propose_size", "release_due_leaf_resize"],
+        [
+            "ShellSession::propose_size",
+            "ShellSession::release_due_size"
+        ],
         "and so does the resize it owes the child"
     );
 
@@ -1879,6 +1888,84 @@ fn every_sizing_write_is_a_size_proposal() {
             "`{setter}` is reached only by a size proposal"
         );
     }
+}
+
+/// RED (row 105, 2026-10-29) — **the resize grids are written by the session alone**:
+/// `ShellSession.grid` moves only by the grid stage of the sizing door and by the session's own
+/// release, and `conpty_grid` — what the child was told — only by the release, so both are
+/// facts of the session's pair of methods, `ShellSession::propose_size` and
+/// `ShellSession::release_due_size`, and of nothing at the root or in a runtime topic.
+///
+/// The lends follow: `pending_pty_resize` is lent by the same pair, and
+/// `pending_psreadline_resize_reanchor` by the release and dpi's
+/// `Runtime::finish_resize_if_quiescent`, which settles the repair the release owes. Each set is
+/// the whole non-read row set of its fact, so a new write or lend anywhere is named; and every
+/// non-read row of the two grids is a `ShellSession` method in the crate root, so a third writer
+/// is refused by kind even where the sets were edited to admit it.
+///
+/// MUTATION (observed red): a root `fn plant(leaf: &mut ShellSession, g: GridSize)` that writes
+/// `leaf.grid = g`; a dpi helper that writes `leaf.conpty_grid`; the free function
+/// `release_due_leaf_resize` this method was before row 105 — each is named.
+#[test]
+fn the_resize_grids_are_written_by_the_session_alone() {
+    let census = the_census();
+    let non_read = |fact: &str| -> BTreeSet<(&'static str, String, String)> {
+        census
+            .rows()
+            .iter()
+            .filter(|row| row.fact == fact && row.column.name() != "read")
+            .map(|row| (row.column.name(), row.module.clone(), row.function.clone()))
+            .collect()
+    };
+    let rows = |pairs: &[(&'static str, &str, &str)]| -> BTreeSet<(&'static str, String, String)> {
+        pairs
+            .iter()
+            .map(|(column, module, function)| {
+                (*column, (*module).to_owned(), (*function).to_owned())
+            })
+            .collect()
+    };
+    let propose = "ShellSession::propose_size";
+    let release = "ShellSession::release_due_size";
+    for (fact, expected) in [
+        (
+            "ShellSession.grid",
+            rows(&[("write", "crate", propose), ("write", "crate", release)]),
+        ),
+        (
+            "ShellSession.conpty_grid",
+            rows(&[("write", "crate", release)]),
+        ),
+        (
+            "ShellSession.pending_pty_resize",
+            rows(&[("access", "crate", propose), ("access", "crate", release)]),
+        ),
+        (
+            "ShellSession.pending_psreadline_resize_reanchor",
+            rows(&[
+                ("access", "crate", release),
+                (
+                    "access",
+                    "crate::runtime::dpi",
+                    "Runtime::finish_resize_if_quiescent",
+                ),
+            ]),
+        ),
+    ] {
+        assert_eq!(non_read(fact), expected, "`{fact}`'s writes and lends");
+    }
+    let strangers: Vec<String> = ["ShellSession.grid", "ShellSession.conpty_grid"]
+        .into_iter()
+        .flat_map(|fact| non_read(fact).into_iter().map(move |row| (fact, row)))
+        .filter(|(_, (_, module, function))| {
+            module != "crate" || !function.starts_with("ShellSession::")
+        })
+        .map(|(fact, (column, module, function))| format!("{fact} {column} {module}::{function}"))
+        .collect();
+    assert!(
+        strangers.is_empty(),
+        "a resize grid written by something other than the session's own methods: {strangers:?}"
+    );
 }
 
 /// RED (O-3; the ownership contract's (b)1, group 3) — **each `bt-term`
@@ -2122,7 +2209,10 @@ fn each_life_transition_has_its_callers() {
             ],
         ),
         (life("land"), &["finish_leaf_birth"]),
-        (life("owe_landing_size"), &["release_due_leaf_resize"]),
+        (
+            life("owe_landing_size"),
+            &["ShellSession::release_due_size"],
+        ),
         (life("exit_draining"), &[reaper]),
         (life("exited"), &[reaper]),
         (life("release_dead_shell"), &[reaper]),

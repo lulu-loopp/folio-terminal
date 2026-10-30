@@ -12,7 +12,7 @@ use crate::{
     ResizeReanchor, Runtime, TabState, TextScale, card_trace, dpi_snapshot, earliest_deadline,
     ensure_metrics_match_authoritative_scale, ensure_swapchain_matches_inner, float, focus_thumb,
     hang_watch, log_dpi_snapshot, presentation_physical_size, psreadline_resize_repaint_input,
-    release_due_leaf_resize, scale_factors_match, seats, trace_surface_size_clamp,
+    scale_factors_match, seats, trace_surface_size_clamp,
 };
 use anyhow::Context;
 use anyhow::{Result, anyhow};
@@ -234,7 +234,7 @@ impl<B: Backend> Runtime<'_, B> {
                 // only place it can be read, because the release is what moves it
                 // (`BT_CARD_TRACE`).
                 let grid_before = leaf.grid;
-                let (commit, leaf_wake) = release_due_leaf_resize(leaf, now, hand_on_the_geometry)?;
+                let (commit, leaf_wake) = leaf.release_due_size(now, hand_on_the_geometry)?;
                 wake_deadline = earliest_deadline([wake_deadline, leaf_wake]);
                 let Some(commit) = commit else {
                     continue;

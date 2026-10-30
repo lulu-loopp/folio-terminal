@@ -2341,7 +2341,7 @@ pub(crate) fn seat_holds_the_keyboard(
 /// it happens **even when the integer grid is unchanged**: a larger face on the same grid is a new
 /// picture, and the frame it projects carries the new face size in its `layout_key`. The grid
 /// itself is the caller's to re-derive afterwards, through the existing resize transaction
-/// (`ShellSession::propose_size` → `release_due_leaf_resize` → `commit_leaf_resize`).
+/// (`ShellSession::propose_size` → `ShellSession::release_due_size` → `commit_leaf_resize`).
 ///
 /// Answers whether anything moved. When the metrics are the ones the leaf already has — a step
 /// the clamp swallowed — it touches nothing and answers `false`, so no reflow, no PTY and no

@@ -17675,7 +17675,7 @@ struct GridChange {
 /// proposal would reorder writes that happen at different moments. No other code calls the
 /// session's cell-size setters, its `set_layout_key` or the local `resize_at` of a solve
 /// (`every_sizing_write_is_a_size_proposal`); the session's own release of a resize
-/// ([`release_due_leaf_resize`]) is the session's, not a proposal.
+/// ([`Self::release_due_size`]) is the session's, not a proposal.
 impl ShellSession {
     /// **The cell-size stage**: the session's cell height, width, ASCII baseline and face size
     /// for freshly derived metrics. Infallible, and applied even when the integer grid is
@@ -17797,50 +17797,51 @@ impl ShellSession {
         self.grid = reflow;
         Ok(true)
     }
-}
 
-/// Release whatever this one pane's quiet window has made due, and say when it could next be due.
-///
-/// The counterpart of [`ShellSession::propose_size`], and the only place `conpty_grid` moves: what
-/// the child was *told* is written exactly where it is told, so a drag that wanders out and comes
-/// back cancels its own request instead of replaying an intermediate size.
-fn release_due_leaf_resize(
-    leaf: &mut ShellSession,
-    now: Instant,
-    hand_on_the_geometry: bool,
-) -> Result<(Option<LeafResizeCommit>, Option<Instant>)> {
-    let (due, wake) =
-        service_pending_pty_resize(&mut leaf.pending_pty_resize, now, hand_on_the_geometry);
-    let Some(pending) = due else {
-        return Ok((None, wake));
-    };
-    let local_grid = leaf.grid;
-    let conpty_grid = leaf.conpty_grid;
-    let integration = leaf.launch.integration;
-    let commit = commit_leaf_resize(
-        &mut leaf.session,
-        leaf.life.pty_mut(),
-        ResizeReanchor {
-            pending: &mut leaf.pending_psreadline_resize_reanchor,
-            integration,
-        },
-        ReleaseGrids {
-            local: local_grid,
-            conpty: conpty_grid,
-            next: pending.grid,
-        },
-        pending.physical,
-        now,
-    )?;
-    leaf.grid = pending.grid;
-    leaf.conpty_grid = pending.grid;
-    // **A shell still being born is owed this size when it lands** (T-BIRTH-OFF-WINDOW,
-    // T-FALLBACK-OWED-RESIZE): it was asked for at the grid of its request, and nothing above
-    // could tell it. A pane's first birth and a birth-death fallback carry the same landing fact.
-    if commit.told_the_child {
-        leaf.life.owe_landing_size(pending.physical);
+    /// Release whatever this one pane's quiet window has made due, and say when it could next be
+    /// due.
+    ///
+    /// The counterpart of [`Self::propose_size`], and the only place `conpty_grid` moves: what the
+    /// child was *told* is written exactly where it is told, so a drag that wanders out and comes
+    /// back cancels its own request instead of replaying an intermediate size.
+    fn release_due_size(
+        &mut self,
+        now: Instant,
+        hand_on_the_geometry: bool,
+    ) -> Result<(Option<LeafResizeCommit>, Option<Instant>)> {
+        let (due, wake) =
+            service_pending_pty_resize(&mut self.pending_pty_resize, now, hand_on_the_geometry);
+        let Some(pending) = due else {
+            return Ok((None, wake));
+        };
+        let local_grid = self.grid;
+        let conpty_grid = self.conpty_grid;
+        let integration = self.launch.integration;
+        let commit = commit_leaf_resize(
+            &mut self.session,
+            self.life.pty_mut(),
+            ResizeReanchor {
+                pending: &mut self.pending_psreadline_resize_reanchor,
+                integration,
+            },
+            ReleaseGrids {
+                local: local_grid,
+                conpty: conpty_grid,
+                next: pending.grid,
+            },
+            pending.physical,
+            now,
+        )?;
+        self.grid = pending.grid;
+        self.conpty_grid = pending.grid;
+        // **A shell still being born is owed this size when it lands** (T-BIRTH-OFF-WINDOW,
+        // T-FALLBACK-OWED-RESIZE): it was asked for at the grid of its request, and nothing above
+        // could tell it. A pane's first birth and a birth-death fallback carry the same landing fact.
+        if commit.told_the_child {
+            self.life.owe_landing_size(pending.physical);
+        }
+        Ok((Some(commit), wake))
     }
-    Ok((Some(commit), wake))
 }
 
 /// **Why a formula's hover ended**, because the two answers differ about one
@@ -44975,7 +44976,7 @@ mod pty_drain_budget_tests {
             "the commit has one caller in the product, and that caller is the release"
         );
         assert!(
-            free_fn_body("release_due_leaf_resize").contains(call),
+            method_body("ShellSession", "release_due_size").contains(call),
             "and the release is it"
         );
         let solve = method_body("Runtime", "resize_leaves_to_layout");
