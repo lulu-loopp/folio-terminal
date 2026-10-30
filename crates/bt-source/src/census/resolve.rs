@@ -270,13 +270,7 @@ impl<'d> Resolver<'d> {
         if !matches!(self.kind(named), Kind::Std(_) | Kind::External(_)) {
             return None;
         }
-        let spelled: Vec<&str> = named
-            .krate
-            .iter()
-            .chain(&named.prefix)
-            .chain(std::iter::once(&named.name))
-            .map(String::as_str)
-            .collect();
+        let spelled = spelled(named);
         let rooted = matches!(named.krate.as_deref(), Some("std" | "core" | "alloc"));
         RESULT_ALIASES
             .iter()
@@ -1227,6 +1221,21 @@ impl<'d> Resolver<'d> {
                             }
                         }
                     }
+                    // An `Option`/`Result` that is one only by its last segment (`syn::Result`
+                    // where `syn` is no dependency) is not the standard enum: its methods are not
+                    // the lists' (plan row 101, the review's F5; `standard_enum`).
+                    Kind::Std(Std::Option | Std::Result)
+                        if self.standard_enum(&named).is_none() =>
+                    {
+                        return Err(fail(
+                            format!(
+                                "`{}` is not the standard `{}`: a path the census places in no                                  crate it knows",
+                                spelled(&named).join("::"),
+                                named.name
+                            ),
+                            shared,
+                        ));
+                    }
                     Kind::Std(kind) => {
                         if let Some(found) = std_method(kind, &named.args, method) {
                             return Ok(answer(found, false, shared));
@@ -1676,4 +1685,15 @@ fn holds_unique_reference(ty: &Ty) -> bool {
         Ty::Entry(_) => true,
         Ty::Fn(_) | Ty::Param(_) | Ty::Assoc { .. } | Ty::Traits(_) | Ty::Unknown(_) => false,
     }
+}
+
+/// A path type's segments as written: its crate (if it names one), its modules and its name.
+fn spelled(named: &Named) -> Vec<&str> {
+    named
+        .krate
+        .iter()
+        .chain(&named.prefix)
+        .chain(std::iter::once(&named.name))
+        .map(String::as_str)
+        .collect()
 }

@@ -17,6 +17,14 @@ pub fn on_table_try(result: anyhow::Result<&mut WindowRuntime>) -> anyhow::Resul
     Ok(())
 }
 
+// Off the table, through a standard method's name: `syn::Result`'s `map_err` is not the
+// standard `Result`'s, so the `?` after it gives nothing the rules type (an unknown site).
+pub fn off_table_map_err(result: syn::Result<&mut WindowRuntime>) -> syn::Result<()> {
+    let window = result.map_err(|e| e)?;
+    window.title = String::new();
+    Ok(())
+}
+
 // Off the table: `?` on `syn::Result` gives nothing the rules type, and the field it spells is
 // an unknown site, never attributed.
 pub fn off_table_try(result: syn::Result<&mut WindowRuntime>) -> syn::Result<()> {

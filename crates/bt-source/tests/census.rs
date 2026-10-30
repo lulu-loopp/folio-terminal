@@ -560,14 +560,19 @@ fn the_standard_result_is_read_by_what_the_type_resolves_to() {
 /// RED (plan row 101, ruling R3; the review's F4) — **a foreign `Result` is a `Result`
 /// to the census only on the alias table**: in a package that declares no `Result`, a `?` on
 /// `anyhow::Result` gives the window (a write), and a `?` on `syn::Result`, off the table, gives
-/// nothing the rules type (an unknown site, never attributed).
+/// nothing the rules type (an unknown site, never attributed) — nor does a `?` after a standard
+/// method's name on it (`result.map_err(|e| e)?`: `syn::Result`'s `map_err` is not on the lists).
 ///
+/// RED on `d6b278013` (the review's re-check, F5): the method dispatch took `syn::Result` for the
+/// standard `Result` by its kind, so `map_err` answered the lists' `Result<T, _>` and
+/// `off_table_map_err` wrote the title.
 /// RED before R3: the bare name `Result` made `syn::Result`'s `?` the window (a write by
 /// `off_table_try`); and RED on R3's first commit (`51dedbaeb`), which still took a path with a
 /// module the census places in no crate it knows (`syn` is no dependency here) for the standard
 /// `Result` by its kind — the kind `Resolver::kind` gives it by its last segment.
 /// MUTATIONS: in `Resolver::result_alias`, accept any spelled path whose last segment is a row's —
-/// `off_table_try` writes the title; in `Resolver::standard_enum`, read the kind alone — it does.
+/// `off_table_try` writes the title; in `Resolver::standard_enum`, read the kind alone — it does;
+/// drop the method dispatch's spelling arm — `off_table_map_err` does.
 #[test]
 fn a_foreign_result_off_the_table_is_not_a_result_to_the_census() {
     let census = census_of("foreign_result");
@@ -583,7 +588,11 @@ fn a_foreign_result_off_the_table_is_not_a_result_to_the_census() {
     assert_eq!(
         unknown,
         // `untyped` is the shared fixture's own.
-        [("?.title", "off_table_try"), ("?.title", "untyped")],
+        [
+            ("?.title", "off_table_map_err"),
+            ("?.title", "off_table_try"),
+            ("?.title", "untyped")
+        ],
         "{:#?}",
         census.unknowns()
     );

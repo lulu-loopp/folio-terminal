@@ -29,7 +29,10 @@
 //! not declare, or a scrutinee that is untyped, a generic or `impl Trait`; an element count the
 //! fields cannot hold; and a pattern a macro writes, or one `syn` keeps as tokens
 //! (`Pat::Macro`, `Pat::Verbatim`): every name in it is bound untyped, so an outer binding of
-//! that name does not show through. Held limit: anyhow's `context`/`with_context` are read by
+//! that name does not show through. It defines every identifier token of the pattern, path heads
+//! and keywords too (`Some`, `ref`), not only the names it binds: it refuses too much (a later
+//! one-segment call or value of such a name in the arm is untyped or `Dynamic`, listed), never
+//! guesses. Held limit: anyhow's `context`/`with_context` are read by
 //! method name on every standard `Option`/`Result`, whether or not the package depends on anyhow
 //! (true while anyhow is the one dependency whose trait gives them these names); a first-party
 //! trait's method of the name is asked first and wins.
