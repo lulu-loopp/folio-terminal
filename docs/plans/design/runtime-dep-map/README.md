@@ -97,16 +97,19 @@ exact count of what it does see.
     `runtime/tabs.rs` (118), `runtime/floats.rs` (95), `runtime/keyboard.rs` (93),
     `runtime/windows.rs` (90) and `runtime/frame.rs` (81).
   - The `runtime/*` topics call each other along 372 edges (2,782 sites).
-- **doors.tsv**: 317 doors at O-5a (2026-10-27; 334 at O-1) and at O-5b
-  (2026-10-28). 221 are on `WindowRuntime`, 55 on `App`, 19 on `TabState`, 9 on
-  `ShellSession`, 7 on `LaunchFacts` and 6 on `TermView`. `PreviewBuffer`,
+- **doors.tsv**: 315 doors at plan row 105 (2026-10-29), 317 at O-5a (2026-10-27;
+  334 at O-1) and at O-5b (2026-10-28). 221 are on `WindowRuntime`, 55 on `App`, 19 on
+  `TabState`, 7 on `ShellSession` (9 before row 105: `grid` and `conpty_grid` left when
+  their writers became the session's own methods), 7 on `LaunchFacts` and 6 on
+  `TermView`. `PreviewBuffer`,
   `PreviewPane`, `DocumentView`, `PictureView` and `TerminalPane` have none: O-7
   and O-8 put their writes inside their own types, and the pane's writes are its
   own methods (O-5b).
-- **unclassified.tsv**: **254 items, 222 free functions and 32 `Runtime`
+- **unclassified.tsv**: **255 items, 223 free functions and 32 `Runtime`
   methods**, still in `main.rs` (at plan row 105's head, which made the free function
-  `release_due_leaf_resize` the method `ShellSession::release_due_size`; 255, 223 and 32
-  at K2 batch 26's head; 263, 229 and 34 before it,
+  `release_due_leaf_resize` the method `ShellSession::release_due_size`; 256, 224 and 32
+  before it, at plan row 90's head, whose `settle_the_first_canvas` is a new root function;
+  255, 223 and 32 at K2 batch 26's head; 263, 229 and 34 before it,
   at main `799ac8592`: batch 25's 260 and plan row 79's three root functions
   `announce_frame_shape_stop`, `say_the_stop_alert` and `claim_the_alert`;
   260, 226 and 34 at batch 25's head; 275, 241 and 34 before batch 25,
