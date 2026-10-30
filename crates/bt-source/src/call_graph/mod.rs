@@ -27,7 +27,12 @@
 //! Refused, by kind (the receiver stays untyped, its call [`Unresolved::Ambiguous`]): `?` on a
 //! type that is neither Q1 nor Q2 or on an untyped operand; a variant the scrutinee's type does
 //! not declare, or a scrutinee that is untyped, a generic or `impl Trait`; an element count the
-//! fields cannot hold. A pattern a macro writes (`Pat::Macro`) binds nothing the rules see.
+//! fields cannot hold; and a pattern a macro writes, or one `syn` keeps as tokens
+//! (`Pat::Macro`, `Pat::Verbatim`): every name in it is bound untyped, so an outer binding of
+//! that name does not show through. Held limit: anyhow's `context`/`with_context` are read by
+//! method name on every standard `Option`/`Result`, whether or not the package depends on anyhow
+//! (true while anyhow is the one dependency whose trait gives them these names); a first-party
+//! trait's method of the name is asked first and wins.
 //!
 //! # The grammar
 //!

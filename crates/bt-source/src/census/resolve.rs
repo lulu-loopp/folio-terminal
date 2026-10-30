@@ -290,6 +290,26 @@ impl<'d> Resolver<'d> {
             .and_then(|row| result_alias(row, &named.args))
     }
 
+    /// **The standard `Option` or `Result` an (expanded) type is**, for `?` and the `Some`/`Ok`/
+    /// `Err` patterns (plan row 101, ruling R3): its kind, written bare or from the standard
+    /// library (`std::result::Result`, what a [`RESULT_ALIASES`] row expands to). A path with a
+    /// module the census places in no crate it knows (`syn::Result` where `syn` is not a
+    /// dependency) is a standard kind to [`Self::kind`] by its last segment only, so it is none
+    /// here.
+    pub(crate) fn standard_enum(&self, named: &Named) -> Option<Std> {
+        let spelled_standard = match named.krate.as_deref() {
+            None => named.prefix.is_empty(),
+            Some("std" | "core" | "alloc") => {
+                named.prefix.is_empty() || named.prefix == [named.name.to_lowercase()]
+            }
+            Some(_) => false,
+        };
+        match self.kind(named) {
+            Kind::Std(kind @ (Std::Option | Std::Result)) if spelled_standard => Some(kind),
+            _ => None,
+        }
+    }
+
     pub(crate) fn kind(&self, named: &Named) -> Kind<'d> {
         let name = &named.name;
         if let Some(krate) = &named.krate

@@ -1480,13 +1480,16 @@ fn shared_untyped() -> Vec<String> {
 /// (`anyhow::Result`, `windows::core::Result`, `std::io::Result`, `std::fmt::Result`,
 /// `std::thread::Result`): `let p = pane()?; p.shared()`, `pane()?.shared()`, `match land()? {
 /// Landing::Landed(p) => p.shared() }` are `Pane::shared`, and the `Err` of a one-argument
-/// standard alias is its error type (`std::io::Error::kind`, a foreign boundary).
+/// standard alias is its error type (`std::io::Error::kind`, a foreign boundary), and the `Err`
+/// of a two-argument `anyhow::Result<T, E>` is its `E` (`KindA::kind`).
 ///
 /// RED before: every one was an untyped receiver's `Ambiguous` call (the O-4b review's F5 class:
 /// `std_of` admitted no foreign path outside `std`/`core`/`alloc`, and `Err` read a second type
 /// argument the alias does not write).
-/// MUTATION: drop `anyhow::Result` from `census::types::RESULT_ALIASES` — `bound`, `chained` and
-/// `matched` are `Ambiguous` again; drop the `std::io::Result` row — `io_error`'s `kind` is.
+/// MUTATIONS: drop `anyhow::Result` from `census::types::RESULT_ALIASES` — `bound`, `chained` and
+/// `matched` are `Ambiguous` again; drop the `std::io::Result` row — `io_error`'s `kind` is;
+/// give the two-argument `anyhow::Result` the one-argument row's error — `two_argument`'s `kind`
+/// is `anyhow::Error`'s.
 #[test]
 fn a_question_marks_value_is_typed_through_the_alias_table() {
     let index = fixture("question_mark");
@@ -1499,8 +1502,12 @@ fn a_question_marks_value_is_typed_through_the_alias_table() {
         ["foreign std::io::Error::kind"]
     );
     assert_eq!(
-        at(&resolver, "fmt_error", "kind"),
-        ["foreign std::fmt::Error::kind"]
+        at(&resolver, "fmt_error", "to_string"),
+        ["foreign std::fmt::Error::to_string"]
+    );
+    assert_eq!(
+        at(&resolver, "two_argument", "kind"),
+        ["cg-question_mark crate::KindA::kind"]
     );
 }
 
@@ -1531,27 +1538,38 @@ fn a_variant_pattern_binds_nested_and_rest_positions() {
 }
 
 /// RED (plan row 101, ruling R1) — **the adapters that keep a value's type keep it**:
-/// `Option::ok_or`/`ok_or_else` and `Result::map_err`/`or_else` answer a `Result` of the same
-/// value, and anyhow's `Context::context`/`with_context` on a `Result` or an `Option` an
-/// `anyhow::Result` of it — so a `?` after one is typed (`Pane::shared`, five times).
+/// `Option::ok_or`/`ok_or_else` and `Result::map_err`/`or_else`/`inspect`/`inspect_err` answer a
+/// `Result` of the same value, and anyhow's `Context::context`/`with_context` on a `Result` or an
+/// `Option` an `anyhow::Result` of it — so a `?` after one is typed (`Pane::shared`, nine times);
+/// and `inspect`/`inspect_err` keep the error too (`Other::shared`, twice).
 ///
 /// RED before: each answered "what `<adapter>` returns", and the `?` after it was untyped.
-/// MUTATION: answer `ok_or_else` with an unknown return again — `p.shared()` is `Ambiguous`.
+/// MUTATIONS: answer `ok_or_else` with an unknown return again — `p.shared()` is `Ambiguous`;
+/// give `inspect`/`inspect_err` the value's type as the error (`arg(args, 0)`) — `adapted_errors`
+/// calls `Pane::shared`.
 #[test]
 fn a_type_keeping_adapters_value_is_typed() {
     let index = fixture("question_mark");
     let resolver = resolver("question_mark", &index);
-    assert_eq!(at(&resolver, "adapted", "shared"), pane_shared(5));
+    assert_eq!(at(&resolver, "adapted", "shared"), pane_shared(9));
+    assert_eq!(
+        at(&resolver, "adapted_errors", "shared"),
+        vec!["cg-question_mark crate::Other::shared".to_owned(); 2]
+    );
 }
 
 /// RED by mutation (plan row 101, ruling R2) — **what the grammar refuses stays refused**: a
 /// `?` on a foreign `Result` alias off the table (`syn::Result`) and on an untyped operand type
 /// nothing, so their receivers' calls are untyped — `shared` with both candidates, `only_pane`
-/// with its one (counted, never followed) — and are never matched by the bare name `Result`.
+/// with its one (counted, never followed) — and are never matched by the bare name `Result`; and
+/// a name a macro's pattern may bind is untyped in its arm, so an outer binding of that name
+/// does not show through (`macro_pattern`: the outer `p` is a `Pane`, the arm's is untyped).
 ///
-/// GREEN before and after.
-/// MUTATION: in `census::types::result_alias`, accept any foreign path whose last segment is
-/// `Result` — `refused`'s `shared` is `Pane::shared`.
+/// GREEN before for `refused` and `untyped_operand`; RED before for `macro_pattern` (the
+/// pattern bound nothing, so the arm's `p` was the outer `Pane`).
+/// MUTATIONS: in `census::types::result_alias`, accept any foreign path whose last segment is
+/// `Result` — `refused`'s `shared` is `Pane::shared`; drop `Walker::bind`'s `Pat::Macro` arm —
+/// `macro_pattern`'s `shared` is `Pane::shared`.
 #[test]
 fn a_question_mark_the_grammar_refuses_is_still_refused() {
     let index = fixture("question_mark");
@@ -1562,6 +1580,11 @@ fn a_question_mark_the_grammar_refuses_is_still_refused() {
         ["ambiguous only_pane: cg-question_mark crate::Pane::only_pane"]
     );
     assert_eq!(at(&resolver, "untyped_operand", "shared"), shared_untyped());
+    assert_eq!(
+        at(&resolver, "macro_pattern", "only_pane"),
+        ["cg-question_mark crate::Pane::only_pane"]
+    );
+    assert_eq!(at(&resolver, "macro_pattern", "shared"), shared_untyped());
 }
 
 // ── round 4 ───────────────────────────────────────────────────────────────

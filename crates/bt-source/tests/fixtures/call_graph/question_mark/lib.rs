@@ -1,6 +1,7 @@
 //! `?` values and variant patterns (plan row 101): a foreign `Result` alias on the fixed table,
 //! a one-argument standard alias's `Err`, the adapters that keep a value's type, nested and rest
-//! patterns — and what the grammar refuses, which stays an untyped receiver's call.
+//! patterns — and what the grammar refuses, which stays an untyped receiver's call (a macro's
+//! pattern binds its names untyped).
 
 use std::io;
 
@@ -73,6 +74,17 @@ pub fn off_table() -> syn::Result<Pane> {
     Ok(Pane)
 }
 
+pub fn two() -> anyhow::Result<Pane, KindA> {
+    Ok(Pane)
+}
+
+/// A macro that writes a pattern: what it binds is the macro's, not the rules'.
+macro_rules! named {
+    ($name:ident) => {
+        $name
+    };
+}
+
 // ── typed through the alias table ────────────────────────────────────────
 
 pub fn bound() -> Result<()> {
@@ -114,6 +126,12 @@ pub fn io_error() {
 
 pub fn fmt_error() {
     if let Err(e) = formatted() {
+        e.to_string();
+    }
+}
+
+pub fn two_argument() {
+    if let Err(e) = two() {
         e.kind();
     }
 }
@@ -167,7 +185,25 @@ pub fn adapted() -> Result<()> {
     s.shared();
     let t = plain().or_else(|_| plain())?;
     t.shared();
+    let u = maybe().ok_or(Other)?;
+    u.shared();
+    let v = plain().inspect(|_| {})?;
+    v.shared();
+    let w = plain().inspect_err(|_| {})?;
+    w.shared();
+    let x = read().with_context(|| "read")?;
+    x.shared();
     Ok(())
+}
+
+/// `inspect` and `inspect_err` keep the error too: `plain()`'s is an `Other`.
+pub fn adapted_errors() {
+    if let Err(e) = plain().inspect(|_| {}) {
+        e.shared();
+    }
+    if let Err(e) = plain().inspect_err(|_| {}) {
+        e.shared();
+    }
 }
 
 // ── refused ──────────────────────────────────────────────────────────────
@@ -177,6 +213,14 @@ pub fn refused() -> Result<()> {
     p.shared();
     p.only_pane();
     Ok(())
+}
+
+/// The outer `p` is a `Pane`; the arm's `p` is whatever the macro's pattern binds.
+pub fn macro_pattern(p: Pane, landing: Landing) {
+    p.only_pane();
+    match landing {
+        named!(p) => p.shared(),
+    }
 }
 
 pub fn untyped_operand() -> Result<()> {

@@ -313,6 +313,23 @@ impl<'t, 'i> Walker<'t, 'i> {
         }
     }
 
+    /// Every name in a pattern's tokens (a macro's, or what `syn` keeps verbatim), defined
+    /// untyped: the rules cannot see which of them the pattern binds (plan row 101).
+    fn bind_unknown_names(&mut self, tokens: proc_macro2::TokenStream) {
+        for token in tokens {
+            match token {
+                proc_macro2::TokenTree::Ident(name) => {
+                    self.define(
+                        &name.to_string(),
+                        Ty::unknown("a name a macro's pattern may bind"),
+                    );
+                }
+                proc_macro2::TokenTree::Group(group) => self.bind_unknown_names(group.stream()),
+                proc_macro2::TokenTree::Punct(_) | proc_macro2::TokenTree::Literal(_) => {}
+            }
+        }
+    }
+
     fn lookup(&self, name: &str) -> Option<&Ty> {
         self.scopes
             .iter()
@@ -651,15 +668,19 @@ impl<'t, 'i> Walker<'t, 'i> {
                 };
                 for item in &slice.elems {
                     // `name @ ..` binds the elements it stands for: a slice of them.
-                    let bound = match item {
-                        syn::Pat::Ident(ident) if matches!(ident.subpat.as_ref(), Some((_, rest)) if matches!(**rest, syn::Pat::Rest(_))) => {
-                            Ty::Slice(Box::new(element.clone()))
-                        }
-                        _ => element.clone(),
+                    let bound = if binds_rest(item) {
+                        Ty::Slice(Box::new(element.clone()))
+                    } else {
+                        element.clone()
                     };
                     self.bind(item, bound, mode);
                 }
             }
+            // A pattern a macro writes, or one `syn` keeps as tokens: any name in it may be one it
+            // binds, so each is untyped here and an outer binding of that name does not show
+            // through.
+            syn::Pat::Macro(pattern) => self.bind_unknown_names(pattern.mac.tokens.clone()),
+            syn::Pat::Verbatim(tokens) => self.bind_unknown_names(tokens.clone()),
             _ => {}
         }
     }
@@ -1735,6 +1756,17 @@ fn arity_fits(elems: &Punctuated<syn::Pat, syn::Token![,]>, fields: usize) -> bo
         elems.len() - 1 <= fields
     } else {
         elems.len() == fields
+    }
+}
+
+/// Whether a slice pattern's element is `name @ ..`: a binding of the elements `..` stands for.
+fn binds_rest(pat: &syn::Pat) -> bool {
+    match pat {
+        syn::Pat::Ident(ident) => ident
+            .subpat
+            .as_ref()
+            .is_some_and(|(_, sub)| matches!(**sub, syn::Pat::Rest(_))),
+        _ => false,
     }
 }
 

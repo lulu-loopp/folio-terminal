@@ -15,9 +15,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use super::names::{Named, Names, canonical_std};
 use super::{ArmQuery, Arms, ItemId, Target, Unresolved, ValueId, Via};
 use crate::census::types::{
-    Method, Named as TyNamed, Receiver, Std, Ty, Written, closures_by_position, entry_method,
-    external_method, impl_header, impl_of, iterator_method, prelude_method, result_alias, std_kind,
-    std_method,
+    Method, Named as TyNamed, Receiver, Std, Ty, Written, closures_by_position,
+    dependency_trait_of, entry_method, external_method, impl_header, impl_of, iterator_method,
+    prelude_method, result_alias, std_kind, std_method,
 };
 use crate::index::{ConditionalVariant, DeclarationPath, Index, ItemRecord};
 use crate::traits::{ResolveCutoff, TraitId, TraitResolver};
@@ -1479,7 +1479,12 @@ impl<'i> Tables<'i> {
                     let found = listed
                         .or_else(|| external_method(&named.name, name))
                         .or_else(|| prelude_method(name, &Ty::Named(named.clone())));
-                    let mut full = path;
+                    // A method of the lists that a dependency trait gives the type (anyhow's
+                    // `Context`) is labelled with that trait, not the standard type.
+                    let mut full = match kind.and_then(|kind| dependency_trait_of(kind, name)) {
+                        Some(owner) => owner.iter().map(|segment| (*segment).to_owned()).collect(),
+                        None => path,
+                    };
                     full.push(name.to_owned());
                     let mut answer =
                         Answer::one(Target::Foreign(full), Via::Direct).with_std(found);
