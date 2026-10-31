@@ -795,66 +795,60 @@ fn a_panic_after_a_stop_on_its_own_thread_ends_the_process_once() {
     }
 }
 
-/// RED (row 102) — **a panic while the stop's box is up does not take the box off the screen,
-/// and the process ends by the panic road once the box is closed.**
+/// RED (row 102, and review F1) — **a panic while the stop's box is up does not take the box
+/// off the screen, and the process ends by the panic road once the box is left, whichever
+/// thread panicked.**
 ///
-/// The child is a run nobody watches, so the stop's alert is owed to its box; the box, while
-/// up, has a worker panic. The hook owes its leave to the stop's thread and returns; the stop,
-/// with its alert said, takes the panic road.
+/// Each child is a run nobody watches, so the stop's alert is owed to its box; the box, while
+/// up, has the panic planted. The hook owes its leave to the stop's thread and returns; the
+/// stop, its alert left, takes the panic road from its said step's guard.
+/// - **On a worker**: the box returns, and the guard drops on the return.
+/// - **On the stop's own thread** (review F1), the window thread's form of a panic during the
+///   alert: one in the alert's own code (winit buffers every other event while a box pumps).
+///   The thread unwinds out of the alert, and the guard drops on the unwind; a said step taken
+///   only on a return never ran, and the panic left by the harness here — by winit and the
+///   loader's teardown in the product.
 ///
-/// MUTATION (observed red): `a_stops_alert_said` answers `false` for `LeaveOwed` — the stop
-/// goes on to its orderly way out, and the child outlives the panic.
+/// The two children are one test's, the resident channel's one writer (TEST-GLOBALS); each
+/// reads on its standard input which thread panics.
+///
+/// MUTATIONS (observed red): `a_stops_alert_said` answers `false` for `LeaveOwed` — the stop
+/// goes on to its orderly way out, and the worker's child outlives the panic; take the said
+/// step after the alert instead of in the guard — the own-thread child's harness catches the
+/// panic and prints its summary, and no footer is written.
 #[test]
 fn a_panic_while_a_stops_box_is_up_ends_the_process_when_it_closes() {
     const SELECTOR: &str =
         "app_diagnostics_tests::a_panic_while_a_stops_box_is_up_ends_the_process_when_it_closes";
-    match crate::test_support::a_process_of_its_own(SELECTOR, b"") {
-        None => {
-            diagnostics::as_a_resident_run_nobody_watches();
-            a_stop_then_a_panic("panic-during-stop-box", a_worker_panics, || {});
+    const ON_A_WORKER: &str = "on a worker";
+    const ON_THE_STOPS_OWN_THREAD: &str = "on the stop's own thread";
+    for panics in [ON_A_WORKER, ON_THE_STOPS_OWN_THREAD] {
+        match crate::test_support::a_process_of_its_own(SELECTOR, panics.as_bytes()) {
+            None => {
+                let mut panics = String::new();
+                std::io::Read::read_to_string(&mut std::io::stdin(), &mut panics)
+                    .expect("the child reads which thread panics");
+                diagnostics::as_a_resident_run_nobody_watches();
+                match panics.as_str() {
+                    ON_A_WORKER => {
+                        a_stop_then_a_panic("panic-during-stop-box", a_worker_panics, || {});
+                    }
+                    ON_THE_STOPS_OWN_THREAD => a_stop_then_a_panic(
+                        "panic-in-stop-box-own-thread",
+                        || panic!("{THE_SECOND_PANIC}"),
+                        || {},
+                    ),
+                    other => panic!("no such thread to panic on: {other:?}"),
+                }
+                return;
+            }
+            Some(output) => the_child_left_by_the_panic_road(&output, |stdout| {
+                stdout
+                    .lines()
+                    .filter(|line| *line == THE_STOPS_ALERT)
+                    .count()
+            }),
         }
-        Some(output) => the_child_left_by_the_panic_road(&output, |stdout| {
-            stdout
-                .lines()
-                .filter(|line| *line == THE_STOPS_ALERT)
-                .count()
-        }),
-    }
-}
-
-/// RED (row 102, review F1) — **a panic on the stop's own thread while its alert is up still
-/// ends the process by the panic road.**
-///
-/// The window thread's form of a panic during the stop's alert: one in the alert's own code
-/// (winit buffers every other event while a box pumps). The hook owes its leave to the stop's
-/// thread and returns, and that thread then unwinds out of the alert: the said step, taken
-/// only on a return, never ran, and the panic left by the harness here — by winit and the
-/// loader's teardown in the product. The step is a guard's drop, taken on the way out of the
-/// alert whichever way it is left.
-///
-/// The child is a run nobody watches, so the stop's alert is owed to its box; the box, while
-/// up, panics on its own thread.
-///
-/// MUTATION (observed red): take the said step after the alert instead of in the guard — the
-/// harness catches the panic and prints its summary, and no footer is written.
-#[test]
-fn a_panic_on_the_stops_own_thread_while_its_box_is_up_ends_the_process() {
-    const SELECTOR: &str = "app_diagnostics_tests::a_panic_on_the_stops_own_thread_while_its_box_is_up_ends_the_process";
-    match crate::test_support::a_process_of_its_own(SELECTOR, b"") {
-        None => {
-            diagnostics::as_a_resident_run_nobody_watches();
-            a_stop_then_a_panic(
-                "panic-in-stop-box-own-thread",
-                || panic!("{THE_SECOND_PANIC}"),
-                || {},
-            );
-        }
-        Some(output) => the_child_left_by_the_panic_road(&output, |stdout| {
-            stdout
-                .lines()
-                .filter(|line| *line == THE_STOPS_ALERT)
-                .count()
-        }),
     }
 }
 
