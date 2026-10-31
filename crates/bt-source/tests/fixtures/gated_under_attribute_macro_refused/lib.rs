@@ -6,6 +6,7 @@
 pub fn a_let() {
     #[cfg(test)]
     let x = 0;
+    let v = vec![#[cfg(test)] 1];
 }
 
 #[proc_attr]

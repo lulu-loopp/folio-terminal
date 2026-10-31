@@ -63,6 +63,17 @@
 //! * Not refused: any other attribute in a macro's tokens (a doc comment, `derive`, a `cfg_attr`
 //!   that writes no `cfg`), `cfg!(…)` (an expression, not a gate), and anything inside a gated
 //!   node, which is not read again.
+//! * **Under an attribute macro (T-GATE-WALK-UNDER-ATTRIBUTE-MACROS, plan row 122).** An item,
+//!   `impl` item, `trait` item or foreign item that carries an attribute that may rewrite it
+//!   ([`may_rewrite`]) hands its tokens to that macro, which may emit anything; so, once the
+//!   item's own `cfg`s are read (the compiler applies them before any attribute macro), every
+//!   `cfg` and `cfg`-writing `cfg_attr` inside it, at any depth and inside macro tokens too, is
+//!   refused ([`Rejection::CfgUnderAttributeMacro`], naming the outermost such attribute), an
+//!   entry of a read list included. The item itself is not refused. Inert, and read through: the
+//!   language's own attributes, the tool namespaces, a `derive` of anything, a derive helper
+//!   beside a derive that declares it ([`DERIVE_HELPERS`], a closed table), and a `cfg_attr`
+//!   writing only those; anything else may rewrite, a `cfg_attr` writing it whatever its
+//!   predicate. The item is also a hazard when an attribute may run a macro, as above.
 //! * **Not reached (a limit older than this row):** a macro written in an attribute's value
 //!   (`#[doc = m!(…)]`) and the tokens `syn` keeps unparsed in a `Verbatim` node are visited by
 //!   neither reading, so a `cfg` there is neither read nor refused (no attribute-value macro in
@@ -106,6 +117,7 @@ pub(crate) fn read(
         scopes: Vec::new(),
         definitions: Vec::new(),
         hazards: Vec::new(),
+        rewritten_by: None,
     };
     walk.visit_file(file);
 }
@@ -127,6 +139,10 @@ struct Gates<'a> {
     definitions: Vec<Definition>,
     /// Every place the walk has passed that could give a name a definition it does not see.
     hazards: Vec<Hazard>,
+    /// While the walk is inside an item that carries an attribute macro ([`may_rewrite`]): that
+    /// attribute, as written between its brackets. The macro receives the item's tokens and may
+    /// emit anything, so no `cfg` in there is read as a gate; each is refused.
+    rewritten_by: Option<String>,
 }
 
 /// One `macro_rules!`, and whether its body is the one this walk reads.
@@ -162,6 +178,10 @@ impl Gates<'_> {
         for attribute in attrs {
             let at = attribute.pound_token.span.byte_range().start;
             self.read.insert(at);
+            if self.rewritten_by.is_some() {
+                self.refuse_under_the_rewrite(attribute);
+                continue;
+            }
             self.judge(attribute);
             cfg |= attribute.path().is_ident("cfg");
         }
@@ -198,6 +218,48 @@ impl Gates<'_> {
                 spelling: spelling(attribute, self.text),
             });
         }
+    }
+
+    /// Inside an item an attribute macro may rewrite: refuse `attribute` when it is a gate — a
+    /// `cfg`, or a `cfg_attr` that writes one.
+    fn refuse_under_the_rewrite(&mut self, attribute: &syn::Attribute) {
+        let Some(attribute_macro) = &self.rewritten_by else {
+            return;
+        };
+        if attribute.path().is_ident("cfg") || cfg_attr_writes_a_cfg(attribute) {
+            self.rejections.push(Rejection::CfgUnderAttributeMacro {
+                file: self.path.to_path_buf(),
+                at: position(attribute.pound_token.span),
+                attribute_macro: attribute_macro.clone(),
+                attribute: self.text[attribute.span().byte_range()].to_owned(),
+            });
+        }
+    }
+
+    /// Visit an item, an `impl` item, a `trait` item or a foreign item whose own `cfg`s have been
+    /// read and keep it in: under its attribute macro, when it carries one and the walk is not
+    /// already under another, and as a hazard when one of its attributes may run a macro.
+    fn item_with(&mut self, attrs: &[syn::Attribute], at: usize, visit: impl FnOnce(&mut Self)) {
+        if attrs
+            .iter()
+            .any(|attribute| may_run_a_macro(&attribute.meta))
+        {
+            self.hazards.push(Hazard {
+                at,
+                scope: self.scope(),
+            });
+        }
+        if self.rewritten_by.is_some() {
+            visit(self);
+            return;
+        }
+        let derives = derived(attrs);
+        self.rewritten_by = attrs
+            .iter()
+            .find(|attribute| may_rewrite(&attribute.meta, &derives))
+            .map(|attribute| self.text[attribute.meta.span().byte_range()].to_owned());
+        visit(self);
+        self.rewritten_by = None;
     }
 
     /// Visit a scope's contents with the scope open.
@@ -324,11 +386,22 @@ impl Gates<'_> {
                 if writes_a_gate(group) {
                     let from = trees[at].span().byte_range().start;
                     let to = group.span().byte_range().end;
-                    self.rejections.push(Rejection::CfgInMacroTokens {
-                        file: self.path.to_path_buf(),
-                        at: position(trees[at].span()),
-                        macro_path: macro_path.to_owned(),
-                        attribute: self.text[from..to].to_owned(),
+                    let file = self.path.to_path_buf();
+                    let written_at = position(trees[at].span());
+                    let attribute = self.text[from..to].to_owned();
+                    self.rejections.push(match &self.rewritten_by {
+                        Some(attribute_macro) => Rejection::CfgUnderAttributeMacro {
+                            file,
+                            at: written_at,
+                            attribute_macro: attribute_macro.clone(),
+                            attribute,
+                        },
+                        None => Rejection::CfgInMacroTokens {
+                            file,
+                            at: written_at,
+                            macro_path: macro_path.to_owned(),
+                            attribute,
+                        },
                     });
                 }
                 at = next;
@@ -347,6 +420,10 @@ impl<'ast> Visit<'ast> for Gates<'_> {
     fn visit_attribute(&mut self, attribute: &'ast syn::Attribute) {
         let at = attribute.pound_token.span.byte_range().start;
         if self.read.contains(&at) {
+            return;
+        }
+        if self.rewritten_by.is_some() {
+            self.refuse_under_the_rewrite(attribute);
             return;
         }
         self.judge(attribute);
@@ -371,16 +448,9 @@ impl<'ast> Visit<'ast> for Gates<'_> {
         if self.gated(attrs, item) {
             return;
         }
-        if attrs
-            .iter()
-            .any(|attribute| may_run_a_macro(&attribute.meta))
-        {
-            self.hazards.push(Hazard {
-                at: item.span().byte_range().start,
-                scope: self.scope(),
-            });
-        }
-        syn::visit::visit_item(self, item);
+        self.item_with(attrs, item.span().byte_range().start, |walk| {
+            syn::visit::visit_item(walk, item);
+        });
     }
 
     fn visit_item_mod(&mut self, module: &'ast syn::ItemMod) {
@@ -419,7 +489,9 @@ impl<'ast> Visit<'ast> for Gates<'_> {
             _ => &[],
         };
         if !self.gated(attrs, item) {
-            syn::visit::visit_impl_item(self, item);
+            self.item_with(attrs, item.span().byte_range().start, |walk| {
+                syn::visit::visit_impl_item(walk, item);
+            });
         }
     }
 
@@ -432,7 +504,9 @@ impl<'ast> Visit<'ast> for Gates<'_> {
             _ => &[],
         };
         if !self.gated(attrs, item) {
-            syn::visit::visit_trait_item(self, item);
+            self.item_with(attrs, item.span().byte_range().start, |walk| {
+                syn::visit::visit_trait_item(walk, item);
+            });
         }
     }
 
@@ -445,7 +519,9 @@ impl<'ast> Visit<'ast> for Gates<'_> {
             _ => &[],
         };
         if !self.gated(attrs, item) {
-            syn::visit::visit_foreign_item(self, item);
+            self.item_with(attrs, item.span().byte_range().start, |walk| {
+                syn::visit::visit_foreign_item(walk, item);
+            });
         }
     }
 
@@ -709,7 +785,6 @@ fn names_a_variable(tokens: TokenStream, attribute: &str, name: &str) -> bool {
 /// language's derives, `macro_use`, or a `cfg_attr` writing any of those. What cannot be read is
 /// taken to.
 fn may_run_a_macro(meta: &syn::Meta) -> bool {
-    const INERT_TOOLS: [&str; 3] = ["rustfmt", "clippy", "diagnostic"];
     let path = meta.path();
     let Some(name) = path.get_ident() else {
         return !path
@@ -748,6 +823,97 @@ fn may_run_a_macro(meta: &syn::Meta) -> bool {
         "macro_use" => true,
         _ => !BUILT_IN_ATTRIBUTES.contains(&name.as_str()),
     }
+}
+
+/// The tool namespaces whose attributes are inert: `#[rustfmt::skip]`, `#[clippy::…]`,
+/// `#[diagnostic::…]`.
+const INERT_TOOLS: [&str; 3] = ["rustfmt", "clippy", "diagnostic"];
+
+/// The derive helpers this walk reads through, each with the derives that declare it (plan row
+/// 122): a helper is inert only on an item that carries one of its derives. A closed table — a
+/// helper not in it is taken to be an attribute macro, and adding one is a row with a fixture.
+const DERIVE_HELPERS: [(&str, &[&str]); 5] = [
+    ("serde", &["Serialize", "Deserialize"]),
+    ("error", &["Error"]),
+    ("from", &["Error"]),
+    ("source", &["Error"]),
+    ("backtrace", &["Error"]),
+];
+
+/// Whether an attribute may rewrite the item it stands on — an attribute macro, which receives
+/// the item's tokens and may emit anything — given the last segment of every path the item's
+/// `derive`s name (`derives`). Inert: the language's own attributes, the tool namespaces, a
+/// `derive` of anything (the item stays as written; the derive's output is beside it), a derive
+/// helper beside a derive that declares it ([`DERIVE_HELPERS`]), and a `cfg_attr` writing only
+/// those. Everything else may rewrite: any other name, any other path (`tokio::main`),
+/// `unsafe(…)`, and what cannot be read.
+fn may_rewrite(meta: &syn::Meta, derives: &[String]) -> bool {
+    let path = meta.path();
+    let Some(name) = path.get_ident() else {
+        return !path
+            .segments
+            .first()
+            .is_some_and(|tool| INERT_TOOLS.iter().any(|inert| tool.ident == inert));
+    };
+    let name = name.to_string();
+    match name.as_str() {
+        "derive" => false,
+        "cfg_attr" => {
+            let syn::Meta::List(list) = meta else {
+                return true;
+            };
+            list.parse_args_with(
+                syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+            )
+            .map_or(true, |written| {
+                written
+                    .iter()
+                    .skip(1)
+                    .any(|meta| may_rewrite(meta, derives))
+            })
+        }
+        built_in if BUILT_IN_ATTRIBUTES.contains(&built_in) => false,
+        helper => !DERIVE_HELPERS.iter().any(|(name, declared_by)| {
+            *name == helper
+                && declared_by
+                    .iter()
+                    .any(|derive| derives.iter().any(|written| written == derive))
+        }),
+    }
+}
+
+/// The last segment of every path the `derive`s in `attrs` name, a `cfg_attr`'s included.
+fn derived(attrs: &[syn::Attribute]) -> Vec<String> {
+    fn from(meta: &syn::Meta, into: &mut Vec<String>) {
+        let syn::Meta::List(list) = meta else {
+            return;
+        };
+        if list.path.is_ident("derive") {
+            if let Ok(paths) = list.parse_args_with(
+                syn::punctuated::Punctuated::<syn::Path, syn::Token![,]>::parse_terminated,
+            ) {
+                into.extend(
+                    paths
+                        .iter()
+                        .filter_map(|path| path.segments.last())
+                        .map(|last| last.ident.to_string()),
+                );
+            }
+        } else if list.path.is_ident("cfg_attr")
+            && let Ok(written) = list.parse_args_with(
+                syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+            )
+        {
+            for meta in written.iter().skip(1) {
+                from(meta, into);
+            }
+        }
+    }
+    let mut derives = Vec::new();
+    for attribute in attrs {
+        from(&attribute.meta, &mut derives);
+    }
+    derives
 }
 
 /// The macro a group at `trees[at]` is the body of — `path!(…)`, `path! name { … }` for

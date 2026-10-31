@@ -1024,7 +1024,8 @@ fn a_cfg_under_inert_attributes_is_a_gate() {
 
 /// RED (plan row 122) — **a `cfg` inside an item that carries an attribute macro is refused by its
 /// line**, never read as a gate: the macro receives the item's tokens and may emit anything, so
-/// what the `cfg` says is not what the compiler sees. Refused: a `let` under `#[proc_attr] fn`; an
+/// what the `cfg` says is not what the compiler sees. Refused: a `let` under `#[proc_attr] fn`,
+/// and a `cfg` in a `vec!` there; an
 /// entry of a read-shape `macro_rules!` written and invoked inside such a fn (the review's R-N2);
 /// an item inside `#[proc_attr] mod`; a field under `#[cfg_attr(test, proc_attr)]` (the predicate
 /// is not evaluated); a `let` under an attribute macro on an `impl` item and on a `trait` item; a
@@ -1036,9 +1037,9 @@ fn a_cfg_under_inert_attributes_is_a_gate() {
 /// Before the row the fixture lowered: every `cfg` inside was read as a gate as written.
 ///
 /// MUTATION: drop the rewritten check in `crate::gates`' `gated_range` — every line but the
-/// macro entry's and the parameter's passes; stop setting the mode on `impl`, `trait` and foreign
-/// items — `h`, `hooked` and the parameter pass; read entries whatever the mode — the entry is
-/// read as a gate.
+/// `vec!` one passes; drop it from `refuse_cfgs` — the `vec!` line is refused as
+/// `CfgInMacroTokens` instead; stop setting the mode on `impl`, `trait` and foreign items — `h`,
+/// `hooked` and the parameter pass.
 #[test]
 fn a_cfg_under_an_attribute_macro_is_refused_by_its_line() {
     let refused = Index::shared(&fixture_universe("gated_under_attribute_macro_refused"))
@@ -1058,14 +1059,15 @@ fn a_cfg_under_an_attribute_macro_is_refused_by_its_line() {
         said,
         [
             "under 7:5 proc_attr",
-            "under 21:9 proc_attr",
-            "under 28:5 proc_attr",
-            "under 34:5 cfg_attr(test, proc_attr)",
-            "under 43:9 proc_attr",
-            "under 51:5 serde(rename_all = \"lowercase\")",
-            "under 57:5 tokio::main",
-            "under 64:9 proc_attr",
-            "under 75:35 proc_attr",
+            "under 9:18 proc_attr",
+            "under 22:9 proc_attr",
+            "under 29:5 proc_attr",
+            "under 35:5 cfg_attr(test, proc_attr)",
+            "under 44:9 proc_attr",
+            "under 52:5 serde(rename_all = \"lowercase\")",
+            "under 58:5 tokio::main",
+            "under 65:9 proc_attr",
+            "under 76:35 proc_attr",
         ]
     );
 }

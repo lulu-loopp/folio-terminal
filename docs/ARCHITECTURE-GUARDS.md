@@ -283,7 +283,21 @@ only by a row with its grammar, a fixture and a pin (`tests/index.rs`
 `a_cfg_in_a_read_macro_body_is_a_gate`, `a_cfg_in_any_other_macro_body_is_refused_by_its_line`;
 `tests/contract.rs` `the_test_only_texts_are_not_product`). Not reached, a limit older than the
 row: a macro in an attribute's value (`#[doc = m!(…)]`) and `syn`'s unparsed `Verbatim` tokens,
-where a `cfg` is neither read nor refused; the tree has no `cfg` there.
+where a `cfg` is neither read nor refused; the tree has no `cfg` there. Under an attribute macro
+(2026-10-31, T-GATE-WALK-UNDER-ATTRIBUTE-MACROS, plan row 122; the review of row 109, R-N2): an
+attribute macro receives its item's tokens and may emit anything, so every `cfg` (or
+`cfg`-writing `cfg_attr`) inside an item, `impl` item, `trait` item or foreign item that carries
+one refuses the index by its line and the attribute macro as written
+(`Rejection::CfgUnderAttributeMacro`), at any depth and inside macro tokens too; the item itself
+is not refused, and its own `cfg`s are read as before (the compiler applies them first). Inert,
+and read through: the language's own attributes, `rustfmt::`, `clippy::` and `diagnostic::`, a
+`derive` of anything, a derive helper beside a derive that declares it (a closed table: `serde`
+for `Serialize`/`Deserialize`; `error`, `from`, `source`, `backtrace` for `Error`), and a
+`cfg_attr` writing only those. Every other attribute may rewrite, `cfg_attr(…, attr_macro)`
+whatever its predicate. Such `impl`, `trait` and foreign items are hazards too, like items
+(`tests/index.rs` `a_cfg_under_an_attribute_macro_is_refused_by_its_line`,
+`a_cfg_under_inert_attributes_is_a_gate`). The tree's one attribute macro on items is
+windows-rs's `#[implement]` (three structs in `bt-platform`), with no `cfg` inside.
 
 ## Ownership census
 
