@@ -15,7 +15,7 @@ site	module	function	reason	sites
 ?.files	crate::runtime::git	Runtime::select_float_git_row	assign through a receiver that does not resolve: what `and_then` returns	1
 ?.files	crate::seats	rail_chrome	call `filter` through a receiver that does not resolve: the value of a block, a branch or a loop	1
 ?.files	crate::shell_integration::profile_runtime	candidates	call `push` through a receiver that does not resolve: `files` is declared by some of the types of that name and not by others	3
-?.files	crate::shell_integration::profile_runtime	operate_with	call `extend` through a receiver that does not resolve: `discover` is not a function the workspace declares	2
+?.files	crate::shell_integration::profile_runtime	operate_with	call `extend` through a receiver that does not resolve: `discover`, a binding called: a stored closure or a function pointer	2
 ?.git_scroll	crate::runtime::git	Runtime::push_float_git_page	assign through a receiver that does not resolve: what `and_then` returns	1
 ?.git_scroll	crate::runtime::git	Runtime::scroll_float_git_page	assign through a receiver that does not resolve: what `and_then` returns	1
 ?.integration	crate::profiles	compose_on	assign through a receiver that does not resolve: the value of a block, a branch or a loop	1
