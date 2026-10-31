@@ -3673,9 +3673,12 @@ fn a_finger_over_a_picture_carries_it_and_never_zooms_it() {
 /// and the one wheel notch after all three takes the volume to 55 %, so every pan had its chance
 /// and moved nothing.
 ///
-/// RED with the edit undone (both finger stations of `Runtime::mouse_wheel`): the pans over the
-/// picture and over the bar were wheel notches, the volume went 50 → 70 → 90 % and the notch
-/// after them to 95 %. The still is a pin: undone, its pan still zooms nothing and starts nothing.
+/// RED with the edit undone (both finger stations of `Runtime::mouse_wheel`), for the pan over the
+/// playing picture only: it was two wheel notches, the volume went 50 → 60 %, and the notch after
+/// it to 65 %. The rest are pins, green with the edit undone too: the pan over the bar left the
+/// volume at 60 %, because the wheel's volume station refuses a point on the bar
+/// (`video_picture_holds`); and the still and every size assertion stayed at Fit, because a
+/// recording never takes a zoom (`picture_takes_zoom`) and the still has no engine to sound.
 ///
 /// MUTATION: drop the finger's station before the wheel's video station in `Runtime::mouse_wheel`
 /// — the pan over the playing picture moves the volume and the wait for 55 % never ends on it.
