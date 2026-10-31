@@ -584,6 +584,9 @@ pub struct Quit {
     /// [`crate::persist::SESSION_SAVE_BUDGET`] the documents, their copies and the
     /// session write share. Set by the phase's first turn.
     documents_from: Option<Instant>,
+    /// **Whether the documents phase has begun** ([`Self::begin_documents`]): every owed
+    /// document handed over once more, before the phase's first turn hears anything.
+    documents_begun: bool,
     /// **The one budget itself** (T-QUIT-FLUSH-BUDGET-PER-QUIT):
     /// [`crate::persist::SESSION_SAVE_BUDGET`] from [`Self::begin_for`] for every quit the
     /// product begins. The documents phase ends at half of it, the recovery phase at five
@@ -687,6 +690,7 @@ impl Quit {
             phase,
             reason,
             documents_from: None,
+            documents_begun: false,
             budget: crate::persist::SESSION_SAVE_BUDGET,
             unsaved: Vec::new(),
             cancelled: None,
@@ -973,11 +977,7 @@ impl Quit {
         if self.phase != Phase::Documents {
             return self.step();
         }
-        if self.documents_from.is_none() {
-            for document in documents.iter_mut() {
-                document.quit_begin();
-            }
-        }
+        self.begin_documents(documents);
         for document in documents.iter_mut() {
             self.merged_lines.extend(document.quit_turn());
         }
@@ -986,6 +986,21 @@ impl Quit {
             .map(|document| (document.file(), document.standing()))
             .collect();
         self.documents(&standings, now)
+    }
+
+    /// **The documents phase begins over `documents`**, once per quit: every owed document is
+    /// handed over once more (a quit is a trigger an owed edit is retried on, design note §4.1).
+    /// The application runs it before its first turn's storage drain
+    /// (T-STORAGE-LANE-ORDER-BY-CONSTRUCTION), so an answer the drain finds is heard after the
+    /// quit's hand-over, as the phase's own turn heard it; [`Self::documents_turn`] runs it too.
+    pub(crate) fn begin_documents(&mut self, documents: &mut [&mut dyn QuitDocument]) {
+        if self.phase != Phase::Documents || self.documents_begun {
+            return;
+        }
+        self.documents_begun = true;
+        for document in documents.iter_mut() {
+            document.quit_begin();
+        }
     }
 
     /// **The lines of what the documents phase merged since they were last

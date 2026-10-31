@@ -51,23 +51,23 @@ crates/bt-app/src/i18n.rs:7951 the command-line usage text: option descriptions 
 crates/bt-app/src/install_channel.rs:1442 a Scoop manifest sample: JSON indentation after an escaped line break
 crates/bt-app/src/install_channel.rs:1898 the Homebrew cask's own key alignment, as the cask writes it
 crates/bt-app/src/runtime/math.rs:3124 the chrome dump's tag column: `quad` padded to the width of the other tags
-crates/bt-app/src/main.rs:41273 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-app/src/main.rs:43885 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-app/src/main.rs:44334 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-app/src/main.rs:44334 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-app/src/main.rs:44526 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-app/src/main.rs:45452 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-app/src/main.rs:59199 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-app/src/main.rs:41315 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-app/src/main.rs:43927 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-app/src/main.rs:44376 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-app/src/main.rs:44376 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-app/src/main.rs:44568 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-app/src/main.rs:45494 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-app/src/main.rs:59213 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-app/src/preview_live.rs:1686 table fixture: each cell padded to its column
 crates/bt-app/src/preview_select.rs:777 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-app/src/preview.rs:11821 a diff line sample: the code's indentation after the `+`/`-` sign is the input
-crates/bt-app/src/preview.rs:11825 a diff line sample: the code's indentation after the `+`/`-` sign is the input
-crates/bt-app/src/preview.rs:11822 a diff line sample: the code's indentation after the `+`/`-` sign is the input
-crates/bt-app/src/preview.rs:11826 a diff line sample: the code's indentation after the `+`/`-` sign is the input
-crates/bt-app/src/preview.rs:13143 tab expansion's expected columns
-crates/bt-app/src/preview.rs:13140 tab expansion's expected columns
-crates/bt-app/src/preview.rs:18811 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-app/src/preview.rs:18838 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-app/src/preview.rs:11855 a diff line sample: the code's indentation after the `+`/`-` sign is the input
+crates/bt-app/src/preview.rs:11859 a diff line sample: the code's indentation after the `+`/`-` sign is the input
+crates/bt-app/src/preview.rs:11856 a diff line sample: the code's indentation after the `+`/`-` sign is the input
+crates/bt-app/src/preview.rs:11860 a diff line sample: the code's indentation after the `+`/`-` sign is the input
+crates/bt-app/src/preview.rs:13177 tab expansion's expected columns
+crates/bt-app/src/preview.rs:13174 tab expansion's expected columns
+crates/bt-app/src/preview.rs:18845 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-app/src/preview.rs:18872 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-app/src/profiles.rs:27236 the spacing between the arguments is the input under test
 crates/bt-app/src/runtime/floats.rs:4090 the chrome dump's tag column: `quad` padded to the width of the other tags
 crates/bt-detect/src/frame.rs:1564 terminal screen fixture: the columns are where the terminal draws them

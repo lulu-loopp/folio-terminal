@@ -74,7 +74,7 @@ use bt_platform::install_txn::{self, Held};
 use bt_platform::file_reads::{self, Lane};
 
 use crate::cli;
-use crate::persist::Reply;
+use crate::persist::Ended;
 use crate::update_apply::{ExitGuard, Leave, Left, Outgoing, WaitClock, WallClock, Window};
 use crate::update_txn::{Class, Event, HeaderOutcome, Home, Journal, Nonce, Refusal, Role, TxnId};
 
@@ -755,16 +755,20 @@ pub(crate) enum Looked {
 /// **A request that ended with no answer is over** (C2), read on the turn the
 /// wake brings rather than at the deadline: no applier is known, and the
 /// window's mark decides. Its terminal says which end it was
-/// (`persist::OnTheWorker`): the worker failed on it — its task panicked, and the
+/// (`persist::Ended`): the worker failed on it — its task panicked, and the
 /// worker went on (T-STORAGE-WORKER-ON-THE-SEAM, R2) — or the worker's end left it
 /// owed (queued behind the end, or inside it); the line names which.
+///
+/// `heard` is what the application's drain heard of the request
+/// (`App::storage_answers`, T-STORAGE-LANE-ORDER-BY-CONSTRUCTION): the hand-over
+/// takes no answer of its own; `None` while nothing has been heard.
 pub(crate) fn look(
-    answer: Option<&mut crate::persist::OnTheWorker<HandedOff>>,
+    heard: Option<crate::persist::Ended<HandedOff>>,
     txn: TxnId,
     overdue: bool,
 ) -> Looked {
-    match answer.map(crate::persist::OnTheWorker::hear) {
-        Some(Reply::Failed(words)) => Looked::Over {
+    match heard {
+        Some(Ended::Failed(words)) => Looked::Over {
             line: format!(
                 "Folio: update {txn}'s hand-over had no answer: the storage worker failed on it \
                  ({words}) and went on; the window's mark decides who opens Folio as this process \
@@ -772,28 +776,28 @@ pub(crate) fn look(
             ),
             applier: None,
         },
-        Some(Reply::Gone) => Looked::Over {
+        Some(Ended::Gone) => Looked::Over {
             line: format!(
                 "Folio: update {txn}'s hand-over had no answer: the storage worker stopped; the \
                  window's mark decides who opens Folio as this process leaves"
             ),
             applier: None,
         },
-        Some(Reply::Answered(handed)) => Looked::Over {
+        Some(Ended::Answered(handed)) => Looked::Over {
             line: handed.line(txn),
             applier: match handed {
                 HandedOff::Started { applier } => Some(applier),
                 _ => None,
             },
         },
-        None | Some(Reply::Waiting) if overdue => Looked::Over {
+        None if overdue => Looked::Over {
             line: format!(
                 "Folio: update {txn}'s hand-over did not answer in time; the window's mark decides \
                  who opens Folio as this process leaves"
             ),
             applier: None,
         },
-        None | Some(Reply::Waiting) => Looked::Waiting,
+        None => Looked::Waiting,
     }
 }
 
@@ -1259,7 +1263,7 @@ mod tests {
             .hand_off(handoff)
             .expect("the storage worker takes the hand-over");
         crate::lane::wait_for_a_wake(&wakes, "the worker's wake after the hand-over's answer");
-        match look(Some(&mut answer), TxnId::new(TXN), false) {
+        match look(answer.heard_alone(), TxnId::new(TXN), false) {
             Looked::Over { applier, .. } => assert_eq!(
                 applier,
                 Some(crate::update_apply::this_process()),
@@ -1813,7 +1817,7 @@ mod tests {
     ) -> String {
         for turn in 0..2_000 {
             match look(
-                Some(&mut *answer),
+                answer.heard_alone(),
                 TxnId::new(TXN),
                 quit.handoff_is_overdue(at(turn)),
             ) {
@@ -1872,14 +1876,14 @@ mod tests {
         quit.handoff_sent(sent);
         assert_eq!(
             look(
-                Some(&mut answer),
+                answer.heard_alone(),
                 TxnId::new(TXN),
                 quit.handoff_is_overdue(sent)
             ),
             Looked::Waiting
         );
         let line = match look(
-            Some(&mut answer),
+            answer.heard_alone(),
             TxnId::new(TXN),
             quit.handoff_is_overdue(sent + crate::quit::HANDOFF_DEADLINE),
         ) {

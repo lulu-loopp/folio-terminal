@@ -86,7 +86,11 @@ use bt_persist::{
 };
 use bt_platform::admission::WorkerCtx;
 
-use crate::persist::{DocumentWrites, OnTheWorker, Reply, Revision, StorageLane};
+#[cfg(test)]
+use crate::persist::Reply;
+use crate::persist::{
+    DocumentWrites, Ended, InAdmissionOrder, OnTheWorker, Revision, StorageId, StorageLane,
+};
 use crate::quit::{CopyStanding, Standing};
 use crate::settings_bundle::{LineRead, read_lines};
 
@@ -1313,7 +1317,7 @@ impl<T: StoredDocument> ReadAnswer<T> {
     }
 }
 
-/// **A re-read's news for a reader** ([`DocumentState::take_answers`]).
+/// **A re-read's news for a reader** ([`DocumentState::take_news`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ReadNews {
     /// Whether the newest read found a file that would not read — `None` when
@@ -1392,7 +1396,7 @@ enum Outstanding<T> {
 }
 
 /// The one document write a store has in flight.
-struct InFlight<T> {
+pub(crate) struct InFlight<T> {
     generation: u64,
     document: T,
     bytes: Arc<[u8]>,
@@ -1439,6 +1443,24 @@ pub(crate) struct DocumentState<T> {
     /// **This document's copy into `recovered`** in a quit's recovery phase, once
     /// sent: its answer on the way, or the answer.
     recovery: Option<RecoveryCopy>,
+    /// What the re-reads the drains heard found, until the reader takes it
+    /// ([`Self::take_news`]).
+    news: ReadNews,
+    /// Whether a write landed among the answers the drain under way heard.
+    landed: bool,
+    /// Whether a re-read was answered among them.
+    heard: bool,
+}
+
+/// **One answer a store took below a drain's mark** ([`DocumentState::answered`]), heard in the
+/// drain's order ([`DocumentState::hear`]).
+pub(crate) enum StoreAnswer<T> {
+    /// A write's answer, with the write it answers (boxed: the write carries its document).
+    Document(Box<(InFlight<T>, Ended<DocumentAnswer>)>),
+    /// A re-read's answer, with the generation it was asked at.
+    Read(Ended<(u64, ReadAnswer<T>)>),
+    /// A quit copy's receipt.
+    Copy(Ended<Result<PathBuf, String>>),
 }
 
 /// A quit's copy of a document, on the storage worker or answered.
@@ -1480,6 +1502,9 @@ impl<T: StoredDocument> DocumentState<T> {
             lane,
             refusal: None,
             recovery: None,
+            news: ReadNews::default(),
+            landed: false,
+            heard: false,
         }
     }
 
@@ -1636,7 +1661,7 @@ impl<T: StoredDocument> DocumentState<T> {
                     left: None,
                 });
                 self.lane.wake();
-                OnTheWorker::answered_at_the_door(answered)
+                OnTheWorker::answered_at_the_door(answered, &self.lane)
             }
         };
         self.outstanding.push_back(Outstanding::Document(InFlight {
@@ -1679,65 +1704,128 @@ impl<T: StoredDocument> DocumentState<T> {
                     ReadAnswer::NotServed(refused.said(crate::persist::NO_STORAGE_WORKER)),
                 ));
                 self.lane.wake();
-                OnTheWorker::answered_at_the_door(answered)
+                OnTheWorker::answered_at_the_door(answered, &self.lane)
             }
         };
         self.outstanding.push_back(Outstanding::Read { answer });
     }
 
-    /// **Take every answer the worker has given, in the order it served them**,
-    /// and send what is owed after them. Never waits.
-    pub(crate) fn take_answers(&mut self) -> ReadNews {
-        let mut news = ReadNews::default();
-        let mut landed = false;
-        let mut heard = false;
-        while let Some(request) = self.outstanding.front_mut() {
-            let answered = match request {
-                Outstanding::Document(flight) => match flight.answer.hear() {
-                    Reply::Answered(answer) => Some(Ok(answer)),
-                    Reply::Waiting => None,
-                    Reply::Failed(words) => Some(Err(Refusal::Failed(words))),
-                    Reply::Gone => Some(Err(Refusal::NoWorker(
-                        crate::persist::STORAGE_WORKER_GONE.to_owned(),
-                    ))),
-                },
-                Outstanding::Read { answer } => match answer.hear() {
-                    Reply::Answered((generation, read)) => {
-                        self.outstanding.pop_front();
-                        heard = true;
-                        self.on_read(generation, read, &mut news);
-                        continue;
+    /// **Every answer this store is owed below the drain's mark `owed`**
+    /// (`persist::StorageLane::earliest_owed`, read once for every asker of one drain,
+    /// `App::storage_answers`; T-STORAGE-LANE-ORDER-BY-CONSTRUCTION): its requests in the
+    /// order it sent them, up to the first that is not below the mark or has not ended, then
+    /// its quit copy's. Each is taken once, with its place in admission order, and heard
+    /// ([`Self::hear`]) in the order the drain merges every asker's into. Never waits.
+    pub(crate) fn answered(
+        &mut self,
+        owed: Option<StorageId>,
+    ) -> Vec<(InAdmissionOrder, StoreAnswer<T>)> {
+        let mut taken = Vec::new();
+        while let Some(request) = self.outstanding.pop_front() {
+            match request {
+                Outstanding::Document(mut flight) => match flight.answer.hear_below(owed) {
+                    Some((order, ended)) => {
+                        taken.push((order, StoreAnswer::Document(Box::new((flight, ended)))));
                     }
-                    Reply::Waiting => None,
-                    Reply::Failed(words) => {
-                        self.outstanding.pop_front();
-                        crate::diagnostics::stderr_line(format!(
-                            "BT_PERSIST {} was not read again: {words}",
-                            self.file
-                        ));
-                        continue;
-                    }
-                    Reply::Gone => {
-                        self.outstanding.pop_front();
-                        crate::diagnostics::stderr_line(format!(
-                            "BT_PERSIST {} was not read again: {}",
-                            self.file,
-                            crate::persist::STORAGE_WORKER_GONE
-                        ));
-                        continue;
+                    None => {
+                        self.outstanding.push_front(Outstanding::Document(flight));
+                        break;
                     }
                 },
-            };
-            let Some(answered) = answered else {
-                break;
-            };
-            let Some(Outstanding::Document(flight)) = self.outstanding.pop_front() else {
-                break;
-            };
-            landed |= self.on_document(flight, answered);
+                Outstanding::Read { mut answer } => match answer.hear_below(owed) {
+                    Some((order, ended)) => taken.push((order, StoreAnswer::Read(ended))),
+                    None => {
+                        self.outstanding.push_front(Outstanding::Read { answer });
+                        break;
+                    }
+                },
+            }
         }
+        if let Some(RecoveryCopy::Sent(answer)) = &mut self.recovery
+            && let Some((order, ended)) = answer.hear_below(owed)
+        {
+            taken.push((order, StoreAnswer::Copy(ended)));
+        }
+        taken
+    }
+
+    /// **Hear one answer [`Self::answered`] took**, in the drain's order: a write's answer
+    /// processed, a re-read compared and its news kept for the reader ([`Self::take_news`]), a
+    /// quit copy's receipt kept for the quit ([`QuitDocument::copy_standing`]). What is owed
+    /// after them is sent once the drain has heard every answer ([`Self::answers_heard`]).
+    pub(crate) fn hear(&mut self, answer: StoreAnswer<T>) {
+        match answer {
+            StoreAnswer::Document(write) => {
+                let (flight, ended) = *write;
+                let answered = match ended {
+                    Ended::Answered(answer) => Ok(answer),
+                    Ended::Failed(words) => Err(Refusal::Failed(words)),
+                    Ended::Gone => Err(Refusal::NoWorker(
+                        crate::persist::STORAGE_WORKER_GONE.to_owned(),
+                    )),
+                };
+                self.landed |= self.on_document(flight, answered);
+            }
+            StoreAnswer::Read(Ended::Answered((generation, read))) => {
+                self.heard = true;
+                let mut news = std::mem::take(&mut self.news);
+                self.on_read(generation, read, &mut news);
+                self.news = news;
+            }
+            StoreAnswer::Read(Ended::Failed(words)) => {
+                crate::diagnostics::stderr_line(format!(
+                    "BT_PERSIST {} was not read again: {words}",
+                    self.file
+                ));
+            }
+            StoreAnswer::Read(Ended::Gone) => {
+                crate::diagnostics::stderr_line(format!(
+                    "BT_PERSIST {} was not read again: {}",
+                    self.file,
+                    crate::persist::STORAGE_WORKER_GONE
+                ));
+            }
+            StoreAnswer::Copy(ended) => {
+                let answered = match ended {
+                    Ended::Answered(answered) => answered,
+                    Ended::Failed(words) => Err(words),
+                    Ended::Gone => Err(crate::persist::STORAGE_WORKER_GONE.to_owned()),
+                };
+                self.recovery = Some(RecoveryCopy::Answered(answered));
+            }
+        }
+    }
+
+    /// **A drain has heard every answer it took**: send what is owed after them. Run once per
+    /// drain for every store, whether it heard anything or not.
+    pub(crate) fn answers_heard(&mut self) {
+        let landed = std::mem::take(&mut self.landed);
+        let heard = std::mem::take(&mut self.heard);
         self.after_answers(landed, heard);
-        news
+    }
+
+    /// **What the re-reads heard since the reader last asked** ([`ReadNews`]) — the storage
+    /// pass's reader's, or a quit's, which lets it go.
+    pub(crate) fn take_news(&mut self) -> ReadNews {
+        std::mem::take(&mut self.news)
+    }
+
+    /// **This store alone, drained below its lane's mark**, heard, and its news taken — a
+    /// test's way to hear one store without the application's drain.
+    #[cfg(test)]
+    pub(crate) fn take_answers(&mut self) -> ReadNews {
+        self.drained_alone();
+        self.take_news()
+    }
+
+    /// Its answers below its lane's mark, heard, and what is owed after them sent.
+    #[cfg(test)]
+    fn drained_alone(&mut self) {
+        let owed = self.lane.earliest_owed();
+        for (_, answer) in self.answered(owed) {
+            self.hear(answer);
+        }
+        self.answers_heard();
     }
 
     /// Wait for the answer to every request this store has on the worker now,
@@ -2198,18 +2286,25 @@ pub(crate) trait QuitDocument {
     /// an earlier write was answered, and nothing of an earlier quit's copy is
     /// kept.
     fn quit_begin(&mut self);
-    /// **One turn of the documents phase**: what the storage worker answered is
-    /// taken, a file a merge can fold is merged (purely — no door runs, the
-    /// windows are leaving), and what is owed with nothing on the worker is sent.
+    /// **One turn of the documents phase**: what the storage worker answered has
+    /// been heard by the application's drain before it (`App::storage_answers`;
+    /// T-STORAGE-LANE-ORDER-BY-CONSTRUCTION) and its re-reads' news is let go, a
+    /// file a merge can fold is merged (purely — no door runs, the windows are
+    /// leaving), and what is owed with nothing on the worker is sent.
     /// Answers the `diagnostics.log` line of what this turn merged, if it merged
     /// anything — said once, whether the quit completes or is cancelled.
     fn quit_turn(&mut self) -> Option<String>;
+    /// **Its answers heard alone**, below its lane's mark, as the application's drain would
+    /// hear them before a turn — a test's way to drive a quit's phases without the application.
+    #[cfg(test)]
+    fn hear_alone(&mut self);
     /// Where the document stands ([`Standing`]).
     fn standing(&self) -> Standing;
     /// **Hand the owed document to the storage worker as a copy into `folder`**,
     /// once per quit.
     fn keep_copy(&mut self, folder: &Path, at: SystemTime);
-    /// Where the copy stands ([`CopyStanding`]); `Waiting` before it is sent.
+    /// Where the copy stands ([`CopyStanding`]), as the application's drain last heard
+    /// it; `Waiting` before it is sent and until its receipt is heard.
     fn copy_standing(&mut self) -> CopyStanding;
     /// **Drop the owed change for this run** — the person chose to leave without
     /// it — and answer the `diagnostics.log` line that names the file and its
@@ -2234,8 +2329,13 @@ impl<T: StoredDocument> QuitDocument for DocumentState<T> {
         }
     }
 
+    #[cfg(test)]
+    fn hear_alone(&mut self) {
+        self.drained_alone();
+    }
+
     fn quit_turn(&mut self) -> Option<String> {
-        let _ = self.take_answers();
+        let _ = self.take_news();
         if self.standing() == Standing::Unsent {
             self.send_owed();
         }
@@ -2300,15 +2400,6 @@ impl<T: StoredDocument> QuitDocument for DocumentState<T> {
     }
 
     fn copy_standing(&mut self) -> CopyStanding {
-        if let Some(RecoveryCopy::Sent(answer)) = &mut self.recovery {
-            let answered = match answer.hear() {
-                Reply::Answered(answered) => answered,
-                Reply::Waiting => return CopyStanding::Waiting,
-                Reply::Failed(words) => Err(words),
-                Reply::Gone => Err(crate::persist::STORAGE_WORKER_GONE.to_owned()),
-            };
-            self.recovery = Some(RecoveryCopy::Answered(answered));
-        }
         match &self.recovery {
             Some(RecoveryCopy::Answered(Ok(copy))) => CopyStanding::Kept(copy.clone()),
             Some(RecoveryCopy::Answered(Err(error))) => CopyStanding::Refused(error.clone()),

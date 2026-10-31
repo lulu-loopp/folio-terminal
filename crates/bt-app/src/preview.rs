@@ -40,6 +40,8 @@ use unicode_properties::{GeneralCategoryGroup, UnicodeGeneralCategory};
 use winit::window::WindowId;
 
 use crate::document_request::{DocumentAnswer, DocumentJob, KeptFile, Outcome, Refusal};
+use crate::persist::Ended;
+#[cfg(test)]
 use crate::persist::Reply;
 use crate::preview_provenance::{BlockOrigins, TextOrigin};
 use crate::{AppEvent, TabId};
@@ -8599,7 +8601,7 @@ fn refusal_said(cause: &Refusal) -> String {
 
 /// **How many saves the preview may have outstanding on the storage worker at once**
 /// (T-STORAGE-WORKER-ON-THE-SEAM, R1): a save counts from its hand-over until its answer is
-/// taken ([`PreviewSaves::take_answers`]) — four tabs' full pools of [`PV_BUFFER_CAP`] buffers,
+/// taken ([`PreviewSaves::answered`]) — four tabs' full pools of [`PV_BUFFER_CAP`] buffers,
 /// every one dirty and saving at once. The preview's share of the storage worker's ledger
 /// (`persist::STORAGE_BOUND`), so a flood of saves never crowds a quit's session write out of
 /// the queue; a save past it is refused on its pane ([`Text::PreviewSaveTooMany`]).
@@ -8745,27 +8747,59 @@ impl PreviewSaves {
         }
     }
 
-    /// **Every answer the worker has given**, in the order the saves were
-    /// handed over. Never waits. A save that ended unanswered — the worker
-    /// ended with it, or failed on it — is answered here as refused, in its words.
-    pub(crate) fn take_answers(&mut self) -> Vec<SaveAnswer> {
+    /// **Every answer the worker has given below the drain's mark `mark`**
+    /// (`persist::StorageLane::earliest_owed`, read once for every asker of one drain,
+    /// `App::storage_answers`; T-STORAGE-LANE-ORDER-BY-CONSTRUCTION), each with its place in
+    /// the order the lane admitted it — the order the drain answers every asker's in. A save at
+    /// or past the mark waits for a later drain even when it has ended since. Never waits. A
+    /// save that ended unanswered — the worker ended with it, or failed on it — is answered here
+    /// as refused, in its words.
+    pub(crate) fn answered(
+        &mut self,
+        mark: Option<crate::persist::StorageId>,
+    ) -> Vec<(crate::persist::InAdmissionOrder, SaveAnswer)> {
         let mut answers = Vec::new();
         self.owed.retain_mut(|owed| {
-            let answer = match owed.answer.hear() {
-                Reply::Answered(answer) => answer,
-                Reply::Waiting => return true,
-                Reply::Failed(words) => unanswered(owed, Refusal::Failed(words)),
-                Reply::Gone => worker_gone(owed),
+            let Some((order, ended)) = owed.answer.hear_below(mark) else {
+                return true;
             };
-            answers.push(SaveAnswer {
-                incarnation: owed.incarnation,
-                asked_from: owed.asked_from,
-                file: owed.file.clone(),
-                answer,
-            });
+            let answer = match ended {
+                Ended::Answered(answer) => answer,
+                Ended::Failed(words) => unanswered(owed, Refusal::Failed(words)),
+                Ended::Gone => worker_gone(owed),
+            };
+            answers.push((
+                order,
+                SaveAnswer {
+                    incarnation: owed.incarnation,
+                    asked_from: owed.asked_from,
+                    file: owed.file.clone(),
+                    answer,
+                },
+            ));
             false
         });
         answers
+    }
+
+    /// **Every answer the worker has given, at a stop** ([`StopKeeps::keep`]): the storage
+    /// worker has ended or been let go at its bound and the lane delivers nothing after this,
+    /// so no later answer can overtake one heard here — every save that has ended is heard, in
+    /// the order the lane admitted them, whatever is still owed before it.
+    fn answered_at_the_stop(&mut self) -> Vec<SaveAnswer> {
+        let answers = self.answered(None);
+        answers.into_iter().map(|(_, answer)| answer).collect()
+    }
+
+    /// **This desk alone, drained below its lane's mark** ([`Self::answered`]) — a test's way
+    /// to hear the preview's saves without the application's drain.
+    #[cfg(test)]
+    pub(crate) fn take_answers(&mut self) -> Vec<SaveAnswer> {
+        let mark = self.lane.earliest_owed();
+        self.answered(mark)
+            .into_iter()
+            .map(|(_, answer)| answer)
+            .collect()
     }
 
     /// **Wait for the answer to every save on the worker now**, within the
@@ -8997,7 +9031,7 @@ impl StopKeeps {
             return Vec::new();
         };
         let mut pools = std::mem::take(&mut self.pools);
-        let mut answers = saves.take_answers();
+        let mut answers = saves.answered_at_the_stop();
         let heard = saves.deliver(&mut answers, &mut pools.iter_mut().collect::<Vec<_>>());
         for answer in answers {
             saves.sink(answer);

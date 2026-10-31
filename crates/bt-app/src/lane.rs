@@ -1721,7 +1721,12 @@ pub(crate) const GIT_MUTATION: Contract = Contract {
 /// go; the ledger owes 50 at once (`persist::STORAGE_BOUND`: the fixed askers' 18 and the
 /// preview's 32), one running and the rest waiting, an answer not yet taken holding its place,
 /// and refuses the rest at the door; a failure (a panic in one request's work) is said once per
-/// request, and the worker goes on.
+/// request, and the worker goes on; the answers are taken by one drain for the whole
+/// application — the lane's earliest request still owed read once, every asker's answers below
+/// it, merged by admission order and heard in that order (`App::storage_answers`,
+/// T-STORAGE-LANE-ORDER-BY-CONSTRUCTION) — and the session's receipts, the launch backup and a
+/// trial's receipt, each left to the sink at admission and read on its own road, are no
+/// delivery of the lane's.
 #[cfg(test)]
 pub(crate) const STORAGE: Contract = Contract {
     lane: Some(LaneName::Storage),

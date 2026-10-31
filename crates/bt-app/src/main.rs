@@ -9515,6 +9515,10 @@ struct App<B: Backend = Native> {
     /// **The hand-over's answer**, while the quit's way out waits for it (U-21): the storage
     /// worker writes `Handoff` and starts the applier, and this thread looks on its turns.
     handoff_answer: Option<persist::OnTheWorker<update_handoff::HandedOff>>,
+    /// **What the storage lane's drain heard of the hand-over** (`App::storage_answers`,
+    /// T-STORAGE-LANE-ORDER-BY-CONSTRUCTION), until the quit's way out looks at it
+    /// ([`update_handoff::look`]).
+    handoff_heard: Option<persist::Ended<update_handoff::HandedOff>>,
     /// **How long the quit waits for the panes it told to go** — [`PANE_RETIREMENT_DEADLINE`] in
     /// every application the product builds; an instance's own so that a test drives the quit
     /// with the suite's patience (`lane::PATIENCE`) rather than the product's four seconds.
@@ -9741,6 +9745,7 @@ impl<B: Backend> App<B> {
             quit_reason: quit::Reason::Asked,
             leave_without: None,
             handoff_answer: None,
+            handoff_heard: None,
             pane_retirement_deadline: PANE_RETIREMENT_DEADLINE,
         }
     }
@@ -36078,8 +36083,9 @@ impl<B: Backend> Runtime<'_, B> {
     /// **What the storage worker answered about the four documents**
     /// (`AppEvent::DocumentsAnswered`; design note 2026-10-11 (b)4, (b)7).
     ///
-    /// Every store takes every answer, in the order the worker served them
-    /// (`persist::hear_documents`). Then the faults: a write that will not land
+    /// Every store has heard its answers, every asker's in the order the lane admitted them
+    /// (`App::storage_answers`, T-STORAGE-LANE-ORDER-BY-CONSTRUCTION), and its re-reads' news
+    /// is taken here (`persist::documents_news`). Then the faults: a write that will not land
     /// is said on the card the start-up announcement uses — a link or a volume
     /// that cannot exchange at once, a disk's refusal at the fifth in a row.
     /// Then what the re-reads put in force: a file that will not parse is said
@@ -36089,7 +36095,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// on the batch's one card once no store is still reading, and the profiles
     /// and pins news is taken.
     pub(crate) fn take_document_answers(&mut self) -> Result<()> {
-        let heard = persist::hear_documents(
+        let heard = persist::documents_news(
             &mut self.app.settings_store,
             &mut self.app.keybindings_store,
             &mut self.app.profiles_store,
@@ -37147,6 +37153,42 @@ impl<B: Backend> App<B> {
                 restart,
             },
         );
+    }
+
+    /// **The update hand-over's answer below the storage drain's mark `owed`**, with its place
+    /// in admission order — the hand-over's part of the one drain (`App::storage_answers`).
+    /// Taken once: the request is let go with the end it yields, so no later drain hears it
+    /// again — the worker drops the answer's road after the end, and a second hearing would
+    /// read that as the worker gone, over the answer kept for the way out.
+    fn handoff_answer_below(
+        &mut self,
+        owed: Option<persist::StorageId>,
+    ) -> Option<(
+        persist::InAdmissionOrder,
+        persist::Ended<update_handoff::HandedOff>,
+    )> {
+        let heard = self.handoff_answer.as_mut()?.hear_below(owed)?;
+        self.handoff_answer = None;
+        Some(heard)
+    }
+
+    /// **Keep the hand-over's answer the drain heard** for the quit's way out to look at
+    /// ([`FolioApp::hand_the_update_over`]).
+    fn keep_handoff_answer(&mut self, ended: persist::Ended<update_handoff::HandedOff>) {
+        self.handoff_heard = Some(ended);
+    }
+
+    /// **The quit's documents phase begins** over the four stores, once
+    /// ([`quit::Quit::begin_documents`]): before the storage lane's drain of its first turn.
+    fn quit_begin_documents(&mut self) {
+        if let Some(quit) = self.quit.as_mut() {
+            quit.begin_documents(&mut [
+                &mut self.settings_store,
+                &mut self.keybindings_store,
+                &mut self.profiles_store,
+                &mut self.pins_store,
+            ]);
+        }
     }
 
     /// **One turn of the quit's documents phase** over the four stores
@@ -48339,7 +48381,7 @@ impl<B: Backend> FolioApp<B> {
         if let Some(app) = self.app.as_mut() {
             app.session_store.take_receipts();
         }
-        let (said, previews) = self.hear_preview_save_answers();
+        let (said, previews) = self.answer_storage();
         let heard = self.take_the_documents_answers();
         for error in [previews.err(), heard.err()].into_iter().flatten() {
             diagnostics::note(&format!(
@@ -48482,13 +48524,13 @@ impl<B: Backend> FolioApp<B> {
         })
     }
 
-    /// **Say where the edits a stop kept are** (T-RECOVERED-FOLDER): the worker's answer, raised
-    /// once on the window the keyboard is on, or on the oldest open window when none has it.
     /// **Hand the storage worker's document answers to the stores**
     /// (`AppEvent::DocumentsAnswered`), in the first window still standing in the
     /// opening order — the one that turns the application's clocks, whose cards
-    /// the storage pass's are. With no window standing the answers wait in their
-    /// channels for the next wake.
+    /// the storage pass's are. Every asker's answers are heard by the one drain whether
+    /// or not a window stands ([`Self::answer_storage`]); with none standing, only the
+    /// stores' re-read news and faults wait in the stores for the next reader, while each
+    /// store still sends what is owed after its answers.
     ///
     /// **The session's receipts first, and always** (T-SESSION-RECEIPTS-ON-THE-WAKE): the
     /// session store is the application's, not a window's, so its receipts are taken whether
@@ -48499,17 +48541,19 @@ impl<B: Backend> FolioApp<B> {
         if let Some(app) = self.app.as_mut() {
             app.session_store.take_receipts();
         }
-        self.take_preview_save_answers()?;
+        self.answer_storage().1?;
         self.take_the_documents_answers()
     }
 
-    /// **What the storage worker answered the four documents, heard by the first standing
+    /// **What the storage worker answered the four documents, said by the first standing
     /// window** — [`Self::take_document_answers`]'s second half, on its own for the system's end
-    /// of the session, which hears every answer before it says any failure.
+    /// of the session, which hears every answer before it says any failure. The answers
+    /// themselves were heard by the drain before it ([`Self::answer_storage`]); this takes each
+    /// store's news and faults.
     fn take_the_documents_answers(&mut self) -> Result<()> {
         // **Not while a quit holds the storage worker** (T-QUIT-DOCUMENTS): its documents and
-        // recovery phases take the answers themselves, on the turn this wake brings, and merge
-        // without the doors.
+        // recovery phases read what the drain heard on their own turns, and merge without the
+        // doors; the stores keep their faults for the windows that stay.
         if self
             .app
             .as_ref()
@@ -48530,48 +48574,9 @@ impl<B: Backend> FolioApp<B> {
         Ok(())
     }
 
-    /// **The storage worker's answers about preview saves** (S-6a): each heard by
-    /// the buffer that asked, in whichever standing window its tab is in now
-    /// (`Runtime::hear_preview_saves`); an answer no buffer is waiting for — its
-    /// tab, pane or edits gone, or its window leaving — goes to the sink,
-    /// recorded and then ignored (C6). Not held back by a quit: these answers are
-    /// the buffers', and the quit's documents phase takes only the stores'.
-    fn take_preview_save_answers(&mut self) -> Result<()> {
-        self.hear_preview_save_answers().1
-    }
-
-    /// [`Self::take_preview_save_answers`], answering also every refusal the answers gave, by
-    /// the file each was for ([`Runtime::hear_preview_saves`]) — gathered whatever a window's
-    /// repaint answered.
-    fn hear_preview_save_answers(&mut self) -> (Vec<(preview::PreviewSource, String)>, Result<()>) {
-        let mut refused = Vec::new();
-        let Some(mut answers) = self.app.as_mut().map(App::take_preview_save_answers) else {
-            return (refused, Ok(()));
-        };
-        if answers.is_empty() {
-            return (refused, Ok(()));
-        }
-        // Every standing window hears its buffers' answers whatever another
-        // window's repaint answered, and every answer taken is ended — heard,
-        // or sunk — before the first error is passed on (C6).
-        let mut first_error = None;
-        for index in 0..self.windows.len() {
-            if let Some(mut runtime) = self.runtime_at(index)
-                && runtime.window.leaving.is_none()
-                && let Err(error) = runtime.hear_preview_saves(&mut answers, &mut refused)
-            {
-                first_error.get_or_insert(error);
-            }
-        }
-        if let Some(app) = self.app.as_mut() {
-            app.sink_preview_save_answers(answers);
-        }
-        (refused, first_error.map_or(Ok(()), Err))
-    }
-
     /// **Every window's close that waits for its saves, looked at** (S-6b) — once
     /// a turn, which the saves' answers wake (`AppEvent::DocumentsAnswered`, heard
-    /// by the buffers first: [`Self::take_preview_save_answers`]) and the waits'
+    /// by the buffers first: [`Self::answer_storage`]) and the waits'
     /// bound ends (`restore::DirtyGate::waits_until`, in the turn's wake-up).
     ///
     /// Each window decides its own (`Runtime::settle_close_wait`); a pane's or a
@@ -49496,9 +49501,15 @@ impl<B: Backend> FolioApp<B> {
                 // **The hand-editable documents, before the session** (T-QUIT-DOCUMENTS; design
                 // note 2026-10-11, revision (c)2). Both phases are a clock read on the turn, never
                 // a wait: the storage worker wakes the loop with each answer
-                // (`AppEvent::DocumentsAnswered`, which leaves the answers to this arm while the
-                // quit holds the worker), and `Quit::deadline` wakes it at the phase's bound.
+                // (`AppEvent::DocumentsAnswered`; each arm hears them through the same drain first,
+                // `Self::answer_storage`), and `Quit::deadline` wakes it at the phase's bound.
                 quit::QuitStep::Documents => {
+                    // The phase begins before the drain hears anything: a write's answer it
+                    // finds owed is heard after the quit's own hand-over ([`App::quit_begin_documents`]).
+                    if let Some(app) = self.app.as_mut() {
+                        app.quit_begin_documents();
+                    }
+                    self.answer_storage().1?;
                     let step = self
                         .app
                         .as_mut()
@@ -49508,6 +49519,7 @@ impl<B: Backend> FolioApp<B> {
                     }
                 }
                 quit::QuitStep::Recovery => {
+                    self.answer_storage().1?;
                     let folder = persist::storage_dir().join(preview::RECOVERED_FOLDER);
                     let step = self
                         .app
@@ -49674,6 +49686,7 @@ impl<B: Backend> FolioApp<B> {
                     // U-21, §C.3): an update whose session landed is handed over — `Handoff`
                     // durable, then the applier started, on the storage worker — and the loop
                     // comes back for the answer rather than waiting for it.
+                    self.answer_storage().1?;
                     if !self.hand_the_update_over(event_loop, now) {
                         return Ok(());
                     }
@@ -50077,7 +50090,7 @@ impl<B: Backend> FolioApp<B> {
             }
             quit::Handoff::Sent { .. } => {
                 match update_handoff::look(
-                    app.handoff_answer.as_mut(),
+                    app.handoff_heard.take(),
                     txn,
                     quit.handoff_is_overdue(now),
                 ) {
@@ -51574,9 +51587,10 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             // four documents were named, and when, is in `storage_watch`'s
             // mailbox, and `about_to_wait` is where the quiet window is read.
             AppEvent::StorageChanged => Ok(()),
-            // **The documents' answers, taken** (T-STORAGE-WORKER-REQUEST): every store's, in the
-            // order the worker served them, in the window that turns the application's clocks —
-            // the window the storage pass's cards belong to.
+            // **The storage lane's answers, taken** (T-STORAGE-WORKER-REQUEST): every asker's, in the
+            // order the lane admitted them (`Self::answer_storage`,
+            // T-STORAGE-LANE-ORDER-BY-CONSTRUCTION), then the stores' news in the window that turns
+            // the application's clocks — the window the storage pass's cards belong to.
             AppEvent::DocumentsAnswered => self.take_document_answers(),
             // The answer is already in the legacy-profile observation or
             // removal report. What is owed is a frame that reveals or hides the

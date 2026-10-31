@@ -20354,14 +20354,18 @@ impl<B: Backend> WindowRuntime<B> {
 
 /// **The preview's saves on the storage worker, as the application holds them**
 /// (S-6a) — written here and nowhere else: the press hands a request over
-/// ([`Runtime::save_preview_on`]), each window's buffers hear the answers owed
-/// them ([`Runtime::hear_preview_saves`]), and these two take the answers off
-/// the worker's channels and end the ones no buffer is waiting for.
+/// ([`Runtime::save_preview_on`]), the storage lane's drain takes the answers off the
+/// worker's channels with every other asker's (`App::storage_answers`), each window's buffers
+/// hear the answers owed them ([`Runtime::hear_preview_saves`]), and this ends the ones no
+/// buffer is waiting for.
 impl<B: Backend> crate::App<B> {
-    /// Every answer the storage worker has given about a preview save. Never
-    /// waits.
-    pub(crate) fn take_preview_save_answers(&mut self) -> Vec<preview::SaveAnswer> {
-        self.preview_saves.take_answers()
+    /// **The preview's saves' answers below the storage drain's mark `owed`**, with their places
+    /// in admission order — the desk's part of the one drain (`App::storage_answers`).
+    pub(crate) fn preview_save_answers_below(
+        &mut self,
+        owed: Option<crate::persist::StorageId>,
+    ) -> Vec<(crate::persist::InAdmissionOrder, preview::SaveAnswer)> {
+        self.preview_saves.answered(owed)
     }
 
     /// The answers no standing window's buffer was waiting for — its tab, pane
