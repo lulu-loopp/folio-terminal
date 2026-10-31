@@ -4,7 +4,7 @@
 # name) with the number of calls behind it. Held equal to the tree by bt-source's call_graph test;
 # shrink-only against the merge base by scripts/ci/check-unfollowed-edges.ps1 - a key added or grown
 # carries a reason 'YYYY-MM-DD: <why>'. Never edit a key or a count by hand.
-# Ambiguous calls with exactly one candidate, not listed by site above or below (bt_source::call_graph::Unresolved::sole_candidate; a guard naming a callee's callers counts each as a call of its one candidate): 1728. A call whose name is renamed to one only one item declares leaves the list and is counted here.
+# Ambiguous calls with exactly one candidate, not listed by site above or below (bt_source::call_graph::Unresolved::sole_candidate; a guard naming a callee's callers counts each as a call of its one candidate): 1729. A call whose name is renamed to one only one item declares leaves the list and is counted here.
 file	item	kind	name	sites	reason
 crates/bt-app/src/animation.rs	bt-app crate::animation::<FileAnimationSource as Read>::read	Ambiguous	unwrap_or	1	
 crates/bt-app/src/animation.rs	bt-app crate::animation::AnimationCursor::start_again	Ambiguous	into_inner	1	
@@ -534,6 +534,7 @@ crates/bt-app/src/computation_lane.rs	bt-app crate::computation_lane::ShareOf::a
 crates/bt-app/src/computation_lane.rs	bt-app crate::computation_lane::ShareOf::ended	Ambiguous	collect	1	
 crates/bt-app/src/computation_lane.rs	bt-app crate::computation_lane::ShareOf::ended	Ambiguous	filter_map	1	
 crates/bt-app/src/computation_lane.rs	bt-app crate::computation_lane::ShareOf::ended	Ambiguous	remove	1	
+crates/bt-app/src/computation_lane.rs	bt-app crate::computation_lane::ShareOf::ended	Ambiguous	take	1	2026-10-31: T-LANE-DRAIN-MARK-GUARD (plan row 110): the share's drain takes each held request under its mark (lane::Request::take) or, past it, through the named door take_superseded_past, where it took through take_if; the request comes from the share's held map behind lane::locked's MutexGuard, a receiver the rules do not type, and three lanes' types declare a take
 crates/bt-app/src/computation_lane.rs	bt-app crate::computation_lane::ShareOf::let_go	Ambiguous	collect	2	
 crates/bt-app/src/computation_lane.rs	bt-app crate::computation_lane::ShareOf::let_go	Ambiguous	filter_map	1	
 crates/bt-app/src/computation_lane.rs	bt-app crate::computation_lane::ShareOf::let_go	Ambiguous	iter	1	
@@ -1153,7 +1154,6 @@ crates/bt-app/src/git_mutation_lane.rs	bt-app crate::git_mutation_lane::GitMutat
 crates/bt-app/src/git_mutation_lane.rs	bt-app crate::git_mutation_lane::GitMutationLane::ask_through	Ambiguous	serve	1	
 crates/bt-app/src/git_mutation_lane.rs	bt-app crate::git_mutation_lane::GitMutationLane::ask_through	Dynamic	door	1	
 crates/bt-app/src/git_mutation_lane.rs	bt-app crate::git_mutation_lane::GitMutationLane::ask_through	Dynamic	make	1	
-crates/bt-app/src/git_mutation_lane.rs	bt-app crate::git_mutation_lane::GitMutationLane::ended	Ambiguous	earliest_owed	1	
 crates/bt-app/src/git_mutation_lane.rs	bt-app crate::git_mutation_lane::GitMutationLane::ended	Ambiguous	ended	1	
 crates/bt-app/src/git_mutation_lane.rs	bt-app crate::git_mutation_lane::GitMutationLane::ended	Ambiguous	into_iter	1	
 crates/bt-app/src/git_mutation_lane.rs	bt-app crate::git_mutation_lane::GitMutationLane::ended	Ambiguous	is_empty	1	
@@ -1709,6 +1709,7 @@ crates/bt-app/src/lane.rs	bt-app crate::lane::Ledger::delivered	Ambiguous	to_str
 crates/bt-app/src/lane.rs	bt-app crate::lane::Ledger::earliest_owed	Ambiguous	find	1	
 crates/bt-app/src/lane.rs	bt-app crate::lane::Ledger::earliest_owed	Ambiguous	iter	1	
 crates/bt-app/src/lane.rs	bt-app crate::lane::Ledger::earliest_owed	Ambiguous	map	1	
+crates/bt-app/src/lane.rs	bt-app crate::lane::Ledger::identity	Ambiguous	addr	1	2026-10-31: T-LANE-DRAIN-MARK-GUARD (plan row 110): the ledger's identity for the take's debug assertion, std::ptr::from_ref(self).addr(); the raw pointer is a receiver the rules do not type, and a first-party type declares an addr too
 crates/bt-app/src/lane.rs	bt-app crate::lane::Ledger::last_minted	Dynamic	from	1	
 crates/bt-app/src/lane.rs	bt-app crate::lane::Ledger::mint	Ambiguous	clone	1	
 crates/bt-app/src/lane.rs	bt-app crate::lane::Ledger::mint	Ambiguous	get	1	

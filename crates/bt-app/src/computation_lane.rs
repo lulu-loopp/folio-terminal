@@ -317,20 +317,23 @@ impl<Job: Send + 'static> ShareOf<Job> {
         drop(abandoned);
     }
 
-    /// **Every terminal below the share's drain mark** ([`Ledger::earliest_owed`], read once,
+    /// **Every terminal below the share's drain mark** ([`Ledger::drain_mark`], read once,
     /// before the requests are looked at), in the order the ledger minted them, each taken once —
-    /// and every `Superseded` terminal past the mark too: it carries no answer, so no answer's
-    /// order depends on it, and taking it at once frees its place in the share's bound while the
-    /// run before it is still out (a divider drag during a long resample).
+    /// and every `Superseded` terminal past the mark too ([`lane::Request::take_superseded_past`]):
+    /// it carries no answer, so no answer's order depends on it, and taking it at once frees its
+    /// place in the share's bound while the run before it is still out (a divider drag during a
+    /// long resample).
     fn ended(&self, into: &mut Vec<Ended>) {
-        let owed = self.queue.ledger().earliest_owed();
+        let mark = self.queue.ledger().drain_mark();
         let mut held = locked(&self.held);
         let taken: Vec<(ComputationId, ComputationTerminal)> = held
             .iter_mut()
             .filter_map(|(id, (request, _, _))| {
-                let below = owed.is_none_or(|owed| *id < owed);
-                let terminal = request
-                    .take_if(|terminal| below || matches!(terminal, Terminal::Superseded { .. }))?;
+                let terminal = if mark.below(*id) {
+                    request.take(&mark)
+                } else {
+                    request.take_superseded_past(&mark)
+                }?;
                 Some((*id, terminal))
             })
             .collect();

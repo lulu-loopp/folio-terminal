@@ -592,6 +592,9 @@ type StorageLedger = crate::lane::Ledger<StorageId, StorageOwed>;
 /// One admitted storage request, held by its asker beside the road its answer comes on.
 pub(crate) type StorageRequest = crate::lane::Request<StorageId, StorageOwed>;
 
+/// A storage drain's mark ([`StorageLane::drain_mark`]).
+pub(crate) type StorageMark = crate::lane::Mark<StorageId>;
+
 /// **Why a door did not admit a request**, before the asker says it in its own words.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum NotAdmitted {
@@ -714,18 +717,18 @@ impl<A> OnTheWorker<A> {
         }
     }
 
-    /// **What has become of it, if it stands below the drain's mark `owed`**
-    /// ([`StorageLane::earliest_owed`], read once for every asker of the drain): its place in
+    /// **What has become of it, if it stands below the drain's `mark`**
+    /// ([`StorageLane::drain_mark`], read once for every asker of the drain): its place in
     /// admission order and what it came to, or `None` — at or past the mark, or nothing yet.
     /// Never waits.
     pub(crate) fn hear_below(
         &mut self,
-        owed: Option<StorageId>,
+        mark: &StorageMark,
     ) -> Option<(InAdmissionOrder, Ended<A>)> {
-        if !self.order.below(owed) {
+        if !self.order.below(mark.owed()) {
             return None;
         }
-        let ended = match self.reply() {
+        let ended = match self.reply(mark) {
             Reply::Waiting => return None,
             Reply::Answered(answer) => Ended::Answered(answer),
             Reply::Failed(words) => Ended::Failed(words),
@@ -737,20 +740,21 @@ impl<A> OnTheWorker<A> {
     /// **What has become of it**, with no mark — a test's way to hear one request alone.
     #[cfg(test)]
     pub(crate) fn hear(&mut self) -> Reply<A> {
-        self.reply()
+        self.reply(&crate::lane::Mark::unmarked_for_a_test())
     }
 
     /// [`Self::hear_below`] with no mark, as a drain would hand it on — a test's way to hear
     /// one request alone.
     #[cfg(test)]
     pub(crate) fn heard_alone(&mut self) -> Option<Ended<A>> {
-        self.hear_below(None).map(|(_, ended)| ended)
+        self.hear_below(&crate::lane::Mark::unmarked_for_a_test())
+            .map(|(_, ended)| ended)
     }
 
-    /// What has become of it, never waiting.
-    fn reply(&mut self) -> Reply<A> {
+    /// What has become of it under the drain's `mark`, never waiting.
+    fn reply(&mut self, mark: &StorageMark) -> Reply<A> {
         if let Some(request) = &mut self.request {
-            match request.take() {
+            match request.take(mark) {
                 None => return Reply::Waiting,
                 Some(crate::lane::Terminal::Done(())) => self.request = None,
                 Some(crate::lane::Terminal::Failed(failure)) => {
@@ -777,7 +781,7 @@ impl<A> OnTheWorker<A> {
     pub(crate) fn within_patience(&mut self, what: &str) -> Reply<A> {
         let mut heard = Reply::Waiting;
         crate::lane::wait_until(what, || {
-            heard = self.reply();
+            heard = self.reply(&crate::lane::Mark::unmarked_for_a_test());
             !matches!(heard, Reply::Waiting)
         });
         heard
@@ -1532,10 +1536,24 @@ impl StorageLane {
     }
 
     /// **The drain's mark** (T-STORAGE-LANE-ORDER-BY-CONSTRUCTION): the earliest request the
-    /// lane's ledger still owes a terminal ([`crate::lane::Ledger::earliest_owed`]), read once for
+    /// lane's ledger still owes a terminal ([`crate::lane::Ledger::drain_mark`]), read once for
     /// every asker of one drain (`App::storage_answers`). Every request below it has ended, so
     /// the askers take a prefix of the order the ledger minted, whatever the worker does while
     /// they are read.
+    pub(crate) fn drain_mark(&self) -> StorageMark {
+        self.shared.ledger.drain_mark()
+    }
+
+    /// **The mark of the preview's saves at a stop**, after the worker has ended or been let go
+    /// ([`crate::lane::Ledger::mark_after_the_worker_ended`]): the lane delivers nothing after
+    /// it, so no save is held back by it. A named door with one caller
+    /// (`preview::PreviewSaves::answered_at_the_stop`; T-LANE-DRAIN-MARK-GUARD).
+    pub(crate) fn mark_after_the_worker_ended(&self) -> StorageMark {
+        self.shared.ledger.mark_after_the_worker_ended()
+    }
+
+    /// The earliest request still owed — a test's look at whether the lane has ended them all.
+    #[cfg(test)]
     pub(crate) fn earliest_owed(&self) -> Option<StorageId> {
         self.shared.ledger.earliest_owed()
     }
@@ -3492,13 +3510,13 @@ impl SettingsStore {
         self.document.send_owed();
     }
 
-    /// **Its answers below the drain's mark `owed`** (`App::storage_answers`;
+    /// **Its answers below the drain's `mark`** (`App::storage_answers`;
     /// T-STORAGE-LANE-ORDER-BY-CONSTRUCTION), each with its place in admission order.
     pub(crate) fn answered(
         &mut self,
-        owed: Option<StorageId>,
+        mark: &StorageMark,
     ) -> Vec<(InAdmissionOrder, StoreAnswer<SettingsV1>)> {
-        self.document.answered(owed)
+        self.document.answered(mark)
     }
 
     /// Hear one answer [`Self::answered`] took, in the drain's order.
@@ -3879,13 +3897,13 @@ impl KeybindingsStore {
         self.document.send_owed();
     }
 
-    /// **Its answers below the drain's mark `owed`** (`App::storage_answers`;
+    /// **Its answers below the drain's `mark`** (`App::storage_answers`;
     /// T-STORAGE-LANE-ORDER-BY-CONSTRUCTION), each with its place in admission order.
     pub(crate) fn answered(
         &mut self,
-        owed: Option<StorageId>,
+        mark: &StorageMark,
     ) -> Vec<(InAdmissionOrder, StoreAnswer<KeybindingsV1>)> {
-        self.document.answered(owed)
+        self.document.answered(mark)
     }
 
     /// Hear one answer [`Self::answered`] took, in the drain's order.
@@ -4209,13 +4227,13 @@ impl ProfilesStore {
         self.document.send_owed();
     }
 
-    /// **Its answers below the drain's mark `owed`** (`App::storage_answers`;
+    /// **Its answers below the drain's `mark`** (`App::storage_answers`;
     /// T-STORAGE-LANE-ORDER-BY-CONSTRUCTION), each with its place in admission order.
     pub(crate) fn answered(
         &mut self,
-        owed: Option<StorageId>,
+        mark: &StorageMark,
     ) -> Vec<(InAdmissionOrder, StoreAnswer<ProfilesV1>)> {
-        self.document.answered(owed)
+        self.document.answered(mark)
     }
 
     /// Hear one answer [`Self::answered`] took, in the drain's order.
@@ -4708,8 +4726,10 @@ pub(crate) mod tests {
     /// nothing; the next takes settings, then keybindings. No timing decides it: the test is the
     /// worker, and serves between the two reads.
     ///
-    /// MUTATION: `OnTheWorker::hear_below` reads no mark (`InAdmissionOrder::below` always true) —
-    /// the first drain takes keybindings' answer, ahead of the settings answer asked before it.
+    /// MUTATION: `OnTheWorker::hear_below` reads no mark (`InAdmissionOrder::below` always true,
+    /// and `lane::Request::take_if`'s refusal at or past the mark, the second layer since T-LANE-DRAIN-MARK-GUARD; both dropped, observed
+    /// red 2026-10-31) — the first drain takes keybindings' answer, ahead of the settings answer
+    /// asked before it.
     #[test]
     fn an_answer_that_ends_between_two_askers_reads_waits_for_the_next_drain() {
         let root = bt_testpath::temp_path("bt-app-storage-mark-两次读");
@@ -4720,16 +4740,16 @@ pub(crate) mod tests {
         settings.ask_reread();
         keybindings.ask_reread();
 
-        let mark = lane.earliest_owed();
-        assert!(mark.is_some(), "the settings re-read is owed");
-        let settings_first = settings.answered(mark);
+        let mark = lane.drain_mark();
+        assert!(mark.owed().is_some(), "the settings re-read is owed");
+        let settings_first = settings.answered(&mark);
         for _ in 0..2 {
             let StorageJob::Read(read) = jobs.receive("a re-read") else {
                 panic!("a re-read is on the lane");
             };
             (read.answer)(read.generation, bt_persist::StableRead::Absent);
         }
-        let keybindings_first = keybindings.answered(mark);
+        let keybindings_first = keybindings.answered(&mark);
         assert!(
             settings_first.is_empty() && keybindings_first.is_empty(),
             "the first drain takes nothing that ended after its mark: settings {}, keybindings {}",
@@ -4737,11 +4757,11 @@ pub(crate) mod tests {
             keybindings_first.len()
         );
 
-        let mark = lane.earliest_owed();
-        assert_eq!(mark, None, "both re-reads have ended");
+        let mark = lane.drain_mark();
+        assert_eq!(mark.owed(), None, "both re-reads have ended");
         let merged = crate::lane::in_admission_order([
-            ("settings", tagged(settings.answered(mark))),
-            ("keybindings", tagged(keybindings.answered(mark))),
+            ("settings", tagged(settings.answered(&mark))),
+            ("keybindings", tagged(keybindings.answered(&mark))),
         ]);
         let heard: Vec<&str> = merged.iter().map(|(asker, _, ())| *asker).collect();
         assert_eq!(
@@ -10813,13 +10833,13 @@ pub(crate) mod contract_adapter {
         }
 
         /// **The product's drain** (`App::storage_answers`; T-STORAGE-LANE-ORDER-BY-CONSTRUCTION):
-        /// the lane's earliest request still owed, read once ([`StorageLane::earliest_owed`]);
+        /// the lane's earliest request still owed, read once ([`StorageLane::drain_mark`]);
         /// each target's requests taken below it as every asker takes them
         /// ([`OnTheWorker::hear_below`]); merged by the order the lane admitted them
         /// (`lane::in_admission_order`). A request that ends while the targets are read waits for
         /// the next drain.
         fn drain(&mut self) -> Vec<Delivered> {
-            let owed = self.lane.earliest_owed();
+            let owed = self.lane.drain_mark();
             let mut held = Vec::new();
             for (index, (target, asked)) in self.targets.iter_mut().enumerate() {
                 if index > 0
@@ -10828,7 +10848,7 @@ pub(crate) mod contract_adapter {
                     step();
                 }
                 let mut taken = Vec::new();
-                asked.retain(|id, request| match request.hear_below(owed) {
+                asked.retain(|id, request| match request.hear_below(&owed) {
                     Some((order, ended)) => {
                         taken.push((order, (*id, ended)));
                         false
@@ -10887,7 +10907,8 @@ pub(crate) mod contract_adapter {
     /// runs inside the drain, between two targets.
     ///
     /// MUTATION: take every ended request whatever the mark (`OnTheWorker::hear_below` reads no
-    /// mark), and the first drain takes 1 and 2, before 0.
+    /// mark, and `lane::Request::take_if`'s refusal at or past the mark, the second layer since T-LANE-DRAIN-MARK-GUARD; both dropped,
+    /// observed red 2026-10-31), and the first drain takes 1 and 2, before 0.
     #[test]
     fn an_answer_that_ends_while_the_askers_are_read_waits_for_the_next_drain() {
         let mut lane = adapter();

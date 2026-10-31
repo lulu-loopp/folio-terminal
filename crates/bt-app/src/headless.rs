@@ -1569,8 +1569,8 @@ impl HeadlessFolio {
                 .map(|owed| owed.asked_at)
                 .min()
                 .unwrap_or_else(Instant::now);
-            let owed = runtime.app.clipboard_lane.earliest_owed();
-            for (id, answered) in runtime.take_clipboard_answers(owed) {
+            let owed = runtime.app.clipboard_lane.drain_mark();
+            for (id, answered) in runtime.take_clipboard_answers(&owed) {
                 runtime
                     .answer_clipboard_request(id, answered)
                     .expect("the clipboard's answer is answered");
@@ -1987,7 +1987,7 @@ mod tests {
             .expect("the lane admits the write");
         let mut ended = None;
         crate::lane::wait_until("the headless clipboard's write", || {
-            ended = write.take();
+            ended = write.take(&crate::lane::Mark::unmarked_for_a_test());
             ended.is_some()
         });
         assert_eq!(
