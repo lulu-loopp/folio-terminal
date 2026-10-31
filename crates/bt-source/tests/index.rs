@@ -972,6 +972,104 @@ fn a_cfg_in_any_other_macro_body_is_refused_by_its_line() {
     );
 }
 
+/// GREEN (T-GATE-WALK-UNDER-ATTRIBUTE-MACROS, plan row 122) — **a `cfg` inside an item whose
+/// attributes rewrite nothing is a gate as written**: the language's own attributes (`allow`,
+/// `inline`, `must_use`, `track_caller`, `macro_use`), a tool namespace (`rustfmt::skip`), a
+/// `cfg_attr` writing only those, a `derive` of anything, and a derive helper (`serde`, `error`)
+/// beside the derive that declares it — on an item, an `impl` item or a `trait` item.
+///
+/// It holds before and after the row: the row refuses only what an attribute macro may rewrite.
+///
+/// MUTATION: drop the helper table from `crate::gates`' `may_rewrite` — the `serde` and `error`
+/// items are refused; take every tool path as rewriting — `skipped` is refused.
+#[test]
+fn a_cfg_under_inert_attributes_is_a_gate() {
+    let index = Index::shared(&fixture_universe("gated_under_inert_attributes"))
+        .unwrap_or_else(|rejections| panic!("{}", report(&rejections)));
+    let found = index
+        .search(&Search::new(
+            Needle::new(Pattern::text("the_gated_needle")),
+            View::CodeKeepingLiterals,
+        ))
+        .unwrap_or_else(|failure| panic!("{failure}"));
+    let union = index.union();
+    let mut wrong = Vec::new();
+    let mut gated = 0;
+    for occurrence in found.occurrences() {
+        let offset = occurrence.span.start();
+        let at = index.locate(offset).expect("an occurrence is in a file");
+        let from = union[..offset].rfind('\n').map_or(0, |at| at + 1);
+        let to = union[offset..]
+            .find('\n')
+            .map_or(union.len(), |at| offset + at);
+        let line = union[from..to].trim_end_matches('\r');
+        let counted = line.ends_with("// counted");
+        assert!(
+            counted || line.ends_with("// gated"),
+            "every needle line says which it is: {line}"
+        );
+        gated += usize::from(!counted);
+        if occurrence.in_the_product(&index) != counted {
+            wrong.push(format!("{}: {line}", at.line));
+        }
+    }
+    assert_eq!((found.len(), gated), (9, 8), "the fixture's needles");
+    assert!(
+        wrong.is_empty(),
+        "read with the wrong verdict:\n  {}",
+        wrong.join("\n  ")
+    );
+    assert_eq!(found.in_the_product(&index).len(), 1);
+}
+
+/// RED (plan row 122) — **a `cfg` inside an item that carries an attribute macro is refused by its
+/// line**, never read as a gate: the macro receives the item's tokens and may emit anything, so
+/// what the `cfg` says is not what the compiler sees. Refused: a `let` under `#[proc_attr] fn`; an
+/// entry of a read-shape `macro_rules!` written and invoked inside such a fn (the review's R-N2);
+/// an item inside `#[proc_attr] mod`; a field under `#[cfg_attr(test, proc_attr)]` (the predicate
+/// is not evaluated); a `let` under an attribute macro on an `impl` item and on a `trait` item; a
+/// field under a `#[serde]` with no derive declaring it; a `let` under a path attribute
+/// (`tokio::main`); a parameter of a foreign fn under one. Not refused: the item itself, a foreign
+/// item whose own `cfg` keeps it out (an item's own `cfg` is applied before any attribute macro
+/// on it), and an item under `#[implement]` with no `cfg` inside.
+///
+/// Before the row the fixture lowered: every `cfg` inside was read as a gate as written.
+///
+/// MUTATION: drop the rewritten check in `crate::gates`' `gated_range` — every line but the
+/// macro entry's and the parameter's passes; stop setting the mode on `impl`, `trait` and foreign
+/// items — `h`, `hooked` and the parameter pass; read entries whatever the mode — the entry is
+/// read as a gate.
+#[test]
+fn a_cfg_under_an_attribute_macro_is_refused_by_its_line() {
+    let refused = Index::shared(&fixture_universe("gated_under_attribute_macro_refused"))
+        .expect_err("the fixture is built to be refused");
+    let said: Vec<String> = refused
+        .iter()
+        .map(|rejection| match rejection {
+            Rejection::CfgUnderAttributeMacro {
+                at,
+                attribute_macro,
+                ..
+            } => format!("under {at} {attribute_macro}"),
+            other => format!("{other}"),
+        })
+        .collect();
+    assert_eq!(
+        said,
+        [
+            "under 7:5 proc_attr",
+            "under 21:9 proc_attr",
+            "under 28:5 proc_attr",
+            "under 34:5 cfg_attr(test, proc_attr)",
+            "under 43:9 proc_attr",
+            "under 51:5 serde(rename_all = \"lowercase\")",
+            "under 57:5 tokio::main",
+            "under 64:9 proc_attr",
+            "under 75:35 proc_attr",
+        ]
+    );
+}
+
 // ── every impl of one type ────────────────────────────────────────────────
 
 fn impls_fixture() -> Arc<Index> {
