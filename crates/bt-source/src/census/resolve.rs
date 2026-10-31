@@ -6,9 +6,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::Callable;
 use super::types::{
-    Binding, Callees, Class, Declarations, FnDecl, Method, MethodDecl, Named, Place, Receiver, Std,
-    Ty, TypeDecl, builds_itself, closures_by_position, entry_method, external_method,
-    iterator_method, prelude_method, std_kind, std_method,
+    Binding, Callees, Class, Declarations, FnDecl, Method, MethodDecl, Named, Place,
+    RESULT_ALIASES, Receiver, Std, Ty, TypeDecl, builds_itself, closures_by_position, entry_method,
+    external_method, iterator_method, prelude_method, result_alias, std_kind, std_method,
 };
 
 /// One field of the four: where it is declared and whether it is a hub.
@@ -194,6 +194,10 @@ impl<'d> Resolver<'d> {
             let Ty::Named(named) = &ty else {
                 return ty;
             };
+            if let Some(target) = self.result_alias(named) {
+                ty = target;
+                continue;
+            }
             if matches!(named.krate.as_deref(), Some("std" | "core" | "alloc")) {
                 return ty;
             }
@@ -250,6 +254,54 @@ impl<'d> Resolver<'d> {
                 .unwrap_or_else(|| Ty::unknown("no alias"));
         }
         ty
+    }
+
+    /// **The census's reading of the foreign `Result` alias table** ([`RESULT_ALIASES`], plan
+    /// row 101, ruling R3): a path written with its module whose spelling is a row's — the whole
+    /// row when it is rooted at `std`/`core`/`alloc`, the row's ending otherwise (the census's
+    /// module-ending rule: `io::Result`, `anyhow::Result`) — and that names no workspace type.
+    /// A bare `Result` is the standard one: the census reads no `use` item, so it cannot tell
+    /// `use anyhow::Result` from the prelude's; both give the value `?` takes out, and the error
+    /// stays the one written.
+    fn result_alias(&self, named: &Named) -> Option<Ty> {
+        if named.krate.is_none() && named.prefix.is_empty() {
+            return None;
+        }
+        if !matches!(self.kind(named), Kind::Std(_) | Kind::External(_)) {
+            return None;
+        }
+        let spelled = spelled(named);
+        let rooted = matches!(named.krate.as_deref(), Some("std" | "core" | "alloc"));
+        RESULT_ALIASES
+            .iter()
+            .find(|row| {
+                if rooted {
+                    **row == spelled.as_slice()
+                } else {
+                    row.ends_with(&spelled)
+                }
+            })
+            .and_then(|row| result_alias(row, &named.args))
+    }
+
+    /// **The standard `Option` or `Result` an (expanded) type is**, for `?` and the `Some`/`Ok`/
+    /// `Err` patterns (plan row 101, ruling R3): its kind, written bare or from the standard
+    /// library (`std::result::Result`, what a [`RESULT_ALIASES`] row expands to). A path with a
+    /// module the census places in no crate it knows (`syn::Result` where `syn` is not a
+    /// dependency) is a standard kind to [`Self::kind`] by its last segment only, so it is none
+    /// here.
+    pub(crate) fn standard_enum(&self, named: &Named) -> Option<Std> {
+        let spelled_standard = match named.krate.as_deref() {
+            None => named.prefix.is_empty(),
+            Some("std" | "core" | "alloc") => {
+                named.prefix.is_empty() || named.prefix == [named.name.to_lowercase()]
+            }
+            Some(_) => false,
+        };
+        match self.kind(named) {
+            Kind::Std(kind @ (Std::Option | Std::Result)) if spelled_standard => Some(kind),
+            _ => None,
+        }
     }
 
     pub(crate) fn kind(&self, named: &Named) -> Kind<'d> {
@@ -1169,6 +1221,21 @@ impl<'d> Resolver<'d> {
                             }
                         }
                     }
+                    // An `Option`/`Result` that is one only by its last segment (`syn::Result`
+                    // where `syn` is no dependency) is not the standard enum: its methods are not
+                    // the lists' (plan row 101, the review's F5; `standard_enum`).
+                    Kind::Std(Std::Option | Std::Result)
+                        if self.standard_enum(&named).is_none() =>
+                    {
+                        return Err(fail(
+                            format!(
+                                "`{}` is not the standard `{}`: its crate is none the census knows",
+                                spelled(&named).join("::"),
+                                named.name
+                            ),
+                            shared,
+                        ));
+                    }
                     Kind::Std(kind) => {
                         if let Some(found) = std_method(kind, &named.args, method) {
                             return Ok(answer(found, false, shared));
@@ -1618,4 +1685,15 @@ fn holds_unique_reference(ty: &Ty) -> bool {
         Ty::Entry(_) => true,
         Ty::Fn(_) | Ty::Param(_) | Ty::Assoc { .. } | Ty::Traits(_) | Ty::Unknown(_) => false,
     }
+}
+
+/// A path type's segments as written: its crate (if it names one), its modules and its name.
+fn spelled(named: &Named) -> Vec<&str> {
+    named
+        .krate
+        .iter()
+        .chain(&named.prefix)
+        .chain(std::iter::once(&named.name))
+        .map(String::as_str)
+        .collect()
 }

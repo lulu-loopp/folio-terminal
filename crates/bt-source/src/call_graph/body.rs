@@ -313,6 +313,23 @@ impl<'t, 'i> Walker<'t, 'i> {
         }
     }
 
+    /// Every name in a pattern's tokens (a macro's, or what `syn` keeps verbatim), defined
+    /// untyped: the rules cannot see which of them the pattern binds (plan row 101).
+    fn bind_unknown_names(&mut self, tokens: proc_macro2::TokenStream) {
+        for token in tokens {
+            match token {
+                proc_macro2::TokenTree::Ident(name) => {
+                    self.define(
+                        &name.to_string(),
+                        Ty::unknown("a name a macro's pattern may bind"),
+                    );
+                }
+                proc_macro2::TokenTree::Group(group) => self.bind_unknown_names(group.stream()),
+                proc_macro2::TokenTree::Punct(_) | proc_macro2::TokenTree::Literal(_) => {}
+            }
+        }
+    }
+
     fn lookup(&self, name: &str) -> Option<&Ty> {
         self.scopes
             .iter()
@@ -591,12 +608,13 @@ impl<'t, 'i> Walker<'t, 'i> {
             syn::Pat::Tuple(tuple) => {
                 let (ty, mode) = self.peel(ty, mode);
                 let items = match ty {
-                    Ty::Tuple(items) if items.len() == tuple.elems.len() => items,
-                    _ => Vec::new(),
+                    Ty::Tuple(items) if arity_fits(&tuple.elems, items.len()) => Some(items),
+                    _ => None,
                 };
-                for (at, element) in tuple.elems.iter().enumerate() {
+                for (element, at) in tuple.elems.iter().zip(positions(&tuple.elems)) {
                     let item = items
-                        .get(at)
+                        .as_ref()
+                        .and_then(|items| at.of(items))
                         .cloned()
                         .unwrap_or_else(|| Ty::unknown("a tuple pattern the rules do not type"));
                     self.bind(element, item, mode);
@@ -605,11 +623,14 @@ impl<'t, 'i> Walker<'t, 'i> {
             syn::Pat::TupleStruct(tuple) => {
                 let (ty, mode) = self.peel(ty, mode);
                 let variant = last_segment(&tuple.path);
-                let fields = self.tables.variant_fields(&ty, &variant);
-                for (at, element) in tuple.elems.iter().enumerate() {
+                let fields = self
+                    .tables
+                    .variant_fields(&ty, &variant)
+                    .filter(|fields| arity_fits(&tuple.elems, fields.len()));
+                for (element, at) in tuple.elems.iter().zip(positions(&tuple.elems)) {
                     let item = fields
                         .as_ref()
-                        .and_then(|fields| fields.get(at))
+                        .and_then(|fields| at.of(fields))
                         .map_or_else(
                             || Ty::unknown("a variant the rules do not find"),
                             |(_, ty)| ty.clone(),
@@ -646,9 +667,20 @@ impl<'t, 'i> Walker<'t, 'i> {
                     },
                 };
                 for item in &slice.elems {
-                    self.bind(item, element.clone(), mode);
+                    // `name @ ..` binds the elements it stands for: a slice of them.
+                    let bound = if binds_rest(item) {
+                        Ty::Slice(Box::new(element.clone()))
+                    } else {
+                        element.clone()
+                    };
+                    self.bind(item, bound, mode);
                 }
             }
+            // A pattern a macro writes, or one `syn` keeps as tokens: any name in it may be one it
+            // binds, so each is untyped here and an outer binding of that name does not show
+            // through.
+            syn::Pat::Macro(pattern) => self.bind_unknown_names(pattern.mac.tokens.clone()),
+            syn::Pat::Verbatim(tokens) => self.bind_unknown_names(tokens.clone()),
             _ => {}
         }
     }
@@ -1680,6 +1712,62 @@ fn repeat_body(input: syn::parse::ParseStream<'_>) -> syn::Result<(syn::Expr, sy
     input.parse::<syn::Token![;]>()?;
     let length: syn::Expr = input.parse()?;
     Ok((value, length))
+}
+
+/// Where one element of a tuple or tuple-variant pattern stands among the fields: counted from
+/// the start before a `..`, from the end after it (plan row 101: `V(.., last)` is the last
+/// field, never the field at its written position). The `..` itself stands for none.
+#[derive(Clone, Copy)]
+enum Position {
+    Start(usize),
+    End(usize),
+    Rest,
+}
+
+impl Position {
+    fn of<T>(self, fields: &[T]) -> Option<&T> {
+        match self {
+            Self::Start(at) => fields.get(at),
+            Self::End(back) => fields.len().checked_sub(back).and_then(|at| fields.get(at)),
+            Self::Rest => None,
+        }
+    }
+}
+
+fn positions(elems: &Punctuated<syn::Pat, syn::Token![,]>) -> Vec<Position> {
+    let rest = elems
+        .iter()
+        .position(|pat| matches!(pat, syn::Pat::Rest(_)));
+    let len = elems.len();
+    (0..len)
+        .map(|at| match rest {
+            Some(dots) if at == dots => Position::Rest,
+            Some(dots) if at > dots => Position::End(len - at),
+            _ => Position::Start(at),
+        })
+        .collect()
+}
+
+/// Whether a tuple or tuple-variant pattern of `elems` can stand over `fields` fields: as many
+/// elements as fields, or with a `..`, no more elements than fields beside it. Otherwise the
+/// rules have the wrong type in hand, and the pattern types nothing.
+fn arity_fits(elems: &Punctuated<syn::Pat, syn::Token![,]>, fields: usize) -> bool {
+    if elems.iter().any(|pat| matches!(pat, syn::Pat::Rest(_))) {
+        elems.len() - 1 <= fields
+    } else {
+        elems.len() == fields
+    }
+}
+
+/// Whether a slice pattern's element is `name @ ..`: a binding of the elements `..` stands for.
+fn binds_rest(pat: &syn::Pat) -> bool {
+    match pat {
+        syn::Pat::Ident(ident) => ident
+            .subpat
+            .as_ref()
+            .is_some_and(|(_, sub)| matches!(**sub, syn::Pat::Rest(_))),
+        _ => false,
+    }
 }
 
 fn member_name(member: &syn::Member) -> String {
