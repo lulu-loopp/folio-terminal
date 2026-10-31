@@ -752,15 +752,17 @@ pub(crate) fn unkept_said(txn: TxnId, version: &str, before: PhaseKind) -> Strin
 }
 
 /// **§C.4's authoritative test that O is gone**: the data directory `data`'s
-/// claim, tried until it is had and let go at once, sleeping `poll` between
-/// tries through the wait door, until `until`. A live holder or a transient
-/// sweep is asked about again; a claim that cannot be asked about is not
-/// (`ClaimRefusal::QueryDenied`: no answer is coming).
+/// claim, tried until it is had and let go at once, pausing `poll` between
+/// tries on `clock` (the road's [`WaitClock`]: the worker's wait door in the
+/// product, so a test sees the wait it lets go of), until `until`. A live
+/// holder or a transient sweep is asked about again; a claim that cannot be
+/// asked about is not (`ClaimRefusal::QueryDenied`: no answer is coming).
 ///
 /// # Errors
 /// Why O is taken to have stayed, as a sentence.
 pub(crate) fn wait_for_the_claim(
     worker: &WorkerCtx,
+    clock: &dyn WaitClock,
     data: &Path,
     poll: Duration,
     until: Instant,
@@ -779,7 +781,7 @@ pub(crate) fn wait_for_the_claim(
                 if left.is_zero() {
                     return Err("still held at the end of the wait".to_owned());
                 }
-                bt_platform::wait::sleep_within(worker, poll.min(left));
+                clock.pause(worker, poll.min(left));
             }
             Err(refusal) => return Err(format!("{refusal:?}")),
         }
@@ -1212,6 +1214,47 @@ impl WaitClock for CountedClock {
 
     fn pause(&self, worker: &WorkerCtx, pause: Duration) {
         TrialClock::pause(self, worker, pause);
+    }
+}
+
+/// **A test's [`WaitClock`] that is the wall clock, watched**
+/// (T-UPDATE-APPLIER-LOCK-WAITS): [`WallClock`]'s readings and pauses, with
+/// `at_pause` run before each pause, with its number from one. A road's wait
+/// for something the test holds pauses only after an ask was refused, so the
+/// test lets go of its hold in the pause of its choosing — once the road has
+/// been seen waiting — never after a sleep of its own; the deadline stays the
+/// wall clock's, so a hold kept to the end still meets it.
+#[cfg(test)]
+pub(crate) struct WatchedWallClock {
+    /// The pauses so far, for each one's number.
+    pauses: std::sync::Mutex<usize>,
+    at_pause: std::sync::Mutex<Box<dyn FnMut(usize) + Send>>,
+}
+
+#[cfg(test)]
+impl WatchedWallClock {
+    pub(crate) fn new(at_pause: impl FnMut(usize) + Send + 'static) -> Self {
+        Self {
+            pauses: std::sync::Mutex::new(0),
+            at_pause: std::sync::Mutex::new(Box::new(at_pause)),
+        }
+    }
+}
+
+#[cfg(test)]
+impl WaitClock for WatchedWallClock {
+    fn now(&self) -> Instant {
+        WaitClock::now(&WallClock)
+    }
+
+    fn pause(&self, worker: &WorkerCtx, pause: Duration) {
+        let number = {
+            let mut pauses = self.pauses.lock().unwrap();
+            *pauses += 1;
+            *pauses
+        };
+        (self.at_pause.lock().unwrap())(number);
+        WaitClock::pause(&WallClock, worker, pause);
     }
 }
 
@@ -2606,8 +2649,11 @@ fn ask_for_the_window_until(
 /// **The one applier election loop**, shared by Windows and macOS: another
 /// live marked owner or a contended election is asked again while the one
 /// `old_within` deadline has time left. No retry receives a fresh budget.
+/// Each pause between two asks is `clock`'s (the road's [`WaitClock`]: the
+/// worker's wait door in the product).
 pub(crate) fn take_the_window_for_applier(
     worker: &WorkerCtx,
+    clock: &dyn WaitClock,
     home: &Home,
     txn: TxnId,
     me: Running,
@@ -2618,7 +2664,7 @@ pub(crate) fn take_the_window_for_applier(
         until,
         poll,
         || take_the_window(Some(worker), home, txn, me, until),
-        |pause| bt_platform::wait::sleep_within(worker, pause),
+        |pause| clock.pause(worker, pause),
     )
 }
 
