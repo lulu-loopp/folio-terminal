@@ -5202,6 +5202,15 @@ impl<B: Backend> Runtime<'_, B> {
         Ok(true)
     }
 
+    /// **Whether `surface` shows a recording**: a seated engine, or a still whose path names a
+    /// video and whose engine has not started yet.
+    pub(in crate::runtime) fn surface_shows_a_recording(&self, surface: PreviewSurface) -> bool {
+        self.window.video.get(surface).is_some()
+            || self
+                .preview_picture(surface)
+                .is_some_and(|image| preview::path_names_a_video(&image.path))
+    }
+
     /// Whether `at` is on the picture of a recording `surface` is showing —
     /// playing, or standing as its still — and not on its bar.
     fn video_picture_holds(
@@ -5211,11 +5220,7 @@ impl<B: Backend> Runtime<'_, B> {
         scale: f32,
         now: Instant,
     ) -> bool {
-        let recording = self.window.video.get(surface).is_some()
-            || self
-                .preview_picture(surface)
-                .is_some_and(|image| preview::path_names_a_video(&image.path));
-        recording
+        self.surface_shows_a_recording(surface)
             && self
                 .video_shape_of(surface, scale, now)
                 .is_some_and(|shape| file_peek::contains(shape.rect(), at))
@@ -17138,6 +17143,34 @@ pub(crate) fn image_pan_key(
             zoom.pan[0] - towards[0] * extent[0] * step,
             zoom.pan[1] - towards[1] * extent[1] * step,
         ],
+        ..zoom
+    };
+    Some(ImageZoom {
+        pan: image_clamped_pan(body, image_px, carried),
+        ..carried
+    })
+}
+
+/// **A finger's pan over a picture zoomed past its box** (0.4.9 plan row 117), or `None` when the
+/// picture fits its body on both axes and has nowhere to go ([`image_is_pannable`], the drag's and
+/// the arrows' own condition).
+///
+/// `travel` is the finger's, in physical pixels, positive right and down, and the picture follows
+/// it one pixel for one, as it follows a drag: a finger moving down carries the picture down and
+/// shows more of its top. The carried pan goes through [`image_clamped_pan`], the drag's clamp, so
+/// at an edge the picture stops there. The size is never changed: a zoom is the wheel's answer and
+/// a pan is not a wheel.
+pub(crate) fn image_finger_pan(
+    zoom: ImageZoom,
+    travel: [f32; 2],
+    body: [f32; 4],
+    image_px: [u32; 2],
+) -> Option<ImageZoom> {
+    if !image_is_pannable(body, image_px, zoom) {
+        return None;
+    }
+    let carried = ImageZoom {
+        pan: [zoom.pan[0] + travel[0], zoom.pan[1] + travel[1]],
         ..zoom
     };
     Some(ImageZoom {

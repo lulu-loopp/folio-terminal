@@ -2262,7 +2262,10 @@ fn a_wheel_notch_over_a_recordings_picture_is_its_volume() {
         folio.move_to(at);
         let mut runtime = folio.runtime();
         runtime
-            .queue_wheel(winit::event::MouseScrollDelta::LineDelta(0.0, lines))
+            .queue_wheel(
+                winit::event::MouseScrollDelta::LineDelta(0.0, lines),
+                crate::WheelHand::Device,
+            )
             .expect("a notch is taken");
         runtime.flush_wheel().expect("and spent");
     };
@@ -2446,7 +2449,10 @@ fn a_floating_windows_picture_answers_as_a_panes_does() {
     folio.move_to(at);
     let mut runtime = folio.runtime();
     runtime
-        .queue_wheel(winit::event::MouseScrollDelta::LineDelta(0.0, -1.0))
+        .queue_wheel(
+            winit::event::MouseScrollDelta::LineDelta(0.0, -1.0),
+            crate::WheelHand::Device,
+        )
         .expect("a notch is taken");
     runtime.flush_wheel().expect("and spent");
     let quieter = played(&folio, float, |state| {
@@ -2663,7 +2669,10 @@ fn the_volumes_flash_goes_out_on_a_paused_recording() {
     {
         let mut runtime = folio.runtime();
         runtime
-            .queue_wheel(winit::event::MouseScrollDelta::LineDelta(0.0, -1.0))
+            .queue_wheel(
+                winit::event::MouseScrollDelta::LineDelta(0.0, -1.0),
+                crate::WheelHand::Device,
+            )
             .expect("a notch is taken");
         runtime.flush_wheel().expect("and spent");
     }
@@ -3574,4 +3583,160 @@ fn a_single_move_onto_an_unfocused_panes_button_lights_it() {
         Some(CursorIcon::Pointer.into()),
         "and the finger is on it on that same move"
     );
+}
+
+// ── 0.4.9 plan row 117: a finger is not a wheel over a picture or a recording ──
+
+/// A finger's pan parked at `at` on the window and spent as the loop spends it: its opening step,
+/// then one step of `travel`, then the burst spent as the turn's end spends it.
+fn a_finger_pans(folio: &mut HeadlessFolio, at: PhysicalPosition<f64>, travel: (i32, i32)) {
+    let mut runtime = folio.runtime();
+    runtime.window.parked_pans.borrow_mut().extend([
+        bt_platform::PanStep {
+            began_at: Some((at.x as i32, at.y as i32)),
+            travel: (0, 0),
+            inertia: false,
+        },
+        bt_platform::PanStep {
+            began_at: None,
+            travel,
+            inertia: false,
+        },
+    ]);
+    runtime
+        .spend_parked_pans()
+        .expect("the parked pans are spent");
+    runtime.flush_wheel().expect("and the wheel burst too");
+}
+
+/// RED (0.4.9 plan row 117, E3) — **a finger over a picture carries it and never zooms it**: at
+/// Fit a pan leaves the picture as it was (there is nowhere for it to go), and at 100 % a pan of
+/// 30 pixels right and 40 down carries the picture 30 right and 40 down, one pixel for one, at the
+/// same size. A wheel notch over the same picture still zooms it.
+///
+/// RED with the edit undone: the pan was spent as a wheel, so 40 pixels down was a third of a notch
+/// and the picture left Fit.
+///
+/// MUTATION: drop the finger's arm from the picture's rung in `Runtime::mouse_wheel` — the pan
+/// zooms the picture and the first assertion goes red.
+#[test]
+fn a_finger_over_a_picture_carries_it_and_never_zooms_it() {
+    let (mut folio, surface) =
+        a_large_picture_beside_a_shell("picture-finger", "手指 finger", false);
+    let body = picture_body(&mut folio, surface);
+    let middle = centre(body);
+    a_finger_pans(&mut folio, middle, (0, 40));
+    assert_eq!(
+        zoom_of(&mut folio, surface),
+        crate::ImageZoom::FIT,
+        "a finger over a fitted picture changes nothing"
+    );
+    assert!(
+        folio
+            .runtime()
+            .set_preview_image_zoom(surface, crate::ImageZoom::scaled(1.0))
+            .expect("the zoom lands"),
+        "the fixture's own precondition: 100 %"
+    );
+    a_finger_pans(&mut folio, middle, (30, 40));
+    let carried = zoom_of(&mut folio, surface);
+    assert_eq!(
+        carried,
+        crate::ImageZoom {
+            pan: [30.0, 40.0],
+            ..crate::ImageZoom::scaled(1.0)
+        },
+        "the picture follows the finger, at the size it had"
+    );
+    folio.move_to(middle);
+    {
+        let mut runtime = folio.runtime();
+        runtime
+            .queue_wheel(
+                winit::event::MouseScrollDelta::LineDelta(0.0, 1.0),
+                crate::WheelHand::Device,
+            )
+            .expect("a notch is taken");
+        runtime.flush_wheel().expect("and spent");
+    }
+    assert_ne!(
+        zoom_of(&mut folio, surface).mode,
+        carried.mode,
+        "and a wheel notch over it still zooms"
+    );
+}
+
+/// RED (0.4.9 plan row 117, E3) — **a finger over a recording changes neither its volume nor its
+/// size**, wherever on the recording it slides: over the still that stands before the engine has
+/// started, the pan leaves the picture at Fit and starts nothing; over the picture of the playing
+/// recording at 50 %, two notches' worth of pan leave the volume alone; over its bar, the same;
+/// and the one wheel notch after all three takes the volume to 55 %, so every pan had its chance
+/// and moved nothing.
+///
+/// RED with the edit undone (both finger stations of `Runtime::mouse_wheel`), for the pan over the
+/// playing picture only: it was two wheel notches, the volume went 50 → 60 %, and the notch after
+/// it to 65 %. The rest are pins, green with the edit undone too: the pan over the bar left the
+/// volume at 60 %, because the wheel's volume station refuses a point on the bar
+/// (`video_picture_holds`); and the still and every size assertion stayed at Fit, because a
+/// recording never takes a zoom (`picture_takes_zoom`) and the still has no engine to sound.
+///
+/// MUTATION: drop the finger's station before the wheel's video station in `Runtime::mouse_wheel`
+/// — the pan over the playing picture moves the volume and the wait for 55 % never ends on it.
+#[test]
+fn a_finger_over_a_recording_changes_neither_its_volume_nor_its_size() {
+    let _ledger = crate::test_support::ledger_gate();
+    let before = bt_platform::video::engine::engines_outstanding();
+    let (mut folio, surface) = a_recording_beside_a_shell("video-picture-finger");
+    let stage = stage_of(&mut folio, surface);
+    let over = on_the_picture(stage, 20.0);
+    a_finger_pans(&mut folio, over, (0, 240));
+    assert_eq!(
+        zoom_of(&mut folio, surface),
+        crate::ImageZoom::FIT,
+        "a finger over the recording's still leaves it at Fit"
+    );
+    assert!(
+        folio.window.video.get(surface).is_none(),
+        "and starts nothing"
+    );
+    click(&mut folio, over);
+    loaded(&folio, surface);
+    folio
+        .window
+        .video
+        .get_mut(surface)
+        .expect("playing")
+        .set_volume(0.5, Instant::now());
+    played(&folio, surface, |state| (state.volume - 0.5).abs() < 1e-6);
+    a_finger_pans(&mut folio, over, (0, 240));
+    folio.move_to(over);
+    let layout = folio
+        .runtime()
+        .video_bar_layout_of(surface)
+        .expect("the hand over the playing picture puts its bar up");
+    let bar = centre(layout.at.expect("a pane's bar has its elapsed clock"));
+    a_finger_pans(&mut folio, bar, (0, 240));
+    assert_eq!(
+        zoom_of(&mut folio, surface),
+        crate::ImageZoom::FIT,
+        "a finger over the picture or the bar leaves the recording's size alone"
+    );
+    folio.move_to(over);
+    {
+        let mut runtime = folio.runtime();
+        runtime
+            .queue_wheel(
+                winit::event::MouseScrollDelta::LineDelta(0.0, 1.0),
+                crate::WheelHand::Device,
+            )
+            .expect("a notch is taken");
+        runtime.flush_wheel().expect("and spent");
+    }
+    let after = played(&folio, surface, |state| (state.volume - 0.55).abs() < 1e-6);
+    assert!(
+        (after.volume - 0.55).abs() < 1e-6,
+        "the pans left the volume at 50 % and the notch took it to 55 %: {after:?}"
+    );
+    folio.window.video.shutdown_all();
+    crate::test_support::engines_settling_to(before);
 }

@@ -37,7 +37,7 @@ pub(crate) use router::{
 
 use crate::runtime::panes::risen_frame;
 use crate::window_seam::prelude::*;
-use crate::{PreviewSurface, Runtime, float, git_panel, hang_watch, seats};
+use crate::{PreviewSurface, Runtime, WheelHand, float, git_panel, hang_watch, seats};
 use anyhow::Result;
 use std::time::Instant;
 use winit::dpi::PhysicalPosition;
@@ -195,7 +195,7 @@ impl<B: Backend> Runtime<'_, B> {
             WindowEvent::CursorMoved { position, .. } => self.pointer_moved(position),
             WindowEvent::CursorLeft { .. } => self.pointer_left(),
             WindowEvent::MouseInput { state, button, .. } => self.mouse_input(state, button),
-            WindowEvent::MouseWheel { delta, .. } => self.queue_wheel(delta),
+            WindowEvent::MouseWheel { delta, .. } => self.queue_wheel(delta, WheelHand::Device),
             _ => Ok(()),
         }
     }
@@ -392,3 +392,7 @@ pub(crate) fn platform_pointer_of(queried: Option<(i32, i32)>) -> Option<Physica
 #[cfg(test)]
 #[path = "held_tests.rs"]
 mod held_tests;
+
+#[cfg(test)]
+#[path = "pan_distance_tests.rs"]
+mod pan_distance_tests;

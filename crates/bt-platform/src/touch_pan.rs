@@ -47,6 +47,12 @@ pub struct PanStep {
     /// finger moving down shows what is above — which is the direction a wheel
     /// turned away from the hand already means on the wheel road.
     pub travel: (i32, i32),
+    /// **Whether the system flagged this message `GF_INERTIA`** — the step at
+    /// which its glide after the finger lifted begins (0.4.9 plan row 117), as
+    /// the system set it and on no other step. Inertia is more positions,
+    /// not a different rule, so nothing spends a step differently for it; it
+    /// is carried so the pointer trace can tell the glide from the contact.
+    pub inertia: bool,
 }
 
 /// **The one pan a window is in the middle of**, as the last position it
@@ -59,9 +65,9 @@ pub struct PanTrack {
 }
 
 impl PanTrack {
-    /// A new pan message: `begins` / `ends` are its `GF_BEGIN` / `GF_END`
-    /// flags, `screen` its `ptsLocation` and `client` the same point in the
-    /// window's client coordinates.
+    /// A new pan message: `begins` / `inertia` / `ends` are its `GF_BEGIN` /
+    /// `GF_INERTIA` / `GF_END` flags, `screen` its `ptsLocation` and `client`
+    /// the same point in the window's client coordinates.
     ///
     /// Travel is measured in screen coordinates, because those are what the
     /// system reported and a window that moves under a pan must not turn its
@@ -78,6 +84,7 @@ impl PanTrack {
     pub fn step(
         &mut self,
         begins: bool,
+        inertia: bool,
         ends: bool,
         screen: (i32, i32),
         client: (i32, i32),
@@ -88,12 +95,14 @@ impl PanTrack {
             return Some(PanStep {
                 began_at: Some(client),
                 travel: (0, 0),
+                inertia,
             });
         };
         let travel = (screen.0 - previous.0, screen.1 - previous.1);
         (travel != (0, 0)).then_some(PanStep {
             began_at: None,
             travel,
+            inertia,
         })
     }
 }
@@ -105,7 +114,8 @@ mod tests {
     /// One `WM_GESTURE` / `GID_PAN` message, as the door reads it:
     /// `(GF_BEGIN, GF_INERTIA, GF_END, ptsLocation)`. The inertia flag is in
     /// the record because the system sets it, and the tests assert that it
-    /// changes nothing — inertia is more positions, not a different rule.
+    /// changes no travel — inertia is more positions, not a different rule —
+    /// and is carried on the step the system set it on and no other.
     type Record = (bool, bool, bool, (i32, i32));
 
     /// Screen and client differ by the window's origin, as they do on a real
@@ -118,7 +128,9 @@ mod tests {
         let mut track = PanTrack::default();
         records
             .iter()
-            .map(|&(begins, _inertia, ends, at)| track.step(begins, ends, at, client_of(at)))
+            .map(|&(begins, inertia, ends, at)| {
+                track.step(begins, inertia, ends, at, client_of(at))
+            })
             .collect()
     }
 
@@ -126,6 +138,15 @@ mod tests {
         Some(PanStep {
             began_at: None,
             travel: (x, y),
+            inertia: false,
+        })
+    }
+
+    fn glided(x: i32, y: i32) -> Option<PanStep> {
+        Some(PanStep {
+            began_at: None,
+            travel: (x, y),
+            inertia: true,
         })
     }
 
@@ -133,6 +154,7 @@ mod tests {
         Some(PanStep {
             began_at: Some((x, y)),
             travel: (0, 0),
+            inertia: false,
         })
     }
 
@@ -170,7 +192,7 @@ mod tests {
                 moved(0, 12),
                 moved(1, 18),
                 moved(0, 30),
-                moved(0, 20),
+                glided(0, 20),
                 moved(0, 10),
                 moved(0, 4),
                 None,

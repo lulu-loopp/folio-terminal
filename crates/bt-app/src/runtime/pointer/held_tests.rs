@@ -96,7 +96,10 @@ fn a_held_gesture_resting_on_a_chevron_opens_nothing() {
 /// The notch the wheel is spent with: three lines back up, as a mouse turns it.
 fn a_notch(runtime: &mut Runtime<'_, Headless>) {
     runtime
-        .queue_wheel(MouseScrollDelta::LineDelta(0.0, 3.0))
+        .queue_wheel(
+            MouseScrollDelta::LineDelta(0.0, 3.0),
+            crate::WheelHand::Device,
+        )
         .expect("the notch is queued");
     runtime.flush_wheel().expect("and spent");
 }
@@ -212,6 +215,7 @@ fn a_pan_under_a_held_gesture_moves_nothing() {
         .push(bt_platform::PanStep {
             began_at: Some((600, 500)),
             travel: (0, 40),
+            inertia: false,
         });
     runtime
         .spend_parked_pans()
@@ -539,10 +543,12 @@ fn a_pan_parked(
     parked.push(bt_platform::PanStep {
         began_at: Some(at),
         travel: (0, 0),
+        inertia: false,
     });
     parked.extend((0..steps).map(|_| bt_platform::PanStep {
         began_at: None,
         travel: (0, travel),
+        inertia: false,
     }));
 }
 
@@ -731,6 +737,7 @@ fn a_pan_discarded_under_a_held_gesture_says_so_once() {
     let pan = bt_platform::PanStep {
         began_at: Some((600, 500)),
         travel: (0, 40),
+        inertia: false,
     };
     {
         let mut runtime = folio.runtime();

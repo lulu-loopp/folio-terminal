@@ -7,7 +7,7 @@ use crate::TerminalPane;
 use crate::runtime::files::{files_row_activation, press_files_node};
 use crate::runtime::panes::risen_frame;
 use crate::runtime::preview::crumb_segments;
-use crate::runtime::preview::image_zoom_notch;
+use crate::runtime::preview::{image_finger_pan, image_zoom_notch};
 use crate::runtime::terminal::write_pty_input;
 use crate::window_seam::prelude::*;
 use crate::{
@@ -20,9 +20,9 @@ use crate::{
     PreviewSurface, RenameExit, RenameSubject, RowActivation, RowHost, RowPayload, RowPayloadKind,
     RowPress, Runtime, SpringGate, TabClick, TabId, TearGrip, TerminalColumnDrag,
     TerminalReference, TerminalThumbDrag, UserInputKind, WebHeadVerb, WheelAxis, WheelBurst,
-    WheelRoute, files, first_run, float, formula_tools, hang_watch, input, marks, mouse_trace,
-    palette, profiles, restore, seats, settings, settling, toast, tooltip, update, websheet,
-    wheel_zoom_notches,
+    WheelHand, WheelRoute, files, first_run, float, formula_tools, hang_watch, input, marks,
+    mouse_trace, palette, profiles, restore, seats, settings, settling, toast, tooltip, update,
+    websheet, wheel_zoom_notches,
 };
 use crate::{TextSizeAim, TextStep};
 use anyhow::Context;
@@ -5385,9 +5385,17 @@ impl<B: Backend> Runtime<'_, B> {
         }
     }
 
-    /// Take one notch from the platform. See [`WheelBurst`] for why this is not
-    /// [`Self::mouse_wheel`].
-    pub(crate) fn queue_wheel(&mut self, reported: MouseScrollDelta) -> Result<()> {
+    /// Take one notch, saying what turned it: the platform's wheel
+    /// ([`WheelHand::Device`]) or a finger's pan ([`Self::spend_parked_pans`],
+    /// [`WheelHand::Finger`], 0.4.9 plan row 117). See [`WheelBurst`] for why
+    /// this is not [`Self::mouse_wheel`]. A report of another hand than the
+    /// burst holds spends the burst first, as a report of the other currency
+    /// does.
+    pub(crate) fn queue_wheel(
+        &mut self,
+        reported: MouseScrollDelta,
+        hand: WheelHand,
+    ) -> Result<()> {
         self.window.wheel_events = self.window.wheel_events.saturating_add(1);
         // **The wheel road's own first station** (`BT_MOUSE_TRACE`, §7.60): the
         // *raw* report, as the driver sent it, before [`WheelBurst`] merges it
@@ -5406,11 +5414,12 @@ impl<B: Backend> Runtime<'_, B> {
         let events = self.window.wheel_events;
         self.mouse_trace(|| {
             format!(
-                "wheel_queue raw_delta={} carried={} events={events}",
+                "wheel_queue raw_delta={} hand={} carried={} events={events}",
                 mouse_trace::delta_word(reported),
+                hand.word(),
                 carried.map_or_else(
                     || "none".to_owned(),
-                    |burst| mouse_trace::delta_word(burst.delta())
+                    |(burst, _)| mouse_trace::delta_word(burst.delta())
                 ),
             )
         });
@@ -5430,14 +5439,14 @@ impl<B: Backend> Runtime<'_, B> {
             bt_platform::host_platform() == bt_platform::HostPlatform::MacOs,
         );
         match self.window.wheel_burst {
-            Some(burst) => match burst.plus(delta) {
-                Some(merged) => self.window.wheel_burst = Some(merged),
+            Some((burst, held)) => match burst.plus(delta).filter(|_| held == hand) {
+                Some(merged) => self.window.wheel_burst = Some((merged, hand)),
                 None => {
                     self.flush_wheel()?;
-                    self.window.wheel_burst = Some(WheelBurst::of(delta));
+                    self.window.wheel_burst = Some((WheelBurst::of(delta), hand));
                 }
             },
-            None => self.window.wheel_burst = Some(WheelBurst::of(delta)),
+            None => self.window.wheel_burst = Some((WheelBurst::of(delta), hand)),
         }
         Ok(())
     }
@@ -5459,7 +5468,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// ([`hang_watch::enter`]): a station that stands inside another's function
     /// hands the enclosing one back rather than keeping the rest of it.
     pub(crate) fn flush_wheel(&mut self) -> Result<()> {
-        let Some(burst) = self.window.wheel_burst.take() else {
+        let Some((burst, hand)) = self.window.wheel_burst.take() else {
             return Ok(());
         };
         // **The router walks once for this burst** (T-POINTER-CAPTURE R-4).
@@ -5468,7 +5477,7 @@ impl<B: Backend> Runtime<'_, B> {
         }
         let leaving = hang_watch::enter(hang_watch::Station::Wheel);
         self.window.wheel_routings = self.window.wheel_routings.saturating_add(1);
-        let spent = self.mouse_wheel(burst.delta());
+        let spent = self.mouse_wheel(burst.delta(), hand);
         hang_watch::at(leaving);
         spent
     }
@@ -5520,7 +5529,7 @@ impl<B: Backend> Runtime<'_, B> {
         DropBatch::collect(&mut self.window.dropped_files, path, point, target);
     }
 
-    fn mouse_wheel(&mut self, delta: MouseScrollDelta) -> Result<()> {
+    fn mouse_wheel(&mut self, delta: MouseScrollDelta, hand: WheelHand) -> Result<()> {
         // **The text-size carry leaves the window on every notch** (ticket 37) and goes back only
         // if the text-size rung below spends this one: a notch taken by any other route — another
         // surface, no modifier, another modifier — ends the gesture the carry belonged to.
@@ -5836,6 +5845,17 @@ impl<B: Backend> Runtime<'_, B> {
             // with no modifier held: `Ctrl`-, `Shift`- and `Alt`-wheel go on to
             // the routes that give them their window-wide meanings. Asked before
             // the picture's zoom below, which a recording does not take.
+            //
+            // **A finger over a recording does nothing** (0.4.9 plan row 117): a
+            // pan sliding over the picture or its bar is not asking for the
+            // volume, and a recording has nothing else a finger could carry.
+            // The recording still owns the gesture: nothing under it scrolls.
+            if hand == WheelHand::Finger && self.surface_shows_a_recording(surface) {
+                self.mouse_trace(|| {
+                    format!("wheel_route taken=pane at=video-finger surface={surface:?}")
+                });
+                return Ok(());
+            }
             if self.window.modifiers.is_empty()
                 && !wheel_points_sideways(delta)
                 && self.wheel_video_picture(
@@ -5862,6 +5882,26 @@ impl<B: Backend> Runtime<'_, B> {
             && let Some((surface, _)) = self.preview_surface_at(position)
             && let Some((body, image_px)) = self.preview_image_geometry(surface)
         {
+            // **A finger over a picture moves it** (0.4.9 plan row 117): the zoom
+            // is a wheel's answer, and a pan asks to carry the picture the way
+            // the finger went, one pixel for one, as a drag of it does, and
+            // nothing at all where the picture fits and has nowhere to go. The
+            // picture is still the gesture's owner either way: nothing under it
+            // scrolls.
+            if hand == WheelHand::Finger {
+                let travel = [
+                    self.wheel_travel(delta, body[2] - body[0], true),
+                    self.wheel_travel(delta, body[3] - body[1], false),
+                ];
+                let zoom = self.preview_image_zoom(surface);
+                self.mouse_trace(|| {
+                    format!("wheel_route taken=pane at=image-pan surface={surface:?}")
+                });
+                if let Some(carried) = image_finger_pan(zoom, travel, body, image_px) {
+                    self.set_preview_image_zoom(surface, carried)?;
+                }
+                return Ok(());
+            }
             let notches = wheel_zoom_notches(delta);
             let zoom = image_zoom_notch(
                 self.preview_image_zoom(surface),
@@ -6205,11 +6245,14 @@ impl<B: Backend> Runtime<'_, B> {
     }
 
     /// Per-notch quantization for the mouse-protocol route: one wheel report per detent, the
-    /// xterm convention every TUI calibrates its own scroll step against. Trackpad pixel deltas
-    /// emit one report per accrued cell height of travel.
+    /// xterm convention every TUI calibrates its own scroll step against. Pixel travel (a
+    /// trackpad, a finger's pan) emits one report per accrued **notch** of travel, a notch being
+    /// as tall as the local road makes one ([`pixels_per_reported_notch`], 0.4.9 plan row 117):
+    /// the program scrolls its own step per report, the step it calibrates against a detent, so a
+    /// report per *cell* had a finger scrolling vim or htop three rows for every row it moved.
     ///
-    /// `seat` is the pane being addressed (ticket 37): a trackpad's report per accrued cell height
-    /// is per *that* pane's cell.
+    /// `seat` is the pane being addressed (ticket 37): the notch is *that* pane's cell times the
+    /// system's lines per notch, and *that* pane's rows for "one screen at a time".
     fn take_forward_wheel_notches(&mut self, seat: SeatId, delta: MouseScrollDelta) -> i32 {
         self.forward_wheel_remainders_for(seat);
         match delta {
@@ -6220,7 +6263,12 @@ impl<B: Backend> Runtime<'_, B> {
             MouseScrollDelta::PixelDelta(position) => {
                 self.window.pixel_wheel_remainder += position.y;
                 let cell_px = self.pane(seat).view.metrics.cell_height_px as f64;
-                drain_whole_units(&mut self.window.pixel_wheel_remainder, cell_px) as i32
+                let notch_px = pixels_per_reported_notch(
+                    recoverable_wheel_scroll_amount(bt_platform::wheel_scroll_amount()),
+                    cell_px,
+                    self.leaf_wheel_rows(seat),
+                );
+                drain_whole_units(&mut self.window.pixel_wheel_remainder, notch_px) as i32
             }
         }
     }
@@ -7973,6 +8021,30 @@ pub(crate) fn recoverable_wheel_scroll_amount(
             ));
             bt_platform::WheelScrollAmount::Lines(FALLBACK_WHEEL_LINES)
         }
+    }
+}
+
+/// **How many pixels of travel one forwarded wheel report stands for** (0.4.9 plan row 117):
+/// the height of the notch the local road scrolls, which is the system's lines per notch times the
+/// addressed pane's cell, or its whole screen of `rows` for "one screen at a time".
+///
+/// One notch-equivalence for the wheel and for pixels: a detent sends a program one report and
+/// scrolls a local pane this far, so this far of a finger or a trackpad sends it one report too,
+/// and a program that steps its rows per report the way the system's lines-per-notch says moves
+/// the content about as far as the hand went. On macOS the system's answer is one line a notch
+/// (`bt_platform::wheel_scroll_amount`), so a trackpad there still reports once a cell.
+///
+/// **At least one line.** "0 lines per notch" is a wheel that scrolls nothing, which is a wish
+/// about the wheel; a finger's report still has to stand for some number of pixels, and a notch
+/// shorter than a row would turn any pixel of travel into reports without end.
+pub(crate) fn pixels_per_reported_notch(
+    amount: bt_platform::WheelScrollAmount,
+    cell_px: f64,
+    rows: f64,
+) -> f64 {
+    match amount {
+        bt_platform::WheelScrollAmount::Lines(lines) => f64::from(lines.max(1)) * cell_px,
+        bt_platform::WheelScrollAmount::Page => rows * cell_px,
     }
 }
 

@@ -10630,9 +10630,9 @@ struct WindowRuntime<B: Backend = Native> {
     /// [`wheel_burst_collapses_a_run_of_notches`].
     wheel_events: u64,
     wheel_routings: u64,
-    /// The notches that have arrived since the loop last acted on one. See
-    /// [`WheelBurst`].
-    wheel_burst: Option<WheelBurst>,
+    /// The notches that have arrived since the loop last acted on one, and
+    /// what turned them. See [`WheelBurst`] and [`WheelHand`].
+    wheel_burst: Option<(WheelBurst, WheelHand)>,
     /// **The system's pan gestures this window's touch door has answered and
     /// the loop has not yet read** (0.4.4 ticket 11). Written by the door from
     /// inside message dispatch, emptied by [`Runtime::spend_parked_pans`] on
@@ -20607,6 +20607,40 @@ impl Default for ImageZoom {
 enum WheelBurst {
     Lines { x: f32, y: f32 },
     Pixels { x: f64, y: f64 },
+}
+
+/// **What turned the wheel a burst holds: a device, or a finger the system
+/// recognised as a pan** (0.4.9 plan row 117).
+///
+/// A pan is spent on the wheel's road (`runtime::pointer::touch`), and on every
+/// scroller that is the right answer: its travel is physical pixels, the
+/// currency a precision touchpad already speaks, and the content follows the
+/// finger one pixel for one. Two stations on that road are not scrollers. Over a
+/// recording's picture a notch is its volume (row 40), and over a picture a
+/// notch is a zoom (#60). Those are answers to a *wheel*, and a finger sliding
+/// over a picture asks to move it, not to change its size or its loudness. So
+/// the burst says which hand it came from, those two stations ask, and every
+/// other station reads the delta exactly as it did.
+///
+/// Two hands are never merged into one burst, for the reason two currencies are
+/// not: the stations read which one they were given.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WheelHand {
+    /// A mouse wheel, a tilt wheel or a touchpad: what the platform reports as
+    /// a wheel.
+    Device,
+    /// A pan the system recognised and the touch door answered.
+    Finger,
+}
+
+impl WheelHand {
+    /// The word the pointer trace writes for it.
+    fn word(self) -> &'static str {
+        match self {
+            Self::Device => "device",
+            Self::Finger => "finger",
+        }
+    }
 }
 
 /// **One drop: the files it let go of, and where it let go of them** (GitHub
@@ -38645,8 +38679,11 @@ mod mouse_trace_station_tests {
         // own `wheel_route taken=overlay at=over-pane` line above it. 28 → 29 on
         // 2026-10-23 (T-VIDEO-POINTER-AND-KEYS, row 40): a notch over a
         // recording's picture is its volume, with its own `wheel_route taken=pane
-        // at=video-volume` line above it.
-        assert_every_exit_is_traced("mouse_wheel", 29);
+        // at=video-volume` line above it. 29 → 31 on 2026-10-30 (row 117): a
+        // finger's pan over a recording does nothing, with its own
+        // `wheel_route taken=pane at=video-finger` line, and over a picture it
+        // carries the picture, with its own `at=image-pan` line.
+        assert_every_exit_is_traced("mouse_wheel", 31);
         assert_every_exit_is_traced("scroll_rail", 3);
         assert_every_exit_is_traced("aim_focus_card_window", 10);
     }
