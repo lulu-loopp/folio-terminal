@@ -142,7 +142,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// Each step enters by the doors a mouse would use: a pan's opening point
     /// is [`Self::pointer_moved`] — after the wheel held so far is spent, as
     /// the dispatcher spends it before any pointer move — and its travel is
-    /// [`Self::hold_wheel`], the wheel's own entrance, so the routing, the
+    /// [`Self::queue_wheel`], the wheel's own entrance, so the routing, the
     /// merging into one burst per turn, the scroll-back rules and every
     /// scroller that already answers a trackpad apply unchanged. There is no
     /// second scroll road, and nothing here recognises anything: the system
@@ -190,7 +190,7 @@ impl<B: Backend> Runtime<'_, B> {
                 self.pointer_moved(position)?;
             }
             if let Some(delta) = wheel {
-                self.hold_wheel(delta, WheelHand::Finger)?;
+                self.queue_wheel(delta, WheelHand::Finger)?;
             }
         }
         Ok(())

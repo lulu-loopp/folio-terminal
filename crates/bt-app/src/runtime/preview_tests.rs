@@ -2262,7 +2262,10 @@ fn a_wheel_notch_over_a_recordings_picture_is_its_volume() {
         folio.move_to(at);
         let mut runtime = folio.runtime();
         runtime
-            .queue_wheel(winit::event::MouseScrollDelta::LineDelta(0.0, lines))
+            .queue_wheel(
+                winit::event::MouseScrollDelta::LineDelta(0.0, lines),
+                crate::WheelHand::Device,
+            )
             .expect("a notch is taken");
         runtime.flush_wheel().expect("and spent");
     };
@@ -2446,7 +2449,10 @@ fn a_floating_windows_picture_answers_as_a_panes_does() {
     folio.move_to(at);
     let mut runtime = folio.runtime();
     runtime
-        .queue_wheel(winit::event::MouseScrollDelta::LineDelta(0.0, -1.0))
+        .queue_wheel(
+            winit::event::MouseScrollDelta::LineDelta(0.0, -1.0),
+            crate::WheelHand::Device,
+        )
         .expect("a notch is taken");
     runtime.flush_wheel().expect("and spent");
     let quieter = played(&folio, float, |state| {
@@ -2663,7 +2669,10 @@ fn the_volumes_flash_goes_out_on_a_paused_recording() {
     {
         let mut runtime = folio.runtime();
         runtime
-            .queue_wheel(winit::event::MouseScrollDelta::LineDelta(0.0, -1.0))
+            .queue_wheel(
+                winit::event::MouseScrollDelta::LineDelta(0.0, -1.0),
+                crate::WheelHand::Device,
+            )
             .expect("a notch is taken");
         runtime.flush_wheel().expect("and spent");
     }
@@ -3643,7 +3652,10 @@ fn a_finger_over_a_picture_carries_it_and_never_zooms_it() {
     {
         let mut runtime = folio.runtime();
         runtime
-            .queue_wheel(winit::event::MouseScrollDelta::LineDelta(0.0, 1.0))
+            .queue_wheel(
+                winit::event::MouseScrollDelta::LineDelta(0.0, 1.0),
+                crate::WheelHand::Device,
+            )
             .expect("a notch is taken");
         runtime.flush_wheel().expect("and spent");
     }
@@ -3685,7 +3697,10 @@ fn a_finger_over_a_recordings_picture_leaves_its_volume_alone() {
     {
         let mut runtime = folio.runtime();
         runtime
-            .queue_wheel(winit::event::MouseScrollDelta::LineDelta(0.0, 1.0))
+            .queue_wheel(
+                winit::event::MouseScrollDelta::LineDelta(0.0, 1.0),
+                crate::WheelHand::Device,
+            )
             .expect("a notch is taken");
         runtime.flush_wheel().expect("and spent");
     }

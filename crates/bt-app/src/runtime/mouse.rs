@@ -5385,18 +5385,17 @@ impl<B: Backend> Runtime<'_, B> {
         }
     }
 
-    /// Take one notch from the platform. See [`WheelBurst`] for why this is not
-    /// [`Self::mouse_wheel`].
-    pub(crate) fn queue_wheel(&mut self, reported: MouseScrollDelta) -> Result<()> {
-        self.hold_wheel(reported, WheelHand::Device)
-    }
-
-    /// **Take one report onto the wheel's road, saying what turned it**: the
-    /// platform's wheel ([`Self::queue_wheel`]) or a finger's pan
-    /// ([`Self::spend_parked_pans`]); see [`WheelHand`]. A report of another
-    /// hand than the burst holds spends the burst first, as a report of the
-    /// other currency does.
-    pub(crate) fn hold_wheel(&mut self, reported: MouseScrollDelta, hand: WheelHand) -> Result<()> {
+    /// Take one notch, saying what turned it: the platform's wheel
+    /// ([`WheelHand::Device`]) or a finger's pan ([`Self::spend_parked_pans`],
+    /// [`WheelHand::Finger`], 0.4.9 plan row 117). See [`WheelBurst`] for why
+    /// this is not [`Self::mouse_wheel`]. A report of another hand than the
+    /// burst holds spends the burst first, as a report of the other currency
+    /// does.
+    pub(crate) fn queue_wheel(
+        &mut self,
+        reported: MouseScrollDelta,
+        hand: WheelHand,
+    ) -> Result<()> {
         self.window.wheel_events = self.window.wheel_events.saturating_add(1);
         // **The wheel road's own first station** (`BT_MOUSE_TRACE`, §7.60): the
         // *raw* report, as the driver sent it, before [`WheelBurst`] merges it

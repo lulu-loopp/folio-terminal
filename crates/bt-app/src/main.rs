@@ -38637,8 +38637,11 @@ mod mouse_trace_station_tests {
         // own `wheel_route taken=overlay at=over-pane` line above it. 28 → 29 on
         // 2026-10-23 (T-VIDEO-POINTER-AND-KEYS, row 40): a notch over a
         // recording's picture is its volume, with its own `wheel_route taken=pane
-        // at=video-volume` line above it.
-        assert_every_exit_is_traced("mouse_wheel", 29);
+        // at=video-volume` line above it. 29 → 31 on 2026-10-30 (row 117): a
+        // finger's pan over a recording does nothing, with its own
+        // `wheel_route taken=pane at=video-finger` line, and over a picture it
+        // carries the picture, with its own `at=image-pan` line.
+        assert_every_exit_is_traced("mouse_wheel", 31);
         assert_every_exit_is_traced("scroll_rail", 3);
         assert_every_exit_is_traced("aim_focus_card_window", 10);
     }

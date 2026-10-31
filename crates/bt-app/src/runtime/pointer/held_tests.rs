@@ -96,7 +96,10 @@ fn a_held_gesture_resting_on_a_chevron_opens_nothing() {
 /// The notch the wheel is spent with: three lines back up, as a mouse turns it.
 fn a_notch(runtime: &mut Runtime<'_, Headless>) {
     runtime
-        .queue_wheel(MouseScrollDelta::LineDelta(0.0, 3.0))
+        .queue_wheel(
+            MouseScrollDelta::LineDelta(0.0, 3.0),
+            crate::WheelHand::Device,
+        )
         .expect("the notch is queued");
     runtime.flush_wheel().expect("and spent");
 }
