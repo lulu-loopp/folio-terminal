@@ -1088,9 +1088,13 @@ the thread it would wait for is still held, awaited within the suite's patience,
 go before the verdict — never by timing it. The hand-off lane's flood and the trace sink's producers
 are read the same way, so a press, an offer, a settle or a writer that waits is red, not a hang, in
 these tests and in the trace sink's, the log writer's and the watchdog's tests that meet a full queue,
-a held writer or a held ring (row 106); the lane doors' gate-held tests (row 111) and the applier's
-lock waits behind a held lock (row 112) are not yet read this way. What such a verdict does
-not catch is a bounded wait, or a give-up that ignores its budget, shorter than the suite's patience.
+a held writer or a held ring (row 106), and in every test that holds a lane's worker — at the
+suite's gate or a fake's hold — and calls a door while it is held (row 111): the held worker lets go
+on its own at the suite's patience and counts it, and the release reads the count, so a door that
+waits is red, not a hang (a channel the test holds is read the same way, on a thread of its own). The
+applier's lock waits behind a held lock (row 112) are not yet read this way, nor is a test-thread
+wait on something no gate or hold holds (row 113). What such a verdict does not catch is a bounded
+wait, or a give-up that ignores its budget, shorter than the suite's patience.
 
 ## Test order and shared fixtures
 

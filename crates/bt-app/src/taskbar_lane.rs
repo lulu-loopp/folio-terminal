@@ -349,6 +349,34 @@ pub(crate) mod tests {
         (lane, wakes)
     }
 
+    /// **A window's reading, made on a thread of its own** while the shell may be held — with the
+    /// request it makes when one is due ([`TaskbarLane::observe`]), so no door of the lane is
+    /// called on the test's thread while the shell is held: what it read, once it came back within the lane suite's patience — or `None`, after the held ask is
+    /// answered with `answer` (the release), so that a reading that waited for the shell can end,
+    /// detached. The thread is joined only once it has come back.
+    fn observe_apart(
+        lane: &'static TaskbarLane,
+        now: Instant,
+        release: &mpsc::Sender<bool>,
+        answer: bool,
+    ) -> Option<TaskbarReading> {
+        let (told, seen) = mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let _ = told.send(lane.observe(now, true));
+        });
+        let mut reading = None;
+        let came_back = crate::lane::within_patience(|| {
+            reading = seen.try_recv().ok();
+            reading.is_some()
+        });
+        if !came_back {
+            release.send(answer).expect("the held shell is there");
+            return None;
+        }
+        reader.join().expect("the reading's thread ends");
+        reading
+    }
+
     /// RED (62) — **The lane's answer is read without waiting, and an older answer never
     /// overwrites a newer one.**
     ///
@@ -358,8 +386,15 @@ pub(crate) mod tests {
     /// larger number. The slot is the one place numbers are compared, so an answer that arrives
     /// out of order (a second asker, a retried one) cannot put back what the reader has moved past.
     ///
+    /// Each question is asked by the reading that finds it due, and each reading made while the
+    /// shell is held is made on a thread of its own and awaited within the suite's patience, the
+    /// shell let go before the verdict ([`observe_apart`]): a request or a reading that waited for
+    /// the shell is red, not a hang (T-LANE-DOOR-CALLS-ON-THE-TEST-THREAD).
+    ///
     /// MUTATION: drop the generation comparison in `bt_platform::TaskbarState::offer` — red (the
     /// older answer replaces the newer one).
+    /// MUTATION: `TaskbarLane::observe` reads until the reading is answered — red (the reading
+    /// made while the shell is held does not come back), not hung.
     #[test]
     fn the_lanes_answer_is_read_without_waiting_and_an_older_answer_never_overwrites_a_newer_one() {
         let (release, released) = mpsc::channel::<bool>();
@@ -367,8 +402,8 @@ pub(crate) mod tests {
         let (lane, wakes) = lane(move || released.lock().unwrap().recv().unwrap_or(false));
         let start = Instant::now();
 
-        lane.request(start);
-        let held = lane.observe(start, true);
+        let held = observe_apart(lane, start, &release, true)
+            .expect("the shell is held, and the reading did not wait for it");
         assert!(
             !held.answered(),
             "the shell is held, and the reading did not wait for it"
@@ -384,8 +419,11 @@ pub(crate) mod tests {
         assert_eq!((first.generation, first.auto_hidden), (1, true));
 
         // A second question, held; the reading is the last answer, at once.
-        lane.request(start + REFRESH_INTERVAL);
-        assert_eq!(lane.observe(start + REFRESH_INTERVAL, true), first);
+        assert_eq!(
+            observe_apart(lane, start + REFRESH_INTERVAL, &release, false),
+            Some(first),
+            "the second question is held, and the reading did not wait for it"
+        );
         release.send(false).unwrap();
         wait_for_a_wake(&wakes, "a changed answer wakes the loop");
         let second = lane.reading();
