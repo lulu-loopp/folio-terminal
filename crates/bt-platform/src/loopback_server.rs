@@ -160,19 +160,25 @@ impl<E: Send + 'static> Server<E> {
     ///
     /// # Panics
     ///
-    /// With the worker's own panic, when an `answer` panicked.
+    /// When an `answer` panicked: the worker's panic is carried on (its own
+    /// message is on the test's output already).
     pub fn stop(self) -> Vec<E> {
-        self.finish()
-            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+        self.raise_the_stop();
+        self.worker
+            .join()
+            .expect("a loopback server's answer panicked")
     }
 
-    /// [`Server::stop`], handing a panicked worker's panic back rather than
-    /// raising it — for a stop made while a test is already unwinding.
-    ///
-    /// # Errors
-    ///
-    /// The worker's panic, when an `answer` panicked.
-    pub fn finish(self) -> std::thread::Result<Vec<E>> {
+    /// **Raise the stop and leave the worker to end on its own**, unjoined —
+    /// for a test that is already unwinding, which must neither wait on a
+    /// worker nor raise a second panic over one.
+    pub fn abandon(self) {
+        self.raise_the_stop();
+    }
+
+    /// The stop: the flag, the connection being served shut and its waiting
+    /// call cancelled, a pause woken, and a worker in `accept` woken.
+    fn raise_the_stop(&self) {
         {
             let mut state = self.shared.state();
             state.stopped = true;
@@ -189,7 +195,6 @@ impl<E: Send + 'static> Server<E> {
         // after the flag) has dropped its listener, and this connect is
         // refused: there is nobody left to wake.
         let _ = TcpStream::connect(self.address);
-        self.worker.join()
     }
 }
 

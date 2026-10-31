@@ -785,7 +785,7 @@ impl Stamping {
 
     /// The URL a signing call is given.
     #[must_use]
-    pub fn url(&self) -> String {
+    pub fn time_stamp_url(&self) -> String {
         format!("http://{}/", self.address())
     }
 
@@ -1344,7 +1344,7 @@ fn signing_call(
             None => (signing(None), Vec::new()),
             Some(authority) => {
                 let stamping = authority.listen();
-                let url = wide(std::ffi::OsStr::new(&stamping.url()));
+                let url = wide(std::ffi::OsStr::new(&stamping.time_stamp_url()));
                 let result = signing(Some(&url));
                 (result, stamping.stop())
             }

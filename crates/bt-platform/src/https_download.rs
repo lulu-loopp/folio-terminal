@@ -796,11 +796,15 @@ pub(crate) mod loopback {
     #[cfg(any(windows, target_os = "macos"))]
     impl Drop for Served {
         /// A test that never asked for the record still ends its server — and
-        /// one that is unwinding does not panic a second time over a worker's
-        /// panic.
+        /// one that is unwinding raises the stop without waiting, so it does
+        /// not panic a second time over a worker's panic.
         fn drop(&mut self) {
             if let Some(server) = self.server.take() {
-                let _ = server.finish();
+                if std::thread::panicking() {
+                    server.abandon();
+                } else {
+                    let _ = server.stop();
+                }
             }
         }
     }
