@@ -1382,6 +1382,24 @@ fn a_file_system_values_accessor_is_no_effect_and_its_question_is() {
     );
 }
 
+/// RED (row 116, T-EFFECT-GUARD-EXITSTATUS-READ) — **a collected child's status and output are
+/// values; the wait that collected them is the effect**: `ExitStatus::code`, `ExitStatus::success`,
+/// `ExitStatus::from_raw` and `Output::clone` pass, `Child::wait` and `Child::try_wait` fail.
+///
+/// MUTATION: drop the [`PURE_PROCESS_VALUES`] exception from [`is_effect`] — the four are `Effect`
+/// findings.
+#[test]
+fn a_child_status_read_is_no_effect_and_its_wait_is() {
+    assert_eq!(judge_fixture("submit_reads_a_status"), Vec::<String>::new());
+    assert_eq!(
+        judge_fixture("submit_waits_for_a_child"),
+        [
+            "Effect std::process::Child::try_wait",
+            "Effect std::process::Child::wait",
+        ]
+    );
+}
+
 /// RED (T-UNTYPED-RECEIVER-FS-CALLS-TRIAGE) — **a path question on an untyped receiver is not
 /// classified; written on a typed one it is an effect**: the closure handed to a
 /// `&dyn Fn(&Path) -> bool` parameter (as `bt_platform::program_in_directories` takes one) gets no
