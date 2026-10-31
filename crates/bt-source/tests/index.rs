@@ -756,8 +756,10 @@ fn what_a_product_build_contains_is_answered_at_the_file_and_at_the_item() {
 /// ungated needles stay counted. The review's fold (F5) adds a line for each other position the
 /// walk reads — a field, a variant, a fn parameter, a generic parameter, an `extern crate`, a
 /// foreign item, an `impl` item, a `trait` item and a file's own `#![cfg(test)]` (`gated_file.rs`)
-/// — and one for the stated limit (F1): a `cfg` inside a macro invocation's tokens is not read, so
-/// its needle counts. Each line of the fixture says which it is (`// counted`, `// gated`).
+/// — and one for the stated limit (F1), which plan row 109 (2026-10-30) replaced by the macro
+/// reading of `a_cfg_in_a_read_macro_body_is_a_gate` and the refusal of
+/// `a_cfg_in_any_other_macro_body_is_refused_by_its_line`. Each line of the fixture says which it
+/// is (`// counted`, `// gated`).
 ///
 /// Before the row the three grains read none of the first nine gates — no item and no inline
 /// module holds a `use`, a `const` or an `impl` header, and the `let`, the expression and the arm
@@ -796,13 +798,13 @@ fn a_cfg_is_read_wherever_it_stands() {
             wrong.push(format!("{}: {line}", at.line));
         }
     }
-    assert_eq!((found.len(), gated), (25, 18), "the fixture's needles");
+    assert_eq!((found.len(), gated), (24, 18), "the fixture's needles");
     assert!(
         wrong.is_empty(),
         "read with the wrong verdict:\n  {}",
         wrong.join("\n  ")
     );
-    assert_eq!(found.in_the_product(&index).len(), 7);
+    assert_eq!(found.in_the_product(&index).len(), 6);
 }
 
 /// RED (plan row 77) — **a `cfg` the reading cannot read, place or evaluate is refused by its
@@ -840,6 +842,85 @@ fn a_cfg_the_reading_cannot_read_is_refused_by_its_line() {
             "unreadable 18:1 true",
         ]
     );
+}
+
+/// RED (T-CFG-INSIDE-MACRO-TOKENS, plan row 109) — **a `cfg` inside a macro's tokens is a gate
+/// where the macro's body is read**: an invocation of a `macro_rules!` written earlier in the same
+/// file, in a scope holding the invocation, whose one arm takes a list of attribute-carrying names
+/// (`$( $(#[$a:meta])* $v:ident, )*`) and pastes each name only behind its own attributes or
+/// inside a top-level transcriber item a `cfg` keeps out of the product. Each entry's `cfg` is
+/// read as a gate on the entry, and the gated transcriber item's bytes are a gate too; a
+/// `cfg(not(test))`, a `cfg(any(test, windows))` and an ungated entry stay counted. The
+/// definition may stand at a file's top, and the invocation in a child module; or both in one
+/// function body.
+///
+/// Before the row no `cfg` inside a macro's tokens was read (row 77's stated limit), so the five
+/// gated lines counted as product (9 of 9, not 4).
+///
+/// MUTATION: drop the reading of a resolved invocation's entries in `crate::gates` — the four
+/// gated entries count (and are refused); drop the reading of the definition's top-level items —
+/// the `ALL` line counts (and is refused).
+#[test]
+fn a_cfg_in_a_read_macro_body_is_a_gate() {
+    let index = Index::shared(&fixture_universe("gated_in_macro"))
+        .unwrap_or_else(|rejections| panic!("{}", report(&rejections)));
+    let found = index
+        .search(&Search::new(
+            Needle::new(Pattern::text("the_gated_needle")),
+            View::CodeKeepingLiterals,
+        ))
+        .unwrap_or_else(|failure| panic!("{failure}"));
+    let union = index.union();
+    let mut wrong = Vec::new();
+    let mut gated = 0;
+    for occurrence in found.occurrences() {
+        let offset = occurrence.span.start();
+        let at = index.locate(offset).expect("an occurrence is in a file");
+        let from = union[..offset].rfind('\n').map_or(0, |at| at + 1);
+        let to = union[offset..]
+            .find('\n')
+            .map_or(union.len(), |at| offset + at);
+        let line = union[from..to].trim_end_matches('\r');
+        let counted = line.ends_with("// counted");
+        assert!(
+            counted || line.ends_with("// gated"),
+            "every needle line says which it is: {line}"
+        );
+        gated += usize::from(!counted);
+        if occurrence.in_the_product(&index) != counted {
+            wrong.push(format!("{}: {line}", at.line));
+        }
+    }
+    assert_eq!((found.len(), gated), (9, 5), "the fixture's needles");
+    assert!(
+        wrong.is_empty(),
+        "read with the wrong verdict:\n  {}",
+        wrong.join("\n  ")
+    );
+    assert_eq!(found.in_the_product(&index).len(), 4);
+}
+
+/// RED (plan row 109) — **every other `cfg` inside a macro's tokens is refused by its line**,
+/// never counted: an invocation with no definition in the file (`other!`, `vec!`,
+/// `thread_local!`), one nested inside another (`outer! { inner! { … } }`), an inner `#![cfg]`, a
+/// `cfg_attr` that writes a `cfg`, a `cfg` in a definition whose shape is not the read one (two
+/// arms), an invocation of a definition that drops the attributes it takes, a path-qualified
+/// invocation (`crate::entries!`), and an invocation an item macro stands between it and its
+/// definition (`shadowing!()` may define another `entries`). An invocation of the read shape whose
+/// body is not that shape is refused as unreadable. Not refused: a macro inside a gated module, a
+/// `cfg_attr` that writes no `cfg`, and `cfg!(…)`.
+///
+/// Before the row the fixture lowered: nothing inside a macro's tokens was read or refused.
+///
+/// MUTATION: drop the lexical refusal in `crate::gates`' macro visit — the fixture lowers; stop
+/// its descent into groups — the nested line passes; take the nearest earlier definition without
+/// checking what stands between — the last `entries!` is read.
+#[test]
+fn a_cfg_in_any_other_macro_body_is_refused_by_its_line() {
+    let refused = Index::shared(&fixture_universe("gated_in_macro_refused"))
+        .expect_err("the fixture is built to be refused");
+    let said: Vec<String> = refused.iter().map(ToString::to_string).collect();
+    assert_eq!(said, Vec::<String>::new());
 }
 
 // ── every impl of one type ────────────────────────────────────────────────

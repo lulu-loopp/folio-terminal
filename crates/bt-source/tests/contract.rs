@@ -270,6 +270,11 @@ fn the_macro_facts_of_this_tree_are_asserted() {
 /// it, braces included — emits exactly two items: `pub enum Text { … }` and an
 /// `impl Text { … }` whose body is one item, the `ALL` constant.
 ///
+/// Since plan row 109 it also pins the two facts the gate reading of the
+/// `text_entries!` invocation stands on: the enum's body pastes each name behind
+/// its own attributes (`$( $(#[$attribute])* $variant, )*`), and the `impl` that
+/// names every variant carries `#[cfg(test)]` and nothing else.
+///
 /// **This is the whole of the exception.** `ItemConstructingArm` is reported
 /// because the item a macro makes is not in the index, so a query for it
 /// answers "not declared" and the census cannot see its writes. The `Text` enum
@@ -280,22 +285,52 @@ fn the_text_declaration_and_nothing_else(arm: &str) -> Result<(), String> {
     use proc_macro2::{Delimiter, TokenStream, TokenTree};
     use std::str::FromStr;
 
-    /// One item at the top level of a token stream: the tokens before its body,
-    /// and its brace body if it has one. Attributes — doc comments included,
-    /// which the lexer turns into `#[doc = …]` — are skipped.
+    /// One item at the top level of a token stream: its attributes (doc
+    /// comments, which the lexer turns into `#[doc = …]`, left out), the tokens
+    /// before its body, and its brace body if it has one.
     struct Item {
+        attributes: Vec<String>,
         head: Vec<String>,
         body: Option<TokenStream>,
+    }
+
+    /// The tokens of a stream, one word each, delimiters spelt — a spelling
+    /// that does not depend on how the source spaced them.
+    fn flat(stream: TokenStream) -> String {
+        let mut words = Vec::new();
+        for tree in stream {
+            match tree {
+                TokenTree::Group(group) => {
+                    let (open, close) = match group.delimiter() {
+                        Delimiter::Parenthesis => ("(", ")"),
+                        Delimiter::Bracket => ("[", "]"),
+                        Delimiter::Brace => ("{", "}"),
+                        Delimiter::None => ("", ""),
+                    };
+                    words.push(open.to_owned());
+                    words.push(flat(group.stream()));
+                    words.push(close.to_owned());
+                }
+                other => words.push(other.to_string()),
+            }
+        }
+        words.retain(|word| !word.is_empty());
+        words.join(" ")
     }
 
     fn items(stream: TokenStream) -> Result<Vec<Item>, String> {
         let trees: Vec<TokenTree> = stream.into_iter().collect();
         let mut found = Vec::new();
         let mut at = 0;
+        let mut attributes = Vec::new();
         while at < trees.len() {
             if matches!(&trees[at], TokenTree::Punct(hash) if hash.as_char() == '#') {
                 match trees.get(at + 1) {
                     Some(TokenTree::Group(group)) if group.delimiter() == Delimiter::Bracket => {
+                        let spelt = flat(group.stream());
+                        if !spelt.starts_with("doc =") {
+                            attributes.push(format!("# [ {spelt} ]"));
+                        }
                         at += 2;
                         continue;
                     }
@@ -316,7 +351,11 @@ fn the_text_declaration_and_nothing_else(arm: &str) -> Result<(), String> {
                     other => head.push(other.to_string()),
                 }
             }
-            found.push(Item { head, body });
+            found.push(Item {
+                attributes: std::mem::take(&mut attributes),
+                head,
+                body,
+            });
         }
         Ok(found)
     }
@@ -337,9 +376,21 @@ fn the_text_declaration_and_nothing_else(arm: &str) -> Result<(), String> {
             "its first item is not `pub enum Text {{ … }}`: {heads:?}"
         ));
     }
+    let pasted = flat(enumeration.body.clone().unwrap_or_default());
+    if pasted != "$ ( $ ( # [ $ attribute ] ) * $ variant , ) *" {
+        return Err(format!(
+            "the enum's body does not paste each name behind its own attributes: {pasted}"
+        ));
+    }
     if list.head != ["impl", "Text"] {
         return Err(format!(
             "its second item is not `impl Text {{ … }}`: {heads:?}"
+        ));
+    }
+    if list.attributes != ["# [ cfg ( test ) ]"] {
+        return Err(format!(
+            "`impl Text` is not `#[cfg(test)]` alone: {:?}",
+            list.attributes
         ));
     }
     let members = items(list.body.clone().unwrap_or_default())?;
@@ -366,9 +417,15 @@ fn the_text_declaration_and_nothing_else(arm: &str) -> Result<(), String> {
 /// it. An `impl Runtime` written there would make a method, with writes the
 /// census cannot see, that no query of this index could find.
 ///
+/// RED (plan row 109) — and **an arm that stops gating its entries is
+/// refused**: the enum's body without `$(#[$attribute])*` before `$variant`, or
+/// the `impl Text` without its `#[cfg(test)]`. Before the row the check skipped
+/// attributes and accepted both.
+///
 /// MUTATION: in `the_text_declaration_and_nothing_else`, match
 /// `[enumeration, list, ..]` instead of `[enumeration, list]` and the first
-/// planted arm is accepted.
+/// planted arm is accepted; drop the pasted-body or the `impl` attribute check
+/// and the matching row-109 plant is accepted.
 #[test]
 fn an_extra_item_inside_the_admitted_arm_is_refused() {
     let index = bt_app();
@@ -401,6 +458,65 @@ fn an_extra_item_inside_the_admitted_arm_is_refused() {
     let refused = the_text_declaration_and_nothing_else(&inside)
         .expect_err("a `fn` inside `impl Text` is an item the index does not hold");
     assert!(refused.contains("more than the `ALL` list"), "{refused}");
+
+    // Plan row 109: the gate reading of the invocation stands on these two.
+    let dropped = arm.replacen("$(#[$attribute])* $variant", "$variant", 1);
+    assert_ne!(&dropped, arm, "the arm pastes `$(#[$attribute])* $variant`");
+    let refused = the_text_declaration_and_nothing_else(&dropped)
+        .expect_err("an enum that drops the entries' attributes ungates every entry");
+    assert!(refused.contains("behind its own attributes"), "{refused}");
+
+    let ungated = arm.replacen("#[cfg(test)]", "", 1);
+    assert_ne!(&ungated, arm, "the arm writes `#[cfg(test)]`");
+    let refused = the_text_declaration_and_nothing_else(&ungated)
+        .expect_err("an `impl Text` without its gate puts every variant's name in the product");
+    assert!(refused.contains("`#[cfg(test)]` alone"), "{refused}");
+}
+
+/// RED (T-CFG-INSIDE-MACRO-TOKENS, plan row 109) — **`bt-app`'s test-only
+/// texts are not product**: the two `#[cfg(test)]` entries of the
+/// `text_entries! { … }` invocation, and the `ALL` list its definition writes
+/// under `#[cfg(test)]`. Every occurrence of the three names in `i18n.rs` is out
+/// of the product, and the index of `bt-app` lowers — no `cfg` in its macros'
+/// tokens is left unread.
+///
+/// Before the row the invocation's entries and the definition's `ALL` were
+/// counted as product (row 77's stated limit).
+///
+/// MUTATION: drop the gate reading of macro bodies in `crate::gates` — the
+/// `bt-app` index is refused at the three `cfg`s; keep only the invocation's
+/// reading — `ALL`'s template line counts.
+#[test]
+fn the_test_only_texts_are_not_product() {
+    let index = bt_app();
+    let mut product = Vec::new();
+    let mut seen = 0;
+    for name in ["UninstallScriptQuestion", "UninstallScriptRunning", "ALL"] {
+        let found = index
+            .search(&Search::new(
+                Needle::new(Pattern::identifier(name)),
+                View::Identifiers,
+            ))
+            .unwrap_or_else(|failure| panic!("{failure}"));
+        for occurrence in found.occurrences() {
+            let at = index
+                .locate(occurrence.span.start())
+                .expect("an occurrence is in a file");
+            if !at.file.ends_with("i18n.rs") {
+                continue;
+            }
+            seen += 1;
+            if occurrence.in_the_product(&index) {
+                product.push(format!("{name} at {at}"));
+            }
+        }
+    }
+    assert!(seen >= 6, "the three names are written in i18n.rs ({seen})");
+    assert!(
+        product.is_empty(),
+        "test-only texts read as product:\n  {}",
+        product.join("\n  ")
+    );
 }
 
 /// RED — **a name written inside a macro is in the index**, which is the

@@ -88,8 +88,5 @@ pub trait WithItems {
 
 pub mod gated_file;
 
-// The limit (F1): a `cfg` inside a macro invocation's tokens is not read, so its needle counts.
-some_list! {
-    #[cfg(test)]
-    the_gated_needle, // counted
-}
+// 2026-10-30 (plan row 109): the macro-token line went to `gated_in_macro` and
+// `gated_in_macro_refused` — a `cfg` inside a macro's tokens is now read or refused.
