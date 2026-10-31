@@ -111,6 +111,31 @@ pub enum Rejection {
     /// would be counted whatever it says. Every position a gate can be read at is named in
     /// `crate::gates`' walk; a new one is added there, never passed.
     UnplacedCfg { file: PathBuf, at: Position },
+    /// A `#[cfg(…)]` (or a `#[cfg_attr(…)]` that writes one) inside a macro's tokens where the
+    /// index reads no gate (plan row 109): `syn` does not parse a macro's tokens, so the bytes
+    /// under it would be counted whatever it says. The one body `crate::gates` reads is a list of
+    /// attribute-carrying names whose `macro_rules!` this file holds; every other macro, invocation
+    /// or definition, is this refusal, so a new one is a red index and never a silent product
+    /// count.
+    CfgInMacroTokens {
+        file: PathBuf,
+        at: Position,
+        /// The innermost macro written around the attribute: an invocation's path as written
+        /// (`thread_local`, `crate::entries`), or `macro_rules! name` for a definition.
+        macro_path: String,
+        /// The attribute as written: `#[cfg(…)]`, `#![cfg(…)]` or `#[cfg_attr(…)]`.
+        attribute: String,
+    },
+    /// An invocation of a `macro_rules!` whose body `crate::gates` reads (plan row 109) — a list of
+    /// attribute-carrying names — that is not such a list: reading its `cfg`s as gates would be
+    /// a guess at what the macro makes of it.
+    UnreadableMacroBody {
+        file: PathBuf,
+        at: Position,
+        macro_path: String,
+        /// What the list's parser said.
+        reason: String,
+    },
     /// A file the walk reached could not be read as text.
     UnreadableFile { file: PathBuf, reason: String },
     /// A directory inside a disk scope could not be listed.
@@ -224,6 +249,28 @@ impl fmt::Display for Rejection {
                 formatter,
                 "{}:{at}: a `#[cfg]` where the index reads no gate, so the bytes under it would \
                  be counted whatever it says",
+                file.display()
+            ),
+            Self::CfgInMacroTokens {
+                file,
+                at,
+                macro_path,
+                attribute,
+            } => write!(
+                formatter,
+                "{}:{at}: `{attribute}` inside the tokens of `{macro_path}`, where the index reads no \
+                 gate, so the bytes under it would be counted whatever it says",
+                file.display()
+            ),
+            Self::UnreadableMacroBody {
+                file,
+                at,
+                macro_path,
+                reason,
+            } => write!(
+                formatter,
+                "{}:{at}: `{macro_path}!` takes a list of attribute-carrying names and its body is \
+                 not one ({reason}), so its `cfg`s are not read as gates",
                 file.display()
             ),
             Self::UnreadableFile { file, reason } => {
