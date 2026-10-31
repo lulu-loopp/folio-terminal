@@ -7168,7 +7168,7 @@ impl ProfileEditor {
     ) -> Option<(SettingsTarget, usize, usize)> {
         let focus = focus?;
         let field = self.field_of(focus)?;
-        let selection = field.selection();
+        let selection = field.composed_selection();
         Some((focus, selection.start, selection.end))
     }
 
@@ -7323,8 +7323,27 @@ impl SettingsPanel {
     ) -> Option<(SettingsTarget, usize, usize)> {
         let focus = focus?;
         let field = self.text_field(focus)?;
-        let selection = field.selection();
+        let selection = field.composed_selection();
         Some((focus, selection.start, selection.end))
+    }
+
+    /// **Take every composition off this dialog's fields** (T-SETTINGS-FIELDS-IME-POSITION).
+    ///
+    /// The dialog has several fields and the window one composition, so a pre-edit
+    /// that is put somewhere, cleared or cancelled is taken off all of them first:
+    /// a composition that re-homes from one field to the next (`Tab`, a press) must
+    /// not leave its letters drawn in the field it left.
+    pub fn clear_preedits(&mut self) {
+        self.quake_command.set_preedit("");
+        if let Some(editor) = self.editor.as_mut() {
+            for field in [&mut editor.name, &mut editor.program, &mut editor.args] {
+                field.set_preedit("");
+            }
+            for (name, value) in &mut editor.env {
+                name.set_preedit("");
+                value.set_preedit("");
+            }
+        }
     }
 
     /// How far the open picker's list has been pushed up inside its body.
@@ -10124,6 +10143,38 @@ impl SettingsLayout {
     #[must_use]
     pub fn row(&self, row: SettingsRow) -> Option<&RowLayout> {
         self.rows.iter().find(|placed| placed.row == row)
+    }
+
+    /// The scale this layout was solved at — the one its painter strikes every box at.
+    #[must_use]
+    pub fn scale(&self) -> f32 {
+        self.scale
+    }
+
+    /// **The box a text field of this dialog is drawn in**, and whether it is set in the
+    /// monospaced face — what [`field_caret_line`] measures from
+    /// (T-SETTINGS-FIELDS-IME-POSITION).
+    ///
+    /// The very rectangles [`build`] hands [`push_field`]: a field row's control box, and an
+    /// environment row's two cells (the reader's own rows; a ghost's cells take no caret).
+    /// `None` for a target that is not a field this layout placed.
+    #[must_use]
+    pub fn text_field_box(&self, target: SettingsTarget) -> Option<([f32; 4], bool)> {
+        let env_row = |index: usize| self.env_rows.iter().find(|line| line.index == Some(index));
+        match target {
+            SettingsTarget::Field(row) => self
+                .row(row)
+                .filter(|placed| {
+                    matches!(
+                        placed.row.control(),
+                        SettingsControl::Field | SettingsControl::FieldPair
+                    )
+                })
+                .map(|placed| (placed.combo, field_row_is_mono(row))),
+            SettingsTarget::EnvName(index) => env_row(index).map(|line| (line.name, true)),
+            SettingsTarget::EnvValue(index) => env_row(index).map(|line| (line.value, true)),
+            _ => None,
+        }
     }
 
     /// What a press or a drag at `x` is asking a slider row for (§7.1.6c-4b).
@@ -13998,7 +14049,7 @@ pub fn build(
     let scale = layout.scale;
     let px = |value: f32| value * scale;
     let alpha = |value: u8| f32::from(value) / 255.0;
-    let border = (FLOAT_WINDOW_BORDER_LOGICAL_PX * scale).max(1.0);
+    let border = dialog_border(scale);
     let mut quads = Vec::new();
     let mut labels = Vec::new();
     let mut sprites = Vec::new();
@@ -14410,7 +14461,7 @@ pub fn build(
                     // A path and an argument line are read character by
                     // character, which is what the mock-up's `.field.mono` says
                     // and why a name — a word — is not in it.
-                    placed.row != SettingsRow::ProfileName,
+                    field_row_is_mono(placed.row),
                     hover == Some(target),
                     if placed.row == SettingsRow::QuakeCommand {
                         summon.command_caret
@@ -15472,7 +15523,9 @@ pub struct EditorInk<'a> {
     /// under the three the terminal fills in.
     pub env: &'a [(String, String)],
     /// Which control the caret is in, and the selection it is holding as byte
-    /// offsets into that control's own text. Both ends equal is a bare caret.
+    /// offsets into what that control shows — its text with any composition
+    /// spliced in ([`TextField::composed_selection`]). Both ends equal is a bare
+    /// caret.
     ///
     /// One answer for every field rather than a caret per field, because there
     /// is one keyboard: the field with the caret is the field with the focus,
@@ -15732,6 +15785,99 @@ fn push_editor_page(
     }
 }
 
+/// Whether a field row is set in the monospaced face: a path and an argument line are read
+/// character by character, which is what the mock-up's `.field.mono` says, and a name — a
+/// word — is not. One answer for the painter and for [`SettingsLayout::text_field_box`].
+const fn field_row_is_mono(row: SettingsRow) -> bool {
+    !matches!(row, SettingsRow::ProfileName)
+}
+
+/// The dialog's hairline at `scale` — the one every face, field and card of it is
+/// inset by.
+#[must_use]
+pub fn dialog_border(scale: f32) -> f32 {
+    (FLOAT_WINDOW_BORDER_LOGICAL_PX * scale).max(1.0)
+}
+
+/// Where a field's text runs: its font, its inside edges, and how far it has been
+/// pushed left so that the caret stays inside the box.
+struct FieldRun {
+    font: f32,
+    left: f32,
+    right: f32,
+    offset: f32,
+}
+
+/// [`FieldRun`] for the field at `rect`, given the text in front of its caret
+/// (`None` while the caret is elsewhere).
+fn field_run(
+    rect: [f32; 4],
+    before_caret: Option<&str>,
+    mono: bool,
+    scale: f32,
+    border: f32,
+    measure: &mut dyn FnMut(&str, f32) -> f32,
+) -> FieldRun {
+    let px = |value: f32| value * scale;
+    let font = px(if mono {
+        FIELD_MONO_FONT_LOGICAL_PX
+    } else {
+        FIELD_FONT_LOGICAL_PX
+    });
+    let left = rect[0] + border + px(FIELD_PADDING_X_LOGICAL_PX);
+    let right = rect[2] - border - px(FIELD_PADDING_X_LOGICAL_PX);
+    let width = (right - left).max(0.0);
+    // How far into the text the view has been pushed, so that the caret is
+    // always inside the box. Zero whenever the whole string fits, which is every
+    // field on the page until somebody types a path into one.
+    let offset = before_caret
+        .map(|before| measure(before, font))
+        .filter(|caret_x| *caret_x > width)
+        .map_or(0.0, |caret_x| caret_x - width);
+    FieldRun {
+        font,
+        left,
+        right,
+        offset,
+    }
+}
+
+/// **The caret a field of this dialog strikes**, in window pixels: one physical
+/// pixel of accent, inset from the hairline top and bottom
+/// (T-SETTINGS-FIELDS-IME-POSITION).
+///
+/// The **one** derivation the painter ([`push_field`]) and the input method
+/// (`Runtime::settings_field_caret_line`) both read — the palette's arrangement
+/// (`PaletteLayout::caret_line`) and for its reason: a candidate
+/// list placed from a second derivation is a list that stands beside the caret it
+/// claims to follow. `before_caret` is what is on the glass in front of the caret,
+/// a composition included.
+#[must_use]
+pub fn field_caret_line(
+    rect: [f32; 4],
+    before_caret: &str,
+    mono: bool,
+    scale: f32,
+    measure: &mut dyn FnMut(&str, f32) -> f32,
+) -> [f32; 4] {
+    let border = dialog_border(scale);
+    let FieldRun {
+        font,
+        left,
+        right,
+        offset,
+    } = field_run(rect, Some(before_caret), mono, scale, border, measure);
+    let caret_x = (left + measure(before_caret, font) - offset).clamp(left, right);
+    let thickness = scale.round().max(1.0);
+    let inset = FIELD_CARET_INSET_LOGICAL_PX * scale;
+    [
+        caret_x,
+        rect[1] + border + inset,
+        caret_x + thickness,
+        rect[3] - border - inset,
+    ]
+}
+
 /// One `.field`: the pickers' own face and hairline, a selection behind the
 /// text, and a caret in it (§7.1.6c-6b).
 ///
@@ -15792,23 +15938,22 @@ fn push_field(
         },
         1.0,
     ));
-    let font = px(if mono {
-        FIELD_MONO_FONT_LOGICAL_PX
-    } else {
-        FIELD_FONT_LOGICAL_PX
-    });
-    let left = rect[0] + border + px(FIELD_PADDING_X_LOGICAL_PX);
-    let right = rect[2] - border - px(FIELD_PADDING_X_LOGICAL_PX);
-    let width = (right - left).max(0.0);
-    // How far into the text the view has been pushed, so that the caret is
-    // always inside the box. Zero whenever the whole string fits, which is every
-    // field on the page until somebody types a path into one.
-    let offset = caret
-        .map(|(_, to)| measure(&text[..to.min(text.len())], font))
-        .filter(|caret_x| *caret_x > width)
-        .map_or(0.0, |caret_x| caret_x - width);
+    let caret =
+        caret.map(|(from, to)| (from.min(to).min(text.len()), from.max(to).min(text.len())));
+    let FieldRun {
+        font,
+        left,
+        right,
+        offset,
+    } = field_run(
+        rect,
+        caret.map(|(_, to)| &text[..to]),
+        mono,
+        scale,
+        border,
+        measure,
+    );
     if let Some((from, to)) = caret {
-        let (from, to) = (from.min(to).min(text.len()), from.max(to).min(text.len()));
         if from < to {
             let start = left + measure(&text[..from], font) - offset;
             let end = left + measure(&text[..to], font) - offset;
@@ -15825,16 +15970,11 @@ fn push_field(
         }
         // The caret itself: one physical pixel of accent, full height inside the
         // hairline. It is drawn at the *caret* end of the selection rather than
-        // at its start, because that is the end that moves.
-        let caret_x = (left + measure(&text[..to], font) - offset).clamp(left, right);
-        let thickness = scale.round().max(1.0);
+        // at its start, because that is the end that moves. Struck through
+        // [`field_caret_line`], the rectangle the input method is told
+        // (T-SETTINGS-FIELDS-IME-POSITION).
         stack.quads.push(OverlayQuad {
-            rect: [
-                caret_x,
-                rect[1] + border + px(FIELD_CARET_INSET_LOGICAL_PX),
-                caret_x + thickness,
-                rect[3] - border - px(FIELD_CARET_INSET_LOGICAL_PX),
-            ],
+            rect: field_caret_line(rect, &text[..to], mono, scale, measure),
             color: palette.accent,
             alpha: 1.0,
         });

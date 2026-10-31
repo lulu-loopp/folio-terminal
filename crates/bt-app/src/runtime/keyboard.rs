@@ -711,6 +711,8 @@ impl<B: Backend> Runtime<'_, B> {
             // The search capsule, and only while the caret is in it.
             search: self.window.search.is_focused(),
             palette: self.window.palette.is_some(),
+            // A text field of the settings dialog, in the key ladder's own words.
+            settings_field: self.settings_field_holds_the_keyboard(),
         };
         self.trace_ime_owner(owner);
         owner
@@ -774,6 +776,8 @@ impl<B: Backend> Runtime<'_, B> {
             // derivation, read twice, which is what stops a candidate list from
             // drifting away from the letters it is offering to finish.
             ImeOwner::Palette => self.window.palette_layout.as_ref()?.caret_line(),
+            // The painter's own caret, through the one function `push_field` strikes it with.
+            ImeOwner::SettingsField => self.settings_field_caret_line()?,
             // Not a field. `ime_caret_source` sends neither of these here, and a
             // rectangle invented for them would be a candidate list following a
             // caret that is receiving nothing.
@@ -1314,9 +1318,9 @@ impl<B: Backend> Runtime<'_, B> {
         //
         // This sits above the IME branch on purpose — a composition that
         // outlived the dialog opening must not be able to reach the child
-        // either, and nothing in this dialog takes text yet. The first surface
-        // here that does (a shortcut recorder, a theme name) opts in through
-        // `ImeOwner`, which is where that decision belongs.
+        // either. A surface here that takes text opts in through `ImeOwner`,
+        // which is where that decision belongs: the dialog's text fields do, as
+        // `ImeOwner::SettingsField` (T-SETTINGS-FIELDS-IME-POSITION).
         if self.settings_layout().is_some() {
             // **The recorder is above the focus walk, and it takes everything.**
             // A box that is listening for a chord cannot also be a dialog whose
@@ -2404,6 +2408,14 @@ impl<B: Backend> Runtime<'_, B> {
                     self.palette_ime(&event)?;
                     return Ok(());
                 }
+                // A text field of the settings dialog, through the same two doors: a
+                // pre-edit is drawn at its caret and is not in the text, and a commit is
+                // an ordinary insert, written through as a typed character is
+                // (T-SETTINGS-FIELDS-IME-POSITION).
+                ImeOwner::SettingsField => {
+                    self.settings_field_ime(&event)?;
+                    return Ok(());
+                }
                 ImeOwner::Shell => {}
             }
             self.reset_cursor_blink(Instant::now());
@@ -2512,12 +2524,30 @@ impl<B: Backend> Runtime<'_, B> {
     /// float closing are all one fact by the time this runs — the rung holding
     /// the keyboard is not the rung the letters were typed into.
     ///
+    /// **And between two fields of the settings dialog**, which are one rung
+    /// ([`ImeOwner::SettingsField`]) and several fields: a press or `Tab` from
+    /// the program to the arguments leaves the rung where it was, so the kinds
+    /// alone would let the letters typed for the program stand drawn there
+    /// while the candidate list follows the caret, and the composition carried
+    /// on would commit into the arguments (review of
+    /// T-SETTINGS-FIELDS-IME-POSITION, F1). The composition remembers its field
+    /// ([`CompositionOrigin::Settings`]); when that is not the focused one, the
+    /// field it began in has gone, which is the same sentence — the hole
+    /// [`Self::take_keyboard_into`] closes for two panes, closed here because
+    /// the dialog's focus moves by `Tab`, a press and an open on a row, and
+    /// this is where all of them have happened.
+    ///
     /// Costs a comparison of two enums on the passes where nothing is being
     /// composed, which is all of them but the ones a reader is typing Chinese
     /// on.
     pub(crate) fn settle_composition_owner(&mut self) -> Result<()> {
         let holds_the_keyboard = ime_owner(self.keyboard_owner());
-        if !composition_outlived_its_field(self.window.composing, holds_the_keyboard) {
+        let moved_to_another_field = self.window.composing == Some(ImeOwner::SettingsField)
+            && holds_the_keyboard == ImeOwner::SettingsField
+            && self.window.composing_in.origin() != Some(&self.composition_origin_now());
+        if !(composition_outlived_its_field(self.window.composing, holds_the_keyboard)
+            || moved_to_another_field)
+        {
             return Ok(());
         }
         let Some(started_in) = self.window.composing.take() else {
@@ -2616,8 +2646,12 @@ impl<B: Backend> Runtime<'_, B> {
                 }
             }
             // Whatever the keyboard produced, which is the layout's answer and
-            // not this build's: a French `é` and a Chinese IME's commit arrive
-            // the same way.
+            // not this build's: a French `é` arrives here as its character. A
+            // composed commit does **not** — winit answers `WM_IME_COMPOSITION`
+            // itself, so no `WM_CHAR` follows, and the text reaches this window
+            // only as `Ime::Commit`, which `ImeOwner::SettingsField` routes into
+            // the same field (`Runtime::settings_field_ime`;
+            // T-SETTINGS-FIELDS-IME-POSITION).
             //
             // **Unless a chord produced it** (M1-7, X-3 §4 ③). This arm is the
             // one that takes *every* key the arms above did not, so it is the one
@@ -2791,6 +2825,7 @@ impl<B: Backend> Runtime<'_, B> {
             }
             ImeOwner::GitPrompt => CompositionOrigin::GitPrompt,
             ImeOwner::Palette => CompositionOrigin::Palette,
+            ImeOwner::SettingsField => CompositionOrigin::Settings(self.window.settings.focus()),
             ImeOwner::Modal => CompositionOrigin::Modal,
             ImeOwner::FilesTree => CompositionOrigin::FilesTree(self.files_keyboard_seat()),
             ImeOwner::Preview => CompositionOrigin::Preview(self.preview_keyboard_surface()),
@@ -2866,6 +2901,7 @@ impl<B: Backend> Runtime<'_, B> {
             ImeOwner::Preview => "preview",
             ImeOwner::Search => "search",
             ImeOwner::Palette => "palette",
+            ImeOwner::SettingsField => "settings_field",
             ImeOwner::FilesTree => "files_tree",
             ImeOwner::Shell => "shell",
         };
@@ -2974,6 +3010,8 @@ pub(crate) fn ime_owner(owner: KeyboardOwner) -> ImeOwner {
         ImeOwner::GitPrompt
     } else if owner.palette {
         ImeOwner::Palette
+    } else if owner.settings_field {
+        ImeOwner::SettingsField
     } else if owner.menu_or_dialog {
         ImeOwner::Modal
     } else if owner.files_tree {
@@ -3055,7 +3093,8 @@ pub(crate) fn ime_caret_source(owner: ImeOwner) -> ImeCaretSource {
         | ImeOwner::GitPrompt
         | ImeOwner::Preview
         | ImeOwner::Search
-        | ImeOwner::Palette => ImeCaretSource::Field,
+        | ImeOwner::Palette
+        | ImeOwner::SettingsField => ImeCaretSource::Field,
         ImeOwner::Modal | ImeOwner::FilesTree => ImeCaretSource::Nowhere,
         ImeOwner::Shell => ImeCaretSource::TerminalCursor,
     }

@@ -1309,20 +1309,21 @@ impl<B: Backend> Runtime<'_, B> {
         clipboard_focus_of(
             rung,
             self.a_surface_above_the_clipboard_rung_holds_the_keyboard(),
-            self.settings_field_holds_the_keyboard(),
             self.preview_edit_focus().is_some(),
         )
     }
 
-    /// **Whether a text field of the settings dialog holds the keyboard** — the
-    /// one fact [`text_field_holding`] needs beyond the rung (B-AUDIT-046 RT-1).
+    /// **Whether a text field of the settings dialog holds the keyboard**
+    /// (B-AUDIT-046 RT-1) — since T-SETTINGS-FIELDS-IME-POSITION the bit
+    /// [`Self::keyboard_owner`] raises [`ImeOwner::SettingsField`] on, so the
+    /// paste, the composition and the caret all read the one rung.
     ///
     /// The conditions under which the ladder reaches
     /// [`Self::settings_field_key`] and it answers, asked in the ladder's own
     /// words: no card stands above the dialog (each of those has its rung above
     /// the dialog's), no chord is being recorded (the recorder takes every key),
     /// no picker is open over the field, and the focus is a text field.
-    fn settings_field_holds_the_keyboard(&self) -> bool {
+    pub(in crate::runtime) fn settings_field_holds_the_keyboard(&self) -> bool {
         let card_above = self.app.quit.as_ref().is_some_and(quit::Quit::is_asking)
             || self.window.dirty_gate.is_open()
             || self.window.first_run.is_open()
@@ -1404,24 +1405,23 @@ pub(crate) fn offer_pty_input(
 ///
 /// The rungs *are* the enumeration: every rung that is a one-line field answers
 /// with itself, and the match is total, so a rung added to [`ImeOwner`] has to
-/// say here whether a paste goes into it. The one field that is not a rung of
-/// its own is the settings dialog's: the dialog is a modal, and whether its
-/// focus is a text field is the one extra fact this is handed
-/// ([`Runtime::settings_field_holds_the_keyboard`]).
+/// say here whether a paste goes into it. The settings dialog's fields are a
+/// rung of their own since T-SETTINGS-FIELDS-IME-POSITION
+/// ([`ImeOwner::SettingsField`]), so no field here needs a fact beside the rung.
 ///
 /// The preview's document is not here: it takes a paste through its own door
 /// (`ClipboardSeat::PreviewDocument`), because it keeps the file's line breaks
 /// where a one-line field keeps the first line.
 #[must_use]
-pub(crate) fn text_field_holding(rung: ImeOwner, settings_field: bool) -> Option<TextFieldSeat> {
+pub(crate) fn text_field_holding(rung: ImeOwner) -> Option<TextFieldSeat> {
     match rung {
         ImeOwner::Rename => Some(TextFieldSeat::TabName),
         ImeOwner::GitPrompt => Some(TextFieldSeat::GitPrompt),
         ImeOwner::Palette => Some(TextFieldSeat::Palette),
         ImeOwner::GraphSearch => Some(TextFieldSeat::GraphSearch),
         ImeOwner::Search => Some(TextFieldSeat::FindBar),
-        ImeOwner::Modal => settings_field.then_some(TextFieldSeat::Settings),
-        ImeOwner::FilesTree | ImeOwner::Preview | ImeOwner::Shell => None,
+        ImeOwner::SettingsField => Some(TextFieldSeat::Settings),
+        ImeOwner::Modal | ImeOwner::FilesTree | ImeOwner::Preview | ImeOwner::Shell => None,
     }
 }
 
@@ -1508,12 +1508,11 @@ fn line_continuation_mark(grammar: shell_literal::ShellGrammar) -> Option<char> 
 pub(crate) fn clipboard_focus_of(
     rung: ImeOwner,
     swallowing: bool,
-    settings_field: bool,
     preview_edit: bool,
 ) -> menubar::ClipboardFocus {
     menubar::ClipboardFocus {
         swallowing,
-        field: text_field_holding(rung, settings_field),
+        field: text_field_holding(rung),
         preview_edit,
         shell: rung == ImeOwner::Shell,
     }

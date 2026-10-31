@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 use winit::dpi::PhysicalPosition;
-use winit::event::{ElementState, MouseButton, MouseScrollDelta};
+use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta};
 
 impl<B: Backend> Runtime<'_, B> {
     /// **Note whether this window is in Cards, and raise the bubble on the frame
@@ -1925,6 +1925,77 @@ impl<B: Backend> Runtime<'_, B> {
             self.present_chrome_change()?;
         }
         Ok(())
+    }
+
+    /// **A composition into the settings field that holds the keyboard**
+    /// (T-SETTINGS-FIELDS-IME-POSITION), through the two doors every other field in
+    /// this window uses: a pre-edit is drawn at the caret and is **not** in the text
+    /// ([`text_field::TextField::set_preedit`]), and a commit is an ordinary insert
+    /// that replaces the selection and is written through at once
+    /// ([`Self::write_editor_field`]), exactly as a typed character is.
+    ///
+    /// A pre-edit is taken off every field of the dialog before it is put on this
+    /// one ([`settings::SettingsPanel::clear_preedits`]): a composition that re-homed
+    /// to this field (`Tab`, a press) must not leave its letters drawn in the one it
+    /// left. Whether a commit belongs here at all was decided above the ladder, by
+    /// the field the composition began in ([`crate::CompositionOrigin::Settings`]).
+    pub(in crate::runtime) fn settings_field_ime(&mut self, event: &Ime) -> Result<()> {
+        let Some(target) = self.window.settings.focus() else {
+            return Ok(());
+        };
+        let wrote = match event {
+            Ime::Preedit(text, _) => {
+                self.window.settings.clear_preedits();
+                if let Some(field) = self.window.settings.text_field_mut(target) {
+                    field.set_preedit(text);
+                }
+                false
+            }
+            Ime::Commit(text) => {
+                self.window.settings.clear_preedits();
+                let Some(field) = self.window.settings.text_field_mut(target) else {
+                    return Ok(());
+                };
+                field.insert(text);
+                true
+            }
+            Ime::Enabled | Ime::Disabled => return Ok(()),
+        };
+        if wrote {
+            self.write_editor_field(target)?;
+        }
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// **The caret of the settings field that holds the keyboard**, in window pixels
+    /// (T-SETTINGS-FIELDS-IME-POSITION) — the rectangle `push_field` strikes it in,
+    /// through the one function both read ([`settings::field_caret_line`]), measured
+    /// with the font the painter measures with.
+    ///
+    /// Off the box the layout placed (the page's scroll already in it) and the string
+    /// the field shows, a composition included. **Unclipped** (ruled 2026-10-30): a
+    /// field the wheel has scrolled partly out of the dialog reports its caret where
+    /// it is laid out, as a Win32 edit's caret in a scrolled parent does.
+    pub(in crate::runtime) fn settings_field_caret_line(&mut self) -> Option<[f32; 4]> {
+        let target = self.window.settings.focus()?;
+        let field = self.window.settings.text_field(target)?;
+        let shown = field.composed().into_owned();
+        let caret = field.composed_selection().end.min(shown.len());
+        let layout = self.settings_layout()?;
+        let (rect, mono) = layout.text_field_box(target)?;
+        let scale = layout.scale();
+        let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+        let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
+        Some(settings::field_caret_line(
+            rect,
+            &shown[..caret],
+            mono,
+            scale,
+            &mut measure,
+        ))
     }
 
     /// **Open the settings dialog on one row.**
