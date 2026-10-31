@@ -677,7 +677,7 @@ const OPENS_AN_ITEM: [&str; 12] = [
 
 /// The derives the language itself defines. Everything else generates items no
 /// byte of this index holds.
-const BUILT_IN_DERIVES: [&str; 9] = [
+pub(crate) const BUILT_IN_DERIVES: [&str; 9] = [
     "Clone",
     "Copy",
     "Debug",
@@ -697,7 +697,7 @@ const BUILT_IN_DERIVES: [&str; 9] = [
 /// uses that turns up in the report is a row somebody reads and adds, which is
 /// the right direction to be wrong in. The other direction — guessing that an
 /// unknown attribute is inert — is the silence §2.7 forbids.
-const BUILT_IN_ATTRIBUTES: [&str; 41] = [
+pub(crate) const BUILT_IN_ATTRIBUTES: [&str; 41] = [
     "allow",
     "automatically_derived",
     "bench",
