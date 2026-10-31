@@ -296,7 +296,7 @@ mod tests {
             assert!(body(method).contains(trace), "{method}: {trace}");
         }
         let input = body("ime_input");
-        assert!(input.find("trace_ime_ruling") < input.find("if !ruling.deliver"));
+        assert!(input.find("trace_ime_ruling") < input.find("!ruling.deliver"));
         assert!(
             in_the_product_raw(bt_source::needle!(bt_source::Pattern::text(
                 "self.trace_ime_frame(&terminal_frame, written)"
