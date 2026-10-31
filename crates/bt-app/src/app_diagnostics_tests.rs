@@ -839,8 +839,7 @@ fn a_panic_while_a_stops_box_is_up_ends_the_process_when_it_closes() {
 /// harness catches the panic and prints its summary, and no footer is written.
 #[test]
 fn a_panic_on_the_stops_own_thread_while_its_box_is_up_ends_the_process() {
-    const SELECTOR: &str =
-        "app_diagnostics_tests::a_panic_on_the_stops_own_thread_while_its_box_is_up_ends_the_process";
+    const SELECTOR: &str = "app_diagnostics_tests::a_panic_on_the_stops_own_thread_while_its_box_is_up_ends_the_process";
     match crate::test_support::a_process_of_its_own(SELECTOR, b"") {
         None => {
             diagnostics::as_a_resident_run_nobody_watches();

@@ -55249,7 +55249,8 @@ mod floated_page_tests {
         let road = free_fn_body("leave_by_the_panic_road");
         let hook = free_fn_body("the_panic_hooks_end");
         assert!(
-            free_fn_body("install_panic_log_hook").contains("the_panic_hooks_end(path, &mut SystemBox)"),
+            free_fn_body("install_panic_log_hook")
+                .contains("the_panic_hooks_end(path, &mut SystemBox)"),
             "the resident hook no longer ends by the panic road's end"
         );
         let leaves = road
@@ -55276,12 +55277,14 @@ mod floated_page_tests {
         // And the alert still gets to be read: whichever panic spoke is the one
         // that closes the process, so a second fault in the same second cannot
         // take the first one's message box off the screen.
-        let asks = hook.find("if !announce_panic(path, crash_box) {").unwrap_or_else(|| {
-            panic!(
-                "every panic now ends the process, so two faults in one second race \
+        let asks = hook
+            .find("if !announce_panic(path, crash_box) {")
+            .unwrap_or_else(|| {
+                panic!(
+                    "every panic now ends the process, so two faults in one second race \
                  to cut each other's alert off:\n{hook}"
-            )
-        });
+                )
+            });
         let takes = hook.find("leave_by_the_panic_road()").unwrap_or_else(|| {
             panic!("the hook's end no longer leaves by the panic road:\n{hook}")
         });
@@ -57114,15 +57117,29 @@ fn the_alert_on_a_watching_console(path: &std::path::Path) -> PanicAlert {
 /// **And then the leave a panic owed it** (row 102): a panic that was not contained while this
 /// alert was up returned from its hook so as not to take the box off the screen
 /// ([`PanicTurn::Owe`]); with the alert read, this thread ends the process by the panic's road.
+/// The step is [`TheStopsAlertSaid`]'s drop, made only by the stop that claimed the alert
+/// (review F1, F2): it is taken however the alert is left — a return, or this thread's own
+/// unwind when the panic was in the alert's own code, which would otherwise carry it past
+/// `main`'s way out.
 fn announce_frame_shape_stop(path: &std::path::Path, boxes: &mut impl SystemBoxes) {
-    let alert = if a_stop_claims_the_alert() {
-        Some(the_alert_on_a_watching_console(path))
-    } else {
-        None
-    };
-    say_the_stop_alert(alert, boxes);
-    if a_stop_has_said_the_alert() {
-        leave_by_the_panic_road()
+    if !a_stop_claims_the_alert() {
+        return;
+    }
+    let _said = TheStopsAlertSaid;
+    say_the_stop_alert(Some(the_alert_on_a_watching_console(path)), boxes);
+}
+
+/// **A claimed stop's alert, said, on every way out of saying it** ([`announce_frame_shape_stop`]):
+/// the said step ([`a_stop_has_said_the_alert`]) and, when a panic owed this thread its leave,
+/// the panic road. On an unwind the road ends the process from inside the drop; a panic there
+/// would be a panic during a panic, which aborts — the process ends either way.
+struct TheStopsAlertSaid;
+
+impl Drop for TheStopsAlertSaid {
+    fn drop(&mut self) {
+        if a_stop_has_said_the_alert() {
+            leave_by_the_panic_road()
+        }
     }
 }
 
