@@ -1328,7 +1328,8 @@ fn a_card_over_the_dialog_takes_the_field_off_the_rung() {
 ///
 /// MUTATION (observed red): drop the `moved_to_another_field` clause from
 /// `Runtime::settle_composition_owner` — the program keeps its pre-edit and the composition
-/// stays live.
+/// stays live. Since plan row 118 that clause is one case of the settle's origin rule, and the
+/// same mutation is "M1" below: compare the rungs alone.
 #[test]
 fn a_press_into_another_settings_field_cancels_the_composition_left_behind() {
     use crate::settings::{SettingsRow, SettingsTarget};
@@ -1430,4 +1431,757 @@ fn a_composition_in_a_settings_field_is_placed_at_its_caret_on_every_platform() 
         "and inside the field's box: {:?}",
         (x, y)
     );
+}
+
+// ── Plan row 118: a composition does not survive its field changing inside one rung ──────────
+//
+// Every rung whose origin names an instance — two shells, two pages, two graphs' search fields,
+// two name boxes, two files columns, two hosts of the capsule — can change instance without
+// changing rung. `Runtime::settle_composition_owner` asks the composition's **origin** against the
+// origin the keyboard is at now, at every pass tail and before every composition event, so each
+// test below drives one road: a pre-edit on instance A, the move to instance B, one pass; A's
+// pre-edit is gone and nothing is composing; the input method's late result for A is refused; and
+// a composition begun afterwards lands in B as B's own.
+//
+// MUTATION (observed red for every road test but the graph-to-shell one, and for row 98's ⑧,
+// "M1"): put back the kind-only settle — cancel only when `started_in` is not
+// `ime_owner(self.keyboard_owner())`, the tree before row 118 without row 98's settings clause —
+// and the first assertion after the move goes red.
+
+/// A shell in birth whose typed bytes the test can read: what a commit into it wrote.
+fn a_shell_that_records(text: &str) -> crate::TerminalPane {
+    let mut leaf = leaf_saying(text);
+    leaf.session.life.begin_birth(crate::PaneBirth {
+        seed: crate::LeafSeed {
+            profile: crate::profiles::DEFAULT_IDENTITY.to_owned(),
+            ..crate::LeafSeed::default()
+        },
+        probe_input: None,
+        typed: std::cell::RefCell::default(),
+        waiting: crate::BirthWait::Programs {
+            _waits: crate::programs_lane::pane_waits(),
+        },
+    });
+    leaf
+}
+
+/// What the shell in seat `seat` of tab `tab` has been sent, in order.
+fn typed_into(folio: &HeadlessFolio, tab: usize, seat: bt_layout::SeatId) -> String {
+    let typed = folio.window.tabs[tab].sessions[&seat]
+        .session
+        .life
+        .birth()
+        .expect("the fixture's shell is in birth")
+        .typed
+        .borrow()
+        .clone();
+    String::from_utf8(typed).expect("UTF-8 was sent")
+}
+
+/// A pre-edit of `text`, its caret at the end, into whatever holds the keyboard.
+fn compose(folio: &mut HeadlessFolio, text: &str) {
+    let end = text.len();
+    folio
+        .runtime()
+        .ime_input(Ime::Preedit(text.to_owned(), Some((end, end))))
+        .expect("a pre-edit is answered");
+}
+
+/// A composition finishing with `text`, as winit sends one: the clearing pre-edit, then the
+/// commit (`event_loop.rs:1550-1557`).
+fn finish_with(folio: &mut HeadlessFolio, text: &str) {
+    let mut runtime = folio.runtime();
+    runtime
+        .ime_input(Ime::Preedit(String::new(), None))
+        .expect("the clearing pre-edit is answered");
+    runtime
+        .ime_input(Ime::Commit(text.to_owned()))
+        .expect("the commit is answered");
+}
+
+/// The rung holding the keyboard now.
+fn rung(folio: &mut HeadlessFolio) -> crate::ImeOwner {
+    let runtime = folio.runtime();
+    crate::runtime::keyboard::ime_owner(runtime.keyboard_owner())
+}
+
+/// Two tabs, each one recording shell; the first in front.
+fn two_tabs_of_shells(tag: &str) -> (HeadlessFolio, [bt_layout::SeatId; 2]) {
+    let first = tab_holding(a_shell_that_records("PS A> "));
+    let mut second = tab_holding(a_shell_that_records("PS B> "));
+    second.id = crate::TabId(2);
+    let seats = [first.focused_leaf, second.focused_leaf];
+    let folio = HeadlessFolio::with_tabs(tag, vec![first, second], 0);
+    (folio, seats)
+}
+
+/// RED (plan row 118, T1) — **a tab switch does not carry a shell's composition to the next
+/// tab's shell**: the pane door (`take_keyboard_into`) was never the only road a shell changes
+/// by, because the active tab is where `focused_leaf` is read from.
+///
+/// MUTATION (observed red): M1 — `composing` is still `Some(Shell)` after the pass.
+#[test]
+fn a_tab_switch_cancels_the_composition_the_shell_behind_it_was_holding() {
+    let (mut folio, [a, b]) = two_tabs_of_shells("ime-origin-tab-switch");
+    let mut turns = Turns::start();
+    folio.runtime().ime_input(Ime::Enabled).expect("a start");
+    compose(&mut folio, "ni");
+    assert_eq!(folio.window.composing, Some(crate::ImeOwner::Shell));
+
+    folio
+        .runtime()
+        .activate_tab(1, false)
+        .expect("the tab comes forward");
+    assert_eq!(
+        rung(&mut folio),
+        crate::ImeOwner::Shell,
+        "one rung, two shells"
+    );
+    paint_and_turn(&mut folio.runtime(), turns.next());
+    assert_eq!(
+        folio.window.composing, None,
+        "the pass after the switch cancelled the composition"
+    );
+    assert!(folio.window.preedit.is_none(), "and nothing is drawn");
+
+    finish_with(&mut folio, "你");
+    assert_eq!(
+        typed_into(&folio, 0, a),
+        "",
+        "the late result reaches neither shell"
+    );
+    assert_eq!(typed_into(&folio, 1, b), "", "not the one behind it either");
+
+    compose(&mut folio, "hao");
+    finish_with(&mut folio, "好");
+    assert_eq!(
+        typed_into(&folio, 1, b),
+        "好",
+        "a composition begun afterwards is B's own"
+    );
+    assert_eq!(typed_into(&folio, 0, a), "");
+}
+
+/// RED (plan row 118, T2) — **a closed pane does not hand its composition to the shell the
+/// keyboard falls back to**: `close_pane` is the door a pane's `×` and a shell that has exited
+/// both reach (`reap_exited_tabs`), and it moves the keyboard in `refocus_after_losing`, not
+/// through the pane door.
+///
+/// MUTATION (observed red): M1 — `composing` is still `Some(Shell)` after the pass.
+#[test]
+fn a_closed_pane_does_not_hand_its_composition_to_the_shell_beside_it() {
+    let mut tab = crate::test_support::cross_tab(1, &["PS A> ", "PS B> "]);
+    let [a, b] = [tab.seats.terminals()[0], tab.seats.terminals()[1]];
+    for (seat, text) in [(a, "PS A> "), (b, "PS B> ")] {
+        tab.sessions.insert(seat, a_shell_that_records(text));
+    }
+    let mut folio = HeadlessFolio::with_tabs("ime-origin-pane-closed", vec![tab], 0);
+    let mut turns = Turns::start();
+    assert_eq!(
+        folio.window.tabs[0].focused_leaf, a,
+        "the fixture types at A"
+    );
+    folio.runtime().ime_input(Ime::Enabled).expect("a start");
+    compose(&mut folio, "ni");
+
+    folio.runtime().close_pane(a).expect("the pane closes");
+    assert_eq!(
+        folio.window.tabs[0].focused_leaf, b,
+        "the keyboard fell back to B"
+    );
+    paint_and_turn(&mut folio.runtime(), turns.next());
+    assert_eq!(
+        folio.window.composing, None,
+        "the pass after the close cancelled the composition"
+    );
+
+    finish_with(&mut folio, "你");
+    assert_eq!(
+        typed_into(&folio, 0, b),
+        "",
+        "the late result does not reach B"
+    );
+    compose(&mut folio, "hao");
+    finish_with(&mut folio, "好");
+    assert_eq!(
+        typed_into(&folio, 0, b),
+        "好",
+        "a composition begun afterwards is B's own"
+    );
+}
+
+/// Two Markdown pages side by side in one tab beside a shell, both drawn: the window, the shell's
+/// seat and the two pages' surfaces.
+fn two_pages(tag: &str) -> (HeadlessFolio, bt_layout::SeatId, [crate::PreviewSurface; 2]) {
+    two_preview_panes(
+        tag,
+        [
+            crate::test_support::buffer_saying(
+                &crate::test_support::host_spelling(r"C:\w\甲 first.md"),
+                "甲 first.md",
+                "# 甲\n\nfirst page.\n",
+            ),
+            crate::test_support::buffer_saying(
+                &crate::test_support::host_spelling(r"C:\w\乙 second.md"),
+                "乙 second.md",
+                "# 乙\n\nsecond page.\n",
+            ),
+        ],
+    )
+}
+
+/// Two preview panes in one tab beside a shell, the first pinned so that the second is a pane of
+/// its own, each showing one of `buffers`; drawn once.
+fn two_preview_panes(
+    tag: &str,
+    buffers: [crate::preview::PreviewBuffer; 2],
+) -> (HeadlessFolio, bt_layout::SeatId, [crate::PreviewSurface; 2]) {
+    use crate::test_support::{cross_metrics, cross_solve, seat_of};
+    let mut seats = crate::seats::Seats::lone_terminal();
+    let shell = seats.identity();
+    let pinned = seats
+        .add_preview(&cross_metrics())
+        .expect("the first preview seat lands");
+    assert!(seats.toggle_preview_lock(pinned));
+    let second = seats
+        .add_preview(&cross_metrics())
+        .expect("a pinned pane is not a reuse target");
+    let (layout, overflow) = cross_solve(&seats);
+    let tab = crate::assemble_tab_state(
+        crate::TabId(1),
+        std::collections::BTreeMap::from([(shell, leaf_saying("SHELL"))]),
+        std::collections::BTreeMap::new(),
+        crate::preview::PreviewPool::default(),
+        crate::PreviewPanes::default(),
+        std::collections::BTreeMap::new(),
+        shell,
+        crate::TabSeed::default(),
+        seats,
+        layout,
+        overflow,
+    );
+    let mut folio = HeadlessFolio::with_tabs(tag, vec![tab], 0);
+    let surfaces = [pinned, second].map(|seat| seat_of(crate::TabId(1), seat));
+    for (surface, buffer) in surfaces.into_iter().zip(buffers) {
+        let held = folio.window.tabs[0].preview_pool.insert(buffer);
+        folio.window.tabs[0]
+            .preview_panes
+            .entry(surface)
+            .show_source(held);
+    }
+    folio.draw();
+    (folio, shell, surfaces)
+}
+
+/// A press that puts the caret at the start of `surface`'s page — the spend a click in its
+/// body makes.
+fn press_into(folio: &mut HeadlessFolio, surface: crate::PreviewSurface) {
+    folio
+        .runtime()
+        .spend_preview_press(
+            surface,
+            crate::preview_press::Spend::Caret {
+                offset: 0,
+                grain: crate::preview_select::Grain::Character,
+                extend: false,
+                head: None,
+            },
+        )
+        .expect("the press is spent");
+    assert_eq!(
+        folio.window.tabs[0].preview_edit_focus,
+        Some(surface),
+        "the fixture's own precondition: the press took the keyboard into the page"
+    );
+}
+
+/// The text of the page on `surface`.
+fn page_text(folio: &mut HeadlessFolio, surface: crate::PreviewSurface) -> String {
+    folio
+        .runtime()
+        .preview_buffer_on(surface)
+        .and_then(|buffer| buffer.text().map(str::to_owned))
+        .expect("the page has text")
+}
+
+/// RED (plan row 118, T3) — **a press in a second page does not carry the first page's
+/// composition into it**: both are `ImeOwner::Preview`, and the window's one pre-edit is drawn at
+/// the edit focus, so the letters would jump to the second page's caret and commit there.
+///
+/// MUTATION (observed red): M1 — `composing` is still `Some(Preview)` and the pre-edit is still
+/// drawn.
+#[test]
+fn a_press_in_a_second_page_cancels_the_composition_left_in_the_first() {
+    let (mut folio, _, [a, b]) = two_pages("ime-origin-two-pages");
+    let mut turns = Turns::start();
+    let (first, second) = (page_text(&mut folio, a), page_text(&mut folio, b));
+    press_into(&mut folio, a);
+    folio.runtime().ime_input(Ime::Enabled).expect("a start");
+    compose(&mut folio, "ni");
+    assert_eq!(folio.window.composing, Some(crate::ImeOwner::Preview));
+
+    press_into(&mut folio, b);
+    assert_eq!(
+        rung(&mut folio),
+        crate::ImeOwner::Preview,
+        "one rung, two pages"
+    );
+    paint_and_turn(&mut folio.runtime(), turns.next());
+    assert_eq!(
+        folio.window.composing, None,
+        "the pass after the press cancelled the composition"
+    );
+    assert!(
+        folio.window.preedit.is_none(),
+        "and the letters are drawn on neither page"
+    );
+
+    finish_with(&mut folio, "你");
+    assert_eq!(
+        page_text(&mut folio, a),
+        first,
+        "the late result lands in neither page"
+    );
+    assert_eq!(page_text(&mut folio, b), second);
+
+    compose(&mut folio, "hao");
+    finish_with(&mut folio, "好");
+    assert_eq!(
+        page_text(&mut folio, a),
+        first,
+        "the first page is untouched"
+    );
+    assert_eq!(
+        page_text(&mut folio, b),
+        format!("好{second}"),
+        "a composition begun afterwards is the second page's own"
+    );
+}
+
+/// Two commit graphs side by side, each with its view, the first's search field holding the
+/// keyboard: the window, the shell's seat and the two graphs' surfaces.
+fn two_graphs(tag: &str) -> (HeadlessFolio, bt_layout::SeatId, [crate::PreviewSurface; 2]) {
+    let roots = [
+        bt_testpath::temp_path("ime-origin-graph 甲"),
+        bt_testpath::temp_path("ime-origin-graph 乙"),
+    ];
+    let graph = |root: &std::path::PathBuf, name: &str| {
+        crate::preview::PreviewBuffer::new(
+            crate::preview::PreviewSource::GitGraph { root: root.clone() },
+            name.to_owned(),
+        )
+    };
+    let (mut folio, shell, surfaces) = two_preview_panes(
+        tag,
+        [graph(&roots[0], "甲 graph"), graph(&roots[1], "乙 graph")],
+    );
+    {
+        let runtime = folio.runtime();
+        for (surface, root) in surfaces.into_iter().zip(&roots) {
+            runtime.window.tabs[0].git_graph_view.insert(
+                surface,
+                crate::GraphView {
+                    root: root.clone(),
+                    ..crate::GraphView::default()
+                },
+            );
+        }
+    }
+    focus_graph_search(&mut folio, surfaces[0]);
+    (folio, shell, surfaces)
+}
+
+/// A press on `surface`'s search field: the pane comes forward and the field takes the keyboard
+/// (`Runtime::press_graph_tool`, the toolbar's door).
+fn focus_graph_search(folio: &mut HeadlessFolio, surface: crate::PreviewSurface) {
+    let crate::PreviewSurface::Seat(leaf) = surface else {
+        panic!("the fixture's graphs are docked");
+    };
+    let mut runtime = folio.runtime();
+    runtime.seats.set_focus(leaf.seat);
+    runtime
+        .press_graph_tool(surface, crate::git_graph::GraphTool::Search)
+        .expect("the field takes the press");
+    assert_eq!(
+        crate::runtime::keyboard::ime_owner(runtime.keyboard_owner()),
+        crate::ImeOwner::GraphSearch,
+        "the fixture's own precondition: a graph's search holds the keyboard"
+    );
+}
+
+/// The search field of the graph on `surface`: its text and its pre-edit.
+fn graph_search(folio: &HeadlessFolio, surface: crate::PreviewSurface) -> (String, String) {
+    let view = &folio.window.tabs[0].git_graph_view[&surface];
+    (
+        view.search.text().to_owned(),
+        view.search.preedit().to_owned(),
+    )
+}
+
+/// RED (plan row 118, T4) — **a press in a second graph's search does not carry the first one's
+/// composition into it**: each graph keeps its own `search_focused`, so the first field went on
+/// drawing its letters while the composition carried on into the second.
+///
+/// MUTATIONS (observed red): M1 — the first field still reads `("", "ni")`; M2 (below) — the
+/// same, because the cancel then clears the second field instead of the first.
+#[test]
+fn a_press_in_a_second_graphs_search_cancels_the_composition_left_in_the_first() {
+    let (mut folio, _, [a, b]) = two_graphs("ime-origin-two-graphs");
+    let mut turns = Turns::start();
+    folio.runtime().ime_input(Ime::Enabled).expect("a start");
+    compose(&mut folio, "ni");
+    assert_eq!(graph_search(&folio, a), (String::new(), "ni".to_owned()));
+
+    focus_graph_search(&mut folio, b);
+    paint_and_turn(&mut folio.runtime(), turns.next());
+    assert_eq!(
+        graph_search(&folio, a),
+        (String::new(), String::new()),
+        "the pass after the press took the first field's letters off"
+    );
+    assert_eq!(
+        folio.window.composing, None,
+        "and cancelled the composition"
+    );
+
+    finish_with(&mut folio, "你");
+    assert_eq!(
+        graph_search(&folio, a).0,
+        "",
+        "the late result lands in neither field"
+    );
+    assert_eq!(graph_search(&folio, b).0, "");
+
+    compose(&mut folio, "hao");
+    finish_with(&mut folio, "好");
+    assert_eq!(graph_search(&folio, a).0, "");
+    assert_eq!(
+        graph_search(&folio, b),
+        ("好".to_owned(), String::new()),
+        "a composition begun afterwards is the second field's own"
+    );
+}
+
+/// RED (plan row 118, T5; red on the base) — **a graph's search keeps no letters once the keyboard
+/// has gone to a shell**: a change of rung, which the kind-only settle did cancel, but
+/// `cancel_composition` cleared the field of the surface holding the keyboard *now* — no graph at
+/// all — so the field the letters were typed into went on drawing them.
+///
+/// MUTATION (observed red): "M2" — read the surface in `cancel_composition`'s `GraphSearch` arm
+/// from `self.preview_keyboard_surface()` again — the field still reads `("", "ni")`. M1 leaves
+/// this test green: the move is between two rungs.
+#[test]
+fn a_graphs_search_keeps_no_letters_once_the_keyboard_goes_to_a_shell() {
+    let (mut folio, shell, [a, _]) = two_graphs("ime-origin-graph-to-shell");
+    let mut turns = Turns::start();
+    folio.runtime().ime_input(Ime::Enabled).expect("a start");
+    compose(&mut folio, "ni");
+
+    folio
+        .runtime()
+        .focus_seat(shell)
+        .expect("the shell takes the press");
+    assert_eq!(rung(&mut folio), crate::ImeOwner::Shell);
+    paint_and_turn(&mut folio.runtime(), turns.next());
+    assert_eq!(folio.window.composing, None, "the composition is cancelled");
+    assert_eq!(
+        graph_search(&folio, a),
+        (String::new(), String::new()),
+        "and the field it was typed into draws none of its letters"
+    );
+}
+
+/// RED (plan row 118, T6; state-level, ruling R5) — **a name box replaced by the address box in
+/// one pass does not hand the address the name's composition**. A press on a page's address row
+/// with a name box open blurs the box (`chrome_mouse_input`) and opens the address in the same
+/// pass (`open_web_address_on`); a headless window hosts no web engine to seed that door from, so
+/// the test makes the door's two writes itself — `finish_rename(Blur)`, then a `WebAddress`
+/// editor.
+///
+/// MUTATION (observed red): M1 — `composing` is still `Some(Rename)`.
+#[test]
+fn a_name_box_replaced_by_the_address_box_takes_its_composition_with_it() {
+    let mut folio = HeadlessFolio::with_tabs(
+        "ime-origin-rename-to-address",
+        vec![tab_holding(leaf_saying("PS> "))],
+        0,
+    );
+    let mut turns = Turns::start();
+    let tab = folio.window.tabs[0].id;
+    let leaf = folio.window.tabs[0].leaf_here(folio.window.tabs[0].focused_leaf);
+    folio.window.rename = Some(crate::TabRename::open(tab, None));
+    folio.runtime().ime_input(Ime::Enabled).expect("a start");
+    compose(&mut folio, "ni");
+    assert_eq!(folio.window.composing, Some(crate::ImeOwner::Rename));
+
+    folio
+        .runtime()
+        .finish_rename(crate::RenameExit::Blur)
+        .expect("the name box blurs");
+    folio.window.rename = Some(crate::TabRename::open_address(leaf, "https://example.com/"));
+    assert_eq!(
+        rung(&mut folio),
+        crate::ImeOwner::Rename,
+        "one rung, two boxes"
+    );
+    paint_and_turn(&mut folio.runtime(), turns.next());
+    let address = |folio: &HeadlessFolio| {
+        let field = &folio.window.rename.as_ref().expect("the address box").field;
+        (field.text().to_owned(), field.preedit().to_owned())
+    };
+    assert_eq!(folio.window.composing, None, "the composition is cancelled");
+    assert_eq!(
+        address(&folio).1,
+        "",
+        "and the address draws none of its letters"
+    );
+
+    finish_with(&mut folio, "你");
+    assert_eq!(
+        address(&folio).0,
+        "https://example.com/",
+        "the late result does not land in the address"
+    );
+    assert_eq!(
+        folio.window.tabs[0].manual_name, None,
+        "nor in the tab's name"
+    );
+
+    compose(&mut folio, "hao");
+    finish_with(&mut folio, "好");
+    assert!(
+        address(&folio).0.contains('好'),
+        "a composition begun afterwards is the address's own: {:?}",
+        address(&folio)
+    );
+}
+
+/// Two files columns beside a shell, the first holding the keyboard: the window and the two
+/// columns' seats.
+fn two_columns(tag: &str) -> (HeadlessFolio, [bt_layout::SeatId; 2]) {
+    let root = bt_testpath::temp_path(tag).join("根 root");
+    std::fs::create_dir_all(&root).expect("the scratch folder");
+    let column = || {
+        bt_persist::LayoutNodeV1::Leaf(bt_persist::LeafNodeV1::Files(bt_persist::FilesLeafV1 {
+            view: bt_persist::FilesViewV1::Files,
+            root: root.display().to_string(),
+            open: Vec::new(),
+            sel: None,
+            width: 240,
+            remotes_open: false,
+        }))
+    };
+    let mut saved = crate::test_support::saved_files_and_terminal(bt_persist::FilesLeafV1 {
+        view: bt_persist::FilesViewV1::Files,
+        root: root.display().to_string(),
+        open: Vec::new(),
+        sel: None,
+        width: 240,
+        remotes_open: false,
+    });
+    saved.root = bt_persist::LayoutNodeV1::Split(bt_persist::SplitNodeV1 {
+        dir: bt_persist::SplitDirV1::Row,
+        ratio: 300_000,
+        children: [Box::new(column()), Box::new(saved.root)],
+    });
+    saved.focused_leaf = "leaf-2".to_owned();
+    let (seats, _, _, files, _preview) = crate::revive_plan(&saved);
+    let terminals = seats.terminals();
+    let sessions = terminals
+        .iter()
+        .map(|seat| (*seat, leaf_saying("SHELL")))
+        .collect();
+    let (layout, overflow) = crate::test_support::cross_solve(&seats);
+    let columns: [bt_layout::SeatId; 2] = seats
+        .files()
+        .try_into()
+        .expect("the fixture has two columns");
+    let tab = crate::assemble_tab_state(
+        crate::TabId(1),
+        sessions,
+        files,
+        crate::preview::PreviewPool::default(),
+        crate::PreviewPanes::default(),
+        std::collections::BTreeMap::new(),
+        terminals[0],
+        crate::TabSeed::default(),
+        seats,
+        layout,
+        overflow,
+    );
+    let mut folio = HeadlessFolio::with_tabs(tag, vec![tab], 0);
+    lend_the_keyboard(&mut folio, columns[0]);
+    (folio, columns)
+}
+
+/// A press in `column`: the keyboard is lent to it (`Runtime::set_files_keyboard`).
+fn lend_the_keyboard(folio: &mut HeadlessFolio, column: bt_layout::SeatId) {
+    let mut runtime = folio.runtime();
+    runtime.set_files_keyboard(Some(column), crate::FilesFocusArrival::Pointer);
+    assert_eq!(
+        runtime.files_keyboard_seat(),
+        Some(column),
+        "the fixture's own precondition: the column holds the keyboard"
+    );
+}
+
+/// RED (plan row 118, T7) — **a press in a second files column ends the composition begun over
+/// the first**: a column swallows compositions, so nothing is drawn or inserted on either side,
+/// but the input method's own composition (and its window) was never told to end.
+///
+/// MUTATION (observed red): M1 — `composing` is still `Some(FilesTree)`.
+#[test]
+fn a_press_in_a_second_files_column_cancels_the_composition_begun_over_the_first() {
+    let (mut folio, [a, b]) = two_columns("ime-origin-two-columns");
+    let mut turns = Turns::start();
+    folio.runtime().ime_input(Ime::Enabled).expect("a start");
+    compose(&mut folio, "ni");
+    assert_eq!(folio.window.composing, Some(crate::ImeOwner::FilesTree));
+    let (first, second) = (
+        folio.window.tabs[0].leaf_here(a),
+        folio.window.tabs[0].leaf_here(b),
+    );
+    assert_eq!(
+        folio.window.composing_in,
+        crate::Composing::In(crate::CompositionOrigin::FilesTree(Some(first))),
+        "the composition names its column by the whole leaf"
+    );
+
+    lend_the_keyboard(&mut folio, b);
+    paint_and_turn(&mut folio.runtime(), turns.next());
+    assert_eq!(
+        folio.window.composing, None,
+        "the pass after the press cancelled the composition"
+    );
+
+    compose(&mut folio, "hao");
+    assert_eq!(
+        folio.window.composing_in,
+        crate::Composing::In(crate::CompositionOrigin::FilesTree(Some(second))),
+        "a composition begun afterwards is the second column's own"
+    );
+}
+
+/// RED (plan row 118, T8) — **a move and the next pre-edit in one batch do not re-home the
+/// composition**: a turn answers a whole batch of events, so the pre-edit after a tab switch can
+/// arrive before any pass tail has settled the switch. The check at the head of `ime_input` cancels
+/// there, and the pre-edit that found the composition outlived — the old composition going on — is
+/// not answered.
+///
+/// MUTATION (observed red): "M3" — drop the `settle_composition_owner_as("ime_input")` call at
+/// the head of `Runtime::ime_input` (`carried_over` always `false`) — the pre-edit adopts B, so
+/// `composing` is `Some(Shell)` after it (and the commit would reach B's shell). M1 turns it red
+/// the same way: the head check is the same function.
+#[test]
+fn a_switch_and_the_next_pre_edit_in_one_batch_do_not_re_home_the_composition() {
+    let (mut folio, [a, b]) = two_tabs_of_shells("ime-origin-one-batch");
+    folio.runtime().ime_input(Ime::Enabled).expect("a start");
+    compose(&mut folio, "ni");
+
+    folio
+        .runtime()
+        .activate_tab(1, false)
+        .expect("the tab comes forward");
+    compose(&mut folio, "nih");
+    assert_eq!(
+        folio.window.composing, None,
+        "the pre-edit found it outlived and cancelled it"
+    );
+    assert!(folio.window.preedit.is_none(), "and was not drawn at B");
+
+    finish_with(&mut folio, "你好");
+    assert_eq!(typed_into(&folio, 1, b), "", "nothing begun at A reaches B");
+    assert_eq!(typed_into(&folio, 0, a), "");
+
+    compose(&mut folio, "hao");
+    finish_with(&mut folio, "好");
+    assert_eq!(
+        typed_into(&folio, 1, b),
+        "好",
+        "a composition begun afterwards is B's own"
+    );
+}
+
+/// RED (plan row 118, T9; door-level, ruling R5) — **the capsule opened on another pane does not
+/// carry its composition there**: `open_search` on a second seat while the capsule holds the
+/// keyboard moves the one search, and only a chord reaches that door mid-composition.
+///
+/// MUTATION (observed red): M1 — `composing` is still `Some(Search)` and the field still holds
+/// `ni`.
+#[test]
+fn the_capsule_opened_on_another_pane_cancels_its_composition() {
+    let tab = crate::test_support::cross_tab(1, &["PS A> ", "PS B> "]);
+    let [a, b] = [tab.seats.terminals()[0], tab.seats.terminals()[1]];
+    let mut folio = HeadlessFolio::with_tabs("ime-origin-capsule", vec![tab], 0);
+    let mut turns = Turns::start();
+    folio
+        .runtime()
+        .open_search(a)
+        .expect("the capsule opens on A");
+    folio.runtime().ime_input(Ime::Enabled).expect("a start");
+    compose(&mut folio, "ni");
+    assert_eq!(folio.window.composing, Some(crate::ImeOwner::Search));
+
+    folio
+        .runtime()
+        .open_search(b)
+        .expect("the capsule moves to B");
+    assert_eq!(
+        rung(&mut folio),
+        crate::ImeOwner::Search,
+        "one rung, two hosts"
+    );
+    paint_and_turn(&mut folio.runtime(), turns.next());
+    assert_eq!(folio.window.composing, None, "the composition is cancelled");
+    assert_eq!(
+        folio.window.search.field().preedit(),
+        "",
+        "and the capsule draws none of its letters"
+    );
+
+    finish_with(&mut folio, "你");
+    assert_eq!(
+        folio.window.search.query(),
+        "",
+        "the late result is refused"
+    );
+    compose(&mut folio, "hao");
+    finish_with(&mut folio, "好");
+    assert_eq!(
+        folio.window.search.query(),
+        "好",
+        "a composition begun afterwards is B's own"
+    );
+}
+
+/// PIN (plan row 118, T10) — **a composition that stays on its field is never cancelled**, however
+/// many passes go by: the origin it recorded is the origin the keyboard is at.
+///
+/// MUTATION (observed red): "M4" — make `composition_outlived_its_field` answer `true` for every
+/// live composition — the first pass cancels it.
+#[test]
+fn a_composition_that_stays_on_its_field_survives_every_pass() {
+    let (mut folio, [a, _]) = two_tabs_of_shells("ime-origin-stays");
+    let mut turns = Turns::start();
+    folio.runtime().ime_input(Ime::Enabled).expect("a start");
+    compose(&mut folio, "ni");
+    for _ in 0..3 {
+        paint_and_turn(&mut folio.runtime(), turns.next());
+    }
+    assert_eq!(
+        folio.window.composing,
+        Some(crate::ImeOwner::Shell),
+        "still composing"
+    );
+    assert_eq!(
+        folio
+            .window
+            .preedit
+            .as_ref()
+            .map(|preedit| preedit.text.as_str()),
+        Some("ni"),
+        "and still drawn"
+    );
+    finish_with(&mut folio, "你");
+    assert_eq!(typed_into(&folio, 0, a), "你", "and its commit is its own");
 }

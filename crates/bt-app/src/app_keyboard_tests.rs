@@ -653,7 +653,10 @@ fn closing_the_palette_cancels_a_composition_typed_into_it() {
     };
     assert_eq!(ime_owner(typing), ImeOwner::Palette);
     assert!(
-        !composition_outlived_its_field(Some(ImeOwner::Palette), ime_owner(typing)),
+        !composition_outlived_its_field(
+            Some(&an_origin_of(ImeOwner::Palette)),
+            &an_origin_of(ime_owner(typing))
+        ),
         "while the box is up the letters are its own",
     );
     // The palette is closed: `menu_or_dialog` and `palette` go down
@@ -661,7 +664,10 @@ fn closing_the_palette_cancels_a_composition_typed_into_it() {
     let closed = KeyboardOwner::default();
     assert_eq!(ime_owner(closed), ImeOwner::Shell);
     assert!(
-        composition_outlived_its_field(Some(ImeOwner::Palette), ime_owner(closed)),
+        composition_outlived_its_field(
+            Some(&an_origin_of(ImeOwner::Palette)),
+            &an_origin_of(ime_owner(closed))
+        ),
         "and the moment the box is gone the composition has no field",
     );
 }
@@ -680,21 +686,40 @@ fn closing_the_palette_cancels_a_composition_typed_into_it() {
 #[test]
 fn a_composition_does_not_follow_the_keyboard_to_another_owner() {
     for started_in in ImeOwner::ALL {
+        let origin = an_origin_of(started_in);
         assert!(
-            !composition_outlived_its_field(Some(started_in), started_in),
+            !composition_outlived_its_field(Some(&origin), &origin),
             "{started_in:?} keeps its own composition while it keeps the keyboard",
         );
         for now in ImeOwner::ALL.into_iter().filter(|rung| *rung != started_in) {
             assert!(
-                composition_outlived_its_field(Some(started_in), now),
+                composition_outlived_its_field(Some(&origin), &an_origin_of(now)),
                 "a composition begun in {started_in:?} may not arrive at {now:?}",
             );
         }
     }
     assert!(
-        !composition_outlived_its_field(None, ImeOwner::Shell),
+        !composition_outlived_its_field(None, &an_origin_of(ImeOwner::Shell)),
         "and a window composing nothing has nothing to cancel",
     );
+}
+
+/// One field of `rung`, as `Runtime::composition_origin_now` names it when the instance cannot
+/// be named — every rung's origin is its own variant, so two of these differ exactly when the
+/// rungs do.
+fn an_origin_of(rung: ImeOwner) -> CompositionOrigin {
+    match rung {
+        ImeOwner::Rename => CompositionOrigin::Rename(None),
+        ImeOwner::GraphSearch => CompositionOrigin::GraphSearch(None),
+        ImeOwner::GitPrompt => CompositionOrigin::GitPrompt,
+        ImeOwner::Palette => CompositionOrigin::Palette,
+        ImeOwner::SettingsField => CompositionOrigin::Settings(None),
+        ImeOwner::Modal => CompositionOrigin::Modal,
+        ImeOwner::FilesTree => CompositionOrigin::FilesTree(None),
+        ImeOwner::Preview => CompositionOrigin::Preview(None),
+        ImeOwner::Search => CompositionOrigin::Search(None),
+        ImeOwner::Shell => CompositionOrigin::Shell(None),
+    }
 }
 
 /// PIN (user report + ruling, 2026-08-13) — **the caret blinks exactly when
