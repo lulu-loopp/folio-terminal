@@ -556,15 +556,18 @@ pub(crate) fn cfg_is_readable(attribute: &syn::Attribute) -> bool {
 /// refuses one on a `mod` declaration; plan row 77 refuses it wherever it stands, so a `mod`
 /// declaration carrying one earns both refusals).
 pub(crate) fn cfg_attr_writes_a_cfg(attribute: &syn::Attribute) -> bool {
-    fn names_cfg(tokens: proc_macro2::TokenStream) -> bool {
-        tokens.into_iter().any(|tree| match tree {
-            proc_macro2::TokenTree::Ident(name) => name == "cfg",
-            proc_macro2::TokenTree::Group(group) => names_cfg(group.stream()),
-            _ => false,
-        })
-    }
     attribute.path().is_ident("cfg_attr")
         && matches!(&attribute.meta, syn::Meta::List(list) if names_cfg(list.tokens.clone()))
+}
+
+/// Whether a `cfg_attr`'s arguments name `cfg` at any depth — what [`cfg_attr_writes_a_cfg`]
+/// asks of a parsed attribute, and what `crate::gates` asks of one inside a macro's tokens.
+pub(crate) fn names_cfg(tokens: proc_macro2::TokenStream) -> bool {
+    tokens.into_iter().any(|tree| match tree {
+        proc_macro2::TokenTree::Ident(name) => name == "cfg",
+        proc_macro2::TokenTree::Group(group) => names_cfg(group.stream()),
+        _ => false,
+    })
 }
 
 /// What stands on a `mod` declaration, read against the text of the file it is

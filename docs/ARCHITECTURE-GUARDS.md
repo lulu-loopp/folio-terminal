@@ -262,10 +262,21 @@ the inline module, the `cfg` written on any node (`Index::test_gates`: a `use`, 
 a `cfg` whose predicate is not a name, a name-value or `all`/`any`/`not` of them, a `cfg_attr`
 that writes a `cfg`, and a `cfg` on a parsed node where it reads no gate (`tests/index.rs`
 `a_cfg_is_read_wherever_it_stands`, `a_cfg_the_reading_cannot_read_is_refused_by_its_line`); the
-literal `cfg(true)` and `cfg(false)` are refused as unreadable. The limit (the review of plan row
-77): a `cfg` inside a macro invocation's tokens is not read, since `syn` does not parse an
-invocation, and the bytes under it count as product; the tree's present cases are
-`crates/bt-app/src/i18n.rs:355` and `:357`, two `#[cfg(test)]` variants inside `text_entries!`.
+literal `cfg(true)` and `cfg(false)` are refused as unreadable. Inside a macro's tokens, which
+`syn` does not parse (2026-10-30, T-CFG-INSIDE-MACRO-TOKENS, plan row 109; it replaces row 77's
+stated limit): the index reads one body — a `macro_rules!` with one arm taking
+`$( $(#[$a:meta])* $v:ident, )*` whose transcriber's top-level items are each gated or paste the
+names only as `$(#[$a])* $v`, and an invocation that resolves to it (one-segment path, the nearest
+earlier definition in the same file in a scope holding the invocation, no macro invocation or
+`#[macro_use]` module between them). Each entry's `cfg` is read as a variant's, and the
+definition's items as items; the tree's one such macro is `bt-app`'s `text_entries!`. Every other
+`cfg` (or `cfg`-writing `cfg_attr`) in any macro's tokens, invocation or definition, refuses the
+index by its line and macro path (`Rejection::CfgInMacroTokens`), and a read-shape invocation whose
+body is not that list is refused as unreadable (`Rejection::UnreadableMacroBody`). So a new macro
+carrying a `cfg` shows up as a red index, never as a silent product count; the read shape grows
+only by a row with its grammar, a fixture and a pin (`tests/index.rs`
+`a_cfg_in_a_read_macro_body_is_a_gate`, `a_cfg_in_any_other_macro_body_is_refused_by_its_line`;
+`tests/contract.rs` `the_test_only_texts_are_not_product`).
 
 ## Ownership census
 

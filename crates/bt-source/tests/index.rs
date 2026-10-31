@@ -913,14 +913,41 @@ fn a_cfg_in_a_read_macro_body_is_a_gate() {
 /// Before the row the fixture lowered: nothing inside a macro's tokens was read or refused.
 ///
 /// MUTATION: drop the lexical refusal in `crate::gates`' macro visit — the fixture lowers; stop
-/// its descent into groups — the nested line passes; take the nearest earlier definition without
-/// checking what stands between — the last `entries!` is read.
+/// its descent into groups — the nested line and the two-arm definition's line pass; take the
+/// nearest earlier definition without checking what stands between — the last `entries!` is
+/// read.
 #[test]
 fn a_cfg_in_any_other_macro_body_is_refused_by_its_line() {
     let refused = Index::shared(&fixture_universe("gated_in_macro_refused"))
         .expect_err("the fixture is built to be refused");
-    let said: Vec<String> = refused.iter().map(ToString::to_string).collect();
-    assert_eq!(said, Vec::<String>::new());
+    let said: Vec<String> = refused
+        .iter()
+        .map(|rejection| match rejection {
+            Rejection::CfgInMacroTokens { at, macro_path, .. } => {
+                format!("in-macro {at} {macro_path}")
+            }
+            Rejection::UnreadableMacroBody { at, macro_path, .. } => {
+                format!("unreadable-body {at} {macro_path}")
+            }
+            other => format!("{other}"),
+        })
+        .collect();
+    assert_eq!(
+        said,
+        [
+            "in-macro 5:5 other",
+            "in-macro 10:10 vec",
+            "in-macro 14:5 thread_local",
+            "in-macro 20:9 outer",
+            "in-macro 26:5 inner_attribute",
+            "in-macro 30:5 conditional",
+            "in-macro 37:9 macro_rules! two_arms",
+            "in-macro 51:5 dropping",
+            "unreadable-body 63:1 entries",
+            "in-macro 69:5 crate::entries",
+            "in-macro 76:5 entries",
+        ]
+    );
 }
 
 // ── every impl of one type ────────────────────────────────────────────────

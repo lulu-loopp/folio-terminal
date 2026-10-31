@@ -1295,9 +1295,11 @@ impl Index {
     /// generic parameter, the file itself — whose own `cfg`s say no product build compiles it,
     /// attributes included, in union order. [`crate::Occurrence::in_the_product`]'s fourth
     /// grain; a `cfg` on a parsed node the index could not place or read refused the index
-    /// instead. Not read: a `cfg` inside a macro invocation's tokens, which `syn` does not parse
-    /// — the bytes under it are counted as product (today `crates/bt-app/src/i18n.rs:355`
-    /// and `:357`, two `#[cfg(test)]` variants inside `text_entries! { … }`).
+    /// instead. Inside a macro's tokens, which `syn` does not parse (plan row 109): a gate is read
+    /// on an entry of a list of attribute-carrying names and on a top-level item of that list's
+    /// `macro_rules!` (`crate::gates`' grammar; in the tree, `bt-app`'s `text_entries!`), and
+    /// every other `cfg` in any macro's tokens refused the index
+    /// ([`crate::Rejection::CfgInMacroTokens`]), so none is counted as product unread.
     #[must_use]
     pub fn test_gates(&self) -> &[Span] {
         &self.gates
