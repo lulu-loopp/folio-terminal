@@ -374,6 +374,14 @@ fn a_double_click_on_the_cards_recording_starts_it_there() {
         !press(&mut folio),
         "the first press is the card's own click"
     );
+    // A quick press the held clock puts a pair window later is a first press too. MUTATION (the
+    // seam bypassed): count `double_click_on_the_cards_video`'s press at its own `Instant::now()`
+    // — the quick press pairs and this assertion goes red.
+    folio.pointer_clock_runs(crate::MULTI_CLICK_INTERVAL + std::time::Duration::from_millis(1));
+    assert!(
+        !press(&mut folio),
+        "a press the held clock puts past the pair window is a first press, however quick the hand"
+    );
     assert!(
         press(&mut folio),
         "the second of the pair is the card's double click"

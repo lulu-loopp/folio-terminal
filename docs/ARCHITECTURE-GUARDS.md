@@ -1099,7 +1099,10 @@ counted at, and that moment is read on the window's `PointerClock`: the product'
 unchanged, so the product counts every press at exactly the moment it did before. A test that
 needs two presses to be one double click, or not one, holds it
 (`HeadlessFolio::hold_the_pointer_clock`) and moves it (`pointer_clock_runs`); how long a loaded
-machine takes between the presses is never the verdict. Seven picture and recording tests and one
+machine takes between the presses is never the verdict. Between a pair's presses such a test
+moves the playhead by a seek, never by playback: the Mac's engine has no media clock in a headless
+test process (`Engine::state_reaching`), so a wait for playback to advance is a Windows-only wait
+(row 124's Mac gate, 2026-10-31). Seven picture and recording tests and one
 rendered-page test were formed on the wall clock this way and are converted; the recording tests'
 verdicts are read behind a volume fence where the state before the gesture could satisfy the
 wait (the glance card's is not: its waits cannot be met by that state, and are unfenced by design). **The
