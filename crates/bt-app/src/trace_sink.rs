@@ -185,9 +185,11 @@ static SINK: OnceLock<Option<Sink>> = OnceLock::new();
 /// Called once, from `main`, after `diagnostics::enter_resident_run` has said
 /// whether the run kept its console — and it is **the only thing that opens
 /// [`SINK`]**, which is what makes "is there a queue" a fact about the program
-/// rather than about the environment a binary happens to inherit. A test binary
-/// never calls it: a test that writes a trace drives a queue of its own
-/// ([`Capture`]), and nothing in a test has to wait for a thread it did not start.
+/// rather than about the environment a binary happens to inherit. A test process
+/// opens no sink: the one test that calls it (`entry_doors`' reading of every door)
+/// does so in a child process running that test alone, and a test that writes a
+/// trace drives a queue of its own ([`Capture`]), so nothing in a test has to wait
+/// for a thread it did not start.
 ///
 /// **The writer is retired through its admitted flush door, never by a drop**
 /// (T-DROP-DOORS, D-78): `main` calls [`Shutdown::flush_through_its_door`] on
@@ -643,7 +645,8 @@ impl StalledWriter {
     /// **The writer's release, handed to the test**, for a test that has to let the writer out
     /// of its write while another thread still borrows this sink — a producer that waits for it
     /// is red, and must not be a hang. Dropping what this returns is the release; this sink's own
-    /// drop then finds it already gone.
+    /// drop then finds it already gone, and joins its writer only once the writer has finished
+    /// — so a release still alive when the sink is dropped is red, never a hang.
     pub(crate) fn take_release(&mut self) -> Option<SyncSender<()>> {
         self.release.take()
     }
@@ -662,7 +665,10 @@ impl Drop for StalledWriter {
         // Released first and closed second: a queue closed while the writer is
         // still in its write would leave this thread waiting for a `join` on a
         // thread that cannot return, which is the hang the tests are about.
-        drop(self.release.take());
+        // A release handed out ([`Self::take_release`]) is the test's to drop, and may still be
+        // alive while this drop runs — on a test's unwind, say — so its writer is joined only
+        // once it has finished, within the lane suite's patience.
+        let handed_out = self.release.take().is_none();
         // A writer that never leaves its write is this helper's red, said by name; while a test
         // is already failing, its own panic is the red and the writer is left where it stands.
         if !crate::lane::within_patience(|| self.queue.close()) {
@@ -673,6 +679,14 @@ impl Drop for StalledWriter {
             return;
         }
         if let Some(writer) = self.writer.take() {
+            if handed_out && !crate::lane::within_patience(|| writer.is_finished()) {
+                assert!(
+                    std::thread::panicking(),
+                    "the stalled writer's release was handed out and the writer never left its \
+                     write within the lane suite's patience"
+                );
+                return;
+            }
             let _ = writer.join();
         }
     }
@@ -1014,14 +1028,38 @@ mod tests {
         let _ = std::fs::remove_dir(&folder);
     }
 
+    /// **The writer says how many lines it lost, and puts out what it has, when its queue lets
+    /// go.** The three offers into a queue of two are made on a thread of their own, and their
+    /// return is awaited within the lane suite's patience while nothing drains the queue; the
+    /// receiver is the holder, let go before the verdict, so an offer that waits for room is red,
+    /// never a hang.
+    ///
+    /// MUTATION: give `Queue::offer` a `send` in place of its `try_send`; the third offer does
+    /// not come back while nothing drains the queue, and the test is red.
     #[test]
     fn the_writer_reports_drops_and_flushes_on_disconnect() {
         let (lines, waiting) = sync_channel(2);
-        let queue = Queue::new(lines, Arc::new(AtomicU64::new(0)));
-        queue.offer(stderr_line("first"));
-        queue.offer(stderr_line("second"));
-        queue.offer(stderr_line("lost"));
-        assert!(queue.close());
+        let queue = Arc::new(Queue::new(lines, Arc::new(AtomicU64::new(0))));
+        let returned = Arc::new(AtomicBool::new(false));
+        let producer = {
+            let queue = Arc::clone(&queue);
+            let returned = Arc::clone(&returned);
+            std::thread::spawn(move || {
+                queue.offer(stderr_line("first"));
+                queue.offer(stderr_line("second"));
+                queue.offer(stderr_line("lost"));
+                returned.store(true, Ordering::SeqCst);
+                queue.close()
+            })
+        };
+        let offered = crate::lane::within_patience(|| returned.load(Ordering::SeqCst));
+        if !offered {
+            // The release: an offer still waiting for room meets a receiver that is gone, and
+            // returns; the producer is left where it stands.
+            drop(waiting);
+            panic!("an offer to a full queue waited for room");
+        }
+        assert!(producer.join().unwrap(), "the queue let its sender go");
         let mut output = Vec::new();
         run_to(&waiting, &queue.dropped, &mut output);
         assert_eq!(

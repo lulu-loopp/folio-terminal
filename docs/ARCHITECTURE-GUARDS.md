@@ -965,8 +965,10 @@ only read) is proven by a signal awaited within the suite's patience, or by the 
 gives up (`trace_sink::flush_sink` at its own budget) is proven the same way: by its return while
 the thread it would wait for is still held, awaited within the suite's patience, with the holder let
 go before the verdict — never by timing it. The hand-off lane's flood and the trace sink's producers
-are read the same way, so in these tests a press, an offer or a writer that waits is red, not a hang
-(the sink's two other full-queue offers on a test thread are plan row 106). What such a verdict does
+are read the same way, so a press, an offer, a settle or a writer that waits is red, not a hang, in
+these tests and in the trace sink's, the log writer's and the watchdog's tests that meet a full queue,
+a held writer or a held ring (row 106); the lane doors' gate-held tests (row 111) and the applier's
+lock waits behind a held lock (row 112) are not yet read this way. What such a verdict does
 not catch is a bounded wait, or a give-up that ignores its budget, shorter than the suite's patience.
 
 ## Test order and shared fixtures
