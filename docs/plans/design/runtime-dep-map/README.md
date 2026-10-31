@@ -37,7 +37,7 @@ as the same item.
 
 **What the map does not see** is printed as a count in each header. Nothing is
 guessed. A read through a receiver the census rules do not type is not attributed:
-180 sites. A call is not followed through a trait object, a stored closure, a
+181 sites. A call is not followed through a trait object, a stored closure, a
 function value, or a receiver the rules do not type. The counts below were read at
 plan row 101 on top of row 98 (2026-10-30; the class counts not named here are row
 84's, unchanged);
@@ -59,6 +59,13 @@ the header is the authority:
   counts above, 5 left the 184 unattributed reads, and 12 call sites became topic
   edges). The census reads no `use` item, so a bare `Result` is the standard one
   unless the package declares a type of that name.
+- A one-segment call of a name bound in an enclosing scope (a parameter of any type,
+  `impl Fn*` and `dyn Fn*` included; a `let`; a closure's or a pattern's name; any
+  name in a pattern a macro writes) is a binding called: neither followed nor typed,
+  never typed as the package's function of that name (row 115, 2026-10-31: one read
+  joined the unattributed count, `uninstall::program_plan`'s `member.name` through
+  its `members` parameter; five calls joined the count of method names a standard
+  type has too; no row of any file moved).
 - 301 sites reach more than one item, for example two types of the same name in two
   modules.
 - A call through an associated type of a generic (`B::Glass`, `B::Window`, `G::Device`)
