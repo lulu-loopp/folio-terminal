@@ -21,8 +21,15 @@
 # new one did not at the base - and its `sites` is held to the base key's. (A
 # same-named function in another module that takes over an unknown the old one
 # dropped passes as moved, held to the base key's `sites`, as check-dead-code's
-# U-44 rule does: the check reads the list, not the tree.) There is no rename
-# arm here: a row has no reason of its own to carry the dated reason a rename needs, so a key whose
+# U-44 rule does: the check reads the list, not the tree.) A **re-reasoned**
+# unknown is not added either (plan row 115, 2026-10-31): a key the merge base
+# does not carry whose `site`, `module` and `function` are a gone base key's,
+# with only its `reason` changed, is that key re-reasoned - when it is the one
+# added key of that place and the one gone, unmoved base key of it - and its
+# `sites` is held to the base key's. That is what an analyser fix that only
+# renames a refusal writes; a reason reworded by hand is held off by bt-source's
+# census test, which needs the list to carry the code's own reason. There is no
+# rename arm here: a row has no reason of its own to carry the dated reason a rename needs, so a key whose
 # function was renamed is added, as before. A key that disappeared or
 # whose `sites` went down is the list shrinking, which is what regenerating it
 # with `scripts/generate-ownership-census.ps1` after a fix writes. A key is
@@ -234,10 +241,13 @@ foreach ($key in $now.Keys) {
 $leftover = @($before.Keys | Where-Object { -not $now.ContainsKey($_) } | ForEach-Object { Get-MoveRow $_ })
 $tree = @($now.Keys | ForEach-Object { Get-MoveRow $_ })
 $moves = 0
+$movedFrom = @()
+$candidates = @()
 foreach ($result in (Find-MovedRows -Unmatched $unmatched -Leftover $leftover -Tree $tree -Base @($before.Keys | ForEach-Object { Get-MoveRow $_ }))) {
     $key = $result.Row
     if ($result.Verdict -eq "moved") {
         $was = $before[$result.From]
+        $movedFrom += $result.From
         $moves += 1
         Write-Host "moved     $(Format-UnknownKey $key) (from $($result.Was))"
         if ($now[$key] -gt $was) {
@@ -246,14 +256,43 @@ foreach ($result in (Find-MovedRows -Unmatched $unmatched -Leftover $leftover -T
             $shrunk += 1
         }
     } elseif ($result.Verdict -eq "added") {
-        $added += "    $(Format-UnknownKey $key): $($now[$key]) site(s), not at $from"
+        $candidates += $key
     } else {
         $added += "    $(Format-UnknownKey $key): $($now[$key]) site(s), not at ${from}: $(Format-MoveRefusal $result)"
     }
 }
-$removed = $leftover.Count - $moves
+# The re-reasoned arm: an added key whose site, module and function are one gone, unmoved base
+# key's, and no other added key's, is that key with its reason changed; its `sites` is held to
+# the base key's. Two keys of that place on either side are not paired: each added one stays added.
+function Get-Place([string]$key) {
+    $columns = $key.Split("`t")
+    return "$($columns[0])`t$($columns[1])`t$($columns[2])"
+}
+$gone = @($leftover | ForEach-Object { $_.Row } | Where-Object { $movedFrom -cnotcontains $_ })
+$reasoned = 0
+foreach ($key in $candidates) {
+    $place = Get-Place $key
+    $peers = @($candidates | Where-Object { (Get-Place $_) -ceq $place })
+    $was = @($gone | Where-Object { (Get-Place $_) -ceq $place })
+    if ($peers.Count -eq 1 -and $was.Count -eq 1) {
+        $old = $was[0]
+        $oldReason = $old.Split("`t")[3]
+        $reasoned += 1
+        Write-Host "re-reasoned $(Format-UnknownKey $key) (was: $oldReason)"
+        if ($now[$key] -gt $before[$old]) {
+            $grown += "    $(Format-UnknownKey $key): $($now[$key]) site(s), re-reasoned from ($oldReason), which had $($before[$old]) at ${from}: a re-reasoned key does not grow"
+        } elseif ($now[$key] -lt $before[$old]) {
+            $shrunk += 1
+        }
+    } elseif ($was.Count -ge 1) {
+        $added += "    $(Format-UnknownKey $key): $($now[$key]) site(s), not at ${from}: $($peers.Count) added and $($was.Count) gone key(s) at this site, module and function, so none is re-reasoned"
+    } else {
+        $added += "    $(Format-UnknownKey $key): $($now[$key]) site(s), not at $from"
+    }
+}
+$removed = $leftover.Count - $moves - $reasoned
 Write-Host ("$relative against ${from}: $($before.Count) unknowns -> $($now.Count), " +
-    "$($added.Count) added, $($grown.Count) grown, $shrunk shrunk, $removed removed, $moves moved.")
+    "$($added.Count) added, $($grown.Count) grown, $shrunk shrunk, $removed removed, $moves moved, $reasoned re-reasoned.")
 
 if ($added.Count + $grown.Count -gt 0) {
     $details = @()
