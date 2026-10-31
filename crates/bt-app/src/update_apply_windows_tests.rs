@@ -3097,12 +3097,13 @@ fn armed(tag: &str) -> Option<Install> {
 /// MUTATION: in `update_apply::write_journal`, return the first failure
 /// (no retry).
 ///
-/// **The journal-held window is out of this test's reach** (T-TIMING-BOUND-STRAYS): the same
-/// window bounds the applier's wait for the trial watch to acknowledge its decision
-/// (`update_apply::note_unkept_after_trial_decision`), which is not what this test asserts, and
-/// at the suite's two seconds a loaded run ended the update `CommittedWithDebt` before the watch
-/// thread came round. The hold this test does assert ends by its own `drop`, long inside the
-/// suite's patience.
+/// **The journal-held window is out of this test's reach** (T-TIMING-BOUND-STRAYS): it bounds
+/// `update_apply::write_journal`'s own asks on the real clock, and this test's hold lasts its
+/// own sleeps, which a loaded run can stretch past the suite's two seconds. The applier's wait
+/// for the trial watch to acknowledge its decision no longer rides on that window's real time:
+/// it is read on the road's decision clock, which the harness lets wait for the acknowledgement
+/// itself (T-UPDATE-APPLY-FLIP-HOLD-FLAKE). The hold this test does assert ends by its own
+/// `drop`, long inside the suite's patience.
 #[test]
 fn a_journal_write_refused_for_a_moment_is_asked_again_and_the_update_completes() {
     let Some(install) = armed("refused-once") else {
@@ -6470,8 +6471,10 @@ fn rescue_part(root: &Path) {
         panic!("the recovery door's line: {line:?}");
     };
     let me = crate::update_apply::this_process();
+    let home = Home::of(HostPlatform::Windows, &plan.installed).unwrap();
     let road = Road {
-        home: Home::of(HostPlatform::Windows, &plan.installed).unwrap(),
+        decision_clock: Arc::new(CountedClock::awaiting_the_decision(&home, plan.txn)),
+        home,
         installed: plan.installed.clone(),
         rescue: plan.rescue.clone(),
         data: plan.data.clone(),
@@ -6487,10 +6490,6 @@ fn rescue_part(root: &Path) {
         },
         trial_clock: Arc::new(WallClock),
         held_clock: Arc::new(WallClock),
-        decision_clock: Arc::new(CountedClock::awaiting_the_decision(
-            &Home::of(HostPlatform::Windows, &plan.installed).unwrap(),
-            plan.txn,
-        )),
         wait_clock: Arc::new(WallClock),
         me,
         starter: install_flip::parent_of_this_process(),
@@ -7386,16 +7385,6 @@ fn held_in_set_at_the_flip(
     (hold, rounds, name)
 }
 
-/// The lines that say a round of a move was refused and asked again, each
-/// beginning with `opening`.
-fn held_rounds_said(world: &Fake, opening: &str) -> usize {
-    world
-        .said
-        .iter()
-        .filter(|line| line.starts_with(opening) && line.contains("; asked again in "))
-        .count()
-}
-
 /// Whether `words` carry a hold of the member `name`: `--update-journal-held`
 /// with the system's refusal, then `--update-held-file <name>`.
 fn names_the_held_file(words: &[OsString], name: &str) -> bool {
@@ -7422,24 +7411,18 @@ fn a_member_held_for_a_moment_at_the_flip_is_moved_once_let_go() {
     };
     let mut world = install.world(Trial::Answers);
     let (hold, rounds, name) = held_in_set_at_the_flip(&install, &mut world, Some(2));
-    let (road, clock) = held_on_a_counted_clock(install.road(limits(20_000, 20_000)));
+    let road = held_on_a_counted_clock(install.road(limits(20_000, 20_000)));
     let (ended, world) = applied_on(&install, road, world);
     drop(hold);
     assert_eq!(ended, Ended::Committed, "{:?}", world.said);
     assert_eq!(*rounds.lock().unwrap(), 2, "{:?}", world.said);
-    // The two refused rounds' pauses, 10 ms then 20 ms, on the road's clock.
+    // The member's own two refused rounds, paused 10 ms then 20 ms.
     assert_eq!(
-        (clock.pauses(), clock.moved_ms()),
-        (2, 30),
-        "{:?}",
-        world.said
-    );
-    assert_eq!(
-        held_rounds_said(
+        held_pauses_said(
             &world,
             &format!("BT_UPDATE_APPLY `{name}` held by another program for ")
         ),
-        2,
+        [10, 20],
         "{:?}",
         world.said
     );
@@ -7461,11 +7444,14 @@ fn a_member_held_past_the_window_is_named_and_the_old_build_restored() {
     };
     let mut world = install.world(Trial::Answers);
     let (hold, rounds, name) = held_in_set_at_the_flip(&install, &mut world, None);
-    let (road, clock) = held_on_a_counted_clock(install.road(limits(20_000, 20_000)));
+    let road = held_on_a_counted_clock(install.road(limits(20_000, 20_000)));
     let (ended, world) = ended_while_held(hold, start(road, install.txn, install.applier, world));
     assert_eq!(ended, Ended::RolledBack, "{:?}", world.said);
     assert!(*rounds.lock().unwrap() > 1, "{:?}", world.said);
-    assert_window_spent_on_the_count(&clock, &world);
+    assert_window_spent_by(
+        &world,
+        &format!("BT_UPDATE_APPLY `{name}` held by another program"),
+    );
     assert!(
         said_at(
             &world,
@@ -7540,29 +7526,49 @@ fn a_taken_destination_cuts_the_flip_without_asking_again() {
 }
 
 /// **`road` with its held moves' window read on a [`CountedClock`]**
-/// (T-UPDATE-APPLY-FLIP-HOLD-FLAKE), and that clock: a round's pause moves it
-/// and never sleeps, so the hold's let-go at a counted round always comes
-/// inside the window, and a hold past it spends exactly the window — real
-/// time decides neither.
-fn held_on_a_counted_clock(road: Road) -> (Road, Arc<CountedClock>) {
-    let clock = Arc::new(CountedClock::new(|_| {}));
-    (
-        Road {
-            held_clock: clock.clone(),
-            ..road
-        },
-        clock,
-    )
+/// (T-UPDATE-APPLY-FLIP-HOLD-FLAKE): a round's pause moves it and never
+/// sleeps, so the hold's let-go at a counted round always comes inside the
+/// window, and a hold past it spends exactly the window — real time decides
+/// neither. The clock is the road's, shared by every member's held move, so a
+/// test reads its own member's rounds from the lines the product says for
+/// that member ([`held_pauses_said`]), never the clock's totals: another
+/// member held for a moment by an on-access scan adds only its own lines.
+fn held_on_a_counted_clock(road: Road) -> Road {
+    Road {
+        held_clock: Arc::new(CountedClock::new(|_| {})),
+        ..road
+    }
 }
 
-/// **A hold past the window spent exactly the window** on the held move's
-/// counted clock: the pauses add up to the test's window and no more.
-fn assert_window_spent_on_the_count(clock: &CountedClock, world: &Fake) {
-    assert_eq!(
-        Duration::from_millis(clock.moved_ms()),
-        JOURNAL_HELD_WITHIN_UNDER_TEST,
-        "{} pauses: {:?}",
-        clock.pauses(),
+/// **The pauses said for one member's refused rounds**, in order: the
+/// `asked again in <n> ms` of each line beginning with `opening`.
+fn held_pauses_said(world: &Fake, opening: &str) -> Vec<u64> {
+    world
+        .said
+        .iter()
+        .filter(|line| line.starts_with(opening))
+        .filter_map(|line| line.split("; asked again in ").nth(1))
+        .map(|rest| rest.trim_end_matches(" ms").parse().unwrap())
+        .collect()
+}
+
+/// **A hold past the window spent exactly the window**, by the member's own
+/// lines (`opening` names it): its refused rounds' pauses add up to the test's
+/// window, and its give-up says the whole window was spent.
+fn assert_window_spent_by(world: &Fake, opening: &str) {
+    let window = JOURNAL_HELD_WITHIN_UNDER_TEST;
+    let paused: u64 = held_pauses_said(world, &format!("{opening} for "))
+        .iter()
+        .sum();
+    assert_eq!(u128::from(paused), window.as_millis(), "{:?}", world.said);
+    let given_up = format!(
+        "{opening} for {:.2} s, past the {} s window: ",
+        window.as_secs_f64(),
+        window.as_secs()
+    );
+    assert!(
+        world.said.iter().any(|line| line.starts_with(&given_up)),
+        "{given_up:?} in {:?}",
         world.said
     );
 }
@@ -7613,23 +7619,17 @@ fn an_old_file_held_for_a_moment_at_the_rollback_is_moved_back_once_let_go() {
     else {
         return;
     };
-    let (road, clock) = held_on_a_counted_clock(install.road(limits(20_000, 20_000)));
+    let road = held_on_a_counted_clock(install.road(limits(20_000, 20_000)));
     let (code, world) = recovered_on(road, world);
     drop(hold);
     assert_eq!(code, 0, "{:?}", world.said);
     assert_eq!(*rounds.lock().unwrap(), 2, "{:?}", world.said);
     assert_eq!(
-        (clock.pauses(), clock.moved_ms()),
-        (2, 30),
-        "{:?}",
-        world.said
-    );
-    assert_eq!(
-        held_rounds_said(
+        held_pauses_said(
             &world,
             &format!("BT_UPDATE_ROLLBACK `{name}` held by another program for ")
         ),
-        2,
+        [10, 20],
         "{:?}",
         world.said
     );
@@ -7650,11 +7650,14 @@ fn an_old_file_held_past_the_window_leaves_the_rollback_stuck_and_named() {
     else {
         return;
     };
-    let (road, clock) = held_on_a_counted_clock(install.road(limits(20_000, 20_000)));
+    let road = held_on_a_counted_clock(install.road(limits(20_000, 20_000)));
     let (code, world) = ended_while_held(hold, start_recovered_on(road, world));
     assert_eq!(code, 0, "{:?}", world.said);
     assert!(*rounds.lock().unwrap() > 1, "{:?}", world.said);
-    assert_window_spent_on_the_count(&clock, &world);
+    assert_window_spent_by(
+        &world,
+        &format!("BT_UPDATE_ROLLBACK `{name}` held by another program"),
+    );
     let Phase::Stuck { last_error, .. } = install.on_disk().body.phase else {
         panic!("{:?} {:?}", install.on_disk().body.phase, world.said);
     };
@@ -7674,7 +7677,8 @@ fn an_old_file_held_past_the_window_leaves_the_rollback_stuck_and_named() {
 /// acknowledges the commit leaves it with debt, its journal `Committed` and
 /// its folder kept, once the window is spent on the road's decision clock**:
 /// the applier asks for the trial's final decision for its whole window and
-/// no more — `journal_held_within` over `poll`, 50 pauses of 40 ms — and
+/// no more — `journal_held_within` over `poll`, 50 pauses of 40 ms under
+/// [`limits`] — and
 /// never turns the elapsed time into a not-kept answer.
 ///
 /// MUTATION: in `update_apply::note_unkept_after_trial_decision`, read the
@@ -7687,9 +7691,10 @@ fn a_live_trial_that_never_acknowledges_leaves_the_commit_with_debt_and_its_fold
     };
     let world = install.world(Trial::AnswersAndNeverAcknowledges);
     let clock = Arc::new(CountedClock::new(|_| {}));
+    let limits = limits(20_000, 20_000);
     let road = Road {
         decision_clock: clock.clone(),
-        ..install.road(limits(20_000, 20_000))
+        ..install.road(limits)
     };
     let (ended, world) = applied_on(&install, road, world);
     assert_eq!(
@@ -7700,10 +7705,14 @@ fn a_live_trial_that_never_acknowledges_leaves_the_commit_with_debt_and_its_fold
         "{:?}",
         world.said
     );
-    let polls = JOURNAL_HELD_WITHIN_UNDER_TEST.as_millis() / 40;
+    // One survey, then one `poll` pause, for the whole window.
+    let polls = limits.journal_held_within.as_millis() / limits.poll.as_millis();
     assert_eq!(
         (clock.pauses(), u128::from(clock.moved_ms())),
-        (usize::try_from(polls).unwrap(), polls * 40),
+        (
+            usize::try_from(polls).unwrap(),
+            limits.journal_held_within.as_millis()
+        ),
         "{:?}",
         world.said
     );

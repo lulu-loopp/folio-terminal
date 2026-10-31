@@ -1253,7 +1253,12 @@ impl CountedClock {
     /// clock. "Acknowledged in time" is the event, never a race between a
     /// real window and the trial's thread; an acknowledgement that never
     /// comes costs the patience once, and the window is then spent on the
-    /// count.
+    /// count. It waits on less than the product does: the product's wait
+    /// also ends when no process runs from the program, or when a valid
+    /// receipt's trial no longer runs, and a test whose trial dies in the
+    /// first pause with its receipt left — or that leaves only an ill-formed
+    /// receipt beside a live process — spends the patience in that pause
+    /// before the next look; its verdict is the same.
     pub(crate) fn awaiting_the_decision(home: &Home, txn: TxnId) -> Self {
         let folder = home.transaction(txn);
         Self::new(move |pause| {

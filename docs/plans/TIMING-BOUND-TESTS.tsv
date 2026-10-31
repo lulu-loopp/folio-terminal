@@ -4,7 +4,8 @@
 # (3) it reaches, through resolved call-graph edges, a test-only helper of its target that keeps a measurement (T-TIMING-BOUND-STRAYS).
 # bt-source's timing test holds the tree to this list both ways; scripts/ci/check-timing-bound.ps1 lets whole
 # rows only disappear against the merge base, except for the rows a new widening line admits by count. A clock reached only
-# through a product function the test calls is not seen by the scan; review owns finding it.
+# through a product function the test calls is not seen by the scan; review owns finding it. A `# noted` line records such a
+# clock found and closed by review: it moves no row.
 # widened 2026-10-24 by T-TIMING-BOUND-STRAYS (+20 rows): clock arithmetic in a test's own body, a budget measured in a test-only helper
 # shrunk 2026-10-27 by T-TRIAL-DEATH-WAIT-CONTROLLED-CLOCK (-4 rows): the trial watch's "dies, ends the wait at once" tests, both platforms, count the pauses of the road's update_apply::TrialClock instead of timing the road
 # shrunk 2026-10-27 by T-ELAPSED-UPPER-BOUNDS-ON-OTHER-WAITS (-4 rows): O's wait for its applier counts the pauses of update_apply::WaitClock; the panic road's and the claims' "never waits for a held lock" are a signal awaited within the suite's patience; the live applier at Handoff has no wait to time and is proven by the state it leaves
