@@ -10386,6 +10386,9 @@ struct WindowRuntime<B: Backend = Native> {
     /// double click undoes before it zooms. Window-level beside [`Self::video`],
     /// because a floating window's picture is clicked as a pane's is.
     video_click: Option<VideoPictureClick>,
+    /// **The clock the double-click counters count presses on** — the wall
+    /// clock in the product; see [`PointerClock`].
+    pointer_clock: PointerClock,
     /// **Every animated picture this window has looked inside**, by the same
     /// normalised path key the decode cache beside it uses (user ruling
     /// 2026-08-28; §7.44 ⑤).
@@ -21112,6 +21115,35 @@ enum PictureUndo {
 #[derive(Default)]
 struct ImageClicks {
     last: Option<(PreviewSurface, [f32; 2], Instant)>,
+}
+
+/// **The moment a press is counted at by the window's double-click counters**
+/// ([`ImageClicks`] and [`PreviewTextClicks`]; T-FLOATING-VIDEO-DOUBLE-CLICK-TIMING,
+/// 0.4.9 plan row 124).
+///
+/// The product's is the wall clock, and [`Self::moment`] answers the instant its
+/// caller has just read, unchanged: a press is counted at exactly the moment it
+/// was before this seam existed. A test holds it instead, so that whether two
+/// presses are one double click is decided by the clock the test moves and not
+/// by how long a loaded machine took between them.
+#[derive(Clone, Copy, Debug, Default)]
+enum PointerClock {
+    #[default]
+    Wall,
+    /// A test's: every press is counted at this moment until the test moves it.
+    #[cfg(test)]
+    Held(Instant),
+}
+
+impl PointerClock {
+    /// The moment a press read at `wall` is counted at.
+    fn moment(self, wall: Instant) -> Instant {
+        match self {
+            Self::Wall => wall,
+            #[cfg(test)]
+            Self::Held(at) => at,
+        }
+    }
 }
 
 impl ImageClicks {
@@ -33998,6 +34030,7 @@ fn new_window_runtime<B: Backend>(parts: NewWindowParts<B>) -> WindowRuntime<B> 
         web: BTreeMap::new(),
         video: video_seat::VideoSeats::default(),
         video_click: None,
+        pointer_clock: PointerClock::Wall,
         animations: AnimationCache::with_budget(MAX_ANIMATION_CACHE_BYTES),
         animations_drawn: BTreeMap::new(),
         pictures_owe_a_frame: false,
