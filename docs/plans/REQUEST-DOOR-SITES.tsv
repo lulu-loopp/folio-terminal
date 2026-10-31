@@ -5542,6 +5542,7 @@ crates/bt-platform/src/lib.rs	bt-platform crate::windows_path_of_file_uri	Ambigu
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_path_of_file_uri	Ambiguous	unwrap_or_default	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-platform/src/logon_hook.rs	bt-platform crate::logon_hook::<Refusal as fmt::Display>::fmt	Implicit	fmt::Display	2	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-platform/src/logon_hook.rs	bt-platform crate::logon_hook::os::<Key as Drop>::drop	Implicit	Drop	1	violation	2026-10-24: (e) an implicit impl with Effect behind it, which may run on a request door's road (review nit 1: held as its sites would be)
+crates/bt-platform/src/loopback_server.rs	bt-platform crate::loopback_server::<Server as Drop>::drop	Implicit	Drop	12	violation	2026-10-31: (e) an implicit impl with Blocking behind it, which may run on a request door's road (review nit 1: held as its sites would be)
 crates/bt-platform/src/macos_compose.rs	bt-platform crate::macos_compose::Compositor::ensure_slot	Ambiguous	clone	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-platform/src/macos_compose.rs	bt-platform crate::macos_compose::Compositor::ensure_slot	Ambiguous	get	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-platform/src/macos_compose.rs	bt-platform crate::macos_compose::Compositor::ensure_slot	Ambiguous	insert	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
