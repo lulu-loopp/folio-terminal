@@ -513,9 +513,23 @@ fn generalized_time(ticks: u64) -> Vec<u8> {
 pub struct Authority {
     pub certificate: Arc<Made>,
     pub at: u64,
+    /// How many of the first requests are read whole and then left
+    /// unanswered (the connection closed) — none, except for a test of what
+    /// the signing call does then ([`Authority::leaving_unanswered`]).
+    unanswered: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl Authority {
+    /// This authority, **leaving its first `requests` requests unanswered**:
+    /// each is read whole and its connection closed without a word.
+    #[must_use]
+    pub fn leaving_unanswered(self, requests: usize) -> Self {
+        Self {
+            unanswered: Arc::new(std::sync::atomic::AtomicUsize::new(requests)),
+            ..self
+        }
+    }
+
     fn sha1(&self) -> Vec<u8> {
         // SAFETY: a context made from the certificate's bytes, freed below.
         unsafe {
@@ -724,6 +738,18 @@ impl Authority {
             }
         };
         exchange.received = received.len();
+        let leave = self
+            .unanswered
+            .fetch_update(
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+                |left| left.checked_sub(1),
+            )
+            .is_ok();
+        if leave {
+            exchange.outcome = Outcome::LeftUnanswered;
+            return exchange;
+        }
         let (status, reply) = match self.respond(&body) {
             Some(reply) => ("200 OK", reply),
             None => {
@@ -789,6 +815,9 @@ pub enum Outcome {
     Answered,
     /// The body was not a `TimeStampReq`; a `400` went back.
     NotARequest,
+    /// Read whole and closed without an answer, as
+    /// [`Authority::leaving_unanswered`] asks.
+    LeftUnanswered,
     /// The client closed before a whole request had arrived.
     HungUp,
     /// The test stopped the authority while this connection was open.
@@ -1198,6 +1227,28 @@ pub fn sign_recorded(
     chain: &[&Made],
     authority: Option<&Authority>,
 ) -> Vec<Exchange> {
+    let (result, exchanges) = signing_call(path, leaf, chain, authority);
+    result.unwrap_or_else(|error| {
+        panic!(
+            "SignerSignEx3: {error}; the time-stamp authority was handed {} connection(s): {exchanges:?}",
+            exchanges.len()
+        )
+    });
+    exchanges
+}
+
+/// **The signing call itself**: what `SignerSignEx3` answered, and every
+/// connection the time-stamp authority was handed while it ran.
+///
+/// # Panics
+///
+/// When `path` is outside the system's temporary folder.
+fn signing_call(
+    path: &Path,
+    leaf: &Made,
+    chain: &[&Made],
+    authority: Option<&Authority>,
+) -> (windows::core::Result<()>, Vec<Exchange>) {
     assert!(
         path.starts_with(std::env::temp_dir()),
         "signs only inside the test's own folder"
@@ -1298,17 +1349,11 @@ pub fn sign_recorded(
                 (result, stamping.stop())
             }
         };
-        result.unwrap_or_else(|error| {
-            panic!(
-                "SignerSignEx3: {error}; the time-stamp authority was handed {} connection(s): {exchanges:?}",
-                exchanges.len()
-            )
-        });
         if !signed.is_null() {
             SignerFreeSignerContext(signed).unwrap();
         }
         let _ = CertFreeCertificateContext(Some(context));
-        exchanges
+        (result, exchanges)
     }
 }
 
@@ -1459,6 +1504,7 @@ impl World {
         Authority {
             certificate: Arc::clone(&self.authority),
             at,
+            unanswered: Arc::default(),
         }
     }
 
@@ -1812,5 +1858,34 @@ mod tests {
         }
         crate::trust::signature(&path, &world.policy())
             .unwrap_or_else(|refusal| panic!("the stamped file verifies: {refusal:?}"));
+    }
+
+    /// RED (row 127; ruling R4) — **a signing call whose request goes
+    /// unanswered does not ask again**: it fails with
+    /// `ERROR_WINHTTP_INVALID_SERVER_RESPONSE` (`0x80072F78`) after one
+    /// connection. So a closed connection does not make `SignerSignEx3`
+    /// connect a second time, and a refused second connection under load
+    /// (`0x80072EFD`) is not the signer retrying an unanswered request.
+    /// Observed the same five runs in five on 2026-10-31 before it was
+    /// committed (R4).
+    ///
+    /// MUTATION: leave `leaving_unanswered` at 0 (the authority answers) and
+    /// the call succeeds.
+    #[test]
+    fn a_signing_call_does_not_ask_again_when_its_request_goes_unanswered() {
+        let world = World::new();
+        let folder = Folder::new("stamped-unanswered");
+        let path = executable(&folder, "folio.exe", VERSION);
+        let leaf = world.leaf(SUBJECT, IDENTITY);
+        let authority = world.stamping(now()).leaving_unanswered(1);
+        let (result, exchanges) = signing_call(&path, &leaf, &[&world.root], Some(&authority));
+        let error = result.expect_err("an unanswered request fails the call");
+        assert_eq!(error.code().0 as u32, 0x8007_2F78, "{error}; {exchanges:?}");
+        assert_eq!(
+            exchanges.len(),
+            1,
+            "one connection, never a second: {exchanges:?}"
+        );
+        assert_eq!(exchanges[0].outcome, Outcome::LeftUnanswered);
     }
 }
