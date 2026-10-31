@@ -18,7 +18,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use bt_platform::admission::{WaitToken, doors};
 use bt_render::{
@@ -1536,6 +1536,23 @@ impl HeadlessFolio {
                 winit::event::MouseButton::Left,
             )
             .expect("a headless release is answered");
+    }
+
+    /// **The window's double-click counters count every press from here on at one held
+    /// moment** ([`crate::PointerClock::Held`], T-FLOATING-VIDEO-DOUBLE-CLICK-TIMING): two
+    /// presses in one place are a double click however long the machine takes between them,
+    /// until [`Self::pointer_clock_runs`] moves the moment on.
+    pub(crate) fn hold_the_pointer_clock(&mut self) {
+        self.window.pointer_clock = crate::PointerClock::Held(Instant::now());
+    }
+
+    /// **The held pointer clock moves on by `span`**, as the wall clock would have between
+    /// two presses — past [`crate::MULTI_CLICK_INTERVAL`], the next press is a first one.
+    pub(crate) fn pointer_clock_runs(&mut self, span: Duration) {
+        let crate::PointerClock::Held(at) = self.window.pointer_clock else {
+            panic!("the test holds the pointer clock before it moves it");
+        };
+        self.window.pointer_clock = crate::PointerClock::Held(at + span);
     }
 
     /// The facade over the two layers, as every event's handler gets it.

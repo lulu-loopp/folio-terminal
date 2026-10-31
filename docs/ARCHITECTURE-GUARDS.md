@@ -1092,6 +1092,21 @@ a held writer or a held ring (row 106); the lane doors' gate-held tests (row 111
 lock waits behind a held lock (row 112) are not yet read this way. What such a verdict does
 not catch is a bounded wait, or a give-up that ignores its budget, shorter than the suite's patience.
 
+2026-10-31 (T-FLOATING-VIDEO-DOUBLE-CLICK-TIMING, plan row 124): a double click is decided by
+the window's multi-click counters (`ImageClicks`, `PreviewTextClicks`) on the moment a press is
+counted at, and that moment is read on the window's `PointerClock`: the product's is `Wall`, whose
+`moment(wall)` answers the instant the press site has just read with its own `Instant::now()`,
+unchanged, so the product counts every press at exactly the moment it did before. A test that
+needs two presses to be one double click, or not one, holds it
+(`HeadlessFolio::hold_the_pointer_clock`) and moves it (`pointer_clock_runs`); how long a loaded
+machine takes between the presses is never the verdict. Seven picture and recording tests and one
+rendered-page test were formed on the wall clock this way and are converted; their engine verdicts
+are read behind a volume fence, so a wait cannot end on the state from before the gesture. **The
+scan never listed them, and could not**: the clock that decided them is read in product code a
+test calls, which is the scan's stated blind spot (its header and `check-timing-bound.ps1` say so),
+not a fault in its grammar. Whether product real-time windows that tests race can be found by a
+scan at all is plan row 125's (T-TIMING-CENSUS-PRODUCT-WINDOWS); until it lands, review owns them.
+
 ## Test order and shared fixtures
 
 The rule: a test's verdict does not hang on a file another build step made, on the
