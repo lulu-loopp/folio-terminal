@@ -388,9 +388,10 @@ fn a_double_click_on_the_cards_recording_starts_it_there() {
     folio.pointer_clock_runs(crate::MULTI_CLICK_INTERVAL + std::time::Duration::from_millis(1));
     assert!(!press(&mut folio), "a first press again");
     assert!(press(&mut folio), "and its pair");
-    let paused = state(&folio, &|state| !state.playing);
+    // Not ended: a recording that ran out is not playing either, and must not pass for the pause.
+    let paused = state(&folio, &|state| !state.playing && !state.ended);
     assert!(
-        !paused.playing,
+        !paused.playing && !paused.ended,
         "a double click on a playing card pauses it: {paused:?}"
     );
     folio.window.video.shutdown_all();

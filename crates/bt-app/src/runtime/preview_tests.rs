@@ -2224,15 +2224,20 @@ fn a_double_click_on_a_recording_zooms_its_pane_and_leaves_playback_as_it_was() 
         KeyCode::Space,
         Some(" "),
     );
-    let paused = played(&folio, surface, |state| !state.playing);
+    played(&folio, surface, |state| !state.playing);
+    let paused = paused_at_the_start(&mut folio, surface);
     let stage = stage_of(&mut folio, surface);
     let pair = on_the_picture(stage, 140.0);
     click(&mut folio, pair);
     // The pair's first click plays, for longer than a pair window lasts on the wall clock.
     let past = paused.position_secs + crate::MULTI_CLICK_INTERVAL.as_secs_f64() + 0.1;
-    played(&folio, surface, |state| {
+    let ran = played(&folio, surface, |state| {
         state.playing && state.position_secs >= past
     });
+    assert!(
+        ran.playing && ran.position_secs >= past,
+        "the pair's first click plays: {ran:?}"
+    );
     click(&mut folio, pair);
     assert_eq!(
         folio.window.tabs[0].seats.zoom(),
@@ -2445,8 +2450,9 @@ fn a_floating_windows_picture_answers_as_a_panes_does() {
     click(&mut folio, on_the_picture(stage, 20.0));
     loaded(&folio, float);
     click(&mut folio, on_the_picture(stage, 60.0));
-    let paused = played(&folio, float, |state| !state.playing);
-    assert!(!paused.playing, "the next click pauses: {paused:?}");
+    let stopped = played(&folio, float, |state| !state.playing);
+    assert!(!stopped.playing, "the next click pauses: {stopped:?}");
+    let paused = paused_at_the_start(&mut folio, float);
 
     let pair = on_the_picture(stage, 100.0);
     click(&mut folio, pair);
@@ -2507,10 +2513,49 @@ fn the_pair_window_lapses(folio: &mut HeadlessFolio) {
     folio.pointer_clock_runs(crate::MULTI_CLICK_INTERVAL + Duration::from_millis(1));
 }
 
+/// **The paused recording on `surface` put back at its start** — the `Home` door — and
+/// awaited there, so a pair that follows has the whole clip ahead of the wait between its
+/// presses however long the machine took to get here (row 124 review F1); and the headroom that
+/// wait needs, asserted as the fixture's own, so a clip too short reads as that and not as a
+/// lost pair.
+fn paused_at_the_start(
+    folio: &mut HeadlessFolio,
+    surface: PreviewSurface,
+) -> bt_platform::video::engine::EngineState {
+    folio
+        .window
+        .video
+        .get_mut(surface)
+        .expect("the surface is playing the recording")
+        .seek_start(Instant::now());
+    let paused = played(folio, surface, |state| {
+        !state.playing && state.position_secs < 0.05
+    });
+    assert!(
+        !paused.playing && paused.position_secs < 0.05,
+        "the paused recording stands at its start: {paused:?}"
+    );
+    let needs = paused.position_secs + crate::MULTI_CLICK_INTERVAL.as_secs_f64() + 0.1;
+    let length = paused
+        .duration_secs
+        .expect("the recording says how long it is");
+    assert!(
+        needs < length,
+        "the fixture's own precondition: the pair's wait needs {needs} s of a {length} s clip"
+    );
+    paused
+}
+
 /// **A fence after a gesture's commands** (T-FLOATING-VIDEO-DOUBLE-CLICK-TIMING): the engine
-/// answers its commands in order, so once `volume` — a volume the engine does not already
-/// stand at — has landed, every play, pause or seek sent before it has landed too. The state
-/// the fence ends on is the gesture's answer, never a state from before the gesture.
+/// answers its commands in order, so once `volume` has landed, every play, pause or seek sent
+/// before it has landed too. The state the fence ends on is the gesture's answer, never a state
+/// from before the gesture.
+///
+/// The rule on `volume`: it must be new against **every volume command already sent**, not only
+/// against the published state. The precondition below refuses only a volume the engine already
+/// publishes; a command with the same value still in flight would land before the gesture's own
+/// commands and end the wait early — so a caller never fences twice with one value unless the
+/// first fence has been awaited and a different volume set in between.
 fn fenced(
     folio: &mut HeadlessFolio,
     surface: PreviewSurface,
@@ -2526,7 +2571,12 @@ fn fenced(
         "the fixture's own precondition: the fence's volume {volume} is not the one already set"
     );
     seat.set_volume(volume, Instant::now());
-    played(folio, surface, |state| (state.volume - volume).abs() < 1e-6)
+    let fenced = played(folio, surface, |state| (state.volume - volume).abs() < 1e-6);
+    assert!(
+        (fenced.volume - volume).abs() < 1e-6,
+        "the fence never landed: volume {volume} was asked and the engine stands at {fenced:?}"
+    );
+    fenced
 }
 
 /// The window's own loop, run headless for `span`: each turn answered, and the next one taken
