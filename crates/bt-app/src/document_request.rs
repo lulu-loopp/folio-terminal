@@ -89,7 +89,7 @@ use bt_platform::admission::WorkerCtx;
 #[cfg(test)]
 use crate::persist::Reply;
 use crate::persist::{
-    DocumentWrites, Ended, InAdmissionOrder, OnTheWorker, Revision, StorageId, StorageLane,
+    DocumentWrites, Ended, InAdmissionOrder, OnTheWorker, Revision, StorageLane, StorageMark,
 };
 use crate::quit::{CopyStanding, Standing};
 use crate::settings_bundle::{LineRead, read_lines};
@@ -1711,19 +1711,19 @@ impl<T: StoredDocument> DocumentState<T> {
     }
 
     /// **Every answer this store is owed below the drain's mark `owed`**
-    /// (`persist::StorageLane::earliest_owed`, read once for every asker of one drain,
+    /// (`persist::StorageLane::drain_mark`, read once for every asker of one drain,
     /// `App::storage_answers`; T-STORAGE-LANE-ORDER-BY-CONSTRUCTION): its requests in the
     /// order it sent them, up to the first that is not below the mark or has not ended, then
     /// its quit copy's. Each is taken once, with its place in admission order, and heard
     /// ([`Self::hear`]) in the order the drain merges every asker's into. Never waits.
     pub(crate) fn answered(
         &mut self,
-        owed: Option<StorageId>,
+        mark: &StorageMark,
     ) -> Vec<(InAdmissionOrder, StoreAnswer<T>)> {
         let mut taken = Vec::new();
         while let Some(request) = self.outstanding.pop_front() {
             match request {
-                Outstanding::Document(mut flight) => match flight.answer.hear_below(owed) {
+                Outstanding::Document(mut flight) => match flight.answer.hear_below(mark) {
                     Some((order, ended)) => {
                         taken.push((order, StoreAnswer::Document(Box::new((flight, ended)))));
                     }
@@ -1732,7 +1732,7 @@ impl<T: StoredDocument> DocumentState<T> {
                         break;
                     }
                 },
-                Outstanding::Read { mut answer } => match answer.hear_below(owed) {
+                Outstanding::Read { mut answer } => match answer.hear_below(mark) {
                     Some((order, ended)) => taken.push((order, StoreAnswer::Read(ended))),
                     None => {
                         self.outstanding.push_front(Outstanding::Read { answer });
@@ -1742,7 +1742,7 @@ impl<T: StoredDocument> DocumentState<T> {
             }
         }
         if let Some(RecoveryCopy::Sent(answer)) = &mut self.recovery
-            && let Some((order, ended)) = answer.hear_below(owed)
+            && let Some((order, ended)) = answer.hear_below(mark)
         {
             taken.push((order, StoreAnswer::Copy(ended)));
         }
@@ -1821,8 +1821,8 @@ impl<T: StoredDocument> DocumentState<T> {
     /// Its answers below its lane's mark, heard, and what is owed after them sent.
     #[cfg(test)]
     fn drained_alone(&mut self) {
-        let owed = self.lane.earliest_owed();
-        for (_, answer) in self.answered(owed) {
+        let mark = self.lane.drain_mark();
+        for (_, answer) in self.answered(&mark) {
             self.hear(answer);
         }
         self.answers_heard();

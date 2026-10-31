@@ -20,9 +20,9 @@ use super::*;
 use crate::lane::{
     Adapter, Admission, Bound, Bounds, Cancellation, Claim, Contract, Delivered, Delivery,
     EXPECTED_FAILURES, Executor, ExpectedFailure, Failure, FailureKind, Gate, HANDOFF, LaneName,
-    LaneUnderTest, Ledger, Order, Outcome, Owed, PLANTED_PANIC, Refused, Replacement, Request,
-    Saying, TaskFailure, Terminal, Verdict, WakeProbe, Withdrawal, WorkerEnd, check, judge,
-    receive, run_suite, task,
+    LaneUnderTest, Ledger, Mark, Order, Outcome, Owed, PLANTED_PANIC, Refused, Replacement,
+    Request, Saying, TaskFailure, Terminal, Verdict, WakeProbe, Withdrawal, WorkerEnd, check,
+    judge, receive, run_suite, task,
 };
 
 /// Every lane's adapter. A lane missing here is a lane [`judge`] reports as skipped.
@@ -678,8 +678,8 @@ fn play(case: &Case, order: &[Step]) -> Option<String> {
     for (at, request) in requests.iter_mut().enumerate() {
         if let Some(request) = request {
             // The consumer asks twice: taking consumes.
-            taken[at].extend(request.take());
-            taken[at].extend(request.take());
+            taken[at].extend(request.take(&Mark::unmarked_for_a_test()));
+            taken[at].extend(request.take(&Mark::unmarked_for_a_test()));
         }
     }
     let sunk = locked(&sunk).clone();
@@ -879,7 +879,10 @@ fn the_ledger_refuses_at_the_door_synchronously() {
         Some(Refused::Full { bound: 2 }),
         "an answer its requester has not taken is still held"
     );
-    assert_eq!(first.take(), Some(Terminal::Done(1)));
+    assert_eq!(
+        first.take(&Mark::unmarked_for_a_test()),
+        Some(Terminal::Done(1))
+    );
     assert_eq!(
         ledger.admit_joined(first.id(), owed()).err(),
         Some(Refused::TwinEnded),
@@ -944,20 +947,26 @@ fn a_failure_is_said_once_per_request_joins_included_and_once_per_streak() {
             .admit_joined(failed.id(), owed())
             .expect("joined to an owed request");
         assert!(ledger.publish(failed.id(), failure()));
-        assert!(failed.take().is_some());
-        assert!(matches!(joined.take(), Some(Terminal::Joined { .. })));
+        assert!(failed.take(&Mark::unmarked_for_a_test()).is_some());
+        assert!(matches!(
+            joined.take(&Mark::unmarked_for_a_test()),
+            Some(Terminal::Joined { .. })
+        ));
         // An answer whose join is delivered first: the joined answer ends the streak.
         let mut answered = ledger.admit(owed()).expect("admitted");
         let mut twin = ledger
             .admit_joined(answered.id(), owed())
             .expect("joined to an owed request");
         assert!(ledger.publish(answered.id(), Terminal::Done(0)));
-        assert!(matches!(twin.take(), Some(Terminal::Joined { .. })));
+        assert!(matches!(
+            twin.take(&Mark::unmarked_for_a_test()),
+            Some(Terminal::Joined { .. })
+        ));
         // The same failure again.
         let mut again = ledger.admit(owed()).expect("admitted");
         assert!(ledger.publish(again.id(), failure()));
-        assert!(again.take().is_some());
-        assert!(answered.take().is_some());
+        assert!(again.take(&Mark::unmarked_for_a_test()).is_some());
+        assert!(answered.take(&Mark::unmarked_for_a_test()).is_some());
         assert_eq!(said.load(Ordering::SeqCst), lines, "{saying:?}");
     }
 }
@@ -1401,22 +1410,20 @@ impl LaneUnderTest for ScriptedLane {
                 outcome: Outcome::Fault(end.to_string()),
             });
         }
-        // The drain's mark (`Ledger::earliest_owed`), read once before any request is, on a lane
+        // The drain's mark (`Ledger::drain_mark`), read once before any request is, on a lane
         // that delivers in admission order: every request below it has ended, so what is taken is
         // a prefix of the admissions, and a request that ends while the rest are being read waits
-        // for the next drain. A latest-value lane's consumer keeps its order by adoption instead
-        // (`Delivery::NewestAdopted`), and takes whatever has ended.
-        let owed = match self.contract.delivery {
-            Delivery::Submission => self.ledger.earliest_owed(),
-            Delivery::NewestAdopted => None,
+        // for the next drain (a take refuses a request at or past its mark). A latest-value lane's
+        // consumer keeps its order by adoption instead (`Delivery::NewestAdopted`), and takes
+        // whatever has ended.
+        let mark = match self.contract.delivery {
+            Delivery::Submission => self.ledger.drain_mark(),
+            Delivery::NewestAdopted => Mark::unmarked_for_a_test(),
         };
         let mut between = self.between_reads.take();
         self.asked.retain_mut(|asked| {
             let id = asked.request.id();
-            let terminal = owed
-                .is_none_or(|owed| id < owed)
-                .then(|| asked.request.take())
-                .flatten();
+            let terminal = asked.request.take(&mark);
             if let Some(step) = between.take() {
                 step();
             }

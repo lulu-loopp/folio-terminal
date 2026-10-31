@@ -41,15 +41,15 @@ impl<B: Backend> Runtime<'_, B> {
         }
     }
 
-    /// **Take every answer this window's hand-offs hold below `owed`** (the lane's earliest
+    /// **Take every answer this window's hand-offs hold below `mark`** (the lane's earliest
     /// request still owed, read once for the whole drain), without answering them — the
     /// application answers every window's in press order across the windows
     /// (`handoff_lane::in_press_order`).
     pub(crate) fn take_handoff_answers(
         &mut self,
-        owed: Option<HandoffId>,
+        mark: &crate::lane::Mark<HandoffId>,
     ) -> Vec<(HandoffId, Answer, Duty)> {
-        self.window.handoffs.answered(owed)
+        self.window.handoffs.answered(mark)
     }
 
     /// **Answer one hand-off** of this window's, as [`Duty::reply`] says.

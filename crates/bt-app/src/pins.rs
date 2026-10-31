@@ -44,7 +44,7 @@ use std::path::{Path, PathBuf};
 use bt_persist::{PinEntryV1, PinKind, PinsV1, read_pins, read_pins_keeping_bytes};
 
 use crate::document_request::{DocumentState, QuitDocument, ReadNews, StoreAnswer};
-use crate::persist::{InAdmissionOrder, Revision, StorageId, StorageLane};
+use crate::persist::{InAdmissionOrder, Revision, StorageLane, StorageMark};
 
 /// The name the pin file wears on disk, which is also what a notice about it has
 /// to say out loud.
@@ -373,13 +373,13 @@ impl PinsStore {
         self.document.send_owed();
     }
 
-    /// **Its answers below the drain's mark `owed`** (`App::storage_answers`;
+    /// **Its answers below the drain's `mark`** (`App::storage_answers`;
     /// T-STORAGE-LANE-ORDER-BY-CONSTRUCTION), each with its place in admission order.
     pub(crate) fn answered(
         &mut self,
-        owed: Option<StorageId>,
+        mark: &StorageMark,
     ) -> Vec<(InAdmissionOrder, StoreAnswer<PinsV1>)> {
-        self.document.answered(owed)
+        self.document.answered(mark)
     }
 
     /// Hear one answer [`Self::answered`] took, in the drain's order.

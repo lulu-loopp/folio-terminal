@@ -23,7 +23,7 @@
 //!   platform handle starts with an empty one.
 //! * **Ordering.** One thread, one FIFO queue: hand-offs are executed in press order, across
 //!   every window, and answered in that order across every window — the application reads the
-//!   earliest request still owed ([`HandoffLane::earliest_owed`]) once, each window takes the
+//!   earliest request still owed ([`HandoffLane::drain_mark`]) once, each window takes the
 //!   answers its requests hold below it, and they are put back in the order the ledger minted
 //!   them before any is answered ([`in_press_order`]). A request that ends while the windows are
 //!   being read waits for the next drain, so no later answer is ever taken before it.
@@ -255,11 +255,12 @@ impl HandoffLane {
         })
     }
 
-    /// **The earliest request still owed an answer** — every request below it has ended, because
-    /// the one worker ends them in the order they were minted (and its end ends the rest). The
-    /// drain reads it once, before any window takes its answers ([`Pending::answered`]).
-    pub(crate) fn earliest_owed(&self) -> Option<HandoffId> {
-        self.ledger.earliest_owed()
+    /// **The drain's mark** ([`lane::Mark`]): the earliest request still owed an answer — every
+    /// request below it has ended, because the one worker ends them in the order they were minted
+    /// (and its end ends the rest). The drain reads it once, before any window takes its answers
+    /// ([`Pending::answered`]).
+    pub(crate) fn drain_mark(&self) -> lane::Mark<HandoffId> {
+        self.ledger.drain_mark()
     }
 
     /// **Put one hand-off on the lane and return at once** with its request, or refuse it at the
@@ -344,17 +345,17 @@ impl<D> Pending<D> {
         self.owed.insert(request.id(), (request, duty));
     }
 
-    /// **Take every answer below `owed`** — the lane's [`HandoffLane::earliest_owed`], read once
+    /// **Take every answer below `mark`** — the lane's [`HandoffLane::drain_mark`], read once
     /// for every window of one drain — in the order the lane minted the requests, without waiting
-    /// for one; each request's terminal taken once, with its duty. A request at or past `owed` is
+    /// for one; each request's terminal taken once, with its duty. A request at or past `mark` is
     /// left for the next drain even when it has ended since, so that no window takes an answer
     /// before an earlier one another window has not been asked for yet.
-    pub(crate) fn answered(&mut self, owed: Option<HandoffId>) -> Vec<(HandoffId, Answer, D)> {
+    pub(crate) fn answered(&mut self, mark: &lane::Mark<HandoffId>) -> Vec<(HandoffId, Answer, D)> {
         let ended: Vec<(HandoffId, HandoffTerminal)> = self
             .owed
             .iter_mut()
-            .take_while(|(id, _)| owed.is_none_or(|owed| **id < owed))
-            .filter_map(|(id, (request, _))| Some((*id, request.take()?)))
+            .take_while(|(id, _)| mark.below(**id))
+            .filter_map(|(id, (request, _))| Some((*id, request.take(mark)?)))
             .collect();
         ended
             .into_iter()
@@ -644,10 +645,10 @@ mod tests {
         wakes: &mpsc::Receiver<()>,
         count: usize,
     ) -> Vec<(HandoffId, Answer, D)> {
-        let mut all = pending.answered(lane.earliest_owed());
+        let mut all = pending.answered(&lane.drain_mark());
         while all.len() < count {
             crate::lane::wait_for_a_wake(wakes, &format!("answer {} of {count}", all.len() + 1));
-            all.extend(pending.answered(lane.earliest_owed()));
+            all.extend(pending.answered(&lane.drain_mark()));
         }
         all
     }
@@ -692,9 +693,9 @@ mod tests {
             crate::lane::wait_for_a_wake(&wakes, &format!("answer {} of {}", at + 1, ids.len()));
         }
         let [first, second] = &mut windows;
-        let owed = lane.earliest_owed();
+        let owed = lane.drain_mark();
         let answered: Vec<HandoffId> =
-            in_press_order([(0, first.answered(owed)), (1, second.answered(owed))])
+            in_press_order([(0, first.answered(&owed)), (1, second.answered(&owed))])
                 .into_iter()
                 .map(|(_, id, answer, ())| {
                     assert_eq!(answer, Answer::HandedOver);
@@ -720,8 +721,9 @@ mod tests {
     /// would come after 6. (This race is what made `OrderIsAsDeclared` fail now and then on a
     /// machine whose worker ran between the two windows' reads.)
     ///
-    /// MUTATION: take every ended answer whatever the mark (`owed` ignored in
-    /// [`Pending::answered`]), and 6 is answered before 5.
+    /// MUTATION: take every ended answer whatever the mark (drop the `mark.below` bound in
+    /// [`Pending::answered`] and `lane::Request::take_if`'s refusal at or past the mark, the second layer since T-LANE-DRAIN-MARK-GUARD; both
+    /// dropped, observed red 2026-10-31), and 6 is answered before 5.
     #[test]
     fn an_answer_that_ends_while_the_windows_are_read_waits_for_the_next_drain() {
         let gate = Arc::new(Gate::default());
@@ -751,23 +753,28 @@ mod tests {
         ids.push(press(true));
         ids.push(press(false));
 
-        let owed = lane.earliest_owed();
-        assert_eq!(owed, Some(ids[3]), "the fourth is the earliest still owed");
-        let first_a = a.answered(owed);
+        let owed = lane.drain_mark();
+        assert_eq!(
+            owed.owed(),
+            Some(ids[3]),
+            "the fourth is the earliest still owed"
+        );
+        let first_a = a.answered(&owed);
         gate.release();
         for at in 3..6 {
             crate::lane::wait_for_a_wake(&wakes, &format!("answer {} of 6", at + 1));
         }
-        let first_b = b.answered(owed);
+        let first_b = b.answered(&owed);
         let first: Vec<HandoffId> = in_press_order([(0, first_a), (1, first_b)])
             .into_iter()
             .map(|(_, id, _, ())| id)
             .collect();
-        let owed = lane.earliest_owed();
-        let second: Vec<HandoffId> = in_press_order([(0, a.answered(owed)), (1, b.answered(owed))])
-            .into_iter()
-            .map(|(_, id, _, ())| id)
-            .collect();
+        let owed = lane.drain_mark();
+        let second: Vec<HandoffId> =
+            in_press_order([(0, a.answered(&owed)), (1, b.answered(&owed))])
+                .into_iter()
+                .map(|(_, id, _, ())| id)
+                .collect();
         assert_eq!(
             first,
             ids[..3],
@@ -942,7 +949,7 @@ mod tests {
             "the window that asked still hears its own, and only its own"
         );
         assert_eq!(
-            third.answered(lane.earliest_owed()),
+            third.answered(&lane.drain_mark()),
             Vec::new(),
             "nor one opened since"
         );
@@ -1393,7 +1400,7 @@ mod tests {
             "an answer not yet taken holds its place"
         );
         assert_eq!(
-            pending.answered(lane.earliest_owed()).len(),
+            pending.answered(&lane.drain_mark()).len(),
             BOUND,
             "every press answered"
         );
@@ -1709,11 +1716,11 @@ pub(crate) mod contract_adapter {
 
         /// `FolioApp::answer_handoffs`: every open window takes the answers it holds.
         fn drain(&mut self) -> Vec<Delivered> {
-            let owed = self.lane.earliest_owed();
+            let owed = self.lane.drain_mark();
             let held: Vec<(u32, _)> = self
                 .windows
                 .iter_mut()
-                .map(|(window, pending)| (*window, pending.answered(owed)))
+                .map(|(window, pending)| (*window, pending.answered(&owed)))
                 .collect();
             in_press_order(held)
                 .into_iter()

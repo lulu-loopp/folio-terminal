@@ -376,7 +376,7 @@ fn a_share_handed_over_meets_the_same_program_list() {
         (),
     );
     let answer = loop {
-        if let Some((_, answer, ())) = pending.answered(lane.earliest_owed()).pop() {
+        if let Some((_, answer, ())) = pending.answered(&lane.drain_mark()).pop() {
             break answer;
         }
         crate::lane::wait_for_a_wake(&wakes, "the share's answer");

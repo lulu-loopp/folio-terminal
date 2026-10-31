@@ -20359,13 +20359,13 @@ impl<B: Backend> WindowRuntime<B> {
 /// hear the answers owed them ([`Runtime::hear_preview_saves`]), and this ends the ones no
 /// buffer is waiting for.
 impl<B: Backend> crate::App<B> {
-    /// **The preview's saves' answers below the storage drain's mark `owed`**, with their places
+    /// **The preview's saves' answers below the storage drain's `mark`**, with their places
     /// in admission order — the desk's part of the one drain (`App::storage_answers`).
     pub(crate) fn preview_save_answers_below(
         &mut self,
-        owed: Option<crate::persist::StorageId>,
+        mark: &crate::persist::StorageMark,
     ) -> Vec<(crate::persist::InAdmissionOrder, preview::SaveAnswer)> {
-        self.preview_saves.answered(owed)
+        self.preview_saves.answered(mark)
     }
 
     /// The answers no standing window's buffer was waiting for — its tab, pane

@@ -36,40 +36,40 @@ pub(crate) enum StorageAnswer {
 
 impl<B: Backend> App<B> {
     /// **One drain's answers, every asker's, in admission order**: the lane's earliest request
-    /// still owed, read once (`persist::StorageLane::earliest_owed`); each asker's answers below
+    /// still owed, read once (`persist::StorageLane::drain_mark`); each asker's answers below
     /// it — the four stores', the preview desk's and the hand-over's; merged by the order the
     /// lane admitted them (`lane::in_admission_order`). Never waits.
     pub(crate) fn storage_answers(&mut self) -> Vec<StorageAnswer> {
-        let owed = self.session_store.lane().earliest_owed();
+        let mark = self.session_store.lane().drain_mark();
         let mut held: Vec<((), Vec<(InAdmissionOrder, StorageAnswer)>)> = vec![
             (
                 (),
-                tagged(self.settings_store.answered(owed), StorageAnswer::Settings),
+                tagged(self.settings_store.answered(&mark), StorageAnswer::Settings),
             ),
             (
                 (),
                 tagged(
-                    self.keybindings_store.answered(owed),
+                    self.keybindings_store.answered(&mark),
                     StorageAnswer::Keybindings,
                 ),
             ),
             (
                 (),
-                tagged(self.profiles_store.answered(owed), StorageAnswer::Profiles),
+                tagged(self.profiles_store.answered(&mark), StorageAnswer::Profiles),
             ),
             (
                 (),
-                tagged(self.pins_store.answered(owed), StorageAnswer::Pins),
+                tagged(self.pins_store.answered(&mark), StorageAnswer::Pins),
             ),
             (
                 (),
                 tagged(
-                    self.preview_save_answers_below(owed),
+                    self.preview_save_answers_below(&mark),
                     StorageAnswer::Preview,
                 ),
             ),
         ];
-        if let Some((order, ended)) = self.handoff_answer_below(owed) {
+        if let Some((order, ended)) = self.handoff_answer_below(&mark) {
             held.push(((), vec![(order, StorageAnswer::Handoff(ended))]));
         }
         lane::in_admission_order(held)

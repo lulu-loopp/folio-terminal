@@ -1196,7 +1196,7 @@ fn the_clipboards_answers_are_spent_in_the_order_they_were_asked() {
             .folio
             .app
             .as_ref()
-            .is_some_and(|app| app.clipboard_lane.earliest_owed().is_none())
+            .is_some_and(|app| app.clipboard_lane.drain_mark().owed().is_none())
     });
 
     application
@@ -1260,7 +1260,7 @@ fn a_replaced_copy_that_had_landed_says_so_after_the_paste_asked_before_it() {
             .folio
             .app
             .as_ref()
-            .is_some_and(|app| app.clipboard_lane.earliest_owed().is_none())
+            .is_some_and(|app| app.clipboard_lane.drain_mark().owed().is_none())
     };
 
     door.worker_hold().hold();
@@ -1365,7 +1365,7 @@ fn each_answer_of_a_drain_is_spent_in_its_own_turn_across_the_windows() {
             .folio
             .app
             .as_ref()
-            .is_some_and(|app| app.clipboard_lane.earliest_owed().is_none())
+            .is_some_and(|app| app.clipboard_lane.drain_mark().owed().is_none())
     });
 
     let answers = application.folio.clipboard_answers();

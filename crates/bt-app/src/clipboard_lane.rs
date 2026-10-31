@@ -29,7 +29,7 @@
 //! * **Ordering.** One thread, one FIFO queue (`lane::Queue`): requests run, and end, in the
 //!   order they were minted, so a copy and the paste after it read what was copied. They are
 //!   answered in that order too, across every window, copies and pastes together: the
-//!   application reads the earliest request still owed ([`ClipboardLane::earliest_owed`]) once,
+//!   application reads the earliest request still owed ([`ClipboardLane::drain_mark`]) once,
 //!   each window takes the answers its requests hold below it ([`ClipboardAsks::answered`]), and
 //!   they are put back in the order the ledger minted them before any is answered
 //!   (`lane::in_admission_order`; `FolioApp::answer_clipboard`). A request that ends while the
@@ -361,12 +361,12 @@ impl ClipboardLane {
             .is_some_and(|paste| paste > copy)
     }
 
-    /// **The earliest request still owed a terminal** — every request below it has ended, because
-    /// the one worker ends them in the order they were minted (and its end ends the rest). The
-    /// application reads it once for a whole drain, before any window takes its answers
-    /// ([`ClipboardAsks::answered`]).
-    pub(crate) fn earliest_owed(&self) -> Option<ClipboardId> {
-        self.queue.ledger().earliest_owed()
+    /// **The drain's mark** ([`lane::Mark`]): the earliest request still owed a terminal — every
+    /// request below it has ended, because the one worker ends them in the order they were minted
+    /// (and its end ends the rest). The application reads it once for a whole drain, before any
+    /// window takes its answers ([`ClipboardAsks::answered`]).
+    pub(crate) fn drain_mark(&self) -> lane::Mark<ClipboardId> {
+        self.queue.ledger().drain_mark()
     }
 
     /// **The asker withdraws `request`** (`Cancelled`): it is ended `Cancelled` — unless its
@@ -382,15 +382,8 @@ impl ClipboardLane {
     /// **The asker's newer request `by` replaces `older`** (`Superseded { by }`): `older` is ended
     /// so — unless its terminal came first — and its terminal taken, here, by the asker that holds
     /// it; it reaches no surface. A request the worker has not reached yet is dropped unrun.
-    pub(crate) fn supersede(
-        &self,
-        mut older: ClipboardRequest,
-        by: ClipboardId,
-    ) -> ClipboardTerminal {
-        self.queue.withdraw(older.id(), Terminal::Superseded { by });
-        older
-            .take()
-            .expect("a request still held has a terminal once it is superseded")
+    pub(crate) fn supersede(&self, older: ClipboardRequest, by: ClipboardId) -> ClipboardTerminal {
+        self.queue.supersede_and_take(older, by)
     }
 }
 
@@ -511,26 +504,29 @@ impl ClipboardAsks {
         self.pastes.is_empty() && self.copies.is_empty()
     }
 
-    /// **Take every answer below `owed`** — the lane's [`ClipboardLane::earliest_owed`], read once
+    /// **Take every answer below `mark`** — the lane's [`ClipboardLane::drain_mark`], read once
     /// for every window of one drain — in the order the lane minted the requests, copies and
     /// pastes together, without waiting for one; each request's terminal taken once. A copy's
     /// leaves the asks with what the window says once it has landed; a paste's goes with its
     /// answer, and the paste stays owed until that answer is handled in its turn, so an earlier
     /// paste's answer does not spend it from its pane's hold ahead of a request between them. A
-    /// request at or past `owed` is left for the next drain even when it has ended since, so that
+    /// request at or past `mark` is left for the next drain even when it has ended since, so that
     /// no window takes an answer before an earlier one another window has not been asked for yet.
-    pub(crate) fn answered(&mut self, owed: Option<ClipboardId>) -> Vec<(ClipboardId, Answered)> {
+    pub(crate) fn answered(
+        &mut self,
+        mark: &lane::Mark<ClipboardId>,
+    ) -> Vec<(ClipboardId, Answered)> {
         let mut taken = Vec::new();
         let mut at = 0;
         while at < self.copies.len() {
             let copy = &mut self.copies[at];
             let id = copy.id;
-            let ended = if !below(id, owed) {
+            let ended = if !mark.below(id) {
                 None
             } else if copy.ended.is_some() {
                 copy.ended.take()
             } else {
-                copy.request.as_mut().and_then(ClipboardRequest::take)
+                copy.request.as_mut().and_then(|request| request.take(mark))
             };
             let Some(ended) = ended else {
                 at += 1;
@@ -541,8 +537,10 @@ impl ClipboardAsks {
         }
         for paste in &mut self.pastes {
             if paste.ended.is_none()
-                && below(paste.id, owed)
-                && let Some(ended) = paste.request.as_mut().and_then(ClipboardRequest::take)
+                && let Some(ended) = paste
+                    .request
+                    .as_mut()
+                    .and_then(|request| request.take(mark))
             {
                 paste.request = None;
                 taken.push((paste.id, Answered::Paste { ended }));
@@ -550,14 +548,6 @@ impl ClipboardAsks {
         }
         taken.sort_by_key(|(id, _)| *id);
         taken
-    }
-}
-
-/// Whether `id` is below the drain's mark `owed` — every request is, when none is owed.
-fn below(id: ClipboardId, owed: Option<ClipboardId>) -> bool {
-    match owed {
-        Some(owed) => id < owed,
-        None => true,
     }
 }
 
@@ -835,11 +825,11 @@ pub(crate) mod contract_adapter {
         /// open window takes its answers below it ([`ClipboardAsks::answered`]); and they are
         /// answered in admission order across the windows (`lane::in_admission_order`).
         fn drain(&mut self) -> Vec<Delivered> {
-            let owed = self.lane.earliest_owed();
+            let owed = self.lane.drain_mark();
             let held: Vec<(u32, Vec<(ClipboardId, Answered)>)> = self
                 .windows
                 .iter_mut()
-                .map(|(window, asks)| (*window, asks.answered(owed)))
+                .map(|(window, asks)| (*window, asks.answered(&owed)))
                 .collect();
             lane::in_admission_order(held)
                 .into_iter()
@@ -942,7 +932,7 @@ mod tests {
         let take = |request: &mut ClipboardRequest| {
             let mut ended = None;
             wait_until("a terminal", || {
-                ended = request.take();
+                ended = request.take(&lane::Mark::unmarked_for_a_test());
                 ended.is_some()
             });
             ended.expect("taken")
@@ -1016,7 +1006,7 @@ mod tests {
         for request in [&mut running, &mut after] {
             let mut ended = None;
             wait_until("a write's answer", || {
-                ended = request.take();
+                ended = request.take(&lane::Mark::unmarked_for_a_test());
                 ended.is_some()
             });
             assert_eq!(ended, Some(Terminal::Done(Reply::Written)));
@@ -1054,8 +1044,9 @@ mod tests {
     /// 6 (`lane_contract_tests` saw that as `OrderBroken` 4 runs in 6 at opt-level 0, 2026-10-26).
     /// No timing decides it: the worker is moved between the two windows' reads by the test.
     ///
-    /// MUTATION: take every ended answer whatever the mark (`owed` ignored in
-    /// [`ClipboardAsks::answered`]), and 6 is answered before 5.
+    /// MUTATION: take every ended answer whatever the mark (drop the `mark.below` check in
+    /// [`ClipboardAsks::answered`] and `lane::Request::take_if`'s refusal at or past the mark, the second layer since T-LANE-DRAIN-MARK-GUARD; both
+    /// dropped, observed red 2026-10-31), and 6 is answered before 5.
     #[test]
     fn an_answer_that_ends_while_the_windows_are_read_waits_for_the_next_drain() {
         let gate = Arc::new(Gate::default());
@@ -1110,19 +1101,23 @@ mod tests {
                 })
                 .collect()
         };
-        let owed = lane.earliest_owed();
-        assert_eq!(owed, Some(ids[3]), "the fourth is the earliest still owed");
-        let first_a = a.answered(owed);
+        let owed = lane.drain_mark();
+        assert_eq!(
+            owed.owed(),
+            Some(ids[3]),
+            "the fourth is the earliest still owed"
+        );
+        let first_a = a.answered(&owed);
         gate.release();
         for at in 3..6 {
             wait_for_a_wake(&wakes, &format!("answer {} of 6", at + 1));
         }
-        let first_b = b.answered(owed);
+        let first_b = b.answered(&owed);
         let first = answered(lane::in_admission_order([(0, first_a), (1, first_b)]));
-        let owed = lane.earliest_owed();
+        let owed = lane.drain_mark();
         let second = answered(lane::in_admission_order([
-            (0, a.answered(owed)),
-            (1, b.answered(owed)),
+            (0, a.answered(&owed)),
+            (1, b.answered(&owed)),
         ]));
         assert_eq!(
             first,

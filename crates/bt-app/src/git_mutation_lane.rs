@@ -534,17 +534,14 @@ impl Share {
         }
     }
 
-    /// **Every terminal below the share's drain mark** ([`Ledger::earliest_owed`], read once,
+    /// **Every terminal below the share's drain mark** ([`Ledger::drain_mark`], read once,
     /// before the requests are looked at), in the order the ledger minted them, each taken once.
     fn ended(&mut self, into: &mut Vec<Ended>) {
-        let owed = self.queue.ledger().earliest_owed();
+        let mark = self.queue.ledger().drain_mark();
         let taken: Vec<(Minted, MutationTerminal)> = self
             .held
             .iter_mut()
-            .filter_map(|(minted, (request, _))| {
-                let below = owed.is_none_or(|owed| *minted < owed);
-                Some((*minted, request.take_if(|_| below)?))
-            })
+            .filter_map(|(minted, (request, _))| Some((*minted, request.take(&mark)?)))
             .collect();
         for (minted, terminal) in taken {
             if let Some((_, request)) = self.held.remove(&minted) {

@@ -510,6 +510,34 @@ where
             .map(|(id, _)| *id)
     }
 
+    /// **The drain's mark** ([`Mark`]): [`Self::earliest_owed`], read once by the one drain the
+    /// lane registers (`crates/bt-source/tests/lane_drains.rs`, T-LANE-DRAIN-MARK-GUARD) before
+    /// any of its targets is read, and handed to every take of that drain
+    /// ([`Request::take`]). The only way to a mark but the two named doors
+    /// ([`Self::mark_after_the_worker_ended`], and a test's [`Mark::unmarked_for_a_test`]).
+    pub(crate) fn drain_mark(&self) -> Mark<Id> {
+        Mark {
+            owed: self.earliest_owed(),
+            ledger: self.identity(),
+        }
+    }
+
+    /// **The mark of a take made after the lane's worker has ended or been let go** — no request
+    /// is held back by it, because none will be delivered after it: the lane's last take. A named
+    /// door with one caller (`persist::StorageLane::mark_after_the_worker_ended`, for the
+    /// preview's saves at a stop; `crates/bt-source/tests/lane_drains.rs`'s exceptions).
+    pub(crate) fn mark_after_the_worker_ended(&self) -> Mark<Id> {
+        Mark {
+            owed: None,
+            ledger: self.identity(),
+        }
+    }
+
+    /// This ledger's identity, as a mark carries it: its address, which its `Arc` keeps.
+    fn identity(&self) -> usize {
+        std::ptr::from_ref(self).addr()
+    }
+
     /// **The last identity this ledger minted**, or `None` before its first. On a lane that ends
     /// its identities in the order it minted them, every identity owed now that will end before a
     /// later admission is at or below it.
@@ -677,14 +705,39 @@ where
         self.id
     }
 
-    /// The terminal, once the request has ended; `None` before, and after it was taken.
-    pub(crate) fn take(&mut self) -> Option<TerminalOf<Id, O>> {
-        self.take_if(|_| true)
+    /// **The terminal, once the request has ended and stands below the drain's `mark`**
+    /// ([`Ledger::drain_mark`]); `None` before, at or past the mark, and after it was taken. A take
+    /// cannot be written without a mark, and a request at or past it waits for the next drain
+    /// even when it has ended since (T-LANE-DRAIN-MARK-GUARD).
+    pub(crate) fn take(&mut self, mark: &Mark<Id>) -> Option<TerminalOf<Id, O>> {
+        self.take_if(mark, |_| true)
     }
 
-    /// The terminal, once the request has ended, if `wanted` says so of it; left for a later take
-    /// otherwise.
+    /// [`Self::take`], if `wanted` says so of the terminal; left for a later take otherwise.
     pub(crate) fn take_if(
+        &mut self,
+        mark: &Mark<Id>,
+        wanted: impl FnOnce(&TerminalOf<Id, O>) -> bool,
+    ) -> Option<TerminalOf<Id, O>> {
+        self.is_marked_by(mark);
+        if !mark.below(self.id) {
+            return None;
+        }
+        self.take_terminal(wanted)
+    }
+
+    /// **A `Superseded` terminal, wherever the request stands against the drain's `mark`** — it
+    /// carries no answer, so no answer's order depends on it, and taking it at once frees its
+    /// place in a bound line. A named door with one caller (`computation_lane`'s share drain;
+    /// `crates/bt-source/tests/lane_drains.rs`'s exceptions).
+    pub(crate) fn take_superseded_past(&mut self, mark: &Mark<Id>) -> Option<TerminalOf<Id, O>> {
+        self.is_marked_by(mark);
+        self.take_terminal(|terminal| matches!(terminal, Terminal::Superseded { .. }))
+    }
+
+    /// The terminal, once the request has ended, if `wanted` says so of it — under a mark or a
+    /// named door, never on its own.
+    fn take_terminal(
         &mut self,
         wanted: impl FnOnce(&TerminalOf<Id, O>) -> bool,
     ) -> Option<TerminalOf<Id, O>> {
@@ -694,6 +747,53 @@ where
         let terminal = self.ledger.take(self.id, wanted);
         self.settled = terminal.is_some();
         terminal
+    }
+
+    /// That `mark` is this request's ledger's — a debug build's check: two ledgers of one
+    /// identity type (the computation lane's three shares, the git lane's shares) cannot be
+    /// told apart by the type.
+    fn is_marked_by(&self, mark: &Mark<Id>) {
+        debug_assert!(
+            mark.ledger == ANY_LEDGER || mark.ledger == self.ledger.identity(),
+            "{}: a take under another ledger's mark",
+            self.ledger.lane
+        );
+    }
+}
+
+/// **A drain's mark**: the earliest request its lane still owes, read once for the whole drain
+/// ([`Ledger::drain_mark`]), and the ledger it was read from. Every take of a request is under one
+/// ([`Request::take`]): a request at or past it is left for the next drain, so what one drain
+/// takes is a prefix of the lane's admission order whatever the worker does while the drain reads
+/// its targets. Only this module makes one; it is neither `Clone` nor `Copy`, and
+/// `crates/bt-source/tests/lane_drains.rs` holds that it is never kept past its drain.
+#[derive(Debug)]
+pub(crate) struct Mark<Id> {
+    owed: Option<Id>,
+    ledger: usize,
+}
+
+/// The ledger a test's unmarked take answers to: any.
+const ANY_LEDGER: usize = 0;
+
+impl<Id: Copy + Ord> Mark<Id> {
+    /// The earliest request still owed when the mark was read; `None`, none was.
+    pub(crate) fn owed(&self) -> Option<Id> {
+        self.owed
+    }
+
+    /// Whether `id` stands below the mark — every request does, when none was owed.
+    pub(crate) fn below(&self, id: Id) -> bool {
+        self.owed.is_none_or(|owed| id < owed)
+    }
+
+    /// **No mark**: every ended request is taken — a test's way to hear one request alone.
+    #[cfg(test)]
+    pub(crate) fn unmarked_for_a_test() -> Self {
+        Self {
+            owed: None,
+            ledger: ANY_LEDGER,
+        }
     }
 }
 
@@ -1082,17 +1182,17 @@ where
     }
 
     /// **The application takes every terminal it is owed below the earliest request still owed**
-    /// ([`Ledger::earliest_owed`], read once, before the requests are looked at), in the order the
+    /// ([`Ledger::drain_mark`], read once, before the requests are looked at), in the order the
     /// ledger minted them, each once. A request at or past the mark waits for the next take even
     /// when it has ended since. One lock; never waits for the worker.
     pub(crate) fn ended(&self) -> Vec<(Id, TerminalOf<Id, O>)> {
-        let owed = self.ledger.earliest_owed();
+        let mark = self.ledger.drain_mark();
         let mut book = lock(&self.book);
         let ended: Vec<(Id, TerminalOf<Id, O>)> = book
             .held
             .iter_mut()
-            .take_while(|(id, _)| owed.is_none_or(|owed| **id < owed))
-            .filter_map(|(id, request)| Some((*id, request.take()?)))
+            .take_while(|(id, _)| mark.below(**id))
+            .filter_map(|(id, request)| Some((*id, request.take(&mark)?)))
             .collect();
         for (id, _) in &ended {
             book.held.remove(id);
@@ -1133,7 +1233,7 @@ pub(crate) enum Relation {
 /// The requester holds what [`Self::ask`] admitted. The identities end in the order they were
 /// minted — one worker, first in first out, a displaced or joined request ending no later than
 /// the one that ends it, the worker's end ending the rest — so a consumer may take the terminals
-/// below [`Ledger::earliest_owed`] as a prefix.
+/// below [`Ledger::drain_mark`] as a prefix.
 pub(crate) struct Queue<Id, O, Job>
 where
     Id: Copy + Ord + fmt::Debug + From<u64> + Send + 'static,
@@ -1309,6 +1409,22 @@ where
         self.ledger.publish(id, terminal)
     }
 
+    /// **The asker's newer request `by` replaces `request`**: it is ended `Superseded { by }` —
+    /// unless its terminal came first, which then stands — and its terminal taken here, by the
+    /// asker that holds it, with no mark: it reaches no surface, and the asker keeps it for its
+    /// drain to answer in its turn. A named door with one caller (`clipboard_lane`'s
+    /// `ClipboardLane::supersede`; `crates/bt-source/tests/lane_drains.rs`'s exceptions).
+    pub(crate) fn supersede_and_take(
+        &self,
+        mut request: Request<Id, O>,
+        by: Id,
+    ) -> TerminalOf<Id, O> {
+        self.withdraw(request.id(), Terminal::Superseded { by });
+        request
+            .take_terminal(|_| true)
+            .expect("a request still held has a terminal once it is superseded")
+    }
+
     /// How many requests wait in line, admitted and not yet taken by the worker — where a test
     /// sees a request wait for the one before it.
     #[cfg(test)]
@@ -1330,7 +1446,7 @@ pub(crate) fn answer_of<Id, T, E>(terminal: Terminal<Id, T, E>) -> Option<T> {
 }
 
 /// **Every target's answers, in admission order across the targets** — what each target `K` took
-/// below the drain's mark ([`Ledger::earliest_owed`], read once for the whole drain), merged by
+/// below the drain's mark ([`Ledger::drain_mark`], read once for the whole drain), merged by
 /// the identity the ledger minted, which is the order the requests were admitted in and, on a lane
 /// with one worker and one line, the order they ended in. The consumer answers them in this
 /// order, each in the target that asked: a drain that answered one target's and then the next's
