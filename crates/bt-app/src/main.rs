@@ -37155,6 +37155,26 @@ impl<B: Backend> App<B> {
         );
     }
 
+    /// **The update hand-over's answer below the storage drain's mark `owed`**, with its place
+    /// in admission order — the hand-over's part of the one drain (`App::storage_answers`).
+    fn handoff_answer_below(
+        &mut self,
+        owed: Option<persist::StorageId>,
+    ) -> Option<(
+        persist::InAdmissionOrder,
+        persist::Ended<update_handoff::HandedOff>,
+    )> {
+        self.handoff_answer
+            .as_mut()
+            .and_then(|answer| answer.hear_below(owed))
+    }
+
+    /// **Keep the hand-over's answer the drain heard** for the quit's way out to look at
+    /// ([`FolioApp::hand_the_update_over`]).
+    fn keep_handoff_answer(&mut self, ended: persist::Ended<update_handoff::HandedOff>) {
+        self.handoff_heard = Some(ended);
+    }
+
     /// **The quit's documents phase begins** over the four stores, once
     /// ([`quit::Quit::begin_documents`]): before the storage lane's drain of its first turn.
     fn quit_begin_documents(&mut self) {

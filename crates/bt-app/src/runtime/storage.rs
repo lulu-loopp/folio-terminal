@@ -63,12 +63,13 @@ impl<B: Backend> App<B> {
             ),
             (
                 (),
-                tagged(self.preview_saves.answered(owed), StorageAnswer::Preview),
+                tagged(
+                    self.preview_save_answers_below(owed),
+                    StorageAnswer::Preview,
+                ),
             ),
         ];
-        if let Some(answer) = self.handoff_answer.as_mut()
-            && let Some((order, ended)) = answer.hear_below(owed)
-        {
+        if let Some((order, ended)) = self.handoff_answer_below(owed) {
             held.push(((), vec![(order, StorageAnswer::Handoff(ended))]));
         }
         lane::in_admission_order(held)
@@ -89,7 +90,7 @@ impl<B: Backend> App<B> {
             StorageAnswer::Profiles(answer) => self.profiles_store.hear(answer),
             StorageAnswer::Pins(answer) => self.pins_store.hear(answer),
             StorageAnswer::Preview(answer) => return Some(answer),
-            StorageAnswer::Handoff(ended) => self.handoff_heard = Some(ended),
+            StorageAnswer::Handoff(ended) => self.keep_handoff_answer(ended),
         }
         None
     }
