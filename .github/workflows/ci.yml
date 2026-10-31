@@ -146,7 +146,10 @@ jobs:
     # 9950X with the binary built, plus that test binary's own build (its
     # dependencies are the `measure` step's); taken as 1.2 min cold until runs
     # measure it. 10.15 + 1.2 = 11.35 x 1.36 = 15.44, so 16.
-    timeout-minutes: 16
+    # T-TEST-SUITE-WATCHDOG (2026-10-31) adds the suite watchdog's canary, no
+    # cargo, 27 s on the 9950X; taken as 0.5 min until runs measure it.
+    # 11.35 + 0.5 = 11.85 x 1.36 = 16.12, so 17.
+    timeout-minutes: 17
     steps:
       # Whole history, for one step: `check-migration-debt.ps1` compares the
       # debt list with `git merge-base HEAD origin/main`, and at the default
@@ -656,6 +659,14 @@ jobs:
         shell: pwsh
         run: ./scripts/ci/check-timing-bound-tests.ps1
 
+      # The suite watchdog (T-TEST-SUITE-WATCHDOG) against a stand-in in cargo's place: a named test
+      # that does not end is red with its name and its process tree gone, a slow one that ends is
+      # green, silence is red with no name, words and exit codes pass through, and the shapes in which
+      # libtest prints no names are refused. No cargo; about 30 s on the 9950X.
+      - name: the suite watchdog can actually fail
+        shell: pwsh
+        run: ./scripts/ci/check-test-watchdog.ps1
+
       # The native-labels guard's lists (T-NATIVE-LABELS-GUARD-REACH) are the same merge-base
       # rule: its ALLOWED, MACROS, BOUNDARY and UNREAD rows only shrink, its FILES, TYPES and
       # FUNCTIONS scope only grows and its PROGRAMMER_MACROS exemptions only shrink, a move honest
@@ -1155,9 +1166,15 @@ jobs:
       # leaves 40 for the other steps, whose cold max is 29.6 (run 39014647034,
       # x 1.36 = 40.2): a run at both edges at once is stopped by the job's
       # clock, not by this step's.
+      #
+      # Run through the suite watchdog (T-TEST-SUITE-WATCHDOG, docs/ARCHITECTURE-GUARDS.md
+      # "Suite watchdog"): a test still running 300 s after it started, or 300 s of silence once
+      # the tests run, ends the step red at once with the test's name (exit 124), instead of
+      # this step's 65 minutes ending it with none. Compiling is not timed by it.
       - name: test
         timeout-minutes: 65
-        run: cargo test --workspace --locked --exclude bt-pty --exclude bt-render --exclude bt-render-probe
+        shell: pwsh
+        run: ./scripts/ci/cargo-test-watched.ps1 --workspace --locked --exclude bt-pty --exclude bt-render --exclude bt-render-probe
 
       # The adapter and cell_capture modules are the vendor compatibility seam. Their job is to
       # report terminal facts; importing document, detection, or viewport policy there recreates
@@ -1789,7 +1806,9 @@ jobs:
             echo "the macOS application skip '$skip' must match exactly one listed test; it matches $matches"
             exit 1
           }
-          cargo test --locked -p bt-app -- --skip "$skip"
+          # The run itself goes through the suite watchdog, as `logic`'s test step does: a hung test
+          # is red within 300 s of its start, with its name (docs/ARCHITECTURE-GUARDS.md, "Suite watchdog").
+          pwsh -NoProfile -File scripts/ci/cargo-test-watched.ps1 --locked -p bt-app -- --skip "$skip"
 
       # The eight suites the spike's own table records as green here, plus the
       # two M1-1's branch made green — `bt-transcript` and `bt-viewport`, whose
