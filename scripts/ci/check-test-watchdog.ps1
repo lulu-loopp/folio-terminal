@@ -52,6 +52,28 @@ switch ($case) {
         Out 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 61.00s'
         exit 0
     }
+    'slow-then-busy' {
+        Running
+        Out 'running 2 tests'
+        Out 'test planted::plain has been running for over 60 seconds'
+        Out 'test README.md - planted (line 3) has been running for over 60 seconds'
+        Out 'test planted::plain ... ok'
+        Out 'test README.md - planted (line 3) - compile fail ... ok'
+        foreach ($i in 1..8) { Start-Sleep -Seconds 1; Out "busy line $i" }
+        Out 'test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 69.00s'
+        exit 0
+    }
+    'two-binaries' {
+        Running
+        Out 'running 1 test'
+        Out 'test planted::dies has been running for over 60 seconds'
+        [Console]::Error.WriteLine('error: test failed, to rerun pass `-p planted --lib`')
+        Running
+        Out 'running 1 test'
+        foreach ($i in 1..8) { Start-Sleep -Seconds 1; Out "busy line $i" }
+        Out 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.00s'
+        exit 101
+    }
     'silent' {
         [IO.File]::WriteAllText($env:FOLIO_STAND_IN_PIDS, "$PID")
         Running
@@ -124,12 +146,26 @@ function Gone([string]$Name, $Run) {
 }
 
 try {
+    # Timed: the 60 s line backdates the test's start by 60 s, so with a 63 s limit the run ends about 3 s
+    # after it. A clock that started at the 60 s line instead would take 63 s.
+    $timer = [Diagnostics.Stopwatch]::StartNew()
     $run = Watch 'hang' 63 @('-p', 'planted')
+    $took = $timer.Elapsed.TotalSeconds
+    Check "a named test is timed from its start, not from its 60 s line ($([int]$took) s)" ($took -lt 20) $run
     Check 'a named test that does not end is red with its name' ($run.code -eq 124 -and $run.output -match 'planted::hangs \(running for' -and $run.output -notmatch 'planted::ends \(running') $run
     Gone 'a hang' $run
 
-    $run = Watch 'slow' 63 @()
+    $run = Watch 'slow' 70 @()
     Check 'a named test that ends is green and listed as slow' ($run.code -eq 0 -and $run.output -match 'slow tests \(named by libtest at 60 s, ended\): planted::slow') $run
+
+    # A plain `... ok` and a spaced doc-test name with a mode each take their test out of the tracked set:
+    # the run goes on past both tests' limit and must stay green.
+    $run = Watch 'slow-then-busy' 63 @()
+    Check 'ended tests leave the tracked set (a plain end, a doc-test name with a mode)' ($run.code -eq 0 -and $run.output -match 'slow tests \(named by libtest at 60 s, ended\): planted::plain, README.md - planted \(line 3\)') $run
+
+    # A binary that ends while a named test runs (no result line) does not leave a phantom hang for the next one.
+    $run = Watch 'two-binaries' 63 @('--no-fail-fast')
+    Check "a test whose binary ended is not a later binary's hang" ($run.code -eq 101 -and $run.output -match 'ended with their binary, no result line: planted::dies') $run
 
     $run = Watch 'silent' 3 @()
     Check 'silence once tests run is red with no name' ($run.code -eq 124 -and $run.output -match 'no test can be named') $run
@@ -151,7 +187,8 @@ try {
         @{ words = @('--', '--format', 'terse') }, @{ words = @('--', '--format=json') },
         @{ words = @('--', '--test-threads=1') }, @{ words = @('--', '--test-threads', '1') },
         @{ words = @(); env = 'RUST_TEST_THREADS'; value = '1' },
-        @{ words = @(); env = 'RUST_TEST_NOCAPTURE'; value = '1' }
+        @{ words = @(); env = 'RUST_TEST_NOCAPTURE'; value = '1' },
+        @{ words = @(); env = 'CARGO_TERM_QUIET'; value = 'true' }
     )
     foreach ($r in $refused) {
         $label = ($r.words -join ' ')

@@ -10,7 +10,8 @@
 # name. What stable libtest does give is the name: in its default (pretty, parallel) output every test
 # still running 60 s after it started is announced once — `test <name> has been running for over 60
 # seconds` — and every test that ends is announced again — `test <name> ... ok|FAILED|ignored`. This
-# script runs cargo as its child, passes every line through unchanged, and reads those two lines.
+# script runs cargo as its child, passes every line through as text (each to the stream it came from), and
+# reads those two lines.
 #
 # **The limit is one number, `$limit` below: 300 s per test** (30 x `lane::PATIENCE`).
 #   * A test libtest has named and that has not ended 300 s after it started ends the run.
@@ -18,8 +19,9 @@
 #     `Running` / `Doc-tests` line): the harness itself is stuck, or a binary did not exit after its
 #     summary. An honest run is never silent that long — libtest's own 60 s line breaks any silence.
 #   Compiling is never timed (the clock starts at the first `Running` line); CI's step clocks bound it.
-#   Measured 2026-10-31: no bt-app test reaches 60 s on any CI runner; the slowest honest test anywhere
-#   in CI is about 110 s (bt-source on core-linux). Re-derive, not bump, if one passes 100 s.
+#   Measured 2026-10-31, on the watched runs: no bt-app test reaches 60 s on any CI runner, and the
+#   slowest watched test is about 61 s (bt-source on `logic`). Unwatched, core-linux's bt-source tests
+#   take about 110 s. Re-derive the limit, not bump it, if a watched test passes 150 s (half the limit).
 #
 # Ending the run: the names, each with its age, then the whole process tree this script started (cargo,
 # the test binary, any child a test started) is ended by the pid it holds, and the exit code is 124 —
@@ -27,7 +29,9 @@
 # list of the tests libtest named at 60 s that did end (information, never a failure).
 #
 # **Shapes in which libtest prints no names to read are refused** (exit 2), never run unwatched:
-# `-q`/`--quiet`, `--format`, `--test-threads=1` (or `RUST_TEST_THREADS=1`; libtest's serial path
+# `-q`/`--quiet` (or `CARGO_TERM_QUIET=true`: cargo hands libtest `--quiet`, whose terse output has the 60 s
+# line but no end-of-test names; a `term.quiet` in a cargo config file is not seen here and must not be set),
+# `--format`, `--test-threads=1` (or `RUST_TEST_THREADS=1`; libtest's serial path
 # has no 60 s line), `--nocapture`/`--no-capture` (or `RUST_TEST_NOCAPTURE`; a test's own output would
 # break the harness's lines).
 #
@@ -64,6 +68,7 @@ for ($i = 0; $i -lt $words.Count; $i++) {
     if ($afterDashes -and $w -eq '--test-threads=1') { Refuse "'$w'" }
     if ($afterDashes -and $w -eq '--test-threads' -and $i + 1 -lt $words.Count -and [string]$words[$i + 1] -eq '1') { Refuse "'--test-threads 1'" }
 }
+if ($env:CARGO_TERM_QUIET -eq 'true') { Refuse 'CARGO_TERM_QUIET=true' }
 if ($env:RUST_TEST_THREADS -eq '1') { Refuse 'RUST_TEST_THREADS=1' }
 if ($env:RUST_TEST_NOCAPTURE -and $env:RUST_TEST_NOCAPTURE -ne '0') { Refuse "RUST_TEST_NOCAPTURE=$($env:RUST_TEST_NOCAPTURE)" }
 
@@ -94,11 +99,13 @@ $ansi = [regex]'\x1b\[[0-9;]*[A-Za-z]'
 $binaryStarts = [regex]'^\s*(Running|Doc-tests)\s'
 $announced = [regex]'^test (.+) has been running for over (\d+) seconds$'
 $ended = [regex]'^test (.+?) \.\.\. (ok|FAILED|ignored)\b'
-$running = [ordered]@{}            # name -> started at (seconds on $clock)
+# name -> started at (seconds on $clock); ordinal, as Rust's test names are case-sensitive
+$running = [Collections.Generic.Dictionary[string, double]]::new([StringComparer]::Ordinal)
 $slow = [Collections.Generic.List[string]]::new()
 $watching = $false
 $lastLine = 0.0
 $lastText = ''
+$exitSeen = $null
 
 function Read-Line($line, [bool]$isError) {
     if ($isError) { [Console]::Error.WriteLine($line) } else { [Console]::Out.WriteLine($line) }
@@ -106,7 +113,16 @@ function Read-Line($line, [bool]$isError) {
     $script:lastLine = $now
     $script:lastText = $line
     $plain = $ansi.Replace($line, '')
-    if ($binaryStarts.IsMatch($plain)) { $script:watching = $true; return }
+    if ($binaryStarts.IsMatch($plain)) {
+        $script:watching = $true
+        # cargo runs one test binary after another: a name still tracked when the next one starts belonged to
+        # a binary that ended without its result line (a crash, an abort, a kill). It is not a hang of this one.
+        if ($running.Count -gt 0) {
+            [Console]::Out.WriteLine("${me}: ended with their binary, no result line: $(@($running.Keys) -join ', ')")
+            $running.Clear()
+        }
+        return
+    }
     $m = $announced.Match($plain)
     if ($m.Success) { $running[$m.Groups[1].Value] = $now - [double]$m.Groups[2].Value; return }
     $m = $ended.Match($plain)
@@ -114,7 +130,7 @@ function Read-Line($line, [bool]$isError) {
         $name = $m.Groups[1].Value
         # A test with a mode is ended as `test <name> - should panic ... ok`; its 60 s line has the bare name.
         foreach ($known in @($running.Keys)) {
-            if ($name -eq $known -or $name.StartsWith("$known - ")) { $running.Remove($known); $slow.Add($known) }
+            if ($name -ceq $known -or $name.StartsWith("$known - ", [StringComparison]::Ordinal)) { [void]$running.Remove($known); $slow.Add($known) }
         }
     }
 }
@@ -123,7 +139,11 @@ function End-Run([string[]]$said) {
     foreach ($line in $said) { [Console]::Out.WriteLine("${me}: $line") }
     [Console]::Out.WriteLine("${me}: ending the process tree of pid $($child.Id); this run is red")
     [Console]::Out.Flush()
-    try { $child.Kill($true) } catch [InvalidOperationException] { }   # it may have exited on its own meanwhile
+    try { $child.Kill($true) }
+    catch [InvalidOperationException] { }   # it may have exited on its own meanwhile
+    catch [AggregateException] {            # a descendant that could not be ended; the run is red all the same
+        [Console]::Out.WriteLine("${me}: part of the tree could not be ended: $($_.Exception.InnerExceptions.Message -join '; ')")
+    }
     $child.WaitForExit()
     exit 124
 }
@@ -133,10 +153,13 @@ $errTask = $child.StandardError.ReadLineAsync()
 while ($outTask -or $errTask) {
     $pending = @(@($outTask, $errTask) | Where-Object { $_ })
     $woke = [Threading.Tasks.Task]::WaitAny([Threading.Tasks.Task[]]$pending, 1000)
-    # Once cargo has exited, everything it wrote is already in the pipes and is read within the second;
-    # a quiet second after that ends the reading. A process a test left behind may hold the pipes open,
-    # and it is not this run.
-    if ($woke -eq -1 -and $child.HasExited) { break }
+    # Once cargo has exited, everything it wrote is already in the pipes: a quiet second, or 5 s in all,
+    # ends the reading. A process a test left behind may hold the pipes open (and even keep writing to
+    # them), and it is not this run.
+    if ($child.HasExited) {
+        if ($null -eq $exitSeen) { $exitSeen = $clock.Elapsed.TotalSeconds }
+        if ($woke -eq -1 -or $clock.Elapsed.TotalSeconds - $exitSeen -ge 5) { break }
+    }
     if ($outTask -and $outTask.IsCompleted) {
         $line = $outTask.Result
         if ($null -eq $line) { $outTask = $null } else { Read-Line $line $false; $outTask = $child.StandardOutput.ReadLineAsync() }
