@@ -351,9 +351,10 @@ pub(crate) mod tests {
 
     /// **A window's reading, made on a thread of its own** while the shell may be held — with the
     /// request it makes when one is due ([`TaskbarLane::observe`]), so no door of the lane is
-    /// called on the test's thread while the shell is held: what it read, once it came back within the lane suite's patience — or `None`, after the held ask is
-    /// answered with `answer` (the release), so that a reading that waited for the shell can end,
-    /// detached. The thread is joined only once it has come back.
+    /// called on the test's thread while the shell is held. What it read, once it came back
+    /// within the lane suite's patience; or `None`, after the held ask is answered with `answer`
+    /// (the release), so that a reading that waited for the shell can end, detached. The thread
+    /// is joined only once it has come back.
     fn observe_apart(
         lane: &'static TaskbarLane,
         now: Instant,
