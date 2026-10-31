@@ -57,17 +57,17 @@ crates/bt-app/src/main.rs:44413 code sample: the indentation after an escaped li
 crates/bt-app/src/main.rs:44413 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-app/src/main.rs:44605 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-app/src/main.rs:45531 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-app/src/main.rs:59250 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-app/src/main.rs:59247 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-app/src/preview_live.rs:1686 table fixture: each cell padded to its column
 crates/bt-app/src/preview_select.rs:777 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-app/src/preview.rs:11855 a diff line sample: the code's indentation after the `+`/`-` sign is the input
-crates/bt-app/src/preview.rs:11859 a diff line sample: the code's indentation after the `+`/`-` sign is the input
-crates/bt-app/src/preview.rs:11856 a diff line sample: the code's indentation after the `+`/`-` sign is the input
-crates/bt-app/src/preview.rs:11860 a diff line sample: the code's indentation after the `+`/`-` sign is the input
-crates/bt-app/src/preview.rs:13177 tab expansion's expected columns
-crates/bt-app/src/preview.rs:13174 tab expansion's expected columns
-crates/bt-app/src/preview.rs:18845 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-app/src/preview.rs:18872 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-app/src/preview.rs:11857 a diff line sample: the code's indentation after the `+`/`-` sign is the input
+crates/bt-app/src/preview.rs:11861 a diff line sample: the code's indentation after the `+`/`-` sign is the input
+crates/bt-app/src/preview.rs:11858 a diff line sample: the code's indentation after the `+`/`-` sign is the input
+crates/bt-app/src/preview.rs:11862 a diff line sample: the code's indentation after the `+`/`-` sign is the input
+crates/bt-app/src/preview.rs:13179 tab expansion's expected columns
+crates/bt-app/src/preview.rs:13176 tab expansion's expected columns
+crates/bt-app/src/preview.rs:18847 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-app/src/preview.rs:18874 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-app/src/profiles.rs:27236 the spacing between the arguments is the input under test
 crates/bt-app/src/runtime/floats.rs:4090 the chrome dump's tag column: `quad` padded to the width of the other tags
 crates/bt-detect/src/frame.rs:1564 terminal screen fixture: the columns are where the terminal draws them

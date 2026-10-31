@@ -8748,7 +8748,7 @@ impl PreviewSaves {
     }
 
     /// **Every answer the worker has given below the drain's mark `mark`**
-    /// (`persist::StorageLane::earliest_owed`, read once for every asker of one drain,
+    /// (`persist::StorageLane::drain_mark`, read once for every asker of one drain,
     /// `App::storage_answers`; T-STORAGE-LANE-ORDER-BY-CONSTRUCTION), each with its place in
     /// the order the lane admitted it — the order the drain answers every asker's in. A save at
     /// or past the mark waits for a later drain even when it has ended since. Never waits. A
@@ -8756,7 +8756,7 @@ impl PreviewSaves {
     /// as refused, in its words.
     pub(crate) fn answered(
         &mut self,
-        mark: Option<crate::persist::StorageId>,
+        mark: &crate::persist::StorageMark,
     ) -> Vec<(crate::persist::InAdmissionOrder, SaveAnswer)> {
         let mut answers = Vec::new();
         self.owed.retain_mut(|owed| {
@@ -8785,9 +8785,11 @@ impl PreviewSaves {
     /// **Every answer the worker has given, at a stop** ([`StopKeeps::keep`]): the storage
     /// worker has ended or been let go at its bound and the lane delivers nothing after this,
     /// so no later answer can overtake one heard here — every save that has ended is heard, in
-    /// the order the lane admitted them, whatever is still owed before it.
+    /// the order the lane admitted them, whatever is still owed before it — under the lane's
+    /// mark for a take after its worker's end (`persist::StorageLane::mark_after_the_worker_ended`).
     fn answered_at_the_stop(&mut self) -> Vec<SaveAnswer> {
-        let answers = self.answered(None);
+        let mark = self.lane.mark_after_the_worker_ended();
+        let answers = self.answered(&mark);
         answers.into_iter().map(|(_, answer)| answer).collect()
     }
 
@@ -8795,8 +8797,8 @@ impl PreviewSaves {
     /// to hear the preview's saves without the application's drain.
     #[cfg(test)]
     pub(crate) fn take_answers(&mut self) -> Vec<SaveAnswer> {
-        let mark = self.lane.earliest_owed();
-        self.answered(mark)
+        let mark = self.lane.drain_mark();
+        self.answered(&mark)
             .into_iter()
             .map(|(_, answer)| answer)
             .collect()

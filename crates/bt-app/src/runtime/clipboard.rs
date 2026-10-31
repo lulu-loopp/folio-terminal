@@ -60,19 +60,16 @@ impl<B: Backend> FolioApp<B> {
     /// open window's answers below it; merged by the identity the lane minted, each with the index
     /// of the window that holds it.
     pub(crate) fn clipboard_answers(&mut self) -> Vec<(usize, ClipboardId, Answered)> {
-        let Some(owed) = self
-            .app
-            .as_ref()
-            .map(|app| app.clipboard_lane.earliest_owed())
-        else {
+        let Some(app) = self.app.as_ref() else {
             return Vec::new();
         };
+        let mark = app.clipboard_lane.drain_mark();
         let mut held = Vec::new();
         for index in 0..self.windows.len() {
             if let Some(mut runtime) = self.runtime_at(index)
                 && runtime.window.leaving.is_none()
             {
-                held.push((index, runtime.take_clipboard_answers(owed)));
+                held.push((index, runtime.take_clipboard_answers(&mark)));
             }
         }
         lane::in_admission_order(held)
@@ -591,9 +588,9 @@ impl<B: Backend> Runtime<'_, B> {
     /// ([`FolioApp::answer_clipboard`]).
     pub(crate) fn take_clipboard_answers(
         &mut self,
-        owed: Option<ClipboardId>,
+        mark: &lane::Mark<ClipboardId>,
     ) -> Vec<(ClipboardId, Answered)> {
-        self.window.clipboard.answered(owed)
+        self.window.clipboard.answered(mark)
     }
 
     /// **Answer one request of this window's** that [`Self::take_clipboard_answers`] took: a copy

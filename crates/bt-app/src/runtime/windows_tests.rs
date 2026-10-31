@@ -195,6 +195,11 @@ impl Saving {
         }
         let mut folio = HeadlessFolio::with_tabs(tag, tabs, 0);
         let (lane, jobs) = crate::persist::StorageLane::scripted();
+        folio.app.session_store = crate::persist::SessionStore::at_on(
+            dir.join("session.json"),
+            dir.join("session.lock"),
+            lane.clone(),
+        );
         folio.app.preview_saves = crate::preview::PreviewSaves::on(lane);
         let other = headless_window(
             &folio.app,
@@ -1169,6 +1174,11 @@ impl Quitting {
         let second = tabs.pop().expect("the second tab");
         let mut folio = HeadlessFolio::with_tabs(tag, tabs, 0);
         let (lane, jobs) = crate::persist::StorageLane::scripted();
+        folio.app.session_store = crate::persist::SessionStore::at_on(
+            dir.join("session.json"),
+            dir.join("session.lock"),
+            lane.clone(),
+        );
         folio.app.preview_saves = crate::preview::PreviewSaves::on(lane);
         let other = headless_window(
             &folio.app,
