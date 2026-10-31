@@ -36878,7 +36878,8 @@ impl<B: Backend> Runtime<'_, B> {
             bt_platform::cancel_composition(reason)
         });
         self.trace_ime_cancel(started_in, reason, Some(told));
-        let drew_a_preedit = self.window.preedit.take().is_some();
+        let drew_a_preedit = self.window.preedit.is_some();
+        self.window.preedit = None;
         self.window.composing = None;
         self.window.ime_cursor.reset();
         // **The system caret is not the composition's** (T-CARET-EVERY-LAYOUT):
