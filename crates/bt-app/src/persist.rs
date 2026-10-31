@@ -1183,6 +1183,10 @@ struct LaneShared {
     ended: Arc<std::sync::atomic::AtomicBool>,
     /// How many requests the doors refused and answered themselves ([`StorageLane::refused_here`]).
     refusals: std::sync::atomic::AtomicU64,
+    /// The identity of the last request the lane admitted, `0` before the first — set under the
+    /// queue's lock at each admission ([`StorageLane::admit_between`]), so a door's refusal finds
+    /// its place without the ledger's lock.
+    admitted: std::sync::atomic::AtomicU64,
     /// The suite's door, served in place of [`serve_storage_job`].
     #[cfg(test)]
     door: Option<TestDoor>,
@@ -1256,6 +1260,7 @@ impl LaneShared {
             sink,
             ended: Arc::default(),
             refusals: std::sync::atomic::AtomicU64::new(0),
+            admitted: std::sync::atomic::AtomicU64::new(0),
             #[cfg(test)]
             door: None,
             #[cfg(test)]
@@ -1433,6 +1438,9 @@ impl StorageLane {
             .admit(StorageOwed(Arc::clone(&self.shared.sink)))
             .map_err(NotAdmitted::of)?;
         let id = request.id();
+        self.shared
+            .admitted
+            .store(id.0, std::sync::atomic::Ordering::Release);
         // A worker serves the queue (`up`, under this lock), so its receiving end stands until
         // its end has taken this lock: the send reaches it, and its end drops the job.
         if ahead {
@@ -1533,11 +1541,14 @@ impl StorageLane {
     }
 
     /// **Where a refusal the door answered itself stands** (R4): after every request admitted
-    /// before it, and before any admitted after it — the ledger's last identity, and this
-    /// refusal's place among the refusals since.
+    /// before it, and before any admitted after it — the last identity the lane admitted, and
+    /// this refusal's place among the refusals since. Takes no lock: a request door answers it.
     fn refused_here(&self) -> InAdmissionOrder {
         InAdmissionOrder {
-            minted: self.shared.ledger.last_minted().map_or(0, |id| id.0),
+            minted: self
+                .shared
+                .admitted
+                .load(std::sync::atomic::Ordering::Acquire),
             refused: self
                 .shared
                 .refusals
