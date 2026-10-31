@@ -4,7 +4,7 @@
 # name) with the number of calls behind it. Held equal to the tree by bt-source's call_graph test;
 # shrink-only against the merge base by scripts/ci/check-unfollowed-edges.ps1 - a key added or grown
 # carries a reason 'YYYY-MM-DD: <why>'. Never edit a key or a count by hand.
-# Ambiguous calls with exactly one candidate, not listed by site above or below (bt_source::call_graph::Unresolved::sole_candidate; a guard naming a callee's callers counts each as a call of its one candidate): 1723. A call whose name is renamed to one only one item declares leaves the list and is counted here.
+# Ambiguous calls with exactly one candidate, not listed by site above or below (bt_source::call_graph::Unresolved::sole_candidate; a guard naming a callee's callers counts each as a call of its one candidate): 1728. A call whose name is renamed to one only one item declares leaves the list and is counted here.
 file	item	kind	name	sites	reason
 crates/bt-app/src/animation.rs	bt-app crate::animation::<FileAnimationSource as Read>::read	Ambiguous	unwrap_or	1	
 crates/bt-app/src/animation.rs	bt-app crate::animation::AnimationCursor::start_again	Ambiguous	into_inner	1	
@@ -3938,9 +3938,9 @@ crates/bt-app/src/runtime/math.rs	bt-app crate::runtime::math::Runtime::refresh_
 crates/bt-app/src/runtime/math.rs	bt-app crate::runtime::math::Runtime::refresh_overlay_with_formula	Ambiguous	as_deref	1	
 crates/bt-app/src/runtime/math.rs	bt-app crate::runtime::math::Runtime::refresh_overlay_with_formula	Ambiguous	as_slice	1	
 crates/bt-app/src/runtime/math.rs	bt-app crate::runtime::math::Runtime::refresh_overlay_with_formula	Ambiguous	clone	2	
-crates/bt-app/src/runtime/math.rs	bt-app crate::runtime::math::Runtime::refresh_overlay_with_formula	Ambiguous	map	3	2026-10-30: T-SETTINGS-FIELDS-IME-POSITION (plan row 98); grown 3 -> 4: the painter now hands EditorInk the fields' composed text (TextField::composed, the pre-edit spliced at the caret) where it handed the stored text, and the summon command is read through text_field(QuakeCommand).map(composed).unwrap_or_default(): Cow and Option reads on the window's own thread, no new door
+crates/bt-app/src/runtime/math.rs	bt-app crate::runtime::math::Runtime::refresh_overlay_with_formula	Ambiguous	map	4	2026-10-30: T-SETTINGS-FIELDS-IME-POSITION (plan row 98); grown 3 -> 4: the painter now hands EditorInk the fields' composed text (TextField::composed, the pre-edit spliced at the caret) where it handed the stored text, and the summon command is read through text_field(QuakeCommand).map(composed).unwrap_or_default(): Cow and Option reads on the window's own thread, no new door
 crates/bt-app/src/runtime/math.rs	bt-app crate::runtime::math::Runtime::refresh_overlay_with_formula	Ambiguous	to_vec	1	
-crates/bt-app/src/runtime/math.rs	bt-app crate::runtime::math::Runtime::refresh_overlay_with_formula	Ambiguous	unwrap_or_default	4	2026-10-30: T-SETTINGS-FIELDS-IME-POSITION (plan row 98); grown 4 -> 5: the painter now hands EditorInk the fields' composed text (TextField::composed, the pre-edit spliced at the caret) where it handed the stored text, and the summon command is read through text_field(QuakeCommand).map(composed).unwrap_or_default(): Cow and Option reads on the window's own thread, no new door
+crates/bt-app/src/runtime/math.rs	bt-app crate::runtime::math::Runtime::refresh_overlay_with_formula	Ambiguous	unwrap_or_default	5	2026-10-30: T-SETTINGS-FIELDS-IME-POSITION (plan row 98); grown 4 -> 5: the painter now hands EditorInk the fields' composed text (TextField::composed, the pre-edit spliced at the caret) where it handed the stored text, and the summon command is read through text_field(QuakeCommand).map(composed).unwrap_or_default(): Cow and Option reads on the window's own thread, no new door
 crates/bt-app/src/runtime/math.rs	bt-app crate::runtime::math::Runtime::search_hit_line_text	Ambiguous	ok	1	
 crates/bt-app/src/runtime/math.rs	bt-app crate::runtime::math::Runtime::tab_surface_tip_text	Ambiguous	text	4	
 crates/bt-app/src/runtime/math.rs	bt-app crate::runtime::math::Runtime::tab_surface_tip_text	Ambiguous	to_owned	3	
@@ -5260,9 +5260,8 @@ crates/bt-app/src/settings.rs	bt-app crate::settings::push_editor_page	Ambiguous
 crates/bt-app/src/settings.rs	bt-app crate::settings::push_editor_page	Ambiguous	unwrap_or_default	2	
 crates/bt-app/src/settings.rs	bt-app crate::settings::push_editor_page	Dynamic	px	1	
 crates/bt-app/src/settings.rs	bt-app crate::settings::push_field	Ambiguous	map	1	2026-10-30: T-SETTINGS-FIELDS-IME-POSITION (plan row 98); added: push_field now asks field_run and field_caret_line; its one Option::map is the caret's selection range read, no new door
-crates/bt-app/src/settings.rs	bt-app crate::settings::push_field	Ambiguous	map_or	1	
-crates/bt-app/src/settings.rs	bt-app crate::settings::push_field	Dynamic	measure	4	
-crates/bt-app/src/settings.rs	bt-app crate::settings::push_field	Dynamic	px	6	
+crates/bt-app/src/settings.rs	bt-app crate::settings::push_field	Dynamic	measure	2	
+crates/bt-app/src/settings.rs	bt-app crate::settings::push_field	Dynamic	px	1	
 crates/bt-app/src/settings.rs	bt-app crate::settings::push_glyph_verb	Dynamic	px	2	
 crates/bt-app/src/settings.rs	bt-app crate::settings::push_mark_verb	Ambiguous	round	2	
 crates/bt-app/src/settings.rs	bt-app crate::settings::push_mark_verb	Dynamic	px	3	
