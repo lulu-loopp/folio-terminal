@@ -773,7 +773,16 @@ fn applied(install: &Install, limits: Limits, world: Fake) -> (Ended, Fake) {
 /// fixture, so the road stays behind the hold and never runs on past the
 /// failed test into the folder that test's end removes.
 fn ended_while_held<T, H>(held: H, road: JoinHandle<T>) -> T {
+    ended_while_held_keeping(held, road, || ())
+}
+
+/// [`ended_while_held`], for a road that waits behind something this test
+/// cannot keep past its own end (O alive, a child the fixture ends): on the red
+/// path `keep` first takes and keeps a hold that stops the road there, and only
+/// then is the test red.
+fn ended_while_held_keeping<T, H>(held: H, road: JoinHandle<T>, keep: impl FnOnce()) -> T {
     if !crate::lane::within_patience(|| road.is_finished()) {
+        keep();
         std::mem::forget(held);
         panic!("the road waited past its own deadline for a hold this test keeps");
     }
@@ -991,7 +1000,11 @@ fn p_waits_for_o_and_releases_the_claim() {
     assert_eq!(ended, Ended::OldHeldTheLock);
     assert_eq!(std::fs::read(install.home.journal()).unwrap(), journal);
 
-    // O lets go of the lock, then of the claim.
+    // O lets go of the lock, then of the claim. The first applier's mark
+    // still names `me`; it goes, so that P's election over is P's own.
+    std::fs::remove_file(crate::update_apply::owner_path(&install.home, install.txn)).unwrap();
+    let mut road = install.road(limits(20_000, 20_000));
+    let me = road.me;
     let lock = install_txn::try_hold(&install.home.lock(), Hold::Exclusive)
         .unwrap()
         .unwrap();
@@ -1000,16 +1013,24 @@ fn p_waits_for_o_and_releases_the_claim() {
     )));
     // The journal's phase in the pause of P's first refused ask of the claim.
     let at_the_claim = Arc::new(Mutex::new(None::<PhaseKind>));
+    // Whether the window's mark named P then: the pause was the claim's, not
+    // an election's ask again.
+    let owned_then = Arc::new(Mutex::new(None::<bool>));
     let clock = {
-        let (claim, seen, journal) = (
+        let (claim, seen, owned, journal, home, txn) = (
             Arc::clone(&claim),
             Arc::clone(&at_the_claim),
+            Arc::clone(&owned_then),
             install.home.journal(),
+            install.home.clone(),
+            install.txn,
         );
         Arc::new(WatchedWallClock::new(move |pause| {
             if pause == 1 {
                 let on_disk = Journal::parse(&std::fs::read(&journal).unwrap()).unwrap();
                 *seen.lock().unwrap() = Some(on_disk.body.phase.kind());
+                *owned.lock().unwrap() =
+                    Some(crate::update_apply::window_owner(&home, txn) == Some(me));
                 claim.lock().unwrap().take();
             }
         }))
@@ -1022,11 +1043,7 @@ fn p_waits_for_o_and_releases_the_claim() {
             "a move while O still held the claim"
         );
     }));
-    let road = Road {
-        wait_clock: clock.clone(),
-        ..install.road(limits(20_000, 20_000))
-    };
-    let me = road.me;
+    road.wait_clock = clock;
     let applier = start(road, install.txn, install.applier, world);
     until_past_the_election(&install, me, &applier);
     assert_eq!(
@@ -1035,8 +1052,13 @@ fn p_waits_for_o_and_releases_the_claim() {
         "nothing is written while O holds the lock"
     );
     drop(lock);
-    let (ended, world) = applier.join().unwrap();
+    let (ended, world) = ended_while_held((), applier);
     assert_eq!(ended, Ended::Committed, "{:?}", world.said);
+    assert_eq!(
+        *owned_then.lock().unwrap(),
+        Some(true),
+        "pause 1 was the claim's: the window's mark named P then"
+    );
     assert_eq!(
         *at_the_claim.lock().unwrap(),
         Some(PhaseKind::Handoff),
@@ -4301,9 +4323,11 @@ fn the_window_is_handed_over_by_one_mark_and_opened_exactly_once() {
     let mut road = install.road(limits(1_500, 20_000));
     road.me = crate::update_apply::this_process();
     // P asks again while O's mark is live and gives up at its own deadline, O
-    // still running (ended with the fixture, as every process the test
-    // started).
-    let (ended, world) = ended_while_held(
+    // still running. O alive cannot be kept past the test (the fixture ends
+    // it), so a P past its deadline is stopped behind the election lock,
+    // taken and kept, before the test is red: refused, P only asks again.
+    let election = crate::update_apply::owner_lock_path(&install.home, install.txn);
+    let (ended, world) = ended_while_held_keeping(
         (),
         start(
             road,
@@ -4311,6 +4335,12 @@ fn the_window_is_handed_over_by_one_mark_and_opened_exactly_once() {
             install.applier,
             install.world(Trial::Answers),
         ),
+        move || {
+            let kept = install_txn::hold_within(&election, Hold::Exclusive, crate::lane::PATIENCE)
+                .unwrap()
+                .expect("the election lock, between P's asks");
+            std::mem::forget(kept);
+        },
     );
     assert!(matches!(ended, Ended::Refused(_)), "{ended:?}");
     assert!(world.opened.is_empty(), "{:?}", world.said);

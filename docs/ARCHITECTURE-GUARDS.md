@@ -1098,7 +1098,8 @@ or a member held open, the election in flight, O alive — are awaited while the
 within the suite's patience (`ended_while_held` in `update_apply_windows_tests.rs` and
 `update_apply_macos_tests.rs`), and a road that waits past its deadline is red, not a hang; the hold
 is then kept for the life of the test process, so the road never runs on into the failed test's
-removed fixture. A hold let go "once the road waits" is let go in the pause of the road's first
+removed fixture (O alive, which the fixture ends, is the one hold a test cannot keep: there the
+election lock is taken and kept before the test is red, `ended_while_held_keeping`). A hold let go "once the road waits" is let go in the pause of the road's first
 refused ask: the window election's asks again and both platforms' waits for the claim pause on the
 road's `wait_clock` (`update_apply::WaitClock`; `WallClock` in the product, `WatchedWallClock` under
 test), and the wait for the transaction lock is reached as state (the election over: the mark
