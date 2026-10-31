@@ -37,14 +37,28 @@ as the same item.
 
 **What the map does not see** is printed as a count in each header. Nothing is
 guessed. A read through a receiver the census rules do not type is not attributed:
-182 sites. A call is not followed through a trait object, a stored closure, a
+180 sites. A call is not followed through a trait object, a stored closure, a
 function value, or a receiver the rules do not type. The counts below were read at
-plan row 84 (2026-10-28); the header is the authority:
+plan row 101 on top of row 98 (2026-10-30; the class counts not named here are row
+84's, unchanged);
+the header is the authority:
 
-- 2,288 sites call a method name only the package has, through an untyped receiver.
+- 2,271 sites call a method name only the package has, through an untyped receiver.
   The largest share is `i18n::Text::X.text()`: the receiver is an enum variant's
   path, and the census does not type a path value.
-- 4,315 sites call a method name that a standard type also has.
+- 4,301 sites call a method name that a standard type also has.
+- A `?` value and an `Ok`/`Err` binding are typed by what the type resolves to: the
+  standard `Option`/`Result`, or a foreign `Result` alias on a fixed table
+  (`std::io::Result`, `std::fmt::Result`, `std::thread::Result`, `anyhow::Result`,
+  `windows::core::Result`, each the standard `Result` it names, its error type
+  included), never by the bare name `Result`; and for `?`, `Ok`/`Err` and the
+  standard `Option`/`Result` methods, never by the last segment of a path whose crate
+  the census does not know (`syn::Result`); and the adapters that keep the value
+  (`ok_or`, `ok_or_else`, `map_err`, `or_else`, `inspect`, `inspect_err`, anyhow's
+  `context` / `with_context`) keep its type (row 101: 20 + 20 sites left the two
+  counts above, 5 left the 184 unattributed reads, and 12 call sites became topic
+  edges). The census reads no `use` item, so a bare `Result` is the standard one
+  unless the package declares a type of that name.
 - 301 sites reach more than one item, for example two types of the same name in two
   modules.
 - A call through an associated type of a generic (`B::Glass`, `B::Window`, `G::Device`)
@@ -80,7 +94,8 @@ plan row 84 (2026-10-28); the header is the authority:
 - The call graph's `Ambiguous` calls with exactly one candidate (every call through an
   untyped receiver whose name one item declares; a rename to such a name is one way an
   edge gets here) are not listed by site in `docs/plans/UNFOLLOWED-EDGES.tsv`; its header
-  counts them (row 84: 1,765), the call graph test holds the count to the tree, and
+  counts them (row 84: 1,765; row 101 on top of row 98: 1,728, after `?` values, variant patterns and
+  the adapters that keep a value were typed), the call graph test holds the count to the tree, and
   `check-unfollowed-edges.ps1` reads it and reports its change against the merge base.
 
 These are S-2a's call graph's to close. The map is a lower bound on edges and an

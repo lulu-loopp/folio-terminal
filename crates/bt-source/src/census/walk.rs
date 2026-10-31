@@ -408,10 +408,14 @@ impl<'w, 'd> Walk<'w, 'd> {
     /// The fields a variant pattern binds: `Some`/`Ok`/`Err` of the standard
     /// enums, or a variant of the workspace enum the scrutinee's type is.
     fn variant_fields(&self, ty: &Ty, variant: &str) -> Option<Vec<(String, Ty)>> {
-        if let Ty::Named(named) = ty {
-            let standard = match (named.name.as_str(), variant) {
-                ("Option", "Some") | ("Result", "Ok") => named.args.first().cloned(),
-                ("Result", "Err") => named.args.get(1).cloned(),
+        if let Ty::Named(named) = self.resolver.expand(ty.clone()) {
+            // The standard enums by what the type resolves to, never by its bare name (plan
+            // row 101, ruling R3); a table alias is expanded to the `Result` it names.
+            let standard = match (self.resolver.standard_enum(&named), variant) {
+                (Some(Std::Option), "Some") | (Some(Std::Result), "Ok") => {
+                    named.args.first().cloned()
+                }
+                (Some(Std::Result), "Err") => named.args.get(1).cloned(),
                 _ => None,
             };
             if let Some(inner) = standard {
@@ -527,7 +531,7 @@ impl<'w, 'd> Walk<'w, 'd> {
             syn::Expr::Try(attempt) => {
                 let inner = self.eval(&attempt.expr);
                 match self.resolver.expand(inner.ty) {
-                    Ty::Named(named) if matches!(named.name.as_str(), "Option" | "Result") => {
+                    Ty::Named(named) if self.resolver.standard_enum(&named).is_some() => {
                         let ty = first_arg(&named);
                         Val {
                             origin: if ty.carries_reference() {
