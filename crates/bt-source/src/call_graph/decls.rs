@@ -15,8 +15,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use super::names::{Named, Names, canonical_std};
 use super::{ArmQuery, Arms, ItemId, Target, Unresolved, ValueId, Via};
 use crate::census::types::{
-    Method, Named as TyNamed, Receiver, Std, Ty, Written, closures_by_position, entry_method,
-    external_method, impl_header, impl_of, iterator_method, prelude_method, std_kind, std_method,
+    Method, Named as TyNamed, Receiver, Std, Ty, Written, closures_by_position,
+    dependency_trait_of, entry_method, external_method, impl_header, impl_of, iterator_method,
+    prelude_method, result_alias, std_kind, std_method,
 };
 use crate::index::{ConditionalVariant, DeclarationPath, Index, ItemRecord};
 use crate::traits::{ResolveCutoff, TraitId, TraitResolver};
@@ -936,8 +937,21 @@ impl<'i> Tables<'i> {
 
     pub(crate) fn place(&self, named: &TyNamed) -> Placed {
         if named.home.is_empty() {
-            // A standard type a fixed list names (`std_named`).
-            return Placed::Foreign(canonical_std(&named.name));
+            // A standard type a fixed list names (`std_named`), or a type outside the workspace
+            // by its full path (`foreign_named`: an error type of the `Result` alias table).
+            if named.prefix.is_empty() && named.krate.as_deref().is_none_or(|krate| krate == "std")
+            {
+                return Placed::Foreign(canonical_std(&named.name));
+            }
+            return Placed::Foreign(
+                named
+                    .krate
+                    .iter()
+                    .chain(&named.prefix)
+                    .chain(std::iter::once(&named.name))
+                    .cloned()
+                    .collect(),
+            );
         }
         let Some(at) = self.names.package_at(&named.home) else {
             return Placed::Unplaced(format!(
@@ -1031,8 +1045,18 @@ impl<'i> Tables<'i> {
             let Ty::Named(named) = &ty else {
                 return Ok(ty);
             };
-            let Placed::Alias(key) = self.place(named) else {
-                return Ok(ty);
+            let key = match self.place(named) {
+                Placed::Alias(key) => key,
+                // A foreign `Result` alias on the fixed table (plan row 101): the standard
+                // `Result` it names, as a first-party alias is followed to its target.
+                Placed::Foreign(path) => match result_alias(&path, &named.args) {
+                    Some(target) => {
+                        ty = target;
+                        continue;
+                    }
+                    None => return Ok(ty),
+                },
+                _ => return Ok(ty),
             };
             let targets = self.alias_targets(&key, &named.args);
             let [target] = targets.as_slice() else {
@@ -1455,7 +1479,12 @@ impl<'i> Tables<'i> {
                     let found = listed
                         .or_else(|| external_method(&named.name, name))
                         .or_else(|| prelude_method(name, &Ty::Named(named.clone())));
-                    let mut full = path;
+                    // A method of the lists that a dependency trait gives the type (anyhow's
+                    // `Context`) is labelled with that trait, not the standard type.
+                    let mut full = match kind.and_then(|kind| dependency_trait_of(kind, name)) {
+                        Some(owner) => owner.iter().map(|segment| (*segment).to_owned()).collect(),
+                        None => path,
+                    };
                     full.push(name.to_owned());
                     let mut answer =
                         Answer::one(Target::Foreign(full), Via::Direct).with_std(found);

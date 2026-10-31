@@ -14,6 +14,29 @@
 //! name. Anything the steps do not type is untyped, and an untyped receiver's call is an
 //! [`Unresolved::Ambiguous`] edge listing every first-party method of the name.
 //!
+//! **`?` values and variant patterns** (plan row 101):
+//!
+//! | # | Form | Rule |
+//! |---|---|---|
+//! | Q1 | `e?` | `e`'s type, aliases followed: a standard `Option<T>` or `Result<T, E>` gives `T` |
+//! | Q2 | a foreign `Result` alias | Only the rows of the fixed table (`std::io::Result`, `std::fmt::Result`, `std::thread::Result`, `anyhow::Result`, `windows::core::Result`), followed to the standard `Result` each names, its error type included — so `?`, `Ok`/`Err` and the standard methods read it as one `Result`. Any other foreign type is not a `Result` to the rules, whatever its name |
+//! | Q3 | variant patterns | `Some`/`Ok`/`Err` over Q1/Q2 types, a first-party enum's variant (tuple or struct form) or tuple struct, nested to any depth (`Ok(E::V(Some(x)))`), in `let`, `let … else`, `if let`, `while let` and `match` arms |
+//! | Q4 | `..` | In a tuple or tuple-variant pattern the elements after `..` are the last fields, counted from the end; in a slice pattern `name @ ..` is a slice of the element. An element count the fields cannot hold types nothing |
+//! | Q5 | the adapters that keep the value | `Option::ok_or`/`ok_or_else` and `Result::map_err`/`or_else`/`inspect`/`inspect_err` answer a `Result` of the same value; anyhow's `Context::context`/`with_context` on a `Result` or an `Option` an `anyhow::Result` of it |
+//!
+//! Refused, by kind (the receiver stays untyped, its call [`Unresolved::Ambiguous`]): `?` on a
+//! type that is neither Q1 nor Q2 or on an untyped operand; a variant the scrutinee's type does
+//! not declare, or a scrutinee that is untyped, a generic or `impl Trait`; an element count the
+//! fields cannot hold; and a pattern a macro writes, or one `syn` keeps as tokens
+//! (`Pat::Macro`, `Pat::Verbatim`): every name in it is bound untyped, so an outer binding of
+//! that name does not show through. It defines every identifier token of the pattern, path heads
+//! and keywords too (`Some`, `ref`), not only the names it binds: it refuses too much (a later
+//! one-segment call or value of such a name in the arm is untyped or `Dynamic`, listed), never
+//! guesses. Held limit: anyhow's `context`/`with_context` are read by
+//! method name on every standard `Option`/`Result`, whether or not the package depends on anyhow
+//! (true while anyhow is the one dependency whose trait gives them these names); a first-party
+//! trait's method of the name is asked first and wins.
+//!
 //! # The grammar
 //!
 //! | # | Shape | Resolution rule | Target |
@@ -296,8 +319,8 @@ pub enum Unresolved {
 
 impl Unresolved {
     /// **The one item an untyped receiver's call can reach**, when exactly one first-party method
-    /// has its name: an [`Unresolved::Ambiguous`] edge with one candidate (a binding of a `?`'s
-    /// value, a box bound by a pattern — receivers the rules do not type). The edge is still not
+    /// has its name: an [`Unresolved::Ambiguous`] edge with one candidate (a receiver the rules
+    /// do not type: a `?` on a type they refuse, a field of an untyped value). The edge is still not
     /// followed: `docs/plans/UNFOLLOWED-EDGES.tsv` lists only edges with other than one candidate
     /// and counts these in its header, and a guard that names a callee's callers counts such an
     /// edge as a call of its one candidate (T-CENSUS-FOLLOWS-ASSOCIATED-TYPE-CALLS, the O-4b

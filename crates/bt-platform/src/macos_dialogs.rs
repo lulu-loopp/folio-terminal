@@ -794,7 +794,8 @@ unsafe extern "C" {
 /// arm's reason: everything Folio says once it has a window it says on a card
 /// anchored at the surface the news is about, and a program that has drawn
 /// nothing — or whose windows are being taken down — has nothing to put a card
-/// on. Its two callers are `bt_app::announce_panic` — the panic hook, when the
+/// on. Its two callers are `bt_app::announce_panic` (through its crash box,
+/// `SystemBox::say_the_crash`) — the panic hook, when the
 /// resident run has no console to write to — and `say_at_the_front_door`, which
 /// is a launch that is about to exit. A controlled stop saying, before its
 /// windows close, the configuration changes it could keep nowhere
@@ -915,7 +916,7 @@ pub(crate) fn an_alert_would_be_seen(mtm: MainThreadMarker) -> bool {
 #[expect(
     clippy::print_stderr,
     reason = "the last-resort fault report, written where it is said, for its two callers: \
-              bt-app's announce_panic (the panic hook, after the panic road's fence, where a \
+              bt-app's announce_panic through its crash box (the panic hook, after the panic road's fence, where a \
               queued line would leave with the process) and say_at_the_front_door, before the \
               resident run has a queue; the stop's lost configuration change and the \
               frame-shape stop's alert ask a_box_would_be_seen first and say the unseen case \

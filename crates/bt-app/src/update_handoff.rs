@@ -1041,8 +1041,9 @@ mod tests {
         // raises a `SeenBox` (T-STOP-NOTICE-BOX-QUERY-MACOS, T-FRAME-SHAPE-STOP-BOX-QUERY).
         let allowed = [
             (
-                "crate::announce_panic",
-                "the panic hook, when the resident run has no console to write to",
+                "crate::SystemBox::say_the_crash",
+                "the panic hook's box (`announce_panic`), when the resident run has no console \
+                 to write to",
             ),
             (
                 "crate::say_at_the_front_door",

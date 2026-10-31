@@ -1434,6 +1434,93 @@ pub(crate) fn option_of(inner: Ty) -> Ty {
     std_named("Option", vec![inner])
 }
 
+/// `Result<ok, err>`, the standard enum.
+pub(crate) fn result_of(ok: Ty, err: Ty) -> Ty {
+    std_named("Result", vec![ok, err])
+}
+
+/// **A type outside the workspace, by its full path** (`std::io::Error`, `anyhow::Error`): what
+/// [`RESULT_ALIASES`] name as error types. Written in no module, so the call graph places it at
+/// that path and the census reads it as an outside type.
+pub(crate) fn foreign_named(krate: &str, prefix: &[&str], name: &str) -> Ty {
+    Ty::Named(Named {
+        name: name.to_owned(),
+        krate: Some(krate.to_owned()),
+        prefix: prefix.iter().map(|segment| (*segment).to_owned()).collect(),
+        args: Vec::new(),
+        home: String::new(),
+        module: String::new(),
+    })
+}
+
+/// **The foreign `Result` aliases the analyser reads, on a fixed table** (plan row 101, ruling
+/// R2): each alias's full path, how many type arguments it may be written with, and the standard
+/// `Result` it names. Every foreign `Result` alias the walked packages write is here; any other
+/// type is not a `Result` to the rules (never one by its bare name).
+///
+/// | Alias | Arguments | Names |
+/// |---|---|---|
+/// | `std::io::Result<T>` | 1 | `Result<T, std::io::Error>` |
+/// | `std::fmt::Result` (`core::fmt::Result`) | 0 | `Result<(), std::fmt::Error>` |
+/// | `std::thread::Result<T>` | 1 | `Result<T, Box<dyn Any + Send>>` (the payload untyped) |
+/// | `anyhow::Result<T>`, `anyhow::Result<T, E>` | 1, 2 | `Result<T, anyhow::Error>`, `Result<T, E>` |
+/// | `windows::core::Result<T>` | 1 | `Result<T, windows::core::Error>` |
+///
+/// Beside the table, anyhow's `Context::context`/`with_context` are read **by method name** on
+/// every standard `Option`/`Result` (`std_method`), whether or not the package depends on anyhow:
+/// a held limit, true while anyhow is the one dependency whose trait gives them these names
+/// (`eyre`'s or `snafu`'s would be read as anyhow's). A first-party trait's method of the name is
+/// asked first and wins.
+pub(crate) const RESULT_ALIASES: [&[&str]; 6] = [
+    &["std", "io", "Result"],
+    &["std", "fmt", "Result"],
+    &["core", "fmt", "Result"],
+    &["std", "thread", "Result"],
+    &["anyhow", "Result"],
+    &["windows", "core", "Result"],
+];
+
+/// **The dependency trait a listed method of a standard type comes from**, when it is not the
+/// type's own: anyhow's `Context` for `context`/`with_context` on an `Option` or a `Result` (read
+/// by method name, the held limit [`RESULT_ALIASES`] states). The call graph labels the method's
+/// foreign target with it.
+pub(crate) fn dependency_trait_of(kind: Std, name: &str) -> Option<[&'static str; 2]> {
+    match (kind, name) {
+        (Std::Option | Std::Result, "context" | "with_context") => Some(["anyhow", "Context"]),
+        _ => None,
+    }
+}
+
+/// What the [`RESULT_ALIASES`] row at `path` names with `args`; `None` for a path off the table
+/// or a number of arguments the alias does not take.
+pub(crate) fn result_alias<S: AsRef<str>>(path: &[S], args: &[Ty]) -> Option<Ty> {
+    let path: Vec<&str> = path.iter().map(AsRef::as_ref).collect();
+    if !RESULT_ALIASES.contains(&path.as_slice()) {
+        return None;
+    }
+    let ok = || args.first().cloned();
+    Some(match (path.as_slice(), args.len()) {
+        (["std", "io", "Result"], 1) => result_of(ok()?, foreign_named("std", &["io"], "Error")),
+        (["std" | "core", "fmt", "Result"], 0) => result_of(
+            Ty::Tuple(Vec::new()),
+            foreign_named("std", &["fmt"], "Error"),
+        ),
+        (["std", "thread", "Result"], 1) => result_of(
+            ok()?,
+            std_named(
+                "Box",
+                vec![Ty::unknown("a panic's payload, `dyn Any + Send`")],
+            ),
+        ),
+        (["anyhow", "Result"], 1) => result_of(ok()?, foreign_named("anyhow", &[], "Error")),
+        (["anyhow", "Result"], 2) => result_of(ok()?, args.get(1)?.clone()),
+        (["windows", "core", "Result"], 1) => {
+            result_of(ok()?, foreign_named("windows", &["core"], "Error"))
+        }
+        _ => return None,
+    })
+}
+
 fn unknown_ret(name: &str) -> Ty {
     Ty::unknown(format!("what `{name}` returns"))
 }
@@ -1650,10 +1737,20 @@ pub(crate) fn std_method(kind: Std, args: &[Ty], name: &str) -> Option<Method> {
                         other => option_of(other),
                     },
                     "filter" | "inspect" | "or" | "or_else" | "xor" | "clone" => option_of(t),
+                    // The adapters that keep the value (plan row 101): a `Result` of it.
+                    "ok_or" | "ok_or_else" => {
+                        result_of(t, Ty::unknown(format!("the error `{name}` makes")))
+                    }
                     _ => unknown_ret(name),
                 };
                 with_closure(Class::Read, ret, closure)
             }
+            // anyhow's `Context`, the one dependency trait giving an `Option` these (plan row
+            // 101): an `anyhow::Result` of the value.
+            "context" | "with_context" => method(
+                Class::Read,
+                result_of(t, foreign_named("anyhow", &[], "Error")),
+            ),
             _ => return None,
         },
         Std::Result => match name {
@@ -1667,10 +1764,22 @@ pub(crate) fn std_method(kind: Std, args: &[Ty], name: &str) -> Option<Method> {
             | "map_or_else" | "into_iter" | "iter" | "eq" | "ne" => {
                 let ret = match name {
                     "unwrap_or" | "unwrap_or_default" | "unwrap_or_else" => t,
+                    // The adapters that keep the value (plan row 101): a `Result` of it, with
+                    // the error kept where the adapter keeps it.
+                    "inspect" | "inspect_err" => result_of(t, arg(args, 1)),
+                    "map_err" | "or_else" => {
+                        result_of(t, Ty::unknown(format!("the error `{name}` makes")))
+                    }
                     _ => unknown_ret(name),
                 };
                 method(Class::Read, ret)
             }
+            // anyhow's `Context`, the one dependency trait giving a `Result` these (plan row
+            // 101): an `anyhow::Result` of the value.
+            "context" | "with_context" => method(
+                Class::Read,
+                result_of(t, foreign_named("anyhow", &[], "Error")),
+            ),
             _ => return None,
         },
         Std::String | Std::Str => match name {

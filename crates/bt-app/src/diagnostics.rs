@@ -842,6 +842,14 @@ pub fn resident_channel() -> Option<Channel> {
 
 static RESIDENT_CHANNEL: std::sync::OnceLock<Channel> = std::sync::OnceLock::new();
 
+/// **A test's process taken for a resident run whose streams go nowhere**: no screen is
+/// watching it ([`a_screen_is_watching`]), so an alert is owed to a box, as in a resident run.
+/// Only for a test in a process of its own — the channel is set once per process.
+#[cfg(test)]
+pub(crate) fn as_a_resident_run_nobody_watches() {
+    let _ = RESIDENT_CHANNEL.set(Channel::Nowhere);
+}
+
 fn choose_resident_channel(storage: &Path, previous_run_last_wrote: Option<SystemTime>) -> Channel {
     if console_was_asked_for(crate::entry_doors::installed().named.iter().cloned()) {
         // The console was named by this run. Keep it, keep the group membership
