@@ -1047,6 +1047,7 @@ fn six_twenty_pixel_reports_are_one_step_and_a_reversal_at_the_top_steps_down_on
         pan_on_the_wheel_road(bt_platform::PanStep {
             began_at: None,
             travel: (0, 30),
+            inertia: false,
         })
         .1
         .expect("a pan that moved turns the wheel")

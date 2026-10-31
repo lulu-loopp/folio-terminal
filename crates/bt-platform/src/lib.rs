@@ -9539,11 +9539,11 @@ mod windows_impl {
             WindowsAndMessaging::{
                 AppendMenuW, CreateCaret, CreatePopupMenu, DefWindowProcW, DestroyCaret,
                 DestroyMenu, FLASHW_STOP, FLASHW_TIMERNOFG, FLASHW_TRAY, FLASHWINFO, FlashWindowEx,
-                GA_ROOT, GCLP_HBRBACKGROUND, GF_BEGIN, GF_END, GetAncestor, GetClientRect,
-                GetCursorPos, GetQueueStatus, GetSystemMetrics, GetWindowRect, HTBOTTOM,
-                HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTMAXBUTTON, HTRIGHT,
-                HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_NOTOPMOST, HWND_TOPMOST, IsIconic, IsZoomed,
-                MB_ICONINFORMATION, MB_OK, MB_SETFOREGROUND, MF_STRING, MINMAXINFO,
+                GA_ROOT, GCLP_HBRBACKGROUND, GF_BEGIN, GF_END, GF_INERTIA, GetAncestor,
+                GetClientRect, GetCursorPos, GetQueueStatus, GetSystemMetrics, GetWindowRect,
+                HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTMAXBUTTON,
+                HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_NOTOPMOST, HWND_TOPMOST, IsIconic,
+                IsZoomed, MB_ICONINFORMATION, MB_OK, MB_SETFOREGROUND, MF_STRING, MINMAXINFO,
                 NCCALCSIZE_PARAMS, PostMessageW, QS_MOUSEBUTTON, RegisterWindowMessageW,
                 SM_CXFRAME, SM_CXPADDEDBORDER, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
                 SM_SWAPBUTTON, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SPI_GETCLIENTAREAANIMATION,
@@ -11902,9 +11902,16 @@ mod windows_impl {
         /// A `GID_PAN` message, read. The step it makes, if it makes one, goes
         /// to [`Self::panned`]; a message that neither opens nor moves a pan
         /// says nothing.
-        fn pan_moved(&self, begins: bool, ends: bool, screen: (i32, i32), client: (i32, i32)) {
+        fn pan_moved(
+            &self,
+            begins: bool,
+            inertia: bool,
+            ends: bool,
+            screen: (i32, i32),
+            client: (i32, i32),
+        ) {
             let mut pan = self.pan.get();
-            let step = pan.step(begins, ends, screen, client);
+            let step = pan.step(begins, inertia, ends, screen, client);
             self.pan.set(pan);
             if let Some(step) = step {
                 (self.panned)(step);
@@ -12170,6 +12177,7 @@ mod windows_impl {
         let _ = unsafe { windows::Win32::Graphics::Gdi::ScreenToClient(hwnd, &mut client) };
         state.pan_moved(
             info.dwFlags & GF_BEGIN != 0,
+            info.dwFlags & GF_INERTIA != 0,
             info.dwFlags & GF_END != 0,
             screen,
             (client.x, client.y),
@@ -17498,25 +17506,28 @@ mod windows_impl {
                     pan: Cell::new(PanTrack::default()),
                 }
             };
-            window.pan_moved(true, false, (500, 400), (20, 30));
-            window.pan_moved(false, false, (500, 420), (20, 50));
-            window.pan_moved(false, false, (500, 420), (20, 50));
-            window.pan_moved(false, false, (500, 390), (20, 20));
-            window.pan_moved(false, true, (500, 390), (20, 20));
+            window.pan_moved(true, false, false, (500, 400), (20, 30));
+            window.pan_moved(false, false, false, (500, 420), (20, 50));
+            window.pan_moved(false, false, false, (500, 420), (20, 50));
+            window.pan_moved(false, true, false, (500, 390), (20, 20));
+            window.pan_moved(false, false, true, (500, 390), (20, 20));
             assert_eq!(
                 *steps.borrow(),
                 vec![
                     PanStep {
                         began_at: Some((20, 30)),
-                        travel: (0, 0)
+                        travel: (0, 0),
+                        inertia: false
                     },
                     PanStep {
                         began_at: None,
-                        travel: (0, 20)
+                        travel: (0, 20),
+                        inertia: false
                     },
                     PanStep {
                         began_at: None,
-                        travel: (0, -30)
+                        travel: (0, -30),
+                        inertia: true
                     },
                 ],
                 "the opening point, then one step per message that moved"
