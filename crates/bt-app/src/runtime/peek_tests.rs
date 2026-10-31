@@ -351,6 +351,9 @@ fn a_double_click_on_the_cards_recording_starts_it_there() {
         f64::from(picture[0] + 20.0),
         f64::from(picture[1] + (picture[3] - picture[1]) / 4.0),
     );
+    // Counted on the held pointer clock (row 124): each pair below is one double click however
+    // long the machine takes between its presses.
+    folio.hold_the_pointer_clock();
     let press = |folio: &mut HeadlessFolio| {
         folio
             .runtime()
@@ -371,6 +374,14 @@ fn a_double_click_on_the_cards_recording_starts_it_there() {
         !press(&mut folio),
         "the first press is the card's own click"
     );
+    // A quick press the held clock puts a pair window later is a first press too. MUTATION (the
+    // seam bypassed): count `double_click_on_the_cards_video`'s press at its own `Instant::now()`
+    // — the quick press pairs and this assertion goes red.
+    folio.pointer_clock_runs(crate::MULTI_CLICK_INTERVAL + std::time::Duration::from_millis(1));
+    assert!(
+        !press(&mut folio),
+        "a press the held clock puts past the pair window is a first press, however quick the hand"
+    );
     assert!(
         press(&mut folio),
         "the second of the pair is the card's double click"
@@ -381,19 +392,14 @@ fn a_double_click_on_the_cards_recording_starts_it_there() {
         "the recording plays inside the card: {playing:?}"
     );
 
-    // The pair window runs out, as the clock would have moved it: the next press is a first one.
-    for tab in &mut folio.window.tabs {
-        if let Some((_, _, when)) = tab.preview_image_clicks.last.as_mut() {
-            *when = when
-                .checked_sub(crate::MULTI_CLICK_INTERVAL + std::time::Duration::from_millis(1))
-                .expect("the clock has run longer than one pair window");
-        }
-    }
+    // The pair window runs out: the next press is a first one.
+    folio.pointer_clock_runs(crate::MULTI_CLICK_INTERVAL + std::time::Duration::from_millis(1));
     assert!(!press(&mut folio), "a first press again");
     assert!(press(&mut folio), "and its pair");
-    let paused = state(&folio, &|state| !state.playing);
+    // Not ended: a recording that ran out is not playing either, and must not pass for the pause.
+    let paused = state(&folio, &|state| !state.playing && !state.ended);
     assert!(
-        !paused.playing,
+        !paused.playing && !paused.ended,
         "a double click on a playing card pauses it: {paused:?}"
     );
     folio.window.video.shutdown_all();

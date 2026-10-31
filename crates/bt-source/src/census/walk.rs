@@ -401,7 +401,29 @@ impl<'w, 'd> Walk<'w, 'd> {
                     self.bind(item, element.clone(), inexact(origin), mode);
                 }
             }
+            // A pattern a macro writes, or one `syn` keeps as tokens: any name in it may be one it
+            // binds, so each is untyped here and an outer binding, or a function, of that name
+            // does not show through (plan row 115; the call graph's rule since row 101).
+            syn::Pat::Macro(pattern) => self.bind_unknown_names(pattern.mac.tokens.clone()),
+            syn::Pat::Verbatim(tokens) => self.bind_unknown_names(tokens.clone()),
             _ => {}
+        }
+    }
+
+    /// Every name in a pattern's tokens (a macro's, or what `syn` keeps verbatim), defined
+    /// untyped: the rules cannot see which of them the pattern binds. It defines every
+    /// identifier token, path heads and keywords too: it refuses too much, never guesses.
+    fn bind_unknown_names(&mut self, tokens: proc_macro2::TokenStream) {
+        for token in tokens {
+            match token {
+                proc_macro2::TokenTree::Ident(name) => self.define(
+                    &name.to_string(),
+                    Ty::unknown("a name a macro's pattern may bind"),
+                    None,
+                ),
+                proc_macro2::TokenTree::Group(group) => self.bind_unknown_names(group.stream()),
+                proc_macro2::TokenTree::Punct(_) | proc_macro2::TokenTree::Literal(_) => {}
+            }
         }
     }
 
@@ -705,6 +727,18 @@ impl<'w, 'd> Walk<'w, 'd> {
             .collect();
         let args: Vec<Val> = call.args.iter().map(|arg| self.eval(arg)).collect();
         let last = segments.last().cloned().unwrap_or_default();
+        if segments.len() == 1 && self.lookup(&last).is_some() {
+            // A binding called (a parameter, a `let`, a closure's or a pattern's name, a name in a
+            // macro's pattern), innermost first: never the package's function of that name (plan
+            // row 115). Refused as the call graph refuses it; `call_edge` follows it to nothing.
+            return (
+                Val::unknown(format!(
+                    "`{last}`, a binding called: a stored closure or a function pointer"
+                )),
+                Vec::new(),
+                Callees::default(),
+            );
+        }
         if segments.len() == 1 && last == "Some" && args.len() == 1 {
             let val = Val {
                 ty: option_of(args[0].ty.clone()),
