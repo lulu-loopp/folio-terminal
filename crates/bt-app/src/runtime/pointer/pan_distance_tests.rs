@@ -121,11 +121,13 @@ fn a_pan_of_n_pixels_moves_a_shell_pane_n_pixels() {
 /// PIN (0.4.9 plan row 117) — **a position the system reports twice moves the pane once**: the
 /// door's own arithmetic ([`bt_platform::PanTrack`]) answers a repeated position with no step, so
 /// a begin and three moves of 40, 0 (the same point again) and 40 pixels scroll the pane 80 pixels
-/// back, not 120. Green before row 117 too (§1: no road spends a pan twice).
+/// back, not 120; and the loop's spend asked a second time in the same turn finds nothing left
+/// to spend. Green before row 117 too (§1: no road spends a pan twice).
 ///
 /// MUTATION: measure each step from the begin instead of from the previous message (leave
 /// `last` at the begin's point in `PanTrack::step`) — the repeated position is travel again and
-/// the pane moves 200 pixels.
+/// the pane moves 160 pixels. Or copy the parked steps out instead of taking them in
+/// `spend_parked_pans` — the second spend moves the pane again, 160 pixels.
 #[test]
 fn a_pan_position_reported_twice_moves_the_pane_once() {
     let mut folio = a_window("pan-twice");
@@ -137,6 +139,9 @@ fn a_pan_position_reported_twice_moves_the_pane_once() {
         .filter_map(|(begins, y)| track.step(begins, false, false, (400, y), at))
         .collect();
     runtime.window.parked_pans.borrow_mut().extend(steps);
+    runtime
+        .spend_parked_pans()
+        .expect("the parked pans are spent");
     spent(&mut runtime);
     assert_eq!(
         runtime.pane(seat).view.projection.scroll_offset_subpixels(),
@@ -180,7 +185,8 @@ fn wheel_reports(bytes: &[u8]) -> usize {
 /// held in birth so the bytes meant for its shell are kept where the test can read them.
 ///
 /// RED with the edit undone (three lines a notch where it ran): six reports, one per cell.
-/// On macOS the system's answer is one line a notch, so the count is six there before and after.
+/// Where the system's answer is one line a notch (macOS always, Windows set to one line), the
+/// count is six before and after, and the test is a pin there, not a RED.
 ///
 /// MUTATION: divide the pixel arm of `take_forward_wheel_notches` by the cell again — six reports.
 #[test]

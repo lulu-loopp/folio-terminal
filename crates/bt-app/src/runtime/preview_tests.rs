@@ -3666,23 +3666,36 @@ fn a_finger_over_a_picture_carries_it_and_never_zooms_it() {
     );
 }
 
-/// RED (0.4.9 plan row 117, E3) — **a finger over a recording's picture leaves its volume
-/// alone**: two notches' worth of pan over the picture of a playing recording at 50 % changes
-/// nothing, and the one wheel notch after it takes the volume to 55 %, so the pan had its chance
+/// RED (0.4.9 plan row 117, E3) — **a finger over a recording changes neither its volume nor its
+/// size**, wherever on the recording it slides: over the still that stands before the engine has
+/// started, the pan leaves the picture at Fit and starts nothing; over the picture of the playing
+/// recording at 50 %, two notches' worth of pan leave the volume alone; over its bar, the same;
+/// and the one wheel notch after all three takes the volume to 55 %, so every pan had its chance
 /// and moved nothing.
 ///
-/// RED with the edit undone: the pan was two wheel notches, the volume went to 60 % and the
-/// notch after it to 65 %.
+/// RED with the edit undone (both finger stations of `Runtime::mouse_wheel`): the pans over the
+/// picture and over the bar were wheel notches, the volume went 50 → 70 → 90 % and the notch
+/// after them to 95 %. The still is a pin: undone, its pan still zooms nothing and starts nothing.
 ///
 /// MUTATION: drop the finger's station before the wheel's video station in `Runtime::mouse_wheel`
-/// — the pan moves the volume and the wait for 55 % never ends on it.
+/// — the pan over the playing picture moves the volume and the wait for 55 % never ends on it.
 #[test]
-fn a_finger_over_a_recordings_picture_leaves_its_volume_alone() {
+fn a_finger_over_a_recording_changes_neither_its_volume_nor_its_size() {
     let _ledger = crate::test_support::ledger_gate();
     let before = bt_platform::video::engine::engines_outstanding();
     let (mut folio, surface) = a_recording_beside_a_shell("video-picture-finger");
     let stage = stage_of(&mut folio, surface);
     let over = on_the_picture(stage, 20.0);
+    a_finger_pans(&mut folio, over, (0, 240));
+    assert_eq!(
+        zoom_of(&mut folio, surface),
+        crate::ImageZoom::FIT,
+        "a finger over the recording's still leaves it at Fit"
+    );
+    assert!(
+        folio.window.video.get(surface).is_none(),
+        "and starts nothing"
+    );
     click(&mut folio, over);
     loaded(&folio, surface);
     folio
@@ -3693,6 +3706,18 @@ fn a_finger_over_a_recordings_picture_leaves_its_volume_alone() {
         .set_volume(0.5, Instant::now());
     played(&folio, surface, |state| (state.volume - 0.5).abs() < 1e-6);
     a_finger_pans(&mut folio, over, (0, 240));
+    folio.move_to(over);
+    let layout = folio
+        .runtime()
+        .video_bar_layout_of(surface)
+        .expect("the hand over the playing picture puts its bar up");
+    let bar = centre(layout.at.expect("a pane's bar has its elapsed clock"));
+    a_finger_pans(&mut folio, bar, (0, 240));
+    assert_eq!(
+        zoom_of(&mut folio, surface),
+        crate::ImageZoom::FIT,
+        "a finger over the picture or the bar leaves the recording's size alone"
+    );
     folio.move_to(over);
     {
         let mut runtime = folio.runtime();
@@ -3707,7 +3732,7 @@ fn a_finger_over_a_recordings_picture_leaves_its_volume_alone() {
     let after = played(&folio, surface, |state| (state.volume - 0.55).abs() < 1e-6);
     assert!(
         (after.volume - 0.55).abs() < 1e-6,
-        "the pan left the volume at 50 % and the notch took it to 55 %: {after:?}"
+        "the pans left the volume at 50 % and the notch took it to 55 %: {after:?}"
     );
     folio.window.video.shutdown_all();
     crate::test_support::engines_settling_to(before);
