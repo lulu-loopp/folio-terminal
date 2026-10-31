@@ -1156,10 +1156,14 @@ impl Occurrence {
     ///   neither an item nor a module — a module-level `#[cfg(test)] use`,
     ///   `const` or `type`, an `impl` header, a `macro_rules!`, a `let`, an
     ///   expression or a match arm inside a product function — each of which the
-    ///   three grains above called product whatever its `cfg` said. Not read: a
-    ///   `cfg` inside a macro invocation's tokens, which `syn` does not parse; the
-    ///   bytes under it are product here (today `crates/bt-app/src/i18n.rs:355`
-    ///   and `:357`, inside `text_entries! { … }`).
+    ///   three grains above called product whatever its `cfg` said. Inside a
+    ///   macro's tokens (plan row 109) it reads the entries of a list of
+    ///   attribute-carrying names and that list's `macro_rules!` items — a
+    ///   definition no `cfg` conditions, pasting the names only as an `enum`'s
+    ///   whole body, with no macro invocation, attribute macro, foreign `derive`
+    ///   or `macro_use` between it and the invocation (`bt-app`'s
+    ///   `text_entries!`); every other `cfg` there refuses the index, so no gate
+    ///   in a macro is counted as product unread.
     ///
     /// An item is in the product if **any** of its identities is, which is
     /// §2.3's "any owning path" said one level down: a product file that a test
