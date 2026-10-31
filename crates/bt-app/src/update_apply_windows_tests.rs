@@ -39,7 +39,7 @@ use bt_platform::trust_harness::{
 use bt_winres::digest::sha256;
 
 use crate::update_apply::{
-    CountedClock, LastTrialCommit, Left, Window, commit_last_trial_as, now_ms,
+    CountedClock, LastTrialCommit, Left, WatchedWallClock, Window, commit_last_trial_as, now_ms,
 };
 use crate::update_handoff::{Leaving, Spawner};
 use crate::update_job::Failure;
@@ -572,6 +572,7 @@ impl Install {
             trial_clock: Arc::new(WallClock),
             held_clock: Arc::new(WallClock),
             decision_clock: Arc::new(CountedClock::awaiting_the_decision(&self.home, self.txn)),
+            wait_clock: Arc::new(WallClock),
             me: Running {
                 pid: std::process::id(),
                 started: 0,
@@ -771,15 +772,82 @@ fn applied(install: &Install, limits: Limits, world: Fake) -> (Ended, Fake) {
     }
 }
 
+/// **`road`'s end, awaited within the suite's patience while `held` is still
+/// held** (T-UPDATE-APPLIER-LOCK-WAITS): a road that waits for what this test
+/// holds waits only up to its own deadline, so it ends with `held` still held,
+/// and `held` is let go after. A road that waits past its deadline is red here,
+/// within [`crate::lane::PATIENCE`], never a hang of the whole run — and then
+/// `held` is kept for the life of the test process: each test owns its
+/// fixture, so the road stays behind the hold and never runs on past the
+/// failed test into the folder that test's end removes.
+fn ended_while_held<T, H>(held: H, road: JoinHandle<T>) -> T {
+    if !crate::lane::within_patience(|| road.is_finished()) {
+        std::mem::forget(held);
+        panic!("the road waited past its own deadline for a hold this test keeps");
+    }
+    drop(held);
+    match road.join() {
+        Ok(answer) => answer,
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
+/// [`applied`], while this test holds `held` ([`ended_while_held`]).
+fn applied_while_held<H>(install: &Install, limits: Limits, world: Fake, held: H) -> (Ended, Fake) {
+    ended_while_held(
+        held,
+        start(install.road(limits), install.txn, install.applier, world),
+    )
+}
+
+/// **P is at its wait for the transaction lock**: its election is over — the
+/// window's mark names `me` and the election lock is free — and the road's next
+/// step is the lock (`apply_under_the_lock`). Awaited as state within the
+/// suite's patience; an applier that ends first is red.
+fn until_past_the_election<T>(install: &Install, me: Running, applier: &JoinHandle<T>) {
+    let elected = crate::lane::within_patience(|| {
+        applier.is_finished()
+            || (crate::update_apply::window_owner(&install.home, install.txn) == Some(me)
+                && install_txn::try_hold(
+                    &crate::update_apply::owner_lock_path(&install.home, install.txn),
+                    Hold::Exclusive,
+                )
+                .ok()
+                .flatten()
+                .is_some())
+    });
+    assert!(elected, "P never took the window");
+    assert!(
+        !applier.is_finished(),
+        "the applier ended before its wait for the lock"
+    );
+}
+
 /// The recovery door, as an ordinary start hands itself to it, run to its
 /// end: its exit code, and the world.
 fn recovered(install: &Install, limits: Limits, world: Fake) -> (i32, Fake) {
-    recovered_on(install.road(limits), world)
+    match start_recovered(install, limits, world).join() {
+        Ok(answer) => answer,
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
+/// [`recovered`], on its own worker, started now.
+fn start_recovered(install: &Install, limits: Limits, world: Fake) -> JoinHandle<(i32, Fake)> {
+    start_recovered_on(install.road(limits), world)
 }
 
 /// [`recovered`] over `road`.
-fn recovered_on(road: Road, mut world: Fake) -> (i32, Fake) {
-    on_a_worker(move |worker| {
+fn recovered_on(road: Road, world: Fake) -> (i32, Fake) {
+    match start_recovered_on(road, world).join() {
+        Ok(answer) => answer,
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
+/// [`start_recovered`] over `road`.
+fn start_recovered_on(road: Road, mut world: Fake) -> JoinHandle<(i32, Fake)> {
+    start_on_a_worker(move |worker| {
         let code = crate::update_recover::run_windows(worker, &road, Some(&handed()), &mut world);
         (code, world)
     })
@@ -915,6 +983,13 @@ fn block_rolledout(install: &Install) {
 /// `claim_data_directory` until it succeeds, then immediately releases it …
 /// If 60 s pass, P journals `Failed` … and exits without touching anything."
 ///
+/// O lets go of the lock once P is at its wait for it (its election over),
+/// and of the claim in the pause of P's first refused ask of it (the road's
+/// `wait_clock`, watched): what the disk says then is what P wrote while the
+/// claim was held, and a move before that pause is red where it happens. The
+/// holds kept to the end are awaited while still held, within the suite's
+/// patience.
+///
 /// MUTATION: in `update_apply::wait_for_the_claim`, answer `Ok(())` for a
 /// claim that is held.
 #[test]
@@ -927,35 +1002,66 @@ fn p_waits_for_o_and_releases_the_claim() {
     let held = install_txn::try_hold(&install.home.lock(), Hold::Exclusive)
         .unwrap()
         .unwrap();
-    let (ended, _) = applied(&install, limits(600, 20_000), install.world(Trial::Answers));
+    let (ended, _) = applied_while_held(
+        &install,
+        limits(600, 20_000),
+        install.world(Trial::Answers),
+        held,
+    );
     assert_eq!(ended, Ended::OldHeldTheLock);
     assert_eq!(std::fs::read(install.home.journal()).unwrap(), journal);
-    drop(held);
 
     // O lets go of the lock, then of the claim.
     let lock = install_txn::try_hold(&install.home.lock(), Hold::Exclusive)
         .unwrap()
         .unwrap();
-    let claim = crate::persist::try_claim(&install.data).unwrap();
-    let applier = start(
-        install.road(limits(20_000, 20_000)),
-        install.txn,
-        install.applier,
-        install.world(Trial::Answers),
-    );
-    std::thread::sleep(Duration::from_millis(300));
-    assert_eq!(install.on_disk().body.phase.kind(), PhaseKind::Handoff);
-    drop(lock);
-    std::thread::sleep(Duration::from_millis(400));
+    let claim = Arc::new(Mutex::new(Some(
+        crate::persist::try_claim(&install.data).unwrap(),
+    )));
+    // The journal's phase in the pause of P's first refused ask of the claim.
+    let at_the_claim = Arc::new(Mutex::new(None::<PhaseKind>));
+    let clock = {
+        let (claim, seen, journal) = (
+            Arc::clone(&claim),
+            Arc::clone(&at_the_claim),
+            install.home.journal(),
+        );
+        Arc::new(WatchedWallClock::new(move |pause| {
+            if pause == 1 {
+                let on_disk = Journal::parse(&std::fs::read(&journal).unwrap()).unwrap();
+                *seen.lock().unwrap() = Some(on_disk.body.phase.kind());
+                claim.lock().unwrap().take();
+            }
+        }))
+    };
+    let mut world = install.world(Trial::Answers);
+    let let_go = Arc::clone(&at_the_claim);
+    world.on_move = Some(Box::new(move |_| {
+        assert!(
+            let_go.lock().unwrap().is_some(),
+            "a move while O still held the claim"
+        );
+    }));
+    let road = Road {
+        wait_clock: clock.clone(),
+        ..install.road(limits(20_000, 20_000))
+    };
+    let me = road.me;
+    let applier = start(road, install.txn, install.applier, world);
+    until_past_the_election(&install, me, &applier);
     assert_eq!(
         install.on_disk().body.phase.kind(),
         PhaseKind::Handoff,
-        "nothing is written while the claim is held"
+        "nothing is written while O holds the lock"
     );
-    nothing_moved(&install);
-    drop(claim);
+    drop(lock);
     let (ended, world) = applier.join().unwrap();
     assert_eq!(ended, Ended::Committed, "{:?}", world.said);
+    assert_eq!(
+        *at_the_claim.lock().unwrap(),
+        Some(PhaseKind::Handoff),
+        "P waited for the claim, and nothing is written while it is held"
+    );
     assert!(
         crate::persist::try_claim(&install.data).is_ok(),
         "the applier let the claim go"
@@ -966,8 +1072,12 @@ fn p_waits_for_o_and_releases_the_claim() {
         return;
     };
     let claim = crate::persist::try_claim(&install.data).unwrap();
-    let (ended, world) = applied(&install, limits(600, 20_000), install.world(Trial::Answers));
-    drop(claim);
+    let (ended, world) = applied_while_held(
+        &install,
+        limits(600, 20_000),
+        install.world(Trial::Answers),
+        claim,
+    );
     assert_eq!(ended, Ended::Abandoned, "{:?}", world.said);
     assert_eq!(install.on_disk().body.phase, Phase::Abandoned);
     nothing_moved(&install);
@@ -2705,13 +2815,19 @@ fn every_phase_left_by_a_dead_applier_still_opens_folio() {
                 .unwrap()
                 .unwrap()
         });
-        let old_within = if copy.is_some() { 1_500 } else { 20_000 };
-        let (code, world) = recovered(
-            &install,
-            limits(old_within, 1_500),
-            install.world(Trial::Silent),
-        );
-        drop(copy);
+        let (code, world) = match copy {
+            // The rollback's wait for the admission ends at its own deadline,
+            // with the copy still holding it.
+            Some(copy) => ended_while_held(
+                copy,
+                start_recovered(&install, limits(1_500, 1_500), install.world(Trial::Silent)),
+            ),
+            None => recovered(
+                &install,
+                limits(20_000, 1_500),
+                install.world(Trial::Silent),
+            ),
+        };
         let phase = install.on_disk().body.phase;
         assert_eq!(phase.kind(), ends, "{tag}: {:?}", world.said);
         if let Some(outcome) = outcome {
@@ -2789,13 +2905,16 @@ fn a_recovery_leaves_handoff_to_an_election_still_in_flight() {
     )
     .unwrap()
     .expect("the election lock is free");
-    let road = install.road(limits(20_000, 20_000));
-    let mut world = install.world(Trial::Silent);
-    let (_code, world) = on_a_worker(move |worker| {
-        let code = crate::update_recover::run_windows(worker, &road, Some(&handed()), &mut world);
-        (code, world)
-    });
-    drop(in_flight);
+    // Recovery's wait for the election ends at `ELECTION_WITHIN`, with the
+    // election still held.
+    let (_code, world) = ended_while_held(
+        in_flight,
+        start_recovered(
+            &install,
+            limits(20_000, 20_000),
+            install.world(Trial::Silent),
+        ),
+    );
     assert!(
         said_at(&world, "an applier's window election is still in flight").is_some(),
         "{:?}",
@@ -3052,13 +3171,13 @@ fn a_journal_write_refused_for_good_still_opens_the_installed_build_with_the_inc
     let held =
         bt_platform::trust_harness::hold_without_delete_sharing(&install.home.journal()).unwrap();
     let began = Instant::now();
-    let (ended, world) = applied(
+    let (ended, world) = applied_while_held(
         &install,
         limits(20_000, 20_000),
         install.world(Trial::Answers),
+        held,
     );
     let waited = began.elapsed();
-    drop(held);
     let Ended::Failed(why) = &ended else {
         panic!("{ended:?}: {:?}", world.said);
     };
@@ -3689,8 +3808,12 @@ fn an_applier_that_never_gets_the_lock_still_opens_folio() {
     let held = install_txn::try_hold(&install.home.lock(), Hold::Exclusive)
         .unwrap()
         .unwrap();
-    let (ended, world) = applied(&install, limits(600, 20_000), install.world(Trial::Answers));
-    drop(held);
+    let (ended, world) = applied_while_held(
+        &install,
+        limits(600, 20_000),
+        install.world(Trial::Answers),
+        held,
+    );
     assert_eq!(ended, Ended::OldHeldTheLock, "{:?}", world.said);
     assert_eq!(std::fs::read(install.home.journal()).unwrap(), journal);
     assert_eq!(
@@ -4071,8 +4194,7 @@ fn a_refused_start_on_the_way_out_falls_back_to_the_rescue_copy() {
         .unwrap();
     let mut world = install.world(Trial::Answers);
     world.refuse_start_of = Some(install.installed.clone());
-    let (ended, world) = applied(&install, limits(600, 20_000), world);
-    drop(held);
+    let (ended, world) = applied_while_held(&install, limits(600, 20_000), world, held);
     assert_eq!(ended, Ended::OldHeldTheLock, "{:?}", world.said);
     assert_eq!(
         world.opened,
@@ -4138,26 +4260,15 @@ fn the_window_is_handed_over_by_one_mark_and_opened_exactly_once() {
         .unwrap();
     let mut road = install.road(limits(1_500, 20_000));
     road.me = crate::update_apply::this_process();
+    let me = road.me;
     let applier = start(
         road,
         install.txn,
         install.applier,
         install.world(Trial::Answers),
     );
-    let give_up = Instant::now() + Duration::from_secs(20);
     // P's election is over: the mark is written and its lock let go.
-    while crate::update_apply::window_owner(&install.home, install.txn).is_none()
-        || install_txn::try_hold(
-            &crate::update_apply::owner_lock_path(&install.home, install.txn),
-            Hold::Exclusive,
-        )
-        .ok()
-        .flatten()
-        .is_none()
-    {
-        assert!(Instant::now() < give_up, "P never took the window");
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    until_past_the_election(&install, me, &applier);
     assert_eq!(
         crate::update_apply::window_owner(&install.home, install.txn),
         Some(crate::update_apply::this_process()),
@@ -4176,8 +4287,7 @@ fn the_window_is_handed_over_by_one_mark_and_opened_exactly_once() {
         "steps 2–3: O finds P's mark"
     );
     assert!(starts.calls.is_empty(), "O starts nothing");
-    let (ended, world) = applier.join().unwrap();
-    drop(lock);
+    let (ended, world) = ended_while_held(lock, applier);
     assert_eq!(ended, Ended::OldHeldTheLock, "{:?}", world.said);
     assert_eq!(
         world.opened,
@@ -4210,17 +4320,18 @@ fn the_window_is_handed_over_by_one_mark_and_opened_exactly_once() {
     let journal = std::fs::read(install.home.journal()).unwrap();
     let mut road = install.road(limits(1_500, 20_000));
     road.me = crate::update_apply::this_process();
-    let (ended, world) = match start(
-        road,
-        install.txn,
-        install.applier,
-        install.world(Trial::Answers),
-    )
-    .join()
-    {
-        Ok(answer) => answer,
-        Err(panic) => std::panic::resume_unwind(panic),
-    };
+    // P asks again while O's mark is live and gives up at its own deadline, O
+    // still running (ended with the fixture, as every process the test
+    // started).
+    let (ended, world) = ended_while_held(
+        (),
+        start(
+            road,
+            install.txn,
+            install.applier,
+            install.world(Trial::Answers),
+        ),
+    );
     assert!(matches!(ended, Ended::Refused(_)), "{ended:?}");
     assert!(world.opened.is_empty(), "{:?}", world.said);
     assert_eq!(
@@ -4255,8 +4366,7 @@ fn a_start_counts_only_when_acknowledged_and_the_last_resort_is_a_window_here() 
         .unwrap();
     let mut world = install.world(Trial::Answers);
     world.starts_die = 1;
-    let (ended, world) = applied(&install, limits(600, 20_000), world);
-    drop(held);
+    let (ended, world) = applied_while_held(&install, limits(600, 20_000), world, held);
     assert_eq!(ended, Ended::OldHeldTheLock);
     assert_eq!(
         world.opened,
@@ -4276,8 +4386,7 @@ fn a_start_counts_only_when_acknowledged_and_the_last_resort_is_a_window_here() 
         .unwrap();
     let mut world = install.world(Trial::Answers);
     world.refuse_every_start = true;
-    let (ended, world) = applied(&install, limits(600, 20_000), world);
-    drop(held);
+    let (ended, world) = applied_while_held(&install, limits(600, 20_000), world, held);
     assert_eq!(ended, Ended::OldHeldTheLock);
     assert_eq!(world.opened.len(), 2, "both programs were tried");
     assert_eq!(
@@ -4689,18 +4798,44 @@ fn a_late_applier_after_os_wait_meets_os_replacement_and_never_commits() {
     assert_eq!(starts.len(), 1, "O's replacement");
     // O's replacement runs and holds the data directory.
     let replacement = crate::persist::try_claim(&install.data).unwrap();
-    let mut road = install.road(limits(4_000, 20_000));
-    road.me = applier;
-    let applier_run = start(
-        road,
-        install.txn,
-        install.applier,
-        install.world(Trial::Answers),
+    // O goes in the pause of P's first ask that found O's live mark (the
+    // road's `wait_clock`, watched): P has been seen waiting for O.
+    let o_marked_at_the_wait = Arc::new(Mutex::new(None::<bool>));
+    let clock = {
+        let (children, home, txn, seen) = (
+            install.children.clone(),
+            install.home.clone(),
+            install.txn,
+            Arc::clone(&o_marked_at_the_wait),
+        );
+        Arc::new(WatchedWallClock::new(move |pause| {
+            if pause == 1 {
+                *seen.lock().unwrap() =
+                    Some(crate::update_apply::window_owner(&home, txn) == Some(old));
+                children.end(old.pid);
+            }
+        }))
+    };
+    let road = Road {
+        me: applier,
+        wait_clock: clock,
+        ..install.road(limits(4_000, 20_000))
+    };
+    // P's wait for the claim O's replacement keeps ends at its own deadline.
+    let (ended, world) = ended_while_held(
+        replacement,
+        start(
+            road,
+            install.txn,
+            install.applier,
+            install.world(Trial::Answers),
+        ),
     );
-    std::thread::sleep(Duration::from_millis(300));
-    install.children.end(old.pid);
-    let (ended, world) = applier_run.join().unwrap();
-    drop(replacement);
+    assert_eq!(
+        *o_marked_at_the_wait.lock().unwrap(),
+        Some(true),
+        "P waited for O while O's mark was live"
+    );
     assert_eq!(ended, Ended::Abandoned, "{:?}", world.said);
     nothing_moved(&install);
     assert!(world.launched.is_empty(), "no trial: never committed");
@@ -6356,6 +6491,7 @@ fn rescue_part(root: &Path) {
             &Home::of(HostPlatform::Windows, &plan.installed).unwrap(),
             plan.txn,
         )),
+        wait_clock: Arc::new(WallClock),
         me,
         starter: install_flip::parent_of_this_process(),
         handed_back: Some(handed_back),
@@ -7326,8 +7462,7 @@ fn a_member_held_past_the_window_is_named_and_the_old_build_restored() {
     let mut world = install.world(Trial::Answers);
     let (hold, rounds, name) = held_in_set_at_the_flip(&install, &mut world, None);
     let (road, clock) = held_on_a_counted_clock(install.road(limits(20_000, 20_000)));
-    let (ended, world) = applied_on(&install, road, world);
-    drop(hold);
+    let (ended, world) = ended_while_held(hold, start(road, install.txn, install.applier, world));
     assert_eq!(ended, Ended::RolledBack, "{:?}", world.said);
     assert!(*rounds.lock().unwrap() > 1, "{:?}", world.said);
     assert_window_spent_on_the_count(&clock, &world);
@@ -7516,8 +7651,7 @@ fn an_old_file_held_past_the_window_leaves_the_rollback_stuck_and_named() {
         return;
     };
     let (road, clock) = held_on_a_counted_clock(install.road(limits(20_000, 20_000)));
-    let (code, world) = recovered_on(road, world);
-    drop(hold);
+    let (code, world) = ended_while_held(hold, start_recovered_on(road, world));
     assert_eq!(code, 0, "{:?}", world.said);
     assert!(*rounds.lock().unwrap() > 1, "{:?}", world.said);
     assert_window_spent_on_the_count(&clock, &world);

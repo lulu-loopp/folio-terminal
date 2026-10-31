@@ -1088,8 +1088,8 @@ the thread it would wait for is still held, awaited within the suite's patience,
 go before the verdict — never by timing it. The hand-off lane's flood and the trace sink's producers
 are read the same way, so a press, an offer, a settle or a writer that waits is red, not a hang, in
 these tests and in the trace sink's, the log writer's and the watchdog's tests that meet a full queue,
-a held writer or a held ring (row 106); the lane doors' gate-held tests (row 111) and the applier's
-lock waits behind a held lock (row 112) are not yet read this way. What such a verdict does
+a held writer or a held ring (row 106), and in the applier's (row 112, below); the lane doors'
+gate-held tests (row 111) are not yet read this way. What such a verdict does
 not catch is a bounded wait, or a give-up that ignores its budget, shorter than the suite's patience.
 
 2026-10-31 (T-UPDATE-APPLY-FLIP-HOLD-FLAKE): a road's wait for another thread or process that has no
@@ -1100,6 +1100,18 @@ read and paused on `Road::decision_clock`, and each held move of the Windows fli
 and `WallClock` in the product. The applier harnesses on both platforms hand a `CountedClock` whose first pause lasts until the
 trial's receipt is gone, within the suite's patience; the held-moment tests count the window's pauses. A product
 window raced by a test thread is not seen by the timing scan, which reads test bodies (plan row 125).
+
+2026-10-31 (T-UPDATE-APPLIER-LOCK-WAITS): the update applier's and recovery's give-ups behind a
+hold the test keeps — the transaction lock, the data directory's claim, the admission, the journal
+or a member held open, the election in flight, O alive — are awaited while the hold is still held,
+within the suite's patience (`ended_while_held` in `update_apply_windows_tests.rs` and
+`update_apply_macos_tests.rs`), and a road that waits past its deadline is red, not a hang; the hold
+is then kept for the life of the test process, so the road never runs on into the failed test's
+removed fixture. A hold let go "once the road waits" is let go in the pause of the road's first
+refused ask: the window election's asks again and both platforms' waits for the claim pause on the
+road's `wait_clock` (`update_apply::WaitClock`; `WallClock` in the product, `WatchedWallClock` under
+test), and the wait for the transaction lock is reached as state (the election over: the mark
+names the applier and the election lock is free).
 
 ## Test order and shared fixtures
 

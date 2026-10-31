@@ -577,6 +577,10 @@ pub(crate) struct Road {
     /// (`update_apply::note_unkept_after_trial_decision`) — [`WallClock`] in
     /// the product (T-UPDATE-APPLY-FLIP-HOLD-FLAKE).
     pub(crate) decision_clock: Arc<dyn WaitClock>,
+    /// **The clock the waits for O pause on** — the window election's asks
+    /// again and the data directory's claim (`update_apply::WaitClock`) —
+    /// [`WallClock`] in the product.
+    pub(crate) wait_clock: Arc<dyn WaitClock>,
     /// This process, by its pid and start time: what the window's mark names
     /// when this process takes it (`update_apply::OWNER_FILE`).
     pub(crate) me: Running,
@@ -612,6 +616,7 @@ impl Road {
             trial_clock: Arc::new(WallClock),
             held_clock: Arc::new(WallClock),
             decision_clock: Arc::new(WallClock),
+            wait_clock: Arc::new(WallClock),
             me: crate::update_apply::this_process(),
             starter: install_flip::parent_of_this_process(),
             handed_back: None,
@@ -833,6 +838,7 @@ pub(crate) fn apply(
     apply_electing(worker, road, txn, nonce, world, |worker, until| {
         crate::update_apply::take_the_window_for_applier(
             worker,
+            &*road.wait_clock,
             &road.home,
             txn,
             road.me,
@@ -1382,6 +1388,7 @@ impl<'a> Txn<'a> {
         }
         if let Err(why) = crate::update_apply::wait_for_the_claim(
             worker,
+            &*self.road.wait_clock,
             &self.road.data,
             self.road.limits.poll,
             window,
