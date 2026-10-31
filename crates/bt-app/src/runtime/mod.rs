@@ -32,6 +32,7 @@ pub(crate) mod profiles;
 mod quake;
 pub(crate) mod search;
 mod settings;
+mod storage;
 pub(crate) mod tabs;
 pub(crate) use windows::AfterTheWait;
 // The contrast theme's two readers outside this module: the boot's first reading and the

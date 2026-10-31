@@ -2466,3 +2466,215 @@ fn a_page_is_opened_on_the_place_the_window_door_names() {
         })]
     );
 }
+
+// ── the storage lane's answers, heard in the order they were asked (T-STORAGE-LANE-ORDER-BY-CONSTRUCTION) ──
+
+/// **Two windows, each with one tab holding a preview of a real file typed into**, their saves
+/// handed to one storage lane whose queue the test serves (`persist::StorageLane::scripted`).
+struct TwoWindowsSaving {
+    application: HeadlessApplication,
+    jobs: crate::persist::ScriptedJobs,
+    /// The lane every asker of the application asks on, as the product's share one.
+    lane: crate::persist::StorageLane,
+    /// Each window's id and the surface its tab's preview pane is, in window order.
+    windows: [(WindowId, crate::PreviewSurface); 2],
+    dir: std::path::PathBuf,
+}
+
+impl TwoWindowsSaving {
+    fn open(tag: &str) -> Self {
+        let dir = crate::test_support::disk_scratch(&format!("storage-order-{tag}"));
+        let typed = |name: &str| {
+            let path = dir.join(name);
+            std::fs::write(&path, READ).expect("the file is written");
+            let mut buffer = crate::test_support::buffer_read_from(&path);
+            assert!(buffer.edit_content(|body| {
+                body.push_str(TYPED);
+                true
+            }));
+            buffer
+        };
+        let (first_tab, first_seat) = tab_with_a_preview(1, vec![typed("一 first.txt")]);
+        let mut folio = HeadlessFolio::with_tabs(tag, vec![first_tab], 0);
+        let (lane, jobs) = crate::persist::StorageLane::scripted();
+        folio.app.preview_saves = crate::preview::PreviewSaves::on(lane.clone());
+        folio.app.session_store = crate::persist::SessionStore::at_on(
+            dir.join("session.json"),
+            dir.join("session.lock"),
+            lane.clone(),
+        );
+        let (second_tab, second_seat) = tab_with_a_preview(2, vec![typed("二 second.txt")]);
+        let other = headless_window(
+            &folio.app,
+            HeadlessParts::new(&folio.app.gpu, 2, (1200, 800), 1.0, &folio.ledger),
+            vec![second_tab],
+            0,
+        );
+        let mut application = HeadlessApplication::of(folio);
+        let first = application.id;
+        let second = WindowId::from(2);
+        application.folio.windows.insert(second, other);
+        Self {
+            application,
+            jobs,
+            lane,
+            windows: [
+                (first, crate::test_support::seat_of(crate::TabId(1), first_seat)),
+                (second, crate::test_support::seat_of(crate::TabId(2), second_seat)),
+            ],
+            dir,
+        }
+    }
+
+    /// `Ctrl+S` on window `at`'s pane: the save handed to the storage worker, as the press hands
+    /// it.
+    fn press_save(&mut self, at: usize) {
+        let (id, surface) = self.windows[at];
+        let mut runtime = self
+            .application
+            .folio
+            .runtime(id)
+            .expect("the window is open");
+        let crate::Runtime { app, window } = &mut runtime;
+        let pool = &mut window.tabs[0].preview_pool;
+        let source = pool
+            .buffers()
+            .next()
+            .expect("the tab's buffer")
+            .source()
+            .clone();
+        let buffer = pool.get_mut(&source).expect("the tab's buffer");
+        assert_eq!(
+            buffer.request_save(&mut app.preview_saves, surface),
+            crate::preview::SaveAsked::Sent,
+            "the save is handed to the worker"
+        );
+    }
+
+    /// **The worker serves the next save on drive 7, which cannot exchange two files in one
+    /// step**: the save lands by an ordinary write.
+    fn serve_on_drive_seven(&self) {
+        let job = crate::test_support::next_document(&self.jobs);
+        let _ = crate::test_support::serve_on_a_volume(
+            job,
+            crate::test_support::NoExchangeDrive {
+                drive: 7,
+                seen: std::sync::Arc::default(),
+            },
+            None,
+        );
+    }
+
+    /// What window `at`'s pane says about its last save.
+    fn notice(&mut self, at: usize) -> Option<String> {
+        let (id, surface) = self.windows[at];
+        let runtime = self
+            .application
+            .folio
+            .runtime(id)
+            .expect("the window is open");
+        runtime
+            .preview_pane(surface)
+            .and_then(|pane| pane.notice())
+            .map(|(notice, _)| notice.clone())
+    }
+}
+
+impl Drop for TwoWindowsSaving {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// RED (T-STORAGE-LANE-ORDER-BY-CONSTRUCTION, plan row 104, T2) — **the storage lane's answers
+/// are heard in the order they were asked, across the windows**: the second window's save is
+/// asked first and the first window's second, both land on a drive that cannot exchange two
+/// files in one step, and both have ended before the one wake's turn
+/// (`AppEvent::DocumentsAnswered`). The sentence of a save by an ordinary write is said once per
+/// drive (`PreviewSaves::saved`), so it belongs to the save asked first — the second window's —
+/// and the first window's pane says "Saved". No timing decides it: every answer is in before the
+/// drain.
+///
+/// Red on the base (`b31af5d89`): the preview's answers were heard window by window, so the first
+/// window's — asked second — took the drive's one sentence.
+#[test]
+fn the_storage_lanes_answers_are_heard_in_the_order_they_were_asked_across_the_windows() {
+    let mut saving = TwoWindowsSaving::open("across-windows");
+    saving.press_save(1);
+    saving.press_save(0);
+    saving.serve_on_drive_seven();
+    saving.serve_on_drive_seven();
+    saving
+        .application
+        .folio
+        .take_document_answers()
+        .expect("the answers are heard");
+    assert_eq!(
+        saving.notice(1).as_deref(),
+        Some(crate::preview::preview_saved_ordinarily_notice()),
+        "the save asked first says the drive's one sentence"
+    );
+    assert_eq!(
+        saving.notice(0).as_deref(),
+        Some(crate::preview::preview_saved_notice()),
+        "the save asked second says Saved"
+    );
+}
+
+/// RED (T-STORAGE-LANE-ORDER-BY-CONSTRUCTION, plan row 104, T2) — **one drain hears every
+/// asker's answers in the order the lane admitted them**: a preview save in the second window, a
+/// `settings.json` write, and a preview save in the first window, asked in that order on one
+/// storage lane and all ended before the wake's turn, are heard preview, settings, preview — not
+/// asker by asker, nor window by window.
+///
+/// MUTATION: in `App::storage_answers`, hand the askers' answers on one asker after another
+/// instead of merging them (`lane::in_admission_order`) — the drain hears settings first.
+#[test]
+fn one_drain_hears_every_askers_answers_in_the_order_the_lane_admitted_them() {
+    let mut saving = TwoWindowsSaving::open("across-askers");
+    let lane = saving.lane.clone();
+    let settings_path = saving.dir.join(crate::persist::SETTINGS_FILE_NAME);
+    saving
+        .application
+        .folio
+        .app
+        .as_mut()
+        .expect("the application")
+        .settings_store = crate::persist::SettingsStore::at_on(settings_path, lane);
+    saving.press_save(1);
+    assert!(
+        saving
+            .application
+            .folio
+            .app
+            .as_mut()
+            .expect("the application")
+            .settings_store
+            .store(bt_persist::SettingsV1 {
+                terminal_font_size: 19,
+                ..bt_persist::SettingsV1::default()
+            }),
+        "the setting is handed to the worker"
+    );
+    saving.press_save(0);
+    saving.serve_on_drive_seven();
+    let settings = crate::test_support::next_document(&saving.jobs);
+    let _ = crate::test_support::serve_on_a_worker(settings, None);
+    saving.serve_on_drive_seven();
+    let _ = crate::runtime::storage::take_heard();
+    saving
+        .application
+        .folio
+        .take_document_answers()
+        .expect("the answers are heard");
+    assert_eq!(
+        crate::runtime::storage::take_heard(),
+        ["preview", "settings", "preview"],
+        "heard in the order asked"
+    );
+    assert_eq!(
+        saving.notice(1).as_deref(),
+        Some(crate::preview::preview_saved_ordinarily_notice()),
+        "the save asked first says the drive's one sentence"
+    );
+}

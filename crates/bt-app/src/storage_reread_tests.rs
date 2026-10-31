@@ -476,15 +476,19 @@ fn what_a_cancelled_quit_merged_is_named_on_the_next_passs_card() {
     let mut quit = quit::Quit::begin(Vec::new());
     let mut lines = Vec::new();
     let mut turn = |rig: &mut StoragePassRig, quit: &mut quit::Quit, now| {
-        let step = quit.documents_turn(
-            &mut [
-                &mut rig.settings,
-                &mut rig.keybindings,
-                &mut rig.profiles,
-                &mut rig.pins,
-            ],
-            now,
-        );
+        let documents: &mut [&mut dyn crate::document_request::QuitDocument] = &mut [
+            &mut rig.settings,
+            &mut rig.keybindings,
+            &mut rig.profiles,
+            &mut rig.pins,
+        ];
+        // As `FolioApp::settle_quit` takes the turn: the phase begun, every answer heard
+        // (the storage drain, T-STORAGE-LANE-ORDER-BY-CONSTRUCTION), then the turn.
+        quit.begin_documents(documents);
+        for document in documents.iter_mut() {
+            document.hear_alone();
+        }
+        let step = quit.documents_turn(documents, now);
         lines.extend(quit.take_merged_lines());
         step
     };
