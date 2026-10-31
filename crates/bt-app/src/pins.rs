@@ -43,8 +43,8 @@ use std::path::{Path, PathBuf};
 
 use bt_persist::{PinEntryV1, PinKind, PinsV1, read_pins, read_pins_keeping_bytes};
 
-use crate::document_request::{DocumentState, QuitDocument, ReadNews};
-use crate::persist::{Revision, StorageLane};
+use crate::document_request::{DocumentState, QuitDocument, ReadNews, StoreAnswer};
+use crate::persist::{InAdmissionOrder, Revision, StorageId, StorageLane};
 
 /// The name the pin file wears on disk, which is also what a notice about it has
 /// to say out loud.
@@ -148,8 +148,13 @@ impl QuitDocument for PinsStore {
     /// A turn that folds a changed file in before it sends: a `Moved` or
     /// `Displaced` answer at quit is merged as the running window merges it,
     /// without the door.
+    #[cfg(test)]
+    fn hear_alone(&mut self) {
+        self.document.hear_alone();
+    }
+
     fn quit_turn(&mut self) -> Option<String> {
-        let _ = self.document.take_answers();
+        let _ = self.document.take_news();
         let merged = self.merge_at_quit();
         if self.document.standing() == crate::quit::Standing::Unsent {
             self.document.send_owed();
@@ -368,8 +373,33 @@ impl PinsStore {
         self.document.send_owed();
     }
 
-    /// **Take what the storage worker has answered** (`AppEvent::DocumentsAnswered`):
-    /// the re-reads' news for the reader.
+    /// **Its answers below the drain's mark `owed`** (`App::storage_answers`;
+    /// T-STORAGE-LANE-ORDER-BY-CONSTRUCTION), each with its place in admission order.
+    pub(crate) fn answered(
+        &mut self,
+        owed: Option<StorageId>,
+    ) -> Vec<(InAdmissionOrder, StoreAnswer<PinsV1>)> {
+        self.document.answered(owed)
+    }
+
+    /// Hear one answer [`Self::answered`] took, in the drain's order.
+    pub(crate) fn hear(&mut self, answer: StoreAnswer<PinsV1>) {
+        self.document.hear(answer);
+    }
+
+    /// The drain has heard every answer it took: what is owed after them is sent.
+    pub(crate) fn answers_heard(&mut self) {
+        self.document.answers_heard();
+    }
+
+    /// **What the re-reads heard came to** (`AppEvent::DocumentsAnswered`): the re-reads'
+    /// news for the reader.
+    pub(crate) fn take_news(&mut self) -> ReadNews {
+        self.document.take_news()
+    }
+
+    /// This store alone, drained and heard — a test's way to hear it without the application.
+    #[cfg(test)]
     pub(crate) fn take_answers(&mut self) -> ReadNews {
         self.document.take_answers()
     }

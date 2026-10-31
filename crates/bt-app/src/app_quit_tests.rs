@@ -370,7 +370,7 @@ fn the_update_hand_over_takes_the_restart_registration_back() {
         "the job was sent, and the way out waits for its answer"
     );
     assert!(
-        matches!(jobs.next(), Some(persist::ScriptedJob::Other)),
+        matches!(jobs.next(), Some(persist::ScriptedJob::Handoff(_))),
         "the hand-over job is on the lane"
     );
     drop(application);
@@ -389,4 +389,82 @@ fn the_update_hand_over_takes_the_restart_registration_back() {
         leaves,
         "an update with nothing staged is not handed over, and the quit leaves"
     );
+}
+
+/// RED (T-STORAGE-LANE-ORDER-BY-CONSTRUCTION, plan row 104, review F1) — **the update
+/// hand-over's answer is heard once, and the way out reads the answer heard**: the storage
+/// lane's one drain takes the hand-over with its end and lets the request go, so a later drain
+/// on the same turn has nothing of it to hear.
+///
+/// The update's quit at its way out sends the hand-over on a lane the test serves; the test
+/// answers it `Started` with an applier and lets the job go, as the worker drops it after its
+/// end. Then the turn the worker's wake brings: the wake's drain (`take_document_answers`), and
+/// the way out's own drain before it looks (`answer_storage`, the Exit arm's first step). What
+/// the way out finds kept is the `Started` answer with that applier, and the request is no longer
+/// held. No timing decides it: the test is the worker, and every answer is in before the drains.
+///
+/// MUTATION: keep the request in `App::handoff_answer` after `App::handoff_answer_below` heard
+/// its end — the second drain hears its road closed as the worker gone, `Ended::Gone`, over the
+/// `Started` the first kept, and the way out says the storage worker stopped with no applier.
+#[test]
+fn the_update_hand_overs_answer_is_heard_once_and_the_way_out_reads_it() {
+    crate::test_support::on_the_window_thread();
+    let txn = crate::update_txn::TxnId::new([0x5b; 16]);
+    let now = Instant::now();
+
+    let root = bt_testpath::temp_path("bt-handoff-heard-once 交接一次");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("the scratch folder");
+    let mut application = owed_handoff("handoff-heard-once", txn);
+    let (lane, jobs) = persist::StorageLane::scripted();
+    {
+        let app = application.folio.app.as_mut().expect("the application");
+        app.session_store = persist::SessionStore::at_on(
+            root.join("session.json"),
+            root.join("session.lock"),
+            lane,
+        );
+        app.update_job.stage_for_a_test(staged_in(&root, txn));
+    }
+    assert!(
+        !application
+            .folio
+            .hand_the_update_over(&application.event_loop, now),
+        "the job was sent, and the way out waits for its answer"
+    );
+    let Some(persist::ScriptedJob::Handoff(answer)) = jobs.next() else {
+        panic!("the hand-over job is on the lane");
+    };
+    let applier = bt_platform::install_flip::Running {
+        pid: 4242,
+        started: 7,
+    };
+    answer
+        .send(crate::update_handoff::HandedOff::Started { applier })
+        .expect("the way out waits for the answer");
+    drop(answer);
+
+    application
+        .folio
+        .take_document_answers()
+        .expect("the wake's drain");
+    let _ = application.folio.answer_storage();
+
+    let app = application.folio.app.as_ref().expect("the application");
+    assert!(
+        matches!(
+            &app.handoff_heard,
+            Some(persist::Ended::Answered(crate::update_handoff::HandedOff::Started {
+                applier: heard
+            })) if *heard == applier
+        ),
+        "the way out finds the Started answer the first drain heard: {:?}",
+        app.handoff_heard
+    );
+    assert!(
+        app.handoff_answer.is_none(),
+        "the request was let go with the end it was heard at"
+    );
+    drop(application);
+    let _ = std::fs::remove_dir_all(&root);
 }
