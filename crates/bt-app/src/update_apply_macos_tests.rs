@@ -468,6 +468,7 @@ impl Install {
             agents: Some(self.agents.clone()),
             limits,
             trial_clock: Arc::new(WallClock),
+            decision_clock: Arc::new(CountedClock::awaiting_the_decision(&self.home, self.txn)),
             starter: None,
             handed_back: None,
             layouts: own_layouts(),
