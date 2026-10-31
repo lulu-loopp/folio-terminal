@@ -9,7 +9,7 @@
 
 use crate::window_seam::LoopProxy;
 use crate::window_seam::prelude::*;
-use crate::{AppEvent, FolioApp, Runtime, diagnostics};
+use crate::{AppEvent, FolioApp, Runtime, WheelHand, diagnostics};
 use anyhow::Result;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -142,12 +142,15 @@ impl<B: Backend> Runtime<'_, B> {
     /// Each step enters by the doors a mouse would use: a pan's opening point
     /// is [`Self::pointer_moved`] — after the wheel held so far is spent, as
     /// the dispatcher spends it before any pointer move — and its travel is
-    /// [`Self::queue_wheel`], the wheel's own entrance, so the routing, the
+    /// [`Self::hold_wheel`], the wheel's own entrance, so the routing, the
     /// merging into one burst per turn, the scroll-back rules and every
     /// scroller that already answers a trackpad apply unchanged. There is no
     /// second scroll road, and nothing here recognises anything: the system
     /// said it was a pan, and [`pan_on_the_wheel_road`] only changes its
-    /// currency.
+    /// currency. The burst says a finger turned it ([`crate::WheelHand`]), for
+    /// the two stations on that road that are not scrollers: a picture is
+    /// carried by a finger rather than zoomed, and a recording's volume is
+    /// left alone (0.4.9 plan row 117).
     ///
     /// **Under a held gesture a parked pan is discarded** (T-POINTER-CAPTURE
     /// §7, cut 6, cell B19): its opening point is a pointer move, which would
@@ -168,13 +171,26 @@ impl<B: Backend> Runtime<'_, B> {
             return Ok(());
         }
         for step in steps {
+            // **The pan's own station** (`BT_MOUSE_TRACE`, 0.4.9 plan row 117): the step as the
+            // door answered it, the system's `GF_INERTIA` included, so a trace of one swipe says
+            // which of its travel the finger made and where the system's glide took over.
+            self.mouse_trace(|| {
+                format!(
+                    "pan_step began_at={} travel={},{} inertia={}",
+                    step.began_at
+                        .map_or_else(|| "none".to_owned(), |(x, y)| format!("{x},{y}")),
+                    step.travel.0,
+                    step.travel.1,
+                    step.inertia,
+                )
+            });
             let (pointer, wheel) = pan_on_the_wheel_road(step);
             if let Some(position) = pointer {
                 self.flush_wheel()?;
                 self.pointer_moved(position)?;
             }
             if let Some(delta) = wheel {
-                self.queue_wheel(delta)?;
+                self.hold_wheel(delta, WheelHand::Finger)?;
             }
         }
         Ok(())

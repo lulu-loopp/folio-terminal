@@ -3575,3 +3575,125 @@ fn a_single_move_onto_an_unfocused_panes_button_lights_it() {
         "and the finger is on it on that same move"
     );
 }
+
+// ── 0.4.9 plan row 117: a finger is not a wheel over a picture or a recording ──
+
+/// A finger's pan parked at `at` on the window and spent as the loop spends it: its opening step,
+/// then one step of `travel`, then the burst spent as the turn's end spends it.
+fn a_finger_pans(folio: &mut HeadlessFolio, at: PhysicalPosition<f64>, travel: (i32, i32)) {
+    let mut runtime = folio.runtime();
+    runtime.window.parked_pans.borrow_mut().extend([
+        bt_platform::PanStep {
+            began_at: Some((at.x as i32, at.y as i32)),
+            travel: (0, 0),
+            inertia: false,
+        },
+        bt_platform::PanStep {
+            began_at: None,
+            travel,
+            inertia: false,
+        },
+    ]);
+    runtime
+        .spend_parked_pans()
+        .expect("the parked pans are spent");
+    runtime.flush_wheel().expect("and the wheel burst too");
+}
+
+/// RED (0.4.9 plan row 117, E3) — **a finger over a picture carries it and never zooms it**: at
+/// Fit a pan leaves the picture as it was (there is nowhere for it to go), and at 100 % a pan of
+/// 30 pixels right and 40 down carries the picture 30 right and 40 down, one pixel for one, at the
+/// same size. A wheel notch over the same picture still zooms it.
+///
+/// RED on 840cacbb6: the pan was spent as a wheel, so 40 pixels down was a third of a zoom notch
+/// and the picture left Fit.
+///
+/// MUTATION: drop the finger's arm from the picture's rung in `Runtime::mouse_wheel` — the pan
+/// zooms the picture and the first assertion goes red.
+#[test]
+fn a_finger_over_a_picture_carries_it_and_never_zooms_it() {
+    let (mut folio, surface) =
+        a_large_picture_beside_a_shell("picture-finger", "手指 finger", false);
+    let body = picture_body(&mut folio, surface);
+    let middle = centre(body);
+    a_finger_pans(&mut folio, middle, (0, 40));
+    assert_eq!(
+        zoom_of(&mut folio, surface),
+        crate::ImageZoom::FIT,
+        "a finger over a fitted picture changes nothing"
+    );
+    assert!(
+        folio
+            .runtime()
+            .set_preview_image_zoom(surface, crate::ImageZoom::scaled(1.0))
+            .expect("the zoom lands"),
+        "the fixture's own precondition: 100 %"
+    );
+    a_finger_pans(&mut folio, middle, (30, 40));
+    let carried = zoom_of(&mut folio, surface);
+    assert_eq!(
+        carried,
+        crate::ImageZoom {
+            pan: [30.0, 40.0],
+            ..crate::ImageZoom::scaled(1.0)
+        },
+        "the picture follows the finger, at the size it had"
+    );
+    folio.move_to(middle);
+    {
+        let mut runtime = folio.runtime();
+        runtime
+            .queue_wheel(winit::event::MouseScrollDelta::LineDelta(0.0, 1.0))
+            .expect("a notch is taken");
+        runtime.flush_wheel().expect("and spent");
+    }
+    assert_ne!(
+        zoom_of(&mut folio, surface).mode,
+        carried.mode,
+        "and a wheel notch over it still zooms"
+    );
+}
+
+/// RED (0.4.9 plan row 117, E3) — **a finger over a recording's picture leaves its volume
+/// alone**: two notches' worth of pan over the picture of a playing recording at 50 % changes
+/// nothing, and the one wheel notch after it takes the volume to 55 %, so the pan had its chance
+/// and moved nothing.
+///
+/// RED on 840cacbb6: the pan was spent as two wheel notches, the volume went to 60 % and the
+/// notch after it to 65 %.
+///
+/// MUTATION: drop the finger's station before the wheel's video station in `Runtime::mouse_wheel`
+/// — the pan moves the volume and the wait for 55 % never ends on it.
+#[test]
+fn a_finger_over_a_recordings_picture_leaves_its_volume_alone() {
+    let _ledger = crate::test_support::ledger_gate();
+    let before = bt_platform::video::engine::engines_outstanding();
+    let (mut folio, surface) = a_recording_beside_a_shell("video-picture-finger");
+    let stage = stage_of(&mut folio, surface);
+    let over = on_the_picture(stage, 20.0);
+    click(&mut folio, over);
+    loaded(&folio, surface);
+    folio
+        .window
+        .video
+        .get_mut(surface)
+        .expect("playing")
+        .set_volume(0.5, Instant::now());
+    played(&folio, surface, |state| (state.volume - 0.5).abs() < 1e-6);
+    a_finger_pans(&mut folio, over, (0, 240));
+    folio.move_to(over);
+    {
+        let mut runtime = folio.runtime();
+        runtime
+            .queue_wheel(winit::event::MouseScrollDelta::LineDelta(0.0, 1.0))
+            .expect("a notch is taken");
+        runtime.flush_wheel().expect("and spent");
+    }
+    let after = played(&folio, surface, |state| (state.volume - 0.55).abs() < 1e-6);
+    assert!(
+        (after.volume - 0.55).abs() < 1e-6,
+        "the pan left the volume at 50 % and the notch took it to 55 %: {after:?}"
+    );
+    folio.window.video.shutdown_all();
+    crate::test_support::engines_settling_to(before);
+}

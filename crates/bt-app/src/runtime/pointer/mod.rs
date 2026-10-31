@@ -392,3 +392,7 @@ pub(crate) fn platform_pointer_of(queried: Option<(i32, i32)>) -> Option<Physica
 #[cfg(test)]
 #[path = "held_tests.rs"]
 mod held_tests;
+
+#[cfg(test)]
+#[path = "pan_distance_tests.rs"]
+mod pan_distance_tests;

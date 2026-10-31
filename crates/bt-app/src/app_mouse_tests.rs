@@ -1378,18 +1378,19 @@ fn a_pan_enters_the_wheel_road_as_pixels() {
 /// Ticket 11's second blocking criterion is a second scroll road beside the wheel's. The runtime
 /// half of the pan needs a window and a GPU, so this pins its shape by reading its items through
 /// `bt-source`: the method that spends parked pans moves the pointer through `pointer_moved` and
-/// turns the wheel through `queue_wheel` — the two doors a mouse uses — and scrolls nothing
+/// turns the wheel through `hold_wheel`, as a finger (0.4.9 plan row 117) — the two doors a mouse
+/// uses — and scrolls nothing
 /// itself; and the wake the touch door sends is answered in one place, by that method, in every
 /// window.
 ///
-/// MUTATION: spend the travel with `scroll_view_exact_in` instead of `queue_wheel` and the first
+/// MUTATION: spend the travel with `scroll_view_exact_in` instead of `hold_wheel` and the first
 /// assertion goes red; answer `TouchPanned` with `Ok(())` and the pan-wake one does.
 #[test]
 fn a_parked_pan_is_spent_through_the_wheels_own_entrance() {
     let spend = squeezed_body("Runtime", "spend_parked_pans");
     assert!(
-        spend.contains("self.queue_wheel(delta)?"),
-        "the travel enters the wheel road where a notch does"
+        spend.contains("self.hold_wheel(delta,WheelHand::Finger)?"),
+        "the travel enters the wheel road where a notch does, as a finger's (row 117)"
     );
     assert!(
         spend.contains("self.flush_wheel()?;self.pointer_moved(position)?;"),
