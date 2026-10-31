@@ -1624,14 +1624,18 @@ fn passing_apart(
 /// instead of hanging the run.
 ///
 /// A worker passes a held hold whose cap is short, and the test awaits its return within the
-/// suite's patience. The hold counts one lapse; a pass after it goes straight through; the release
-/// panics. The worker is never let go by the test, so it can only come back through the lapse,
-/// under any cap: nothing here reads the time.
+/// suite's patience. The hold counts one lapse; a pass after it goes straight through; a wait for a
+/// standing worker and the release both panic, naming the lapse. The worker is never let go by
+/// the test, so it can only come back through the lapse, under any cap: nothing here reads the
+/// time.
 ///
 /// MUTATION: let `Hold::pass` wait without its cap — the worker never comes back and the test is
 /// red (`came_back`), with the worker left standing.
 /// MUTATION: count no lapse in `Hold::pass` — red (`lapses() == 1`).
 /// MUTATION: drop the assertion in `Hold::release` — the release returns, and the test is red.
+/// MUTATION: let `Hold::wait_standing` wait only for a standing worker — nothing stands after the
+/// lapse, the wait gives up at the suite's patience saying nothing stood, and the test is red
+/// (the wait's failure does not name the lapse).
 #[test]
 fn a_hold_stood_in_past_its_cap_lets_go_once_and_its_release_is_red() {
     let hold = Arc::new(crate::lane::Hold::default());
@@ -1651,6 +1655,17 @@ fn a_hold_stood_in_past_its_cap_lets_go_once_and_its_release_is_red() {
         hold.lapses(),
         1,
         "a lapse lets go once: a later pass is not held"
+    );
+    let awaited = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        hold.wait_standing("a worker after the lapse");
+    }));
+    let said = awaited
+        .err()
+        .and_then(|panic| panic.downcast::<String>().ok())
+        .expect("a wait for a standing worker after a lapse is red");
+    assert!(
+        said.contains("let go on its own"),
+        "the wait's failure names the lapse, not the worker that never came: {said}"
     );
     let released = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| hold.release()));
     assert!(released.is_err(), "a release after a lapse is red");

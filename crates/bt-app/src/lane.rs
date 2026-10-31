@@ -2482,13 +2482,22 @@ impl Hold {
     }
 
     /// Waits until a worker stands in the hold; a worker that never comes fails the test that
-    /// awaited `what`, by name, rather than hanging it.
+    /// awaited `what`, by name, rather than hanging it. A hold that has let go on its own fails it
+    /// at once: the worker that stood in it has gone on, and what the test called before this
+    /// waited on it ([`Self::release`]'s verdict, read here as well).
     pub(crate) fn wait_standing(&self, what: &str) {
         let (state, waited) = self
             .changed
-            .wait_timeout_while(lock(&self.state), PATIENCE, |state| state.standing == 0)
+            .wait_timeout_while(lock(&self.state), PATIENCE, |state| {
+                state.standing == 0 && state.lapses == 0
+            })
             .unwrap_or_else(PoisonError::into_inner);
+        let lapses = state.lapses;
         drop(state);
+        assert_eq!(
+            lapses, 0,
+            "the hold let go on its own before {what}: a call waited on the worker standing in it"
+        );
         assert!(
             !waited.timed_out(),
             "nothing stood in the hold within the lane suite's patience while awaiting {what}"
