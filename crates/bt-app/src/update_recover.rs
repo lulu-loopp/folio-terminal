@@ -445,6 +445,7 @@ pub(crate) fn run(worker: &WorkerCtx, door: &Door<'_>, world: &mut impl World) -
                 agents: door.agents.map(Path::to_path_buf),
                 limits: door.limits,
                 trial_clock: std::sync::Arc::new(crate::update_apply::WallClock),
+                wait_clock: std::sync::Arc::new(crate::update_apply::WallClock),
                 starter: door.starter,
                 handed_back: door.handed_back,
                 layouts: update_apply_macos::own_layouts(),
