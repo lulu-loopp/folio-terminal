@@ -378,11 +378,13 @@ fn given_up_said(
 /// file), and while the move is refused because another program holds the
 /// file open (`install_txn::Failure::refused_while_open`: Windows only) — an
 /// on-access scan of the freshly staged set, an indexer, a sync tool — ask
-/// the same move again through `worker`'s wait door until `within` has passed
-/// since the first ask (T-UPDATE-MOVE-HELD-RETRY: the flip's and the
-/// rollback's moves, [`Limits::journal_held_within`], [`JOURNAL_HELD_WITHIN`]
-/// in the product — E4's window and its reason, counted per move as E4
-/// counts it per write). Every round asks the one move: nothing else is moved
+/// the same move again through the wait's door until its `within` has passed
+/// on its clock since the first ask (T-UPDATE-MOVE-HELD-RETRY: the flip's and
+/// the rollback's moves, [`Limits::journal_held_within`],
+/// [`JOURNAL_HELD_WITHIN`] in the product — E4's window and its reason,
+/// counted per move as E4 counts it per write; the window read and the pauses
+/// made on [`WaitWithin::clock`], [`WallClock`] in the product:
+/// T-UPDATE-APPLY-FLIP-HOLD-FLAKE). Every round asks the one move: nothing else is moved
 /// between two rounds, and a refusal that is not a hold — the destination
 /// already taken (I1′), a flush after a rename that landed — is answered at
 /// once. **Each refused round says one line** through `say`, `opening` first
@@ -393,15 +395,19 @@ fn given_up_said(
 /// The last failure, and the refusal when it was a hold that outlasted the
 /// window.
 pub(crate) fn move_held_within(
-    worker: &WorkerCtx,
+    wait: WaitWithin<'_>,
     from: &Path,
     to: &Path,
-    within: Duration,
     opening: &str,
     say: &mut dyn FnMut(&str),
     look: &mut dyn FnMut(),
 ) -> Result<(), Unwritten> {
-    let began = Instant::now();
+    let WaitWithin {
+        worker,
+        within,
+        clock,
+    } = wait;
+    let began = clock.now();
     asked_while_held(
         within,
         &Asked {
@@ -410,14 +416,24 @@ pub(crate) fn move_held_within(
         },
         || install_txn::durable_move(from, to),
         held_refusal,
-        &mut || began.elapsed(),
+        &mut || clock.now().saturating_duration_since(began),
         &mut |pause| {
             look();
-            bt_platform::wait::sleep_within(worker, pause);
+            clock.pause(worker, pause);
             true
         },
         say,
     )
+}
+
+/// **A bounded wait on a worker's door**: the worker whose door it pauses
+/// through, how long it lasts, and the clock it is read and paused on —
+/// [`WallClock`] in the product (T-UPDATE-APPLY-FLIP-HOLD-FLAKE).
+#[derive(Clone, Copy)]
+pub(crate) struct WaitWithin<'a> {
+    pub(crate) worker: &'a WorkerCtx,
+    pub(crate) within: Duration,
+    pub(crate) clock: &'a dyn WaitClock,
 }
 
 /// **The system's refusal of a rename another program's hold refused**
@@ -545,6 +561,9 @@ pub(crate) struct Journaled<'w> {
     /// How long a write another program's hold refuses is asked again
     /// ([`write_journal`]).
     held_within: Duration,
+    /// **The clock a layout's held move is read and paused on**
+    /// ([`Self::held_door`]): [`WallClock`] in the product.
+    held_clock: &'w dyn WaitClock,
     pub(crate) journal: Journal,
     pub(crate) written: Vec<PhaseKind>,
     /// **The refusal of the last write another program's hold outlasted the
@@ -555,17 +574,20 @@ pub(crate) struct Journaled<'w> {
 
 impl<'w> Journaled<'w> {
     /// The journal `journal`, as read from the home `home`, written from
-    /// `worker`, a held write asked again for `held_within`.
+    /// `worker`, a held write asked again for `held_within`, a layout's held
+    /// move read and paused on `held_clock`.
     pub(crate) fn of(
         home: &Home,
         worker: &'w WorkerCtx,
         journal: Journal,
         held_within: Duration,
+        held_clock: &'w dyn WaitClock,
     ) -> Self {
         Self {
             path: home.journal(),
             worker,
             held_within,
+            held_clock,
             journal,
             written: Vec::new(),
             held: None,
@@ -576,11 +598,15 @@ impl<'w> Journaled<'w> {
         self.journal.body.phase.kind()
     }
 
-    /// **The worker this holder writes from, and its window for a held
-    /// file** — what a layout's moves are asked again through and for
-    /// ([`move_held_within`]).
-    pub(crate) fn held_door(&self) -> (&'w WorkerCtx, Duration) {
-        (self.worker, self.held_within)
+    /// **The worker this holder writes from, its window for a held file,
+    /// and the clock that window is read on** — what a layout's moves are
+    /// asked again through, for and on ([`move_held_within`]).
+    pub(crate) fn held_door(&self) -> WaitWithin<'w> {
+        WaitWithin {
+            worker: self.worker,
+            within: self.held_within,
+            clock: self.held_clock,
+        }
     }
 
     /// **Record `event` as `actor`**: the next phase by the protocol, allowed
@@ -890,7 +916,7 @@ pub(crate) fn reserve_last_trial(
         return Ok(Reserved::NotEligible);
     }
     let nonce = crate::update_job::mint_nonce();
-    let mut journaled = Journaled::of(home, worker, journal, JOURNAL_HELD_WITHIN);
+    let mut journaled = Journaled::of(home, worker, journal, JOURNAL_HELD_WITHIN, &WallClock);
     journaled.record(
         actor,
         &Event::TrialPlanned {
@@ -1073,7 +1099,7 @@ fn commit_last_trial_reading(
     }
     // On the trial's watch worker, whose lines it says through the watch's
     // own `say`.
-    let mut journaled = Journaled::of(home, worker, journal, JOURNAL_HELD_WITHIN);
+    let mut journaled = Journaled::of(home, worker, journal, JOURNAL_HELD_WITHIN, &WallClock);
     journaled.record(
         Actor::Trial,
         &Event::LastTrialReady { receipt, process },
@@ -1214,6 +1240,46 @@ impl WaitClock for CountedClock {
 
     fn pause(&self, worker: &WorkerCtx, pause: Duration) {
         TrialClock::pause(self, worker, pause);
+    }
+}
+
+#[cfg(test)]
+impl CountedClock {
+    /// **A road's decision clock in a test whose synthetic trial acknowledges
+    /// the commit** (T-UPDATE-APPLY-FLIP-HOLD-FLAKE): its first pause lasts
+    /// until no receipt is left in `H\<txn>` — the trial's watch removed it,
+    /// [`note_unkept_after_trial_decision`]'s awaited end — within the suite's
+    /// patience (`lane::within_patience`); every later pause only moves the
+    /// clock. "Acknowledged in time" is the event, never a race between a
+    /// real window and the trial's thread; an acknowledgement that never
+    /// comes costs the patience once, and the window is then spent on the
+    /// count. It waits on less than the product does: the product's wait
+    /// also ends when no process runs from the program, or when a valid
+    /// receipt's trial no longer runs, and a test whose trial dies in the
+    /// first pause with its receipt left — or that leaves only an ill-formed
+    /// receipt beside a live process — spends the patience in that pause
+    /// before the next look; its verdict is the same.
+    pub(crate) fn awaiting_the_decision(home: &Home, txn: TxnId) -> Self {
+        let folder = home.transaction(txn);
+        Self::new(move |pause| {
+            if pause == 1 {
+                crate::lane::within_patience(|| !holds_a_receipt(&folder));
+            }
+        })
+    }
+}
+
+/// Whether `folder` holds a file named as a trial's receipt.
+#[cfg(test)]
+fn holds_a_receipt(folder: &Path) -> bool {
+    match crate::files::read_directory(folder) {
+        crate::files::DirOutcome::Listed(listing) => listing.entries.iter().any(|entry| {
+            !entry.is_dir
+                && entry
+                    .name
+                    .starts_with(crate::update_txn::RECEIPT_FILE_PREFIX)
+        }),
+        crate::files::DirOutcome::Failed(_) => false,
     }
 }
 
@@ -1606,23 +1672,29 @@ pub(crate) fn survey(home: &Home, txn: TxnId, program: &Path, excluded: &[Runnin
 /// worker door; after the acknowledgement (or after the exact trial has ended)
 /// it re-reads the mark and carries that final answer into `Retired`.
 ///
-/// A decision not observed within the journal-held window is an error. The
+/// A decision not observed within the journal-held window (`wait`'s
+/// `within`, read on its clock, [`WallClock`] in the product:
+/// T-UPDATE-APPLY-FLIP-HOLD-FLAKE) is an error. The
 /// caller must preserve `H/<txn>` and the committed journal for a later holder;
 /// it must not turn elapsed time into a not-kept assertion.
 pub(crate) fn note_unkept_after_trial_decision(
-    worker: &WorkerCtx,
+    wait: WaitWithin<'_>,
     journal: &Journal,
     home: &Home,
     program: &Path,
     poll: Duration,
-    within: Duration,
     say: &mut dyn FnMut(&str),
 ) -> Result<Option<String>, String> {
     if let Some(version) = &journal.body.unkept {
         return Ok(Some(version.clone()));
     }
+    let WaitWithin {
+        worker,
+        within,
+        clock,
+    } = wait;
     let txn = journal.txn;
-    let until = Instant::now() + within;
+    let until = clock.now() + within;
     loop {
         match survey(home, txn, program, &[]) {
             Survey::Adoptable { .. }
@@ -1647,7 +1719,7 @@ pub(crate) fn note_unkept_after_trial_decision(
                 return Ok(unkept);
             }
             Survey::Unlistable(why) => {
-                if Instant::now() >= until {
+                if clock.now() >= until {
                     return Err(format!(
                         "the trial's final decision could not be observed: {why}"
                     ));
@@ -1655,13 +1727,13 @@ pub(crate) fn note_unkept_after_trial_decision(
             }
         }
 
-        let left = until.saturating_duration_since(Instant::now());
+        let left = until.saturating_duration_since(clock.now());
         if left.is_zero() {
             return Err(
                 "the live trial did not acknowledge its final not-kept decision".to_owned(),
             );
         }
-        bt_platform::wait::sleep_within(worker, poll.min(left));
+        clock.pause(worker, poll.min(left));
     }
 }
 

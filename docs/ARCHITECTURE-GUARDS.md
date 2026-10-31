@@ -1111,6 +1111,15 @@ test calls, which is the scan's stated blind spot (its header and `check-timing-
 not a fault in its grammar. Whether product real-time windows that tests race can be found by a
 scan at all is plan row 125's (T-TIMING-CENSUS-PRODUCT-WINDOWS); until it lands, review owns them.
 
+2026-10-31 (T-UPDATE-APPLY-FLIP-HOLD-FLAKE): a road's wait for another thread or process that has no
+clock of the test's own is still timed by the product, and a loaded run turns that race the other way. The update
+applier's wait for a live trial's final decision after the commit (`note_unkept_after_trial_decision`) is
+read and paused on `Road::decision_clock`, and each held move of the Windows flip or rollback
+(`move_held_within`, through `Journaled::held_door`) on `Road::held_clock`. Both are `update_apply::WaitClock`,
+and `WallClock` in the product. The applier harnesses on both platforms hand a `CountedClock` whose first pause lasts until the
+trial's receipt is gone, within the suite's patience; the held-moment tests count the window's pauses. A product
+window raced by a test thread is not seen by the timing scan, which reads test bodies (plan row 125).
+
 2026-10-31 (T-UPDATE-APPLIER-LOCK-WAITS): the update applier's and recovery's give-ups behind a
 hold the test keeps — the transaction lock, the data directory's claim, the admission, the journal
 or a member held open, the election in flight, O alive — are awaited while the hold is still held,
