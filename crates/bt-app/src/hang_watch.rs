@@ -5108,17 +5108,19 @@ mod tests {
     /// report file appears, and the line about it reaches `diagnostics.log` by
     /// the road that owns no lock.
     ///
-    /// A test binary opens no process sink (`trace_sink::start` is `main`'s alone), so the
-    /// report's road cannot reach the stalled one: the sink is the state the console would be in,
-    /// and the half the road can meet is the `stderr` lock.
+    /// A test process opens no process sink (only `main`, and `entry_doors`' child process
+    /// running its one test, call `trace_sink::start`), and the report's road never calls
+    /// `trace_sink`: the sink is the state the console would be in, and the half the road can
+    /// meet is the `stderr` lock.
     ///
     /// The work runs on a second thread only so that this one can await it within the lane
     /// suite's patience, with the lock's holder let go before the verdict: a regression here does
     /// not stop the suite, it is red. The "one more" offer to the full sink is made the same way,
     /// so an offer that waits for room is red, never a hang.
     ///
-    /// MUTATION: put the `eprintln!` back in `write_report`; the report does not come back while
-    /// the lock is held. Give `trace_sink::Queue::offer` a `send` in place of its `try_send`; the
+    /// MUTATION: take the real lock in `write_report` (`drop(std::io::stderr().lock());` at its
+    /// top — an `eprintln!` alone writes to the test's captured output and never reaches it); the
+    /// report does not come back while the lock is held. Give `trace_sink::Queue::offer` a `send` in place of its `try_send`; the
     /// "one more" offer does not come back while the writer is stalled.
     #[test]
     fn a_report_and_its_line_do_not_wait_for_the_console() {
@@ -5130,8 +5132,11 @@ mod tests {
 
         let mut sink = crate::trace_sink::StalledWriter::start();
         sink.fill();
-        let mut writer_release = sink.take_release();
+        let writer_release = sink.take_release();
         let sink = std::sync::Arc::new(sink);
+        // Declared after the sink, so that on any red the writer is let out before the sink's
+        // drop looks for it.
+        let mut writer_release = writer_release;
         let (answered, answer) = std::sync::mpsc::channel::<bool>();
         let offering = {
             let sink = std::sync::Arc::clone(&sink);

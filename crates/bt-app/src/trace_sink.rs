@@ -185,9 +185,11 @@ static SINK: OnceLock<Option<Sink>> = OnceLock::new();
 /// Called once, from `main`, after `diagnostics::enter_resident_run` has said
 /// whether the run kept its console — and it is **the only thing that opens
 /// [`SINK`]**, which is what makes "is there a queue" a fact about the program
-/// rather than about the environment a binary happens to inherit. A test binary
-/// never calls it: a test that writes a trace drives a queue of its own
-/// ([`Capture`]), and nothing in a test has to wait for a thread it did not start.
+/// rather than about the environment a binary happens to inherit. A test process
+/// opens no sink: the one test that calls it (`entry_doors`' reading of every door)
+/// does so in a child process running that test alone, and a test that writes a
+/// trace drives a queue of its own ([`Capture`]), so nothing in a test has to wait
+/// for a thread it did not start.
 ///
 /// **The writer is retired through its admitted flush door, never by a drop**
 /// (T-DROP-DOORS, D-78): `main` calls [`Shutdown::flush_through_its_door`] on
@@ -643,7 +645,8 @@ impl StalledWriter {
     /// **The writer's release, handed to the test**, for a test that has to let the writer out
     /// of its write while another thread still borrows this sink — a producer that waits for it
     /// is red, and must not be a hang. Dropping what this returns is the release; this sink's own
-    /// drop then finds it already gone.
+    /// drop then finds it already gone, and joins its writer only once the writer has finished
+    /// — so a release still alive when the sink is dropped is red, never a hang.
     pub(crate) fn take_release(&mut self) -> Option<SyncSender<()>> {
         self.release.take()
     }
@@ -662,7 +665,10 @@ impl Drop for StalledWriter {
         // Released first and closed second: a queue closed while the writer is
         // still in its write would leave this thread waiting for a `join` on a
         // thread that cannot return, which is the hang the tests are about.
-        drop(self.release.take());
+        // A release handed out ([`Self::take_release`]) is the test's to drop, and may still be
+        // alive while this drop runs — on a test's unwind, say — so its writer is joined only
+        // once it has finished, within the lane suite's patience.
+        let handed_out = self.release.take().is_none();
         // A writer that never leaves its write is this helper's red, said by name; while a test
         // is already failing, its own panic is the red and the writer is left where it stands.
         if !crate::lane::within_patience(|| self.queue.close()) {
@@ -673,6 +679,14 @@ impl Drop for StalledWriter {
             return;
         }
         if let Some(writer) = self.writer.take() {
+            if handed_out && !crate::lane::within_patience(|| writer.is_finished()) {
+                assert!(
+                    std::thread::panicking(),
+                    "the stalled writer's release was handed out and the writer never left its \
+                     write within the lane suite's patience"
+                );
+                return;
+            }
             let _ = writer.join();
         }
     }

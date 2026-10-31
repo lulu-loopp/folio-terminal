@@ -1216,22 +1216,24 @@ mod tests {
     /// held.
     #[test]
     fn a_full_ring_counts_losses_and_keeps_the_summary() {
-        let heart = std::sync::Arc::new(heart());
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let heart = Arc::new(heart());
         for turn in 0..BUDGET_LINES_KEPT as u64 + 3 {
             one_line_turn(&heart, turn * 2_000 * MS);
         }
         let held = heart.accounts.ring().lock().expect("the ring");
-        let returned = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let returned = Arc::new(AtomicBool::new(false));
         let turn = {
-            let heart = std::sync::Arc::clone(&heart);
-            let returned = std::sync::Arc::clone(&returned);
+            let heart = Arc::clone(&heart);
+            let returned = Arc::clone(&returned);
             std::thread::spawn(move || {
                 one_line_turn(&heart, 100_000 * MS);
-                returned.store(true, std::sync::atomic::Ordering::SeqCst);
+                returned.store(true, Ordering::SeqCst);
             })
         };
-        let while_held =
-            crate::lane::within_patience(|| returned.load(std::sync::atomic::Ordering::SeqCst));
+        let while_held = crate::lane::within_patience(|| returned.load(Ordering::SeqCst));
         drop(held);
         // The verdict before the join: a turn still waiting for the ring is red, never a hang.
         assert!(while_held, "a turn waited for the ring the watchdog holds");
