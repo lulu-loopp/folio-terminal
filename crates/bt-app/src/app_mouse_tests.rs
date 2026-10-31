@@ -1314,6 +1314,7 @@ fn a_pan_enters_the_wheel_road_as_pixels() {
         .filter_map(|&(begins, ends, (x, y))| {
             track.step(
                 begins,
+                false,
                 ends,
                 (x, y),
                 (x - window_origin.0, y - window_origin.1),
