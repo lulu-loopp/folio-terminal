@@ -483,14 +483,21 @@ fn an_extra_item_inside_the_admitted_arm_is_refused() {
 /// Before the row the invocation's entries and the definition's `ALL` were
 /// counted as product (row 77's stated limit).
 ///
+/// The five sites the row is about are found by what their lines say, not by
+/// line number (the review's N1): the two entries (`UninstallScriptQuestion,`),
+/// the two match arms (`Self::UninstallScriptQuestion => pick(`), and the
+/// template line of `ALL` (`stringify!($variant)`). A search that stopped
+/// returning names inside macro tokens fails the first assertion.
+///
 /// MUTATION: drop the gate reading of macro bodies in `crate::gates` — the
 /// `bt-app` index is refused at the three `cfg`s; keep only the invocation's
 /// reading — `ALL`'s template line counts.
 #[test]
 fn the_test_only_texts_are_not_product() {
     let index = bt_app();
+    let union = index.union();
     let mut product = Vec::new();
-    let mut seen = 0;
+    let mut sites: BTreeSet<String> = BTreeSet::new();
     for name in ["UninstallScriptQuestion", "UninstallScriptRunning", "ALL"] {
         let found = index
             .search(&Search::new(
@@ -505,13 +512,28 @@ fn the_test_only_texts_are_not_product() {
             if !at.file.ends_with("i18n.rs") {
                 continue;
             }
-            seen += 1;
+            let offset = occurrence.span.start();
+            let from = union[..offset].rfind('\n').map_or(0, |at| at + 1);
+            let to = union[offset..]
+                .find('\n')
+                .map_or(union.len(), |at| offset + at);
+            let line = union[from..to].trim();
+            if line == format!("{name},")
+                || line == format!("Self::{name} => pick(")
+                || (name == "ALL" && line.contains("stringify!($variant)"))
+            {
+                sites.insert(format!("{name}: {line}"));
+            }
             if occurrence.in_the_product(&index) {
                 product.push(format!("{name} at {at}"));
             }
         }
     }
-    assert!(seen >= 6, "the three names are written in i18n.rs ({seen})");
+    assert_eq!(
+        sites.len(),
+        5,
+        "the two entries, the two arms and the template of `ALL` are found: {sites:#?}"
+    );
     assert!(
         product.is_empty(),
         "test-only texts read as product:\n  {}",

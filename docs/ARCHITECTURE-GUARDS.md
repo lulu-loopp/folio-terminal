@@ -264,19 +264,26 @@ that writes a `cfg`, and a `cfg` on a parsed node where it reads no gate (`tests
 `a_cfg_is_read_wherever_it_stands`, `a_cfg_the_reading_cannot_read_is_refused_by_its_line`); the
 literal `cfg(true)` and `cfg(false)` are refused as unreadable. Inside a macro's tokens, which
 `syn` does not parse (2026-10-30, T-CFG-INSIDE-MACRO-TOKENS, plan row 109; it replaces row 77's
-stated limit): the index reads one body — a `macro_rules!` with one arm taking
-`$( $(#[$a:meta])* $v:ident, )*` whose transcriber's top-level items are each gated or paste the
-names only as `$(#[$a])* $v`, and an invocation that resolves to it (one-segment path, the nearest
-earlier definition in the same file in a scope holding the invocation, no macro invocation or
-`#[macro_use]` module between them). Each entry's `cfg` is read as a variant's, and the
+stated limit): the index reads one body — a `macro_rules!` that no `cfg` conditions, with one arm
+taking `$( $(#[$a:meta])* $v:ident, )*` whose transcriber's top-level items are each gated, or an
+`enum` whose whole body is `$( $(#[$a])* $v, )*`, or name neither variable (so no name lands
+inside another macro's tokens, `stringify!` and the like, where its attributes gate nothing), and
+an invocation that resolves to it: one-segment path, the nearest earlier definition in the same
+file in a scope holding the invocation, and no hazard between them — a macro invocation in item or
+statement position, an item carrying an attribute macro, a `derive` other than the language's own,
+`macro_use`, or a `cfg_attr` writing one of those (2026-10-30 review fold). Each entry's `cfg` is
+read as a variant's, and the
 definition's items as items; the tree's one such macro is `bt-app`'s `text_entries!`. Every other
 `cfg` (or `cfg`-writing `cfg_attr`) in any macro's tokens, invocation or definition, refuses the
-index by its line and macro path (`Rejection::CfgInMacroTokens`), and a read-shape invocation whose
+index by its line, the attribute as written and the innermost macro's path
+(`Rejection::CfgInMacroTokens`), and a read-shape invocation whose
 body is not that list is refused as unreadable (`Rejection::UnreadableMacroBody`). So a new macro
 carrying a `cfg` shows up as a red index, never as a silent product count; the read shape grows
 only by a row with its grammar, a fixture and a pin (`tests/index.rs`
 `a_cfg_in_a_read_macro_body_is_a_gate`, `a_cfg_in_any_other_macro_body_is_refused_by_its_line`;
-`tests/contract.rs` `the_test_only_texts_are_not_product`).
+`tests/contract.rs` `the_test_only_texts_are_not_product`). Not reached, a limit older than the
+row: a macro in an attribute's value (`#[doc = m!(…)]`) and `syn`'s unparsed `Verbatim` tokens,
+where a `cfg` is neither read nor refused; the tree has no `cfg` there.
 
 ## Ownership census
 

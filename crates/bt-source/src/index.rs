@@ -1297,9 +1297,12 @@ impl Index {
     /// grain; a `cfg` on a parsed node the index could not place or read refused the index
     /// instead. Inside a macro's tokens, which `syn` does not parse (plan row 109): a gate is read
     /// on an entry of a list of attribute-carrying names and on a top-level item of that list's
-    /// `macro_rules!` (`crate::gates`' grammar; in the tree, `bt-app`'s `text_entries!`), and
-    /// every other `cfg` in any macro's tokens refused the index
-    /// ([`crate::Rejection::CfgInMacroTokens`]), so none is counted as product unread.
+    /// `macro_rules!` — a definition no `cfg` conditions, pasting the names only as an `enum`'s
+    /// whole body `$( $(#[$a])* $v, )*`, reached with no hazard (a macro invocation, an attribute
+    /// macro, a foreign `derive`, a `macro_use`) between it and the invocation (`crate::gates`'
+    /// grammar; in the tree, `bt-app`'s `text_entries!`) — and every other `cfg` in any macro's
+    /// tokens refused the index ([`crate::Rejection::CfgInMacroTokens`]), so none is counted as
+    /// product unread.
     #[must_use]
     pub fn test_gates(&self) -> &[Span] {
         &self.gates

@@ -908,14 +908,27 @@ fn a_cfg_in_a_read_macro_body_is_a_gate() {
 /// invocation (`crate::entries!`), and an invocation an item macro stands between it and its
 /// definition (`shadowing!()` may define another `entries`). An invocation of the read shape whose
 /// body is not that shape is refused as unreadable. Not refused: a macro inside a gated module, a
-/// `cfg_attr` that writes no `cfg`, and `cfg!(…)`.
+/// `cfg_attr` that writes no `cfg`, and `cfg!(…)`. A nested refusal names the innermost macro.
 ///
-/// Before the row the fixture lowered: nothing inside a macro's tokens was read or refused.
+/// The review's fold (2026-10-30) adds an invocation of a read-shape definition under
+/// `#[cfg(windows)]`; one with an attribute macro, a non-language `derive`, a `cfg_attr(…,
+/// macro_use)` module or a `#[macro_use]` module between it and its definition; a definition that
+/// pastes the names into `stringify!`; one in an inline module used after it; a read definition
+/// shadowed by a later non-read one; and a statement macro between a block's definition and its
+/// invocation — each refused.
+///
+/// Before the row the fixture lowered: nothing inside a macro's tokens was read or refused. The
+/// expected list was filled from the reading's output and then checked row by row against the
+/// fixture's lines and columns.
 ///
 /// MUTATION: drop the lexical refusal in `crate::gates`' macro visit — the fixture lowers; stop
 /// its descent into groups — the nested line and the two-arm definition's line pass; take the
 /// nearest earlier definition without checking what stands between — the last `entries!` is
-/// read.
+/// read; read a definition whatever its `cfg` — `windows_entries!` is; drop the attribute hazard
+/// — the three items between pass; accept a paste inside a group — `named_entries!` (and
+/// `dropping!`) are read; drop the scope check — `scoped_entries!` is; take the first definition
+/// — `twice!` is; drop the statement hazard — `block_entries!` is; drop `macro_use` from the
+/// hazards — the two module cases are.
 #[test]
 fn a_cfg_in_any_other_macro_body_is_refused_by_its_line() {
     let refused = Index::shared(&fixture_universe("gated_in_macro_refused"))
@@ -938,7 +951,7 @@ fn a_cfg_in_any_other_macro_body_is_refused_by_its_line() {
             "in-macro 5:5 other",
             "in-macro 10:10 vec",
             "in-macro 14:5 thread_local",
-            "in-macro 20:9 outer",
+            "in-macro 20:9 inner",
             "in-macro 26:5 inner_attribute",
             "in-macro 30:5 conditional",
             "in-macro 37:9 macro_rules! two_arms",
@@ -946,6 +959,15 @@ fn a_cfg_in_any_other_macro_body_is_refused_by_its_line() {
             "unreadable-body 63:1 entries",
             "in-macro 69:5 crate::entries",
             "in-macro 76:5 entries",
+            "in-macro 109:5 windows_entries",
+            "in-macro 126:5 attribute_entries",
+            "in-macro 143:5 derive_entries",
+            "in-macro 160:5 conditional_use_entries",
+            "in-macro 172:5 named_entries",
+            "in-macro 188:5 scoped_entries",
+            "in-macro 206:5 twice",
+            "in-macro 221:9 block_entries",
+            "in-macro 239:5 used_entries",
         ]
     );
 }

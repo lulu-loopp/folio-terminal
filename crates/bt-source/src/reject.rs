@@ -120,9 +120,11 @@ pub enum Rejection {
     CfgInMacroTokens {
         file: PathBuf,
         at: Position,
-        /// The invocation's path as written (`thread_local`, `crate::entries`), or
-        /// `macro_rules! name` for a definition.
+        /// The innermost macro written around the attribute: an invocation's path as written
+        /// (`thread_local`, `crate::entries`), or `macro_rules! name` for a definition.
         macro_path: String,
+        /// The attribute as written: `#[cfg(…)]`, `#![cfg(…)]` or `#[cfg_attr(…)]`.
+        attribute: String,
     },
     /// An invocation of a `macro_rules!` whose body `crate::gates` reads (plan row 109) — a list of
     /// attribute-carrying names — that is not such a list: reading its `cfg`s as gates would be
@@ -253,9 +255,10 @@ impl fmt::Display for Rejection {
                 file,
                 at,
                 macro_path,
+                attribute,
             } => write!(
                 formatter,
-                "{}:{at}: a `#[cfg]` inside the tokens of `{macro_path}`, where the index reads no \
+                "{}:{at}: `{attribute}` inside the tokens of `{macro_path}`, where the index reads no \
                  gate, so the bytes under it would be counted whatever it says",
                 file.display()
             ),

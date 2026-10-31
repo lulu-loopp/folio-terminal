@@ -94,3 +94,148 @@ bitflags_like! {
 pub fn a_cfg_macro() -> bool {
     cfg!(test)
 }
+
+// The review's fold (2026-10-30): a definition a `cfg` keeps out of some build is not read.
+#[cfg(windows)]
+macro_rules! windows_entries {
+    ($( $(#[$a:meta])* $v:ident, )*) => {
+        pub enum Windows {
+            $( $(#[$a])* $v, )*
+        }
+    };
+}
+
+windows_entries! {
+    #[cfg(test)]
+    the_needle,
+}
+
+// An attribute macro between the definition and the invocation may define another one.
+macro_rules! attribute_entries {
+    ($( $(#[$a:meta])* $v:ident, )*) => {
+        pub enum Attributed {
+            $( $(#[$a])* $v, )*
+        }
+    };
+}
+
+#[some_attribute]
+pub fn between_an_attribute() {}
+
+attribute_entries! {
+    #[cfg(test)]
+    the_needle,
+}
+
+// So may a derive of anything but the language's own derives.
+macro_rules! derive_entries {
+    ($( $(#[$a:meta])* $v:ident, )*) => {
+        pub enum Derived {
+            $( $(#[$a])* $v, )*
+        }
+    };
+}
+
+#[derive(Clone, Serialize)]
+pub struct BetweenADerive;
+
+derive_entries! {
+    #[cfg(test)]
+    the_needle,
+}
+
+// And a module a `cfg_attr` gives `macro_use`.
+macro_rules! conditional_use_entries {
+    ($( $(#[$a:meta])* $v:ident, )*) => {
+        pub enum ConditionalUse {
+            $( $(#[$a])* $v, )*
+        }
+    };
+}
+
+#[cfg_attr(test, macro_use)]
+mod between_a_conditional_use {}
+
+conditional_use_entries! {
+    #[cfg(test)]
+    the_needle,
+}
+
+// A paste into another macro's tokens: `stringify!` keeps the name in every build.
+macro_rules! named_entries {
+    ($( $(#[$a:meta])* $v:ident, )*) => {
+        pub const NAMES: &str = stringify!($( $(#[$a])* $v, )*);
+    };
+}
+
+named_entries! {
+    #[cfg(test)]
+    the_needle,
+}
+
+// A definition in an inline module is not visible after the module ends.
+mod scoped {
+    macro_rules! scoped_entries {
+        ($( $(#[$a:meta])* $v:ident, )*) => {
+            pub enum Scoped {
+                $( $(#[$a])* $v, )*
+            }
+        };
+    }
+}
+
+scoped_entries! {
+    #[cfg(test)]
+    the_needle,
+}
+
+// The nearest earlier definition wins, not the first.
+macro_rules! twice {
+    ($( $(#[$a:meta])* $v:ident, )*) => {
+        pub enum Twice {
+            $( $(#[$a])* $v, )*
+        }
+    };
+}
+
+macro_rules! twice {
+    ($($tokens:tt)*) => {};
+}
+
+twice! {
+    #[cfg(test)]
+    the_needle,
+}
+
+// A statement macro between a block's definition and its invocation may define another one.
+pub fn a_statement_between() {
+    macro_rules! block_entries {
+        ($( $(#[$a:meta])* $v:ident, )*) => {
+            enum Block {
+                $( $(#[$a])* $v, )*
+            }
+        };
+    }
+    statement_between!();
+    block_entries! {
+        #[cfg(test)]
+        the_needle,
+    }
+}
+
+// As may a `#[macro_use]` module.
+macro_rules! used_entries {
+    ($( $(#[$a:meta])* $v:ident, )*) => {
+        pub enum Used {
+            $( $(#[$a])* $v, )*
+        }
+    };
+}
+
+#[macro_use]
+mod between_a_use {}
+
+used_entries! {
+    #[cfg(test)]
+    the_needle,
+}

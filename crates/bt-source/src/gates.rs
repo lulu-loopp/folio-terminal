@@ -29,29 +29,44 @@
 //! `macro_rules!` definition's — so a `cfg` there is read only where this walk knows what the
 //! macro makes of it. The grammar:
 //!
-//! * **Read: a list of attribute-carrying names.** A `macro_rules!` with one arm whose matcher is
+//! * **Read: a list of attribute-carrying names.** A `macro_rules!` carrying no `cfg` and no
+//!   attribute that may run a macro (below), with one arm whose matcher is
 //!   `$( $(#[$a:meta])* $v:ident, )*`, and whose transcriber is top-level items (attributes, an
 //!   optional `pub`, then `impl`, `enum`, `struct`, `union`, `trait` or `fn` up to its brace body,
-//!   or `const`, `static`, `type` or `use` up to its `;`), each of which either a `cfg` keeps out
-//!   of the product or pastes `$a` and `$v` only as `$(#[$a])* $v` — so every name lands behind
-//!   its own attributes. The definition's top-level items are read like items (a gated one is a
-//!   gate). An invocation by a one-segment path that resolves to such a definition — the nearest
-//!   one written earlier in the same file, in a scope (the file, an inline module, a block) that
-//!   holds the invocation, with no macro invocation and no `#[macro_use]` module written between
-//!   them in a scope that holds it (either could define another macro of that name) — is read as
-//!   `$( $(#[…])* name, )*`: each entry's attributes are read as a variant's are, and a gated
-//!   entry's bytes, from its first attribute to its name, are a gate. A body that is not that
-//!   list is refused ([`Rejection::UnreadableMacroBody`]). The tree's one such macro is
+//!   or `const`, `static`, `type` or `use` up to its `;`) carrying no attribute that may run a
+//!   macro, each of which either a `cfg` keeps out of the product, or is `[pub] enum Name { $(
+//!   $(#[$a])* $v, )* }` with exactly that body, or names neither `$a` nor `$v`. So every name
+//!   lands as a variant behind its own attributes, where the compiler applies them, and nowhere
+//!   else a product build compiles — not inside another macro's tokens (`stringify!`, `concat!`,
+//!   a local macro), where the attributes would gate nothing. The definition's top-level items
+//!   are read like items (a gated one is a gate). An invocation by a one-segment path that
+//!   resolves to such a definition is read as `$( $(#[…])* name, )*`: each entry's attributes
+//!   are read as a variant's are, and a gated entry's bytes, from its first attribute to its
+//!   name, are a gate. A body that is not that list is refused
+//!   ([`Rejection::UnreadableMacroBody`]). The tree's one such macro is
 //!   `crates/bt-app/src/i18n.rs`' `text_entries!`.
+//! * **Resolution.** The nearest definition of the name written earlier in the same file, in a
+//!   scope (the file, an inline module, a block) that holds the invocation, with no hazard written
+//!   between them in a scope that holds it. A hazard is anything that may define another macro of
+//!   that name where this walk cannot see it: a macro invocation in item or statement position
+//!   that is not itself read, and an item carrying an attribute that may run a macro — an
+//!   attribute outside the language's own (an attribute macro), a `derive` of anything but the
+//!   language's derives, `macro_use`, or a `cfg_attr` writing any of those. A definition that a
+//!   `cfg` keeps out of some build is never read, so an invocation of it is refused.
 //! * **Refused: every other `cfg` in a macro's tokens** ([`Rejection::CfgInMacroTokens`]): a
 //!   `#[cfg]`, a `#![cfg]` or a `cfg_attr` that writes one, at any depth of the tokens of any
 //!   other invocation (`thread_local!`, `vec!`, a path-qualified or unresolved one) or definition,
-//!   or of an ungated item of a read definition. A new macro carrying a `cfg` is therefore a
-//!   refusal naming its file, line and path — never a silent product count — and the read shape
-//!   grows only by a row that brings its grammar, a fixture and a pin.
+//!   or of an ungated item of a read definition. The refusal names the innermost macro written
+//!   around the attribute — the one whose grammar would have to be read — so a new macro carrying
+//!   a `cfg` is a refusal naming its file, line and path, never a silent product count; the read
+//!   shape grows only by a row that brings its grammar, a fixture and a pin.
 //! * Not refused: any other attribute in a macro's tokens (a doc comment, `derive`, a `cfg_attr`
 //!   that writes no `cfg`), `cfg!(…)` (an expression, not a gate), and anything inside a gated
 //!   node, which is not read again.
+//! * **Not reached (a limit older than this row):** a macro written in an attribute's value
+//!   (`#[doc = m!(…)]`) and the tokens `syn` keeps unparsed in a `Verbatim` node are visited by
+//!   neither reading, so a `cfg` there is neither read nor refused (no attribute-value macro in
+//!   the tree carries one: the lexical scan of 2026-10-30, plan row 109's report §1).
 
 use std::collections::BTreeSet;
 use std::ops::Range;
@@ -67,7 +82,7 @@ use crate::declarations::{
     Compilation, cfg_attr_writes_a_cfg, cfg_is_readable, cfg_predicates, expr_attrs, names_cfg,
 };
 use crate::index::Span;
-use crate::lower::at_union;
+use crate::lower::{BUILT_IN_ATTRIBUTES, BUILT_IN_DERIVES, at_union};
 use crate::reject::{Position, Rejection};
 
 /// Walk `file` (parsed from `text`, which starts at union offset `base`) and push the span of
@@ -125,8 +140,9 @@ struct Definition {
     reads_entries: bool,
 }
 
-/// A macro invocation this walk does not read, or a `#[macro_use]` module: either may define a
-/// `macro_rules!` of any name, visible from `at` on in `scope`.
+/// A macro invocation in item or statement position this walk does not read, or an item carrying
+/// an attribute that may run a macro ([`may_run_a_macro`]): either may define a `macro_rules!` of
+/// any name, visible from `at` on in `scope`.
 struct Hazard {
     at: usize,
     scope: Range<usize>,
@@ -263,11 +279,20 @@ impl Gates<'_> {
         }
     }
 
-    /// A `macro_rules! name { … }`: read its items when it is a list of attribute-carrying
-    /// names, refuse every `cfg` in its tokens otherwise; then make it visible by name.
-    fn definition(&mut self, mac: &syn::Macro, name: &syn::Ident) {
+    /// A `macro_rules! name { … }` carrying `attrs`: read its items when it is a list of
+    /// attribute-carrying names that every product build compiles as written, refuse every
+    /// `cfg` in its tokens otherwise; then make it visible by name.
+    fn definition(&mut self, attrs: &[syn::Attribute], mac: &syn::Macro, name: &syn::Ident) {
         let spelt = format!("macro_rules! {name}");
-        let reads_entries = match entries_definition(mac.tokens.clone(), self.text) {
+        // A definition a `cfg` keeps out of some build leaves the name to another definition
+        // there; one an attribute macro may rewrite is not the tokens written.
+        let as_written = !attrs
+            .iter()
+            .any(|attribute| attribute.path().is_ident("cfg") || may_run_a_macro(&attribute.meta));
+        let read = as_written
+            .then(|| entries_definition(mac.tokens.clone(), self.text))
+            .flatten();
+        let reads_entries = match read {
             Some(items) => {
                 for item in items {
                     if !self.gated_range(&item.attrs, item.range) {
@@ -289,24 +314,29 @@ impl Gates<'_> {
         });
     }
 
-    /// Refuse every `#[cfg]`, `#![cfg]` and `cfg`-writing `cfg_attr` in `tokens`, at any depth.
+    /// Refuse every `#[cfg]`, `#![cfg]` and `cfg`-writing `cfg_attr` in `tokens`, at any depth,
+    /// naming the innermost macro written around it (`macro_path` until another opens).
     fn refuse_cfgs(&mut self, tokens: TokenStream, macro_path: &str) {
         let trees: Vec<TokenTree> = tokens.into_iter().collect();
         let mut at = 0;
         while at < trees.len() {
             if let Some((group, next)) = attribute_at(&trees, at) {
                 if writes_a_gate(group) {
+                    let from = trees[at].span().byte_range().start;
+                    let to = group.span().byte_range().end;
                     self.rejections.push(Rejection::CfgInMacroTokens {
                         file: self.path.to_path_buf(),
                         at: position(trees[at].span()),
                         macro_path: macro_path.to_owned(),
+                        attribute: self.text[from..to].to_owned(),
                     });
                 }
                 at = next;
                 continue;
             }
             if let TokenTree::Group(group) = &trees[at] {
-                self.refuse_cfgs(group.stream(), macro_path);
+                let inner = macro_opened_by(&trees, at);
+                self.refuse_cfgs(group.stream(), inner.as_deref().unwrap_or(macro_path));
             }
             at += 1;
         }
@@ -337,22 +367,23 @@ impl<'ast> Visit<'ast> for Gates<'_> {
     }
 
     fn visit_item(&mut self, item: &'ast syn::Item) {
-        if !self.gated(item_attrs(item), item) {
-            syn::visit::visit_item(self, item);
+        let attrs = item_attrs(item);
+        if self.gated(attrs, item) {
+            return;
         }
-    }
-
-    fn visit_item_mod(&mut self, module: &'ast syn::ItemMod) {
-        if module
-            .attrs
+        if attrs
             .iter()
-            .any(|attribute| attribute.path().is_ident("macro_use"))
+            .any(|attribute| may_run_a_macro(&attribute.meta))
         {
             self.hazards.push(Hazard {
-                at: module.span().byte_range().start,
+                at: item.span().byte_range().start,
                 scope: self.scope(),
             });
         }
+        syn::visit::visit_item(self, item);
+    }
+
+    fn visit_item_mod(&mut self, module: &'ast syn::ItemMod) {
         match &module.content {
             Some((brace, _)) => {
                 let scope =
@@ -373,7 +404,7 @@ impl<'ast> Visit<'ast> for Gates<'_> {
     fn visit_item_macro(&mut self, item: &'ast syn::ItemMacro) {
         match &item.ident {
             Some(name) if item.mac.path.is_ident("macro_rules") => {
-                self.definition(&item.mac, name);
+                self.definition(&item.attrs, &item.mac, name);
             }
             _ => self.invocation(&item.mac, true),
         }
@@ -424,21 +455,8 @@ impl<'ast> Visit<'ast> for Gates<'_> {
         }
     }
 
-    fn visit_stmt(&mut self, statement: &'ast syn::Stmt) {
-        // `foo!(…);` and `foo![…];` are expression statements in `syn`, and their expansion is
-        // statements of this block as much as `foo! { … }`'s is.
-        if let syn::Stmt::Expr(syn::Expr::Macro(expression), _) = statement {
-            let at = expression.mac.path.span().byte_range().start;
-            if !self.resolves_to_entries(&expression.mac.path, at) {
-                self.hazards.push(Hazard {
-                    at,
-                    scope: self.scope(),
-                });
-            }
-        }
-        syn::visit::visit_stmt(self, statement);
-    }
-
+    // `syn` parses `foo!(…);`, `foo![…];` and `foo! { … }` in a block as a statement macro, so
+    // every statement-position invocation is a hazard here.
     fn visit_stmt_macro(&mut self, statement: &'ast syn::StmtMacro) {
         if !self.gated(&statement.attrs, statement) {
             self.invocation(&statement.mac, true);
@@ -562,18 +580,25 @@ fn entries_definition(tokens: TokenStream, text: &str) -> Option<Vec<Transcribed
         ] => (*attribute, *name),
         _ => return None,
     };
-    let pasted = [
-        format!("$ ( # [ $ {attribute} ] ) * $ {name} ,"),
-        format!("$ ( # [ $ {attribute} ] ) * $ {name}"),
-    ];
+    let enumerated = format!("$ ( $ ( # [ $ {attribute} ] ) * $ {name} , ) *");
     let items = transcribed_items(transcriber.stream())?;
     for item in &items {
+        if item
+            .attrs
+            .iter()
+            .any(|attribute| may_run_a_macro(&attribute.meta))
+        {
+            return None;
+        }
         let gated = item
             .attrs
             .iter()
             .any(|attribute| attribute.path().is_ident("cfg"))
             && cfg_predicates(&item.attrs, text).1 == Compilation::NeverInProduct;
-        if !gated && !pastes_behind_attributes(item.rest.clone(), attribute, name, &pasted) {
+        if !gated
+            && !enumerates_the_names(item.rest.clone(), &enumerated)
+            && names_a_variable(item.rest.clone(), attribute, name)
+        {
             return None;
         }
     }
@@ -639,43 +664,123 @@ fn transcribed_items(tokens: TokenStream) -> Option<Vec<TranscribedItem>> {
     Some(items)
 }
 
-/// Whether `tokens` paste `$attribute` and `$name` only as one of `pasted`
-/// (`$( $(#[$attribute])* $name, )*`'s inside), at any depth.
-fn pastes_behind_attributes(
-    tokens: TokenStream,
-    attribute: &str,
-    name: &str,
-    pasted: &[String; 2],
-) -> bool {
+/// Whether an item's tokens are `[pub] enum Name { … }` whose whole body is `enumerated` —
+/// `$( $(#[$a])* $v, )*`, the one place the attributes are sure to gate the names they carry.
+fn enumerates_the_names(tokens: TokenStream, enumerated: &str) -> bool {
     let trees: Vec<TokenTree> = tokens.into_iter().collect();
     let mut at = 0;
-    while at < trees.len() {
-        match &trees[at] {
-            TokenTree::Punct(dollar) if dollar.as_char() == '$' => match trees.get(at + 1) {
-                Some(TokenTree::Group(repetition)) => {
-                    if !pasted.contains(&flat(repetition.stream()))
-                        && !pastes_behind_attributes(repetition.stream(), attribute, name, pasted)
-                    {
-                        return false;
-                    }
-                    at += 2;
-                    continue;
-                }
-                Some(TokenTree::Ident(variable)) if variable == attribute || variable == name => {
-                    return false;
-                }
-                _ => {}
-            },
-            TokenTree::Group(group) => {
-                if !pastes_behind_attributes(group.stream(), attribute, name, pasted) {
-                    return false;
-                }
-            }
-            _ => {}
-        }
+    if matches!(trees.get(at), Some(TokenTree::Ident(word)) if word == "pub") {
         at += 1;
+        if matches!(trees.get(at), Some(TokenTree::Group(group)) if group.delimiter() == Delimiter::Parenthesis)
+        {
+            at += 1;
+        }
     }
-    true
+    match &trees[at..] {
+        [
+            TokenTree::Ident(keyword),
+            TokenTree::Ident(_),
+            TokenTree::Group(body),
+        ] => {
+            keyword == "enum"
+                && body.delimiter() == Delimiter::Brace
+                && flat(body.stream()) == enumerated
+        }
+        _ => false,
+    }
+}
+
+/// Whether `tokens` paste `$attribute` or `$name` anywhere.
+fn names_a_variable(tokens: TokenStream, attribute: &str, name: &str) -> bool {
+    let trees: Vec<TokenTree> = tokens.into_iter().collect();
+    trees.iter().enumerate().any(|(at, tree)| match tree {
+        TokenTree::Punct(dollar) if dollar.as_char() == '$' => matches!(
+            trees.get(at + 1),
+            Some(TokenTree::Ident(variable)) if variable == attribute || variable == name
+        ),
+        TokenTree::Group(group) => names_a_variable(group.stream(), attribute, name),
+        _ => false,
+    })
+}
+
+/// Whether an attribute may run a macro whose expansion this walk does not see — and so define a
+/// `macro_rules!` of any name: an attribute outside the language's own (an attribute macro; the
+/// tool namespaces `rustfmt`, `clippy` and `diagnostic` are inert), a `derive` of anything but the
+/// language's derives, `macro_use`, or a `cfg_attr` writing any of those. What cannot be read is
+/// taken to.
+fn may_run_a_macro(meta: &syn::Meta) -> bool {
+    const INERT_TOOLS: [&str; 3] = ["rustfmt", "clippy", "diagnostic"];
+    let path = meta.path();
+    let Some(name) = path.get_ident() else {
+        return !path
+            .segments
+            .first()
+            .is_some_and(|tool| INERT_TOOLS.iter().any(|inert| tool.ident == inert));
+    };
+    let name = name.to_string();
+    match name.as_str() {
+        "derive" => {
+            let syn::Meta::List(list) = meta else {
+                return true;
+            };
+            list.parse_args_with(
+                syn::punctuated::Punctuated::<syn::Path, syn::Token![,]>::parse_terminated,
+            )
+            .map_or(true, |derived| {
+                derived.iter().any(|path| {
+                    path.segments.last().is_none_or(|last| {
+                        !BUILT_IN_DERIVES
+                            .iter()
+                            .any(|built_in| last.ident == built_in)
+                    })
+                })
+            })
+        }
+        "cfg_attr" => {
+            let syn::Meta::List(list) = meta else {
+                return true;
+            };
+            list.parse_args_with(
+                syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+            )
+            .map_or(true, |written| written.iter().skip(1).any(may_run_a_macro))
+        }
+        "macro_use" => true,
+        _ => !BUILT_IN_ATTRIBUTES.contains(&name.as_str()),
+    }
+}
+
+/// The macro a group at `trees[at]` is the body of — `path!(…)`, `path! name { … }` for
+/// `macro_rules!` — spelt as a refusal names it; `None` when the group is no macro's body.
+fn macro_opened_by(trees: &[TokenTree], at: usize) -> Option<String> {
+    let mut bang = at.checked_sub(1)?;
+    let mut defined = None;
+    if let TokenTree::Ident(name) = &trees[bang] {
+        defined = Some(name.to_string());
+        bang = bang.checked_sub(1)?;
+    }
+    if !matches!(&trees[bang], TokenTree::Punct(one) if one.as_char() == '!') {
+        return None;
+    }
+    let mut start = bang.checked_sub(1)?;
+    let TokenTree::Ident(last) = &trees[start] else {
+        return None;
+    };
+    let mut path = vec![last.to_string()];
+    while start >= 3
+        && matches!(&trees[start - 1], TokenTree::Punct(colon) if colon.as_char() == ':')
+        && matches!(&trees[start - 2], TokenTree::Punct(colon) if colon.as_char() == ':')
+        && let TokenTree::Ident(segment) = &trees[start - 3]
+    {
+        path.insert(0, segment.to_string());
+        start -= 3;
+    }
+    let path = path.join("::");
+    match defined {
+        Some(name) if path == "macro_rules" => Some(format!("macro_rules! {name}")),
+        Some(_) => None,
+        None => Some(path),
+    }
 }
 
 /// The tokens of a stream, one word each and delimiters spelt — a spelling that does not depend
