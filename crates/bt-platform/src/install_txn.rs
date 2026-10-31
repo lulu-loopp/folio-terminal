@@ -170,6 +170,24 @@ impl Failure {
     pub fn refused_while_open(&self) -> bool {
         self.stage == Stage::Rename && arm::refused_while_open(&self.error)
     }
+
+    /// **Whether this is a removal refused because something still holds what
+    /// it removes** — on Windows `ERROR_ACCESS_DENIED` or
+    /// `ERROR_SHARING_VIOLATION` at [`Stage::Remove`]: an executable inside
+    /// the folder still mapped as a process's image for a moment after that
+    /// process has ended, or a scanner or an indexer holding a file without
+    /// `FILE_SHARE_DELETE`, which lets go of it again in a moment
+    /// (T-UPDATE-STARTUP-ON-DISK-TEMP-DIR-RACE). `ERROR_ACCESS_DENIED` is also
+    /// what a removal the account has no right to answers, which this cannot
+    /// tell apart and which never goes away by itself: a caller asks again
+    /// only within a bound, and its line at the bound says what was refused.
+    /// This door never asks again. **Never on macOS**: `unlink(2)` and
+    /// `rmdir(2)` remove what is open, and no error of theirs goes away by
+    /// itself.
+    #[must_use]
+    pub fn removal_refused_while_held(&self) -> bool {
+        self.stage == Stage::Remove && arm::refused_while_open(&self.error)
+    }
 }
 
 impl std::fmt::Display for Failure {
@@ -890,6 +908,10 @@ mod arm {
     /// `MoveFileExW(…, MOVEFILE_REPLACE_EXISTING)` over a target another
     /// handle holds without delete sharing answers `ERROR_ACCESS_DENIED`; a
     /// source or target opened with no sharing at all, `ERROR_SHARING_VIOLATION`.
+    /// A removal answers the same two: `ERROR_ACCESS_DENIED` while a file
+    /// inside is still mapped as a process's image, `ERROR_SHARING_VIOLATION`
+    /// while a handle holds one without delete sharing
+    /// ([`super::Failure::removal_refused_while_held`]).
     pub(super) fn refused_while_open(error: &io::Error) -> bool {
         error.raw_os_error().is_some_and(|code| {
             code == ERROR_ACCESS_DENIED.0.cast_signed()
@@ -2095,6 +2117,50 @@ mod tests {
         assert_eq!(names_in(&home), vec!["journal.json".to_string()]);
         assert_eq!(std::fs::read(&journal).unwrap(), "再写 again".as_bytes());
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// RED (T-UPDATE-STARTUP-ON-DISK-TEMP-DIR-RACE) — **on the real arm, a
+    /// folder's removal refused while a file inside it is held without delete
+    /// sharing is a removal refused while held, and the folder goes once the
+    /// hold lifts**; a refused rename is not one, nor a removal's other
+    /// refusals, and on macOS none is.
+    ///
+    /// MUTATION: `removal_refused_while_held` answers
+    /// `arm::refused_while_open(&self.error)` (the stage not asked).
+    #[cfg(any(windows, target_os = "macos"))]
+    #[test]
+    fn a_removal_refused_while_a_file_inside_is_held_says_so_and_lands_once_let_go() {
+        let denied = || io::Error::from_raw_os_error(if cfg!(windows) { 5 } else { 13 });
+        let at = |stage| Failure::at(stage, Path::new("x"), denied());
+        assert_eq!(
+            at(Stage::Remove).removal_refused_while_held(),
+            cfg!(windows)
+        );
+        assert!(!at(Stage::Rename).removal_refused_while_held());
+        assert!(
+            !Failure::at(
+                Stage::Remove,
+                Path::new("x"),
+                io::Error::from_raw_os_error(2)
+            )
+            .removal_refused_while_held()
+        );
+        #[cfg(windows)]
+        {
+            let home = scratch("held-removal");
+            let folder = home.join("txn");
+            std::fs::create_dir_all(folder.join("rescue")).unwrap();
+            let file = folder.join("rescue").join("folio.exe");
+            std::fs::write(&file, b"held").unwrap();
+            let held = crate::trust_harness::hold_without_delete_sharing(&file).unwrap();
+            let refused = durable_remove(&folder).unwrap_err();
+            assert!(refused.removal_refused_while_held(), "{refused}");
+            assert!(!refused.refused_while_open(), "{refused}");
+            drop(held);
+            durable_remove(&folder).unwrap();
+            assert!(!folder.exists(), "removed once let go");
+            let _ = std::fs::remove_dir_all(&home);
+        }
     }
 
     /// RED (U-12) — **a durable remove flushes the directory the entry was in,

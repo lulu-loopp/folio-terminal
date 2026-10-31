@@ -6597,7 +6597,6 @@ crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::<Machine as Wo
 crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::<Machine as World>::retire_entrance	Ambiguous	to_string	1	
 crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::<Machine as World>::spawn_detached	Ambiguous	map	1	
 crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::<Machine as World>::spawn_detached	Ambiguous	spawn	1	
-crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::ended_within	Ambiguous	elapsed	1	2026-10-23: T-UNKEPT-CARD-ONCE; `Instant::elapsed` on the worker's own start instant, a standard-library method on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::failed	Ambiguous	cloned	1	
 crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::hand_to_rescue	Ambiguous	is_some	1	
 crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::held	Ambiguous	map	1	
@@ -6608,7 +6607,7 @@ crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::mounts_under	A
 crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::pass	Ambiguous	collect	1	
 crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::pass	Ambiguous	map	1	2026-10-21: T-UPDATE-MOVE-HELD-RETRY; a standard-library method (Option, Iterator, String, Duration, Vec) on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::pass	Ambiguous	skip	1	
-crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::perform	Ambiguous	to_string	2	
+crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::perform	Ambiguous	to_string	1	
 crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::rescue_copy	Ambiguous	is_some	1	2026-10-22: T-RESCUE-WINDOW-NO-OFFER; `Option::is_some` on the `OnceLock` read `update_startup::rescue_copy` answers, a standard-library method on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::retire	Dynamic	kept	2	
 crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::run_by	Ambiguous	flatten	2	2026-10-21: T-RESCUE-COPY-CARD; the same sites as `update_startup::run`'s rows, the pass renamed `run_by` (the rescue copy's start); a standard-library method (Option, bool) on a receiver the grammar does not type, which reaches no door

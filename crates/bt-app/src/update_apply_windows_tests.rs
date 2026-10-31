@@ -2371,6 +2371,10 @@ impl crate::update_startup::World for StartWorld {
     fn on_a_worker(&mut self, _job: crate::update_startup::OffThread) -> io::Result<()> {
         panic!("nothing is mounted on Windows")
     }
+
+    fn wait_clock(&self) -> std::sync::Arc<dyn crate::update_apply::WaitClock> {
+        panic!("nothing is mounted on Windows")
+    }
 }
 
 /// RED (U-24) — **`RolledBack` left by a dead holder is retired by the next
@@ -2466,6 +2470,10 @@ impl crate::update_startup::World for RefusedStart {
     }
 
     fn on_a_worker(&mut self, _job: crate::update_startup::OffThread) -> io::Result<()> {
+        panic!("nothing is mounted on Windows")
+    }
+
+    fn wait_clock(&self) -> std::sync::Arc<dyn crate::update_apply::WaitClock> {
         panic!("nothing is mounted on Windows")
     }
 }
@@ -5313,6 +5321,10 @@ impl crate::update_startup::World for StartsRecorded {
     }
 
     fn on_a_worker(&mut self, _job: crate::update_startup::OffThread) -> io::Result<()> {
+        panic!("nothing is mounted on Windows")
+    }
+
+    fn wait_clock(&self) -> std::sync::Arc<dyn crate::update_apply::WaitClock> {
         panic!("nothing is mounted on Windows")
     }
 }
