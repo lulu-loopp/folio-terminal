@@ -33,7 +33,7 @@ All notable changes to Folio are recorded here. The format follows
 - Chinese and other input-method text can now be typed into the Settings and profile fields, and the candidate window sits at the field's caret. <!-- zh: 现在可以在设置和配置文件的输入框中用输入法输入中文等文字，候选窗口显示在输入框的光标处。 -->
 - When Folio stops after an internal error and a second error happens while it closes, it now closes as it does after any crash, instead of possibly leaving a window on the screen with Folio still running. <!-- zh: Folio 因内部错误停止、并在关闭过程中再次出错时，现在会像其他崩溃之后一样关闭，不再可能把窗口留在屏幕上而 Folio 仍在运行。 -->
 - On Windows, a one-finger swipe over a program that reads the mouse, such as vim, htop or Claude Code, now scrolls about as far as the finger moved; a swipe over a picture or a video no longer zooms it or changes the volume, and a one-finger swipe over a zoomed picture moves it instead of zooming. <!-- zh: 在 Windows 上，在 vim、htop 或 Claude Code 等读取鼠标的程序上单指滑动，现在滚动的距离与手指移动的距离大致相同；在图片或视频上滑动也不再缩放图片或改变音量，在放大的图片上单指滑动会移动图片，而不是缩放它。 -->
-- Letters begun with an input method in one place, such as a shell, a search field or a name box, no longer land somewhere else after a click or a tab switch; the composition is cancelled instead. <!-- zh: 在一处（例如 shell、搜索框或名称框）用输入法开始输入的字母，单击别处或切换标签页后不再落到其他地方，这次输入会被取消。 -->
+- Letters begun with an input method in one place, such as a shell, a search field or a name box, no longer land somewhere else after a click or a tab switch; the composition is cancelled instead, and the commit graph's search box no longer keeps showing its half-typed letters after a click elsewhere. <!-- zh: 在一处（例如 shell、搜索框或名称框）用输入法开始输入的字母，单击别处或切换标签页后不再落到其他地方，这次输入会被取消；提交图的搜索框在单击别处后也不再继续显示输入了一半的字母。 -->
 
 ## 0.4.8-preview — 2026-10-23
 

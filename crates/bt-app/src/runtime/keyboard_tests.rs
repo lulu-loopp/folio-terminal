@@ -1610,6 +1610,91 @@ fn a_closed_pane_does_not_hand_its_composition_to_the_shell_beside_it() {
     );
 }
 
+/// The frames the window holds for the glass, the one waiting to be presented first: what the
+/// reader sees now and what they will see next.
+fn frames_for_the_glass(folio: &HeadlessFolio) -> Vec<&bt_viewport::ViewportFrame> {
+    folio
+        .window
+        .pending_frames
+        .pending_frame()
+        .into_iter()
+        .chain(folio.window.last_presented_frame.as_ref())
+        .collect()
+}
+
+/// Whether `frame` draws the letters `text` anywhere in its cells.
+fn draws(frame: &bt_viewport::ViewportFrame, text: &str) -> bool {
+    frame
+        .cells
+        .iter()
+        .map(|cell| cell.text.as_str())
+        .collect::<String>()
+        .contains(text)
+}
+
+/// RED (plan row 118, T11; review F1) — **a press in another shell of the same tab draws none of
+/// the letters left behind at the first**. The press publishes its frame while the composition is
+/// still live, so the window's pre-edit is composed at B's prompt; the pass that cancels the
+/// composition then has to compose a frame without it, because re-presenting the chrome shows the
+/// frame already composed. `focus_seat` is the road the palette, the attention jump and a dropped
+/// path take, and a click in a pane takes the same one (`focus_pane_at` → `settle_focus_on`).
+///
+/// MUTATION (observed red): "M5" — drop the terminal frame `cancel_composition` publishes when it
+/// takes a pre-edit away — the frame on the glass still draws `ni` at B.
+#[test]
+fn a_press_in_another_shell_draws_none_of_the_letters_left_behind() {
+    let mut tab = crate::test_support::cross_tab(1, &["PS A> ", "PS B> "]);
+    let [a, b] = [tab.seats.terminals()[0], tab.seats.terminals()[1]];
+    for (seat, text) in [(a, "PS A> "), (b, "PS B> ")] {
+        tab.sessions.insert(seat, a_shell_that_records(text));
+    }
+    let mut folio = HeadlessFolio::with_tabs("ime-origin-shell-press", vec![tab], 0);
+    let mut turns = Turns::start();
+    folio.draw();
+    folio.runtime().ime_input(Ime::Enabled).expect("a start");
+    compose(&mut folio, "ni");
+    assert_eq!(folio.window.composing, Some(crate::ImeOwner::Shell));
+
+    folio
+        .runtime()
+        .focus_seat(b)
+        .expect("the shell takes the press");
+    assert_eq!(folio.window.tabs[0].focused_leaf, b, "the keyboard is at B");
+    assert!(
+        frames_for_the_glass(&folio)
+            .iter()
+            .any(|frame| draws(frame, "ni")),
+        "the fixture's own precondition: the press's frame was composed with the letters at B"
+    );
+    paint_and_turn(&mut folio.runtime(), turns.next());
+    assert_eq!(
+        folio.window.composing, None,
+        "the pass after the press cancelled the composition"
+    );
+    assert!(folio.window.preedit.is_none(), "and holds no pre-edit");
+    let glass = frames_for_the_glass(&folio);
+    assert!(!glass.is_empty(), "the window holds a frame for the glass");
+    assert!(
+        glass.iter().all(|frame| !draws(frame, "ni")),
+        "and no frame it holds draws the letters at B"
+    );
+
+    finish_with(&mut folio, "你");
+    assert_eq!(
+        typed_into(&folio, 0, a),
+        "",
+        "the late result reaches neither shell"
+    );
+    assert_eq!(typed_into(&folio, 0, b), "");
+    compose(&mut folio, "hao");
+    finish_with(&mut folio, "好");
+    assert_eq!(
+        typed_into(&folio, 0, b),
+        "好",
+        "a composition begun afterwards is B's own"
+    );
+}
+
 /// Two Markdown pages side by side in one tab beside a shell, both drawn: the window, the shell's
 /// seat and the two pages' surfaces.
 fn two_pages(tag: &str) -> (HeadlessFolio, bt_layout::SeatId, [crate::PreviewSurface; 2]) {
@@ -1949,17 +2034,24 @@ fn a_name_box_replaced_by_the_address_box_takes_its_composition_with_it() {
 
     compose(&mut folio, "hao");
     finish_with(&mut folio, "好");
-    assert!(
-        address(&folio).0.contains('好'),
-        "a composition begun afterwards is the address's own: {:?}",
-        address(&folio)
+    assert_eq!(
+        address(&folio),
+        ("好".to_owned(), String::new()),
+        "a composition begun afterwards is the address's own, in place of the selected address"
     );
 }
 
-/// Two files columns beside a shell, the first holding the keyboard: the window and the two
-/// columns' seats.
-fn two_columns(tag: &str) -> (HeadlessFolio, [bt_layout::SeatId; 2]) {
-    let root = bt_testpath::temp_path(tag).join("根 root");
+/// Two files columns beside a shell, the first holding the keyboard: the window, the two columns'
+/// seats, and the folder they show, removed when the test lets go of it.
+fn two_columns(
+    tag: &str,
+) -> (
+    HeadlessFolio,
+    [bt_layout::SeatId; 2],
+    crate::headless::Scratch,
+) {
+    let scratch = crate::headless::Scratch(bt_testpath::temp_path(tag));
+    let root = scratch.0.join("根 root");
     std::fs::create_dir_all(&root).expect("the scratch folder");
     let column = || {
         bt_persist::LayoutNodeV1::Leaf(bt_persist::LeafNodeV1::Files(bt_persist::FilesLeafV1 {
@@ -2011,7 +2103,7 @@ fn two_columns(tag: &str) -> (HeadlessFolio, [bt_layout::SeatId; 2]) {
     );
     let mut folio = HeadlessFolio::with_tabs(tag, vec![tab], 0);
     lend_the_keyboard(&mut folio, columns[0]);
-    (folio, columns)
+    (folio, columns, scratch)
 }
 
 /// A press in `column`: the keyboard is lent to it (`Runtime::set_files_keyboard`).
@@ -2027,12 +2119,14 @@ fn lend_the_keyboard(folio: &mut HeadlessFolio, column: bt_layout::SeatId) {
 
 /// RED (plan row 118, T7) — **a press in a second files column ends the composition begun over
 /// the first**: a column swallows compositions, so nothing is drawn or inserted on either side,
-/// but the input method's own composition (and its window) was never told to end.
+/// but the input method's own composition (and its window) was never told to end. So this road
+/// has no late result to refuse — a column takes no commit, its own or another's — and the test
+/// asserts the cancel and the next composition's origin only.
 ///
 /// MUTATION (observed red): M1 — `composing` is still `Some(FilesTree)`.
 #[test]
 fn a_press_in_a_second_files_column_cancels_the_composition_begun_over_the_first() {
-    let (mut folio, [a, b]) = two_columns("ime-origin-two-columns");
+    let (mut folio, [a, b], _scratch) = two_columns("ime-origin-two-columns");
     let mut turns = Turns::start();
     folio.runtime().ime_input(Ime::Enabled).expect("a start");
     compose(&mut folio, "ni");
@@ -2155,7 +2249,9 @@ fn the_capsule_opened_on_another_pane_cancels_its_composition() {
 }
 
 /// PIN (plan row 118, T10) — **a composition that stays on its field is never cancelled**, however
-/// many passes go by: the origin it recorded is the origin the keyboard is at.
+/// many passes go by: the origin it recorded is the origin the keyboard is at. A shell, a page and
+/// a graph's search, because a page's and a graph's origin are read from the edit focus and the
+/// focused search field, state a pass could disturb where a shell's is fixed.
 ///
 /// MUTATION (observed red): "M4" — make `composition_outlived_its_field` answer `true` for every
 /// live composition — the first pass cancels it.
@@ -2184,4 +2280,44 @@ fn a_composition_that_stays_on_its_field_survives_every_pass() {
     );
     finish_with(&mut folio, "你");
     assert_eq!(typed_into(&folio, 0, a), "你", "and its commit is its own");
+
+    let (mut folio, _, [page, _]) = two_pages("ime-origin-stays-page");
+    let mut turns = Turns::start();
+    let first = page_text(&mut folio, page);
+    press_into(&mut folio, page);
+    folio.runtime().ime_input(Ime::Enabled).expect("a start");
+    compose(&mut folio, "ni");
+    for _ in 0..3 {
+        paint_and_turn(&mut folio.runtime(), turns.next());
+    }
+    assert_eq!(
+        folio.window.composing,
+        Some(crate::ImeOwner::Preview),
+        "a page's composition is still live"
+    );
+    finish_with(&mut folio, "你");
+    assert_eq!(
+        page_text(&mut folio, page),
+        format!("你{first}"),
+        "and its commit is the page's own"
+    );
+
+    let (mut folio, _, [graph, _]) = two_graphs("ime-origin-stays-graph");
+    let mut turns = Turns::start();
+    folio.runtime().ime_input(Ime::Enabled).expect("a start");
+    compose(&mut folio, "ni");
+    for _ in 0..3 {
+        paint_and_turn(&mut folio.runtime(), turns.next());
+    }
+    assert_eq!(
+        graph_search(&folio, graph),
+        (String::new(), "ni".to_owned()),
+        "a graph's search still draws its letters"
+    );
+    finish_with(&mut folio, "你");
+    assert_eq!(
+        graph_search(&folio, graph),
+        ("你".to_owned(), String::new()),
+        "and its commit is the field's own"
+    );
 }

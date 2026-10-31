@@ -36845,7 +36845,7 @@ impl<B: Backend> Runtime<'_, B> {
             bt_platform::cancel_composition(reason)
         });
         self.trace_ime_cancel(started_in, reason, Some(told));
-        self.window.preedit = None;
+        let drew_a_preedit = self.window.preedit.take().is_some();
         self.window.composing = None;
         self.window.ime_cursor.reset();
         // **The system caret is not the composition's** (T-CARET-EVERY-LAYOUT):
@@ -36909,6 +36909,19 @@ impl<B: Backend> Runtime<'_, B> {
         // `Ime::Disabled`'s own argument, one door along.
         if matches!(started_in, ImeOwner::Preview) {
             self.repaint_preview()?;
+        }
+        // **The window's own pre-edit is drawn into the terminal frame, and the
+        // keyboard may already stand at another shell** (plan row 118, review
+        // F1). A press that moved the keyboard published its frame with the
+        // composition still live, so the letters begun at A were composed at
+        // B's prompt; re-presenting the chrome shows that same composed frame
+        // again. A fresh terminal frame is composed without them, as
+        // `Ime::Disabled` publishes one.
+        if drew_a_preedit {
+            self.publish_frame(FrameTrigger {
+                occurred_at: Instant::now(),
+                source: FrameSource::Expose,
+            })?;
         }
         Ok(())
     }

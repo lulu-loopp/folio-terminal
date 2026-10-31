@@ -2339,19 +2339,28 @@ impl<B: Backend> Runtime<'_, B> {
             let here = self.composition_origin_now();
             if let Some(what) = composing_event_of(&event) {
                 let ruling = composition_ruling(&self.window.composing_in, &here, what);
-                self.trace_ime_ruling(&event, &here, ruling);
-                // A discarded pre-edit with letters in it adopts nothing: the
-                // composition still names the field it began in, so a refused
-                // cancel's result is refused when it comes. A discarded ending
-                // moves on as any ending does.
-                let next = if carried_over && what == ComposingEvent::Opens {
-                    ComposingAfter::Unchanged
+                // An event that found its composition outlived is discarded
+                // whatever the ruling would have said, and the trace records
+                // what is done with it. A discarded pre-edit with letters in it
+                // adopts nothing: the composition still names the field it began
+                // in, so a refused cancel's result is refused when it comes. A
+                // discarded ending moves on as any ending does.
+                let ruling = if carried_over {
+                    CompositionRuling {
+                        deliver: false,
+                        next: if what == ComposingEvent::Opens {
+                            ComposingAfter::Unchanged
+                        } else {
+                            ruling.next
+                        },
+                    }
                 } else {
-                    ruling.next
+                    ruling
                 };
+                self.trace_ime_ruling(&event, &here, ruling);
                 let held = std::mem::take(&mut self.window.composing_in);
-                self.window.composing_in = held.after(next, &here);
-                if carried_over || !ruling.deliver {
+                self.window.composing_in = held.after(ruling.next, &here);
+                if !ruling.deliver {
                     return Ok(());
                 }
             }
