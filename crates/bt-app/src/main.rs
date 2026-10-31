@@ -37157,6 +37157,9 @@ impl<B: Backend> App<B> {
 
     /// **The update hand-over's answer below the storage drain's mark `owed`**, with its place
     /// in admission order — the hand-over's part of the one drain (`App::storage_answers`).
+    /// Taken once: the request is let go with the end it yields, so no later drain hears it
+    /// again — the worker drops the answer's road after the end, and a second hearing would
+    /// read that as the worker gone, over the answer kept for the way out.
     fn handoff_answer_below(
         &mut self,
         owed: Option<persist::StorageId>,
@@ -37164,9 +37167,9 @@ impl<B: Backend> App<B> {
         persist::InAdmissionOrder,
         persist::Ended<update_handoff::HandedOff>,
     )> {
-        self.handoff_answer
-            .as_mut()
-            .and_then(|answer| answer.hear_below(owed))
+        let heard = self.handoff_answer.as_mut()?.hear_below(owed)?;
+        self.handoff_answer = None;
+        Some(heard)
     }
 
     /// **Keep the hand-over's answer the drain heard** for the quit's way out to look at
@@ -48521,13 +48524,13 @@ impl<B: Backend> FolioApp<B> {
         })
     }
 
-    /// **Say where the edits a stop kept are** (T-RECOVERED-FOLDER): the worker's answer, raised
-    /// once on the window the keyboard is on, or on the oldest open window when none has it.
     /// **Hand the storage worker's document answers to the stores**
     /// (`AppEvent::DocumentsAnswered`), in the first window still standing in the
     /// opening order — the one that turns the application's clocks, whose cards
-    /// the storage pass's are. With no window standing the answers wait in their
-    /// channels for the next wake.
+    /// the storage pass's are. Every asker's answers are heard by the one drain whether
+    /// or not a window stands ([`Self::answer_storage`]); with none standing, only the
+    /// stores' re-read news and faults wait in the stores for the next reader, while each
+    /// store still sends what is owed after its answers.
     ///
     /// **The session's receipts first, and always** (T-SESSION-RECEIPTS-ON-THE-WAKE): the
     /// session store is the application's, not a window's, so its receipts are taken whether

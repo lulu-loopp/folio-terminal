@@ -2471,11 +2471,12 @@ fn a_page_is_opened_on_the_place_the_window_door_names() {
 
 /// **Two windows, each with one tab holding a preview of a real file typed into**, their saves
 /// handed to one storage lane whose queue the test serves (`persist::StorageLane::scripted`).
+/// Every asker of the application asks on that lane — the session store, the preview desk and
+/// the four documents' stores, in a scratch folder — as the product's all share one, so the
+/// drain's mark and every asker's identities come from one ledger.
 struct TwoWindowsSaving {
     application: HeadlessApplication,
     jobs: crate::persist::ScriptedJobs,
-    /// The lane every asker of the application asks on, as the product's share one.
-    lane: crate::persist::StorageLane,
     /// Each window's id and the surface its tab's preview pane is, in window order.
     windows: [(WindowId, crate::PreviewSurface); 2],
     dir: std::path::PathBuf,
@@ -2503,6 +2504,20 @@ impl TwoWindowsSaving {
             dir.join("session.lock"),
             lane.clone(),
         );
+        folio.app.settings_store = crate::persist::SettingsStore::at_on(
+            dir.join(crate::persist::SETTINGS_FILE_NAME),
+            lane.clone(),
+        );
+        folio.app.keybindings_store = crate::persist::KeybindingsStore::at_on(
+            dir.join(crate::persist::KEYBINDINGS_FILE_NAME),
+            lane.clone(),
+        );
+        folio.app.profiles_store = crate::persist::ProfilesStore::at_on(
+            dir.join(crate::persist::PROFILES_FILE_NAME),
+            lane.clone(),
+        );
+        folio.app.pins_store =
+            crate::pins::PinsStore::at_on(dir.join(crate::pins::PINS_FILE_NAME), lane);
         let (second_tab, second_seat) = tab_with_a_preview(2, vec![typed("二 second.txt")]);
         let other = headless_window(
             &folio.app,
@@ -2517,7 +2532,6 @@ impl TwoWindowsSaving {
         Self {
             application,
             jobs,
-            lane,
             windows: [
                 (
                     first,
@@ -2638,15 +2652,6 @@ fn the_storage_lanes_answers_are_heard_in_the_order_they_were_asked_across_the_w
 #[test]
 fn one_drain_hears_every_askers_answers_in_the_order_the_lane_admitted_them() {
     let mut saving = TwoWindowsSaving::open("across-askers");
-    let lane = saving.lane.clone();
-    let settings_path = saving.dir.join(crate::persist::SETTINGS_FILE_NAME);
-    saving
-        .application
-        .folio
-        .app
-        .as_mut()
-        .expect("the application")
-        .settings_store = crate::persist::SettingsStore::at_on(settings_path, lane);
     saving.press_save(1);
     assert!(
         saving

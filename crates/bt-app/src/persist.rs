@@ -3140,8 +3140,8 @@ pub(crate) enum ScriptedJob {
     Backup,
     /// An update trial's receipt.
     Receipt,
-    /// Anything else the worker takes.
-    Other,
+    /// An update's hand-over, with the road the test answers it on.
+    Handoff(mpsc::Sender<crate::update_handoff::HandedOff>),
 }
 
 #[cfg(test)]
@@ -3157,7 +3157,7 @@ impl ScriptedJobs {
             StorageJob::Session(_) => ScriptedJob::Session,
             StorageJob::Receipt { .. } => ScriptedJob::Receipt,
             StorageJob::SessionBackup(_) => ScriptedJob::Backup,
-            StorageJob::Handoff { .. } => ScriptedJob::Other,
+            StorageJob::Handoff { answer, .. } => ScriptedJob::Handoff(answer),
         })
     }
 }
