@@ -29290,3 +29290,10 @@ pub use exchange::{
     Displaced, ExchangeRefusal, flush_directory, rename_without_replacing_durably,
     replace_keeping_displaced,
 };
+/// **A loopback server for tests that answers every connection until the test
+/// stops it**, recording each (0.4.9 plan row 127): the trust harness's
+/// time-stamp authority and the download tests' scripted server stand on it.
+/// Tests only, as [`trust_harness`] is.
+#[cfg(any(test, feature = "trust-harness"))]
+#[doc(hidden)]
+pub mod loopback_server;
