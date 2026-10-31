@@ -44,7 +44,7 @@ use windows::Win32::System::LibraryLoader::{
 };
 use windows::core::{PCSTR, PCWSTR, PSTR};
 
-use crate::loopback_server::{Server, Stop};
+use crate::loopback_server::{Entry, Server, Stop};
 use crate::trust::{CODE_SIGNING, FileVersion, PUBLIC_TRUST_MARKER, Policy, TIME_STAMPING};
 
 /// `sha256RSA`.
@@ -789,10 +789,26 @@ impl Stamping {
         format!("http://{}/", self.address())
     }
 
-    /// **Stop listening, and answer every connection it was handed**, in order.
+    /// **Stop listening, and answer every connection it was handed**, in
+    /// order: those it served, one that arrived after the stop and was never
+    /// served, and a failed `accept`, each as an [`Exchange`].
     #[must_use]
     pub fn stop(self) -> Vec<Exchange> {
-        self.0.stop()
+        let unserved = |outcome| Exchange {
+            request_line: None,
+            content_type: None,
+            received: 0,
+            outcome,
+        };
+        self.0
+            .stop()
+            .into_iter()
+            .map(|entry| match entry {
+                Entry::Served(exchange) => exchange,
+                Entry::ArrivedAfterTheStop(_) => unserved(Outcome::ArrivedAfterTheStop),
+                Entry::AcceptFailed { error, .. } => unserved(Outcome::AcceptFailed(error)),
+            })
+            .collect()
     }
 }
 
@@ -824,6 +840,11 @@ pub enum Outcome {
     Stopped,
     /// A read or a write failed, in these words.
     Failed(String),
+    /// The connection arrived after the test stopped the authority, and was
+    /// never served (a client still in the backlog).
+    ArrivedAfterTheStop,
+    /// The authority's `accept` failed, in these words.
+    AcceptFailed(String),
 }
 
 // ── the signed file ─────────────────────────────────────────────────────────
@@ -1820,13 +1841,15 @@ mod tests {
         );
     }
 
-    /// RED (row 127) — **a real signing call's requests are recorded**: each
-    /// is a `POST` of `application/timestamp-query` and each was answered, and
-    /// the file it signed carries a time stamp the world's policy accepts.
+    /// RED (row 127) — **a real signing call's requests are recorded**: the
+    /// last is a `POST` of `application/timestamp-query` that was answered,
+    /// and the file it signed carries a time stamp the world's policy accepts.
     ///
     /// How many requests one `SignerSignEx3` makes is the signer's own
-    /// (Microsoft documents no retry policy), so this asserts what each one
-    /// was, not how many came.
+    /// (Microsoft documents no retry policy), and one it abandoned under load
+    /// may end any way at all (row 127 review F4), so this asserts only the
+    /// connection that succeeded; the record keeps the earlier ones, and a
+    /// failure prints it.
     ///
     /// MUTATION: answer every request with the `400` of `NotARequest` and the
     /// signing call fails, its panic naming each connection.
@@ -1837,25 +1860,21 @@ mod tests {
         let path = executable(&folder, "folio.exe", VERSION);
         let leaf = world.leaf(SUBJECT, IDENTITY);
         let exchanges = sign_recorded(&path, &leaf, &[&world.root], Some(&world.stamping(now())));
+        let last = exchanges
+            .last()
+            .unwrap_or_else(|| panic!("the signing call asked the authority: {exchanges:?}"));
+        assert_eq!(last.outcome, Outcome::Answered, "{exchanges:?}");
         assert!(
-            !exchanges.is_empty(),
-            "the signing call asked the authority"
+            last.request_line
+                .as_deref()
+                .is_some_and(|line| line.starts_with("POST ")),
+            "{exchanges:?}"
         );
-        for exchange in &exchanges {
-            assert_eq!(exchange.outcome, Outcome::Answered, "{exchanges:?}");
-            assert!(
-                exchange
-                    .request_line
-                    .as_deref()
-                    .is_some_and(|line| line.starts_with("POST ")),
-                "{exchanges:?}"
-            );
-            assert_eq!(
-                exchange.content_type.as_deref(),
-                Some("application/timestamp-query"),
-                "{exchanges:?}"
-            );
-        }
+        assert_eq!(
+            last.content_type.as_deref(),
+            Some("application/timestamp-query"),
+            "{exchanges:?}"
+        );
         crate::trust::signature(&path, &world.policy())
             .unwrap_or_else(|refusal| panic!("the stamped file verifies: {refusal:?}"));
     }
@@ -1867,7 +1886,9 @@ mod tests {
     /// connect a second time, and a refused second connection under load
     /// (`0x80072EFD`) is not the signer retrying an unanswered request.
     /// Observed the same five runs in five on 2026-10-31 before it was
-    /// committed (R4).
+    /// committed (R4), on one Windows build: what it pins is Microsoft's
+    /// signer, so a red here on another build (a CI runner's) is a finding
+    /// about the signer — open a row — not about Folio.
     ///
     /// MUTATION: leave `leaving_unanswered` at 0 (the authority answers) and
     /// the call succeeds.

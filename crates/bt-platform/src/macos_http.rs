@@ -906,7 +906,7 @@ mod tests {
     use objc2_foundation::{NSString, NSURL};
 
     use super::{HttpsGet, fetch, https_get};
-    use crate::https_download::loopback::{Served, Step, serve};
+    use crate::https_download::loopback::{Entry, Served, Step, serve};
 
     /// The product's own numbers, so that what these cases exercise is what
     /// `bt_app::update` exercises.
@@ -1178,10 +1178,10 @@ mod tests {
             .expect("every ask is answered");
             assert_eq!(body, RELEASES);
         }
-        let paths: Vec<Option<String>> = server.stop().into_iter().map(|e| e.path).collect();
+        let paths = server.stop();
         assert_eq!(
             paths,
-            vec![Some("/repos/lulu-loopp/folio-terminal/releases".to_owned()); 2]
+            vec![Entry::Served(Some("/repos/lulu-loopp/folio-terminal/releases".to_owned())); 2]
         );
     }
 
@@ -1202,7 +1202,7 @@ mod tests {
         };
         use crate::https_download::{
             DOWNLOAD_FLOOR_BYTES, DOWNLOAD_IDLE_TIMEOUT,
-            loopback::{Step, begun, body, head, ok, serve},
+            loopback::{Entry, Step, begun, body, head, ok, serve},
         };
 
         const IDLE: Duration = Duration::from_secs(5);
@@ -1574,8 +1574,11 @@ mod tests {
                 .unwrap_or_else(|error| panic!("the {name} download: {error}"));
                 assert_eq!(std::fs::read(&done.path).expect("the file"), bytes);
             }
-            let paths: Vec<Option<String>> = server.stop().into_iter().map(|e| e.path).collect();
-            assert_eq!(paths, vec![Some("/folio-0.4.6-aarch64.dmg".to_owned()); 2]);
+            let paths = server.stop();
+            assert_eq!(
+                paths,
+                vec![Entry::Served(Some("/folio-0.4.6-aarch64.dmg".to_owned())); 2]
+            );
         }
     }
 }

@@ -749,6 +749,8 @@ pub(crate) mod loopback {
     };
 
     #[cfg(any(windows, target_os = "macos"))]
+    pub(crate) use crate::loopback_server::Entry;
+    #[cfg(any(windows, target_os = "macos"))]
     use crate::loopback_server::Server;
 
     /// One thing the server does on a connection, in order.
@@ -765,47 +767,22 @@ pub(crate) mod loopback {
     }
 
     /// **A scripted server, listening** ([`serve`]): its port, and on
-    /// [`Served::stop`] (or its drop) the record of every connection it served.
+    /// [`Served::stop`] the record of every connection it met, each served
+    /// one as the request line's path when a whole head arrived before the
+    /// client went away. Its drop stops it too (the [`Server`]'s own).
     #[cfg(any(windows, target_os = "macos"))]
-    pub(crate) struct Served {
-        server: Option<Server<Exchange>>,
-        port: u16,
-    }
-
-    /// One connection the server was handed: the request line's path, when a
-    /// whole head arrived before the client went away.
-    #[cfg(any(windows, target_os = "macos"))]
-    #[derive(Clone, Debug, PartialEq, Eq)]
-    pub(crate) struct Exchange {
-        pub(crate) path: Option<String>,
-    }
+    pub(crate) struct Served(Server<Option<String>>);
 
     #[cfg(any(windows, target_os = "macos"))]
     impl Served {
         /// The port the server listens on.
         pub(crate) fn port(&self) -> u16 {
-            self.port
+            self.0.port()
         }
 
-        /// **Stop the server and answer every connection it served**, in order.
-        pub(crate) fn stop(mut self) -> Vec<Exchange> {
-            self.server.take().map(Server::stop).unwrap_or_default()
-        }
-    }
-
-    #[cfg(any(windows, target_os = "macos"))]
-    impl Drop for Served {
-        /// A test that never asked for the record still ends its server — and
-        /// one that is unwinding raises the stop without waiting, so it does
-        /// not panic a second time over a worker's panic.
-        fn drop(&mut self) {
-            if let Some(server) = self.server.take() {
-                if std::thread::panicking() {
-                    server.abandon();
-                } else {
-                    let _ = server.stop();
-                }
-            }
+        /// **Stop the server and answer every connection it met**, in order.
+        pub(crate) fn stop(self) -> Vec<Entry<Option<String>>> {
+            self.0.stop()
         }
     }
 
@@ -823,7 +800,7 @@ pub(crate) mod loopback {
                 let mut byte = [0u8; 1];
                 while !head.ends_with(b"\r\n\r\n") {
                     if connection.read(&mut byte).unwrap_or(0) != 1 {
-                        return Exchange { path: None };
+                        return None;
                     }
                     head.push(byte[0]);
                 }
@@ -858,14 +835,11 @@ pub(crate) mod loopback {
                 // The connection closes when the worker lets go of it, which
                 // ends a body that carried no length and cuts one that carried
                 // a longer one.
-                Exchange { path: Some(path) }
+                Some(path)
             },
         )
         .expect("a loopback server");
-        Served {
-            port: server.port(),
-            server: Some(server),
-        }
+        Served(server)
     }
 
     /// A status line, `Connection: close`, and the headers given.

@@ -864,7 +864,7 @@ mod tests {
     };
     use crate::https_download::{
         DOWNLOAD_FLOOR_BYTES, DOWNLOAD_IDLE_TIMEOUT,
-        loopback::{Step, begun, body, head, ok, serve},
+        loopback::{Entry, Step, begun, body, head, ok, serve},
     };
 
     const IDLE: Duration = Duration::from_secs(5);
@@ -1164,12 +1164,12 @@ mod tests {
         )
         .expect("followed");
         assert_eq!(std::fs::read(&done.path).expect("the file"), bytes);
-        let paths: Vec<Option<String>> = server.stop().into_iter().map(|e| e.path).collect();
+        let paths = server.stop();
         assert_eq!(
             paths,
             [
-                Some("/folio-0.4.6-x64.zip".to_owned()),
-                Some("/objects/asset".to_owned())
+                Entry::Served(Some("/folio-0.4.6-x64.zip".to_owned())),
+                Entry::Served(Some("/objects/asset".to_owned()))
             ],
             "the asked path, then the one it was sent to"
         );
@@ -1235,16 +1235,16 @@ mod tests {
         assert!(started.elapsed() < BUDGET, "{:?}", started.elapsed());
         assert!(entries(&directory).is_empty(), "{error}");
         // The stack's own hop limit ends the loop, not a count of the server's.
-        let paths: Vec<Option<String>> = server.stop().into_iter().map(|e| e.path).collect();
+        let paths = server.stop();
         assert_eq!(
             paths.first(),
-            Some(&Some("/folio-0.4.6-x64.zip".to_owned()))
+            Some(&Entry::Served(Some("/folio-0.4.6-x64.zip".to_owned())))
         );
         assert!(
             paths.len() > 1
                 && paths[1..]
                     .iter()
-                    .all(|path| path.as_deref() == Some("/again")),
+                    .all(|path| *path == Entry::Served(Some("/again".to_owned()))),
             "{paths:?}"
         );
     }
@@ -1273,8 +1273,11 @@ mod tests {
             .unwrap_or_else(|error| panic!("the {name} download: {error}"));
             assert_eq!(std::fs::read(&done.path).expect("the file"), bytes);
         }
-        let paths: Vec<Option<String>> = server.stop().into_iter().map(|e| e.path).collect();
-        assert_eq!(paths, vec![Some("/folio-0.4.6-x64.zip".to_owned()); 2]);
+        let paths = server.stop();
+        assert_eq!(
+            paths,
+            vec![Entry::Served(Some("/folio-0.4.6-x64.zip".to_owned())); 2]
+        );
     }
 
     /// RED (U-7) — **a cancel interrupts a wait the server is not ending: the

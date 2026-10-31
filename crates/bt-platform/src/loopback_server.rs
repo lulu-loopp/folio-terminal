@@ -16,12 +16,19 @@
 //!   [`Server::stop`].** What a connection is answered with is the caller's
 //!   `answer`, and what it returns for each connection is **recorded**. The
 //!   record comes back from `stop`, so a test can say how many connections came
-//!   and what each one was.
+//!   and what each one was — a connection that arrived after the stop was
+//!   raised, never served, and a failed `accept` included ([`Entry`]).
+//! - **One connection at a time.** A client that opens a connection and keeps
+//!   it silent holds every later connection in the backlog until the stop
+//!   (the clients these servers stand in for — WinHTTP per request, and
+//!   `NSURLSession` with one connection per host — do not).
 //! - **Stopping is a signal, never a count or a time.** `stop` raises the flag,
 //!   shuts the connection being served (if any) and cancels a read or a write
-//!   already waiting on it, so the answer ends, wakes a [`Stop::pause`], and makes one connection of its own so a
-//!   worker blocked in `accept` sees the flag. Then it joins the worker. Every
-//!   wait it ends is one it causes.
+//!   already waiting on it, so the answer ends, wakes a [`Stop::pause`], and
+//!   makes one connection of its own so a worker blocked in `accept` sees the
+//!   flag. Then it joins the worker. Every wait it ends is one it causes. A
+//!   server dropped without `stop` stops the same way (and, when the test is
+//!   already unwinding, does not wait for its worker).
 //!
 //! Tests only: this crate's own (`cfg(test)`), and those of a crate that turns
 //! on `trust-harness` (the trust harness's time-stamp authority stands on it).
@@ -33,17 +40,34 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 /// **A loopback server**, answering every connection with its `answer` and
-/// recording what each answer returned, until [`Server::stop`].
+/// recording what each answer returned, until [`Server::stop`] or its drop.
 pub struct Server<E> {
     address: SocketAddr,
     shared: Arc<Shared>,
-    worker: JoinHandle<Vec<E>>,
+    /// Taken by `stop` or the drop, whichever comes first.
+    worker: Option<JoinHandle<Vec<Entry<E>>>>,
+}
+
+/// **One entry of a server's record**, in the order the worker met them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Entry<E> {
+    /// A connection served: what its `answer` returned.
+    Served(E),
+    /// A connection from this peer, accepted after the stop was raised and
+    /// never served — a client still in the backlog when the test was done
+    /// (the stop's own wake-up connection is not one).
+    ArrivedAfterTheStop(SocketAddr),
+    /// An `accept` that failed. One of a connection reset or aborted while it
+    /// waited in the backlog is that client's, and the worker goes on; any
+    /// other is the listener's own, would fail again, and ends the worker.
+    AcceptFailed { kind: io::ErrorKind, error: String },
 }
 
 /// What the test's side and the worker share.
 struct Shared {
     state: Mutex<State>,
-    /// Signalled when the stop is raised, for [`Stop::pause`].
+    /// Signalled when the stop is raised, for [`Stop::pause`], and when the
+    /// stop's wake-up connection is made.
     stopping: Condvar,
 }
 
@@ -53,6 +77,18 @@ struct State {
     /// A handle on the connection the worker is serving, so the stop can shut
     /// it and end a read or a write the client is not ending.
     serving: Option<TcpStream>,
+    /// The stop's own wake-up connection, as the worker will see it.
+    wake_up: WakeUp,
+}
+
+/// The stop's wake-up connection: not made yet, made from this local address,
+/// or refused (the worker had already ended and its listener with it).
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum WakeUp {
+    #[default]
+    Pending,
+    From(SocketAddr),
+    Refused,
 }
 
 impl Shared {
@@ -102,9 +138,18 @@ impl<E: Send + 'static> Server<E> {
     pub fn start(
         name: &'static str,
         band: crate::ThreadPriority,
+        answer: impl FnMut(&mut TcpStream, &Stop) -> E + Send + 'static,
+    ) -> io::Result<Self> {
+        Self::start_on(TcpListener::bind("127.0.0.1:0")?, name, band, answer)
+    }
+
+    /// [`Server::start`] on a listener already bound.
+    fn start_on(
+        listener: TcpListener,
+        name: &'static str,
+        band: crate::ThreadPriority,
         mut answer: impl FnMut(&mut TcpStream, &Stop) -> E + Send + 'static,
     ) -> io::Result<Self> {
-        let listener = TcpListener::bind("127.0.0.1:0")?;
         let address = listener.local_addr()?;
         let shared = Arc::new(Shared {
             state: Mutex::new(State::default()),
@@ -114,24 +159,50 @@ impl<E: Send + 'static> Server<E> {
         let worker = crate::spawn_at_priority(name, band, move |_| {
             let mut record = Vec::new();
             loop {
-                // A failed `accept` is the client's (a connection reset while
-                // it waited in the backlog): the listener is still there.
-                let Ok((mut connection, _)) = listener.accept() else {
-                    if stop.requested() {
-                        break;
+                let (mut connection, peer) = match listener.accept() {
+                    Ok(accepted) => accepted,
+                    Err(error) => {
+                        let kind = error.kind();
+                        record.push(Entry::AcceptFailed {
+                            kind,
+                            error: error.to_string(),
+                        });
+                        match kind {
+                            io::ErrorKind::ConnectionReset
+                            | io::ErrorKind::ConnectionAborted
+                            | io::ErrorKind::Interrupted => continue,
+                            _ => break,
+                        }
                     }
-                    continue;
                 };
                 {
                     let mut state = stop.0.state();
                     if state.stopped {
                         // The stop's own wake-up, or a client that came after
-                        // the test was done: neither is a request of the test.
-                        break;
+                        // the test was done: told apart by the wake-up's
+                        // address, which the stop publishes once its connect
+                        // returns.
+                        let state = stop
+                            .0
+                            .stopping
+                            .wait_while(state, |state| state.wake_up == WakeUp::Pending)
+                            .unwrap_or_else(PoisonError::into_inner);
+                        if state.wake_up == WakeUp::From(peer) {
+                            break;
+                        }
+                        record.push(Entry::ArrivedAfterTheStop(peer));
+                        if state.wake_up == WakeUp::Refused {
+                            break;
+                        }
+                        continue;
                     }
-                    state.serving = connection.try_clone().ok();
+                    state.serving = Some(
+                        connection
+                            .try_clone()
+                            .expect("a second handle on the connection being served"),
+                    );
                 }
-                record.push(answer(&mut connection, &stop));
+                record.push(Entry::Served(answer(&mut connection, &stop)));
                 stop.0.state().serving = None;
             }
             record
@@ -139,7 +210,7 @@ impl<E: Send + 'static> Server<E> {
         Ok(Self {
             address,
             shared,
-            worker,
+            worker: Some(worker),
         })
     }
 
@@ -156,28 +227,23 @@ impl<E: Send + 'static> Server<E> {
     }
 
     /// **Stop the server and answer what it recorded**, one entry per
-    /// connection it served, in order.
+    /// connection it met (and per failed `accept`), in order.
     ///
     /// # Panics
     ///
     /// When an `answer` panicked: the worker's panic is carried on (its own
     /// message is on the test's output already).
-    pub fn stop(self) -> Vec<E> {
+    pub fn stop(mut self) -> Vec<Entry<E>> {
+        let worker = self.worker.take().expect("a server is stopped once");
         self.raise_the_stop();
-        self.worker
-            .join()
-            .expect("a loopback server's answer panicked")
+        worker.join().expect("a loopback server's answer panicked")
     }
+}
 
-    /// **Raise the stop and leave the worker to end on its own**, unjoined —
-    /// for a test that is already unwinding, which must neither wait on a
-    /// worker nor raise a second panic over one.
-    pub fn abandon(self) {
-        self.raise_the_stop();
-    }
-
+impl<E> Server<E> {
     /// The stop: the flag, the connection being served shut and its waiting
-    /// call cancelled, a pause woken, and a worker in `accept` woken.
+    /// call cancelled, a pause woken, and a worker in `accept` woken by a
+    /// connection whose address it is told.
     fn raise_the_stop(&self) {
         {
             let mut state = self.shared.state();
@@ -190,11 +256,33 @@ impl<E: Send + 'static> Server<E> {
             }
         }
         self.shared.stopping.notify_all();
-        // A worker blocked in `accept` wakes on this connection and ends on the
-        // flag. A worker that has already ended (on a late client's connection
-        // after the flag) has dropped its listener, and this connect is
-        // refused: there is nobody left to wake.
-        let _ = TcpStream::connect(self.address);
+        // A worker blocked in `accept` wakes on this connection and ends on it.
+        // A worker that has already ended (on a failed `accept`) has dropped
+        // its listener, and this connect is refused: there is nobody to wake.
+        let wake_up = match TcpStream::connect(self.address) {
+            Ok(connection) => WakeUp::From(
+                connection
+                    .local_addr()
+                    .expect("the address of a connection just made"),
+            ),
+            Err(_) => WakeUp::Refused,
+        };
+        self.shared.state().wake_up = wake_up;
+        self.shared.stopping.notify_all();
+    }
+}
+
+impl<E> Drop for Server<E> {
+    /// **A server the test never stopped stops on its drop** — and one dropped
+    /// while the test is unwinding raises the stop without waiting for its
+    /// worker, so it neither hangs on it nor panics a second time over it.
+    fn drop(&mut self) {
+        if let Some(worker) = self.worker.take() {
+            self.raise_the_stop();
+            if !std::thread::panicking() {
+                worker.join().expect("a loopback server's answer panicked");
+            }
+        }
     }
 }
 
@@ -230,7 +318,7 @@ mod tests {
     /// **`server` stopped, within the suites' patience** — a stop that waits
     /// for something nobody will do fails the test by name rather than
     /// hanging it.
-    fn stopped<E: Send + 'static>(server: Server<E>, what: &str) -> Vec<E> {
+    fn stopped<E: Send + 'static>(server: Server<E>, what: &str) -> Vec<Entry<E>> {
         let (said, heard) = channel();
         std::thread::spawn(move || {
             let _ = said.send(server.stop());
@@ -280,7 +368,11 @@ mod tests {
         }
         assert_eq!(
             stopped(server, "the stop of a server that answered three"),
-            vec![b"one".to_vec(), b"two".to_vec(), b"three".to_vec()],
+            vec![
+                Entry::Served(b"one".to_vec()),
+                Entry::Served(b"two".to_vec()),
+                Entry::Served(b"three".to_vec())
+            ],
             "one record per connection, and the stop's own wake-up is not one"
         );
     }
@@ -289,10 +381,10 @@ mod tests {
     /// open without a word**, and a pause the script is in: the stop returns
     /// within the suites' patience, and the record says what each was.
     ///
-    /// MUTATION: leave out `cancel_outstanding` in `finish` and, on Windows,
-    /// the first stop waits on a read nobody ends ("nothing within the door
-    /// suites' patience"; `shutdown` alone does not end it); wait in `pause`
-    /// with a sleep and the second does.
+    /// MUTATION: leave out `cancel_outstanding` in `raise_the_stop` and, on
+    /// Windows, the first stop waits on a read nobody ends ("nothing within
+    /// the door suites' patience"; `shutdown` alone does not end it); wait in
+    /// `pause` with a sleep and the second does.
     #[test]
     fn the_stop_ends_a_held_connection_and_a_pause() {
         let (reading, read) = channel();
@@ -310,7 +402,7 @@ mod tests {
         received(&read, "the server reading the held connection");
         assert_eq!(
             stopped(server, "the stop of a server reading a held connection"),
-            vec![(0, true)]
+            vec![Entry::Served((0, true))]
         );
 
         let (pausing, paused) = channel();
@@ -327,7 +419,7 @@ mod tests {
         received(&paused, "the server pausing");
         assert_eq!(
             stopped(server, "the stop of a paused server"),
-            vec![true],
+            vec![Entry::Served(true)],
             "the pause ended on the stop"
         );
     }
@@ -335,12 +427,85 @@ mod tests {
     /// RED (row 127) — **a server nobody connects to stops**: the stop's own
     /// connection wakes the `accept`, and the record is empty.
     ///
-    /// MUTATION: drop the wake-up connect from `finish` and the stop waits in
-    /// `accept` forever ("nothing within the door suites' patience").
+    /// MUTATION: drop the wake-up connect from `raise_the_stop` and the stop
+    /// waits in `accept` forever ("nothing within the door suites'
+    /// patience").
     #[test]
     fn a_server_nobody_asked_stops_with_an_empty_record() {
         let server = Server::start("bt-loopback-test", ThreadPriority::Normal, |_, _| ())
             .expect("a loopback server");
         assert!(stopped(server, "the stop of an idle server").is_empty());
+    }
+
+    /// RED (row 127 review F1) — **a connection that arrives after the stop
+    /// is raised is recorded as arrived and never served**, and the stop's
+    /// own wake-up still is not: a client the worker had not reached when the
+    /// test was done is evidence too.
+    ///
+    /// The second client connects while the first is being served, so it
+    /// waits in the backlog ahead of the stop's wake-up, and the worker
+    /// accepts it with the flag already up.
+    ///
+    /// MUTATION: end the worker on any connection accepted after the flag
+    /// (the shape this replaces) and the record holds the served connection
+    /// only.
+    #[test]
+    fn a_connection_after_the_stop_is_recorded_as_never_served() {
+        let (reading, read) = channel();
+        let server = Server::start(
+            "bt-loopback-test",
+            ThreadPriority::Normal,
+            move |connection, _| {
+                let _ = reading.send(());
+                everything(connection).len()
+            },
+        )
+        .expect("a loopback server");
+        let _held = TcpStream::connect(server.address()).expect("a connection");
+        received(&read, "the server reading the held connection");
+        let late = TcpStream::connect(server.address()).expect("a second connection");
+        let late = late.local_addr().expect("the late client's address");
+        assert_eq!(
+            stopped(server, "the stop of a server with a client in its backlog"),
+            vec![Entry::Served(0), Entry::ArrivedAfterTheStop(late)]
+        );
+    }
+
+    /// RED (row 127 review N3) — **an `accept` that fails for the listener's
+    /// own reason ends the worker, the failure recorded** — it never spins
+    /// at the worker's band until the stop. A listener left non-blocking is
+    /// one whose every `accept` fails (`WouldBlock`).
+    ///
+    /// MUTATION: go back to `accept` again on every failure and the worker
+    /// never ends on its own ("nothing within the door suites' patience").
+    #[test]
+    fn a_failing_accept_ends_the_worker_with_the_failure_recorded() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+        listener
+            .set_nonblocking(true)
+            .expect("a non-blocking listener");
+        let mut server = Server::start_on(
+            listener,
+            "bt-loopback-test",
+            ThreadPriority::Normal,
+            |_, _| (),
+        )
+        .expect("a loopback server");
+        let worker = server.worker.take().expect("the worker");
+        let (said, heard) = channel();
+        std::thread::spawn(move || {
+            let _ = said.send(worker.join().expect("the worker ends without a panic"));
+        });
+        let record = received(&heard, "the worker ending on its own");
+        assert!(
+            matches!(
+                record.as_slice(),
+                [Entry::AcceptFailed {
+                    kind: io::ErrorKind::WouldBlock,
+                    ..
+                }]
+            ),
+            "{record:?}"
+        );
     }
 }
