@@ -27,35 +27,48 @@
 //! * **D2** — `drain_mark` is called exactly once in each registered drain, as the initializer of
 //!   a `let` that binds a plain name, written directly in the drain's own block: never in a loop,
 //!   a closure, an async block, a nested `fn` or a macro's arguments (the standard library's
-//!   expression macros, `vec!`, `format!`, the assertions, are read as the expressions they are,
-//!   [`EXPRESSION_MACROS`]; any other macro's are a shape). A forwarder's body is that
+//!   expression macros, `vec!`, `format!`, the assertions, written bare or under `std`, `core` or
+//!   `alloc` and not shadowed by a `macro_rules!` of the tree's name, are read as the expressions
+//!   they are, [`EXPRESSION_MACROS`]; any other macro's are a shape). A forwarder's body is that
 //!   one call and nothing else. The name is called nowhere else in the product, and no other fn is
 //!   named `drain_mark`. Each door of [`EXCEPTIONS`] is called by its one caller (once) and its
-//!   forwarders, and by nothing else.
+//!   forwarders, and by nothing else; a door that mints a mark is bound by its caller as a drain
+//!   binds its read.
 //! * **D3** — every path the rules name resolves to exactly one fn.
 //! * **D4** — each contract adapter's drain reaches one of its row's takes over the call graph
 //!   (`bt_source::call_graph`, every `cfg` arm, an untyped call with one candidate followed, and
-//!   the reviewed edges of [`Rules::follows`]).
-//! * **D5** — a `Mark` is never kept: its name is written only as the referent of a whole `&`
-//!   parameter type (a fn's, a closure's), as the whole type of a `let`, as the return type of a
-//!   minting fn or a forwarder, as a type alias's whole right side (`persist::StorageMark`; the
-//!   alias is then read as the name), and in `lane`'s own declaration of it. A field, a `static`,
-//!   a `const`, a collection's or any other generic argument, another fn's return type, an
-//!   expression path: each is a finding. A `Mark` is built (`Mark { … }`) only in a minting fn,
-//!   and the binding a registered drain reads its mark into is used only borrowed — `&mark`, or as
-//!   a method call's receiver — never moved.
+//!   the reviewed edges of [`Rules::follows`], each pinned to its call's method; an edge no walk
+//!   used is stale, and a finding).
+//! * **D5** — a `Mark` is never kept, copied or changed: its name is written only as the referent
+//!   of a whole `&` parameter type (a fn's, a closure's), as the whole type of a `let`, as the
+//!   return type of a minting fn or a forwarder, as a type alias's whole right side
+//!   (`persist::StorageMark`; the alias is then read as the name), and in `lane`'s own
+//!   declaration of it. A field, a `static`, a `const`, a collection's or any other generic
+//!   argument, another fn's return type, an expression path: each is a finding. A `Mark` is built
+//!   (`Mark { … }`, and `Self { … }` in an `impl` of it, where `Self` is the mark) only in a
+//!   minting fn. The binding a registered drain reads its mark into, and the one a minting door's
+//!   caller binds, is used only borrowed — `&mark`, or as the receiver of a method the mark's own
+//!   `impl` declares — never moved: a mention in a `move` closure or an `async move` block moves
+//!   it, and so does a call of any other method (`Into::into`, a trait's). The mark derives only
+//!   what [`Rules::mark_derives`] lists, is given no trait by hand ([`Rules::mark_traits`]), has
+//!   its inherent `impl`s in its own module only, and each of its fns takes `&self`.
 //! * **D6** — a drain of several askers calls the lane's `in_admission_order`, or a registered
 //!   wrapper that does (`handoff_lane::in_press_order`), directly in its body. The computation
 //!   lanes, the git lane and the `NewestAdopted` row are exempt by row: one share, or adoption.
 //!
 //! # What it does not read (its grammar's edges)
 //!
-//! Every product identifier token named `drain_mark`, a door's name, or the mark — by scope: a
-//! path whose segment before it is the mark's module (`lane::Mark`), or a bare name where the
-//! mark's module, an import or a glob makes it the mark; `uninstall`'s and the update trial's own
-//! `Mark` types are not it — must be one the reading above classified; any other — in a macro's arguments, an `impl` header's
-//! generics, an associated type, a path call (`Ledger::drain_mark(&l)`), a fn named as a value, a
-//! renamed import — is a `shape` diagnostic with its file and line, never silence.
+//! Every product identifier token named `drain_mark`, a door's name, or one of the mark's names
+//! must be one the reading above classified; any other — in a macro's arguments, an `impl`
+//! header's generics, an associated type, a path call (`Ledger::drain_mark(&l)`), a fn named as a
+//! value, a renamed import — is a `shape` diagnostic with its file and line, never silence. Each of
+//! the mark's names is the mark unless the path reaches another type of that name: a module that
+//! declares one of its own (`uninstall`'s and the update trial's `Mark`, found from the index),
+//! imports one, or globs a module where it is one; a qualified path whose prefix resolves to such a
+//! module, or, unanchored, is that module's own name ([`Watched::names_mark`]). The spellings that
+//! would carry `lane`'s mark under a path the reading does not follow to `lane` are shapes of
+//! their own: `lane` imported under another name, the mark re-exported, a glob that carries it in
+//! from a module other than its own ([`import_shapes`]).
 //!
 //! **Blind spots, stated.** (1) *Partial target coverage*: the guard proves the mark is read once
 //! and that the adapter reaches a take; it does not prove the drain asks **every** target (a
@@ -66,8 +79,11 @@
 //! each other's marks; only `lane::Request`'s `debug_assert` (the mark's ledger identity) catches
 //! that, in a debug build that runs the take. (3) Calls are matched by method name, not by
 //! receiver type: a method of another type named `drain_mark` is read as a mark read (a false
-//! finding, never a missed one). (4) A by-value `self` method on `Mark` would move the drain's
-//! binding through a receiver; `Mark` has none, and `lane` is where one would be written.
+//! finding, never a missed one). (4) A call on a held mark of a name the mark's `impl` declares
+//! is taken for the mark's own: a blanket trait of the tree's giving every type a by-value method
+//! of that name would win method resolution and move the mark unseen (none exists; it would be a
+//! trait written for the purpose). (5) A macro's scope is not resolved: a standard expression
+//! macro's name the tree also defines is read as the tree's everywhere (a false shape at worst).
 //!
 //! `cargo test -p bt-source` runs this, as every bt-source guard; `docs/ARCHITECTURE-GUARDS.md`
 //! (§ Lane drains read their mark once) states it for a reader of the tree.
@@ -78,8 +94,8 @@ use std::path::{Path, PathBuf};
 
 use bt_source::call_graph::{Arms, CallGraph, Edge, ItemId, Node, Resolver, Target, Unresolved};
 use bt_source::{
-    Certainty, DiskScope, Index, ItemRecord, Occurrence, Span, TargetId, TargetKind, TargetRoot,
-    Universe, ValueKind, Vendor, View, report,
+    Certainty, DiskScope, Index, ItemRecord, MacroKind, Occurrence, Span, TargetId, TargetKind,
+    TargetRoot, Universe, UseRecord, ValueKind, Vendor, View, report,
 };
 use syn::visit::{self, Visit};
 
@@ -142,9 +158,13 @@ struct Rules {
     wrappers: &'static [&'static str],
     drains: &'static [Drain],
     doors: &'static [Door],
-    /// **The call graph's reviewed edges** (D4): at a call the resolver leaves unresolved in the
-    /// first fn, among whose candidates is the second, the walk follows the second.
-    follows: &'static [(&'static str, &'static str)],
+    /// **The call graph's reviewed edges** (D4), each `(caller, method, callee)`: at an
+    /// `Ambiguous` call of `method` in the caller, among whose candidates is the callee, the walk
+    /// follows the callee. An edge no walk used is stale, and a finding.
+    follows: &'static [(&'static str, &'static str, &'static str)],
+    /// The derives the mark's declaration may carry, and the traits an `impl` may give it by hand.
+    mark_derives: &'static [&'static str],
+    mark_traits: &'static [&'static str],
 }
 
 /// **The registry**: every drain of `bt-app`'s lanes.
@@ -249,11 +269,15 @@ const TREE: Rules = Rules {
     drains: LANE_DRAINS,
     doors: EXCEPTIONS,
     // `GitMutationLane::ended` drains each share through a guard the resolver does not type
-    // (`for share in &mut shares.live`, `shares` a `MutexGuard` from the generic `lane::locked`).
+    // (`for share in &mut shares.live`, `shares` a `MutexGuard` from the generic `lane::locked`):
+    // its UNFOLLOWED-EDGES key `GitMutationLane::ended Ambiguous ended`.
     follows: &[(
         "crate::git_mutation_lane::GitMutationLane::ended",
+        "ended",
         "crate::git_mutation_lane::Share::ended",
     )],
+    mark_derives: &["Debug"],
+    mark_traits: &[],
 };
 
 impl Rules {
@@ -274,7 +298,7 @@ impl Rules {
             paths.extend(door.forwarders);
             paths.push(door.caller);
         }
-        for (caller, callee) in self.follows {
+        for (caller, _, callee) in self.follows {
             paths.push(caller);
             paths.push(callee);
         }
@@ -335,11 +359,13 @@ enum ReadShape {
 enum Fact {
     /// A method call of the mark's read.
     Read { at: usize, shape: ReadShape },
-    /// A call of a door, by name.
+    /// A call of a door, by name: the one call of a forwarder's body, or bound by a `let` as a
+    /// drain's read is (`bound`).
     DoorCall {
         name: String,
         at: usize,
         forward: bool,
+        bound: bool,
     },
     /// A fn declared under a watched name.
     Def { name: String, at: usize },
@@ -351,8 +377,15 @@ enum Fact {
     },
     /// `Mark { … }`.
     Minting { at: usize },
-    /// The drain's binding used other than borrowed.
-    Moved { at: usize, binding: String },
+    /// The binding a drain (or a minting door's caller) holds its mark in, used other than
+    /// borrowed, and how.
+    Moved {
+        at: usize,
+        binding: String,
+        how: String,
+    },
+    /// What the mark's own declaration and `impl`s may not be (a derive, a trait, a receiver).
+    Refused { at: usize, what: String },
     /// A shape the grammar does not read.
     Shape { at: usize, what: String },
     /// A token accounted for without a finding (an import, the type's own declaration).
@@ -368,6 +401,7 @@ impl Fact {
             | Self::MarkType { at, .. }
             | Self::Minting { at }
             | Self::Moved { at, .. }
+            | Self::Refused { at, .. }
             | Self::Shape { at, .. }
             | Self::Known { at } => *at,
         }
@@ -377,12 +411,28 @@ impl Fact {
 /// The names the reading watches.
 struct Watched {
     read: String,
+    /// The module that declares the mark.
+    mark_module: String,
     doors: BTreeSet<String>,
+    /// The doors that return a mark (a door whose definition is a minting fn): their caller binds
+    /// it as a drain binds its read.
+    minting_doors: BTreeSet<String>,
     /// The mark's name and every alias of it, each with the module that declares it.
     marks: BTreeMap<String, String>,
-    /// `(module, name)`: where a bare name is the mark — its own module, a module-level import of
-    /// it, a glob of its module.
-    bare: BTreeSet<(String, String)>,
+    /// `(module, name)`: a module that declares a type of its own under one of the mark's names
+    /// (`uninstall`'s and the update trial's `Mark`).
+    own: BTreeSet<(String, String)>,
+    /// `(module, name)`: where that name, written bare, is another type — the module declares
+    /// one, imports one, or globs a module where it is one.
+    other: BTreeSet<(String, String)>,
+    /// `(module, name)`: where that name, written bare, is the mark by a declaration, an import
+    /// or a glob — what a glob of the module carries in.
+    reach: BTreeSet<(String, String)>,
+    /// The methods the mark's own `impl` declares: a call of any other on a held mark moves it.
+    methods: BTreeSet<String>,
+    /// The `macro_rules!` names the product defines: a standard expression macro's name among
+    /// them is the tree's macro.
+    tree_macros: BTreeSet<String>,
     /// Every watched name.
     every: BTreeSet<String>,
 }
@@ -392,11 +442,14 @@ impl Watched {
         name == self.read || self.doors.contains(name)
     }
 
-    /// **Whether segment `at` of a path written in `module` names the mark**: a qualified
-    /// segment when the one before it is its module's own name (`lane::Mark`,
-    /// `crate::persist::StorageMark`), a bare one where `bare` (or the body's own import,
-    /// `local`) says so. Another type that happens to be called `Mark` (`uninstall`'s, the
-    /// update trial's) is not the mark.
+    /// **Whether segment `at` of a path written in `module` names the mark.** Each of the mark's
+    /// names is the mark unless the path reaches another type of that name: a bare name where the
+    /// module (or the body's own import, `local`) makes it another (`other`); a qualified one
+    /// whose prefix is a module declaring its own — resolved when it starts at `crate`, `self` or
+    /// `super` (`crate::update_trial::Mark`, `super::Mark` in `uninstall`'s child), by that
+    /// module's own name when it does not (`update_trial::Mark`). Every other spelling is the
+    /// mark: a renamed import of its module, a re-export and a glob that carries it in are shapes
+    /// of their own, so none of them reads as "not the mark".
     fn names_mark(
         &self,
         segments: &[String],
@@ -404,16 +457,33 @@ impl Watched {
         module: &str,
         local: &BTreeSet<String>,
     ) -> bool {
-        let Some(declared) = self.marks.get(&segments[at]) else {
+        let name = &segments[at];
+        if !self.marks.contains_key(name) {
             return false;
-        };
-        if at == 0 {
-            self.bare
-                .contains(&(module.to_owned(), segments[0].clone()))
-                || local.contains(&segments[0])
-        } else {
-            last_segment(declared) == segments[at - 1]
         }
+        if at == 0 {
+            return !local.contains(name)
+                && !self.other.contains(&(module.to_owned(), name.clone()));
+        }
+        let prefix = &segments[..at];
+        let anchored = matches!(prefix[0].as_str(), "crate" | "self" | "super");
+        let reached = resolved(module, prefix);
+        !self.own.iter().any(|(declaring, own)| {
+            own == name
+                && if anchored {
+                    *declaring == reached
+                } else {
+                    last_segment(declaring) == prefix[at - 1]
+                }
+        })
+    }
+
+    /// The `(module, name)` pairs of the mark's names in `module`.
+    fn pairs(&self, module: &str) -> Vec<(String, String)> {
+        self.marks
+            .keys()
+            .map(|name| (module.to_owned(), name.clone()))
+            .collect()
     }
 }
 
@@ -445,49 +515,55 @@ fn resolved(module: &str, prefix: &[String]) -> String {
     at.join("::")
 }
 
+/// The name a `macro_rules!` definition defines, read from its text.
+fn macro_rules_name(text: &str) -> Option<String> {
+    let (_, rest) = text.split_once('!')?;
+    let name: String = rest
+        .trim_start()
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect();
+    (!name.is_empty()).then_some(name)
+}
+
 /// **The names the guard watches over `index`**: the read, the doors, the mark and its aliases
-/// (every product `type X = <the mark>;`, followed to a fixed point) and where each is bare.
+/// (every product `type X = <the mark>;`), the other types under the mark's names and where a
+/// bare name is one, where a bare name is the mark (a glob carries it from there), the mark's
+/// methods and the tree's macros — followed to a fixed point.
 fn watched(index: &Index, rules: &Rules) -> Watched {
     let doors: BTreeSet<String> = rules
         .doors
         .iter()
         .map(|door| door.name.to_owned())
         .collect();
+    let minting_doors: BTreeSet<String> = rules
+        .doors
+        .iter()
+        .filter(|door| rules.minted_by.contains(&door.defined))
+        .map(|door| door.name.to_owned())
+        .collect();
     let mut watched = Watched {
         read: rules.read.to_owned(),
+        mark_module: rules.mark_module.to_owned(),
         doors,
+        minting_doors,
         marks: BTreeMap::from([(rules.mark.to_owned(), rules.mark_module.to_owned())]),
-        bare: BTreeSet::new(),
+        own: BTreeSet::new(),
+        other: BTreeSet::new(),
+        reach: BTreeSet::new(),
+        methods: BTreeSet::new(),
+        tree_macros: BTreeSet::new(),
         every: BTreeSet::new(),
     };
+    let none = BTreeSet::new();
     loop {
-        let before = (watched.marks.len(), watched.bare.len());
-        for (name, module) in &watched.marks.clone() {
-            watched.bare.insert((module.clone(), name.clone()));
-        }
-        for import in index.uses() {
-            if !in_product(index, import.whole()) {
-                continue;
-            }
-            for module in import.module_paths() {
-                for (bound, path) in import.names() {
-                    if let Some((name, prefix)) = path.split_last()
-                        && let Some(declared) = watched.marks.get(name)
-                        && resolved(module, prefix) == *declared
-                    {
-                        watched.bare.insert((module.to_owned(), bound.clone()));
-                    }
-                }
-                for glob in import.globs() {
-                    let globbed = resolved(module, glob);
-                    for (name, declared) in &watched.marks.clone() {
-                        if globbed == *declared {
-                            watched.bare.insert((module.to_owned(), name.clone()));
-                        }
-                    }
-                }
-            }
-        }
+        let before = (
+            watched.marks.len(),
+            watched.own.len(),
+            watched.other.len(),
+            watched.reach.len(),
+        );
+        // The mark's aliases, and the aliases of something else under one of its names.
         for alias in index.aliases() {
             if !in_product(index, alias.whole()) {
                 continue;
@@ -496,20 +572,145 @@ fn watched(index: &Index, rules: &Rules) -> Watched {
             else {
                 continue;
             };
-            let syn::Type::Path(path) = &*item.ty else {
-                continue;
+            let written = match &*item.ty {
+                syn::Type::Path(path) if path.qself.is_none() && !path.path.segments.is_empty() => {
+                    Some(segments(&path.path))
+                }
+                _ => None,
             };
-            let segments = segments(&path.path);
             for module in alias.module_paths() {
-                if watched.names_mark(&segments, segments.len() - 1, module, &BTreeSet::new()) {
-                    watched
-                        .marks
-                        .insert(alias.name().to_owned(), module.to_owned());
+                let is_mark = written.as_ref().is_some_and(|written| {
+                    watched.names_mark(written, written.len() - 1, module, &none)
+                });
+                match watched.marks.get(alias.name()).cloned() {
+                    None if is_mark => {
+                        watched
+                            .marks
+                            .insert(alias.name().to_owned(), module.to_owned());
+                    }
+                    Some(declared) if !is_mark && declared != *module => {
+                        watched
+                            .own
+                            .insert((module.to_owned(), alias.name().to_owned()));
+                    }
+                    _ => {}
                 }
             }
         }
-        if (watched.marks.len(), watched.bare.len()) == before {
+        // The other types declared under the mark's names.
+        for record in index.items() {
+            if matches!(
+                record.kind(),
+                bt_source::ItemKind::Struct
+                    | bt_source::ItemKind::Enum
+                    | bt_source::ItemKind::Union
+            ) && in_product(index, record.whole())
+                && let Some(declared) = watched.marks.get(record.name())
+            {
+                for module in record.module_paths() {
+                    if module != declared {
+                        watched
+                            .own
+                            .insert((module.to_owned(), record.name().to_owned()));
+                    }
+                }
+            }
+        }
+        for declared in index.traits() {
+            if in_product(index, declared.whole())
+                && let Some(module_of_mark) = watched.marks.get(declared.name())
+            {
+                for module in declared.module_paths() {
+                    if module != module_of_mark {
+                        watched
+                            .own
+                            .insert((module.to_owned(), declared.name().to_owned()));
+                    }
+                }
+            }
+        }
+        // Bare names: the declarations, then the named imports, then the globs (which a
+        // declaration or a named import of the name shadows).
+        let mut explicit: BTreeSet<(String, String)> = BTreeSet::new();
+        for (name, module) in &watched.marks {
+            explicit.insert((module.clone(), name.clone()));
+            watched.reach.insert((module.clone(), name.clone()));
+        }
+        for pair in &watched.own {
+            explicit.insert(pair.clone());
+            watched.other.insert(pair.clone());
+        }
+        for import in index.uses() {
+            if !in_product(index, import.whole()) {
+                continue;
+            }
+            for module in import.module_paths() {
+                for (bound, path) in import.names() {
+                    if !watched.marks.contains_key(bound) || path.is_empty() {
+                        continue;
+                    }
+                    let pair = (module.to_owned(), bound.clone());
+                    explicit.insert(pair.clone());
+                    if watched.names_mark(path, path.len() - 1, module, &none) {
+                        watched.reach.insert(pair);
+                    } else {
+                        watched.other.insert(pair);
+                    }
+                }
+            }
+        }
+        for import in index.uses() {
+            if !in_product(index, import.whole()) {
+                continue;
+            }
+            for module in import.module_paths() {
+                for glob in import.globs() {
+                    let globbed = resolved(module, glob);
+                    for (pair, source) in watched
+                        .pairs(module)
+                        .into_iter()
+                        .zip(watched.pairs(&globbed))
+                    {
+                        if explicit.contains(&pair) {
+                            continue;
+                        }
+                        if watched.reach.contains(&source) {
+                            watched.reach.insert(pair);
+                        } else if watched.other.contains(&source) {
+                            watched.other.insert(pair);
+                        }
+                    }
+                }
+            }
+        }
+        let after = (
+            watched.marks.len(),
+            watched.own.len(),
+            watched.other.len(),
+            watched.reach.len(),
+        );
+        if after == before {
             break;
+        }
+    }
+    for record in index.items() {
+        if record.kind().is_callable()
+            && !test_only(index, record)
+            && record.trait_name().is_none()
+            && record
+                .type_owner()
+                .is_some_and(|owner| watched.marks.contains_key(owner))
+            && record.module_paths().contains(&rules.mark_module)
+        {
+            watched.methods.insert(record.name().to_owned());
+        }
+    }
+    for invocation in index.macros() {
+        if invocation.kind() == MacroKind::Definition
+            && in_product(index, invocation.span())
+            && let Some(name) = macro_rules_name(index.text(invocation.span()))
+        {
+            watched.tree_macros.insert(name);
         }
     }
     watched.every = watched.marks.keys().cloned().collect();
@@ -532,17 +733,25 @@ struct Reader<'w> {
     base: usize,
     watched: &'w Watched,
     module: String,
-    /// The mark's names a `use` inside the body brings in bare.
+    /// The mark's names a `use` inside the body makes another type.
     local: BTreeSet<String>,
     facts: Vec<Fact>,
     closures: usize,
     loops: usize,
     asyncs: usize,
     nested: usize,
-    /// The drain's binding of its mark, once read.
+    /// The `move` closures and `async move` blocks the reading is inside: a mention of the
+    /// binding there moves it.
+    moving: usize,
+    /// Whether `Self` is the mark: the item is a fn of an `impl` of the mark.
+    self_is_mark: bool,
+    /// The binding a drain (or a minting door's caller) holds its mark in, once read.
     binding: Option<String>,
     place: &'static str,
 }
+
+/// How a mention inside a `move` closure or an `async move` block uses the binding.
+const MOVED_INTO: &str = "moved into a `move` closure or an `async move` block";
 
 impl<'w> Reader<'w> {
     fn new(base: usize, watched: &'w Watched, module: &str) -> Self {
@@ -556,6 +765,8 @@ impl<'w> Reader<'w> {
             loops: 0,
             asyncs: 0,
             nested: 0,
+            moving: 0,
+            self_is_mark: false,
             binding: None,
             place: "a type",
         }
@@ -579,8 +790,11 @@ impl<'w> Reader<'w> {
         }
     }
 
-    /// Whether segment `at` of `path` names the mark.
+    /// Whether segment `at` of `path` names the mark (`Self` in an `impl` of it, too).
     fn names_mark(&self, path: &syn::Path, at: usize) -> bool {
+        if at == 0 && self.self_is_mark && path.segments[0].ident == "Self" {
+            return true;
+        }
         self.watched
             .names_mark(&segments(path), at, &self.module, &self.local)
     }
@@ -655,6 +869,31 @@ impl<'w> Reader<'w> {
         }
     }
 
+    /// A receiver of a fn of an `impl` of the mark: `&self` alone keeps a held mark borrowed and
+    /// unchanged — `self` would move the drain's binding through a method call, `&mut self` would
+    /// change the mark under it.
+    fn read_receiver(&mut self, receiver: &syn::Receiver, name: &str) {
+        let written = if receiver.colon_token.is_some() {
+            Some("a typed `self`")
+        } else if receiver.reference.is_none() {
+            Some("`self` by value")
+        } else if receiver.mutability.is_some() {
+            Some("`&mut self`")
+        } else {
+            None
+        };
+        if let Some(written) = written {
+            let at = self.at(receiver.self_token.span);
+            self.facts.push(Fact::Refused {
+                at,
+                what: format!(
+                    "the mark's fn `{name}` takes {written}: a fn of the mark takes `&self`, so a \
+                     held mark is neither moved nor changed by a call"
+                ),
+            });
+        }
+    }
+
     /// **A fn's signature and body**: `may_return` when the fn mints or forwards a mark.
     fn read_fn(
         &mut self,
@@ -672,9 +911,16 @@ impl<'w> Reader<'w> {
         }
         self.visit_generics(&signature.generics);
         for input in &signature.inputs {
-            if let syn::FnArg::Typed(typed) = input {
-                self.visit_pat(&typed.pat);
-                self.read_type(&typed.ty, "a parameter", Allow::BORROWED);
+            match input {
+                syn::FnArg::Typed(typed) => {
+                    self.visit_pat(&typed.pat);
+                    self.read_type(&typed.ty, "a parameter", Allow::BORROWED);
+                }
+                syn::FnArg::Receiver(receiver) => {
+                    if self.self_is_mark && self.nested == 0 {
+                        self.read_receiver(receiver, &name);
+                    }
+                }
             }
         }
         if let syn::ReturnType::Type(_, ty) = &signature.output {
@@ -711,6 +957,7 @@ impl<'w> Reader<'w> {
                     name,
                     at,
                     forward: true,
+                    bound: false,
                 });
             }
             self.visit_expr(&call.receiver);
@@ -724,15 +971,20 @@ impl<'w> Reader<'w> {
         (self.binding, self.local) = saved;
     }
 
-    /// A statement written directly in the fn's block.
+    /// A statement written directly in the fn's block: a `let` the mark's read (or a minting
+    /// door's call) initializes binds the mark, and the rest of the block is read with it.
     fn top_statement(&mut self, statement: &syn::Stmt) {
         if self.nested == 0
             && let syn::Stmt::Local(local) = statement
             && let Some(init) = &local.init
             && init.diverge.is_none()
             && let syn::Expr::MethodCall(call) = unparenthesised(&init.expr)
-            && call.method == self.watched.read
             && call.args.is_empty()
+            && (call.method == self.watched.read
+                || self
+                    .watched
+                    .minting_doors
+                    .contains(&call.method.to_string()))
         {
             for attribute in &local.attrs {
                 self.visit_attribute(attribute);
@@ -744,14 +996,24 @@ impl<'w> Reader<'w> {
                 }
                 _ => None,
             };
-            self.facts.push(Fact::Read {
-                at,
-                shape: if bound.is_some() {
-                    ReadShape::Statement
-                } else {
-                    ReadShape::Stray("bound by a pattern other than a plain name")
-                },
-            });
+            let name = call.method.to_string();
+            if name == self.watched.read {
+                self.facts.push(Fact::Read {
+                    at,
+                    shape: if bound.is_some() {
+                        ReadShape::Statement
+                    } else {
+                        ReadShape::Stray("bound by a pattern other than a plain name")
+                    },
+                });
+            } else {
+                self.facts.push(Fact::DoorCall {
+                    name,
+                    at,
+                    forward: false,
+                    bound: bound.is_some(),
+                });
+            }
             self.read_pattern(&local.pat, "a `let`", Allow::BOTH);
             self.visit_expr(&call.receiver);
             self.binding = bound;
@@ -760,15 +1022,26 @@ impl<'w> Reader<'w> {
         self.visit_stmt(statement);
     }
 
-    fn is_binding(&self, expression: &syn::Expr) -> bool {
+    /// The offset of `expression`, when it is the held binding, written alone.
+    fn binding_at(&self, expression: &syn::Expr) -> Option<usize> {
         let syn::Expr::Path(path) = unparenthesised(expression) else {
-            return false;
+            return None;
         };
-        path.qself.is_none()
-            && self
-                .binding
-                .as_ref()
-                .is_some_and(|binding| path.path.is_ident(binding))
+        self.binding_path_at(path)
+    }
+
+    /// The offset of `path`, when it is the held binding.
+    fn binding_path_at(&self, path: &syn::ExprPath) -> Option<usize> {
+        let held = self.binding.as_ref()?;
+        (path.qself.is_none() && path.path.is_ident(held))
+            .then(|| self.at(path.path.segments[0].ident.span()))
+    }
+
+    /// The held binding at `at`, moved as `how` says.
+    fn moved(&mut self, at: usize, how: String) {
+        if let Some(binding) = self.binding.clone() {
+            self.facts.push(Fact::Moved { at, binding, how });
+        }
     }
 
     /// Every watched identifier in a macro's tokens: a read's or a door's name always, the mark's
@@ -816,10 +1089,10 @@ impl<'w> Reader<'w> {
     }
 
     /// One `use` tree written in a body, flattened under `prefix`.
-    fn use_tree(&mut self, tree: &syn::UseTree, prefix: &mut Vec<String>) {
+    fn use_tree(&mut self, tree: &syn::UseTree, prefix: &mut Vec<syn::Ident>) {
         match tree {
             syn::UseTree::Path(path) => {
-                prefix.push(path.ident.to_string());
+                prefix.push(path.ident.clone());
                 self.use_tree(&path.tree, prefix);
                 prefix.pop();
             }
@@ -828,10 +1101,24 @@ impl<'w> Reader<'w> {
                 self.use_leaf(&rename.ident, Some(&rename.rename), prefix);
             }
             syn::UseTree::Glob(_) => {
-                let globbed = resolved(&self.module, prefix);
-                for (name, declared) in &self.watched.marks {
-                    if globbed == *declared {
+                let written: Vec<String> = prefix.iter().map(ToString::to_string).collect();
+                let globbed = resolved(&self.module, &written);
+                for name in self.watched.marks.keys() {
+                    let source = (globbed.clone(), name.clone());
+                    if self.watched.other.contains(&source) {
                         self.local.insert(name.clone());
+                    } else if self.watched.reach.contains(&source)
+                        && globbed != self.watched.marks[name]
+                        && let Some(last) = prefix.last()
+                    {
+                        let at = self.at(last.span());
+                        self.facts.push(Fact::Shape {
+                            at,
+                            what: format!(
+                                "a glob of `{globbed}` carries the mark's `{name}` in: the guard \
+                                 reads an import of it by name"
+                            ),
+                        });
                     }
                 }
             }
@@ -843,14 +1130,42 @@ impl<'w> Reader<'w> {
         }
     }
 
-    fn use_leaf(&mut self, ident: &syn::Ident, rename: Option<&syn::Ident>, prefix: &[String]) {
+    fn use_leaf(&mut self, ident: &syn::Ident, rename: Option<&syn::Ident>, prefix: &[syn::Ident]) {
         let name = ident.to_string();
+        let mut path: Vec<String> = prefix.iter().map(ToString::to_string).collect();
+        let module_import = name == "self";
+        if !module_import {
+            path.push(name.clone());
+        }
+        let bound = rename.or(if module_import {
+            prefix.last()
+        } else {
+            Some(ident)
+        });
+        let mark_module = &self.watched.mark_module;
+        if !path.is_empty()
+            && resolved(&self.module, &path) == *mark_module
+            && let Some(bound) = bound
+            && bound != last_segment(mark_module)
+        {
+            let at = self.at(bound.span());
+            self.facts.push(Fact::Shape {
+                at,
+                what: format!(
+                    "`{mark_module}` imported as `{bound}`: the guard reads the mark's module by \
+                     its own name"
+                ),
+            });
+            return;
+        }
+        if module_import {
+            return;
+        }
         let at = self.at(ident.span());
-        let mark = self
-            .watched
-            .marks
-            .get(&name)
-            .is_some_and(|declared| resolved(&self.module, prefix) == *declared);
+        let mark = self.watched.marks.contains_key(&name)
+            && self
+                .watched
+                .names_mark(&path, path.len() - 1, &self.module, &BTreeSet::new());
         match rename {
             Some(rename) if mark => self.facts.push(Fact::Shape {
                 at,
@@ -858,11 +1173,13 @@ impl<'w> Reader<'w> {
                     "`{name}` imported as `{rename}`: the guard reads the name as written"
                 ),
             }),
-            None if mark => {
-                self.local.insert(name);
-                self.facts.push(Fact::Known { at });
+            None if mark => self.facts.push(Fact::Known { at }),
+            _ => {
+                let bound = rename.unwrap_or(ident).to_string();
+                if self.watched.marks.contains_key(&bound) {
+                    self.local.insert(bound);
+                }
             }
-            _ => {}
         }
     }
 }
@@ -895,8 +1212,9 @@ impl Allow {
 
 /// **The standard library's macros whose arguments are expressions**, each evaluated once where
 /// the macro is written (`vec![a, b]` as an array literal, `format!`'s arguments, an assertion's
-/// operands): their arguments are read as the code around them. Every other macro's tokens are
-/// a shape — a macro of the tree may wrap them in a loop or a closure.
+/// operands): their arguments are read as the code around them, where [`is_expression_macro`]
+/// says the invocation is the standard one. Every other macro's tokens are a shape — a macro of
+/// the tree may wrap them in a loop or a closure.
 const EXPRESSION_MACROS: &[&str] = &[
     "vec",
     "format",
@@ -943,6 +1261,24 @@ fn unparenthesised(expression: &syn::Expr) -> &syn::Expr {
     }
 }
 
+/// Whether `path` is one of the standard library's expression macros: its name is one of
+/// [`EXPRESSION_MACROS`], it is written bare or under `std`, `core` or `alloc`, and the tree defines
+/// no `macro_rules!` of that name (one would shadow it where it is in scope; the guard does not
+/// resolve a macro's scope, so it reads any such name as the tree's).
+fn is_expression_macro(path: &syn::Path, tree_macros: &BTreeSet<String>) -> bool {
+    let Some(last) = path.segments.last() else {
+        return false;
+    };
+    let name = last.ident.to_string();
+    EXPRESSION_MACROS.contains(&name.as_str())
+        && !tree_macros.contains(&name)
+        && (path.segments.len() == 1
+            || matches!(
+                path.segments[0].ident.to_string().as_str(),
+                "std" | "core" | "alloc"
+            ))
+}
+
 impl<'ast> Visit<'ast> for Reader<'_> {
     fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
         let name = call.method.to_string();
@@ -952,15 +1288,28 @@ impl<'ast> Visit<'ast> for Reader<'_> {
             self.facts.push(Fact::Read { at, shape });
         } else if self.watched.doors.contains(&name) {
             self.facts.push(Fact::DoorCall {
-                name,
+                name: name.clone(),
                 at,
                 forward: false,
+                bound: false,
             });
         }
         for attribute in &call.attrs {
             self.visit_attribute(attribute);
         }
-        if !self.is_binding(&call.receiver) {
+        if let Some(held) = self.binding_at(&call.receiver) {
+            if self.moving > 0 {
+                self.moved(held, MOVED_INTO.to_owned());
+            } else if !self.watched.methods.contains(&name) {
+                self.moved(
+                    held,
+                    format!(
+                        "used through `.{name}()`, which the mark does not declare (a trait's \
+                         method, `Into::into`, takes or copies it)"
+                    ),
+                );
+            }
+        } else {
             self.visit_expr(&call.receiver);
         }
         if let Some(turbofish) = &call.turbofish {
@@ -993,15 +1342,13 @@ impl<'ast> Visit<'ast> for Reader<'_> {
     }
 
     fn visit_expr_path(&mut self, path: &'ast syn::ExprPath) {
-        if path.qself.is_none()
-            && let Some(binding) = &self.binding
-            && path.path.is_ident(binding)
-        {
-            let at = self.at(path.path.segments[0].ident.span());
-            self.facts.push(Fact::Moved {
-                at,
-                binding: binding.clone(),
-            });
+        if let Some(held) = self.binding_path_at(path) {
+            let how = if self.moving > 0 {
+                MOVED_INTO
+            } else {
+                "used other than borrowed"
+            };
+            self.moved(held, how.to_owned());
             return;
         }
         for (index, segment) in path.path.segments.iter().enumerate() {
@@ -1024,7 +1371,12 @@ impl<'ast> Visit<'ast> for Reader<'_> {
     }
 
     fn visit_expr_reference(&mut self, reference: &'ast syn::ExprReference) {
-        if reference.mutability.is_none() && self.is_binding(&reference.expr) {
+        if reference.mutability.is_none()
+            && let Some(held) = self.binding_at(&reference.expr)
+        {
+            if self.moving > 0 {
+                self.moved(held, MOVED_INTO.to_owned());
+            }
             return;
         }
         visit::visit_expr_reference(self, reference);
@@ -1048,7 +1400,9 @@ impl<'ast> Visit<'ast> for Reader<'_> {
     }
 
     fn visit_expr_closure(&mut self, closure: &'ast syn::ExprClosure) {
+        let moving = usize::from(closure.capture.is_some());
         self.closures += 1;
+        self.moving += moving;
         for input in &closure.inputs {
             self.read_pattern(input, "a closure's parameter", Allow::BORROWED);
         }
@@ -1056,6 +1410,7 @@ impl<'ast> Visit<'ast> for Reader<'_> {
             self.read_type(ty, "a closure's return type", Allow::NONE);
         }
         self.visit_expr(&closure.body);
+        self.moving -= moving;
         self.closures -= 1;
     }
 
@@ -1078,8 +1433,11 @@ impl<'ast> Visit<'ast> for Reader<'_> {
     }
 
     fn visit_expr_async(&mut self, node: &'ast syn::ExprAsync) {
+        let moving = usize::from(node.capture.is_some());
         self.asyncs += 1;
+        self.moving += moving;
         visit::visit_expr_async(self, node);
+        self.moving -= moving;
         self.asyncs -= 1;
     }
 
@@ -1141,12 +1499,9 @@ impl<'ast> Visit<'ast> for Reader<'_> {
     }
 
     fn visit_macro(&mut self, invocation: &'ast syn::Macro) {
-        let std_macro = invocation
-            .path
-            .segments
-            .last()
-            .is_some_and(|last| EXPRESSION_MACROS.contains(&last.ident.to_string().as_str()));
-        if std_macro && let Some(arguments) = expression_arguments(&invocation.tokens) {
+        if is_expression_macro(&invocation.path, &self.watched.tree_macros)
+            && let Some(arguments) = expression_arguments(&invocation.tokens)
+        {
             for argument in &arguments {
                 self.visit_expr(argument);
             }
@@ -1277,25 +1632,32 @@ fn container(index: &Index, at: usize) -> Option<(String, Span)> {
     best
 }
 
-/// **Whether the token `name` at `at` names the mark**, read from the text before it in its
-/// record: `<its module's name> :: name`, or a bare name where the mark is bare. `None`: the
-/// token is in no record.
+/// **Whether the token `name` at `at` names the mark**, read from the path written before it in
+/// its record (`a :: b :: name`, every segment) as [`Watched::names_mark`] reads a path. `None`:
+/// the token is in no record.
 fn token_names_mark(index: &Index, watched: &Watched, name: &str, at: usize) -> Option<bool> {
     let (module, whole) = container(index, at)?;
-    let before = index.text(whole)[..at - whole.start()].trim_end();
+    let mut before = index.text(whole)[..at - whole.start()].trim_end();
     let mut path = vec![name.to_owned()];
-    if let Some(qualified) = before.strip_suffix("::") {
+    while let Some(qualified) = before.strip_suffix("::") {
         let qualified = qualified.trim_end();
         let start = qualified
             .rfind(|c: char| !(c.is_alphanumeric() || c == '_'))
             .map_or(0, |at| at + 1);
+        if start == qualified.len() {
+            break;
+        }
         path.insert(0, qualified[start..].to_owned());
+        before = qualified[..start].trim_end();
     }
     Some(watched.names_mark(&path, path.len() - 1, &module, &BTreeSet::new()))
 }
 
 /// **The guard over one package**, its files shown relative to `root`.
-#[allow(clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the checks D1-D6 share one reading and one set of facts; split, each would re-read"
+)]
 fn judge(index: &Index, package: &str, rules: &Rules, root: &Path) -> Judged {
     let mut judged = Judged::default();
     let watched = watched(index, rules);
@@ -1331,6 +1693,12 @@ fn judge(index: &Index, package: &str, rules: &Rules, root: &Path) -> Judged {
         let text = index.text(record.whole());
         let module = record.module_paths().first().copied().unwrap_or("crate");
         let mut reader = Reader::new(base, &watched, module);
+        reader.self_is_mark = record.type_owner().is_some_and(|owner| {
+            watched.marks.contains_key(owner)
+                && !watched
+                    .other
+                    .contains(&(module.to_owned(), owner.to_owned()))
+        });
         let record_keys = keys(record);
         if record.kind().is_callable() {
             judged.fns_read += 1;
@@ -1364,6 +1732,7 @@ fn judge(index: &Index, package: &str, rules: &Rules, root: &Path) -> Judged {
                     {
                         let at = reader.at(declared.ident.span());
                         reader.facts.push(Fact::Known { at });
+                        declaration_attributes(&mut reader, declared, rules);
                     }
                     reader.visit_item(&item);
                 }
@@ -1446,22 +1815,54 @@ fn judge(index: &Index, package: &str, rules: &Rules, root: &Path) -> Judged {
         }
         facts.extend(reader.facts.into_iter().map(|fact| (Vec::new(), fact)));
     }
-    // The mark's own `impl` headers, and the module-level imports of it (a rename is a shape).
+    // The `impl`s of the mark: inherent ones in its module are its own; an `impl` of it elsewhere,
+    // and a trait it is given by hand, are refused.
     for block in index.impls() {
-        if block.type_owner() != rules.mark || !block.module_paths().contains(&rules.mark_module) {
+        let owner = block.type_owner();
+        if !watched.marks.contains_key(owner) || !in_product(index, block.whole()) {
             continue;
         }
         let header = block.whole().start()..block.body().start();
-        for token in index.identifier_occurrences(rules.mark, View::Identifiers) {
-            if header.contains(&token.start()) {
-                facts.push((Vec::new(), Fact::Known { at: token.start() }));
-            }
+        let named: Vec<usize> = index
+            .identifier_occurrences(owner, View::Identifiers)
+            .into_iter()
+            .map(|token| token.start())
+            .filter(|at| header.contains(at))
+            .filter(|at| token_names_mark(index, &watched, owner, *at).unwrap_or(true))
+            .collect();
+        let refused = match block.trait_name() {
+            None if block.module_paths().contains(&rules.mark_module) => None,
+            None => Some(format!(
+                "an `impl` of the mark outside `{}`: its fns are written in its own module",
+                rules.mark_module
+            )),
+            Some(name) if rules.mark_traits.contains(&trait_base(name)) => None,
+            Some(name) => Some(format!(
+                "the mark implements `{name}` by hand: its traits are its declaration's derive of \
+                 {} alone",
+                rules.mark_derives.join(", ")
+            )),
+        };
+        for at in named {
+            facts.push((
+                Vec::new(),
+                match &refused {
+                    None => Fact::Known { at },
+                    Some(what) => Fact::Refused {
+                        at,
+                        what: what.clone(),
+                    },
+                },
+            ));
         }
     }
+    // The module-level imports: of the mark (a rename is a shape), of its module under another
+    // name, a re-export of the mark, a glob that carries it in from a module other than its own.
     for import in index.uses() {
         if !in_product(index, import.whole()) {
             continue;
         }
+        import_shapes(index, &watched, import, rules, root, &mut judged.findings);
         let whole = import.whole().start()..import.whole().end();
         for (name, declared) in &watched.marks {
             let renamed = import.module_paths().iter().any(|module| {
@@ -1587,7 +1988,12 @@ fn judge(index: &Index, package: &str, rules: &Rules, root: &Path) -> Judged {
                     )),
                 }
             }
-            Fact::DoorCall { name, at, forward } => {
+            Fact::DoorCall {
+                name,
+                at,
+                forward,
+                bound,
+            } => {
                 let door = rules
                     .doors
                     .iter()
@@ -1595,6 +2001,18 @@ fn judge(index: &Index, package: &str, rules: &Rules, root: &Path) -> Judged {
                     .expect("a door call is of a door");
                 if named(item, door.caller) {
                     *door_calls.entry((door.name, door.caller)).or_default() += 1;
+                    if rules.minted_by.contains(&door.defined) && !bound {
+                        judged.findings.push(find(
+                            "D2",
+                            *at,
+                            format!(
+                                "`{}` calls the minting door `{name}` other than as the \
+                                 initializer of a `let` that binds a plain name, written directly \
+                                 in its block",
+                                door.caller
+                            ),
+                        ));
+                    }
                 } else if let Some(path) = door.forwarders.iter().find(|path| named(item, path)) {
                     *door_calls.entry((door.name, *path)).or_default() += 1;
                     if !forward {
@@ -1658,15 +2076,23 @@ fn judge(index: &Index, package: &str, rules: &Rules, root: &Path) -> Judged {
                     ));
                 }
             }
-            Fact::Moved { at, binding } => {
-                if drains.iter().any(|drain| named(item, drain)) {
+            Fact::Moved { at, binding, how } => {
+                let holder = if drains.iter().any(|drain| named(item, drain)) {
+                    Some("drain's")
+                } else if rules.doors.iter().any(|door| named(item, door.caller)) {
+                    Some("door's")
+                } else {
+                    None
+                };
+                if let Some(holder) = holder {
                     judged.findings.push(find(
                         "D5",
                         *at,
-                        format!("the drain's mark `{binding}` used other than borrowed"),
+                        format!("the {holder} mark `{binding}` {how}"),
                     ));
                 }
             }
+            Fact::Refused { at, what } => judged.findings.push(find("D5", *at, what.clone())),
             Fact::Shape { at, what } => judged.findings.push(find("shape", *at, what.clone())),
             Fact::Known { .. } => {}
         }
@@ -1738,30 +2164,29 @@ fn judge(index: &Index, package: &str, rules: &Rules, root: &Path) -> Judged {
             })
             .collect()
     };
-    let reviewed: Vec<(ItemId, ItemId)> = rules
+    let reviewed: Vec<(usize, ItemId, &str, ItemId)> = rules
         .follows
         .iter()
-        .filter_map(|(caller, callee)| Some((id_of(caller)?, id_of(callee)?)))
+        .enumerate()
+        .filter_map(|(at, (caller, method, callee))| {
+            Some((at, id_of(caller)?, *method, id_of(callee)?))
+        })
         .collect();
+    let used = std::cell::RefCell::new(BTreeSet::new());
     let follow = |edge: &Edge| -> Vec<ItemId> {
         let Target::Unresolved(unresolved) = &edge.to else {
             return Vec::new();
         };
-        let candidates = match unresolved {
-            Unresolved::Ambiguous { candidates, .. }
-            | Unresolved::Dynamic { candidates, .. }
-            | Unresolved::OtherArm { candidates } => candidates.as_slice(),
-            _ => &[],
-        };
         let mut next: Vec<ItemId> = unresolved.sole_candidate().into_iter().collect();
-        next.extend(
-            reviewed
-                .iter()
-                .filter(|(caller, callee)| {
-                    edge.from == Node::Item(*caller) && candidates.contains(callee)
-                })
-                .map(|(_, callee)| *callee),
-        );
+        if let Unresolved::Ambiguous { method, candidates } = unresolved {
+            for (at, caller, name, callee) in &reviewed {
+                if edge.from == Node::Item(*caller) && method == name && candidates.contains(callee)
+                {
+                    used.borrow_mut().insert(*at);
+                    next.push(*callee);
+                }
+            }
+        }
         next
     };
     for drain in rules.drains {
@@ -1788,6 +2213,17 @@ fn judge(index: &Index, package: &str, rules: &Rules, root: &Path) -> Judged {
                     ),
                 ));
             }
+        }
+    }
+    for (at, (caller, method, callee)) in rules.follows.iter().enumerate() {
+        if !used.borrow().contains(&at) {
+            judged.findings.push(unplaced(
+                "D4",
+                format!(
+                    "the reviewed edge `{caller}` -> `{callee}` at `.{method}()` followed no call \
+                     of any adapter's walk: it is stale"
+                ),
+            ));
         }
     }
     let merge = id_of(rules.merge);
@@ -1825,6 +2261,136 @@ fn judge(index: &Index, package: &str, rules: &Rules, root: &Path) -> Judged {
     judged.findings.sort();
     judged.findings.dedup();
     judged
+}
+
+/// A trait's name without its arguments (`From<Mark>` is `From`).
+fn trait_base(name: &str) -> &str {
+    name.split('<').next().unwrap_or(name).trim()
+}
+
+/// **The mark's declaration's attributes**: each derive is one the rules list, and none stands on
+/// a `cfg_attr` the guard would have to evaluate.
+fn declaration_attributes(reader: &mut Reader<'_>, declared: &syn::ItemStruct, rules: &Rules) {
+    for attribute in &declared.attrs {
+        if attribute.path().is_ident("derive") {
+            let listed = attribute.parse_args_with(
+                syn::punctuated::Punctuated::<syn::Path, syn::Token![,]>::parse_terminated,
+            );
+            let Ok(listed) = listed else {
+                let at = reader.at(declared.ident.span());
+                reader.facts.push(Fact::Shape {
+                    at,
+                    what: String::from("the mark's `derive` does not parse as a list of paths"),
+                });
+                continue;
+            };
+            for path in listed {
+                let Some(last) = path.segments.last() else {
+                    continue;
+                };
+                if !rules
+                    .mark_derives
+                    .contains(&last.ident.to_string().as_str())
+                {
+                    let at = reader.at(last.ident.span());
+                    reader.facts.push(Fact::Refused {
+                        at,
+                        what: format!(
+                            "the mark derives `{}`: it derives {} alone, so it is neither \
+                             copied nor converted",
+                            last.ident,
+                            rules.mark_derives.join(", ")
+                        ),
+                    });
+                }
+            }
+        } else if attribute.path().is_ident("cfg_attr") {
+            let at = reader.at(declared.ident.span());
+            reader.facts.push(Fact::Shape {
+                at,
+                what: String::from(
+                    "a `cfg_attr` on the mark's declaration: the guard reads its derives written \
+                     plainly",
+                ),
+            });
+        }
+    }
+}
+
+/// **The shapes of one module-level `use`**: the mark's module imported under another name
+/// (`use crate::lane as l;`), the mark re-exported (`pub(crate) use crate::lane::Mark;`), a glob
+/// that carries the mark in from a module other than its own (`use super::*;` under a module that
+/// imports it) or re-exports it. Each would make a spelling of the mark the reading does not
+/// follow to its module, so each is a shape, never "not the mark".
+fn import_shapes(
+    index: &Index,
+    watched: &Watched,
+    import: &UseRecord,
+    rules: &Rules,
+    root: &Path,
+    findings: &mut Vec<Finding>,
+) {
+    let whole = import.whole();
+    let public = syn::parse_str::<syn::ItemUse>(index.text(whole))
+        .is_ok_and(|item| !matches!(item.vis, syn::Visibility::Inherited));
+    let token = |name: &str| -> usize {
+        index
+            .identifier_occurrences(name, View::Identifiers)
+            .into_iter()
+            .map(|token| token.start())
+            .find(|at| (whole.start()..whole.end()).contains(at))
+            .unwrap_or_else(|| whole.start())
+    };
+    let shape = |at: usize, what: String| Finding {
+        check: "shape",
+        at: place(index, at, root),
+        what,
+    };
+    let none = BTreeSet::new();
+    for module in import.module_paths() {
+        for (bound, path) in import.names() {
+            if path.is_empty() {
+                continue;
+            }
+            if resolved(module, path) == rules.mark_module
+                && bound != last_segment(rules.mark_module)
+            {
+                findings.push(shape(
+                    token(bound),
+                    format!(
+                        "`{}` imported as `{bound}`: the guard reads the mark's module by its own \
+                         name",
+                        rules.mark_module
+                    ),
+                ));
+            }
+            if public && watched.names_mark(path, path.len() - 1, module, &none) {
+                findings.push(shape(
+                    token(bound),
+                    format!(
+                        "the mark's `{bound}` re-exported from `{module}`: the guard reads the \
+                         mark at its own module and its aliases"
+                    ),
+                ));
+            }
+        }
+        for glob in import.globs() {
+            let globbed = resolved(module, glob);
+            for name in watched.marks.keys() {
+                let carries = watched.reach.contains(&(globbed.clone(), name.clone()));
+                if carries && (public || globbed != watched.marks[name]) {
+                    findings.push(shape(
+                        whole.start(),
+                        format!(
+                            "a glob of `{globbed}` in `{module}` carries the mark's `{name}` in{}: \
+                             the guard reads an import of it by name",
+                            if public { " and re-exports it" } else { "" }
+                        ),
+                    ));
+                }
+            }
+        }
+    }
 }
 
 /// The delivery a contract's literal writes, `delivery: Delivery::…`.
@@ -1891,26 +2457,29 @@ fn every_lane_drain_reads_its_mark_once_and_keeps_none() {
 
 // ── the fixtures ──────────────────────────────────────────────────────────
 
+/// The fixture's `Submission` drain of several askers.
+const ASKS_ROW: Drain = Drain {
+    contracts: &["ASKS"],
+    delivery: Delivery::Submission,
+    drain: "crate::asks::App::answers",
+    takes: &["crate::asks::Window::answered"],
+    adapters: &["crate::asks::contract_adapter::Adapter::drain"],
+    targets: Targets::Many,
+};
+
+/// The fixture's shared `NewestAdopted` row.
+const LATEST_ROW: Drain = Drain {
+    contracts: &["LATEST"],
+    delivery: Delivery::NewestAdopted,
+    drain: "crate::lane::Coalescing::ended",
+    takes: &["crate::lane::Coalescing::ended"],
+    adapters: &["crate::latest_adapter::Adapter::drain"],
+    targets: Targets::One("adoption orders it"),
+};
+
 /// The fixture's drains: one `Submission` drain of several askers and the shared
 /// `NewestAdopted` row.
-const FIXTURE_DRAINS: &[Drain] = &[
-    Drain {
-        contracts: &["ASKS"],
-        delivery: Delivery::Submission,
-        drain: "crate::asks::App::answers",
-        takes: &["crate::asks::Window::answered"],
-        adapters: &["crate::asks::contract_adapter::Adapter::drain"],
-        targets: Targets::Many,
-    },
-    Drain {
-        contracts: &["LATEST"],
-        delivery: Delivery::NewestAdopted,
-        drain: "crate::lane::Coalescing::ended",
-        takes: &["crate::lane::Coalescing::ended"],
-        adapters: &["crate::latest_adapter::Adapter::drain"],
-        targets: Targets::One("adoption orders it"),
-    },
-];
+const FIXTURE_DRAINS: &[Drain] = &[ASKS_ROW, LATEST_ROW];
 
 const FIXTURE_DOORS: &[Door] = &[Door {
     name: "mark_after_the_worker_ended",
@@ -1933,11 +2502,18 @@ const FIXTURE: Rules = Rules {
     wrappers: &[],
     drains: FIXTURE_DRAINS,
     doors: FIXTURE_DOORS,
-    follows: &[],
+    follows: &[(
+        "crate::latest_adapter::Adapter::drain",
+        "ended",
+        "crate::lane::Coalescing::ended",
+    )],
+    mark_derives: &["Debug"],
+    mark_traits: &[],
 };
 
-/// The fixture `variant`, judged: its findings as `check at: what`, the directory stripped.
-fn fixture(variant: &str) -> Vec<Finding> {
+/// The fixture `variant`, judged under `rules`: its findings as `check at: what`, the directory
+/// stripped.
+fn fixture(variant: &str, rules: &Rules) -> Vec<Finding> {
     let directory = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
         .join("fixtures")
@@ -1960,7 +2536,7 @@ fn fixture(variant: &str) -> Vec<Finding> {
     let index =
         Index::build(&universe).unwrap_or_else(|rejections| panic!("{}", report(&rejections)));
     let root = directory.canonicalize().expect("the fixture is there");
-    let judged = judge(&index, "lookalike", &FIXTURE, &root);
+    let judged = judge(&index, "lookalike", rules, &root);
     assert!(
         judged.fns_read > 0 && judged.tokens_read > 0,
         "{variant}: nothing read"
@@ -1970,7 +2546,12 @@ fn fixture(variant: &str) -> Vec<Finding> {
 
 /// The findings of `variant` are exactly `expected`, each a check and a fragment of its message.
 fn assert_findings(variant: &str, expected: &[(&str, &str, &str)]) {
-    let found = fixture(variant);
+    assert_findings_under(variant, &FIXTURE, expected);
+}
+
+/// The findings of `variant` under `rules` are exactly `expected`.
+fn assert_findings_under(variant: &str, rules: &Rules, expected: &[(&str, &str, &str)]) {
+    let found = fixture(variant, rules);
     let shown: Vec<String> = found.iter().map(ToString::to_string).collect();
     println!("{variant}:\n  {}", shown.join("\n  "));
     assert_eq!(
@@ -2154,5 +2735,329 @@ fn a_read_in_a_macro_is_a_shape_diagnostic() {
                 "`crate::asks::App::answers` reads no mark",
             ),
         ],
+    );
+}
+
+/// GREEN — three modules with a `Mark` of their own (declared, imported, globbed) beside the
+/// lane's: none of them is the mark.
+#[test]
+fn a_lookalike_mark_in_another_module_is_not_the_mark() {
+    assert_findings("lookalike", &[]);
+}
+
+/// The fixture's rules with `ASKS` in two rows.
+const FIXTURE_TWICE: Rules = Rules {
+    drains: &[ASKS_ROW, ASKS_ROW, LATEST_ROW],
+    ..FIXTURE
+};
+
+/// The fixture's rules with a row naming a contract the tree no longer has.
+const FIXTURE_STALE: Rules = Rules {
+    drains: &[
+        Drain {
+            contracts: &["ASKS", "GONE"],
+            ..ASKS_ROW
+        },
+        LATEST_ROW,
+    ],
+    ..FIXTURE
+};
+
+/// D1 — a contract in two rows, and a row's contract the tree does not declare.
+#[test]
+fn d1_a_contract_in_two_rows_or_a_stale_row_is_refused() {
+    assert_findings_under(
+        "green",
+        &FIXTURE_TWICE,
+        &[("D1", "the rules", "`ASKS` is in two rows")],
+    );
+    assert_findings_under(
+        "green",
+        &FIXTURE_STALE,
+        &[(
+            "D1",
+            "the rules",
+            "the row's contract `GONE` is no product `const`",
+        )],
+    );
+}
+
+/// D2 — the minting door's caller takes the door's mark other than into a `let`'s plain name.
+#[test]
+fn d2_a_minting_door_called_unbound_is_refused() {
+    assert_findings(
+        "d2_door_unbound",
+        &[(
+            "D2",
+            "lib.rs:127",
+            "calls the minting door `mark_after_the_worker_ended` other than as the initializer",
+        )],
+    );
+}
+
+/// D2 — a forwarder whose body does more than forward the read.
+#[test]
+fn d2_a_forwarder_that_does_more_is_refused() {
+    assert_findings(
+        "d2_forwarder_more",
+        &[(
+            "D2",
+            "lib.rs:88",
+            "the forwarder `crate::asks::Lane::drain_mark` is not the one call of its body",
+        )],
+    );
+}
+
+/// D2 — the read moved into a helper the drain calls: the helper reads outside a drain (and
+/// returns the mark), the drain reads none.
+#[test]
+fn d2_a_read_in_a_helper_is_refused() {
+    assert_findings(
+        "d2_helper",
+        &[
+            (
+                "D2",
+                "the rules",
+                "`crate::asks::App::answers` reads no mark",
+            ),
+            ("D2", "lib.rs:133", "a mark read outside a registered drain"),
+            ("D5", "lib.rs:132", "the mark named in a return type"),
+        ],
+    );
+}
+
+/// D2 — a fn named as the read that the rules do not list.
+#[test]
+fn d2_a_stray_fn_named_as_the_read_is_refused() {
+    assert_findings(
+        "d2_stray_fn",
+        &[(
+            "D2",
+            "lib.rs:108",
+            "a fn named `drain_mark` that the rules do not list",
+        )],
+    );
+}
+
+/// D3 — a drain's path that names two fns (one per `cfg` arm).
+#[test]
+fn d3_a_path_naming_two_fns_is_refused() {
+    assert_findings(
+        "d3_two_fns",
+        &[(
+            "D3",
+            "the rules",
+            "`crate::asks::App::answers` names 2 fn(s), not one",
+        )],
+    );
+}
+
+/// D4 — a reviewed edge no walk follows any more (the call it was for is now typed).
+#[test]
+fn d4_a_stale_reviewed_edge_is_refused() {
+    assert_findings(
+        "d4_follow_unused",
+        &[(
+            "D4",
+            "the rules",
+            "`crate::latest_adapter::Adapter::drain` -> `crate::lane::Coalescing::ended` at \
+             `.ended()` followed no call",
+        )],
+    );
+}
+
+/// D5 (F1) — the drain's mark mentioned in a `move` closure, and in an `async move` block: each
+/// moves it there, borrowed as it is written.
+#[test]
+fn d5_a_mark_moved_into_a_move_closure_or_async_block_is_refused() {
+    assert_findings(
+        "d5_move_closure",
+        &[(
+            "D5",
+            "lib.rs:117",
+            "the drain's mark `mark` moved into a `move` closure",
+        )],
+    );
+    assert_findings(
+        "d5_async_move",
+        &[(
+            "D5",
+            "lib.rs:117",
+            "the drain's mark `mark` moved into a `move` closure or an `async move` block",
+        )],
+    );
+}
+
+/// D5 (N3) — the drain's mark used through a method the mark does not declare (`Into::into`).
+#[test]
+fn d5_a_mark_used_through_a_method_it_does_not_declare_is_refused() {
+    assert_findings(
+        "d5_into",
+        &[(
+            "D5",
+            "lib.rs:117",
+            "the drain's mark `mark` used through `.into()`, which the mark does not declare",
+        )],
+    );
+}
+
+/// D5 (F4) — the minting door's mark, bound by its caller, moved.
+#[test]
+fn d5_the_doors_mark_moved_is_refused() {
+    assert_findings(
+        "d5_door_moved",
+        &[(
+            "D5",
+            "lib.rs:126",
+            "the door's mark `mark` used other than borrowed",
+        )],
+    );
+}
+
+/// D5 — a mark built outside the minting fns.
+#[test]
+fn d5_a_mark_built_outside_its_minting_fns_is_refused() {
+    assert_findings(
+        "d5_minting_stray",
+        &[(
+            "D5",
+            "lib.rs:117",
+            "a mark built outside its ledger's minting fns",
+        )],
+    );
+}
+
+/// D5 (F2) — inside the mark's module, a fn of the mark that copies it through `Self { … }`, and
+/// one that forges a "take everything" mark: each returns `Self` and builds one.
+#[test]
+fn d5_a_mark_copied_or_forged_through_self_is_refused() {
+    for variant in ["d5_self_clone", "d5_widen"] {
+        assert_findings(
+            variant,
+            &[
+                ("D5", "lib.rs:32", "the mark named in a return type"),
+                (
+                    "D5",
+                    "lib.rs:33",
+                    "a mark built outside its ledger's minting fns",
+                ),
+            ],
+        );
+    }
+}
+
+/// D5 (F2) — a fn of the mark that takes `self` by value.
+#[test]
+fn d5_a_mark_fn_taking_self_by_value_is_refused() {
+    assert_findings(
+        "d5_by_value",
+        &[(
+            "D5",
+            "lib.rs:32",
+            "the mark's fn `spent` takes `self` by value",
+        )],
+    );
+}
+
+/// D5 (F2) — the mark's declaration derives `Clone` and `Copy`.
+#[test]
+fn d5_a_mark_deriving_clone_or_copy_is_refused() {
+    assert_findings(
+        "d5_derive_clone",
+        &[
+            ("D5", "lib.rs:23", "the mark derives `Clone`"),
+            ("D5", "lib.rs:23", "the mark derives `Copy`"),
+        ],
+    );
+}
+
+/// D5 (F2) — a hand-written `impl Clone for Mark`: the trait refused, and its body's `Self`.
+#[test]
+fn d5_a_hand_written_clone_of_the_mark_is_refused() {
+    assert_findings(
+        "d5_impl_clone",
+        &[
+            ("D5", "lib.rs:33", "the mark implements `Clone` by hand"),
+            ("D5", "lib.rs:34", "the mark named in a return type"),
+            (
+                "D5",
+                "lib.rs:35",
+                "a mark built outside its ledger's minting fns",
+            ),
+        ],
+    );
+}
+
+/// D5 — a field typed through an alias of the mark.
+#[test]
+fn d5_a_field_typed_through_an_alias_is_refused() {
+    assert_findings(
+        "d5_alias_field",
+        &[("D5", "lib.rs:113", "the mark named in a field")],
+    );
+}
+
+/// UNSUPPORTED — the mark imported under another name.
+#[test]
+fn a_renamed_import_of_the_mark_is_a_shape_diagnostic() {
+    assert_findings(
+        "d5_renamed_import",
+        &[("shape", "lib.rs:81", "`Mark` imported under another name")],
+    );
+}
+
+/// UNSUPPORTED (F3) — the mark's module imported under another name, then its `Mark` kept in a
+/// field: the rename is a shape, the field still the mark's.
+#[test]
+fn a_renamed_import_of_the_marks_module_is_a_shape_diagnostic() {
+    assert_findings(
+        "d5_renamed_lane",
+        &[
+            ("shape", "lib.rs:81", "`crate::lane` imported as `l`"),
+            ("D5", "lib.rs:113", "the mark named in a field"),
+        ],
+    );
+}
+
+/// UNSUPPORTED (F3) — the mark re-exported, then kept in a field through the re-export.
+#[test]
+fn a_re_export_of_the_mark_is_a_shape_diagnostic() {
+    assert_findings(
+        "d5_reexport",
+        &[
+            (
+                "shape",
+                "lib.rs:81",
+                "the mark's `Mark` re-exported from `crate::asks`",
+            ),
+            ("D5", "lib.rs:113", "the mark named in a field"),
+        ],
+    );
+}
+
+/// UNSUPPORTED (F3) — `use super::*;` under a module that imports the mark, then the bare name
+/// kept in a field.
+#[test]
+fn an_inherited_glob_that_carries_the_mark_is_a_shape_diagnostic() {
+    assert_findings(
+        "d5_glob",
+        &[
+            (
+                "shape",
+                "lib.rs:83",
+                "a glob of `crate::asks` in `crate::asks::inner` carries the mark's `Mark` in",
+            ),
+            ("D5", "lib.rs:86", "the mark named in a field"),
+        ],
+    );
+}
+
+/// UNSUPPORTED (N4) — a tree `macro_rules! vec` shadows the standard one: its arguments are the
+/// tree macro's tokens, a shape, not the array literal the standard `vec!` is.
+#[test]
+fn a_tree_macro_shadowing_an_expression_macro_is_a_shape_diagnostic() {
+    assert_findings(
+        "shape_shadowed_vec",
+        &[("shape", "lib.rs:119", "`drain_mark` in a macro's arguments")],
     );
 }

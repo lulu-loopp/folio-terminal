@@ -151,9 +151,23 @@ mod latest_adapter {
         pub lane: crate::lane::Coalescing,
     }
 
+    /// A second `ended`: the generic `held` leaves the adapter's call of it `Ambiguous`, and the
+    /// rules' reviewed edge follows it.
+    pub struct Other;
+
+    impl Other {
+        pub fn ended(&mut self) -> Vec<u64> {
+            Vec::new()
+        }
+    }
+
+    pub fn held<T>(value: &mut T) -> &mut T {
+        value
+    }
+
     impl Adapter {
         pub fn drain(&mut self) -> Vec<u64> {
-            self.lane.ended()
+            held(&mut self.lane).ended()
         }
     }
 }

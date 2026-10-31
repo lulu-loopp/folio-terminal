@@ -840,7 +840,9 @@ takes only below it (T-LANE-DRAIN-MARK-GUARD, row 110 of the 0.4.9 plan; ruled
 ledger (`Ledger::drain_mark`; its fields are private to `lane`) and is neither
 `Clone` nor `Copy`, and in a debug build the take asserts that the mark came
 from the request's own ledger. The guard carries the other half — where the
-mark is read, and how often.
+mark is read, and how often — and holds the type's own properties, which
+nothing else pins: no derive but `Debug`, no trait by hand, no `Self { … }`
+outside the minting fns, no fn of the mark but `&self` ones.
 
 The guard is `crates/bt-source/tests/lane_drains.rs`
 (`every_lane_drain_reads_its_mark_once_and_keeps_none`, run by
@@ -865,34 +867,61 @@ Its grammar:
   initializer of a `let` binding a plain name written directly in the drain's
   block: never in a loop, a closure, an async block, a nested `fn` or a
   macro's arguments. The standard library's expression macros (`vec!`,
-  `format!`, the assertions) are read as the expressions they are; any other
-  macro's tokens are a shape. A forwarder's body is that one call. The name is
-  called nowhere else in the product, no other fn is named `drain_mark`, and
-  each door is called by its one caller and its forwarders alone.
+  `format!`, the assertions), written bare or under `std`, `core` or `alloc`
+  and not shadowed by a `macro_rules!` of the tree's under the same name, are
+  read as the expressions they are; any other macro's tokens are a shape. A
+  forwarder's body is that one call. The name is called nowhere else in the
+  product, no other fn is named `drain_mark`, and each door is called by its
+  one caller and its forwarders alone. The door that mints a mark
+  (`mark_after_the_worker_ended`) is bound by its caller as a drain binds its
+  read: the initializer of a `let` of a plain name in its block.
 - **D3** — every path the rules name resolves to exactly one fn.
 - **D4** — each contract adapter's drain reaches one of its row's takes over
   `bt_source::call_graph` (every `cfg` arm, an untyped call with one
-  candidate followed, and the reviewed edges of `TREE.follows`: today one,
-  `GitMutationLane::ended` → `Share::ended`, through a `MutexGuard` the
-  resolver does not type).
-- **D5** — a mark is never kept: its name is written only as the referent of
-  a whole `&` parameter type, as the whole type of a `let`, as the return type
-  of a minting fn or a forwarder, as a type alias's whole right side
-  (`persist::StorageMark`, then read as the name) and in `lane`'s own
-  declaration of it. A field, a `static`, a `const`, a generic argument,
+  candidate followed, and the reviewed edges of `TREE.follows`). A reviewed
+  edge names its caller, the call's method and its callee — today one,
+  `GitMutationLane::ended` at `.ended()` → `Share::ended`, its UNFOLLOWED-EDGES
+  key `GitMutationLane::ended Ambiguous ended`, through a `MutexGuard` the
+  resolver does not type — and is followed only at an `Ambiguous` call of that
+  method listing that callee. An edge no adapter's walk used is stale, and a
+  finding.
+- **D5** — a mark is never kept, copied or changed. Its name is written only
+  as the referent of a whole `&` parameter type, as the whole type of a `let`,
+  as the return type of a minting fn or a forwarder, as a type alias's whole
+  right side (`persist::StorageMark`, then read as the name) and in `lane`'s
+  own declaration of it. A field, a `static`, a `const`, a generic argument,
   another fn's return type or an expression path is a finding; so is a
-  `Mark { … }` outside the minting fns, and a drain's binding used other than
-  borrowed (`&mark`, or a method call's receiver).
+  `Mark { … }` outside the minting fns. In an `impl` of the mark `Self` is the
+  mark: `Self { … }` is a minting and `-> Self` a return type under the same
+  rules. The binding a drain reads its mark into, and the one the minting
+  door's caller binds, is used only borrowed — `&mark`, or as the receiver of a
+  method the mark's own `impl` declares — never moved: any mention of it in a
+  `move` closure or an `async move` block moves it, and so does a call of any
+  other method on it (`Into::into`, a trait's). The mark's declaration derives
+  `Debug` alone (`TREE.mark_derives`; a `cfg_attr` on it is a shape), no
+  trait is implemented for it by hand (`TREE.mark_traits` is empty), its
+  inherent `impl`s are written in `lane` alone, and each of its fns takes
+  `&self` — `self` by value would move a held mark through a receiver,
+  `&mut self` would change it.
 - **D6** — a drain of several askers calls `lane::in_admission_order`, or a
   registered wrapper that does (`handoff_lane::in_press_order`), directly in
   its body. The computation lanes, the git lane and the `NewestAdopted` row
   are exempt by row.
 - **Shapes** — every product identifier token named `drain_mark`, a door, or
-  the mark (by scope: `lane::Mark`, or a bare `Mark` where `lane`'s is
-  imported; `uninstall`'s and the update trial's own `Mark` types are not it)
-  must be one the reading classified; any other — a macro's tokens, an `impl`
-  header's generics, an associated type, a path call, a fn named as a value, a
-  renamed import — is a `shape` finding with its file and line.
+  one of the mark's names (`Mark`, `StorageMark`) must be one the reading
+  classified; any other — a macro's tokens, an `impl` header's generics, an
+  associated type, a path call, a fn named as a value, a renamed import — is a
+  `shape` finding with its file and line. Each of the mark's names is the mark
+  unless the path reaches another type of that name: a module that declares
+  one of its own (today `uninstall` and `update_trial`, found from the index,
+  not listed), imports one or globs a module where it is one; a qualified path
+  whose prefix resolves to such a module (`crate::update_trial::Mark`), or,
+  unanchored, is that module's own name (`update_trial::Mark`). So no spelling
+  of `lane`'s mark reads as "not the mark": the spellings that would make one
+  the reading cannot follow to `lane` are shapes of their own — `lane`
+  imported under another name (`use crate::lane as l;`), the mark re-exported
+  (`pub(crate) use crate::lane::Mark;`), and a glob that carries it in from a
+  module other than `lane` (`use super::*;` under a module that imports it).
 
 Blind spots, stated: the guard proves the mark is read once and that an
 adapter reaches a take, not that a drain asks **every** target (a store left
@@ -900,10 +929,17 @@ out of `App::storage_answers` keeps its answers with nothing out of order) —
 the contract suite's per-lane rows answer that. Two ledgers of one id type
 type-check each other's marks; only the take's `debug_assert` on the mark's
 ledger catches that, in a debug build that runs the take. Calls are matched by
-method name, not by receiver type, so another type's `drain_mark` would be read
-as a mark read (a false finding, never a missed one). A by-value `self` method
-on `Mark` would move a drain's binding through a receiver; `Mark` has none,
-and `lane` is where one would be written.
+method name, not by receiver type: another type's `drain_mark` would be read
+as a mark read (a false finding, never a missed one), and a call on a held
+mark of a name the mark's `impl` declares (`below`, `owed`) is taken for the
+mark's own — a blanket trait of the tree's giving every type a by-value
+method of that name would be chosen first and move the mark unseen; no such
+trait exists, and one would be a trait written for the purpose. A macro's
+scope is not resolved: a standard expression macro's name that the tree also
+defines with `macro_rules!` is read as the tree's everywhere (a false shape at
+worst). An unanchored path to another module's `Mark` is told apart by that
+module's own name; an import that renamed `lane` to such a name would be read
+as that module, and is itself a shape.
 
 Where and what to do: when red, read the finding's check. A D2 read in a loop
 or a closure, or a second read for a later asker, is the bug the guard exists
