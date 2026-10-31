@@ -107,6 +107,25 @@ pub fn scope_ended() {
     grab(1).title = String::new();
 }
 
+// An `if let`'s binding ends with its `then` block: in the `else` and after the `if`, `grab` is
+// the package's.
+pub fn if_let_after(maybe: Option<fn(u32) -> &'static mut Other>) {
+    if let Some(grab) = maybe {
+        let _ = grab;
+    } else {
+        grab(1).title = String::new();
+    }
+    grab(1).title = String::new();
+}
+
+// A closure's parameter ends with the closure: after it, `grab` is the package's.
+pub fn closure_after() {
+    apply(|grab| {
+        let _ = grab;
+    });
+    grab(1).title = String::new();
+}
+
 // A nested function sees none of the outer one's bindings: its `grab` is the package's.
 pub fn outer(grab: impl Fn(u32) -> &'static mut Other) {
     fn inner() {

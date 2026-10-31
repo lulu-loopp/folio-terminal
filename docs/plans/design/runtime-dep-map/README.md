@@ -65,7 +65,7 @@ the header is the authority:
   never typed as the package's function of that name (row 115, 2026-10-31: one read
   joined the unattributed count, `uninstall::program_plan`'s `member.name` through
   its `members` parameter; five calls joined the count of method names a standard
-  type has too; no row of any file moved).
+  type has too, 4,308 -> 4,313 in the header; no row of any file moved).
 - 301 sites reach more than one item, for example two types of the same name in two
   modules.
 - A call through an associated type of a generic (`B::Glass`, `B::Window`, `G::Device`)

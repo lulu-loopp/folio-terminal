@@ -603,9 +603,11 @@ fn a_foreign_result_off_the_table_is_not_a_result_to_the_census() {
 /// generic bounded `Fn*` inline or by `where`), a `let` of a closure, a closure's parameter, a
 /// tuple's and an `if let`'s name, and a name in a pattern a macro writes are each called as
 /// `grab(1)`, and each `.title` written through them is an unknown site; with nothing bound
-/// (`plain`), after the binding's scope ended (`scope_ended`), and in a nested function, which
-/// sees none of the outer one's bindings (`outer`'s `inner`), `grab` is the package's function,
-/// which returns the window, so the write is the window's title.
+/// (`plain`), after the binding's scope ended (a block's in `scope_ended`, an `if let`'s in its
+/// `else` and after it in `if_let_after`, a closure parameter's after the closure in
+/// `closure_after`), and in a nested function, which sees none of the outer one's bindings
+/// (`outer`'s `inner`), `grab` is the package's function, which returns the window, so the write
+/// is the window's title.
 ///
 /// RED on `6d012c2c2` (main `1df251db3` plus row 110): `Walk::callee` sent every one-segment call
 /// to the package's functions by name, so all eleven binding calls wrote the window's title.
@@ -620,7 +622,17 @@ fn a_call_through_a_local_binding_is_not_typed_as_the_package_function() {
     let mut writers = functions(&rows(&census, "WindowRuntime.title", Column::Write));
     writers.sort();
     // `retitle` is the shared fixture's own writer.
-    assert_eq!(writers, ["outer", "plain", "retitle", "scope_ended"]);
+    assert_eq!(
+        writers,
+        [
+            "closure_after",
+            "if_let_after",
+            "outer",
+            "plain",
+            "retitle",
+            "scope_ended"
+        ]
+    );
     // Each binding call is refused by kind, and the write through it is an unknown site.
     let mut called: Vec<&str> = census
         .unknowns()

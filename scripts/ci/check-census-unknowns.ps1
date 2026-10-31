@@ -28,7 +28,10 @@
 # added key of that place and the one gone, unmoved base key of it - and its
 # `sites` is held to the base key's. That is what an analyser fix that only
 # renames a refusal writes; a reason reworded by hand is held off by bt-source's
-# census test, which needs the list to carry the code's own reason. There is no
+# census test, which needs the list to carry the code's own reason. A key the
+# move rule refused (its move into a module that already lists the function) may
+# still pair here with a different gone key at its own place; the count is held
+# to that key's, so the list cannot grow by it. There is no
 # rename arm here: a row has no reason of its own to carry the dated reason a rename needs, so a key whose
 # function was renamed is added, as before. A key that disappeared or
 # whose `sites` went down is the list shrinking, which is what regenerating it
