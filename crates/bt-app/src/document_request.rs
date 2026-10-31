@@ -86,11 +86,11 @@ use bt_persist::{
 };
 use bt_platform::admission::WorkerCtx;
 
+#[cfg(test)]
+use crate::persist::Reply;
 use crate::persist::{
     DocumentWrites, Ended, InAdmissionOrder, OnTheWorker, Revision, StorageId, StorageLane,
 };
-#[cfg(test)]
-use crate::persist::Reply;
 use crate::quit::{CopyStanding, Standing};
 use crate::settings_bundle::{LineRead, read_lines};
 
@@ -1455,8 +1455,8 @@ pub(crate) struct DocumentState<T> {
 /// **One answer a store took below a drain's mark** ([`DocumentState::answered`]), heard in the
 /// drain's order ([`DocumentState::hear`]).
 pub(crate) enum StoreAnswer<T> {
-    /// A write's answer, with the write it answers.
-    Document(InFlight<T>, Ended<DocumentAnswer>),
+    /// A write's answer, with the write it answers (boxed: the write carries its document).
+    Document(Box<(InFlight<T>, Ended<DocumentAnswer>)>),
     /// A re-read's answer, with the generation it was asked at.
     Read(Ended<(u64, ReadAnswer<T>)>),
     /// A quit copy's receipt.
@@ -1725,7 +1725,7 @@ impl<T: StoredDocument> DocumentState<T> {
             match request {
                 Outstanding::Document(mut flight) => match flight.answer.hear_below(owed) {
                     Some((order, ended)) => {
-                        taken.push((order, StoreAnswer::Document(flight, ended)));
+                        taken.push((order, StoreAnswer::Document(Box::new((flight, ended)))));
                     }
                     None => {
                         self.outstanding.push_front(Outstanding::Document(flight));
@@ -1755,7 +1755,8 @@ impl<T: StoredDocument> DocumentState<T> {
     /// after them is sent once the drain has heard every answer ([`Self::answers_heard`]).
     pub(crate) fn hear(&mut self, answer: StoreAnswer<T>) {
         match answer {
-            StoreAnswer::Document(flight, ended) => {
+            StoreAnswer::Document(write) => {
+                let (flight, ended) = *write;
                 let answered = match ended {
                     Ended::Answered(answer) => Ok(answer),
                     Ended::Failed(words) => Err(Refusal::Failed(words)),

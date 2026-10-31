@@ -2519,8 +2519,14 @@ impl TwoWindowsSaving {
             jobs,
             lane,
             windows: [
-                (first, crate::test_support::seat_of(crate::TabId(1), first_seat)),
-                (second, crate::test_support::seat_of(crate::TabId(2), second_seat)),
+                (
+                    first,
+                    crate::test_support::seat_of(crate::TabId(1), first_seat),
+                ),
+                (
+                    second,
+                    crate::test_support::seat_of(crate::TabId(2), second_seat),
+                ),
             ],
             dir,
         }

@@ -1282,7 +1282,13 @@ fn the_session_write_spends_only_what_remains_of_the_one_budget() {
     );
     disk.answer_copy(Ok(folder.join("1970-01-01T000000Z settings.json")));
     assert_eq!(
-        recovery_turn(&mut quit, &mut documents, &folder, SystemTime::UNIX_EPOCH, late),
+        recovery_turn(
+            &mut quit,
+            &mut documents,
+            &folder,
+            SystemTime::UNIX_EPOCH,
+            late
+        ),
         QuitStep::Photograph
     );
     assert_eq!(quit.photographed(), QuitStep::Write);
@@ -1330,7 +1336,13 @@ fn a_quit_with_no_budget_left_closes_without_a_new_flush() {
     disk.answer_copy(Ok(folder.join("1970-01-01T000000Z settings.json")));
     // The copy's receipt read on a turn that came late, with nothing of the budget left.
     assert_eq!(
-        recovery_turn(&mut quit, &mut documents, &folder, SystemTime::UNIX_EPOCH, spent),
+        recovery_turn(
+            &mut quit,
+            &mut documents,
+            &folder,
+            SystemTime::UNIX_EPOCH,
+            spent
+        ),
         QuitStep::Photograph
     );
     assert_eq!(quit.photographed(), QuitStep::Write);
