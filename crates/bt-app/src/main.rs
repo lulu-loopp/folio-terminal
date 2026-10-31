@@ -16716,6 +16716,17 @@ struct KeyboardOwner {
     /// and a palette you cannot type Chinese into is a palette that cannot find
     /// a Chinese file name.
     palette: bool,
+    /// **A text field of the settings dialog holds it** (T-SETTINGS-FIELDS-IME-POSITION) —
+    /// the summoned terminal's startup command, a profile's name, program and arguments, an
+    /// environment row's name or value.
+    ///
+    /// [`Self::palette`]'s arrangement, and for its reason: the dialog is a modal, so
+    /// `menu_or_dialog` is true the whole time it is up, and the rung under this one swallows
+    /// every composition. The seam the dialog's key ladder promised for "the first surface here
+    /// that takes text" is this bit. Read off `Runtime::settings_field_holds_the_keyboard`, the
+    /// key ladder's own condition, so the field that gets the keys is the field that gets the
+    /// composition.
+    settings_field: bool,
 }
 
 impl KeyboardOwner {
@@ -16730,8 +16741,8 @@ impl KeyboardOwner {
     ///   and the in-pane capsule are **borrowing** it — they sit inside the
     ///   layout, the panes behind them are visible, and a gesture aimed at a
     ///   pane may simply ask for the keyboard back;
-    /// * a menu, any of the four modals, the palette, a git prompt and the
-    ///   tab-name box are **being answered**. The window is waiting for a reply
+    /// * a menu, any of the four modals (a settings field among them), the
+    ///   palette, a git prompt and the tab-name box are **being answered**. The window is waiting for a reply
     ///   and the reply is a keystroke, so a path written underneath one would be
     ///   followed by an `Enter` that answers the card instead of running the
     ///   command.
@@ -16739,7 +16750,7 @@ impl KeyboardOwner {
     /// Only the second list is here. [`Runtime::a_modal_holds_the_window`] is
     /// its one reader.
     const fn is_modal(self) -> bool {
-        self.menu_or_dialog || self.rename || self.git_prompt || self.palette
+        self.menu_or_dialog || self.rename || self.git_prompt || self.palette || self.settings_field
     }
 }
 
@@ -16810,6 +16821,14 @@ enum ImeOwner {
     /// Searching in Chinese is the reason, one surface along from
     /// [`Self::Search`]'s.
     Palette,
+    /// **A text field of the settings dialog** (T-SETTINGS-FIELDS-IME-POSITION).
+    ///
+    /// **Above `Modal`**, for [`Self::Palette`]'s reason one surface along: the dialog is a
+    /// modal and the rung under it swallows compositions outright, which is right for its
+    /// switches and pickers and exactly wrong for a box a path or a name is typed into. Before
+    /// this rung a commit made in one of these fields was dropped and its candidate list stood
+    /// wherever the last composition had left it.
+    SettingsField,
     /// The shell — the only owner that has a PTY, and the only one that gets it.
     Shell,
 }
@@ -16823,7 +16842,7 @@ impl ImeOwner {
     /// that has to answer for every rung, checked by walking it. Test-only
     /// because nothing that ships iterates the rungs; the window is always
     /// holding exactly one.
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 10] = [
         Self::Rename,
         Self::GraphSearch,
         Self::GitPrompt,
@@ -16832,6 +16851,7 @@ impl ImeOwner {
         Self::Preview,
         Self::Search,
         Self::Palette,
+        Self::SettingsField,
         Self::Shell,
     ];
 }
@@ -16940,7 +16960,9 @@ enum ImeCaretSource {
 /// * a files column and the search capsule by the seat they stand on;
 /// * the name box by its [`RenameSubject`], which is what it is editing;
 /// * the palette, a git prompt and a popup by themselves — this window has one
-///   of each at a time.
+///   of each at a time;
+/// * a settings field by its [`settings::SettingsTarget`], because the dialog has
+///   several and `Tab` walks between them (T-SETTINGS-FIELDS-IME-POSITION).
 ///
 /// The `Option`s inside are not uncertainty to be resolved: a surface that
 /// cannot be named right now is one no text can be inserted into either, so two
@@ -16955,6 +16977,7 @@ enum CompositionOrigin {
     Rename(Option<RenameSubject>),
     GitPrompt,
     Palette,
+    Settings(Option<settings::SettingsTarget>),
     Modal,
 }
 
@@ -36827,6 +36850,9 @@ impl<B: Backend> Runtime<'_, B> {
                     state.field_mut().set_preedit("");
                 }
             }
+            // Every field of the dialog, because the one the letters were drawn in
+            // need not be the one the focus is on now (T-SETTINGS-FIELDS-IME-POSITION).
+            ImeOwner::SettingsField => self.window.settings.clear_preedits(),
             // A page draws the window's own `preedit` and holds none of its own,
             // and the three that swallow compositions never had one.
             ImeOwner::Preview | ImeOwner::Modal | ImeOwner::FilesTree | ImeOwner::Shell => {}
@@ -60480,7 +60506,7 @@ mod edit_menu_clipboard_tests {
         let mut refused = Vec::new();
         for rung in ImeOwner::ALL {
             let shell = rung == ImeOwner::Shell;
-            let field = text_field_holding(rung, false);
+            let field = text_field_holding(rung);
             let seat = paste_seat(ClipboardFocus {
                 swallowing: false,
                 field,
@@ -60607,12 +60633,8 @@ mod edit_menu_clipboard_tests {
         for rung in [ImeOwner::FilesTree, ImeOwner::Preview, ImeOwner::Modal] {
             let mut doors = selected();
             let expected = doors.session.selection_text().expect("a selection");
-            run_clipboard_verb(
-                true,
-                clipboard_focus_of(rung, false, false, false),
-                &mut doors,
-            )
-            .expect("the copy runs");
+            run_clipboard_verb(true, clipboard_focus_of(rung, false, false), &mut doors)
+                .expect("the copy runs");
             assert_eq!(
                 doors.clipboard,
                 [expected],
@@ -60629,7 +60651,7 @@ mod edit_menu_clipboard_tests {
         let mut doors = selected();
         run_clipboard_verb(
             true,
-            clipboard_focus_of(ImeOwner::Preview, false, false, true),
+            clipboard_focus_of(ImeOwner::Preview, false, true),
             &mut doors,
         )
         .expect("the copy runs");
@@ -60638,7 +60660,7 @@ mod edit_menu_clipboard_tests {
         let mut doors = selected();
         run_clipboard_verb(
             true,
-            clipboard_focus_of(ImeOwner::Modal, true, false, false),
+            clipboard_focus_of(ImeOwner::Modal, true, false),
             &mut doors,
         )
         .expect("the copy runs");
@@ -60696,42 +60718,35 @@ mod edit_menu_clipboard_tests {
 
         let mut fields_reached = Vec::new();
         for rung in ImeOwner::ALL {
-            for settings_field in [false, true] {
-                for swallowing in [false, true] {
-                    for preview_edit in [false, true] {
-                        let field = text_field_holding(rung, settings_field);
-                        let seat = paste_seat(ClipboardFocus {
-                            swallowing,
-                            field,
-                            preview_edit,
-                            shell: rung == ImeOwner::Shell,
-                        });
-                        let takes_text = ime_caret_source(rung) == ImeCaretSource::Field;
-                        if takes_text && rung != ImeOwner::Preview {
-                            let field = field.unwrap_or_else(|| {
-                                panic!("{rung:?} has a caret and is no text field")
-                            });
-                            assert_eq!(
-                                seat,
-                                ClipboardSeat::Field(field),
-                                "a paste with {rung:?} holding the keyboard goes into it"
-                            );
-                            fields_reached.push(field);
-                        }
-                        if rung == ImeOwner::Modal && settings_field {
-                            assert_eq!(seat, ClipboardSeat::Field(TextFieldSeat::Settings));
-                            fields_reached.push(TextFieldSeat::Settings);
-                        }
-                        if rung == ImeOwner::Preview && preview_edit && !swallowing {
-                            assert_eq!(seat, ClipboardSeat::PreviewDocument);
-                        }
-                        if field.is_some() {
-                            assert_ne!(
-                                seat,
-                                ClipboardSeat::Terminal,
-                                "{rung:?}: a paste reached the shell behind a field"
-                            );
-                        }
+            for swallowing in [false, true] {
+                for preview_edit in [false, true] {
+                    let field = text_field_holding(rung);
+                    let seat = paste_seat(ClipboardFocus {
+                        swallowing,
+                        field,
+                        preview_edit,
+                        shell: rung == ImeOwner::Shell,
+                    });
+                    let takes_text = ime_caret_source(rung) == ImeCaretSource::Field;
+                    if takes_text && rung != ImeOwner::Preview {
+                        let field = field
+                            .unwrap_or_else(|| panic!("{rung:?} has a caret and is no text field"));
+                        assert_eq!(
+                            seat,
+                            ClipboardSeat::Field(field),
+                            "a paste with {rung:?} holding the keyboard goes into it"
+                        );
+                        fields_reached.push(field);
+                    }
+                    if rung == ImeOwner::Preview && preview_edit && !swallowing {
+                        assert_eq!(seat, ClipboardSeat::PreviewDocument);
+                    }
+                    if field.is_some() {
+                        assert_ne!(
+                            seat,
+                            ClipboardSeat::Terminal,
+                            "{rung:?}: a paste reached the shell behind a field"
+                        );
                     }
                 }
             }
@@ -60744,8 +60759,13 @@ mod edit_menu_clipboard_tests {
             }),
             ClipboardSeat::Terminal
         );
-        // The two fields the defect was reported in are among the ones reached.
-        for field in [TextFieldSeat::FindBar, TextFieldSeat::GraphSearch] {
+        // The two fields the defect was reported in are among the ones reached, and
+        // so is the settings dialog's, on its own rung (T-SETTINGS-FIELDS-IME-POSITION).
+        for field in [
+            TextFieldSeat::FindBar,
+            TextFieldSeat::GraphSearch,
+            TextFieldSeat::Settings,
+        ] {
             assert!(
                 fields_reached.contains(&field),
                 "{field:?} is never reached"
@@ -62875,6 +62895,7 @@ mod clipboard_path_tests {
             KeyboardOwnerCase::new("the tab-name box", |o| o.rename = true),
             KeyboardOwnerCase::new("a git prompt", |o| o.git_prompt = true),
             KeyboardOwnerCase::new("the command palette", |o| o.palette = true),
+            KeyboardOwnerCase::new("a settings field", |o| o.settings_field = true),
         ] {
             assert!(
                 row.owner().is_modal(),

@@ -337,22 +337,39 @@ impl<B: Backend> Runtime<'_, B> {
             // whichever one has the focus. Hoisted with the recorder's caps and
             // for its reason: they are `String`s owned by the panel, and the
             // renderer is borrowed mutably below them.
+            //
+            // **What each field shows, a composition included**
+            // (T-SETTINGS-FIELDS-IME-POSITION): the text with its pre-edit spliced in at
+            // the caret, and the caret past the pre-edit — the palette's and the capsule's
+            // picture of a composition, and the string `settings_field_caret_line`
+            // measures the input method's rectangle off.
             let editor = self.window.settings.editor();
             let editor_env: Vec<(String, String)> = editor.map_or_else(Vec::new, |editor| {
                 editor
                     .env
                     .iter()
-                    .map(|(name, value)| (name.text().to_owned(), value.text().to_owned()))
+                    .map(|(name, value)| {
+                        (name.composed().into_owned(), value.composed().into_owned())
+                    })
                     .collect()
             });
             let editor_caret = editor.and_then(|editor| editor.caret_of(focus_for_caret));
-            let editor = editor.map(|editor| settings::EditorInk {
-                name: editor.name.text(),
-                program: editor.program.text(),
-                args: editor.args.text(),
-                env: &editor_env,
-                caret: editor_caret,
+            let editor_shown = editor.map(|editor| {
+                (
+                    editor.name.composed(),
+                    editor.program.composed(),
+                    editor.args.composed(),
+                )
             });
+            let editor = editor_shown
+                .as_ref()
+                .map(|(name, program, args)| settings::EditorInk {
+                    name: name.as_ref(),
+                    program: program.as_ref(),
+                    args: args.as_ref(),
+                    env: &editor_env,
+                    caret: editor_caret,
+                });
             // **The summoned terminal's two strings, joined where both halves are
             // in hand** (§7.54e ⑤ — §7.54b's own arrangement for the sentence
             // about a chord another program is holding, said again about the caps
@@ -370,7 +387,14 @@ impl<B: Backend> Runtime<'_, B> {
                     .map(|line| line.caps.clone())
                     .unwrap_or_default(),
             };
-            let summon_command = self.window.settings.quake_command().to_owned();
+            let summon_command = self
+                .window
+                .settings
+                .text_field(settings::SettingsTarget::Field(
+                    settings::SettingsRow::QuakeCommand,
+                ))
+                .map(|field| field.composed().into_owned())
+                .unwrap_or_default();
             let summon_command_caret = self
                 .window
                 .settings
