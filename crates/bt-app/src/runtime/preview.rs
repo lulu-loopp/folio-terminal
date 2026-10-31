@@ -5151,7 +5151,8 @@ impl<B: Backend> Runtime<'_, B> {
         if !playing && !path.as_deref().is_some_and(preview::path_names_a_video) {
             return Ok(false);
         }
-        if !self.preview_image_clicks.register(surface, at, now) {
+        let moment = self.window.pointer_clock.moment(now);
+        if !self.preview_image_clicks.register(surface, at, moment) {
             return Ok(false);
         }
         if playing {
@@ -5188,7 +5189,8 @@ impl<B: Backend> Runtime<'_, B> {
         if !self.video_picture_holds(surface, at, scale, now) {
             return Ok(false);
         }
-        if self.preview_image_clicks.register(surface, at, now) {
+        let moment = self.window.pointer_clock.moment(now);
+        if self.preview_image_clicks.register(surface, at, moment) {
             self.double_click_video_picture(surface)?;
         } else {
             // **A first press forgets the last click's record** (review round 1,
@@ -6058,9 +6060,8 @@ impl<B: Backend> Runtime<'_, B> {
             .flatten();
         let placing = caret_at.filter(|_| link.is_none() || shift);
         let point = [position.x as f32, position.y as f32];
-        let clicks = self
-            .preview_text_clicks
-            .register(surface, point, Instant::now());
+        let moment = self.window.pointer_clock.moment(Instant::now());
+        let clicks = self.preview_text_clicks.register(surface, point, moment);
         let grain = preview_text_grain(clicks);
         // **The record, and it is the whole of what this press does to the
         // page** (owner's ruling 2026-09-21). One of two things is named — a
@@ -8356,10 +8357,8 @@ impl<B: Backend> Runtime<'_, B> {
             return Ok(false);
         }
         let point = [position.x as f32, position.y as f32];
-        if self
-            .preview_image_clicks
-            .register(surface, point, Instant::now())
-        {
+        let moment = self.window.pointer_clock.moment(Instant::now());
+        if self.preview_image_clicks.register(surface, point, moment) {
             let toggled = image_zoom_toggled(self.preview_image_zoom(surface));
             self.set_preview_image_zoom(surface, toggled)?;
         } else {

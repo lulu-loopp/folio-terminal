@@ -392,10 +392,33 @@ fn a_press_on_a_rendered_page_changes_no_blocks_face_until_the_release() {
 /// — a double click takes a character; drop `want_caret_at(Some(offset))` — a press on a page
 /// whose file is still being read is lost; drop the owed caret's read in
 /// `Runtime::settle_preview_caret` — nothing spends it when the body lands.
+///
+/// The repeat is counted on the held pointer clock (row 124), so the two presses are one double
+/// click however long the machine takes between them; and two quick presses the held clock puts
+/// a pair window apart are two single presses. MUTATION (the seam bypassed): count
+/// `press_preview_text`'s press at its own `Instant::now()` — the quick pair is a double click and
+/// the first assertion goes red.
 #[test]
 fn a_repeated_press_keeps_its_grain_and_a_page_still_reading_keeps_its_caret_owed() {
     let (mut folio, surface) = drawn_page("headless-grain");
     let at = point_on(&folio, "first paragraph");
+    folio.hold_the_pointer_clock();
+    folio.press(at);
+    folio.release(at);
+    the_pair_window_lapses(&mut folio);
+    folio.press(at);
+    folio.release(at);
+    assert!(
+        folio
+            .runtime()
+            .preview_pane(surface)
+            .unwrap()
+            .caret()
+            .range()
+            .is_empty(),
+        "two presses the held clock puts a pair window apart are two presses, however quick the hand: a caret, not a word"
+    );
+    the_pair_window_lapses(&mut folio);
     folio.press(at);
     folio.release(at);
     folio.press(at);
@@ -2175,8 +2198,16 @@ fn a_click_on_a_recordings_picture_plays_and_pauses_it() {
 /// leaves playback as it was**: playing stays playing, paused stays paused at its playhead, and a
 /// second double click lets the zoom go.
 ///
+/// Both pairs are counted on the held pointer clock (row 124), so each is one double click
+/// however long the machine takes between its presses, and each verdict is read behind a fence;
+/// two quick presses the held clock puts a pair window apart zoom nothing. MUTATION (the seam
+/// bypassed): count `press_video_picture`'s press at its own `Instant::now()` — the quick pair
+/// zooms the pane and the last assertion goes red.
+///
 /// MUTATION: drop the undo from `Runtime::double_click_video_picture` — the first click of the
-/// pair pauses a playing recording and the pane zooms over a stopped one.
+/// pair pauses a playing recording and the pane zooms over a stopped one. MUTATION (the second
+/// press too late): move the held clock past `MULTI_CLICK_INTERVAL` before either pair's second
+/// press — no zoom comes, and the zoom assertion goes red.
 #[test]
 fn a_double_click_on_a_recording_zooms_its_pane_and_leaves_playback_as_it_was() {
     let _ledger = crate::test_support::ledger_gate();
@@ -2186,11 +2217,10 @@ fn a_double_click_on_a_recording_zooms_its_pane_and_leaves_playback_as_it_was() 
         unreachable!("a docked pane")
     };
     let stage = stage_of(&mut folio, surface);
+    folio.hold_the_pointer_clock();
     click(&mut folio, on_the_picture(stage, 20.0));
     loaded(&folio, surface);
-    played(&folio, surface, |state| {
-        state.playing && state.position_secs > 0.2
-    });
+    played_on(&mut folio, surface, 0.0, 0.3);
     assert_eq!(folio.window.tabs[0].seats.zoom(), None);
 
     let pair = on_the_picture(stage, 80.0);
@@ -2201,7 +2231,7 @@ fn a_double_click_on_a_recording_zooms_its_pane_and_leaves_playback_as_it_was() 
         Some(leaf.seat),
         "a double click is the pane's zoom"
     );
-    let still_playing = played(&folio, surface, |state| state.playing);
+    let still_playing = fenced(&mut folio, surface, 0.3);
     assert!(
         still_playing.playing,
         "and playing stays playing: {still_playing:?}"
@@ -2214,16 +2244,21 @@ fn a_double_click_on_a_recording_zooms_its_pane_and_leaves_playback_as_it_was() 
         KeyCode::Space,
         Some(" "),
     );
-    let paused = played(&folio, surface, |state| !state.playing);
+    played(&folio, surface, |state| !state.playing);
+    let paused = paused_at_the_start(&mut folio, surface);
     let stage = stage_of(&mut folio, surface);
     let pair = on_the_picture(stage, 140.0);
     click(&mut folio, pair);
+    // The pair's first click plays, and the playhead moves on a second before the second press.
+    played_on(&mut folio, surface, paused.position_secs, 1.0);
     click(&mut folio, pair);
     assert_eq!(
         folio.window.tabs[0].seats.zoom(),
         None,
         "and a second lets it go"
     );
+    // The fence, then the seek back's landing (see the floating test).
+    fenced(&mut folio, surface, 0.4);
     let after = played(&folio, surface, |state| {
         !state.playing && (state.position_secs - paused.position_secs).abs() < 0.05
     });
@@ -2231,6 +2266,18 @@ fn a_double_click_on_a_recording_zooms_its_pane_and_leaves_playback_as_it_was() 
         !after.playing && (after.position_secs - paused.position_secs).abs() < 0.05,
         "paused stays paused at {}: {after:?}",
         paused.position_secs
+    );
+
+    // Two quick presses the held clock puts a pair window apart are two clicks, so no zoom.
+    let stage = stage_of(&mut folio, surface);
+    let lapsed = on_the_picture(stage, 60.0);
+    click(&mut folio, lapsed);
+    the_pair_window_lapses(&mut folio);
+    click(&mut folio, lapsed);
+    assert_eq!(
+        folio.window.tabs[0].seats.zoom(),
+        None,
+        "two presses the held clock puts a pair window apart are two presses, however quick the hand: no zoom"
     );
     folio.window.video.shutdown_all();
     crate::test_support::engines_settling_to(before);
@@ -2390,8 +2437,18 @@ fn every_play_door_plays_an_ended_recording_from_the_start() {
 /// answers a click, a double click and the wheel as a pane's does**, through the same door; and a
 /// double click there, where a recording has no zoom, only leaves playback as it was.
 ///
+/// The pair is counted on the held pointer clock (T-FLOATING-VIDEO-DOUBLE-CLICK-TIMING, row 124),
+/// so it is one double click however long the machine takes between its presses: between them
+/// the playhead is moved on a second by a seek — never by playback, which a headless test on a
+/// Mac does not have — and the verdict is read behind a fence, so it is the pair's answer and
+/// not the state from before it.
+///
 /// MUTATION: drop the `VideoPicture` arm from `PreviewBodyRung::LADDER` — the float's body takes
-/// the press for nothing and the first assertion goes red.
+/// the press for nothing and the first assertion goes red. MUTATION (the second press too late):
+/// move the held clock past `MULTI_CLICK_INTERVAL` before the pair's second press — it is a first
+/// press, its release pauses a second past where the pair began, and the "where it was"
+/// assertion goes red. The seam bypassed at `press_video_picture` is the pane test's red
+/// (`a_double_click_on_a_recording_zooms_its_pane_and_leaves_playback_as_it_was`).
 #[test]
 fn a_floating_windows_picture_answers_as_a_panes_does() {
     let _ledger = crate::test_support::ledger_gate();
@@ -2415,16 +2472,25 @@ fn a_floating_windows_picture_answers_as_a_panes_does() {
     let float = PreviewSurface::Float(id);
     folio.draw();
     let stage = stage_of(&mut folio, float);
+    folio.hold_the_pointer_clock();
 
     click(&mut folio, on_the_picture(stage, 20.0));
     loaded(&folio, float);
     click(&mut folio, on_the_picture(stage, 60.0));
-    let paused = played(&folio, float, |state| !state.playing);
-    assert!(!paused.playing, "the next click pauses: {paused:?}");
+    let stopped = played(&folio, float, |state| !state.playing);
+    assert!(!stopped.playing, "the next click pauses: {stopped:?}");
+    let paused = paused_at_the_start(&mut folio, float);
 
     let pair = on_the_picture(stage, 100.0);
     click(&mut folio, pair);
+    // The pair's first click plays, and the playhead moves on a second before the second press.
+    played_on(&mut folio, float, paused.position_secs, 1.0);
     click(&mut folio, pair);
+    // The fence says the pair's pause and seek have reached the engine; the seek back lands
+    // only once the engine has finished the seek `played_on` made (an engine queues a seek
+    // behind one still under way), so the verdict waits for it — a state the recording, still
+    // playing a second on, did not stand in before the pair.
+    fenced(&mut folio, float, 0.3);
     let after = played(&folio, float, |state| {
         !state.playing && (state.position_secs - paused.position_secs).abs() < 0.05
     });
@@ -2466,17 +2532,105 @@ fn a_floating_windows_picture_answers_as_a_panes_does() {
     crate::test_support::engines_settling_to(before);
 }
 
-/// **The double click's pair window runs out** for the last press any tab of `folio` counted — its
-/// moment set back past [`crate::MULTI_CLICK_INTERVAL`], as the clock would have moved it — so the
-/// next press is a first one.
+/// **The double click's pair window runs out**: the held pointer clock
+/// ([`HeadlessFolio::hold_the_pointer_clock`]) moves on past [`crate::MULTI_CLICK_INTERVAL`], so
+/// the next press is a first one.
 fn the_pair_window_lapses(folio: &mut HeadlessFolio) {
-    for tab in &mut folio.window.tabs {
-        if let Some((_, _, when)) = tab.preview_image_clicks.last.as_mut() {
-            *when = when
-                .checked_sub(crate::MULTI_CLICK_INTERVAL + Duration::from_millis(1))
-                .expect("the clock has run longer than one pair window");
-        }
-    }
+    folio.pointer_clock_runs(crate::MULTI_CLICK_INTERVAL + Duration::from_millis(1));
+}
+
+/// **The paused recording on `surface` put back at its start** — the `Home` door — and
+/// awaited there, so a pair that follows has the whole clip ahead of it however far the machine
+/// had played to get here (row 124 review F1); and the second [`played_on`] moves its playhead
+/// on, asserted as the fixture's own, so a clip too short reads as that and not as a lost pair.
+fn paused_at_the_start(
+    folio: &mut HeadlessFolio,
+    surface: PreviewSurface,
+) -> bt_platform::video::engine::EngineState {
+    folio
+        .window
+        .video
+        .get_mut(surface)
+        .expect("the surface is playing the recording")
+        .seek_start(Instant::now());
+    let paused = played(folio, surface, |state| {
+        !state.playing && state.position_secs < 0.05
+    });
+    assert!(
+        !paused.playing && paused.position_secs < 0.05,
+        "the paused recording stands at its start: {paused:?}"
+    );
+    let needs = paused.position_secs + 1.0;
+    let length = paused
+        .duration_secs
+        .expect("the recording says how long it is");
+    assert!(
+        needs < length,
+        "the fixture's own precondition: the pair needs {needs} s of a {length} s clip"
+    );
+    paused
+}
+
+/// **The playing recording on `surface`, its playhead moved on `seconds` past `from`** — by a
+/// seek, never by playback. A seek lands without a clock on both arms; playback in a headless
+/// test advances on Windows only, because the Mac's engine needs a main run loop a test thread
+/// does not have (`Engine::state_reaching`), so its `playing` is the rate and its playhead stays
+/// where the last seek put it. A wait for the media clock to advance is a Windows-only wait.
+/// Awaited still playing past the mark, and asserted.
+fn played_on(
+    folio: &mut HeadlessFolio,
+    surface: PreviewSurface,
+    from: f64,
+    seconds: f64,
+) -> bt_platform::video::engine::EngineState {
+    folio
+        .window
+        .video
+        .get_mut(surface)
+        .expect("the surface is playing the recording")
+        .step(seconds, Instant::now());
+    let mark = from + seconds - 0.05;
+    let on = played(folio, surface, |state| {
+        state.playing && state.position_secs >= mark
+    });
+    assert!(
+        on.playing && on.position_secs >= mark,
+        "the recording plays on past {mark} s: {on:?}"
+    );
+    on
+}
+
+/// **A fence after a gesture's commands** (T-FLOATING-VIDEO-DOUBLE-CLICK-TIMING): the engine
+/// answers its commands in order, so once `volume` has landed, every play, pause or seek sent
+/// before it has landed too. The state the fence ends on is the gesture's answer, never a state
+/// from before the gesture.
+///
+/// The rule on `volume`: it must be new against **every volume command already sent**, not only
+/// against the published state. The precondition below refuses only a volume the engine already
+/// publishes; a command with the same value still in flight would land before the gesture's own
+/// commands and end the wait early — so a caller never fences twice with one value unless the
+/// first fence has been awaited and a different volume set in between.
+fn fenced(
+    folio: &mut HeadlessFolio,
+    surface: PreviewSurface,
+    volume: f64,
+) -> bt_platform::video::engine::EngineState {
+    let seat = folio
+        .window
+        .video
+        .get_mut(surface)
+        .expect("the surface is playing the recording");
+    assert!(
+        (seat.state().volume - volume).abs() > 1e-6,
+        "the fixture's own precondition: the fence's volume {volume} is not the one already set"
+    );
+    seat.set_volume(volume, Instant::now());
+    let fenced = played(folio, surface, |state| (state.volume - volume).abs() < 1e-6);
+    assert!(
+        (fenced.volume - volume).abs() < 1e-6,
+        "the fence never landed: volume {volume} was asked and the engine stands at {fenced:?}"
+    );
+    fenced
 }
 
 /// The window's own loop, run headless for `span`: each turn answered, and the next one taken
@@ -2568,6 +2722,7 @@ fn a_press_pairing_with_a_drag_puts_back_no_older_click() {
     let before = bt_platform::video::engine::engines_outstanding();
     let (mut folio, surface) = a_recording_beside_a_shell("video-picture-drag-pair");
     let stage = stage_of(&mut folio, surface);
+    folio.hold_the_pointer_clock();
     click(&mut folio, on_the_picture(stage, 20.0));
     loaded(&folio, surface);
     the_pair_window_lapses(&mut folio);
@@ -2584,15 +2739,7 @@ fn a_press_pairing_with_a_drag_puts_back_no_older_click() {
     folio.release(away);
     folio.press(origin);
     folio.release(origin);
-    // A fence: the engine answers its commands in order, so once this volume has landed any play
-    // or seek the pair had sent has landed before it.
-    folio
-        .window
-        .video
-        .get_mut(surface)
-        .expect("the seat stands")
-        .set_volume(0.3, Instant::now());
-    let after = played(&folio, surface, |state| (state.volume - 0.3).abs() < 1e-6);
+    let after = fenced(&mut folio, surface, 0.3);
     assert!(
         !after.playing && (after.position_secs - paused.position_secs).abs() < 0.05,
         "the pairing press left playback as it was: {after:?} against {paused:?}"
@@ -2722,6 +2869,7 @@ fn a_pair_after_the_seat_is_replaced_puts_nothing_back_on_the_new_one() {
     let before = bt_platform::video::engine::engines_outstanding();
     let (mut folio, surface) = a_recording_beside_a_shell("video-picture-replaced-pair");
     let stage = stage_of(&mut folio, surface);
+    folio.hold_the_pointer_clock();
     let at = on_the_picture(stage, 20.0);
     click(&mut folio, at);
     loaded(&folio, surface);
@@ -2767,20 +2915,13 @@ fn a_pair_after_the_seat_is_replaced_puts_nothing_back_on_the_new_one() {
         replaced, first,
         "the fixture's own precondition: another seat"
     );
+    // The new recording is playing before the press, so a press that did not pair would be a
+    // click that pauses it.
+    played(&folio, surface, |state| state.ready && state.playing);
     // The press that pairs with the click.
     folio.press(at);
     folio.release(at);
-    // A fence: the engine answers its commands in order, so once this volume has landed any
-    // pause or seek the pair had sent has landed before it.
-    folio
-        .window
-        .video
-        .get_mut(surface)
-        .expect("the seat stands")
-        .set_volume(0.3, Instant::now());
-    let after = played(&folio, surface, |state| {
-        state.ready && (state.volume - 0.3).abs() < 1e-6
-    });
+    let after = fenced(&mut folio, surface, 0.3);
     assert!(
         after.playing,
         "the pair put the old recording's pause at {:.2} s onto the new one: {after:?}",
@@ -3027,6 +3168,9 @@ fn a_picture_that_fits_keeps_the_arrows_for_the_folder() {
 #[test]
 fn the_digit_stops_land_where_the_double_click_lands() {
     let (mut folio, surface) = a_large_picture_beside_a_shell("picture-stops", "两站 stops", true);
+    // The double click below is counted on the held pointer clock (row 124): one double click
+    // however long the machine takes between its presses.
+    folio.hold_the_pointer_clock();
     let body = picture_body(&mut folio, surface);
     let centre = PhysicalPosition::new(
         f64::from((body[0] + body[2]) / 2.0),
@@ -3046,6 +3190,18 @@ fn the_digit_stops_land_where_the_double_click_lands() {
             .set_preview_image_zoom(surface, zoom)
             .expect("the zoom lands");
     };
+
+    // Two quick presses the held clock puts a pair window apart are two presses: no zoom.
+    // MUTATION (the seam bypassed): count `press_preview_image`'s press at its own
+    // `Instant::now()` — the quick pair zooms and this assertion goes red.
+    click(&mut folio, centre);
+    the_pair_window_lapses(&mut folio);
+    click(&mut folio, centre);
+    assert!(
+        zoom_of(&mut folio, surface).is_fit(),
+        "two presses the held clock puts a pair window apart are two presses, however quick the hand: the picture stays at Fit"
+    );
+    the_pair_window_lapses(&mut folio);
 
     double_click(&mut folio);
     let clicked_from_fit = zoom_of(&mut folio, surface);
@@ -3087,6 +3243,8 @@ fn the_digit_stops_land_where_the_double_click_lands() {
 #[test]
 fn a_floating_windows_picture_pans_and_stops_on_the_same_keys() {
     let (mut folio, surface) = a_large_picture_beside_a_shell("picture-float", "悬浮 float", true);
+    // The window's double click below is counted on the held pointer clock (row 124).
+    folio.hold_the_pointer_clock();
     let PreviewSurface::Seat(leaf) = surface else {
         unreachable!("a docked pane")
     };

@@ -942,7 +942,7 @@ fn p_waits_for_o_and_releases_the_claim() {
         "nothing is written while O holds the lock"
     );
     drop(lock);
-    let (ended, _) = applier.join().unwrap();
+    let (ended, _) = ended_while_held((), applier);
     assert_eq!(ended, Ended::Committed);
     assert!(*swapped_at.lock().unwrap());
     assert_eq!(

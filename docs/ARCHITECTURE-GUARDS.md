@@ -1092,6 +1092,25 @@ a held writer or a held ring (row 106), and in the applier's (row 112, below); t
 gate-held tests (row 111) are not yet read this way. What such a verdict does
 not catch is a bounded wait, or a give-up that ignores its budget, shorter than the suite's patience.
 
+2026-10-31 (T-FLOATING-VIDEO-DOUBLE-CLICK-TIMING, plan row 124): a double click is decided by
+the window's multi-click counters (`ImageClicks`, `PreviewTextClicks`) on the moment a press is
+counted at, and that moment is read on the window's `PointerClock`: the product's is `Wall`, whose
+`moment(wall)` answers the instant the press site has just read with its own `Instant::now()`,
+unchanged, so the product counts every press at exactly the moment it did before. A test that
+needs two presses to be one double click, or not one, holds it
+(`HeadlessFolio::hold_the_pointer_clock`) and moves it (`pointer_clock_runs`); how long a loaded
+machine takes between the presses is never the verdict. Between a pair's presses such a test
+moves the playhead by a seek, never by playback: the Mac's engine has no media clock in a headless
+test process (`Engine::state_reaching`), so a wait for playback to advance is a Windows-only wait
+(row 124's Mac gate, 2026-10-31). Seven picture and recording tests and one
+rendered-page test were formed on the wall clock this way and are converted; the recording tests'
+verdicts are read behind a volume fence where the state before the gesture could satisfy the
+wait (the glance card's is not: its waits cannot be met by that state, and are unfenced by design). **The
+scan never listed them, and could not**: the clock that decided them is read in product code a
+test calls, which is the scan's stated blind spot (its header and `check-timing-bound.ps1` say so),
+not a fault in its grammar. Whether product real-time windows that tests race can be found by a
+scan at all is plan row 125's (T-TIMING-CENSUS-PRODUCT-WINDOWS); until it lands, review owns them.
+
 2026-10-31 (T-UPDATE-APPLY-FLIP-HOLD-FLAKE): a road's wait for another thread or process that has no
 clock of the test's own is still timed by the product, and a loaded run turns that race the other way. The update
 applier's wait for a live trial's final decision after the commit (`note_unkept_after_trial_decision`) is
@@ -1107,11 +1126,13 @@ or a member held open, the election in flight, O alive — are awaited while the
 within the suite's patience (`ended_while_held` in `update_apply_windows_tests.rs` and
 `update_apply_macos_tests.rs`), and a road that waits past its deadline is red, not a hang; the hold
 is then kept for the life of the test process, so the road never runs on into the failed test's
-removed fixture. A hold let go "once the road waits" is let go in the pause of the road's first
-refused ask: the window election's asks again and both platforms' waits for the claim pause on the
-road's `wait_clock` (`update_apply::WaitClock`; `WallClock` in the product, `WatchedWallClock` under
-test), and the wait for the transaction lock is reached as state (the election over: the mark
-names the applier and the election lock is free).
+removed fixture (O alive, which the fixture ends, is the one hold a test cannot keep: there the
+election lock is taken and kept before the test is red, `ended_while_held_keeping`). A hold let
+go "once the road waits" is let go in the pause of the road's first refused ask: the window
+election's asks again and both platforms' waits for the claim pause on the road's `wait_clock`
+(`update_apply::WaitClock`; `WallClock` in the product, `WatchedWallClock` under test), and the
+wait for the transaction lock is reached as state (the election over: the mark names the
+applier and the election lock is free).
 
 ## Test order and shared fixtures
 
