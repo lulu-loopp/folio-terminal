@@ -55241,9 +55241,10 @@ mod floated_page_tests {
     ///
     /// MUTATIONS: end the road with `std::process::exit(PANIC_EXIT_CODE)` in place of the
     /// `leave_process` call (it still type-checks as `-> !`, and walks out through the loader's
-    /// teardown) and the first assertion goes red; drop the hide and the second does; put the
-    /// hide *after* the exit and the third does — a window hidden after `TerminateProcess` is a
-    /// window never hidden. (Dropping the call outright no longer compiles: the road is `-> !`.)
+    /// teardown) and the reading of the leave goes red; drop the hide and the reading of the
+    /// hide does; put the hide *after* the exit and the order's assertion does — a window
+    /// hidden after `TerminateProcess` is a window never hidden. (Dropping the call outright no
+    /// longer compiles: the road is `-> !`.)
     #[test]
     fn a_panic_leaves_by_the_same_road_as_a_shut() {
         let road = free_fn_body("leave_by_the_panic_road");
