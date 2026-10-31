@@ -177,8 +177,10 @@ impl<B: Backend> Runtime<'_, B> {
             self.mouse_trace(|| {
                 format!(
                     "pan_step began_at={} travel={},{} inertia={}",
-                    step.began_at
-                        .map_or_else(|| "none".to_owned(), |(x, y)| format!("{x},{y}")),
+                    match step.began_at {
+                        Some((x, y)) => format!("{x},{y}"),
+                        None => "none".to_owned(),
+                    },
                     step.travel.0,
                     step.travel.1,
                     step.inertia,
