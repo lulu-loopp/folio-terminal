@@ -20,6 +20,7 @@
 # and an added row of a by-hand class only under a new "# widened <date> by <ticket> (+n rows)"
 # line, in a change to the scan. A reason is "YYYY-MM-DD: why".
 file	global	binary	class	reason
+crates/bt-app/src/diagnostics.rs	crate::diagnostics::RESIDENT_CHANNEL	bt-app:bin:folio	single writer	2026-10-30: set only in the child arm of its test (T-PANIC-ANNOUNCED-ONCE-FLAG-REVIEW), a process of its own (a_process_of_its_own) for each of its two children, so the stop's alert is owed to its box as in a resident run; the parent never writes it
 crates/bt-app/src/explorer_menu.rs	crate::explorer_menu::BUSY	bt-app:bin:folio	lock:DEPLOYMENT	2026-10-24: the deployment latch; the one test that takes it holds the explorer-menu tests' DEPLOYMENT turn first
 crates/bt-app/src/explorer_menu.rs	crate::explorer_menu::KNOWN	bt-app:bin:folio	lock:DEPLOYMENT	2026-10-25: the row's package state; the two press tests whose jobs write it (T-EXPLORER-MENU-PROBE-OFF-THE-WINDOW-THREAD) hold the explorer-menu tests' DEPLOYMENT turn and put it back
 crates/bt-app/src/explorer_menu.rs	crate::explorer_menu::REGISTERED_HERE	bt-app:bin:folio	lock:DEPLOYMENT	2026-10-25: whether this process registered the package; the press test whose job registers (T-EXPLORER-MENU-PROBE-OFF-THE-WINDOW-THREAD) holds the explorer-menu tests' DEPLOYMENT turn and puts it back

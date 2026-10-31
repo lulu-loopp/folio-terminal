@@ -1956,7 +1956,7 @@ pub fn leave_process(code: i32) -> ! {
 #[expect(
     clippy::print_stderr,
     reason = "the last-resort fault report, written where it is said, for its two callers: \
-              bt-app's announce_panic (the panic hook, after the panic road's fence, where a \
+              bt-app's announce_panic through its crash box (the panic hook, after the panic road's fence, where a \
               queued line would leave with the process) and say_at_the_front_door, before the \
               resident run has a queue; the stop's lost configuration change and the \
               frame-shape stop's alert ask a_box_would_be_seen first and say the unseen case \

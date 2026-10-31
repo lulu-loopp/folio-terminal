@@ -517,6 +517,87 @@ fn each_receiver_shape_is_resolved_or_listed_unknown() {
     );
 }
 
+/// RED (T-CALL-GRAPH-TYPES-QUESTION-MARK-BINDINGS, plan row 101, ruling R3) — **the census reads
+/// `?` and `Ok`/`Err` by what a type resolves to, never by the bare name `Result`**: the standard
+/// `Result`'s `Ok` and a `?` on `std::io::Result` (an alias on the table) give the window,
+/// so their title writes are rows; a workspace enum called `Result` is that enum — its `Ok`
+/// holds a number (no write: `title` on a number is an unknown site), its `Err` the window (a
+/// write) — and a `?` on it is no standard `?`, so the field it spells is an unknown site, never
+/// attributed.
+///
+/// RED before: the bare name `Result` made the workspace enum's `Ok` the window (a write by
+/// `named_ok`) and its `?` the window too (a write by `named_try`).
+/// MUTATION: in `Walk::variant_fields`, match the standard enums by `named.name` again —
+/// `named_ok` writes the title.
+#[test]
+fn the_standard_result_is_read_by_what_the_type_resolves_to() {
+    let census = census_of("named_result");
+    let mut writers = functions(&rows(&census, "WindowRuntime.title", Column::Write));
+    writers.sort();
+    // `retitle` is the shared fixture's own writer.
+    assert_eq!(
+        writers,
+        ["named_err", "retitle", "spelled_try", "standard_ok"]
+    );
+    let unknown: Vec<(&str, &str)> = census
+        .unknowns()
+        .iter()
+        .map(|row| (row.site.as_str(), row.function.as_str()))
+        .collect();
+    assert_eq!(
+        unknown,
+        // `untyped` is the shared fixture's own; `named_ok` spells `title` on a number.
+        [
+            ("?.title", "named_ok"),
+            ("?.title", "named_try"),
+            ("?.title", "untyped")
+        ],
+        "{:#?}",
+        census.unknowns()
+    );
+}
+
+/// RED (plan row 101, ruling R3; the review's F4) — **a foreign `Result` is a `Result`
+/// to the census only on the alias table**: in a package that declares no `Result`, a `?` on
+/// `anyhow::Result` gives the window (a write), and a `?` on `syn::Result`, off the table, gives
+/// nothing the rules type (an unknown site, never attributed) — nor does a `?` after a standard
+/// method's name on it (`result.map_err(|e| e)?`: `syn::Result`'s `map_err` is not on the lists).
+///
+/// RED on `d6b278013` (the review's re-check, F5): the method dispatch took `syn::Result` for the
+/// standard `Result` by its kind, so `map_err` answered the lists' `Result<T, _>` and
+/// `off_table_map_err` wrote the title.
+/// RED before R3: the bare name `Result` made `syn::Result`'s `?` the window (a write by
+/// `off_table_try`); and RED on R3's first commit (`51dedbaeb`), which still took a path with a
+/// module the census places in no crate it knows (`syn` is no dependency here) for the standard
+/// `Result` by its kind — the kind `Resolver::kind` gives it by its last segment.
+/// MUTATIONS: in `Resolver::result_alias`, accept any spelled path whose last segment is a row's —
+/// `off_table_try` writes the title; in `Resolver::standard_enum`, read the kind alone — it does;
+/// drop the method dispatch's spelling arm — `off_table_map_err` does.
+#[test]
+fn a_foreign_result_off_the_table_is_not_a_result_to_the_census() {
+    let census = census_of("foreign_result");
+    let mut writers = functions(&rows(&census, "WindowRuntime.title", Column::Write));
+    writers.sort();
+    // `retitle` is the shared fixture's own writer.
+    assert_eq!(writers, ["on_table_try", "retitle"]);
+    let unknown: Vec<(&str, &str)> = census
+        .unknowns()
+        .iter()
+        .map(|row| (row.site.as_str(), row.function.as_str()))
+        .collect();
+    assert_eq!(
+        unknown,
+        // `untyped` is the shared fixture's own.
+        [
+            ("?.title", "off_table_map_err"),
+            ("?.title", "off_table_try"),
+            ("?.title", "untyped")
+        ],
+        "{:#?}",
+        census.unknowns()
+    );
+}
+
 /// RED (census-1) — **`Runtime.{app, window}` are the runtime's own fields,
 /// looked up before its `Deref` to `TabState`.**
 ///

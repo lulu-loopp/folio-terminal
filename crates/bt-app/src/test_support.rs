@@ -3512,6 +3512,24 @@ pub(crate) fn alone_in_a_process(selector: &str, stdin: &[u8]) -> bool {
 /// passed, what the child wrote to its standard error — for a claim about what a process says
 /// there.
 pub(crate) fn alone_in_a_process_with_its_stderr(selector: &str, stdin: &[u8]) -> Option<String> {
+    let output = a_process_of_its_own(selector, stdin)?;
+    let said = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && said.contains("test result: ok. 1 passed"),
+        "`{selector}` did not pass as the one test of its own process ({}):\n{said}\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Some(String::from_utf8_lossy(&output.stderr).into_owned())
+}
+
+/// **[`alone_in_a_process`]'s run, however the child ended**: `None` in the child, and in the
+/// parent the child's status and everything it wrote — for a claim about how a process of this
+/// binary leaves (T-PANIC-ANNOUNCED-ONCE-FLAG-REVIEW: one that a panic ends, which no summary
+/// line of the harness's says). The parent stops its own child after a minute. The child's
+/// output is read while it runs, so a child that writes more than a pipe holds is not stopped
+/// for it.
+pub(crate) fn a_process_of_its_own(selector: &str, stdin: &[u8]) -> Option<std::process::Output> {
     const CHILD: &str = "BT_STANDALONE_ENTRY_TEST_CHILD";
     if std::env::var_os(CHILD).is_some_and(|named| named == selector) {
         return None;
@@ -3531,24 +3549,36 @@ pub(crate) fn alone_in_a_process_with_its_stderr(selector: &str, stdin: &[u8]) -
             .write_all(stdin)
             .expect("the child's standard input takes its bytes");
     }
+    fn read_all(
+        mut stream: impl std::io::Read + Send + 'static,
+    ) -> std::thread::JoinHandle<Vec<u8>> {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            stream
+                .read_to_end(&mut bytes)
+                .expect("the child's stream reads to its end");
+            bytes
+        })
+    }
+    let stdout = read_all(child.stdout.take().expect("the child's standard output"));
+    let stderr = read_all(child.stderr.take().expect("the child's standard error"));
     let started = std::time::Instant::now();
-    while child.try_wait().unwrap().is_none() {
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
         if started.elapsed() > std::time::Duration::from_secs(60) {
             child.kill().unwrap();
             let _ = child.wait();
             panic!("`{selector}` ran for a minute in its own process and was stopped");
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-    let output = child.wait_with_output().unwrap();
-    let said = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        output.status.success() && said.contains("test result: ok. 1 passed"),
-        "`{selector}` did not pass as the one test of its own process ({}):\n{said}\n{}",
-        output.status,
-        String::from_utf8_lossy(&output.stderr)
-    );
-    Some(String::from_utf8_lossy(&output.stderr).into_owned())
+    };
+    Some(std::process::Output {
+        status,
+        stdout: stdout.join().expect("the child's standard output was read"),
+        stderr: stderr.join().expect("the child's standard error was read"),
+    })
 }
 
 // ── the storage pass's window, over the four real stores (T-STORE-NOTICE)
