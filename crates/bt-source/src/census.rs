@@ -37,6 +37,14 @@
 //! known (a generic return is bound only from an argument of that parameter's
 //! type). A bare type name is looked for in the package it is written in
 //! first, then in the workspace, and the declarations found must agree.
+//! **A one-segment call of a name bound in an enclosing scope** — a
+//! parameter of any type (`impl Fn*`, `dyn Fn*`, a generic `F: Fn*`), a `let`,
+//! a closure's or a pattern's name, innermost first — is a binding called:
+//! untyped, with no closure parameters, never the package's function of that
+//! name (plan row 115). Every identifier in a pattern a macro writes
+//! (`Pat::Macro`, `Pat::Verbatim`) is bound untyped, so neither an outer
+//! binding nor a function of that name shows through; this refuses too much
+//! (path heads and keywords in its tokens too), never guesses.
 //!
 //! **The module column is the declaring item's module path** — the
 //! [`crate::ItemIdentity`] — and nothing about files: a writer moved into a
