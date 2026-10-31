@@ -222,6 +222,17 @@ mod tests {
     use std::io::{Read, Write};
     use std::sync::mpsc::channel;
 
+    /// **`server` stopped, within the suites' patience** — a stop that waits
+    /// for something nobody will do fails the test by name rather than
+    /// hanging it.
+    fn stopped<E: Send + 'static>(server: Server<E>, what: &str) -> Vec<E> {
+        let (said, heard) = channel();
+        std::thread::spawn(move || {
+            let _ = said.send(server.stop());
+        });
+        received(&heard, what)
+    }
+
     /// The bytes of one connection, read until the client closes its side.
     fn everything(connection: &mut TcpStream) -> Vec<u8> {
         let mut bytes = Vec::new();
@@ -263,7 +274,7 @@ mod tests {
             assert_eq!(echoed, word);
         }
         assert_eq!(
-            server.stop(),
+            stopped(server, "the stop of a server that answered three"),
             vec![b"one".to_vec(), b"two".to_vec(), b"three".to_vec()],
             "one record per connection, and the stop's own wake-up is not one"
         );
@@ -292,12 +303,8 @@ mod tests {
         .expect("a loopback server");
         let _held = TcpStream::connect(server.address()).expect("a connection");
         received(&read, "the server reading the held connection");
-        let (stopped, stops) = channel();
-        std::thread::spawn(move || {
-            let _ = stopped.send(server.stop());
-        });
         assert_eq!(
-            received(&stops, "the stop of a server reading a held connection"),
+            stopped(server, "the stop of a server reading a held connection"),
             vec![(0, true)]
         );
 
@@ -313,12 +320,8 @@ mod tests {
         .expect("a loopback server");
         let _client = TcpStream::connect(server.address()).expect("a connection");
         received(&paused, "the server pausing");
-        let (stopped, stops) = channel();
-        std::thread::spawn(move || {
-            let _ = stopped.send(server.stop());
-        });
         assert_eq!(
-            received(&stops, "the stop of a paused server"),
+            stopped(server, "the stop of a paused server"),
             vec![true],
             "the pause ended on the stop"
         );
@@ -333,10 +336,6 @@ mod tests {
     fn a_server_nobody_asked_stops_with_an_empty_record() {
         let server = Server::start("bt-loopback-test", ThreadPriority::Normal, |_, _| ())
             .expect("a loopback server");
-        let (stopped, stops) = channel();
-        std::thread::spawn(move || {
-            let _ = stopped.send(server.stop());
-        });
-        assert!(received(&stops, "the stop of an idle server").is_empty());
+        assert!(stopped(server, "the stop of an idle server").is_empty());
     }
 }

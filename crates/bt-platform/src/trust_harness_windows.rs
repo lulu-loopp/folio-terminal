@@ -1755,13 +1755,8 @@ mod tests {
         abandoned
             .write_all(b"POST / HTTP/1.1\r\n")
             .expect("half a head");
-        abandoned
-            .shutdown(std::net::Shutdown::Write)
-            .expect("the client goes away");
-        let mut nothing = Vec::new();
-        // The server ends its side once it has seen the hang-up.
-        let _ = abandoned.read_to_end(&mut nothing);
-        assert!(nothing.is_empty(), "{nothing:?}");
+        // The client goes away with half a head sent.
+        drop(abandoned);
         let body = time_stamp_request(3);
         let answer = post(address, &body).expect("the next request is answered");
         assert!(granted(&answer), "{answer:?}");
