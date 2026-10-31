@@ -944,9 +944,8 @@ mod tests {
         let directory = scratch("whole");
         let bytes = body(300_000);
         let served = bytes.clone();
-        let port = serve(1, move |_| {
-            vec![Step::Send(ok(&served, Some(served.len())))]
-        });
+        let server = serve(move |_| vec![Step::Send(ok(&served, Some(served.len())))]);
+        let port = server.port();
         let monitor = quiet();
         let done = fetch(
             port,
@@ -973,9 +972,8 @@ mod tests {
         let directory = scratch("at-ceiling");
         let bytes = body(70_000);
         let served = bytes.clone();
-        let port = serve(1, move |_| {
-            vec![Step::Send(ok(&served, Some(served.len())))]
-        });
+        let server = serve(move |_| vec![Step::Send(ok(&served, Some(served.len())))]);
+        let port = server.port();
         let done = fetch(
             port,
             &directory,
@@ -1000,7 +998,8 @@ mod tests {
     fn unknown_length_stream_is_bounded() {
         let directory = scratch("over-unknown");
         let served = body(70_001);
-        let port = serve(1, move |_| vec![Step::Send(ok(&served, None))]);
+        let server = serve(move |_| vec![Step::Send(ok(&served, None))]);
+        let port = server.port();
         let monitor = quiet();
         let error = fetch(
             port,
@@ -1028,12 +1027,13 @@ mod tests {
     #[test]
     fn an_announced_length_over_the_ceiling_is_refused_before_the_body() {
         let directory = scratch("announced-over");
-        let port = serve(1, |_| {
+        let server = serve(|_| {
             vec![
                 Step::Send(begun(&["Content-Length: 1073741824".to_owned()])),
                 Step::Pause(Duration::from_secs(10)),
             ]
         });
+        let port = server.port();
         let started = Instant::now();
         let error = fetch(
             port,
@@ -1067,11 +1067,12 @@ mod tests {
     #[test]
     fn a_truncated_body_never_takes_the_name() {
         let directory = scratch("truncated");
-        let port = serve(1, |_| {
+        let server = serve(|_| {
             let mut bytes = head(200, "OK", &["Content-Length: 100000".to_owned()]);
             bytes.extend_from_slice(&body(40_000));
             vec![Step::Send(bytes)]
         });
+        let port = server.port();
         let error = fetch(
             port,
             &directory,
@@ -1092,7 +1093,7 @@ mod tests {
     #[test]
     fn a_status_that_is_not_200_makes_no_file() {
         let directory = scratch("status");
-        let port = serve(1, |_| {
+        let server = serve(|_| {
             let page = b"<h1>Not Found</h1>";
             let mut bytes = head(
                 404,
@@ -1102,6 +1103,7 @@ mod tests {
             bytes.extend_from_slice(page);
             vec![Step::Send(bytes)]
         });
+        let port = server.port();
         let error = fetch(
             port,
             &directory,
@@ -1138,7 +1140,7 @@ mod tests {
         let directory = scratch("redirect");
         let bytes = body(5_000);
         let served = bytes.clone();
-        let port = serve(2, move |path| {
+        let server = serve(move |path| {
             if path == "/folio-0.4.6-x64.zip" {
                 vec![Step::Send(head(
                     302,
@@ -1152,6 +1154,7 @@ mod tests {
                 vec![Step::Send(ok(&served, Some(served.len())))]
             }
         });
+        let port = server.port();
         let done = fetch(
             port,
             &directory,
@@ -1161,6 +1164,15 @@ mod tests {
         )
         .expect("followed");
         assert_eq!(std::fs::read(&done.path).expect("the file"), bytes);
+        let paths: Vec<Option<String>> = server.stop().into_iter().map(|e| e.path).collect();
+        assert_eq!(
+            paths,
+            [
+                Some("/folio-0.4.6-x64.zip".to_owned()),
+                Some("/objects/asset".to_owned())
+            ],
+            "the asked path, then the one it was sent to"
+        );
     }
 
     /// RED (U-7; 047-EXPERIENCE) — **a trickling body and a redirect loop each
@@ -1176,12 +1188,13 @@ mod tests {
     #[test]
     fn redirect_loop_and_trickle_body_hit_deadlines() {
         let directory = scratch("trickle");
-        let port = serve(1, |_| {
+        let server = serve(|_| {
             vec![
                 Step::Send(begun(&[])),
                 Step::Trickle(Duration::from_millis(50), Duration::from_secs(8)),
             ]
         });
+        let port = server.port();
         let started = Instant::now();
         let stretch = Duration::from_millis(1_500);
         let error = fetch(
@@ -1199,7 +1212,7 @@ mod tests {
         assert!(entries(&directory).is_empty(), "{:?}", entries(&directory));
 
         let directory = scratch("loop");
-        let port = serve(40, |_| {
+        let server = serve(|_| {
             vec![Step::Send(head(
                 302,
                 "Found",
@@ -1209,6 +1222,7 @@ mod tests {
                 ],
             ))]
         });
+        let port = server.port();
         let started = Instant::now();
         let error = fetch(
             port,
@@ -1220,6 +1234,47 @@ mod tests {
         .expect_err("a loop");
         assert!(started.elapsed() < BUDGET, "{:?}", started.elapsed());
         assert!(entries(&directory).is_empty(), "{error}");
+        // The stack's own hop limit ends the loop, not a count of the server's.
+        let paths: Vec<Option<String>> = server.stop().into_iter().map(|e| e.path).collect();
+        assert_eq!(
+            paths.first(),
+            Some(&Some("/folio-0.4.6-x64.zip".to_owned()))
+        );
+        assert!(
+            paths.len() > 1
+                && paths[1..]
+                    .iter()
+                    .all(|path| path.as_deref() == Some("/again")),
+            "{paths:?}"
+        );
+    }
+
+    /// RED (row 127) — **one server answers one download after another**: the
+    /// loopback server serves every connection until the test stops it, and
+    /// records each.
+    ///
+    /// MUTATION: end the server's loop after its first connection (the "up to
+    /// N" server this replaces, at N = 1) and the second download fails at
+    /// the connection (`ERROR_WINHTTP_CANNOT_CONNECT`).
+    #[test]
+    fn one_server_answers_one_download_after_another() {
+        let bytes = body(10_000);
+        let served = bytes.clone();
+        let server = serve(move |_| vec![Step::Send(ok(&served, Some(served.len())))]);
+        for name in ["first", "second"] {
+            let directory = scratch(name);
+            let done = fetch(
+                server.port(),
+                &directory,
+                1 << 20,
+                (IDLE, DOWNLOAD_FLOOR_BYTES),
+                &quiet(),
+            )
+            .unwrap_or_else(|error| panic!("the {name} download: {error}"));
+            assert_eq!(std::fs::read(&done.path).expect("the file"), bytes);
+        }
+        let paths: Vec<Option<String>> = server.stop().into_iter().map(|e| e.path).collect();
+        assert_eq!(paths, vec![Some("/folio-0.4.6-x64.zip".to_owned()); 2]);
     }
 
     /// RED (U-7) — **a cancel interrupts a wait the server is not ending: the
@@ -1239,10 +1294,11 @@ mod tests {
         // The cancel is sent once the server holds the whole request, so the
         // wait it interrupts is the wait for the response's headers.
         let (asked, heard) = std::sync::mpsc::channel();
-        let port = serve(1, move |_| {
+        let server = serve(move |_| {
             let _ = asked.send(());
             vec![Step::Pause(Duration::from_secs(40))]
         });
+        let port = server.port();
         let monitor = quiet();
         let canceller = Arc::clone(&monitor);
         std::thread::spawn(move || {
@@ -1328,10 +1384,11 @@ mod tests {
     #[test]
     fn the_close_door_waits_for_the_closing_callback() {
         let (asked, heard) = std::sync::mpsc::channel();
-        let port = serve(1, move |_| {
+        let server = serve(move |_| {
             let _ = asked.send(());
             vec![Step::Pause(Duration::from_secs(40))]
         });
+        let port = server.port();
         let (session, connection, request) = a_request_to(port);
         // SAFETY: a live, armed request; its context is the one `arm` gave it.
         unsafe { super::WinHttpSendRequest(request.handle, None, None, 0, 0, request.context) }

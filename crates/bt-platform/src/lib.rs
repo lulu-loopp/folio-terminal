@@ -9294,6 +9294,14 @@ pub mod trust;
 #[doc(hidden)]
 pub mod trust_harness;
 
+/// **A loopback server for tests that answers every connection until the test
+/// stops it**, recording each (0.4.9 plan row 127): the trust harness's
+/// time-stamp authority and the download tests' scripted server stand on it.
+/// Tests only, as [`trust_harness`] is.
+#[cfg(any(test, feature = "trust-harness"))]
+#[doc(hidden)]
+pub mod loopback_server;
+
 /// **The effects of an update transaction** — durable writes and moves, the
 /// registry flush and the two locks on the installation home (ticket U-11;
 /// `docs/plans/design/self-update-2026-09-16.md` revision (b), §(b).2, F-6,

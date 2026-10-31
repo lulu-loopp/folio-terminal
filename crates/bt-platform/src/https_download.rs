@@ -745,9 +745,11 @@ pub(crate) mod loopback {
     #[cfg(any(windows, target_os = "macos"))]
     use std::{
         io::{Read, Write},
-        net::TcpListener,
         time::{Duration, Instant},
     };
+
+    #[cfg(any(windows, target_os = "macos"))]
+    use crate::loopback_server::Server;
 
     /// One thing the server does on a connection, in order.
     #[cfg(any(windows, target_os = "macos"))]
@@ -755,46 +757,69 @@ pub(crate) mod loopback {
         /// Write these bytes.
         Send(Vec<u8>),
         /// Write one byte every `.0`, for at most `.1` or until the client goes
-        /// away — bounded, so a download whose stall rule does not hold ends in a
-        /// failed assertion rather than a hung test.
+        /// away or the server is stopped — bounded, so a download whose stall
+        /// rule does not hold ends in a failed assertion rather than a hung test.
         Trickle(Duration, Duration),
-        /// Say nothing for this long.
+        /// Say nothing for this long, or until the server is stopped.
         Pause(Duration),
     }
 
-    /// How long a server waits for connections it was told to expect before
-    /// its thread ends, so a test that fails early leaves no listener behind
-    /// for long.
+    /// **A scripted server, listening** ([`serve`]): its port, and on
+    /// [`Served::stop`] (or its drop) the record of every connection it served.
     #[cfg(any(windows, target_os = "macos"))]
-    const LISTEN_FOR: Duration = Duration::from_secs(60);
+    pub(crate) struct Served {
+        server: Option<Server<Exchange>>,
+        port: u16,
+    }
 
-    /// Serve up to `connections` connections, each answered by `script` given
-    /// the request line's path. Returns the port.
+    /// One connection the server was handed: the request line's path, when a
+    /// whole head arrived before the client went away.
     #[cfg(any(windows, target_os = "macos"))]
-    pub(crate) fn serve(
-        connections: usize,
-        script: impl Fn(&str) -> Vec<Step> + Send + 'static,
-    ) -> u16 {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("a loopback port");
-        let port = listener.local_addr().expect("the chosen port").port();
-        listener
-            .set_nonblocking(true)
-            .expect("a listener that can be polled");
-        std::thread::spawn(move || {
-            let until = Instant::now() + LISTEN_FOR;
-            let mut served = 0;
-            while served < connections && Instant::now() < until {
-                let Ok((mut connection, _)) = listener.accept() else {
-                    std::thread::sleep(Duration::from_millis(5));
-                    continue;
-                };
-                served += 1;
-                let _ = connection.set_nonblocking(false);
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub(crate) struct Exchange {
+        pub(crate) path: Option<String>,
+    }
+
+    #[cfg(any(windows, target_os = "macos"))]
+    impl Served {
+        /// The port the server listens on.
+        pub(crate) fn port(&self) -> u16 {
+            self.port
+        }
+
+        /// **Stop the server and answer every connection it served**, in order.
+        pub(crate) fn stop(mut self) -> Vec<Exchange> {
+            self.server.take().map(Server::stop).unwrap_or_default()
+        }
+    }
+
+    #[cfg(any(windows, target_os = "macos"))]
+    impl Drop for Served {
+        /// A test that never asked for the record still ends its server — and
+        /// one that is unwinding does not panic a second time over a worker's
+        /// panic.
+        fn drop(&mut self) {
+            if let Some(server) = self.server.take() {
+                let _ = server.finish();
+            }
+        }
+    }
+
+    /// **Serve every connection until the stop**, each answered by `script`
+    /// given the request line's path (0.4.9 plan row 127: it used to serve "up
+    /// to N" connections for at most 60 s, polling `accept` every 5 ms, and a
+    /// connection past the count met a closed port).
+    #[cfg(any(windows, target_os = "macos"))]
+    pub(crate) fn serve(script: impl Fn(&str) -> Vec<Step> + Send + 'static) -> Served {
+        let server = Server::start(
+            "bt-download-test-server",
+            crate::ThreadPriority::Normal,
+            move |connection, stop| {
                 let mut head = Vec::new();
                 let mut byte = [0u8; 1];
                 while !head.ends_with(b"\r\n\r\n") {
                     if connection.read(&mut byte).unwrap_or(0) != 1 {
-                        break;
+                        return Exchange { path: None };
                     }
                     head.push(byte[0]);
                 }
@@ -806,10 +831,7 @@ pub(crate) mod loopback {
                             .write_all(&bytes)
                             .and_then(|()| connection.flush())
                             .is_err(),
-                        Step::Pause(pause) => {
-                            std::thread::sleep(pause);
-                            false
-                        }
+                        Step::Pause(pause) => stop.pause(pause),
                         Step::Trickle(every, most) => {
                             let until = Instant::now() + most;
                             loop {
@@ -818,10 +840,10 @@ pub(crate) mod loopback {
                                         .write_all(b"x")
                                         .and_then(|()| connection.flush())
                                         .is_err()
+                                    || stop.pause(every)
                                 {
                                     break true;
                                 }
-                                std::thread::sleep(every);
                             }
                         }
                     };
@@ -829,11 +851,17 @@ pub(crate) mod loopback {
                         break;
                     }
                 }
-                // The connection closes here, which ends a body that carried no
-                // length and cuts one that carried a longer one.
-            }
-        });
-        port
+                // The connection closes when the worker lets go of it, which
+                // ends a body that carried no length and cuts one that carried
+                // a longer one.
+                Exchange { path: Some(path) }
+            },
+        )
+        .expect("a loopback server");
+        Served {
+            port: server.port(),
+            server: Some(server),
+        }
     }
 
     /// A status line, `Connection: close`, and the headers given.
