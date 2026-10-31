@@ -1876,9 +1876,6 @@ crates/bt-app/src/main.rs	bt-app crate::FolioApp::for_each_window	Dynamic	answer
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::for_every_window_engines_included	Dynamic	answer	1	
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::frontmost_window	Ambiguous	find_map	1	
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::hand_the_update_over	Ambiguous	and_then	1	
-crates/bt-app/src/main.rs	bt-app crate::FolioApp::hear_preview_save_answers	Ambiguous	get_or_insert	1	2026-10-21: T-ENDSESSION-SAVES review; moved with the preview answers' hearing out of `take_preview_save_answers` (or the documents' out of `take_document_answers`); a standard-library combinator on an Option, an iterator, a slice or a string, which calls no door
-crates/bt-app/src/main.rs	bt-app crate::FolioApp::hear_preview_save_answers	Ambiguous	is_empty	1	2026-10-21: T-ENDSESSION-SAVES review; moved with the preview answers' hearing out of `take_preview_save_answers` (or the documents' out of `take_document_answers`); a standard-library combinator on an Option, an iterator, a slice or a string, which calls no door
-crates/bt-app/src/main.rs	bt-app crate::FolioApp::hear_preview_save_answers	Ambiguous	map_or	1	2026-10-21: T-ENDSESSION-SAVES review; moved with the preview answers' hearing out of `take_preview_save_answers` (or the documents' out of `take_document_answers`); a standard-library combinator on an Option, an iterator, a slice or a string, which calls no door
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::install_main_menu	Ambiguous	map	1	
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::install_main_menu	Dynamic	send	1	
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::keep_what_the_systems_end_did_not_save	Ambiguous	flatten	1	2026-10-21: T-ENDSESSION-SAVES review; a standard-library combinator on an Option, an iterator, a slice or a string, which calls no door
@@ -2458,8 +2455,8 @@ crates/bt-app/src/persist.rs	bt-app crate::persist::adopt_claim	Ambiguous	get	1
 crates/bt-app/src/persist.rs	bt-app crate::persist::adopt_claim	Ambiguous	insert	1	
 crates/bt-app/src/persist.rs	bt-app crate::persist::adopt_claim	Ambiguous	is_some	1	
 crates/bt-app/src/persist.rs	bt-app crate::persist::claim_table	Ambiguous	expect	1	
-crates/bt-app/src/persist.rs	bt-app crate::persist::hear_documents	Ambiguous	collect	1	
-crates/bt-app/src/persist.rs	bt-app crate::persist::hear_documents	Ambiguous	flatten	1	
+crates/bt-app/src/persist.rs	bt-app crate::persist::documents_news	Ambiguous	collect	1	
+crates/bt-app/src/persist.rs	bt-app crate::persist::documents_news	Ambiguous	flatten	1	
 crates/bt-app/src/persist.rs	bt-app crate::persist::is_writer_of_document	Ambiguous	unwrap_or_else	1	
 crates/bt-app/src/persist.rs	bt-app crate::persist::lane_lock	Ambiguous	unwrap_or_else	1	
 crates/bt-app/src/persist.rs	bt-app crate::persist::let_go_of_every_claim	Ambiguous	into_inner	1	
@@ -2523,6 +2520,8 @@ crates/bt-app/src/preview.rs	bt-app crate::preview::PreviewPool::kept_after_the_
 crates/bt-app/src/preview.rs	bt-app crate::preview::PreviewPool::kept_after_the_stop	Ambiguous	unwrap_or_else	1	2026-10-21: T-QUIT-AND-STOP-SAVES; a standard-library combinator on an Option, an iterator, a slice or a string, which calls no door
 crates/bt-app/src/preview.rs	bt-app crate::preview::PreviewPool::save_for_a_shut	Dynamic	shown_on	1	
 crates/bt-app/src/preview.rs	bt-app crate::preview::PreviewRefusal::notice	Ambiguous	text	3	
+crates/bt-app/src/preview.rs	bt-app crate::preview::PreviewSaves::answered_at_the_stop	Ambiguous	collect	1	
+crates/bt-app/src/preview.rs	bt-app crate::preview::PreviewSaves::answered_at_the_stop	Ambiguous	map	1	
 crates/bt-app/src/preview.rs	bt-app crate::preview::PreviewSaves::sink	Ambiguous	display	1	
 crates/bt-app/src/preview.rs	bt-app crate::preview::PreviewSaves::sink	Ambiguous	map_or_else	1	
 crates/bt-app/src/preview.rs	bt-app crate::preview::PreviewSaves::sink	Ambiguous	or_else	1	
@@ -4568,6 +4567,14 @@ crates/bt-app/src/runtime/settings.rs	bt-app crate::runtime::settings::Runtime::
 crates/bt-app/src/runtime/settings.rs	bt-app crate::runtime::settings::Runtime::settings_values	Ambiguous	collect	1	2026-10-27: T-SPLIT-2B batch 24; the same site, moved by K2 batch 24 with `settings_values` from main.rs into runtime/settings.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/settings.rs	bt-app crate::runtime::settings::Runtime::settings_values	Ambiguous	map	1	2026-10-27: T-SPLIT-2B batch 24; the same site, moved by K2 batch 24 with `settings_values` from main.rs into runtime/settings.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/settings.rs	bt-app crate::runtime::settings::Runtime::toggle_advanced_group	Ambiguous	retarget	1	2026-10-27: T-SPLIT-2B batch 23; the same site, moved by K2 batch 23 with `toggle_advanced_group` from main.rs into runtime/settings.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/storage.rs	bt-app crate::runtime::storage::App::storage_answers	Ambiguous	collect	1	
+crates/bt-app/src/runtime/storage.rs	bt-app crate::runtime::storage::App::storage_answers	Ambiguous	map	1	
+crates/bt-app/src/runtime/storage.rs	bt-app crate::runtime::storage::FolioApp::answer_storage	Ambiguous	get_or_insert	1	
+crates/bt-app/src/runtime/storage.rs	bt-app crate::runtime::storage::FolioApp::answer_storage	Ambiguous	is_empty	1	
+crates/bt-app/src/runtime/storage.rs	bt-app crate::runtime::storage::FolioApp::answer_storage	Ambiguous	map_or	1	
+crates/bt-app/src/runtime/storage.rs	bt-app crate::runtime::storage::tagged	Ambiguous	collect	1	
+crates/bt-app/src/runtime/storage.rs	bt-app crate::runtime::storage::tagged	Ambiguous	map	1	
+crates/bt-app/src/runtime/storage.rs	bt-app crate::runtime::storage::tagged	Dynamic	asker	1	
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::Runtime::browse_for_new_tab_root	Ambiguous	as_deref	1	
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::Runtime::browse_for_new_tab_root	Ambiguous	or_else	1	
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::Runtime::commit_row_into_new_tab	Ambiguous	to_string	1	
@@ -6448,7 +6455,6 @@ crates/bt-app/src/update_handoff.rs	bt-app crate::update_handoff::leave_armed	Am
 crates/bt-app/src/update_handoff.rs	bt-app crate::update_handoff::leave_in_panic	Ambiguous	leave	1	
 crates/bt-app/src/update_handoff.rs	bt-app crate::update_handoff::leave_in_panic	Ambiguous	ok	2	
 crates/bt-app/src/update_handoff.rs	bt-app crate::update_handoff::leave_in_panic	Ambiguous	take	1	
-crates/bt-app/src/update_handoff.rs	bt-app crate::update_handoff::look	Ambiguous	line	1	
 crates/bt-app/src/update_handoff.rs	bt-app crate::update_handoff::perform_counted	Ambiguous	elapsed	3	
 crates/bt-app/src/update_handoff.rs	bt-app crate::update_handoff::perform_counted	Ambiguous	to_string	1	
 crates/bt-app/src/update_handoff.rs	bt-app crate::update_handoff::perform_counted	Dynamic	say	2	
