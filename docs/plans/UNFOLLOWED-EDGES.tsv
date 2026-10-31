@@ -6221,7 +6221,6 @@ crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::given_up_said	Dyna
 crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::launched_trial	Ambiguous	any	1	
 crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::launched_trial	Ambiguous	find	1	
 crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::launched_trial	Ambiguous	map	1	
-crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::move_held_within	Ambiguous	elapsed	1	2026-10-21: T-UPDATE-MOVE-HELD-RETRY; a standard-library method (Option, Iterator, String, Duration, Vec) on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::move_held_within	Dynamic	look	1	2026-10-21: T-UPDATE-MOVE-HELD-RETRY; a seam closure of the held rounds (the ask, its reading of a failure, the elapsed time, the pause, the line, the look), whose product bodies are install_txn's durable_move or DurableWrite::ask, Instant::elapsed, wait::sleep_within on the holder's worker and the world's say
 crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::note_settled_unkept	Dynamic	say	1	
 crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::note_unkept_after_trial_decision	Ambiguous	is_zero	1	
