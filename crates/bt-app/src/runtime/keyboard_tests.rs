@@ -1610,16 +1610,17 @@ fn a_closed_pane_does_not_hand_its_composition_to_the_shell_beside_it() {
     );
 }
 
-/// The frames the window holds for the glass, the one waiting to be presented first: what the
-/// reader sees now and what they will see next.
-fn frames_for_the_glass(folio: &HeadlessFolio) -> Vec<&bt_viewport::ViewportFrame> {
+/// The frame on the glass once whatever the window owes it is presented: what the reader sees.
+fn on_the_glass(folio: &mut HeadlessFolio) -> &bt_viewport::ViewportFrame {
+    folio
+        .runtime()
+        .redraw()
+        .expect("the owed frame reaches the glass");
     folio
         .window
-        .pending_frames
-        .pending_frame()
-        .into_iter()
-        .chain(folio.window.last_presented_frame.as_ref())
-        .collect()
+        .last_presented_frame
+        .as_ref()
+        .expect("the window has presented a frame")
 }
 
 /// Whether `frame` draws the letters `text` anywhere in its cells.
@@ -1638,6 +1639,11 @@ fn draws(frame: &bt_viewport::ViewportFrame, text: &str) -> bool {
 /// composition then has to compose a frame without it, because re-presenting the chrome shows the
 /// frame already composed. `focus_seat` is the road the palette, the attention jump and a dropped
 /// path take, and a click in a pane takes the same one (`focus_pane_at` → `settle_focus_on`).
+///
+/// The glass is read right after the settle, the clock that cancels, and not at the end of the
+/// whole turn: in this fixture a later clock of the same turn publishes a frame of its own, which
+/// would hide whether the cancel left the glass clean, and nothing promises that clock runs on
+/// every pass the cancel does.
 ///
 /// MUTATION (observed red): "M5" — drop the terminal frame `cancel_composition` publishes when it
 /// takes a pre-edit away — the frame on the glass still draws `ni` at B.
@@ -1661,23 +1667,27 @@ fn a_press_in_another_shell_draws_none_of_the_letters_left_behind() {
         .expect("the shell takes the press");
     assert_eq!(folio.window.tabs[0].focused_leaf, b, "the keyboard is at B");
     assert!(
-        frames_for_the_glass(&folio)
-            .iter()
-            .any(|frame| draws(frame, "ni")),
+        draws(on_the_glass(&mut folio), "ni"),
         "the fixture's own precondition: the press's frame was composed with the letters at B"
     );
-    paint_and_turn(&mut folio.runtime(), turns.next());
+    folio.draw();
+    folio
+        .runtime()
+        .settle_composition_owner()
+        .expect("the pass's settle is answered");
     assert_eq!(
         folio.window.composing, None,
         "the pass after the press cancelled the composition"
     );
     assert!(folio.window.preedit.is_none(), "and holds no pre-edit");
-    let glass = frames_for_the_glass(&folio);
-    assert!(!glass.is_empty(), "the window holds a frame for the glass");
     assert!(
-        glass.iter().all(|frame| !draws(frame, "ni")),
-        "and no frame it holds draws the letters at B"
+        !draws(on_the_glass(&mut folio), "ni"),
+        "and the glass draws none of the letters at B"
     );
+    folio
+        .runtime()
+        .turn(turns.next(), true)
+        .expect("the rest of the pass is answered");
 
     finish_with(&mut folio, "你");
     assert_eq!(
@@ -2249,9 +2259,10 @@ fn the_capsule_opened_on_another_pane_cancels_its_composition() {
 }
 
 /// PIN (plan row 118, T10) — **a composition that stays on its field is never cancelled**, however
-/// many passes go by: the origin it recorded is the origin the keyboard is at. A shell, a page and
-/// a graph's search, because a page's and a graph's origin are read from the edit focus and the
-/// focused search field, state a pass could disturb where a shell's is fixed.
+/// many passes go by: the origin it recorded is the origin the keyboard is at. A shell, then every
+/// rung whose origin is read from state a pass could disturb where a shell's is fixed: a page and
+/// a graph's search (the edit focus, the focused search field), a name box, the search capsule
+/// and a settings field.
 ///
 /// MUTATION (observed red): "M4" — make `composition_outlived_its_field` answer `true` for every
 /// live composition — the first pass cancels it.
@@ -2318,6 +2329,81 @@ fn a_composition_that_stays_on_its_field_survives_every_pass() {
     assert_eq!(
         graph_search(&folio, graph),
         ("你".to_owned(), String::new()),
+        "and its commit is the field's own"
+    );
+
+    let mut folio = HeadlessFolio::with_tabs(
+        "ime-origin-stays-name",
+        vec![tab_holding(leaf_saying("PS> "))],
+        0,
+    );
+    let mut turns = Turns::start();
+    let tab = folio.window.tabs[0].id;
+    folio.window.rename = Some(crate::TabRename::open(tab, None));
+    folio.runtime().ime_input(Ime::Enabled).expect("a start");
+    compose(&mut folio, "ni");
+    for _ in 0..3 {
+        paint_and_turn(&mut folio.runtime(), turns.next());
+    }
+    let name_box = |folio: &HeadlessFolio| {
+        let field = &folio.window.rename.as_ref().expect("the name box").field;
+        (field.text().to_owned(), field.preedit().to_owned())
+    };
+    assert_eq!(
+        name_box(&folio),
+        (String::new(), "ni".to_owned()),
+        "a name box still draws its letters"
+    );
+    finish_with(&mut folio, "你");
+    assert_eq!(
+        name_box(&folio),
+        ("你".to_owned(), String::new()),
+        "and its commit is the box's own"
+    );
+
+    let tab = crate::test_support::cross_tab(1, &["PS A> ", "PS B> "]);
+    let a = tab.seats.terminals()[0];
+    let mut folio = HeadlessFolio::with_tabs("ime-origin-stays-capsule", vec![tab], 0);
+    let mut turns = Turns::start();
+    folio
+        .runtime()
+        .open_search(a)
+        .expect("the capsule opens on A");
+    folio.runtime().ime_input(Ime::Enabled).expect("a start");
+    compose(&mut folio, "ni");
+    for _ in 0..3 {
+        paint_and_turn(&mut folio.runtime(), turns.next());
+    }
+    assert_eq!(
+        folio.window.search.field().preedit(),
+        "ni",
+        "the capsule still draws its letters"
+    );
+    finish_with(&mut folio, "你");
+    assert_eq!(
+        folio.window.search.query(),
+        "你",
+        "and its commit is the capsule's own"
+    );
+
+    let program =
+        crate::settings::SettingsTarget::Field(crate::settings::SettingsRow::ProfileProgram);
+    let mut folio = editor_on("ime-origin-stays-settings", program);
+    let mut turns = Turns::start();
+    folio.runtime().ime_input(Ime::Enabled).expect("a start");
+    compose(&mut folio, "ni");
+    for _ in 0..3 {
+        paint_and_turn(&mut folio.runtime(), turns.next());
+    }
+    assert_eq!(
+        field_text(&folio, program),
+        ("pwsh.exe".to_owned(), "ni".to_owned()),
+        "a settings field still draws its letters"
+    );
+    finish_with(&mut folio, "你");
+    assert_eq!(
+        field_text(&folio, program),
+        ("pwsh.exe你".to_owned(), String::new()),
         "and its commit is the field's own"
     );
 }
