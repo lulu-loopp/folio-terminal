@@ -33,6 +33,7 @@ All notable changes to Folio are recorded here. The format follows
 - Chinese and other input-method text can now be typed into the Settings and profile fields, and the candidate window sits at the field's caret. <!-- zh: 现在可以在设置和配置文件的输入框中用输入法输入中文等文字，候选窗口显示在输入框的光标处。 -->
 - When Folio stops after an internal error and a second error happens while it closes, it now closes as it does after any crash, instead of possibly leaving a window on the screen with Folio still running. <!-- zh: Folio 因内部错误停止、并在关闭过程中再次出错时，现在会像其他崩溃之后一样关闭，不再可能把窗口留在屏幕上而 Folio 仍在运行。 -->
 - On Windows, a one-finger swipe over a program that reads the mouse, such as vim, htop or Claude Code, now scrolls about as far as the finger moved; a swipe over a picture or a video no longer zooms it or changes the volume, and a one-finger swipe over a zoomed picture moves it instead of zooming. <!-- zh: 在 Windows 上，在 vim、htop 或 Claude Code 等读取鼠标的程序上单指滑动，现在滚动的距离与手指移动的距离大致相同；在图片或视频上滑动也不再缩放图片或改变音量，在放大的图片上单指滑动会移动图片，而不是缩放它。 -->
+- On Windows, when an antivirus scan or the copy of Folio that finished an update still holds the update's leftover files for a moment, Folio now waits and removes them during that start, so the card that says changes were not kept is no longer shown again at the next start. <!-- zh: Windows 上，更新留下的文件若仍被杀毒软件扫描或被完成更新的那份 Folio 短暂占用，Folio 现在会稍等片刻，在这次启动中把它们清除，说明更改没有保留的卡片不再在下次启动时再次显示。 -->
 
 ## 0.4.8-preview — 2026-10-23
 
