@@ -30,6 +30,7 @@ All notable changes to Folio are recorded here. The format follows
 - When answers from the clipboard arrive together, Folio now handles them in the order you asked, so a paste's text or notice no longer comes after a copy you made after it. <!-- zh: 剪贴板的多个应答同时到达时，Folio 现在按你请求的顺序处理，粘贴的文字或提示不会再排到你随后所做的复制之后。 -->
 - On Windows, a one-finger swipe scrolls a pane again after a mouse or touch release was lost (for example when a window moved between displays while a finger was down); before, a held press that never ended made every swipe do nothing until the next click. <!-- zh: 在 Windows 上，鼠标或触摸的松开丢失后（例如手指按住时窗口移到了另一台显示器），单指滑动又能滚动窗格了；以前，一次始终没有结束的按住会让之后的每次滑动都不起作用，直到下一次单击。 -->
 - Chinese and other input-method text can now be typed into the Settings and profile fields, and the candidate window sits at the field's caret. <!-- zh: 现在可以在设置和配置文件的输入框中用输入法输入中文等文字，候选窗口显示在输入框的光标处。 -->
+- When Folio stops after an internal error and a second error happens while it closes, it now closes as it does after any crash, instead of possibly leaving a window on the screen with Folio still running. <!-- zh: Folio 因内部错误停止、并在关闭过程中再次出错时，现在会像其他崩溃之后一样关闭，不再可能把窗口留在屏幕上而 Folio 仍在运行。 -->
 
 ## 0.4.8-preview — 2026-10-23
 
