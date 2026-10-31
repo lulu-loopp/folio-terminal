@@ -1092,6 +1092,15 @@ a held writer or a held ring (row 106); the lane doors' gate-held tests (row 111
 lock waits behind a held lock (row 112) are not yet read this way. What such a verdict does
 not catch is a bounded wait, or a give-up that ignores its budget, shorter than the suite's patience.
 
+2026-10-31 (T-UPDATE-APPLY-FLIP-HOLD-FLAKE): a road's wait for another thread or process that has no
+clock of the test's own is still timed by the product, and a loaded run turns that race the other way. The update
+applier's wait for a live trial's final decision after the commit (`note_unkept_after_trial_decision`) is
+read and paused on `Road::decision_clock`, and each held move of the Windows flip or rollback
+(`move_held_within`, through `Journaled::held_door`) on `Road::held_clock`. Both are `update_apply::WaitClock`,
+and `WallClock` in the product. The applier harnesses on both platforms hand a `CountedClock` whose first pause lasts until the
+trial's receipt is gone, within the suite's patience; the held-moment tests count the window's pauses. A product
+window raced by a test thread is not seen by the timing scan, which reads test bodies (plan row 125).
+
 ## Test order and shared fixtures
 
 The rule: a test's verdict does not hang on a file another build step made, on the
