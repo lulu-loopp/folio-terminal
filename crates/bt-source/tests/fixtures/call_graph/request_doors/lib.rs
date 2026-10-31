@@ -407,10 +407,17 @@ pub fn submit_reads_a_status(
     submit(lane, job);
 }
 
-/// Row 116: waiting for a child stays an effect.
-pub fn submit_waits_for_a_child(lane: &'static Lane, job: u32, child: &mut std::process::Child) {
+/// Row 116: waiting for a child stays an effect, and so does an `ExitStatusError`'s method, which
+/// the rule leaves out of its scope.
+pub fn submit_waits_for_a_child(
+    lane: &'static Lane,
+    job: u32,
+    child: &mut std::process::Child,
+    failure: &std::process::ExitStatusError,
+) {
     let _ = child.wait();
     let _ = child.try_wait();
+    let _ = failure.code();
     submit(lane, job);
 }
 
