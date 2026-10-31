@@ -896,11 +896,7 @@ fn retire(
                         // The lock goes with the steps it guards, and is
                         // let go when they are done.
                         let _held = held;
-                        let patience = Patience {
-                            worker,
-                            clock: &*clock,
-                            deadline: clock.now() + RESCUE_ENDS_WITHIN,
-                        };
+                        let patience = Patience::from_now(worker, &*clock);
                         the_rest(&patience, rest, txn, &home)
                     });
                     match world.on_a_worker(job) {
@@ -922,11 +918,7 @@ fn retire(
                             let clock = world.wait_clock();
                             let job: OffThread = Box::new(move |worker| {
                                 let _held = held;
-                                let patience = Patience {
-                                    worker,
-                                    clock: &*clock,
-                                    deadline: clock.now() + RESCUE_ENDS_WITHIN,
-                                };
+                                let patience = Patience::from_now(worker, &*clock);
                                 if !patience.ended(&running) {
                                     return Err(format!(
                                         "BT_UPDATE_START transaction {txn} is kept for the next start: its rescue build {} still runs {} s after {said}",
@@ -999,7 +991,17 @@ struct Patience<'a> {
     deadline: std::time::Instant,
 }
 
-impl Patience<'_> {
+impl<'a> Patience<'a> {
+    /// **The patience of a worker that begins now**: its one deadline,
+    /// [`RESCUE_ENDS_WITHIN`] from this reading of `clock`.
+    fn from_now(worker: &'a bt_platform::admission::WorkerCtx, clock: &'a dyn WaitClock) -> Self {
+        Self {
+            worker,
+            clock,
+            deadline: clock.now() + RESCUE_ENDS_WITHIN,
+        }
+    }
+
     /// Whether the deadline has come.
     fn lapsed(&self) -> bool {
         self.clock.now() >= self.deadline
@@ -1069,7 +1071,7 @@ fn perform(patience: &Patience<'_>, step: Clearing, txn: TxnId, home: &Home) -> 
                 Err(failure) if failure.removal_refused_while_held() => {
                     if patience.lapsed() {
                         return Err(format!(
-                            "{failure}, still held {} s after the retirement's worker began",
+                            "{failure}, still refused {} s after the retirement's worker began",
                             RESCUE_ENDS_WITHIN.as_secs()
                         ));
                     }
@@ -3738,12 +3740,12 @@ mod tests {
         }
 
         /// A program of the test's own, started from `path`, ended by
-        /// [`Running::end`] or when any of its clones is dropped (on a failed
+        /// [`OwnProgram::end`] or when any of its clones is dropped (on a failed
         /// assertion too); the clones share one process.
         #[derive(Clone)]
-        struct Running(Arc<std::sync::Mutex<std::process::Child>>);
+        struct OwnProgram(Arc<std::sync::Mutex<std::process::Child>>);
 
-        impl Running {
+        impl OwnProgram {
             /// `path`'s program, written there with `StaysUp`'s code, then
             /// started.
             fn start(path: &Path) -> Self {
@@ -3771,7 +3773,7 @@ mod tests {
             }
         }
 
-        impl Drop for Running {
+        impl Drop for OwnProgram {
             fn drop(&mut self) {
                 self.end();
             }
@@ -3781,14 +3783,14 @@ mod tests {
         /// change**: on Windows only, a scene whose rescue build
         /// (`H\<txn>\rescue\folio.exe`, a program of the test's own) runs, and
         /// a retired journal that notes Folio 0.4.9's held changes.
-        fn the_rescue_runs(tag: &str) -> Option<(Scene, Running)> {
+        fn the_rescue_runs(tag: &str) -> Option<(Scene, OwnProgram)> {
             use crate::update_txn::{Outcome, Phase};
             if bt_platform::host_platform() != bt_platform::HostPlatform::Windows {
                 return None;
             }
             let scene = Scene::new(tag)?;
             std::fs::remove_file(&scene.rescue).unwrap();
-            let rescue = Running::start(&scene.rescue);
+            let rescue = OwnProgram::start(&scene.rescue);
             write_noted(
                 &scene,
                 Phase::Retired {
@@ -3924,9 +3926,10 @@ mod tests {
         /// Windows answers `ERROR_ACCESS_DENIED` to a removal of an
         /// executable still mapped as a process's image — what CI run
         /// 41156010943 met for a moment after the rescue's end. A program
-        /// other than the rescue build is not one the worker waits for; its
-        /// image is let go in the second pause, and the worker removes the
-        /// folder then.
+        /// other than the rescue build is not one the worker waits for; it
+        /// still runs when the second pause comes (`install_flip::still_running`,
+        /// so the refusal before it was its image's), it is ended in that
+        /// pause, and the worker removes the folder then.
         ///
         /// MUTATION: as above.
         #[test]
@@ -3940,17 +3943,31 @@ mod tests {
                 .join("stage")
                 .join("other.exe");
             std::fs::create_dir_all(other.parent().unwrap()).unwrap();
-            let image = Running::start(&other);
-            let (ends, lets_go) = (rescue.clone(), image.clone());
+            let image = OwnProgram::start(&other);
+            let [process] = install_flip::running_from(&other).unwrap()[..] else {
+                panic!("one process runs from {}", other.display());
+            };
+            let ran_at_pause_2 = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let (ends, lets_go, ran) = (rescue.clone(), image.clone(), Arc::clone(&ran_at_pause_2));
             let clock = Arc::new(crate::update_apply::CountedClock::new(move |pause| {
                 if pause == 1 {
                     ends.end();
                 } else {
+                    if pause == 2 {
+                        ran.store(
+                            install_flip::still_running(process),
+                            std::sync::atomic::Ordering::SeqCst,
+                        );
+                    }
                     lets_go.end();
                 }
             }));
             retired_on_the_worker(&scene, &clock);
             assert!(clock.pauses() >= 2, "{} pauses", clock.pauses());
+            assert!(
+                ran_at_pause_2.load(std::sync::atomic::Ordering::SeqCst),
+                "the removal before pause 2 was refused while the other program still ran"
+            );
         }
 
         /// RED (T-UPDATE-STARTUP-ON-DISK-TEMP-DIR-RACE; Windows) — **the
@@ -4018,7 +4035,7 @@ mod tests {
                         "BT_UPDATE_START transaction {} is kept for the next start: install_txn remove ",
                         txn()
                     )) && line.ends_with(&format!(
-                        ", still held {} s after the retirement's worker began",
+                        ", still refused {} s after the retirement's worker began",
                         RESCUE_ENDS_WITHIN.as_secs()
                     )),
                     "{line}"

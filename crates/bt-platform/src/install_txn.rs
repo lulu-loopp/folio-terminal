@@ -177,8 +177,11 @@ impl Failure {
     /// the folder still mapped as a process's image for a moment after that
     /// process has ended, or a scanner or an indexer holding a file without
     /// `FILE_SHARE_DELETE`, which lets go of it again in a moment
-    /// (T-UPDATE-STARTUP-ON-DISK-TEMP-DIR-RACE). A caller that can wait asks
-    /// again; this door never does. **Never on macOS**: `unlink(2)` and
+    /// (T-UPDATE-STARTUP-ON-DISK-TEMP-DIR-RACE). `ERROR_ACCESS_DENIED` is also
+    /// what a removal the account has no right to answers, which this cannot
+    /// tell apart and which never goes away by itself: a caller asks again
+    /// only within a bound, and its line at the bound says what was refused.
+    /// This door never asks again. **Never on macOS**: `unlink(2)` and
     /// `rmdir(2)` remove what is open, and no error of theirs goes away by
     /// itself.
     #[must_use]
@@ -2123,7 +2126,7 @@ mod tests {
     /// refusals, and on macOS none is.
     ///
     /// MUTATION: `removal_refused_while_held` answers
-    /// `refused_while_open()` (the stage not asked).
+    /// `arm::refused_while_open(&self.error)` (the stage not asked).
     #[cfg(any(windows, target_os = "macos"))]
     #[test]
     fn a_removal_refused_while_a_file_inside_is_held_says_so_and_lands_once_let_go() {
