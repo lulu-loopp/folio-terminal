@@ -5760,11 +5760,16 @@ fn the_macos_outgoing_build_that_lingers_still_opens_the_one_window() {
             crate::update_apply::this_process(),
             Duration::from_millis(300),
         );
+    // O's wait for the applier that stood aside unmarked is spent on the count,
+    // not on the wall clock (T-TIMING-CENSUS-PRODUCT-WINDOWS).
+    let o_clock = Arc::new(CountedClock::new(|_| {}));
     let (left, calls) = {
         let program = program.clone();
+        let o_clock = Arc::clone(&o_clock);
         on_a_worker(move |worker| {
             let mut starts = OldStarts::default();
-            let left = leaving.leave(
+            let left = leaving.leave_on(
+                &*o_clock,
                 Running { pid: 2, started: 2 },
                 &program,
                 &mut starts,
@@ -5780,6 +5785,7 @@ fn the_macos_outgoing_build_that_lingers_still_opens_the_one_window() {
         "O lingers: the transaction lock is still held after its leave"
     );
     drop(o_lock);
+    assert_eq!(o_clock.moved_ms(), 300, "O waited out its budget for P");
     assert_eq!(left, crate::update_apply::Left::Started(program.clone()));
     assert_eq!(
         calls,
