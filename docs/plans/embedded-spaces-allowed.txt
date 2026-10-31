@@ -17,7 +17,7 @@
 # and is repaired, never listed: end the line with `\` (`docs/CONVENTIONS.md` §五).
 #
 crates/bt-app/examples/video-probe.rs:398 the probe's caption: its fields spaced apart on purpose
-crates/bt-app/src/app_mouse_tests.rs:1549 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-app/src/app_mouse_tests.rs:1551 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-app/src/clipboard_picture.rs:890 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-app/src/file_reads_source_tests.rs:632 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-app/src/focus_thumb.rs:3456 code sample: the indentation after an escaped line break is the sample's own
@@ -51,13 +51,13 @@ crates/bt-app/src/i18n.rs:7951 the command-line usage text: option descriptions 
 crates/bt-app/src/install_channel.rs:1442 a Scoop manifest sample: JSON indentation after an escaped line break
 crates/bt-app/src/install_channel.rs:1898 the Homebrew cask's own key alignment, as the cask writes it
 crates/bt-app/src/runtime/math.rs:3124 the chrome dump's tag column: `quad` padded to the width of the other tags
-crates/bt-app/src/main.rs:41273 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-app/src/main.rs:43885 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-app/src/main.rs:44334 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-app/src/main.rs:44334 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-app/src/main.rs:44526 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-app/src/main.rs:45452 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-app/src/main.rs:59199 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-app/src/main.rs:41310 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-app/src/main.rs:43922 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-app/src/main.rs:44371 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-app/src/main.rs:44371 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-app/src/main.rs:44563 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-app/src/main.rs:45489 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-app/src/main.rs:59236 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-app/src/preview_live.rs:1686 table fixture: each cell padded to its column
 crates/bt-app/src/preview_select.rs:777 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-app/src/preview.rs:11821 a diff line sample: the code's indentation after the `+`/`-` sign is the input
@@ -107,12 +107,12 @@ crates/bt-detect/tests/strand_lines.rs:44 terminal screen fixture: the columns a
 crates/bt-detect/tests/strand_lines.rs:49 terminal screen fixture: the columns are where the terminal draws them
 crates/bt-detect/tests/strand_lines.rs:54 terminal screen fixture: the columns are where the terminal draws them
 crates/bt-detect/tests/strand_lines.rs:59 terminal screen fixture: the columns are where the terminal draws them
-crates/bt-platform/src/lib.rs:22137 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-platform/src/lib.rs:22189 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-platform/src/lib.rs:22592 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-platform/src/lib.rs:22908 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-platform/src/lib.rs:23292 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-platform/src/lib.rs:23498 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-platform/src/lib.rs:22148 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-platform/src/lib.rs:22200 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-platform/src/lib.rs:22603 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-platform/src/lib.rs:22919 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-platform/src/lib.rs:23303 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-platform/src/lib.rs:23509 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-platform/src/macos_update_mount_tests.rs:13 recorded `hdiutil` output: its columns as the tool prints them
 crates/bt-platform/src/macos_update_mount_tests.rs:26 recorded `hdiutil` output: its columns as the tool prints them
 crates/bt-platform/src/macos_update_mount_tests.rs:141 recorded `hdiutil` output: its columns as the tool prints them
