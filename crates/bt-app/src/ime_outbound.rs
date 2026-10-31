@@ -74,6 +74,7 @@ fn origin_kind(origin: &CompositionOrigin) -> ImeOwner {
         CompositionOrigin::Rename(_) => ImeOwner::Rename,
         CompositionOrigin::GitPrompt => ImeOwner::GitPrompt,
         CompositionOrigin::Palette => ImeOwner::Palette,
+        CompositionOrigin::Settings(_) => ImeOwner::SettingsField,
         CompositionOrigin::Modal => ImeOwner::Modal,
     }
 }
