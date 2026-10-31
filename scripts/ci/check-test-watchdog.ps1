@@ -28,7 +28,7 @@ $pids = Join-Path $root 'pids.txt'
 [IO.File]::WriteAllText($standIn, @'
 $case = $env:FOLIO_STAND_IN_CASE
 function Out([string]$line) { [Console]::Out.WriteLine($line); [Console]::Out.Flush() }
-function Running { [Console]::Error.WriteLine('     Running unittests src/main.rs (stand-in)'); [Console]::Error.Flush() }
+function Running { [Console]::Error.WriteLine('     Running unittests (stand-in)'); [Console]::Error.Flush() }
 switch ($case) {
     'hang' {
         Running
