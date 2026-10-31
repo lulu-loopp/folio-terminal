@@ -179,7 +179,7 @@ fn wheel_reports(bytes: &[u8]) -> usize {
 /// system's lines-per-notch says moves the content about as far as the finger went. The pane is
 /// held in birth so the bytes meant for its shell are kept where the test can read them.
 ///
-/// RED on 840cacbb6 (lines per notch 3 on the machine that ran it): six reports, one per cell.
+/// RED with the edit undone (three lines a notch where it ran): six reports, one per cell.
 /// On macOS the system's answer is one line a notch, so the count is six there before and after.
 ///
 /// MUTATION: divide the pixel arm of `take_forward_wheel_notches` by the cell again — six reports.

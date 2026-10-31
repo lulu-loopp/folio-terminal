@@ -3614,7 +3614,7 @@ fn a_finger_pans(folio: &mut HeadlessFolio, at: PhysicalPosition<f64>, travel: (
 /// 30 pixels right and 40 down carries the picture 30 right and 40 down, one pixel for one, at the
 /// same size. A wheel notch over the same picture still zooms it.
 ///
-/// RED on 840cacbb6: the pan was spent as a wheel, so 40 pixels down was a third of a zoom notch
+/// RED with the edit undone: the pan was spent as a wheel, so 40 pixels down was a third of a notch
 /// and the picture left Fit.
 ///
 /// MUTATION: drop the finger's arm from the picture's rung in `Runtime::mouse_wheel` — the pan
@@ -3671,7 +3671,7 @@ fn a_finger_over_a_picture_carries_it_and_never_zooms_it() {
 /// nothing, and the one wheel notch after it takes the volume to 55 %, so the pan had its chance
 /// and moved nothing.
 ///
-/// RED on 840cacbb6: the pan was spent as two wheel notches, the volume went to 60 % and the
+/// RED with the edit undone: the pan was two wheel notches, the volume went to 60 % and the
 /// notch after it to 65 %.
 ///
 /// MUTATION: drop the finger's station before the wheel's video station in `Runtime::mouse_wheel`
