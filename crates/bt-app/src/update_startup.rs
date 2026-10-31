@@ -1057,12 +1057,7 @@ fn the_rest(
 /// refusal would keep the transaction, and the next start would raise the
 /// journal's card a second time. Any other refusal fails at once; one still
 /// held at the deadline fails with the bound.
-fn perform(
-    patience: &Patience<'_>,
-    step: Clearing,
-    txn: TxnId,
-    home: &Home,
-) -> Result<(), String> {
+fn perform(patience: &Patience<'_>, step: Clearing, txn: TxnId, home: &Home) -> Result<(), String> {
     match step {
         Clearing::DetachMount => {
             bt_platform::macos_update::detach_all_under(patience.worker, &home.transaction(txn))
@@ -1455,9 +1450,9 @@ mod tests {
             }
 
             fn wait_clock(&self) -> Arc<dyn WaitClock> {
-                self.clock.clone().unwrap_or_else(|| {
-                    Arc::new(crate::update_apply::CountedClock::new(|_| {}))
-                })
+                self.clock
+                    .clone()
+                    .unwrap_or_else(|| Arc::new(crate::update_apply::CountedClock::new(|_| {})))
             }
 
             fn on_a_worker(&mut self, job: OffThread) -> io::Result<()> {

@@ -2129,11 +2129,18 @@ mod tests {
     fn a_removal_refused_while_a_file_inside_is_held_says_so_and_lands_once_let_go() {
         let denied = || io::Error::from_raw_os_error(if cfg!(windows) { 5 } else { 13 });
         let at = |stage| Failure::at(stage, Path::new("x"), denied());
-        assert_eq!(at(Stage::Remove).removal_refused_while_held(), cfg!(windows));
+        assert_eq!(
+            at(Stage::Remove).removal_refused_while_held(),
+            cfg!(windows)
+        );
         assert!(!at(Stage::Rename).removal_refused_while_held());
         assert!(
-            !Failure::at(Stage::Remove, Path::new("x"), io::Error::from_raw_os_error(2))
-                .removal_refused_while_held()
+            !Failure::at(
+                Stage::Remove,
+                Path::new("x"),
+                io::Error::from_raw_os_error(2)
+            )
+            .removal_refused_while_held()
         );
         #[cfg(windows)]
         {
