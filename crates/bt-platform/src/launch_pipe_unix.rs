@@ -1580,7 +1580,10 @@ mod tests {
     /// An endpoint whose listener stands inside `decide` until the test lets it
     /// go, and the flag `decide` raises on its way out. The request that holds
     /// it is handed over on a thread of its own, which gives up at
-    /// [`HANDOVER_BUDGET`] whatever the test does.
+    /// [`HANDOVER_BUDGET`] whatever the test does. The endpoint's steps are on a
+    /// counted clock that awaits the holder (T-LAUNCH-HANDOVER-BUDGET-ON-A-CLOCK),
+    /// so the holder's request reaches `decide` whatever its thread's scheduling,
+    /// never inside 250 ms of real time or not at all.
     fn a_held_endpoint(
         directory: &Path,
     ) -> (
@@ -1592,8 +1595,9 @@ mod tests {
         let (release, held) = mpsc::channel::<()>();
         let left = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let leaving = std::sync::Arc::clone(&left);
-        let endpoint = LaunchPipe::start(
+        let endpoint = served_on(
             directory,
+            &Arc::new(CountedClock::answering()),
             move |_line| {
                 let _ = entered.send(());
                 let _ = held.recv();
@@ -1601,8 +1605,7 @@ mod tests {
                 None::<Decision<()>>
             },
             |()| {},
-        )
-        .expect("open the launch endpoint");
+        );
         let name = endpoint.name().to_owned();
         std::thread::spawn(move || {
             let _ = hand_over(&name, "hold", |_, _| {});

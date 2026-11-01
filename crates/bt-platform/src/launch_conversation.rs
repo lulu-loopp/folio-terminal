@@ -17,11 +17,14 @@ use std::{
 };
 
 /// **The clock the launch wire's waits are read on, and the waits themselves**
-/// (T-LAUNCH-HANDOVER-BUDGET-ON-A-CLOCK). Every wait of the conversation is a wait for the other
-/// end to act, at either end: the second launch's whole budget
-/// ([`crate::launch_pipe::HANDOVER_BUDGET`]: the busy retry and the reads and writes it bounds),
-/// the server's step deadline, and the Windows listener's first word. Each arm reads its deadline
-/// on [`LaunchClock::now`] and hands every transport wait to [`LaunchClock::wait`]. [`RealClock`]
+/// (T-LAUNCH-HANDOVER-BUDGET-ON-A-CLOCK). A wait of the conversation is a wait for the other end
+/// to act, at either end: the second launch's budget ([`crate::launch_pipe::HANDOVER_BUDGET`]:
+/// the reply on Windows, every frame on Unix), the server's step deadline, and the Windows
+/// listener's first word. Each arm reads its deadline on [`LaunchClock::now`] and hands each of
+/// those waits to [`LaunchClock::wait`]; the Windows busy retry's own waits, made inside the
+/// client's open, are counted through [`LaunchClock::spent`]. The Windows writes are not here:
+/// each is `attention_pipe::write_bounded`'s own real 250 ms, which buffering decides, not the
+/// peer (noted in `docs/plans/TIMING-BOUND-TESTS.tsv`). [`RealClock`]
 /// in the product, through `hand_over` and `LaunchPipe::start`; a test hands a counted clock, so
 /// "the other end acted in time" and "the budget ran out" are facts of the test, never a race
 /// between a real window and a thread of the same process.
