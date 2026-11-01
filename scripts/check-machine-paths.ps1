@@ -124,10 +124,12 @@ try {
     # directly under `Developer\` (`Developer\wt`, `Developer\trace`,
     # `Developer\launchers`, `Developer\build`), and the last two still do on
     # this machine. Each is named whole, so a neighbour such as `wtx` passes.
-    # Never a bare drive-letter `\Developer\`: product fixtures stand in a
-    # drive-letter `\Developer\<folder>\…` of their own (`notes`, `Ledger`,
-    # `elsewhere`, …), and a folder no machine of this project's has ever used
-    # names nobody's machine.
+    # Never a bare drive-letter `\Developer\`: a product fixture is meant to
+    # stand in a drive-letter `\Developer\<folder>\…` that no machine of this
+    # project's has used (`notes`, `Ledger`, `elsewhere`, …), and such a path
+    # names nobody's machine. Not every fixture does yet: some product files
+    # still stand in the product's pre-rename checkout folder (and a few in
+    # other folders this machine has used); 0.4.9 row 159 rewrites them.
     # Nor `Developer\Folio\` alone: a fixture standing in a folder named after
     # the product (`…\Developer\folio\notes.md`, `…\Developer\Folio\docs`) is a
     # placeholder like `folio` in the account list below, not this checkout.

@@ -7447,8 +7447,8 @@ mod tests {
     /// PIN (owner report 2026-09-21, on the 0.4.3 candidate) — **a printed path may hold spaces,
     /// and the disk still says which reading is real.**
     ///
-    /// The line was `D:\Developer\notes\验收 next85\中文 说明.md` (folders renamed), printed by an agent
-    /// in a pane beside the file. It wore no mark and the pointer went straight through it, while
+    /// The line was `D:\Developer\notes\验收 next85\中文 说明.md` (one folder renamed), printed by an
+    /// agent in a pane beside the file. It wore no mark and the pointer went through it, while
     /// the same tree spelled without spaces was an ordinary link. Nothing to do with the Chinese:
     /// [`token_end`] stopped at the first space, `D:\Developer\notes\验收` is not a name on that
     /// disk, and so the row never offered a second reading to be arbitrated. `C:\Program Files\…`
@@ -7465,7 +7465,7 @@ mod tests {
     /// defect itself.
     #[test]
     fn a_bare_path_is_read_across_the_spaces_a_filename_may_hold() {
-        // The owner's line, its folders renamed: the whole spelling is the first reading, and each
+        // The owner's line, one folder renamed: the whole spelling is the first reading, and each
         // space behind it is one shorter reading, longest first.
         assert_eq!(
             rooted_readings("D:\\Developer\\notes\\验收 next85\\中文 说明.md"),
