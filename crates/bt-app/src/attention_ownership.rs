@@ -23,7 +23,7 @@ impl From<bool> for Decision {
 }
 
 /// **How long a refusal's take-over consent stands**: the next install of the same configuration
-/// takes over only if it comes fewer than this many seconds after the refusal was shown.
+/// takes over only if it comes before this lifetime has passed since the refusal was shown.
 pub(crate) const CONSENT_LIFETIME: std::time::Duration = std::time::Duration::from_secs(30);
 
 pub(crate) struct Pending {
@@ -47,8 +47,8 @@ impl Pending {
     }
 }
 
-/// `now` is the instant of the decision; the product passes `Instant::now()`, and a test passes
-/// an instant counted from the consent's own, so [`CONSENT_LIFETIME`] is read on a counted clock.
+/// `now` is the instant of the decision, read against [`CONSENT_LIFETIME`]; the product passes
+/// `Instant::now()`.
 pub(crate) fn next_decision(
     pending: &mut Option<Pending>,
     install: bool,
