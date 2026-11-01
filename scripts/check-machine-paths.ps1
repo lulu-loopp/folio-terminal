@@ -245,10 +245,12 @@ try {
         }
     }
     # A hit as `-PrintKeys` shows it: the account and the drive masked, the
-    # checkout and the address not spelt at all.
+    # checkout, the address and the author check's hit (the name, or the
+    # mailbox domain its second half matches) not spelt at all.
     $masked = {
         param([string] $check, [string] $value)
         switch ($check) {
+            "author" { "<author>" }
             "checkout" { "<checkout>" }
             "mail" { "<address>" }
             default {
