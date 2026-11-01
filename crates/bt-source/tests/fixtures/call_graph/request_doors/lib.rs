@@ -392,6 +392,35 @@ pub fn submit_reads_a_value(lane: &'static Lane, job: u32, meta: &std::fs::Metad
     submit(lane, job);
 }
 
+/// Row 116: the methods of a collected child's status and output read the value; the wait that
+/// collected it is the effect.
+pub fn submit_reads_a_status(
+    lane: &'static Lane,
+    job: u32,
+    status: std::process::ExitStatus,
+    output: &std::process::Output,
+) {
+    let _ = status.code();
+    let _ = status.success();
+    let _ = std::process::ExitStatus::from_raw(0);
+    let _ = output.clone();
+    submit(lane, job);
+}
+
+/// Row 116: waiting for a child stays an effect, and so does an `ExitStatusError`'s method, which
+/// the rule leaves out of its scope.
+pub fn submit_waits_for_a_child(
+    lane: &'static Lane,
+    job: u32,
+    child: &mut std::process::Child,
+    failure: &std::process::ExitStatusError,
+) {
+    let _ = child.wait();
+    let _ = child.try_wait();
+    let _ = failure.code();
+    submit(lane, job);
+}
+
 /// R2: the worker's lock under an alias of `Mutex`.
 pub type Held = Mutex<u32>;
 
