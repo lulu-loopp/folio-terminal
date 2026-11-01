@@ -2884,14 +2884,13 @@ pub(crate) fn take_the_window_within_reads_at(
 /// (`install_txn::LockClock`, T-STALE-MARK-RACE-ON-A-COUNTED-CLOCK): its
 /// readings are the clock's, and each pause is the clock's pause through
 /// `worker`'s wait door. The one adapter by which a wait for a lock
-/// (`install_txn::hold_by`) reads a road's clock.
-#[cfg(test)]
+/// (`install_txn::hold_by`) reads a road's clock: the applier's and recovery's
+/// roads pass theirs (T-WINDOWS-HANDOVER-ORDER-A-HELD-LOCK-WAIT).
 pub(crate) struct LockWaitOn<'a> {
     pub(crate) clock: &'a dyn WaitClock,
     pub(crate) worker: &'a WorkerCtx,
 }
 
-#[cfg(test)]
 impl install_txn::LockClock for LockWaitOn<'_> {
     fn now(&self) -> Instant {
         self.clock.now()
