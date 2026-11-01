@@ -2251,8 +2251,9 @@ fn a_prepare_whose_journal_is_held_writes_it_once_the_hold_lifts() {
 /// next pause, the write waiting is the abandonment — never `Prepared` — and
 /// the hold lifts there. Every pause is the counted clock's.
 ///
-/// MUTATION: in `journal_written`, `asks_again` answers yes whatever the job
-/// did (the write waiting in the second pause is `Prepared`).
+/// MUTATION: in `journal_written`, hand `write_journal_on` no cancel flag
+/// (`None`: asked again whatever the job did) — the write waiting in the
+/// second pause is `Prepared`.
 #[test]
 fn a_cancel_while_the_journal_is_held_ends_the_wait() {
     let Some(scene) = Scene::new("journal-held-cancel") else {
