@@ -22,21 +22,34 @@
 #   * `vendor/`, `licenses/` and `THIRD-PARTY-NOTICES.md` — third-party code and
 #     licence texts carry their own authors' names and addresses. Those addresses
 #     are the attribution; removing them is the breach, not the fix.
-#   * the dated record inside `docs/` — the folders and files listed in
+#   * the dated record inside `docs/` — the folders listed in
 #     `$docsNotScanned` below, each with its reason. They are verbatim history
-#     (transcripts, evidence logs, quoted prompts, an append-only log), and a
+#     (transcripts, evidence logs, quoted prompts, handoffs), and a
 #     record rewritten to pass a scan is no longer the record. One more file,
 #     listed in `$authorNameAllowed`, is scanned in full except for the
 #     author's name, which it spells as the publisher. Everything else in
 #     `docs/` is scanned: the rules, the guards and the front page's prose are
 #     living documents, and since 2026-10-31 (0.4.9 row 129) a new file there is
 #     covered by default instead of by being remembered on an include list.
+#   * nothing in the append-only log, `docs/DESIGN.md`, except the hits that were
+#     already there (2026-11-01, 0.4.9 row 156). Its old entries cannot be
+#     rewritten, and every row appends a new one, so the file is scanned like any
+#     other against `$keyedAllowList` below: a list of the hits it held on that
+#     day, each keyed by its content rather than its line. A hit not on the list
+#     is refused with its line number; a row that matches no hit is refused as
+#     stale, so the list cannot rot. `-PrintKeys` prints the row a hit would take.
 #   * `tests/corpus/` — terminal recordings, cleaned on their own line, with
 #     their own gate.
 #   * this file — it has to spell the forbidden strings in order to forbid them,
 #     and a rule that cannot state its own subject is not a rule.
 # Binary payloads are skipped by extension: a 10 MB font is a lottery of byte
 # sequences that look like anything you care to search for.
+
+param(
+    # Print, for every hit in a file on `$keyedAllowList`, the key its row takes
+    # and the hit masked, then exit without judging anything.
+    [switch]$PrintKeys
+)
 
 $ErrorActionPreference = "Stop"
 
@@ -76,9 +89,16 @@ try {
         "docs/spikes/"   = "dated spike records and their probes, as run"
         # Session handoffs, each a snapshot of one day.
         "docs/handoff/"  = "dated session handoffs"
-        # DESIGN is append-only (`docs/ARCHITECTURE.md`, "append-only and it is
-        # evidence"): an old entry cannot be rewritten.
-        "docs/DESIGN.md" = "append-only design log"
+    }
+    # **Files scanned against a list of the hits they already hold** (2026-11-01,
+    # 0.4.9 row 156; until then DESIGN sat in the table above). DESIGN is
+    # append-only (`docs/ARCHITECTURE.md`, "append-only and it is evidence"): an
+    # old entry cannot be rewritten, but a new one is written by nearly every
+    # row, and a machine path in it would land unseen. The list file's own
+    # header gives its grammar; it is scanned like any other file, which it can
+    # pass because a row carries a hash and a masked shape, never the hit.
+    $keyedAllowList = [ordered]@{
+        "docs/DESIGN.md" = "scripts/check-machine-paths-design-allowed.txt"
     }
     # **Files scanned in full except for the author's name** (2026-11-01, row
     # 129's review F3). The home-directory, checkout and e-mail checks still run
@@ -164,6 +184,92 @@ try {
 
     $problems = New-Object System.Collections.Generic.List[string]
 
+    # **The keyed lists** (row 156). A row is
+    #     <key> <check> <date> <reason class>: <shape>
+    # and its key is the first 16 hex digits of the SHA-256 of the check's name,
+    # the matched text and the whole line, joined by NUL and taken as the bytes
+    # the scan read (the line without its trailing whitespace). The line number
+    # is no part of it: an entry inserted above a listed hit leaves its row
+    # valid, and any edit to the hit's own line makes the row stale and the hit
+    # new. Two identical hits on one line take two rows.
+    $hitKey = {
+        param([string] $check, [string] $value, [string] $line)
+        $bytes = [Text.Encoding]::Latin1.GetBytes("$check`0$value`0$($line.TrimEnd())")
+        $hash = [Security.Cryptography.SHA256]::HashData($bytes)
+        ([Convert]::ToHexString($hash).Substring(0, 16)).ToLowerInvariant()
+    }
+    $row_re = [regex]"^(?<key>[0-9a-f]{16}) (?<check>author|checkout|home|mail) (?<date>\d{4}-\d{2}-\d{2}) (?<reason>old-checkout example|author|runner account|false positive): (?<shape>\S.*)$"
+    $keyedRows = @{}
+    if (-not $PrintKeys) {
+        foreach ($listed in $keyedAllowList.Keys) {
+            $listFile = $keyedAllowList[$listed]
+            $rows = [Collections.Generic.Dictionary[string, Collections.Generic.List[object]]]::new()
+            $number = 0
+            foreach ($row in [IO.File]::ReadAllLines((Join-Path $repo $listFile), [Text.UTF8Encoding]::new($false))) {
+                $number++
+                if ($row -match "^\s*(#|$)") { continue }
+                $m = $row_re.Match($row)
+                if (-not $m.Success) {
+                    $problems.Add("${listFile}:$number is not a row: <key> <check> <date> <reason class>: <shape>")
+                    continue
+                }
+                $key = "$($m.Groups['check'].Value) $($m.Groups['key'].Value)"
+                if (-not $rows.ContainsKey($key)) { $rows[$key] = [Collections.Generic.List[object]]::new() }
+                $rows[$key].Add([pscustomobject]@{ Number = $number; Text = $row })
+            }
+            $keyedRows[$listed] = $rows
+        }
+    }
+
+    # Every hit in a text — a whole file, or one line of a keyed one: its check,
+    # its matched text and its problem. The author check asks line by line,
+    # because what excuses the name is the sentence it stands in; no pattern of
+    # the other three can match across a line break, so they ask the text whole.
+    $hitsIn = {
+        param([string] $text, [bool] $nameAllowed)
+        foreach ($line in ($text -split "`n")) {
+            $notice = $nameAllowed -or $copyright_re.IsMatch($line) -or
+                      $signed_re.IsMatch($line) -or $publisher_re.IsMatch($line)
+            foreach ($m in $author_re.Matches($line)) {
+                if ($notice -and $m.Value -notmatch "(?i)umich") { continue }
+                [pscustomobject]@{ Check = "author"; Value = $m.Value; Problem = "names the author: $($m.Value)" }
+            }
+        }
+        foreach ($m in $checkout_re.Matches($text)) {
+            [pscustomobject]@{ Check = "checkout"; Value = $m.Value; Problem = "names the development checkout: $($m.Value)" }
+        }
+        foreach ($m in $home_re.Matches($text)) {
+            $who = $m.Groups[1].Value
+            $ok = ($placeholders -contains $who.ToLowerInvariant()) -or ($who -match "^%[A-Za-z_]+%$")
+            if (-not $ok) {
+                [pscustomobject]@{ Check = "home"; Value = $m.Value; Problem = "names a real account directory: $($m.Value) (use one of: $($placeholders -join ', '))" }
+            }
+        }
+        foreach ($m in $mail_re.Matches($text)) {
+            $domain = $m.Groups[1].Value.ToLowerInvariant()
+            if ($notDomains -contains $m.Groups[2].Value.ToLowerInvariant()) { continue }
+            if ($domain -notmatch $exampleDomains) {
+                [pscustomobject]@{ Check = "mail"; Value = $m.Value; Problem = "carries a deliverable e-mail address: $($m.Value)" }
+            }
+        }
+    }
+    # A hit as `-PrintKeys` shows it: the account and the drive masked, the
+    # checkout, the address and the author check's hit (the name, or the
+    # mailbox domain its second half matches) not spelt at all.
+    $masked = {
+        param([string] $check, [string] $value)
+        switch ($check) {
+            "author" { "<author>" }
+            "checkout" { "<checkout>" }
+            "mail" { "<address>" }
+            default {
+                $v = [regex]::Replace($value, "(?i)weiyi[A-Za-z0-9_.-]*", "<author>")
+                $v = [regex]::Replace($v, "[A-Za-z]:([\\/])", 'X:$1')
+                [regex]::Replace($v, "((?:[Uu]sers|home)[\\/]{1,2})[A-Za-z0-9_.$-]+", '$1<acct>')
+            }
+        }
+    }
+
     foreach ($rel in $tracked) {
         if ($skipPaths | Where-Object { $rel.StartsWith($_) }) { continue }
         if ($docsNotScanned.Keys | Where-Object { $rel.StartsWith($_) }) { continue }
@@ -196,29 +302,39 @@ try {
         # names who signed a release, it says who published this and nothing
         # whatever about the machine it was built on.
         $nameAllowed = $authorNameAllowed.Contains($rel)
+        $keyed = $keyedAllowList.Contains($rel)
+        if ($PrintKeys -and -not $keyed) { continue }
+        if (-not $keyed) {
+            foreach ($hit in & $hitsIn $text $nameAllowed) { $problems.Add("$rel $($hit.Problem)") }
+            continue
+        }
+        $number = 0
         foreach ($line in ($text -split "`n")) {
-            $notice = $nameAllowed -or $copyright_re.IsMatch($line) -or
-                      $signed_re.IsMatch($line) -or $publisher_re.IsMatch($line)
-            foreach ($m in $author_re.Matches($line)) {
-                if ($notice -and $m.Value -notmatch "(?i)umich") { continue }
-                $problems.Add("$rel names the author: $($m.Value)")
+            $number++
+            foreach ($hit in & $hitsIn $line $nameAllowed) {
+                $check, $value, $problem = $hit.Check, $hit.Value, $hit.Problem
+                $key = & $hitKey $check $value $line
+                if ($PrintKeys) {
+                    Write-Output "$rel`:$number`t$key $check <date> <reason class>: $(& $masked $check $value)"
+                    continue
+                }
+                $rows = $keyedRows[$rel]
+                if ($rows.ContainsKey("$check $key") -and $rows["$check $key"].Count -gt 0) {
+                    $rows["$check $key"].RemoveAt(0)
+                    continue
+                }
+                $problems.Add("${rel}:$number $problem (not on $($keyedAllowList[$rel]), which lists only the hits the file held on 2026-11-01)")
             }
         }
-        foreach ($m in $checkout_re.Matches($text)) {
-            $problems.Add("$rel names the development checkout: $($m.Value)")
-        }
-        foreach ($m in $home_re.Matches($text)) {
-            $who = $m.Groups[1].Value
-            $ok = ($placeholders -contains $who.ToLowerInvariant()) -or ($who -match "^%[A-Za-z_]+%$")
-            if (-not $ok) {
-                $problems.Add("$rel names a real account directory: $($m.Value) (use one of: $($placeholders -join ', '))")
-            }
-        }
-        foreach ($m in $mail_re.Matches($text)) {
-            $domain = $m.Groups[1].Value.ToLowerInvariant()
-            if ($notDomains -contains $m.Groups[2].Value.ToLowerInvariant()) { continue }
-            if ($domain -notmatch $exampleDomains) {
-                $problems.Add("$rel carries a deliverable e-mail address: $($m.Value)")
+    }
+
+    if ($PrintKeys) { return }
+
+    # A row left over matched no hit: the line it was taken from has changed.
+    foreach ($listed in $keyedRows.Keys) {
+        foreach ($left in $keyedRows[$listed].Values) {
+            foreach ($row in $left) {
+                $problems.Add("$($keyedAllowList[$listed]):$($row.Number) is stale - no line of $listed carries that hit any more: $($row.Text) (the file is append-only, so an old entry was edited: restore it, or remove the row if the edit was ruled)")
             }
         }
     }
