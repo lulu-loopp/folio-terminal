@@ -10,13 +10,15 @@
 //!
 //! 1. **Wait for O** (§C.4). The transaction lock `H/lock`, which O holds
 //!    until its process ends, is asked for through
-//!    `install_txn::hold_within` for up to [`Limits::old_within`]; not had →
+//!    `install_txn::hold_by` for up to [`Limits::old_within`] on the road's
+//!    [`Road::wait_clock`]; not had →
 //!    nothing is written (the journal stays `Handoff`, M3: the first lock
 //!    holder applies it). Then the authoritative test: the data directory's
 //!    claim is tried (`persist::try_claim`) until it is had, and **let go at
 //!    once** — P is not the writer and never becomes one — sleeping between
-//!    tries through the worker's wait door (`bt_platform::wait::sleep_within`),
-//!    within the same window. Still held when the window runs out, or the
+//!    tries on the same clock (the worker's wait door,
+//!    `bt_platform::wait::sleep_within`, in the product), within the same
+//!    window. Still held when the window runs out, or the
 //!    claim cannot be asked about at all → [`Event::OldStayed`]: `Abandoned`,
 //!    and the transaction's folder and journal are cleared. Nothing moved.
 //! 2. **Arm** (M3 → M4): the LaunchAgent plist for the rescue executable with
@@ -166,8 +168,8 @@ use bt_platform::{HostPlatform, launch_agent};
 use crate::cli;
 use crate::update_adapter::Layouts;
 use crate::update_apply::{
-    Ahead, BeforeDeciding, Deferral, ExitGuard, Leave, Recording, TrialClock, WaitClock,
-    WaitWithin, WallClock, Watch, Watched, Window, stop_trial, trial_runs,
+    Ahead, BeforeDeciding, Deferral, ExitGuard, Leave, LockWaitOn, Recording, TrialClock,
+    WaitClock, WaitWithin, WallClock, Watch, Watched, Window, stop_trial, trial_runs,
 };
 
 /// **What H.3 answered before `decide`** (U-37).
@@ -316,9 +318,13 @@ pub(crate) struct Road {
     /// (`update_apply::note_unkept_after_trial_decision`) — [`WallClock`] in
     /// the product (T-UPDATE-APPLY-FLIP-HOLD-FLAKE).
     pub(crate) decision_clock: Arc<dyn WaitClock>,
-    /// **The clock the waits for O pause on** — the window election's asks
-    /// again and the data directory's claim (`update_apply::WaitClock`) —
-    /// [`WallClock`] in the product.
+    /// **The clock the waits for O are read and paused on** — the road's one
+    /// deadline ([`Limits::old_within`]), the window election's asks again,
+    /// the transaction lock, the data directory's claim, the admission and
+    /// the process check before the exchange; recovery's lock, its wait for
+    /// an election in flight, and a rollback's admission
+    /// (`update_apply::WaitClock`, T-WINDOWS-HANDOVER-ORDER-A-HELD-LOCK-WAIT)
+    /// — [`WallClock`] in the product.
     pub(crate) wait_clock: Arc<dyn WaitClock>,
     /// **The clock a trial asked to quit, then ended, is waited out on** — the
     /// quit grace and the end window of [`stop_trial`] — [`WallClock`] in the
@@ -764,7 +770,7 @@ fn apply_electing(
     world: &mut impl World,
     elect: impl FnOnce(&WorkerCtx, Instant) -> Window,
 ) -> Ended {
-    let window = Instant::now() + road.limits.old_within;
+    let window = road.wait_clock.now() + road.limits.old_within;
     // Every way out of the road, a panic included, leaves through the guard
     // (U-34). It owes a window only once the election is won (0.4.8 E2):
     // before that the duty is O's, and an applier that ends or panics there
@@ -898,12 +904,14 @@ pub(crate) fn recover(
         road,
         worker,
         Asker::Rescue,
-        Instant::now() + road.limits.old_within,
+        road.wait_clock.now() + road.limits.old_within,
     ) {
         Ok((mut txn, bundles)) => {
             let places = bundles.places();
             let mut ended = if txn.phase() == PhaseKind::Handoff {
-                match crate::update_apply::window_holder(
+                match crate::update_apply::window_holder_on(
+                    worker,
+                    &*road.wait_clock,
                     &road.home,
                     road.txn,
                     crate::update_apply::this_process(),
@@ -1162,10 +1170,14 @@ impl<'a> Txn<'a> {
                 "the home is not a macOS bundle's".to_owned(),
             ));
         };
-        let lock = match install_txn::hold_within(
+        let lock = match install_txn::hold_by(
             &road.home.lock(),
             Hold::Exclusive,
-            until.saturating_duration_since(Instant::now()),
+            until,
+            &LockWaitOn {
+                clock: &*road.wait_clock,
+                worker,
+            },
         ) {
             Ok(Some(held)) => held,
             Ok(None) => return Err(Ended::LockHeld),
@@ -1383,19 +1395,26 @@ impl<'a> Txn<'a> {
         window: Instant,
         world: &mut impl World,
     ) -> Result<Ended, String> {
-        let left = window.saturating_duration_since(Instant::now());
-        let admission =
-            match install_txn::hold_within(&self.road.home.admission(), Hold::Exclusive, left) {
-                Ok(Some(held)) => held,
-                Ok(None) => {
-                    world.say("BT_UPDATE_APPLY a running copy holds the admission");
-                    return self.revert(Actor::Applier);
-                }
-                Err(failure) => {
-                    world.say(&format!("BT_UPDATE_APPLY the admission: {failure}"));
-                    return self.revert(Actor::Applier);
-                }
-            };
+        let clock = LockWaitOn {
+            clock: &*self.road.wait_clock,
+            worker,
+        };
+        let admission = match install_txn::hold_by(
+            &self.road.home.admission(),
+            Hold::Exclusive,
+            window,
+            &clock,
+        ) {
+            Ok(Some(held)) => held,
+            Ok(None) => {
+                world.say("BT_UPDATE_APPLY a running copy holds the admission");
+                return self.revert(Actor::Applier);
+            }
+            Err(failure) => {
+                world.say(&format!("BT_UPDATE_APPLY the admission: {failure}"));
+                return self.revert(Actor::Applier);
+            }
+        };
         // A process of the installed executable that is leaving — a person's
         // start that hands itself to the recovery build is gone within moments
         // — is waited for within the window, as the Windows road waits for a
@@ -1406,7 +1425,7 @@ impl<'a> Txn<'a> {
         let let_go = crate::update_apply::until_let_go(
             window,
             self.road.limits.poll,
-            &mut Instant::now,
+            &mut || self.road.wait_clock.now(),
             &mut || {
                 let running = install_flip::running_from(program)
                     .map_err(|error| format!("the process list: {error}"))?;
@@ -1423,7 +1442,7 @@ impl<'a> Txn<'a> {
                 }
                 Ok(held)
             },
-            &mut |pause| bt_platform::wait::sleep_within(worker, pause),
+            &mut |pause| self.road.wait_clock.pause(worker, pause),
         );
         if let Err(why) = let_go {
             world.say(&format!("BT_UPDATE_APPLY {why}"));
@@ -1974,10 +1993,14 @@ impl<'a> Txn<'a> {
                     }
                 }
                 Action::RollBack(Restore::SwapBack) => {
-                    let admission = match install_txn::hold_within(
+                    let admission = match install_txn::hold_by(
                         &self.road.home.admission(),
                         Hold::Exclusive,
-                        self.road.limits.old_within,
+                        self.road.wait_clock.now() + self.road.limits.old_within,
+                        &LockWaitOn {
+                            clock: &*self.road.wait_clock,
+                            worker: self.worker,
+                        },
                     ) {
                         Ok(Some(held)) => held,
                         Ok(None) => {
@@ -2234,7 +2257,7 @@ fn wait_for_the_claim(worker: &WorkerCtx, road: &Road, until: Instant) -> Result
                 bt_platform::instance::ClaimRefusal::Held
                 | bt_platform::instance::ClaimRefusal::Sweeping,
             ) => {
-                let left = until.saturating_duration_since(Instant::now());
+                let left = until.saturating_duration_since(road.wait_clock.now());
                 if left.is_zero() {
                     return Err("still held at the end of the wait".to_owned());
                 }

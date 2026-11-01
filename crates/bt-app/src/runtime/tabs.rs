@@ -5307,9 +5307,10 @@ mod life_tests;
 #[cfg(test)]
 mod birth_death_tests {
     use super::*;
+    use crate::lane::Hold;
     use crate::test_support;
     use std::num::NonZeroU16;
-    use std::sync::{Arc, Barrier, mpsc};
+    use std::sync::{Arc, mpsc};
 
     fn grid(columns: u16, rows: u16) -> crate::GridSize {
         crate::GridSize {
@@ -5328,6 +5329,11 @@ mod birth_death_tests {
         )
     }
 
+    /// Waits for the birth's wake without the suite's patience: the fresh birth below starts a
+    /// real default shell, which can take longer than that to be born (plan row 167). The wait
+    /// holds nothing the test lets go, so it is not a held door: the suite's watchdog (row 113)
+    /// ends a birth that never wakes red by name, and the test shell's own setup gives up at
+    /// 180 s.
     fn wait_for_answer(shell: &pty_door::ShellBirth, heard: &mpsc::Receiver<()>) {
         while !shell.answered() {
             heard.recv().expect("a birth publishes before it wakes");
@@ -5403,11 +5409,12 @@ mod birth_death_tests {
         let born_grid = leaf.session.conpty_grid;
         let (wake, heard) = waking();
         let worker_wake = Arc::clone(&wake);
-        let open = Arc::new(Barrier::new(2));
+        let open = Arc::new(Hold::default());
+        open.hold();
         let worker_open = Arc::clone(&open);
         let shell = pty_door::request(
             move |_| {
-                worker_open.wait();
+                worker_open.pass();
                 fallback.spawn(
                     born_grid.columns,
                     born_grid.rows,
@@ -5443,7 +5450,7 @@ mod birth_death_tests {
             "the pending fallback owns the released size"
         );
 
-        open.wait();
+        open.release();
         wait_for_answer(
             &leaf
                 .session
@@ -5543,12 +5550,13 @@ mod birth_death_tests {
             ..crate::LeafSeed::default()
         };
         let (wake, heard) = waking();
-        let open = Arc::new(Barrier::new(2));
+        let open = Arc::new(Hold::default());
+        open.hold();
         let worker_open = Arc::clone(&open);
         let (kept, hygiene) = mpsc::channel();
         let shell = pty_door::request(
             move |_| {
-                worker_open.wait();
+                worker_open.pass();
                 bt_pty::test_shell::TestShell::spawn_default(bt_pty::PtySize::cells(
                     born_grid.columns,
                     born_grid.rows,
@@ -5567,7 +5575,7 @@ mod birth_death_tests {
         let resized_grid = grid(57, 9);
         let resized_physical = winit::dpi::PhysicalSize::new(901, 407);
         resize_pending_shell(&mut leaf.session, resized_grid, resized_physical);
-        open.wait();
+        open.release();
         let landing = match leaf.session.life.birth().map(|birth| &birth.waiting) {
             Some(crate::BirthWait::Shell(landing)) => landing,
             _ => panic!("the fresh shell is pending"),
