@@ -89,8 +89,6 @@ use crate::update_job::{
     Driver, MACOS_ARCHITECTURE, NotEligible, Offer, Poster, Refused, SharedTransport, Step, Stop,
     Transport, Unsupported,
 };
-#[cfg(test)]
-pub(crate) use crate::update_prepare::{AtLaunch, at_launch, sum_for};
 use crate::update_prepare::{
     WORKER, abandon, discard, fetching, finish, journal_failed, journal_stop, matches_its_sum,
 };
@@ -212,27 +210,6 @@ impl MacPrepare {
                 layouts: own_layouts(),
             }),
             None => Box::new(Unsupported),
-        }
-    }
-
-    /// A driver for `bundle`, with `tools` and `channel` — a test's.
-    #[cfg(test)]
-    pub(crate) fn with(bundle: PathBuf, tools: Arc<dyn Tools>, channel: Option<Channel>) -> Self {
-        Self {
-            bundle,
-            tools,
-            channel,
-            layouts: own_layouts(),
-        }
-    }
-
-    /// This driver with `ours` in place of the road's own layout — a test's
-    /// fake layout, which records or refuses (U-41a1).
-    #[cfg(test)]
-    pub(crate) fn laid_out(self, ours: Arc<dyn PreparePoint>) -> Self {
-        Self {
-            layouts: Layouts::of(ours),
-            ..self
         }
     }
 }

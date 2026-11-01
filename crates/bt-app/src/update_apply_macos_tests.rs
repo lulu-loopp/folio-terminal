@@ -24,10 +24,13 @@
 use super::*;
 
 use std::collections::VecDeque;
+#[cfg(target_os = "macos")]
 use std::ffi::OsStr;
 #[cfg(target_os = "macos")]
 use std::io::{BufRead, BufReader, Read, Write};
-use std::process::{Child, ExitStatus, Stdio};
+use std::process::Child;
+#[cfg(target_os = "macos")]
+use std::process::{ExitStatus, Stdio};
 #[cfg(target_os = "macos")]
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -41,20 +44,22 @@ use crate::update_apply::{CountedClock, now_ms};
 
 #[cfg(target_os = "macos")]
 use crate::update_prepare_macos::tests::fixture::{
-    HOMEBREW_MARKER, fake_brew, homebrew_install, version_of,
+    HOMEBREW_MARKER, fake_brew, homebrew_install, run, sign, version_of,
 };
-use crate::update_prepare_macos::tests::fixture::{Scratch, on_macos, run, sign};
+use crate::update_prepare_macos::tests::fixture::{Scratch, on_macos};
 use crate::update_txn::{Body, Cdhash, Outcome, STUCK_ATTEMPT_LIMIT};
 #[cfg(target_os = "macos")]
 use crate::update_txn::{Class, Header, HeaderOutcome, StartAction, TrialSight};
 
 /// The synthetic bundles' identifier.
+#[cfg(target_os = "macos")]
 const IDENTIFIER: &str = "io.github.lulu-loopp.folio.u28-test";
 
 /// The main executable's place in every synthetic bundle.
 const EXE: &str = "Contents/MacOS/folio";
 
 /// The synthetic executable (see the module header).
+#[cfg(target_os = "macos")]
 const SOURCE: &str = "#include <fcntl.h>\n#include <signal.h>\n#include <stdio.h>\n\
 #include <string.h>\n#include <unistd.h>\n\
 static const char *mark;\n\
@@ -77,6 +82,7 @@ int main(int argc, char **argv) {\n\
 }\n";
 
 /// **A signed synthetic bundle** `<parent>/<name>` of `version`.
+#[cfg(target_os = "macos")]
 fn bundle(parent: &Path, name: &str, version: &str) -> PathBuf {
     let bundle = parent.join(name);
     let macos = bundle.join("Contents").join("MacOS");
@@ -119,6 +125,7 @@ fn bundle(parent: &Path, name: &str, version: &str) -> PathBuf {
 /// trial LaunchServices started does), its exit status kept, and every one
 /// still unreaped ended by its recorded pid when the test is over, pass or
 /// fail.
+#[cfg(target_os = "macos")]
 #[derive(Clone, Default)]
 struct Children {
     started: Arc<Mutex<Vec<u32>>>,
@@ -126,6 +133,7 @@ struct Children {
     pids: Arc<Mutex<Vec<u32>>>,
 }
 
+#[cfg(target_os = "macos")]
 impl Children {
     /// Start `bundle`'s executable with one argument: it stays up.
     fn start(&self, bundle: &Path, word: &str) -> u32 {
@@ -155,7 +163,6 @@ impl Children {
     /// **Start `bundle`'s executable as the trial a launch was asked for**:
     /// with the launch's own words, as LaunchServices hands them on — the
     /// words its holder knows it by (U-40).
-    #[cfg(target_os = "macos")]
     fn start_trial(&self, bundle: &Path, args: &[OsString]) -> u32 {
         let words: Vec<&OsStr> = args.iter().map(OsString::as_os_str).collect();
         self.start_with(bundle, &words)
@@ -194,12 +201,12 @@ impl Children {
     }
 
     /// A process this test caused to start without a handle (through `open`).
-    #[cfg(target_os = "macos")]
     fn record(&self, pid: u32) {
         self.pids.lock().unwrap().push(pid);
     }
 }
 
+#[cfg(target_os = "macos")]
 impl Drop for Children {
     fn drop(&mut self) {
         if Arc::strong_count(&self.started) > 1 {
@@ -381,6 +388,7 @@ struct Install {
 }
 
 impl Install {
+    #[cfg(target_os = "macos")]
     fn new(tag: &str) -> Self {
         let scratch = Scratch::new(&format!("u28-{tag}"));
         let root = scratch.root.clone();
@@ -538,6 +546,7 @@ impl Install {
         }
     }
 
+    #[cfg(target_os = "macos")]
     fn stage(&self) -> PathBuf {
         self.home.stage_bundle(self.txn).unwrap()
     }
@@ -548,6 +557,7 @@ impl Install {
 
     /// The receipt the trial writes, as `update_trial` writes it: the real
     /// encoder, created durably and never over an existing one.
+    #[cfg(target_os = "macos")]
     fn receipt(&self, nonce: Nonce, carried: Nonce, pid: u32) {
         let receipt = Receipt {
             txn: self.txn,
@@ -625,6 +635,7 @@ fn limits(old_within_ms: u64, trial_within_ms: u64) -> Limits {
 }
 
 /// The rescue build as recovery on its own worker, over `road`.
+#[cfg(target_os = "macos")]
 fn recovered(road: Road, mut hands: Fake) -> (Option<Ended>, Fake) {
     on_a_worker(move |worker| {
         let ended = recover(worker, &road, &mut hands, None).ended;
@@ -751,6 +762,7 @@ fn a_healthy_trial(install: &Install, children: &Children, carried: Option<Nonce
 /// Run the product watch beside a synthetic live trial. Once it reads
 /// `Committed`, it removes the receipt to acknowledge that its final mark
 /// decision is complete, just as the real trial does.
+#[cfg(target_os = "macos")]
 fn watch_receipt_decision(home: Home, txn: TxnId, nonce: Nonce) {
     let journal = home.journal();
     let mark = home.unkept(txn);
@@ -2730,6 +2742,7 @@ fn start_then_recover_while_held<H>(
 }
 
 /// The recovery door's run on a worker, as [`start_then_recover_on`] hands it.
+#[cfg(target_os = "macos")]
 type Recovery = Box<dyn FnOnce(&WorkerCtx) -> (i32, Fake) + Send>;
 
 /// [`start_then_recover`], with the recovery door's run on a worker handed to
@@ -4257,6 +4270,7 @@ fn a_launch_ended_by_a_signal_is_unknown_not_over() {
 }
 
 /// The words of a command line.
+#[cfg(target_os = "macos")]
 fn args(words: &[&str]) -> Vec<OsString> {
     words.iter().map(OsString::from).collect()
 }

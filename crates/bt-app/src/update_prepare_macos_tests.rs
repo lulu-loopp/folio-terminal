@@ -15,11 +15,14 @@
 
 use super::*;
 
+#[cfg(target_os = "macos")]
 use std::ffi::OsStr;
+#[cfg(target_os = "macos")]
 use std::sync::Mutex;
 
 #[cfg(target_os = "macos")]
 use bt_persist::UpdateCheckV1;
+#[cfg(target_os = "macos")]
 use bt_platform::HostPlatform;
 
 #[cfg(target_os = "macos")]
@@ -30,6 +33,34 @@ use crate::update_txn::{Actor, Effect, PhaseKind, may};
 #[cfg(target_os = "macos")]
 use crate::update_txn::{HeaderOutcome, Phase};
 
+use crate::update_prepare::sum_for;
+#[cfg(target_os = "macos")]
+use crate::update_prepare::{AtLaunch, at_launch};
+
+/// The test's own ways to make a driver (macOS only: their only users are the
+/// tests that press one).
+#[cfg(target_os = "macos")]
+impl MacPrepare {
+    /// A driver for `bundle`, with `tools` and `channel` — a test's.
+    pub(crate) fn with(bundle: PathBuf, tools: Arc<dyn Tools>, channel: Option<Channel>) -> Self {
+        Self {
+            bundle,
+            tools,
+            channel,
+            layouts: own_layouts(),
+        }
+    }
+
+    /// This driver with `ours` in place of the road's own layout — a test's
+    /// fake layout, which records or refuses (U-41a1).
+    pub(crate) fn laid_out(self, ours: Arc<dyn PreparePoint>) -> Self {
+        Self {
+            layouts: Layouts::of(ours),
+            ..self
+        }
+    }
+}
+
 /// Real images, bundles and mounts, shared with `update_startup`'s tests.
 pub(crate) mod fixture {
     use std::ffi::OsStr;
@@ -37,10 +68,12 @@ pub(crate) mod fixture {
     use std::process::Output;
 
     /// The synthetic bundles' identifier.
+    #[cfg(target_os = "macos")]
     pub(crate) const IDENTIFIER: &str = "io.github.lulu-loopp.folio.u27-test";
 
     /// The requirement a test holds a synthetic bundle to, standing for the
     /// running bundle's designated requirement.
+    #[cfg(target_os = "macos")]
     pub(crate) const REQUIREMENT: &str = "identifier \"io.github.lulu-loopp.folio.u27-test\"";
 
     /// Whether this is the platform these tests run their real half on.
@@ -57,6 +90,7 @@ pub(crate) mod fixture {
     }
 
     /// Run `program`, which must succeed.
+    #[cfg(target_os = "macos")]
     pub(crate) fn run(program: &str, arguments: &[&OsStr]) -> Output {
         let output = answer(program, arguments);
         assert!(
@@ -127,6 +161,7 @@ pub(crate) mod fixture {
 
     /// **A signed synthetic bundle** `<parent>/<name>` of `version`, whose one
     /// resource says `notice`.
+    #[cfg(target_os = "macos")]
     pub(crate) fn bundle(parent: &Path, name: &str, version: &str, notice: &str) -> PathBuf {
         bundle_needing(
             parent,
@@ -138,6 +173,7 @@ pub(crate) mod fixture {
     }
 
     /// [`bundle`], whose sealed `FolioMinUpdater` is `needs` (U-42c).
+    #[cfg(target_os = "macos")]
     pub(crate) fn bundle_needing(
         parent: &Path,
         name: &str,
@@ -151,6 +187,7 @@ pub(crate) mod fixture {
 
     /// [`bundle_needing`], whose sealed `FolioUpdateProtocol` is `protocol`,
     /// or which seals none (E1-a2).
+    #[cfg(target_os = "macos")]
     pub(crate) fn bundle_sealing(
         parent: &Path,
         name: &str,
@@ -206,6 +243,7 @@ pub(crate) mod fixture {
     }
 
     /// Ad-hoc sign `bundle` again.
+    #[cfg(target_os = "macos")]
     pub(crate) fn sign(bundle: &Path) {
         run(
             "/usr/bin/codesign",
@@ -237,6 +275,7 @@ pub(crate) mod fixture {
     }
 
     /// **A compressed read-only image of `folder`** at `image`.
+    #[cfg(target_os = "macos")]
     pub(crate) fn image_of(folder: &Path, image: &Path) -> PathBuf {
         run(
             "/usr/bin/hdiutil",
@@ -301,6 +340,7 @@ pub(crate) mod fixture {
     }
 
     /// Every file under `root`, with its bytes, sorted by path.
+    #[cfg(target_os = "macos")]
     pub(crate) fn listing(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
         fn walk(base: &Path, at: &Path, out: &mut Vec<(PathBuf, Vec<u8>)>) {
             for entry in std::fs::read_dir(at).unwrap() {
@@ -322,6 +362,7 @@ pub(crate) mod fixture {
     }
 
     /// The marker the cask's `postflight_steps` write (`packaging/homebrew/folio.rb`).
+    #[cfg(target_os = "macos")]
     pub(crate) const HOMEBREW_MARKER: &str =
         r#"{"v":1,"manager":"homebrew","uninstall_hook":false}"#;
 
@@ -371,6 +412,7 @@ pub(crate) mod fixture {
     }
 
     /// The cask's two marks on `bundle`, the second naming `caskroom`.
+    #[cfg(target_os = "macos")]
     pub(crate) fn mark(bundle: &Path, caskroom: &Path) {
         for (name, value) in [
             (
@@ -418,12 +460,11 @@ pub(crate) mod fixture {
     }
 }
 
-use fixture::{
-    HOMEBREW_MARKER, Scratch, answer, bundle, bundle_needing, bundle_sealing, image_of, listing,
-    mark, mounted, on_macos,
-};
 #[cfg(target_os = "macos")]
-use fixture::{attach, blank_image, fake_brew, homebrew_install, record_version};
+use fixture::{
+    HOMEBREW_MARKER, Scratch, answer, attach, blank_image, bundle, bundle_needing, bundle_sealing,
+    fake_brew, homebrew_install, image_of, listing, mark, mounted, on_macos, record_version,
+};
 
 /// The offer every test presses: `v0.4.7`, for macOS.
 #[cfg(target_os = "macos")]
@@ -452,6 +493,7 @@ fn on_a_worker<T: Send + 'static>(body: impl FnOnce(&WorkerCtx) -> T + Send + 's
 /// --deep --all-architectures -R=<requirement>`, the real `ditto` and the real
 /// rescue clone, and download folders under the test's own folder — each
 /// able to be told to fail, or (the copy) to alter what it made.
+#[cfg(target_os = "macos")]
 struct TestTools {
     requirement: String,
     downloads: PathBuf,
@@ -472,6 +514,7 @@ struct TestTools {
     unlistable: bool,
 }
 
+#[cfg(target_os = "macos")]
 impl TestTools {
     fn new(scratch: &Scratch) -> Self {
         Self {
@@ -489,12 +532,12 @@ impl TestTools {
     }
 
     /// The download folders it made.
-    #[cfg(target_os = "macos")]
     fn folders(&self) -> Vec<PathBuf> {
         self.made.lock().unwrap().clone()
     }
 }
 
+#[cfg(target_os = "macos")]
 impl Tools for TestTools {
     fn verify(&self, _worker: &WorkerCtx, bundle: &Path) -> Result<(), String> {
         let requirement = format!("-R={}", self.requirement);
@@ -639,6 +682,7 @@ fn sums_for(image: &Path) -> String {
 /// **A running bundle and a release**: `<scratch>/apps/<running>` at 0.4.6,
 /// and an image whose `Folio.app` is 0.4.7 (`dress` may change it, re-signed
 /// after), with its checksum document.
+#[cfg(target_os = "macos")]
 struct Scene {
     scratch: Scratch,
     apps: PathBuf,
@@ -646,6 +690,7 @@ struct Scene {
     image: PathBuf,
 }
 
+#[cfg(target_os = "macos")]
 impl Scene {
     fn new(tag: &str, running: &str, dress: impl FnOnce(&Path)) -> Self {
         let scratch = Scratch::new(tag);
@@ -665,7 +710,6 @@ impl Scene {
         }
     }
 
-    #[cfg(target_os = "macos")]
     fn release(&self) -> Arc<Release> {
         Arc::new(Release {
             image: self.image.clone(),
@@ -675,7 +719,6 @@ impl Scene {
         })
     }
 
-    #[cfg(target_os = "macos")]
     fn home(&self) -> Home {
         Home::for_bundle(&self.running).expect("an .app with a parent")
     }
