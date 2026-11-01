@@ -9,7 +9,8 @@
 //!   `std::net`, `std::process`, `std::os::{windows, unix}::fs` or the `std::io` read and write
 //!   traits and handles, a `Path`'s question to the disk (`is_file`, `exists`, `metadata`, …), or
 //!   `std::env::set_current_dir` (C1 names the file system; ruling Q3), but never a method of a
-//!   `Metadata`, `FileType` or `Permissions` value, which reads the value ([`PURE_FS_VALUES`]); a
+//!   `Metadata`, `FileType` or `Permissions` value, which reads the value ([`PURE_FS_VALUES`]),
+//!   nor of a collected child's `ExitStatus` or `Output` ([`PURE_PROCESS_VALUES`]); a
 //!   function of the `windows` crate's file-system, registry and I/O modules, or a shell call that
 //!   starts a process or opens a file (the coordinator's ruling extending Q3,
 //!   [`WIN32_EFFECT_MODULES`], [`EFFECT_FUNCTIONS`]); a first-party `# vocabulary` entry reached;
@@ -199,6 +200,19 @@ const PURE_FS_VALUES: &[&str] = &[
     "std::os::unix::fs::PermissionsExt::",
 ];
 
+/// **The standard process values whose methods read only the value** (row 116,
+/// T-EFFECT-GUARD-EXITSTATUS-READ, 2026-10-31, ruled as D2 above): an `ExitStatus` or an `Output`
+/// is what a wait already collected, and every method of it reads or builds that value, never the
+/// child or the OS: `code`, `success`, `exit_ok`, the platform `ExitStatusExt` methods (`signal`,
+/// `core_dumped`, `stopped_signal`, `continued`, `into_raw`, `from_raw`, which the call graph writes
+/// on the type, `std::process::ExitStatus::from_raw`), and `Output`'s derived traits; its fields
+/// are no calls. Under [`EFFECT_NAMESPACES`]' `std::process::` they are no effect; the wait that
+/// collected the value (`Child::wait`, `Child::try_wait`, `Child::wait_with_output`,
+/// `Command::output`, `Command::status`) still is, as is every other `std::process` callee.
+/// `ExitStatusError` and `ExitCode` are out of this rule's scope and stay effects (the prefixes end
+/// in `::`, so neither matches).
+const PURE_PROCESS_VALUES: &[&str] = &["std::process::ExitStatus::", "std::process::Output::"];
+
 /// The `windows` crate's modules of the file system, the registry and file I/O (the coordinator's
 /// ruling extending Q3, the modules the tree uses): a function written directly in one
 /// (`…::FileSystem::CreateFileW`, `…::Registry::RegSetValueExW`) is an effect. Its types and
@@ -387,7 +401,10 @@ fn is_effect(rules: &Rules, path: &str) -> bool {
         || (EFFECT_NAMESPACES
             .iter()
             .any(|namespace| path.starts_with(namespace))
-            && !PURE_FS_VALUES.iter().any(|value| path.starts_with(value)))
+            && !PURE_FS_VALUES
+                .iter()
+                .chain(PURE_PROCESS_VALUES)
+                .any(|value| path.starts_with(value)))
         || path.rsplit_once("::").is_some_and(|(module, name)| {
             WIN32_EFFECT_MODULES.contains(&module) && name.chars().any(|c| c.is_ascii_lowercase())
         })
@@ -1379,6 +1396,27 @@ fn a_file_system_values_accessor_is_no_effect_and_its_question_is() {
     assert_eq!(
         judge_fixture("submit_reads_a_value"),
         ["Effect std::fs::metadata"]
+    );
+}
+
+/// RED (row 116, T-EFFECT-GUARD-EXITSTATUS-READ) — **a collected child's status and output are
+/// values; the wait that collected them is the effect**: `ExitStatus::code`, `ExitStatus::success`,
+/// `ExitStatus::from_raw` and `Output::clone` pass, `Child::wait` and `Child::try_wait` fail, and
+/// so does `ExitStatusError::code`, which the rule leaves out of its scope (review N2).
+///
+/// MUTATIONS: drop the [`PURE_PROCESS_VALUES`] exception from [`is_effect`] — the four are `Effect`
+/// findings; drop the trailing `::` of `"std::process::ExitStatus::"` — `ExitStatusError::code`
+/// passes.
+#[test]
+fn a_child_status_read_is_no_effect_and_its_wait_is() {
+    assert_eq!(judge_fixture("submit_reads_a_status"), Vec::<String>::new());
+    assert_eq!(
+        judge_fixture("submit_waits_for_a_child"),
+        [
+            "Effect std::process::Child::try_wait",
+            "Effect std::process::Child::wait",
+            "Effect std::process::ExitStatusError::code",
+        ]
     );
 }
 
