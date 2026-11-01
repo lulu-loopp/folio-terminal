@@ -73,6 +73,7 @@ use std::ffi::OsString;
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bt_platform::admission::WorkerCtx;
@@ -344,30 +345,57 @@ pub(crate) fn write_journal(
             within,
             clock: &WallClock,
         },
-        &|| true,
-        |failure| failure.to_string(),
+        None,
+        Spelling::Whole,
         path,
         bytes,
         say,
     )
 }
 
-/// **[`write_journal`], on `wait`'s clock, asked again only while
-/// `asks_again` answers yes, and every failure spelled by `spell`**
+/// **How a journal write's failure is said** ([`write_journal_on`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Spelling {
+    /// The install door's whole sentence, its path included — the applier's
+    /// log ([`write_journal`]).
+    Whole,
+    /// [`failure_words`]: no path — `diagnostics.log`, the Prepare's.
+    WithoutPath,
+}
+
+impl Spelling {
+    fn of(self, failure: &install_txn::Failure) -> String {
+        match self {
+            Self::Whole => failure.to_string(),
+            Self::WithoutPath => failure_words(failure),
+        }
+    }
+}
+
+/// **A failure of the install door in the words `diagnostics.log` gets**: the
+/// door's step and the operating system's error, never the path (it names
+/// the account's folders) — `install_txn rename: Access is denied. (os error
+/// 5)` (T-UPDATE-PREPARE-REVALIDATION-RESUME-FLAKE).
+pub(crate) fn failure_words(failure: &install_txn::Failure) -> String {
+    format!("install_txn {}: {}", failure.stage.name(), failure.error)
+}
+
+/// **[`write_journal`], on `wait`'s clock, asked again only while `cancelled`
+/// (when there is one) is not set, and every failure said in `spelling`**
 /// (T-UPDATE-PREPARE-REVALIDATION-RESUME-FLAKE): the Prepare's journal
 /// writes ride a hold the way the applier's do, read and paused on the clock
 /// its road was given ([`WallClock`] in the product), stop asking once the
-/// job has cancelled the transaction, and say each failure without its path
-/// (`update_prepare::failure_words`). [`write_journal`] is this with the
-/// wall clock, no cancel, and a failure's whole sentence.
+/// job has cancelled the transaction (its `Poster`'s flag), and say each
+/// failure without its path. [`write_journal`] is this with the wall clock,
+/// no cancel, and a failure's whole sentence.
 ///
 /// # Errors
-/// As [`write_journal`]; a hold still there when `asks_again` said no is
+/// As [`write_journal`]; a hold still there when the cancel was seen is
 /// answered as one that outlasted the window.
 pub(crate) fn write_journal_on(
     wait: WaitWithin<'_>,
-    asks_again: &dyn Fn() -> bool,
-    spell: fn(&install_txn::Failure) -> String,
+    cancelled: Option<&AtomicBool>,
+    spelling: Spelling,
     path: &Path,
     bytes: &[u8],
     say: &mut dyn FnMut(&str),
@@ -388,20 +416,20 @@ pub(crate) fn write_journal_on(
         || {
             write.ask().map_err(|failure| {
                 held.set(held_refusal(&failure));
-                spell(&failure)
+                spelling.of(&failure)
             })
         },
         |_| held.take(),
         &mut || clock.now().saturating_duration_since(began),
         &mut |pause| {
             clock.pause(worker, pause);
-            asks_again()
+            !cancelled.is_some_and(|flag| flag.load(Ordering::SeqCst))
         },
         say,
     );
     given_up_said(
         written,
-        || write.give_up().map_err(|failure| spell(&failure)),
+        || write.give_up().map_err(|failure| spelling.of(&failure)),
         say,
     )
 }

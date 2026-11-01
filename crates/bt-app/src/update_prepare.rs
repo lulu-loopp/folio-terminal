@@ -45,7 +45,7 @@ use bt_platform::HostPlatform;
 
 use crate::install_channel::Channel;
 use crate::update_apply::{
-    JOURNAL_HELD_WITHIN, WaitClock, WaitWithin, WallClock, write_journal_on,
+    JOURNAL_HELD_WITHIN, Spelling, WaitClock, WaitWithin, WallClock, write_journal_on,
 };
 use crate::update_handoff::Staged;
 use crate::update_job::{Bytes, Fetching, Landed, Offer, Poster, Step, Stop};
@@ -151,14 +151,6 @@ pub(crate) fn matches_its_sum(file: &Path, sums: &Path, asset: &str) -> Result<(
 
 // ── the journal's writes ────────────────────────────────────────────────────
 
-/// **A failure of the install door in the words `diagnostics.log` gets**: the
-/// door's step and the operating system's error, never the path (it names
-/// the account's folders) — `install_txn rename: Access is denied. (os error
-/// 5)` (T-UPDATE-PREPARE-REVALIDATION-RESUME-FLAKE).
-pub(crate) fn failure_words(failure: &install_txn::Failure) -> String {
-    format!("install_txn {}: {}", failure.stage.name(), failure.error)
-}
-
 /// **One line of the update job's in `diagnostics.log`**.
 pub(crate) fn note(line: &str) {
     crate::diagnostics::note(&format!("Folio: update job — {line}"));
@@ -175,7 +167,7 @@ pub(crate) fn note(line: &str) {
 /// abandonment ([`abandon_on`]).
 ///
 /// # Errors
-/// The last failure, in [`failure_words`].
+/// The last failure, in `update_apply::failure_words`.
 fn journal_written_by_the_owner(
     worker: &WorkerCtx,
     clock: &dyn WaitClock,
@@ -188,8 +180,8 @@ fn journal_written_by_the_owner(
             within: JOURNAL_HELD_WITHIN,
             clock,
         },
-        &|| true,
-        failure_words,
+        None,
+        Spelling::WithoutPath,
         &home.journal(),
         &journal.encode(),
         &mut |line| note(line),

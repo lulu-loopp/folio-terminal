@@ -97,7 +97,8 @@ use bt_winres::release_manifest::{self, Manifest};
 use crate::install_channel::Channel;
 use crate::update_adapter::Layouts;
 use crate::update_apply::{
-    JOURNAL_HELD_WITHIN, WaitClock, WaitWithin, WallClock, write_journal_on,
+    JOURNAL_HELD_WITHIN, Spelling, WaitClock, WaitWithin, WallClock, failure_words,
+    write_journal_on,
 };
 use crate::update_archive::{self, Deadline, EmbeddedManifest, Expected, ManifestSource, Reason};
 use crate::update_handoff::Staged;
@@ -106,7 +107,7 @@ use crate::update_job::{
     Unsupported,
 };
 use crate::update_prepare::{
-    WORKER, abandon_on, digest_of, discard, failure_words, fetching, finish, matches_its_sum, note,
+    WORKER, abandon_on, digest_of, discard, fetching, finish, matches_its_sum, note,
 };
 use crate::update_txn::{
     Adapter, Digest, Event, Home, Inventories, Journal, Layout, Member, Place, TxnId,
@@ -455,10 +456,10 @@ fn prepare_on(worker: &WorkerCtx, road: &Road<'_>) -> Result<Staged, Stop> {
     // Step 2: the home, the lock, the journal at `Allocated`.
     let txn = road.offer.txn();
     let rescue = home.rescue_copy(txn, name).ok_or(Stop::NotWritable)?;
-    let rescue_text = rescue
-        .to_str()
-        .ok_or_else(|| journal_stop("the rescue copy's path is not Unicode"))?
-        .to_owned();
+    let Some(rescue_text) = rescue.to_str() else {
+        return Err(journal_stop("the rescue copy's path is not Unicode"));
+    };
+    let rescue_text = rescue_text.to_owned();
     match install_txn::durable_create_dir(home.root()) {
         Ok(()) => {}
         Err(failure) if failure.error.kind() == std::io::ErrorKind::AlreadyExists => {}
@@ -548,8 +549,8 @@ fn journal_written(
             within: JOURNAL_HELD_WITHIN,
             clock: road.clock,
         },
-        &|| !road.post.cancelled(),
-        failure_words,
+        Some(&road.post.cancel_flag()),
+        Spelling::WithoutPath,
         &home.journal(),
         &journal.encode(),
         &mut |line| note(line),
@@ -574,7 +575,7 @@ fn journal_stop(what: &str) -> Stop {
 }
 
 /// [`journal_stop`] for a failure of the install door, in
-/// [`failure_words`].
+/// `update_apply::failure_words`.
 fn journal_failed(what: &str, failure: &install_txn::Failure) -> Stop {
     journal_stop(&format!("{what}: {}", failure_words(failure)))
 }
@@ -587,8 +588,9 @@ fn acquire(
     running: &Running,
     rescue: &Path,
 ) -> Result<Inventories, Stop> {
-    let folders = Folders::of(home, road.offer.txn())
-        .ok_or_else(|| journal_stop("the transaction's set folder has no name"))?;
+    let Some(folders) = Folders::of(home, road.offer.txn()) else {
+        return Err(journal_stop("the transaction's set folder has no name"));
+    };
     for folder in [
         Some(folders.transaction.as_path()),
         Some(folders.download.as_path()),
@@ -596,7 +598,9 @@ fn acquire(
         Some(folders.set.as_path()),
         rescue.parent(),
     ] {
-        let folder = folder.ok_or_else(|| journal_stop("the rescue copy has no folder"))?;
+        let Some(folder) = folder else {
+            return Err(journal_stop("the rescue copy has no folder"));
+        };
         install_txn::durable_create_dir(folder)
             .map_err(|failure| journal_failed("a transaction folder was not created", &failure))?;
     }
@@ -653,10 +657,9 @@ fn acquire(
     road.go_on()?;
 
     // Step 8's inventories, measured under the lock.
-    let install = road
-        .exe
-        .parent()
-        .ok_or_else(|| journal_stop("the running executable has no folder"))?;
+    let Some(install) = road.exe.parent() else {
+        return Err(journal_stop("the running executable has no folder"));
+    };
     Ok(Inventories {
         old_shipped: running.shipped.clone(),
         old_present: present(install, &running.shipped, &new)?,
@@ -974,9 +977,11 @@ pub(crate) fn staged_as_verified(
     }
     let running = trust::identity_of(resume.exe, resume.policy)
         .map_err(|refusal| trust_refused("the running build", &refusal, Stop::Identity))?;
-    let set = home
-        .members_folder(journal.txn, Place::Set)
-        .ok_or_else(|| journal_stop("the staged transaction's set folder has no name"))?;
+    let Some(set) = home.members_folder(journal.txn, Place::Set) else {
+        return Err(journal_stop(
+            "the staged transaction's set folder has no name",
+        ));
+    };
     let staged_version = trust::identity_of(&set.join(EXECUTABLE), resume.policy)
         .map_err(|refusal| trust_refused(EXECUTABLE, &refusal, Stop::Identity))?
         .version;
@@ -986,9 +991,9 @@ pub(crate) fn staged_as_verified(
         &running.for_offer(staged_version),
         resume.policy,
     )?;
-    let rescue = home
-        .rescue_copy(journal.txn, name)
-        .ok_or_else(|| journal_stop("the staged rescue copy has no name"))?;
+    let Some(rescue) = home.rescue_copy(journal.txn, name) else {
+        return Err(journal_stop("the staged rescue copy has no name"));
+    };
     if !is(&rescue, old) {
         return Err(Stop::Clone);
     }
