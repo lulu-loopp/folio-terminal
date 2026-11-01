@@ -1123,11 +1123,23 @@ reads the count, so a door that waits is red, not a hang (the taskbar's held she
 read by its reading's return on a thread of its own, awaited within the suite's patience, the shell
 let go before the verdict). The cap frees holds, not locks: a door that waits while it keeps a
 product lock the held worker takes next still hangs — the program walk's admission keeps the lane's
-lock across the ask (`ProgramsLane::request`), and row 111's planted wait there hung. That, and a
+lock across the ask (`ProgramsLane::request`), and row 111's planted wait there hung. That ask is
+pinned apart from the lane's lock (`a_coalescing_ask_never_waits_for_its_worker`, row 133): its
+worker stands in a held hold while the three roads of `Coalescing::ask` taken while a run is out
+are taken on the test's thread, so a wait planted there that lets the lane's lock go is red at the
+cap (one that keeps that lock is the suite watchdog's, row 113). A worker held at a `Barrier`, at a
+channel or behind a lock a parked thread keeps is read the same way (row 133): the shell's birth
+worker, the log's writer and the update's fetch stand in a hold; the stalled sink's fill, the
+session writer that never answers and a contender held inside the election are read by their
+door's return on a thread of its own, the holder let go before the verdict; and the trace sink's
+lines are offered and its queue closed on the writer's own thread after another thread has taken
+the process `stderr` lock, so an offer, a close or a write that waits for that lock is red with the
+writer, and nothing is called under it on the test's thread. That program-walk lock, and a
 test-thread wait on something no gate or hold holds, are not read this way; wherever the suite runs
 through the suite watchdog (row 113, below), a hang of either kind ends the run red within 300 s of
 the test's start and names it (save the shapes that section says it cannot name). What such a
-verdict does not catch is a bounded wait, or a give-up that ignores its budget, shorter than the suite's patience.
+verdict does not catch is a bounded wait, or a give-up that ignores its budget, shorter than the
+suite's patience.
 
 2026-10-31 (T-FLOATING-VIDEO-DOUBLE-CLICK-TIMING, plan row 124): a double click is decided by
 the window's multi-click counters (`ImageClicks`, `PreviewTextClicks`) on the moment a press is
@@ -1171,6 +1183,21 @@ election's asks again and both platforms' waits for the claim pause on the road'
 wait for the transaction lock is reached as state (the election over: the mark names the
 applier and the election lock is free).
 
+2026-11-01 (T-LAUNCH-HANDOVER-BUDGET-ON-A-CLOCK): a kernel wait with a fixed bound in milliseconds is a
+product window as much as an `Instant` deadline is. TIMING-BOUND's census, which reads only a test's own
+body, sees neither; plan row 125's hand sweep found `Instant` deadlines (G13 among them) but not these. The launch wire's
+tests ran the client and the listener as two threads of one process, so the second launch's 2 s budget and
+the server's 250 ms steps were each a race against the other thread. Every wait for the other end, at both
+ends and on both platforms (the budget's reply read, and on Unix every frame; each server step; the Windows
+listener's first word), is now handed to `launch_conversation::LaunchClock::wait`, and the Windows busy
+retry's own waits are counted through `LaunchClock::spent`; `RealClock` makes the one wait the product always
+made, and `hand_over` and `LaunchPipe::start` are its doors. The one exception is the Windows writes:
+each is `attention_pipe::write_bounded`'s own real 250 ms, which buffering decides, not the peer (every frame
+fits the pipe's quota; noted in TIMING-BOUND). The tests hand
+a `CountedClock` that awaits the other end within the door suites' patience or spends the bound on its
+count, so "answered in time" is an event and "the budget ran out" is a count. The same shape elsewhere in
+bt-platform, starting with `attention_pipe`, is plan row 163.
+
 ## Suite watchdog
 
 The rule: a test that hangs ends its run red within 300 s of its start, and is named, wherever a
@@ -1185,13 +1212,20 @@ reads libtest's own report: stable libtest names every test still running 60 s a
 (`test <name> ... ok`). A named test not ended 300 s after its start, or a run that prints nothing
 for 300 s once its first test binary started, ends the whole process tree the script started, by its
 pid, with exit 124 and the names; the binaries a workspace run had not reached yet do not run. A
-name still tracked when cargo starts the next test binary belonged to a binary that ended without its
-result line (a crash, an abort); it is said and dropped, not taken for a hang. 300 s (30 x `lane::PATIENCE`) is the one limit, a default in that
-script and nowhere else. Measured 2026-10-31 on the watched runs: no bt-app test reaches 60 s on any
-CI runner, and the slowest watched test is about 61 s (bt-source on `logic`); unwatched, `core-linux`'s
-bt-source tests take about 110 s. The limit is re-derived, not bumped, if a watched test passes 150 s.
-Compiling is not timed: the clock starts at cargo's first `Running`
-line.
+name still tracked when the next binary's libtest report starts (its `running N tests` line, on the
+same stdout pipe as the test lines; cargo's `Running` comes on stderr, whose order against stdout is
+not kept, and only starts the silence clock: plan row 171, 2026-11-01) belonged to a binary that
+ended without its result line (a crash, an abort); it is said and dropped, not taken for a hang. A
+binary that prints no `running N tests` line (`harness = false`, a crash before libtest starts, a
+doc-test binary still compiling) leaves the previous binary's unfinished names tracked until the
+next binary that prints one: a run that passes the limit meanwhile is red naming the dead test, and
+the silence check is off while any name is tracked. A test's child process that wrote
+`running N tests` to the stdout it inherited would clear the tracked names (no test does today).
+300 s (30 x `lane::PATIENCE`) is the one limit, a default in that script and nowhere else.
+Measured 2026-10-31 on the watched runs: no bt-app test reaches 60 s on any CI runner, and the
+slowest watched test is about 61 s (bt-source on `logic`); unwatched, `core-linux`'s bt-source tests
+take about 110 s. The limit is re-derived, not bumped, if a watched test passes 150 s. Compiling is
+not timed: the clock starts at cargo's first `Running` line.
 
 Who runs through it: the lanes' bt-app and bt-source gates
 (the lane tools' `ccheck.sh scripts/ci/cargo-test-watched.ps1 -p bt-app --no-fail-fast`),

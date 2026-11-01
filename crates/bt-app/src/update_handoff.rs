@@ -2925,7 +2925,16 @@ mod tests {
     /// round-4 ballot scheme the second contender read the dead value without
     /// waiting and overwrote it.
     ///
-    /// MUTATION: in `update_apply::take_the_window_within`, skip the lock.
+    /// **"It waits" is its first pause, not a sleep**
+    /// (T-STALE-MARK-RACE-ON-A-COUNTED-CLOCK): the contender's wait for the
+    /// lock is read and paused on a [`crate::update_apply::CountedClock`]
+    /// (`update_apply::take_the_window_on`), which never sleeps. Its first
+    /// pause — taken only after an ask the test's hold refused — tells the
+    /// test, and lasts until the test has written the live owner and let the
+    /// lock go; the contender's next ask takes it. No real window decides the
+    /// verdict, and the contender's budget is the clock's count.
+    ///
+    /// MUTATION: in `update_apply::take_the_window_within_using`, skip the lock.
     #[test]
     fn a_contender_waits_for_the_election_and_never_overwrites_a_live_owner() {
         let folder = Folder::new("election-order");
@@ -2942,20 +2951,44 @@ mod tests {
         .expect("the test is inside the election");
         let home = staged.home.clone();
         let late = Running { pid: 1, started: 1 };
-        let contender = std::thread::spawn(move || {
-            crate::update_apply::take_the_window(
-                None,
-                &home,
-                txn,
-                late,
-                Instant::now() + crate::update_apply::ELECTION_WITHIN,
-            )
+        let (waits, waiting) = mpsc::channel();
+        let (let_in, let_go) = mpsc::channel::<()>();
+        // The clock lives on the contender's thread only: a contender that
+        // never pauses drops it, and with it `waits`, as it answers.
+        let clock = crate::update_apply::CountedClock::new(move |pause| {
+            if pause == 1 {
+                waits.send(()).unwrap();
+                let _ = let_go.recv();
+            }
         });
-        std::thread::sleep(Duration::from_millis(300));
-        assert!(!contender.is_finished(), "the contender waits for the lock");
+        let contender = bt_platform::spawn_at_priority(
+            "bt-u34-election-order",
+            bt_platform::ThreadPriority::Normal,
+            move |worker| {
+                let answer = crate::update_apply::take_the_window_on(
+                    worker,
+                    &clock,
+                    &home,
+                    txn,
+                    late,
+                    crate::update_apply::ELECTION_WITHIN,
+                );
+                (answer, clock.pauses())
+            },
+        )
+        .expect("the contender");
+        if waiting.recv().is_err() {
+            panic!(
+                "the contender did not wait for the lock: {:?}",
+                contender.join().unwrap()
+            );
+        }
         std::fs::write(&mark, format!("{}:{}", me.pid, me.started)).unwrap();
         drop(inside);
-        assert_eq!(contender.join().unwrap(), Window::Theirs(me));
+        let_in.send(()).unwrap();
+        let (answer, pauses) = contender.join().unwrap();
+        assert_eq!(answer, Window::Theirs(me));
+        assert_eq!(pauses, 1, "taken at the ask after its first pause");
         assert_eq!(
             crate::update_apply::window_owner(&staged.home, txn),
             Some(me)
@@ -3005,17 +3038,34 @@ mod tests {
                 },
             )
         });
-        entered.recv().unwrap();
-        let second = crate::update_apply::take_the_window_within(
-            None,
-            &staged.home,
-            txn,
-            Running { pid: 1, started: 1 },
-            Duration::ZERO,
-            crate::update_apply::Applier,
-        );
+        crate::lane::receive(&entered, "the first contender inside the election");
+        // The second ask is made on a thread of its own while the first stands inside the
+        // election, and awaited within the lane suite's patience; the first is let go before the
+        // verdict, so an ask that ignored its zero budget and waited for the lock is red, never a
+        // hang.
+        let (answered, second) = std::sync::mpsc::channel();
+        let asking = {
+            let home = staged.home.clone();
+            std::thread::spawn(move || {
+                let _ = answered.send(crate::update_apply::take_the_window_within(
+                    None,
+                    &home,
+                    txn,
+                    Running { pid: 1, started: 1 },
+                    Duration::ZERO,
+                    crate::update_apply::Applier,
+                ));
+            })
+        };
+        let mut came_back = None;
+        let _ = crate::lane::within_patience(|| {
+            came_back = second.try_recv().ok();
+            came_back.is_some()
+        });
         release.send(()).unwrap();
         let first = first.join().unwrap();
+        let second = came_back.expect("the second ask waited for the lock past its zero budget");
+        asking.join().unwrap();
 
         assert!(first.is_mine(), "{first:?}");
         assert!(matches!(second, Window::Refused(_)), "{second:?}");

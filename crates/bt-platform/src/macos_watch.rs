@@ -2131,15 +2131,51 @@ mod tests {
         );
     }
 
+    /// **A retirement door called on a worker the thread door started, its answer awaited
+    /// within `bound` and the door suites' patience after it**
+    /// (T-DIR-WATCH-RETIRE-DOORS-ON-A-CLOCK). The door's own wait is `bound`; a door that never
+    /// answers (a budget that never ends) fails the test by name rather than hanging it.
+    fn door_answered_within<T: Send + 'static>(
+        bound: Duration,
+        door: impl FnOnce(&WorkerCtx) -> T + Send + 'static,
+    ) -> T {
+        let (answered, answer) = mpsc::channel();
+        let worker = crate::spawn_at_priority(
+            "bt-dir-watch-test",
+            crate::ThreadPriority::Normal,
+            move |ctx| {
+                let _ = answered.send(door(ctx));
+            },
+        )
+        .expect("start a worker for the watch");
+        match answer.recv_timeout(bound + crate::door_skipped::PATIENCE) {
+            Ok(left) => {
+                worker.join().expect("the worker answered");
+                left
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => std::panic::resume_unwind(
+                worker
+                    .join()
+                    .expect_err("a worker that dropped its answer panicked"),
+            ),
+            Err(mpsc::RecvTimeoutError::Timeout) => panic!(
+                "the retirement door did not answer within {bound:?} and the door suites' \
+                 patience after it"
+            ),
+        }
+    }
+
     /// **A watch retired the way the product retires one**: through its door, on a worker the
     /// thread door started, within `bound`. Answers whether the watcher left in time.
     fn retired_within(watch: DirWatch, bound: Duration) -> bool {
-        on_a_worker(move |ctx| watch.retire_within(ctx, bound))
+        door_answered_within(bound, move |ctx| watch.retire_within(ctx, bound))
     }
 
-    /// [`retired_within`] within the product's own bound.
+    /// [`retired_within`] within the door suites' patience: the watcher's leaving is the state
+    /// awaited. The product's own budget (`DIR_WATCH_RETIRE_BUDGET`, 2 s) is its real callers'
+    /// bound, never a test's pass condition (T-DIR-WATCH-RETIRE-DOORS-ON-A-CLOCK).
     fn retired(watch: DirWatch) -> bool {
-        retired_within(watch, crate::DIR_WATCH_RETIRE_BUDGET)
+        retired_within(watch, crate::door_skipped::PATIENCE)
     }
 
     /// A watch on `path` whose watcher stands inside its wake until the test lets it go (drops
@@ -2338,17 +2374,57 @@ mod set_tests {
         .expect("watch a directory this process just made")
     }
 
+    /// **A retirement door called on a worker the thread door started, its answer awaited
+    /// within `bound` and the door suites' patience after it**
+    /// (T-DIR-WATCH-RETIRE-DOORS-ON-A-CLOCK). The door's own wait is `bound`; a door that never
+    /// answers (a budget that never ends) fails the test by name rather than hanging it.
+    fn door_answered_within<T: Send + 'static>(
+        bound: Duration,
+        door: impl FnOnce(&WorkerCtx) -> T + Send + 'static,
+    ) -> T {
+        let (answered, answer) = mpsc::channel();
+        let worker = crate::spawn_at_priority(
+            "bt-dir-watch-test",
+            crate::ThreadPriority::Normal,
+            move |ctx| {
+                let _ = answered.send(door(ctx));
+            },
+        )
+        .expect("start a worker for the watch");
+        match answer.recv_timeout(bound + crate::door_skipped::PATIENCE) {
+            Ok(left) => {
+                worker.join().expect("the worker answered");
+                left
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => std::panic::resume_unwind(
+                worker
+                    .join()
+                    .expect_err("a worker that dropped its answer panicked"),
+            ),
+            Err(mpsc::RecvTimeoutError::Timeout) => panic!(
+                "the retirement door did not answer within {bound:?} and the door suites' \
+                 patience after it"
+            ),
+        }
+    }
+
+    /// A member retired through its door, on a worker, within `bound`.
     fn retired_within(watch: DirWatch, bound: Duration) -> bool {
-        on_a_worker(move |ctx| watch.retire_within(ctx, bound))
+        door_answered_within(bound, move |ctx| watch.retire_within(ctx, bound))
     }
 
+    /// [`retired_within`] within the door suites' patience: the member's leaving is the state
+    /// awaited, not the product's 2 s budget (T-DIR-WATCH-RETIRE-DOORS-ON-A-CLOCK).
     fn retired(watch: DirWatch) -> bool {
-        retired_within(watch, crate::DIR_WATCH_RETIRE_BUDGET)
+        retired_within(watch, crate::door_skipped::PATIENCE)
     }
 
+    /// The set retired through its door, on a worker, within the door suites' patience: its
+    /// thread's leaving is the state awaited, not the product's 2 s budget.
     fn set_retired(set: Arc<DirWatchSet>) -> bool {
         let set = Arc::try_unwrap(set).unwrap_or_else(|_| panic!("the test holds the set alone"));
-        on_a_worker(move |ctx| set.retire_within(ctx, crate::DIR_WATCH_RETIRE_BUDGET))
+        let bound = crate::door_skipped::PATIENCE;
+        door_answered_within(bound, move |ctx| set.retire_within(ctx, bound))
     }
 
     /// The next word `label` said within the budget, skipping everyone else's.
