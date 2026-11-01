@@ -2643,7 +2643,11 @@ mod tests {
         let until = clock.now() + LOCK_POLL * 200;
         let taken = hold_by(&lock, Hold::Exclusive, until, &clock).unwrap();
         assert!(taken.is_some(), "the holder let go in pause 2");
-        assert_eq!(clock.pauses.borrow().len(), 2, "taken at the ask after pause 2");
+        assert_eq!(
+            clock.pauses.borrow().len(),
+            2,
+            "taken at the ask after pause 2"
+        );
         assert!(holder.borrow().is_none());
         drop(taken);
         let _ = std::fs::remove_dir_all(&home);
