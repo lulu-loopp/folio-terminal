@@ -2432,7 +2432,9 @@ impl SessionStore {
     /// stores, as the product keeps all of them in one data folder.
     #[cfg(test)]
     pub(crate) fn folder(&self) -> &Path {
-        self.session_path.parent().unwrap_or_else(|| Path::new(""))
+        self.session_path
+            .parent()
+            .expect("a session file is in a folder")
     }
 
     /// Replace the in-memory document and start the debounce window. Called on

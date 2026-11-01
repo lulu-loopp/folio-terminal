@@ -1769,17 +1769,21 @@ impl Quitting {
             .settle_session_end_keeping_in(&self.application.event_loop, &recovery)
     }
 
-    /// What the test's worker was handed, in the order it would serve it.
+    /// What the test's worker was handed, in the order it would serve it, each job named by its
+    /// asker: a document store's by its file, a preview save as `preview`, the session's
+    /// document as `document`.
     fn handed(&self) -> Vec<&'static str> {
         std::iter::from_fn(|| self.jobs.next())
             .map(|job| match job {
-                crate::persist::ScriptedJob::Document(job) => {
-                    if job.which.ends_with(crate::persist::SETTINGS_FILE_NAME) {
-                        "settings"
-                    } else {
-                        "save"
-                    }
-                }
+                crate::persist::ScriptedJob::Document(job) => [
+                    (crate::persist::SETTINGS_FILE_NAME, "settings"),
+                    (crate::persist::KEYBINDINGS_FILE_NAME, "keybindings"),
+                    (crate::persist::PROFILES_FILE_NAME, "profiles"),
+                    (crate::pins::PINS_FILE_NAME, "pins"),
+                ]
+                .into_iter()
+                .find(|(file, _)| job.which.ends_with(file))
+                .map_or("preview", |(_, asker)| asker),
                 crate::persist::ScriptedJob::Session => "document",
                 _ => "other",
             })
@@ -1816,7 +1820,7 @@ impl Quitting {
 ///
 /// MUTATION: in `FolioApp::settle_session_end_keeping_in`, hand the saves over after
 /// `session_end::settle` (move the `hand_over_for_the_systems_end` call below it) — the worker is
-/// handed `document, save, save`.
+/// handed `document, preview, preview`.
 #[test]
 fn the_systems_end_hands_every_save_to_the_worker_ahead_of_the_document() {
     let _news = crate::test_support::EndSessionHome::new("end-order");
@@ -1826,7 +1830,7 @@ fn the_systems_end_hands_every_save_to_the_worker_ahead_of_the_document() {
     let _ = quitting.settle_the_systems_end();
     assert_eq!(
         quitting.handed(),
-        ["save", "save", "document"],
+        ["preview", "preview", "document"],
         "both saves, then the document behind them"
     );
     assert_eq!(
@@ -2054,7 +2058,7 @@ fn the_systems_end_keeps_an_owed_document_beside_the_edits() {
     let _ = quitting.settle_the_systems_end();
     assert_eq!(
         quitting.handed(),
-        ["settings", "save", "save", "document"],
+        ["settings", "preview", "preview", "document"],
         "the owed document first, then the saves, then the session"
     );
     let names = quitting.copy_names();
@@ -2095,7 +2099,7 @@ fn the_systems_end_leaves_a_quits_documents_to_the_quit() {
     let _ = quitting.settle_the_systems_end();
     assert_eq!(
         quitting.handed(),
-        ["settings", "save", "save", "document"],
+        ["settings", "preview", "preview", "document"],
         "the quit's write stays the one on the worker: nothing sends it again"
     );
     let names = quitting.copy_names();
@@ -2114,7 +2118,7 @@ fn the_systems_end_leaves_a_quits_documents_to_the_quit() {
 ///
 /// MUTATION: drop the once-per-span guard (in `session_end::owes_the_write`, the
 /// `!SETTLED.with(Cell::get)` term, and `settle`'s `AlreadySaved` arm) — the worker is handed a
-/// second document (`save, save, document, document`), and each edit is copied twice.
+/// second document (`preview, preview, document, document`), and each edit is copied twice.
 #[test]
 fn the_systems_question_to_every_window_is_settled_once() {
     let _news = crate::test_support::EndSessionHome::new("end-once");
@@ -2123,7 +2127,7 @@ fn the_systems_question_to_every_window_is_settled_once() {
     assert_eq!(crate::test_support::the_system_asks(), Some(1));
     assert_eq!(crate::test_support::the_system_asks(), Some(1));
     let _ = quitting.settle_the_systems_end();
-    assert_eq!(quitting.handed(), ["save", "save", "document"]);
+    assert_eq!(quitting.handed(), ["preview", "preview", "document"]);
     assert_eq!(quitting.copies().len(), 2, "each edit copied once");
 }
 

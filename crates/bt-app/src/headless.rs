@@ -1690,6 +1690,18 @@ struct StorageAskers {
 
 impl StorageAskers {
     fn on(folder: &Path, lane: &crate::persist::StorageLane) -> Self {
+        // In the product's order (`Runtime::create`): settings, profiles, pins, then the
+        // keybindings and the shortcut table read from them, then the preview saves.
+        let settings_store = crate::persist::SettingsStore::at_on(
+            folder.join(crate::persist::SETTINGS_FILE_NAME),
+            lane.clone(),
+        );
+        let profiles_store = crate::persist::ProfilesStore::at_on(
+            folder.join(crate::persist::PROFILES_FILE_NAME),
+            lane.clone(),
+        );
+        let pins_store =
+            crate::pins::PinsStore::at_on(folder.join(crate::pins::PINS_FILE_NAME), lane.clone());
         let mut keybindings_store = crate::persist::KeybindingsStore::at_on(
             folder.join(crate::persist::KEYBINDINGS_FILE_NAME),
             lane.clone(),
@@ -1699,20 +1711,11 @@ impl StorageAskers {
             bt_platform::host_platform(),
         );
         Self {
-            settings_store: crate::persist::SettingsStore::at_on(
-                folder.join(crate::persist::SETTINGS_FILE_NAME),
-                lane.clone(),
-            ),
+            settings_store,
             keybindings_store,
             shortcuts,
-            profiles_store: crate::persist::ProfilesStore::at_on(
-                folder.join(crate::persist::PROFILES_FILE_NAME),
-                lane.clone(),
-            ),
-            pins_store: crate::pins::PinsStore::at_on(
-                folder.join(crate::pins::PINS_FILE_NAME),
-                lane.clone(),
-            ),
+            profiles_store,
+            pins_store,
             preview_saves: crate::preview::PreviewSaves::on(lane.clone()),
         }
     }

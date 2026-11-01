@@ -961,9 +961,13 @@ a borrowed mark (`std::ptr::read(&mark)`, `std::mem::transmute_copy(&mark)`)
 is a mark copied through a borrow the grammar accepts. What holds that is the
 compiler, not the guard: `bt-app` takes the workspace's `unsafe_code = "deny"`
 (`Cargo.toml`'s `[workspace.lints.rust]`, `[lints] workspace = true` in its
-manifest), so such a copy needs an `#[expect(unsafe_code, reason = "…")]` the
-owner rules on; the tree's one is the counting test allocator of
-`pointer_app_tests.rs`.
+manifest), so such a copy needs an `#[allow]` or `#[expect(unsafe_code,
+reason = "…")]` the owner rules on — either lifts `deny`; only `forbid` cannot
+be lifted. Inside `bt-app`'s own crate, the only one that can name the
+`pub(crate)` `Mark`, the one lift is the counting test allocator of
+`pointer_app_tests.rs`; its integration test `tests/macos_glyph_surface.rs`
+has another, in a crate of its own that cannot reach `Mark`, and the lifts in
+`bt-render` and `bt-platform` are outside it too.
 
 Where and what to do: when red, read the finding's check. A D2 read in a loop
 or a closure, or a second read for a later asker, is the bug the guard exists
