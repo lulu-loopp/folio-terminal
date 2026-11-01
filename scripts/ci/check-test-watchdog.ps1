@@ -47,7 +47,6 @@ switch ($case) {
         Running
         Out 'running 1 test'
         Out 'test planted::slow has been running for over 60 seconds'
-        Start-Sleep -Seconds 1
         Out 'test planted::slow - should panic ... ok'
         Out 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 61.00s'
         exit 0
@@ -59,8 +58,8 @@ switch ($case) {
         Out 'test README.md - planted (line 3) has been running for over 60 seconds'
         Out 'test planted::plain ... ok'
         Out 'test README.md - planted (line 3) - compile fail ... ok'
-        foreach ($i in 1..8) { Start-Sleep -Seconds 1; Out "busy line $i" }
-        Out 'test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 69.00s'
+        foreach ($i in 1..15) { Start-Sleep -Seconds 1; Out "busy line $i" }
+        Out 'test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 76.00s'
         exit 0
     }
     'two-binaries' {
@@ -69,6 +68,19 @@ switch ($case) {
         Out 'test planted::dies has been running for over 60 seconds'
         [Console]::Error.WriteLine('error: test failed, to rerun pass `-p planted --lib`')
         Running
+        Out 'running 1 test'
+        foreach ($i in 1..8) { Start-Sleep -Seconds 1; Out "busy line $i" }
+        Out 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.00s'
+        exit 101
+    }
+    'boundary-before-name' {
+        # cargo's `Running` (stderr) and libtest's lines (stdout) are two pipes, and the watchdog may read the
+        # next binary's `Running` before the dead binary's 60 s line. Planted on ONE pipe, so that is the
+        # order the watchdog reads, every time: the boundary it trusts must be libtest's own `running N tests`.
+        Out '     Running unittests (stand-in)'
+        Out 'running 1 test'
+        Out '     Running unittests (stand-in)'
+        Out 'test planted::dies has been running for over 60 seconds'
         Out 'running 1 test'
         foreach ($i in 1..8) { Start-Sleep -Seconds 1; Out "busy line $i" }
         Out 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.00s'
@@ -106,27 +118,24 @@ function Watch([string]$Case, [int]$Limit, [string[]]$Words) {
     $env:FOLIO_STAND_IN_CASE = $Case
     $env:FOLIO_STAND_IN_PIDS = $pids
     try {
-        # Waited for by its exit, never by the end of its output: a grandchild that a regressed watchdog left
-        # alive inherits the pipes and would hold them open for ten minutes; it is a FAIL in `Gone` instead.
         $start = [Diagnostics.ProcessStartInfo]::new((Get-Process -Id $PID).Path)
         foreach ($w in @('-NoProfile', '-File', $watchdog) + $Words) { $start.ArgumentList.Add([string]$w) }
         $start.UseShellExecute = $false
         $start.RedirectStandardOutput = $true
         $start.RedirectStandardError = $true
-        $said = [Collections.Concurrent.ConcurrentQueue[string]]::new()
-        $p = [Diagnostics.Process]::new()
-        $p.StartInfo = $start
-        $take = { if ($null -ne $EventArgs.Data) { $Event.MessageData.Enqueue($EventArgs.Data) } }
-        $o = Register-ObjectEvent -InputObject $p -EventName OutputDataReceived -Action $take -MessageData $said
-        $e = Register-ObjectEvent -InputObject $p -EventName ErrorDataReceived -Action $take -MessageData $said
-        [void]$p.Start()
-        $p.BeginOutputReadLine()
-        $p.BeginErrorReadLine()
+        $p = [Diagnostics.Process]::Start($start)
+        $out = $p.StandardOutput.ReadToEndAsync()
+        $err = $p.StandardError.ReadToEndAsync()
+        $clock = [Diagnostics.Stopwatch]::StartNew()
         if (-not $p.WaitForExit(120000)) { $p.Kill($true); return @{ code = -1; output = 'the watchdog itself did not end within 120 s' } }
-        Start-Sleep -Milliseconds 500
-        Unregister-Event -SourceIdentifier $o.Name
-        Unregister-Event -SourceIdentifier $e.Name
-        return @{ code = $p.ExitCode; output = (@($said.ToArray()) -join "`n") }
+        # The output is all here when both pipes are at their end, never after a sleep (row 171: a loaded
+        # runner may deliver it later than any sleep). The 120 s bound is met only by a regression: a
+        # grandchild that a regressed watchdog left alive holds the pipes open, and it is a FAIL in `Gone`.
+        $left = [Math]::Max(0, 120000 - [int]$clock.ElapsedMilliseconds)
+        if (-not [Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]@($out, $err), $left)) {
+            return @{ code = $p.ExitCode; output = 'the watchdog exited, but its output did not end within 120 s (a process it left holds its pipes)' }
+        }
+        return @{ code = $p.ExitCode; output = ($out.Result + "`n" + $err.Result) -replace "`r", '' }
     } finally {
         foreach ($n in 'FOLIO_TEST_WATCHDOG_STAND_IN', 'FOLIO_TEST_WATCHDOG_LIMIT_SECONDS', 'FOLIO_STAND_IN_CASE', 'FOLIO_STAND_IN_PIDS') {
             Remove-Item "env:$n" -ErrorAction SilentlyContinue
@@ -159,13 +168,19 @@ try {
     Check 'a named test that ends is green and listed as slow' ($run.code -eq 0 -and $run.output -match 'slow tests \(named by libtest at 60 s, ended\): planted::slow') $run
 
     # A plain `... ok` and a spaced doc-test name with a mode each take their test out of the tracked set:
-    # the run goes on past both tests' limit and must stay green.
-    $run = Watch 'slow-then-busy' 63 @()
+    # the run goes on past both tests' limit and must stay green. Limit 70: the end lines have 10 s from the
+    # 60 s lines to be read on a loaded runner (row 171), and the 15 busy seconds pass that limit.
+    $run = Watch 'slow-then-busy' 70 @()
     Check 'ended tests leave the tracked set (a plain end, a doc-test name with a mode)' ($run.code -eq 0 -and $run.output -match 'slow tests \(named by libtest at 60 s, ended\): planted::plain, README.md - planted \(line 3\)') $run
 
     # A binary that ends while a named test runs (no result line) does not leave a phantom hang for the next one.
     $run = Watch 'two-binaries' 63 @('--no-fail-fast')
     Check "a test whose binary ended is not a later binary's hang" ($run.code -eq 101 -and $run.output -match 'ended with their binary, no result line: planted::dies') $run
+
+    # The same, with the next binary's `Running` read before the dead binary's 60 s line (the order two pipes
+    # can arrive in on a loaded runner; plan row 171): the binary boundary is libtest's `running N tests`.
+    $run = Watch 'boundary-before-name' 63 @()
+    Check "a test whose binary ended is not a later binary's hang, whichever pipe is read first" ($run.code -eq 101 -and $run.output -match 'ended with their binary, no result line: planted::dies') $run
 
     $run = Watch 'silent' 3 @()
     Check 'silence once tests run is red with no name' ($run.code -eq 124 -and $run.output -match 'no test can be named') $run
