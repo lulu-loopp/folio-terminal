@@ -556,6 +556,9 @@ fn journal_written(
         &mut |line| note(line),
     )
     .map_err(|unwritten| {
+        // A cancel wins: once the job has cancelled, any failure of the write
+        // (a hold given up on at the cancel, or another refusal met at the
+        // same moment) stops at `Stop::Cancelled`, with no journal line.
         road.go_on().err().unwrap_or_else(|| {
             journal_stop(&format!(
                 "the journal at {phase} was not written: {}",
