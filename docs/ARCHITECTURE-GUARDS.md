@@ -1113,8 +1113,10 @@ read by its reading's return on a thread of its own, awaited within the suite's 
 let go before the verdict). The cap frees holds, not locks: a door that waits while it keeps a
 product lock the held worker takes next still hangs — the program walk's admission keeps the lane's
 lock across the ask (`ProgramsLane::request`), and row 111's planted wait there hung. That, and a
-test-thread wait on something no gate or hold holds (row 113), are not yet read this way. What such a verdict does not catch is a bounded wait, or a give-up that ignores
-its budget, shorter than the suite's patience.
+test-thread wait on something no gate or hold holds, are not read this way; wherever the suite runs
+through the suite watchdog (row 113, below), a hang of either kind ends the run red within 300 s of
+the test's start and names it (save the shapes that section says it cannot name). What such a
+verdict does not catch is a bounded wait, or a give-up that ignores its budget, shorter than the suite's patience.
 
 2026-10-31 (T-FLOATING-VIDEO-DOUBLE-CLICK-TIMING, plan row 124): a double click is decided by
 the window's multi-click counters (`ImageClicks`, `PreviewTextClicks`) on the moment a press is
