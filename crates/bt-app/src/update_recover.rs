@@ -447,6 +447,7 @@ pub(crate) fn run(worker: &WorkerCtx, door: &Door<'_>, world: &mut impl World) -
                 trial_clock: std::sync::Arc::new(crate::update_apply::WallClock),
                 decision_clock: std::sync::Arc::new(crate::update_apply::WallClock),
                 wait_clock: std::sync::Arc::new(crate::update_apply::WallClock),
+                stop_clock: std::sync::Arc::new(crate::update_apply::WallClock),
                 starter: door.starter,
                 handed_back: door.handed_back,
                 layouts: update_apply_macos::own_layouts(),

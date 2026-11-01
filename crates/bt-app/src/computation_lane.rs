@@ -1748,9 +1748,14 @@ mod tests {
 
     /// A pane showing one live formula, settled and ready to be handed out.
     fn a_pane_with_a_formula() -> bt_term::DualPlaneSession {
+        a_pane_with_a_formula_in(40)
+    }
+
+    /// [`a_pane_with_a_formula`], `columns` wide.
+    fn a_pane_with_a_formula_in(columns: u32) -> bt_term::DualPlaneSession {
         let start = std::time::Instant::now();
         let mut session = bt_term::DualPlaneSession::new(
-            std::num::NonZeroU32::new(40).unwrap(),
+            std::num::NonZeroU32::new(columns).unwrap(),
             std::num::NonZeroU32::new(4).unwrap(),
         );
         session
@@ -1760,10 +1765,42 @@ mod tests {
         session
     }
 
+    /// **The columns a pane needs to print `path` on one row and stop short of the row's last
+    /// cell**, whatever the machine's temporary folder, process id or the suite's ordinal make it
+    /// spell: twice its characters (no character is wider than two cells) and two more.
+    ///
+    /// A path whose last character lands in the last cell of its physical line is one the
+    /// truncation gate holds back on purpose — it may be the front half of a name the program cut
+    /// in two (`docs/DESIGN.md` §7.1.5k ①; `bt_transcript::paths::touches_line_end`) — so a fixed
+    /// grid width under a machine-made path was a test of the gate on the runner where the two
+    /// happened to meet (row 134: 80 columns on a 40-column grid, CI only), not of the hand-out.
+    fn columns_for(path: &std::path::Path) -> u32 {
+        u32::try_from(2 * path.to_string_lossy().chars().count() + 2).unwrap()
+    }
+
+    /// A pane with a formula on screen and then `path`, printed by the program after it: the
+    /// formula's task and the path's question both queued, nothing handed out yet.
+    fn a_pane_with_a_formula_then_a_path(path: &std::path::Path) -> bt_term::DualPlaneSession {
+        let mut session = a_pane_with_a_formula_in(columns_for(path));
+        session.set_math_layout_options(bt_term::MathLayoutOptions {
+            detect_image_paths: true,
+            ..bt_term::MathLayoutOptions::default()
+        });
+        let mut projection = session.new_projection(session.layout_key());
+        session.viewport_frame(&mut projection).unwrap();
+        session
+            .feed(format!("\r\n{}\r\n", path.to_string_lossy()).as_bytes())
+            .unwrap();
+        session.refresh_projection(&mut projection);
+        session.viewport_frame(&mut projection).unwrap();
+        session.absorb_printed_path_probes(&mut projection);
+        session
+    }
+
     /// A pane that printed one path (a name in Chinese and Latin), its question queued.
     fn a_pane_with_a_printed_path(path: &std::path::Path) -> bt_term::DualPlaneSession {
         let mut session = bt_term::DualPlaneSession::new(
-            std::num::NonZeroU32::new(120).unwrap(),
+            std::num::NonZeroU32::new(columns_for(path)).unwrap(),
             std::num::NonZeroU32::new(6).unwrap(),
         );
         session.set_math_layout_options(bt_term::MathLayoutOptions {
@@ -2091,21 +2128,9 @@ mod tests {
                 .ok()
                 .expect("within the bound");
         }
-        // A pane with a formula on screen, then the path the program printed after it.
-        let mut session = a_pane_with_a_formula();
-        let path = bt_testpath::temp_path("bt-app-shares-apart").join("笔记-apart.md");
-        session.set_math_layout_options(bt_term::MathLayoutOptions {
-            detect_image_paths: true,
-            ..bt_term::MathLayoutOptions::default()
-        });
-        let mut projection = session.new_projection(session.layout_key());
-        session.viewport_frame(&mut projection).unwrap();
-        session
-            .feed(format!("\r\n{}\r\n", path.to_string_lossy()).as_bytes())
-            .unwrap();
-        session.refresh_projection(&mut projection);
-        session.viewport_frame(&mut projection).unwrap();
-        session.absorb_printed_path_probes(&mut projection);
+        let mut session = a_pane_with_a_formula_then_a_path(
+            &bt_testpath::temp_path("bt-app-shares-apart").join("笔记-apart.md"),
+        );
         let outstanding = session.outstanding_decoration_work();
         assert_eq!(outstanding, 2, "a formula and a path to hand out");
         assert!(!hand_out(&mut session, &lane.lane));
@@ -2125,6 +2150,50 @@ mod tests {
             "the formula waits in the pane, not lost"
         );
         gate.release();
+    }
+
+    /// RED (row 134) — **The pane the share test hands out holds both questions however wide the
+    /// printed path is**: a formula's task and the path's question, for every path width from 60
+    /// to 130 cells.
+    ///
+    /// The share test prints a path under the machine's temporary folder, so its width is the
+    /// machine's: on the Windows runner a 36-character temporary folder, a five-digit process id
+    /// and a three-digit ordinal made it exactly 80 cells, and on the 40-column grid the
+    /// fixture had then its last character sat in the last cell of its second row — where the
+    /// truncation gate holds a name back as maybe cut in two (§7.1.5k ①), so the pane asked
+    /// nothing about it and held one task, not two (CI run 41269258357). Each width here is spelled
+    /// from the file system's root with a padding directory, so the walk is the same on every
+    /// machine.
+    ///
+    /// MUTATION: make `columns_for` answer 40 (the grid the fixture had) — widths 80 and 120 hold
+    /// one task.
+    #[test]
+    fn a_formula_then_a_path_are_both_held_whatever_the_paths_width() {
+        let root = std::env::temp_dir()
+            .ancestors()
+            .last()
+            .expect("a path has a root")
+            .to_path_buf();
+        let name = "笔记-apart.md";
+        let narrowest = bt_unicode::text_width(&root.join("x").join(name).to_string_lossy());
+        let mut short = Vec::new();
+        for width in 60..=130 {
+            let path = root.join("x".repeat(width + 1 - narrowest)).join(name);
+            assert_eq!(
+                bt_unicode::text_width(&path.to_string_lossy()),
+                width,
+                "the padding spells the width"
+            );
+            let held = a_pane_with_a_formula_then_a_path(&path).outstanding_decoration_work();
+            if held != 2 {
+                short.push((width, held));
+            }
+        }
+        assert_eq!(
+            short,
+            Vec::<(usize, usize)>::new(),
+            "every width holds a formula and a path"
+        );
     }
 
     /// RED (S-8 round 2) — **A superseded resample is announced and leaves the share's bound at

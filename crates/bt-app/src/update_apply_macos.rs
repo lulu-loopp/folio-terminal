@@ -74,10 +74,11 @@
 //!      quit (`SIGTERM`, the road any application's quit takes on macOS; the
 //!      trial writes nothing it held back, `update_trial`), given
 //!      [`Limits::quit_within`], then ended (`SIGKILL`) and given
-//!      [`Limits::end_within`] — each signal sent only after the process list
-//!      shows the journal's pid, with its start instant, running from the new
-//!      bundle's executable (at the launch path, or at `stage/` if a swap back
-//!      already happened: `bt_platform::install_flip::ask`);
+//!      [`Limits::end_within`], both on the road's `stop_clock` — each signal
+//!      sent only after the process list shows the journal's pid, with its
+//!      start instant, running from the new bundle's executable (at the launch
+//!      path, or at `stage/` if a swap back already happened:
+//!      `bt_platform::install_flip::ask`);
 //!    - **the swap back**, only while the live identity is the new one and
 //!      `stage/` holds the old one: exclusive admission within
 //!      [`Limits::old_within`] (not had → nothing is recorded and the
@@ -319,6 +320,10 @@ pub(crate) struct Road {
     /// again and the data directory's claim (`update_apply::WaitClock`) —
     /// [`WallClock`] in the product.
     pub(crate) wait_clock: Arc<dyn WaitClock>,
+    /// **The clock a trial asked to quit, then ended, is waited out on** — the
+    /// quit grace and the end window of [`stop_trial`] — [`WallClock`] in the
+    /// product (T-TRIAL-STOP-QUIT-GRACE-ON-THE-ROAD-CLOCK).
+    pub(crate) stop_clock: Arc<dyn WaitClock>,
     /// **This process's starter** (U-37, H.3): its parent, by pid and an
     /// earlier start instant — an ordinary start that handed itself over is no
     /// candidate.
@@ -678,6 +683,7 @@ pub(crate) fn run_here(home: &Path, txn: &str, nonce: &str) -> i32 {
                 trial_clock: Arc::new(WallClock),
                 decision_clock: Arc::new(WallClock),
                 wait_clock: Arc::new(WallClock),
+                stop_clock: Arc::new(WallClock),
                 starter: install_flip::parent_of_this_process(),
                 handed_back: None,
                 layouts: own_layouts(),
@@ -1638,6 +1644,7 @@ impl<'a> Txn<'a> {
                 let limits = &self.road.limits;
                 stop_trial(
                     worker,
+                    &*self.road.stop_clock,
                     process,
                     &images,
                     (limits.quit_within, limits.end_within, limits.poll),
@@ -1957,6 +1964,7 @@ impl<'a> Txn<'a> {
                     let limits = &self.road.limits;
                     if let Err(why) = stop_trial(
                         worker,
+                        &*self.road.stop_clock,
                         process,
                         &images,
                         (limits.quit_within, limits.end_within, limits.poll),
@@ -2077,6 +2085,7 @@ impl<'a> Txn<'a> {
             may_end.clone()?;
             stop_trial(
                 worker,
+                &*road.stop_clock,
                 process,
                 &[program],
                 (

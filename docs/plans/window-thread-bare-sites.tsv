@@ -104,7 +104,7 @@ bt-platform	-	crate::hotkey::SummonTrace::opened	std::io::Write::write_fmt	1
 bt-platform	-	crate::hotkey::SummonTrace::write	std::io::Write::write_fmt	1
 bt-platform	-	crate::https_download::<File as Store>::seal	std::fs::File::sync_all	1
 bt-platform	-	crate::https_download::Partial::finish	std::fs::rename	1
-bt-platform	-	crate::install_txn::hold_until	std::thread::sleep	1
+bt-platform	-	crate::install_txn::<WallLockClock as LockClock>::pause	std::thread::sleep	1
 bt-platform	-	crate::instance::canonical_path	std::fs::canonicalize	1
 bt-platform	-	crate::launch_agent::sweep	std::fs::read_dir	1
 bt-platform	-	crate::macos_update::attach_with	std::fs::canonicalize	3
@@ -141,7 +141,7 @@ bt-platform	[unix]	crate::install_evidence::imp::owner_of	std::fs::metadata	1
 bt-platform	[unix]	crate::launch_pipe::LaunchPipe::hang_up	libc::close	1
 bt-platform	[unix]	crate::launch_pipe::LaunchPipe::hang_up	libc::write	1
 bt-platform	[unix]	crate::launch_pipe::LaunchPipe::retire_within	std::thread::JoinHandle::join	1
-bt-platform	[unix]	crate::launch_pipe::LaunchPipe::start	libc::close	2
+bt-platform	[unix]	crate::launch_pipe::LaunchPipe::start_on	libc::close	2
 bt-platform	[unix]	crate::launch_pipe::listen	libc::close	1
 bt-platform	[windows]	crate::attention_pipe::<Overlapped as Drop>::drop	windows::Win32::Foundation::CloseHandle	1
 bt-platform	[windows]	crate::attention_pipe::<OwnedHandle as Drop>::drop	windows::Win32::Foundation::CloseHandle	1
@@ -162,9 +162,9 @@ bt-platform	[windows]	crate::instance::try_claim_data_directory	windows::Win32::
 bt-platform	[windows]	crate::launch_pipe::Instance::arm_connect	windows::Win32::System::Threading::SetEvent	1
 bt-platform	[windows]	crate::launch_pipe::LaunchPipe::retire_within	std::thread::JoinHandle::join	1
 bt-platform	[windows]	crate::launch_pipe::LaunchPipe::retire_within	windows::Win32::Foundation::CloseHandle	1
-bt-platform	[windows]	crate::launch_pipe::LaunchPipe::start	std::thread::JoinHandle::join	2
-bt-platform	[windows]	crate::launch_pipe::LaunchPipe::start	windows::Win32::Foundation::CloseHandle	2
-bt-platform	[windows]	crate::launch_pipe::LaunchPipe::start	windows::Win32::System::Threading::SetEvent	1
+bt-platform	[windows]	crate::launch_pipe::LaunchPipe::start_on	std::thread::JoinHandle::join	2
+bt-platform	[windows]	crate::launch_pipe::LaunchPipe::start_on	windows::Win32::Foundation::CloseHandle	2
+bt-platform	[windows]	crate::launch_pipe::LaunchPipe::start_on	windows::Win32::System::Threading::SetEvent	1
 bt-platform	[windows]	crate::launch_pipe::LaunchPipe::stop_listening	windows::Win32::System::Threading::SetEvent	1
 bt-platform	[windows]	crate::process_image_path	windows::Win32::Foundation::CloseHandle	1
 bt-platform	[windows]	crate::video::Readers::quiet_within	std::sync::Condvar::wait_timeout	1

@@ -149,7 +149,7 @@ const READ_DEADLINE: Duration = Duration::from_millis(250);
 /// and waits exactly this long for the instance to come free. Past that the verb exits non-zero
 /// rather than queueing — an attention signal that arrives a second late has already been overtaken
 /// by whatever the user did in the meantime.
-const CLIENT_BUSY_WAIT_MS: u32 = 100;
+pub(crate) const CLIENT_BUSY_WAIT_MS: u32 = 100;
 
 /// `SE_GROUP_LOGON_ID` from `winnt.h`.
 ///
