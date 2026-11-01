@@ -1374,6 +1374,57 @@ impl CountedClock {
     }
 }
 
+#[cfg(test)]
+impl CountedClock {
+    /// **A road's stop clock in a test whose road stops a trial**
+    /// (T-TRIAL-STOP-QUIT-GRACE-ON-THE-ROAD-CLOCK): [`stop_trial`]'s two
+    /// windows, `quit_within` and `end_within` looked at every `poll`, spent on
+    /// the count. Each pause of the stop is `poll`, or what is left, so the quit
+    /// grace is exactly [`Self::grace_pauses`] pauses and the next is the end
+    /// window's first:
+    ///
+    /// * **pause 1** lasts until `answered` holds — the trial's answer to the
+    ///   ask to quit: its end, or a trial that keeps the signal saying it got
+    ///   it — within the suite's patience (`lane::within_patience`);
+    /// * **the end window's first pause** lasts until `gone` holds — the ended
+    ///   trial gone, as the test's own waiter reports it — within the patience;
+    /// * every other pause only moves the clock, and a pause past both windows
+    ///   is red: a grace that never ends fails, never hangs.
+    ///
+    /// "Ended within the grace" and "asked to quit, then ended" are then the
+    /// trial's state at a counted pause, never a race between a real second
+    /// and the trial's exit. An answer that never comes costs the patience
+    /// once, and its window is then spent on the count.
+    pub(crate) fn stopping(
+        (quit_within, end_within, poll): (Duration, Duration, Duration),
+        answered: impl Fn() -> bool + Send + 'static,
+        gone: impl Fn() -> bool + Send + 'static,
+    ) -> Self {
+        let grace = Self::grace_pauses(quit_within, poll);
+        let past_both = grace + Self::grace_pauses(end_within, poll);
+        Self::new(move |pause| {
+            assert!(
+                pause <= past_both,
+                "the stop paused {pause} times, past its two windows ({past_both} pauses)"
+            );
+            if pause == 1 {
+                crate::lane::within_patience(&answered);
+            }
+            if pause == grace + 1 {
+                crate::lane::within_patience(&gone);
+            }
+        })
+    }
+
+    /// **How many of the stop's pauses a window of `within` looked at every
+    /// `poll` takes on this clock**: each pause is `poll`, the last what is
+    /// left.
+    pub(crate) fn grace_pauses(within: Duration, poll: Duration) -> usize {
+        assert!(!poll.is_zero(), "a stop that looks every 0 ms never pauses");
+        usize::try_from(within.as_millis().div_ceil(poll.as_millis())).unwrap()
+    }
+}
+
 /// Whether `folder` holds a file named as a trial's receipt.
 #[cfg(test)]
 fn holds_a_receipt(folder: &Path) -> bool {
@@ -2032,15 +2083,19 @@ pub(crate) fn before_deciding(
 
 /// **Stop the trial** (W9/M9; the coordinator's ruling 2 of U-29 and ruling 1
 /// of U-24): ask it to quit, wait up to `quit_within` for it to leave the list,
-/// then end it and wait up to `end_within`, polling every `poll` through the
-/// wait door. Each ask goes through [`install_flip::ask`], which sends nothing
-/// to a process that is not that very trial running from one of `images`.
+/// then end it and wait up to `end_within`, looking every `poll`. Both windows
+/// are read and paused on `clock`, the road's `stop_clock` ([`WallClock`] in
+/// the product: the monotonic clock and the worker's wait door;
+/// T-TRIAL-STOP-QUIT-GRACE-ON-THE-ROAD-CLOCK). Each ask goes through
+/// [`install_flip::ask`], which sends nothing to a process that is not that
+/// very trial running from one of `images`.
 ///
 /// # Errors
 /// The process list could not be read, the trial could not be asked, or it
 /// did not end.
 pub(crate) fn stop_trial(
     worker: &WorkerCtx,
+    clock: &dyn WaitClock,
     process: TrialProcess,
     images: &[&Path],
     (quit_within, end_within, poll): (Duration, Duration, Duration),
@@ -2063,16 +2118,16 @@ pub(crate) fn stop_trial(
             Ok(false) => return Ok(()),
             Err(error) => return Err(format!("the trial {}: {error}", process.pid)),
         }
-        let until = Instant::now() + within;
+        let until = clock.now() + within;
         loop {
             if !trial_runs(process, images) {
                 return Ok(());
             }
-            let left = until.saturating_duration_since(Instant::now());
+            let left = until.saturating_duration_since(clock.now());
             if left.is_zero() {
                 break;
             }
-            bt_platform::wait::sleep_within(worker, poll.min(left));
+            clock.pause(worker, poll.min(left));
         }
     }
     Err(format!("the trial {} did not end", process.pid))
