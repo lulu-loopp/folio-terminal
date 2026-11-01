@@ -1186,6 +1186,18 @@ a `CountedClock` that awaits the other end within the door suites' patience or s
 count, so "answered in time" is an event and "the budget ran out" is a count. The same shape elsewhere in
 bt-platform, starting with `attention_pipe`, is plan row 163.
 
+2026-11-01 (T-CLIPBOARD-PASTE-PAST-DESK-BUSY-NOTICE-FLAKE, plan row 172): a stamp the product reads
+and a later press compares is a product window too. `Runtime::ask_for_a_paste` stamped each paste with its
+own `Instant::now()` and settled what the window owed at it, so a paste held on the clipboard lane's worker
+since an earlier press was past `PASTE_DEADLINE` (1 s) at a later press whenever a loaded machine took that
+long between them, and said the clipboard was busy. Row 124's `PointerClock` is now `PressClock`, the one
+type for "the moment a press is counted at": the window keeps two, `pointer_clock` for the double-click
+counters and `paste_clock` for the paste press, both `Wall` in the product (`moment(wall)` answers the
+instant just read, unchanged). The three clipboard tests that press a paste again while one is held hold the
+paste clock (`HeadlessFolio::hold_the_paste_clock`); a test that means the deadline passes its own clock to
+`Runtime::settle_clipboard`. Row 125's sweep counted the read as a stamp handed down, and the comparison
+sits in a private function (`paste_withdrawn`); noted in TIMING-BOUND.
+
 ## Suite watchdog
 
 The rule: a test that hangs ends its run red within 300 s of its start, and is named, wherever a
