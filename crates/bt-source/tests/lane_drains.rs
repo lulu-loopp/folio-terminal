@@ -84,6 +84,13 @@
 //! of that name would win method resolution and move the mark unseen (none exists; it would be a
 //! trait written for the purpose). (5) A macro's scope is not resolved: a standard expression
 //! macro's name the tree also defines is read as the tree's everywhere (a false shape at worst).
+//! (6) Unsafe code is not read: `ptr::read(&mark)` or `mem::transmute_copy(&mark)` copies a mark
+//! through a borrow the grammar accepts. The compiler holds that, not this: `bt-app` takes the
+//! workspace's `unsafe_code = "deny"`, so such a copy needs an `#[allow]` or
+//! `#[expect(unsafe_code)]` the owner rules on (either lifts `deny`). Inside `bt-app`'s own crate,
+//! the only one that can name the `pub(crate)` `Mark`, the one lift is `pointer_app_tests.rs`'s
+//! counting allocator; its integration test `tests/macos_glyph_surface.rs` has another, in a crate
+//! that cannot reach `Mark`, and `bt-render`'s and `bt-platform`'s are outside it.
 //!
 //! `cargo test -p bt-source` runs this, as every bt-source guard; `docs/ARCHITECTURE-GUARDS.md`
 //! (§ Lane drains read their mark once) states it for a reader of the tree.

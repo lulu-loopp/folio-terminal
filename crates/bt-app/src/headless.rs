@@ -1657,10 +1657,102 @@ impl HeadlessApplication {
     }
 }
 
+/// **The askers of `app`'s storage drain that are not on its session store's lane**, by name:
+/// none, in an application whose storage is laid out as the product's is — the session store's
+/// lane, and the other five askers on it (`App::storage_answers` reads its one mark from that
+/// lane's ledger and hands it to all of them).
+pub(crate) fn askers_off_the_storage_lane(app: &App<Headless>) -> Vec<&'static str> {
+    let lane = app.session_store.lane();
+    [
+        ("settings", app.settings_store.lane()),
+        ("keybindings", app.keybindings_store.lane()),
+        ("profiles", app.profiles_store.lane()),
+        ("pins", app.pins_store.lane()),
+        ("preview", app.preview_saves.lane()),
+    ]
+    .into_iter()
+    .filter(|(_, other)| !lane.is(other))
+    .map(|(asker, _)| asker)
+    .collect()
+}
+
+/// **The five storage askers an application holds besides its session store**, built on `lane`
+/// over the documents of `folder` — as the product builds them on `session_store.lane()` in its
+/// one data folder, the shortcut table read from the keybindings store as a launch reads it.
+struct StorageAskers {
+    settings_store: crate::persist::SettingsStore,
+    keybindings_store: crate::persist::KeybindingsStore,
+    shortcuts: crate::shortcuts::Shortcuts,
+    profiles_store: crate::persist::ProfilesStore,
+    pins_store: crate::pins::PinsStore,
+    preview_saves: crate::preview::PreviewSaves,
+}
+
+impl StorageAskers {
+    fn on(folder: &Path, lane: &crate::persist::StorageLane) -> Self {
+        // In the product's order (`Runtime::create`): settings, profiles, pins, then the
+        // keybindings and the shortcut table read from them, then the preview saves.
+        let settings_store = crate::persist::SettingsStore::at_on(
+            folder.join(crate::persist::SETTINGS_FILE_NAME),
+            lane.clone(),
+        );
+        let profiles_store = crate::persist::ProfilesStore::at_on(
+            folder.join(crate::persist::PROFILES_FILE_NAME),
+            lane.clone(),
+        );
+        let pins_store =
+            crate::pins::PinsStore::at_on(folder.join(crate::pins::PINS_FILE_NAME), lane.clone());
+        let mut keybindings_store = crate::persist::KeybindingsStore::at_on(
+            folder.join(crate::persist::KEYBINDINGS_FILE_NAME),
+            lane.clone(),
+        );
+        let (shortcuts, _) = crate::settings_bundle::shortcuts_at_start(
+            &mut keybindings_store,
+            bt_platform::host_platform(),
+        );
+        Self {
+            settings_store,
+            keybindings_store,
+            shortcuts,
+            profiles_store,
+            pins_store,
+            preview_saves: crate::preview::PreviewSaves::on(lane.clone()),
+        }
+    }
+}
+
+impl App<Headless> {
+    /// **This application's storage, on `session_store`'s lane**: the store in, and the five
+    /// other askers built again on its lane over the documents of its folder — the product's
+    /// layout (one lane, its six askers; `App::storage_answers` reads its one mark from that
+    /// lane's ledger), for a harness that serves the lane itself (a scripted lane, a worker held
+    /// at a gate, a lane that refuses). The one door a test puts a session store in by.
+    pub(crate) fn storage_on(&mut self, session_store: crate::persist::SessionStore) {
+        let StorageAskers {
+            settings_store,
+            keybindings_store,
+            shortcuts,
+            profiles_store,
+            pins_store,
+            preview_saves,
+        } = StorageAskers::on(session_store.folder(), &session_store.lane());
+        self.settings_store = settings_store;
+        self.keybindings_store = keybindings_store;
+        self.shortcuts = shortcuts;
+        self.profiles_store = profiles_store;
+        self.pins_store = pins_store;
+        self.preview_saves = preview_saves;
+        self.session_store = session_store;
+    }
+}
+
 /// **A headless application**: every field at the value a launch with nothing on disk gives it,
-/// its stores at `root`, its workers started and waking `proxy` — but its storage lane, which no
-/// worker serves and none can start: every job handed to it is refused at the door (a preview
-/// save says "not saved"), and nothing a test does reaches a disk through it.
+/// its stores at `root`, its workers started and waking `proxy`. Its storage is the product's:
+/// one storage lane with a worker of its own, the session store's, woken as the product's wakes
+/// the loop (`AppEvent::DocumentsAnswered`), and the other five askers on it
+/// ([`StorageAskers::on`]). What its documents' stores write lands in `root`, the test's scratch
+/// folder; a test that needs the lane served otherwise puts a session store in through
+/// [`App::storage_on`].
 pub(crate) fn headless_app(gpu: HeadlessDevice, proxy: LoopProxy, root: &Path) -> App<Headless> {
     use crate::*;
     let wake = |event: fn() -> AppEvent| {
@@ -1669,14 +1761,19 @@ pub(crate) fn headless_app(gpu: HeadlessDevice, proxy: LoopProxy, root: &Path) -
             let _ = proxy.send_event(event());
         }
     };
-    let lane = persist::StorageLane::without_a_worker(wake(|| AppEvent::DocumentsAnswered));
-    let session_store =
-        persist::SessionStore::at(root.join("session.json"), root.join("session.lock"));
-    let settings_store = persist::SettingsStore::at_on(root.join("settings.json"), lane.clone());
-    let mut keybindings_store =
-        persist::KeybindingsStore::at_on(root.join("keybindings.json"), lane.clone());
-    let (shortcuts, _) =
-        settings_bundle::shortcuts_at_start(&mut keybindings_store, bt_platform::host_platform());
+    let session_store = persist::SessionStore::at_waking(
+        root.join("session.json"),
+        root.join("session.lock"),
+        wake(|| AppEvent::DocumentsAnswered),
+    );
+    let StorageAskers {
+        settings_store,
+        keybindings_store,
+        shortcuts,
+        profiles_store,
+        pins_store,
+        preview_saves,
+    } = StorageAskers::on(root, &session_store.lane());
     let git_mutations = git_mutation_lane::GitMutationLane::new(
         git_mutation_lane::RepoTurns::new(),
         wake(|| AppEvent::GitReady),
@@ -1694,7 +1791,7 @@ pub(crate) fn headless_app(gpu: HeadlessDevice, proxy: LoopProxy, root: &Path) -
         math_worker: Arc::new(computation_lane::ComputationLane::new(wake(|| {
             AppEvent::MathReady
         }))),
-        preview_saves: preview::PreviewSaves::on(lane.clone()),
+        preview_saves,
         git_mutations,
         foreground_program_worker: foreground_program::Worker::spawn(wake(|| AppEvent::MathReady))
             .expect("the foreground worker starts"),
@@ -1727,9 +1824,9 @@ pub(crate) fn headless_app(gpu: HeadlessDevice, proxy: LoopProxy, root: &Path) -
         keybindings_fault: None,
         cli_refusals: Vec::new(),
         cli_preview: None,
-        profiles_store: persist::ProfilesStore::at_on(root.join("profiles.json"), lane.clone()),
+        profiles_store,
         profiles_fault: None,
-        pins_store: pins::PinsStore::at_on(root.join("pins.json"), lane),
+        pins_store,
         pins_fault: None,
         settings_fault: None,
         session_fault: None,
@@ -1919,6 +2016,29 @@ mod tests {
     use super::*;
     use bt_platform::admission::admitted;
     use winit::window::CursorIcon;
+
+    /// RED (T-HEADLESS-HARNESS-ONE-STORAGE-LANE, plan row 123) — **a headless application's
+    /// storage askers are on its session store's lane**, as the product's six are
+    /// (`SessionStore::open`, and the settings, keybindings, profiles and pins stores and the
+    /// preview saves built on its `lane()`): the drain reads its one mark from that lane's
+    /// ledger and asks every asker under it, so an asker on another lane is asked under a mark
+    /// that is not its ledger's.
+    ///
+    /// Red on the base (`9ac40b223`): the session store had a working lane of its own and the
+    /// other five shared a lane no worker served — all five named.
+    #[test]
+    fn a_headless_applications_storage_askers_are_on_its_session_stores_lane() {
+        let folio = HeadlessFolio::with_tabs(
+            "one-storage-lane",
+            vec![crate::test_support::ringing_tab(1, 1)],
+            0,
+        );
+        assert_eq!(
+            askers_off_the_storage_lane(&folio.app),
+            Vec::<&str>::new(),
+            "every asker is on the session store's lane"
+        );
+    }
 
     /// RED — **the headless runtime records what the window would do**: every door of the
     /// window seam, knocked on once, leaves exactly one typed effect carrying its arguments, in

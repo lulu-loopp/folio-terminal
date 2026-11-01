@@ -8672,6 +8672,12 @@ impl PreviewSaves {
         }
     }
 
+    /// The storage lane this desk hands its saves to — a test's look at where a harness put it.
+    #[cfg(test)]
+    pub(crate) fn lane(&self) -> &crate::persist::StorageLane {
+        &self.lane
+    }
+
     /// **What a landing says** (T-PREVIEW-NO-EXCHANGE-RULING, owner ruling
     /// 2026-10-15): "Saved" — or, for a landing by an ordinary write
     /// (`ordinary_on`, a drive that cannot exchange two files in one step), the
