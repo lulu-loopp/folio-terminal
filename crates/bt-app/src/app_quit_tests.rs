@@ -96,9 +96,10 @@ fn a_quit_at_its_write(
     let mut application = crate::headless::HeadlessApplication::of(folio);
     let app = application.folio.app.as_mut().expect("the application");
     let place = store(&root);
-    app.session_store =
+    let mut store =
         persist::SessionStore::at(place.join("session.json"), place.join("session.lock"));
-    app.session_store.set_save_budget(crate::lane::PATIENCE);
+    store.set_save_budget(crate::lane::PATIENCE);
+    app.storage_on(store);
     app.pane_retirement_deadline = crate::lane::PATIENCE;
     let begun = Instant::now();
     app.session_store
@@ -350,11 +351,11 @@ fn the_update_hand_over_takes_the_restart_registration_back() {
     let (lane, jobs) = persist::StorageLane::scripted();
     {
         let app = application.folio.app.as_mut().expect("the application");
-        app.session_store = persist::SessionStore::at_on(
+        app.storage_on(persist::SessionStore::at_on(
             root.join("session.json"),
             root.join("session.lock"),
             lane,
-        );
+        ));
         app.update_job.stage_for_a_test(staged_in(&root, txn));
     }
     let leaves = application
@@ -419,11 +420,11 @@ fn the_update_hand_overs_answer_is_heard_once_and_the_way_out_reads_it() {
     let (lane, jobs) = persist::StorageLane::scripted();
     {
         let app = application.folio.app.as_mut().expect("the application");
-        app.session_store = persist::SessionStore::at_on(
+        app.storage_on(persist::SessionStore::at_on(
             root.join("session.json"),
             root.join("session.lock"),
             lane,
-        );
+        ));
         app.update_job.stage_for_a_test(staged_in(&root, txn));
     }
     assert!(

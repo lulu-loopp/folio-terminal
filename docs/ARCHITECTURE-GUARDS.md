@@ -956,7 +956,14 @@ scope is not resolved: a standard expression macro's name that the tree also
 defines with `macro_rules!` is read as the tree's everywhere (a false shape at
 worst). An unanchored path to another module's `Mark` is told apart by that
 module's own name; an import that renamed `lane` to such a name would be read
-as that module, and is itself a shape.
+as that module, and is itself a shape. Unsafe code is not read: a byte copy of
+a borrowed mark (`std::ptr::read(&mark)`, `std::mem::transmute_copy(&mark)`)
+is a mark copied through a borrow the grammar accepts. What holds that is the
+compiler, not the guard: `bt-app` takes the workspace's `unsafe_code = "deny"`
+(`Cargo.toml`'s `[workspace.lints.rust]`, `[lints] workspace = true` in its
+manifest), so such a copy needs an `#[expect(unsafe_code, reason = "…")]` the
+owner rules on; the tree's one is the counting test allocator of
+`pointer_app_tests.rs`.
 
 Where and what to do: when red, read the finding's check. A D2 read in a loop
 or a closure, or a second read for a later asker, is the bug the guard exists

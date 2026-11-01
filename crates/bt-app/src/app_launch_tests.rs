@@ -717,7 +717,7 @@ fn a_window_that_saves_nothing_asks_for_no_restart() {
         .app
         .as_mut()
         .expect("the application")
-        .session_store = store;
+        .storage_on(store);
     application
         .folio
         .register_for_restart_held_by(&application.event_loop, |_| false);
