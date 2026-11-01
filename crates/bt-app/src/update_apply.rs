@@ -1430,13 +1430,8 @@ impl CountedClock {
     /// it keeps it. The grace alone is read there — the end window's pauses
     /// come after — so a stop that cut the grace short reads less than its
     /// `quit_within`, whatever the end window then spends.
-    pub(crate) fn at_the_end_ask(
-        self: &std::sync::Arc<Self>,
-    ) -> (
-        Box<dyn FnMut(&str) + Send>,
-        std::sync::Arc<std::sync::Mutex<Option<u64>>>,
-    ) {
-        let read = std::sync::Arc::new(std::sync::Mutex::new(None));
+    pub(crate) fn at_the_end_ask(self: &std::sync::Arc<Self>) -> (SaidLineHook, ReadAtEndAsk) {
+        let read: ReadAtEndAsk = std::sync::Arc::new(std::sync::Mutex::new(None));
         let (clock, kept) = (std::sync::Arc::clone(self), std::sync::Arc::clone(&read));
         let hook = Box::new(move |line: &str| {
             let mut kept = kept.lock().unwrap();
@@ -1447,6 +1442,15 @@ impl CountedClock {
         (hook, read)
     }
 }
+
+/// A world's hook on every line it says (a test's `Fake::on_say`).
+#[cfg(test)]
+pub(crate) type SaidLineHook = Box<dyn FnMut(&str) + Send>;
+
+/// Where [`CountedClock::at_the_end_ask`] keeps the stop clock's reading:
+/// `None` until the stop asks for the end.
+#[cfg(test)]
+pub(crate) type ReadAtEndAsk = std::sync::Arc<std::sync::Mutex<Option<u64>>>;
 
 /// Whether `folder` holds a file named as a trial's receipt.
 #[cfg(test)]

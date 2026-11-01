@@ -2604,8 +2604,10 @@ fn the_trial_is_asked_to_quit_before_it_is_killed() {
         ..install.recovery(bounds)
     };
     let (at_end, read_at_end) = stop.at_the_end_ask();
-    let mut hands = Fake::default();
-    hands.on_say = Some(at_end);
+    let hands = Fake {
+        on_say: Some(at_end),
+        ..Fake::default()
+    };
     let (ended, hands) = recovered(road, hands);
     assert_eq!(ended, Some(Ended::RolledBack), "{:?}", hands.said);
     assert_eq!(
