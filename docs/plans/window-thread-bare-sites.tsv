@@ -38,8 +38,8 @@ bt-app	-	crate::files::canonical_path	std::fs::canonicalize	1
 bt-app	-	crate::files::read_directory	std::fs::metadata	1
 bt-app	-	crate::files::read_directory	std::fs::read_dir	1
 bt-app	-	crate::files::run_dir_worker	std::sync::mpsc::Receiver::recv	1
+bt-app	-	crate::git::<WallClock as GitClock>::pause	std::thread::sleep	1
 bt-app	-	crate::git::run_git_with_input	std::thread::JoinHandle::join	2
-bt-app	-	crate::git::run_git_with_input	std::thread::sleep	1
 bt-app	-	crate::git::run_git_worker	std::sync::mpsc::Receiver::recv	1
 bt-app	-	crate::hang_watch::prune_reports	std::fs::read_dir	1
 bt-app	-	crate::hang_watch::watch_forever	std::thread::sleep	1
