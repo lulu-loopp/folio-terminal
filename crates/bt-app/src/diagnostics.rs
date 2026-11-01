@@ -1252,6 +1252,28 @@ mod tests {
         })
     }
 
+    /// [`settled`] within the lane suite's patience, where the writer is free to take every
+    /// earlier line: anything but [`Settled::Written`] fails the test that awaited `what`, by
+    /// name. The settle's own bound is the suite's hang cap here, never a race the test runs.
+    fn settled_written(queue: &Queue, what: &str) {
+        let settled = settled(queue, crate::lane::PATIENCE);
+        assert_eq!(
+            settled,
+            Settled::Written,
+            "not written within the lane suite's patience while awaiting {what}"
+        );
+    }
+
+    /// [`settled_written`] for [`Queue::settle_in_panic`], the panic hook's settle.
+    fn settled_in_panic_written(queue: &Queue, what: &str) {
+        let settled = queue.settle_in_panic(crate::lane::PATIENCE);
+        assert_eq!(
+            settled,
+            Settled::Written,
+            "not written within the lane suite's patience while awaiting {what}"
+        );
+    }
+
     /// [`settled`], asked while the test's writer is still held: the settle runs on a thread of
     /// its own and its answer is awaited within the lane suite's patience. Answers that answer,
     /// `None` if it did not come in that patience, and the settling thread — which the test joins
@@ -1307,7 +1329,7 @@ mod tests {
             lines_of(&log)
         );
         go.send(()).expect("the writer is waiting");
-        assert_eq!(settled(&queue, Duration::from_secs(5)), Settled::Written);
+        settled_written(&queue, "the writer taking the stderr line");
         assert_eq!(lines_of(&log), ["BT_WEB refused about:blank"]);
         drop(queue);
         writer.join().expect("the writer ends with its queue");
@@ -1333,10 +1355,9 @@ mod tests {
         );
         super::note_on(Some(&queue), Some(Channel::Log), "the note last");
         go.send(()).expect("the writer is waiting");
-        assert_eq!(
-            settled(&queue, Duration::from_secs(5)),
-            Settled::Written,
-            "the fence was answered only once every earlier line was written"
+        settled_written(
+            &queue,
+            "the writer taking the note, the stderr line and the note",
         );
         assert_eq!(
             lines_of(&log),
@@ -1379,7 +1400,7 @@ mod tests {
         );
         super::note_on(Some(&queue), Some(Channel::Log), "a note before the settle");
         go.send(()).expect("the writer is waiting");
-        assert_eq!(settled(&queue, Duration::from_secs(5)), Settled::Written);
+        settled_written(&queue, "the writer taking the lines the settle covers");
         super::way_out_line_on(
             Some(&log),
             None,
@@ -1467,7 +1488,7 @@ mod tests {
         );
         super::note_on(Some(&queue), Some(Channel::Console), "a note, for the file");
         go.send(()).expect("the writer is waiting");
-        assert_eq!(settled(&queue, Duration::from_secs(5)), Settled::Written);
+        settled_written(&queue, "the writer taking the note");
         assert_eq!(lines_of(&log), ["a note, for the file"]);
         drop(queue);
         writer.join().expect("the writer ends with its queue");
@@ -1496,7 +1517,7 @@ mod tests {
             lines_of(&log)
         );
         go.send(()).expect("the writer is waiting");
-        assert_eq!(settled(&queue, Duration::from_secs(5)), Settled::Written);
+        settled_written(&queue, "the writer taking the line");
         assert_eq!(lines_of(&log), ["a clipboard picture could not be saved"]);
         drop(queue);
         writer.join().expect("the writer ends with its queue");
@@ -1541,12 +1562,11 @@ mod tests {
         );
         assert!(unwritten);
         settling.join().expect("the settling thread returned");
-        assert_eq!(settled(&queue, Duration::from_secs(5)), Settled::Written);
+        settled_written(&queue, "the writer let go taking both lines");
         assert_eq!(lines_of(&log), ["the first", "the second"]);
-        assert_eq!(
-            queue.settle_in_panic(Duration::from_secs(5)),
-            Settled::Written,
-            "the panic hook's settle is answered by the same writer"
+        settled_in_panic_written(
+            &queue,
+            "the panic hook's settle, answered by the same writer",
         );
         drop(queue);
         writer.join().expect("the writer ends with its queue");
@@ -1572,9 +1592,9 @@ mod tests {
             "a full queue refuses at once"
         );
         go.send(()).expect("the writer is waiting");
-        assert_eq!(settled(&queue, Duration::from_secs(5)), Settled::Written);
+        settled_written(&queue, "the writer taking the two lines before the loss");
         assert!(queue.offer("four".to_owned()));
-        assert_eq!(settled(&queue, Duration::from_secs(5)), Settled::Written);
+        settled_written(&queue, "the writer taking the line after the loss");
         assert_eq!(lines_of(&log), ["one", "two", &super::lost_line(1), "four"]);
         drop(queue);
         writer.join().expect("the writer ends with its queue");
@@ -1620,7 +1640,7 @@ mod tests {
             "the fence did not get in behind a full queue"
         );
         settling.join().expect("the settling thread returned");
-        assert_eq!(settled(&queue, Duration::from_secs(5)), Settled::Written);
+        settled_written(&queue, "the writer let go taking the lines and the loss");
         assert_eq!(lines_of(&log), ["one", "two", &super::lost_line(1)]);
         drop(queue);
         writer.join().expect("the writer ends with its queue");
@@ -1646,10 +1666,7 @@ mod tests {
         crate::the_fatal_road(
             || {
                 go.send(()).expect("the writer is waiting");
-                assert_eq!(
-                    queue.settle_in_panic(Duration::from_secs(5)),
-                    Settled::Written
-                );
+                settled_in_panic_written(&queue, "the fatal road's settle");
             },
             || {
                 assert!(append_note(&log, "thread 'bt-x' panicked at the line"));
@@ -1677,6 +1694,12 @@ mod tests {
     ///
     /// MUTATION: put the sender behind a `Mutex` taken with `try_lock`, a line dropped on
     /// `WouldBlock`, and lines go missing.
+    ///
+    /// The writer is waited for by the queue's close: the producers' half dropped, it takes
+    /// every line still queued and ends, while the count of lines it has still to take falls
+    /// ([`crate::lane::while_progressing`]). A loaded machine that writes the 40,000 lines slowly
+    /// is waited for; a writer that stops taking them is red by name, never a hang. It was a
+    /// 30 s settle, which a loaded machine ran out of (row 128).
     #[test]
     fn two_producers_lose_nothing_and_keep_their_order() {
         const EACH: usize = 20_000;
@@ -1694,8 +1717,15 @@ mod tests {
             }
         });
         let (go, writer) = a_held_writer(drain);
+        let to_take = std::sync::Arc::clone(&queue.lines);
+        drop(queue);
         go.send(()).expect("the writer is waiting");
-        assert_eq!(settled(&queue, Duration::from_secs(30)), Settled::Written);
+        crate::lane::while_progressing(
+            "the writer taking both producers' lines",
+            || to_take.load(std::sync::atomic::Ordering::Acquire),
+            || writer.is_finished(),
+        );
+        writer.join().expect("the writer ends with its queue");
         let lines = lines_of(&log);
         assert_eq!(lines.len(), 2 * EACH, "lines went missing");
         for name in ["left", "right"] {
@@ -1709,8 +1739,6 @@ mod tests {
                 "{name}'s lines are out of order"
             );
         }
-        drop(queue);
-        writer.join().expect("the writer ends with its queue");
         let _ = std::fs::remove_dir_all(&directory);
     }
 

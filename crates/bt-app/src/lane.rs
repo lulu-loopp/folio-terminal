@@ -2387,6 +2387,36 @@ pub(crate) fn wait_until(what: &str, done: impl FnMut() -> bool) {
     );
 }
 
+/// **Long work another thread does, waited for while it moves**: `done` asked again until it
+/// holds, the suite's [`PATIENCE`] starting over each time `progress` (a count the work moves)
+/// changes. A loaded machine that does the work slowly is waited for, however long the whole
+/// takes; work that stops moving for one [`PATIENCE`] before `done` fails the test that awaited
+/// `what`, by name and with the count it stopped at, rather than hanging it. Where a single
+/// event ends the work, [`receive`] or [`wait_until`] waits for it instead.
+#[cfg(test)]
+pub(crate) fn while_progressing(
+    what: &str,
+    mut progress: impl FnMut() -> usize,
+    mut done: impl FnMut() -> bool,
+) {
+    let mut seen = progress();
+    let mut since = Instant::now();
+    while !done() {
+        let now = progress();
+        if now != seen {
+            seen = now;
+            since = Instant::now();
+        } else if since.elapsed() >= PATIENCE {
+            assert!(
+                done(),
+                "no progress within the lane suite's patience while awaiting {what}: it stopped at {seen}"
+            );
+            return;
+        }
+        std::thread::yield_now();
+    }
+}
+
 /// **A hold a fake puts its work behind**: the suite holds it; the fake passes it where its work
 /// begins and stands there while it is held; the suite waits, within [`PATIENCE`], until a worker
 /// is standing in it — the signal that the work has been taken and has not ended.
