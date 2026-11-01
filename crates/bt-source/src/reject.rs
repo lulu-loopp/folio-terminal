@@ -126,6 +126,19 @@ pub enum Rejection {
         /// The attribute as written: `#[cfg(…)]`, `#![cfg(…)]` or `#[cfg_attr(…)]`.
         attribute: String,
     },
+    /// A `#[cfg(…)]` (or a `#[cfg_attr(…)]` that writes one) inside an item that carries an
+    /// attribute macro (plan row 122): the macro receives the item's tokens and may emit anything,
+    /// so what the `cfg` says is not what the compiler sees. The item itself is not refused, and an
+    /// item's own `cfg` is read as a gate (the compiler applies it before any attribute macro).
+    CfgUnderAttributeMacro {
+        file: PathBuf,
+        at: Position,
+        /// The outermost attribute that may rewrite the item, as written between its brackets:
+        /// `proc_attr`, `tokio::main`, `cfg_attr(test, proc_attr)`.
+        attribute_macro: String,
+        /// The attribute as written: `#[cfg(…)]`, `#![cfg(…)]` or `#[cfg_attr(…)]`.
+        attribute: String,
+    },
     /// An invocation of a `macro_rules!` whose body `crate::gates` reads (plan row 109) — a list of
     /// attribute-carrying names — that is not such a list: reading its `cfg`s as gates would be
     /// a guess at what the macro makes of it.
@@ -260,6 +273,18 @@ impl fmt::Display for Rejection {
                 formatter,
                 "{}:{at}: `{attribute}` inside the tokens of `{macro_path}`, where the index reads no \
                  gate, so the bytes under it would be counted whatever it says",
+                file.display()
+            ),
+            Self::CfgUnderAttributeMacro {
+                file,
+                at,
+                attribute_macro,
+                attribute,
+            } => write!(
+                formatter,
+                "{}:{at}: `{attribute}` inside an item under `#[{attribute_macro}]`, an attribute \
+                 macro that may rewrite the item, so the bytes under it would be counted whatever \
+                 it says",
                 file.display()
             ),
             Self::UnreadableMacroBody {
