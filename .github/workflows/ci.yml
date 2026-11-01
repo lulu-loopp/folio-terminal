@@ -1955,7 +1955,25 @@ jobs:
     # 15. With a cache restored (in full or by its prefix), over the 8 of
     # the ten green runs on `main` (39032766393 back to 38691455267) that
     # restored one: p50 7.8, max 8.5.
-    timeout-minutes: 15
+    #
+    # **Provisional: 30, until a cold run measures the number**
+    # (T-CI-CORE-LINUX-BUDGET-REDERIVE, plan row 165, measured 2026-11-01).
+    # The 15 above stopped holding with a *restored* cache. Over the 33
+    # attempts 41220186308 to 41304814816 (2026-10-31 16:32Z to 11-01
+    # 12:05Z), every one restored its cache in full and none was cold, the
+    # test step took 7.9-11.1 min on 13 of them and 13.3-14.4 min on 19
+    # (runner speed, not the commit: head 42db8d1f6 took 8.60 in
+    # 41300386741 and 13.85 in 41304273777), and four were cancelled at 15
+    # (41303744747 twice, 41299423212, 41294422269): green totals p50 14.1,
+    # max 14.97 (41220409108), the cancelled ones at least 15.2. `bt-source`
+    # is about 81 % of the step (408-704 s, 322 tests, against 297 s and
+    # 165 tests on 2026-10-17), from more test binaries that each build the
+    # real-tree index anew (plan row 166). `logic`'s rule cannot be applied
+    # yet: it takes the cold max, the window holds no cold run, and a cold
+    # run could not finish under 15 to be measured. 30 is the room to
+    # measure one in, not a derived budget; the next commit replaces it with
+    # the cold max x 1.36 and lists the runs.
+    timeout-minutes: 30
     # **The static C runtime is a Windows shipping rule and this job ships
     # nothing.** `.cargo/config.toml` puts `-C target-feature=+crt-static` on
     # every build so that `folio.exe` carries its own CRT rather than asking a
