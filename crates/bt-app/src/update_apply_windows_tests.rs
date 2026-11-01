@@ -4469,12 +4469,23 @@ fn a_start_counts_only_when_acknowledged_and_the_last_resort_is_a_window_here() 
 /// window's mark is taken over by exactly one of two contenders racing for
 /// it** (a soak): the election is one exclusive lock around
 /// read-check-replace, so the first in takes the duty and the second reads the
-/// live winner, `Theirs`, or — while the winner still holds the lock, or an
-/// outside scanner refuses its read — truthfully answers `Refused`; it may
-/// never become another winner. Two threads race, released together by a
+/// live winner, `Theirs`, or — when an outside scanner refuses its read —
+/// truthfully answers a `Refused` that is not the election's "still held"; it
+/// may never become another winner. Two threads race, released together by a
 /// barrier, over many rounds, each round from a fresh stale mark; the two
 /// contenders are both live processes (this test and a synthetic program it
 /// started), so neither can be taken for a dead owner.
+///
+/// **The second in waits out the first on one counted clock**
+/// (T-STALE-MARK-RACE-ON-A-COUNTED-CLOCK): both racers' waits for the election
+/// lock are read and paused on one [`CountedClock`] of the round
+/// (`update_apply::take_the_window_on`), which never sleeps. Its first pause
+/// lasts until the other racer has answered — and so let the lock go — within
+/// the suite's patience; the first in never pauses while it holds the lock (it
+/// asks each read and its write once). So the first holds for no pause of the
+/// clock, the second's wait has the election's 200 (`ELECTION_WITHIN` over
+/// `install_txn::LOCK_POLL`), and the round asserts the second took at most
+/// one: how long the first takes on a loaded machine decides nothing.
 ///
 /// **A replacement refused before its rename gives no winner** (0.4.8 E2):
 /// each applier whose mark does not land stands aside and lets the lock go,
@@ -4488,7 +4499,9 @@ fn a_start_counts_only_when_acknowledged_and_the_last_resort_is_a_window_here() 
 /// MUTATION: in `update_apply::take_the_window_within_using`, give each
 /// contender a lock of its own (both answer `Mine`); or, in
 /// `Applier::unrecorded`, answer `Mine` through a lock it keeps (a scanned
-/// round then has a winner whose duty the outgoing build cannot see).
+/// round then has a winner whose duty the outgoing build cannot see); or, in
+/// `install_txn::hold_until`, give up at the first refusal (the second
+/// answers "still held").
 #[test]
 fn a_stale_mark_is_taken_over_by_exactly_one_contender() {
     let Some(install) = Install::new("stale-race") else {
@@ -4513,27 +4526,43 @@ fn a_stale_mark_is_taken_over_by_exactly_one_contender() {
         let scanner = scanned
             .then(|| bt_platform::trust_harness::hold_without_delete_sharing(&mark).unwrap());
         let barrier = Arc::new(std::sync::Barrier::new(2));
+        let answered = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let clock = Arc::new(CountedClock::new({
+            let answered = Arc::clone(&answered);
+            move |pause| {
+                if pause == 1 {
+                    crate::lane::within_patience(|| {
+                        answered.load(std::sync::atomic::Ordering::SeqCst) >= 1
+                    });
+                }
+            }
+        }));
         let racers: Vec<_> = contenders
             .iter()
             .map(|who| {
-                let (home, txn, who, barrier) = (
+                let (home, txn, who, barrier, answered, clock) = (
                     install.home.clone(),
                     install.txn,
                     *who,
                     Arc::clone(&barrier),
+                    Arc::clone(&answered),
+                    Arc::clone(&clock),
                 );
                 bt_platform::spawn_at_priority(
                     "bt-u34-stale-race",
                     bt_platform::ThreadPriority::BelowNormal,
-                    move |_worker| {
+                    move |worker| {
                         barrier.wait();
-                        crate::update_apply::take_the_window(
-                            None,
+                        let answer = crate::update_apply::take_the_window_on(
+                            worker,
+                            &*clock,
                             &home,
                             txn,
                             who,
-                            Instant::now() + crate::update_apply::ELECTION_WITHIN,
-                        )
+                            crate::update_apply::ELECTION_WITHIN,
+                        );
+                        answered.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        answer
                     },
                 )
                 .expect("a racer")
@@ -4543,6 +4572,11 @@ fn a_stale_mark_is_taken_over_by_exactly_one_contender() {
             .into_iter()
             .map(|racer| racer.join().unwrap())
             .collect();
+        assert!(
+            clock.pauses() <= 1,
+            "round {round}: the second in waited out the first in one pause of the clock, not {}: {answers:?}",
+            clock.pauses()
+        );
         let on_disk =
             std::fs::read(&mark).map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
         let stood_aside = |answer: &Window| matches!(answer, Window::Refused(refusal) if refusal.why().contains("stands aside"));
@@ -4552,8 +4586,10 @@ fn a_stale_mark_is_taken_over_by_exactly_one_contender() {
                 let winner = contenders[at];
                 let loser = &answers[1 - at];
                 assert!(
-                    *loser == Window::Theirs(winner) || matches!(loser, Window::Refused(_)),
-                    "round {round}: the loser names the winner or truthfully refuses: {answers:?}"
+                    *loser == Window::Theirs(winner)
+                        || matches!(loser, Window::Refused(refusal) if !refusal.contended()),
+                    "round {round}: the loser names the winner or truthfully refuses, never \
+                     because the election was still held: {answers:?}"
                 );
                 assert_eq!(
                     crate::update_apply::window_owner(&install.home, install.txn),
