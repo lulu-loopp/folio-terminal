@@ -827,26 +827,24 @@ fn read_first_frame(
         // them look otherwise would be turning a good file into a refusal for a
         // reason that has nothing to do with the file. The caller's own
         // [`FIRST_FRAME_BUDGET`] still bounds the whole question from outside.
-        let deadline = Instant::now() + FIRST_FRAME_BUDGET;
-        let sample = loop {
-            let mut flags = 0_u32;
-            let mut sample = None;
-            reader
-                .ReadSample(stream, 0, None, Some(&mut flags), None, Some(&mut sample))
-                .ok()?;
-            if let Some(sample) = sample {
-                break sample;
-            }
-            // No sample and no end: a stream tick, or a format change the reader
-            // is working through. Both are answered by asking again — but a file
-            // that answers this way for ever is what the deadline above is for.
-            if flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0 {
-                return None;
-            }
-            if Instant::now() >= deadline {
-                return None;
-            }
-        };
+        // The loop's decision is [`first_sample`]'s; what is left here is the one
+        // `ReadSample` each turn asks, read into the three answers it can give.
+        let sample = first_sample(
+            || {
+                let mut flags = 0_u32;
+                let mut sample = None;
+                reader
+                    .ReadSample(stream, 0, None, Some(&mut flags), None, Some(&mut sample))
+                    .ok()?;
+                Some(match sample {
+                    Some(sample) => ReadAnswer::Sample(sample),
+                    None if flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0 => ReadAnswer::End,
+                    None => ReadAnswer::Tick,
+                })
+            },
+            Instant::now,
+            FIRST_FRAME_BUDGET,
+        )?;
         lap(&mut cost.read_sample);
 
         let buffer = sample.ConvertToContiguousBuffer().ok()?;
@@ -860,6 +858,48 @@ fn read_first_frame(
             native_width: native.0,
             native_height: native.1,
         })
+    }
+}
+
+/// **What one `ReadSample` answered**, as [`first_sample`] reads it.
+enum ReadAnswer<S> {
+    /// A sample: the frame the loop was waiting for.
+    Sample(S),
+    /// No sample and no end: a stream tick, or a format change the reader is
+    /// working through. Both are answered by asking again.
+    Tick,
+    /// The end of the stream, with no sample: the file has nothing to give.
+    End,
+}
+
+/// **Ask `read` until it answers a sample, the stream ends, or `budget` read on
+/// `now` has run out** (T-FIRST-FRAME-BUDGET-FROM-A-CLOCK) — [`read_first_frame`]'s
+/// loop, with the platform's `ReadSample` and the clock both handed in.
+///
+/// `None` is the module's one silence for all three ways it stops without a
+/// picture: `read` itself failed (`None` from it), the stream ended, or the
+/// deadline — `now()` at the call plus `budget` — had passed when a tick came
+/// back. The deadline is read only after a tick, so it ends a reader that answers
+/// "not yet" for ever and cannot bound a `ReadSample` that never returns; that
+/// one is [`within_budget`]'s. The real caller passes `Instant::now` and
+/// [`FIRST_FRAME_BUDGET`]; a test passes a planted reader and a clock that moves
+/// by the looks it is asked for.
+fn first_sample<S>(
+    mut read: impl FnMut() -> Option<ReadAnswer<S>>,
+    now: impl Fn() -> Instant,
+    budget: Duration,
+) -> Option<S> {
+    let deadline = now() + budget;
+    loop {
+        match read()? {
+            ReadAnswer::Sample(sample) => return Some(sample),
+            ReadAnswer::End => return None,
+            ReadAnswer::Tick => {}
+        }
+        // A file that answers "not yet" for ever is what the deadline is for.
+        if now() >= deadline {
+            return None;
+        }
     }
 }
 
@@ -1152,11 +1192,23 @@ fn contain(size: (u32, u32), fit: (u32, u32)) -> (u32, u32) {
 mod tests {
     use super::*;
 
-    /// How long a test here waits for the decoder to answer something that must
-    /// be answered: a quick machine pays nothing, and a decoder that never
-    /// answers is a red. The same patience as the engine's tests
-    /// (`engine::tests::PATIENCE`), whose module is private to `engine`.
+    /// How long planted work that a test holds waits to be let go before it lets
+    /// itself go: a test that releases it pays nothing, and a wait that never
+    /// ends becomes a late answer and a red. The same patience as the engine's
+    /// tests (`engine::tests::PATIENCE`), whose module is private to `engine`.
+    ///
+    /// **Never a bound on a real decode** (T-FIRST-FRAME-BUDGET-FROM-A-CLOCK,
+    /// R8): a loaded machine's decode ran past it, so the tests that need a real
+    /// frame ask with no wall limit, and a decode that never answers is the suite
+    /// watchdog's red.
     const DECODER_PATIENCE: Duration = Duration::from_secs(10);
+
+    /// **Planted work's hold**: wait until the test lets the work go, or until
+    /// [`DECODER_PATIENCE`] has passed — the suite's patience, so a wait that
+    /// never ends turns into a late answer and a red, never a hang.
+    fn held_until_let_go(release: &std::sync::mpsc::Receiver<()>) {
+        let _ = release.recv_timeout(DECODER_PATIENCE);
+    }
 
     /// PIN — **a frame is measured before it is copied, on both locks** (review
     /// row R2-4).
@@ -1387,17 +1439,20 @@ mod tests {
     /// either half of this can be stated without a real file's real duration
     /// standing in the middle of it. The first arm hands it work that answers at
     /// once under a budget nothing could exceed; the second hands it work that
-    /// cannot finish inside the budget it is given, and the budget is small
-    /// enough that a machine under any load at all still cannot finish it.
+    /// cannot finish inside the budget it is given: it is held until the test
+    /// has the answer (T-FIRST-FRAME-BUDGET-FROM-A-CLOCK), so no budget and no
+    /// machine can let it answer first.
     ///
     /// **Neither arm can be made red or green by a busy machine**, which is the
     /// whole reason this test exists rather than a slow file: an hour is not a
-    /// duration a thread spawn and a channel send can miss, and twenty
-    /// milliseconds is not one a two-second sleep can beat.
+    /// duration a thread spawn and a channel send can miss, and work that is
+    /// held until the answer is in has not answered by then, whatever the
+    /// budget. Nothing here sleeps.
     ///
-    /// MUTATION: swap `recv_timeout` for `recv` and the second arm hangs for two
-    /// seconds and then answers `Some`, which is a hover that has frozen the
-    /// decoration worker for as long as the file feels like taking.
+    /// MUTATION: swap `recv_timeout` for `recv` and the second arm waits for the
+    /// held work, which lets itself go after [`DECODER_PATIENCE`] and answers
+    /// `Some` — red, and a hover that has frozen the decoration worker for as
+    /// long as the file feels like taking.
     #[test]
     fn a_question_that_cannot_finish_is_given_up_on() {
         assert_eq!(
@@ -1405,13 +1460,158 @@ mod tests {
             Some(7),
             "an answer inside the budget is the answer"
         );
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let (finished, done) = std::sync::mpsc::channel();
+        let answer = within_budget(Duration::from_millis(20), move || {
+            held_until_let_go(&held);
+            let _ = finished.send(());
+            Some(7_u32)
+        });
+        // The work is let go only now, after the answer, and ends.
+        let _ = release.send(());
+        let _ = done.recv();
         assert_eq!(
-            within_budget(Duration::from_millis(20), || {
-                std::thread::sleep(Duration::from_secs(2));
-                Some(7_u32)
-            }),
-            None,
+            answer, None,
             "work that has not answered by the end of the budget is the module's one silence"
+        );
+    }
+
+    /// **A clock that moves only when a read is asked**: one [`STEP`] per
+    /// `ReadSample` (the planted reader takes it, as the real one spends its time
+    /// in the platform), from one wall reading taken once, and never when it is
+    /// only read. [`first_sample`] reads it once to set its deadline and once
+    /// after every tick, and both are counted, so "the budget ran out at the
+    /// third read" is a count, never a duration.
+    struct Looks {
+        began: Instant,
+        /// How far the reads have moved it.
+        moved: std::cell::Cell<Duration>,
+        /// How many times it was read.
+        readings: std::cell::Cell<u32>,
+    }
+
+    /// How far one planted read moves [`Looks`].
+    const STEP: Duration = Duration::from_secs(1);
+
+    impl Looks {
+        fn new() -> Self {
+            Self {
+                began: Instant::now(),
+                moved: std::cell::Cell::new(Duration::ZERO),
+                readings: std::cell::Cell::new(0),
+            }
+        }
+
+        fn now(&self) -> Instant {
+            self.readings.set(self.readings.get() + 1);
+            self.began + self.moved.get()
+        }
+
+        /// One read's worth of time.
+        fn step(&self) {
+            self.moved.set(self.moved.get() + STEP);
+        }
+    }
+
+    /// **A planted `ReadSample`**: each read takes one [`STEP`] of `clock`'s
+    /// time and answers the next of `script` (`None` is a failed read), then the
+    /// last one for ever; and how many times it was asked.
+    fn planted(
+        clock: &Looks,
+        script: Vec<Option<ReadAnswer<u32>>>,
+    ) -> (
+        impl FnMut() -> Option<ReadAnswer<u32>> + '_,
+        std::rc::Rc<std::cell::Cell<usize>>,
+    ) {
+        let asked = std::rc::Rc::new(std::cell::Cell::new(0_usize));
+        let count = std::rc::Rc::clone(&asked);
+        let read = move || {
+            let turn = count.get();
+            count.set(turn + 1);
+            clock.step();
+            match script.get(turn).or(script.last())? {
+                Some(ReadAnswer::Sample(sample)) => Some(ReadAnswer::Sample(*sample)),
+                Some(ReadAnswer::Tick) => Some(ReadAnswer::Tick),
+                Some(ReadAnswer::End) => Some(ReadAnswer::End),
+                None => None,
+            }
+        };
+        (read, asked)
+    }
+
+    /// RED (T-FIRST-FRAME-BUDGET-FROM-A-CLOCK) — **a reader that only ever
+    /// answers "not yet" is given up on when its budget runs out, counted on
+    /// the clock it was handed.**
+    ///
+    /// [`read_first_frame`]'s loop with the platform taken out: the real
+    /// `ReadSample` is the only producer of a tick, and a real fixture answers
+    /// with a sample at the first read, so the budget's end is stated here, on a
+    /// planted reader whose every read takes a second. Three seconds of budget
+    /// is three reads: the deadline is set before the first, and the third tick
+    /// comes back at 3 s.
+    ///
+    /// MUTATIONS: never read the deadline (`if false && now() >= deadline`) —
+    /// the loop asks on past the third tick and comes back with the sample the
+    /// planted reader gives at the eleventh. Set the deadline after the first
+    /// read rather than before it — the budget is a read longer, and the loop
+    /// gives up at the fourth.
+    #[test]
+    fn a_reader_that_only_says_not_yet_is_given_up_on_when_its_budget_runs_out() {
+        let mut script: Vec<Option<ReadAnswer<u32>>> =
+            (0..10).map(|_| Some(ReadAnswer::Tick)).collect();
+        script.push(Some(ReadAnswer::Sample(7)));
+        let clock = Looks::new();
+        let (read, asked) = planted(&clock, script);
+        let answer = first_sample(read, || clock.now(), Duration::from_secs(3));
+        assert_eq!(
+            (answer, asked.get(), clock.readings.get()),
+            (None, 3, 4),
+            "three ticks, the third at the deadline: the module's one silence"
+        );
+    }
+
+    /// RED (T-FIRST-FRAME-BUDGET-FROM-A-CLOCK) — **a sample inside the budget is
+    /// the answer, and the end of the stream and a failed read are a silence at
+    /// once.**
+    ///
+    /// MUTATIONS: end the loop at the first tick (`if true || now() >= deadline`)
+    /// — the sample after two ticks is never asked for, and the first assertion
+    /// reads `None` after one read. Read a failed read as a tick — the last case
+    /// reads on until the deadline, and the clock is read four times, not once.
+    #[test]
+    fn a_sample_inside_the_budget_is_the_answer_and_an_end_is_a_silence() {
+        let clock = Looks::new();
+        let (read, asked) = planted(
+            &clock,
+            vec![
+                Some(ReadAnswer::Tick),
+                Some(ReadAnswer::Tick),
+                Some(ReadAnswer::Sample(7)),
+            ],
+        );
+        let answer = first_sample(read, || clock.now(), Duration::from_secs(3));
+        assert_eq!(
+            (answer, asked.get(), clock.readings.get()),
+            (Some(7), 3, 3),
+            "two ticks inside three seconds, then the frame"
+        );
+
+        let clock = Looks::new();
+        let (read, asked) = planted(&clock, vec![Some(ReadAnswer::End)]);
+        let answer = first_sample(read, || clock.now(), Duration::from_secs(3));
+        assert_eq!(
+            (answer, asked.get(), clock.readings.get()),
+            (None, 1, 1),
+            "a stream that ends has nothing to give, and the deadline is never read"
+        );
+
+        let clock = Looks::new();
+        let (read, asked) = planted(&clock, vec![None]);
+        let answer = first_sample(read, || clock.now(), Duration::from_secs(3));
+        assert_eq!(
+            (answer, asked.get(), clock.readings.get()),
+            (None, 1, 1),
+            "a read that failed is the same silence, at once"
         );
     }
 
@@ -1570,15 +1770,17 @@ mod tests {
     fn the_shipped_mov_fixture_gives_up_a_frame_it_will_never_play() {
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/assets/folio-video-test.mov");
-        // The decoder itself, on a thread of its own, within the suite's patience
-        // rather than `first_frame`'s outer `FIRST_FRAME_BUDGET`: whether this
-        // decoder reads a QuickTime file is the subject, and how fast a loaded
-        // machine opens and seeks one is not. Only the open and the seek leave the
+        // The decoder itself, on this thread, with no wall limit over it rather than
+        // `first_frame`'s outer `FIRST_FRAME_BUDGET` (T-FIRST-FRAME-BUDGET-FROM-A-CLOCK,
+        // R8): whether this decoder reads a QuickTime file is the subject, and how
+        // fast a loaded machine opens and seeks one is not; a decode that never
+        // answers is the suite watchdog's red. Only the open and the seek leave the
         // product's clock here; `read_first_frame` still bounds its `ReadSample`
-        // loop by `FIRST_FRAME_BUDGET`, which is the product's answer to a reader
-        // that never ends.
+        // loop by `FIRST_FRAME_BUDGET` (`first_sample`), which is the product's
+        // answer to a reader that never ends.
         let url = HSTRING::from(fixture.as_os_str());
-        let frame = within_budget(DECODER_PATIENCE, move || decode_from_url(&url, 280, 160).0)
+        let frame = decode_from_url(&url, 280, 160)
+            .0
             .expect("a real mov gives up a frame");
         assert_eq!(
             (frame.native_width, frame.native_height),
@@ -1664,9 +1866,12 @@ mod tests {
     /// module's one silence, and at that moment nobody holds the file: the caller
     /// closed it before it answered, whatever the walked-away thread still holds.
     ///
-    /// MUTATION: empty `TheFile`'s `Drop` (no `Close`), or hand the thread the
+    /// MUTATIONS: empty `TheFile`'s `Drop` (no `Close`), or hand the thread the
     /// `TheFile` itself rather than a [`Lent`] reference — the thread still
     /// holding the stream holds the file, and the exclusive open is refused.
+    /// Swap `within_budget`'s `recv_timeout` for `recv` — the answer waits for the
+    /// held decode to let itself go after [`DECODER_PATIENCE`], and the decode is
+    /// no longer running when it comes.
     #[test]
     fn a_frame_given_up_on_leaves_its_file_free() {
         let dir = bt_testpath::temp_path("folio-video-given-up");
@@ -1677,17 +1882,24 @@ mod tests {
         let answer = first_frame_through(&url, Duration::from_millis(20), move |stream| {
             // Held until the test has looked, holding the stream all the while: a decode
             // that cannot answer inside any budget, whatever the machine is doing.
-            let _ = held.recv();
+            held_until_let_go(&held);
             drop(stream);
             let _ = finished.send(());
             None
         });
         let free = bt_testpath::nobody_holds(&copy);
+        // Read before the release: the decode cannot have finished, because nothing has
+        // let it go — unless the budget waited for it to let itself go.
+        let still_running = done.try_recv().is_err();
         // The walked-away thread is let go, and ends; the scratch file goes after it.
         let _ = release.send(());
         let _ = done.recv();
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(answer, None, "a decode given up on is the module's silence");
+        assert!(
+            still_running,
+            "the budget gave up on the decode, which was still running when it answered"
+        );
         assert!(
             free,
             "and the file is let go before the silence is answered, though the decode still runs"
@@ -1701,7 +1913,20 @@ mod tests {
     ///
     /// The real platform, the shipped fixture and a file that is no video at all
     /// (the refusal arm, whose source resolver gives up on the bytes), each asked
-    /// through [`first_frame`] and written over at once — exactly the gesture.
+    /// down [`first_frame`]'s own road and written over at once — exactly the
+    /// gesture.
+    ///
+    /// **The road is `first_frame`'s, its constant is not**
+    /// (T-FIRST-FRAME-BUDGET-FROM-A-CLOCK): each question goes through
+    /// [`first_frame_through`] with the real decode, under a budget that never
+    /// ends (`Duration::MAX`, which `recv_timeout` waits out as a plain `recv`)
+    /// instead of [`FIRST_FRAME_BUDGET`]. Through `first_frame` the fixture's arm
+    /// was a decode racing three seconds, and a loaded machine that lost the race
+    /// read "no frame" for a file it had decoded; under [`DECODER_PATIENCE`] it
+    /// raced ten (R8). Whether the file is free when the answer comes back is the
+    /// subject; how fast a loaded machine decodes is not, a decode that never
+    /// answers is the suite watchdog's red, and the budget is pinned next door, on
+    /// work that has no decoder in it.
     ///
     /// No mutation turns this red at will: the platform's late release it guards
     /// against is a race (CI run 39055489876 lost it once, in a full suite, on the
@@ -1709,6 +1934,12 @@ mod tests {
     /// takes the race away; this states the gesture itself.
     #[test]
     fn an_answered_frame_leaves_its_file_free() {
+        let patiently = |path: &Path| {
+            let url = HSTRING::from(path.as_os_str());
+            first_frame_through(&url, Duration::MAX, move |stream| {
+                decode_lent(&stream, (280, 160)).0
+            })
+        };
         let dir = bt_testpath::temp_path("folio-video-answered");
         let real = a_copy_of_the_fixture(&dir, "录屏 real.mp4");
         let junk = dir.join("录屏 junk.mp4");
@@ -1716,12 +1947,12 @@ mod tests {
         let answers = [
             (
                 "the fixture",
-                first_frame(&real, 280, 160).is_some(),
+                patiently(&real).is_some(),
                 bt_testpath::nobody_holds(&real),
             ),
             (
                 "no video",
-                first_frame(&junk, 280, 160).is_some(),
+                patiently(&junk).is_some(),
                 bt_testpath::nobody_holds(&junk),
             ),
         ];
