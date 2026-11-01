@@ -67,18 +67,26 @@ the header is the authority:
   its `members` parameter; five calls joined the count of method names a standard
   type has too, 4,308 -> 4,313 in the header; no row of any file moved).
 - A one-segment call of a name bound nowhere is typed only from the declarations its
-  module reaches: the module's own product items, then its `use` items a product build
-  compiles (renames and re-exports followed, a module looked up before a `use` name of
-  the same spelling), then its globs, and across a `use` or a glob into another
-  workspace crate to that crate's declaration. A name that reaches only a test build's
-  declaration, a path into a crate the census does not read (`std`), a `fn` or a `use`
-  written in a body, or nothing at all is not typed; it is never matched by its bare
-  name elsewhere (row 126, 2026-10-31: of bt-app's 13,289 such calls, 1,071 became
-  typed, 45 changed type — 43 `admitted` calls typed from bt-effects' instead of a test
-  helper's, 2 `read_keybindings` from bt-persist's instead of `settings_bundle`'s — and
-  10 calls of a `fn` written in a body became untyped; the unattributed reads went
-  181 -> 178, the two untyped-receiver classes 4,313 -> 4,253 and 2,287 -> 2,258, and
-  eight topic rows grew; no field, door or unknown row moved).
+  module reaches: the module's own product items (a test-only one skipped), then its
+  `use` items a product build compiles (renames and re-exports followed, a module looked
+  up before a `use` name of the same spelling), then its globs, and across a `use` or a
+  glob into another workspace crate to that crate's declaration. A name that reaches
+  only a test build's declaration, a `fn` or a `use` written in a body, or nothing at
+  all is not typed, and neither is one that comes through a path the rules do not
+  place, each refusal naming why: a crate the census does not read (`std`), a first
+  segment that is no module, type or workspace crate (a crate outside the workspace, a
+  module a macro writes), `super` past the crate root, or a chain of more than eight
+  `use` steps (a cycle). It is never matched by its bare name elsewhere, and the call
+  graph's edge for the call follows the same rules (row 126, 2026-10-31: of bt-app's
+  13,289 such call visits — a closure walked twice is visited twice — 1,071 became
+  typed, 45 changed type — 43 `admitted` visits typed from bt-effects' instead of a
+  test helper's, 2 visits of the one `read_keybindings` call in
+  `KeybindingsStore::read_at` from bt-persist's instead of `settings_bundle`'s — and 10
+  calls of a `fn` written in a body became untyped; the unattributed reads went 181 ->
+  178, the two untyped-receiver classes 4,313 -> 4,253 and 2,287 -> 2,258, and eight
+  topic rows grew; no field, door or unknown row moved. The review's fold — the last
+  segment never replaced through a `use` name, the refusal reasons, a test-only
+  declaration skipped, the edge on the same rules — moved no row).
 - 301 sites reach more than one item, for example two types of the same name in two
   modules.
 - A call through an associated type of a generic (`B::Glass`, `B::Window`, `G::Device`)
