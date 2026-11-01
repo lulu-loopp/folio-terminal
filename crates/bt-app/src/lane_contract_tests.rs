@@ -1608,7 +1608,10 @@ fn a_full_lane_answers_without_waiting_and_an_admission_waiting_for_the_worker_i
 /// has not raised it.
 fn passing_apart(
     pass: impl FnOnce() + Send + 'static,
-) -> (Arc<std::sync::atomic::AtomicBool>, std::thread::JoinHandle<()>) {
+) -> (
+    Arc<std::sync::atomic::AtomicBool>,
+    std::thread::JoinHandle<()>,
+) {
     let returned = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let raised = Arc::clone(&returned);
     let worker = std::thread::spawn(move || {
@@ -1649,7 +1652,11 @@ fn a_hold_stood_in_past_its_cap_lets_go_once_and_its_release_is_red() {
         "a worker standing in a held hold comes back through the hold's cap"
     );
     worker.join().expect("the worker ends");
-    assert_eq!(hold.lapses(), 1, "the hold counts that it let go on its own");
+    assert_eq!(
+        hold.lapses(),
+        1,
+        "the hold counts that it let go on its own"
+    );
     hold.pass();
     assert_eq!(
         hold.lapses(),
@@ -1691,7 +1698,11 @@ fn a_gate_that_let_go_on_its_own_makes_its_release_red() {
         "a worker held at the gate comes back through the gate's cap"
     );
     worker.join().expect("the worker ends");
-    assert_eq!(gate.lapses(), 1, "the gate counts that it let go on its own");
+    assert_eq!(
+        gate.lapses(),
+        1,
+        "the gate counts that it let go on its own"
+    );
     let released = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| gate.release()));
     assert!(released.is_err(), "a release after a lapse is red");
 }
