@@ -104,7 +104,7 @@ bt-platform	-	crate::hotkey::SummonTrace::opened	std::io::Write::write_fmt	1
 bt-platform	-	crate::hotkey::SummonTrace::write	std::io::Write::write_fmt	1
 bt-platform	-	crate::https_download::<File as Store>::seal	std::fs::File::sync_all	1
 bt-platform	-	crate::https_download::Partial::finish	std::fs::rename	1
-bt-platform	-	crate::install_txn::hold_until	std::thread::sleep	1
+bt-platform	-	crate::install_txn::<WallLockClock as LockClock>::pause	std::thread::sleep	1
 bt-platform	-	crate::instance::canonical_path	std::fs::canonicalize	1
 bt-platform	-	crate::launch_agent::sweep	std::fs::read_dir	1
 bt-platform	-	crate::macos_update::attach_with	std::fs::canonicalize	3
