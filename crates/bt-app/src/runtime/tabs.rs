@@ -5329,6 +5329,11 @@ mod birth_death_tests {
         )
     }
 
+    /// Waits for the birth's wake without the suite's patience: the fresh birth below starts a
+    /// real default shell, which can take longer than that to be born (plan row 167). The wait
+    /// holds nothing the test lets go, so it is not a held door: the suite's watchdog (row 113)
+    /// ends a birth that never wakes red by name, and the test shell's own setup gives up at
+    /// 180 s.
     fn wait_for_answer(shell: &pty_door::ShellBirth, heard: &mpsc::Receiver<()>) {
         while !shell.answered() {
             heard.recv().expect("a birth publishes before it wakes");

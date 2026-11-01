@@ -1125,8 +1125,9 @@ let go before the verdict). The cap frees holds, not locks: a door that waits wh
 product lock the held worker takes next still hangs — the program walk's admission keeps the lane's
 lock across the ask (`ProgramsLane::request`), and row 111's planted wait there hung. That ask is
 pinned apart from the lane's lock (`a_coalescing_ask_never_waits_for_its_worker`, row 133): its
-worker stands in a held hold while every road of `Coalescing::ask` is taken on the test's thread, so
-a wait planted there is red at the cap. A worker held at a `Barrier`, at a channel or behind a lock
+worker stands in a held hold while the three roads of `Coalescing::ask` taken while a run is out
+are taken on the test's thread, so a wait planted there that lets the lane's lock go is red at the
+cap (one that keeps that lock is the suite watchdog's, row 113). A worker held at a `Barrier`, at a channel or behind a lock
 a parked thread keeps is read the same way (row 133): the shell's birth worker, the log's writer and
 the update's fetch stand in a hold; the stalled sink's fill, the session writer that never answers
 and a contender held inside the election are read by their door's return on a thread of its own,

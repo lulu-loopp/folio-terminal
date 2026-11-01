@@ -1714,19 +1714,22 @@ fn a_gate_that_let_go_on_its_own_makes_its_release_red() {
 }
 
 /// PIN (T-BARRIER-HELD-DOOR-CALLS, plan row 133) — **a latest-value lane's admission never waits
-/// for its worker**: every road of `Coalescing::ask` — a request while a run is out, one joined to
-/// the waiting run, one displacing it — and the reads beside it (`count_arrivals`, `waiting`,
-/// `ended`) come back on the test's thread while the worker stands in a held hold mid-run.
+/// for its worker**: the three roads of `Coalescing::ask` taken while a run is out — a request that
+/// waits for the next run, one joined to the waiting run, one displacing it — and the reads beside
+/// them (`count_arrivals`, `waiting`, `ended`) come back on the test's thread while the worker
+/// stands in a held hold mid-run. (The first request, which starts the worker, is not one of them:
+/// nothing is out yet.)
 ///
 /// The contract suite cannot keep this: its programs adapter asks under the lane's own lock
 /// (`ProgramsLane::request`), which the walk worker takes as soon as it is free, so a wait planted
 /// in `ask` deadlocks the suite rather than lapsing (row 111's plant C). Here the test holds no
-/// lane lock: a call that waits on the held worker lets the hold go on its own at its cap, and the
-/// release is red, never a hang.
+/// lane lock. A planted wait that lets the lane's lock go while it waits lets the hold go on its
+/// own at its cap, and the test is red there, never a hang; one that keeps the lane's lock while
+/// it waits stops the worker's next take as well, and is the suite watchdog's (row 113) to end.
 ///
 /// MUTATION: in `Coalescing::ask`, wait (the lane's lock let go between looks) while a run is
 /// waiting until the worker takes it — the joined request waits on the held worker, the hold
-/// lapses, and the release is red.
+/// lapses, and the test is red at the cap.
 #[test]
 fn a_coalescing_ask_never_waits_for_its_worker() {
     type Answered = crate::lane::ToTheApplication<u8, String>;

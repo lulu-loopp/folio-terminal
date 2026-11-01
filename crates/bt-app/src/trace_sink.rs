@@ -936,16 +936,6 @@ mod tests {
     /// for the holder and the body does not finish while the lock is held.
     #[test]
     fn the_writer_does_not_wait_for_the_process_stderr_lock() {
-        // The line is queued and the queue closed before the lock is taken, so this thread calls
-        // nothing while another holds it; the writer starts under the held lock and finds both.
-        let (lines, waiting) = sync_channel(QUEUE_DEPTH);
-        let dropped = Arc::new(AtomicU64::new(0));
-        let counted = Arc::clone(&dropped);
-        let queue = Queue::new(lines, dropped);
-        queue.offer(stderr_line(
-            "bt-app trace_sink test: one line written past a held stderr lock, on purpose",
-        ));
-        assert!(queue.close());
         let (release, released) = sync_channel::<()>(0);
         let (locked, holding) = sync_channel::<()>(1);
         let holder = std::thread::spawn(move || {
@@ -954,8 +944,19 @@ mod tests {
             let _ = released.recv();
         });
         crate::lane::receive(&holding, "the holder taking the process lock");
+        // The line is offered and the queue closed on the writer's own thread, under the held
+        // lock and before the body runs: an offer or a close that waited for the lock is red with
+        // the writer, never a call on this thread under it.
+        let (lines, waiting) = sync_channel(QUEUE_DEPTH);
+        let dropped = Arc::new(AtomicU64::new(0));
+        let counted = Arc::clone(&dropped);
         let (done, finished) = sync_channel::<()>(1);
         let writer = std::thread::spawn(move || {
+            let queue = Queue::new(lines, dropped);
+            queue.offer(stderr_line(
+                "bt-app trace_sink test: one line written past a held stderr lock, on purpose",
+            ));
+            assert!(queue.close());
             run(&waiting, &counted, Reports::Console);
             let _ = done.send(());
         });
@@ -1000,15 +1001,6 @@ mod tests {
             }
         };
 
-        // Queued and closed before the lock is taken, as in the test above: nothing is called on
-        // this thread while another holds it.
-        let failing = Arc::new(TraceFile::new(&folder, Some("# header")));
-        let (lines, waiting) = sync_channel(QUEUE_DEPTH);
-        let dropped = Arc::new(AtomicU64::new(0));
-        let counted = Arc::clone(&dropped);
-        let queue = Queue::new(lines, dropped);
-        offer_two(&queue, &failing);
-        assert!(queue.close());
         let (release, released) = sync_channel::<()>(0);
         let (locked, holding) = sync_channel::<()>(1);
         let holder = std::thread::spawn(move || {
@@ -1017,8 +1009,16 @@ mod tests {
             let _ = released.recv();
         });
         crate::lane::receive(&holding, "the holder taking the process lock");
+        // Offered and closed on the writer's own thread under the held lock, as in the test above.
+        let failing = Arc::new(TraceFile::new(&folder, Some("# header")));
+        let (lines, waiting) = sync_channel(QUEUE_DEPTH);
+        let dropped = Arc::new(AtomicU64::new(0));
+        let counted = Arc::clone(&dropped);
         let (done, finished) = sync_channel::<()>(1);
         let writer = std::thread::spawn(move || {
+            let queue = Queue::new(lines, dropped);
+            offer_two(&queue, &failing);
+            assert!(queue.close());
             run(&waiting, &counted, Reports::Console);
             let _ = done.send(());
         });
