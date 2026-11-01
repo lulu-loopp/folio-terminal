@@ -107,7 +107,8 @@ use crate::update_job::{
     Unsupported,
 };
 use crate::update_prepare::{
-    WORKER, abandon_on, digest_of, discard, fetching, finish, matches_its_sum, note,
+    WORKER, abandon_on, digest_of, discard, fetching, finish, journal_failed, journal_stop,
+    matches_its_sum, note,
 };
 use crate::update_txn::{
     Adapter, Digest, Event, Home, Inventories, Journal, Layout, Member, Place, TxnId,
@@ -566,21 +567,6 @@ fn journal_written(
             ))
         })
     })
-}
-
-/// **[`Stop::Journal`], and its one `diagnostics.log` line**: what the
-/// Prepare could not do with its home, its folders or its journal, never a
-/// path (T-UPDATE-PREPARE-REVALIDATION-RESUME-FLAKE: every such stop was
-/// silent, so a failure seen once could not be told from any other).
-fn journal_stop(what: &str) -> Stop {
-    note(&format!("the Prepare stops at its journal: {what}"));
-    Stop::Journal
-}
-
-/// [`journal_stop`] for a failure of the install door, in
-/// `update_apply::failure_words`.
-fn journal_failed(what: &str, failure: &install_txn::Failure) -> Stop {
-    journal_stop(&format!("{what}: {}", failure_words(failure)))
 }
 
 /// Steps 2 (the folders) to 7: everything the transaction acquires; the
