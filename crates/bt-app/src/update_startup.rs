@@ -3798,6 +3798,7 @@ mod tests {
             (scene, rescue)
         }
 
+        #[cfg(windows)]
         fn changes_not_kept() -> Option<Failure> {
             Some(Failure::ChangesNotKept {
                 version: "0.4.9".to_owned(),
