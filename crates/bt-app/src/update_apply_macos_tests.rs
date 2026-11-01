@@ -668,6 +668,7 @@ fn applied(road: Road, world: Fake) -> (Ended, Fake) {
 /// `held` is kept for the life of the test process: each test owns its
 /// fixture, so the road stays behind the hold and never runs on past the
 /// failed test into the folder that test's end removes.
+#[track_caller]
 fn ended_while_held<T, H>(held: H, road: JoinHandle<T>) -> T {
     if !crate::lane::within_patience(|| road.is_finished()) {
         std::mem::forget(held);
@@ -681,8 +682,47 @@ fn ended_while_held<T, H>(held: H, road: JoinHandle<T>) -> T {
 }
 
 /// [`applied`], while this test holds `held` ([`ended_while_held`]).
+#[track_caller]
 fn applied_while_held<H>(road: Road, world: Fake, held: H) -> (Ended, Fake) {
     ended_while_held(held, start(road, world))
+}
+
+/// **`road`'s end, awaited while its commit moves**
+/// (T-APPLIER-HOLD-CAP-UNDER-LOAD): for a road this test holds nothing of —
+/// it has let go of everything the road waited for — and that commits. Its
+/// remaining work is durable (each journal write flushed, the bundles
+/// exchanged, a trial process started and its decision awaited), so a loaded
+/// machine does it slowly; the suite's [`crate::lane::PATIENCE`] starts over at
+/// each step the disk shows ([`crate::update_apply::commit_steps_left`]), and
+/// a road that stops moving for one patience before it ends is red, naming
+/// the line that awaited it, never a hang of the whole run. A journal caught
+/// mid-replace counts as the step last seen.
+#[track_caller]
+fn ended_while_committing<T>(install: &Install, road: JoinHandle<T>) -> T {
+    let at = std::panic::Location::caller();
+    let (journal, folder) = (
+        install.home.journal(),
+        install.home.transaction(install.txn),
+    );
+    let mut last = crate::update_apply::COMMIT_STEPS;
+    crate::lane::while_progressing(
+        &format!("the road's commit, awaited at {at}"),
+        crate::update_apply::COMMIT_STEPS,
+        || {
+            let phase = match std::fs::read(&journal).map(|bytes| Journal::parse(&bytes)) {
+                Ok(Ok(on_disk)) => Some(on_disk.body.phase.kind()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Ok(Err(_)) | Err(_) => return last,
+            };
+            last = crate::update_apply::commit_steps_left(phase, &folder);
+            last
+        },
+        || road.is_finished(),
+    );
+    match road.join() {
+        Ok(answer) => answer,
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
 }
 
 /// **P is at its wait for the transaction lock**: its election is over — the
@@ -942,7 +982,7 @@ fn p_waits_for_o_and_releases_the_claim() {
         "nothing is written while O holds the lock"
     );
     drop(lock);
-    let (ended, _) = ended_while_held((), applier);
+    let (ended, _) = ended_while_committing(&install, applier);
     assert_eq!(ended, Ended::Committed);
     assert!(*swapped_at.lock().unwrap());
     assert_eq!(
