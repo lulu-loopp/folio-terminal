@@ -121,6 +121,31 @@ impl Children {
         pid
     }
 
+    /// Whether the first process this test started — the trial, in every test
+    /// whose road stops one — has ended, as its handle reports.
+    fn first_ended(&self) -> bool {
+        self.0
+            .lock()
+            .unwrap()
+            .first_mut()
+            .is_some_and(|child| matches!(child.try_wait(), Ok(Some(_))))
+    }
+
+    /// **The road's stop clock for a test whose road stops a silent trial**
+    /// (T-TRIAL-STOP-QUIT-GRACE-ON-THE-ROAD-CLOCK; `CountedClock::stopping`
+    /// over `limits`): the trial is the first process this test started. It
+    /// opens no window, so the ask to quit has no answer to wait for and the
+    /// grace is spent on the count; the end window waits for its handle to
+    /// report it ended.
+    fn stop_clock(&self, limits: &Limits) -> Arc<CountedClock> {
+        let at_end = self.clone();
+        Arc::new(CountedClock::stopping(
+            (limits.quit_within, limits.end_within, limits.poll),
+            || true,
+            move || at_end.first_ended(),
+        ))
+    }
+
     /// End the one started as `pid`, by its handle, and wait for it.
     fn end(&self, pid: u32) {
         let mut children = self.0.lock().unwrap();
@@ -573,6 +598,7 @@ impl Install {
             held_clock: Arc::new(WallClock),
             decision_clock: Arc::new(CountedClock::awaiting_the_decision(&self.home, self.txn)),
             wait_clock: Arc::new(WallClock),
+            stop_clock: Arc::new(WallClock),
             me: Running {
                 pid: std::process::id(),
                 started: 0,
@@ -1830,16 +1856,23 @@ fn a_failed_health_reverses_the_moves_and_relaunches_the_old_build() {
     let Some(install) = Install::new("health") else {
         return;
     };
+    let bounds = limits(20_000, 1_500);
+    let stop = install.children.stop_clock(&bounds);
+    let road = Road {
+        stop_clock: stop.clone(),
+        ..install.road(bounds)
+    };
     let began = Instant::now();
-    let (ended, world) = applied(
-        &install,
-        limits(20_000, 1_500),
-        install.world(Trial::Silent),
-    );
+    let (ended, world) = applied_on(&install, road, install.world(Trial::Silent));
     assert_eq!(ended, Ended::RolledBack, "{:?}", world.said);
     assert!(
         began.elapsed() >= Duration::from_millis(1_500),
         "the trial had its deadline"
+    );
+    assert!(
+        stop.moved_ms() >= u64::try_from(GRACE.as_millis()).unwrap(),
+        "its grace ran out on the stop's clock: {} ms",
+        stop.moved_ms()
     );
     assert!(
         wrote(&world).ends_with("[Armed, Moving, Trial, RollbackIntent, RolledBack, Retired]"),
@@ -2592,10 +2625,12 @@ fn a_rollback_over_a_held_session_notes_it_and_the_restored_build_says_so() {
 /// The coordinator's ruling 1: "the process is identified by pid **and**
 /// creation time **and** image path = `<install>\folio.exe` … never touch a
 /// process whose identity does not match all three". The synthetic programs
-/// open no window, so the ask reaches no window and the grace runs out.
+/// open no window, so the ask reaches no window and the grace runs out — on
+/// the road's stop clock (`Children::stop_clock`), whose end window waits for
+/// the ended trial's handle (T-TRIAL-STOP-QUIT-GRACE-ON-THE-ROAD-CLOCK).
 ///
 /// MUTATION: in `update_apply::stop_trial`, ask `Ask::End` first (part A
-/// red); in `install_flip::runs_from`, answer from the pid and start time
+/// red), skip the grace or never end it (row 136's plants B and C); in `install_flip::runs_from`, answer from the pid and start time
 /// alone (part C red: the stranger is then asked and ended — the image is
 /// checked both where the trial is judged alive and inside `ask`, and both
 /// read `runs_from`).
@@ -2612,12 +2647,13 @@ fn the_trial_is_asked_to_quit_before_it_is_ended_and_only_by_its_identity() {
         trial: Some(trial),
         trial_started: false,
     });
-    let began = Instant::now();
-    let (code, world) = recovered(
-        &install,
-        limits(20_000, 20_000),
-        install.world(Trial::Silent),
-    );
+    let bounds = limits(20_000, 20_000);
+    let stop = install.children.stop_clock(&bounds);
+    let road = Road {
+        stop_clock: stop.clone(),
+        ..install.road(bounds)
+    };
+    let (code, world) = recovered_on(road, install.world(Trial::Silent));
     assert_eq!(code, 0, "{:?}", world.said);
     let quit = said_at(&world, &format!("trial {} is asked to quit", trial.pid));
     let end = said_at(&world, &format!("trial {} is asked to end", trial.pid));
@@ -2626,7 +2662,11 @@ fn the_trial_is_asked_to_quit_before_it_is_ended_and_only_by_its_identity() {
         "{:?}",
         world.said
     );
-    assert!(began.elapsed() >= GRACE, "the grace ran before the end");
+    assert!(
+        stop.moved_ms() >= u64::try_from(GRACE.as_millis()).unwrap(),
+        "the grace ran out on the stop's clock before the end: {} ms",
+        stop.moved_ms()
+    );
     assert!(!runs(trial), "the trial is ended");
     assert!(runs(beside), "the other process of its image runs on");
     rolled_back_on_disk(&install);
@@ -6609,6 +6649,7 @@ fn rescue_part(root: &Path) {
         trial_clock: Arc::new(WallClock),
         held_clock: Arc::new(WallClock),
         wait_clock: Arc::new(WallClock),
+        stop_clock: Arc::new(WallClock),
         me,
         starter: install_flip::parent_of_this_process(),
         handed_back: Some(handed_back),
