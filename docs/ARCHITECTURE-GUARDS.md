@@ -1124,8 +1124,10 @@ read by its reading's return on a thread of its own, awaited within the suite's 
 let go before the verdict). The cap frees holds, not locks: a door that waits while it keeps a
 product lock the held worker takes next still hangs — the program walk's admission keeps the lane's
 lock across the ask (`ProgramsLane::request`), and row 111's planted wait there hung. That, and a
-test-thread wait on something no gate or hold holds (row 113), are not yet read this way. What such a verdict does not catch is a bounded wait, or a give-up that ignores
-its budget, shorter than the suite's patience.
+test-thread wait on something no gate or hold holds, are not read this way; wherever the suite runs
+through the suite watchdog (row 113, below), a hang of either kind ends the run red within 300 s of
+the test's start and names it (save the shapes that section says it cannot name). What such a
+verdict does not catch is a bounded wait, or a give-up that ignores its budget, shorter than the suite's patience.
 
 2026-10-31 (T-FLOATING-VIDEO-DOUBLE-CLICK-TIMING, plan row 124): a double click is decided by
 the window's multi-click counters (`ImageClicks`, `PreviewTextClicks`) on the moment a press is
@@ -1183,6 +1185,47 @@ fits the pipe's quota; noted in TIMING-BOUND). The tests hand
 a `CountedClock` that awaits the other end within the door suites' patience or spends the bound on its
 count, so "answered in time" is an event and "the budget ran out" is a count. The same shape elsewhere in
 bt-platform, starting with `attention_pipe`, is plan row 163.
+
+## Suite watchdog
+
+The rule: a test that hangs ends its run red within 300 s of its start, and is named, wherever a
+suite runs through the watchdog (T-TEST-SUITE-WATCHDOG, plan row 113, 2026-10-31). libtest has no
+timeout on the stable toolchain (`--ensure-time` and `--report-time` are nightly-only, and judge a
+test only when it ends), so before this a hung test held a lane's run for hours and CI's until the
+step's clock cancelled it without a name.
+
+Where: `scripts/ci/cargo-test-watched.ps1` runs `cargo test <args>`, passes every line through as text, and
+reads libtest's own report: stable libtest names every test still running 60 s after it started
+(`test <name> has been running for over 60 seconds`) and names it again when it ends
+(`test <name> ... ok`). A named test not ended 300 s after its start, or a run that prints nothing
+for 300 s once its first test binary started, ends the whole process tree the script started, by its
+pid, with exit 124 and the names; the binaries a workspace run had not reached yet do not run. A
+name still tracked when cargo starts the next test binary belonged to a binary that ended without its
+result line (a crash, an abort); it is said and dropped, not taken for a hang. 300 s (30 x `lane::PATIENCE`) is the one limit, a default in that
+script and nowhere else. Measured 2026-10-31 on the watched runs: no bt-app test reaches 60 s on any
+CI runner, and the slowest watched test is about 61 s (bt-source on `logic`); unwatched, `core-linux`'s
+bt-source tests take about 110 s. The limit is re-derived, not bumped, if a watched test passes 150 s.
+Compiling is not timed: the clock starts at cargo's first `Running`
+line.
+
+Who runs through it: the lanes' bt-app and bt-source gates
+(the lane tools' `ccheck.sh scripts/ci/cargo-test-watched.ps1 -p bt-app --no-fail-fast`),
+`logic`'s `test` step (the whole workspace it tests) and `core-macos`'s `test the application`. Not
+yet: the owner's Mac mini gate, which has no pwsh (an owner's ruling is pending), and the `conpty` and
+`gpu` jobs (left as they are, by ruling).
+
+Shapes in which libtest prints no names to read are refused with exit 2, never run unwatched: `-q`
+(or `CARGO_TERM_QUIET=true`: cargo hands libtest `--quiet`, whose terse output has the 60 s line but no
+end-of-test names; a `term.quiet` in a cargo config file is not seen by the script and must not be set),
+`--format`, `--test-threads=1` (or `RUST_TEST_THREADS=1`; libtest's serial path has no 60 s line) and
+`--nocapture` (or `RUST_TEST_NOCAPTURE`). What it does not name: a hang that holds the process's real
+stdout lock (the harness cannot print either, so the run is red by silence, with no name), and a child
+process its parent test no longer waits for (it is no longer in the tree). A `harness = false` target
+prints no libtest lines, so it is watched by silence only. Its verdicts are planted
+against a stand-in in cargo's place by `scripts/ci/check-test-watchdog.ps1` on every run; that the
+pinned libtest prints the two lines it reads was observed on the real binary by the ticket (a planted
+`loop {}` and a planted blocked `recv`, both named and ended at 300 s), and is observed again when
+`rust-toolchain.toml` moves.
 
 ## Test order and shared fixtures
 
