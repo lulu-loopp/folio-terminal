@@ -2457,26 +2457,22 @@ impl Hold {
 
     /// **Called by the fake where its work begins**: counted as standing, and kept there while the
     /// hold is held — until its cap runs out, when the hold lets go on its own, once, and counts
-    /// it. The cap is only compared: each wait is the whole cap, so a wake (a pass, a release)
-    /// can make the lapse land later than the cap, never earlier.
+    /// it. The cap is one deadline, from this worker's arrival: the condition variable's own timed
+    /// wait keeps it across every wake (a pass entering, a release, a spurious one), so the lapse
+    /// lands at the cap, never earlier and not a second cap later. Nothing here reads the time.
     pub(crate) fn pass(&self) {
         let mut state = lock(&self.state);
         state.standing += 1;
         self.changed.notify_all();
         let cap = state.cap.unwrap_or(PATIENCE);
-        let since = Instant::now();
-        while state.held {
-            if since.elapsed() >= cap {
-                state.held = false;
-                state.lapses += 1;
-                self.changed.notify_all();
-                break;
-            }
-            state = self
-                .changed
-                .wait_timeout(state, cap)
-                .unwrap_or_else(PoisonError::into_inner)
-                .0;
+        let (mut state, waited) = self
+            .changed
+            .wait_timeout_while(state, cap, |state| state.held)
+            .unwrap_or_else(PoisonError::into_inner);
+        if waited.timed_out() && state.held {
+            state.held = false;
+            state.lapses += 1;
+            self.changed.notify_all();
         }
         state.standing -= 1;
     }

@@ -1621,6 +1621,19 @@ fn passing_apart(
     (returned, worker)
 }
 
+/// **`what`, after a lapse, failed, and its failure names the lapse** — not some other panic on
+/// the way, nor the worker that never came.
+fn assert_names_the_lapse(caught: std::thread::Result<()>, what: &str) {
+    let said = caught
+        .err()
+        .and_then(|panic| panic.downcast::<String>().ok())
+        .unwrap_or_else(|| panic!("{what} after a lapse is red, with a message"));
+    assert!(
+        said.contains("let go on its own"),
+        "{what}'s failure names the lapse: {said}"
+    );
+}
+
 /// RED (T-LANE-DOOR-CALLS-ON-THE-TEST-THREAD, plan row 111) — **A worker standing in a held hold
 /// past its cap is let go, once, and the hold's release is red** — so a door a test calls while a
 /// fake's work stands in a hold, and that waits on that work, fails the test on its own thread
@@ -1666,16 +1679,9 @@ fn a_hold_stood_in_past_its_cap_lets_go_once_and_its_release_is_red() {
     let awaited = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         hold.wait_standing("a worker after the lapse");
     }));
-    let said = awaited
-        .err()
-        .and_then(|panic| panic.downcast::<String>().ok())
-        .expect("a wait for a standing worker after a lapse is red");
-    assert!(
-        said.contains("let go on its own"),
-        "the wait's failure names the lapse, not the worker that never came: {said}"
-    );
+    assert_names_the_lapse(awaited, "the wait for a standing worker");
     let released = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| hold.release()));
-    assert!(released.is_err(), "a release after a lapse is red");
+    assert_names_the_lapse(released, "the hold's release");
 }
 
 /// RED (T-LANE-DOOR-CALLS-ON-THE-TEST-THREAD, plan row 111) — **A gate that let go on its own makes
@@ -1704,7 +1710,7 @@ fn a_gate_that_let_go_on_its_own_makes_its_release_red() {
         "the gate counts that it let go on its own"
     );
     let released = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| gate.release()));
-    assert!(released.is_err(), "a release after a lapse is red");
+    assert_names_the_lapse(released, "the gate's release");
 }
 
 /// RED (T-CLIPBOARD-ORDER-HOLDS-BY-SPEED, plan row 72) — **a lane built on the seam takes only

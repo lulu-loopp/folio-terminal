@@ -1091,9 +1091,12 @@ these tests and in the trace sink's, the log writer's and the watchdog's tests t
 a held writer or a held ring (row 106), in the applier's (row 112, below), and in every test that
 holds a lane's worker — at the suite's gate or a fake's hold — and calls a door while it is held
 (row 111): the held worker lets go on its own at the suite's patience and counts it, and the release
-reads the count, so a door that waits is red, not a hang (a channel the test holds is read the same
-way, on a thread of its own). A test-thread wait on something no gate or hold holds (row 113) is not
-yet read this way. What such a verdict does not catch is a bounded wait, or a give-up that ignores
+reads the count, so a door that waits is red, not a hang (the taskbar's held shell, a channel, is
+read by its reading's return on a thread of its own, awaited within the suite's patience, the shell
+let go before the verdict). The cap frees holds, not locks: a door that waits while it keeps a
+product lock the held worker takes next still hangs — the program walk's admission keeps the lane's
+lock across the ask (`ProgramsLane::request`), and row 111's planted wait there hung. That, and a
+test-thread wait on something no gate or hold holds (row 113), are not yet read this way. What such a verdict does not catch is a bounded wait, or a give-up that ignores
 its budget, shorter than the suite's patience.
 
 2026-10-31 (T-FLOATING-VIDEO-DOUBLE-CLICK-TIMING, plan row 124): a double click is decided by
