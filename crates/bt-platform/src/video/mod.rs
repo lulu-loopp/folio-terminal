@@ -827,26 +827,24 @@ fn read_first_frame(
         // them look otherwise would be turning a good file into a refusal for a
         // reason that has nothing to do with the file. The caller's own
         // [`FIRST_FRAME_BUDGET`] still bounds the whole question from outside.
-        let deadline = Instant::now() + FIRST_FRAME_BUDGET;
-        let sample = loop {
-            let mut flags = 0_u32;
-            let mut sample = None;
-            reader
-                .ReadSample(stream, 0, None, Some(&mut flags), None, Some(&mut sample))
-                .ok()?;
-            if let Some(sample) = sample {
-                break sample;
-            }
-            // No sample and no end: a stream tick, or a format change the reader
-            // is working through. Both are answered by asking again — but a file
-            // that answers this way for ever is what the deadline above is for.
-            if flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0 {
-                return None;
-            }
-            if Instant::now() >= deadline {
-                return None;
-            }
-        };
+        // The loop's decision is [`first_sample`]'s; what is left here is the one
+        // `ReadSample` each turn asks, read into the three answers it can give.
+        let sample = first_sample(
+            || {
+                let mut flags = 0_u32;
+                let mut sample = None;
+                reader
+                    .ReadSample(stream, 0, None, Some(&mut flags), None, Some(&mut sample))
+                    .ok()?;
+                Some(match sample {
+                    Some(sample) => ReadAnswer::Sample(sample),
+                    None if flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0 => ReadAnswer::End,
+                    None => ReadAnswer::Tick,
+                })
+            },
+            Instant::now,
+            FIRST_FRAME_BUDGET,
+        )?;
         lap(&mut cost.read_sample);
 
         let buffer = sample.ConvertToContiguousBuffer().ok()?;
@@ -860,6 +858,48 @@ fn read_first_frame(
             native_width: native.0,
             native_height: native.1,
         })
+    }
+}
+
+/// **What one `ReadSample` answered**, as [`first_sample`] reads it.
+enum ReadAnswer<S> {
+    /// A sample: the frame the loop was waiting for.
+    Sample(S),
+    /// No sample and no end: a stream tick, or a format change the reader is
+    /// working through. Both are answered by asking again.
+    Tick,
+    /// The end of the stream, with no sample: the file has nothing to give.
+    End,
+}
+
+/// **Ask `read` until it answers a sample, the stream ends, or `budget` read on
+/// `now` has run out** (T-FIRST-FRAME-BUDGET-FROM-A-CLOCK) — [`read_first_frame`]'s
+/// loop, with the platform's `ReadSample` and the clock both handed in.
+///
+/// `None` is the module's one silence for all three ways it stops without a
+/// picture: `read` itself failed (`None` from it), the stream ended, or the
+/// deadline — `now()` at the call plus `budget` — had passed when a tick came
+/// back. The deadline is read only after a tick, so it ends a reader that answers
+/// "not yet" for ever and cannot bound a `ReadSample` that never returns; that
+/// one is [`within_budget`]'s. The real caller passes `Instant::now` and
+/// [`FIRST_FRAME_BUDGET`]; a test passes a planted reader and a clock that moves
+/// by the looks it is asked for.
+fn first_sample<S>(
+    mut read: impl FnMut() -> Option<ReadAnswer<S>>,
+    now: impl Fn() -> Instant,
+    budget: Duration,
+) -> Option<S> {
+    let deadline = now() + budget;
+    loop {
+        match read()? {
+            ReadAnswer::Sample(sample) => return Some(sample),
+            ReadAnswer::End => return None,
+            ReadAnswer::Tick => {}
+        }
+        // A file that answers "not yet" for ever is what the deadline is for.
+        if now() >= deadline {
+            return None;
+        }
     }
 }
 
@@ -1158,6 +1198,13 @@ mod tests {
     /// (`engine::tests::PATIENCE`), whose module is private to `engine`.
     const DECODER_PATIENCE: Duration = Duration::from_secs(10);
 
+    /// **Planted work's hold**: wait until the test lets the work go, or until
+    /// [`DECODER_PATIENCE`] has passed — the suite's patience, so a wait that
+    /// never ends turns into a late answer and a red, never a hang.
+    fn held_until_let_go(release: &std::sync::mpsc::Receiver<()>) {
+        let _ = release.recv_timeout(DECODER_PATIENCE);
+    }
+
     /// PIN — **a frame is measured before it is copied, on both locks** (review
     /// row R2-4).
     ///
@@ -1387,17 +1434,20 @@ mod tests {
     /// either half of this can be stated without a real file's real duration
     /// standing in the middle of it. The first arm hands it work that answers at
     /// once under a budget nothing could exceed; the second hands it work that
-    /// cannot finish inside the budget it is given, and the budget is small
-    /// enough that a machine under any load at all still cannot finish it.
+    /// cannot finish inside the budget it is given: it is held until the test
+    /// has the answer (T-FIRST-FRAME-BUDGET-FROM-A-CLOCK), so no budget and no
+    /// machine can let it answer first.
     ///
     /// **Neither arm can be made red or green by a busy machine**, which is the
     /// whole reason this test exists rather than a slow file: an hour is not a
-    /// duration a thread spawn and a channel send can miss, and twenty
-    /// milliseconds is not one a two-second sleep can beat.
+    /// duration a thread spawn and a channel send can miss, and work that is
+    /// held until the answer is in has not answered by then, whatever the
+    /// budget. Nothing here sleeps.
     ///
-    /// MUTATION: swap `recv_timeout` for `recv` and the second arm hangs for two
-    /// seconds and then answers `Some`, which is a hover that has frozen the
-    /// decoration worker for as long as the file feels like taking.
+    /// MUTATION: swap `recv_timeout` for `recv` and the second arm waits for the
+    /// held work, which lets itself go after [`DECODER_PATIENCE`] and answers
+    /// `Some` — red, and a hover that has frozen the decoration worker for as
+    /// long as the file feels like taking.
     #[test]
     fn a_question_that_cannot_finish_is_given_up_on() {
         assert_eq!(
@@ -1405,13 +1455,135 @@ mod tests {
             Some(7),
             "an answer inside the budget is the answer"
         );
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let (finished, done) = std::sync::mpsc::channel();
+        let answer = within_budget(Duration::from_millis(20), move || {
+            held_until_let_go(&held);
+            let _ = finished.send(());
+            Some(7_u32)
+        });
+        // The work is let go only now, after the answer, and ends.
+        let _ = release.send(());
+        let _ = done.recv();
         assert_eq!(
-            within_budget(Duration::from_millis(20), || {
-                std::thread::sleep(Duration::from_secs(2));
-                Some(7_u32)
-            }),
-            None,
+            answer, None,
             "work that has not answered by the end of the budget is the module's one silence"
+        );
+    }
+
+    /// **A clock that moves only when it is read**: one [`STEP`] per reading,
+    /// from one wall reading taken once. [`first_sample`] reads it once to set
+    /// its deadline and once after every tick, so "the budget ran out at the
+    /// third look" is a count, never a duration.
+    struct Looks {
+        began: Instant,
+        readings: std::cell::Cell<u32>,
+    }
+
+    /// How far [`Looks`] moves per reading.
+    const STEP: Duration = Duration::from_secs(1);
+
+    impl Looks {
+        fn new() -> Self {
+            Self {
+                began: Instant::now(),
+                readings: std::cell::Cell::new(0),
+            }
+        }
+
+        fn now(&self) -> Instant {
+            let read = self.readings.get();
+            self.readings.set(read + 1);
+            self.began + STEP * read
+        }
+    }
+
+    /// **A planted `ReadSample`**: the answers in `script`, in order, then the
+    /// last one for ever; and how many times it was asked.
+    fn planted(
+        script: Vec<ReadAnswer<u32>>,
+    ) -> (
+        impl FnMut() -> Option<ReadAnswer<u32>>,
+        std::rc::Rc<std::cell::Cell<usize>>,
+    ) {
+        let asked = std::rc::Rc::new(std::cell::Cell::new(0_usize));
+        let count = std::rc::Rc::clone(&asked);
+        let read = move || {
+            let turn = count.get();
+            count.set(turn + 1);
+            Some(match script.get(turn).or(script.last())? {
+                ReadAnswer::Sample(sample) => ReadAnswer::Sample(*sample),
+                ReadAnswer::Tick => ReadAnswer::Tick,
+                ReadAnswer::End => ReadAnswer::End,
+            })
+        };
+        (read, asked)
+    }
+
+    /// RED (T-FIRST-FRAME-BUDGET-FROM-A-CLOCK) — **a reader that only ever
+    /// answers "not yet" is given up on when its budget runs out, counted on
+    /// the clock it was handed.**
+    ///
+    /// [`read_first_frame`]'s loop with the platform taken out: the real
+    /// `ReadSample` is the only producer of a tick, and a real fixture answers
+    /// with a sample at the first read, so the budget's end is stated here, on a
+    /// planted reader and a clock that moves a second per look. Three seconds of
+    /// budget is three ticks: the deadline is set at reading 0, and the third
+    /// tick reads 3 s.
+    ///
+    /// MUTATION: never read the deadline (`if false && now() >= deadline`) — the
+    /// loop asks on past the third tick and comes back with the sample the
+    /// planted reader gives at the eleventh.
+    #[test]
+    fn a_reader_that_only_says_not_yet_is_given_up_on_when_its_budget_runs_out() {
+        let mut script: Vec<ReadAnswer<u32>> = (0..10).map(|_| ReadAnswer::Tick).collect();
+        script.push(ReadAnswer::Sample(7));
+        let (read, asked) = planted(script);
+        let clock = Looks::new();
+        let answer = first_sample(read, || clock.now(), Duration::from_secs(3));
+        assert_eq!(
+            (answer, asked.get(), clock.readings.get()),
+            (None, 3, 4),
+            "three ticks, the third at the deadline: the module's one silence"
+        );
+    }
+
+    /// RED (T-FIRST-FRAME-BUDGET-FROM-A-CLOCK) — **a sample inside the budget is
+    /// the answer, and the end of the stream is a silence at once.**
+    ///
+    /// MUTATION: end the loop at the first tick (`if true || now() >= deadline`)
+    /// — the sample after two ticks is never asked for, and the first assertion
+    /// reads `None` after one read.
+    #[test]
+    fn a_sample_inside_the_budget_is_the_answer_and_an_end_is_a_silence() {
+        let (read, asked) = planted(vec![
+            ReadAnswer::Tick,
+            ReadAnswer::Tick,
+            ReadAnswer::Sample(7),
+        ]);
+        let clock = Looks::new();
+        let answer = first_sample(read, || clock.now(), Duration::from_secs(3));
+        assert_eq!(
+            (answer, asked.get()),
+            (Some(7), 3),
+            "two ticks inside three seconds, then the frame"
+        );
+
+        let (read, asked) = planted(vec![ReadAnswer::End]);
+        let clock = Looks::new();
+        let answer = first_sample(read, || clock.now(), Duration::from_secs(3));
+        assert_eq!(
+            (answer, asked.get(), clock.readings.get()),
+            (None, 1, 1),
+            "a stream that ends has nothing to give, and the deadline is never read"
+        );
+
+        let failed = || None::<ReadAnswer<u32>>;
+        let clock = Looks::new();
+        assert_eq!(
+            first_sample(failed, || clock.now(), Duration::from_secs(3)),
+            None,
+            "a read that failed is the same silence"
         );
     }
 
@@ -1677,7 +1849,7 @@ mod tests {
         let answer = first_frame_through(&url, Duration::from_millis(20), move |stream| {
             // Held until the test has looked, holding the stream all the while: a decode
             // that cannot answer inside any budget, whatever the machine is doing.
-            let _ = held.recv();
+            held_until_let_go(&held);
             drop(stream);
             let _ = finished.send(());
             None
@@ -1701,7 +1873,17 @@ mod tests {
     ///
     /// The real platform, the shipped fixture and a file that is no video at all
     /// (the refusal arm, whose source resolver gives up on the bytes), each asked
-    /// through [`first_frame`] and written over at once — exactly the gesture.
+    /// down [`first_frame`]'s own road and written over at once — exactly the
+    /// gesture.
+    ///
+    /// **The road is `first_frame`'s, its constant is not**
+    /// (T-FIRST-FRAME-BUDGET-FROM-A-CLOCK): each question goes through
+    /// [`first_frame_through`] with the real decode, under [`DECODER_PATIENCE`]
+    /// instead of [`FIRST_FRAME_BUDGET`]. Through `first_frame` the fixture's arm
+    /// was a decode racing three seconds, and a loaded machine that lost the race
+    /// read "no frame" for a file it had decoded. Whether the file is free when
+    /// the answer comes back is the subject; how fast a loaded machine decodes is
+    /// not, and the budget is pinned next door, on work that has no decoder in it.
     ///
     /// No mutation turns this red at will: the platform's late release it guards
     /// against is a race (CI run 39055489876 lost it once, in a full suite, on the
@@ -1709,6 +1891,12 @@ mod tests {
     /// takes the race away; this states the gesture itself.
     #[test]
     fn an_answered_frame_leaves_its_file_free() {
+        let patiently = |path: &Path| {
+            let url = HSTRING::from(path.as_os_str());
+            first_frame_through(&url, DECODER_PATIENCE, move |stream| {
+                decode_lent(&stream, (280, 160)).0
+            })
+        };
         let dir = bt_testpath::temp_path("folio-video-answered");
         let real = a_copy_of_the_fixture(&dir, "录屏 real.mp4");
         let junk = dir.join("录屏 junk.mp4");
@@ -1716,12 +1904,12 @@ mod tests {
         let answers = [
             (
                 "the fixture",
-                first_frame(&real, 280, 160).is_some(),
+                patiently(&real).is_some(),
                 bt_testpath::nobody_holds(&real),
             ),
             (
                 "no video",
-                first_frame(&junk, 280, 160).is_some(),
+                patiently(&junk).is_some(),
                 bt_testpath::nobody_holds(&junk),
             ),
         ];
