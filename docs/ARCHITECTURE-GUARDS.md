@@ -283,7 +283,24 @@ only by a row with its grammar, a fixture and a pin (`tests/index.rs`
 `a_cfg_in_a_read_macro_body_is_a_gate`, `a_cfg_in_any_other_macro_body_is_refused_by_its_line`;
 `tests/contract.rs` `the_test_only_texts_are_not_product`). Not reached, a limit older than the
 row: a macro in an attribute's value (`#[doc = m!(…)]`) and `syn`'s unparsed `Verbatim` tokens,
-where a `cfg` is neither read nor refused; the tree has no `cfg` there.
+where a `cfg` is neither read nor refused; the tree has no `cfg` there. Under an attribute macro
+(2026-10-31, T-GATE-WALK-UNDER-ATTRIBUTE-MACROS, plan row 122; the review of row 109, R-N2): an
+attribute macro receives its item's tokens and may emit anything, so every `cfg` (or
+`cfg`-writing `cfg_attr`) inside an item, `impl` item, `trait` item or foreign item that carries
+one refuses the index by its line and the attribute macro as written
+(`Rejection::CfgUnderAttributeMacro`), at any depth and inside macro tokens too; the item itself
+is not refused, and its own `cfg`s are read as before (the compiler applies them first). Inert,
+and read through: the language's own attributes, `rustfmt::`, `clippy::` and `diagnostic::` (not
+`::`-led, which names a crate), a `derive` of anything, a derive helper beside a derive that
+declares it, spelt as written (a closed table: `serde` for `Serialize`/`Deserialize` or
+`serde::Serialize`/`serde::Deserialize`; `error`, `from`, `source`, `backtrace` for `Error` or
+`thiserror::Error`), and a `cfg_attr` writing only those. Every other attribute may rewrite,
+`cfg_attr(…, attr_macro)` whatever its predicate, and a helper beside a derive spelt any other way
+(`other_crate::Error`). Not reached: a `use` that replaces a built-in attribute macro (`use
+test_log::test;`) — the allow-list is keyed by name; none in the tree. Such `impl`, `trait` and foreign items are hazards too, like items
+(`tests/index.rs` `a_cfg_under_an_attribute_macro_is_refused_by_its_line`,
+`a_cfg_under_inert_attributes_is_a_gate`). The tree's one attribute macro on items is
+windows-rs's `#[implement]` (three structs in `bt-platform`), with no `cfg` inside.
 
 ## Ownership census
 
@@ -1088,9 +1105,16 @@ the thread it would wait for is still held, awaited within the suite's patience,
 go before the verdict — never by timing it. The hand-off lane's flood and the trace sink's producers
 are read the same way, so a press, an offer, a settle or a writer that waits is red, not a hang, in
 these tests and in the trace sink's, the log writer's and the watchdog's tests that meet a full queue,
-a held writer or a held ring (row 106), and in the applier's (row 112, below); the lane doors'
-gate-held tests (row 111) are not yet read this way. What such a verdict does
-not catch is a bounded wait, or a give-up that ignores its budget, shorter than the suite's patience.
+a held writer or a held ring (row 106), in the applier's (row 112, below), and in every test that
+holds a lane's worker — at the suite's gate or a fake's hold — and calls a door while it is held
+(row 111): the held worker lets go on its own at the suite's patience and counts it, and the release
+reads the count, so a door that waits is red, not a hang (the taskbar's held shell, a channel, is
+read by its reading's return on a thread of its own, awaited within the suite's patience, the shell
+let go before the verdict). The cap frees holds, not locks: a door that waits while it keeps a
+product lock the held worker takes next still hangs — the program walk's admission keeps the lane's
+lock across the ask (`ProgramsLane::request`), and row 111's planted wait there hung. That, and a
+test-thread wait on something no gate or hold holds (row 113), are not yet read this way. What such a verdict does not catch is a bounded wait, or a give-up that ignores
+its budget, shorter than the suite's patience.
 
 2026-10-31 (T-FLOATING-VIDEO-DOUBLE-CLICK-TIMING, plan row 124): a double click is decided by
 the window's multi-click counters (`ImageClicks`, `PreviewTextClicks`) on the moment a press is

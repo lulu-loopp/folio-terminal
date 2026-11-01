@@ -1197,6 +1197,7 @@ mod tests {
     ///
     /// MUTATION: hand any of them to `png_bytes` as `PictureEncoding::DibV5`
     /// — the old decoder — and it is red.
+    #[cfg(windows)]
     #[test]
     fn a_top_down_bitmap_and_a_sixteen_bit_one_are_pasted() {
         for (depth, top_down, profile, tolerance, what) in [
@@ -1207,9 +1208,7 @@ mod tests {
         ] {
             let (width, height) = (9, 6);
             let dib = dib_v5(width, height, depth, top_down, profile);
-            let Some(drawn) = drawn_by_windows(&dib) else {
-                return;
-            };
+            let drawn = drawn_by_windows(&dib).expect("Windows draws through GDI");
             let png = png_bytes(&[drawn]).unwrap_or_else(|reason| panic!("{what}: {reason}"));
             assert_the_picture(&png, width, height, tolerance, what);
         }

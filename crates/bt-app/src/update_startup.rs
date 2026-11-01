@@ -1419,7 +1419,9 @@ mod tests {
     /// installation home (`Home::of`), so the pass never runs there, and
     /// `install_txn` refuses these effects by name
     /// (`install_txn::tests::the_portable_arm_refuses_by_name`); these tests
-    /// answer at once on such a platform.
+    /// answer at once on such a platform. A test whose fact exists on one of
+    /// the two platforms only is compiled there only (`#[cfg]`, CONVENTIONS
+    /// H1), with the helpers only it uses.
     mod on_disk {
         use super::super::*;
         use crate::update_txn::Journal;
@@ -1873,18 +1875,14 @@ mod tests {
         ///
         /// MUTATION: drop `Clearing::DetachMount` from the steps of
         /// `StartAction::Retire` and `StartAction::Discard` in `update_txn`.
+        #[cfg(target_os = "macos")]
         #[test]
         fn retire_and_discard_detach_before_deleting() {
             use crate::update_prepare_macos::tests::fixture;
-            if !fixture::on_macos() {
-                return;
-            }
             let scratch = fixture::Scratch::new("startup-detach");
             let image = fixture::blank_image(&scratch.root.join("left.dmg"));
             for (class, tag) in [(Class::Terminal, "retire"), (Class::Deferred, "discard")] {
-                let Some(scene) = Scene::new(&format!("detach-{tag}")) else {
-                    return;
-                };
+                let scene = Scene::new(&format!("detach-{tag}")).expect("macOS has a home");
                 scene.journal(class);
                 if class == Class::Deferred {
                     // The folder was replaced by hand: the start's own image
@@ -1916,18 +1914,14 @@ mod tests {
         ///
         /// MUTATION: in `run_by`'s Retire arm, raise the card only for
         /// `Retirement::Done` (no card on the detach road).
+        #[cfg(target_os = "macos")]
         #[test]
         fn a_retirement_handed_to_the_detach_worker_raises_its_card_once() {
             use crate::update_prepare_macos::tests::fixture;
             use crate::update_txn::{Outcome, Phase};
-            if !fixture::on_macos() {
-                return;
-            }
             let scratch = fixture::Scratch::new("startup-detach-card");
             let image = fixture::blank_image(&scratch.root.join("left.dmg"));
-            let Some(scene) = Scene::new("detach-card") else {
-                return;
-            };
+            let scene = Scene::new("detach-card").expect("macOS has a home");
             write_noted(
                 &scene,
                 Phase::Retired {
@@ -3742,9 +3736,11 @@ mod tests {
         /// A program of the test's own, started from `path`, ended by
         /// [`OwnProgram::end`] or when any of its clones is dropped (on a failed
         /// assertion too); the clones share one process.
+        #[cfg(windows)]
         #[derive(Clone)]
         struct OwnProgram(Arc<std::sync::Mutex<std::process::Child>>);
 
+        #[cfg(windows)]
         impl OwnProgram {
             /// `path`'s program, written there with `StaysUp`'s code, then
             /// started.
@@ -3773,6 +3769,7 @@ mod tests {
             }
         }
 
+        #[cfg(windows)]
         impl Drop for OwnProgram {
             fn drop(&mut self) {
                 self.end();
@@ -3780,15 +3777,14 @@ mod tests {
         }
 
         /// **A start the rescue build opened, over a commit whose trial held a
-        /// change**: on Windows only, a scene whose rescue build
-        /// (`H\<txn>\rescue\folio.exe`, a program of the test's own) runs, and
-        /// a retired journal that notes Folio 0.4.9's held changes.
-        fn the_rescue_runs(tag: &str) -> Option<(Scene, OwnProgram)> {
+        /// change**: a scene whose rescue build (`H\<txn>\rescue\folio.exe`,
+        /// a program of the test's own) runs, and a retired journal that notes
+        /// Folio 0.4.9's held changes. Windows only: macOS starts no rescue
+        /// build from the transaction's folder.
+        #[cfg(windows)]
+        fn the_rescue_runs(tag: &str) -> (Scene, OwnProgram) {
             use crate::update_txn::{Outcome, Phase};
-            if bt_platform::host_platform() != bt_platform::HostPlatform::Windows {
-                return None;
-            }
-            let scene = Scene::new(tag)?;
+            let scene = Scene::new(tag).expect("Windows has a home");
             std::fs::remove_file(&scene.rescue).unwrap();
             let rescue = OwnProgram::start(&scene.rescue);
             write_noted(
@@ -3799,9 +3795,10 @@ mod tests {
                 },
                 Some("0.4.9"),
             );
-            Some((scene, rescue))
+            (scene, rescue)
         }
 
+        #[cfg(windows)]
         fn changes_not_kept() -> Option<Failure> {
             Some(Failure::ChangesNotKept {
                 version: "0.4.9".to_owned(),
@@ -3811,6 +3808,7 @@ mod tests {
         /// **The pass over [`the_rescue_runs`]'s scene, with `clock`; its
         /// worker removes the folder, then the journal, and lets the lock go;
         /// the card is this start's, and the next start finds nothing.**
+        #[cfg(windows)]
         fn retired_on_the_worker(scene: &Scene, clock: &Arc<crate::update_apply::CountedClock>) {
             let mut world = Recorded {
                 clock: Some(Arc::clone(clock) as Arc<dyn WaitClock>),
@@ -3841,9 +3839,11 @@ mod tests {
 
         /// A file opened without delete sharing, as a scanner or an indexer
         /// opens one, until the test lets it go; whether it was let go.
+        #[cfg(windows)]
         #[derive(Clone)]
         struct ScannerHold(Arc<std::sync::Mutex<Option<std::fs::File>>>);
 
+        #[cfg(windows)]
         impl ScannerHold {
             fn of(file: &Path) -> Self {
                 Self(Arc::new(std::sync::Mutex::new(Some(
@@ -3875,11 +3875,10 @@ mod tests {
         /// MUTATION: in `retire`, keep the transaction when the folder's
         /// removal is refused, whatever runs from the rescue build (the
         /// journal kept, the card on the next start).
+        #[cfg(windows)]
         #[test]
         fn a_start_opened_by_the_rescue_retires_on_a_worker_once_the_rescue_ends() {
-            let Some((scene, rescue)) = the_rescue_runs("rescue-runs") else {
-                return;
-            };
+            let (scene, rescue) = the_rescue_runs("rescue-runs");
             let ends = rescue.clone();
             let clock = Arc::new(crate::update_apply::CountedClock::new(move |pause| {
                 if pause == 1 {
@@ -3900,11 +3899,10 @@ mod tests {
         /// MUTATION: `install_txn::Failure::removal_refused_while_held`
         /// answers `false` (the worker gives up at the first refusal: the
         /// transaction kept, the card again on the next start).
+        #[cfg(windows)]
         #[test]
         fn a_retirement_worker_removes_the_folder_once_a_file_held_inside_is_let_go() {
-            let Some((scene, rescue)) = the_rescue_runs("held-inside") else {
-                return;
-            };
+            let (scene, rescue) = the_rescue_runs("held-inside");
             let file = scene.home.transaction(txn()).join("scanned");
             std::fs::write(&file, b"open in a scanner").unwrap();
             let hold = ScannerHold::of(&file);
@@ -3932,11 +3930,10 @@ mod tests {
         /// pause, and the worker removes the folder then.
         ///
         /// MUTATION: as above.
+        #[cfg(windows)]
         #[test]
         fn a_retirement_worker_removes_the_folder_once_an_image_inside_is_let_go() {
-            let Some((scene, rescue)) = the_rescue_runs("image-inside") else {
-                return;
-            };
+            let (scene, rescue) = the_rescue_runs("image-inside");
             let other = scene
                 .home
                 .transaction(txn())
@@ -3978,11 +3975,10 @@ mod tests {
         /// first after `H\<txn>` is gone.
         ///
         /// MUTATION: as above.
+        #[cfg(windows)]
         #[test]
         fn a_retirement_worker_removes_the_journal_once_its_hold_is_let_go() {
-            let Some((scene, rescue)) = the_rescue_runs("held-journal") else {
-                return;
-            };
+            let (scene, rescue) = the_rescue_runs("held-journal");
             let hold = ScannerHold::of(&scene.home.journal());
             let folder = scene.home.transaction(txn());
             let (ends, lifts) = (rescue.clone(), hold.clone());
@@ -4007,11 +4003,10 @@ mod tests {
         ///
         /// MUTATION: the worker's deadline is `2 * RESCUE_ENDS_WITHIN` (twice
         /// the pauses).
+        #[cfg(windows)]
         #[test]
         fn a_hold_that_outlasts_the_workers_deadline_keeps_the_transaction() {
-            let Some((scene, rescue)) = the_rescue_runs("held-past") else {
-                return;
-            };
+            let (scene, rescue) = the_rescue_runs("held-past");
             let file = scene.home.transaction(txn()).join("scanned");
             std::fs::write(&file, b"open in a scanner").unwrap();
             let hold = ScannerHold::of(&file);
