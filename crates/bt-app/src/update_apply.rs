@@ -73,6 +73,7 @@ use std::ffi::OsString;
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bt_platform::admission::WorkerCtx;
@@ -338,30 +339,108 @@ pub(crate) fn write_journal(
     within: Duration,
     say: &mut dyn FnMut(&str),
 ) -> Result<(), Unwritten> {
-    let began = Instant::now();
+    write_journal_on(
+        WaitWithin {
+            worker,
+            within,
+            clock: &WallClock,
+        },
+        None,
+        Spelling::Whole,
+        path,
+        bytes,
+        say,
+    )
+}
+
+/// **How a journal write's failure is said** ([`write_journal_on`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Spelling {
+    /// The install door's whole sentence, its path included — the applier's
+    /// log ([`write_journal`]).
+    Whole,
+    /// [`failure_words`]: no path — `diagnostics.log`, the Prepare's.
+    WithoutPath,
+}
+
+impl Spelling {
+    fn of(self, failure: &install_txn::Failure) -> String {
+        match self {
+            Self::Whole => failure.to_string(),
+            Self::WithoutPath => failure_words(failure),
+        }
+    }
+}
+
+/// **A failure of the install door in the words `diagnostics.log` gets**: the
+/// door's step and the operating system's error, never the path (it names
+/// the account's folders) — `install_txn rename: Access is denied. (os error
+/// 5)` (T-UPDATE-PREPARE-REVALIDATION-RESUME-FLAKE).
+pub(crate) fn failure_words(failure: &install_txn::Failure) -> String {
+    format!("install_txn {}: {}", failure.stage.name(), failure.error)
+}
+
+/// **[`write_journal`], on `wait`'s clock, asked again only while `cancelled`
+/// (when there is one) is not set, and every failure said in `spelling`**
+/// (T-UPDATE-PREPARE-REVALIDATION-RESUME-FLAKE): the Prepare's journal
+/// writes ride a hold the way the applier's do, read and paused on the clock
+/// its road was given ([`WallClock`] in the product), stop asking once the
+/// job has cancelled the transaction (its `Poster`'s flag), and say each
+/// failure without its path. [`write_journal`] is this with the wall clock,
+/// no cancel, and a failure's whole sentence.
+///
+/// # Errors
+/// As [`write_journal`]; a hold still there when the cancel was seen is
+/// answered as one that outlasted the window.
+pub(crate) fn write_journal_on(
+    wait: WaitWithin<'_>,
+    cancelled: Option<&AtomicBool>,
+    spelling: Spelling,
+    path: &Path,
+    bytes: &[u8],
+    say: &mut dyn FnMut(&str),
+) -> Result<(), Unwritten> {
+    let WaitWithin {
+        worker,
+        within,
+        clock,
+    } = wait;
+    let began = clock.now();
     let mut write = install_txn::DurableWrite::new(path, bytes);
+    // The round's failure is spelled at once; whether it was a hold is read
+    // off it first, and taken back by the round's one reading of it.
+    let held = std::cell::Cell::new(None);
     let written = asked_while_held(
         within,
         &Asked::JOURNAL,
-        || write.ask(),
-        held_refusal,
-        &mut || began.elapsed(),
+        || {
+            write.ask().map_err(|failure| {
+                held.set(held_refusal(&failure));
+                spelling.of(&failure)
+            })
+        },
+        |_| held.take(),
+        &mut || clock.now().saturating_duration_since(began),
         &mut |pause| {
-            bt_platform::wait::sleep_within(worker, pause);
-            true
+            clock.pause(worker, pause);
+            !cancelled.is_some_and(|flag| flag.load(Ordering::SeqCst))
         },
         say,
     );
-    given_up_said(written, || write.give_up(), say)
+    given_up_said(
+        written,
+        || write.give_up().map_err(|failure| spelling.of(&failure)),
+        say,
+    )
 }
 
 /// **A journal write's end**: when it did not land, the write is given up
 /// (`give_up`: its kept temporary removed), and a removal refused is said in a
 /// line of its own, after what the rounds said; `written` is the answer either
 /// way.
-fn given_up_said(
+fn given_up_said<E: fmt::Display>(
     written: Result<(), Unwritten>,
-    give_up: impl FnOnce() -> Result<(), install_txn::Failure>,
+    give_up: impl FnOnce() -> Result<(), E>,
     say: &mut dyn FnMut(&str),
 ) -> Result<(), Unwritten> {
     if written.is_err()
@@ -1171,6 +1250,32 @@ impl WaitClock for WallClock {
 
     fn pause(&self, worker: &WorkerCtx, pause: Duration) {
         bt_platform::wait::sleep_within(worker, pause);
+    }
+}
+
+/// **A file opened without delete sharing, as a scanner or an indexer opens
+/// one, until the test lets it go; whether it was let go**
+/// (T-UPDATE-STARTUP-ON-DISK-TEMP-DIR-RACE; shared with the Prepare's held
+/// journal, T-UPDATE-PREPARE-REVALIDATION-RESUME-FLAKE). Made on Windows only:
+/// the open is `bt_platform::trust_harness::hold_without_delete_sharing`'s.
+#[cfg(test)]
+#[derive(Clone)]
+pub(crate) struct ScannerHold(std::sync::Arc<std::sync::Mutex<Option<std::fs::File>>>);
+
+#[cfg(test)]
+impl ScannerHold {
+    pub(crate) fn of(file: &Path) -> Self {
+        Self(std::sync::Arc::new(std::sync::Mutex::new(Some(
+            bt_platform::trust_harness::hold_without_delete_sharing(file).unwrap(),
+        ))))
+    }
+
+    pub(crate) fn let_go(&self) {
+        self.0.lock().unwrap().take();
+    }
+
+    pub(crate) fn was_let_go(&self) -> bool {
+        self.0.lock().unwrap().is_none()
     }
 }
 
@@ -4144,7 +4249,7 @@ mod held_journal_tests {
                 Ok(()),
                 || {
                     asked = true;
-                    Ok(())
+                    Ok::<(), install_txn::Failure>(())
                 },
                 &mut |line| said.push(line.to_owned())
             )
@@ -4152,8 +4257,11 @@ mod held_journal_tests {
         );
         assert!(!asked && said.is_empty(), "a landed write asks no removal");
         assert!(
-            given_up_said(Err(unwritten()), || Ok(()), &mut |line| said
-                .push(line.to_owned()))
+            given_up_said(
+                Err(unwritten()),
+                || Ok::<(), install_txn::Failure>(()),
+                &mut |line| said.push(line.to_owned())
+            )
             .is_err()
         );
         assert!(said.is_empty(), "a removal done says nothing: {said:?}");

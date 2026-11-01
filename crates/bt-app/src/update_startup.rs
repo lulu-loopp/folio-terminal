@@ -3837,28 +3837,8 @@ mod tests {
             );
         }
 
-        /// A file opened without delete sharing, as a scanner or an indexer
-        /// opens one, until the test lets it go; whether it was let go.
         #[cfg(windows)]
-        #[derive(Clone)]
-        struct ScannerHold(Arc<std::sync::Mutex<Option<std::fs::File>>>);
-
-        #[cfg(windows)]
-        impl ScannerHold {
-            fn of(file: &Path) -> Self {
-                Self(Arc::new(std::sync::Mutex::new(Some(
-                    bt_platform::trust_harness::hold_without_delete_sharing(file).unwrap(),
-                ))))
-            }
-
-            fn let_go(&self) {
-                self.0.lock().unwrap().take();
-            }
-
-            fn was_let_go(&self) -> bool {
-                self.0.lock().unwrap().is_none()
-            }
-        }
+        use crate::update_apply::ScannerHold;
 
         /// RED (T-UNKEPT-CARD-ONCE, F2; Windows) — **the start the rescue
         /// build opens retires on a worker once the rescue has ended**: the
