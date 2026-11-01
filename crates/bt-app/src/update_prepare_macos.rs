@@ -611,7 +611,9 @@ fn acquire(
     ];
     for folder in folders {
         let Some(folder) = folder else {
-            return Err(journal_stop("a transaction folder has no name"));
+            return Err(journal_stop(
+                "the staged bundle or the rescue copy has no folder",
+            ));
         };
         install_txn::durable_create_dir(&folder)
             .map_err(|failure| journal_failed("a transaction folder was not created", &failure))?;
