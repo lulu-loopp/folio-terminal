@@ -115,7 +115,7 @@ crates/bt-platform/src/lib.rs:23303 code sample: the indentation after an escape
 crates/bt-platform/src/lib.rs:23509 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-platform/src/macos_update_mount_tests.rs:13 recorded `hdiutil` output: its columns as the tool prints them
 crates/bt-platform/src/macos_update_mount_tests.rs:26 recorded `hdiutil` output: its columns as the tool prints them
-crates/bt-platform/src/macos_update_mount_tests.rs:141 recorded `hdiutil` output: its columns as the tool prints them
+crates/bt-platform/src/macos_update_mount_tests.rs:139 recorded `hdiutil` output: its columns as the tool prints them
 crates/bt-platform/tests/macos_services.rs:230 the probe's listing: each path indented under the line that counts them
 crates/bt-pty/src/lib.rs:4188 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-source/src/declarations.rs:763 the spacing inside the predicate is the input under test
