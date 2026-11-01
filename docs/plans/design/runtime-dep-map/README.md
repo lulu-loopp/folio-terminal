@@ -66,6 +66,19 @@ the header is the authority:
   joined the unattributed count, `uninstall::program_plan`'s `member.name` through
   its `members` parameter; five calls joined the count of method names a standard
   type has too, 4,308 -> 4,313 in the header; no row of any file moved).
+- A one-segment call of a name bound nowhere is typed only from the declarations its
+  module reaches: the module's own product items, then its `use` items a product build
+  compiles (renames and re-exports followed, a module looked up before a `use` name of
+  the same spelling), then its globs, and across a `use` or a glob into another
+  workspace crate to that crate's declaration. A name that reaches only a test build's
+  declaration, a path into a crate the census does not read (`std`), a `fn` or a `use`
+  written in a body, or nothing at all is not typed; it is never matched by its bare
+  name elsewhere (row 126, 2026-10-31: of bt-app's 13,289 such calls, 1,071 became
+  typed, 45 changed type — 43 `admitted` calls typed from bt-effects' instead of a test
+  helper's, 2 `read_keybindings` from bt-persist's instead of `settings_bundle`'s — and
+  10 calls of a `fn` written in a body became untyped; the unattributed reads went
+  181 -> 178, the two untyped-receiver classes 4,313 -> 4,253 and 2,287 -> 2,258, and
+  eight topic rows grew; no field, door or unknown row moved).
 - 301 sites reach more than one item, for example two types of the same name in two
   modules.
 - A call through an associated type of a generic (`B::Glass`, `B::Window`, `G::Device`)
