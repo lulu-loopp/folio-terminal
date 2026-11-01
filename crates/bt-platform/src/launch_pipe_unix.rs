@@ -75,11 +75,13 @@ use std::{
         net::{UnixListener, UnixStream},
     },
     path::{Path, PathBuf},
+    sync::Arc,
     thread::JoinHandle,
     time::{Duration, Instant},
 };
 
 use crate::instance::SOCKET_PATH_LIMIT;
+use crate::launch_conversation::{LaunchClock, RealClock};
 
 /// **The most bytes one frame on this endpoint may carry** — 256 KiB (F-SWEEP-2-048).
 ///
@@ -196,7 +198,27 @@ impl LaunchPipe {
     /// between them is the contract this module exists to keep — `decide`
     /// answers a [`Decision`] on the listener thread, and `commit` is handed
     /// **that same admitted value** once the client has confirmed.
+    ///
+    /// Each step of every conversation it serves is waited for on the real
+    /// clock ([`Self::start_on`]).
     pub fn start<T, D, C>(directory: &Path, decide: D, commit: C) -> io::Result<Self>
+    where
+        T: Send + 'static,
+        D: Fn(&str) -> Option<Decision<T>> + Send + 'static,
+        C: Fn(T) + Send + 'static,
+    {
+        Self::start_on(directory, Arc::new(RealClock), decide, commit)
+    }
+
+    /// [`Self::start`] with each step of the conversations its listener serves
+    /// ([`STEP_DEADLINE`]) waited for on `clock`
+    /// (T-LAUNCH-HANDOVER-BUDGET-ON-A-CLOCK).
+    fn start_on<T, D, C>(
+        directory: &Path,
+        clock: Arc<dyn LaunchClock>,
+        decide: D,
+        commit: C,
+    ) -> io::Result<Self>
     where
         T: Send + 'static,
         D: Fn(&str) -> Option<Decision<T>> + Send + 'static,
@@ -246,7 +268,7 @@ impl LaunchPipe {
             crate::ThreadPriority::Normal,
             move |_ctx| {
                 let _alive = alive;
-                listen(&listener, wake, &decide, &commit);
+                listen(&listener, wake, &*clock, &decide, &commit);
             },
         );
         match listener {
@@ -354,6 +376,7 @@ impl Drop for LaunchPipe {
 fn listen<T>(
     listener: &UnixListener,
     wake: RawFd,
+    clock: &dyn LaunchClock,
     decide: &(impl Fn(&str) -> Option<Decision<T>> + ?Sized),
     commit: &(impl Fn(T) + ?Sized),
 ) {
@@ -389,7 +412,7 @@ fn listen<T>(
             continue;
         }
         match listener.accept() {
-            Ok((stream, _)) => serve(stream, decide, commit),
+            Ok((stream, _)) => serve(stream, clock, decide, commit),
             Err(error)
                 if matches!(
                     error.kind(),
@@ -412,15 +435,11 @@ fn listen<T>(
 /// window of its own — is the report.
 fn serve<T>(
     stream: UnixStream,
+    clock: &dyn LaunchClock,
     decide: &(impl Fn(&str) -> Option<Decision<T>> + ?Sized),
     commit: &(impl Fn(T) + ?Sized),
 ) {
-    if stream.set_read_timeout(Some(STEP_DEADLINE)).is_err()
-        || stream.set_write_timeout(Some(STEP_DEADLINE)).is_err()
-    {
-        return;
-    }
-    answer(Served(stream), decide, commit);
+    answer(Served { stream, clock }, decide, commit);
 }
 
 /// **The server's half of one conversation, on a connection it has accepted** —
@@ -486,33 +505,74 @@ trait Accepted: crate::launch_conversation::Connection {
     fn outwait_first_move(&mut self);
 }
 
-/// **An accepted socket**, its every step bounded by [`STEP_DEADLINE`] (set by
-/// [`serve`] before this is made).
-struct Served(UnixStream);
+/// **An accepted socket**, its every step bounded by [`STEP_DEADLINE`] on the
+/// endpoint's clock.
+struct Served<'c> {
+    stream: UnixStream,
+    clock: &'c dyn LaunchClock,
+}
 
-impl crate::launch_conversation::Connection for Served {
+impl crate::launch_conversation::Connection for Served<'_> {
     fn vetted_peer(&mut self) -> io::Result<u32> {
-        vetted_peer(&self.0)
+        vetted_peer(&self.stream)
     }
 
     fn say(&mut self, frame: &[u8]) -> io::Result<()> {
-        write_frame(&self.0, frame)
+        let stream = &self.stream;
+        on_clock(self.clock, STEP_DEADLINE, |wait| {
+            stream.set_write_timeout(Some(wait))?;
+            write_frame(stream, frame)
+        })
     }
 
     fn hear(&mut self) -> io::Result<Vec<u8>> {
-        read_frame(&self.0)
+        let stream = &self.stream;
+        on_clock(self.clock, STEP_DEADLINE, |wait| {
+            stream.set_read_timeout(Some(wait))?;
+            read_frame(stream)
+        })
     }
 }
 
-impl Accepted for Served {
+impl Accepted for Served<'_> {
     fn outwait_first_move(&mut self) {
-        let mut byte = [0u8; 1];
-        while let Err(error) = (&self.0).read(&mut byte) {
-            if error.kind() != io::ErrorKind::Interrupted {
-                break;
+        let stream = &self.stream;
+        let _ = on_clock(self.clock, STEP_DEADLINE, |wait| {
+            stream.set_read_timeout(Some(wait))?;
+            let mut byte = [0u8; 1];
+            let mut reader = stream;
+            loop {
+                match reader.read(&mut byte) {
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                    moved => return moved.map(drop),
+                }
             }
-        }
+        });
     }
+}
+
+/// **One step of a conversation, waited for on `clock` up to `bound`**: `step`
+/// is made with its socket's timeout set to the wait the clock hands it, and a
+/// step the clock does not make at all is `WouldBlock` — a socket's own word for
+/// a timeout.
+///
+/// The wait is never zero: `set_read_timeout(Some(Duration::ZERO))` is how the
+/// standard library spells *block forever*, so a budget that has already run
+/// out is a very short wait rather than no wait — the one shape this refuses to
+/// produce is the one that would hang.
+fn on_clock<T>(
+    clock: &dyn LaunchClock,
+    bound: Duration,
+    mut step: impl FnMut(Duration) -> io::Result<T>,
+) -> io::Result<T> {
+    let mut made = None;
+    clock.wait(bound, &mut |wait| {
+        let result = step(wait.max(Duration::from_millis(1)));
+        let acted = !matches!(&result, Err(error) if error.kind() == io::ErrorKind::WouldBlock);
+        made = Some(result);
+        acted
+    });
+    made.unwrap_or_else(|| Err(io::Error::from(io::ErrorKind::WouldBlock)))
 }
 
 /// **A second launch's whole conversation with the Folio that is already
@@ -538,9 +598,24 @@ impl Accepted for Served {
 /// the answer is the same — this process opens the window itself. **A failure
 /// after the request was written is safe by construction**: the server commits
 /// on this end's [`CONFIRM`], which a failing handover never sends.
+///
+/// The budget is read on the real clock ([`hand_over_on`]).
 pub fn hand_over(
     endpoint: &str,
     request: &str,
+    on_reply: impl FnOnce(u32, &str),
+) -> io::Result<()> {
+    hand_over_on(endpoint, request, &RealClock, on_reply)
+}
+
+/// [`hand_over`] with its budget on `clock`
+/// (T-LAUNCH-HANDOVER-BUDGET-ON-A-CLOCK): the deadline is set and read on
+/// [`LaunchClock::now`], and each write and read it bounds is
+/// [`LaunchClock::wait`].
+fn hand_over_on(
+    endpoint: &str,
+    request: &str,
+    clock: &dyn LaunchClock,
     on_reply: impl FnOnce(u32, &str),
 ) -> io::Result<()> {
     if request.len() > MAX_FRAME_BYTES {
@@ -549,7 +624,7 @@ pub fn hand_over(
             "request longer than the launch endpoint's frame bound",
         ));
     }
-    let began = Instant::now();
+    let deadline = clock.now() + HANDOVER_BUDGET;
     let path = Path::new(endpoint);
     // **The door is read before it is opened.** `connect` on a path somebody
     // else stood up would be this process introducing itself to whoever is
@@ -562,42 +637,55 @@ pub fn hand_over(
     // connection stands and before a byte of the command line is written — the
     // request names a folder somebody is standing in — and [`CONFIRM`] goes
     // last.
-    crate::launch_conversation::hand_over_on(Client { stream, began }, request, on_reply)
+    crate::launch_conversation::hand_over_on(
+        Client {
+            stream,
+            clock,
+            deadline,
+        },
+        request,
+        on_reply,
+    )
 }
 
 /// **The client's end of one connected socket**, every step bounded by what is
-/// left of the budget the handover began with.
-struct Client {
+/// left of the budget the handover began with: its deadline, on the handover's
+/// clock.
+struct Client<'c> {
     stream: UnixStream,
-    began: Instant,
+    clock: &'c dyn LaunchClock,
+    deadline: Instant,
 }
 
-impl crate::launch_conversation::Connection for Client {
+impl Client<'_> {
+    /// Whatever is left of the budget ([`on_clock`] never waits zero).
+    fn left(&self) -> Duration {
+        self.deadline.saturating_duration_since(self.clock.now())
+    }
+}
+
+impl crate::launch_conversation::Connection for Client<'_> {
     fn vetted_peer(&mut self) -> io::Result<u32> {
         vetted_peer(&self.stream)
     }
 
     fn say(&mut self, frame: &[u8]) -> io::Result<()> {
-        self.stream.set_write_timeout(Some(remaining(self.began)))?;
-        write_frame(&self.stream, frame).map_err(ran_out)
+        let stream = &self.stream;
+        on_clock(self.clock, self.left(), |wait| {
+            stream.set_write_timeout(Some(wait))?;
+            write_frame(stream, frame)
+        })
+        .map_err(ran_out)
     }
 
     fn hear(&mut self) -> io::Result<Vec<u8>> {
-        self.stream.set_read_timeout(Some(remaining(self.began)))?;
-        read_frame(&self.stream).map_err(ran_out)
+        let stream = &self.stream;
+        on_clock(self.clock, self.left(), |wait| {
+            stream.set_read_timeout(Some(wait))?;
+            read_frame(stream)
+        })
+        .map_err(ran_out)
     }
-}
-
-/// Whatever is left of the budget, and never zero.
-///
-/// `set_read_timeout(Some(Duration::ZERO))` is how the standard library spells
-/// *block forever*, so a budget that has already run out has to be a very short
-/// wait rather than no wait — the one shape this function refuses to produce is
-/// the one that would hang.
-fn remaining(began: Instant) -> Duration {
-    HANDOVER_BUDGET
-        .saturating_sub(began.elapsed())
-        .max(Duration::from_millis(1))
 }
 
 /// **A socket timeout is `WouldBlock`, and this wire's word for it is
@@ -808,6 +896,7 @@ fn read_frame(mut stream: &UnixStream) -> io::Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::launch_conversation::{CountedClock, Turn};
     use std::sync::mpsc;
 
     /// A data directory no other test in this process is using, so two of them
@@ -817,6 +906,37 @@ mod tests {
         let directory = bt_testpath::temp_path(&format!("bt-platform-launch-{line}"));
         std::fs::create_dir_all(&directory).expect("make the data directory");
         directory
+    }
+
+    /// An endpoint for `directory` whose waits are read on `served`.
+    fn served_on<T: Send + 'static>(
+        directory: &Path,
+        served: &Arc<CountedClock>,
+        decide: impl Fn(&str) -> Option<Decision<T>> + Send + 'static,
+        commit: impl Fn(T) + Send + 'static,
+    ) -> LaunchPipe {
+        let clock: Arc<dyn LaunchClock> = Arc::clone(served) as Arc<dyn LaunchClock>;
+        LaunchPipe::start_on(directory, clock, decide, commit).expect("open the launch endpoint")
+    }
+
+    /// **One whole handover on a thread of its own, on `clock`**: its end and the reply it was
+    /// handed, within the suite's patience — so a handover that waits past what it was asked to is
+    /// red by name, never a hang.
+    fn handed(
+        name: &str,
+        request: &str,
+        clock: &Arc<CountedClock>,
+    ) -> (io::Result<()>, Option<String>) {
+        let (name, request, clock) = (name.to_owned(), request.to_owned(), Arc::clone(clock));
+        let (ended, end) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut reply = None;
+            let result = hand_over_on(&name, &request, &*clock, |_, line| {
+                reply = Some(line.to_owned());
+            });
+            let _ = ended.send((result, reply));
+        });
+        crate::door_skipped::received(&end, "the handover's end")
     }
 
     /// What one recorded server conversation did, in the order it did it.
@@ -958,14 +1078,23 @@ mod tests {
     /// number handed to `on_reply` is the kernel's answer for the far end and
     /// not anything either side wrote into a frame.
     ///
+    /// **Both ends on a counted clock** (T-LAUNCH-HANDOVER-BUDGET-ON-A-CLOCK):
+    /// the client's budget and the server's steps await the other end within the
+    /// suite's patience, so "answered in time" is the other thread's event, never
+    /// a race against 2 s or 250 ms of real time; and neither clock moved.
+    ///
     /// MUTATION: read the request with `read` instead of `read_exact` and a
-    /// frame split across two packets arrives truncated.
+    /// frame split across two packets arrives truncated; compute the client's
+    /// `left` as nothing (the budget ends at once) and the handover is
+    /// `TimedOut`.
     #[test]
     fn a_request_crosses_the_launch_endpoint_and_is_answered() {
         let directory = scratch(line!());
         let (sender, committed) = mpsc::channel();
-        let endpoint = LaunchPipe::start(
+        let served = Arc::new(CountedClock::answering());
+        let endpoint = served_on(
             &directory,
+            &served,
             |line| {
                 Some(Decision {
                     reply: format!("answer to {line}"),
@@ -975,26 +1104,43 @@ mod tests {
             move |admitted: String| {
                 let _ = sender.send(admitted);
             },
-        )
-        .expect("open the launch endpoint");
-        let (heard, replies) = mpsc::channel();
-        hand_over(endpoint.name(), "one request", |server, reply| {
+        );
+        let asking = CountedClock::answering();
+        let mut replied = None;
+        hand_over_on(endpoint.name(), "one request", &asking, |server, reply| {
             assert_eq!(
                 server,
                 std::process::id(),
                 "the server this client vetted is the process it is actually talking to"
             );
-            let _ = heard.send(reply.to_owned());
+            replied = Some(reply.to_owned());
         })
         .expect("hand the request over");
+        assert_eq!(replied.as_deref(), Some("answer to one request"));
         assert_eq!(
-            replies.recv_timeout(Duration::from_secs(5)).ok(),
-            Some("answer to one request".to_owned())
+            crate::door_skipped::received(&committed, "the commit"),
+            "one request",
+            "and the request is committed once the caller has let go"
         );
         assert_eq!(
-            committed.recv_timeout(Duration::from_secs(5)).ok(),
-            Some("one request".to_owned()),
-            "and the request is committed once the caller has let go"
+            asking.moved(),
+            Duration::ZERO,
+            "the client spent none of its budget"
+        );
+        assert_eq!(
+            asking.asked(),
+            vec![HANDOVER_BUDGET; 3],
+            "the request, the reply and the confirmation each waited inside the whole budget"
+        );
+        assert_eq!(
+            served.moved(),
+            Duration::ZERO,
+            "the server spent none of its steps"
+        );
+        assert!(
+            served.asked().iter().all(|bound| *bound == STEP_DEADLINE),
+            "every step of the server's is one step deadline: {:?}",
+            served.asked()
         );
     }
 
@@ -1010,8 +1156,13 @@ mod tests {
         let directory = scratch(line!());
         // The reply is the server's count of what it read, so it is the whole of the proof: no
         // waiting on the commit, which `a_request_crosses_the_launch_endpoint_and_is_answered` pins.
-        let endpoint = LaunchPipe::start(
+        // Both ends on a counted clock that awaits the other end: each chunk of the
+        // request is the server's step and the client's budget, never 250 ms of real
+        // time against the other thread.
+        let served = Arc::new(CountedClock::answering());
+        let endpoint = served_on(
             &directory,
+            &served,
             |line| {
                 Some(Decision {
                     reply: format!("{} bytes", line.len()),
@@ -1019,15 +1170,25 @@ mod tests {
                 })
             },
             |(): ()| {},
-        )
-        .expect("open the launch endpoint");
+        );
         let request = "环境".repeat(20_000);
+        let asking = CountedClock::answering();
         let mut reply = None;
-        hand_over(endpoint.name(), &request, |_, line| {
+        hand_over_on(endpoint.name(), &request, &asking, |_, line| {
             reply = Some(line.to_owned());
         })
         .expect("hand the request over");
         assert_eq!(reply, Some(format!("{} bytes", request.len())));
+        assert_eq!(
+            asking.moved(),
+            Duration::ZERO,
+            "the client spent none of its budget"
+        );
+        assert_eq!(
+            served.moved(),
+            Duration::ZERO,
+            "the server spent none of its steps"
+        );
     }
 
     /// **RED — the endpoint is `0600` inside a `0700` directory, and it is gone
@@ -1066,14 +1227,19 @@ mod tests {
     /// assertion is the one that matters: a refused line must not reach the
     /// window thread.
     ///
+    /// The absence is read as state: the listener serves one caller at a time,
+    /// so a refused line that had been committed would reach the channel before
+    /// the good line that follows it.
+    ///
     /// MUTATION: commit before the reply is written, or commit on a `None`
-    /// verdict, and the second assertion goes red.
+    /// verdict, and the first commit is the refused line's.
     #[test]
     fn a_line_the_grammar_refuses_is_dropped_without_a_reply_and_without_effect() {
         let directory = scratch(line!());
         let (sender, committed) = mpsc::channel();
-        let endpoint = LaunchPipe::start(
+        let endpoint = served_on(
             &directory,
+            &Arc::new(CountedClock::answering()),
             |line| {
                 (line == "good").then(|| Decision {
                     reply: "ok".to_owned(),
@@ -1083,14 +1249,18 @@ mod tests {
             move |admitted: String| {
                 let _ = sender.send(admitted);
             },
-        )
-        .expect("open the launch endpoint");
-        let mut answered = false;
-        let _ = hand_over(endpoint.name(), "rubbish", |_, _| answered = true);
-        assert!(!answered, "a refused line is answered with silence");
-        assert!(
-            committed.recv_timeout(Duration::from_millis(500)).is_err(),
-            "and it never reaches the window thread"
+        );
+        let asking = Arc::new(CountedClock::answering());
+        let (refused, reply) = handed(endpoint.name(), "rubbish", &asking);
+        assert!(refused.is_err(), "a refused line is not handed over");
+        assert_eq!(reply, None, "a refused line is answered with silence");
+        let (good, reply) = handed(endpoint.name(), "good", &asking);
+        good.expect("the good line after it is handed over");
+        assert_eq!(reply.as_deref(), Some("ok"));
+        assert_eq!(
+            crate::door_skipped::received(&committed, "the good line's commit"),
+            "good",
+            "the refused line never reached the window thread"
         );
     }
 
@@ -1104,13 +1274,15 @@ mod tests {
     ///
     /// The client here is written by hand rather than through [`hand_over`],
     /// because what is being pinned is precisely the step `hand_over` always
-    /// takes: it reads the reply and then stops.
+    /// takes: it reads the reply and then stops. The absence is read as state,
+    /// as for a refused line: the next launch's commit is the first.
     #[test]
     fn a_client_that_never_confirms_commits_nothing() {
         let directory = scratch(line!());
         let (sender, committed) = mpsc::channel();
-        let endpoint = LaunchPipe::start(
+        let endpoint = served_on(
             &directory,
+            &Arc::new(CountedClock::answering()),
             |line| {
                 Some(Decision {
                     reply: format!("answer to {line}"),
@@ -1120,8 +1292,7 @@ mod tests {
             move |admitted: String| {
                 let _ = sender.send(admitted);
             },
-        )
-        .expect("open the launch endpoint");
+        );
         {
             let stream = UnixStream::connect(endpoint.name()).expect("connect to the endpoint");
             write_frame(&stream, b"one request").expect("write the request");
@@ -1131,12 +1302,90 @@ mod tests {
             // client that lost the reply, crashed, or was killed between the
             // two statements above.
         }
-        assert!(
-            committed
-                .recv_timeout(HANDOVER_BUDGET + Duration::from_millis(500))
-                .is_err(),
+        let (next, _) = handed(
+            endpoint.name(),
+            "the next launch",
+            &Arc::new(CountedClock::answering()),
+        );
+        next.expect("the next launch is handed over");
+        assert_eq!(
+            crate::door_skipped::received(&committed, "the next launch's commit"),
+            "the next launch",
             "the launch was handed to the window thread on the strength of a reply the client \
              never acted on"
+        );
+    }
+
+    /// **RED (T-LAUNCH-HANDOVER-BUDGET-ON-A-CLOCK) — a client that holds the
+    /// line without confirming costs the server one step, on the server's
+    /// clock, and commits nothing.**
+    ///
+    /// After the decision the server makes two steps: the reply, awaited here,
+    /// and the wait for the confirmation, spent once the client has read its
+    /// reply. The server then closes,
+    /// and the client's next read says so; the commit would have been made
+    /// before that close, and the server's clock moved by exactly one step.
+    ///
+    /// MUTATION: wait for the server's read on a socket timeout of its own
+    /// rather than through the clock, and the server's clock does not move.
+    #[test]
+    fn a_client_that_holds_the_line_without_confirming_costs_the_server_one_step() {
+        let directory = scratch(line!());
+        let (sender, committed) = mpsc::channel();
+        let decided = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        // The step is spent only once the client has its reply, as on Windows.
+        let (read_it, reply_read) = mpsc::channel::<()>();
+        let served = Arc::new({
+            let decided = Arc::clone(&decided);
+            let mut after = 0;
+            CountedClock::new(move |_, _| {
+                if decided.load(std::sync::atomic::Ordering::SeqCst) {
+                    after += 1;
+                }
+                if after == 2 {
+                    crate::door_skipped::received(&reply_read, "the client's read of the reply");
+                    Turn::Spend
+                } else {
+                    Turn::Await
+                }
+            })
+        });
+        let endpoint = served_on(
+            &directory,
+            &served,
+            move |line| {
+                decided.store(true, std::sync::atomic::Ordering::SeqCst);
+                Some(Decision {
+                    reply: format!("answer to {line}"),
+                    admitted: Some(line.to_owned()),
+                })
+            },
+            move |admitted: String| {
+                let _ = sender.send(admitted);
+            },
+        );
+        let stream = UnixStream::connect(endpoint.name()).expect("connect to the endpoint");
+        stream
+            .set_read_timeout(Some(crate::door_skipped::PATIENCE))
+            .expect("bound this client's reads by the suite's patience");
+        write_frame(&stream, b"one request").expect("write the request");
+        let reply = read_frame(&stream).expect("read the reply");
+        assert_eq!(reply, b"answer to one request");
+        let _ = read_it.send(());
+        let after = read_frame(&stream).expect_err("the server let this client go");
+        assert_eq!(
+            after.kind(),
+            io::ErrorKind::UnexpectedEof,
+            "the server closed inside the client's patience: {after}"
+        );
+        assert!(
+            committed.try_recv().is_err(),
+            "a launch the client never confirmed was committed"
+        );
+        assert_eq!(
+            served.moved(),
+            STEP_DEADLINE,
+            "the server's wait for the confirmation is one step on its clock"
         );
     }
 
@@ -1155,36 +1404,57 @@ mod tests {
     /// **RED — a Folio that takes the request and never answers costs the
     /// launch its budget and nothing more.**
     ///
+    /// **The budget runs out on the count** (T-LAUNCH-HANDOVER-BUDGET-ON-A-CLOCK):
+    /// the listener stands inside `decide` until the handover has ended; the
+    /// client's clock awaits its first wait (the request, which the socket takes)
+    /// and spends its second (the reply) — so the end is `TimedOut` with the clock
+    /// moved by exactly the budget, never a measurement of real time.
+    ///
     /// MUTATION: leave the read timeout unset — which on a socket means *block
-    /// forever* — and this test never returns.
+    /// forever* — and the handover does not end within the suite's patience;
+    /// read the client's budget off the real clock and the bounds it asks for
+    /// are not the whole budget.
     #[test]
     fn a_server_that_never_answers_costs_the_launch_its_budget_and_no_more() {
         let directory = scratch(line!());
-        let endpoint = LaunchPipe::start(
+        let (release, held) = mpsc::channel::<()>();
+        let endpoint = served_on(
             &directory,
-            |_| {
-                std::thread::sleep(HANDOVER_BUDGET * 3);
+            &Arc::new(CountedClock::answering()),
+            move |_| {
+                let _ = held.recv();
                 Some(Decision {
                     reply: "far too late".to_owned(),
                     admitted: None::<()>,
                 })
             },
             |()| {},
-        )
-        .expect("open the launch endpoint");
-        let began = Instant::now();
-        let refused = hand_over(endpoint.name(), "one request", |_, _| {
-            panic!("a hung Folio has not answered");
-        })
-        .expect_err("a Folio that never answers cannot be handed anything");
-        assert_eq!(refused.kind(), io::ErrorKind::TimedOut);
-        assert!(
-            began.elapsed() + Duration::from_millis(20) >= HANDOVER_BUDGET,
-            "the budget is waited out before the launch gives up"
         );
-        assert!(
-            began.elapsed() < HANDOVER_BUDGET * 3,
-            "and it is not waited past: the person is owed a window, not a syscall"
+        let asking = Arc::new(CountedClock::new(|number, _| {
+            if number == 1 {
+                Turn::Await
+            } else {
+                Turn::Spend
+            }
+        }));
+        let (refused, reply) = handed(endpoint.name(), "one request", &asking);
+        let _ = release.send(());
+        assert_eq!(reply, None, "a hung Folio has not answered");
+        assert_eq!(
+            refused
+                .expect_err("a Folio that never answers cannot be handed anything")
+                .kind(),
+            io::ErrorKind::TimedOut
+        );
+        assert_eq!(
+            asking.asked(),
+            vec![HANDOVER_BUDGET; 2],
+            "the request and then the reply are each waited for inside the whole budget"
+        );
+        assert_eq!(
+            asking.moved(),
+            HANDOVER_BUDGET,
+            "and the launch gives up when the budget is spent, and not past it"
         );
     }
 
@@ -1192,21 +1462,24 @@ mod tests {
     ///
     /// The ordinary case of a first launch: there is no Folio running, so there
     /// is no socket, and the answer has to come back immediately rather than
-    /// after [`HANDOVER_BUDGET`].
+    /// after [`HANDOVER_BUDGET`]. Read on a counted clock: no wait is asked for
+    /// at all.
     #[test]
     fn an_endpoint_nobody_is_listening_on_refuses_at_once() {
         let directory = scratch(line!());
         let name = endpoint_for(&directory).expect("the name is addressable");
-        let began = Instant::now();
-        let refused = hand_over(&name, "one request", |_, _| {
+        let asking = CountedClock::answering();
+        let refused = hand_over_on(&name, "one request", &asking, |_, _| {
             panic!("there is nobody to answer");
         })
         .expect_err("a name with nobody behind it cannot be handed anything");
-        assert!(
-            began.elapsed() < HANDOVER_BUDGET,
-            "a launch with no Folio running must not wait out the budget"
-        );
         assert_eq!(refused.kind(), io::ErrorKind::NotFound);
+        assert_eq!(
+            asking.asked(),
+            Vec::<Duration>::new(),
+            "a launch with no Folio running waits for nothing"
+        );
+        assert_eq!(asking.moved(), Duration::ZERO);
     }
 
     /// **RED (0.4.8 D3) — a door held by a program that is not a Folio is not
