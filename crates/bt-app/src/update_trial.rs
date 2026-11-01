@@ -3525,11 +3525,9 @@ mod tests {
     ///
     /// MUTATION: in `update_trial::hand_back`, leave the `--from-trial` word
     /// out of the line.
+    #[cfg(windows)]
     #[test]
     fn a_trial_watch_in_a_process_of_its_own_hands_back_its_identity_and_stays() {
-        if bt_platform::host_platform() != bt_platform::HostPlatform::Windows {
-            return;
-        }
         if let Ok(root) = std::env::var("BT_U37_WATCH_CHILD") {
             let root = PathBuf::from(root);
             let home = Home::at(root.join("home"));
