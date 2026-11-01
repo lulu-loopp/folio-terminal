@@ -118,6 +118,7 @@ use windows::{
 };
 
 use crate::https_download::{DOWNLOAD_CHUNK_BYTES, Deadlines, Destination, Partial, admit_length};
+use crate::launch_conversation::{LaunchClock, RealClock};
 
 /// The one request this module knows how to make.
 ///
@@ -518,7 +519,8 @@ unsafe extern "system" fn on_status(
 
 /// How long closing an abandoned request may wait for WinHTTP to say the
 /// handle is gone. Past it the handle's count is left to WinHTTP, which is a
-/// leak of one buffer and never a use after free.
+/// leak of one buffer and never a use after free. Real time in the product:
+/// [`download_from`] hands the door [`RealClock`].
 const CLOSE_WAIT: Duration = Duration::from_secs(5);
 
 /// **An asynchronous request handle, with its callback and its context.**
@@ -593,30 +595,28 @@ impl Request {
         })
     }
 
-    /// **The door: close the handle and wait, up to `bound`, for WinHTTP to say
-    /// it is gone.** Answers whether it did. Past the bound the handle's count
-    /// is left to WinHTTP, which gives it back at `HANDLE_CLOSING`: a leak of one
-    /// buffer until then, never a use after free.
-    fn close_within(mut self, bound: Duration) -> bool {
+    /// **The door: close the handle and wait, up to `bound` on `clock`, for
+    /// WinHTTP to say it is gone.** Answers whether it did. Past the bound the
+    /// handle's count is left to WinHTTP, which gives it back at
+    /// `HANDLE_CLOSING`: a leak of one buffer until then, never a use after free.
+    ///
+    /// The wait is one [`LaunchClock::wait`] (T-WINHTTP-CLOSE-DOOR-ON-A-CLOCK):
+    /// [`RealClock`] in the product, which makes it once on the real clock for
+    /// the whole bound; a counted clock in a test. `closed` is read only inside
+    /// that wait, so the clock alone judges whether the bound ended first.
+    fn close_within(mut self, bound: Duration, clock: &dyn LaunchClock) -> bool {
         let handle = std::mem::replace(&mut self.handle, std::ptr::null_mut());
         // SAFETY: a live handle, closed once: the door takes it out of `self`,
         // so the drop that follows finds nothing to close.
         let _ = unsafe { WinHttpCloseHandle(handle) };
-        let started = Instant::now();
-        let mut signals = self.shared.locked();
-        while !signals.closed {
-            let left = bound.saturating_sub(started.elapsed());
-            if left.is_zero() {
-                return false;
-            }
-            let (next, _) = self
-                .shared
+        let shared = &self.shared;
+        clock.wait(bound, &mut |within| {
+            let (signals, _) = shared
                 .raised
-                .wait_timeout(signals, left)
+                .wait_timeout_while(shared.locked(), within, |signals| !signals.closed)
                 .expect("the download's signals are not held across a panic");
-            signals = next;
-        }
-        true
+            signals.closed
+        })
     }
 }
 
@@ -749,7 +749,7 @@ fn download_from(
     // of the exchange, an error's included, comes back here to close it.
     let exchange = Request::arm(handle)?;
     let transferred = transfer(&exchange, request, &mut deadlines);
-    let _ = exchange.close_within(CLOSE_WAIT);
+    let _ = exchange.close_within(CLOSE_WAIT, &RealClock);
     let (partial, announced) = transferred?;
     partial.finish(announced)
 }
@@ -866,6 +866,7 @@ mod tests {
         DOWNLOAD_FLOOR_BYTES, DOWNLOAD_IDLE_TIMEOUT,
         loopback::{Entry, Step, begun, body, head, ok, serve},
     };
+    use crate::launch_conversation::{CountedClock, Turn};
 
     const IDLE: Duration = Duration::from_secs(5);
     /// Longer than any of these exchanges takes: the redirect loop's bound.
@@ -1381,32 +1382,111 @@ mod tests {
     /// thread after it — an unsent request's arrives inside the close itself,
     /// which no door needs to wait for.
     ///
+    /// The door's wait is on a counted clock (T-WINHTTP-CLOSE-DOOR-ON-A-CLOCK):
+    /// the one wait is awaited within the door suites' patience, so the bound
+    /// never ends and WinHTTP's own thread answers in its own time.
+    ///
     /// MUTATION: return from `close_within` right after the close and `closed`
     /// is not yet set when it answers; leave the handle in `self` and the drop
-    /// after the door closes it a second time and says a skipped door.
+    /// after the door closes it a second time and says a skipped door; wait
+    /// beside the clock instead of through it and the clock was asked nothing.
     #[test]
     fn the_close_door_waits_for_the_closing_callback() {
-        let (asked, heard) = std::sync::mpsc::channel();
-        let server = serve(move |_| {
-            let _ = asked.send(());
-            vec![Step::Pause(Duration::from_secs(40))]
-        });
-        let port = server.port();
-        let (session, connection, request) = a_request_to(port);
-        // SAFETY: a live, armed request; its context is the one `arm` gave it.
-        unsafe { super::WinHttpSendRequest(request.handle, None, None, 0, 0, request.context) }
-            .expect("the request goes out");
-        crate::door_skipped::received(&heard, "the server holding the request");
+        let (session, connection, request, _server) = a_request_held_in_flight();
         let shared = Arc::clone(&request.shared);
-        let closed = request.close_within(super::CLOSE_WAIT);
+        let clock = CountedClock::answering();
+        let closed = request.close_within(super::CLOSE_WAIT, &clock);
         assert!(closed, "the door saw `HANDLE_CLOSING` within its bound");
         assert!(shared.locked().closed, "and the callback had said so");
+        assert_eq!(
+            clock.asked(),
+            vec![super::CLOSE_WAIT],
+            "the door's one wait is the product's bound, on the clock it was handed"
+        );
+        assert_eq!(clock.moved(), Duration::ZERO, "and the bound never ended");
         assert_eq!(
             crate::door_skipped::skipped_on_this_thread(),
             0,
             "a request closed through its door has nothing to say at its drop"
         );
         drop((connection, session));
+    }
+
+    /// RED (T-WINHTTP-CLOSE-DOOR-ON-A-CLOCK) — **a bound that ends before the
+    /// closing callback is answered `false`, and the callback that comes after
+    /// it still finds its context alive.**
+    ///
+    /// The same request in flight as above, on a counted clock that spends the
+    /// door's one wait whole at once: the bound ends before WinHTTP is heard,
+    /// whatever WinHTTP has done by then. The late answer is WinHTTP's own
+    /// `HANDLE_CLOSING`, awaited afterwards as state within the door suites'
+    /// patience: the count the door left to WinHTTP is the one the callback
+    /// gives back.
+    ///
+    /// MUTATION: wait beside the clock (the old `Instant` loop, or the real
+    /// wait for the whole bound) and the door hears the callback and answers
+    /// `true`, and the clock was asked nothing; look at `closed` before asking
+    /// the clock and an early callback answers `true`.
+    #[test]
+    fn the_close_door_answers_false_when_its_bound_ends_before_the_closing_callback() {
+        let (session, connection, request, _server) = a_request_held_in_flight();
+        let shared = Arc::clone(&request.shared);
+        let clock = CountedClock::new(|_, _| Turn::Spend);
+        let closed = request.close_within(super::CLOSE_WAIT, &clock);
+        assert!(
+            !closed,
+            "the bound ended before the door heard `HANDLE_CLOSING`"
+        );
+        assert_eq!(
+            clock.asked(),
+            vec![super::CLOSE_WAIT],
+            "the door's one wait is the product's bound, on the clock it was handed"
+        );
+        assert_eq!(
+            clock.moved(),
+            super::CLOSE_WAIT,
+            "spent whole, on the count"
+        );
+        assert_eq!(
+            crate::door_skipped::skipped_on_this_thread(),
+            0,
+            "the door emptied the request: its drop has nothing to close or say"
+        );
+        let (signals, _) = shared
+            .raised
+            .wait_timeout_while(shared.locked(), crate::door_skipped::PATIENCE, |signals| {
+                !signals.closed
+            })
+            .expect("the download's signals are not held across a panic");
+        assert!(
+            signals.closed,
+            "the closing callback came after the bound and found its context alive"
+        );
+        drop(signals);
+        drop((connection, session));
+    }
+
+    /// A request on the wire to a loopback server that has read it and holds
+    /// it, so a close cancels a call outstanding and `HANDLE_CLOSING` arrives
+    /// on a WinHTTP thread after the close. The server is handed back so that
+    /// it outlives the request.
+    fn a_request_held_in_flight() -> (
+        super::Handle,
+        super::Handle,
+        super::Request,
+        crate::https_download::loopback::Served,
+    ) {
+        let (asked, heard) = std::sync::mpsc::channel();
+        let server = serve(move |_| {
+            let _ = asked.send(());
+            vec![Step::Pause(Duration::from_secs(40))]
+        });
+        let (session, connection, request) = a_request_to(server.port());
+        // SAFETY: a live, armed request; its context is the one `arm` gave it.
+        unsafe { super::WinHttpSendRequest(request.handle, None, None, 0, 0, request.context) }
+            .expect("the request goes out");
+        crate::door_skipped::received(&heard, "the server holding the request");
+        (session, connection, request, server)
     }
 
     /// RED (T-DROP-DOORS, D-82) — **a request dropped without its door waits for
