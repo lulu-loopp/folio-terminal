@@ -832,9 +832,10 @@ pub(crate) mod loopback {
                         break;
                     }
                 }
-                // The connection closes when the worker lets go of it, which
-                // ends a body that carried no length and cuts one that carried
-                // a longer one.
+                // The server ends its side of the connection when the script
+                // is done (and closes it once the client has), which ends a
+                // body that carried no length and cuts one that carried a
+                // longer one.
                 Some(path)
             },
         )

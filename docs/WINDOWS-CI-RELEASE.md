@@ -215,12 +215,29 @@ Minutes.
 | `gpu` | Windows | 5.0 / 5.57 | 19.4 / 20.95 (38708586878) | 29 | 40 |
 | `conpty` | Windows | 6.4 / 7.08 | 10.7 / 11.80 (38714746975) | 17 | 30 |
 | `smoke` | Windows | 4.2 / 5.47 | 10.1 / 11.05 (39014776542) | 16 | 60 |
-| `core-linux` | Linux | 7.8 / 8.53 | 10.4 / 10.82 (39010930188) | 15 | 45 |
+| `core-linux` (2026-11-01, below) | Linux | 13.5 / 14.97 | 16.6 / 17.73 (41315751889) | 25 | 15 |
 | `gates-can-fail` | Windows | 6.4 / 7.4 | 8.1 / 10.15 (38693069271) | 14 | 20 |
 | `licensing` | Windows | 2.9 / 3.35 | 6.3 / 7.92 (39014776542) | 11 | 16 |
 | `wasm-lib-check` | Windows | 1.3 / 2.5 | 3.8 / 4.77 (38720519586) | 7 | 30 |
 | `release-script-tests` | Windows | no cache: 1.8 / 2.53 (38687157155) | - | 10 (floor; the rule gives 4) | 10 |
 | `cask-audit` | macOS | no cache: 1.1 / 1.80 (38665182697) | - | 10 (floor; the rule gives 3) | 10 |
+
+**`core-linux` was re-derived on 2026-11-01 (T-CI-CORE-LINUX-BUDGET-REDERIVE,
+plan row 165), not with the rest of the table.** Its 15 stopped holding with a
+restored cache. The 33 attempts 41220186308 to 41304814816 all restored theirs
+in full, none was cold, and four were cancelled at 15 (41303744747 twice,
+41299423212, 41294422269). There are two speeds of runner: head 42db8d1f6 took
+8.60 in 41300386741 and 13.85 in 41304273777. `bt-source` is about 81 % of the
+test step (408-720 s over 322 tests, against 297 s over 165 on 2026-10-17),
+because each of its test binaries builds the real-tree index again (plan row
+166). The cold runs were made on purpose. The job's only cache entry (id
+9741164280, 0.58 GB, `main`) was deleted. Three throwaway branches, each its
+own sha so that `ci-${{ github.sha }}` concurrency did not queue them behind one
+another, were dispatched together: 41315751889 41315753978 41315756178. The
+next `main` push, 41316493392, was cold as well. Cold: 13.87-17.73 min, p50
+16.6, max 17.73 (41315751889). 17.73 x 1.36 = 24.11, so 25. Restored, over the
+34 attempts 41220186308 to 41315580382: green p50 13.5, max 14.97
+(41220409108). Re-derive when the cold max passes 25 / 1.36 = 18.4.
 
 The 1.36 was, when `logic`'s budget was first derived, the slowest cold `test`
 step over the fastest (47.8 / 35.1 min; cause unknown: the fast ones were

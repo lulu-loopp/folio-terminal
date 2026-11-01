@@ -146,7 +146,11 @@ jobs:
     # 9950X with the binary built, plus that test binary's own build (its
     # dependencies are the `measure` step's); taken as 1.2 min cold until runs
     # measure it. 10.15 + 1.2 = 11.35 x 1.36 = 15.44, so 16.
-    timeout-minutes: 16
+    # T-TEST-SUITE-WATCHDOG (2026-10-31) adds the suite watchdog's canary, no
+    # cargo, 46 s on the 9950X, of which about 40 pwsh cold starts (1-3 s each
+    # on a hosted runner) are the uncertain part; taken as 1.5 min until runs
+    # measure it. 11.35 + 1.5 = 12.85 x 1.36 = 17.48, so 18.
+    timeout-minutes: 18
     steps:
       # Whole history, for one step: `check-migration-debt.ps1` compares the
       # debt list with `git merge-base HEAD origin/main`, and at the default
@@ -656,6 +660,16 @@ jobs:
         shell: pwsh
         run: ./scripts/ci/check-timing-bound-tests.ps1
 
+      # The suite watchdog (T-TEST-SUITE-WATCHDOG) against a stand-in in cargo's place: a named test
+      # that does not end is red, timed from its start, with its name and its process tree gone; slow
+      # ones that end leave the tracked set and are green; a binary that ends mid-test leaves no
+      # phantom hang for the next one; silence is red with no name; words and exit codes pass
+      # through; and the shapes in which libtest prints no names are refused. No cargo; about 46 s
+      # on the 9950X.
+      - name: the suite watchdog can actually fail
+        shell: pwsh
+        run: ./scripts/ci/check-test-watchdog.ps1
+
       # The native-labels guard's lists (T-NATIVE-LABELS-GUARD-REACH) are the same merge-base
       # rule: its ALLOWED, MACROS, BOUNDARY and UNREAD rows only shrink, its FILES, TYPES and
       # FUNCTIONS scope only grows and its PROGRAMMER_MACROS exemptions only shrink, a move honest
@@ -1155,9 +1169,16 @@ jobs:
       # leaves 40 for the other steps, whose cold max is 29.6 (run 39014647034,
       # x 1.36 = 40.2): a run at both edges at once is stopped by the job's
       # clock, not by this step's.
+      #
+      # Run through the suite watchdog (T-TEST-SUITE-WATCHDOG, docs/ARCHITECTURE-GUARDS.md
+      # "Suite watchdog"): a test still running 300 s after it started, or 300 s of silence once
+      # the tests run, ends the step red at once with the test's name (exit 124), instead of
+      # this step's 65 minutes ending it with none. Compiling is not timed by it. Called through
+      # `-File`, as everywhere else: a script called in-process drops a bare `--`.
       - name: test
         timeout-minutes: 65
-        run: cargo test --workspace --locked --exclude bt-pty --exclude bt-render --exclude bt-render-probe
+        shell: pwsh
+        run: pwsh -NoProfile -File scripts/ci/cargo-test-watched.ps1 --workspace --locked --exclude bt-pty --exclude bt-render --exclude bt-render-probe
 
       # The adapter and cell_capture modules are the vendor compatibility seam. Their job is to
       # report terminal facts; importing document, detection, or viewport policy there recreates
@@ -1789,7 +1810,9 @@ jobs:
             echo "the macOS application skip '$skip' must match exactly one listed test; it matches $matches"
             exit 1
           }
-          cargo test --locked -p bt-app -- --skip "$skip"
+          # The run itself goes through the suite watchdog, as `logic`'s test step does: a hung test
+          # is red within 300 s of its start, with its name (docs/ARCHITECTURE-GUARDS.md, "Suite watchdog").
+          pwsh -NoProfile -File scripts/ci/cargo-test-watched.ps1 --locked -p bt-app -- --skip "$skip"
 
       # The eight suites the spike's own table records as green here, plus the
       # two M1-1's branch made green — `bt-transcript` and `bt-viewport`, whose
@@ -1922,17 +1945,24 @@ jobs:
   core-linux:
     if: github.event_name != 'workflow_dispatch' || github.ref != 'refs/heads/main'
     runs-on: ubuntu-latest
-    # Budget by `logic`'s rule (T-CI-JOB-BUDGETS-REDERIVE, measured
-    # 2026-10-17): the largest total with no cache restored (the toolchain
-    # step's log says `No cache found.`), x 1.36, rounded up. Cold, over
-    # runs 38699851507 38705000975 38708586878 38714746975 38715696851
-    # 39010930188 39014647034 39014757099 39014764059 39014771087
-    # 39014776542 39014784008 39014791387 39016679706 39017771237: 6.7-10.82
-    # min, p50 10.4, max 10.82 (run 39010930188). 10.82 x 1.36 = 14.72, so
-    # 15. With a cache restored (in full or by its prefix), over the 8 of
-    # the ten green runs on `main` (39032766393 back to 38691455267) that
-    # restored one: p50 7.8, max 8.5.
-    timeout-minutes: 15
+    # Budget by `logic`'s rule (re-derived by T-CI-CORE-LINUX-BUDGET-REDERIVE,
+    # plan row 165, measured 2026-11-01; was 15 from T-CI-JOB-BUDGETS-REDERIVE's
+    # cold max 10.82 of 2026-10-17): the largest total with no cache restored
+    # (the toolchain step's log says `No cache found.`), x 1.36, rounded up.
+    # Cold, over runs 41315751889 41315753978 41315756178 (three dispatches of
+    # throwaway branches, each its own sha, started together after the job's
+    # only cache entry was deleted) and 41316493392 (the next `main` push):
+    # 13.87-17.73 min, p50 16.59, max 17.73 (run 41315751889). 17.73 x 1.36 =
+    # 24.11, so 25. With a cache restored in full, over the 34 attempts
+    # 41220186308 to 41315580382: the green ones p50 13.5, max 14.97 (run
+    # 41220409108), and four were cancelled at the old 15 (41303744747 twice,
+    # 41299423212, 41294422269). Two speeds of runner: the same head took 8.60
+    # (41300386741) and 13.85 (41304273777). The test step is most of it, and
+    # `bt-source` is about 81 % of that step (408-720 s over 322 tests,
+    # against 297 s over 165 on 2026-10-17): each of its test binaries builds
+    # the real-tree index again (plan row 166). Re-derive with the same rule
+    # when the cold max passes 25 / 1.36 = 18.4 min.
+    timeout-minutes: 25
     # **The static C runtime is a Windows shipping rule and this job ships
     # nothing.** `.cargo/config.toml` puts `-C target-feature=+crt-static` on
     # every build so that `folio.exe` carries its own CRT rather than asking a
