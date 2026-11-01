@@ -146,7 +146,11 @@ jobs:
     # 9950X with the binary built, plus that test binary's own build (its
     # dependencies are the `measure` step's); taken as 1.2 min cold until runs
     # measure it. 10.15 + 1.2 = 11.35 x 1.36 = 15.44, so 16.
-    timeout-minutes: 16
+    # T-TEST-SUITE-WATCHDOG (2026-10-31) adds the suite watchdog's canary, no
+    # cargo, 46 s on the 9950X, of which about 40 pwsh cold starts (1-3 s each
+    # on a hosted runner) are the uncertain part; taken as 1.5 min until runs
+    # measure it. 11.35 + 1.5 = 12.85 x 1.36 = 17.48, so 18.
+    timeout-minutes: 18
     steps:
       # Whole history, for one step: `check-migration-debt.ps1` compares the
       # debt list with `git merge-base HEAD origin/main`, and at the default
@@ -656,6 +660,16 @@ jobs:
         shell: pwsh
         run: ./scripts/ci/check-timing-bound-tests.ps1
 
+      # The suite watchdog (T-TEST-SUITE-WATCHDOG) against a stand-in in cargo's place: a named test
+      # that does not end is red, timed from its start, with its name and its process tree gone; slow
+      # ones that end leave the tracked set and are green; a binary that ends mid-test leaves no
+      # phantom hang for the next one; silence is red with no name; words and exit codes pass
+      # through; and the shapes in which libtest prints no names are refused. No cargo; about 46 s
+      # on the 9950X.
+      - name: the suite watchdog can actually fail
+        shell: pwsh
+        run: ./scripts/ci/check-test-watchdog.ps1
+
       # The native-labels guard's lists (T-NATIVE-LABELS-GUARD-REACH) are the same merge-base
       # rule: its ALLOWED, MACROS, BOUNDARY and UNREAD rows only shrink, its FILES, TYPES and
       # FUNCTIONS scope only grows and its PROGRAMMER_MACROS exemptions only shrink, a move honest
@@ -1155,9 +1169,16 @@ jobs:
       # leaves 40 for the other steps, whose cold max is 29.6 (run 39014647034,
       # x 1.36 = 40.2): a run at both edges at once is stopped by the job's
       # clock, not by this step's.
+      #
+      # Run through the suite watchdog (T-TEST-SUITE-WATCHDOG, docs/ARCHITECTURE-GUARDS.md
+      # "Suite watchdog"): a test still running 300 s after it started, or 300 s of silence once
+      # the tests run, ends the step red at once with the test's name (exit 124), instead of
+      # this step's 65 minutes ending it with none. Compiling is not timed by it. Called through
+      # `-File`, as everywhere else: a script called in-process drops a bare `--`.
       - name: test
         timeout-minutes: 65
-        run: cargo test --workspace --locked --exclude bt-pty --exclude bt-render --exclude bt-render-probe
+        shell: pwsh
+        run: pwsh -NoProfile -File scripts/ci/cargo-test-watched.ps1 --workspace --locked --exclude bt-pty --exclude bt-render --exclude bt-render-probe
 
       # The adapter and cell_capture modules are the vendor compatibility seam. Their job is to
       # report terminal facts; importing document, detection, or viewport policy there recreates
@@ -1789,7 +1810,9 @@ jobs:
             echo "the macOS application skip '$skip' must match exactly one listed test; it matches $matches"
             exit 1
           }
-          cargo test --locked -p bt-app -- --skip "$skip"
+          # The run itself goes through the suite watchdog, as `logic`'s test step does: a hung test
+          # is red within 300 s of its start, with its name (docs/ARCHITECTURE-GUARDS.md, "Suite watchdog").
+          pwsh -NoProfile -File scripts/ci/cargo-test-watched.ps1 --locked -p bt-app -- --skip "$skip"
 
       # The eight suites the spike's own table records as green here, plus the
       # two M1-1's branch made green — `bt-transcript` and `bt-viewport`, whose
@@ -1932,7 +1955,25 @@ jobs:
     # 15. With a cache restored (in full or by its prefix), over the 8 of
     # the ten green runs on `main` (39032766393 back to 38691455267) that
     # restored one: p50 7.8, max 8.5.
-    timeout-minutes: 15
+    #
+    # **Provisional: 30, until a cold run measures the number**
+    # (T-CI-CORE-LINUX-BUDGET-REDERIVE, plan row 165, measured 2026-11-01).
+    # The 15 above stopped holding with a *restored* cache. Over the 33
+    # attempts 41220186308 to 41304814816 (2026-10-31 16:32Z to 11-01
+    # 12:05Z), every one restored its cache in full and none was cold, the
+    # test step took 7.9-11.1 min on 13 of them and 13.3-14.4 min on 19
+    # (runner speed, not the commit: head 42db8d1f6 took 8.60 in
+    # 41300386741 and 13.85 in 41304273777), and four were cancelled at 15
+    # (41303744747 twice, 41299423212, 41294422269): green totals p50 14.1,
+    # max 14.97 (41220409108), the cancelled ones at least 15.2. `bt-source`
+    # is about 81 % of the step (408-704 s, 322 tests, against 297 s and
+    # 165 tests on 2026-10-17), from more test binaries that each build the
+    # real-tree index anew (plan row 166). `logic`'s rule cannot be applied
+    # yet: it takes the cold max, the window holds no cold run, and a cold
+    # run could not finish under 15 to be measured. 30 is the room to
+    # measure one in, not a derived budget; the next commit replaces it with
+    # the cold max x 1.36 and lists the runs.
+    timeout-minutes: 30
     # **The static C runtime is a Windows shipping rule and this job ships
     # nothing.** `.cargo/config.toml` puts `-C target-feature=+crt-static` on
     # every build so that `folio.exe` carries its own CRT rather than asking a
