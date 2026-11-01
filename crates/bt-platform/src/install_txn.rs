@@ -2538,36 +2538,36 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
-    /// RED (U-11) — **the bounded wait asks until its deadline and not past
-    /// it, and is answered at once when the lock is free.**
+    /// RED (U-11) — **the bounded wait on the wall clock gives up while the
+    /// lock stays held, and a free lock is taken at the first ask, with no
+    /// wait to spend.**
     ///
     /// The applier waits for the running copies to quit for a bounded time
     /// (F-6: 60 s, then `Prepared`, deferred). A wait that gave up at the first
     /// refusal would defer every update a quitting copy was slow to leave;
-    /// one that ignored its deadline would hang the job.
+    /// one that ignored its deadline would hang the job. How far the wait asks
+    /// — to its deadline and not past it — is counted on a clock of the
+    /// caller's in `a_lock_wait_on_a_clock_of_the_callers_reads_and_pauses_on_it`
+    /// ([`hold_by`]; [`hold_within`] is it on [`WallLockClock`]), never measured
+    /// here (T-WINDOWS-HANDOVER-ORDER-A-HELD-LOCK-WAIT).
     ///
-    /// MUTATION: return `Ok(None)` after the first refusal in `hold_until`
-    /// whatever the deadline.
+    /// MUTATION: in `hold_until`, read the deadline before the first ask (a
+    /// free lock asked with no wait left is then refused).
     #[cfg(any(windows, target_os = "macos"))]
     #[test]
     fn a_durable_lock_wait_gives_up_at_its_deadline_and_not_before() {
         let home = scratch("admission-deadline");
         let lock = home.join("lock");
         let holder = try_hold(&lock, Hold::Exclusive).unwrap().unwrap();
-        let wait = Duration::from_millis(300);
-        let began = Instant::now();
-        assert!(hold_within(&lock, Hold::Exclusive, wait).unwrap().is_none());
-        let waited = began.elapsed();
-        assert!(waited >= wait, "gave up after {waited:?}, before {wait:?}");
-        assert!(waited < Duration::from_secs(5), "waited {waited:?}");
-        drop(holder);
-        let began = Instant::now();
-        let taken = hold_within(&lock, Hold::Exclusive, Duration::from_secs(30)).unwrap();
-        assert!(taken.is_some());
         assert!(
-            began.elapsed() < Duration::from_secs(5),
-            "a free lock is taken at once"
+            hold_within(&lock, Hold::Exclusive, Duration::from_millis(300))
+                .unwrap()
+                .is_none(),
+            "a lock held to the end is not had"
         );
+        drop(holder);
+        let taken = hold_within(&lock, Hold::Exclusive, Duration::ZERO).unwrap();
+        assert!(taken.is_some(), "a free lock is taken at the first ask");
         drop(taken);
         let _ = std::fs::remove_dir_all(&home);
     }

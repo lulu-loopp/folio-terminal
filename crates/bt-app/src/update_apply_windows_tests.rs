@@ -809,27 +809,23 @@ fn applied_while_held<H>(install: &Install, limits: Limits, world: Fake, held: H
     )
 }
 
-/// **P is at its wait for the transaction lock**: its election is over — the
-/// window's mark names `me` and the election lock is free — and the road's next
-/// step is the lock (`apply_under_the_lock`). Awaited as state within the
-/// suite's patience; an applier that ends first is red.
-fn until_past_the_election<T>(install: &Install, me: Running, applier: &JoinHandle<T>) {
-    let elected = crate::lane::within_patience(|| {
-        applier.is_finished()
-            || (crate::update_apply::window_owner(&install.home, install.txn) == Some(me)
-                && install_txn::try_hold(
-                    &crate::update_apply::owner_lock_path(&install.home, install.txn),
-                    Hold::Exclusive,
-                )
-                .ok()
-                .flatten()
-                .is_some())
-    });
-    assert!(elected, "P never took the window");
-    assert!(
-        !applier.is_finished(),
-        "the applier ended before its wait for the lock"
-    );
+/// **P is past its election**: the window's mark names `me` and the election
+/// lock is free — the road's next wait is the transaction lock's
+/// (`apply_under_the_lock`). The state a test's road clock stops P at, in a
+/// pause of that wait (T-WINDOWS-HANDOVER-ORDER-A-HELD-LOCK-WAIT): P is then
+/// past its election while the lock is still held, as a fact of the test.
+fn past_the_election(install: &Install, me: Running) -> impl FnMut() -> bool + Send + 'static {
+    let (home, txn) = (install.home.clone(), install.txn);
+    move || {
+        crate::update_apply::window_owner(&home, txn) == Some(me)
+            && install_txn::try_hold(
+                &crate::update_apply::owner_lock_path(&home, txn),
+                Hold::Exclusive,
+            )
+            .ok()
+            .flatten()
+            .is_some()
+    }
 }
 
 /// The recovery door, as an ordinary start hands itself to it, run to its
@@ -992,12 +988,13 @@ fn block_rolledout(install: &Install) {
 /// `claim_data_directory` until it succeeds, then immediately releases it …
 /// If 60 s pass, P journals `Failed` … and exits without touching anything."
 ///
-/// O lets go of the lock once P is at its wait for it (its election over),
-/// and of the claim in the pause of P's first refused ask of it (the road's
-/// `wait_clock`, watched): what the disk says then is what P wrote while the
-/// claim was held, and a move before that pause is red where it happens. The
-/// holds kept to the end are awaited while still held, within the suite's
-/// patience.
+/// O lets go of the lock in a pause of P's wait for it, P's election over,
+/// and of the claim in the pause of P's first refused ask of it — both pauses
+/// of the road's `wait_clock`, a counted clock, picked by state
+/// (T-WINDOWS-HANDOVER-ORDER-A-HELD-LOCK-WAIT): what the disk says then is
+/// what P wrote while each was held, and a move before the claim's pause is
+/// red where it happens. The holds kept to the end are awaited while still
+/// held, within the suite's patience.
 ///
 /// MUTATION: in `update_apply::wait_for_the_claim`, answer `Ok(())` for a
 /// claim that is held.
@@ -1025,30 +1022,55 @@ fn p_waits_for_o_and_releases_the_claim() {
     std::fs::remove_file(crate::update_apply::owner_path(&install.home, install.txn)).unwrap();
     let mut road = install.road(limits(20_000, 20_000));
     let me = road.me;
-    let lock = install_txn::try_hold(&install.home.lock(), Hold::Exclusive)
-        .unwrap()
-        .unwrap();
+    let lock = Arc::new(Mutex::new(Some(
+        install_txn::try_hold(&install.home.lock(), Hold::Exclusive)
+            .unwrap()
+            .unwrap(),
+    )));
     let claim = Arc::new(Mutex::new(Some(
         crate::persist::try_claim(&install.data).unwrap(),
     )));
+    // The journal's phase in the pause of P's wait for the lock, its election
+    // over, where O lets go of the lock.
+    let at_the_lock = Arc::new(Mutex::new(None::<PhaseKind>));
     // The journal's phase in the pause of P's first refused ask of the claim.
     let at_the_claim = Arc::new(Mutex::new(None::<PhaseKind>));
     // Whether the window's mark named P then: the pause was the claim's, not
     // an election's ask again.
     let owned_then = Arc::new(Mutex::new(None::<bool>));
     let clock = {
-        let (claim, seen, owned, journal, home, txn) = (
+        let (o_lock, claim, at_lock, seen, owned, journal, home, txn) = (
+            Arc::clone(&lock),
             Arc::clone(&claim),
+            Arc::clone(&at_the_lock),
             Arc::clone(&at_the_claim),
             Arc::clone(&owned_then),
             install.home.journal(),
             install.home.clone(),
             install.txn,
         );
-        Arc::new(WatchedWallClock::new(move |pause| {
-            if pause == 1 {
-                let on_disk = Journal::parse(&std::fs::read(&journal).unwrap()).unwrap();
-                *seen.lock().unwrap() = Some(on_disk.body.phase.kind());
+        let mut elected = past_the_election(&install, me);
+        let phase = move || {
+            Journal::parse(&std::fs::read(&journal).unwrap())
+                .unwrap()
+                .body
+                .phase
+                .kind()
+        };
+        Arc::new(CountedClock::new(move |_| {
+            let mut o_lock = o_lock.lock().unwrap();
+            if o_lock.is_some() {
+                if elected() {
+                    *at_lock.lock().unwrap() = Some(phase());
+                    o_lock.take();
+                }
+            } else if claim.lock().unwrap().is_some()
+                && install_txn::try_hold(&home.lock(), Hold::Exclusive)
+                    .unwrap()
+                    .is_none()
+            {
+                // O's lock let go, P holds it: P's ask of the claim.
+                *seen.lock().unwrap() = Some(phase());
                 *owned.lock().unwrap() =
                     Some(crate::update_apply::window_owner(&home, txn) == Some(me));
                 claim.lock().unwrap().take();
@@ -1065,14 +1087,12 @@ fn p_waits_for_o_and_releases_the_claim() {
     }));
     road.wait_clock = clock;
     let applier = start(road, install.txn, install.applier, world);
-    until_past_the_election(&install, me, &applier);
-    assert_eq!(
-        install.on_disk().body.phase.kind(),
-        PhaseKind::Handoff,
-        "nothing is written while O holds the lock"
-    );
-    drop(lock);
     let (ended, world) = ended_while_held((), applier);
+    assert_eq!(
+        *at_the_lock.lock().unwrap(),
+        Some(PhaseKind::Handoff),
+        "P waited for the lock past its election, and nothing is written while O holds it"
+    );
     assert_eq!(ended, Ended::Committed, "{:?}", world.said);
     assert_eq!(
         *owned_then.lock().unwrap(),
@@ -1121,7 +1141,10 @@ fn p_waits_for_o_and_releases_the_claim() {
 /// (b).2 "Durability": "Every destructive step is preceded by a durable
 /// journal state that names it". A running copy holds the admission shared:
 /// the applier stops at `Armed`, the entrance written, the install untouched,
-/// until the copy lets go.
+/// until the copy lets go. The test reads the disk in a pause of the
+/// applier's wait for the admission (the road's `wait_clock`, counted,
+/// stopped there by state; T-WINDOWS-HANDOVER-ORDER-A-HELD-LOCK-WAIT), and
+/// lets the copy go before the road goes on.
 ///
 /// MUTATION: in `at_armed`, record `Admitted` after the first move.
 #[test]
@@ -1144,14 +1167,24 @@ fn armed_is_durable_before_moving() {
             *seen = Some(on_disk.body.phase.kind());
         }
     }));
-    let applier = start(
-        install.road(limits(20_000, 20_000)),
-        install.txn,
-        install.applier,
-        world,
-    );
-    until_journal(&install, PhaseKind::Armed, &applier);
-    std::thread::sleep(Duration::from_millis(300));
+    let at_armed = {
+        let journal = install.home.journal();
+        move || {
+            Journal::parse(&std::fs::read(&journal).unwrap())
+                .unwrap()
+                .body
+                .phase
+                .kind()
+                == PhaseKind::Armed
+        }
+    };
+    let (clock, stopped) = CountedClock::stopping_where(at_armed);
+    let road = Road {
+        wait_clock: Arc::new(clock),
+        ..install.road(limits(20_000, 20_000))
+    };
+    let applier = start(road, install.txn, install.applier, world);
+    stopped.until_stopped("the applier at its wait for the admission, at `Armed`");
     assert_eq!(install.on_disk().body.phase, Phase::Armed);
     assert!(
         install.registry.holds(install.txn),
@@ -1159,6 +1192,7 @@ fn armed_is_durable_before_moving() {
     );
     nothing_moved(&install);
     drop(running);
+    stopped.go();
     let (ended, world) = applier.join().unwrap();
     assert_eq!(ended, Ended::Committed, "{:?}", world.said);
     assert_eq!(*first.lock().unwrap(), Some(PhaseKind::Moving));
@@ -2936,14 +2970,21 @@ fn a_recovery_leaves_handoff_to_an_election_still_in_flight() {
     .unwrap()
     .expect("the election lock is free");
     // Recovery's wait for the election ends at `ELECTION_WITHIN`, with the
-    // election still held.
+    // election still held: spent on the road's counted clock, never on the
+    // machine's (T-WINDOWS-HANDOVER-ORDER-A-HELD-LOCK-WAIT).
+    let clock = Arc::new(CountedClock::new(|_| {}));
+    let road = Road {
+        wait_clock: clock.clone(),
+        ..install.road(limits(20_000, 20_000))
+    };
     let (_code, world) = ended_while_held(
         in_flight,
-        start_recovered(
-            &install,
-            limits(20_000, 20_000),
-            install.world(Trial::Silent),
-        ),
+        start_recovered_on(road, install.world(Trial::Silent)),
+    );
+    assert_eq!(
+        Duration::from_millis(clock.moved_ms()),
+        crate::update_apply::ELECTION_WITHIN,
+        "recovery waited out the election in flight on its road's clock, once"
     );
     assert!(
         said_at(&world, "an applier's window election is still in flight").is_some(),
@@ -4321,6 +4362,11 @@ fn the_window_is_handed_over_by_one_mark_and_opened_exactly_once() {
     let mut road = install.road(limits(1_500, 20_000));
     road.me = crate::update_apply::this_process();
     let me = road.me;
+    // P is stopped in a pause of its wait for the lock this test holds, its
+    // election over; the rest of that wait is spent on the count.
+    let (clock, stopped) = CountedClock::stopping_where(past_the_election(&install, me));
+    let clock = Arc::new(clock);
+    road.wait_clock = clock.clone();
     let applier = start(
         road,
         install.txn,
@@ -4328,7 +4374,8 @@ fn the_window_is_handed_over_by_one_mark_and_opened_exactly_once() {
         install.world(Trial::Answers),
     );
     // P's election is over: the mark is written and its lock let go.
-    until_past_the_election(&install, me, &applier);
+    stopped.until_stopped("P at its wait for the lock, its election over");
+    assert!(!applier.is_finished(), "P waits for the lock");
     assert_eq!(
         crate::update_apply::window_owner(&install.home, install.txn),
         Some(crate::update_apply::this_process()),
@@ -4347,8 +4394,14 @@ fn the_window_is_handed_over_by_one_mark_and_opened_exactly_once() {
         "steps 2–3: O finds P's mark"
     );
     assert!(starts.calls.is_empty(), "O starts nothing");
+    stopped.go();
     let (ended, world) = ended_while_held(lock, applier);
     assert_eq!(ended, Ended::OldHeldTheLock, "{:?}", world.said);
+    assert_eq!(
+        clock.moved_ms(),
+        1_500,
+        "P's wait for the held lock is its road's 1.5 s, spent on the count"
+    );
     assert_eq!(
         world.opened,
         vec![(install.installed.clone(), failed_then(&install, &[]))],
@@ -4842,12 +4895,12 @@ fn applied_on(install: &Install, road: Road, world: Fake) -> (Ended, Fake) {
 
 /// RED (T-UPDATE-LOCK-RACE round 2) — **the transaction-lock leg spends only
 /// what remains of the applier's one wait for O**. At an already-spent
-/// deadline the injected real-lock entrance is asked with exactly zero, even
-/// though `road.limits.old_within` is two seconds. No clock or sleep decides
-/// the assertion.
+/// deadline the injected real-lock entrance is asked by exactly that deadline,
+/// even though `road.limits.old_within` is two seconds. No clock or sleep
+/// decides the assertion.
 ///
-/// MUTATION: in `apply_under_the_lock_with`, ask for a fresh
-/// `road.limits.old_within` instead of `window - now`.
+/// MUTATION: in `apply_under_the_lock_with`, ask by a fresh
+/// `road.limits.old_within` instead of `window`.
 #[test]
 fn the_applier_waits_for_o_within_one_budget() {
     let Some(install) = Install::new("one-budget") else {
@@ -4867,14 +4920,14 @@ fn the_applier_waits_for_o_within_one_budget() {
             nonce,
             expired,
             &mut world,
-            |_path, within| {
-                asked = Some(within);
+            |_path, until| {
+                asked = Some(until);
                 Ok(None)
             },
         );
         (answer, asked)
     });
-    assert_eq!(asked, Some(Duration::ZERO));
+    assert_eq!(asked, Some(expired));
     assert_eq!(ended, Ended::OldHeldTheLock);
     assert_eq!(successor, None);
 }
