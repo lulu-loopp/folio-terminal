@@ -394,8 +394,11 @@ fn a_qualified_call_is_the_impl_of_the_trait() {
 /// `self.surface.remove_entry` in `impl<S: Surface> Rewrite<S>`, whose durable-write internals a
 /// clause once said the walk followed to no implementation. A `#[cfg(test)]` impl is not admitted.
 ///
-/// MUTATION: in `Tables::dispatch_param`, answer `Unresolved::Path` whatever the bounds — both
-/// sites are `path` edges and the walk meets no `std::fs::remove_file`.
+/// MUTATIONS: in `Tables::dispatch_param`, answer `Unresolved::Path` whatever the bounds — the
+/// field site (`give_up`, its receiver `Param(S)`) is a `path S::remove` edge and the walk meets
+/// no `std::fs::remove_file`; in `Tables::method_at`'s `Ty::Traits` arm, answer
+/// `Unresolved::Path` — the argument site (`handed`, its `impl Surface` typed `Ty::Traits`, never
+/// a parameter) leaves `Dispatch`.
 #[test]
 fn a_generic_field_and_an_impl_argument_dispatch_to_the_admitted_impls() {
     let index = fixture("generic_field");
