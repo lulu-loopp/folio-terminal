@@ -13,7 +13,11 @@
 # script runs cargo as its child, passes every line through as text (each to the stream it came from), and
 # reads those two lines. Where one binary's report ends is read from libtest's own `running N tests` line,
 # on the same stdout pipe as those two, never from cargo's `Running` line on stderr, whose order against
-# stdout is not kept (plan row 171).
+# stdout is not kept (plan row 171). A binary that prints no `running N tests` line (`harness = false`, a
+# crash before libtest starts, a doc-test binary still compiling) leaves the previous binary's unfinished
+# names tracked until the next binary that prints one: a run that passes the limit meanwhile is red naming
+# the dead test, and the silence check is off while any name is tracked. A test's child process that wrote
+# `running N tests` to the stdout it inherited would clear the tracked names (no test does today).
 #
 # **The limit is one number, `$limit` below: 300 s per test** (30 x `lane::PATIENCE`).
 #   * A test libtest has named and that has not ended 300 s after it started ends the run.

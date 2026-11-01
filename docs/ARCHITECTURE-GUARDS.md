@@ -1201,14 +1201,19 @@ reads libtest's own report: stable libtest names every test still running 60 s a
 for 300 s once its first test binary started, ends the whole process tree the script started, by its
 pid, with exit 124 and the names; the binaries a workspace run had not reached yet do not run. A
 name still tracked when the next binary's libtest report starts (its `running N tests` line, on the
-same stdout pipe as the test lines; cargo's `Running` comes on stderr, whose order against stdout is not
-kept, and only starts the silence clock: plan row 171, 2026-11-01) belonged to a binary that ended without its
-result line (a crash, an abort); it is said and dropped, not taken for a hang. 300 s (30 x `lane::PATIENCE`) is the one limit, a default in that
-script and nowhere else. Measured 2026-10-31 on the watched runs: no bt-app test reaches 60 s on any
-CI runner, and the slowest watched test is about 61 s (bt-source on `logic`); unwatched, `core-linux`'s
-bt-source tests take about 110 s. The limit is re-derived, not bumped, if a watched test passes 150 s.
-Compiling is not timed: the clock starts at cargo's first `Running`
-line.
+same stdout pipe as the test lines; cargo's `Running` comes on stderr, whose order against stdout is
+not kept, and only starts the silence clock: plan row 171, 2026-11-01) belonged to a binary that
+ended without its result line (a crash, an abort); it is said and dropped, not taken for a hang. A
+binary that prints no `running N tests` line (`harness = false`, a crash before libtest starts, a
+doc-test binary still compiling) leaves the previous binary's unfinished names tracked until the
+next binary that prints one: a run that passes the limit meanwhile is red naming the dead test, and
+the silence check is off while any name is tracked. A test's child process that wrote
+`running N tests` to the stdout it inherited would clear the tracked names (no test does today).
+300 s (30 x `lane::PATIENCE`) is the one limit, a default in that script and nowhere else.
+Measured 2026-10-31 on the watched runs: no bt-app test reaches 60 s on any CI runner, and the
+slowest watched test is about 61 s (bt-source on `logic`); unwatched, `core-linux`'s bt-source tests
+take about 110 s. The limit is re-derived, not bumped, if a watched test passes 150 s. Compiling is
+not timed: the clock starts at cargo's first `Running` line.
 
 Who runs through it: the lanes' bt-app and bt-source gates
 (the lane tools' `ccheck.sh scripts/ci/cargo-test-watched.ps1 -p bt-app --no-fail-fast`),

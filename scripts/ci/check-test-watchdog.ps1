@@ -58,8 +58,8 @@ switch ($case) {
         Out 'test README.md - planted (line 3) has been running for over 60 seconds'
         Out 'test planted::plain ... ok'
         Out 'test README.md - planted (line 3) - compile fail ... ok'
-        foreach ($i in 1..12) { Start-Sleep -Seconds 1; Out "busy line $i" }
-        Out 'test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 73.00s'
+        foreach ($i in 1..15) { Start-Sleep -Seconds 1; Out "busy line $i" }
+        Out 'test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 76.00s'
         exit 0
     }
     'two-binaries' {
@@ -169,7 +169,7 @@ try {
 
     # A plain `... ok` and a spaced doc-test name with a mode each take their test out of the tracked set:
     # the run goes on past both tests' limit and must stay green. Limit 70: the end lines have 10 s from the
-    # 60 s lines to be read on a loaded runner (row 171), and the 12 busy seconds pass that limit.
+    # 60 s lines to be read on a loaded runner (row 171), and the 15 busy seconds pass that limit.
     $run = Watch 'slow-then-busy' 70 @()
     Check 'ended tests leave the tracked set (a plain end, a doc-test name with a mode)' ($run.code -eq 0 -and $run.output -match 'slow tests \(named by libtest at 60 s, ended\): planted::plain, README.md - planted \(line 3\)') $run
 
