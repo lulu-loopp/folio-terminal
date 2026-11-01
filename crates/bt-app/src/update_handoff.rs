@@ -3038,17 +3038,34 @@ mod tests {
                 },
             )
         });
-        entered.recv().unwrap();
-        let second = crate::update_apply::take_the_window_within(
-            None,
-            &staged.home,
-            txn,
-            Running { pid: 1, started: 1 },
-            Duration::ZERO,
-            crate::update_apply::Applier,
-        );
+        crate::lane::receive(&entered, "the first contender inside the election");
+        // The second ask is made on a thread of its own while the first stands inside the
+        // election, and awaited within the lane suite's patience; the first is let go before the
+        // verdict, so an ask that ignored its zero budget and waited for the lock is red, never a
+        // hang.
+        let (answered, second) = std::sync::mpsc::channel();
+        let asking = {
+            let home = staged.home.clone();
+            std::thread::spawn(move || {
+                let _ = answered.send(crate::update_apply::take_the_window_within(
+                    None,
+                    &home,
+                    txn,
+                    Running { pid: 1, started: 1 },
+                    Duration::ZERO,
+                    crate::update_apply::Applier,
+                ));
+            })
+        };
+        let mut came_back = None;
+        let _ = crate::lane::within_patience(|| {
+            came_back = second.try_recv().ok();
+            came_back.is_some()
+        });
         release.send(()).unwrap();
         let first = first.join().unwrap();
+        let second = came_back.expect("the second ask waited for the lock past its zero budget");
+        asking.join().unwrap();
 
         assert!(first.is_mine(), "{first:?}");
         assert!(matches!(second, Window::Refused(_)), "{second:?}");

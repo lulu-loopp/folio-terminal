@@ -1348,6 +1348,84 @@ impl CountedClock {
     }
 }
 
+#[cfg(test)]
+impl CountedClock {
+    /// **A road's stop clock in a test whose road stops a trial**
+    /// (T-TRIAL-STOP-QUIT-GRACE-ON-THE-ROAD-CLOCK): [`stop_trial`]'s two
+    /// windows, `quit_within` and `end_within` looked at every `poll`, spent on
+    /// the count. Each pause of the stop is `poll`, or what is left, so the quit
+    /// grace is exactly [`Self::grace_pauses`] pauses and the next is the end
+    /// window's first:
+    ///
+    /// * **pause 1** lasts until `answered` holds — the trial's answer to the
+    ///   ask to quit: its end, or a trial that keeps the signal saying it got
+    ///   it — within the suite's patience (`lane::within_patience`);
+    /// * **the end window's first pause** lasts until `gone` holds — the ended
+    ///   trial gone, as the test's own waiter reports it — within the patience;
+    /// * every other pause only moves the clock, and a pause past both windows
+    ///   is red: a grace that never ends fails, never hangs.
+    ///
+    /// "Ended within the grace" and "asked to quit, then ended" are then the
+    /// trial's state at a counted pause, never a race between a real second
+    /// and the trial's exit. An answer that never comes costs the patience
+    /// once, and its window is then spent on the count.
+    pub(crate) fn stopping(
+        (quit_within, end_within, poll): (Duration, Duration, Duration),
+        answered: impl Fn() -> bool + Send + 'static,
+        gone: impl Fn() -> bool + Send + 'static,
+    ) -> Self {
+        let grace = Self::grace_pauses(quit_within, poll);
+        let past_both = grace + Self::grace_pauses(end_within, poll);
+        Self::new(move |pause| {
+            assert!(
+                pause <= past_both,
+                "the stop paused {pause} times, past its two windows ({past_both} pauses)"
+            );
+            if pause == 1 {
+                crate::lane::within_patience(&answered);
+            }
+            if pause == grace + 1 {
+                crate::lane::within_patience(&gone);
+            }
+        })
+    }
+
+    /// **How many of the stop's pauses a window of `within` looked at every
+    /// `poll` takes on this clock**: each pause is `poll`, the last what is
+    /// left.
+    pub(crate) fn grace_pauses(within: Duration, poll: Duration) -> usize {
+        assert!(!poll.is_zero(), "a stop that looks every 0 ms never pauses");
+        usize::try_from(within.as_millis().div_ceil(poll.as_millis())).unwrap()
+    }
+
+    /// **This stop clock's reading at the moment the stop asks for the end**:
+    /// a world's `say` hook that keeps [`Self::moved_ms`] at the first line
+    /// saying a trial "is asked to end" ([`stop_trial`]'s own words), and where
+    /// it keeps it. The grace alone is read there — the end window's pauses
+    /// come after — so a stop that cut the grace short reads less than its
+    /// `quit_within`, whatever the end window then spends.
+    pub(crate) fn at_the_end_ask(self: &std::sync::Arc<Self>) -> (SaidLineHook, ReadAtEndAsk) {
+        let read: ReadAtEndAsk = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let (clock, kept) = (std::sync::Arc::clone(self), std::sync::Arc::clone(&read));
+        let hook = Box::new(move |line: &str| {
+            let mut kept = kept.lock().unwrap();
+            if kept.is_none() && line.contains("is asked to end") {
+                *kept = Some(clock.moved_ms());
+            }
+        });
+        (hook, read)
+    }
+}
+
+/// A world's hook on every line it says (a test's `Fake::on_say`).
+#[cfg(test)]
+pub(crate) type SaidLineHook = Box<dyn FnMut(&str) + Send>;
+
+/// Where [`CountedClock::at_the_end_ask`] keeps the stop clock's reading:
+/// `None` until the stop asks for the end.
+#[cfg(test)]
+pub(crate) type ReadAtEndAsk = std::sync::Arc<std::sync::Mutex<Option<u64>>>;
+
 /// Whether `folder` holds a file named as a trial's receipt.
 #[cfg(test)]
 fn holds_a_receipt(folder: &Path) -> bool {
@@ -1361,6 +1439,42 @@ fn holds_a_receipt(folder: &Path) -> bool {
         crate::files::DirOutcome::Failed(_) => false,
     }
 }
+
+/// **How many durable steps a committing road has still to take, as the
+/// disk shows them** (T-APPLIER-HOLD-CAP-UNDER-LOAD): from the journal's
+/// `phase` (`None`: no journal is left — a macOS holder removes the
+/// transaction once it is over) and the transaction folder `folder`. The
+/// commit road is `Handoff`, `Armed`, `Moving` (or a reserved
+/// `TrialStarting`), `Trial`, then `Committed` with the trial's receipt still
+/// in `folder` — the trial's watch removes it once it reads `Committed`, the
+/// decision the road's last wait is for — and nothing is left once the
+/// receipt is gone or the journal is past the road (ended otherwise, or
+/// removed). Along one road the count only falls, so a test awaits a commit
+/// with [`crate::lane::while_progressing`] on it: the suite's patience starts
+/// over at each step, and a road that stops moving is red by name.
+#[cfg(test)]
+pub(crate) fn commit_steps_left(phase: Option<PhaseKind>, folder: &Path) -> usize {
+    match phase {
+        Some(PhaseKind::Allocated | PhaseKind::Prepared) => COMMIT_STEPS,
+        Some(PhaseKind::Handoff) => 5,
+        Some(PhaseKind::Armed) => 4,
+        Some(PhaseKind::Moving | PhaseKind::TrialStarting) => 3,
+        Some(PhaseKind::Trial) => 2,
+        Some(PhaseKind::Committed) => usize::from(holds_a_receipt(folder)),
+        Some(
+            PhaseKind::RollbackIntent
+            | PhaseKind::Stuck
+            | PhaseKind::RolledBack
+            | PhaseKind::Abandoned
+            | PhaseKind::Retired,
+        )
+        | None => 0,
+    }
+}
+
+/// The most [`commit_steps_left`] counts: a journal not yet handed over.
+#[cfg(test)]
+pub(crate) const COMMIT_STEPS: usize = 6;
 
 /// **A test's [`WaitClock`] that is the wall clock, watched**
 /// (T-UPDATE-APPLIER-LOCK-WAITS): [`WallClock`]'s readings and pauses, with
@@ -2006,15 +2120,19 @@ pub(crate) fn before_deciding(
 
 /// **Stop the trial** (W9/M9; the coordinator's ruling 2 of U-29 and ruling 1
 /// of U-24): ask it to quit, wait up to `quit_within` for it to leave the list,
-/// then end it and wait up to `end_within`, polling every `poll` through the
-/// wait door. Each ask goes through [`install_flip::ask`], which sends nothing
-/// to a process that is not that very trial running from one of `images`.
+/// then end it and wait up to `end_within`, looking every `poll`. Both windows
+/// are read and paused on `clock`, the road's `stop_clock` ([`WallClock`] in
+/// the product: the monotonic clock and the worker's wait door;
+/// T-TRIAL-STOP-QUIT-GRACE-ON-THE-ROAD-CLOCK). Each ask goes through
+/// [`install_flip::ask`], which sends nothing to a process that is not that
+/// very trial running from one of `images`.
 ///
 /// # Errors
 /// The process list could not be read, the trial could not be asked, or it
 /// did not end.
 pub(crate) fn stop_trial(
     worker: &WorkerCtx,
+    clock: &dyn WaitClock,
     process: TrialProcess,
     images: &[&Path],
     (quit_within, end_within, poll): (Duration, Duration, Duration),
@@ -2037,16 +2155,16 @@ pub(crate) fn stop_trial(
             Ok(false) => return Ok(()),
             Err(error) => return Err(format!("the trial {}: {error}", process.pid)),
         }
-        let until = Instant::now() + within;
+        let until = clock.now() + within;
         loop {
             if !trial_runs(process, images) {
                 return Ok(());
             }
-            let left = until.saturating_duration_since(Instant::now());
+            let left = until.saturating_duration_since(clock.now());
             if left.is_zero() {
                 break;
             }
-            bt_platform::wait::sleep_within(worker, poll.min(left));
+            clock.pause(worker, poll.min(left));
         }
     }
     Err(format!("the trial {} did not end", process.pid))
