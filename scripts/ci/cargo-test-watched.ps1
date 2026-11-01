@@ -11,7 +11,13 @@
 # still running 60 s after it started is announced once — `test <name> has been running for over 60
 # seconds` — and every test that ends is announced again — `test <name> ... ok|FAILED|ignored`. This
 # script runs cargo as its child, passes every line through as text (each to the stream it came from), and
-# reads those two lines.
+# reads those two lines. Where one binary's report ends is read from libtest's own `running N tests` line,
+# on the same stdout pipe as those two, never from cargo's `Running` line on stderr, whose order against
+# stdout is not kept (plan row 171). A binary that prints no `running N tests` line (`harness = false`, a
+# crash before libtest starts, a doc-test binary still compiling) leaves the previous binary's unfinished
+# names tracked until the next binary that prints one: a run that passes the limit meanwhile is red naming
+# the dead test, and the silence check is off while any name is tracked. A test's child process that wrote
+# `running N tests` to the stdout it inherited would clear the tracked names (no test does today).
 #
 # **The limit is one number, `$limit` below: 300 s per test** (30 x `lane::PATIENCE`).
 #   * A test libtest has named and that has not ended 300 s after it started ends the run.
@@ -97,6 +103,7 @@ $child = [Diagnostics.Process]::Start($start)
 $clock = [Diagnostics.Stopwatch]::StartNew()
 $ansi = [regex]'\x1b\[[0-9;]*[A-Za-z]'
 $binaryStarts = [regex]'^\s*(Running|Doc-tests)\s'
+$reportStarts = [regex]'^running \d+ tests?$'
 $announced = [regex]'^test (.+) has been running for over (\d+) seconds$'
 $ended = [regex]'^test (.+?) \.\.\. (ok|FAILED|ignored)\b'
 # name -> started at (seconds on $clock); ordinal, as Rust's test names are case-sensitive
@@ -113,10 +120,15 @@ function Read-Line($line, [bool]$isError) {
     $script:lastLine = $now
     $script:lastText = $line
     $plain = $ansi.Replace($line, '')
-    if ($binaryStarts.IsMatch($plain)) {
-        $script:watching = $true
-        # cargo runs one test binary after another: a name still tracked when the next one starts belonged to
-        # a binary that ended without its result line (a crash, an abort, a kill). It is not a hang of this one.
+    # cargo's `Running` / `Doc-tests` line only starts the silence clock. It comes on cargo's stderr, a pipe of
+    # its own, so it may be read before or after lines the previous binary wrote to stdout: it never says
+    # where one binary's report ends (plan row 171).
+    if ($binaryStarts.IsMatch($plain)) { $script:watching = $true; return }
+    # cargo runs one test binary after another, and every libtest harness (unit, integration, doc-tests) starts
+    # its report with `running N tests` on stdout, the pipe its 60 s and end lines come on, so it is read after
+    # every line of the binary before. A name still tracked then belonged to a binary that ended without its
+    # result line (a crash, an abort, a kill). It is not a hang of this one.
+    if (-not $isError -and $reportStarts.IsMatch($plain)) {
         if ($running.Count -gt 0) {
             [Console]::Out.WriteLine("${me}: ended with their binary, no result line: $(@($running.Keys) -join ', ')")
             $running.Clear()
