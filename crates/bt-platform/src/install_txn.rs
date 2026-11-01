@@ -44,7 +44,8 @@
 //! * **The registry flush** (Windows only, [`flush_current_user_key`]):
 //!   `RegFlushKey` on a key under `HKEY_CURRENT_USER`, for the entrance value a
 //!   later ticket writes (U-22).
-//! * **The two locks** ([`try_hold`], [`hold_within`]): a byte-range lock
+//! * **The two locks** ([`try_hold`], [`hold_within`], and [`hold_by`], whose
+//!   wait is read and paused on the caller's [`LockClock`]): a byte-range lock
 //!   (`LockFileEx`) on Windows, `flock` on macOS, held by a [`Held`] whose drop
 //!   releases it. The admission file `H\admission` is held [`Hold::Shared`] by
 //!   every running copy of the install (many holders; the file is opened for
@@ -823,34 +824,85 @@ pub const LOCK_POLL: Duration = Duration::from_millis(25);
 /// file is `NotFound`) or at [`Stage::Lock`]; on a platform with no arm, one at
 /// [`Stage::OpenLockFile`] whose error is `Unsupported` and names this door.
 pub fn try_hold(path: &Path, hold: Hold) -> Result<Option<Held>, Failure> {
-    hold_until(path, hold, None)
+    hold_until::<WallLockClock>(path, hold, None)
 }
 
 /// **The same, asking again every [`LOCK_POLL`] until `wait` has passed** —
 /// the applier's bounded wait for the running copies to quit. `Ok(None)` means
-/// the lock was still held by somebody else at the deadline.
+/// the lock was still held by somebody else at the deadline. It is
+/// [`hold_by`] on [`WallLockClock`], `wait` past the wall clock's reading.
 ///
 /// # Errors
 /// As [`try_hold`].
 pub fn hold_within(path: &Path, hold: Hold, wait: Duration) -> Result<Option<Held>, Failure> {
-    hold_until(path, hold, Some(Instant::now() + wait))
+    hold_by(path, hold, Instant::now() + wait, &WallLockClock)
 }
 
-fn hold_until(path: &Path, hold: Hold, deadline: Option<Instant>) -> Result<Option<Held>, Failure> {
+/// **The clock a bounded lock wait reads its deadline on, and the pause
+/// between two asks** (T-STALE-MARK-RACE-ON-A-COUNTED-CLOCK): what a caller
+/// hands [`hold_by`], the one door through which a lock wait is read and
+/// paused on a clock of the caller's. [`WallLockClock`] is [`hold_within`]'s;
+/// a caller whose road already reads its waits on a clock of its own (bt-app's
+/// `update_apply::WaitClock`, through a small adapter that carries the
+/// worker its pause needs) passes that clock here instead of writing a lock
+/// loop beside this one.
+pub trait LockClock {
+    /// The monotonic reading the deadline is set and read on.
+    fn now(&self) -> Instant;
+    /// One pause between two asks of a lock somebody else holds.
+    fn pause(&self, pause: Duration);
+}
+
+/// **The wall clock as a [`LockClock`]**: `Instant::now` and
+/// `std::thread::sleep`.
+pub struct WallLockClock;
+
+impl LockClock for WallLockClock {
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+
+    fn pause(&self, pause: Duration) {
+        std::thread::sleep(pause);
+    }
+}
+
+/// **Take the lock on `path`, asking again after each pause of [`LOCK_POLL`]
+/// (the last one cut to what is left) until `clock` reads `until`**: the
+/// bounded wait with its deadline read, and every pause taken, on the
+/// caller's clock. `until` is a reading of that same clock. `Ok(None)` means
+/// the lock was still held by somebody else at that deadline.
+///
+/// # Errors
+/// As [`try_hold`].
+pub fn hold_by<C: LockClock + ?Sized>(
+    path: &Path,
+    hold: Hold,
+    until: Instant,
+    clock: &C,
+) -> Result<Option<Held>, Failure> {
+    hold_until(path, hold, Some((clock, until)))
+}
+
+fn hold_until<C: LockClock + ?Sized>(
+    path: &Path,
+    hold: Hold,
+    deadline: Option<(&C, Instant)>,
+) -> Result<Option<Held>, Failure> {
     let file = arm::open_lock_file(path, hold)
         .map_err(|error| Failure::at(Stage::OpenLockFile, path, error))?;
     loop {
         if arm::try_lock(&file, hold).map_err(|error| Failure::at(Stage::Lock, path, error))? {
             return Ok(Some(Held { hold, file }));
         }
-        let Some(deadline) = deadline else {
+        let Some((clock, deadline)) = deadline else {
             return Ok(None);
         };
-        let now = Instant::now();
+        let now = clock.now();
         if now >= deadline {
             return Ok(None);
         }
-        std::thread::sleep(LOCK_POLL.min(deadline - now));
+        clock.pause(LOCK_POLL.min(deadline - now));
     }
 }
 
@@ -2516,6 +2568,87 @@ mod tests {
             began.elapsed() < Duration::from_secs(5),
             "a free lock is taken at once"
         );
+        drop(taken);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// RED (T-STALE-MARK-RACE-ON-A-COUNTED-CLOCK) — **a lock wait on the
+    /// caller's clock reads its deadline and takes every pause there**: a lock
+    /// held to the end is given up after the pauses the deadline allows on that
+    /// clock, the last one cut to what is left, and a holder let go in a pause
+    /// of the clock's is taken at the next ask. The clock moves only by the
+    /// pauses it is asked for and never sleeps, so the counts are facts of the
+    /// test, not of the machine.
+    ///
+    /// MUTATION: in `hold_until`, read `Instant::now()` for `now`, or sleep
+    /// instead of `clock.pause` (the counted pauses then differ, or none is
+    /// counted).
+    #[cfg(any(windows, target_os = "macos"))]
+    #[test]
+    fn a_lock_wait_on_a_clock_of_the_callers_reads_and_pauses_on_it() {
+        struct Counted {
+            began: Instant,
+            pauses: std::cell::RefCell<Vec<Duration>>,
+            at_pause: std::cell::RefCell<Box<dyn FnMut(usize)>>,
+        }
+        impl LockClock for Counted {
+            fn now(&self) -> Instant {
+                self.began + self.pauses.borrow().iter().sum::<Duration>()
+            }
+            fn pause(&self, pause: Duration) {
+                let number = {
+                    let mut pauses = self.pauses.borrow_mut();
+                    pauses.push(pause);
+                    pauses.len()
+                };
+                (self.at_pause.borrow_mut())(number);
+            }
+        }
+        let counted = |at_pause: Box<dyn FnMut(usize)>| Counted {
+            began: Instant::now(),
+            pauses: std::cell::RefCell::new(Vec::new()),
+            at_pause: std::cell::RefCell::new(at_pause),
+        };
+        let home = scratch("lock-wait-on-a-clock");
+        let lock = home.join("lock");
+
+        let holder = try_hold(&lock, Hold::Exclusive).unwrap().unwrap();
+        let clock = counted(Box::new(|_: usize| {}));
+        let wait = LOCK_POLL * 4 + Duration::from_millis(10);
+        let until = clock.now() + wait;
+        assert!(
+            hold_by(&lock, Hold::Exclusive, until, &clock)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            *clock.pauses.borrow(),
+            vec![
+                LOCK_POLL,
+                LOCK_POLL,
+                LOCK_POLL,
+                LOCK_POLL,
+                Duration::from_millis(10)
+            ],
+            "the wait gave up at its deadline on the caller's clock, the last pause cut"
+        );
+
+        let holder = std::rc::Rc::new(std::cell::RefCell::new(Some(holder)));
+        let let_go = std::rc::Rc::clone(&holder);
+        let clock = counted(Box::new(move |pause: usize| {
+            if pause == 2 {
+                let_go.borrow_mut().take();
+            }
+        }));
+        let until = clock.now() + LOCK_POLL * 200;
+        let taken = hold_by(&lock, Hold::Exclusive, until, &clock).unwrap();
+        assert!(taken.is_some(), "the holder let go in pause 2");
+        assert_eq!(
+            clock.pauses.borrow().len(),
+            2,
+            "taken at the ask after pause 2"
+        );
+        assert!(holder.borrow().is_none());
         drop(taken);
         let _ = std::fs::remove_dir_all(&home);
     }
