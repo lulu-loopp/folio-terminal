@@ -1169,6 +1169,17 @@ election's asks again and both platforms' waits for the claim pause on the road'
 wait for the transaction lock is reached as state (the election over: the mark names the
 applier and the election lock is free).
 
+2026-11-01 (T-LAUNCH-HANDOVER-BUDGET-ON-A-CLOCK): a kernel wait with a fixed bound in milliseconds is a
+product window as much as an `Instant` deadline is, and the timing scan sees neither. The launch wire's
+tests ran the client and the listener as two threads of one process, so the second launch's 2 s budget and
+the server's 250 ms steps were each a race against the other thread. Every wait of the conversation, at both
+ends and on both platforms (the budget's busy retry and the reads and writes it bounds, each server step, the
+Windows listener's first word), is now handed to `launch_conversation::LaunchClock::wait`; `RealClock` makes
+the one wait the product always made, and `hand_over` and `LaunchPipe::start` are its doors. The tests hand
+a `CountedClock` that awaits the other end within the door suites' patience or spends the bound on its
+count, so "answered in time" is an event and "the budget ran out" is a count. The same shape elsewhere in
+bt-platform, starting with `attention_pipe`, is plan row 163.
+
 ## Test order and shared fixtures
 
 The rule: a test's verdict does not hang on a file another build step made, on the
