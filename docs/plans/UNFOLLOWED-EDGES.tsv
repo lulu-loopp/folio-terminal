@@ -8362,11 +8362,11 @@ crates/bt-platform/src/launch_agent.rs	bt-platform crate::launch_agent::sweep	Am
 crates/bt-platform/src/launch_agent.rs	bt-platform crate::launch_agent::sweep	Ambiguous	kind	1	
 crates/bt-platform/src/launch_agent.rs	bt-platform crate::launch_agent::sweep	Ambiguous	map	1	
 crates/bt-platform/src/launch_agent.rs	bt-platform crate::launch_agent::sweep	Ambiguous	map_err	1	
-crates/bt-platform/src/launch_conversation.rs	bt-platform crate::launch_conversation::<RealClock as LaunchClock>::wait	Dynamic	ready	1	
+crates/bt-platform/src/launch_conversation.rs	bt-platform crate::launch_conversation::<RealClock as LaunchClock>::wait	Dynamic	ready	1	2026-11-01: T-LAUNCH-HANDOVER-BUDGET-ON-A-CLOCK; the transport's own wait handed to the clock as a closure, written at each call site in launch_pipe (a kernel wait on an event, a channel receive) and launch_pipe_unix (one socket step); none of them reaches a door
 crates/bt-platform/src/launch_conversation.rs	bt-platform crate::launch_conversation::hand_over_on	Dynamic	on_reply	1	
 crates/bt-platform/src/launch_pipe.rs	bt-platform crate::launch_pipe::<Client as crate::launch_conversation::Connection>::hear	Ambiguous	truncate	1	
 crates/bt-platform/src/launch_pipe.rs	bt-platform crate::launch_pipe::Instance::open	Ambiguous	unwrap_or	2	
-crates/bt-platform/src/launch_pipe.rs	bt-platform crate::launch_pipe::LaunchPipe::start_on	Ambiguous	map_err	1	
+crates/bt-platform/src/launch_pipe.rs	bt-platform crate::launch_pipe::LaunchPipe::start_on	Ambiguous	map_err	1	2026-11-01: T-LAUNCH-HANDOVER-BUDGET-ON-A-CLOCK; the same call, moved unchanged when LaunchPipe::start became the real-clock door over start_on and the reply wait became signalled_within; it reaches no door
 crates/bt-platform/src/launch_pipe.rs	bt-platform crate::launch_pipe::listen	Ambiguous	is_err	1	
 crates/bt-platform/src/launch_pipe.rs	bt-platform crate::launch_pipe::listen	Ambiguous	recycle	1	
 crates/bt-platform/src/launch_pipe.rs	bt-platform crate::launch_pipe::read_reply	Ambiguous	map_err	1	
@@ -8375,27 +8375,27 @@ crates/bt-platform/src/launch_pipe.rs	bt-platform crate::launch_pipe::serve	Ambi
 crates/bt-platform/src/launch_pipe.rs	bt-platform crate::launch_pipe::serve	Dynamic	commit	1	
 crates/bt-platform/src/launch_pipe.rs	bt-platform crate::launch_pipe::serve	Dynamic	decide	1	
 crates/bt-platform/src/launch_pipe.rs	bt-platform crate::launch_pipe::server_process_id	Ambiguous	map_err	1	
-crates/bt-platform/src/launch_pipe.rs	bt-platform crate::launch_pipe::signalled_within	Ambiguous	is_multiple_of	1	
-crates/bt-platform/src/launch_pipe.rs	bt-platform crate::launch_pipe::signalled_within	Ambiguous	unwrap_or	1	
+crates/bt-platform/src/launch_pipe.rs	bt-platform crate::launch_pipe::signalled_within	Ambiguous	is_multiple_of	1	2026-11-01: T-LAUNCH-HANDOVER-BUDGET-ON-A-CLOCK; the same call, moved unchanged when LaunchPipe::start became the real-clock door over start_on and the reply wait became signalled_within; it reaches no door
+crates/bt-platform/src/launch_pipe.rs	bt-platform crate::launch_pipe::signalled_within	Ambiguous	unwrap_or	1	2026-11-01: T-LAUNCH-HANDOVER-BUDGET-ON-A-CLOCK; the same call, moved unchanged when LaunchPipe::start became the real-clock door over start_on and the reply wait became signalled_within; it reaches no door
 crates/bt-platform/src/launch_pipe.rs	bt-platform crate::launch_pipe::vetted_server	Ambiguous	and_then	1	
 crates/bt-platform/src/launch_pipe.rs	bt-platform crate::launch_pipe::vetted_server	Ambiguous	as_deref	1	
 crates/bt-platform/src/launch_pipe.rs	bt-platform crate::launch_pipe::vetted_server	Ambiguous	map	1	
 crates/bt-platform/src/launch_pipe.rs	bt-platform crate::launch_pipe::vetted_server	Ambiguous	ok	1	
 crates/bt-platform/src/launch_pipe.rs	bt-platform crate::launch_pipe::vetted_server	Dynamic	named	1	
 crates/bt-platform/src/launch_pipe_unix.rs	bt-platform crate::launch_pipe::<Served as Accepted>::outwait_first_move	Ambiguous	kind	1	
-crates/bt-platform/src/launch_pipe_unix.rs	bt-platform crate::launch_pipe::<Served as Accepted>::outwait_first_move	Ambiguous	map	1	
-crates/bt-platform/src/launch_pipe_unix.rs	bt-platform crate::launch_pipe::LaunchPipe::start_on	Ambiguous	as_encoded_bytes	1	
-crates/bt-platform/src/launch_pipe_unix.rs	bt-platform crate::launch_pipe::LaunchPipe::start_on	Ambiguous	len	1	
-crates/bt-platform/src/launch_pipe_unix.rs	bt-platform crate::launch_pipe::LaunchPipe::start_on	Ambiguous	map	1	
+crates/bt-platform/src/launch_pipe_unix.rs	bt-platform crate::launch_pipe::<Served as Accepted>::outwait_first_move	Ambiguous	map	1	2026-11-01: T-LAUNCH-HANDOVER-BUDGET-ON-A-CLOCK; a standard-library method (io::Result, io::Error, Option) on a receiver the grammar does not type, which reaches no door
+crates/bt-platform/src/launch_pipe_unix.rs	bt-platform crate::launch_pipe::LaunchPipe::start_on	Ambiguous	as_encoded_bytes	1	2026-11-01: T-LAUNCH-HANDOVER-BUDGET-ON-A-CLOCK; the same call, moved unchanged when LaunchPipe::start became the real-clock door over start_on and the reply wait became signalled_within; it reaches no door
+crates/bt-platform/src/launch_pipe_unix.rs	bt-platform crate::launch_pipe::LaunchPipe::start_on	Ambiguous	len	1	2026-11-01: T-LAUNCH-HANDOVER-BUDGET-ON-A-CLOCK; the same call, moved unchanged when LaunchPipe::start became the real-clock door over start_on and the reply wait became signalled_within; it reaches no door
+crates/bt-platform/src/launch_pipe_unix.rs	bt-platform crate::launch_pipe::LaunchPipe::start_on	Ambiguous	map	1	2026-11-01: T-LAUNCH-HANDOVER-BUDGET-ON-A-CLOCK; the same call, moved unchanged when LaunchPipe::start became the real-clock door over start_on and the reply wait became signalled_within; it reaches no door
 crates/bt-platform/src/launch_pipe_unix.rs	bt-platform crate::launch_pipe::answer	Ambiguous	as_bytes	1	
 crates/bt-platform/src/launch_pipe_unix.rs	bt-platform crate::launch_pipe::answer	Ambiguous	into_owned	1	
 crates/bt-platform/src/launch_pipe_unix.rs	bt-platform crate::launch_pipe::answer	Dynamic	commit	1	
 crates/bt-platform/src/launch_pipe_unix.rs	bt-platform crate::launch_pipe::answer	Dynamic	decide	1	
 crates/bt-platform/src/launch_pipe_unix.rs	bt-platform crate::launch_pipe::endpoint_for	Ambiguous	map	1	
 crates/bt-platform/src/launch_pipe_unix.rs	bt-platform crate::launch_pipe::listen	Ambiguous	kind	2	
-crates/bt-platform/src/launch_pipe_unix.rs	bt-platform crate::launch_pipe::on_clock	Ambiguous	kind	1	
-crates/bt-platform/src/launch_pipe_unix.rs	bt-platform crate::launch_pipe::on_clock	Ambiguous	unwrap_or_else	1	
-crates/bt-platform/src/launch_pipe_unix.rs	bt-platform crate::launch_pipe::on_clock	Dynamic	step	1	
+crates/bt-platform/src/launch_pipe_unix.rs	bt-platform crate::launch_pipe::on_clock	Ambiguous	kind	1	2026-11-01: T-LAUNCH-HANDOVER-BUDGET-ON-A-CLOCK; a standard-library method (io::Result, io::Error, Option) on a receiver the grammar does not type, which reaches no door
+crates/bt-platform/src/launch_pipe_unix.rs	bt-platform crate::launch_pipe::on_clock	Ambiguous	unwrap_or_else	1	2026-11-01: T-LAUNCH-HANDOVER-BUDGET-ON-A-CLOCK; a standard-library method (io::Result, io::Error, Option) on a receiver the grammar does not type, which reaches no door
+crates/bt-platform/src/launch_pipe_unix.rs	bt-platform crate::launch_pipe::on_clock	Dynamic	step	1	2026-11-01: T-LAUNCH-HANDOVER-BUDGET-ON-A-CLOCK; one socket step handed to on_clock as a closure, written at its five call sites in the same file (a frame written or read, or a byte awaited, under a socket timeout); none of them reaches a door
 crates/bt-platform/src/launch_pipe_unix.rs	bt-platform crate::launch_pipe::peer_executable	Ambiguous	as_mut_ptr	1	
 crates/bt-platform/src/launch_pipe_unix.rs	bt-platform crate::launch_pipe::peer_executable	Ambiguous	cast	1	
 crates/bt-platform/src/launch_pipe_unix.rs	bt-platform crate::launch_pipe::peer_executable	Ambiguous	map_err	1	
