@@ -388,6 +388,52 @@ fn a_qualified_call_is_the_impl_of_the_trait() {
     );
 }
 
+/// RED (R5, plan row 155) — **a method on a generic struct's field and on an `impl Tr` argument is
+/// the dispatch to every admitted impl, and a concrete wrapper around the generic struct reaches
+/// that impl's effect** — `bt_platform::install_txn`'s `DurableWrite(Rewrite<arm::Os>)` and
+/// `self.surface.remove_entry` in `impl<S: Surface> Rewrite<S>`, whose durable-write internals a
+/// clause once said the walk followed to no implementation. A `#[cfg(test)]` impl is not admitted.
+///
+/// MUTATION: in `Tables::dispatch_param`, answer `Unresolved::Path` whatever the bounds — both
+/// sites are `path` edges and the walk meets no `std::fs::remove_file`.
+#[test]
+fn a_generic_field_and_an_impl_argument_dispatch_to_the_admitted_impls() {
+    let index = fixture("generic_field");
+    let resolver = resolver("generic_field", &index);
+    let os = "cg-generic_field crate::<Os as Surface>::remove";
+    for caller in ["give_up", "handed"] {
+        let found = at_via(&resolver, caller, "remove");
+        assert!(
+            matches!(found.as_slice(), [(target, Via::Dispatch(_))] if target == os),
+            "`{caller}`'s `remove` is `Os`'s, by dispatch: {found:?}"
+        );
+    }
+    let graph = CallGraph::new(&resolver);
+    let root = item(&resolver, "cg-generic_field", "abandon");
+    let reach = graph.walk(&[root], &BTreeSet::new());
+    let effects: Vec<(String, Vec<String>)> = reach
+        .foreign
+        .iter()
+        .map(|(edge, path)| {
+            (
+                spelled(&resolver, edge),
+                path.iter().map(|node| resolver.node_key(*node)).collect(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        effects,
+        [(
+            "foreign std::fs::remove_file".to_owned(),
+            vec![
+                "cg-generic_field crate::DurableWrite::abandon".to_owned(),
+                "cg-generic_field crate::Rewrite::give_up".to_owned(),
+                os.to_owned(),
+            ]
+        )]
+    );
+}
+
 /// RED (R7) — **a type written through an alias of an alias is the type it names**, and an alias
 /// is an index record: one per `type` item written in a module, with its arm, and none for an
 /// associated type or one written inside a body.
