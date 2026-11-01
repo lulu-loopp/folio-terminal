@@ -2277,9 +2277,7 @@ fn a_cancel_while_the_journal_is_held_ends_the_wait() {
         match held_pauses {
             1 => {
                 paused.send(()).unwrap();
-                go_seen
-                    .recv_timeout(Duration::from_secs(60))
-                    .expect("the test cancels");
+                crate::lane::wait_for_a_wake(&go_seen, "the test's Cancel");
             }
             2 => {
                 *seen.lock().unwrap() = Some(pending_phase(&at));
@@ -2293,18 +2291,9 @@ fn a_cancel_while_the_journal_is_held_ends_the_wait() {
     let transport: SharedTransport = Arc::new(Release::of(scene.archive.clone()));
     job.answer_verb(Verb::Press, &driver, &transport)
         .expect("the press is taken");
-    let deadline = Instant::now() + Duration::from_secs(300);
-    while paused_seen.try_recv().is_err() {
-        job.drain_progress();
-        assert!(
-            !matches!(job.state(), State::Verified(_) | State::Failed(..)),
-            "the Prepare ended before it waited for the held journal: {:?}",
-            job.state()
-        );
-        assert!(Instant::now() < deadline, "the journal was never held");
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    crate::lane::wait_for_a_wake(&paused_seen, "a pause of the Prepare over the held journal");
     job.drain_progress();
+    assert!(matches!(job.state(), State::Staged(_)), "{:?}", job.state());
     job.answer_verb(Verb::Cancel, &driver, &transport)
         .expect("Cancel is on the staged card");
     go.send(()).unwrap();
