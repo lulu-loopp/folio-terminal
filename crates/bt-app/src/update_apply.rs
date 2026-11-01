@@ -677,12 +677,6 @@ impl<'w> Journaled<'w> {
         self.journal.body.phase.kind()
     }
 
-    /// The worker this holder writes from, whose wait door its road's other
-    /// waits pause through.
-    pub(crate) fn worker(&self) -> &'w WorkerCtx {
-        self.worker
-    }
-
     /// **The worker this holder writes from, its window for a held file,
     /// and the clock that window is read on** — what a layout's moves are
     /// asked again through, for and on ([`move_held_within`]).

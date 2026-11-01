@@ -1826,7 +1826,7 @@ impl<'a> Txn<'a> {
                     }
                 }
                 Action::RollBack(Restore::Moves(moves)) => {
-                    if let Some(ended) = self.move_back(actor, &moves, world)? {
+                    if let Some(ended) = self.move_back(worker, actor, &moves, world)? {
                         return Ok(ended);
                     }
                 }
@@ -1965,13 +1965,14 @@ impl<'a> Txn<'a> {
     /// nothing recorded), or a move that failed (`Stuck`, everything kept).
     fn move_back(
         &mut self,
+        worker: &WorkerCtx,
         actor: Actor,
         moves: &[Move],
         world: &mut impl World,
     ) -> Result<Option<Ended>, String> {
         let clock = LockWaitOn {
             clock: &*self.road.wait_clock,
-            worker: self.j.worker(),
+            worker,
         };
         let admission = match install_txn::hold_by(
             &self.road.home.admission(),
