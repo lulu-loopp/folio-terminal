@@ -28219,7 +28219,7 @@ mod tests {
     /// PIN (owner report 2026-09-21, on the 0.4.3 candidate) — **a printed path with spaces in it
     /// is a link when the file is there**, walked from the printed row to the real disk.
     ///
-    /// The report was `D:\Developer\trace\验收 next85\中文 说明.md`: no mark, no click, while the
+    /// The report was `D:\Developer\notes\验收 next85\中文 说明.md` (renamed): no mark, no click; the
     /// same tree without the spaces was an ordinary link. The lexer's half of the fix is pinned in
     /// `bt_transcript::paths` by `a_bare_path_is_read_across_the_spaces_a_filename_may_hold` — the
     /// row offers the whole spelling first and one shorter reading per space behind it. **This is
