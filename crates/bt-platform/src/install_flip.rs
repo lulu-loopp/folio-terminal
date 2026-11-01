@@ -1255,11 +1255,9 @@ mod tests {
     ///
     /// MUTATION: in the Windows arm, `creation_of` answers the creation time
     /// without asking whether the process is still active.
+    #[cfg(windows)]
     #[test]
     fn a_started_program_is_listed_while_it_runs_and_not_after() {
-        if crate::host_platform() != crate::HostPlatform::Windows {
-            return;
-        }
         let scratch = Scratch::new("list");
         let program = scratch.0.join("folio.exe");
         crate::trust_harness::program(

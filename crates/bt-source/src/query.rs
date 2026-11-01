@@ -1163,7 +1163,9 @@ impl Occurrence {
     ///   whole body, with no macro invocation, attribute macro, foreign `derive`
     ///   or `macro_use` between it and the invocation (`bt-app`'s
     ///   `text_entries!`); every other `cfg` there refuses the index, so no gate
-    ///   in a macro is counted as product unread.
+    ///   in a macro is counted as product unread. Inside an item that carries an
+    ///   attribute macro (plan row 122), which may rewrite it, every `cfg`
+    ///   refuses the index; the item's own `cfg`s are read as before.
     ///
     /// An item is in the product if **any** of its identities is, which is
     /// §2.3's "any owning path" said one level down: a product file that a test
