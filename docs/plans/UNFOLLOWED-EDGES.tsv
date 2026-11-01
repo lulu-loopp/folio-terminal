@@ -6263,8 +6263,6 @@ crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::watch_trial	Dynami
 crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::watch_trial	Dynamic	launch_over	1	
 crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::watch_trial	Dynamic	say	5	
 crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::window_holder_using	Dynamic	in_flight	1	
-crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::write_journal_on	Dynamic	asks_again	1	
-crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::write_journal_on	Dynamic	spell	2	
 crates/bt-app/src/update_apply_macos.rs	bt-app crate::update_apply_macos::<Machine as Hands>::exchange	Ambiguous	to_string	1	
 crates/bt-app/src/update_apply_macos.rs	bt-app crate::update_apply_macos::<Machine as Hands>::say	Ambiguous	as_bytes	1	
 crates/bt-app/src/update_apply_macos.rs	bt-app crate::update_apply_macos::Launch::over	Ambiguous	code	1	
@@ -6560,12 +6558,10 @@ crates/bt-app/src/update_prepare_windows.rs	bt-app crate::update_prepare_windows
 crates/bt-app/src/update_prepare_windows.rs	bt-app crate::update_prepare_windows::<System as Tools>::copy	Ambiguous	to_string	2	
 crates/bt-app/src/update_prepare_windows.rs	bt-app crate::update_prepare_windows::<WinPrepare as Driver>::prepare	Ambiguous	map_err	1	
 crates/bt-app/src/update_prepare_windows.rs	bt-app crate::update_prepare_windows::acquire	Ambiguous	ok_or	1	
-crates/bt-app/src/update_prepare_windows.rs	bt-app crate::update_prepare_windows::acquire	Ambiguous	ok_or_else	1	
 crates/bt-app/src/update_prepare_windows.rs	bt-app crate::update_prepare_windows::expand_release	Ambiguous	map_err	1	
 crates/bt-app/src/update_prepare_windows.rs	bt-app crate::update_prepare_windows::fetch	Dynamic	fetched	2	
 crates/bt-app/src/update_prepare_windows.rs	bt-app crate::update_prepare_windows::prepare_on	Ambiguous	is_ok	1	
 crates/bt-app/src/update_prepare_windows.rs	bt-app crate::update_prepare_windows::prepare_on	Ambiguous	ok_or	1	
-crates/bt-app/src/update_prepare_windows.rs	bt-app crate::update_prepare_windows::prepare_on	Ambiguous	ok_or_else	1	
 crates/bt-app/src/update_prepare_windows.rs	bt-app crate::update_prepare_windows::prepare_on	Ambiguous	to_owned	1	
 crates/bt-app/src/update_prepare_windows.rs	bt-app crate::update_prepare_windows::present	Ambiguous	is_file	1	2026-10-26: Metadata::is_file, an accessor of the value std::fs::symlink_metadata returned: no disk question (that call is the question, typed: an Effect where a door reaches it); the engine reads no foreign function's return type, and a method of a file-system value is no effect (T-UNTYPED-RECEIVER-FS-CALLS-TRIAGE)
 crates/bt-app/src/update_prepare_windows.rs	bt-app crate::update_prepare_windows::resume	Ambiguous	and_then	1	
