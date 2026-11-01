@@ -49,11 +49,11 @@
 //!   trial beside a candidate, never a rollback under it;
 //! * [`OWNER_FILE`] — **the window's owner** (U-34): the one process that has
 //!   taken the duty that a Folio window follows *Restart to update*, handed
-//!   from O to P explicitly ([`take_the_window`]); the mark names a recorded
+//!   from O to P explicitly ([`take_the_window_by`]); the mark names a recorded
 //!   live owner, the lock names a live unrecorded owner, and the journal says
 //!   whether an owner whose lock is now gone already took its road; recovery
 //!   that finds `Handoff` leaves it to a live process the mark names or whose
-//!   election lock is still held ([`window_holder`]), writes nothing and opens
+//!   election lock is still held ([`window_holder_on`]), writes nothing and opens
 //!   nothing;
 //! * [`ExitGuard`] — **the one way a road process leaves** (U-34): at its
 //!   exit, whatever the reason, a successor it holds still running opens
@@ -882,7 +882,7 @@ pub(crate) fn wait_for_the_claim(
                 bt_platform::instance::ClaimRefusal::Held
                 | bt_platform::instance::ClaimRefusal::Sweeping,
             ) => {
-                let left = until.saturating_duration_since(Instant::now());
+                let left = until.saturating_duration_since(clock.now());
                 if left.is_zero() {
                     return Err("still held at the end of the wait".to_owned());
                 }
@@ -1345,6 +1345,54 @@ impl CountedClock {
                 crate::lane::within_patience(|| !holds_a_receipt(&folder));
             }
         })
+    }
+}
+
+/// **A road's clock in a test that stops the road where the test needs it**
+/// (T-WINDOWS-HANDOVER-ORDER-A-HELD-LOCK-WAIT): a [`CountedClock`] whose
+/// first pause in which `here` holds tells the test (its [`Stopped`]) and
+/// lasts until the test says go, within the suite's patience; every other
+/// pause only moves the count. A road that waits for what the test holds is
+/// then seen waiting at that exact state — inside the wait, its deadline not
+/// moving — and the rest of the wait is spent on the count, never on the
+/// machine's speed.
+#[cfg(test)]
+impl CountedClock {
+    pub(crate) fn stopping_where(
+        mut here: impl FnMut() -> bool + Send + 'static,
+    ) -> (Self, Stopped) {
+        let (stopped, at) = std::sync::mpsc::channel();
+        let (go, gone) = std::sync::mpsc::channel();
+        let mut stopped = Some(stopped);
+        let clock = Self::new(move |_| {
+            if stopped.is_some() && here() {
+                let _ = stopped.take().map(|stopped| stopped.send(()));
+                crate::lane::receive(&gone, "the test's go to the road it stopped");
+            }
+        });
+        (clock, Stopped { at, go })
+    }
+}
+
+/// **The test's end of [`CountedClock::stopping_where`]**: the road stopped,
+/// and the go that lets it on.
+#[cfg(test)]
+pub(crate) struct Stopped {
+    at: std::sync::mpsc::Receiver<()>,
+    go: std::sync::mpsc::Sender<()>,
+}
+
+#[cfg(test)]
+impl Stopped {
+    /// The road is in its pause at the state, within the suite's patience; a
+    /// road that never gets there is red by `what`.
+    pub(crate) fn until_stopped(&self, what: &str) {
+        crate::lane::receive(&self.at, what);
+    }
+
+    /// The road goes on from that pause.
+    pub(crate) fn go(&self) {
+        let _ = self.go.send(());
     }
 }
 
@@ -2179,7 +2227,7 @@ pub(crate) fn stop_trial(
 /// * O clears it as it hands the transaction over (before `Handoff`, while O
 ///   holds the transaction lock), so no mark of an earlier attempt stands;
 /// * P takes it as soon as it knows its transaction, before it waits for O's
-///   lock ([`take_the_window`]) — and only a P whose mark landed runs its
+///   lock ([`take_the_window_by`]) — and only a P whose mark landed runs its
 ///   road and opens a window; one that finds it taken, or whose mark does not
 ///   land, leaves everything alone (0.4.8 E2);
 /// * O takes it at its very end, after letting go of its claim — and starts
@@ -2189,7 +2237,7 @@ pub(crate) fn stop_trial(
 ///   process (a P that never took the mark is not an applier to wait for).
 ///
 /// Taking is one election under an exclusive operating-system lock,
-/// `H\<txn>\owner.lock` ([`take_the_window`]): read the mark, and write this
+/// `H\<txn>\owner.lock` ([`take_the_window_by`]): read the mark, and write this
 /// process into it only when it is absent or its process no longer runs (pid
 /// and start instant) — its owner died. The lock goes with a holder that dies
 /// inside the election.
@@ -2384,7 +2432,7 @@ impl std::fmt::Debug for WindowRefusal {
     }
 }
 
-/// **Who has the duty a window follows**, as [`take_the_window`] found it for
+/// **Who has the duty a window follows**, as [`take_the_window_by`] found it for
 /// the contender `C`.
 ///
 /// The two answers that come from the journal are `C`'s to have: an
@@ -2479,7 +2527,21 @@ pub(crate) fn election_within(until: Instant, now: Instant) -> Duration {
 /// **By `until`** (round 8, Codex's finding 15): the wait for the lock is the
 /// smaller of [`ELECTION_WITHIN`] and what is left before `until` — the
 /// applier's road deadline — so an election begun near that deadline never
-/// carries the applier's wait for O past it.
+/// carries the applier's wait for O past it. `now` is a reading of the clock
+/// `until` is read on (the road's [`WaitClock`] for an applier's road).
+pub(crate) fn take_the_window_by(
+    worker: Option<&WorkerCtx>,
+    home: &Home,
+    txn: TxnId,
+    me: Running,
+    until: Instant,
+    now: Instant,
+) -> Window {
+    take_the_window_within(worker, home, txn, me, election_within(until, now), Applier)
+}
+
+/// [`take_the_window_by`], `until` read on the wall clock.
+#[cfg(test)]
 pub(crate) fn take_the_window(
     worker: Option<&WorkerCtx>,
     home: &Home,
@@ -2487,17 +2549,10 @@ pub(crate) fn take_the_window(
     me: Running,
     until: Instant,
 ) -> Window {
-    take_the_window_within(
-        worker,
-        home,
-        txn,
-        me,
-        election_within(until, Instant::now()),
-        Applier,
-    )
+    take_the_window_by(worker, home, txn, me, until, Instant::now())
 }
 
-/// [`take_the_window`], as `contender`, waiting up to `within` for the
+/// [`take_the_window_by`], as `contender`, waiting up to `within` for the
 /// election's lock — zero in O's panic road, which waits for nothing.
 pub(crate) fn take_the_window_within<C: Contender>(
     worker: Option<&WorkerCtx>,
@@ -2915,14 +2970,13 @@ pub(crate) fn take_the_window_within_reads_at(
 /// (`install_txn::LockClock`, T-STALE-MARK-RACE-ON-A-COUNTED-CLOCK): its
 /// readings are the clock's, and each pause is the clock's pause through
 /// `worker`'s wait door. The one adapter by which a wait for a lock
-/// (`install_txn::hold_by`) reads a road's clock.
-#[cfg(test)]
+/// (`install_txn::hold_by`) reads a road's clock: the applier's and recovery's
+/// roads pass theirs (T-WINDOWS-HANDOVER-ORDER-A-HELD-LOCK-WAIT).
 pub(crate) struct LockWaitOn<'a> {
     pub(crate) clock: &'a dyn WaitClock,
     pub(crate) worker: &'a WorkerCtx,
 }
 
-#[cfg(test)]
 impl install_txn::LockClock for LockWaitOn<'_> {
     fn now(&self) -> Instant {
         self.clock.now()
@@ -2966,9 +3020,14 @@ pub(crate) fn take_the_window_on(
     )
 }
 
-fn ask_for_the_window_until(
+/// **The applier's asks for the window, again while the answer is another
+/// live owner or a contended election, until `until`** — read on `now`, the
+/// road's [`WaitClock`] for an applier (T-WINDOWS-HANDOVER-ORDER-A-HELD-LOCK-WAIT);
+/// each pause between two asks is `wait`'s, never past `until`.
+fn ask_for_the_window_by(
     until: Instant,
     poll: Duration,
+    mut now: impl FnMut() -> Instant,
     mut ask: impl FnMut() -> Window,
     mut wait: impl FnMut(Duration),
 ) -> Window {
@@ -2976,7 +3035,7 @@ fn ask_for_the_window_until(
         let answer = ask();
         let asks_again = matches!(&answer, Window::Theirs(_))
             || matches!(&answer, Window::Refused(refusal) if refusal.retryable());
-        let left = until.saturating_duration_since(Instant::now());
+        let left = until.saturating_duration_since(now());
         if !asks_again || left.is_zero() {
             return answer;
         }
@@ -2988,7 +3047,9 @@ fn ask_for_the_window_until(
 /// live marked owner or a contended election is asked again while the one
 /// `old_within` deadline has time left. No retry receives a fresh budget.
 /// Each pause between two asks is `clock`'s (the road's [`WaitClock`]: the
-/// worker's wait door in the product).
+/// worker's wait door in the product), and `until` — the road's deadline — is
+/// a reading of that clock, read there before each ask again and for each
+/// election's budget ([`take_the_window_by`]).
 pub(crate) fn take_the_window_for_applier(
     worker: &WorkerCtx,
     clock: &dyn WaitClock,
@@ -2998,10 +3059,11 @@ pub(crate) fn take_the_window_for_applier(
     until: Instant,
     poll: Duration,
 ) -> Window {
-    ask_for_the_window_until(
+    ask_for_the_window_by(
         until,
         poll,
-        || take_the_window(Some(worker), home, txn, me, until),
+        || clock.now(),
+        || take_the_window_by(Some(worker), home, txn, me, until, clock.now()),
         |pause| clock.pause(worker, pause),
     )
 }
@@ -3014,7 +3076,7 @@ pub(crate) fn take_the_window_for_applier_at(
     ask: impl FnMut() -> Window,
     wait: impl FnMut(Duration),
 ) -> Window {
-    ask_for_the_window_until(until, poll, ask, wait)
+    ask_for_the_window_by(until, poll, Instant::now, ask, wait)
 }
 
 /// **Clear the window's mark** — O, as it hands the transaction over, before
@@ -3048,28 +3110,44 @@ pub(crate) enum WindowHolder {
 /// applier whose mark did not land stood aside (0.4.8 E2) and owns nothing.
 /// If the lock file itself cannot be opened, recovery falls back to that
 /// mark: an open refusal is not allowed to stall a persistent `Handoff`
-/// forever.
+/// forever. The wait for the election in flight is read and paused on
+/// `clock` (the recovery road's [`WaitClock`], through [`LockWaitOn`]:
+/// [`WallClock`] in the product; T-WINDOWS-HANDOVER-ORDER-A-HELD-LOCK-WAIT).
+pub(crate) fn window_holder_on(
+    worker: &WorkerCtx,
+    clock: &dyn WaitClock,
+    home: &Home,
+    txn: TxnId,
+    me: Running,
+) -> Result<Option<WindowHolder>, String> {
+    window_holder_using(home, txn, me, &LockWaitOn { clock, worker }, || {})
+}
+
+/// [`window_holder_on`] off a worker, its wait on the wall clock
+/// (`install_txn::hold_within`'s).
+#[cfg(test)]
 pub(crate) fn window_holder(
     home: &Home,
     txn: TxnId,
     me: Running,
 ) -> Result<Option<WindowHolder>, String> {
-    window_holder_using(home, txn, me, || {})
+    window_holder_using(home, txn, me, &install_txn::WallLockClock, || {})
 }
 
-/// [`window_holder`], with `in_flight` run once when the first ask finds an
-/// election in flight, before the wait for it.
-fn window_holder_using(
+/// [`window_holder_on`], with the wait on `clock` and `in_flight` run once
+/// when the first ask finds an election in flight, before the wait for it.
+fn window_holder_using<Clock: install_txn::LockClock + ?Sized>(
     home: &Home,
     txn: TxnId,
     me: Running,
+    clock: &Clock,
     in_flight: impl FnOnce(),
 ) -> Result<Option<WindowHolder>, String> {
     let lock = owner_lock_path(home, txn);
     let held = match install_txn::try_hold(&lock, Hold::Exclusive) {
         Ok(None) => {
             in_flight();
-            install_txn::hold_within(&lock, Hold::Exclusive, ELECTION_WITHIN)
+            install_txn::hold_by(&lock, Hold::Exclusive, clock.now() + ELECTION_WITHIN, clock)
         }
         asked => asked,
     };
@@ -3084,7 +3162,7 @@ fn window_holder_using(
     }
 }
 
-/// [`window_holder`] with a test step between finding the election in flight
+/// [`window_holder_on`] with a test step between finding the election in flight
 /// and waiting for it, so a test can end that election at that exact state
 /// without the clock.
 #[cfg(test)]
@@ -3094,7 +3172,7 @@ pub(crate) fn window_holder_at(
     me: Running,
     in_flight: impl FnOnce(),
 ) -> Result<Option<WindowHolder>, String> {
-    window_holder_using(home, txn, me, in_flight)
+    window_holder_using(home, txn, me, &install_txn::WallLockClock, in_flight)
 }
 
 /// **What a road process's exit guard asks of the platform it runs on**

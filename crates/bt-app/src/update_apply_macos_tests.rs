@@ -38,8 +38,6 @@ use std::thread::JoinHandle;
 
 use bt_platform::trust_harness::done_once_let_go;
 
-#[cfg(target_os = "macos")]
-use crate::update_apply::WatchedWallClock;
 use crate::update_apply::{CountedClock, now_ms};
 
 #[cfg(target_os = "macos")]
@@ -776,29 +774,25 @@ fn ended_while_committing<T>(install: &Install, road: JoinHandle<T>) -> T {
     }
 }
 
-/// **P is at its wait for the transaction lock**: its election is over — the
-/// window's mark names this process and the election lock is free — and the
-/// road's next step is the lock (`Txn::hold`). Awaited as state within the
-/// suite's patience; an applier that ends first is red.
+/// **P is past its election**: the window's mark names this process and the
+/// election lock is free — the road's next wait is the transaction lock's
+/// (`Txn::hold`). The state a test's road clock stops P at, in a pause of that
+/// wait (T-WINDOWS-HANDOVER-ORDER-A-HELD-LOCK-WAIT): P is then past its
+/// election while the lock is still held, as a fact of the test.
 #[cfg(target_os = "macos")]
-fn until_past_the_election<T>(install: &Install, applier: &JoinHandle<T>) {
+fn past_the_election(install: &Install) -> impl FnMut() -> bool + Send + 'static {
+    let (home, txn) = (install.home.clone(), install.txn);
     let me = crate::update_apply::this_process();
-    let elected = crate::lane::within_patience(|| {
-        applier.is_finished()
-            || (crate::update_apply::window_owner(&install.home, install.txn) == Some(me)
-                && install_txn::try_hold(
-                    &crate::update_apply::owner_lock_path(&install.home, install.txn),
-                    Hold::Exclusive,
-                )
-                .ok()
-                .flatten()
-                .is_some())
-    });
-    assert!(elected, "P never took the window");
-    assert!(
-        !applier.is_finished(),
-        "the applier ended before its wait for the lock"
-    );
+    move || {
+        crate::update_apply::window_owner(&home, txn) == Some(me)
+            && install_txn::try_hold(
+                &crate::update_apply::owner_lock_path(&home, txn),
+                Hold::Exclusive,
+            )
+            .ok()
+            .flatten()
+            .is_some()
+    }
 }
 
 /// A launch that starts the new bundle's executable and writes the receipt
@@ -973,12 +967,13 @@ fn swap_leaves_no_instant_without_a_bundle() {
 /// If 60 s pass, P journals `Failed`, deletes staging, and exits without
 /// touching anything."
 ///
-/// O lets go of the lock once P is at its wait for it (its election over),
-/// and of the claim in the pause of P's first refused ask of it (the road's
-/// `wait_clock`, watched): whether the entrance is armed then is what P did
-/// while the claim was held, and an exchange before that pause is red where
-/// it happens. The holds kept to the end are awaited while still held, within
-/// the suite's patience.
+/// O lets go of the lock in a pause of P's wait for it, P's election over,
+/// and of the claim in the pause of P's first refused ask of it — both pauses
+/// of the road's `wait_clock`, a counted clock, picked by state
+/// (T-WINDOWS-HANDOVER-ORDER-A-HELD-LOCK-WAIT): what the disk says then is
+/// what P did while each was held, and an exchange before the claim's pause
+/// is red where it happens. The holds kept to the end are awaited while still
+/// held, within the suite's patience.
 ///
 /// MUTATION: in `wait_for_the_claim`, answer `Ok(())` for a held claim.
 #[cfg(target_os = "macos")]
@@ -986,23 +981,50 @@ fn swap_leaves_no_instant_without_a_bundle() {
 fn p_waits_for_o_and_releases_the_claim() {
     // O alive: its lock, then its claim, let go one after the other.
     let install = Install::new("wait");
-    let lock = install_txn::try_hold(&install.home.lock(), Hold::Exclusive)
-        .unwrap()
-        .unwrap();
+    let lock = Arc::new(Mutex::new(Some(
+        install_txn::try_hold(&install.home.lock(), Hold::Exclusive)
+            .unwrap()
+            .unwrap(),
+    )));
     let claim = Arc::new(Mutex::new(Some(
         bt_platform::instance::claim_data_directory(&install.data).unwrap(),
     )));
+    // The journal's phase in the pause of P's wait for the lock, its election
+    // over, where O lets go of the lock.
+    let at_the_lock = Arc::new(Mutex::new(None::<PhaseKind>));
     // Whether the entrance was armed in the pause of P's first refused ask of
     // the claim.
     let armed_at_the_claim = Arc::new(Mutex::new(None::<bool>));
     let clock = {
-        let (claim, seen, plist) = (
+        let (o_lock, claim, at_lock, seen, plist, journal, home) = (
+            Arc::clone(&lock),
             Arc::clone(&claim),
+            Arc::clone(&at_the_lock),
             Arc::clone(&armed_at_the_claim),
             install.plist(),
+            install.home.journal(),
+            install.home.clone(),
         );
-        Arc::new(WatchedWallClock::new(move |pause| {
-            if pause == 1 {
+        let mut elected = past_the_election(&install);
+        Arc::new(CountedClock::new(move |_| {
+            let mut o_lock = o_lock.lock().unwrap();
+            if o_lock.is_some() {
+                if elected() {
+                    *at_lock.lock().unwrap() = Some(
+                        Journal::parse(&std::fs::read(&journal).unwrap())
+                            .unwrap()
+                            .body
+                            .phase
+                            .kind(),
+                    );
+                    o_lock.take();
+                }
+            } else if claim.lock().unwrap().is_some()
+                && install_txn::try_hold(&home.lock(), Hold::Exclusive)
+                    .unwrap()
+                    .is_none()
+            {
+                // O's lock let go, P holds it: P's ask of the claim.
                 *seen.lock().unwrap() = Some(plist.exists());
                 claim.lock().unwrap().take();
             }
@@ -1026,15 +1048,13 @@ fn p_waits_for_o_and_releases_the_claim() {
         ..install.road(limits(10_000, 10_000))
     };
     let applier = start(road, world);
-    until_past_the_election(&install, &applier);
-    assert_eq!(
-        install.on_disk().unwrap().body.phase.kind(),
-        PhaseKind::Handoff,
-        "nothing is written while O holds the lock"
-    );
-    drop(lock);
     let (ended, _) = ended_while_committing(&install, applier);
     assert_eq!(ended, Ended::Committed);
+    assert_eq!(
+        *at_the_lock.lock().unwrap(),
+        Some(PhaseKind::Handoff),
+        "P waited for the lock past its election, and nothing is written while O holds it"
+    );
     assert!(*swapped_at.lock().unwrap());
     assert_eq!(
         *armed_at_the_claim.lock().unwrap(),
@@ -1079,8 +1099,11 @@ fn p_waits_for_o_and_releases_the_claim() {
 /// names it"; M4: the LaunchAgent plist durable, then the admission and the
 /// process check, then `Exchanging`. A running copy holds the admission shared
 /// while the test reads the disk: the journal says `Armed` and the plist
-/// names the rescue executable and the home, and no bundle has moved. At the
-/// exchange itself the journal says `Moving`.
+/// names the rescue executable and the home, and no bundle has moved — read in
+/// a pause of the applier's wait for the admission (the road's `wait_clock`,
+/// counted, stopped there by state; T-WINDOWS-HANDOVER-ORDER-A-HELD-LOCK-WAIT),
+/// the copy let go before the road goes on. At the exchange itself the journal
+/// says `Moving`.
 ///
 /// MUTATION: in `at_handoff`, go on to `at_armed` before recording
 /// `Armed` (record it after the call returns).
@@ -1105,10 +1128,24 @@ fn armed_is_durable_before_exchanging() {
             .kind();
         *seen.lock().unwrap() = Some(phase);
     }));
-    let applier = start(install.road(limits(10_000, 10_000)), world);
-    journal_reaches(&install, &applier, |journal| {
-        journal.body.phase == Phase::Armed
-    });
+    let at_armed = {
+        let journal = install.home.journal();
+        move || {
+            Journal::parse(&std::fs::read(&journal).unwrap())
+                .unwrap()
+                .body
+                .phase
+                == Phase::Armed
+        }
+    };
+    let (clock, stopped) = CountedClock::stopping_where(at_armed);
+    let road = Road {
+        wait_clock: Arc::new(clock),
+        ..install.road(limits(10_000, 10_000))
+    };
+    let applier = start(road, world);
+    stopped.until_stopped("the applier at its wait for the admission, at `Armed`");
+    assert_eq!(install.on_disk().unwrap().body.phase, Phase::Armed);
     let plist = std::fs::read_to_string(install.plist()).expect("the plist is there at Armed");
     let rescue = install.home.rescue_executable(install.txn).unwrap();
     assert!(plist.contains(&*rescue.to_string_lossy()));
@@ -1116,6 +1153,7 @@ fn armed_is_durable_before_exchanging() {
     assert!(plist.contains("--update-recover"));
     assert_eq!(version_of(&install.installed), "1.0", "nothing moved yet");
     drop(copy);
+    stopped.go();
     let (ended, world) = applier.join().unwrap();
     assert_eq!(ended, Ended::Committed, "{:?}", world.said);
     assert_eq!(*at_exchange.lock().unwrap(), Some(PhaseKind::Moving));
@@ -1490,13 +1528,30 @@ fn a_persons_start_at_the_process_check_is_waited_for() {
     let children = Children::default();
     let person = children.start(&install.installed, "person");
     let mut world = launching(a_healthy_trial(&install, &children, None));
-    let leaves = children.clone();
+    let (leaves, asked_to_leave) = (children.clone(), Arc::new(AtomicBool::new(false)));
+    let asked = Arc::clone(&asked_to_leave);
     world.on_say = Some(Box::new(move |line| {
         if line.contains("the exchange waits for it to leave") {
             leaves.end(person);
+            asked.store(true, Ordering::SeqCst);
         }
     }));
-    let (ended, world) = applied(install.road(limits(5_000, 5_000)), world);
+    // The window is the road's `wait_clock`'s, counted: a pause after the
+    // person was ended lasts until it has left and been reaped, so "gone
+    // within the window" is the event, never the machine's speed
+    // (T-WINDOWS-HANDOVER-ORDER-A-HELD-LOCK-WAIT).
+    let gone = children.clone();
+    let road = Road {
+        wait_clock: Arc::new(CountedClock::new(move |_| {
+            if asked_to_leave.load(Ordering::SeqCst) {
+                crate::lane::wait_until("the person's start to leave", || {
+                    gone.status(person).is_some()
+                });
+            }
+        })),
+        ..install.road(limits(5_000, 5_000))
+    };
+    let (ended, world) = applied(road, world);
     assert_eq!(ended, Ended::Committed, "{:?}", world.said);
     assert!(
         said(&world, &format!("(pid {person}) runs; the exchange waits")),
@@ -1963,7 +2018,7 @@ impl crate::update_recover::World for Fake {
 /// **The recovery door over `install`** on a worker, handed `then_launch`:
 /// its exit code and what it asked of `hands`.
 fn recover_door(install: &Install, then_launch: Vec<OsString>, hands: Fake) -> (i32, Fake) {
-    match start_recover_door(install, then_launch, hands).join() {
+    match start_recover_door(install, then_launch, hands, Arc::new(WallClock)).join() {
         Ok(answer) => answer,
         Err(panic) => std::panic::resume_unwind(panic),
     }
@@ -1974,6 +2029,7 @@ fn start_recover_door(
     install: &Install,
     then_launch: Vec<OsString>,
     hands: Fake,
+    wait_clock: Arc<dyn crate::update_apply::WaitClock>,
 ) -> JoinHandle<(i32, Fake)> {
     let (home, installed, data, agents) = (
         install.home.clone(),
@@ -1992,6 +2048,7 @@ fn start_recover_door(
             limits: limits(5_000, 5_000),
             starter: None,
             handed_back: None,
+            wait_clock,
         };
         let code = crate::update_recover::run(worker, &door, &mut hands);
         (code, hands)
@@ -2919,6 +2976,7 @@ fn start_then_recover_on(
             limits,
             starter: None,
             handed_back: None,
+            wait_clock: Arc::new(WallClock),
         };
         let code = crate::update_recover::run(worker, &door, &mut hands);
         (code, hands)
@@ -5236,8 +5294,12 @@ fn the_macos_recovery_carries_a_start_it_defers_to_an_election_in_flight() {
         .unwrap()
         .expect("the election lock is free");
         let recorder = Recorder::of(&install);
+        // Recovery's wait for the election is spent on the road's counted
+        // clock (T-WINDOWS-HANDOVER-ORDER-A-HELD-LOCK-WAIT).
+        let clock = Arc::new(CountedClock::new(|_| {}));
         let road = Road {
             nonce: None,
+            wait_clock: clock.clone(),
             ..recorded_road(&install, &recorder, limits(5_000, 0))
         };
         let person = start.is_some();
@@ -5254,6 +5316,11 @@ fn the_macos_recovery_carries_a_start_it_defers_to_an_election_in_flight() {
             recovered.ended,
             Ended::Deferred(Deferral::WindowDuty),
             "the transaction is left to the election in flight"
+        );
+        assert_eq!(
+            Duration::from_millis(clock.moved_ms()),
+            crate::update_apply::ELECTION_WITHIN,
+            "recovery waited out the election in flight on its road's clock, once"
         );
         assert_eq!(
             recovered.deferred_to,
@@ -5292,12 +5359,19 @@ fn the_macos_recovery_door_hands_a_deferred_start_to_the_window() {
         OsString::from("/工作/文件夹"),
     ];
     // The door's wait for the election ends at `ELECTION_WITHIN`, with the
-    // election still held.
+    // election still held: spent on the door's counted clock
+    // (T-WINDOWS-HANDOVER-ORDER-A-HELD-LOCK-WAIT).
+    let clock = Arc::new(CountedClock::new(|_| {}));
     let (code, hands) = ended_while_held(
         in_flight,
-        start_recover_door(&install, handed.clone(), Fake::default()),
+        start_recover_door(&install, handed.clone(), Fake::default(), clock.clone()),
     );
     assert_eq!(code, 0, "{:?}", hands.said);
+    assert_eq!(
+        Duration::from_millis(clock.moved_ms()),
+        crate::update_apply::ELECTION_WITHIN,
+        "the door waited out the election in flight on its clock, once"
+    );
     let here = std::env::current_dir().ok();
     assert_eq!(
         hands.carried,

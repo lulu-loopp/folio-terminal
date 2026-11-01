@@ -2398,7 +2398,7 @@ mod tests {
     /// releases the first holder, so the second ask takes the duty without a
     /// sleep or a fresh budget.
     ///
-    /// MUTATION: in `update_apply::ask_for_the_window_until`, return the first
+    /// MUTATION: in `update_apply::ask_for_the_window_by`, return the first
     /// contended `Window::Refused`.
     #[test]
     fn both_appliers_reask_a_contended_election_within_the_same_budget() {
