@@ -10387,8 +10387,13 @@ struct WindowRuntime<B: Backend = Native> {
     /// because a floating window's picture is clicked as a pane's is.
     video_click: Option<VideoPictureClick>,
     /// **The clock the double-click counters count presses on** — the wall
-    /// clock in the product; see [`PointerClock`].
-    pointer_clock: PointerClock,
+    /// clock in the product; see [`PressClock`].
+    pointer_clock: PressClock,
+    /// **The clock a paste press is stamped and settled on**
+    /// (`Runtime::ask_for_a_paste`) — the wall clock in the product; see
+    /// [`PressClock`]. Its own field, so that a test holding the pointer clock
+    /// does not hold this one too.
+    paste_clock: PressClock,
     /// **Every animated picture this window has looked inside**, by the same
     /// normalised path key the decode cache beside it uses (user ruling
     /// 2026-08-28; §7.44 ⑤).
@@ -21119,17 +21124,21 @@ struct ImageClicks {
     last: Option<(PreviewSurface, [f32; 2], Instant)>,
 }
 
-/// **The moment a press is counted at by the window's double-click counters**
-/// ([`ImageClicks`] and [`PreviewTextClicks`]; T-FLOATING-VIDEO-DOUBLE-CLICK-TIMING,
-/// 0.4.9 plan row 124).
+/// **The moment a press is counted at** — by the window's double-click counters
+/// ([`ImageClicks`] and [`PreviewTextClicks`], on its `pointer_clock`;
+/// T-FLOATING-VIDEO-DOUBLE-CLICK-TIMING, 0.4.9 plan row 124), and by its clipboard's
+/// pastes, whose `asked_at` and whose deadline at the next press are read on its
+/// `paste_clock` (`Runtime::ask_for_a_paste`; T-CLIPBOARD-PASTE-PAST-DESK-BUSY-NOTICE-FLAKE,
+/// 0.4.9 plan row 172).
 ///
 /// The product's is the wall clock, and [`Self::moment`] answers the instant its
 /// caller has just read, unchanged: a press is counted at exactly the moment it
 /// was before this seam existed. A test holds it instead, so that whether two
-/// presses are one double click is decided by the clock the test moves and not
+/// presses are one double click, or whether a paste owed since the first press has
+/// outlived its deadline at the next, is decided by the clock the test moves and not
 /// by how long a loaded machine took between them.
 #[derive(Clone, Copy, Debug, Default)]
-enum PointerClock {
+enum PressClock {
     #[default]
     Wall,
     /// A test's: every press is counted at this moment until the test moves it.
@@ -21137,7 +21146,7 @@ enum PointerClock {
     Held(Instant),
 }
 
-impl PointerClock {
+impl PressClock {
     /// The moment a press read at `wall` is counted at.
     fn moment(self, wall: Instant) -> Instant {
         match self {
@@ -34032,7 +34041,8 @@ fn new_window_runtime<B: Backend>(parts: NewWindowParts<B>) -> WindowRuntime<B> 
         web: BTreeMap::new(),
         video: video_seat::VideoSeats::default(),
         video_click: None,
-        pointer_clock: PointerClock::Wall,
+        pointer_clock: PressClock::Wall,
+        paste_clock: PressClock::Wall,
         animations: AnimationCache::with_budget(MAX_ANIMATION_CACHE_BYTES),
         animations_drawn: BTreeMap::new(),
         pictures_owe_a_frame: false,
