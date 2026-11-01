@@ -8362,42 +8362,45 @@ crates/bt-platform/src/launch_agent.rs	bt-platform crate::launch_agent::sweep	Am
 crates/bt-platform/src/launch_agent.rs	bt-platform crate::launch_agent::sweep	Ambiguous	kind	1	
 crates/bt-platform/src/launch_agent.rs	bt-platform crate::launch_agent::sweep	Ambiguous	map	1	
 crates/bt-platform/src/launch_agent.rs	bt-platform crate::launch_agent::sweep	Ambiguous	map_err	1	
+crates/bt-platform/src/launch_conversation.rs	bt-platform crate::launch_conversation::<RealClock as LaunchClock>::wait	Dynamic	ready	1	
 crates/bt-platform/src/launch_conversation.rs	bt-platform crate::launch_conversation::hand_over_on	Dynamic	on_reply	1	
 crates/bt-platform/src/launch_pipe.rs	bt-platform crate::launch_pipe::<Client as crate::launch_conversation::Connection>::hear	Ambiguous	truncate	1	
 crates/bt-platform/src/launch_pipe.rs	bt-platform crate::launch_pipe::Instance::open	Ambiguous	unwrap_or	2	
-crates/bt-platform/src/launch_pipe.rs	bt-platform crate::launch_pipe::LaunchPipe::start	Ambiguous	map_err	1	
-crates/bt-platform/src/launch_pipe.rs	bt-platform crate::launch_pipe::hand_over	Ambiguous	elapsed	1	
+crates/bt-platform/src/launch_pipe.rs	bt-platform crate::launch_pipe::LaunchPipe::start_on	Ambiguous	map_err	1	
 crates/bt-platform/src/launch_pipe.rs	bt-platform crate::launch_pipe::listen	Ambiguous	is_err	1	
 crates/bt-platform/src/launch_pipe.rs	bt-platform crate::launch_pipe::listen	Ambiguous	recycle	1	
-crates/bt-platform/src/launch_pipe.rs	bt-platform crate::launch_pipe::read_reply	Ambiguous	is_multiple_of	1	
 crates/bt-platform/src/launch_pipe.rs	bt-platform crate::launch_pipe::read_reply	Ambiguous	map_err	1	
-crates/bt-platform/src/launch_pipe.rs	bt-platform crate::launch_pipe::read_reply	Ambiguous	unwrap_or	1	
 crates/bt-platform/src/launch_pipe.rs	bt-platform crate::launch_pipe::serve	Ambiguous	as_bytes	1	
 crates/bt-platform/src/launch_pipe.rs	bt-platform crate::launch_pipe::serve	Ambiguous	into_owned	1	
 crates/bt-platform/src/launch_pipe.rs	bt-platform crate::launch_pipe::serve	Dynamic	commit	1	
 crates/bt-platform/src/launch_pipe.rs	bt-platform crate::launch_pipe::serve	Dynamic	decide	1	
 crates/bt-platform/src/launch_pipe.rs	bt-platform crate::launch_pipe::server_process_id	Ambiguous	map_err	1	
+crates/bt-platform/src/launch_pipe.rs	bt-platform crate::launch_pipe::signalled_within	Ambiguous	is_multiple_of	1	
+crates/bt-platform/src/launch_pipe.rs	bt-platform crate::launch_pipe::signalled_within	Ambiguous	unwrap_or	1	
 crates/bt-platform/src/launch_pipe.rs	bt-platform crate::launch_pipe::vetted_server	Ambiguous	and_then	1	
 crates/bt-platform/src/launch_pipe.rs	bt-platform crate::launch_pipe::vetted_server	Ambiguous	as_deref	1	
 crates/bt-platform/src/launch_pipe.rs	bt-platform crate::launch_pipe::vetted_server	Ambiguous	map	1	
 crates/bt-platform/src/launch_pipe.rs	bt-platform crate::launch_pipe::vetted_server	Ambiguous	ok	1	
 crates/bt-platform/src/launch_pipe.rs	bt-platform crate::launch_pipe::vetted_server	Dynamic	named	1	
 crates/bt-platform/src/launch_pipe_unix.rs	bt-platform crate::launch_pipe::<Served as Accepted>::outwait_first_move	Ambiguous	kind	1	
-crates/bt-platform/src/launch_pipe_unix.rs	bt-platform crate::launch_pipe::LaunchPipe::start	Ambiguous	as_encoded_bytes	1	
-crates/bt-platform/src/launch_pipe_unix.rs	bt-platform crate::launch_pipe::LaunchPipe::start	Ambiguous	len	1	
-crates/bt-platform/src/launch_pipe_unix.rs	bt-platform crate::launch_pipe::LaunchPipe::start	Ambiguous	map	1	
+crates/bt-platform/src/launch_pipe_unix.rs	bt-platform crate::launch_pipe::<Served as Accepted>::outwait_first_move	Ambiguous	map	1	
+crates/bt-platform/src/launch_pipe_unix.rs	bt-platform crate::launch_pipe::LaunchPipe::start_on	Ambiguous	as_encoded_bytes	1	
+crates/bt-platform/src/launch_pipe_unix.rs	bt-platform crate::launch_pipe::LaunchPipe::start_on	Ambiguous	len	1	
+crates/bt-platform/src/launch_pipe_unix.rs	bt-platform crate::launch_pipe::LaunchPipe::start_on	Ambiguous	map	1	
 crates/bt-platform/src/launch_pipe_unix.rs	bt-platform crate::launch_pipe::answer	Ambiguous	as_bytes	1	
 crates/bt-platform/src/launch_pipe_unix.rs	bt-platform crate::launch_pipe::answer	Ambiguous	into_owned	1	
 crates/bt-platform/src/launch_pipe_unix.rs	bt-platform crate::launch_pipe::answer	Dynamic	commit	1	
 crates/bt-platform/src/launch_pipe_unix.rs	bt-platform crate::launch_pipe::answer	Dynamic	decide	1	
 crates/bt-platform/src/launch_pipe_unix.rs	bt-platform crate::launch_pipe::endpoint_for	Ambiguous	map	1	
 crates/bt-platform/src/launch_pipe_unix.rs	bt-platform crate::launch_pipe::listen	Ambiguous	kind	2	
+crates/bt-platform/src/launch_pipe_unix.rs	bt-platform crate::launch_pipe::on_clock	Ambiguous	kind	1	
+crates/bt-platform/src/launch_pipe_unix.rs	bt-platform crate::launch_pipe::on_clock	Ambiguous	unwrap_or_else	1	
+crates/bt-platform/src/launch_pipe_unix.rs	bt-platform crate::launch_pipe::on_clock	Dynamic	step	1	
 crates/bt-platform/src/launch_pipe_unix.rs	bt-platform crate::launch_pipe::peer_executable	Ambiguous	as_mut_ptr	1	
 crates/bt-platform/src/launch_pipe_unix.rs	bt-platform crate::launch_pipe::peer_executable	Ambiguous	cast	1	
 crates/bt-platform/src/launch_pipe_unix.rs	bt-platform crate::launch_pipe::peer_executable	Ambiguous	map_err	1	
 crates/bt-platform/src/launch_pipe_unix.rs	bt-platform crate::launch_pipe::peer_executable	Ambiguous	truncate	1	
 crates/bt-platform/src/launch_pipe_unix.rs	bt-platform crate::launch_pipe::peer_executable	Ambiguous	unwrap_or	3	
-crates/bt-platform/src/launch_pipe_unix.rs	bt-platform crate::launch_pipe::serve	Ambiguous	is_err	2	
 crates/bt-platform/src/launch_pipe_unix.rs	bt-platform crate::launch_pipe::vet_executable	Ambiguous	map	1	
 crates/bt-platform/src/launch_pipe_unix.rs	bt-platform crate::launch_pipe::vet_executable	Dynamic	named	2	
 crates/bt-platform/src/launch_pipe_unix.rs	bt-platform crate::launch_pipe::vetted_endpoint	Ambiguous	file_type	2	2026-10-26: Metadata::file_type, an accessor of the value std::fs::symlink_metadata returned: no disk question (that call is the question, typed: an Effect where a door reaches it); the engine reads no foreign function's return type, and a method of a file-system value is no effect (T-UNTYPED-RECEIVER-FS-CALLS-TRIAGE)
