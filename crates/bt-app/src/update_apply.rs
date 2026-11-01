@@ -1253,32 +1253,6 @@ impl WaitClock for WallClock {
     }
 }
 
-/// **A file opened without delete sharing, as a scanner or an indexer opens
-/// one, until the test lets it go; whether it was let go**
-/// (T-UPDATE-STARTUP-ON-DISK-TEMP-DIR-RACE; shared with the Prepare's held
-/// journal, T-UPDATE-PREPARE-REVALIDATION-RESUME-FLAKE). Made on Windows only:
-/// the open is `bt_platform::trust_harness::hold_without_delete_sharing`'s.
-#[cfg(test)]
-#[derive(Clone)]
-pub(crate) struct ScannerHold(std::sync::Arc<std::sync::Mutex<Option<std::fs::File>>>);
-
-#[cfg(test)]
-impl ScannerHold {
-    pub(crate) fn of(file: &Path) -> Self {
-        Self(std::sync::Arc::new(std::sync::Mutex::new(Some(
-            bt_platform::trust_harness::hold_without_delete_sharing(file).unwrap(),
-        ))))
-    }
-
-    pub(crate) fn let_go(&self) {
-        self.0.lock().unwrap().take();
-    }
-
-    pub(crate) fn was_let_go(&self) -> bool {
-        self.0.lock().unwrap().is_none()
-    }
-}
-
 /// **A test's [`TrialClock`] and [`WaitClock`]** (T-TRIAL-DEATH-WAIT-CONTROLLED-CLOCK,
 /// T-ELAPSED-UPPER-BOUNDS-ON-OTHER-WAITS): it starts at one wall reading and
 /// one monotonic reading and moves only by the pauses it is asked for — it

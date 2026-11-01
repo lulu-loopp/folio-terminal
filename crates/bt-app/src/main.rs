@@ -58312,7 +58312,7 @@ mod platform_gate_tests {
 
     /// **The list.** One file per line, in the order `ls` gives them, each with
     /// the reason it is allowed to ask.
-    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 39] = [
+    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 40] = [
         // Windows-only test fixture: the `pi` row, which only the Windows table ships, reopened
         // from a Recent row, beside its every-platform twin on the host's fallback shell.
         "app_files_tests.rs",
@@ -58394,6 +58394,9 @@ mod platform_gate_tests {
         // Homebrew records, and the guard that detaches an image mounted under a test's folder
         // (`hdiutil`); the Prepare's pure parts run everywhere.
         "update_prepare_macos_tests.rs",
+        // Windows-only test fixtures: a journal another program holds open (`ScannerHold`, shared
+        // with `update_startup`'s retirement tests); the Prepare's refusal elsewhere is portable.
+        "update_prepare_windows_tests.rs",
         // Only test fixtures: the rescue build running from `H\<txn>` and the scanner holds
         // its retirement's worker waits out (Windows), and the mounted image a retirement
         // detaches (macOS); the start's pass itself is portable.
