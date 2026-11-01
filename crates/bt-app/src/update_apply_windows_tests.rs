@@ -3925,9 +3925,16 @@ fn mark_unwritable_cell(tag: &str, outgoing: OutgoingAfterLeave, applier: Applie
         }
         ApplierIs::Dead => Running { pid: 1, started: 1 },
     };
-    let leaving = Leaving::over(&install.home, install.txn, &install.data)
-        .after_applier(p, Duration::from_millis(300));
-    let (left, started) = match old_leaves(&install, Running { pid: 2, started: 2 }, leaving).join()
+    let within = Duration::from_millis(300);
+    let leaving = Leaving::over(&install.home, install.txn, &install.data).after_applier(p, within);
+    let clock = Arc::new(CountedClock::new(|_| {}));
+    let (left, started) = match old_leaves_on(
+        &install,
+        Arc::clone(&clock),
+        Running { pid: 2, started: 2 },
+        leaving,
+    )
+    .join()
     {
         Ok(answer) => answer,
         Err(panic) => std::panic::resume_unwind(panic),
@@ -3935,6 +3942,16 @@ fn mark_unwritable_cell(tag: &str, outgoing: OutgoingAfterLeave, applier: Applie
     if matches!(outgoing, OutgoingAfterLeave::Gone) {
         o_lock = None;
     }
+    assert_eq!(
+        u128::from(clock.moved_ms()),
+        match applier {
+            // P runs and never marks: O's wait for it is spent, on the count.
+            ApplierIs::Alive => within.as_millis(),
+            // P is gone: O takes the duty at its first look, with no pause.
+            ApplierIs::Dead => 0,
+        },
+        "{outgoing:?}/{applier:?}: O's wait for P"
+    );
     assert_eq!(
         left,
         Left::Started(install.installed.clone()),
@@ -4066,12 +4083,24 @@ fn a_panic_before_the_duty_leaves_the_one_window_to_o() {
 
     let leaving = Leaving::over(&install.home, install.txn, &install.data)
         .after_applier(Running { pid: 1, started: 1 }, Duration::from_millis(300));
-    let (left, started) = match old_leaves(&install, Running { pid: 2, started: 2 }, leaving).join()
+    let clock = Arc::new(CountedClock::new(|_| {}));
+    let (left, started) = match old_leaves_on(
+        &install,
+        Arc::clone(&clock),
+        Running { pid: 2, started: 2 },
+        leaving,
+    )
+    .join()
     {
         Ok(answer) => answer,
         Err(panic) => std::panic::resume_unwind(panic),
     };
     drop(o_lock);
+    assert_eq!(
+        clock.pauses(),
+        0,
+        "the applier is gone: O takes the duty at its first look"
+    );
     assert_eq!(left, Left::Started(install.installed.clone()));
     assert_eq!(
         started,
@@ -4560,18 +4589,11 @@ fn a_stale_mark_is_taken_over_by_exactly_one_contender() {
 type Started = Vec<(PathBuf, Vec<OsString>)>;
 
 /// O's end, on a worker of its own as `update_handoff::leave_armed` runs it:
-/// `leaving`, as the process `old`, with the recording spawner.
-fn old_leaves(install: &Install, old: Running, leaving: Leaving) -> JoinHandle<(Left, Started)> {
-    let installed = install.installed.clone();
-    start_on_a_worker(move |worker| {
-        let mut starts = Starts::default();
-        let left = leaving.leave(old, &installed, &mut starts, Some(worker));
-        (left, starts.calls)
-    })
-}
-
-/// [`old_leaves`], with O's wait for its applier read and paused on `clock`
-/// (`Leaving::leave_on`).
+/// `leaving`, as the process `old`, with the recording spawner, and O's wait
+/// for its applier read and paused on `clock` (`Leaving::leave_on`). Every
+/// test of O's end hands a [`CountedClock`] (T-TIMING-CENSUS-PRODUCT-WINDOWS):
+/// a wait the test outlasts is spent on the count, and one the applier ends is
+/// ended inside a pause the test chooses, so no real window decides a verdict.
 fn old_leaves_on(
     install: &Install,
     clock: Arc<CountedClock>,
@@ -4594,11 +4616,19 @@ fn old_leaves_on(
 /// On A5 O reached its end 0.8 s before its applier's first decision, won the
 /// election, and the applier refused and abandoned the whole update. Here O's
 /// end runs first with the applier recorded (this test process, as the
-/// applier), and the applier starts half a second later, through the real
-/// road.
+/// applier), and the applier starts, through the real road, only once O has
+/// looked for its mark and found none.
 ///
-/// MUTATION: in `update_handoff::Leaving::leave`, skip the wait for the
-/// applier's decision.
+/// O's wait is read on a [`CountedClock`] (T-TIMING-CENSUS-PRODUCT-WINDOWS):
+/// its first pause lasts until the applier's mark names it, within the suite's
+/// patience, so "the applier decided inside O's wait" is that one pause and
+/// never a race between O's real 20 s and the applier's road. A mark that
+/// never comes costs the patience once; the rest of O's wait is then spent on
+/// the count and O takes the duty, which is red here, never a hang.
+///
+/// MUTATION: in `update_handoff::Leaving::leave_on`, skip the wait for the
+/// applier's decision; or wait out the whole budget whatever the mark says (O
+/// then takes the duty after the applier's commit: its pauses are 400, not 1).
 #[test]
 fn o_waits_for_the_applier_it_started_and_the_update_applies() {
     let Some(install) = Install::new("o-waits") else {
@@ -4610,12 +4640,31 @@ fn o_waits_for_the_applier_it_started_and_the_update_applies() {
     let applier = crate::update_apply::this_process();
     let leaving = Leaving::over(&install.home, install.txn, &install.data)
         .after_applier(applier, Duration::from_secs(20));
-    let o = old_leaves(&install, old, leaving);
-    std::thread::sleep(Duration::from_millis(500));
+    let looked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let clock = {
+        let (home, txn, looked) = (install.home.clone(), install.txn, Arc::clone(&looked));
+        Arc::new(CountedClock::new(move |pause| {
+            if pause == 1 {
+                looked.store(true, std::sync::atomic::Ordering::SeqCst);
+                crate::lane::within_patience(|| {
+                    crate::update_apply::window_owner(&home, txn) == Some(applier)
+                });
+            }
+        }))
+    };
+    let o = old_leaves_on(&install, Arc::clone(&clock), old, leaving);
+    crate::lane::wait_until("O's first look for its applier's mark", || {
+        looked.load(std::sync::atomic::Ordering::SeqCst)
+    });
     let mut road = install.road(limits(20_000, 20_000));
     road.me = applier;
     let (ended, world) = applied_on(&install, road, install.world(Trial::Answers));
     let (left, starts) = o.join().unwrap();
+    assert_eq!(
+        clock.pauses(),
+        1,
+        "O's wait ended at its first look after the applier's mark"
+    );
     assert_eq!(left, Left::NotMine(Some(applier.pid)), "{starts:?}");
     assert!(starts.is_empty(), "O starts nothing");
     assert_eq!(ended, Ended::Committed, "{:?}", world.said);
@@ -4691,10 +4740,19 @@ fn an_applier_that_dies_before_its_mark_leaves_the_window_to_o() {
 /// RED (U-34, round 6) — **an applier alive that never takes the mark loses
 /// the duty to O once O's wait has passed**, and O starts Folio.
 ///
-/// MUTATION: in `update_handoff::Leaving::leave`, wait for the applier with no
-/// bound (O's end then never leaves).
+/// O's wait is read on a [`CountedClock`] (T-TIMING-CENSUS-PRODUCT-WINDOWS):
+/// "O waited its whole budget" is how far its pauses moved that clock, not a
+/// reading of the real one, and a wait that does not end within its budget is
+/// stopped by the clock at a pause no bounded wait reaches.
+///
+/// MUTATION: in `update_handoff::Leaving::leave_on`, wait for the applier with
+/// no bound — the clock stops O at pause [`PAST_ANY_BUDGET`], red, not a hang;
+/// end the wait at the first look — the clock moved 0 ms, not 700.
 #[test]
 fn an_applier_that_never_takes_the_mark_loses_the_window_after_os_wait() {
+    /// More pauses than any bounded wait of O's in this test asks for: each
+    /// pause moves the clock by at least a millisecond, and the budget is 700.
+    const PAST_ANY_BUDGET: usize = 1_000;
     let Some(install) = Install::new("applier-silent") else {
         return;
     };
@@ -4708,11 +4766,23 @@ fn an_applier_that_never_takes_the_mark_loses_the_window_after_os_wait() {
         pid: silent,
         started: install_flip::started_of(silent).expect("it runs"),
     };
-    let leaving = Leaving::over(&install.home, install.txn, &install.data)
-        .after_applier(applier, Duration::from_millis(700));
-    let began = Instant::now();
-    let (left, starts) = old_leaves(&install, old, leaving).join().unwrap();
-    assert!(began.elapsed() >= Duration::from_millis(700), "O waited");
+    let within = Duration::from_millis(700);
+    let leaving =
+        Leaving::over(&install.home, install.txn, &install.data).after_applier(applier, within);
+    let clock = Arc::new(CountedClock::new(|pause| {
+        assert!(
+            pause < PAST_ANY_BUDGET,
+            "O's wait for a silent applier did not end within its budget"
+        );
+    }));
+    let (left, starts) = old_leaves_on(&install, Arc::clone(&clock), old, leaving)
+        .join()
+        .unwrap();
+    assert_eq!(
+        u128::from(clock.moved_ms()),
+        within.as_millis(),
+        "O waited its whole budget for the silent applier, and no more"
+    );
     assert_eq!(left, Left::Started(install.installed.clone()), "{starts:?}");
     assert_eq!(
         crate::update_apply::window_owner(&install.home, install.txn),
@@ -4832,7 +4902,13 @@ fn a_late_applier_after_os_wait_meets_os_replacement_and_never_commits() {
     let applier = crate::update_apply::this_process();
     let leaving = Leaving::over(&install.home, install.txn, &install.data)
         .after_applier(applier, Duration::from_millis(500));
-    let (left, starts) = old_leaves(&install, old, leaving).join().unwrap();
+    // O's wait for the unmarked applier is spent on the count, not on the wall
+    // clock (T-TIMING-CENSUS-PRODUCT-WINDOWS): the applier is late by state.
+    let o_clock = Arc::new(CountedClock::new(|_| {}));
+    let (left, starts) = old_leaves_on(&install, Arc::clone(&o_clock), old, leaving)
+        .join()
+        .unwrap();
+    assert_eq!(o_clock.moved_ms(), 500, "O waited out its budget");
     assert_eq!(left, Left::Started(install.installed.clone()), "{starts:?}");
     assert_eq!(starts.len(), 1, "O's replacement");
     // O's replacement runs and holds the data directory.
