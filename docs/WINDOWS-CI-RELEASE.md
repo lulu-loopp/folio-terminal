@@ -215,12 +215,27 @@ Minutes.
 | `gpu` | Windows | 5.0 / 5.57 | 19.4 / 20.95 (38708586878) | 29 | 40 |
 | `conpty` | Windows | 6.4 / 7.08 | 10.7 / 11.80 (38714746975) | 17 | 30 |
 | `smoke` | Windows | 4.2 / 5.47 | 10.1 / 11.05 (39014776542) | 16 | 60 |
-| `core-linux` | Linux | 7.8 / 8.53 | 10.4 / 10.82 (39010930188) | 15 | 45 |
+| `core-linux` | Linux | 7.8 / 8.53 | 10.4 / 10.82 (39010930188) | 30 (provisional, below) | 15 |
 | `gates-can-fail` | Windows | 6.4 / 7.4 | 8.1 / 10.15 (38693069271) | 14 | 20 |
 | `licensing` | Windows | 2.9 / 3.35 | 6.3 / 7.92 (39014776542) | 11 | 16 |
 | `wasm-lib-check` | Windows | 1.3 / 2.5 | 3.8 / 4.77 (38720519586) | 7 | 30 |
 | `release-script-tests` | Windows | no cache: 1.8 / 2.53 (38687157155) | - | 10 (floor; the rule gives 4) | 10 |
 | `cask-audit` | macOS | no cache: 1.1 / 1.80 (38665182697) | - | 10 (floor; the rule gives 3) | 10 |
+
+**`core-linux` is at a provisional 30 (T-CI-CORE-LINUX-BUDGET-REDERIVE,
+plan row 165, measured 2026-11-01), not a derived number.** Its 15 stopped
+holding with a restored cache: over the 33 attempts 41220186308 to
+41304814816 every one restored its cache in full and none was cold; the test
+step took 7.9-11.1 min on 13 of them and 13.3-14.4 min on 19 (two speeds of
+runner: head 42db8d1f6 took 8.60 in 41300386741 and 13.85 in 41304273777);
+four were cancelled at 15 (41303744747 twice, 41299423212, 41294422269).
+Green totals p50 14.1, max 14.97 (41220409108); the cancelled ones at least
+15.2. `bt-source` is about 81 % of the step (408-704 s over 322 tests, against
+297 s over 165 on 2026-10-17): more test binaries, each building the real-tree
+index again (plan row 166). The rule takes the cold max, the window holds no
+cold run, and a cold run could not finish under 15 to be measured; 30 is the
+room to measure one in. The row is replaced by the cold max x 1.36, with its
+runs, once cold runs have been measured.
 
 The 1.36 was, when `logic`'s budget was first derived, the slowest cold `test`
 step over the fastest (47.8 / 35.1 min; cause unknown: the fast ones were
