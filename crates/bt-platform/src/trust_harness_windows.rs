@@ -1740,13 +1740,25 @@ mod tests {
     }
 
     /// **The stand-in signer**: `body` POSTed on a connection of its own, and
-    /// everything that came back.
+    /// everything that came back. A failure names the step it came at (the
+    /// connect, the head, the body, or the read of the answer), so a reset
+    /// says where it met the client (row 154: one under load said only
+    /// `os error 10054`).
     fn post(address: std::net::SocketAddr, body: &[u8]) -> std::io::Result<Vec<u8>> {
-        let mut connection = TcpStream::connect(address)?;
-        connection.write_all(post_head(address, body).as_bytes())?;
-        connection.write_all(body)?;
+        let at = |step: &'static str| {
+            move |error: std::io::Error| {
+                std::io::Error::new(error.kind(), format!("{step}: {error}"))
+            }
+        };
+        let mut connection = TcpStream::connect(address).map_err(at("the connect"))?;
+        connection
+            .write_all(post_head(address, body).as_bytes())
+            .map_err(at("the head"))?;
+        connection.write_all(body).map_err(at("the body"))?;
         let mut answer = Vec::new();
-        connection.read_to_end(&mut answer)?;
+        connection
+            .read_to_end(&mut answer)
+            .map_err(at("the read of the answer"))?;
         Ok(answer)
     }
 

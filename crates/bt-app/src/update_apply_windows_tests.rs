@@ -121,6 +121,31 @@ impl Children {
         pid
     }
 
+    /// Whether the first process this test started — the trial, in every test
+    /// whose road stops one — has ended, as its handle reports.
+    fn first_ended(&self) -> bool {
+        self.0
+            .lock()
+            .unwrap()
+            .first_mut()
+            .is_some_and(|child| matches!(child.try_wait(), Ok(Some(_))))
+    }
+
+    /// **The road's stop clock for a test whose road stops a silent trial**
+    /// (T-TRIAL-STOP-QUIT-GRACE-ON-THE-ROAD-CLOCK; `CountedClock::stopping`
+    /// over `limits`): the trial is the first process this test started. It
+    /// opens no window, so the ask to quit has no answer to wait for and the
+    /// grace is spent on the count; the end window waits for its handle to
+    /// report it ended.
+    fn stop_clock(&self, limits: &Limits) -> Arc<CountedClock> {
+        let at_end = self.clone();
+        Arc::new(CountedClock::stopping(
+            (limits.quit_within, limits.end_within, limits.poll),
+            || true,
+            move || at_end.first_ended(),
+        ))
+    }
+
     /// End the one started as `pid`, by its handle, and wait for it.
     fn end(&self, pid: u32) {
         let mut children = self.0.lock().unwrap();
@@ -573,6 +598,7 @@ impl Install {
             held_clock: Arc::new(WallClock),
             decision_clock: Arc::new(CountedClock::awaiting_the_decision(&self.home, self.txn)),
             wait_clock: Arc::new(WallClock),
+            stop_clock: Arc::new(WallClock),
             me: Running {
                 pid: std::process::id(),
                 started: 0,
@@ -780,6 +806,7 @@ fn applied(install: &Install, limits: Limits, world: Fake) -> (Ended, Fake) {
 /// `held` is kept for the life of the test process: each test owns its
 /// fixture, so the road stays behind the hold and never runs on past the
 /// failed test into the folder that test's end removes.
+#[track_caller]
 fn ended_while_held<T, H>(held: H, road: JoinHandle<T>) -> T {
     ended_while_held_keeping(held, road, || ())
 }
@@ -788,6 +815,7 @@ fn ended_while_held<T, H>(held: H, road: JoinHandle<T>) -> T {
 /// cannot keep past its own end (O alive, a child the fixture ends): on the red
 /// path `keep` first takes and keeps a hold that stops the road there, and only
 /// then is the test red.
+#[track_caller]
 fn ended_while_held_keeping<T, H>(held: H, road: JoinHandle<T>, keep: impl FnOnce()) -> T {
     if !crate::lane::within_patience(|| road.is_finished()) {
         keep();
@@ -801,7 +829,47 @@ fn ended_while_held_keeping<T, H>(held: H, road: JoinHandle<T>, keep: impl FnOnc
     }
 }
 
+/// **`road`'s end, awaited while its commit moves**
+/// (T-APPLIER-HOLD-CAP-UNDER-LOAD): for a road this test holds nothing of —
+/// it has let go of everything the road waited for — and that commits. Its
+/// remaining work is durable (each journal write flushed, each member moved
+/// write-through, a trial process started and its decision awaited), so a
+/// loaded machine does it slowly; the suite's [`crate::lane::PATIENCE`]
+/// starts over at each step the disk shows
+/// ([`crate::update_apply::commit_steps_left`]), and a road that stops moving
+/// for one patience before it ends is red, naming the line that awaited it,
+/// never a hang of the whole run. A journal caught mid-replace counts as the
+/// step last seen.
+#[track_caller]
+fn ended_while_committing<T>(install: &Install, road: JoinHandle<T>) -> T {
+    let at = std::panic::Location::caller();
+    let (journal, folder) = (
+        install.home.journal(),
+        install.home.transaction(install.txn),
+    );
+    let mut last = crate::update_apply::COMMIT_STEPS;
+    crate::lane::while_progressing(
+        &format!("the road's commit, awaited at {at}"),
+        crate::update_apply::COMMIT_STEPS,
+        || {
+            let phase = match std::fs::read(&journal).map(|bytes| Journal::parse(&bytes)) {
+                Ok(Ok(on_disk)) => Some(on_disk.body.phase.kind()),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+                Ok(Err(_)) | Err(_) => return last,
+            };
+            last = crate::update_apply::commit_steps_left(phase, &folder);
+            last
+        },
+        || road.is_finished(),
+    );
+    match road.join() {
+        Ok(answer) => answer,
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
 /// [`applied`], while this test holds `held` ([`ended_while_held`]).
+#[track_caller]
 fn applied_while_held<H>(install: &Install, limits: Limits, world: Fake, held: H) -> (Ended, Fake) {
     ended_while_held(
         held,
@@ -1072,7 +1140,7 @@ fn p_waits_for_o_and_releases_the_claim() {
         "nothing is written while O holds the lock"
     );
     drop(lock);
-    let (ended, world) = ended_while_held((), applier);
+    let (ended, world) = ended_while_committing(&install, applier);
     assert_eq!(ended, Ended::Committed, "{:?}", world.said);
     assert_eq!(
         *owned_then.lock().unwrap(),
@@ -1830,16 +1898,26 @@ fn a_failed_health_reverses_the_moves_and_relaunches_the_old_build() {
     let Some(install) = Install::new("health") else {
         return;
     };
+    let bounds = limits(20_000, 1_500);
+    let stop = install.children.stop_clock(&bounds);
+    let road = Road {
+        stop_clock: stop.clone(),
+        ..install.road(bounds)
+    };
+    let (at_end, read_at_end) = stop.at_the_end_ask();
+    let mut world = install.world(Trial::Silent);
+    world.on_say = Some(at_end);
     let began = Instant::now();
-    let (ended, world) = applied(
-        &install,
-        limits(20_000, 1_500),
-        install.world(Trial::Silent),
-    );
+    let (ended, world) = applied_on(&install, road, world);
     assert_eq!(ended, Ended::RolledBack, "{:?}", world.said);
     assert!(
         began.elapsed() >= Duration::from_millis(1_500),
         "the trial had its deadline"
+    );
+    assert_eq!(
+        *read_at_end.lock().unwrap(),
+        Some(u64::try_from(GRACE.as_millis()).unwrap()),
+        "asked to end exactly when its grace ran out on the stop's clock"
     );
     assert!(
         wrote(&world).ends_with("[Armed, Moving, Trial, RollbackIntent, RolledBack, Retired]"),
@@ -2592,13 +2670,16 @@ fn a_rollback_over_a_held_session_notes_it_and_the_restored_build_says_so() {
 /// The coordinator's ruling 1: "the process is identified by pid **and**
 /// creation time **and** image path = `<install>\folio.exe` … never touch a
 /// process whose identity does not match all three". The synthetic programs
-/// open no window, so the ask reaches no window and the grace runs out.
+/// open no window, so the ask reaches no window and the grace runs out — on
+/// the road's stop clock (`Children::stop_clock`), whose end window waits for
+/// the ended trial's handle (T-TRIAL-STOP-QUIT-GRACE-ON-THE-ROAD-CLOCK).
 ///
 /// MUTATION: in `update_apply::stop_trial`, ask `Ask::End` first (part A
-/// red); in `install_flip::runs_from`, answer from the pid and start time
-/// alone (part C red: the stranger is then asked and ended — the image is
-/// checked both where the trial is judged alive and inside `ask`, and both
-/// read `runs_from`).
+/// red), skip the grace, skip only the quit grace, or never end it (row 136's
+/// plants B, B′ and C); in `install_flip::runs_from`, answer from the pid and
+/// start time alone (part C red: the stranger is then asked and ended — the
+/// image is checked both where the trial is judged alive and inside `ask`,
+/// and both read `runs_from`).
 #[test]
 fn the_trial_is_asked_to_quit_before_it_is_ended_and_only_by_its_identity() {
     // A: the recorded trial, beside another process of the same image.
@@ -2612,12 +2693,16 @@ fn the_trial_is_asked_to_quit_before_it_is_ended_and_only_by_its_identity() {
         trial: Some(trial),
         trial_started: false,
     });
-    let began = Instant::now();
-    let (code, world) = recovered(
-        &install,
-        limits(20_000, 20_000),
-        install.world(Trial::Silent),
-    );
+    let bounds = limits(20_000, 20_000);
+    let stop = install.children.stop_clock(&bounds);
+    let road = Road {
+        stop_clock: stop.clone(),
+        ..install.road(bounds)
+    };
+    let (at_end, read_at_end) = stop.at_the_end_ask();
+    let mut world = install.world(Trial::Silent);
+    world.on_say = Some(at_end);
+    let (code, world) = recovered_on(road, world);
     assert_eq!(code, 0, "{:?}", world.said);
     let quit = said_at(&world, &format!("trial {} is asked to quit", trial.pid));
     let end = said_at(&world, &format!("trial {} is asked to end", trial.pid));
@@ -2626,7 +2711,11 @@ fn the_trial_is_asked_to_quit_before_it_is_ended_and_only_by_its_identity() {
         "{:?}",
         world.said
     );
-    assert!(began.elapsed() >= GRACE, "the grace ran before the end");
+    assert_eq!(
+        *read_at_end.lock().unwrap(),
+        Some(u64::try_from(GRACE.as_millis()).unwrap()),
+        "asked to end exactly when the grace ran out on the stop's clock"
+    );
     assert!(!runs(trial), "the trial is ended");
     assert!(runs(beside), "the other process of its image runs on");
     rolled_back_on_disk(&install);
@@ -4469,12 +4558,23 @@ fn a_start_counts_only_when_acknowledged_and_the_last_resort_is_a_window_here() 
 /// window's mark is taken over by exactly one of two contenders racing for
 /// it** (a soak): the election is one exclusive lock around
 /// read-check-replace, so the first in takes the duty and the second reads the
-/// live winner, `Theirs`, or — while the winner still holds the lock, or an
-/// outside scanner refuses its read — truthfully answers `Refused`; it may
-/// never become another winner. Two threads race, released together by a
+/// live winner, `Theirs`, or — when an outside scanner refuses its read —
+/// truthfully answers a `Refused` that is not the election's "still held"; it
+/// may never become another winner. Two threads race, released together by a
 /// barrier, over many rounds, each round from a fresh stale mark; the two
 /// contenders are both live processes (this test and a synthetic program it
 /// started), so neither can be taken for a dead owner.
+///
+/// **The second in waits out the first on one counted clock**
+/// (T-STALE-MARK-RACE-ON-A-COUNTED-CLOCK): both racers' waits for the election
+/// lock are read and paused on one [`CountedClock`] of the round
+/// (`update_apply::take_the_window_on`), which never sleeps. Its first pause
+/// lasts until the other racer has answered — and so let the lock go — within
+/// the suite's patience; the first in never pauses while it holds the lock (it
+/// asks each read and its write once). So the first holds for no pause of the
+/// clock, the second's wait has the election's 200 (`ELECTION_WITHIN` over
+/// `install_txn::LOCK_POLL`), and the round asserts the second took at most
+/// one: how long the first takes on a loaded machine decides nothing.
 ///
 /// **A replacement refused before its rename gives no winner** (0.4.8 E2):
 /// each applier whose mark does not land stands aside and lets the lock go,
@@ -4488,7 +4588,9 @@ fn a_start_counts_only_when_acknowledged_and_the_last_resort_is_a_window_here() 
 /// MUTATION: in `update_apply::take_the_window_within_using`, give each
 /// contender a lock of its own (both answer `Mine`); or, in
 /// `Applier::unrecorded`, answer `Mine` through a lock it keeps (a scanned
-/// round then has a winner whose duty the outgoing build cannot see).
+/// round then has a winner whose duty the outgoing build cannot see); or, in
+/// `install_txn::hold_until`, give up at the first refusal (the second
+/// answers "still held").
 #[test]
 fn a_stale_mark_is_taken_over_by_exactly_one_contender() {
     let Some(install) = Install::new("stale-race") else {
@@ -4513,27 +4615,43 @@ fn a_stale_mark_is_taken_over_by_exactly_one_contender() {
         let scanner = scanned
             .then(|| bt_platform::trust_harness::hold_without_delete_sharing(&mark).unwrap());
         let barrier = Arc::new(std::sync::Barrier::new(2));
+        let answered = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let clock = Arc::new(CountedClock::new({
+            let answered = Arc::clone(&answered);
+            move |pause| {
+                if pause == 1 {
+                    crate::lane::within_patience(|| {
+                        answered.load(std::sync::atomic::Ordering::SeqCst) >= 1
+                    });
+                }
+            }
+        }));
         let racers: Vec<_> = contenders
             .iter()
             .map(|who| {
-                let (home, txn, who, barrier) = (
+                let (home, txn, who, barrier, answered, clock) = (
                     install.home.clone(),
                     install.txn,
                     *who,
                     Arc::clone(&barrier),
+                    Arc::clone(&answered),
+                    Arc::clone(&clock),
                 );
                 bt_platform::spawn_at_priority(
                     "bt-u34-stale-race",
                     bt_platform::ThreadPriority::BelowNormal,
-                    move |_worker| {
+                    move |worker| {
                         barrier.wait();
-                        crate::update_apply::take_the_window(
-                            None,
+                        let answer = crate::update_apply::take_the_window_on(
+                            worker,
+                            &*clock,
                             &home,
                             txn,
                             who,
-                            Instant::now() + crate::update_apply::ELECTION_WITHIN,
-                        )
+                            crate::update_apply::ELECTION_WITHIN,
+                        );
+                        answered.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        answer
                     },
                 )
                 .expect("a racer")
@@ -4543,6 +4661,11 @@ fn a_stale_mark_is_taken_over_by_exactly_one_contender() {
             .into_iter()
             .map(|racer| racer.join().unwrap())
             .collect();
+        assert!(
+            clock.pauses() <= 1,
+            "round {round}: the second in waited out the first in one pause of the clock, not {}: {answers:?}",
+            clock.pauses()
+        );
         let on_disk =
             std::fs::read(&mark).map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
         let stood_aside = |answer: &Window| matches!(answer, Window::Refused(refusal) if refusal.why().contains("stands aside"));
@@ -4552,8 +4675,13 @@ fn a_stale_mark_is_taken_over_by_exactly_one_contender() {
                 let winner = contenders[at];
                 let loser = &answers[1 - at];
                 assert!(
-                    *loser == Window::Theirs(winner) || matches!(loser, Window::Refused(_)),
-                    "round {round}: the loser names the winner or truthfully refuses: {answers:?}"
+                    *loser == Window::Theirs(winner)
+                        || matches!(
+                            loser,
+                            Window::Refused(refusal) if refusal.retryable() && !refusal.contended()
+                        ),
+                    "round {round}: the loser names the winner or truthfully refuses a read it may \
+                     ask again, never because the election was still held: {answers:?}"
                 );
                 assert_eq!(
                     crate::update_apply::window_owner(&install.home, install.txn),
@@ -6609,6 +6737,7 @@ fn rescue_part(root: &Path) {
         trial_clock: Arc::new(WallClock),
         held_clock: Arc::new(WallClock),
         wait_clock: Arc::new(WallClock),
+        stop_clock: Arc::new(WallClock),
         me,
         starter: install_flip::parent_of_this_process(),
         handed_back: Some(handed_back),

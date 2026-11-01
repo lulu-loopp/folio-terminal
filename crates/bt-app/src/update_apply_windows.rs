@@ -84,9 +84,9 @@
 //!      with its creation time, running from `<install>\folio.exe`
 //!      (`update_apply::stop_trial` → `bt_platform::install_flip::ask`): asked
 //!      to quit (`WM_CLOSE` to the windows a person could close), 5 s of grace
-//!      through the wait door, then ended (`TerminateProcess` on a handle
-//!      whose creation time is read again), 5 s more; a process that is not
-//!      all three is never touched;
+//!      on the road's `stop_clock` (the wait door in the product), then ended
+//!      (`TerminateProcess` on a handle whose creation time is read again), 5 s
+//!      more; a process that is not all three is never touched;
 //!    - **the moves back**, under exclusive admission within 60 s (not had →
 //!      nothing recorded, [`Ended::RollbackWaits`]: the next holder tries):
 //!      `rolledout\` made; every install file whose digest is a **new**
@@ -581,6 +581,10 @@ pub(crate) struct Road {
     /// again and the data directory's claim (`update_apply::WaitClock`) —
     /// [`WallClock`] in the product.
     pub(crate) wait_clock: Arc<dyn WaitClock>,
+    /// **The clock a trial asked to quit, then ended, is waited out on** — the
+    /// quit grace and the end window of [`stop_trial`] — [`WallClock`] in the
+    /// product (T-TRIAL-STOP-QUIT-GRACE-ON-THE-ROAD-CLOCK).
+    pub(crate) stop_clock: Arc<dyn WaitClock>,
     /// This process, by its pid and start time: what the window's mark names
     /// when this process takes it (`update_apply::OWNER_FILE`).
     pub(crate) me: Running,
@@ -617,6 +621,7 @@ impl Road {
             held_clock: Arc::new(WallClock),
             decision_clock: Arc::new(WallClock),
             wait_clock: Arc::new(WallClock),
+            stop_clock: Arc::new(WallClock),
             me: crate::update_apply::this_process(),
             starter: install_flip::parent_of_this_process(),
             handed_back: None,
@@ -1619,6 +1624,7 @@ impl<'a> Txn<'a> {
         let installed = self.road.installed.clone();
         let stopped = stop_trial(
             worker,
+            &*self.road.stop_clock,
             process,
             &[installed.as_path()],
             (limits.quit_within, limits.end_within, limits.poll),
@@ -1787,6 +1793,7 @@ impl<'a> Txn<'a> {
                     let limits = &self.road.limits;
                     if let Err(why) = stop_trial(
                         worker,
+                        &*self.road.stop_clock,
                         process,
                         &images,
                         (limits.quit_within, limits.end_within, limits.poll),
@@ -1887,6 +1894,7 @@ impl<'a> Txn<'a> {
             may_end.clone()?;
             stop_trial(
                 worker,
+                &*road.stop_clock,
                 process,
                 &[installed.as_path()],
                 (
