@@ -1192,10 +1192,15 @@ fn contain(size: (u32, u32), fit: (u32, u32)) -> (u32, u32) {
 mod tests {
     use super::*;
 
-    /// How long a test here waits for the decoder to answer something that must
-    /// be answered: a quick machine pays nothing, and a decoder that never
-    /// answers is a red. The same patience as the engine's tests
-    /// (`engine::tests::PATIENCE`), whose module is private to `engine`.
+    /// How long planted work that a test holds waits to be let go before it lets
+    /// itself go: a test that releases it pays nothing, and a wait that never
+    /// ends becomes a late answer and a red. The same patience as the engine's
+    /// tests (`engine::tests::PATIENCE`), whose module is private to `engine`.
+    ///
+    /// **Never a bound on a real decode** (T-FIRST-FRAME-BUDGET-FROM-A-CLOCK,
+    /// R8): a loaded machine's decode ran past it, so the tests that need a real
+    /// frame ask with no wall limit, and a decode that never answers is the suite
+    /// watchdog's red.
     const DECODER_PATIENCE: Duration = Duration::from_secs(10);
 
     /// **Planted work's hold**: wait until the test lets the work go, or until
@@ -1765,15 +1770,17 @@ mod tests {
     fn the_shipped_mov_fixture_gives_up_a_frame_it_will_never_play() {
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/assets/folio-video-test.mov");
-        // The decoder itself, on a thread of its own, within the suite's patience
-        // rather than `first_frame`'s outer `FIRST_FRAME_BUDGET`: whether this
-        // decoder reads a QuickTime file is the subject, and how fast a loaded
-        // machine opens and seeks one is not. Only the open and the seek leave the
+        // The decoder itself, on this thread, with no wall limit over it rather than
+        // `first_frame`'s outer `FIRST_FRAME_BUDGET` (T-FIRST-FRAME-BUDGET-FROM-A-CLOCK,
+        // R8): whether this decoder reads a QuickTime file is the subject, and how
+        // fast a loaded machine opens and seeks one is not; a decode that never
+        // answers is the suite watchdog's red. Only the open and the seek leave the
         // product's clock here; `read_first_frame` still bounds its `ReadSample`
-        // loop by `FIRST_FRAME_BUDGET`, which is the product's answer to a reader
-        // that never ends.
+        // loop by `FIRST_FRAME_BUDGET` (`first_sample`), which is the product's
+        // answer to a reader that never ends.
         let url = HSTRING::from(fixture.as_os_str());
-        let frame = within_budget(DECODER_PATIENCE, move || decode_from_url(&url, 280, 160).0)
+        let frame = decode_from_url(&url, 280, 160)
+            .0
             .expect("a real mov gives up a frame");
         assert_eq!(
             (frame.native_width, frame.native_height),
@@ -1911,12 +1918,15 @@ mod tests {
     ///
     /// **The road is `first_frame`'s, its constant is not**
     /// (T-FIRST-FRAME-BUDGET-FROM-A-CLOCK): each question goes through
-    /// [`first_frame_through`] with the real decode, under [`DECODER_PATIENCE`]
+    /// [`first_frame_through`] with the real decode, under a budget that never
+    /// ends (`Duration::MAX`, which `recv_timeout` waits out as a plain `recv`)
     /// instead of [`FIRST_FRAME_BUDGET`]. Through `first_frame` the fixture's arm
     /// was a decode racing three seconds, and a loaded machine that lost the race
-    /// read "no frame" for a file it had decoded. Whether the file is free when
-    /// the answer comes back is the subject; how fast a loaded machine decodes is
-    /// not, and the budget is pinned next door, on work that has no decoder in it.
+    /// read "no frame" for a file it had decoded; under [`DECODER_PATIENCE`] it
+    /// raced ten (R8). Whether the file is free when the answer comes back is the
+    /// subject; how fast a loaded machine decodes is not, a decode that never
+    /// answers is the suite watchdog's red, and the budget is pinned next door, on
+    /// work that has no decoder in it.
     ///
     /// No mutation turns this red at will: the platform's late release it guards
     /// against is a race (CI run 39055489876 lost it once, in a full suite, on the
@@ -1926,7 +1936,7 @@ mod tests {
     fn an_answered_frame_leaves_its_file_free() {
         let patiently = |path: &Path| {
             let url = HSTRING::from(path.as_os_str());
-            first_frame_through(&url, DECODER_PATIENCE, move |stream| {
+            first_frame_through(&url, Duration::MAX, move |stream| {
                 decode_lent(&stream, (280, 160)).0
             })
         };
