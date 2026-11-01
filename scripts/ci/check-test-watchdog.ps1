@@ -74,6 +74,19 @@ switch ($case) {
         Out 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.00s'
         exit 101
     }
+    'boundary-before-name' {
+        # cargo's `Running` (stderr) and libtest's lines (stdout) are two pipes, and the watchdog may read the
+        # next binary's `Running` before the dead binary's 60 s line. Planted on ONE pipe, so that is the
+        # order the watchdog reads, every time: the boundary it trusts must be libtest's own `running N tests`.
+        Out '     Running unittests (stand-in)'
+        Out 'running 1 test'
+        Out '     Running unittests (stand-in)'
+        Out 'test planted::dies has been running for over 60 seconds'
+        Out 'running 1 test'
+        foreach ($i in 1..8) { Start-Sleep -Seconds 1; Out "busy line $i" }
+        Out 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.00s'
+        exit 101
+    }
     'silent' {
         [IO.File]::WriteAllText($env:FOLIO_STAND_IN_PIDS, "$PID")
         Running
@@ -166,6 +179,11 @@ try {
     # A binary that ends while a named test runs (no result line) does not leave a phantom hang for the next one.
     $run = Watch 'two-binaries' 63 @('--no-fail-fast')
     Check "a test whose binary ended is not a later binary's hang" ($run.code -eq 101 -and $run.output -match 'ended with their binary, no result line: planted::dies') $run
+
+    # The same, with the next binary's `Running` read before the dead binary's 60 s line (the order two pipes
+    # can arrive in on a loaded runner; plan row 171): the binary boundary is libtest's `running N tests`.
+    $run = Watch 'boundary-before-name' 63 @()
+    Check "a test whose binary ended is not a later binary's hang, whichever pipe is read first" ($run.code -eq 101 -and $run.output -match 'ended with their binary, no result line: planted::dies') $run
 
     $run = Watch 'silent' 3 @()
     Check 'silence once tests run is red with no name' ($run.code -eq 124 -and $run.output -match 'no test can be named') $run
