@@ -1862,17 +1862,20 @@ fn a_failed_health_reverses_the_moves_and_relaunches_the_old_build() {
         stop_clock: stop.clone(),
         ..install.road(bounds)
     };
+    let (at_end, read_at_end) = stop.at_the_end_ask();
+    let mut world = install.world(Trial::Silent);
+    world.on_say = Some(at_end);
     let began = Instant::now();
-    let (ended, world) = applied_on(&install, road, install.world(Trial::Silent));
+    let (ended, world) = applied_on(&install, road, world);
     assert_eq!(ended, Ended::RolledBack, "{:?}", world.said);
     assert!(
         began.elapsed() >= Duration::from_millis(1_500),
         "the trial had its deadline"
     );
-    assert!(
-        stop.moved_ms() >= u64::try_from(GRACE.as_millis()).unwrap(),
-        "its grace ran out on the stop's clock: {} ms",
-        stop.moved_ms()
+    assert_eq!(
+        *read_at_end.lock().unwrap(),
+        Some(u64::try_from(GRACE.as_millis()).unwrap()),
+        "asked to end exactly when its grace ran out on the stop's clock"
     );
     assert!(
         wrote(&world).ends_with("[Armed, Moving, Trial, RollbackIntent, RolledBack, Retired]"),
@@ -2630,10 +2633,11 @@ fn a_rollback_over_a_held_session_notes_it_and_the_restored_build_says_so() {
 /// the ended trial's handle (T-TRIAL-STOP-QUIT-GRACE-ON-THE-ROAD-CLOCK).
 ///
 /// MUTATION: in `update_apply::stop_trial`, ask `Ask::End` first (part A
-/// red), skip the grace or never end it (row 136's plants B and C); in `install_flip::runs_from`, answer from the pid and start time
-/// alone (part C red: the stranger is then asked and ended — the image is
-/// checked both where the trial is judged alive and inside `ask`, and both
-/// read `runs_from`).
+/// red), skip the grace, skip only the quit grace, or never end it (row 136's
+/// plants B, B′ and C); in `install_flip::runs_from`, answer from the pid and
+/// start time alone (part C red: the stranger is then asked and ended — the
+/// image is checked both where the trial is judged alive and inside `ask`,
+/// and both read `runs_from`).
 #[test]
 fn the_trial_is_asked_to_quit_before_it_is_ended_and_only_by_its_identity() {
     // A: the recorded trial, beside another process of the same image.
@@ -2653,7 +2657,10 @@ fn the_trial_is_asked_to_quit_before_it_is_ended_and_only_by_its_identity() {
         stop_clock: stop.clone(),
         ..install.road(bounds)
     };
-    let (code, world) = recovered_on(road, install.world(Trial::Silent));
+    let (at_end, read_at_end) = stop.at_the_end_ask();
+    let mut world = install.world(Trial::Silent);
+    world.on_say = Some(at_end);
+    let (code, world) = recovered_on(road, world);
     assert_eq!(code, 0, "{:?}", world.said);
     let quit = said_at(&world, &format!("trial {} is asked to quit", trial.pid));
     let end = said_at(&world, &format!("trial {} is asked to end", trial.pid));
@@ -2662,10 +2669,10 @@ fn the_trial_is_asked_to_quit_before_it_is_ended_and_only_by_its_identity() {
         "{:?}",
         world.said
     );
-    assert!(
-        stop.moved_ms() >= u64::try_from(GRACE.as_millis()).unwrap(),
-        "the grace ran out on the stop's clock before the end: {} ms",
-        stop.moved_ms()
+    assert_eq!(
+        *read_at_end.lock().unwrap(),
+        Some(u64::try_from(GRACE.as_millis()).unwrap()),
+        "asked to end exactly when the grace ran out on the stop's clock"
     );
     assert!(!runs(trial), "the trial is ended");
     assert!(runs(beside), "the other process of its image runs on");

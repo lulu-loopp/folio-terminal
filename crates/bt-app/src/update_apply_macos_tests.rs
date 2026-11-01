@@ -2533,8 +2533,10 @@ fn a_rollback_notes_what_it_did_not_keep_before_its_folder_goes() {
 /// the count, and the end window's first pause waits for the killed trial to
 /// be reaped (T-TRIAL-STOP-QUIT-GRACE-ON-THE-ROAD-CLOCK).
 ///
-/// MUTATION: in `stop_trial`, ask `Ask::End` first. RED on the stop's clock:
-/// row 136's plants B (the grace skipped) and C (the grace never ends).
+/// MUTATION: in `stop_trial`, ask `Ask::End` first. RED on the stop's clock,
+/// read when the stop asks for the end (`CountedClock::at_the_end_ask`): row
+/// 136's plants B (the grace skipped), B′ (only the quit grace skipped) and C
+/// (the grace never ends).
 #[test]
 fn the_trial_is_asked_to_quit_before_it_is_killed() {
     if !on_macos() {
@@ -2564,12 +2566,15 @@ fn the_trial_is_asked_to_quit_before_it_is_killed() {
         stop_clock: stop.clone(),
         ..install.recovery(bounds)
     };
-    let (ended, hands) = recovered(road, Fake::default());
+    let (at_end, read_at_end) = stop.at_the_end_ask();
+    let mut hands = Fake::default();
+    hands.on_say = Some(at_end);
+    let (ended, hands) = recovered(road, hands);
     assert_eq!(ended, Some(Ended::RolledBack), "{:?}", hands.said);
-    assert!(
-        stop.moved_ms() >= 1_000,
-        "ended before its grace ran out on the stop's clock: {} ms",
-        stop.moved_ms()
+    assert_eq!(
+        *read_at_end.lock().unwrap(),
+        Some(1_000),
+        "asked to end exactly when its grace ran out on the stop's clock"
     );
     assert_eq!(std::fs::read_to_string(&mark).unwrap(), "term");
     let quit = hands
@@ -2601,8 +2606,10 @@ fn the_trial_is_asked_to_quit_before_it_is_killed() {
     });
     let (ended, hands) = recovered(install.recovery(limits(5_000, 5_000)), Fake::default());
     assert_eq!(ended, Some(Ended::RolledBack), "{:?}", hands.said);
-    // The stop says each ask only after its signal was sent (`stop_trial`), so
-    // no line is no signal: the stranger is not waited on to prove it.
+    // The stop says each ask only after its signal was sent (`stop_trial`), and
+    // `stop_trial` is the product's only caller of `install_flip::ask`, the
+    // only door that signals a process: no line is no signal, so the stranger
+    // is not waited on to prove it.
     assert!(!hands.said.iter().any(|line| line.contains("is asked to")));
     assert_eq!(children.status(stranger), None, "the stranger still runs");
 }

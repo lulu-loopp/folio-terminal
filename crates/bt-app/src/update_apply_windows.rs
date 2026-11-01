@@ -84,9 +84,9 @@
 //!      with its creation time, running from `<install>\folio.exe`
 //!      (`update_apply::stop_trial` → `bt_platform::install_flip::ask`): asked
 //!      to quit (`WM_CLOSE` to the windows a person could close), 5 s of grace
-//!      on the road's `stop_clock` (the wait door in the product), then ended (`TerminateProcess` on a handle
-//!      whose creation time is read again), 5 s more; a process that is not
-//!      all three is never touched;
+//!      on the road's `stop_clock` (the wait door in the product), then ended
+//!      (`TerminateProcess` on a handle whose creation time is read again), 5 s
+//!      more; a process that is not all three is never touched;
 //!    - **the moves back**, under exclusive admission within 60 s (not had →
 //!      nothing recorded, [`Ended::RollbackWaits`]: the next holder tries):
 //!      `rolledout\` made; every install file whose digest is a **new**

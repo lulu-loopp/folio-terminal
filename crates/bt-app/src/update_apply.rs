@@ -1423,6 +1423,29 @@ impl CountedClock {
         assert!(!poll.is_zero(), "a stop that looks every 0 ms never pauses");
         usize::try_from(within.as_millis().div_ceil(poll.as_millis())).unwrap()
     }
+
+    /// **This stop clock's reading at the moment the stop asks for the end**:
+    /// a world's `say` hook that keeps [`Self::moved_ms`] at the first line
+    /// saying a trial "is asked to end" ([`stop_trial`]'s own words), and where
+    /// it keeps it. The grace alone is read there — the end window's pauses
+    /// come after — so a stop that cut the grace short reads less than its
+    /// `quit_within`, whatever the end window then spends.
+    pub(crate) fn at_the_end_ask(
+        self: &std::sync::Arc<Self>,
+    ) -> (
+        Box<dyn FnMut(&str) + Send>,
+        std::sync::Arc<std::sync::Mutex<Option<u64>>>,
+    ) {
+        let read = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let (clock, kept) = (std::sync::Arc::clone(self), std::sync::Arc::clone(&read));
+        let hook = Box::new(move |line: &str| {
+            let mut kept = kept.lock().unwrap();
+            if kept.is_none() && line.contains("is asked to end") {
+                *kept = Some(clock.moved_ms());
+            }
+        });
+        (hook, read)
+    }
 }
 
 /// Whether `folder` holds a file named as a trial's receipt.
