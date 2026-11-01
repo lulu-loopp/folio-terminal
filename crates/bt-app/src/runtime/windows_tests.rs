@@ -195,12 +195,11 @@ impl Saving {
         }
         let mut folio = HeadlessFolio::with_tabs(tag, tabs, 0);
         let (lane, jobs) = crate::persist::StorageLane::scripted();
-        folio.app.session_store = crate::persist::SessionStore::at_on(
+        folio.app.storage_on(crate::persist::SessionStore::at_on(
             dir.join("session.json"),
             dir.join("session.lock"),
-            lane.clone(),
-        );
-        folio.app.preview_saves = crate::preview::PreviewSaves::on(lane);
+            lane,
+        ));
         let other = headless_window(
             &folio.app,
             HeadlessParts::new(&folio.app.gpu, 2, (1200, 800), 1.0, &folio.ledger),
@@ -1174,12 +1173,11 @@ impl Quitting {
         let second = tabs.pop().expect("the second tab");
         let mut folio = HeadlessFolio::with_tabs(tag, tabs, 0);
         let (lane, jobs) = crate::persist::StorageLane::scripted();
-        folio.app.session_store = crate::persist::SessionStore::at_on(
+        folio.app.storage_on(crate::persist::SessionStore::at_on(
             dir.join("session.json"),
             dir.join("session.lock"),
-            lane.clone(),
-        );
-        folio.app.preview_saves = crate::preview::PreviewSaves::on(lane);
+            lane,
+        ));
         let other = headless_window(
             &folio.app,
             HeadlessParts::new(&folio.app.gpu, 2, (1200, 800), 1.0, &folio.ledger),
@@ -1683,14 +1681,13 @@ fn the_stops_one_bounded_wait_serves_the_saves_queued_on_the_shared_lane() {
     );
     let dir = quitting.dir.clone();
     {
-        let app = quitting.app();
-        app.session_store = crate::persist::SessionStore::at_on(
+        let mut store = crate::persist::SessionStore::at_on(
             dir.join("session.json"),
             dir.join("session.lock"),
-            lane.clone(),
+            lane,
         );
-        app.session_store.set_save_budget(crate::lane::PATIENCE);
-        app.preview_saves = crate::preview::PreviewSaves::on(lane);
+        store.set_save_budget(crate::lane::PATIENCE);
+        quitting.app().storage_on(store);
     }
     let recovery = dir.join(crate::preview::RECOVERED_FOLDER);
     quitting
@@ -1726,31 +1723,29 @@ fn the_stops_one_bounded_wait_serves_the_saves_queued_on_the_shared_lane() {
 // that must run out has a budget of zero, and one that must not has the suite's patience.
 
 impl Quitting {
-    /// **The session store and the preview saves on one lane this test serves**, as the
-    /// product's are on one storage worker: every job is taken by the test, in the order the
+    /// **The application's storage on one lane this test serves** (`App::storage_on`), as the
+    /// product's is on one storage worker: every job is taken by the test, in the order the
     /// worker would serve it, and none is answered — the document's wait has `budget` to run out
     /// in. The store's sentinel stands.
     fn on_one_scripted_lane(&mut self, budget: std::time::Duration) {
         let (lane, jobs) = crate::persist::StorageLane::scripted();
         let dir = self.dir.clone();
-        let app = self.app();
-        app.session_store = crate::persist::SessionStore::at_on(
+        let mut store = crate::persist::SessionStore::at_on(
             dir.join("session.json"),
             dir.join("session.lock"),
-            lane.clone(),
+            lane,
         )
         .armed();
-        app.session_store.set_save_budget(budget);
-        app.preview_saves = crate::preview::PreviewSaves::on(lane);
+        store.set_save_budget(budget);
+        self.app().storage_on(store);
         self.jobs = jobs;
     }
 
-    /// **The session store and the preview saves on one working storage worker**, as the
-    /// product's are: it writes the files and answers, and the document's wait has the suite's
+    /// **The application's storage on one working storage worker** (`App::storage_on`), as the
+    /// product's is: it writes the files and answers, and the document's wait has the suite's
     /// patience. The store's sentinel stands.
     fn on_one_working_lane(&mut self) {
         let dir = self.dir.clone();
-        let app = self.app();
         let mut store = crate::persist::SessionStore::at_waking(
             dir.join("session.json"),
             dir.join("session.lock"),
@@ -1758,8 +1753,7 @@ impl Quitting {
         )
         .armed();
         store.set_save_budget(crate::lane::PATIENCE);
-        app.preview_saves = crate::preview::PreviewSaves::on(store.lane());
-        app.session_store = store;
+        self.app().storage_on(store);
     }
 
     /// The test's own `recovered` folder.
@@ -1775,17 +1769,21 @@ impl Quitting {
             .settle_session_end_keeping_in(&self.application.event_loop, &recovery)
     }
 
-    /// What the test's worker was handed, in the order it would serve it.
+    /// What the test's worker was handed, in the order it would serve it, each job named by its
+    /// asker: a document store's by its file, a preview save as `preview`, the session's
+    /// document as `document`.
     fn handed(&self) -> Vec<&'static str> {
         std::iter::from_fn(|| self.jobs.next())
             .map(|job| match job {
-                crate::persist::ScriptedJob::Document(job) => {
-                    if job.which.ends_with(crate::persist::SETTINGS_FILE_NAME) {
-                        "settings"
-                    } else {
-                        "save"
-                    }
-                }
+                crate::persist::ScriptedJob::Document(job) => [
+                    (crate::persist::SETTINGS_FILE_NAME, "settings"),
+                    (crate::persist::KEYBINDINGS_FILE_NAME, "keybindings"),
+                    (crate::persist::PROFILES_FILE_NAME, "profiles"),
+                    (crate::pins::PINS_FILE_NAME, "pins"),
+                ]
+                .into_iter()
+                .find(|(file, _)| job.which.ends_with(file))
+                .map_or("preview", |(_, asker)| asker),
                 crate::persist::ScriptedJob::Session => "document",
                 _ => "other",
             })
@@ -1822,7 +1820,7 @@ impl Quitting {
 ///
 /// MUTATION: in `FolioApp::settle_session_end_keeping_in`, hand the saves over after
 /// `session_end::settle` (move the `hand_over_for_the_systems_end` call below it) — the worker is
-/// handed `document, save, save`.
+/// handed `document, preview, preview`.
 #[test]
 fn the_systems_end_hands_every_save_to_the_worker_ahead_of_the_document() {
     let _news = crate::test_support::EndSessionHome::new("end-order");
@@ -1832,7 +1830,7 @@ fn the_systems_end_hands_every_save_to_the_worker_ahead_of_the_document() {
     let _ = quitting.settle_the_systems_end();
     assert_eq!(
         quitting.handed(),
-        ["save", "save", "document"],
+        ["preview", "preview", "document"],
         "both saves, then the document behind them"
     );
     assert_eq!(
@@ -2051,11 +2049,7 @@ fn the_systems_end_keeps_an_owed_document_beside_the_edits() {
     let _news = crate::test_support::EndSessionHome::new("end-documents");
     let mut quitting = Quitting::open("end-documents", ["one.md", "two.md"]);
     quitting.on_one_scripted_lane(std::time::Duration::ZERO);
-    let dir = quitting.dir.clone();
-    let lane = quitting.app().session_store.lane();
     let app = quitting.app();
-    app.settings_store =
-        crate::persist::SettingsStore::at_on(dir.join(crate::persist::SETTINGS_FILE_NAME), lane);
     assert!(app.settings_store.store(bt_persist::SettingsV1 {
         terminal_font_family: "关机 Shutdown Mono".to_owned(),
         ..bt_persist::SettingsV1::default()
@@ -2064,7 +2058,7 @@ fn the_systems_end_keeps_an_owed_document_beside_the_edits() {
     let _ = quitting.settle_the_systems_end();
     assert_eq!(
         quitting.handed(),
-        ["settings", "save", "save", "document"],
+        ["settings", "preview", "preview", "document"],
         "the owed document first, then the saves, then the session"
     );
     let names = quitting.copy_names();
@@ -2090,11 +2084,7 @@ fn the_systems_end_leaves_a_quits_documents_to_the_quit() {
     let _news = crate::test_support::EndSessionHome::new("end-quit-documents");
     let mut quitting = Quitting::open("end-quit-documents", ["one.md", "two.md"]);
     quitting.on_one_scripted_lane(std::time::Duration::ZERO);
-    let dir = quitting.dir.clone();
-    let lane = quitting.app().session_store.lane();
     let app = quitting.app();
-    app.settings_store =
-        crate::persist::SettingsStore::at_on(dir.join(crate::persist::SETTINGS_FILE_NAME), lane);
     assert!(app.settings_store.store(bt_persist::SettingsV1 {
         terminal_font_family: "退出 Quitting Mono".to_owned(),
         ..bt_persist::SettingsV1::default()
@@ -2109,7 +2099,7 @@ fn the_systems_end_leaves_a_quits_documents_to_the_quit() {
     let _ = quitting.settle_the_systems_end();
     assert_eq!(
         quitting.handed(),
-        ["settings", "save", "save", "document"],
+        ["settings", "preview", "preview", "document"],
         "the quit's write stays the one on the worker: nothing sends it again"
     );
     let names = quitting.copy_names();
@@ -2128,7 +2118,7 @@ fn the_systems_end_leaves_a_quits_documents_to_the_quit() {
 ///
 /// MUTATION: drop the once-per-span guard (in `session_end::owes_the_write`, the
 /// `!SETTLED.with(Cell::get)` term, and `settle`'s `AlreadySaved` arm) — the worker is handed a
-/// second document (`save, save, document, document`), and each edit is copied twice.
+/// second document (`preview, preview, document, document`), and each edit is copied twice.
 #[test]
 fn the_systems_question_to_every_window_is_settled_once() {
     let _news = crate::test_support::EndSessionHome::new("end-once");
@@ -2137,7 +2127,7 @@ fn the_systems_question_to_every_window_is_settled_once() {
     assert_eq!(crate::test_support::the_system_asks(), Some(1));
     assert_eq!(crate::test_support::the_system_asks(), Some(1));
     let _ = quitting.settle_the_systems_end();
-    assert_eq!(quitting.handed(), ["save", "save", "document"]);
+    assert_eq!(quitting.handed(), ["preview", "preview", "document"]);
     assert_eq!(quitting.copies().len(), 2, "each edit copied once");
 }
 
@@ -2508,26 +2498,11 @@ impl TwoWindowsSaving {
         let (first_tab, first_seat) = tab_with_a_preview(1, vec![typed("一 first.txt")]);
         let mut folio = HeadlessFolio::with_tabs(tag, vec![first_tab], 0);
         let (lane, jobs) = crate::persist::StorageLane::scripted();
-        folio.app.preview_saves = crate::preview::PreviewSaves::on(lane.clone());
-        folio.app.session_store = crate::persist::SessionStore::at_on(
+        folio.app.storage_on(crate::persist::SessionStore::at_on(
             dir.join("session.json"),
             dir.join("session.lock"),
-            lane.clone(),
-        );
-        folio.app.settings_store = crate::persist::SettingsStore::at_on(
-            dir.join(crate::persist::SETTINGS_FILE_NAME),
-            lane.clone(),
-        );
-        folio.app.keybindings_store = crate::persist::KeybindingsStore::at_on(
-            dir.join(crate::persist::KEYBINDINGS_FILE_NAME),
-            lane.clone(),
-        );
-        folio.app.profiles_store = crate::persist::ProfilesStore::at_on(
-            dir.join(crate::persist::PROFILES_FILE_NAME),
-            lane.clone(),
-        );
-        folio.app.pins_store =
-            crate::pins::PinsStore::at_on(dir.join(crate::pins::PINS_FILE_NAME), lane);
+            lane,
+        ));
         let (second_tab, second_seat) = tab_with_a_preview(2, vec![typed("二 second.txt")]);
         let other = headless_window(
             &folio.app,
@@ -2697,5 +2672,109 @@ fn one_drain_hears_every_askers_answers_in_the_order_the_lane_admitted_them() {
         saving.notice(1).as_deref(),
         Some(crate::preview::preview_saved_ordinarily_notice()),
         "the save asked first says the drive's one sentence"
+    );
+}
+
+// ── One storage lane, as the product's (T-HEADLESS-HARNESS-ONE-STORAGE-LANE, plan row 123) ────
+
+/// RED (T-HEADLESS-HARNESS-ONE-STORAGE-LANE, plan row 123) — **a save on the default headless
+/// application lands, and the one drain hears it**: the application's storage is the product's
+/// (one working lane, the session store's, and every asker on it), so `Ctrl+S` hands the edited
+/// file to that lane's worker, the worker writes it, and the drain, reading its one mark from the
+/// session store's lane, takes the answer from the ledger the save was admitted to and hears it
+/// on the pane.
+///
+/// Red on the base (`9ac40b223`): the preview saves were on a lane no worker served, so the save
+/// was refused at the door and the file kept its old bytes. With the session store moved to one
+/// lane and the preview saves left on another working lane (the half-move), the take panics on
+/// the mark of another ledger (`lane::Request::is_marked_by`).
+#[test]
+fn a_save_on_the_default_headless_application_lands_and_its_drain_hears_it() {
+    let dir = crate::test_support::disk_scratch("one-storage-lane-save");
+    let path = dir.join("一 one.md");
+    std::fs::write(&path, READ).expect("the file is written");
+    let mut buffer = crate::test_support::buffer_read_from(&path);
+    assert!(buffer.edit_content(|body| {
+        body.push_str(TYPED);
+        true
+    }));
+    let (tab, seat) = tab_with_a_preview(1, vec![buffer]);
+    let mut application = HeadlessApplication::of(HeadlessFolio::with_tabs(
+        "one-storage-lane-save",
+        vec![tab],
+        0,
+    ));
+    let surface = crate::test_support::seat_of(crate::TabId(1), seat);
+    application
+        .runtime()
+        .save_preview_on(surface)
+        .expect("the verb runs");
+    let _ = crate::runtime::storage::take_heard();
+    let mut heard = Vec::new();
+    crate::lane::wait_until("the save's answer, heard by the drain", || {
+        application
+            .folio
+            .take_document_answers()
+            .expect("the answers are heard");
+        heard.extend(crate::runtime::storage::take_heard());
+        !heard.is_empty()
+    });
+    assert_eq!(heard, ["preview"], "the drain heard the save");
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("the file reads"),
+        format!("{READ}{TYPED}"),
+        "the worker wrote the edit"
+    );
+    assert_eq!(
+        application
+            .runtime()
+            .preview_pane(surface)
+            .and_then(|pane| pane.notice())
+            .map(|(notice, _)| notice.clone())
+            .as_deref(),
+        Some(crate::preview::preview_saved_notice()),
+        "and the pane says Saved"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// RED (T-HEADLESS-HARNESS-ONE-STORAGE-LANE, plan row 123) — **the close and quit harnesses keep
+/// every storage asker on the session store's lane**: each lane a harness makes its own
+/// (`Saving`'s and `Quitting`'s scripted lane, the scripted lane of `on_one_scripted_lane`, the
+/// working one of `on_one_working_lane`) carries the session store and the five other askers, as
+/// the product's one lane does.
+///
+/// Red on the base (`9ac40b223`): each moved the session store and the preview saves and left the
+/// settings, keybindings, profiles and pins stores on the default application's lane.
+#[test]
+fn the_close_and_quit_harnesses_keep_every_storage_asker_on_one_lane() {
+    let saving = Saving::open("one-lane", &["一 one.md"]);
+    assert_eq!(
+        crate::headless::askers_off_the_storage_lane(
+            saving
+                .application
+                .folio
+                .app
+                .as_ref()
+                .expect("the application")
+        ),
+        Vec::<&str>::new(),
+        "the close harness"
+    );
+    let mut quitting = Quitting::open("one-lane", ["one.md", "two.md"]);
+    let off =
+        |quitting: &mut Quitting| crate::headless::askers_off_the_storage_lane(quitting.app());
+    assert_eq!(off(&mut quitting), Vec::<&str>::new(), "the quit harness");
+    quitting.on_one_scripted_lane(std::time::Duration::ZERO);
+    assert_eq!(
+        off(&mut quitting),
+        Vec::<&str>::new(),
+        "on one scripted lane"
+    );
+    quitting.on_one_working_lane();
+    assert_eq!(
+        off(&mut quitting),
+        Vec::<&str>::new(),
+        "on one working lane"
     );
 }

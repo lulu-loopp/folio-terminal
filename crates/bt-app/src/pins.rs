@@ -184,6 +184,12 @@ impl QuitDocument for PinsStore {
 }
 
 impl PinsStore {
+    /// The storage lane this store's requests go to — a test's look at where a harness put it.
+    #[cfg(test)]
+    pub(crate) fn lane(&self) -> &StorageLane {
+        self.document.lane()
+    }
+
     /// Read `pins.json`, falling back to *an empty table* on every failure. Its
     /// writes and re-reads go to the storage worker on `lane`.
     pub(crate) fn open(lane: StorageLane) -> Self {

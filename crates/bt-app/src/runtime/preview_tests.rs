@@ -666,7 +666,8 @@ fn an_edit_draws_and_keys_its_block_as_source_in_its_one_draw() {
 }
 
 /// RED — **a save the storage lane refuses is said on the pane, and the page stays dirty**,
-/// driven on a headless window, whose storage lane no worker serves (S-6a, C2): `Ctrl+S`'s verb
+/// driven on a headless window whose storage is put on a lane no worker serves (S-6a, C2;
+/// `App::storage_on`, the application's six storage askers on that one lane): `Ctrl+S`'s verb
 /// hands the edited page to the lane, the lane refuses it at the door, and the pane says why.
 ///
 /// MUTATION: in `Runtime::save_preview_on`, answer a refused request as sent — the pane says
@@ -674,6 +675,12 @@ fn an_edit_draws_and_keys_its_block_as_source_in_its_one_draw() {
 #[test]
 fn a_save_the_lane_refuses_is_said_on_the_pane_and_the_page_stays_dirty() {
     let (mut folio, surface) = drawn_page("headless-save-refused");
+    let scratch = folio.scratch.0.clone();
+    folio.app.storage_on(crate::persist::SessionStore::at_on(
+        scratch.join("session.json"),
+        scratch.join("session.lock"),
+        crate::persist::StorageLane::without_a_worker(|| {}),
+    ));
     enter_at(&mut folio, surface, "bold here");
     type_on_the_page(&mut folio, "x");
     let mut runtime = folio.runtime();

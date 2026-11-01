@@ -134,10 +134,10 @@
 | | 图标 | 文字 |
 |---|---|---|
 | `[claude] proj-a` vs `[claude] proj-b` | 同 | **不同** ✓ |
-| `[claude] BetterTerminal` vs `[pwsh] BetterTerminal` | **不同** ✓ | 同 |
+| `[claude] project` vs `[pwsh] project` | **不同** ✓ | 同 |
 
 - **来源是 OSC 7**——shell 主动报的。**这不是我们从屏幕上读出来再猜的**。
-- **窄的地方只放最后一段**（`BetterTerminal`），窗格头放更完整的路径（`~/Developer/BetterTerminal`）。
+- **窄的地方只放最后一段**（`project`），窗格头放更完整的路径（`~/src/project`）。
 - **新标签继承你当前所在的目录**——一个没有地方的标签也就没有名字。
 - **chrome 显示它,是因为提示符会滚走**:你翻到 200 行之前时提示符早已离屏,而同时扫 4 个窗格时你读不过来 4 个提示符。
 
