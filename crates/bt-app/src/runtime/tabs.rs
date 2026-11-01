@@ -5329,14 +5329,13 @@ mod birth_death_tests {
         )
     }
 
-    /// Waits for the birth's wake without the suite's patience: the fresh birth below starts a
-    /// real default shell, which can take longer than that to be born (plan row 167). The wait
-    /// holds nothing the test lets go, so it is not a held door: the suite's watchdog (row 113)
-    /// ends a birth that never wakes red by name, and the test shell's own setup gives up at
-    /// 180 s.
+    /// Waits for the birth's wake within the lane suite's patience: both births below are born
+    /// at once — the fallback's answer is its `CreateProcess`, the fresh birth's a shell that owes
+    /// no history refusal (`test_support::a_quiet_shell`, plan row 167) — so a birth that never
+    /// wakes is red by name here and not a hang.
     fn wait_for_answer(shell: &pty_door::ShellBirth, heard: &mpsc::Receiver<()>) {
         while !shell.answered() {
-            heard.recv().expect("a birth publishes before it wakes");
+            crate::lane::receive(heard, "the birth's wake");
         }
     }
 
@@ -5528,8 +5527,10 @@ mod birth_death_tests {
         assert!(!tab_has_ended(true, true) && tab_has_ended(true, false));
     }
 
-    /// MUTATION (observed RED in T-BIRTH-OFF-WINDOW): drop an ordinary landing's owed size and the
-    /// PTY remains at its born size. This is the no-regression twin of the fallback test above.
+    /// MUTATION (observed RED in T-BIRTH-OFF-WINDOW, again in plan row 167): drop an ordinary
+    /// landing's owed size and the PTY remains at its born size. This is the no-regression twin of
+    /// the fallback test above. Its shell is a quiet one: the claim needs a live pseudoconsole
+    /// and not the default shell, whose history refusal took ~18 s to read back (plan row 167).
     #[test]
     fn a_fresh_birth_still_lands_at_the_size_released_while_it_was_pending() {
         test_support::on_the_window_thread();
@@ -5557,12 +5558,11 @@ mod birth_death_tests {
         let shell = pty_door::request(
             move |_| {
                 worker_open.pass();
-                bt_pty::test_shell::TestShell::spawn_default(bt_pty::PtySize::cells(
+                test_support::a_quiet_shell(bt_pty::PtySize::cells(
                     born_grid.columns,
                     born_grid.rows,
                 ))
-                .map(|shell| {
-                    let (session, shell_hygiene) = shell.into_session();
+                .map(|(session, shell_hygiene)| {
                     let _ = kept.send(shell_hygiene);
                     session
                 })
@@ -5599,7 +5599,7 @@ mod birth_death_tests {
             "the fresh PTY still receives the size released while it was pending"
         );
         drop(leaf);
-        drop(hygiene.recv().expect("the fresh shell's hygiene"));
+        drop(crate::lane::receive(&hygiene, "the fresh shell's hygiene"));
     }
 
     /// MUTATION (observed RED): ignore the byte count and choose the fallback; the disposition
