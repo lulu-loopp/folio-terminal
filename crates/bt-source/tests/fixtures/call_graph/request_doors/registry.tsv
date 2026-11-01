@@ -47,4 +47,6 @@ submit_asks_the_disk	window	std::sync::Condvar::notify_one, spawn@0	—	Lane::ma
 submit_probes_untyped	window	std::sync::Condvar::notify_one, spawn@0	—	Lane::mailbox
 submit_probes_typed	window	std::sync::Condvar::notify_one, spawn@0	—	Lane::mailbox
 submit_reads_a_value	window	std::sync::Condvar::notify_one, spawn@0	—	Lane::mailbox
+submit_reads_a_status	window	std::sync::Condvar::notify_one, spawn@0	—	Lane::mailbox
+submit_waits_for_a_child	window	std::sync::Condvar::notify_one, spawn@0	—	Lane::mailbox
 prewarm	main (before the loop)	—	—	—

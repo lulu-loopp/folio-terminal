@@ -15,10 +15,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use syn::punctuated::Punctuated;
 
+use super::paths::{Follow, Uses};
 use super::resolve::{FieldAnswer, Kind, Owner, Resolver, first_arg};
 use super::types::{
-    Callees, Class, Receiver, Std, Ty, Written, closures_by_position, impl_header, impl_of,
-    option_of, standard_method_name,
+    Callees, Class, Imports, Receiver, Std, Ty, Written, closures_by_position, flatten_use,
+    impl_header, impl_of, option_of, standard_method_name,
 };
 use super::{Callable, Sink};
 use crate::index::{Index, ItemKind, ItemRecord};
@@ -141,6 +142,32 @@ enum Mode {
     Unique,
 }
 
+/// The items one block writes that a one-segment call may name: its `fn`s, and its `use` items
+/// flattened (plan row 126).
+struct BlockItems {
+    functions: BTreeSet<String>,
+    uses: Imports,
+}
+
+impl BlockItems {
+    fn of(block: &syn::Block) -> Self {
+        let mut functions = BTreeSet::new();
+        let mut uses = Imports::default();
+        for statement in &block.stmts {
+            match statement {
+                syn::Stmt::Item(syn::Item::Fn(function)) => {
+                    functions.insert(function.sig.ident.to_string());
+                }
+                syn::Stmt::Item(syn::Item::Use(used)) => {
+                    flatten_use(&used.tree, &mut Vec::new(), &mut uses);
+                }
+                _ => {}
+            }
+        }
+        Self { functions, uses }
+    }
+}
+
 // ── the walk ────────────────────────────────────────────────────────────
 
 /// One function body, walked.
@@ -148,6 +175,11 @@ pub(crate) struct Walk<'w, 'd> {
     resolver: &'w Resolver<'d>,
     written: Written,
     scopes: Vec<BTreeMap<String, Binding>>,
+    /// The items each enclosing block writes that a one-segment call may name (plan row 126):
+    /// its `fn`s and the names its `use` items bring in, innermost last. The census reads no
+    /// declaration of either, so a call naming one is refused; unlike a binding, an item of an
+    /// outer block is still in scope inside a nested `fn`.
+    block_items: Vec<BlockItems>,
     sink: &'w mut Sink,
     module: String,
     function: String,
@@ -205,6 +237,7 @@ impl<'w, 'd> Walk<'w, 'd> {
             resolver,
             written,
             scopes: vec![BTreeMap::new()],
+            block_items: Vec::new(),
             sink,
             module,
             function,
@@ -747,6 +780,11 @@ impl<'w, 'd> Walk<'w, 'd> {
             };
             return (val, Vec::new(), Callees::default());
         }
+        if segments.len() == 1
+            && let Some(why) = self.block_item(&last)
+        {
+            return (Val::unknown(why), Vec::new(), Callees::default());
+        }
         let (ret, closures, callees) = if segments.len() >= 2 {
             let owner_ty = if segments[segments.len() - 2] == "Self" {
                 self.written
@@ -789,10 +827,12 @@ impl<'w, 'd> Walk<'w, 'd> {
     }
 
     /// The edge a call `f(..)` or `path::f(..)` adds: to what its type
-    /// reached (`Type::f`), or else to the free functions its path names by
-    /// the declarations and `use` items of the module it is written in. A
-    /// path that names a function of the subject package and reaches none, or
-    /// reaches more than one item, is listed as not followed.
+    /// reached (`Type::f`), or else to the subject package's free functions
+    /// its path names by the rules that type a call ([`Follow`], plan row
+    /// 126: the module's product items, product `use` items and globs). A
+    /// one-segment call of a `fn` or `use` written in a body, or a path that
+    /// names a function of the subject package and reaches none, or reaches
+    /// more than one item, is listed as not followed.
     fn call_edge(&mut self, call: &syn::ExprCall, by_type: Callees) {
         let syn::Expr::Path(path) = &*call.func else {
             return;
@@ -833,29 +873,36 @@ impl<'w, 'd> Walk<'w, 'd> {
             self.edge(by_type.items, &segments.join("::"));
             return;
         }
-        let package = self.resolver.subject.package.clone();
-        let reach = if segments.len() == 1 {
-            Some(self.resolver.functions_at(&package, &self.module, &name))
-        } else {
-            // `None`: the path leaves the package.
-            self.resolver
-                .absolute(&package, &self.module, &segments)
-                .and_then(|absolute| {
-                    let (last, at) = absolute.split_last()?;
-                    Some(self.resolver.functions_at(&package, &at.join("::"), last))
-                })
-        };
-        if let Some(reach) = &reach
-            && !reach.items.is_empty()
+        if segments.len() == 1
+            && let Some(why) = self.block_item(&name)
         {
-            self.edge(reach.items.clone(), &segments.join("::"));
+            // A `fn` or a `use` written in a body: the rules read no declaration of it, as the
+            // call's type says (`Walk::callee`).
+            if self.resolver.subject.functions.contains(&name) {
+                self.sink
+                    .unfollowed(&self.module, &self.function, &segments.join("::"), &why);
+            }
             return;
         }
-        if let Some(reach) = &reach
-            && !reach.outside
-            && !reach.test_only
-            && self.resolver.subject.functions.contains(&name)
-        {
+        let follow = Follow {
+            declarations: self.resolver.declarations,
+            uses: Uses::Product,
+        };
+        let found = follow.path(&self.written.package, &self.module, &segments);
+        let subject = &self.resolver.subject.package;
+        let items: BTreeSet<Callable> = found
+            .declarations
+            .iter()
+            .filter(|reached| &reached.decl.place.0 == subject)
+            .filter_map(|reached| reached.decl.callable.clone())
+            .collect();
+        if !items.is_empty() {
+            self.edge(items, &segments.join("::"));
+            return;
+        }
+        // Another crate's function, or a path the rules do not place: no edge of the package's.
+        let outside = !found.declarations.is_empty() || !found.refused.is_empty();
+        if !outside && !found.test_only && self.resolver.subject.functions.contains(&name) {
             self.sink.unfollowed(
                 &self.module,
                 &self.function,
@@ -894,28 +941,25 @@ impl<'w, 'd> Walk<'w, 'd> {
         }
     }
 
-    /// A free function's return type and closure parameters — with one
-    /// bounded unification: a generic parameter the return type names is
-    /// bound from the argument whose declared type is that parameter behind
-    /// references or a slice.
+    /// A free function's return type and closure parameters, from the declarations the call's
+    /// module reaches (plan row 126): its own items, then the `use` items a product build
+    /// compiles, then its globs, followed through re-exports and into another workspace crate.
+    /// Only product declarations answer; a test-only one is skipped and the lookup goes on. A
+    /// name that comes through a path the rules do not place (into a crate the census does not
+    /// read, a first segment they cannot place, `super` past the root, a chain of `use` items
+    /// longer than they follow), reaches only a test build's declaration, or reaches nothing is
+    /// refused, each with its own reason — never matched by its bare name elsewhere. The answers
+    /// of the declarations reached (the `cfg` variants of one item) must agree, with one bounded
+    /// unification: a generic parameter the return type names is bound from the argument whose
+    /// declared type is that parameter behind references or a slice.
     fn free_function(&self, name: &str, args: &[Val]) -> (Ty, Vec<Option<Vec<Ty>>>) {
-        let Some(all) = self.resolver.declarations.functions.get(name) else {
-            return (
-                Ty::unknown(format!("`{name}` is not a function the workspace declares")),
-                Vec::new(),
-            );
+        let follow = Follow {
+            declarations: self.resolver.declarations,
+            uses: Uses::Product,
         };
-        let home: Vec<_> = all
-            .iter()
-            .filter(|decl| decl.package == self.written.package)
-            .collect();
-        let candidates = if home.is_empty() {
-            all.iter().collect()
-        } else {
-            home
-        };
-        let mut found: Option<(Ty, Vec<Option<Vec<Ty>>>)> = None;
-        for decl in candidates {
+        let found = follow.path(&self.written.package, &self.module, &[name.to_owned()]);
+        let mut answers = found.declarations.iter().map(|reached| {
+            let decl = reached.decl;
             let mut map = BTreeMap::new();
             for (param, arg) in decl.params.iter().zip(args) {
                 unify(param, &arg.ty, &decl.generics, &mut map);
@@ -931,23 +975,25 @@ impl<'w, 'd> Walk<'w, 'd> {
                 .iter()
                 .map(|param| param.substitute(&map))
                 .collect();
-            let answer = (ret, closures_by_position(&params));
-            match &found {
-                Some(earlier) if *earlier != answer => {
-                    return (
-                        Ty::unknown(format!("the declarations of `{name}` disagree")),
-                        Vec::new(),
-                    );
-                }
-                _ => found = Some(answer),
-            }
-        }
-        found.unwrap_or_else(|| {
-            (
-                Ty::unknown(format!("`{name}` has no declaration")),
+            (ret, closures_by_position(&params))
+        });
+        let Some(first) = answers.next() else {
+            let why = if let Some(why) = found.refusal(name) {
+                why
+            } else if found.test_only {
+                format!("`{name}` is declared only for a test build where the module reaches it")
+            } else {
+                format!("`{name}` is not a function the module's items and `use` items reach")
+            };
+            return (Ty::unknown(why), Vec::new());
+        };
+        if answers.any(|answer| answer != first) {
+            return (
+                Ty::unknown(format!("the declarations of `{name}` disagree")),
                 Vec::new(),
-            )
-        })
+            );
+        }
+        first
     }
 
     // ── what is done to it ────────────────────────────────────────────────
@@ -993,10 +1039,54 @@ impl<'w, 'd> Walk<'w, 'd> {
 
     fn block(&mut self, block: &syn::Block) {
         self.scopes.push(BTreeMap::new());
+        self.block_items.push(BlockItems::of(block));
         for statement in &block.stmts {
             self.statement(statement);
         }
+        self.block_items.pop();
         self.scopes.pop();
+    }
+
+    /// Why a one-segment call of `name` names an item a block writes, innermost first: its `fn`,
+    /// a name its `use` items bring in, or a function one of its globs brings in — or may: a
+    /// glob whose path the rules cannot place. `None` when no enclosing block writes one.
+    fn block_item(&self, name: &str) -> Option<String> {
+        let follow = Follow {
+            declarations: self.resolver.declarations,
+            uses: Uses::Product,
+        };
+        self.block_items.iter().rev().find_map(|items| {
+            if items.functions.contains(name) {
+                return Some(format!(
+                    "`{name}`, a `fn` written in the body: the census reads no declaration of it"
+                ));
+            }
+            if items.uses.names.contains_key(name) {
+                return Some(format!(
+                    "`{name}`, brought in by a `use` written in the body: the census reads no \
+                     `use` of a body"
+                ));
+            }
+            items.uses.globs.iter().find_map(|glob| {
+                let mut path = glob.clone();
+                path.push(name.to_owned());
+                let found = follow.path(&self.written.package, &self.module, &path);
+                let glob = glob.join("::");
+                if !found.declarations.is_empty() {
+                    Some(format!(
+                        "`{name}`, brought in by the glob `use {glob}::*` written in the body: \
+                         the census reads no `use` of a body"
+                    ))
+                } else if found.refusal(name).is_some() {
+                    Some(format!(
+                        "`{name}`: the glob `use {glob}::*` written in the body may bring it in, \
+                         and the rules do not place its path"
+                    ))
+                } else {
+                    None
+                }
+            })
+        })
     }
 
     fn statement(&mut self, statement: &syn::Stmt) {
