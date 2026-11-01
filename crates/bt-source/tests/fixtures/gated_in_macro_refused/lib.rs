@@ -239,3 +239,24 @@ used_entries! {
     #[cfg(test)]
     the_needle,
 }
+
+// So may an `impl` item carrying an attribute macro (plan row 122).
+macro_rules! impl_item_entries {
+    ($( $(#[$a:meta])* $v:ident, )*) => {
+        pub enum ImplItemEntry {
+            $( $(#[$a])* $v, )*
+        }
+    };
+}
+
+pub struct BetweenAnImplItem;
+
+impl BetweenAnImplItem {
+    #[proc_attr]
+    pub fn between() {}
+}
+
+impl_item_entries! {
+    #[cfg(test)]
+    the_needle,
+}
