@@ -1388,6 +1388,42 @@ fn holds_a_receipt(folder: &Path) -> bool {
     }
 }
 
+/// **How many durable steps a committing road has still to take, as the
+/// disk shows them** (T-APPLIER-HOLD-CAP-UNDER-LOAD): from the journal's
+/// `phase` (`None`: no journal is left — a macOS holder removes the
+/// transaction once it is over) and the transaction folder `folder`. The
+/// commit road is `Handoff`, `Armed`, `Moving` (or a reserved
+/// `TrialStarting`), `Trial`, then `Committed` with the trial's receipt still
+/// in `folder` — the trial's watch removes it once it reads `Committed`, the
+/// decision the road's last wait is for — and nothing is left once the
+/// receipt is gone or the journal is past the road (ended otherwise, or
+/// removed). Along one road the count only falls, so a test awaits a commit
+/// with [`crate::lane::while_progressing`] on it: the suite's patience starts
+/// over at each step, and a road that stops moving is red by name.
+#[cfg(test)]
+pub(crate) fn commit_steps_left(phase: Option<PhaseKind>, folder: &Path) -> usize {
+    match phase {
+        Some(PhaseKind::Allocated | PhaseKind::Prepared) => COMMIT_STEPS,
+        Some(PhaseKind::Handoff) => 5,
+        Some(PhaseKind::Armed) => 4,
+        Some(PhaseKind::Moving | PhaseKind::TrialStarting) => 3,
+        Some(PhaseKind::Trial) => 2,
+        Some(PhaseKind::Committed) => usize::from(holds_a_receipt(folder)),
+        Some(
+            PhaseKind::RollbackIntent
+            | PhaseKind::Stuck
+            | PhaseKind::RolledBack
+            | PhaseKind::Abandoned
+            | PhaseKind::Retired,
+        )
+        | None => 0,
+    }
+}
+
+/// The most [`commit_steps_left`] counts: a journal not yet handed over.
+#[cfg(test)]
+pub(crate) const COMMIT_STEPS: usize = 6;
+
 /// **A test's [`WaitClock`] that is the wall clock, watched**
 /// (T-UPDATE-APPLIER-LOCK-WAITS): [`WallClock`]'s readings and pauses, with
 /// `at_pause` run before each pause, with its number from one. A road's wait
