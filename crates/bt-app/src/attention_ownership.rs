@@ -22,6 +22,10 @@ impl From<bool> for Decision {
     }
 }
 
+/// **How long a refusal's take-over consent stands**: the next install of the same configuration
+/// takes over only if it comes fewer than this many seconds after the refusal was shown.
+pub(crate) const CONSENT_LIFETIME: std::time::Duration = std::time::Duration::from_secs(30);
+
 pub(crate) struct Pending {
     config: PathBuf,
     owners: Vec<PathBuf>,
@@ -29,25 +33,33 @@ pub(crate) struct Pending {
 }
 
 impl Pending {
-    pub fn new(config: Option<PathBuf>, owners: Vec<PathBuf>) -> Option<Self> {
+    /// `now` is the instant the refusal is shown; the product passes `Instant::now()`.
+    pub fn new(
+        config: Option<PathBuf>,
+        owners: Vec<PathBuf>,
+        now: std::time::Instant,
+    ) -> Option<Self> {
         Some(Self {
             config: config?,
             owners,
-            shown: std::time::Instant::now(),
+            shown: now,
         })
     }
 }
 
+/// `now` is the instant of the decision; the product passes `Instant::now()`, and a test passes
+/// an instant counted from the consent's own, so [`CONSENT_LIFETIME`] is read on a counted clock.
 pub(crate) fn next_decision(
     pending: &mut Option<Pending>,
     install: bool,
     config: Option<&Path>,
+    now: std::time::Instant,
 ) -> Decision {
     let consent = pending.take();
     if install
         && let Some(consent) = consent
         && config == Some(consent.config.as_path())
-        && consent.shown.elapsed() < std::time::Duration::from_secs(30)
+        && now.saturating_duration_since(consent.shown) < CONSENT_LIFETIME
     {
         return Decision::TakeOver(consent.owners);
     }
@@ -495,26 +507,44 @@ mod tests {
             check(&owners, &here, &Decision::TakeOver(vec![])),
             Err(Outcome::TakeOverRequired(owners.clone()))
         );
-        let mut pending = Pending::new(Some(root.to_path_buf()), owners.clone());
+        // The refusal is shown at `shown` and every decision is counted from it, so the
+        // consent's age is the test's own count and never the real time between two steps.
+        let shown = std::time::Instant::now();
+        let consent = || Pending::new(Some(root.to_path_buf()), owners.clone(), shown);
+        let mut pending = consent();
         assert_eq!(
-            next_decision(&mut pending, true, Some(&root)),
+            next_decision(&mut pending, true, Some(&root), shown),
             Decision::TakeOver(owners.clone())
         );
         assert_eq!(
-            next_decision(&mut pending, true, Some(&root)),
-            Decision::Install
+            next_decision(&mut pending, true, Some(&root), shown),
+            Decision::Install,
+            "a consent is spent by the decision it grants"
         );
-        pending = Pending::new(Some(root.to_path_buf()), owners.clone());
+        pending = consent();
         assert_eq!(
-            next_decision(&mut pending, true, Some(&owner)),
-            Decision::Install
+            next_decision(&mut pending, true, Some(&owner), shown),
+            Decision::Install,
+            "a consent applies only to the configuration it was shown for"
         );
-        pending = Pending::new(Some(root.to_path_buf()), owners);
-        pending.as_mut().unwrap().shown -= std::time::Duration::from_secs(31);
+        let just_inside = CONSENT_LIFETIME - std::time::Duration::from_millis(1);
+        pending = consent();
         assert_eq!(
-            next_decision(&mut pending, true, Some(&root)),
-            Decision::Install
+            next_decision(&mut pending, true, Some(&root), shown + just_inside),
+            Decision::TakeOver(owners.clone()),
+            "a consent stands until its lifetime ends"
         );
+        for late in [
+            CONSENT_LIFETIME,
+            CONSENT_LIFETIME + std::time::Duration::from_secs(1),
+        ] {
+            pending = consent();
+            assert_eq!(
+                next_decision(&mut pending, true, Some(&root), shown + late),
+                Decision::Install,
+                "a consent {late:?} old has expired"
+            );
+        }
     }
 
     #[test]
