@@ -92,8 +92,10 @@ pub(crate) mod fixture {
 
     /// **Detaches every image mounted under its folder when dropped** — for a
     /// test whose folder another guard removes.
+    #[cfg(target_os = "macos")]
     pub(crate) struct Detach(pub(crate) PathBuf);
 
+    #[cfg(target_os = "macos")]
     impl Drop for Detach {
         fn drop(&mut self) {
             detach_all(&self.0);
@@ -1406,6 +1408,10 @@ impl crate::update_startup::World for Quiet {
     }
 
     fn on_a_worker(&mut self, _: crate::update_startup::OffThread) -> std::io::Result<()> {
+        panic!("a later launch handed a retirement to a worker")
+    }
+
+    fn wait_clock(&self) -> std::sync::Arc<dyn crate::update_apply::WaitClock> {
         panic!("a later launch handed a retirement to a worker")
     }
 }

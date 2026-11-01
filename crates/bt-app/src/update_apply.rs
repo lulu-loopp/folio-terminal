@@ -73,6 +73,7 @@ use std::ffi::OsString;
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bt_platform::admission::WorkerCtx;
@@ -338,30 +339,108 @@ pub(crate) fn write_journal(
     within: Duration,
     say: &mut dyn FnMut(&str),
 ) -> Result<(), Unwritten> {
-    let began = Instant::now();
+    write_journal_on(
+        WaitWithin {
+            worker,
+            within,
+            clock: &WallClock,
+        },
+        None,
+        Spelling::Whole,
+        path,
+        bytes,
+        say,
+    )
+}
+
+/// **How a journal write's failure is said** ([`write_journal_on`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Spelling {
+    /// The install door's whole sentence, its path included — the applier's
+    /// log ([`write_journal`]).
+    Whole,
+    /// [`failure_words`]: no path — `diagnostics.log`, the Prepare's.
+    WithoutPath,
+}
+
+impl Spelling {
+    fn of(self, failure: &install_txn::Failure) -> String {
+        match self {
+            Self::Whole => failure.to_string(),
+            Self::WithoutPath => failure_words(failure),
+        }
+    }
+}
+
+/// **A failure of the install door in the words `diagnostics.log` gets**: the
+/// door's step and the operating system's error, never the path (it names
+/// the account's folders) — `install_txn rename: Access is denied. (os error
+/// 5)` (T-UPDATE-PREPARE-REVALIDATION-RESUME-FLAKE).
+pub(crate) fn failure_words(failure: &install_txn::Failure) -> String {
+    format!("install_txn {}: {}", failure.stage.name(), failure.error)
+}
+
+/// **[`write_journal`], on `wait`'s clock, asked again only while `cancelled`
+/// (when there is one) is not set, and every failure said in `spelling`**
+/// (T-UPDATE-PREPARE-REVALIDATION-RESUME-FLAKE): the Prepare's journal
+/// writes ride a hold the way the applier's do, read and paused on the clock
+/// its road was given ([`WallClock`] in the product), stop asking once the
+/// job has cancelled the transaction (its `Poster`'s flag), and say each
+/// failure without its path. [`write_journal`] is this with the wall clock,
+/// no cancel, and a failure's whole sentence.
+///
+/// # Errors
+/// As [`write_journal`]; a hold still there when the cancel was seen is
+/// answered as one that outlasted the window.
+pub(crate) fn write_journal_on(
+    wait: WaitWithin<'_>,
+    cancelled: Option<&AtomicBool>,
+    spelling: Spelling,
+    path: &Path,
+    bytes: &[u8],
+    say: &mut dyn FnMut(&str),
+) -> Result<(), Unwritten> {
+    let WaitWithin {
+        worker,
+        within,
+        clock,
+    } = wait;
+    let began = clock.now();
     let mut write = install_txn::DurableWrite::new(path, bytes);
+    // The round's failure is spelled at once; whether it was a hold is read
+    // off it first, and taken back by the round's one reading of it.
+    let held = std::cell::Cell::new(None);
     let written = asked_while_held(
         within,
         &Asked::JOURNAL,
-        || write.ask(),
-        held_refusal,
-        &mut || began.elapsed(),
+        || {
+            write.ask().map_err(|failure| {
+                held.set(held_refusal(&failure));
+                spelling.of(&failure)
+            })
+        },
+        |_| held.take(),
+        &mut || clock.now().saturating_duration_since(began),
         &mut |pause| {
-            bt_platform::wait::sleep_within(worker, pause);
-            true
+            clock.pause(worker, pause);
+            !cancelled.is_some_and(|flag| flag.load(Ordering::SeqCst))
         },
         say,
     );
-    given_up_said(written, || write.give_up(), say)
+    given_up_said(
+        written,
+        || write.give_up().map_err(|failure| spelling.of(&failure)),
+        say,
+    )
 }
 
 /// **A journal write's end**: when it did not land, the write is given up
 /// (`give_up`: its kept temporary removed), and a removal refused is said in a
 /// line of its own, after what the rounds said; `written` is the answer either
 /// way.
-fn given_up_said(
+fn given_up_said<E: fmt::Display>(
     written: Result<(), Unwritten>,
-    give_up: impl FnOnce() -> Result<(), install_txn::Failure>,
+    give_up: impl FnOnce() -> Result<(), E>,
     say: &mut dyn FnMut(&str),
 ) -> Result<(), Unwritten> {
     if written.is_err()
@@ -378,11 +457,13 @@ fn given_up_said(
 /// file), and while the move is refused because another program holds the
 /// file open (`install_txn::Failure::refused_while_open`: Windows only) — an
 /// on-access scan of the freshly staged set, an indexer, a sync tool — ask
-/// the same move again through `worker`'s wait door until `within` has passed
-/// since the first ask (T-UPDATE-MOVE-HELD-RETRY: the flip's and the
-/// rollback's moves, [`Limits::journal_held_within`], [`JOURNAL_HELD_WITHIN`]
-/// in the product — E4's window and its reason, counted per move as E4
-/// counts it per write). Every round asks the one move: nothing else is moved
+/// the same move again through the wait's door until its `within` has passed
+/// on its clock since the first ask (T-UPDATE-MOVE-HELD-RETRY: the flip's and
+/// the rollback's moves, [`Limits::journal_held_within`],
+/// [`JOURNAL_HELD_WITHIN`] in the product — E4's window and its reason,
+/// counted per move as E4 counts it per write; the window read and the pauses
+/// made on [`WaitWithin::clock`], [`WallClock`] in the product:
+/// T-UPDATE-APPLY-FLIP-HOLD-FLAKE). Every round asks the one move: nothing else is moved
 /// between two rounds, and a refusal that is not a hold — the destination
 /// already taken (I1′), a flush after a rename that landed — is answered at
 /// once. **Each refused round says one line** through `say`, `opening` first
@@ -393,15 +474,19 @@ fn given_up_said(
 /// The last failure, and the refusal when it was a hold that outlasted the
 /// window.
 pub(crate) fn move_held_within(
-    worker: &WorkerCtx,
+    wait: WaitWithin<'_>,
     from: &Path,
     to: &Path,
-    within: Duration,
     opening: &str,
     say: &mut dyn FnMut(&str),
     look: &mut dyn FnMut(),
 ) -> Result<(), Unwritten> {
-    let began = Instant::now();
+    let WaitWithin {
+        worker,
+        within,
+        clock,
+    } = wait;
+    let began = clock.now();
     asked_while_held(
         within,
         &Asked {
@@ -410,14 +495,24 @@ pub(crate) fn move_held_within(
         },
         || install_txn::durable_move(from, to),
         held_refusal,
-        &mut || began.elapsed(),
+        &mut || clock.now().saturating_duration_since(began),
         &mut |pause| {
             look();
-            bt_platform::wait::sleep_within(worker, pause);
+            clock.pause(worker, pause);
             true
         },
         say,
     )
+}
+
+/// **A bounded wait on a worker's door**: the worker whose door it pauses
+/// through, how long it lasts, and the clock it is read and paused on —
+/// [`WallClock`] in the product (T-UPDATE-APPLY-FLIP-HOLD-FLAKE).
+#[derive(Clone, Copy)]
+pub(crate) struct WaitWithin<'a> {
+    pub(crate) worker: &'a WorkerCtx,
+    pub(crate) within: Duration,
+    pub(crate) clock: &'a dyn WaitClock,
 }
 
 /// **The system's refusal of a rename another program's hold refused**
@@ -545,6 +640,9 @@ pub(crate) struct Journaled<'w> {
     /// How long a write another program's hold refuses is asked again
     /// ([`write_journal`]).
     held_within: Duration,
+    /// **The clock a layout's held move is read and paused on**
+    /// ([`Self::held_door`]): [`WallClock`] in the product.
+    held_clock: &'w dyn WaitClock,
     pub(crate) journal: Journal,
     pub(crate) written: Vec<PhaseKind>,
     /// **The refusal of the last write another program's hold outlasted the
@@ -555,17 +653,20 @@ pub(crate) struct Journaled<'w> {
 
 impl<'w> Journaled<'w> {
     /// The journal `journal`, as read from the home `home`, written from
-    /// `worker`, a held write asked again for `held_within`.
+    /// `worker`, a held write asked again for `held_within`, a layout's held
+    /// move read and paused on `held_clock`.
     pub(crate) fn of(
         home: &Home,
         worker: &'w WorkerCtx,
         journal: Journal,
         held_within: Duration,
+        held_clock: &'w dyn WaitClock,
     ) -> Self {
         Self {
             path: home.journal(),
             worker,
             held_within,
+            held_clock,
             journal,
             written: Vec::new(),
             held: None,
@@ -576,11 +677,15 @@ impl<'w> Journaled<'w> {
         self.journal.body.phase.kind()
     }
 
-    /// **The worker this holder writes from, and its window for a held
-    /// file** — what a layout's moves are asked again through and for
-    /// ([`move_held_within`]).
-    pub(crate) fn held_door(&self) -> (&'w WorkerCtx, Duration) {
-        (self.worker, self.held_within)
+    /// **The worker this holder writes from, its window for a held file,
+    /// and the clock that window is read on** — what a layout's moves are
+    /// asked again through, for and on ([`move_held_within`]).
+    pub(crate) fn held_door(&self) -> WaitWithin<'w> {
+        WaitWithin {
+            worker: self.worker,
+            within: self.held_within,
+            clock: self.held_clock,
+        }
     }
 
     /// **Record `event` as `actor`**: the next phase by the protocol, allowed
@@ -752,15 +857,17 @@ pub(crate) fn unkept_said(txn: TxnId, version: &str, before: PhaseKind) -> Strin
 }
 
 /// **§C.4's authoritative test that O is gone**: the data directory `data`'s
-/// claim, tried until it is had and let go at once, sleeping `poll` between
-/// tries through the wait door, until `until`. A live holder or a transient
-/// sweep is asked about again; a claim that cannot be asked about is not
-/// (`ClaimRefusal::QueryDenied`: no answer is coming).
+/// claim, tried until it is had and let go at once, pausing `poll` between
+/// tries on `clock` (the road's [`WaitClock`]: the worker's wait door in the
+/// product, so a test sees the wait it lets go of), until `until`. A live
+/// holder or a transient sweep is asked about again; a claim that cannot be
+/// asked about is not (`ClaimRefusal::QueryDenied`: no answer is coming).
 ///
 /// # Errors
 /// Why O is taken to have stayed, as a sentence.
 pub(crate) fn wait_for_the_claim(
     worker: &WorkerCtx,
+    clock: &dyn WaitClock,
     data: &Path,
     poll: Duration,
     until: Instant,
@@ -779,7 +886,7 @@ pub(crate) fn wait_for_the_claim(
                 if left.is_zero() {
                     return Err("still held at the end of the wait".to_owned());
                 }
-                bt_platform::wait::sleep_within(worker, poll.min(left));
+                clock.pause(worker, poll.min(left));
             }
             Err(refusal) => return Err(format!("{refusal:?}")),
         }
@@ -888,7 +995,7 @@ pub(crate) fn reserve_last_trial(
         return Ok(Reserved::NotEligible);
     }
     let nonce = crate::update_job::mint_nonce();
-    let mut journaled = Journaled::of(home, worker, journal, JOURNAL_HELD_WITHIN);
+    let mut journaled = Journaled::of(home, worker, journal, JOURNAL_HELD_WITHIN, &WallClock);
     journaled.record(
         actor,
         &Event::TrialPlanned {
@@ -1071,7 +1178,7 @@ fn commit_last_trial_reading(
     }
     // On the trial's watch worker, whose lines it says through the watch's
     // own `say`.
-    let mut journaled = Journaled::of(home, worker, journal, JOURNAL_HELD_WITHIN);
+    let mut journaled = Journaled::of(home, worker, journal, JOURNAL_HELD_WITHIN, &WallClock);
     journaled.record(
         Actor::Trial,
         &Event::LastTrialReady { receipt, process },
@@ -1146,6 +1253,32 @@ impl WaitClock for WallClock {
     }
 }
 
+/// **A file opened without delete sharing, as a scanner or an indexer opens
+/// one, until the test lets it go; whether it was let go**
+/// (T-UPDATE-STARTUP-ON-DISK-TEMP-DIR-RACE; shared with the Prepare's held
+/// journal, T-UPDATE-PREPARE-REVALIDATION-RESUME-FLAKE). Made on Windows only:
+/// the open is `bt_platform::trust_harness::hold_without_delete_sharing`'s.
+#[cfg(test)]
+#[derive(Clone)]
+pub(crate) struct ScannerHold(std::sync::Arc<std::sync::Mutex<Option<std::fs::File>>>);
+
+#[cfg(test)]
+impl ScannerHold {
+    pub(crate) fn of(file: &Path) -> Self {
+        Self(std::sync::Arc::new(std::sync::Mutex::new(Some(
+            bt_platform::trust_harness::hold_without_delete_sharing(file).unwrap(),
+        ))))
+    }
+
+    pub(crate) fn let_go(&self) {
+        self.0.lock().unwrap().take();
+    }
+
+    pub(crate) fn was_let_go(&self) -> bool {
+        self.0.lock().unwrap().is_none()
+    }
+}
+
 /// **A test's [`TrialClock`] and [`WaitClock`]** (T-TRIAL-DEATH-WAIT-CONTROLLED-CLOCK,
 /// T-ELAPSED-UPPER-BOUNDS-ON-OTHER-WAITS): it starts at one wall reading and
 /// one monotonic reading and moves only by the pauses it is asked for — it
@@ -1212,6 +1345,87 @@ impl WaitClock for CountedClock {
 
     fn pause(&self, worker: &WorkerCtx, pause: Duration) {
         TrialClock::pause(self, worker, pause);
+    }
+}
+
+#[cfg(test)]
+impl CountedClock {
+    /// **A road's decision clock in a test whose synthetic trial acknowledges
+    /// the commit** (T-UPDATE-APPLY-FLIP-HOLD-FLAKE): its first pause lasts
+    /// until no receipt is left in `H\<txn>` — the trial's watch removed it,
+    /// [`note_unkept_after_trial_decision`]'s awaited end — within the suite's
+    /// patience (`lane::within_patience`); every later pause only moves the
+    /// clock. "Acknowledged in time" is the event, never a race between a
+    /// real window and the trial's thread; an acknowledgement that never
+    /// comes costs the patience once, and the window is then spent on the
+    /// count. It waits on less than the product does: the product's wait
+    /// also ends when no process runs from the program, or when a valid
+    /// receipt's trial no longer runs, and a test whose trial dies in the
+    /// first pause with its receipt left — or that leaves only an ill-formed
+    /// receipt beside a live process — spends the patience in that pause
+    /// before the next look; its verdict is the same.
+    pub(crate) fn awaiting_the_decision(home: &Home, txn: TxnId) -> Self {
+        let folder = home.transaction(txn);
+        Self::new(move |pause| {
+            if pause == 1 {
+                crate::lane::within_patience(|| !holds_a_receipt(&folder));
+            }
+        })
+    }
+}
+
+/// Whether `folder` holds a file named as a trial's receipt.
+#[cfg(test)]
+fn holds_a_receipt(folder: &Path) -> bool {
+    match crate::files::read_directory(folder) {
+        crate::files::DirOutcome::Listed(listing) => listing.entries.iter().any(|entry| {
+            !entry.is_dir
+                && entry
+                    .name
+                    .starts_with(crate::update_txn::RECEIPT_FILE_PREFIX)
+        }),
+        crate::files::DirOutcome::Failed(_) => false,
+    }
+}
+
+/// **A test's [`WaitClock`] that is the wall clock, watched**
+/// (T-UPDATE-APPLIER-LOCK-WAITS): [`WallClock`]'s readings and pauses, with
+/// `at_pause` run before each pause, with its number from one. A road's wait
+/// for something the test holds pauses only after an ask was refused, so the
+/// test lets go of its hold in the pause of its choosing — once the road has
+/// been seen waiting — never after a sleep of its own; the deadline stays the
+/// wall clock's, so a hold kept to the end still meets it.
+#[cfg(test)]
+pub(crate) struct WatchedWallClock {
+    /// The pauses so far, for each one's number.
+    pauses: std::sync::Mutex<usize>,
+    at_pause: std::sync::Mutex<Box<dyn FnMut(usize) + Send>>,
+}
+
+#[cfg(test)]
+impl WatchedWallClock {
+    pub(crate) fn new(at_pause: impl FnMut(usize) + Send + 'static) -> Self {
+        Self {
+            pauses: std::sync::Mutex::new(0),
+            at_pause: std::sync::Mutex::new(Box::new(at_pause)),
+        }
+    }
+}
+
+#[cfg(test)]
+impl WaitClock for WatchedWallClock {
+    fn now(&self) -> Instant {
+        WaitClock::now(&WallClock)
+    }
+
+    fn pause(&self, worker: &WorkerCtx, pause: Duration) {
+        let number = {
+            let mut pauses = self.pauses.lock().unwrap();
+            *pauses += 1;
+            *pauses
+        };
+        (self.at_pause.lock().unwrap())(number);
+        WaitClock::pause(&WallClock, worker, pause);
     }
 }
 
@@ -1563,23 +1777,29 @@ pub(crate) fn survey(home: &Home, txn: TxnId, program: &Path, excluded: &[Runnin
 /// worker door; after the acknowledgement (or after the exact trial has ended)
 /// it re-reads the mark and carries that final answer into `Retired`.
 ///
-/// A decision not observed within the journal-held window is an error. The
+/// A decision not observed within the journal-held window (`wait`'s
+/// `within`, read on its clock, [`WallClock`] in the product:
+/// T-UPDATE-APPLY-FLIP-HOLD-FLAKE) is an error. The
 /// caller must preserve `H/<txn>` and the committed journal for a later holder;
 /// it must not turn elapsed time into a not-kept assertion.
 pub(crate) fn note_unkept_after_trial_decision(
-    worker: &WorkerCtx,
+    wait: WaitWithin<'_>,
     journal: &Journal,
     home: &Home,
     program: &Path,
     poll: Duration,
-    within: Duration,
     say: &mut dyn FnMut(&str),
 ) -> Result<Option<String>, String> {
     if let Some(version) = &journal.body.unkept {
         return Ok(Some(version.clone()));
     }
+    let WaitWithin {
+        worker,
+        within,
+        clock,
+    } = wait;
     let txn = journal.txn;
-    let until = Instant::now() + within;
+    let until = clock.now() + within;
     loop {
         match survey(home, txn, program, &[]) {
             Survey::Adoptable { .. }
@@ -1604,7 +1824,7 @@ pub(crate) fn note_unkept_after_trial_decision(
                 return Ok(unkept);
             }
             Survey::Unlistable(why) => {
-                if Instant::now() >= until {
+                if clock.now() >= until {
                     return Err(format!(
                         "the trial's final decision could not be observed: {why}"
                     ));
@@ -1612,13 +1832,13 @@ pub(crate) fn note_unkept_after_trial_decision(
             }
         }
 
-        let left = until.saturating_duration_since(Instant::now());
+        let left = until.saturating_duration_since(clock.now());
         if left.is_zero() {
             return Err(
                 "the live trial did not acknowledge its final not-kept decision".to_owned(),
             );
         }
-        bt_platform::wait::sleep_within(worker, poll.min(left));
+        clock.pause(worker, poll.min(left));
     }
 }
 
@@ -2606,8 +2826,11 @@ fn ask_for_the_window_until(
 /// **The one applier election loop**, shared by Windows and macOS: another
 /// live marked owner or a contended election is asked again while the one
 /// `old_within` deadline has time left. No retry receives a fresh budget.
+/// Each pause between two asks is `clock`'s (the road's [`WaitClock`]: the
+/// worker's wait door in the product).
 pub(crate) fn take_the_window_for_applier(
     worker: &WorkerCtx,
+    clock: &dyn WaitClock,
     home: &Home,
     txn: TxnId,
     me: Running,
@@ -2618,7 +2841,7 @@ pub(crate) fn take_the_window_for_applier(
         until,
         poll,
         || take_the_window(Some(worker), home, txn, me, until),
-        |pause| bt_platform::wait::sleep_within(worker, pause),
+        |pause| clock.pause(worker, pause),
     )
 }
 
@@ -4026,7 +4249,7 @@ mod held_journal_tests {
                 Ok(()),
                 || {
                     asked = true;
-                    Ok(())
+                    Ok::<(), install_txn::Failure>(())
                 },
                 &mut |line| said.push(line.to_owned())
             )
@@ -4034,8 +4257,11 @@ mod held_journal_tests {
         );
         assert!(!asked && said.is_empty(), "a landed write asks no removal");
         assert!(
-            given_up_said(Err(unwritten()), || Ok(()), &mut |line| said
-                .push(line.to_owned()))
+            given_up_said(
+                Err(unwritten()),
+                || Ok::<(), install_txn::Failure>(()),
+                &mut |line| said.push(line.to_owned())
+            )
             .is_err()
         );
         assert!(said.is_empty(), "a removal done says nothing: {said:?}");

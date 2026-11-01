@@ -165,8 +165,8 @@ use bt_platform::{HostPlatform, launch_agent};
 use crate::cli;
 use crate::update_adapter::Layouts;
 use crate::update_apply::{
-    Ahead, BeforeDeciding, Deferral, ExitGuard, Leave, Recording, TrialClock, WallClock, Watch,
-    Watched, Window, stop_trial, trial_runs,
+    Ahead, BeforeDeciding, Deferral, ExitGuard, Leave, Recording, TrialClock, WaitClock,
+    WaitWithin, WallClock, Watch, Watched, Window, stop_trial, trial_runs,
 };
 
 /// **What H.3 answered before `decide`** (U-37).
@@ -310,6 +310,15 @@ pub(crate) struct Road {
     /// (a launch's, a retrial's, an adopted trial's), the watch's turns and pauses,
     /// `decide`'s `now_ms` — [`WallClock`] in the product.
     pub(crate) trial_clock: Arc<dyn TrialClock>,
+    /// **The clock the wait for a live trial's final decision after the
+    /// commit is read and paused on**
+    /// (`update_apply::note_unkept_after_trial_decision`) — [`WallClock`] in
+    /// the product (T-UPDATE-APPLY-FLIP-HOLD-FLAKE).
+    pub(crate) decision_clock: Arc<dyn WaitClock>,
+    /// **The clock the waits for O pause on** — the window election's asks
+    /// again and the data directory's claim (`update_apply::WaitClock`) —
+    /// [`WallClock`] in the product.
+    pub(crate) wait_clock: Arc<dyn WaitClock>,
     /// **This process's starter** (U-37, H.3): its parent, by pid and an
     /// earlier start instant — an ordinary start that handed itself over is no
     /// candidate.
@@ -667,6 +676,8 @@ pub(crate) fn run_here(home: &Path, txn: &str, nonce: &str) -> i32 {
                 agents: launch_agents(),
                 limits: Limits::PRODUCT,
                 trial_clock: Arc::new(WallClock),
+                decision_clock: Arc::new(WallClock),
+                wait_clock: Arc::new(WallClock),
                 starter: install_flip::parent_of_this_process(),
                 handed_back: None,
                 layouts: own_layouts(),
@@ -729,6 +740,7 @@ pub(crate) fn apply(worker: &WorkerCtx, road: &Road, world: &mut impl World) -> 
     apply_electing(worker, road, world, |worker, until| {
         crate::update_apply::take_the_window_for_applier(
             worker,
+            &*road.wait_clock,
             &road.home,
             road.txn,
             crate::update_apply::this_process(),
@@ -1714,12 +1726,15 @@ impl<'a> Txn<'a> {
         let home = self.road.home.clone();
         let limits = self.road.limits;
         let committed_unkept = match crate::update_apply::note_unkept_after_trial_decision(
-            worker,
+            WaitWithin {
+                worker,
+                within: crate::update_apply::JOURNAL_HELD_WITHIN,
+                clock: &*self.road.decision_clock,
+            },
             &self.journal,
             &home,
             places.program,
             limits.poll,
-            crate::update_apply::JOURNAL_HELD_WITHIN,
             &mut |line| {
                 bt_platform::write_std_error(format!("{line}\n").as_bytes());
             },
@@ -2194,10 +2209,11 @@ impl Recording for Txn<'_> {
 }
 
 /// **§C.4's authoritative test that O is gone**: the data directory's claim,
-/// tried until it is had and let go at once, sleeping between tries through
-/// the wait door, until `until`. A live holder or a transient sweep is asked
-/// about again; a claim that cannot be asked about is not
-/// (`ClaimRefusal::QueryDenied`: no answer is coming).
+/// tried until it is had and let go at once, pausing between tries on the
+/// road's `wait_clock` (the worker's wait door in the product), until
+/// `until`. A live holder or a transient sweep is asked about again; a claim
+/// that cannot be asked about is not (`ClaimRefusal::QueryDenied`: no answer
+/// is coming).
 fn wait_for_the_claim(worker: &WorkerCtx, road: &Road, until: Instant) -> Result<(), String> {
     loop {
         match crate::persist::try_claim(&road.data) {
@@ -2213,7 +2229,7 @@ fn wait_for_the_claim(worker: &WorkerCtx, road: &Road, until: Instant) -> Result
                 if left.is_zero() {
                     return Err("still held at the end of the wait".to_owned());
                 }
-                bt_platform::wait::sleep_within(worker, road.limits.poll.min(left));
+                road.wait_clock.pause(worker, road.limits.poll.min(left));
             }
             Err(refusal) => return Err(format!("{refusal:?}")),
         }

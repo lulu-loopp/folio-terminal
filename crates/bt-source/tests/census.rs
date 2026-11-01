@@ -671,6 +671,203 @@ fn a_call_through_a_local_binding_is_not_typed_as_the_package_function() {
     );
 }
 
+/// The free-function-reach fixture (plan row 126): the subject (`free_function_reach/app/`, with
+/// the shared files beside it in scope) and two more workspace crates — `…/other/`
+/// (`census_reach_other`) and `…/deep/` (`census_reach_deep`), which `other` re-exports by a glob
+/// — each its own universe, the census taken over all three as the real tree's is over the
+/// workspace.
+fn free_function_reach_census() -> FieldCensus {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("census");
+    let package = |folder: &str, scope: &Path, package: &str, name: &str| {
+        let universe = Universe::declare(
+            format!("the free-function-reach fixture's {folder}"),
+            vec![TargetRoot {
+                id: TargetId {
+                    package: package.to_owned(),
+                    kind: TargetKind::Library,
+                    name: name.to_owned(),
+                },
+                file: root.join("free_function_reach").join(folder).join("lib.rs"),
+            }],
+            vec![DiskScope::under(scope)],
+            Vendor::Excluded,
+        )
+        .expect("the fixture is there");
+        Index::shared(&universe).unwrap_or_else(|rejections| panic!("{}", report(&rejections)))
+    };
+    let app = package("app", &root, "census-reach", "census_reach");
+    let other = package(
+        "other",
+        &root.join("free_function_reach").join("other"),
+        "census-reach-other",
+        "census_reach_other",
+    );
+    let deep = package(
+        "deep",
+        &root.join("free_function_reach").join("deep"),
+        "census-reach-deep",
+        "census_reach_deep",
+    );
+    let census = FieldCensus::take(&app, &FIXTURE_STRUCTS, &[&app, &other, &deep])
+        .expect("the fixture's four");
+    assert!(
+        census.unparsed().is_empty(),
+        "every declaration of the fixture parses: {:?}",
+        census.unparsed()
+    );
+    census
+}
+
+/// RED (plan row 126) — **a one-segment call `f(..)` is typed only from the declarations its
+/// module reaches**: the module's own product items (a test-only one skipped), its product `use`
+/// items (a rename, the package's re-export, `self::` and `super::` paths), its globs (one through
+/// a module re-exported under another name), and across a
+/// `use` or a glob into another workspace crate to that crate's declaration (through its
+/// re-exports, two crates deep). Each GREEN call reaches the package's `windows::grab` or
+/// `windows::pick` (two `cfg` variants of one item), or `shadowed::config` — a function named like
+/// the module its own module imports, beside the root's decoy `fn config` that returns another
+/// crate's struct — which return the window, so the write is the window's
+/// title. Each RED call is named like a test helper that returns the window, or like the package's
+/// `grab`; none of them reaches it:
+/// - through another crate's `use` (`fetch`, a re-export there), its re-export of a function
+///   named like the module it comes from (`solve`: the module is looked up before the `use`
+///   name), a path through a module the crate root brings in from that crate
+///   (`crate::attention::kind_mode`), its glob (`spread`) and its glob re-export of a third
+///   crate's module (`admitted`), it is that crate's function, which returns that crate's own
+///   struct: typed, so neither a write nor an unknown site;
+/// - a name only a test helper elsewhere declares (`helper`), one brought in only by a test
+///   build's `use` (`probe`), one the module declares only for a test build
+///   (`only_in_tests`), a `use` into the standard library (`take`), a `fn` written in the body
+///   (`lend`), a `use` written in the body (`grab`), a `pub use` cycle (`spin`), `super` past the
+///   crate root (`lost`), a first segment the rules cannot place (`thing`) and a name only a
+///   local enum's glob could have brought (`missing`) are refused, and the write through each is
+///   an unknown site naming why.
+///
+/// RED on `9ac40b223` (main): `Walk::free_function` looked the bare name up over every package's
+/// declarations, test items included, keeping the subject's own when it had any. The writers were
+/// the seven GREEN-or-shared ones less `through_a_reexport` and `through_a_rename` (no function is
+/// declared under the name `fetch_window` or `window_of`, so both were unknown), plus nine wrong
+/// ones: `a_test_helper_elsewhere`, `a_test_only_declaration_here`, `a_test_only_use`,
+/// `a_use_of_the_body`, `through_a_foreign_glob`, `through_a_foreign_use`,
+/// `through_a_reexport_named_like_its_module`, `through_an_aliased_module` and
+/// `through_the_standard_library`, each typed from the test helper of its name or from the
+/// package's `grab`; `lend` was typed from the other crate's function.
+///
+/// RED on `a7622878a` (the review's HOLD, fold F1–F4):
+/// `through_a_function_named_like_an_imported_module` was refused as not reached (the last
+/// segment was replaced through `shadowed`'s `use crate::config`),
+/// `a_test_only_declaration_beside_a_product_use` was refused as test-only, and every path the
+/// rules could not place — the cycle, `super` past the root, the unknown first segment, the
+/// enum's glob — was "a path into a crate the census does not read".
+///
+/// RED on `00acd5535` (the fold; the re-check's R1): `through_a_glob_of_a_renamed_module` was
+/// refused as not reached — the glob's last segment, `wins`, a module `hub` re-exports, was left
+/// unsettled like a value name.
+///
+/// MUTATIONS (each observed red on the fold, then reverted): look a `use` name up before a child
+/// module in `Follow::placed` — `solve` loops and is refused at the step limit; drop
+/// `Follow::settled` — `kind_mode` is refused as not reached; settle a value path's last segment
+/// too — `config` is typed from the root's decoy `fn config`, neither a write nor an unknown;
+/// settle no glob's last segment — `through_a_glob_of_a_renamed_module` is not reached; type the
+/// call by `Uses::Every` — `probe` and `only_in_tests` write the window's title; let a test-only
+/// declaration answer under `Uses::Product` — `only_in_tests` writes it; stop at a test-only
+/// declaration — `now` is refused; drop the type check in `Follow::placed` — `missing` is refused
+/// as a first segment the rules cannot place; drop the `block_item` check in `Walk::callee` —
+/// `lend` and the body's `grab` are refused as not reached, never naming the body's `fn` or `use`.
+#[test]
+fn a_free_function_is_typed_from_what_its_module_reaches() {
+    let census = free_function_reach_census();
+    let mut writers = functions(&rows(&census, "WindowRuntime.title", Column::Write));
+    writers.sort();
+    // `retitle` is the shared fixture's own writer.
+    assert_eq!(
+        writers,
+        [
+            "a_test_only_declaration_beside_a_product_use",
+            "here",
+            "retitle",
+            "through_a_function_named_like_an_imported_module",
+            "through_a_glob",
+            "through_a_glob_of_a_renamed_module",
+            "through_a_reexport",
+            "through_a_rename",
+            "through_a_use",
+            "through_cfg_variants",
+            "through_self",
+            "through_super",
+        ],
+        "{:#?}",
+        census.rows()
+    );
+    let unresolved = "assign through a receiver that does not resolve: ";
+    let mut unknown: Vec<(String, String)> = census
+        .unknowns()
+        .iter()
+        .map(|row| {
+            let reason = row.reason.strip_prefix(unresolved).unwrap_or(&row.reason);
+            (row.function.clone(), reason.to_owned())
+        })
+        .collect();
+    unknown.sort_unstable();
+    let expected: Vec<(String, String)> = [
+        (
+            "a_function_of_the_body",
+            "`lend`, a `fn` written in the body: the census reads no declaration of it",
+        ),
+        (
+            "a_test_helper_elsewhere",
+            "`helper` is not a function the module's items and `use` items reach",
+        ),
+        (
+            "a_test_only_declaration_here",
+            "`only_in_tests` is declared only for a test build where the module reaches it",
+        ),
+        (
+            "a_test_only_use",
+            "`probe` is not a function the module's items and `use` items reach",
+        ),
+        (
+            "a_type_glob_brings_no_function",
+            "`missing` is not a function the module's items and `use` items reach",
+        ),
+        (
+            "a_use_cycle",
+            "`spin` comes through a chain of `use` items longer than the rules follow (8 steps; a \
+             cycle never ends)",
+        ),
+        (
+            "a_use_of_the_body",
+            "`grab`, brought in by a `use` written in the body: the census reads no `use` of a body",
+        ),
+        (
+            "an_unknown_first_segment",
+            "`thing` comes through `outside_the_workspace::thing`, whose first segment \
+             `outside_the_workspace` is no module, type or workspace crate the rules place: a \
+             crate outside the workspace, or a module a macro writes",
+        ),
+        (
+            "past_the_root",
+            "`lost` comes through `super::super::lost`, whose `super` goes past the crate root",
+        ),
+        (
+            "through_the_standard_library",
+            "`take` comes through `std::mem::take`, a path into a crate the census does not read",
+        ),
+        // The shared fixture's own.
+        (
+            "untyped",
+            "call `clear` through a receiver that does not resolve: what `map` returns",
+        ),
+    ]
+    .iter()
+    .map(|(function, reason)| ((*function).to_owned(), (*reason).to_owned()))
+    .collect();
+    assert_eq!(unknown, expected, "{:#?}", census.unknowns());
+}
+
 /// RED (census-1) — **`Runtime.{app, window}` are the runtime's own fields,
 /// looked up before its `Deref` to `TabState`.**
 ///

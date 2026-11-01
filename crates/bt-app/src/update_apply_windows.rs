@@ -185,8 +185,9 @@ use crate::install_channel::Channel;
 use crate::update_adapter::Layouts;
 use crate::update_apply::{
     Ahead, BeforeDeciding, Carried, Deferral, Ended, ExitGuard, HandedBack, Journaled, Leave,
-    Limits, Opener, Opens, Recording, TrialClock, WallClock, Watch, Watched, Window, failed_words,
-    owed_at_logon, read_receipt, stop_trial, trial_runs, trial_words, until_let_go,
+    Limits, Opener, Opens, Recording, TrialClock, WaitClock, WaitWithin, WallClock, Watch, Watched,
+    Window, failed_words, owed_at_logon, read_receipt, stop_trial, trial_runs, trial_words,
+    until_let_go,
 };
 
 /// **What H.3 answered before `decide`** (U-37).
@@ -507,15 +508,13 @@ fn held_move(
     to: &Path,
     world: &mut dyn World,
 ) -> Result<(), crate::update_apply::Unwritten> {
-    let (worker, within) = journal.held_door();
     // One world behind two seams, each round's line said as it happens and
     // the round looked at after it; never both at once.
     let world = std::cell::RefCell::new(world);
     crate::update_apply::move_held_within(
-        worker,
+        journal.held_door(),
         from,
         to,
-        within,
         opening,
         &mut |line| world.borrow_mut().say(line),
         &mut || world.borrow_mut().move_held(step),
@@ -569,6 +568,19 @@ pub(crate) struct Road {
     /// trial's), the watch's turns and pauses, `decide`'s `now_ms` —
     /// [`WallClock`] in the product.
     pub(crate) trial_clock: Arc<dyn TrialClock>,
+    /// **The clock a held member's move window is read and paused on**
+    /// (`update_apply::move_held_within`, through the journal holder's
+    /// door) — [`WallClock`] in the product (T-UPDATE-APPLY-FLIP-HOLD-FLAKE).
+    pub(crate) held_clock: Arc<dyn WaitClock>,
+    /// **The clock the wait for a live trial's final decision after the
+    /// commit is read and paused on**
+    /// (`update_apply::note_unkept_after_trial_decision`) — [`WallClock`] in
+    /// the product (T-UPDATE-APPLY-FLIP-HOLD-FLAKE).
+    pub(crate) decision_clock: Arc<dyn WaitClock>,
+    /// **The clock the waits for O pause on** — the window election's asks
+    /// again and the data directory's claim (`update_apply::WaitClock`) —
+    /// [`WallClock`] in the product.
+    pub(crate) wait_clock: Arc<dyn WaitClock>,
     /// This process, by its pid and start time: what the window's mark names
     /// when this process takes it (`update_apply::OWNER_FILE`).
     pub(crate) me: Running,
@@ -602,6 +614,9 @@ impl Road {
             channel,
             limits: Limits::PRODUCT,
             trial_clock: Arc::new(WallClock),
+            held_clock: Arc::new(WallClock),
+            decision_clock: Arc::new(WallClock),
+            wait_clock: Arc::new(WallClock),
             me: crate::update_apply::this_process(),
             starter: install_flip::parent_of_this_process(),
             handed_back: None,
@@ -823,6 +838,7 @@ pub(crate) fn apply(
     apply_electing(worker, road, txn, nonce, world, |worker, until| {
         crate::update_apply::take_the_window_for_applier(
             worker,
+            &*road.wait_clock,
             &road.home,
             txn,
             road.me,
@@ -1280,7 +1296,13 @@ impl<'a> Txn<'a> {
         Ok(Self {
             road,
             asker,
-            j: Journaled::of(&road.home, worker, journal, road.limits.journal_held_within),
+            j: Journaled::of(
+                &road.home,
+                worker,
+                journal,
+                road.limits.journal_held_within,
+                &*road.held_clock,
+            ),
             _lock: lock,
             inventories,
             layout,
@@ -1366,6 +1388,7 @@ impl<'a> Txn<'a> {
         }
         if let Err(why) = crate::update_apply::wait_for_the_claim(
             worker,
+            &*self.road.wait_clock,
             &self.road.data,
             self.road.limits.poll,
             window,
@@ -2164,12 +2187,15 @@ impl<'a> Txn<'a> {
         let installed = self.road.installed.clone();
         let limits = self.road.limits;
         let unkept = crate::update_apply::note_unkept_after_trial_decision(
-            worker,
+            WaitWithin {
+                worker,
+                within: limits.journal_held_within,
+                clock: &*self.road.decision_clock,
+            },
             &self.j.journal,
             &home,
             &installed,
             limits.poll,
-            limits.journal_held_within,
             &mut |line| world.say(line),
         )?;
         let located = self.layout.locate(&self.site())?;

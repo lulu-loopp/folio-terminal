@@ -615,14 +615,21 @@ mod imp {
     /// `None` once it has ended (its record outlives it while any handle is
     /// open). `process` was opened with `PROCESS_SYNCHRONIZE`.
     ///
-    /// **Ended is the process object signalled**, which the kernel does after
-    /// it has closed every handle the process held and unmapped its image —
-    /// not the exit code being readable, which comes first: a process leaving
-    /// by `ExitProcess` or by `TerminateProcess` on itself (Folio's way out)
-    /// has said its code while its handles — a data directory's claim among
-    /// them — and its image are still its own, for as long as its threads take
-    /// to leave the kernel. Whoever waits for a process to end waits for what
-    /// it held, so that stretch is still running.
+    /// **Ended is the process object signalled**, which the kernel does once
+    /// the process has closed the handles it held — not the exit code being
+    /// readable, which comes first: a process leaving by `ExitProcess` or by
+    /// `TerminateProcess` on itself (Folio's way out) has said its code while
+    /// its handles — a data directory's claim among them — are still its own,
+    /// for as long as its threads take to leave the kernel. Whoever waits for
+    /// a process to end waits for what it held, so that stretch is still
+    /// running. **That its image file is let go by then is not promised**:
+    /// CI run 41156010943 met a removal of the rescue build refused with
+    /// `ERROR_ACCESS_DENIED` (the answer for an executable still mapped as an
+    /// image — the ended process's own or a scanner's, which is not known)
+    /// just after this said it had ended, so a caller that removes the
+    /// executable next asks again while the removal is refused as held
+    /// (`install_txn::Failure::removal_refused_while_held`;
+    /// T-UPDATE-STARTUP-ON-DISK-TEMP-DIR-RACE).
     fn creation_of(process: HANDLE) -> Option<u64> {
         // SAFETY: `process` is live for the call; a zero timeout only asks.
         if unsafe { WaitForSingleObject(process, 0) } != WAIT_TIMEOUT {
@@ -1248,11 +1255,9 @@ mod tests {
     ///
     /// MUTATION: in the Windows arm, `creation_of` answers the creation time
     /// without asking whether the process is still active.
+    #[cfg(windows)]
     #[test]
     fn a_started_program_is_listed_while_it_runs_and_not_after() {
-        if crate::host_platform() != crate::HostPlatform::Windows {
-            return;
-        }
         let scratch = Scratch::new("list");
         let program = scratch.0.join("folio.exe");
         crate::trust_harness::program(

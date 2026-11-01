@@ -901,15 +901,12 @@ fn download_from(url: &NSURL, request: &HttpsDownload<'_>) -> Result<Downloaded,
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        io::{Read, Write},
-        net::TcpListener,
-        time::{Duration, Instant},
-    };
+    use std::time::{Duration, Instant};
 
     use objc2_foundation::{NSString, NSURL};
 
     use super::{HttpsGet, fetch, https_get};
+    use crate::https_download::loopback::{Entry, Served, Step, serve};
 
     /// The product's own numbers, so that what these cases exercise is what
     /// `bt_app::update` exercises.
@@ -929,8 +926,10 @@ mod tests {
     }
 
     /// **One canned HTTP/1.1 response, from a server on this machine** — bound
-    /// on a loopback port of the kernel's choosing, answering the first request
-    /// that arrives and then closing.
+    /// on a loopback port of the kernel's choosing, answering every request
+    /// that arrives with it until the test is done (0.4.9 plan row 127: it
+    /// answered the first and closed, so a client that connected again met a
+    /// closed port).
     ///
     /// **The three cases below used to ask `api.github.com`, and that is why CI
     /// was red for two days**: a shared runner is one of a great many machines
@@ -939,34 +938,14 @@ mod tests {
     /// Mac. A test that passes or fails according to how busy somebody else's
     /// service is has stopped being a statement about this code.
     ///
-    /// The head is read before the answer is written, because a server that
-    /// answers and closes while the client is still writing hands some stacks a
-    /// reset in place of a response.
-    fn answering(response: Vec<u8>) -> u16 {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("a loopback port");
-        let port = listener
-            .local_addr()
-            .expect("the port the kernel chose")
-            .port();
-        std::thread::spawn(move || {
-            let Ok((mut connection, _)) = listener.accept() else {
-                return;
-            };
-            let mut head = Vec::new();
-            let mut byte = [0u8; 1];
-            while !head.ends_with(b"\r\n\r\n") {
-                if connection.read(&mut byte).unwrap_or(0) != 1 {
-                    return;
-                }
-                head.push(byte[0]);
-            }
-            // The client of a body longer than its cap cancels mid-transfer, so
-            // the far end going away here is one of the outcomes rather than a
-            // failure of the server.
-            let _ = connection.write_all(&response);
-            let _ = connection.flush();
-        });
-        port
+    /// The head is read before the answer is written (the download tests'
+    /// [`serve`] does), because a server that answers and closes while the
+    /// client is still writing hands some stacks a reset in place of a
+    /// response. The client of a body longer than its cap cancels
+    /// mid-transfer, so the far end going away is one of the outcomes rather
+    /// than a failure of the server.
+    fn answering(response: Vec<u8>) -> Served {
+        serve(move |_| vec![Step::Send(response.clone())])
     }
 
     /// The least HTTP/1.1 the client needs: a status line, a length, and a
@@ -1039,7 +1018,8 @@ mod tests {
     #[test]
     fn the_releases_list_comes_back_as_json() {
         const RELEASES: &str = r#"[{"tag_name":"v0.3.0","name":"Folio 0.3.0","draft":false}]"#;
-        let port = answering(response(200, "OK", RELEASES));
+        let server = answering(response(200, "OK", RELEASES));
+        let port = server.port();
         let body = ask_this_machine(port, "/repos/lulu-loopp/folio-terminal/releases", CAP)
             .expect("the releases list");
         assert_eq!(body, RELEASES, "the body arrived whole and in order");
@@ -1149,7 +1129,8 @@ mod tests {
     fn a_body_longer_than_the_cap_is_an_error() {
         let long = format!("[{}]", "\"v0.3.0\",".repeat(40));
         assert!(long.len() > 64, "the body has to be longer than the cap");
-        let port = answering(response(200, "OK", &long));
+        let server = answering(response(200, "OK", &long));
+        let port = server.port();
         let refusal = ask_this_machine(port, "/repos/lulu-loopp/folio-terminal/releases", 64)
             .expect_err("64 bytes is not a release list");
         assert_eq!(refusal, "the body is longer than 64 bytes");
@@ -1168,7 +1149,8 @@ mod tests {
     /// `NSURLSession: cancelled`.
     #[test]
     fn a_status_that_is_not_200_comes_back_as_the_number() {
-        let port = answering(response(404, "Not Found", r#"{"message":"Not Found"}"#));
+        let server = answering(response(404, "Not Found", r#"{"message":"Not Found"}"#));
+        let port = server.port();
         let refusal = ask_this_machine(
             port,
             "/repos/lulu-loopp/folio-terminal-not-a-repo/releases",
@@ -1176,6 +1158,31 @@ mod tests {
         )
         .expect_err("there is no such repository");
         assert_eq!(refusal, "the server answered 404");
+    }
+
+    /// RED (row 127) — **one canned response is given to every ask**, one
+    /// after another, until the test is done, and each ask is recorded.
+    ///
+    /// MUTATION: end the server's loop after its first connection (the
+    /// answer-once server this replaces) and the second ask fails to connect.
+    #[test]
+    fn a_canned_response_answers_every_ask() {
+        const RELEASES: &str = r#"[{"tag_name":"v0.3.0"}]"#;
+        let server = answering(response(200, "OK", RELEASES));
+        for _ in 0..2 {
+            let body = ask_this_machine(
+                server.port(),
+                "/repos/lulu-loopp/folio-terminal/releases",
+                CAP,
+            )
+            .expect("every ask is answered");
+            assert_eq!(body, RELEASES);
+        }
+        let paths = server.stop();
+        assert_eq!(
+            paths,
+            vec![Entry::Served(Some("/repos/lulu-loopp/folio-terminal/releases".to_owned())); 2]
+        );
     }
 
     /// **The download's cases, on `NSURLSession`** — the Windows arm's list,
@@ -1195,7 +1202,7 @@ mod tests {
         };
         use crate::https_download::{
             DOWNLOAD_FLOOR_BYTES, DOWNLOAD_IDLE_TIMEOUT,
-            loopback::{Step, begun, body, head, ok, serve},
+            loopback::{Entry, Step, begun, body, head, ok, serve},
         };
 
         const IDLE: Duration = Duration::from_secs(5);
@@ -1264,9 +1271,8 @@ mod tests {
             let directory = scratch("whole");
             let bytes = body(300_000);
             let served = bytes.clone();
-            let port = serve(1, move |_| {
-                vec![Step::Send(ok(&served, Some(served.len())))]
-            });
+            let server = serve(move |_| vec![Step::Send(ok(&served, Some(served.len())))]);
+            let port = server.port();
             let monitor = quiet();
             let done = fetch(
                 port,
@@ -1292,9 +1298,8 @@ mod tests {
             let directory = scratch("at-ceiling");
             let bytes = body(70_000);
             let served = bytes.clone();
-            let port = serve(1, move |_| {
-                vec![Step::Send(ok(&served, Some(served.len())))]
-            });
+            let server = serve(move |_| vec![Step::Send(ok(&served, Some(served.len())))]);
+            let port = server.port();
             let done = fetch(
                 port,
                 &directory,
@@ -1319,7 +1324,8 @@ mod tests {
         fn unknown_length_stream_is_bounded() {
             let directory = scratch("over-unknown");
             let served = body(70_001);
-            let port = serve(1, move |_| vec![Step::Send(ok(&served, None))]);
+            let server = serve(move |_| vec![Step::Send(ok(&served, None))]);
+            let port = server.port();
             let monitor = quiet();
             let error = fetch(
                 port,
@@ -1342,12 +1348,13 @@ mod tests {
         #[test]
         fn an_announced_length_over_the_ceiling_is_refused_before_the_body() {
             let directory = scratch("announced-over");
-            let port = serve(1, |_| {
+            let server = serve(|_| {
                 vec![
                     Step::Send(begun(&["Content-Length: 1073741824".to_owned()])),
                     Step::Pause(Duration::from_secs(10)),
                 ]
             });
+            let port = server.port();
             let started = Instant::now();
             let error = fetch(
                 port,
@@ -1378,11 +1385,12 @@ mod tests {
         #[test]
         fn a_truncated_body_never_takes_the_name() {
             let directory = scratch("truncated");
-            let port = serve(1, |_| {
+            let server = serve(|_| {
                 let mut bytes = head(200, "OK", &["Content-Length: 100000".to_owned()]);
                 bytes.extend_from_slice(&body(40_000));
                 vec![Step::Send(bytes)]
             });
+            let port = server.port();
             let error = fetch(
                 port,
                 &directory,
@@ -1403,7 +1411,7 @@ mod tests {
         #[test]
         fn a_status_that_is_not_200_makes_no_file() {
             let directory = scratch("status");
-            let port = serve(1, |_| {
+            let server = serve(|_| {
                 let page = b"<h1>Not Found</h1>";
                 let mut bytes = head(
                     404,
@@ -1413,6 +1421,7 @@ mod tests {
                 bytes.extend_from_slice(page);
                 vec![Step::Send(bytes)]
             });
+            let port = server.port();
             let error = fetch(
                 port,
                 &directory,
@@ -1442,7 +1451,7 @@ mod tests {
         fn a_redirect_to_plain_http_is_refused_with_its_status() {
             let directory = scratch("redirect");
             let served = body(5_000);
-            let port = serve(2, move |path| {
+            let server = serve(move |path| {
                 if path == "/folio-0.4.6-aarch64.dmg" {
                     vec![Step::Send(head(
                         302,
@@ -1456,6 +1465,7 @@ mod tests {
                     vec![Step::Send(ok(&served, Some(served.len())))]
                 }
             });
+            let port = server.port();
             let error = fetch(
                 port,
                 &directory,
@@ -1480,12 +1490,13 @@ mod tests {
         #[test]
         fn redirect_loop_and_trickle_body_hit_deadlines() {
             let directory = scratch("trickle");
-            let port = serve(1, |_| {
+            let server = serve(|_| {
                 vec![
                     Step::Send(begun(&[])),
                     Step::Trickle(Duration::from_millis(50), Duration::from_secs(8)),
                 ]
             });
+            let port = server.port();
             let started = Instant::now();
             let stretch = Duration::from_millis(1_500);
             let error = fetch(
@@ -1514,7 +1525,8 @@ mod tests {
         #[test]
         fn cancel_interrupts_idle_wait() {
             let directory = scratch("cancel");
-            let port = serve(1, |_| vec![Step::Pause(Duration::from_secs(40))]);
+            let server = serve(|_| vec![Step::Pause(Duration::from_secs(40))]);
+            let port = server.port();
             let monitor = quiet();
             let canceller = Arc::clone(&monitor);
             std::thread::spawn(move || {
@@ -1538,6 +1550,35 @@ mod tests {
                 started.elapsed()
             );
             assert!(entries(&directory).is_empty());
+        }
+
+        /// RED (row 127) — **one server answers one download after another**,
+        /// as the Windows arm's twin says.
+        ///
+        /// MUTATION: end the server's loop after its first connection and the
+        /// second download fails to connect.
+        #[test]
+        fn one_server_answers_one_download_after_another() {
+            let bytes = body(10_000);
+            let served = bytes.clone();
+            let server = serve(move |_| vec![Step::Send(ok(&served, Some(served.len())))]);
+            for name in ["first", "second"] {
+                let directory = scratch(name);
+                let done = fetch(
+                    server.port(),
+                    &directory,
+                    1 << 20,
+                    (IDLE, DOWNLOAD_FLOOR_BYTES),
+                    &quiet(),
+                )
+                .unwrap_or_else(|error| panic!("the {name} download: {error}"));
+                assert_eq!(std::fs::read(&done.path).expect("the file"), bytes);
+            }
+            let paths = server.stop();
+            assert_eq!(
+                paths,
+                vec![Entry::Served(Some("/folio-0.4.6-aarch64.dmg".to_owned())); 2]
+            );
         }
     }
 }

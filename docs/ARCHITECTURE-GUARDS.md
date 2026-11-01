@@ -283,7 +283,24 @@ only by a row with its grammar, a fixture and a pin (`tests/index.rs`
 `a_cfg_in_a_read_macro_body_is_a_gate`, `a_cfg_in_any_other_macro_body_is_refused_by_its_line`;
 `tests/contract.rs` `the_test_only_texts_are_not_product`). Not reached, a limit older than the
 row: a macro in an attribute's value (`#[doc = m!(…)]`) and `syn`'s unparsed `Verbatim` tokens,
-where a `cfg` is neither read nor refused; the tree has no `cfg` there.
+where a `cfg` is neither read nor refused; the tree has no `cfg` there. Under an attribute macro
+(2026-10-31, T-GATE-WALK-UNDER-ATTRIBUTE-MACROS, plan row 122; the review of row 109, R-N2): an
+attribute macro receives its item's tokens and may emit anything, so every `cfg` (or
+`cfg`-writing `cfg_attr`) inside an item, `impl` item, `trait` item or foreign item that carries
+one refuses the index by its line and the attribute macro as written
+(`Rejection::CfgUnderAttributeMacro`), at any depth and inside macro tokens too; the item itself
+is not refused, and its own `cfg`s are read as before (the compiler applies them first). Inert,
+and read through: the language's own attributes, `rustfmt::`, `clippy::` and `diagnostic::` (not
+`::`-led, which names a crate), a `derive` of anything, a derive helper beside a derive that
+declares it, spelt as written (a closed table: `serde` for `Serialize`/`Deserialize` or
+`serde::Serialize`/`serde::Deserialize`; `error`, `from`, `source`, `backtrace` for `Error` or
+`thiserror::Error`), and a `cfg_attr` writing only those. Every other attribute may rewrite,
+`cfg_attr(…, attr_macro)` whatever its predicate, and a helper beside a derive spelt any other way
+(`other_crate::Error`). Not reached: a `use` that replaces a built-in attribute macro (`use
+test_log::test;`) — the allow-list is keyed by name; none in the tree. Such `impl`, `trait` and foreign items are hazards too, like items
+(`tests/index.rs` `a_cfg_under_an_attribute_macro_is_refused_by_its_line`,
+`a_cfg_under_inert_attributes_is_a_gate`). The tree's one attribute macro on items is
+windows-rs's `#[implement]` (three structs in `bt-platform`), with no `cfg` inside.
 
 ## Ownership census
 
@@ -1088,9 +1105,58 @@ the thread it would wait for is still held, awaited within the suite's patience,
 go before the verdict — never by timing it. The hand-off lane's flood and the trace sink's producers
 are read the same way, so a press, an offer, a settle or a writer that waits is red, not a hang, in
 these tests and in the trace sink's, the log writer's and the watchdog's tests that meet a full queue,
-a held writer or a held ring (row 106); the lane doors' gate-held tests (row 111) and the applier's
-lock waits behind a held lock (row 112) are not yet read this way. What such a verdict does
-not catch is a bounded wait, or a give-up that ignores its budget, shorter than the suite's patience.
+a held writer or a held ring (row 106), in the applier's (row 112, below), and in every test that
+holds a lane's worker — at the suite's gate or a fake's hold — and calls a door while it is held
+(row 111): the held worker lets go on its own at the suite's patience and counts it, and the release
+reads the count, so a door that waits is red, not a hang (the taskbar's held shell, a channel, is
+read by its reading's return on a thread of its own, awaited within the suite's patience, the shell
+let go before the verdict). The cap frees holds, not locks: a door that waits while it keeps a
+product lock the held worker takes next still hangs — the program walk's admission keeps the lane's
+lock across the ask (`ProgramsLane::request`), and row 111's planted wait there hung. That, and a
+test-thread wait on something no gate or hold holds (row 113), are not yet read this way. What such a verdict does not catch is a bounded wait, or a give-up that ignores
+its budget, shorter than the suite's patience.
+
+2026-10-31 (T-FLOATING-VIDEO-DOUBLE-CLICK-TIMING, plan row 124): a double click is decided by
+the window's multi-click counters (`ImageClicks`, `PreviewTextClicks`) on the moment a press is
+counted at, and that moment is read on the window's `PointerClock`: the product's is `Wall`, whose
+`moment(wall)` answers the instant the press site has just read with its own `Instant::now()`,
+unchanged, so the product counts every press at exactly the moment it did before. A test that
+needs two presses to be one double click, or not one, holds it
+(`HeadlessFolio::hold_the_pointer_clock`) and moves it (`pointer_clock_runs`); how long a loaded
+machine takes between the presses is never the verdict. Between a pair's presses such a test
+moves the playhead by a seek, never by playback: the Mac's engine has no media clock in a headless
+test process (`Engine::state_reaching`), so a wait for playback to advance is a Windows-only wait
+(row 124's Mac gate, 2026-10-31). Seven picture and recording tests and one
+rendered-page test were formed on the wall clock this way and are converted; the recording tests'
+verdicts are read behind a volume fence where the state before the gesture could satisfy the
+wait (the glance card's is not: its waits cannot be met by that state, and are unfenced by design). **The
+scan never listed them, and could not**: the clock that decided them is read in product code a
+test calls, which is the scan's stated blind spot (its header and `check-timing-bound.ps1` say so),
+not a fault in its grammar. Whether product real-time windows that tests race can be found by a
+scan at all is plan row 125's (T-TIMING-CENSUS-PRODUCT-WINDOWS); until it lands, review owns them.
+
+2026-10-31 (T-UPDATE-APPLY-FLIP-HOLD-FLAKE): a road's wait for another thread or process that has no
+clock of the test's own is still timed by the product, and a loaded run turns that race the other way. The update
+applier's wait for a live trial's final decision after the commit (`note_unkept_after_trial_decision`) is
+read and paused on `Road::decision_clock`, and each held move of the Windows flip or rollback
+(`move_held_within`, through `Journaled::held_door`) on `Road::held_clock`. Both are `update_apply::WaitClock`,
+and `WallClock` in the product. The applier harnesses on both platforms hand a `CountedClock` whose first pause lasts until the
+trial's receipt is gone, within the suite's patience; the held-moment tests count the window's pauses. A product
+window raced by a test thread is not seen by the timing scan, which reads test bodies (plan row 125).
+
+2026-10-31 (T-UPDATE-APPLIER-LOCK-WAITS): the update applier's and recovery's give-ups behind a
+hold the test keeps — the transaction lock, the data directory's claim, the admission, the journal
+or a member held open, the election in flight, O alive — are awaited while the hold is still held,
+within the suite's patience (`ended_while_held` in `update_apply_windows_tests.rs` and
+`update_apply_macos_tests.rs`), and a road that waits past its deadline is red, not a hang; the hold
+is then kept for the life of the test process, so the road never runs on into the failed test's
+removed fixture (O alive, which the fixture ends, is the one hold a test cannot keep: there the
+election lock is taken and kept before the test is red, `ended_while_held_keeping`). A hold let
+go "once the road waits" is let go in the pause of the road's first refused ask: the window
+election's asks again and both platforms' waits for the claim pause on the road's `wait_clock`
+(`update_apply::WaitClock`; `WallClock` in the product, `WatchedWallClock` under test), and the
+wait for the transaction lock is reached as state (the election over: the mark names the
+applier and the election lock is free).
 
 ## Suite watchdog
 
