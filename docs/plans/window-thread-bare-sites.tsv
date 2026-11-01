@@ -141,7 +141,7 @@ bt-platform	[unix]	crate::install_evidence::imp::owner_of	std::fs::metadata	1
 bt-platform	[unix]	crate::launch_pipe::LaunchPipe::hang_up	libc::close	1
 bt-platform	[unix]	crate::launch_pipe::LaunchPipe::hang_up	libc::write	1
 bt-platform	[unix]	crate::launch_pipe::LaunchPipe::retire_within	std::thread::JoinHandle::join	1
-bt-platform	[unix]	crate::launch_pipe::LaunchPipe::start	libc::close	2
+bt-platform	[unix]	crate::launch_pipe::LaunchPipe::start_on	libc::close	2
 bt-platform	[unix]	crate::launch_pipe::listen	libc::close	1
 bt-platform	[windows]	crate::attention_pipe::<Overlapped as Drop>::drop	windows::Win32::Foundation::CloseHandle	1
 bt-platform	[windows]	crate::attention_pipe::<OwnedHandle as Drop>::drop	windows::Win32::Foundation::CloseHandle	1
@@ -162,9 +162,9 @@ bt-platform	[windows]	crate::instance::try_claim_data_directory	windows::Win32::
 bt-platform	[windows]	crate::launch_pipe::Instance::arm_connect	windows::Win32::System::Threading::SetEvent	1
 bt-platform	[windows]	crate::launch_pipe::LaunchPipe::retire_within	std::thread::JoinHandle::join	1
 bt-platform	[windows]	crate::launch_pipe::LaunchPipe::retire_within	windows::Win32::Foundation::CloseHandle	1
-bt-platform	[windows]	crate::launch_pipe::LaunchPipe::start	std::thread::JoinHandle::join	2
-bt-platform	[windows]	crate::launch_pipe::LaunchPipe::start	windows::Win32::Foundation::CloseHandle	2
-bt-platform	[windows]	crate::launch_pipe::LaunchPipe::start	windows::Win32::System::Threading::SetEvent	1
+bt-platform	[windows]	crate::launch_pipe::LaunchPipe::start_on	std::thread::JoinHandle::join	2
+bt-platform	[windows]	crate::launch_pipe::LaunchPipe::start_on	windows::Win32::Foundation::CloseHandle	2
+bt-platform	[windows]	crate::launch_pipe::LaunchPipe::start_on	windows::Win32::System::Threading::SetEvent	1
 bt-platform	[windows]	crate::launch_pipe::LaunchPipe::stop_listening	windows::Win32::System::Threading::SetEvent	1
 bt-platform	[windows]	crate::process_image_path	windows::Win32::Foundation::CloseHandle	1
 bt-platform	[windows]	crate::video::Readers::quiet_within	std::sync::Condvar::wait_timeout	1
