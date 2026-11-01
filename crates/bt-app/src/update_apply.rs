@@ -2970,17 +2970,10 @@ pub(crate) fn take_the_window_on(
     )
 }
 
-fn ask_for_the_window_until(
-    until: Instant,
-    poll: Duration,
-    ask: impl FnMut() -> Window,
-    wait: impl FnMut(Duration),
-) -> Window {
-    ask_for_the_window_by(until, poll, Instant::now, ask, wait)
-}
-
-/// [`ask_for_the_window_until`], with `until` read on `now` (the road's
-/// [`WaitClock`] for an applier, T-WINDOWS-HANDOVER-ORDER-A-HELD-LOCK-WAIT).
+/// **The applier's asks for the window, again while the answer is another
+/// live owner or a contended election, until `until`** — read on `now`, the
+/// road's [`WaitClock`] for an applier (T-WINDOWS-HANDOVER-ORDER-A-HELD-LOCK-WAIT);
+/// each pause between two asks is `wait`'s, never past `until`.
 fn ask_for_the_window_by(
     until: Instant,
     poll: Duration,
@@ -3033,7 +3026,7 @@ pub(crate) fn take_the_window_for_applier_at(
     ask: impl FnMut() -> Window,
     wait: impl FnMut(Duration),
 ) -> Window {
-    ask_for_the_window_until(until, poll, ask, wait)
+    ask_for_the_window_by(until, poll, Instant::now, ask, wait)
 }
 
 /// **Clear the window's mark** — O, as it hands the transaction over, before
