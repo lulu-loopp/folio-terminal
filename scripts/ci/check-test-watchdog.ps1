@@ -47,7 +47,6 @@ switch ($case) {
         Running
         Out 'running 1 test'
         Out 'test planted::slow has been running for over 60 seconds'
-        Start-Sleep -Seconds 1
         Out 'test planted::slow - should panic ... ok'
         Out 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 61.00s'
         exit 0
@@ -59,8 +58,8 @@ switch ($case) {
         Out 'test README.md - planted (line 3) has been running for over 60 seconds'
         Out 'test planted::plain ... ok'
         Out 'test README.md - planted (line 3) - compile fail ... ok'
-        foreach ($i in 1..8) { Start-Sleep -Seconds 1; Out "busy line $i" }
-        Out 'test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 69.00s'
+        foreach ($i in 1..12) { Start-Sleep -Seconds 1; Out "busy line $i" }
+        Out 'test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 73.00s'
         exit 0
     }
     'two-binaries' {
@@ -119,27 +118,24 @@ function Watch([string]$Case, [int]$Limit, [string[]]$Words) {
     $env:FOLIO_STAND_IN_CASE = $Case
     $env:FOLIO_STAND_IN_PIDS = $pids
     try {
-        # Waited for by its exit, never by the end of its output: a grandchild that a regressed watchdog left
-        # alive inherits the pipes and would hold them open for ten minutes; it is a FAIL in `Gone` instead.
         $start = [Diagnostics.ProcessStartInfo]::new((Get-Process -Id $PID).Path)
         foreach ($w in @('-NoProfile', '-File', $watchdog) + $Words) { $start.ArgumentList.Add([string]$w) }
         $start.UseShellExecute = $false
         $start.RedirectStandardOutput = $true
         $start.RedirectStandardError = $true
-        $said = [Collections.Concurrent.ConcurrentQueue[string]]::new()
-        $p = [Diagnostics.Process]::new()
-        $p.StartInfo = $start
-        $take = { if ($null -ne $EventArgs.Data) { $Event.MessageData.Enqueue($EventArgs.Data) } }
-        $o = Register-ObjectEvent -InputObject $p -EventName OutputDataReceived -Action $take -MessageData $said
-        $e = Register-ObjectEvent -InputObject $p -EventName ErrorDataReceived -Action $take -MessageData $said
-        [void]$p.Start()
-        $p.BeginOutputReadLine()
-        $p.BeginErrorReadLine()
+        $p = [Diagnostics.Process]::Start($start)
+        $out = $p.StandardOutput.ReadToEndAsync()
+        $err = $p.StandardError.ReadToEndAsync()
+        $clock = [Diagnostics.Stopwatch]::StartNew()
         if (-not $p.WaitForExit(120000)) { $p.Kill($true); return @{ code = -1; output = 'the watchdog itself did not end within 120 s' } }
-        Start-Sleep -Milliseconds 500
-        Unregister-Event -SourceIdentifier $o.Name
-        Unregister-Event -SourceIdentifier $e.Name
-        return @{ code = $p.ExitCode; output = (@($said.ToArray()) -join "`n") }
+        # The output is all here when both pipes are at their end, never after a sleep (row 171: a loaded
+        # runner may deliver it later than any sleep). The 120 s bound is met only by a regression: a
+        # grandchild that a regressed watchdog left alive holds the pipes open, and it is a FAIL in `Gone`.
+        $left = [Math]::Max(0, 120000 - [int]$clock.ElapsedMilliseconds)
+        if (-not [Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]@($out, $err), $left)) {
+            return @{ code = $p.ExitCode; output = 'the watchdog exited, but its output did not end within 120 s (a process it left holds its pipes)' }
+        }
+        return @{ code = $p.ExitCode; output = ($out.Result + "`n" + $err.Result) -replace "`r", '' }
     } finally {
         foreach ($n in 'FOLIO_TEST_WATCHDOG_STAND_IN', 'FOLIO_TEST_WATCHDOG_LIMIT_SECONDS', 'FOLIO_STAND_IN_CASE', 'FOLIO_STAND_IN_PIDS') {
             Remove-Item "env:$n" -ErrorAction SilentlyContinue
@@ -172,8 +168,9 @@ try {
     Check 'a named test that ends is green and listed as slow' ($run.code -eq 0 -and $run.output -match 'slow tests \(named by libtest at 60 s, ended\): planted::slow') $run
 
     # A plain `... ok` and a spaced doc-test name with a mode each take their test out of the tracked set:
-    # the run goes on past both tests' limit and must stay green.
-    $run = Watch 'slow-then-busy' 63 @()
+    # the run goes on past both tests' limit and must stay green. Limit 70: the end lines have 10 s from the
+    # 60 s lines to be read on a loaded runner (row 171), and the 12 busy seconds pass that limit.
+    $run = Watch 'slow-then-busy' 70 @()
     Check 'ended tests leave the tracked set (a plain end, a doc-test name with a mode)' ($run.code -eq 0 -and $run.output -match 'slow tests \(named by libtest at 60 s, ended\): planted::plain, README.md - planted \(line 3\)') $run
 
     # A binary that ends while a named test runs (no result line) does not leave a phantom hang for the next one.
