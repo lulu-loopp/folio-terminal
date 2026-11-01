@@ -9932,6 +9932,8 @@ crates/bt-platform/src/video/mod.rs	bt-platform crate::video::copy_locked_frame	
 crates/bt-platform/src/video/mod.rs	bt-platform crate::video::copy_locked_frame	Ambiguous	ok	2	
 crates/bt-platform/src/video/mod.rs	bt-platform crate::video::duration_of	Ambiguous	ok	2	
 crates/bt-platform/src/video/mod.rs	bt-platform crate::video::first_frame_through	Dynamic	decode	1	2026-10-20: T-ANSWER-AFTER-THE-FILE-IS-CLOSED; the decode closure first_frame_through is handed: first_frame's decode_lent in the product, a held fake under test; it runs on the budgeted thread, inside the process apartment, and reaches no door
+crates/bt-platform/src/video/mod.rs	bt-platform crate::video::first_sample	Dynamic	now	2	2026-11-01: T-FIRST-FRAME-BUDGET-FROM-A-CLOCK; the clock first_sample is handed: Instant::now in the product, a clock that moves by its readings under test; it reads the time and reaches no door
+crates/bt-platform/src/video/mod.rs	bt-platform crate::video::first_sample	Dynamic	read	1	2026-11-01: T-FIRST-FRAME-BUDGET-FROM-A-CLOCK; the read first_sample is handed: read_first_frame's one ReadSample in the product, a planted reader under test; the platform call it wraps is read_first_frame's own edge
 crates/bt-platform/src/video/mod.rs	bt-platform crate::video::frame_fits	Ambiguous	is_some_and	1	
 crates/bt-platform/src/video/mod.rs	bt-platform crate::video::in_the_process_apartment	Ambiguous	elapsed	3	
 crates/bt-platform/src/video/mod.rs	bt-platform crate::video::in_the_process_apartment	Ambiguous	is_err	1	

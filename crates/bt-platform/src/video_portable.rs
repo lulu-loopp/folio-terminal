@@ -244,6 +244,75 @@ fn within_budget<T: Send + 'static>(
     wait.recv_timeout(budget).ok().flatten()
 }
 
+/// **The macOS `within_budget`, stated the way the Windows arm's is**
+/// (T-FIRST-FRAME-BUDGET-FROM-A-CLOCK review F1).
+///
+/// The Windows arm's `video::tests::a_question_that_cannot_finish_is_given_up_on`
+/// compiles only on Windows, and `tests/video_first_frame.rs` asks the decoder
+/// with no clock over it, so without this module nothing run on a Mac would see
+/// whether [`within_budget`] passes an answer through or gives up on work that has
+/// not answered. Same two arms, same shape: no decoder underneath, and nothing
+/// that sleeps.
+#[cfg(all(test, target_os = "macos"))]
+mod macos_budget_tests {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    use super::within_budget;
+
+    /// The suite's patience for planted work that is held: a wait that never
+    /// ends turns into a late answer and a red, never a hang. The Windows arm's
+    /// `DECODER_PATIENCE`.
+    const PATIENCE: Duration = Duration::from_secs(10);
+
+    /// **Planted work's hold**: wait until the test lets the work go, or until
+    /// [`PATIENCE`] has passed.
+    fn held_until_let_go(release: &mpsc::Receiver<()>) {
+        let _ = release.recv_timeout(PATIENCE);
+    }
+
+    /// PIN — **an answer inside the budget is the answer, and work that has not
+    /// answered when the budget ends is the module's one silence.**
+    ///
+    /// The first arm hands [`within_budget`] work that answers at once under an
+    /// hour; the second hands it work held until the test has the answer, so no
+    /// budget and no machine can let it answer first. Neither arm can be made red
+    /// or green by a busy machine.
+    ///
+    /// MUTATIONS: answer `None` whatever the work said (or wait with a zero
+    /// budget, which a thread spawn and a send cannot meet before the wait has
+    /// looked — this one is caught by chance, not by construction) — the first
+    /// arm reads `None`. Swap `recv_timeout` for `recv` — the second arm waits
+    /// for the held work to let itself go after [`PATIENCE`] and reads `Some`.
+    #[test]
+    fn a_question_that_cannot_finish_is_given_up_on() {
+        assert_eq!(
+            within_budget(Duration::from_secs(3_600), || Some(7_u32)),
+            Some(7),
+            "an answer inside the budget is the answer"
+        );
+        let (release, held) = mpsc::channel::<()>();
+        let (finished, done) = mpsc::channel();
+        let answer = within_budget(Duration::from_millis(20), move || {
+            held_until_let_go(&held);
+            let _ = finished.send(());
+            Some(7_u32)
+        });
+        let still_running = done.try_recv().is_err();
+        // The work is let go only now, after the answer, and ends.
+        let _ = release.send(());
+        let _ = done.recv();
+        assert_eq!(
+            answer, None,
+            "work that has not answered by the end of the budget is the module's one silence"
+        );
+        assert!(
+            still_running,
+            "the budget gave up on the work, which was still running when it answered"
+        );
+    }
+}
+
 /// Warm the media platform up before the first card asks for a frame.
 ///
 /// A no-op, and one of the plan's §4.4 class-N items rather than deferred work:

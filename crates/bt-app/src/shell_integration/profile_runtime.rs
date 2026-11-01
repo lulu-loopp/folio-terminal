@@ -1932,6 +1932,20 @@ mod tests {
     /// here is a raw OS lock on a second handle to the lock file, which never
     /// stands in this process's queue. On both platforms a file lock held
     /// through another handle is exactly what another process looks like.
+    ///
+    /// Since 2026-11-01 (plan row 141) the stranger lets go the way another
+    /// Folio or a command-line door does — unlocked, then closed
+    /// ([`ForeignHolder`]) — so the second write finds the lock free on its
+    /// first look. A holder that only closes (a crashed process, or a 0.4.7 on
+    /// the same data root) is freed whenever Windows gets round to it; the
+    /// product tolerates that inside [`OUR_TURN`], and no test pins it, because
+    /// only Windows decides when that is.
+    ///
+    /// MUTATION: let the stranger never let go (`std::mem::forget(held)`) and
+    /// the second write is refused after [`OUR_TURN`], every time. The old
+    /// close-without-unlock cannot be made red on purpose: Windows usually
+    /// frees the lock in time, which is why it was a race that passed, never
+    /// a failure on record.
     #[test]
     fn shell_integration_record_lock_refuses_overlap_and_releases_on_drop() {
         let root = super::super::tests::temp_dir("marks-lock");
@@ -2034,7 +2048,7 @@ mod tests {
     /// A holder of the record that is not this process's: a raw OS lock taken
     /// through a second handle to the lock file, which never stands in
     /// [`profile_marks`]'s queue.
-    fn foreign_holder(root: &Path) -> fs::File {
+    fn foreign_holder(root: &Path) -> ForeignHolder {
         let file = fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -2043,7 +2057,26 @@ mod tests {
             .open(root.join("integration-marks.lock"))
             .unwrap();
         file.try_lock().unwrap();
-        file
+        ForeignHolder(file)
+    }
+
+    /// [`foreign_holder`]'s lock, let go the way every Folio holder lets go of
+    /// it since 0.4.8 ([`MarksLock`]'s `Drop`): **unlocked, then closed.**
+    ///
+    /// Closed alone, the handle's lock is freed whenever Windows gets round to
+    /// it, and the next writer would have only [`OUR_TURN`] to find it free
+    /// (plan row 141). The unlock is done when it returns.
+    struct ForeignHolder(fs::File);
+
+    impl Drop for ForeignHolder {
+        /// A failed unlock is red, except during an unwind, where a second
+        /// panic would abort the whole test binary.
+        fn drop(&mut self) {
+            let unlocked = self.0.unlock();
+            if !std::thread::panicking() {
+                unlocked.expect("the stranger lets go of its lock");
+            }
+        }
     }
 
     /// RED (34) — **one of Folio's own writers waits behind another of ours for

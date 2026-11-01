@@ -191,6 +191,31 @@ impl Children {
     fn record(&self, pid: u32) {
         self.pids.lock().unwrap().push(pid);
     }
+
+    /// Whether the first process this test started — the trial, in every test
+    /// whose road stops one — has ended and been reaped.
+    fn trial_reaped(&self) -> bool {
+        let first = self.started.lock().unwrap().first().copied();
+        first.is_some_and(|pid| self.status(pid).is_some())
+    }
+
+    /// **The road's stop clock for a test whose road stops its trial**
+    /// (T-TRIAL-STOP-QUIT-GRACE-ON-THE-ROAD-CLOCK; `CountedClock::stopping`
+    /// over `limits`): the trial is the first process this test started. Its
+    /// answer to the ask to quit is its end, reaped by this test's waiter
+    /// thread — or, for a trial that keeps `SIGTERM`, `term` in its `kept`
+    /// mark; the end window waits for it to be reaped.
+    fn stop_clock(&self, limits: &Limits, kept: Option<PathBuf>) -> Arc<CountedClock> {
+        let (at_answer, at_end) = (self.clone(), self.clone());
+        Arc::new(CountedClock::stopping(
+            (limits.quit_within, limits.end_within, limits.poll),
+            move || match &kept {
+                Some(mark) => std::fs::read_to_string(mark).ok().as_deref() == Some("term"),
+                None => at_answer.trial_reaped(),
+            },
+            move || at_end.trial_reaped(),
+        ))
+    }
 }
 
 impl Drop for Children {
@@ -470,6 +495,7 @@ impl Install {
             trial_clock: Arc::new(WallClock),
             decision_clock: Arc::new(CountedClock::awaiting_the_decision(&self.home, self.txn)),
             wait_clock: Arc::new(WallClock),
+            stop_clock: Arc::new(WallClock),
             starter: None,
             handed_back: None,
             layouts: own_layouts(),
@@ -1125,8 +1151,14 @@ fn armed_is_durable_before_exchanging() {
 ///
 /// (b).2: "`Committed` … only on a receipt whose `txn` and `nonce` match."
 ///
+/// The trial quits when asked: the road's stop clock (`Children::stop_clock`)
+/// holds its first pause until this test's waiter has reaped the trial, so
+/// "it quit within the grace" is the trial's state at that pause, never a
+/// race with one second of real time (T-TRIAL-STOP-QUIT-GRACE-ON-THE-ROAD-CLOCK).
+///
 /// MUTATION: in `trial`, give the receipt read the trial's own nonce before it
-/// is offered to the journal.
+/// is offered to the journal. RED by a late answer: the trial keeps `SIGTERM`
+/// (row 136's plant A) — asked to end, on every run.
 #[test]
 fn a_receipt_for_another_nonce_is_refused() {
     if !on_macos() {
@@ -1139,7 +1171,13 @@ fn a_receipt_for_another_nonce_is_refused() {
         &children,
         Some(Nonce::new([0x99; 32])),
     ));
-    let (ended, world) = applied(install.road(limits(5_000, 1_500)), world);
+    let bounds = limits(5_000, 1_500);
+    let stop = children.stop_clock(&bounds, None);
+    let road = Road {
+        stop_clock: stop.clone(),
+        ..install.road(bounds)
+    };
+    let (ended, world) = applied(road, world);
     assert_eq!(ended, Ended::RolledBack, "{:?}", world.said);
     assert!(world.said.iter().any(|line| line.contains("is refused")));
     assert!(
@@ -1153,6 +1191,7 @@ fn a_receipt_for_another_nonce_is_refused() {
     assert!(children.ended(trial).is_some(), "the trial is gone");
     assert!(said(&world, "is asked to quit"), "{:?}", world.said);
     assert!(!said(&world, "is asked to end"), "it quit when asked");
+    assert!(stop.pauses() <= 1, "gone by the look after its answer");
     assert_eq!(
         version_of(&install.installed),
         "1.0",
@@ -2073,7 +2112,12 @@ fn a_failed_health_swaps_back() {
         started.start_trial(bundle, args);
         Ok(())
     }));
-    let (ended, world) = applied(install.road(limits(5_000, 1_500)), world);
+    let bounds = limits(5_000, 1_500);
+    let road = Road {
+        stop_clock: children.stop_clock(&bounds, None),
+        ..install.road(bounds)
+    };
+    let (ended, world) = applied(road, world);
     assert_eq!(ended, Ended::RolledBack, "{:?}", world.said);
     assert!(
         world
@@ -2583,7 +2627,15 @@ fn a_rollback_notes_what_it_did_not_keep_before_its_folder_goes() {
 /// … then `SIGKILL`; never touch a process whose image is not the trial's
 /// executable".
 ///
-/// MUTATION: in `stop_trial`, ask `Ask::End` first.
+/// The grace runs out on the road's stop clock (`Children::stop_clock`): its
+/// first pause waits for the trial's `term` mark, the grace is then spent on
+/// the count, and the end window's first pause waits for the killed trial to
+/// be reaped (T-TRIAL-STOP-QUIT-GRACE-ON-THE-ROAD-CLOCK).
+///
+/// MUTATION: in `stop_trial`, ask `Ask::End` first. RED on the stop's clock,
+/// read when the stop asks for the end (`CountedClock::at_the_end_ask`): row
+/// 136's plants B (the grace skipped), B′ (only the quit grace skipped) and C
+/// (the grace never ends).
 #[test]
 fn the_trial_is_asked_to_quit_before_it_is_killed() {
     if !on_macos() {
@@ -2599,25 +2651,31 @@ fn the_trial_is_asked_to_quit_before_it_is_killed() {
     );
     // It keeps `SIGTERM` only once it says so: a signal before that would end
     // it at once, however loaded the machine.
-    let give_up = Instant::now() + Duration::from_secs(20);
-    while std::fs::read_to_string(&mark).ok().as_deref() != Some("ready") {
-        assert!(
-            Instant::now() < give_up,
-            "the stubborn trial never got ready"
-        );
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    crate::lane::wait_until("the stubborn trial's `ready`", || {
+        std::fs::read_to_string(&mark).ok().as_deref() == Some("ready")
+    });
     let trial = recorded(&install.installed.join(EXE), pid);
     install.write(Phase::RollbackIntent {
         trial: Some(trial),
         trial_started: false,
     });
-    let began = Instant::now();
-    let (ended, hands) = recovered(install.recovery(limits(5_000, 5_000)), Fake::default());
+    let bounds = limits(5_000, 5_000);
+    let stop = children.stop_clock(&bounds, Some(mark.clone()));
+    let road = Road {
+        stop_clock: stop.clone(),
+        ..install.recovery(bounds)
+    };
+    let (at_end, read_at_end) = stop.at_the_end_ask();
+    let hands = Fake {
+        on_say: Some(at_end),
+        ..Fake::default()
+    };
+    let (ended, hands) = recovered(road, hands);
     assert_eq!(ended, Some(Ended::RolledBack), "{:?}", hands.said);
-    assert!(
-        began.elapsed() >= Duration::from_millis(1_000),
-        "ended before its grace ran out"
+    assert_eq!(
+        *read_at_end.lock().unwrap(),
+        Some(1_000),
+        "asked to end exactly when its grace ran out on the stop's clock"
     );
     assert_eq!(std::fs::read_to_string(&mark).unwrap(), "term");
     let quit = hands
@@ -2637,16 +2695,23 @@ fn the_trial_is_asked_to_quit_before_it_is_killed() {
     install.exchanged();
     let children = Children::default();
     let stranger = children.start(&install.stage(), "by-hand");
-    std::thread::sleep(Duration::from_millis(200));
-    let trial = recorded(&install.stage().join(EXE), stranger);
+    let program = install.stage().join(EXE);
+    crate::lane::wait_until("the stranger listed from its program", || {
+        install_flip::running_from(&program)
+            .is_ok_and(|listed| listed.iter().any(|running| running.pid == stranger))
+    });
+    let trial = recorded(&program, stranger);
     install.write(Phase::RollbackIntent {
         trial: Some(trial),
         trial_started: false,
     });
     let (ended, hands) = recovered(install.recovery(limits(5_000, 5_000)), Fake::default());
     assert_eq!(ended, Some(Ended::RolledBack), "{:?}", hands.said);
+    // The stop says each ask only after its signal was sent (`stop_trial`), and
+    // `stop_trial` is the product's only caller of `install_flip::ask`, the
+    // only door that signals a process: no line is no signal, so the stranger
+    // is not waited on to prove it.
     assert!(!hands.said.iter().any(|line| line.contains("is asked to")));
-    std::thread::sleep(Duration::from_millis(200));
     assert_eq!(children.status(stranger), None, "the stranger still runs");
 }
 
@@ -3733,7 +3798,12 @@ fn a_trial_whose_start_cannot_be_recorded_is_ended_and_swapped_back() {
             std::fs::set_permissions(&root, before).unwrap();
         }
     }));
-    let (ended, world) = applied(install.road(limits(5_000, 20_000)), world);
+    let bounds = limits(5_000, 20_000);
+    let road = Road {
+        stop_clock: children.stop_clock(&bounds, None),
+        ..install.road(bounds)
+    };
+    let (ended, world) = applied(road, world);
     if let Some(before) = shut.lock().unwrap().take() {
         std::fs::set_permissions(install.home.root(), before).unwrap();
     }
@@ -3859,7 +3929,12 @@ fn a_home_unwritable_after_the_exchange_leaves_the_new_build_as_a_trial_with_the
         *at_launch.lock().unwrap() = Some(before);
         Ok(())
     }));
-    let (ended, world) = applied(install.road(limits(5_000, 20_000)), world);
+    let bounds = limits(5_000, 20_000);
+    let road = Road {
+        stop_clock: children.stop_clock(&bounds, None),
+        ..install.road(bounds)
+    };
+    let (ended, world) = applied(road, world);
     if let Some(before) = shut.lock().unwrap().take() {
         std::fs::set_permissions(install.home.root(), before).unwrap();
     }
@@ -3917,7 +3992,12 @@ fn failed_with_the_home_shut(tag: &str) -> (Install, Children, TrialProcess, Fak
         *at_launch.lock().unwrap() = Some(before);
         Ok(())
     }));
-    let (ended, world) = applied(install.road(limits(5_000, 20_000)), world);
+    let bounds = limits(5_000, 20_000);
+    let road = Road {
+        stop_clock: children.stop_clock(&bounds, None),
+        ..install.road(bounds)
+    };
+    let (ended, world) = applied(road, world);
     if let Some(before) = shut.lock().unwrap().take() {
         std::fs::set_permissions(install.home.root(), before).unwrap();
     }

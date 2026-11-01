@@ -1046,7 +1046,6 @@ mod tests {
     };
     use bt_platform::admission::doors;
     use bt_source::ItemQuery;
-    use std::sync::mpsc::{SyncSender, sync_channel};
     use std::time::Duration;
 
     fn names(list: &[&str]) -> Vec<OsString> {
@@ -1219,14 +1218,24 @@ mod tests {
 
     // ── T-DIAGNOSTICS-NOTE-OFF-THE-WINDOW-THREAD: the log's own writer ─────
 
-    /// A writer thread for `drain` that does not start writing until the test lets it.
-    fn a_held_writer(drain: Drain) -> (SyncSender<()>, std::thread::JoinHandle<()>) {
-        let (go, held) = sync_channel::<()>(0);
+    /// A writer thread for `drain` that does not start writing until the test lets it: it stands
+    /// in the returned hold (`crate::lane::Hold`) until the test's `release`. A door the test calls
+    /// meanwhile that waits on the writer lets the hold go on its own at its cap, and the release
+    /// is red — never a hang.
+    fn a_held_writer(
+        drain: Drain,
+    ) -> (
+        std::sync::Arc<crate::lane::Hold>,
+        std::thread::JoinHandle<()>,
+    ) {
+        let go = std::sync::Arc::new(crate::lane::Hold::default());
+        go.hold();
+        let held = std::sync::Arc::clone(&go);
         let writer = bt_platform::spawn_at_priority(
             "bt-diagnostics-test",
             bt_platform::ThreadPriority::BelowNormal,
             move |ctx| {
-                let _ = held.recv();
+                held.pass();
                 drain.serve(ctx);
             },
         )
@@ -1328,7 +1337,7 @@ mod tests {
             "the caller wrote the line itself: {:?}",
             lines_of(&log)
         );
-        go.send(()).expect("the writer is waiting");
+        go.release();
         settled_written(&queue, "the writer taking the stderr line");
         assert_eq!(lines_of(&log), ["BT_WEB refused about:blank"]);
         drop(queue);
@@ -1354,7 +1363,7 @@ mod tests {
             "the stderr line".to_owned(),
         );
         super::note_on(Some(&queue), Some(Channel::Log), "the note last");
-        go.send(()).expect("the writer is waiting");
+        go.release();
         settled_written(
             &queue,
             "the writer taking the note, the stderr line and the note",
@@ -1399,7 +1408,7 @@ mod tests {
             "the trace sink's last report".to_owned(),
         );
         super::note_on(Some(&queue), Some(Channel::Log), "a note before the settle");
-        go.send(()).expect("the writer is waiting");
+        go.release();
         settled_written(&queue, "the writer taking the lines the settle covers");
         super::way_out_line_on(
             Some(&log),
@@ -1487,7 +1496,7 @@ mod tests {
             "a console run's line reaches the console's queue, and a silenced run's reaches nothing"
         );
         super::note_on(Some(&queue), Some(Channel::Console), "a note, for the file");
-        go.send(()).expect("the writer is waiting");
+        go.release();
         settled_written(&queue, "the writer taking the note");
         assert_eq!(lines_of(&log), ["a note, for the file"]);
         drop(queue);
@@ -1516,7 +1525,7 @@ mod tests {
             "the caller wrote the line itself: {:?}",
             lines_of(&log)
         );
-        go.send(()).expect("the writer is waiting");
+        go.release();
         settled_written(&queue, "the writer taking the line");
         assert_eq!(lines_of(&log), ["a clipboard picture could not be saved"]);
         drop(queue);
@@ -1549,7 +1558,7 @@ mod tests {
         assert!(queue.offer("the second".to_owned()));
         let (held, settling) = settled_while_held(&queue, Duration::from_millis(50));
         let unwritten = lines_of(&log).is_empty();
-        go.send(()).expect("the writer is waiting");
+        go.release();
         // The verdict after the writer is let go and before the settle is joined.
         assert!(
             held.is_some(),
@@ -1591,7 +1600,7 @@ mod tests {
             !queue.offer("three".to_owned()),
             "a full queue refuses at once"
         );
-        go.send(()).expect("the writer is waiting");
+        go.release();
         settled_written(&queue, "the writer taking the two lines before the loss");
         assert!(queue.offer("four".to_owned()));
         settled_written(&queue, "the writer taking the line after the loss");
@@ -1628,7 +1637,7 @@ mod tests {
             "a full queue refuses a line"
         );
         let (held, settling) = settled_while_held(&queue, Duration::from_millis(50));
-        go.send(()).expect("the writer is waiting");
+        go.release();
         // The verdict after the writer is let go and before the settle is joined.
         assert!(
             held.is_some(),
@@ -1665,7 +1674,7 @@ mod tests {
         assert!(queue.offer("the refusal said just before the panic".to_owned()));
         crate::the_fatal_road(
             || {
-                go.send(()).expect("the writer is waiting");
+                go.release();
                 settled_in_panic_written(&queue, "the fatal road's settle");
             },
             || {
@@ -1719,7 +1728,7 @@ mod tests {
         let (go, writer) = a_held_writer(drain);
         let to_take = std::sync::Arc::clone(&queue.lines);
         drop(queue);
-        go.send(()).expect("the writer is waiting");
+        go.release();
         crate::lane::while_progressing(
             "the writer taking both producers' lines",
             2 * EACH,

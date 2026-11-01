@@ -44,7 +44,9 @@
 
 use std::path::{Path, PathBuf};
 
-use bt_platform::video::{VideoFrame, decode_first_frame_measured, first_frame};
+use bt_platform::video::{
+    VideoFrame, decode_first_frame, decode_first_frame_measured, first_frame,
+};
 
 /// The hover card's own box, which is the size the product asks for.
 const CARD: (u32, u32) = (280, 160);
@@ -208,6 +210,14 @@ fn both_shipped_recordings_give_up_a_frame_of_the_colour_they_were_made_in() {
 /// asserted is the pair of things that are true either way — nothing comes back
 /// larger than the file, and whatever size comes back has the file's own shape.
 ///
+/// **It asks [`decode_first_frame`], the half with no clock over it**
+/// (T-FIRST-FRAME-BUDGET-FROM-A-CLOCK), for the reason the case above and the
+/// in-crate fixture case do: through `first_frame` this was a decode racing the
+/// three-second `video::FIRST_FRAME_BUDGET`, and a loaded machine that lost the
+/// race read "no frame" for a file it had decoded. The fit is the subject, and
+/// the fit is the same on both halves; the budget is pinned in each arm's own
+/// module, on work that has no decoder in it.
+///
 /// MUTATION: fit by `cover` rather than by `contain` in either arm and the
 /// frame comes back 80×80 with the aspect assertion naming it; drop the clamp
 /// that refuses to enlarge and the case above comes back 280×210.
@@ -215,7 +225,7 @@ fn both_shipped_recordings_give_up_a_frame_of_the_colour_they_were_made_in() {
 fn a_frame_asked_for_smaller_keeps_its_proportions() {
     let file = fixture("folio-video-test.mp4");
     let box_ = (80_u32, 80_u32);
-    let frame = first_frame(&file, box_.0, box_.1);
+    let frame = decode_first_frame(&file, box_.0, box_.1);
     if !HAS_DECODER {
         assert_eq!(frame, None, "a machine with no decoder draws nothing");
         return;

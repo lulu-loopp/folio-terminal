@@ -5309,6 +5309,7 @@ pub(crate) mod tests {
         let mut stalled = SessionStore::at(root.join("stalled.json"), root.join("stalled.lock"));
         retire(&mut stalled.writer);
         let (never, release) = a_writer_that_never_answers();
+        let mut release = Some(release);
         stalled.writer = never;
         stalled.set_save_budget(Duration::ZERO);
         let mut document = SessionV1::default();
@@ -5317,7 +5318,9 @@ pub(crate) mod tests {
             .push(bt_persist::SessionWindowV1::default());
         stalled.record(document, Instant::now());
         assert_eq!(
-            stalled.flush_judged(),
+            judged_apart(&mut stalled, &mut release, "the judged flush", |store| {
+                store.flush_judged()
+            }),
             Err(SaveRefusal::TimedOut(save_did_not_finish(Duration::ZERO))),
             "the wait ends on the store's budget"
         );
@@ -5364,6 +5367,7 @@ pub(crate) mod tests {
         // place.
         retire(&mut store.writer);
         let (stalled, release) = a_writer_that_never_answers();
+        let mut release = Some(release);
         store.writer = stalled;
 
         let mut document = SessionV1::default();
@@ -5372,9 +5376,16 @@ pub(crate) mod tests {
             .push(bt_persist::SessionWindowV1::default());
         store.record(document, Instant::now());
 
-        let started = Instant::now();
-        let verdict = store.flush_judged();
-        let waited = started.elapsed();
+        let (verdict, waited) = judged_apart(
+            &mut store,
+            &mut release,
+            "the quit's judged flush",
+            |store| {
+                let started = Instant::now();
+                let verdict = store.flush_judged();
+                (verdict, started.elapsed())
+            },
+        );
         assert_eq!(
             verdict,
             Err(SaveRefusal::TimedOut(save_did_not_finish(
@@ -5393,10 +5404,13 @@ pub(crate) mod tests {
 
         // And the exit that follows does not spend the same budget again, because this writer
         // has already said it is not answering.
-        let started = Instant::now();
-        store.close();
+        let closed_within = judged_apart(&mut store, &mut release, "the exit's close", |store| {
+            let started = Instant::now();
+            store.close();
+            started.elapsed()
+        });
         assert!(
-            started.elapsed() < SESSION_SAVE_BUDGET,
+            closed_within < SESSION_SAVE_BUDGET,
             "a writer already known to be stalled is not waited on a second time"
         );
         assert!(
@@ -5446,6 +5460,7 @@ pub(crate) mod tests {
         store.record(owed, Instant::now());
         retire(&mut store.writer);
         let (stalled, release) = a_writer_that_never_answers();
+        let mut release = Some(release);
         store.writer = stalled;
 
         let answered = bt_platform::session_end::answer(
@@ -5459,10 +5474,12 @@ pub(crate) mod tests {
             Some(1),
             "the system is answered yes before anything is written"
         );
-        let settled: Vec<_> = crate::session_end::take()
-            .into_iter()
-            .map(|end| crate::session_end::settle(end, &mut store, false, Instant::now()))
-            .collect();
+        let ends = crate::session_end::take();
+        let settled: Vec<_> = judged_apart(&mut store, &mut release, "the system's end", |store| {
+            ends.into_iter()
+                .map(|end| crate::session_end::settle(end, store, false, Instant::now()))
+                .collect()
+        });
         assert_eq!(
             settled,
             vec![crate::session_end::Settled::Saved(Err(
@@ -5629,6 +5646,37 @@ pub(crate) mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **`judge` over `store` on a thread of its own**, entered as the window thread on its way
+    /// out (the session's waits are owner-thread doors, admitted only there), and awaited within
+    /// the lane suite's patience. The writer that never answers is the holder: a judgement that has
+    /// not come back by then has `release` dropped — the writer ends, its channels disconnect, and
+    /// a wait on them returns — before the verdict, so a wait that ignores its budget is red, never
+    /// a hang.
+    fn judged_apart<R: Send>(
+        store: &mut SessionStore,
+        release: &mut Option<mpsc::Sender<()>>,
+        what: &str,
+        judge: impl FnOnce(&mut SessionStore) -> R + Send,
+    ) -> R {
+        std::thread::scope(|threads| {
+            let judging = threads.spawn(move || {
+                assert!(bt_platform::admission::enter_window_thread());
+                assert!(bt_platform::admission::exiting());
+                judge(store)
+            });
+            let came_back = crate::lane::within_patience(|| judging.is_finished());
+            if !came_back {
+                drop(release.take());
+            }
+            let answer = judging.join();
+            assert!(
+                came_back,
+                "{what} waited on a writer that never answers past the lane suite's patience"
+            );
+            answer.unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+        })
     }
 
     /// A writer thread that takes documents, stays connected, and answers nothing — the shape of
