@@ -4,7 +4,7 @@
 # name) with the number of calls behind it. Held equal to the tree by bt-source's call_graph test;
 # shrink-only against the merge base by scripts/ci/check-unfollowed-edges.ps1 - a key added or grown
 # carries a reason 'YYYY-MM-DD: <why>'. Never edit a key or a count by hand.
-# Ambiguous calls with exactly one candidate, not listed by site above or below (bt_source::call_graph::Unresolved::sole_candidate; a guard naming a callee's callers counts each as a call of its one candidate): 1729. A call whose name is renamed to one only one item declares leaves the list and is counted here.
+# Ambiguous calls with exactly one candidate, not listed by site above or below (bt_source::call_graph::Unresolved::sole_candidate; a guard naming a callee's callers counts each as a call of its one candidate): 1730. A call whose name is renamed to one only one item declares leaves the list and is counted here.
 file	item	kind	name	sites	reason
 crates/bt-app/src/animation.rs	bt-app crate::animation::<FileAnimationSource as Read>::read	Ambiguous	unwrap_or	1	
 crates/bt-app/src/animation.rs	bt-app crate::animation::AnimationCursor::start_again	Ambiguous	into_inner	1	
@@ -6263,7 +6263,8 @@ crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::watch_trial	Dynami
 crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::watch_trial	Dynamic	launch_over	1	
 crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::watch_trial	Dynamic	say	5	
 crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::window_holder_using	Dynamic	in_flight	1	
-crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::write_journal	Ambiguous	elapsed	1	
+crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::write_journal_on	Dynamic	asks_again	1	
+crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::write_journal_on	Dynamic	spell	2	
 crates/bt-app/src/update_apply_macos.rs	bt-app crate::update_apply_macos::<Machine as Hands>::exchange	Ambiguous	to_string	1	
 crates/bt-app/src/update_apply_macos.rs	bt-app crate::update_apply_macos::<Machine as Hands>::say	Ambiguous	as_bytes	1	
 crates/bt-app/src/update_apply_macos.rs	bt-app crate::update_apply_macos::Launch::over	Ambiguous	code	1	
@@ -6510,11 +6511,10 @@ crates/bt-app/src/update_job.rs	bt-app crate::update_job::released_version	Ambig
 crates/bt-app/src/update_job.rs	bt-app crate::update_job::released_version	Ambiguous	to_owned	1	
 crates/bt-app/src/update_job.rs	bt-app crate::update_job::released_version	Ambiguous	unwrap_or	1	
 crates/bt-app/src/update_prepare.rs	bt-app crate::update_prepare::at_launch	Ambiguous	advance	1	
-crates/bt-app/src/update_prepare.rs	bt-app crate::update_prepare::at_launch	Ambiguous	encode	1	
 crates/bt-app/src/update_prepare.rs	bt-app crate::update_prepare::at_launch	Ambiguous	is_err	1	
 crates/bt-app/src/update_prepare.rs	bt-app crate::update_prepare::at_launch	Ambiguous	kind	1	
 crates/bt-app/src/update_prepare.rs	bt-app crate::update_prepare::at_launch	Ambiguous	map_err	1	
-crates/bt-app/src/update_prepare.rs	bt-app crate::update_prepare::at_launch	Ambiguous	to_string	2	
+crates/bt-app/src/update_prepare.rs	bt-app crate::update_prepare::at_launch	Ambiguous	to_string	1	
 crates/bt-app/src/update_prepare.rs	bt-app crate::update_prepare::clear	Ambiguous	to_string	3	
 crates/bt-app/src/update_prepare.rs	bt-app crate::update_prepare::fetching	Ambiguous	load	1	
 crates/bt-app/src/update_prepare.rs	bt-app crate::update_prepare::fetching	Ambiguous	post	1	
@@ -6556,15 +6556,16 @@ crates/bt-app/src/update_prepare_macos.rs	bt-app crate::update_prepare_macos::re
 crates/bt-app/src/update_prepare_macos.rs	bt-app crate::update_prepare_macos::resumer_of_this_copy	Ambiguous	ok	1	
 crates/bt-app/src/update_prepare_macos.rs	bt-app crate::update_prepare_macos::spoken	Dynamic	note	1	
 crates/bt-app/src/update_prepare_macos.rs	bt-app crate::update_prepare_macos::still_carried	Ambiguous	map_err	1	
-crates/bt-app/src/update_prepare_windows.rs	bt-app crate::update_prepare_windows::<System as Tools>::available	Ambiguous	to_string	1	
 crates/bt-app/src/update_prepare_windows.rs	bt-app crate::update_prepare_windows::<System as Tools>::copy	Ambiguous	map_err	1	
 crates/bt-app/src/update_prepare_windows.rs	bt-app crate::update_prepare_windows::<System as Tools>::copy	Ambiguous	to_string	2	
 crates/bt-app/src/update_prepare_windows.rs	bt-app crate::update_prepare_windows::<WinPrepare as Driver>::prepare	Ambiguous	map_err	1	
-crates/bt-app/src/update_prepare_windows.rs	bt-app crate::update_prepare_windows::acquire	Ambiguous	ok_or	2	
+crates/bt-app/src/update_prepare_windows.rs	bt-app crate::update_prepare_windows::acquire	Ambiguous	ok_or	1	
+crates/bt-app/src/update_prepare_windows.rs	bt-app crate::update_prepare_windows::acquire	Ambiguous	ok_or_else	1	
 crates/bt-app/src/update_prepare_windows.rs	bt-app crate::update_prepare_windows::expand_release	Ambiguous	map_err	1	
 crates/bt-app/src/update_prepare_windows.rs	bt-app crate::update_prepare_windows::fetch	Dynamic	fetched	2	
 crates/bt-app/src/update_prepare_windows.rs	bt-app crate::update_prepare_windows::prepare_on	Ambiguous	is_ok	1	
-crates/bt-app/src/update_prepare_windows.rs	bt-app crate::update_prepare_windows::prepare_on	Ambiguous	ok_or	2	
+crates/bt-app/src/update_prepare_windows.rs	bt-app crate::update_prepare_windows::prepare_on	Ambiguous	ok_or	1	
+crates/bt-app/src/update_prepare_windows.rs	bt-app crate::update_prepare_windows::prepare_on	Ambiguous	ok_or_else	1	
 crates/bt-app/src/update_prepare_windows.rs	bt-app crate::update_prepare_windows::prepare_on	Ambiguous	to_owned	1	
 crates/bt-app/src/update_prepare_windows.rs	bt-app crate::update_prepare_windows::present	Ambiguous	is_file	1	2026-10-26: Metadata::is_file, an accessor of the value std::fs::symlink_metadata returned: no disk question (that call is the question, typed: an Effect where a door reaches it); the engine reads no foreign function's return type, and a method of a file-system value is no effect (T-UNTYPED-RECEIVER-FS-CALLS-TRIAGE)
 crates/bt-app/src/update_prepare_windows.rs	bt-app crate::update_prepare_windows::resume	Ambiguous	and_then	1	
