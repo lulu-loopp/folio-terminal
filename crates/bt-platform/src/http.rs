@@ -610,7 +610,7 @@ impl Request {
         // so the drop that follows finds nothing to close.
         let _ = unsafe { WinHttpCloseHandle(handle) };
         let shared = &self.shared;
-        clock.wait(bound, &mut |within| {
+        clock.wait(bound, &mut |within: Duration| {
             let started = Instant::now();
             let mut signals = shared.locked();
             while !signals.closed {
