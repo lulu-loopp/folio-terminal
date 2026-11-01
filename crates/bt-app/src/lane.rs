@@ -2388,34 +2388,47 @@ pub(crate) fn wait_until(what: &str, done: impl FnMut() -> bool) {
 }
 
 /// **Long work another thread does, waited for while it moves**: `done` asked again until it
-/// holds, the suite's [`PATIENCE`] starting over each time `progress` (a count the work moves)
-/// changes. A loaded machine that does the work slowly is waited for, however long the whole
-/// takes; work that stops moving for one [`PATIENCE`] before `done` fails the test that awaited
-/// `what`, by name and with the count it stopped at, rather than hanging it. Where a single
-/// event ends the work, [`receive`] or [`wait_until`] waits for it instead.
+/// holds, the suite's [`PATIENCE`] starting over each time `remaining` (how much of the `of` units
+/// of work is still to do) changes. A loaded machine that does the work slowly is waited for,
+/// however long the whole takes; work that stops moving for one [`PATIENCE`] before `done` fails
+/// the test that awaited `what`, by name and with how much was still to do, rather than hanging
+/// it. Where a single event ends the work, [`receive`] or [`wait_until`] waits for it instead.
+///
+/// `remaining` must move one way only, falling as the work is done: a count that could go back
+/// and forth would keep the wait alive without the work getting nearer its end.
+///
+/// The loop looks at the two every [`LOOK_EVERY`], so a wait through a long drain leaves the
+/// core to the work it waits for. That is a poll interval, never a pass condition: the verdict
+/// comes only from `done` and `remaining`.
 #[cfg(test)]
 pub(crate) fn while_progressing(
     what: &str,
-    mut progress: impl FnMut() -> usize,
+    of: usize,
+    mut remaining: impl FnMut() -> usize,
     mut done: impl FnMut() -> bool,
 ) {
-    let mut seen = progress();
+    let mut seen = remaining();
     let mut since = Instant::now();
     while !done() {
-        let now = progress();
+        let now = remaining();
         if now != seen {
             seen = now;
             since = Instant::now();
         } else if since.elapsed() >= PATIENCE {
             assert!(
                 done(),
-                "no progress within the lane suite's patience while awaiting {what}: it stopped at {seen}"
+                "no progress within the lane suite's patience while awaiting {what}: {seen} of {of} still to take"
             );
             return;
         }
-        std::thread::yield_now();
+        std::thread::sleep(LOOK_EVERY);
     }
 }
+
+/// How often [`while_progressing`] looks at the work it waits for: a poll interval, never a
+/// pass condition.
+#[cfg(test)]
+const LOOK_EVERY: Duration = Duration::from_millis(2);
 
 /// **A hold a fake puts its work behind**: the suite holds it; the fake passes it where its work
 /// begins and stands there while it is held; the suite waits, within [`PATIENCE`], until a worker

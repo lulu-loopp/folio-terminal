@@ -1722,6 +1722,7 @@ mod tests {
         go.send(()).expect("the writer is waiting");
         crate::lane::while_progressing(
             "the writer taking both producers' lines",
+            2 * EACH,
             || to_take.load(std::sync::atomic::Ordering::Acquire),
             || writer.is_finished(),
         );
@@ -1733,6 +1734,7 @@ mod tests {
                 .iter()
                 .filter(|line| line.starts_with(&format!("{name} ")))
                 .collect();
+            assert_eq!(mine.len(), EACH, "{name}'s lines went missing");
             let expected: Vec<String> = (0..EACH).map(|index| format!("{name} {index}")).collect();
             assert!(
                 mine.iter().zip(&expected).all(|(line, want)| *line == want),
