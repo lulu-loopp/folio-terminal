@@ -28,6 +28,10 @@ use std::{
 /// in the product, through `hand_over` and `LaunchPipe::start`; a test hands a counted clock, so
 /// "the other end acted in time" and "the budget ran out" are facts of the test, never a race
 /// between a real window and a thread of the same process.
+///
+/// The elevated pane's handshake (`crate::elevated_pipe`, Windows) is its second user
+/// (T-ELEVATED-HANDSHAKE-FINISH-DEADLINE-ON-A-CLOCK): its attempt's deadline is read on
+/// [`LaunchClock::now`] and each overlapped operation's one wait is a [`LaunchClock::wait`].
 pub(crate) trait LaunchClock: Send + Sync {
     /// The monotonic reading a deadline is set and read on.
     fn now(&self) -> Instant;
