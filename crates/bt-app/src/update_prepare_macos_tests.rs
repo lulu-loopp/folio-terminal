@@ -92,8 +92,10 @@ pub(crate) mod fixture {
 
     /// **Detaches every image mounted under its folder when dropped** — for a
     /// test whose folder another guard removes.
+    #[cfg(target_os = "macos")]
     pub(crate) struct Detach(pub(crate) PathBuf);
 
+    #[cfg(target_os = "macos")]
     impl Drop for Detach {
         fn drop(&mut self) {
             detach_all(&self.0);

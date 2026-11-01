@@ -58312,7 +58312,7 @@ mod platform_gate_tests {
 
     /// **The list.** One file per line, in the order `ls` gives them, each with
     /// the reason it is allowed to ask.
-    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 32] = [
+    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 36] = [
         // Windows-only test fixture: the `pi` row, which only the Windows table ships, reopened
         // from a Recent row, beside its every-platform twin on the host's fallback shell.
         "app_files_tests.rs",
@@ -58331,6 +58331,9 @@ mod platform_gate_tests {
         // The fixture for "an argument is not text", and nothing else — see the
         // module's own note above.
         "cli.rs",
+        // Windows-only test fixture: GDI's own drawing of a top-down and a 16-bit bitmap,
+        // beside the every-platform rows of the layout the Windows arm hands over.
+        "clipboard_picture.rs",
         // The Explorer verb itself, which has no counterpart off Windows.
         "explorer_menu.rs",
         // Drive roots, the recycle bin, and the reveal.
@@ -58380,6 +58383,16 @@ mod platform_gate_tests {
         // Only the held-journal fixtures: a hold that refuses a replacing rename is a
         // Windows fact; their platform-free halves run beside the door everywhere.
         "update_apply_windows_tests.rs",
+        // macOS-only test fixture: the guard that detaches a disk image mounted under a
+        // test's folder (`hdiutil`), gated with the only tests that mount one.
+        "update_prepare_macos_tests.rs",
+        // Only test fixtures: the rescue build running from `H\<txn>` and the scanner holds
+        // its retirement's worker waits out (Windows), and the mounted image a retirement
+        // detaches (macOS); the start's pass itself is portable.
+        "update_startup.rs",
+        // Windows-only test fixture: a trial's watch in a process of its own handing back
+        // to a real rescue program; the watch and the hand-back are portable.
+        "update_trial.rs",
         // Only the symlinked-log regression fixture; the recovery road is portable.
         "update_recover.rs",
         // Only the real detached-handoff regression fixture; the handoff API is portable.
