@@ -7447,10 +7447,10 @@ mod tests {
     /// PIN (owner report 2026-09-21, on the 0.4.3 candidate) — **a printed path may hold spaces,
     /// and the disk still says which reading is real.**
     ///
-    /// The line was `D:\Developer\trace\验收 next85\中文 说明.md`, printed by an agent into a pane
-    /// standing beside the file. It wore no mark and the pointer went straight through it, while
+    /// The line was `D:\Developer\notes\验收 next85\中文 说明.md` (one folder renamed), printed by an
+    /// agent in a pane beside the file. It wore no mark and the pointer went through it, while
     /// the same tree spelled without spaces was an ordinary link. Nothing to do with the Chinese:
-    /// [`token_end`] stopped at the first space, `D:\Developer\trace\验收` is not a name on that
+    /// [`token_end`] stopped at the first space, `D:\Developer\notes\验收` is not a name on that
     /// disk, and so the row never offered a second reading to be arbitrated. `C:\Program Files\…`
     /// and a work account's `…\OneDrive - Example State University\…` are the same shape, in ASCII.
     ///
@@ -7465,14 +7465,14 @@ mod tests {
     /// defect itself.
     #[test]
     fn a_bare_path_is_read_across_the_spaces_a_filename_may_hold() {
-        // The owner's own line: the whole spelling is the first reading, and each space behind it
-        // is one shorter reading, longest first.
+        // The owner's line, one folder renamed: the whole spelling is the first reading, and each
+        // space behind it is one shorter reading, longest first.
         assert_eq!(
-            rooted_readings("D:\\Developer\\trace\\验收 next85\\中文 说明.md"),
+            rooted_readings("D:\\Developer\\notes\\验收 next85\\中文 说明.md"),
             [
-                "D:\\Developer\\trace\\验收 next85\\中文 说明.md",
-                "D:\\Developer\\trace\\验收 next85\\中文",
-                "D:\\Developer\\trace\\验收",
+                "D:\\Developer\\notes\\验收 next85\\中文 说明.md",
+                "D:\\Developer\\notes\\验收 next85\\中文",
+                "D:\\Developer\\notes\\验收",
             ]
         );
         // The prose behind a real name is read as far as the bound reaches, because no rule short
