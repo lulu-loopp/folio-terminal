@@ -1123,7 +1123,15 @@ reads the count, so a door that waits is red, not a hang (the taskbar's held she
 read by its reading's return on a thread of its own, awaited within the suite's patience, the shell
 let go before the verdict). The cap frees holds, not locks: a door that waits while it keeps a
 product lock the held worker takes next still hangs — the program walk's admission keeps the lane's
-lock across the ask (`ProgramsLane::request`), and row 111's planted wait there hung. That, and a
+lock across the ask (`ProgramsLane::request`), and row 111's planted wait there hung. That ask is
+pinned apart from the lane's lock (`a_coalescing_ask_never_waits_for_its_worker`, row 133): its
+worker stands in a held hold while every road of `Coalescing::ask` is taken on the test's thread, so
+a wait planted there is red at the cap. A worker held at a `Barrier`, at a channel or behind a lock
+a parked thread keeps is read the same way (row 133): the shell's birth worker, the log's writer and
+the update's fetch stand in a hold; the stalled sink's fill, the session writer that never answers
+and a contender held inside the election are read by their door's return on a thread of its own,
+the holder let go before the verdict; and the trace sink's lines are queued before another thread
+takes the process `stderr` lock, so nothing is called under it. That program-walk lock, and a
 test-thread wait on something no gate or hold holds (row 113), are not yet read this way. What such a verdict does not catch is a bounded wait, or a give-up that ignores
 its budget, shorter than the suite's patience.
 
