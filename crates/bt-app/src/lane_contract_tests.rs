@@ -1603,6 +1603,116 @@ fn a_full_lane_answers_without_waiting_and_an_admission_waiting_for_the_worker_i
     );
 }
 
+/// A worker that stands in `pass` on a thread of its own, and the flag it raises once `pass` has
+/// returned: the test awaits that flag within the suite's patience, and never joins a worker that
+/// has not raised it.
+fn passing_apart(
+    pass: impl FnOnce() + Send + 'static,
+) -> (
+    Arc<std::sync::atomic::AtomicBool>,
+    std::thread::JoinHandle<()>,
+) {
+    let returned = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let raised = Arc::clone(&returned);
+    let worker = std::thread::spawn(move || {
+        pass();
+        raised.store(true, Ordering::SeqCst);
+    });
+    (returned, worker)
+}
+
+/// **`what`, after a lapse, failed, and its failure names the lapse** — not some other panic on
+/// the way, nor the worker that never came.
+fn assert_names_the_lapse(caught: std::thread::Result<()>, what: &str) {
+    let said = caught
+        .err()
+        .and_then(|panic| panic.downcast::<String>().ok())
+        .unwrap_or_else(|| panic!("{what} after a lapse is red, with a message"));
+    assert!(
+        said.contains("let go on its own"),
+        "{what}'s failure names the lapse: {said}"
+    );
+}
+
+/// RED (T-LANE-DOOR-CALLS-ON-THE-TEST-THREAD, plan row 111) — **A worker standing in a held hold
+/// past its cap is let go, once, and the hold's release is red** — so a door a test calls while a
+/// fake's work stands in a hold, and that waits on that work, fails the test on its own thread
+/// instead of hanging the run.
+///
+/// A worker passes a held hold whose cap is short, and the test awaits its return within the
+/// suite's patience. The hold counts one lapse; a pass after it goes straight through; a wait for a
+/// standing worker and the release both panic, naming the lapse. The worker is never let go by
+/// the test, so it can only come back through the lapse, under any cap: nothing here reads the
+/// time.
+///
+/// MUTATION: let `Hold::pass` wait without its cap — the worker never comes back and the test is
+/// red (`came_back`), with the worker left standing.
+/// MUTATION: count no lapse in `Hold::pass` — red (`lapses() == 1`).
+/// MUTATION: drop the assertion in `Hold::release` — the release returns, and the test is red.
+/// MUTATION: let `Hold::wait_standing` wait only for a standing worker — nothing stands after the
+/// lapse, the wait gives up at the suite's patience saying nothing stood, and the test is red
+/// (the wait's failure does not name the lapse).
+#[test]
+fn a_hold_stood_in_past_its_cap_lets_go_once_and_its_release_is_red() {
+    let hold = Arc::new(crate::lane::Hold::default());
+    hold.lapse_after(std::time::Duration::from_millis(50));
+    hold.hold();
+    let standing = Arc::clone(&hold);
+    let (returned, worker) = passing_apart(move || standing.pass());
+    let came_back = crate::lane::within_patience(|| returned.load(Ordering::SeqCst));
+    assert!(
+        came_back,
+        "a worker standing in a held hold comes back through the hold's cap"
+    );
+    worker.join().expect("the worker ends");
+    assert_eq!(
+        hold.lapses(),
+        1,
+        "the hold counts that it let go on its own"
+    );
+    hold.pass();
+    assert_eq!(
+        hold.lapses(),
+        1,
+        "a lapse lets go once: a later pass is not held"
+    );
+    let awaited = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        hold.wait_standing("a worker after the lapse");
+    }));
+    assert_names_the_lapse(awaited, "the wait for a standing worker");
+    let released = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| hold.release()));
+    assert_names_the_lapse(released, "the hold's release");
+}
+
+/// RED (T-LANE-DOOR-CALLS-ON-THE-TEST-THREAD, plan row 111) — **A gate that let go on its own makes
+/// its release red** outside the suite's claims too: a lane's module test whose door waited on the
+/// held worker fails on its own thread, where the lapse was a pause nothing read before. The
+/// suite's claims let go without the assertion and judge the count themselves (`check`), so the
+/// planted lane above keeps its `SubmissionWaited`.
+///
+/// MUTATION: drop the assertion in `Gate::release` — the release returns, and the test is red.
+#[test]
+fn a_gate_that_let_go_on_its_own_makes_its_release_red() {
+    let gate = Arc::new(Gate::default());
+    gate.lapse_after(std::time::Duration::from_millis(50));
+    gate.hold();
+    let arriving = Arc::clone(&gate);
+    let (returned, worker) = passing_apart(move || arriving.arrive());
+    let came_back = crate::lane::within_patience(|| returned.load(Ordering::SeqCst));
+    assert!(
+        came_back,
+        "a worker held at the gate comes back through the gate's cap"
+    );
+    worker.join().expect("the worker ends");
+    assert_eq!(
+        gate.lapses(),
+        1,
+        "the gate counts that it let go on its own"
+    );
+    let released = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| gate.release()));
+    assert_names_the_lapse(released, "the gate's release");
+}
+
 /// RED (T-CLIPBOARD-ORDER-HOLDS-BY-SPEED, plan row 72) — **a lane built on the seam takes only
 /// what ended before its drain began**, so a request that ends while the drain is reading the
 /// requests waits for the next drain, and the declared order holds however slow the drain is
