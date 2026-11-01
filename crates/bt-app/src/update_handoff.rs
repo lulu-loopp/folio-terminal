@@ -2934,7 +2934,7 @@ mod tests {
     /// lock go; the contender's next ask takes it. No real window decides the
     /// verdict, and the contender's budget is the clock's count.
     ///
-    /// MUTATION: in `update_apply::take_the_window_within`, skip the lock.
+    /// MUTATION: in `update_apply::take_the_window_within_using`, skip the lock.
     #[test]
     fn a_contender_waits_for_the_election_and_never_overwrites_a_live_owner() {
         let folder = Folder::new("election-order");
