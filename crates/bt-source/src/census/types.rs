@@ -35,6 +35,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::Callable;
+use crate::declarations::cfg_predicates;
 use crate::index::{ImplRecord, Index, ItemKind, ItemRecord, ModuleShape, TokenKind};
 
 /// A type, as far as a declaration says.
@@ -558,7 +559,6 @@ pub(crate) struct Binding {
 /// One free function of the workspace.
 #[derive(Clone, Debug)]
 pub(crate) struct FnDecl {
-    pub(crate) package: String,
     /// Its package and module, whether or not a product build has it.
     pub(crate) place: Place,
     pub(crate) generics: Vec<String>,
@@ -569,11 +569,15 @@ pub(crate) struct FnDecl {
 }
 
 /// The `use` items written directly in one module: each name brought in,
-/// with the path it was written as, and each glob's path.
+/// with the path it was written as, and each glob's path — of every `use`
+/// item, and again of those a product build can compile (not under
+/// `cfg(test)`; plan row 126).
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Imports {
     pub(crate) names: BTreeMap<String, Vec<String>>,
     pub(crate) globs: Vec<Vec<String>>,
+    pub(crate) product_names: BTreeMap<String, Vec<String>>,
+    pub(crate) product_globs: Vec<Vec<String>>,
 }
 
 /// One `impl Deref for X`.
@@ -1099,7 +1103,6 @@ impl Declarations {
             .entry(item.name().to_owned())
             .or_default()
             .push(FnDecl {
-                package,
                 place,
                 generics: generic_names(&signature.generics),
                 params,
@@ -1113,9 +1116,13 @@ impl Declarations {
     fn read_imports(&mut self, index: &Index) {
         for module in index.modules() {
             let text = index.text(module.span());
+            let source = match module.body() {
+                ModuleShape::WholeFile => text.to_owned(),
+                ModuleShape::Inline => format!("mod m {text}"),
+            };
             let items = match module.body() {
-                ModuleShape::WholeFile => syn::parse_file(text).map(|file| file.items),
-                ModuleShape::Inline => syn::parse_str::<syn::ItemMod>(&format!("mod m {text}"))
+                ModuleShape::WholeFile => syn::parse_file(&source).map(|file| file.items),
+                ModuleShape::Inline => syn::parse_str::<syn::ItemMod>(&source)
                     .map(|parsed| parsed.content.map(|(_, items)| items).unwrap_or_default()),
             };
             let Ok(items) = items else {
@@ -1128,7 +1135,14 @@ impl Declarations {
             let mut imports = Imports::default();
             for item in &items {
                 if let syn::Item::Use(used) = item {
-                    flatten_use(&used.tree, &mut Vec::new(), &mut imports);
+                    let mut one = Imports::default();
+                    flatten_use(&used.tree, &mut Vec::new(), &mut one);
+                    if cfg_predicates(&used.attrs, &source).1.permits_product() {
+                        imports.product_names.extend(one.names.clone());
+                        imports.product_globs.extend(one.globs.clone());
+                    }
+                    imports.names.extend(one.names);
+                    imports.globs.extend(one.globs);
                 }
             }
             let package = package_at(index, module.span().start());
@@ -1139,6 +1153,8 @@ impl Declarations {
                     .or_default();
                 entry.names.extend(imports.names.clone());
                 entry.globs.extend(imports.globs.clone());
+                entry.product_names.extend(imports.product_names.clone());
+                entry.product_globs.extend(imports.product_globs.clone());
             }
         }
     }
@@ -1146,7 +1162,7 @@ impl Declarations {
 
 /// A `use` tree, flattened into the names it brings in and the globs it
 /// opens; `prefix` is the path written before this subtree.
-fn flatten_use(tree: &syn::UseTree, prefix: &mut Vec<String>, imports: &mut Imports) {
+pub(crate) fn flatten_use(tree: &syn::UseTree, prefix: &mut Vec<String>, imports: &mut Imports) {
     match tree {
         syn::UseTree::Path(path) => {
             prefix.push(path.ident.to_string());
