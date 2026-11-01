@@ -559,8 +559,6 @@ pub(crate) struct Binding {
 /// One free function of the workspace.
 #[derive(Clone, Debug)]
 pub(crate) struct FnDecl {
-    /// Its name.
-    pub(crate) name: String,
     /// Its package and module, whether or not a product build has it.
     pub(crate) place: Place,
     pub(crate) generics: Vec<String>,
@@ -1105,7 +1103,6 @@ impl Declarations {
             .entry(item.name().to_owned())
             .or_default()
             .push(FnDecl {
-                name: item.name().to_owned(),
                 place,
                 generics: generic_names(&signature.generics),
                 params,

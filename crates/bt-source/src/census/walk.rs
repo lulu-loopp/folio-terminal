@@ -827,10 +827,12 @@ impl<'w, 'd> Walk<'w, 'd> {
     }
 
     /// The edge a call `f(..)` or `path::f(..)` adds: to what its type
-    /// reached (`Type::f`), or else to the free functions its path names by
-    /// the declarations and `use` items of the module it is written in. A
-    /// path that names a function of the subject package and reaches none, or
-    /// reaches more than one item, is listed as not followed.
+    /// reached (`Type::f`), or else to the subject package's free functions
+    /// its path names by the rules that type a call ([`Follow`], plan row
+    /// 126: the module's product items, product `use` items and globs). A
+    /// one-segment call of a `fn` or `use` written in a body, or a path that
+    /// names a function of the subject package and reaches none, or reaches
+    /// more than one item, is listed as not followed.
     fn call_edge(&mut self, call: &syn::ExprCall, by_type: Callees) {
         let syn::Expr::Path(path) = &*call.func else {
             return;
@@ -871,29 +873,36 @@ impl<'w, 'd> Walk<'w, 'd> {
             self.edge(by_type.items, &segments.join("::"));
             return;
         }
-        let package = self.resolver.subject.package.clone();
-        let reach = if segments.len() == 1 {
-            Some(self.resolver.functions_at(&package, &self.module, &name))
-        } else {
-            // `None`: the path leaves the package.
-            self.resolver
-                .absolute(&package, &self.module, &segments)
-                .and_then(|absolute| {
-                    let (last, at) = absolute.split_last()?;
-                    Some(self.resolver.functions_at(&package, &at.join("::"), last))
-                })
-        };
-        if let Some(reach) = &reach
-            && !reach.items.is_empty()
+        if segments.len() == 1
+            && let Some(why) = self.block_item(&name)
         {
-            self.edge(reach.items.clone(), &segments.join("::"));
+            // A `fn` or a `use` written in a body: the rules read no declaration of it, as the
+            // call's type says (`Walk::callee`).
+            if self.resolver.subject.functions.contains(&name) {
+                self.sink
+                    .unfollowed(&self.module, &self.function, &segments.join("::"), &why);
+            }
             return;
         }
-        if let Some(reach) = &reach
-            && !reach.outside
-            && !reach.test_only
-            && self.resolver.subject.functions.contains(&name)
-        {
+        let follow = Follow {
+            declarations: self.resolver.declarations,
+            uses: Uses::Product,
+        };
+        let found = follow.path(&self.written.package, &self.module, &segments);
+        let subject = &self.resolver.subject.package;
+        let items: BTreeSet<Callable> = found
+            .declarations
+            .iter()
+            .filter(|reached| &reached.decl.place.0 == subject)
+            .filter_map(|reached| reached.decl.callable.clone())
+            .collect();
+        if !items.is_empty() {
+            self.edge(items, &segments.join("::"));
+            return;
+        }
+        // Another crate's function, or a path the rules do not place: no edge of the package's.
+        let outside = !found.declarations.is_empty() || !found.refused.is_empty();
+        if !outside && !found.test_only && self.resolver.subject.functions.contains(&name) {
             self.sink.unfollowed(
                 &self.module,
                 &self.function,
@@ -935,48 +944,44 @@ impl<'w, 'd> Walk<'w, 'd> {
     /// A free function's return type and closure parameters, from the declarations the call's
     /// module reaches (plan row 126): its own items, then the `use` items a product build
     /// compiles, then its globs, followed through re-exports and into another workspace crate.
-    /// Only product declarations answer. A name that reaches only a test build's declaration, a
-    /// path into a crate the census does not read, or nothing at all is refused — never matched
-    /// by its bare name elsewhere. The answers of the declarations reached (the `cfg` variants of
-    /// one item) must agree, with one bounded unification: a generic parameter the return type
-    /// names is bound from the argument whose declared type is that parameter behind references
-    /// or a slice.
+    /// Only product declarations answer; a test-only one is skipped and the lookup goes on. A
+    /// name that comes through a path the rules do not place (into a crate the census does not
+    /// read, a first segment they cannot place, `super` past the root, a chain of `use` items
+    /// longer than they follow), reaches only a test build's declaration, or reaches nothing is
+    /// refused, each with its own reason — never matched by its bare name elsewhere. The answers
+    /// of the declarations reached (the `cfg` variants of one item) must agree, with one bounded
+    /// unification: a generic parameter the return type names is bound from the argument whose
+    /// declared type is that parameter behind references or a slice.
     fn free_function(&self, name: &str, args: &[Val]) -> (Ty, Vec<Option<Vec<Ty>>>) {
         let follow = Follow {
             declarations: self.resolver.declarations,
             uses: Uses::Product,
         };
         let found = follow.path(&self.written.package, &self.module, &[name.to_owned()]);
-        let mut answers = found
-            .declarations
-            .iter()
-            .filter(|decl| decl.callable.is_some())
-            .map(|decl| {
-                let mut map = BTreeMap::new();
-                for (param, arg) in decl.params.iter().zip(args) {
-                    unify(param, &arg.ty, &decl.generics, &mut map);
-                }
-                let ret = decl.ret.substitute(&map);
-                let ret = if ret.is_a_parameter() {
-                    Ty::unknown(format!("`{name}` returns a generic type"))
-                } else {
-                    ret
-                };
-                let params: Vec<Ty> = decl
-                    .params
-                    .iter()
-                    .map(|param| param.substitute(&map))
-                    .collect();
-                (ret, closures_by_position(&params))
-            });
+        let mut answers = found.declarations.iter().map(|reached| {
+            let decl = reached.decl;
+            let mut map = BTreeMap::new();
+            for (param, arg) in decl.params.iter().zip(args) {
+                unify(param, &arg.ty, &decl.generics, &mut map);
+            }
+            let ret = decl.ret.substitute(&map);
+            let ret = if ret.is_a_parameter() {
+                Ty::unknown(format!("`{name}` returns a generic type"))
+            } else {
+                ret
+            };
+            let params: Vec<Ty> = decl
+                .params
+                .iter()
+                .map(|param| param.substitute(&map))
+                .collect();
+            (ret, closures_by_position(&params))
+        });
         let Some(first) = answers.next() else {
-            let why = if !found.declarations.is_empty() {
+            let why = if let Some(why) = found.refusal(name) {
+                why
+            } else if found.test_only {
                 format!("`{name}` is declared only for a test build where the module reaches it")
-            } else if let Some(unread) = found.unread.first() {
-                format!(
-                    "`{name}` comes through `{unread}`, a path into a crate the census does not \
-                     read"
-                )
             } else {
                 format!("`{name}` is not a function the module's items and `use` items reach")
             };
@@ -1072,7 +1077,7 @@ impl<'w, 'd> Walk<'w, 'd> {
                         "`{name}`, brought in by the glob `use {glob}::*` written in the body: \
                          the census reads no `use` of a body"
                     ))
-                } else if !found.unread.is_empty() {
+                } else if found.refusal(name).is_some() {
                     Some(format!(
                         "`{name}`: the glob `use {glob}::*` written in the body may bring it in, \
                          and the rules do not place its path"

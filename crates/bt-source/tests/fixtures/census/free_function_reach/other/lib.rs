@@ -40,3 +40,9 @@ pub mod attention {
         unimplemented!()
     }
 }
+
+// Fold F4: a re-export by a glob of a third crate's module, so the subject's `use` of
+// `census_reach_other::admission::admitted` reaches `census_reach_deep::admission::admitted`.
+pub mod admission {
+    pub use census_reach_deep::admission::*;
+}

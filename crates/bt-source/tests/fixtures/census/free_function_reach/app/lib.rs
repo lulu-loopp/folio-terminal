@@ -79,6 +79,14 @@ mod tests {
     pub fn kind_mode(_: u32) -> &'static mut WindowRuntime {
         unimplemented!()
     }
+
+    pub fn admitted(_: u32) -> &'static mut WindowRuntime {
+        unimplemented!()
+    }
+
+    pub fn spin(_: u32) -> &'static mut WindowRuntime {
+        unimplemented!()
+    }
 }
 
 pub mod green {
@@ -117,8 +125,94 @@ pub mod glob_user {
     }
 }
 
+// Fold F1: a module `config` of the crate root, and a module that imports it and declares a
+// function of the same name. A module and a function live in two namespaces, so both are there.
+pub mod config {}
+
+pub mod shadowed {
+    #[allow(unused_imports)]
+    use crate::config;
+
+    pub fn config(_: u32) -> &'static mut crate::model::WindowRuntime {
+        unimplemented!()
+    }
+}
+
+// Fold F4: `self::` and `super::` paths.
+pub mod relative {
+    use self::deeper::grab_here;
+
+    pub mod deeper {
+        use super::super::windows::grab;
+
+        pub use crate::windows::grab as grab_here;
+
+        // GREEN: `super::super::windows::grab`.
+        pub fn through_super() {
+            grab(1).title = String::new();
+        }
+    }
+
+    // GREEN: `self::deeper::grab_here`, a re-export there.
+    pub fn through_self() {
+        grab_here(1).title = String::new();
+    }
+}
+
+// Fold F3: a test-only declaration beside a product `use` of the same name: a product build has
+// only the `use`.
+pub mod skips {
+    use crate::windows::grab as now;
+
+    #[cfg(test)]
+    fn now(_: u32) -> &'static mut crate::model::WindowRuntime {
+        unimplemented!()
+    }
+
+    // GREEN: the test-only `now` is skipped; the `use` answers.
+    pub fn a_test_only_declaration_beside_a_product_use() {
+        now(1).title = String::new();
+    }
+}
+
+// Fold F4: a `pub use` cycle.
+pub mod cycle_a {
+    pub use crate::cycle_b::spin;
+}
+
+pub mod cycle_b {
+    pub use crate::cycle_a::spin;
+}
+
+// Fold F2: a local enum's glob brings in no function.
+pub mod enum_glob {
+    pub enum Kind {
+        One,
+    }
+
+    use Kind::*;
+
+    pub fn a_type_glob_brings_no_function() {
+        let _ = One;
+        missing(1).title = String::new();
+    }
+}
+
+pub mod green_fold {
+    use crate::shadowed::config;
+
+    // GREEN (fold F1): `shadowed`'s own `config`, not the module it imports.
+    pub fn through_a_function_named_like_an_imported_module() {
+        config(1).title = String::new();
+    }
+}
+
 pub mod red {
+    use super::super::lost;
     use crate::attention::kind_mode;
+    use crate::cycle_a::spin;
+    use census_reach_other::admission::admitted;
+    use outside_the_workspace::thing;
     #[cfg(test)]
     use crate::tests::probe;
     use census_reach_other::fetch;
@@ -182,6 +276,27 @@ pub mod red {
     // RED 7: brought in only by a test build's `use`. Refused.
     pub fn a_test_only_use() {
         probe(1).title = String::new();
+    }
+
+    // RED 9 (fold F4): a re-export chain two crates deep — `other`'s `admission` globs
+    // `deep`'s. Typed from `deep`'s `admitted`, so nothing of the window is written.
+    pub fn through_two_crates() {
+        admitted(1).title = String::new();
+    }
+
+    // RED 10 (fold F4/F2): a `pub use` cycle. Refused, naming the chain.
+    pub fn a_use_cycle() {
+        spin(1).title = String::new();
+    }
+
+    // Fold F2: `super` past the crate root. Refused, naming it.
+    pub fn past_the_root() {
+        lost(1).title = String::new();
+    }
+
+    // Fold F2: a first segment the rules cannot place. Refused, naming it.
+    pub fn an_unknown_first_segment() {
+        thing(1).title = String::new();
     }
 
     // RED 8: brought in by a `use` written in the body, under the name of the package's `grab`.
