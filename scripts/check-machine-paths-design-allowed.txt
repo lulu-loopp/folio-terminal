@@ -1,0 +1,46 @@
+# check-machine-paths-design-allowed — the machine-specific hits that
+# `docs/DESIGN.md` held on 2026-11-01 (0.4.9 row 156), when the append-only log
+# stopped being excluded from `scripts/check-machine-paths.ps1`. Its old entries
+# are evidence and cannot be rewritten, so each of their hits has a row here; a
+# hit in any new entry has none and is refused with its line number.
+#
+# **This list only shrinks.** A row that matches no hit is refused as stale. A new
+# row is not a way to excuse a new hit: a new entry spells a placeholder instead.
+#
+# One row per hit:
+#     <key> <check> <date> <reason class>: <shape>
+# <key> is the first 16 hex digits of the SHA-256 of the check's name, the matched
+# text and the whole line (trailing whitespace dropped), joined by NUL, as the
+# scan reads them; no line number is in it, so an entry inserted above a hit
+# keeps its row. Two identical hits on one line take two rows. <check> is author,
+# checkout, home or mail. <reason class> is old-checkout example, author, runner
+# account or false positive. <shape> says what the hit is in words, with the
+# account and the drive masked; it never spells the hit, so this file passes
+# the scan it serves. `check-machine-paths.ps1 -PrintKeys` prints the key of
+# every hit in the file.
+#
+fb4573c678ca4698 author 2026-11-01 author: the account in a pane-ghost label (§2.12)
+8c81c555c319e398 checkout 2026-11-01 old-checkout example: the pre-move checkout in a repro note (§7.1)
+1ac1d3c80f714698 checkout 2026-11-01 old-checkout example: the pre-move checkout in a bare-path example (§7.1)
+b536206f668cf09e checkout 2026-11-01 old-checkout example: the pre-move checkout with backslashes in a bare-path example (§7.1)
+d6f430c96a9a207d checkout 2026-11-01 old-checkout example: the pre-move checkout with forward slashes in a bare-path example (§7.1)
+3be4a1f61f6c1d0b checkout 2026-11-01 old-checkout example: the pre-move checkout in a bare-path example, first of two on the line (§7.1)
+3be4a1f61f6c1d0b checkout 2026-11-01 old-checkout example: the pre-move checkout in a bare-path example, second of two on the line (§7.1)
+1130f03c3a57c68d checkout 2026-11-01 old-checkout example: the pre-move checkout in a bare-path table row (§7.1)
+7081195a5d29581e checkout 2026-11-01 old-checkout example: the pre-move checkout with forward slashes in a bare-path table row (§7.1)
+5c16c0c16c3759f0 checkout 2026-11-01 old-checkout example: the pre-move checkout with forward slashes in a bare-path table row (§7.1)
+cb286855d1c69f44 checkout 2026-11-01 old-checkout example: the pre-move checkout in a repro note (§7.1)
+915379c0122cdb72 author 2026-11-01 author: the account in a WSL prompt, <author> at a host (§7.1)
+b6e53b34c0c02cfa author 2026-11-01 author: the account in a tab head (§7.1)
+9a075153a13b304b author 2026-11-01 author: the account in a PSReadLine diagnostics line (§7.25)
+8b6f7dc640d6d362 home 2026-11-01 author: X:\Users\<author> in the same diagnostics line (§7.25)
+c09703e0c60cb46a home 2026-11-01 runner account: X:\Users\<acct>, a CI runner's account (§7.30)
+c87c390b0081185c author 2026-11-01 author: the account in a WSL prompt, <author> at a host (§7.40)
+0e5be7d82a0c2455 home 2026-11-01 false positive: X:\Users\<acct>, a truncated example fragment, not an account (§7.47)
+81a5185300098001 checkout 2026-11-01 old-checkout example: the pre-move checkout in a repro note (§7.49)
+57f07a9fb5c40009 checkout 2026-11-01 old-checkout example: the pre-move checkout in a repro note (§7.51)
+86f2f404902ce17e home 2026-11-01 false positive: /home/<acct>, a segment inside a Mac worktree path, not an account (§13.40)
+72aafb2508ff6a6a checkout 2026-11-01 old-checkout example: the pre-move trace folder in a bare-path example, first of two on the line (2026-09-21 entry)
+72aafb2508ff6a6a checkout 2026-11-01 old-checkout example: the pre-move trace folder in a bare-path example, second of two on the line (2026-09-21 entry)
+93604fe936e525bc home 2026-11-01 runner account: X:\Users\<acct>, a CI runner's account (2026-10-08 entry)
+afd3545ee77c0012 home 2026-11-01 runner account: X:\Users\<acct>, the CI runner's admin account (2026-10-08 entry)
