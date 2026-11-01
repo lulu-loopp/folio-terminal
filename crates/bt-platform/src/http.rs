@@ -611,11 +611,20 @@ impl Request {
         let _ = unsafe { WinHttpCloseHandle(handle) };
         let shared = &self.shared;
         clock.wait(bound, &mut |within| {
-            let (signals, _) = shared
-                .raised
-                .wait_timeout_while(shared.locked(), within, |signals| !signals.closed)
-                .expect("the download's signals are not held across a panic");
-            signals.closed
+            let started = Instant::now();
+            let mut signals = shared.locked();
+            while !signals.closed {
+                let left = within.saturating_sub(started.elapsed());
+                if left.is_zero() {
+                    return false;
+                }
+                let (next, _) = shared
+                    .raised
+                    .wait_timeout(signals, left)
+                    .expect("the download's signals are not held across a panic");
+                signals = next;
+            }
+            true
         })
     }
 }
