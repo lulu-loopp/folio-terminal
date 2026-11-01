@@ -1277,6 +1277,14 @@ impl LaneShared {
 fn let_go(_id: StorageId, _terminal: StorageTerminal) {}
 
 impl StorageLane {
+    /// **Whether `other` is this lane** — a clone of the same queue, worker and ledger, as the
+    /// product's six storage askers hold one (`SessionStore::lane`): what a test asks of a
+    /// harness that has to put them where the product does.
+    #[cfg(test)]
+    pub(crate) fn is(&self, other: &StorageLane) -> bool {
+        Arc::ptr_eq(&self.shared, &other.shared)
+    }
+
     /// A lane and the session receipts its worker sends, with no thread yet.
     fn fresh() -> (Self, mpsc::Receiver<SessionWriteReceipt>) {
         Self::fresh_with(
@@ -2420,6 +2428,13 @@ impl SessionStore {
         &self.session
     }
 
+    /// The folder this store's two files are in — where a harness puts the other documents'
+    /// stores, as the product keeps all of them in one data folder.
+    #[cfg(test)]
+    pub(crate) fn folder(&self) -> &Path {
+        self.session_path.parent().unwrap_or_else(|| Path::new(""))
+    }
+
     /// Replace the in-memory document and start the debounce window. Called on
     /// a meaningful change: a tree edit, or the end of a resize.
     ///
@@ -3345,6 +3360,12 @@ impl SettingsStore {
         self.document.projection()
     }
 
+    /// The storage lane this store's requests go to — a test's look at where a harness put it.
+    #[cfg(test)]
+    pub(crate) fn lane(&self) -> &StorageLane {
+        self.document.lane()
+    }
+
     /// What `settings.json` is known to hold.
     #[cfg(test)]
     pub(crate) fn revision(&self) -> &Revision<SettingsV1> {
@@ -3744,6 +3765,12 @@ impl KeybindingsStore {
         &self.document.projection().bindings
     }
 
+    /// The storage lane this store's requests go to — a test's look at where a harness put it.
+    #[cfg(test)]
+    pub(crate) fn lane(&self) -> &StorageLane {
+        self.document.lane()
+    }
+
     /// **The document the file says**, its dialect with it — what the reader
     /// reads at launch (`settings_bundle::shortcuts_at_start`).
     pub(crate) fn file_document(&self) -> &KeybindingsV1 {
@@ -4092,6 +4119,12 @@ impl ProfilesStore {
     /// The table as it stands.
     pub fn loaded(&self) -> &ProfilesV1 {
         self.document.projection()
+    }
+
+    /// The storage lane this store's requests go to — a test's look at where a harness put it.
+    #[cfg(test)]
+    pub(crate) fn lane(&self) -> &StorageLane {
+        self.document.lane()
     }
 
     /// What `profiles.json` is known to hold.

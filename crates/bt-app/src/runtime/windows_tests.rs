@@ -2699,3 +2699,93 @@ fn one_drain_hears_every_askers_answers_in_the_order_the_lane_admitted_them() {
         "the save asked first says the drive's one sentence"
     );
 }
+
+// ── One storage lane, as the product's (T-HEADLESS-HARNESS-ONE-STORAGE-LANE, plan row 123) ────
+
+/// RED (T-HEADLESS-HARNESS-ONE-STORAGE-LANE, plan row 123) — **a save on the default headless
+/// application lands, and the one drain hears it**: the application's storage is the product's
+/// (one working lane, the session store's, and every asker on it), so `Ctrl+S` hands the edited
+/// file to that lane's worker, the worker writes it, and the drain, reading its one mark from the
+/// session store's lane, takes the answer from the ledger the save was admitted to and hears it
+/// on the pane.
+///
+/// Red on the base (`9ac40b223`): the preview saves were on a lane no worker served, so the save
+/// was refused at the door and the file kept its old bytes. With the session store moved to one
+/// lane and the preview saves left on another working lane (the half-move), the take panics on
+/// the mark of another ledger (`lane::Request::is_marked_by`).
+#[test]
+fn a_save_on_the_default_headless_application_lands_and_its_drain_hears_it() {
+    let dir = crate::test_support::disk_scratch("one-storage-lane-save");
+    let path = dir.join("一 one.md");
+    std::fs::write(&path, READ).expect("the file is written");
+    let mut buffer = crate::test_support::buffer_read_from(&path);
+    assert!(buffer.edit_content(|body| {
+        body.push_str(TYPED);
+        true
+    }));
+    let (tab, seat) = tab_with_a_preview(1, vec![buffer]);
+    let mut application = HeadlessApplication::of(HeadlessFolio::with_tabs(
+        "one-storage-lane-save",
+        vec![tab],
+        0,
+    ));
+    let surface = crate::test_support::seat_of(crate::TabId(1), seat);
+    application
+        .runtime()
+        .save_preview_on(surface)
+        .expect("the verb runs");
+    let _ = crate::runtime::storage::take_heard();
+    let mut heard = Vec::new();
+    crate::lane::wait_until("the save's answer, heard by the drain", || {
+        application
+            .folio
+            .take_document_answers()
+            .expect("the answers are heard");
+        heard.extend(crate::runtime::storage::take_heard());
+        !heard.is_empty()
+    });
+    assert_eq!(heard, ["preview"], "the drain heard the save");
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("the file reads"),
+        format!("{READ}{TYPED}"),
+        "the worker wrote the edit"
+    );
+    assert_eq!(
+        application
+            .runtime()
+            .preview_pane(surface)
+            .and_then(|pane| pane.notice())
+            .map(|(notice, _)| notice.clone())
+            .as_deref(),
+        Some(crate::preview::preview_saved_notice()),
+        "and the pane says Saved"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// RED (T-HEADLESS-HARNESS-ONE-STORAGE-LANE, plan row 123) — **the close and quit harnesses keep
+/// every storage asker on the session store's lane**: each lane a harness makes its own
+/// (`Saving`'s and `Quitting`'s scripted lane, the scripted lane of `on_one_scripted_lane`, the
+/// working one of `on_one_working_lane`) carries the session store and the five other askers, as
+/// the product's one lane does.
+///
+/// Red on the base (`9ac40b223`): each moved the session store and the preview saves and left the
+/// settings, keybindings, profiles and pins stores on the default application's lane.
+#[test]
+fn the_close_and_quit_harnesses_keep_every_storage_asker_on_one_lane() {
+    let saving = Saving::open("one-lane", &["一 one.md"]);
+    assert_eq!(
+        crate::headless::askers_off_the_storage_lane(
+            saving.application.folio.app.as_ref().expect("the application")
+        ),
+        Vec::<&str>::new(),
+        "the close harness"
+    );
+    let mut quitting = Quitting::open("one-lane", ["one.md", "two.md"]);
+    let off = |quitting: &mut Quitting| crate::headless::askers_off_the_storage_lane(quitting.app());
+    assert_eq!(off(&mut quitting), Vec::<&str>::new(), "the quit harness");
+    quitting.on_one_scripted_lane(std::time::Duration::ZERO);
+    assert_eq!(off(&mut quitting), Vec::<&str>::new(), "on one scripted lane");
+    quitting.on_one_working_lane();
+    assert_eq!(off(&mut quitting), Vec::<&str>::new(), "on one working lane");
+}

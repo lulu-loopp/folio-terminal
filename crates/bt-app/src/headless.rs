@@ -1657,6 +1657,25 @@ impl HeadlessApplication {
     }
 }
 
+/// **The askers of `app`'s storage drain that are not on its session store's lane**, by name:
+/// none, in an application whose storage is laid out as the product's is — the session store's
+/// lane, and the other five askers on it (`App::storage_answers` reads its one mark from that
+/// lane's ledger and hands it to all of them).
+pub(crate) fn askers_off_the_storage_lane(app: &App<Headless>) -> Vec<&'static str> {
+    let lane = app.session_store.lane();
+    [
+        ("settings", app.settings_store.lane()),
+        ("keybindings", app.keybindings_store.lane()),
+        ("profiles", app.profiles_store.lane()),
+        ("pins", app.pins_store.lane()),
+        ("preview", app.preview_saves.lane()),
+    ]
+    .into_iter()
+    .filter(|(_, other)| !lane.is(other))
+    .map(|(asker, _)| asker)
+    .collect()
+}
+
 /// **A headless application**: every field at the value a launch with nothing on disk gives it,
 /// its stores at `root`, its workers started and waking `proxy` — but its storage lane, which no
 /// worker serves and none can start: every job handed to it is refused at the door (a preview
@@ -1919,6 +1938,29 @@ mod tests {
     use super::*;
     use bt_platform::admission::admitted;
     use winit::window::CursorIcon;
+
+    /// RED (T-HEADLESS-HARNESS-ONE-STORAGE-LANE, plan row 123) — **a headless application's
+    /// storage askers are on its session store's lane**, as the product's six are
+    /// (`SessionStore::open`, and the settings, keybindings, profiles and pins stores and the
+    /// preview saves built on its `lane()`): the drain reads its one mark from that lane's
+    /// ledger and asks every asker under it, so an asker on another lane is asked under a mark
+    /// that is not its ledger's.
+    ///
+    /// Red on the base (`9ac40b223`): the session store had a working lane of its own and the
+    /// other five shared a lane no worker served — all five named.
+    #[test]
+    fn a_headless_applications_storage_askers_are_on_its_session_stores_lane() {
+        let folio = HeadlessFolio::with_tabs(
+            "one-storage-lane",
+            vec![crate::test_support::ringing_tab(1, 1)],
+            0,
+        );
+        assert_eq!(
+            askers_off_the_storage_lane(&folio.app),
+            Vec::<&str>::new(),
+            "every asker is on the session store's lane"
+        );
+    }
 
     /// RED — **the headless runtime records what the window would do**: every door of the
     /// window seam, knocked on once, leaves exactly one typed effect carrying its arguments, in

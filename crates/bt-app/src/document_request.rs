@@ -1513,6 +1513,12 @@ impl<T: StoredDocument> DocumentState<T> {
         &self.projection
     }
 
+    /// The storage lane this document's requests go to.
+    #[cfg(test)]
+    pub(crate) fn lane(&self) -> &StorageLane {
+        &self.lane
+    }
+
     /// The document Folio wants on disk ((b)6).
     pub(crate) fn desired(&self) -> &T {
         &self.desired
