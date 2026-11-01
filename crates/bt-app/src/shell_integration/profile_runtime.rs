@@ -1944,7 +1944,8 @@ mod tests {
     /// MUTATION: let the stranger never let go (`std::mem::forget(held)`) and
     /// the second write is refused after [`OUR_TURN`], every time. The old
     /// close-without-unlock cannot be made red on purpose: Windows usually
-    /// frees the lock in time, which is why it was a flake.
+    /// frees the lock in time, which is why it was a race that passed, never
+    /// a failure on record.
     #[test]
     fn shell_integration_record_lock_refuses_overlap_and_releases_on_drop() {
         let root = super::super::tests::temp_dir("marks-lock");
@@ -2068,8 +2069,13 @@ mod tests {
     struct ForeignHolder(fs::File);
 
     impl Drop for ForeignHolder {
+        /// A failed unlock is red, except during an unwind, where a second
+        /// panic would abort the whole test binary.
         fn drop(&mut self) {
-            self.0.unlock().expect("the stranger lets go of its lock");
+            let unlocked = self.0.unlock();
+            if !std::thread::panicking() {
+                unlocked.expect("the stranger lets go of its lock");
+            }
         }
     }
 
