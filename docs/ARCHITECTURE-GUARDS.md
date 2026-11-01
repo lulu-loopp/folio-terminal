@@ -290,11 +290,14 @@ attribute macro receives its item's tokens and may emit anything, so every `cfg`
 one refuses the index by its line and the attribute macro as written
 (`Rejection::CfgUnderAttributeMacro`), at any depth and inside macro tokens too; the item itself
 is not refused, and its own `cfg`s are read as before (the compiler applies them first). Inert,
-and read through: the language's own attributes, `rustfmt::`, `clippy::` and `diagnostic::`, a
-`derive` of anything, a derive helper beside a derive that declares it (a closed table: `serde`
-for `Serialize`/`Deserialize`; `error`, `from`, `source`, `backtrace` for `Error`), and a
-`cfg_attr` writing only those. Every other attribute may rewrite, `cfg_attr(…, attr_macro)`
-whatever its predicate. Such `impl`, `trait` and foreign items are hazards too, like items
+and read through: the language's own attributes, `rustfmt::`, `clippy::` and `diagnostic::` (not
+`::`-led, which names a crate), a `derive` of anything, a derive helper beside a derive that
+declares it, spelt as written (a closed table: `serde` for `Serialize`/`Deserialize` or
+`serde::Serialize`/`serde::Deserialize`; `error`, `from`, `source`, `backtrace` for `Error` or
+`thiserror::Error`), and a `cfg_attr` writing only those. Every other attribute may rewrite,
+`cfg_attr(…, attr_macro)` whatever its predicate, and a helper beside a derive spelt any other way
+(`other_crate::Error`). Not reached: a `use` that replaces a built-in attribute macro (`use
+test_log::test;`) — the allow-list is keyed by name; none in the tree. Such `impl`, `trait` and foreign items are hazards too, like items
 (`tests/index.rs` `a_cfg_under_an_attribute_macro_is_refused_by_its_line`,
 `a_cfg_under_inert_attributes_is_a_gate`). The tree's one attribute macro on items is
 windows-rs's `#[implement]` (three structs in `bt-platform`), with no `cfg` inside.

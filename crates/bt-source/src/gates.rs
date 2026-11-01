@@ -70,10 +70,13 @@
 //!   `cfg` and `cfg`-writing `cfg_attr` inside it, at any depth and inside macro tokens too, is
 //!   refused ([`Rejection::CfgUnderAttributeMacro`], naming the outermost such attribute), an
 //!   entry of a read list included. The item itself is not refused. Inert, and read through: the
-//!   language's own attributes, the tool namespaces, a `derive` of anything, a derive helper
-//!   beside a derive that declares it ([`DERIVE_HELPERS`], a closed table), and a `cfg_attr`
-//!   writing only those; anything else may rewrite, a `cfg_attr` writing it whatever its
-//!   predicate. The item is also a hazard when an attribute may run a macro, as above.
+//!   language's own attributes, the tool namespaces (not a `::`-led path, which names a crate),
+//!   a `derive` of anything, a derive helper beside a derive that declares it, spelt as the table
+//!   holds it ([`DERIVE_HELPERS`], a closed table of bare and declaring-crate spellings), and a
+//!   `cfg_attr` writing only those; anything else may rewrite, a `cfg_attr` writing it whatever
+//!   its predicate. Not reached: a `use` that replaces a built-in attribute macro (`use
+//!   test_log::test;`), since the allow-list is keyed by name (the review's N2; none in the
+//!   tree). The item is also a hazard when an attribute may run a macro, as above.
 //! * **Not reached (a limit older than this row):** a macro written in an attribute's value
 //!   (`#[doc = m!(…)]`) and the tokens `syn` keeps unparsed in a `Verbatim` node are visited by
 //!   neither reading, so a `cfg` there is neither read nor refused (no attribute-value macro in
@@ -787,10 +790,7 @@ fn names_a_variable(tokens: TokenStream, attribute: &str, name: &str) -> bool {
 fn may_run_a_macro(meta: &syn::Meta) -> bool {
     let path = meta.path();
     let Some(name) = path.get_ident() else {
-        return !path
-            .segments
-            .first()
-            .is_some_and(|tool| INERT_TOOLS.iter().any(|inert| tool.ident == inert));
+        return !names_an_inert_tool(path);
     };
     let name = name.to_string();
     match name.as_str() {
@@ -829,20 +829,41 @@ fn may_run_a_macro(meta: &syn::Meta) -> bool {
 /// `#[diagnostic::…]`.
 const INERT_TOOLS: [&str; 3] = ["rustfmt", "clippy", "diagnostic"];
 
-/// The derive helpers this walk reads through, each with the derives that declare it (plan row
-/// 122): a helper is inert only on an item that carries one of its derives. A closed table — a
-/// helper not in it is taken to be an attribute macro, and adding one is a row with a fixture.
+/// Whether `path` names an attribute of an inert tool namespace ([`INERT_TOOLS`]). A path with a
+/// leading `::` names an extern crate, not a tool, so it never does (`#[::clippy::x]`).
+fn names_an_inert_tool(path: &syn::Path) -> bool {
+    path.leading_colon.is_none()
+        && path
+            .segments
+            .first()
+            .is_some_and(|tool| INERT_TOOLS.iter().any(|inert| tool.ident == inert))
+}
+
+/// The derive helpers this walk reads through, each with the derives that declare it, spelt as
+/// a `derive` may write them — the bare name and the declaring crate's path (plan row 122, the
+/// review's N1): a helper is inert only on an item that carries one of its derives spelt so. A
+/// closed table — a helper not in it, or beside a derive spelt any other way
+/// (`other_crate::Error`, `::serde::Serialize`), is taken to be an attribute macro, and adding
+/// one is a row with a fixture.
 const DERIVE_HELPERS: [(&str, &[&str]); 5] = [
-    ("serde", &["Serialize", "Deserialize"]),
-    ("error", &["Error"]),
-    ("from", &["Error"]),
-    ("source", &["Error"]),
-    ("backtrace", &["Error"]),
+    (
+        "serde",
+        &[
+            "Serialize",
+            "Deserialize",
+            "serde::Serialize",
+            "serde::Deserialize",
+        ],
+    ),
+    ("error", &["Error", "thiserror::Error"]),
+    ("from", &["Error", "thiserror::Error"]),
+    ("source", &["Error", "thiserror::Error"]),
+    ("backtrace", &["Error", "thiserror::Error"]),
 ];
 
 /// Whether an attribute may rewrite the item it stands on — an attribute macro, which receives
-/// the item's tokens and may emit anything — given the last segment of every path the item's
-/// `derive`s name (`derives`). Inert: the language's own attributes, the tool namespaces, a
+/// the item's tokens and may emit anything — given every path the item's `derive`s name, as
+/// written (`derives`). Inert: the language's own attributes, the tool namespaces, a
 /// `derive` of anything (the item stays as written; the derive's output is beside it), a derive
 /// helper beside a derive that declares it ([`DERIVE_HELPERS`]), and a `cfg_attr` writing only
 /// those. Everything else may rewrite: any other name, any other path (`tokio::main`),
@@ -850,10 +871,7 @@ const DERIVE_HELPERS: [(&str, &[&str]); 5] = [
 fn may_rewrite(meta: &syn::Meta, derives: &[String]) -> bool {
     let path = meta.path();
     let Some(name) = path.get_ident() else {
-        return !path
-            .segments
-            .first()
-            .is_some_and(|tool| INERT_TOOLS.iter().any(|inert| tool.ident == inert));
+        return !names_an_inert_tool(path);
     };
     let name = name.to_string();
     match name.as_str() {
@@ -882,7 +900,8 @@ fn may_rewrite(meta: &syn::Meta, derives: &[String]) -> bool {
     }
 }
 
-/// The last segment of every path the `derive`s in `attrs` name, a `cfg_attr`'s included.
+/// Every path the `derive`s in `attrs` name, as written (`Error`, `thiserror::Error`), a
+/// `cfg_attr`'s included.
 fn derived(attrs: &[syn::Attribute]) -> Vec<String> {
     fn from(meta: &syn::Meta, into: &mut Vec<String>) {
         let syn::Meta::List(list) = meta else {
@@ -892,12 +911,7 @@ fn derived(attrs: &[syn::Attribute]) -> Vec<String> {
             if let Ok(paths) = list.parse_args_with(
                 syn::punctuated::Punctuated::<syn::Path, syn::Token![,]>::parse_terminated,
             ) {
-                into.extend(
-                    paths
-                        .iter()
-                        .filter_map(|path| path.segments.last())
-                        .map(|last| last.ident.to_string()),
-                );
+                into.extend(paths.iter().map(path_spelling));
             }
         } else if list.path.is_ident("cfg_attr")
             && let Ok(written) = list.parse_args_with(

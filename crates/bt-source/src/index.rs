@@ -1303,8 +1303,8 @@ impl Index {
     /// grammar; in the tree, `bt-app`'s `text_entries!`) — and every other `cfg` in any macro's
     /// tokens refused the index ([`crate::Rejection::CfgInMacroTokens`]), so none is counted as
     /// product unread. Inside an item that carries an attribute macro (plan row 122) — anything
-    /// but the language's own attributes, the tool namespaces, a `derive` and a derive helper
-    /// beside its derive — no `cfg` is read: each refused the index
+    /// but the language's own attributes, the tool namespaces, a `derive`, a derive helper beside
+    /// its derive, and a `cfg_attr` writing only those — no `cfg` is read: each refused the index
     /// ([`crate::Rejection::CfgUnderAttributeMacro`]); the item's own `cfg`s are read as before.
     #[must_use]
     pub fn test_gates(&self) -> &[Span] {
