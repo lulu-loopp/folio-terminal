@@ -21,7 +21,11 @@
 //! - **One connection at a time.** A client that opens a connection and keeps
 //!   it silent holds every later connection in the backlog until the stop
 //!   (the clients these servers stand in for — WinHTTP per request, and
-//!   `NSURLSession` with one connection per host — do not).
+//!   `NSURLSession` with one connection per host — do not). Each connection
+//!   is closed after its client closes (row 154: a half-close, then a read
+//!   to the client's end), so a client that keeps a connection open once
+//!   its answer is done holds the later ones the same way, until it closes
+//!   or the stop ends it; those clients close on `Connection: close`.
 //! - **Stopping is a signal, never a count or a time.** `stop` raises the flag,
 //!   shuts the connection being served (if any) and cancels a read or a write
 //!   already waiting on it, so the answer ends, wakes a [`Stop::pause`], and
@@ -203,6 +207,7 @@ impl<E: Send + 'static> Server<E> {
                     );
                 }
                 record.push(Entry::Served(answer(&mut connection, &stop)));
+                close_after_the_client(&mut connection);
                 stop.0.state().serving = None;
             }
             record
@@ -284,6 +289,28 @@ impl<E> Drop for Server<E> {
             }
         }
     }
+}
+
+/// **Close a connection whose answer is done without resetting its client**
+/// (0.4.9 plan row 154): end the sending side, so the client reads the end of
+/// the answer, and read until the client closes before letting go.
+///
+/// On Windows and Linux a socket closed while bytes it never read are
+/// waiting sends a reset instead of an end (RFC 1122 §4.2.2.13), and a reset
+/// discards whatever of the answer the client had not read yet — the bytes a
+/// request carries past what its answer read (the stray CRLF after a body
+/// that RFC 9112 §2.2 says some clients send) are enough. This is the
+/// half-close of RFC 9112 §9.6.
+///
+/// The read ends when the client closes, or on the stop: the worker's
+/// `serving` handle is still published, so [`Server::stop`]'s shutdown and
+/// cancellation end a read already waiting here, and a read begun after them
+/// is refused at once.
+fn close_after_the_client(connection: &mut TcpStream) {
+    use std::io::Read as _;
+    let _ = connection.shutdown(Shutdown::Write);
+    let mut unread = [0u8; 512];
+    while matches!(connection.read(&mut unread), Ok(read) if read > 0) {}
 }
 
 /// **End a read or a write already waiting on `connection`.** On Windows a
@@ -468,6 +495,47 @@ mod tests {
         assert_eq!(
             stopped(server, "the stop of a server with a client in its backlog"),
             vec![Entry::Served(0), Entry::ArrivedAfterTheStop(late)]
+        );
+    }
+
+    /// RED (row 154) — **a client that sends more than its answer reads gets
+    /// the answer and a clean close, never a reset.** The server half-closes
+    /// after its answer and reads until the client closes; on Windows and
+    /// Linux a socket closed with bytes still unread sends a reset instead of
+    /// an end (RFC 1122 §4.2.2.13), and a reset discards the answer the
+    /// client had not read yet (a BSD stack, macOS's, discards the unread
+    /// bytes and ends cleanly, so there this test is green either way).
+    /// The bytes past the request here are the stray CRLF after a body that
+    /// RFC 9112 §2.2 says some clients send.
+    ///
+    /// MUTATION: drop the half-close and the read after it from the worker
+    /// (the server closes as soon as its answer returns) and the client's
+    /// read fails with `ConnectionReset` (os error 10054 on Windows).
+    #[test]
+    fn a_client_that_says_more_than_is_read_is_answered_without_a_reset() {
+        let server = Server::start(
+            "bt-loopback-test",
+            ThreadPriority::Normal,
+            |connection, _| {
+                let mut heard = [0u8; 3];
+                let read = connection.read_exact(&mut heard).is_ok();
+                let _ = connection.write_all(b"ok");
+                read.then_some(heard)
+            },
+        )
+        .expect("a loopback server");
+        let mut connection = TcpStream::connect(server.address()).expect("a connection");
+        connection
+            .write_all(b"one\r\n")
+            .expect("a request and a stray CRLF");
+        let mut answer = Vec::new();
+        let read = connection.read_to_end(&mut answer);
+        drop(connection);
+        assert!(read.is_ok(), "the answer ends cleanly: {read:?}");
+        assert_eq!(answer, b"ok");
+        assert_eq!(
+            stopped(server, "the stop of a server that answered a chatty client"),
+            vec![Entry::Served(Some(*b"one"))]
         );
     }
 
