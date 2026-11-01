@@ -189,9 +189,8 @@ use crate::update_adapter::Layouts;
 use crate::update_apply::{
     Ahead, BeforeDeciding, Carried, Deferral, Ended, ExitGuard, HandedBack, Journaled, Leave,
     Limits, LockWaitOn, Opener, Opens, Recording, TrialClock, WaitClock, WaitWithin, WallClock,
-    Watch, Watched,
-    Window, failed_words, owed_at_logon, read_receipt, stop_trial, trial_runs, trial_words,
-    until_let_go,
+    Watch, Watched, Window, failed_words, owed_at_logon, read_receipt, stop_trial, trial_runs,
+    trial_words, until_let_go,
 };
 
 /// **What H.3 answered before `decide`** (U-37).
@@ -1473,18 +1472,22 @@ impl<'a> Txn<'a> {
             clock: &*self.road.wait_clock,
             worker,
         };
-        let admission =
-            match install_txn::hold_by(&self.road.home.admission(), Hold::Exclusive, window, &clock) {
-                Ok(Some(held)) => held,
-                Ok(None) => {
-                    world.say("BT_UPDATE_APPLY a running copy holds the admission");
-                    return self.revert(Actor::Applier, world);
-                }
-                Err(failure) => {
-                    world.say(&format!("BT_UPDATE_APPLY the admission: {failure}"));
-                    return self.revert(Actor::Applier, world);
-                }
-            };
+        let admission = match install_txn::hold_by(
+            &self.road.home.admission(),
+            Hold::Exclusive,
+            window,
+            &clock,
+        ) {
+            Ok(Some(held)) => held,
+            Ok(None) => {
+                world.say("BT_UPDATE_APPLY a running copy holds the admission");
+                return self.revert(Actor::Applier, world);
+            }
+            Err(failure) => {
+                world.say(&format!("BT_UPDATE_APPLY the admission: {failure}"));
+                return self.revert(Actor::Applier, world);
+            }
+        };
         if let Err(why) = self.ready_to_move(worker, window) {
             world.say(&format!("BT_UPDATE_APPLY nothing is moved: {why}"));
             return self.revert(Actor::Applier, world);

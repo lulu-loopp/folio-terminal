@@ -1393,18 +1393,22 @@ impl<'a> Txn<'a> {
             clock: &*self.road.wait_clock,
             worker,
         };
-        let admission =
-            match install_txn::hold_by(&self.road.home.admission(), Hold::Exclusive, window, &clock) {
-                Ok(Some(held)) => held,
-                Ok(None) => {
-                    world.say("BT_UPDATE_APPLY a running copy holds the admission");
-                    return self.revert(Actor::Applier);
-                }
-                Err(failure) => {
-                    world.say(&format!("BT_UPDATE_APPLY the admission: {failure}"));
-                    return self.revert(Actor::Applier);
-                }
-            };
+        let admission = match install_txn::hold_by(
+            &self.road.home.admission(),
+            Hold::Exclusive,
+            window,
+            &clock,
+        ) {
+            Ok(Some(held)) => held,
+            Ok(None) => {
+                world.say("BT_UPDATE_APPLY a running copy holds the admission");
+                return self.revert(Actor::Applier);
+            }
+            Err(failure) => {
+                world.say(&format!("BT_UPDATE_APPLY the admission: {failure}"));
+                return self.revert(Actor::Applier);
+            }
+        };
         // A process of the installed executable that is leaving — a person's
         // start that hands itself to the recovery build is gone within moments
         // — is waited for within the window, as the Windows road waits for a
