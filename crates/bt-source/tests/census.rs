@@ -671,6 +671,150 @@ fn a_call_through_a_local_binding_is_not_typed_as_the_package_function() {
     );
 }
 
+/// The free-function-reach fixture (plan row 126): the subject (`free_function_reach/app/`, with
+/// the shared files beside it in scope) and another workspace crate (`…/other/`,
+/// `census_reach_other`), each its own universe, the census taken over both as the real tree's is
+/// over the workspace.
+fn free_function_reach_census() -> FieldCensus {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("census");
+    let package = |folder: &str, scope: &Path, package: &str, name: &str| {
+        let universe = Universe::declare(
+            format!("the free-function-reach fixture's {folder}"),
+            vec![TargetRoot {
+                id: TargetId {
+                    package: package.to_owned(),
+                    kind: TargetKind::Library,
+                    name: name.to_owned(),
+                },
+                file: root.join("free_function_reach").join(folder).join("lib.rs"),
+            }],
+            vec![DiskScope::under(scope)],
+            Vendor::Excluded,
+        )
+        .expect("the fixture is there");
+        Index::shared(&universe).unwrap_or_else(|rejections| panic!("{}", report(&rejections)))
+    };
+    let app = package("app", &root, "census-reach", "census_reach");
+    let other = package(
+        "other",
+        &root.join("free_function_reach").join("other"),
+        "census-reach-other",
+        "census_reach_other",
+    );
+    let census =
+        FieldCensus::take(&app, &FIXTURE_STRUCTS, &[&app, &other]).expect("the fixture's four");
+    assert!(
+        census.unparsed().is_empty(),
+        "every declaration of the fixture parses: {:?}",
+        census.unparsed()
+    );
+    census
+}
+
+/// RED (plan row 126) — **a one-segment call `f(..)` is typed only from the declarations its
+/// module reaches**: the module's own product items, its product `use` items (a rename, the
+/// package's re-export), its globs, and across a `use` or a glob into another workspace crate to
+/// that crate's declaration (through its re-export). Each GREEN call reaches the package's
+/// `windows::grab` or `windows::pick` (two `cfg` variants of one item), which return the window,
+/// so the write is the window's title. Each RED call is named like a test helper that returns the
+/// window, or like the package's `grab`; none of them reaches it:
+/// - through another crate's `use` (`fetch`, a re-export there), its re-export of a function
+///   named like the module it comes from (`solve`: the module is looked up before the `use`
+///   name), a path through a module the crate root brings in from that crate
+///   (`crate::attention::kind_mode`) and its glob (`spread`), it is that crate's function, which
+///   returns that crate's `Other`: typed, so neither a write nor an unknown site;
+/// - a name only a test helper elsewhere declares (`helper`), one brought in only by a test
+///   build's `use` (`probe`), one the module declares only for a test build
+///   (`only_in_tests`), a `use` into the standard library (`take`), a `fn` written in the body
+///   (`lend`) and a `use` written in the body (`grab`) are refused, and the write through each
+///   is an unknown site naming why.
+///
+/// RED on `9ac40b223` (main): `Walk::free_function` looked the bare name up over every package's
+/// declarations, test items included, keeping the subject's own when it had any. The writers were
+/// the seven GREEN-or-shared ones less `through_a_reexport` and `through_a_rename` (no function is
+/// declared under the name `fetch_window` or `window_of`, so both were unknown), plus nine wrong
+/// ones: `a_test_helper_elsewhere`, `a_test_only_declaration_here`, `a_test_only_use`,
+/// `a_use_of_the_body`, `through_a_foreign_glob`, `through_a_foreign_use`,
+/// `through_a_reexport_named_like_its_module`, `through_an_aliased_module` and
+/// `through_the_standard_library`, each typed from the test helper of its name or from the
+/// package's `grab`; `lend` was typed from the other crate's function.
+///
+/// MUTATIONS (each observed red, then reverted): look a `use` name up before a child module in
+/// `Follow::placed` — `solve` is refused (`solve::solve` is not placed); drop `Follow::settled` —
+/// `kind_mode` is refused (not reached); follow every `use` item instead of `Uses::Product` —
+/// `probe` reaches the test helper and is refused for that, not as unreached; let a test-only
+/// declaration answer — `a_test_only_declaration_here` writes the window's title; drop the
+/// `block_item` check in `Walk::callee` — `lend` and the body's `grab` are refused as unreached,
+/// never naming the body's `fn` or `use`.
+#[test]
+fn a_free_function_is_typed_from_what_its_module_reaches() {
+    let census = free_function_reach_census();
+    let mut writers = functions(&rows(&census, "WindowRuntime.title", Column::Write));
+    writers.sort();
+    // `retitle` is the shared fixture's own writer.
+    assert_eq!(
+        writers,
+        [
+            "here",
+            "retitle",
+            "through_a_glob",
+            "through_a_reexport",
+            "through_a_rename",
+            "through_a_use",
+            "through_cfg_variants",
+        ],
+        "{:#?}",
+        census.rows()
+    );
+    let mut unknown: Vec<(&str, &str)> = census
+        .unknowns()
+        .iter()
+        .map(|row| (row.function.as_str(), row.reason.as_str()))
+        .collect();
+    unknown.sort_unstable();
+    assert_eq!(
+        unknown,
+        [
+            (
+                "a_function_of_the_body",
+                "assign through a receiver that does not resolve: `lend`, a `fn` written in the body: the census reads no declaration of it"
+            ),
+            (
+                "a_test_helper_elsewhere",
+                "assign through a receiver that does not resolve: `helper` is not a function the module's items and `use` items reach"
+            ),
+            (
+                "a_test_only_declaration_here",
+                "assign through a receiver that does not resolve: `only_in_tests` is declared only for a test build where the module reaches it"
+            ),
+            (
+                "a_test_only_use",
+                "assign through a receiver that does not resolve: `probe` is not a function the module's items and `use` items reach"
+            ),
+            (
+                "a_use_of_the_body",
+                "assign through a receiver that does not resolve: `grab`, brought in by a `use` written in the body: the census reads no `use` of \
+                 a body"
+            ),
+            (
+                "through_the_standard_library",
+                "assign through a receiver that does not resolve: `take` comes through `std::mem::take`, a path into a crate the census does not \
+                 read"
+            ),
+            // The shared fixture's own.
+            (
+                "untyped",
+                "call `clear` through a receiver that does not resolve: what `map` returns"
+            ),
+        ],
+        "{:#?}",
+        census.unknowns()
+    );
+}
+
 /// RED (census-1) — **`Runtime.{app, window}` are the runtime's own fields,
 /// looked up before its `Deref` to `TabState`.**
 ///
