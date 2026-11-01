@@ -10,7 +10,7 @@
 use crate::trust_harness::{Behaviour, HELD_ATTEMPTS, HELD_FIRST_PAUSE, HELD_LONGEST_PAUSE};
 use std::ffi::c_void;
 use std::io::{Read, Write};
-use std::net::TcpListener;
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::ptr::null_mut;
 use std::sync::Arc;
@@ -44,6 +44,7 @@ use windows::Win32::System::LibraryLoader::{
 };
 use windows::core::{PCSTR, PCWSTR, PSTR};
 
+use crate::loopback_server::{Entry, Server, Stop};
 use crate::trust::{CODE_SIGNING, FileVersion, PUBLIC_TRUST_MARKER, Policy, TIME_STAMPING};
 
 /// `sha256RSA`.
@@ -512,9 +513,23 @@ fn generalized_time(ticks: u64) -> Vec<u8> {
 pub struct Authority {
     pub certificate: Arc<Made>,
     pub at: u64,
+    /// How many of the first requests are read whole and then left
+    /// unanswered (the connection closed) — none, except for a test of what
+    /// the signing call does then ([`Authority::leaving_unanswered`]).
+    unanswered: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl Authority {
+    /// This authority, **leaving its first `requests` requests unanswered**:
+    /// each is read whole and its connection closed without a word.
+    #[must_use]
+    pub fn leaving_unanswered(self, requests: usize) -> Self {
+        Self {
+            unanswered: Arc::new(std::sync::atomic::AtomicUsize::new(requests)),
+            ..self
+        }
+    }
+
     fn sha1(&self) -> Vec<u8> {
         // SAFETY: a context made from the certificate's bytes, freed below.
         unsafe {
@@ -533,15 +548,12 @@ impl Authority {
         }
     }
 
-    /// The `TimeStampResp` to one `TimeStampReq`.
-    fn respond(&self, request: &[u8]) -> Vec<u8> {
-        let (_, _, content) = element(request).expect("a request");
+    /// The `TimeStampResp` to one `TimeStampReq`, or `None` when `request` is
+    /// not one (no outer `SEQUENCE`, or no message imprint in it).
+    fn respond(&self, request: &[u8]) -> Option<Vec<u8>> {
+        let (_, _, content) = element(request)?;
         let fields = children(content);
-        let imprint = fields
-            .iter()
-            .find(|(tag, _)| *tag == 0x30)
-            .expect("an imprint")
-            .1;
+        let imprint = fields.iter().find(|(tag, _)| *tag == 0x30)?.1;
         // The version is the request's first INTEGER; a nonce, when there is
         // one, is the second.
         let nonce = fields
@@ -562,7 +574,7 @@ impl Authority {
         let token = self.token(&tst);
         let mut response = der(0x30, &der(0x02, &[0]));
         response.extend(token);
-        der(0x30, &response)
+        Some(der(0x30, &response))
     }
 
     /// The `ContentInfo` of a signed `TSTInfo`.
@@ -646,42 +658,193 @@ impl Authority {
         }
     }
 
-    /// Answer `requests` HTTP requests on `listener`, on a worker of the
-    /// thread door nobody waits for: a signing call that never connects leaves
-    /// it blocked in `accept` until the test process ends, and a signing call
-    /// that does connect has its answer before it returns.
-    fn serve(&self, listener: &TcpListener, requests: usize) {
-        for _ in 0..requests {
-            let Ok((mut stream, _)) = listener.accept() else {
-                return;
-            };
-            let mut received = Vec::new();
-            let mut buffer = [0u8; 4096];
-            let body = loop {
-                let read = stream.read(&mut buffer).unwrap();
-                assert!(read > 0, "the client hung up");
-                received.extend_from_slice(&buffer[..read]);
-                let Some(end) = received.windows(4).position(|w| w == b"\r\n\r\n") else {
-                    continue;
-                };
-                let head = String::from_utf8_lossy(&received[..end]).to_ascii_lowercase();
-                let length: usize = head
-                    .lines()
-                    .find_map(|line| line.strip_prefix("content-length:"))
-                    .map_or(0, |value| value.trim().parse().unwrap());
-                if received.len() >= end + 4 + length {
-                    break received[end + 4..end + 4 + length].to_vec();
-                }
-            };
-            let reply = self.respond(&body);
-            let head = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/timestamp-reply\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                reply.len()
-            );
-            stream.write_all(head.as_bytes()).unwrap();
-            stream.write_all(&reply).unwrap();
-        }
+    /// **Listen for time-stamp requests** on a loopback port of the kernel's
+    /// choosing, answering every connection until [`Stamping::stop`] (0.4.9
+    /// plan row 127). It used to answer one request and close: a signing call
+    /// that connected a second time — `SignerSignEx3` reports
+    /// `0x80072EFD`, `ERROR_WINHTTP_CANNOT_CONNECT`, which a listening port
+    /// cannot produce — met a closed port. Twice on 2026-10-31, under load.
+    ///
+    /// # Panics
+    ///
+    /// When no loopback port can be bound or the worker cannot start.
+    #[must_use]
+    pub fn listen(&self) -> Stamping {
+        let authority = self.clone();
+        Stamping(
+            Server::start(
+                "bt-trust-harness-tsa",
+                crate::ThreadPriority::BelowNormal,
+                move |connection, stop| authority.answer(connection, stop),
+            )
+            .expect("a loopback port for the time-stamp authority"),
+        )
     }
+
+    /// **One connection, answered and recorded**: read one HTTP request whole,
+    /// answer its `TimeStampReq` with a `TimeStampResp`, and say what came.
+    /// A client that goes away, a request that is not one, and a write that
+    /// fails are each recorded, never a panic — a worker that panicked would
+    /// close the port on the next connection.
+    fn answer(&self, connection: &mut TcpStream, stop: &Stop) -> Exchange {
+        let mut exchange = Exchange {
+            request_line: None,
+            content_type: None,
+            received: 0,
+            outcome: Outcome::Answered,
+        };
+        let mut received = Vec::new();
+        let mut buffer = [0u8; 4096];
+        let gone = |stop: &Stop, why: Outcome| {
+            if stop.requested() {
+                Outcome::Stopped
+            } else {
+                why
+            }
+        };
+        let body = loop {
+            match connection.read(&mut buffer) {
+                Ok(0) => {
+                    exchange.received = received.len();
+                    exchange.outcome = gone(stop, Outcome::HungUp);
+                    return exchange;
+                }
+                Ok(read) => received.extend_from_slice(&buffer[..read]),
+                Err(error) => {
+                    exchange.received = received.len();
+                    exchange.outcome = gone(stop, Outcome::Failed(error.to_string()));
+                    return exchange;
+                }
+            }
+            let Some(end) = received.windows(4).position(|w| w == b"\r\n\r\n") else {
+                continue;
+            };
+            let head = String::from_utf8_lossy(&received[..end]).into_owned();
+            let field = |name: &str| {
+                head.lines().skip(1).find_map(|line| {
+                    let (key, value) = line.split_once(':')?;
+                    key.trim()
+                        .eq_ignore_ascii_case(name)
+                        .then(|| value.trim().to_owned())
+                })
+            };
+            exchange.request_line = head.lines().next().map(str::to_owned);
+            exchange.content_type = field("content-type");
+            let length = field("content-length")
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(0);
+            if received.len() >= end + 4 + length {
+                break received[end + 4..end + 4 + length].to_vec();
+            }
+        };
+        exchange.received = received.len();
+        let leave = self
+            .unanswered
+            .fetch_update(
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+                |left| left.checked_sub(1),
+            )
+            .is_ok();
+        if leave {
+            exchange.outcome = Outcome::LeftUnanswered;
+            return exchange;
+        }
+        let (status, reply) = match self.respond(&body) {
+            Some(reply) => ("200 OK", reply),
+            None => {
+                exchange.outcome = Outcome::NotARequest;
+                ("400 Bad Request", Vec::new())
+            }
+        };
+        let head = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/timestamp-reply\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            reply.len()
+        );
+        if let Err(error) = connection
+            .write_all(head.as_bytes())
+            .and_then(|()| connection.write_all(&reply))
+        {
+            exchange.outcome = gone(stop, Outcome::Failed(error.to_string()));
+        }
+        exchange
+    }
+}
+
+/// **A time-stamp authority listening** ([`Authority::listen`]): its URL, and
+/// the record of every connection it was handed, which [`Stamping::stop`]
+/// answers.
+pub struct Stamping(Server<Exchange>);
+
+impl Stamping {
+    /// The address it listens on.
+    #[must_use]
+    pub fn address(&self) -> std::net::SocketAddr {
+        self.0.address()
+    }
+
+    /// The URL a signing call is given.
+    #[must_use]
+    pub fn time_stamp_url(&self) -> String {
+        format!("http://{}/", self.address())
+    }
+
+    /// **Stop listening, and answer every connection it was handed**, in
+    /// order: those it served, one that arrived after the stop and was never
+    /// served, and a failed `accept`, each as an [`Exchange`].
+    #[must_use]
+    pub fn stop(self) -> Vec<Exchange> {
+        let unserved = |outcome| Exchange {
+            request_line: None,
+            content_type: None,
+            received: 0,
+            outcome,
+        };
+        self.0
+            .stop()
+            .into_iter()
+            .map(|entry| match entry {
+                Entry::Served(exchange) => exchange,
+                Entry::ArrivedAfterTheStop(_) => unserved(Outcome::ArrivedAfterTheStop),
+                Entry::AcceptFailed { error, .. } => unserved(Outcome::AcceptFailed(error)),
+            })
+            .collect()
+    }
+}
+
+/// **One connection the time-stamp authority was handed**, as it went.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Exchange {
+    /// The request line (`POST / HTTP/1.1`), when a whole head arrived.
+    pub request_line: Option<String>,
+    /// The request's `Content-Type`, when it named one.
+    pub content_type: Option<String>,
+    /// Every byte that arrived, head and body.
+    pub received: usize,
+    pub outcome: Outcome,
+}
+
+/// How a connection to the time-stamp authority ended.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Outcome {
+    /// A `TimeStampResp` went back.
+    Answered,
+    /// The body was not a `TimeStampReq`; a `400` went back.
+    NotARequest,
+    /// Read whole and closed without an answer, as
+    /// [`Authority::leaving_unanswered`] asks.
+    LeftUnanswered,
+    /// The client closed before a whole request had arrived.
+    HungUp,
+    /// The test stopped the authority while this connection was open.
+    Stopped,
+    /// A read or a write failed, in these words.
+    Failed(String),
+    /// The connection arrived after the test stopped the authority, and was
+    /// never served (a client still in the backlog).
+    ArrivedAfterTheStop,
+    /// The authority's `accept` failed, in these words.
+    AcceptFailed(String),
 }
 
 // ── the signed file ─────────────────────────────────────────────────────────
@@ -1068,6 +1231,45 @@ pub fn executable(folder: &Folder, name: &str, version: FileVersion) -> PathBuf 
 /// by `authority` when there is one (RFC 3161, SHA-256 imprint: `signtool
 /// sign /fd SHA256 /tr <url> /td SHA256`, the form `sign.ps1` produces).
 pub fn sign(path: &Path, leaf: &Made, chain: &[&Made], authority: Option<&Authority>) {
+    let _ = sign_recorded(path, leaf, chain, authority);
+}
+
+/// [`sign`], answering every connection the time-stamp authority was handed
+/// during the call (none without an authority).
+///
+/// # Panics
+///
+/// When `path` is outside the system's temporary folder, or the signing call
+/// fails — the panic names the error and every connection the authority saw.
+#[must_use]
+pub fn sign_recorded(
+    path: &Path,
+    leaf: &Made,
+    chain: &[&Made],
+    authority: Option<&Authority>,
+) -> Vec<Exchange> {
+    let (result, exchanges) = signing_call(path, leaf, chain, authority);
+    result.unwrap_or_else(|error| {
+        panic!(
+            "SignerSignEx3: {error}; the time-stamp authority was handed {} connection(s): {exchanges:?}",
+            exchanges.len()
+        )
+    });
+    exchanges
+}
+
+/// **The signing call itself**: what `SignerSignEx3` answered, and every
+/// connection the time-stamp authority was handed while it ran.
+///
+/// # Panics
+///
+/// When `path` is outside the system's temporary folder.
+fn signing_call(
+    path: &Path,
+    leaf: &Made,
+    chain: &[&Made],
+    authority: Option<&Authority>,
+) -> (windows::core::Result<()>, Vec<Exchange>) {
     assert!(
         path.starts_with(std::env::temp_dir()),
         "signs only inside the test's own folder"
@@ -1156,29 +1358,23 @@ pub fn sign(path: &Path, leaf: &Made, chain: &[&Made], authority: Option<&Author
                 None,
             )
         };
-        let result = match authority {
-            None => signing(None),
+        // The authority answers every connection until the call has returned
+        // and is stopped here (row 127): what it was handed is the evidence a
+        // failure carries.
+        let (result, exchanges) = match authority {
+            None => (signing(None), Vec::new()),
             Some(authority) => {
-                let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-                let url = wide(std::ffi::OsStr::new(&format!(
-                    "http://{}/",
-                    listener.local_addr().unwrap()
-                )));
-                let authority = authority.clone();
-                crate::spawn_at_priority(
-                    "bt-trust-harness-tsa",
-                    crate::ThreadPriority::BelowNormal,
-                    move |_| authority.serve(&listener, 1),
-                )
-                .unwrap();
-                signing(Some(&url))
+                let stamping = authority.listen();
+                let url = wide(std::ffi::OsStr::new(&stamping.time_stamp_url()));
+                let result = signing(Some(&url));
+                (result, stamping.stop())
             }
         };
-        result.unwrap_or_else(|error| panic!("SignerSignEx3: {error}"));
         if !signed.is_null() {
             SignerFreeSignerContext(signed).unwrap();
         }
         let _ = CertFreeCertificateContext(Some(context));
+        (result, exchanges)
     }
 }
 
@@ -1329,6 +1525,7 @@ impl World {
         Authority {
             certificate: Arc::clone(&self.authority),
             at,
+            unanswered: Arc::default(),
         }
     }
 
@@ -1503,5 +1700,213 @@ mod tests {
             )),
             "every refusal is named, the last as the failure: {said}"
         );
+    }
+
+    // ── the time-stamp authority answers until it is stopped (row 127) ─────
+
+    /// A `TimeStampReq` (RFC 3161 §2.4.1) for a SHA-256 imprint, with `nonce`
+    /// and `certReq`, as a signing call sends one.
+    fn time_stamp_request(nonce: u8) -> Vec<u8> {
+        let algorithm = der(
+            0x30,
+            &[
+                der(
+                    0x06,
+                    &[0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01],
+                ),
+                der(0x05, &[]),
+            ]
+            .concat(),
+        );
+        let imprint = der(0x30, &[algorithm, der(0x04, &[0xAB; 32])].concat());
+        der(
+            0x30,
+            &[
+                der(0x02, &[1]),
+                imprint,
+                der(0x02, &[nonce]),
+                der(0x01, &[0xFF]),
+            ]
+            .concat(),
+        )
+    }
+
+    /// The head a client sends before `body`.
+    fn post_head(address: std::net::SocketAddr, body: &[u8]) -> String {
+        format!(
+            "POST / HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/timestamp-query\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+    }
+
+    /// **The stand-in signer**: `body` POSTed on a connection of its own, and
+    /// everything that came back.
+    fn post(address: std::net::SocketAddr, body: &[u8]) -> std::io::Result<Vec<u8>> {
+        let mut connection = TcpStream::connect(address)?;
+        connection.write_all(post_head(address, body).as_bytes())?;
+        connection.write_all(body)?;
+        let mut answer = Vec::new();
+        connection.read_to_end(&mut answer)?;
+        Ok(answer)
+    }
+
+    /// Whether `answer` is a `200` carrying a `TimeStampResp` whose status is
+    /// `granted` (0).
+    fn granted(answer: &[u8]) -> bool {
+        let Some(end) = answer.windows(4).position(|w| w == b"\r\n\r\n") else {
+            return false;
+        };
+        let Some((0x30, _, content)) = element(&answer[end + 4..]) else {
+            return false;
+        };
+        answer.starts_with(b"HTTP/1.1 200 OK\r\n")
+            && children(content).first().map(|(_, status)| *status)
+                == Some(&der(0x30, &der(0x02, &[0]))[..])
+    }
+
+    /// What a whole request the authority answered is recorded as.
+    fn answered(address: std::net::SocketAddr, body: &[u8]) -> Exchange {
+        Exchange {
+            request_line: Some("POST / HTTP/1.1".to_owned()),
+            content_type: Some("application/timestamp-query".to_owned()),
+            received: post_head(address, body).len() + body.len(),
+            outcome: Outcome::Answered,
+        }
+    }
+
+    /// RED (row 127) — **the time-stamp authority answers a second request**,
+    /// on a second connection, and records both.
+    ///
+    /// A signing call that connects twice is what failed
+    /// `armed_is_durable_before_moving` and
+    /// `rollback_from_a_half_moved_install_uses_the_digests_not_the_phase`
+    /// under load (`SignerSignEx3 0x80072EFD`); the stand-in signer here does
+    /// it on purpose.
+    ///
+    /// MUTATION: the authority this replaced — end the server's loop after its
+    /// first answer (`serve(&listener, 1)`) — and the second POST is refused
+    /// (`ConnectionRefused`, os error 10061).
+    #[test]
+    fn the_authority_answers_every_request_until_it_is_told_to_stop() {
+        let world = World::new();
+        let stamping = world.stamping(now()).listen();
+        let address = stamping.address();
+        let (first, second) = (time_stamp_request(1), time_stamp_request(2));
+        let answer = post(address, &first).expect("the first request is answered");
+        assert!(granted(&answer), "{answer:?}");
+        let answer = post(address, &second).expect("the second request is answered");
+        assert!(granted(&answer), "{answer:?}");
+        assert_eq!(
+            stamping.stop(),
+            vec![answered(address, &first), answered(address, &second)]
+        );
+    }
+
+    /// RED (row 127) — **a client that goes away mid-request is recorded, and
+    /// the next request is still answered.**
+    ///
+    /// The other road to a refusal: a signing call that abandons its first
+    /// attempt (a late answer under load) and opens another. The old server
+    /// asserted the client had not hung up, and its worker's panic closed the
+    /// port.
+    ///
+    /// MUTATION: put back `assert!(read > 0, "the client hung up")` in
+    /// `Authority::answer` and the worker panics on the first connection; the
+    /// POST after it is refused (`ConnectionRefused`, os error 10061).
+    #[test]
+    fn a_connection_that_hangs_up_is_recorded_and_the_next_is_answered() {
+        let world = World::new();
+        let stamping = world.stamping(now()).listen();
+        let address = stamping.address();
+        let mut abandoned = TcpStream::connect(address).expect("a connection");
+        abandoned
+            .write_all(b"POST / HTTP/1.1\r\n")
+            .expect("half a head");
+        // The client goes away with half a head sent.
+        drop(abandoned);
+        let body = time_stamp_request(3);
+        let answer = post(address, &body).expect("the next request is answered");
+        assert!(granted(&answer), "{answer:?}");
+        assert_eq!(
+            stamping.stop(),
+            vec![
+                Exchange {
+                    request_line: None,
+                    content_type: None,
+                    received: "POST / HTTP/1.1\r\n".len(),
+                    outcome: Outcome::HungUp,
+                },
+                answered(address, &body),
+            ]
+        );
+    }
+
+    /// RED (row 127) — **a real signing call's requests are recorded**: the
+    /// last is a `POST` of `application/timestamp-query` that was answered,
+    /// and the file it signed carries a time stamp the world's policy accepts.
+    ///
+    /// How many requests one `SignerSignEx3` makes is the signer's own
+    /// (Microsoft documents no retry policy), and one it abandoned under load
+    /// may end any way at all (row 127 review F4), so this asserts only the
+    /// connection that succeeded; the record keeps the earlier ones, and a
+    /// failure prints it.
+    ///
+    /// MUTATION: answer every request with the `400` of `NotARequest` and the
+    /// signing call fails, its panic naming each connection.
+    #[test]
+    fn a_signing_call_s_requests_are_recorded() {
+        let world = World::new();
+        let folder = Folder::new("stamped-record");
+        let path = executable(&folder, "folio.exe", VERSION);
+        let leaf = world.leaf(SUBJECT, IDENTITY);
+        let exchanges = sign_recorded(&path, &leaf, &[&world.root], Some(&world.stamping(now())));
+        let last = exchanges
+            .last()
+            .unwrap_or_else(|| panic!("the signing call asked the authority: {exchanges:?}"));
+        assert_eq!(last.outcome, Outcome::Answered, "{exchanges:?}");
+        assert!(
+            last.request_line
+                .as_deref()
+                .is_some_and(|line| line.starts_with("POST ")),
+            "{exchanges:?}"
+        );
+        assert_eq!(
+            last.content_type.as_deref(),
+            Some("application/timestamp-query"),
+            "{exchanges:?}"
+        );
+        crate::trust::signature(&path, &world.policy())
+            .unwrap_or_else(|refusal| panic!("the stamped file verifies: {refusal:?}"));
+    }
+
+    /// RED (row 127; ruling R4) — **a signing call whose request goes
+    /// unanswered does not ask again**: it fails with
+    /// `ERROR_WINHTTP_INVALID_SERVER_RESPONSE` (`0x80072F78`) after one
+    /// connection. So a closed connection does not make `SignerSignEx3`
+    /// connect a second time, and a refused second connection under load
+    /// (`0x80072EFD`) is not the signer retrying an unanswered request.
+    /// Observed the same five runs in five on 2026-10-31 before it was
+    /// committed (R4), on one Windows build: what it pins is Microsoft's
+    /// signer, so a red here on another build (a CI runner's) is a finding
+    /// about the signer — open a row — not about Folio.
+    ///
+    /// MUTATION: leave `leaving_unanswered` at 0 (the authority answers) and
+    /// the call succeeds.
+    #[test]
+    fn a_signing_call_does_not_ask_again_when_its_request_goes_unanswered() {
+        let world = World::new();
+        let folder = Folder::new("stamped-unanswered");
+        let path = executable(&folder, "folio.exe", VERSION);
+        let leaf = world.leaf(SUBJECT, IDENTITY);
+        let authority = world.stamping(now()).leaving_unanswered(1);
+        let (result, exchanges) = signing_call(&path, &leaf, &[&world.root], Some(&authority));
+        let error = result.expect_err("an unanswered request fails the call");
+        assert_eq!(error.code().0 as u32, 0x8007_2F78, "{error}; {exchanges:?}");
+        assert_eq!(
+            exchanges.len(),
+            1,
+            "one connection, never a second: {exchanges:?}"
+        );
+        assert_eq!(exchanges[0].outcome, Outcome::LeftUnanswered);
     }
 }

@@ -16960,7 +16960,9 @@ enum ImeCaretSource {
 ///   restarted in the same hole is a different field;
 /// * a preview and the graph's field by [`PreviewSurface`], the id every
 ///   preview map in this window is keyed by;
-/// * a files column and the search capsule by the seat they stand on;
+/// * a files column and the search capsule by the leaf they stand on — the tab
+///   as well as the seat, because a seat number repeats in every tab (plan
+///   row 118);
 /// * the name box by its [`RenameSubject`], which is what it is editing;
 /// * the palette, a git prompt and a popup by themselves — this window has one
 ///   of each at a time;
@@ -16975,8 +16977,8 @@ enum CompositionOrigin {
     Shell(Option<PasteTarget>),
     Preview(Option<PreviewSurface>),
     GraphSearch(Option<PreviewSurface>),
-    Search(Option<SeatId>),
-    FilesTree(Option<SeatId>),
+    Search(Option<LeafId>),
+    FilesTree(Option<LeafId>),
     Rename(Option<RenameSubject>),
     GitPrompt,
     Palette,
@@ -36876,6 +36878,7 @@ impl<B: Backend> Runtime<'_, B> {
             bt_platform::cancel_composition(reason)
         });
         self.trace_ime_cancel(started_in, reason, Some(told));
+        let drew_a_preedit = self.window.preedit.is_some();
         self.window.preedit = None;
         self.window.composing = None;
         self.window.ime_cursor.reset();
@@ -36893,8 +36896,17 @@ impl<B: Backend> Runtime<'_, B> {
                     editor.field.set_preedit("");
                 }
             }
+            // **The graph the letters were typed into, named by the composition's
+            // own origin** (plan row 118) — not the surface holding the keyboard
+            // now, which by the time a composition is cancelled for having
+            // outlived its field is another graph, a page or nothing, and the
+            // field that was being typed into would go on drawing its letters.
+            // `composing_in` is still the live composition's here: this door
+            // never clears it (above).
             ImeOwner::GraphSearch => {
-                if let Some(surface) = self.preview_keyboard_surface() {
+                if let Some(CompositionOrigin::GraphSearch(Some(surface))) =
+                    self.window.composing_in.origin().cloned()
+                {
                     let tab = self.preview_tab_index(surface);
                     if let Some(view) = self.window.tabs[tab].git_graph_view.get_mut(&surface) {
                         view.search.set_preedit("");
@@ -36931,6 +36943,19 @@ impl<B: Backend> Runtime<'_, B> {
         // `Ime::Disabled`'s own argument, one door along.
         if matches!(started_in, ImeOwner::Preview) {
             self.repaint_preview()?;
+        }
+        // **The window's own pre-edit is drawn into the terminal frame, and the
+        // keyboard may already stand at another shell** (plan row 118, review
+        // F1). A press that moved the keyboard published its frame with the
+        // composition still live, so the letters begun at A were composed at
+        // B's prompt; re-presenting the chrome shows that same composed frame
+        // again. A fresh terminal frame is composed without them, as
+        // `Ime::Disabled` publishes one.
+        if drew_a_preedit {
+            self.publish_frame(FrameTrigger {
+                occurred_at: Instant::now(),
+                source: FrameSource::Expose,
+            })?;
         }
         Ok(())
     }
@@ -63290,51 +63315,38 @@ mod clipboard_path_tests {
     ///
     /// The ruling is that a composition belongs to the field it started in and
     /// is cancelled when that field goes away — never committed into whatever
-    /// holds the keyboard next. [`Runtime::settle_composition_owner`] keeps it
-    /// at the tail of every pass through [`composition_outlived_its_field`],
-    /// which compares **kinds**: two shells are both [`ImeOwner::Shell`], so
-    /// half-typed letters begun at pane A's prompt survived the keyboard moving
-    /// to pane B and the next commit arrived at B. A pane is a field, so that is
-    /// the same report said about two terminals.
+    /// holds the keyboard next. Two shells are both [`ImeOwner::Shell`], so a
+    /// comparison of kinds let letters begun at pane A's prompt survive the
+    /// keyboard moving to pane B. That was closed at `take_keyboard_into` until
+    /// plan row 118 found the roads that door does not see (a tab switch, a shell
+    /// that exits); [`Runtime::settle_composition_owner`] now asks
+    /// [`composition_outlived_its_field`] of the **origins**, which name a shell
+    /// by tab, seat and incarnation. This is the function's table for shells;
+    /// the roads themselves are driven in `runtime::keyboard_tests`.
     ///
-    /// Closed at [`Runtime::take_keyboard_into`] — the one place `focused_leaf`
-    /// moves — so the pointer's road and the named road are shut together. The
-    /// pointer road had the identical hole.
-    ///
-    /// MUTATION: take the cancel out of that door and the source pin below goes
-    /// red; leave the category comparison as the only guard and the first two
-    /// assertions say why that is not enough.
+    /// MUTATION: compare the origins' kinds only (`discriminant`) and every
+    /// assertion after the first goes red.
     #[test]
-    fn a_shell_to_shell_move_settles_the_composition_it_leaves_behind() {
+    fn a_shell_to_shell_move_outlives_the_composition_it_leaves_behind() {
+        let a = shell_origin(1, 1, 7);
         assert!(
-            !composition_outlived_its_field(Some(ImeOwner::Shell), ImeOwner::Shell),
-            "two shells are one kind of owner, so the pass-tail settlement \
-             cannot be what closes this"
+            !composition_outlived_its_field(Some(&a), &a),
+            "the shell the letters were typed at keeps them"
         );
-        assert!(
-            composition_outlived_its_field(Some(ImeOwner::Shell), ImeOwner::Preview),
-            "the control: it does still close every move between two kinds"
-        );
-        let door = method_body("Runtime", "take_keyboard_into");
-        assert!(
-            door.contains("self.cancel_composition(ImeOwner::Shell, \"take_keyboard_into\")?;"),
-            "the keyboard moves between two shells without ending the \
-             composition the old one was holding, so the next commit lands in \
-             the new pane:\n{door}"
-        );
-        assert!(
-            door.find("cancel_composition") < door.find("self.focused_leaf = seat;"),
-            "the composition is settled after the keyboard has already moved, \
-             which is the same defect one line later:\n{door}"
-        );
-        for road in ["focus_pane_at", "focus_seat"] {
-            let text = method_body("Runtime", road);
+        for (elsewhere, what) in [
+            (shell_origin(1, 2, 7), "another pane of the same tab"),
+            (shell_origin(2, 1, 7), "the same seat number in another tab"),
+            (shell_origin(1, 1, 8), "a shell restarted in the same hole"),
+        ] {
             assert!(
-                text.contains("self.take_keyboard_into(seat)?;"),
-                "`{road}` no longer moves the keyboard through the door the \
-                 composition is settled at:\n{text}"
+                composition_outlived_its_field(Some(&a), &elsewhere),
+                "a composition begun at one shell may not go on at {what}"
             );
         }
+        assert!(
+            !composition_outlived_its_field(None, &a),
+            "and a window composing nothing has nothing to cancel"
+        );
     }
 
     /// **A composition that was left behind never reaches the field the keyboard
@@ -63560,7 +63572,10 @@ mod clipboard_path_tests {
         let shell_a = shell_origin(1, 2, 7);
         let shell_b = shell_origin(1, 5, 9);
         let preview = CompositionOrigin::Preview(Some(PreviewSurface::Peek));
-        let search = CompositionOrigin::Search(Some(bt_layout::SeatId(2)));
+        let search = CompositionOrigin::Search(Some(LeafId {
+            tab: TabId(1),
+            seat: bt_layout::SeatId(2),
+        }));
         let palette = CompositionOrigin::Palette;
         for (from, to, what) in [
             (&shell_a, &shell_b, "one prompt to another"),

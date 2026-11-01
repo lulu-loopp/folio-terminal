@@ -528,35 +528,18 @@ impl<B: Backend> Runtime<'_, B> {
     /// nothing to type into and a folder tab has no shell at all — the guard
     /// every focus move in this window carries, written once.
     ///
-    /// **And a composition does not come with it** (review 2026-09-17 P2-b).
-    /// §7.1.5a″'s ruling is that a composition belongs to the field it started
-    /// in and is cancelled when that field goes away — never committed into
-    /// whatever is holding the keyboard next. [`Self::settle_composition_owner`] keeps
-    /// that promise at the tail of every pass, but it asks it of
-    /// [`composition_outlived_its_field`], which compares **kinds** of owner:
-    /// one shell and another shell are both [`ImeOwner::Shell`], so a
-    /// composition begun at pane A's prompt survives the keyboard moving to pane
-    /// B and the next commit arrives at B. A pane is a field, so that is the
-    /// same report said about two terminals.
-    ///
-    /// **Closed here, at the door, and therefore for every road at once.** This
-    /// is the one place `focused_leaf` moves — the pointer's
-    /// ([`Self::focus_pane_at`]) and the named one's ([`Self::focus_seat`], which
-    /// the palette, the attention queue and a dropped path all come through) —
-    /// and the pointer road had the identical hole, so fixing it anywhere else
-    /// would have closed one of the two. The branch this sits in is exactly
-    /// "the shell holding the keyboard is changing", which is exactly when the
-    /// old field goes away.
-    ///
-    /// **Cancelled and not committed**, through the window's one door
-    /// ([`Self::cancel_composition`]), because that is the ruling: half-typed
-    /// letters meant for A's prompt must not be handed to B's.
+    /// **A composition does not come with it** (review 2026-09-17 P2-b), and
+    /// this door no longer says so itself (plan row 118). It used to cancel a
+    /// shell's composition here, on the argument that this was the one place
+    /// `focused_leaf` moves; it is not — a tab switch moves it by moving the
+    /// tab, and a shell that exits hands it on in `refocus_after_losing`. The
+    /// rule now lives once in [`Self::settle_composition_owner`], keyed on the
+    /// composition's origin, which names the shell by tab, seat and incarnation
+    /// ([`PasteTarget`](crate::PasteTarget)), and is asked at every pass tail and before every
+    /// composition event, so every road a shell changes by is answered by it.
     pub(crate) fn take_keyboard_into(&mut self, seat: SeatId) -> Result<()> {
         if !(self.sessions.contains_key(&seat) && self.focused_leaf != seat) {
             return Ok(());
-        }
-        if self.window.composing == Some(ImeOwner::Shell) {
-            self.cancel_composition(ImeOwner::Shell, "take_keyboard_into")?;
         }
         self.focused_leaf = seat;
         // The frame slot holds the pane that *was* focused. Leaving it would
@@ -2326,10 +2309,25 @@ impl<B: Backend> Runtime<'_, B> {
         // pre-edit is a cancelled one, so both put it out; `Enabled`/`Disabled`
         // are the window's own bookkeeping and are answered in their own arms.
         if composing {
-            self.window.composing = match &event {
-                Ime::Preedit(text, _) if !text.is_empty() => Some(ime_owner(self.keyboard_owner())),
-                _ => None,
-            };
+            // **A composition the keyboard has left is settled before this event
+            // is judged** (plan row 118, ruling R1). The pass tail asks the same
+            // question, but a turn answers a whole batch of events: a press that
+            // moves the keyboard and the next pre-edit can arrive in one batch,
+            // and then this event would be the first to see the move — and an
+            // `Opens` would adopt the new field for letters begun in the old one.
+            // The event that finds the composition outlived is that composition
+            // going on, so it is not answered: an honoured cancel has already
+            // taken it from the input method, and a refused one re-homes on its
+            // next pre-edit (bound ① on [`composition_ruling`]).
+            let carried_over = self.settle_composition_owner_as("ime_input")?;
+            if !carried_over {
+                self.window.composing = match &event {
+                    Ime::Preedit(text, _) if !text.is_empty() => {
+                        Some(ime_owner(self.keyboard_owner()))
+                    }
+                    _ => None,
+                };
+            }
             // **§7.1.5a″ — and the letters have to belong to *this* field**
             // (review 2026-09-17 P2). Above the ladder and not inside one of its
             // arms, because the ladder is *routing*: it answers where text goes
@@ -2341,6 +2339,24 @@ impl<B: Backend> Runtime<'_, B> {
             let here = self.composition_origin_now();
             if let Some(what) = composing_event_of(&event) {
                 let ruling = composition_ruling(&self.window.composing_in, &here, what);
+                // An event that found its composition outlived is discarded
+                // whatever the ruling would have said, and the trace records
+                // what is done with it. A discarded pre-edit with letters in it
+                // adopts nothing: the composition still names the field it began
+                // in, so a refused cancel's result is refused when it comes. A
+                // discarded ending moves on as any ending does.
+                let ruling = if carried_over {
+                    CompositionRuling {
+                        deliver: false,
+                        next: if what == ComposingEvent::Opens {
+                            ComposingAfter::Unchanged
+                        } else {
+                            ruling.next
+                        },
+                    }
+                } else {
+                    ruling
+                };
                 self.trace_ime_ruling(&event, &here, ruling);
                 let held = std::mem::take(&mut self.window.composing_in);
                 self.window.composing_in = held.after(ruling.next, &here);
@@ -2524,36 +2540,47 @@ impl<B: Backend> Runtime<'_, B> {
     /// float closing are all one fact by the time this runs — the rung holding
     /// the keyboard is not the rung the letters were typed into.
     ///
-    /// **And between two fields of the settings dialog**, which are one rung
-    /// ([`ImeOwner::SettingsField`]) and several fields: a press or `Tab` from
-    /// the program to the arguments leaves the rung where it was, so the kinds
-    /// alone would let the letters typed for the program stand drawn there
-    /// while the candidate list follows the caret, and the composition carried
-    /// on would commit into the arguments (review of
-    /// T-SETTINGS-FIELDS-IME-POSITION, F1). The composition remembers its field
-    /// ([`CompositionOrigin::Settings`]); when that is not the focused one, the
-    /// field it began in has gone, which is the same sentence — the hole
-    /// [`Self::take_keyboard_into`] closes for two panes, closed here because
-    /// the dialog's focus moves by `Tab`, a press and an open on a row, and
-    /// this is where all of them have happened.
+    /// **And between two instances of one rung** (plan row 118). Two shells are
+    /// both [`ImeOwner::Shell`], two pages both `Preview`, two graphs' search
+    /// fields both `GraphSearch`, two name boxes both `Rename`, two fields of the
+    /// settings dialog both `SettingsField`: a click on another tab, a press in
+    /// another page, a press on a page's address row while a name box is open
+    /// and `Tab` in the dialog all leave the rung where it was, and the kinds
+    /// alone let the composition carry on into the new field and commit there.
+    /// So the question is asked of the **origin** the composition recorded
+    /// ([`CompositionOrigin`], which names the instance) against the origin
+    /// the keyboard is at now — one rule for every rung, keyed on what the
+    /// window already uses to tell its instances apart. Row 98's clause for the
+    /// settings dialog (T-SETTINGS-FIELDS-IME-POSITION, review F1) and the
+    /// cancel `take_keyboard_into` used to send for two panes are both cases of
+    /// it, and both are gone: the pane door was not the only road a shell
+    /// changes by — a tab switch and a shell that exits move it too.
     ///
-    /// Costs a comparison of two enums on the passes where nothing is being
-    /// composed, which is all of them but the ones a reader is typing Chinese
-    /// on.
+    /// **Asked twice, by one function**: here at the pass tail, and at the head
+    /// of [`Self::ime_input`] before an event is judged, because a turn answers a
+    /// batch of events and the move and the next pre-edit can share one.
+    ///
+    /// Costs nothing on the passes where nothing is being composed, which is all
+    /// of them but the ones a reader is typing Chinese on.
     pub(crate) fn settle_composition_owner(&mut self) -> Result<()> {
-        let holds_the_keyboard = ime_owner(self.keyboard_owner());
-        let moved_to_another_field = self.window.composing == Some(ImeOwner::SettingsField)
-            && holds_the_keyboard == ImeOwner::SettingsField
-            && self.window.composing_in.origin() != Some(&self.composition_origin_now());
-        if !(composition_outlived_its_field(self.window.composing, holds_the_keyboard)
-            || moved_to_another_field)
-        {
-            return Ok(());
-        }
-        let Some(started_in) = self.window.composing.take() else {
-            return Ok(());
+        self.settle_composition_owner_as("settle_composition_owner")
+            .map(|_| ())
+    }
+
+    /// [`Self::settle_composition_owner`], told who is asking, and answering
+    /// whether it cancelled.
+    fn settle_composition_owner_as(&mut self, reason: &'static str) -> Result<bool> {
+        let Some(started_in) = self.window.composing else {
+            return Ok(false);
         };
-        self.cancel_composition(started_in, "settle_composition_owner")
+        let here = self.composition_origin_now();
+        let live = self.window.composing_in.origin();
+        if !composition_outlived_its_field(live, &here) {
+            return Ok(false);
+        }
+        self.window.composing = None;
+        self.cancel_composition(started_in, reason)?;
+        Ok(true)
     }
 
     /// Whether the focused pane has a strip up — the Esc ladder's question.
@@ -2827,9 +2854,14 @@ impl<B: Backend> Runtime<'_, B> {
             ImeOwner::Palette => CompositionOrigin::Palette,
             ImeOwner::SettingsField => CompositionOrigin::Settings(self.window.settings.focus()),
             ImeOwner::Modal => CompositionOrigin::Modal,
-            ImeOwner::FilesTree => CompositionOrigin::FilesTree(self.files_keyboard_seat()),
+            // By the whole leaf: a seat number repeats in every tab.
+            ImeOwner::FilesTree => CompositionOrigin::FilesTree(
+                self.files_keyboard_seat().map(|seat| self.leaf_here(seat)),
+            ),
             ImeOwner::Preview => CompositionOrigin::Preview(self.preview_keyboard_surface()),
-            ImeOwner::Search => CompositionOrigin::Search(self.window.search.seat()),
+            ImeOwner::Search => CompositionOrigin::Search(
+                self.window.search.seat().map(|seat| self.leaf_here(seat)),
+            ),
             ImeOwner::Shell => CompositionOrigin::Shell(self.paste_target(self.focused_leaf)),
         }
     }
@@ -3465,16 +3497,21 @@ pub(crate) fn ime_cursor_area_of(line: [f32; 4]) -> ImeCursorArea {
 /// nothing in this window had ever ended a composition and Windows only ends one
 /// on a blur.
 ///
-/// A function of the two rungs and of nothing else, so that every site the
+/// A function of the two origins and of nothing else, so that every site the
 /// keyboard can move at is answered by the same sentence rather than by its own
 /// idea of when a field has gone: what makes a composition stale is not which
 /// gesture moved the keyboard, it is that the keyboard is somewhere else.
+///
+/// **Origins, not rungs** (plan row 118): `composing` is the field a live
+/// composition began in and `here` the field the keyboard is in now, each named
+/// down to the instance, so two shells, two pages or two name boxes are two
+/// fields here although they are one rung of [`ime_owner`]'s ladder.
 #[must_use]
 pub(crate) fn composition_outlived_its_field(
-    composing: Option<ImeOwner>,
-    holds_the_keyboard: ImeOwner,
+    composing: Option<&CompositionOrigin>,
+    here: &CompositionOrigin,
 ) -> bool {
-    composing.is_some_and(|started_in| started_in != holds_the_keyboard)
+    composing.is_some_and(|started_in| started_in != here)
 }
 
 /// **The window's input-method facts, as the platform reads them now** — through

@@ -296,7 +296,7 @@ mod tests {
             assert!(body(method).contains(trace), "{method}: {trace}");
         }
         let input = body("ime_input");
-        assert!(input.find("trace_ime_ruling") < input.find("if !ruling.deliver"));
+        assert!(input.find("trace_ime_ruling") < input.find("!ruling.deliver"));
         assert!(
             in_the_product_raw(bt_source::needle!(bt_source::Pattern::text(
                 "self.trace_ime_frame(&terminal_frame, written)"
@@ -342,8 +342,14 @@ mod tests {
             assert!(!line.contains("private-preedit"));
         }
         // No origin Debug output: RenameSubject can contain file names.
-        let here = CompositionOrigin::Search(Some(SeatId(2)));
-        let state = Composing::Retiring(CompositionOrigin::Search(Some(SeatId(1))));
+        let here = CompositionOrigin::Search(Some(crate::LeafId {
+            tab: crate::TabId(1),
+            seat: SeatId(2),
+        }));
+        let state = Composing::Retiring(CompositionOrigin::Search(Some(crate::LeafId {
+            tab: crate::TabId(1),
+            seat: SeatId(1),
+        })));
         let event = Ime::Commit("private-commit".to_owned());
         let ruling = composition_ruling(&state, &here, ComposingEvent::Commits);
         assert_eq!(

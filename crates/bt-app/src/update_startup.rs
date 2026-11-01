@@ -26,7 +26,9 @@
 //!      journal, each removed durably through `bt_platform::install_txn`, all
 //!      under the transaction lock — a removal of `H\<txn>` refused while its
 //!      rescue build still runs from it (the start a Windows rescue opens)
-//!      is finished on a worker once the rescue has ended (T-UNKEPT-CARD-ONCE);
+//!      is finished on a worker once the rescue has ended (T-UNKEPT-CARD-ONCE),
+//!      which asks again while a removal is refused as held
+//!      (T-UPDATE-STARTUP-ON-DISK-TEMP-DIR-RACE);
 //!      continue;
 //!    - `destructive`, or the trial of another transaction, or no trial at all
 //!      → the rescue build is started detached with
@@ -112,13 +114,14 @@
 use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use bt_platform::file_reads::{self, Lane};
 use bt_platform::install_flip;
 use bt_platform::install_txn::{self, Held, Hold};
 
 use crate::cli;
+use crate::update_apply::WaitClock;
 use crate::update_job::Failure;
 use crate::update_txn::{
     AfterRollback, Class, Clearing, Digest, Header, Home, Nonce, Outcome, Phase, Removal, Role,
@@ -336,6 +339,12 @@ pub(crate) trait World {
     /// on `hdiutil` and the start's window thread waits on nothing it does not
     /// have to. The job says, as its error, the one line a failure gets.
     fn on_a_worker(&mut self, job: OffThread) -> io::Result<()>;
+    /// **The clock a retirement's worker reads its deadline on, and pauses
+    /// through between two looks** ([`RESCUE_ENDS_WITHIN`], [`RESCUE_POLL`]):
+    /// `update_apply::WallClock` in the product; a test hands a clock that
+    /// moves only by the pauses it is asked for
+    /// (T-UPDATE-STARTUP-ON-DISK-TEMP-DIR-RACE).
+    fn wait_clock(&self) -> Arc<dyn WaitClock>;
 }
 
 /// The rest of a retirement, handed to a worker ([`World::on_a_worker`]).
@@ -848,8 +857,10 @@ fn image(program: &Path) -> Option<Digest> {
 /// Folio to take the data directory's claim — which that start takes only
 /// after this pass — and Windows refuses to remove a running image. The
 /// worker holds the lock, waits for the processes running from the rescue
-/// build to end (at most [`RESCUE_ENDS_WITHIN`], through its wait door), then
-/// removes the folder and then the journal; one whose wait lapses keeps the
+/// build to end (at most [`RESCUE_ENDS_WITHIN`], on [`World::wait_clock`]),
+/// then removes the folder and then the journal, each asked again while it
+/// is refused as held, up to the same deadline ([`perform`],
+/// T-UPDATE-STARTUP-ON-DISK-TEMP-DIR-RACE); one whose wait lapses keeps the
 /// transaction for the next start, with its line.
 ///
 /// Answers whether the journal was removed ([`Retirement::Done`]), its
@@ -880,12 +891,13 @@ fn retire(
                 Ok(points) if points.is_empty() => Ok(()),
                 Ok(_) => {
                     let rest = steps.clearing[at..].to_vec();
-                    let (home, held) = (home.clone(), lock.take());
+                    let (home, held, clock) = (home.clone(), lock.take(), world.wait_clock());
                     let job: OffThread = Box::new(move |worker| {
                         // The lock goes with the steps it guards, and is
                         // let go when they are done.
                         let _held = held;
-                        the_rest(worker, rest, txn, &home)
+                        let patience = Patience::from_now(worker, &*clock);
+                        the_rest(&patience, rest, txn, &home)
                     });
                     match world.on_a_worker(job) {
                         Ok(()) => return Retirement::OnAWorker,
@@ -903,16 +915,18 @@ fn retire(
                         Ok(running) if !running.is_empty() => {
                             let rest = steps.clearing[at..].to_vec();
                             let (home, held, said) = (home.clone(), lock.take(), refused.clone());
+                            let clock = world.wait_clock();
                             let job: OffThread = Box::new(move |worker| {
                                 let _held = held;
-                                if !ended_within(worker, &running, RESCUE_ENDS_WITHIN) {
+                                let patience = Patience::from_now(worker, &*clock);
+                                if !patience.ended(&running) {
                                     return Err(format!(
                                         "BT_UPDATE_START transaction {txn} is kept for the next start: its rescue build {} still runs {} s after {said}",
                                         rescue.display(),
                                         RESCUE_ENDS_WITHIN.as_secs()
                                     ));
                                 }
-                                the_rest(worker, rest, txn, &home)
+                                the_rest(&patience, rest, txn, &home)
                             });
                             match world.on_a_worker(job) {
                                 Ok(()) => return Retirement::OnAWorker,
@@ -956,48 +970,76 @@ enum Retirement {
     Kept,
 }
 
-/// **How long a retirement's worker waits for its rescue build to end**
-/// ([`retire`]): the rescue's wait for a Folio to take the data directory's
-/// claim (`update_apply::ACKNOWLEDGED_WITHIN`), which began before the start
-/// it opened ran this pass, and ten seconds for its last line and its exit.
+/// **How long a retirement's worker waits for its rescue build to end, and
+/// for what it removes to be let go** ([`retire`]): the rescue's wait for a
+/// Folio to take the data directory's claim
+/// (`update_apply::ACKNOWLEDGED_WITHIN`), which began before the start it
+/// opened ran this pass, and ten seconds for its last line and its exit. One
+/// deadline, counted from the worker's start, bounds every wait it makes.
 const RESCUE_ENDS_WITHIN: std::time::Duration =
     crate::update_apply::ACKNOWLEDGED_WITHIN.saturating_add(std::time::Duration::from_secs(10));
 
 /// How often that worker looks again.
 const RESCUE_POLL: std::time::Duration = std::time::Duration::from_millis(100);
 
-/// **Whether every process in `running` ended within `within`**, asked every
-/// [`RESCUE_POLL`] through `worker`'s wait door.
-fn ended_within(
-    worker: &bt_platform::admission::WorkerCtx,
-    running: &[install_flip::Running],
-    within: std::time::Duration,
-) -> bool {
-    let began = std::time::Instant::now();
-    loop {
-        if !running
-            .iter()
-            .any(|process| install_flip::still_running(*process))
-        {
-            return true;
+/// **A retirement worker's patience**: its wait door, the clock it reads
+/// ([`World::wait_clock`]), and the one deadline every wait of its own ends
+/// at ([`RESCUE_ENDS_WITHIN`] after it began).
+struct Patience<'a> {
+    worker: &'a bt_platform::admission::WorkerCtx,
+    clock: &'a dyn WaitClock,
+    deadline: std::time::Instant,
+}
+
+impl<'a> Patience<'a> {
+    /// **The patience of a worker that begins now**: its one deadline,
+    /// [`RESCUE_ENDS_WITHIN`] from this reading of `clock`.
+    fn from_now(worker: &'a bt_platform::admission::WorkerCtx, clock: &'a dyn WaitClock) -> Self {
+        Self {
+            worker,
+            clock,
+            deadline: clock.now() + RESCUE_ENDS_WITHIN,
         }
-        if began.elapsed() >= within {
-            return false;
+    }
+
+    /// Whether the deadline has come.
+    fn lapsed(&self) -> bool {
+        self.clock.now() >= self.deadline
+    }
+
+    /// One pause of [`RESCUE_POLL`] between two looks.
+    fn pause(&self) {
+        self.clock.pause(self.worker, RESCUE_POLL);
+    }
+
+    /// **Whether every process in `running` ended by the deadline**, asked
+    /// again after every pause.
+    fn ended(&self, running: &[install_flip::Running]) -> bool {
+        loop {
+            if !running
+                .iter()
+                .any(|process| install_flip::still_running(*process))
+            {
+                return true;
+            }
+            if self.lapsed() {
+                return false;
+            }
+            self.pause();
         }
-        bt_platform::wait::sleep_within(worker, RESCUE_POLL);
     }
 }
 
 /// The steps of a retirement left to a worker, in order, stopping at the
 /// first that fails, as its one line.
 fn the_rest(
-    worker: &bt_platform::admission::WorkerCtx,
+    patience: &Patience<'_>,
     rest: Vec<Clearing>,
     txn: TxnId,
     home: &Home,
 ) -> Result<(), String> {
     for step in rest {
-        perform(worker, step, txn, home).map_err(|failure| {
+        perform(patience, step, txn, home).map_err(|failure| {
             format!("BT_UPDATE_START transaction {txn} is kept for the next start: {failure}")
         })?;
     }
@@ -1006,20 +1048,38 @@ fn the_rest(
 
 /// One of a retirement's steps on a worker: the detach of every image under
 /// `H/<txn>` (`bt_platform::macos_update::detach_all_under`), or a deletion.
-fn perform(
-    worker: &bt_platform::admission::WorkerCtx,
-    step: Clearing,
-    txn: TxnId,
-    home: &Home,
-) -> Result<(), String> {
+///
+/// **A deletion refused while something still holds what it removes is asked
+/// again after every pause, up to the deadline**
+/// (T-UPDATE-STARTUP-ON-DISK-TEMP-DIR-RACE;
+/// `install_txn::Failure::removal_refused_while_held`, Windows only): a rescue
+/// build that has ended can keep its executable mapped as its image for a
+/// moment after its end is signalled, and a scanner or an indexer opens what
+/// was just run or written and lets go of it again. Giving up at the first
+/// refusal would keep the transaction, and the next start would raise the
+/// journal's card a second time. Any other refusal fails at once; one still
+/// held at the deadline fails with the bound.
+fn perform(patience: &Patience<'_>, step: Clearing, txn: TxnId, home: &Home) -> Result<(), String> {
     match step {
         Clearing::DetachMount => {
-            bt_platform::macos_update::detach_all_under(worker, &home.transaction(txn))
+            bt_platform::macos_update::detach_all_under(patience.worker, &home.transaction(txn))
                 .map_err(|refusal| refusal.to_string())
         }
-        Clearing::Delete(removal) => {
-            delete(removal, txn, home).map_err(|failure| failure.to_string())
-        }
+        Clearing::Delete(removal) => loop {
+            match delete(removal, txn, home) {
+                Ok(()) => return Ok(()),
+                Err(failure) if failure.removal_refused_while_held() => {
+                    if patience.lapsed() {
+                        return Err(format!(
+                            "{failure}, still refused {} s after the retirement's worker began",
+                            RESCUE_ENDS_WITHIN.as_secs()
+                        ));
+                    }
+                    patience.pause();
+                }
+                Err(failure) => return Err(failure.to_string()),
+            }
+        },
     }
 }
 
@@ -1280,6 +1340,10 @@ impl World for Machine<'_> {
         mounts_under(folder)
     }
 
+    fn wait_clock(&self) -> Arc<dyn WaitClock> {
+        Arc::new(crate::update_apply::WallClock)
+    }
+
     fn on_a_worker(&mut self, job: OffThread) -> io::Result<()> {
         let log = self.log();
         bt_platform::spawn_at_priority(
@@ -1374,14 +1438,23 @@ mod tests {
             /// What each job handed to a worker answered; the test's world
             /// waits for it, where the product's does not.
             workers: Vec<Result<(), String>>,
-            /// Done once a job is on its worker, before the world waits for
-            /// it: what the start goes on to do meanwhile (the rescue's end).
-            meanwhile: Option<Box<dyn FnOnce() + Send>>,
+            /// The clock a worker's waits are read on: a test's
+            /// `update_apply::CountedClock`, which never sleeps and runs what
+            /// the test makes happen in the pause of its choosing (a rescue's
+            /// end, a hold let go); one with nothing to do where none is
+            /// handed.
+            clock: Option<Arc<dyn WaitClock>>,
         }
 
         impl World for Recorded {
             fn mounts_under(&mut self, folder: &Path) -> Result<Vec<PathBuf>, String> {
                 mounts_under(folder)
+            }
+
+            fn wait_clock(&self) -> Arc<dyn WaitClock> {
+                self.clock
+                    .clone()
+                    .unwrap_or_else(|| Arc::new(crate::update_apply::CountedClock::new(|_| {})))
             }
 
             fn on_a_worker(&mut self, job: OffThread) -> io::Result<()> {
@@ -1390,9 +1463,6 @@ mod tests {
                     bt_platform::ThreadPriority::BelowNormal,
                     job,
                 )?;
-                if let Some(meanwhile) = self.meanwhile.take() {
-                    meanwhile();
-                }
                 self.workers.push(
                     worker
                         .join()
@@ -3669,57 +3739,58 @@ mod tests {
             assert_eq!(failed, None, "once");
         }
 
-        /// RED (T-UNKEPT-CARD-ONCE, F2; Windows) — **the start the rescue
-        /// build opens retires on a worker once the rescue has ended**: the
-        /// rescue runs from `H\<txn>\rescue\folio.exe` until a Folio takes the
-        /// data directory's claim, which the start it opened takes only after
-        /// this pass, so the pass's removal of `H\<txn>` is refused; the rest
-        /// of the retirement goes to a worker, which holds the lock, waits for
-        /// the rescue to end, then removes the folder and then the journal.
-        /// The card is raised by this start, and the next start finds nothing.
-        ///
-        /// MUTATION: in `retire`, keep the transaction when the folder's
-        /// removal is refused, whatever runs from the rescue build (the
-        /// journal kept, the card on the next start).
-        #[test]
-        fn a_start_opened_by_the_rescue_retires_on_a_worker_once_the_rescue_ends() {
+        /// A program of the test's own, started from `path`, ended by
+        /// [`OwnProgram::end`] or when any of its clones is dropped (on a failed
+        /// assertion too); the clones share one process.
+        #[derive(Clone)]
+        struct OwnProgram(Arc<std::sync::Mutex<std::process::Child>>);
+
+        impl OwnProgram {
+            /// `path`'s program, written there with `StaysUp`'s code, then
+            /// started.
+            fn start(path: &Path) -> Self {
+                bt_platform::trust_harness::program(
+                    path,
+                    bt_platform::trust::FileVersion([0, 4, 7, 0]),
+                    bt_platform::trust_harness::Behaviour::StaysUp,
+                )
+                .unwrap();
+                Self(Arc::new(std::sync::Mutex::new(
+                    bt_platform::quiet_command(path)
+                        .stdin(std::process::Stdio::null())
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .spawn()
+                        .unwrap(),
+                )))
+            }
+
+            /// Ended, and waited for until its process object is signalled.
+            fn end(&self) {
+                let mut child = self.0.lock().unwrap();
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+
+        impl Drop for OwnProgram {
+            fn drop(&mut self) {
+                self.end();
+            }
+        }
+
+        /// **A start the rescue build opened, over a commit whose trial held a
+        /// change**: on Windows only, a scene whose rescue build
+        /// (`H\<txn>\rescue\folio.exe`, a program of the test's own) runs, and
+        /// a retired journal that notes Folio 0.4.9's held changes.
+        fn the_rescue_runs(tag: &str) -> Option<(Scene, OwnProgram)> {
             use crate::update_txn::{Outcome, Phase};
             if bt_platform::host_platform() != bt_platform::HostPlatform::Windows {
-                return;
+                return None;
             }
-            let Some(scene) = Scene::new("rescue-runs") else {
-                return;
-            };
+            let scene = Scene::new(tag)?;
             std::fs::remove_file(&scene.rescue).unwrap();
-            bt_platform::trust_harness::program(
-                &scene.rescue,
-                bt_platform::trust::FileVersion([0, 4, 7, 0]),
-                bt_platform::trust_harness::Behaviour::StaysUp,
-            )
-            .unwrap();
-            /// The rescue, ended when this is dropped, on a failed assertion
-            /// too.
-            struct Rescue(std::sync::Arc<std::sync::Mutex<std::process::Child>>);
-            impl Rescue {
-                fn end(&self) {
-                    let mut child = self.0.lock().unwrap();
-                    let _ = child.kill();
-                    let _ = child.wait();
-                }
-            }
-            impl Drop for Rescue {
-                fn drop(&mut self) {
-                    self.end();
-                }
-            }
-            let rescue = Rescue(std::sync::Arc::new(std::sync::Mutex::new(
-                bt_platform::quiet_command(&scene.rescue)
-                    .stdin(std::process::Stdio::null())
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .spawn()
-                    .unwrap(),
-            )));
+            let rescue = OwnProgram::start(&scene.rescue);
             write_noted(
                 &scene,
                 Phase::Retired {
@@ -3728,24 +3799,25 @@ mod tests {
                 },
                 Some("0.4.9"),
             );
-            // The rescue ends once the start has gone on past its pass (it
-            // takes the data directory's claim), while the worker waits.
-            let ends = Rescue(std::sync::Arc::clone(&rescue.0));
+            Some((scene, rescue))
+        }
+
+        fn changes_not_kept() -> Option<Failure> {
+            Some(Failure::ChangesNotKept {
+                version: "0.4.9".to_owned(),
+            })
+        }
+
+        /// **The pass over [`the_rescue_runs`]'s scene, with `clock`; its
+        /// worker removes the folder, then the journal, and lets the lock go;
+        /// the card is this start's, and the next start finds nothing.**
+        fn retired_on_the_worker(scene: &Scene, clock: &Arc<crate::update_apply::CountedClock>) {
             let mut world = Recorded {
-                meanwhile: Some(Box::new(move || {
-                    ends.end();
-                })),
+                clock: Some(Arc::clone(clock) as Arc<dyn WaitClock>),
                 ..Recorded::default()
             };
             let (failed, ..) = continued_with(scene.run(&[], None, &mut world));
-            assert_eq!(
-                failed,
-                Some(Failure::ChangesNotKept {
-                    version: "0.4.9".to_owned(),
-                }),
-                "{:?}",
-                world.said
-            );
+            assert_eq!(failed, changes_not_kept(), "{:?}", world.said);
             assert_eq!(world.workers, vec![Ok(())], "{:?}", world.said);
             assert!(
                 !scene.home.transaction(txn()).exists(),
@@ -3765,6 +3837,219 @@ mod tests {
                 "the next start finds nothing: {:?}",
                 world.said
             );
+        }
+
+        /// A file opened without delete sharing, as a scanner or an indexer
+        /// opens one, until the test lets it go; whether it was let go.
+        #[derive(Clone)]
+        struct ScannerHold(Arc<std::sync::Mutex<Option<std::fs::File>>>);
+
+        impl ScannerHold {
+            fn of(file: &Path) -> Self {
+                Self(Arc::new(std::sync::Mutex::new(Some(
+                    bt_platform::trust_harness::hold_without_delete_sharing(file).unwrap(),
+                ))))
+            }
+
+            fn let_go(&self) {
+                self.0.lock().unwrap().take();
+            }
+
+            fn was_let_go(&self) -> bool {
+                self.0.lock().unwrap().is_none()
+            }
+        }
+
+        /// RED (T-UNKEPT-CARD-ONCE, F2; Windows) — **the start the rescue
+        /// build opens retires on a worker once the rescue has ended**: the
+        /// rescue runs from `H\<txn>\rescue\folio.exe` until a Folio takes the
+        /// data directory's claim, which the start it opened takes only after
+        /// this pass, so the pass's removal of `H\<txn>` is refused; the rest
+        /// of the retirement goes to a worker, which holds the lock, waits for
+        /// the rescue to end, then removes the folder and then the journal.
+        /// The card is raised by this start, and the next start finds nothing.
+        /// The rescue ends in the worker's first pause
+        /// (T-UPDATE-STARTUP-ON-DISK-TEMP-DIR-RACE: on the worker's clock,
+        /// never in a race with it).
+        ///
+        /// MUTATION: in `retire`, keep the transaction when the folder's
+        /// removal is refused, whatever runs from the rescue build (the
+        /// journal kept, the card on the next start).
+        #[test]
+        fn a_start_opened_by_the_rescue_retires_on_a_worker_once_the_rescue_ends() {
+            let Some((scene, rescue)) = the_rescue_runs("rescue-runs") else {
+                return;
+            };
+            let ends = rescue.clone();
+            let clock = Arc::new(crate::update_apply::CountedClock::new(move |pause| {
+                if pause == 1 {
+                    ends.end();
+                }
+            }));
+            retired_on_the_worker(&scene, &clock);
+            assert!(clock.pauses() >= 1, "it waited for the rescue's end");
+        }
+
+        /// RED (T-UPDATE-STARTUP-ON-DISK-TEMP-DIR-RACE; Windows) — **a
+        /// retirement's worker whose removal of `H\<txn>` is refused while a
+        /// file inside is held without delete sharing (a scanner, an indexer)
+        /// asks again after each pause, and removes it once the hold lifts**:
+        /// the card is this start's, once, and the next start finds nothing.
+        /// The rescue ends in the first pause; the hold lifts in the second.
+        ///
+        /// MUTATION: `install_txn::Failure::removal_refused_while_held`
+        /// answers `false` (the worker gives up at the first refusal: the
+        /// transaction kept, the card again on the next start).
+        #[test]
+        fn a_retirement_worker_removes_the_folder_once_a_file_held_inside_is_let_go() {
+            let Some((scene, rescue)) = the_rescue_runs("held-inside") else {
+                return;
+            };
+            let file = scene.home.transaction(txn()).join("scanned");
+            std::fs::write(&file, b"open in a scanner").unwrap();
+            let hold = ScannerHold::of(&file);
+            let (ends, lifts) = (rescue.clone(), hold.clone());
+            let clock = Arc::new(crate::update_apply::CountedClock::new(move |pause| {
+                if pause == 1 {
+                    ends.end();
+                } else {
+                    lifts.let_go();
+                }
+            }));
+            retired_on_the_worker(&scene, &clock);
+            assert!(hold.was_let_go(), "it was refused while held");
+            assert!(clock.pauses() >= 2, "{} pauses", clock.pauses());
+        }
+
+        /// RED (T-UPDATE-STARTUP-ON-DISK-TEMP-DIR-RACE; Windows) — **the
+        /// same, while another program still runs from inside `H\<txn>`**:
+        /// Windows answers `ERROR_ACCESS_DENIED` to a removal of an
+        /// executable still mapped as a process's image — what CI run
+        /// 41156010943 met for a moment after the rescue's end. A program
+        /// other than the rescue build is not one the worker waits for; it
+        /// still runs when the second pause comes (`install_flip::still_running`,
+        /// so the refusal before it was its image's), it is ended in that
+        /// pause, and the worker removes the folder then.
+        ///
+        /// MUTATION: as above.
+        #[test]
+        fn a_retirement_worker_removes_the_folder_once_an_image_inside_is_let_go() {
+            let Some((scene, rescue)) = the_rescue_runs("image-inside") else {
+                return;
+            };
+            let other = scene
+                .home
+                .transaction(txn())
+                .join("stage")
+                .join("other.exe");
+            std::fs::create_dir_all(other.parent().unwrap()).unwrap();
+            let image = OwnProgram::start(&other);
+            let [process] = install_flip::running_from(&other).unwrap()[..] else {
+                panic!("one process runs from {}", other.display());
+            };
+            let ran_at_pause_2 = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let (ends, lets_go, ran) = (rescue.clone(), image.clone(), Arc::clone(&ran_at_pause_2));
+            let clock = Arc::new(crate::update_apply::CountedClock::new(move |pause| {
+                if pause == 1 {
+                    ends.end();
+                } else {
+                    if pause == 2 {
+                        ran.store(
+                            install_flip::still_running(process),
+                            std::sync::atomic::Ordering::SeqCst,
+                        );
+                    }
+                    lets_go.end();
+                }
+            }));
+            retired_on_the_worker(&scene, &clock);
+            assert!(clock.pauses() >= 2, "{} pauses", clock.pauses());
+            assert!(
+                ran_at_pause_2.load(std::sync::atomic::Ordering::SeqCst),
+                "the removal before pause 2 was refused while the other program still ran"
+            );
+        }
+
+        /// RED (T-UPDATE-STARTUP-ON-DISK-TEMP-DIR-RACE; Windows) — **the
+        /// worker's removal of the journal is asked again the same way**: a
+        /// scanner holds `H\journal.json` (which the pass still reads, since
+        /// the hold shares reading); the worker removes `H\<txn>`, is refused
+        /// the journal, and removes it in the pause the hold lifts in, the
+        /// first after `H\<txn>` is gone.
+        ///
+        /// MUTATION: as above.
+        #[test]
+        fn a_retirement_worker_removes_the_journal_once_its_hold_is_let_go() {
+            let Some((scene, rescue)) = the_rescue_runs("held-journal") else {
+                return;
+            };
+            let hold = ScannerHold::of(&scene.home.journal());
+            let folder = scene.home.transaction(txn());
+            let (ends, lifts) = (rescue.clone(), hold.clone());
+            let clock = Arc::new(crate::update_apply::CountedClock::new(move |pause| {
+                if pause == 1 {
+                    ends.end();
+                } else if !folder.exists() {
+                    lifts.let_go();
+                }
+            }));
+            retired_on_the_worker(&scene, &clock);
+            assert!(hold.was_let_go(), "the journal was refused while held");
+        }
+
+        /// RED (T-UPDATE-STARTUP-ON-DISK-TEMP-DIR-RACE; Windows) — **a hold
+        /// that outlasts the worker's deadline keeps the transaction, as a
+        /// lapsed wait for the rescue does**: the worker asks after every
+        /// [`RESCUE_POLL`] until [`RESCUE_ENDS_WITHIN`] has gone by on its
+        /// clock — counted, never timed — and its line names the refusal and
+        /// the bound; the journal stays, and the start after the hold lifts
+        /// retires it and raises the card again, as before this ticket.
+        ///
+        /// MUTATION: the worker's deadline is `2 * RESCUE_ENDS_WITHIN` (twice
+        /// the pauses).
+        #[test]
+        fn a_hold_that_outlasts_the_workers_deadline_keeps_the_transaction() {
+            let Some((scene, rescue)) = the_rescue_runs("held-past") else {
+                return;
+            };
+            let file = scene.home.transaction(txn()).join("scanned");
+            std::fs::write(&file, b"open in a scanner").unwrap();
+            let hold = ScannerHold::of(&file);
+            let ends = rescue.clone();
+            let clock = Arc::new(crate::update_apply::CountedClock::new(move |pause| {
+                if pause == 1 {
+                    ends.end();
+                }
+            }));
+            let mut world = Recorded {
+                clock: Some(Arc::clone(&clock) as Arc<dyn WaitClock>),
+                ..Recorded::default()
+            };
+            let (failed, ..) = continued_with(scene.run(&[], None, &mut world));
+            assert_eq!(failed, changes_not_kept(), "{:?}", world.said);
+            let polls = RESCUE_ENDS_WITHIN.as_millis() / RESCUE_POLL.as_millis();
+            assert_eq!(clock.pauses() as u128, polls, "{:?}", world.workers);
+            match world.workers.as_slice() {
+                [Err(line)] => assert!(
+                    line.starts_with(&format!(
+                        "BT_UPDATE_START transaction {} is kept for the next start: install_txn remove ",
+                        txn()
+                    )) && line.ends_with(&format!(
+                        ", still refused {} s after the retirement's worker began",
+                        RESCUE_ENDS_WITHIN.as_secs()
+                    )),
+                    "{line}"
+                ),
+                other => panic!("one line, the worker's: {other:?}"),
+            }
+            assert!(scene.home.journal().exists(), "kept for the next start");
+            hold.let_go();
+            let mut world = Recorded::default();
+            let (failed, ..) = continued_with(scene.run(&[], None, &mut world));
+            assert_eq!(failed, changes_not_kept(), "{:?}", world.said);
+            assert!(!scene.home.journal().exists(), "retired");
+            let (failed, ..) = continued_with(scene.run(&[], None, &mut Recorded::default()));
+            assert_eq!(failed, None, "once");
         }
 
         /// RED (0.4.8 E5, census #16) — **a Folio that ran over an unfinished

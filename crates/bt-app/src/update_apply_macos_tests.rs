@@ -468,6 +468,7 @@ impl Install {
             agents: Some(self.agents.clone()),
             limits,
             trial_clock: Arc::new(WallClock),
+            decision_clock: Arc::new(CountedClock::awaiting_the_decision(&self.home, self.txn)),
             wait_clock: Arc::new(WallClock),
             starter: None,
             handed_back: None,
@@ -2344,6 +2345,10 @@ impl crate::update_startup::World for StartWorld {
     fn on_a_worker(&mut self, _job: crate::update_startup::OffThread) -> io::Result<()> {
         panic!("nothing is mounted")
     }
+
+    fn wait_clock(&self) -> std::sync::Arc<dyn crate::update_apply::WaitClock> {
+        panic!("nothing is mounted")
+    }
 }
 
 /// RED (U-29, M11) — **a transaction found at `RolledBack` is retired by the
@@ -2695,6 +2700,10 @@ impl crate::update_startup::World for Starting {
     }
 
     fn on_a_worker(&mut self, _job: crate::update_startup::OffThread) -> io::Result<()> {
+        panic!("nothing is mounted")
+    }
+
+    fn wait_clock(&self) -> std::sync::Arc<dyn crate::update_apply::WaitClock> {
         panic!("nothing is mounted")
     }
 }
