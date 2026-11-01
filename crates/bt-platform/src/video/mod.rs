@@ -1471,39 +1471,51 @@ mod tests {
         );
     }
 
-    /// **A clock that moves only when it is read**: one [`STEP`] per reading,
-    /// from one wall reading taken once. [`first_sample`] reads it once to set
-    /// its deadline and once after every tick, so "the budget ran out at the
-    /// third look" is a count, never a duration.
+    /// **A clock that moves only when a read is asked**: one [`STEP`] per
+    /// `ReadSample` (the planted reader takes it, as the real one spends its time
+    /// in the platform), from one wall reading taken once, and never when it is
+    /// only read. [`first_sample`] reads it once to set its deadline and once
+    /// after every tick, and both are counted, so "the budget ran out at the
+    /// third read" is a count, never a duration.
     struct Looks {
         began: Instant,
+        /// How far the reads have moved it.
+        moved: std::cell::Cell<Duration>,
+        /// How many times it was read.
         readings: std::cell::Cell<u32>,
     }
 
-    /// How far [`Looks`] moves per reading.
+    /// How far one planted read moves [`Looks`].
     const STEP: Duration = Duration::from_secs(1);
 
     impl Looks {
         fn new() -> Self {
             Self {
                 began: Instant::now(),
+                moved: std::cell::Cell::new(Duration::ZERO),
                 readings: std::cell::Cell::new(0),
             }
         }
 
         fn now(&self) -> Instant {
-            let read = self.readings.get();
-            self.readings.set(read + 1);
-            self.began + STEP * read
+            self.readings.set(self.readings.get() + 1);
+            self.began + self.moved.get()
+        }
+
+        /// One read's worth of time.
+        fn step(&self) {
+            self.moved.set(self.moved.get() + STEP);
         }
     }
 
-    /// **A planted `ReadSample`**: the answers in `script`, in order, then the
+    /// **A planted `ReadSample`**: each read takes one [`STEP`] of `clock`'s
+    /// time and answers the next of `script` (`None` is a failed read), then the
     /// last one for ever; and how many times it was asked.
     fn planted(
-        script: Vec<ReadAnswer<u32>>,
+        clock: &Looks,
+        script: Vec<Option<ReadAnswer<u32>>>,
     ) -> (
-        impl FnMut() -> Option<ReadAnswer<u32>>,
+        impl FnMut() -> Option<ReadAnswer<u32>> + '_,
         std::rc::Rc<std::cell::Cell<usize>>,
     ) {
         let asked = std::rc::Rc::new(std::cell::Cell::new(0_usize));
@@ -1511,11 +1523,13 @@ mod tests {
         let read = move || {
             let turn = count.get();
             count.set(turn + 1);
-            Some(match script.get(turn).or(script.last())? {
-                ReadAnswer::Sample(sample) => ReadAnswer::Sample(*sample),
-                ReadAnswer::Tick => ReadAnswer::Tick,
-                ReadAnswer::End => ReadAnswer::End,
-            })
+            clock.step();
+            match script.get(turn).or(script.last())? {
+                Some(ReadAnswer::Sample(sample)) => Some(ReadAnswer::Sample(*sample)),
+                Some(ReadAnswer::Tick) => Some(ReadAnswer::Tick),
+                Some(ReadAnswer::End) => Some(ReadAnswer::End),
+                None => None,
+            }
         };
         (read, asked)
     }
@@ -1527,19 +1541,22 @@ mod tests {
     /// [`read_first_frame`]'s loop with the platform taken out: the real
     /// `ReadSample` is the only producer of a tick, and a real fixture answers
     /// with a sample at the first read, so the budget's end is stated here, on a
-    /// planted reader and a clock that moves a second per look. Three seconds of
-    /// budget is three ticks: the deadline is set at reading 0, and the third
-    /// tick reads 3 s.
+    /// planted reader whose every read takes a second. Three seconds of budget
+    /// is three reads: the deadline is set before the first, and the third tick
+    /// comes back at 3 s.
     ///
-    /// MUTATION: never read the deadline (`if false && now() >= deadline`) — the
-    /// loop asks on past the third tick and comes back with the sample the
-    /// planted reader gives at the eleventh.
+    /// MUTATIONS: never read the deadline (`if false && now() >= deadline`) —
+    /// the loop asks on past the third tick and comes back with the sample the
+    /// planted reader gives at the eleventh. Set the deadline after the first
+    /// read rather than before it — the budget is a read longer, and the loop
+    /// gives up at the fourth.
     #[test]
     fn a_reader_that_only_says_not_yet_is_given_up_on_when_its_budget_runs_out() {
-        let mut script: Vec<ReadAnswer<u32>> = (0..10).map(|_| ReadAnswer::Tick).collect();
-        script.push(ReadAnswer::Sample(7));
-        let (read, asked) = planted(script);
+        let mut script: Vec<Option<ReadAnswer<u32>>> =
+            (0..10).map(|_| Some(ReadAnswer::Tick)).collect();
+        script.push(Some(ReadAnswer::Sample(7)));
         let clock = Looks::new();
+        let (read, asked) = planted(&clock, script);
         let answer = first_sample(read, || clock.now(), Duration::from_secs(3));
         assert_eq!(
             (answer, asked.get(), clock.readings.get()),
@@ -1549,28 +1566,33 @@ mod tests {
     }
 
     /// RED (T-FIRST-FRAME-BUDGET-FROM-A-CLOCK) — **a sample inside the budget is
-    /// the answer, and the end of the stream is a silence at once.**
+    /// the answer, and the end of the stream and a failed read are a silence at
+    /// once.**
     ///
-    /// MUTATION: end the loop at the first tick (`if true || now() >= deadline`)
+    /// MUTATIONS: end the loop at the first tick (`if true || now() >= deadline`)
     /// — the sample after two ticks is never asked for, and the first assertion
-    /// reads `None` after one read.
+    /// reads `None` after one read. Read a failed read as a tick — the last case
+    /// reads on until the deadline, and the clock is read four times, not once.
     #[test]
     fn a_sample_inside_the_budget_is_the_answer_and_an_end_is_a_silence() {
-        let (read, asked) = planted(vec![
-            ReadAnswer::Tick,
-            ReadAnswer::Tick,
-            ReadAnswer::Sample(7),
-        ]);
         let clock = Looks::new();
+        let (read, asked) = planted(
+            &clock,
+            vec![
+                Some(ReadAnswer::Tick),
+                Some(ReadAnswer::Tick),
+                Some(ReadAnswer::Sample(7)),
+            ],
+        );
         let answer = first_sample(read, || clock.now(), Duration::from_secs(3));
         assert_eq!(
-            (answer, asked.get()),
-            (Some(7), 3),
+            (answer, asked.get(), clock.readings.get()),
+            (Some(7), 3, 3),
             "two ticks inside three seconds, then the frame"
         );
 
-        let (read, asked) = planted(vec![ReadAnswer::End]);
         let clock = Looks::new();
+        let (read, asked) = planted(&clock, vec![Some(ReadAnswer::End)]);
         let answer = first_sample(read, || clock.now(), Duration::from_secs(3));
         assert_eq!(
             (answer, asked.get(), clock.readings.get()),
@@ -1578,12 +1600,13 @@ mod tests {
             "a stream that ends has nothing to give, and the deadline is never read"
         );
 
-        let failed = || None::<ReadAnswer<u32>>;
         let clock = Looks::new();
+        let (read, asked) = planted(&clock, vec![None]);
+        let answer = first_sample(read, || clock.now(), Duration::from_secs(3));
         assert_eq!(
-            first_sample(failed, || clock.now(), Duration::from_secs(3)),
-            None,
-            "a read that failed is the same silence"
+            (answer, asked.get(), clock.readings.get()),
+            (None, 1, 1),
+            "a read that failed is the same silence, at once"
         );
     }
 
@@ -1836,9 +1859,12 @@ mod tests {
     /// module's one silence, and at that moment nobody holds the file: the caller
     /// closed it before it answered, whatever the walked-away thread still holds.
     ///
-    /// MUTATION: empty `TheFile`'s `Drop` (no `Close`), or hand the thread the
+    /// MUTATIONS: empty `TheFile`'s `Drop` (no `Close`), or hand the thread the
     /// `TheFile` itself rather than a [`Lent`] reference — the thread still
     /// holding the stream holds the file, and the exclusive open is refused.
+    /// Swap `within_budget`'s `recv_timeout` for `recv` — the answer waits for the
+    /// held decode to let itself go after [`DECODER_PATIENCE`], and the decode is
+    /// no longer running when it comes.
     #[test]
     fn a_frame_given_up_on_leaves_its_file_free() {
         let dir = bt_testpath::temp_path("folio-video-given-up");
@@ -1855,11 +1881,18 @@ mod tests {
             None
         });
         let free = bt_testpath::nobody_holds(&copy);
+        // Read before the release: the decode cannot have finished, because nothing has
+        // let it go — unless the budget waited for it to let itself go.
+        let still_running = done.try_recv().is_err();
         // The walked-away thread is let go, and ends; the scratch file goes after it.
         let _ = release.send(());
         let _ = done.recv();
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(answer, None, "a decode given up on is the module's silence");
+        assert!(
+            still_running,
+            "the budget gave up on the decode, which was still running when it answered"
+        );
         assert!(
             free,
             "and the file is let go before the silence is answered, though the decode still runs"
