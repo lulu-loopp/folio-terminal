@@ -14,9 +14,8 @@
 //!    60 s; not had → nothing written, [`Ended::OldHeldTheLock`], W3 stays for
 //!    the next lock holder), then the data directory's claim tried until had
 //!    and let go at once (`update_apply::wait_for_the_claim`); still held →
-//!    `OldStayed`,
-//!    `Abandoned`. An entrance already there from a dead attempt (W4) → the
-//!    `Run` value removed, `Reverted`.
+//!    `OldStayed`, `Abandoned`. An entrance already there from a dead attempt
+//!    (W4) → the `Run` value removed, `Reverted`.
 //! 2. **Revalidate** (U-20's decision 1, taken here):
 //!    `update_prepare_windows::staged_as_verified` — the channel of the
 //!    installed copy, the installed `folio.exe` still the recorded old image,
