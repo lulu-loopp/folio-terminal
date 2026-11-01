@@ -4587,9 +4587,12 @@ fn a_stale_mark_is_taken_over_by_exactly_one_contender() {
                 let loser = &answers[1 - at];
                 assert!(
                     *loser == Window::Theirs(winner)
-                        || matches!(loser, Window::Refused(refusal) if !refusal.contended()),
-                    "round {round}: the loser names the winner or truthfully refuses, never \
-                     because the election was still held: {answers:?}"
+                        || matches!(
+                            loser,
+                            Window::Refused(refusal) if refusal.retryable() && !refusal.contended()
+                        ),
+                    "round {round}: the loser names the winner or truthfully refuses a read it may \
+                     ask again, never because the election was still held: {answers:?}"
                 );
                 assert_eq!(
                     crate::update_apply::window_owner(&install.home, install.txn),

@@ -2270,7 +2270,7 @@ impl WindowRefusal {
 
     /// Whether an applier should ask the same election again inside its one
     /// existing deadline.
-    const fn retryable(&self) -> bool {
+    pub(crate) const fn retryable(&self) -> bool {
         self.retryable
     }
 
