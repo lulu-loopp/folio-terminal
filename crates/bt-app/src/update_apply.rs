@@ -379,11 +379,19 @@ pub(crate) fn write_journal_on(
     } = wait;
     let began = clock.now();
     let mut write = install_txn::DurableWrite::new(path, bytes);
+    // The round's failure is spelled at once; whether it was a hold is read
+    // off it first, and taken back by the round's one reading of it.
+    let held = std::cell::Cell::new(None);
     let written = asked_while_held(
         within,
         &Asked::JOURNAL,
-        || write.ask().map_err(|failure| Spelled { failure, spell }),
-        |spelled| held_refusal(&spelled.failure),
+        || {
+            write.ask().map_err(|failure| {
+                held.set(held_refusal(&failure));
+                spell(&failure)
+            })
+        },
+        |_| held.take(),
         &mut || clock.now().saturating_duration_since(began),
         &mut |pause| {
             clock.pause(worker, pause);
@@ -393,26 +401,9 @@ pub(crate) fn write_journal_on(
     );
     given_up_said(
         written,
-        || {
-            write
-                .give_up()
-                .map_err(|failure| Spelled { failure, spell })
-        },
+        || write.give_up().map_err(|failure| spell(&failure)),
         say,
     )
-}
-
-/// **A failure of the journal's door with the words its caller says it in**
-/// ([`write_journal_on`]'s `spell`).
-struct Spelled {
-    failure: install_txn::Failure,
-    spell: fn(&install_txn::Failure) -> String,
-}
-
-impl fmt::Display for Spelled {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&(self.spell)(&self.failure))
-    }
 }
 
 /// **A journal write's end**: when it did not land, the write is given up
