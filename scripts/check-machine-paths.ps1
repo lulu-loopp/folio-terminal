@@ -118,13 +118,20 @@ try {
     # `Developer\Folio\` this project's work has run from since — the checkout,
     # its worktrees and the trace tools (`Folio\BetterTerminal`, `Folio\wt`,
     # `Folio\trace`). That folder holds other projects as well; they are not
-    # named here, because a list of them would drift with every new one. Never
-    # a bare drive-letter `\Developer\`: 31 product Rust files use a drive-letter
-    # `\Developer\…` as a neutral fixture path, and that names nobody's machine.
+    # named here, because a list of them would drift with every new one.
+    # **The pre-move layout too** (2026-11-01, 0.4.9 row 157): before the move
+    # the worktrees, the trace tools, the launchers and the build checkouts sat
+    # directly under `Developer\` (`Developer\wt`, `Developer\trace`,
+    # `Developer\launchers`, `Developer\build`), and the last two still do on
+    # this machine. Each is named whole, so a neighbour such as `wtx` passes.
+    # Never a bare drive-letter `\Developer\`: product fixtures stand in a
+    # drive-letter `\Developer\<folder>\…` of their own (`notes`, `Ledger`,
+    # `elsewhere`, …), and a folder no machine of this project's has ever used
+    # names nobody's machine.
     # Nor `Developer\Folio\` alone: a fixture standing in a folder named after
     # the product (`…\Developer\folio\notes.md`, `…\Developer\Folio\docs`) is a
     # placeholder like `folio` in the account list below, not this checkout.
-    $checkout_re = [regex]"(?i)Developer[\\/]{1,2}(?:BetterTerminal|Folio[\\/]{1,2}(?:BetterTerminal|trace|wt)\b)"
+    $checkout_re = [regex]"(?i)Developer[\\/]{1,2}(?:BetterTerminal|Folio[\\/]{1,2}(?:BetterTerminal|trace|wt)\b|(?:wt|trace|launchers|build)\b)"
     $author_re = [regex]"(?i)weiyi|umich\.edu"
     # The three sentences the name above may appear in — see the loop below.
     $copyright_re = [regex]"(?i)copyright\b.*\bweiyi shi\b"
