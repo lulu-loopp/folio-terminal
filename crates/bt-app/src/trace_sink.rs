@@ -651,11 +651,32 @@ impl StalledWriter {
         self.release.take()
     }
 
-    /// Fill the queue, so that the next offer meets a full one.
-    pub(crate) fn fill(&self) {
-        for index in 0..QUEUE_DEPTH {
-            self.offer(&format!("filler={index}"));
-        }
+    /// Fill the queue, so that the next offer meets a full one. The offers are made on a thread
+    /// of their own and awaited within the lane suite's patience: an offer that waited on the
+    /// parked writer lets the writer out (its release dropped) before the verdict, so it is red,
+    /// never a hang.
+    pub(crate) fn fill(&mut self) {
+        let queue = &self.queue;
+        let release = &mut self.release;
+        let filled = std::thread::scope(|threads| {
+            let filler = threads.spawn(move || {
+                for index in 0..QUEUE_DEPTH {
+                    queue.offer(Line {
+                        destination: Destination::Stderr,
+                        text: format!("filler={index}"),
+                    });
+                }
+            });
+            let filled = crate::lane::within_patience(|| filler.is_finished());
+            if !filled {
+                drop(release.take());
+            }
+            filled
+        });
+        assert!(
+            filled,
+            "filling the stalled sink waited for its parked writer"
+        );
     }
 }
 
@@ -915,6 +936,16 @@ mod tests {
     /// for the holder and the body does not finish while the lock is held.
     #[test]
     fn the_writer_does_not_wait_for_the_process_stderr_lock() {
+        // The line is queued and the queue closed before the lock is taken, so this thread calls
+        // nothing while another holds it; the writer starts under the held lock and finds both.
+        let (lines, waiting) = sync_channel(QUEUE_DEPTH);
+        let dropped = Arc::new(AtomicU64::new(0));
+        let counted = Arc::clone(&dropped);
+        let queue = Queue::new(lines, dropped);
+        queue.offer(stderr_line(
+            "bt-app trace_sink test: one line written past a held stderr lock, on purpose",
+        ));
+        assert!(queue.close());
         let (release, released) = sync_channel::<()>(0);
         let (locked, holding) = sync_channel::<()>(1);
         let holder = std::thread::spawn(move || {
@@ -923,19 +954,11 @@ mod tests {
             let _ = released.recv();
         });
         crate::lane::receive(&holding, "the holder taking the process lock");
-        let (lines, waiting) = sync_channel(QUEUE_DEPTH);
-        let dropped = Arc::new(AtomicU64::new(0));
-        let counted = Arc::clone(&dropped);
         let (done, finished) = sync_channel::<()>(1);
         let writer = std::thread::spawn(move || {
             run(&waiting, &counted, Reports::Console);
             let _ = done.send(());
         });
-        let queue = Queue::new(lines, dropped);
-        queue.offer(stderr_line(
-            "bt-app trace_sink test: one line written past a held stderr lock, on purpose",
-        ));
-        assert!(queue.close());
         // The body's end while the lock is still held, within the lane suite's patience.
         let ended = crate::lane::within_patience(|| finished.try_recv().is_ok());
         drop(release);
@@ -977,6 +1000,15 @@ mod tests {
             }
         };
 
+        // Queued and closed before the lock is taken, as in the test above: nothing is called on
+        // this thread while another holds it.
+        let failing = Arc::new(TraceFile::new(&folder, Some("# header")));
+        let (lines, waiting) = sync_channel(QUEUE_DEPTH);
+        let dropped = Arc::new(AtomicU64::new(0));
+        let counted = Arc::clone(&dropped);
+        let queue = Queue::new(lines, dropped);
+        offer_two(&queue, &failing);
+        assert!(queue.close());
         let (release, released) = sync_channel::<()>(0);
         let (locked, holding) = sync_channel::<()>(1);
         let holder = std::thread::spawn(move || {
@@ -985,18 +1017,11 @@ mod tests {
             let _ = released.recv();
         });
         crate::lane::receive(&holding, "the holder taking the process lock");
-        let failing = Arc::new(TraceFile::new(&folder, Some("# header")));
-        let (lines, waiting) = sync_channel(QUEUE_DEPTH);
-        let dropped = Arc::new(AtomicU64::new(0));
-        let counted = Arc::clone(&dropped);
         let (done, finished) = sync_channel::<()>(1);
         let writer = std::thread::spawn(move || {
             run(&waiting, &counted, Reports::Console);
             let _ = done.send(());
         });
-        let queue = Queue::new(lines, dropped);
-        offer_two(&queue, &failing);
-        assert!(queue.close());
         let ended = crate::lane::within_patience(|| finished.try_recv().is_ok());
         drop(release);
         holder.join().unwrap();
