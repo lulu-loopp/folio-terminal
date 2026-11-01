@@ -25445,7 +25445,12 @@ mod dir_watch_tests {
                 worker.join().expect("the worker answered");
                 left
             }
-            Err(_) => panic!(
+            Err(mpsc::RecvTimeoutError::Disconnected) => std::panic::resume_unwind(
+                worker
+                    .join()
+                    .expect_err("a worker that dropped its answer panicked"),
+            ),
+            Err(mpsc::RecvTimeoutError::Timeout) => panic!(
                 "the retirement door did not answer within {bound:?} and the door suites' \
                  patience after it"
             ),
@@ -25673,7 +25678,12 @@ mod dir_watch_set_tests {
                 worker.join().expect("the worker answered");
                 left
             }
-            Err(_) => panic!(
+            Err(mpsc::RecvTimeoutError::Disconnected) => std::panic::resume_unwind(
+                worker
+                    .join()
+                    .expect_err("a worker that dropped its answer panicked"),
+            ),
+            Err(mpsc::RecvTimeoutError::Timeout) => panic!(
                 "the retirement door did not answer within {bound:?} and the door suites' \
                  patience after it"
             ),
