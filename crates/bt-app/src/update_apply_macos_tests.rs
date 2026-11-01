@@ -726,7 +726,10 @@ fn applied_while_held<H>(road: Road, world: Fake, held: H) -> (Ended, Fake) {
 #[track_caller]
 fn ended_while_committing<T>(install: &Install, road: JoinHandle<T>) -> T {
     let at = std::panic::Location::caller();
-    let (journal, folder) = (install.home.journal(), install.home.transaction(install.txn));
+    let (journal, folder) = (
+        install.home.journal(),
+        install.home.transaction(install.txn),
+    );
     let mut last = crate::update_apply::COMMIT_STEPS;
     crate::lane::while_progressing(
         &format!("the road's commit, awaited at {at}"),
