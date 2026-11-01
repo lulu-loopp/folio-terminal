@@ -40,5 +40,7 @@ c87c390b0081185c author 2026-11-01 author: the account in a WSL prompt, <author>
 81a5185300098001 checkout 2026-11-01 old-checkout example: the pre-move checkout in a repro note (§7.49)
 57f07a9fb5c40009 checkout 2026-11-01 old-checkout example: the pre-move checkout in a repro note (§7.51)
 86f2f404902ce17e home 2026-11-01 false positive: /home/<acct>, a segment inside a Mac worktree path, not an account (§13.40)
+72aafb2508ff6a6a checkout 2026-11-01 old-checkout example: the pre-move trace folder in a bare-path example, first of two on the line (2026-09-21 entry)
+72aafb2508ff6a6a checkout 2026-11-01 old-checkout example: the pre-move trace folder in a bare-path example, second of two on the line (2026-09-21 entry)
 93604fe936e525bc home 2026-11-01 runner account: X:\Users\<acct>, a CI runner's account (2026-10-08 entry)
 afd3545ee77c0012 home 2026-11-01 runner account: X:\Users\<acct>, the CI runner's admin account (2026-10-08 entry)
