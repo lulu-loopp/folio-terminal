@@ -1170,12 +1170,16 @@ wait for the transaction lock is reached as state (the election over: the mark n
 applier and the election lock is free).
 
 2026-11-01 (T-LAUNCH-HANDOVER-BUDGET-ON-A-CLOCK): a kernel wait with a fixed bound in milliseconds is a
-product window as much as an `Instant` deadline is, and the timing scan sees neither. The launch wire's
+product window as much as an `Instant` deadline is. TIMING-BOUND's census, which reads only a test's own
+body, sees neither; plan row 125's hand sweep found `Instant` deadlines (G13 among them) but not these. The launch wire's
 tests ran the client and the listener as two threads of one process, so the second launch's 2 s budget and
-the server's 250 ms steps were each a race against the other thread. Every wait of the conversation, at both
-ends and on both platforms (the budget's busy retry and the reads and writes it bounds, each server step, the
-Windows listener's first word), is now handed to `launch_conversation::LaunchClock::wait`; `RealClock` makes
-the one wait the product always made, and `hand_over` and `LaunchPipe::start` are its doors. The tests hand
+the server's 250 ms steps were each a race against the other thread. Every wait for the other end, at both
+ends and on both platforms (the budget's reply read, and on Unix every frame; each server step; the Windows
+listener's first word), is now handed to `launch_conversation::LaunchClock::wait`, and the Windows busy
+retry's own waits are counted through `LaunchClock::spent`; `RealClock` makes the one wait the product always
+made, and `hand_over` and `LaunchPipe::start` are its doors. The one exception is the Windows writes:
+each is `attention_pipe::write_bounded`'s own real 250 ms, which buffering decides, not the peer (every frame
+fits the pipe's quota; noted in TIMING-BOUND). The tests hand
 a `CountedClock` that awaits the other end within the door suites' patience or spends the bound on its
 count, so "answered in time" is an event and "the budget ran out" is a count. The same shape elsewhere in
 bt-platform, starting with `attention_pipe`, is plan row 163.
