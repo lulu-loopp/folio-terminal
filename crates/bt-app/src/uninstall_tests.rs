@@ -1644,12 +1644,10 @@ fn uninstall_update_rows_remove_only_ours() {
 /// leaves it, under `H/<txn>/mnt`, with no record.
 ///
 /// MUTATION: in `update_home`, drop the `detach_images_under` call.
+#[cfg(target_os = "macos")]
 #[test]
 fn uninstall_update_home_detaches_before_removing() {
     use crate::update_prepare_macos::tests::fixture;
-    if !fixture::on_macos() {
-        return;
-    }
     let scratch = fixture::Scratch::new("uninstall-home");
     let home = scratch.root.join(".Folio.app.folio-update");
     let image = fixture::blank_image(&scratch.root.join("left.dmg"));
