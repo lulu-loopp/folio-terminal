@@ -161,11 +161,20 @@ pub(crate) struct Found<'d> {
 }
 
 impl Found<'_> {
-    /// Why a call of `name` that reached nothing is refused, by the first refusal on its way
-    /// that refuses (a type's path does not).
+    /// Why a call of `name` that reached nothing is refused: the refusal of the smallest path in
+    /// [`Found::refused`] that refuses (a type's path does not) — one fixed choice, not the order
+    /// the paths were met in.
     pub(crate) fn refusal(&self, name: &str) -> Option<String> {
         self.refused.iter().find_map(|refusal| refusal.reason(name))
     }
+}
+
+/// What a path names: a value (`f`, `m::f`; its last segment is the name looked up in the
+/// module before it) or a module (a glob's path, `m::*`; every segment is a module).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Shape {
+    Value,
+    Module,
 }
 
 /// The path rules over one set of declarations.
@@ -186,7 +195,7 @@ impl<'d> Follow<'d> {
             self.functions_into(package, module, name, 0, &mut found);
             return found;
         }
-        match self.absolute(package, module, path, 0) {
+        match self.absolute(package, module, path, Shape::Value, 0) {
             Ok((package, absolute)) => {
                 if let Some((name, at)) = absolute.split_last() {
                     self.functions_into(&package, &at.join("::"), name, 0, &mut found);
@@ -202,33 +211,38 @@ impl<'d> Follow<'d> {
         found
     }
 
-    /// The package and absolute module path `path`, written in `module` of `package`, names:
-    /// its first segment placed, then each later one but the last that is not a module there but
-    /// a name a `use` item of the module so far brings in (`crate::attention::f` where the crate
-    /// root writes `use other::attention;`) replaced by what that `use` names. The last segment
-    /// is the value name, which [`Self::functions_into`] looks up, declarations first.
+    /// The package and absolute path `path`, written in `module` of `package`, names: its first
+    /// segment placed, then each later one that is not a module there but a name a `use` item of
+    /// the module so far brings in (`crate::attention::f` where the crate root writes `use
+    /// other::attention;`) replaced by what that `use` names. A value path's last segment is the
+    /// value name, which [`Self::functions_into`] looks up, declarations first, so it is left as
+    /// written; a module path's last segment is a module like the others (`use crate::hub::wins::*;`
+    /// where `hub` writes `pub use crate::windows as wins;`).
     fn absolute(
         &self,
         package: &str,
         module: &str,
         path: &[String],
+        shape: Shape,
         depth: usize,
     ) -> Result<(String, Vec<String>), Unplaced> {
         let (package, placed) = self.placed(package, module, path, depth)?;
-        self.settled(package, placed, depth)
+        self.settled(package, placed, shape, depth)
     }
 
-    /// `path` with each segment after the first and before the last that is a `use` name of the
-    /// module before it replaced by the path it names, so every segment but the last is a
-    /// module.
+    /// `path` with each segment after the first that is a `use` name of the module before it
+    /// replaced by the path it names — up to the last for a module path, before it for a value
+    /// path — so every segment it settles is a module.
     fn settled(
         &self,
         mut package: String,
         mut path: Vec<String>,
+        shape: Shape,
         mut depth: usize,
     ) -> Result<(String, Vec<String>), Unplaced> {
+        let value = usize::from(shape == Shape::Value);
         let mut at = 1;
-        while at + 1 < path.len() {
+        while at + value < path.len() {
             let module = path[..at].join("::");
             if self.is_module(&package, &format!("{module}::{}", path[at])) {
                 at += 1;
@@ -314,7 +328,8 @@ impl<'d> Follow<'d> {
                     return Ok((other.clone(), rooted));
                 }
                 for glob in imports.map(Brought::globs).unwrap_or_default() {
-                    let Ok((at, mut opened)) = self.absolute(package, module, glob, depth + 1)
+                    let Ok((at, mut opened)) =
+                        self.absolute(package, module, glob, Shape::Module, depth + 1)
                     else {
                         continue;
                     };
@@ -369,7 +384,7 @@ impl<'d> Follow<'d> {
             return;
         };
         if let Some(path) = imports.get(name) {
-            match self.absolute(package, module, path, depth + 1) {
+            match self.absolute(package, module, path, Shape::Value, depth + 1) {
                 Ok((at, absolute)) => {
                     if let Some((last, within)) = absolute.split_last() {
                         self.functions_into(&at, &within.join("::"), last, depth + 1, found);
@@ -386,7 +401,7 @@ impl<'d> Follow<'d> {
             return;
         }
         for glob in imports.globs() {
-            match self.absolute(package, module, glob, depth + 1) {
+            match self.absolute(package, module, glob, Shape::Module, depth + 1) {
                 Ok((at, absolute)) => {
                     self.functions_into(&at, &absolute.join("::"), name, depth + 1, found);
                 }

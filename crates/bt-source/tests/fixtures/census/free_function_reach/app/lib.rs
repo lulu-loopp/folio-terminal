@@ -127,7 +127,13 @@ pub mod glob_user {
 
 // Fold F1: a module `config` of the crate root, and a module that imports it and declares a
 // function of the same name. A module and a function live in two namespaces, so both are there.
+// The root's own `fn config` is the decoy: a call typed through the module's `use` would land on
+// it and be typed as another crate's struct.
 pub mod config {}
+
+pub fn config(_: u32) -> &'static mut census_reach_other::Other {
+    unimplemented!()
+}
 
 pub mod shadowed {
     #[allow(unused_imports)]
@@ -162,6 +168,7 @@ pub mod relative {
 // Fold F3: a test-only declaration beside a product `use` of the same name: a product build has
 // only the `use`.
 pub mod skips {
+    #[cfg(not(test))]
     use crate::windows::grab as now;
 
     #[cfg(test)]
@@ -195,6 +202,21 @@ pub mod enum_glob {
     pub fn a_type_glob_brings_no_function() {
         let _ = One;
         missing(1).title = String::new();
+    }
+}
+
+// Re-check R1: a glob through a module re-exported under another name. The glob's path is a
+// module path, so its last segment is followed too.
+pub mod hub {
+    pub use crate::windows as wins;
+}
+
+pub mod through_hub {
+    use crate::hub::wins::*;
+
+    // GREEN (re-check R1): `crate::hub::wins` is `crate::windows`, whose `grab` the glob brings.
+    pub fn through_a_glob_of_a_renamed_module() {
+        grab(1).title = String::new();
     }
 }
 

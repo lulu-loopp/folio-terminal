@@ -723,11 +723,13 @@ fn free_function_reach_census() -> FieldCensus {
 
 /// RED (plan row 126) — **a one-segment call `f(..)` is typed only from the declarations its
 /// module reaches**: the module's own product items (a test-only one skipped), its product `use`
-/// items (a rename, the package's re-export, `self::` and `super::` paths), its globs, and across a
+/// items (a rename, the package's re-export, `self::` and `super::` paths), its globs (one through
+/// a module re-exported under another name), and across a
 /// `use` or a glob into another workspace crate to that crate's declaration (through its
 /// re-exports, two crates deep). Each GREEN call reaches the package's `windows::grab` or
 /// `windows::pick` (two `cfg` variants of one item), or `shadowed::config` — a function named like
-/// the module its own module imports — which return the window, so the write is the window's
+/// the module its own module imports, beside the root's decoy `fn config` that returns another
+/// crate's struct — which return the window, so the write is the window's
 /// title. Each RED call is named like a test helper that returns the window, or like the package's
 /// `grab`; none of them reaches it:
 /// - through another crate's `use` (`fetch`, a re-export there), its re-export of a function
@@ -761,15 +763,20 @@ fn free_function_reach_census() -> FieldCensus {
 /// rules could not place — the cycle, `super` past the root, the unknown first segment, the
 /// enum's glob — was "a path into a crate the census does not read".
 ///
+/// RED on `00acd5535` (the fold; the re-check's R1): `through_a_glob_of_a_renamed_module` was
+/// refused as not reached — the glob's last segment, `wins`, a module `hub` re-exports, was left
+/// unsettled like a value name.
+///
 /// MUTATIONS (each observed red on the fold, then reverted): look a `use` name up before a child
 /// module in `Follow::placed` — `solve` loops and is refused at the step limit; drop
-/// `Follow::settled` — `kind_mode` is refused as not reached; settle the last segment too —
-/// `config` is refused; type the call by `Uses::Every` — `probe` and `only_in_tests` write
-/// the window's title; let a test-only declaration answer under
-/// `Uses::Product` — `only_in_tests` writes it; stop at a test-only declaration — `now` is
-/// refused; drop the type check in `Follow::placed` — `missing` is refused as a first segment
-/// the rules cannot place; drop the `block_item` check in `Walk::callee` — `lend` and the
-/// body's `grab` are refused as not reached, never naming the body's `fn` or `use`.
+/// `Follow::settled` — `kind_mode` is refused as not reached; settle a value path's last segment
+/// too — `config` is typed from the root's decoy `fn config`, neither a write nor an unknown;
+/// settle no glob's last segment — `through_a_glob_of_a_renamed_module` is not reached; type the
+/// call by `Uses::Every` — `probe` and `only_in_tests` write the window's title; let a test-only
+/// declaration answer under `Uses::Product` — `only_in_tests` writes it; stop at a test-only
+/// declaration — `now` is refused; drop the type check in `Follow::placed` — `missing` is refused
+/// as a first segment the rules cannot place; drop the `block_item` check in `Walk::callee` —
+/// `lend` and the body's `grab` are refused as not reached, never naming the body's `fn` or `use`.
 #[test]
 fn a_free_function_is_typed_from_what_its_module_reaches() {
     let census = free_function_reach_census();
@@ -784,6 +791,7 @@ fn a_free_function_is_typed_from_what_its_module_reaches() {
             "retitle",
             "through_a_function_named_like_an_imported_module",
             "through_a_glob",
+            "through_a_glob_of_a_renamed_module",
             "through_a_reexport",
             "through_a_rename",
             "through_a_use",
