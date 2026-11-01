@@ -67,3 +67,10 @@ pub mod used {
     #[cfg(test)]
     pub fn the_gated_needle() {} // gated
 }
+
+#[derive(serde::Deserialize)]
+#[serde(default)]
+pub struct Spelt {
+    #[cfg(test)]
+    pub the_gated_needle: u8, // gated
+}

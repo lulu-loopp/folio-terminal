@@ -915,7 +915,8 @@ fn a_cfg_in_a_read_macro_body_is_a_gate() {
 /// macro_use)` module or a `#[macro_use]` module between it and its definition; a definition that
 /// pastes the names into `stringify!`; one in an inline module used after it; a read definition
 /// shadowed by a later non-read one; and a statement macro between a block's definition and its
-/// invocation — each refused.
+/// invocation — each refused. Plan row 122 adds an `impl` item carrying an attribute macro between
+/// a definition and its invocation, refused the same way.
 ///
 /// Before the row the fixture lowered: nothing inside a macro's tokens was read or refused. The
 /// expected list was filled from the reading's output and then checked row by row against the
@@ -928,7 +929,8 @@ fn a_cfg_in_a_read_macro_body_is_a_gate() {
 /// — the three items between pass; accept a paste inside a group — `named_entries!` (and
 /// `dropping!`) are read; drop the scope check — `scoped_entries!` is; take the first definition
 /// — `twice!` is; drop the statement hazard — `block_entries!` is; drop `macro_use` from the
-/// hazards — the two module cases are.
+/// hazards — the two module cases are; make only items hazards again (plan row 122's R4) —
+/// `impl_item_entries!` is.
 #[test]
 fn a_cfg_in_any_other_macro_body_is_refused_by_its_line() {
     let refused = Index::shared(&fixture_universe("gated_in_macro_refused"))
@@ -968,6 +970,7 @@ fn a_cfg_in_any_other_macro_body_is_refused_by_its_line() {
             "in-macro 206:5 twice",
             "in-macro 221:9 block_entries",
             "in-macro 239:5 used_entries",
+            "in-macro 260:5 impl_item_entries",
         ]
     );
 }
@@ -976,12 +979,14 @@ fn a_cfg_in_any_other_macro_body_is_refused_by_its_line() {
 /// attributes rewrite nothing is a gate as written**: the language's own attributes (`allow`,
 /// `inline`, `must_use`, `track_caller`, `macro_use`), a tool namespace (`rustfmt::skip`), a
 /// `cfg_attr` writing only those, a `derive` of anything, and a derive helper (`serde`, `error`)
-/// beside the derive that declares it — on an item, an `impl` item or a `trait` item.
+/// beside the derive that declares it, spelt bare or by the declaring crate's path
+/// (`thiserror::Error`, `serde::Deserialize`) — on an item, an `impl` item or a `trait` item.
 ///
 /// It holds before and after the row: the row refuses only what an attribute macro may rewrite.
 ///
 /// MUTATION: drop the helper table from `crate::gates`' `may_rewrite` — the `serde` and `error`
-/// items are refused; take every tool path as rewriting — `skipped` is refused.
+/// items are refused; take every tool path as rewriting — `skipped` and `conditionally_allowed`
+/// (whose `cfg_attr` writes `clippy::inline_always`) are refused.
 #[test]
 fn a_cfg_under_inert_attributes_is_a_gate() {
     let index = Index::shared(&fixture_universe("gated_under_inert_attributes"))
@@ -1013,7 +1018,7 @@ fn a_cfg_under_inert_attributes_is_a_gate() {
             wrong.push(format!("{}: {line}", at.line));
         }
     }
-    assert_eq!((found.len(), gated), (9, 8), "the fixture's needles");
+    assert_eq!((found.len(), gated), (10, 9), "the fixture's needles");
     assert!(
         wrong.is_empty(),
         "read with the wrong verdict:\n  {}",
@@ -1030,16 +1035,21 @@ fn a_cfg_under_inert_attributes_is_a_gate() {
 /// an item inside `#[proc_attr] mod`; a field under `#[cfg_attr(test, proc_attr)]` (the predicate
 /// is not evaluated); a `let` under an attribute macro on an `impl` item and on a `trait` item; a
 /// field under a `#[serde]` with no derive declaring it; a `let` under a path attribute
-/// (`tokio::main`); a parameter of a foreign fn under one. Not refused: the item itself, a foreign
+/// (`tokio::main`); a parameter of a foreign fn under one; a `let` under a rewriting fn inside a
+/// rewriting module, named by the outer attribute; a field under `#[error]` beside a derive spelt
+/// `other_crate::Error`, which the helper table does not hold; and a `let` under
+/// `#[::clippy::…]`, a crate path and not the tool. Not refused: the item itself, a foreign
 /// item whose own `cfg` keeps it out (an item's own `cfg` is applied before any attribute macro
 /// on it), and an item under `#[implement]` with no `cfg` inside.
 ///
-/// Before the row the fixture lowered: every `cfg` inside was read as a gate as written.
+/// Before the row only the `vec!` line was refused (as `CfgInMacroTokens`, row 109); every other
+/// `cfg` inside was read as a gate as written.
 ///
 /// MUTATION: drop the rewritten check in `crate::gates`' `gated_range` — every line but the
 /// `vec!` one passes; drop it from `refuse_cfgs` — the `vec!` line is refused as
 /// `CfgInMacroTokens` instead; stop setting the mode on `impl`, `trait` and foreign items — `h`,
-/// `hooked` and the parameter pass.
+/// `hooked` and the parameter pass; take a `::`-led tool path as the tool — the
+/// `::clippy::not_the_tool` line passes.
 #[test]
 fn a_cfg_under_an_attribute_macro_is_refused_by_its_line() {
     let refused = Index::shared(&fixture_universe("gated_under_attribute_macro_refused"))
@@ -1068,6 +1078,9 @@ fn a_cfg_under_an_attribute_macro_is_refused_by_its_line() {
             "under 58:5 tokio::main",
             "under 65:9 proc_attr",
             "under 76:35 proc_attr",
+            "under 88:9 proc_attr",
+            "under 96:5 error(\"not thiserror's\")",
+            "under 102:5 ::clippy::not_the_tool",
         ]
     );
 }

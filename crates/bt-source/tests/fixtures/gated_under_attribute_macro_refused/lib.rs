@@ -80,3 +80,25 @@ extern "C" {
 pub struct WithoutAGate {
     pub f: u8,
 }
+
+#[proc_attr]
+pub mod nested {
+    #[other_attr]
+    pub fn f() {
+        #[cfg(test)]
+        let n = 0;
+    }
+}
+
+#[derive(other_crate::Error)]
+#[error("not thiserror's")]
+pub struct ForeignError {
+    #[cfg(test)]
+    pub f: u8,
+}
+
+#[::clippy::not_the_tool]
+pub fn a_crate_path() {
+    #[cfg(test)]
+    let c = 0;
+}
