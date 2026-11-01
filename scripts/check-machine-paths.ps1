@@ -25,8 +25,9 @@
 #   * the dated record inside `docs/` — the folders and files listed in
 #     `$docsNotScanned` below, each with its reason. They are verbatim history
 #     (transcripts, evidence logs, quoted prompts, an append-only log), and a
-#     record rewritten to pass a scan is no longer the record; one more file
-#     there names the publisher, as attribution. Everything else in
+#     record rewritten to pass a scan is no longer the record. One more file,
+#     listed in `$authorNameAllowed`, is scanned in full except for the
+#     author's name, which it spells as the publisher. Everything else in
 #     `docs/` is scanned: the rules, the guards and the front page's prose are
 #     living documents, and since 2026-10-31 (0.4.9 row 129) a new file there is
 #     covered by default instead of by being remembered on an include list.
@@ -42,17 +43,28 @@ $ErrorActionPreference = "Stop"
 $repo = Split-Path -Parent $PSScriptRoot
 Push-Location $repo
 try {
-    $tracked = @(& git ls-files)
-    if ($LASTEXITCODE -ne 0) { throw "git ls-files failed" }
+    # **Every tracked name as itself** (2026-11-01, row 129's review N4). Git
+    # C-quotes a name that is not ASCII unless `core.quotepath` is off, and the
+    # quoted spelling names no file: `Test-Path` below then said no and the file
+    # was skipped without a word. The names arrive as UTF-8, so they are read as
+    # UTF-8 whatever the console's own code page is.
+    $consoleEncoding = [Console]::OutputEncoding
+    try {
+        [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+        $tracked = @(& git -c core.quotepath=off ls-files)
+        if ($LASTEXITCODE -ne 0) { throw "git ls-files failed" }
+    } finally {
+        [Console]::OutputEncoding = $consoleEncoding
+    }
 
     $skipPaths = @("tests/corpus/", "vendor/", "licenses/", "THIRD-PARTY-NOTICES.md",
                    "scripts/check-machine-paths.ps1")
 
-    # **The dated record inside `docs/`, and one attribution file** (2026-10-31,
-    # 0.4.9 row 129). Until then the whole of `docs/` was skipped and four
-    # front-page files were scanned by name, so a machine path landed in
-    # `docs/ARCHITECTURE-GUARDS.md` unseen (row 113's review, N3). Each entry is a
-    # prefix and says why it may hold what the rest of the tree may not.
+    # **The dated record inside `docs/`** (2026-10-31, 0.4.9 row 129). Until then
+    # the whole of `docs/` was skipped and four front-page files were scanned by
+    # name, so a machine path landed in `docs/ARCHITECTURE-GUARDS.md` unseen (row
+    # 113's review, N3). Each entry is a prefix and says why it may hold what the
+    # rest of the tree may not.
     $docsNotScanned = [ordered]@{
         # Plans, evidence runs (gate logs recorded verbatim) and agent transcripts.
         "docs/plans/"    = "dated planning record and verbatim evidence, 2026-07 to date"
@@ -64,10 +76,20 @@ try {
         "docs/spikes/"   = "dated spike records and their probes, as run"
         # Session handoffs, each a snapshot of one day.
         "docs/handoff/"  = "dated session handoffs"
-        # DESIGN is append-only (CONVENTIONS): an old entry cannot be rewritten.
+        # DESIGN is append-only (`docs/ARCHITECTURE.md`, "append-only and it is
+        # evidence"): an old entry cannot be rewritten.
         "docs/DESIGN.md" = "append-only design log"
-        # The winget manifest folder and branch are named after the publisher ID,
-        # which is attribution (as `$publisher_re` below), not a machine.
+    }
+    # **Files scanned in full except for the author's name** (2026-11-01, row
+    # 129's review F3). The home-directory, checkout and e-mail checks still run
+    # on them, and so does the `umich.edu` half of the author check: a mailbox is
+    # never attribution.
+    $authorNameAllowed = [ordered]@{
+        # The winget manifest folder, `manifests/w/<publisher-id>/Folio`, and the
+        # winget-pkgs branch are named after the publisher ID, which is
+        # attribution (as `$publisher_re` below), not a machine. The runbook's
+        # pasted commands are exactly where a home or checkout path could land,
+        # so only the name is excused.
         "docs/RELEASING.md" = "winget publisher identity"
     }
     $skipExt = @(".ttf", ".otf", ".pfb", ".icc", ".nupkg", ".zip", ".png", ".jpg",
@@ -92,9 +114,11 @@ try {
     $home_re = [regex]"(?:[A-Za-z]:[\\/]{1,2}[Uu]sers[\\/]{1,2}|/home/|/Users/)(%[A-Za-z_]+%|[A-Za-z0-9_.$-]{1,32})"
     $mail_re = [regex]"[A-Za-z0-9._%+-]+@([A-Za-z0-9.-]+\.([A-Za-z]{2,24}))"
     # The checkout this product was developed in, before and after the 2026-10-23
-    # disk move: `Developer\BetterTerminal`, and the three things the
-    # `Developer\Folio\` folder has held since — the checkout, its worktrees and
-    # the trace tools (`Folio\BetterTerminal`, `Folio\wt`, `Folio\trace`). Never
+    # disk move: `Developer\BetterTerminal`, and the three folders under
+    # `Developer\Folio\` this project's work has run from since — the checkout,
+    # its worktrees and the trace tools (`Folio\BetterTerminal`, `Folio\wt`,
+    # `Folio\trace`). That folder holds other projects as well; they are not
+    # named here, because a list of them would drift with every new one. Never
     # a bare drive-letter `\Developer\`: 31 product Rust files use a drive-letter
     # `\Developer\…` as a neutral fixture path, and that names nobody's machine.
     # Nor `Developer\Folio\` alone: a fixture standing in a folder named after
@@ -162,9 +186,10 @@ try {
         # one in order to check it. Like a copyright notice and like the line that
         # names who signed a release, it says who published this and nothing
         # whatever about the machine it was built on.
+        $nameAllowed = $authorNameAllowed.Contains($rel)
         foreach ($line in ($text -split "`n")) {
-            $notice = $copyright_re.IsMatch($line) -or $signed_re.IsMatch($line) -or
-                      $publisher_re.IsMatch($line)
+            $notice = $nameAllowed -or $copyright_re.IsMatch($line) -or
+                      $signed_re.IsMatch($line) -or $publisher_re.IsMatch($line)
             foreach ($m in $author_re.Matches($line)) {
                 if ($notice -and $m.Value -notmatch "(?i)umich") { continue }
                 $problems.Add("$rel names the author: $($m.Value)")

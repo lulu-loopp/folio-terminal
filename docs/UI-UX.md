@@ -134,7 +134,7 @@
 | | 图标 | 文字 |
 |---|---|---|
 | `[claude] proj-a` vs `[claude] proj-b` | 同 | **不同** ✓ |
-| `[claude] BetterTerminal` vs `[pwsh] BetterTerminal` | **不同** ✓ | 同 |
+| `[claude] project` vs `[pwsh] project` | **不同** ✓ | 同 |
 
 - **来源是 OSC 7**——shell 主动报的。**这不是我们从屏幕上读出来再猜的**。
 - **窄的地方只放最后一段**（`project`），窗格头放更完整的路径（`~/src/project`）。
