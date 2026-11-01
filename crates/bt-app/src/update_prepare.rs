@@ -44,6 +44,9 @@ use bt_platform::install_txn::{self, Hold};
 use bt_platform::HostPlatform;
 
 use crate::install_channel::Channel;
+use crate::update_apply::{
+    JOURNAL_HELD_WITHIN, WaitClock, WaitWithin, WallClock, write_journal_on,
+};
 use crate::update_handoff::Staged;
 use crate::update_job::{Bytes, Fetching, Landed, Offer, Poster, Step, Stop};
 use crate::update_txn::{
@@ -146,6 +149,54 @@ pub(crate) fn matches_its_sum(file: &Path, sums: &Path, asset: &str) -> Result<(
     }
 }
 
+// ── the journal's writes ────────────────────────────────────────────────────
+
+/// **A failure of the install door in the words `diagnostics.log` gets**: the
+/// door's step and the operating system's error, never the path (it names
+/// the account's folders) — `install_txn rename: Access is denied. (os error
+/// 5)` (T-UPDATE-PREPARE-REVALIDATION-RESUME-FLAKE).
+pub(crate) fn failure_words(failure: &install_txn::Failure) -> String {
+    format!("install_txn {}: {}", failure.stage.name(), failure.error)
+}
+
+/// **One line of the update job's in `diagnostics.log`**.
+pub(crate) fn note(line: &str) {
+    crate::diagnostics::note(&format!("Folio: update job — {line}"));
+}
+
+/// **Write `journal` durably as the job owner, riding a hold**: while another
+/// program holds `journal.json` open (a scanner, an indexer: `install_txn::
+/// Failure::refused_while_open`, Windows only) the rename is asked again on
+/// the wall clock until [`JOURNAL_HELD_WITHIN`] has passed, each round said in
+/// `diagnostics.log` (U-34, 0.4.8 E4 — the applier's
+/// `update_apply::write_journal`; T-UPDATE-PREPARE-REVALIDATION-RESUME-FLAKE).
+/// Read and paused on `clock`: [`WallClock`] for the writes whose callers
+/// hand none (a launch's count, [`abandon`]); a Prepare's road's own for its
+/// abandonment ([`abandon_on`]).
+///
+/// # Errors
+/// The last failure, in [`failure_words`].
+fn journal_written_by_the_owner(
+    worker: &WorkerCtx,
+    clock: &dyn WaitClock,
+    home: &Home,
+    journal: &Journal,
+) -> Result<(), String> {
+    write_journal_on(
+        WaitWithin {
+            worker,
+            within: JOURNAL_HELD_WITHIN,
+            clock,
+        },
+        &|| true,
+        failure_words,
+        &home.journal(),
+        &journal.encode(),
+        &mut |line| note(line),
+    )
+    .map_err(|unwritten| unwritten.said)
+}
+
 // ── the worker's last word ──────────────────────────────────────────────────
 
 /// **End a Prepare's worker with its one last report**, posted only once the
@@ -188,8 +239,23 @@ pub(crate) fn abandon(
     journal: &Journal,
     event: &Event,
 ) -> Result<(), String> {
+    abandon_on(worker, &WallClock, home, journal, event)
+}
+
+/// [`abandon`], its held write asked again on `clock` — a Prepare's road's
+/// (T-UPDATE-PREPARE-REVALIDATION-RESUME-FLAKE).
+///
+/// # Errors
+/// As [`abandon`].
+pub(crate) fn abandon_on(
+    worker: &WorkerCtx,
+    clock: &dyn WaitClock,
+    home: &Home,
+    journal: &Journal,
+    event: &Event,
+) -> Result<(), String> {
     let phase = match journal.advance(event) {
-        Ok(abandoned) => match install_txn::durable_write(&home.journal(), &abandoned.encode()) {
+        Ok(abandoned) => match journal_written_by_the_owner(worker, clock, home, &abandoned) {
             Ok(()) => abandoned.body.phase.kind(),
             Err(_) => journal.body.phase.kind(),
         },
@@ -360,8 +426,7 @@ pub(crate) fn at_launch(
             let counted = journal
                 .advance(&event)
                 .map_err(|refusal| format!("{refusal:?}"))?;
-            install_txn::durable_write(&home.journal(), &counted.encode())
-                .map_err(|failure| failure.to_string())?;
+            journal_written_by_the_owner(worker, &WallClock, home, &counted)?;
             if counted.body.phase.kind() == PhaseKind::Abandoned {
                 clear(worker, home, counted.txn, PhaseKind::Abandoned)?;
                 drop(lock);
@@ -433,7 +498,7 @@ pub(crate) fn settle_at_launch(
     platform: HostPlatform,
     previous: PreviousRun,
 ) -> Landed {
-    let say = |line: &str| crate::diagnostics::note(&format!("Folio: update job — {line}"));
+    let say = note;
     let (staged, restart_missed) = match at_launch(worker, home, previous) {
         Ok(AtLaunch::Kept(staged)) => (staged, false),
         Ok(AtLaunch::RestartMissed(staged)) => (staged, true),

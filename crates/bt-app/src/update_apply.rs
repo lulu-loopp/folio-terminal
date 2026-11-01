@@ -338,30 +338,90 @@ pub(crate) fn write_journal(
     within: Duration,
     say: &mut dyn FnMut(&str),
 ) -> Result<(), Unwritten> {
-    let began = Instant::now();
+    write_journal_on(
+        WaitWithin {
+            worker,
+            within,
+            clock: &WallClock,
+        },
+        &|| true,
+        |failure| failure.to_string(),
+        path,
+        bytes,
+        say,
+    )
+}
+
+/// **[`write_journal`], on `wait`'s clock, asked again only while
+/// `asks_again` answers yes, and every failure spelled by `spell`**
+/// (T-UPDATE-PREPARE-REVALIDATION-RESUME-FLAKE): the Prepare's journal
+/// writes ride a hold the way the applier's do, read and paused on the clock
+/// its road was given ([`WallClock`] in the product), stop asking once the
+/// job has cancelled the transaction, and say each failure without its path
+/// (`update_prepare::failure_words`). [`write_journal`] is this with the
+/// wall clock, no cancel, and a failure's whole sentence.
+///
+/// # Errors
+/// As [`write_journal`]; a hold still there when `asks_again` said no is
+/// answered as one that outlasted the window.
+pub(crate) fn write_journal_on(
+    wait: WaitWithin<'_>,
+    asks_again: &dyn Fn() -> bool,
+    spell: fn(&install_txn::Failure) -> String,
+    path: &Path,
+    bytes: &[u8],
+    say: &mut dyn FnMut(&str),
+) -> Result<(), Unwritten> {
+    let WaitWithin {
+        worker,
+        within,
+        clock,
+    } = wait;
+    let began = clock.now();
     let mut write = install_txn::DurableWrite::new(path, bytes);
     let written = asked_while_held(
         within,
         &Asked::JOURNAL,
-        || write.ask(),
-        held_refusal,
-        &mut || began.elapsed(),
+        || write.ask().map_err(|failure| Spelled { failure, spell }),
+        |spelled| held_refusal(&spelled.failure),
+        &mut || clock.now().saturating_duration_since(began),
         &mut |pause| {
-            bt_platform::wait::sleep_within(worker, pause);
-            true
+            clock.pause(worker, pause);
+            asks_again()
         },
         say,
     );
-    given_up_said(written, || write.give_up(), say)
+    given_up_said(
+        written,
+        || {
+            write
+                .give_up()
+                .map_err(|failure| Spelled { failure, spell })
+        },
+        say,
+    )
+}
+
+/// **A failure of the journal's door with the words its caller says it in**
+/// ([`write_journal_on`]'s `spell`).
+struct Spelled {
+    failure: install_txn::Failure,
+    spell: fn(&install_txn::Failure) -> String,
+}
+
+impl fmt::Display for Spelled {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&(self.spell)(&self.failure))
+    }
 }
 
 /// **A journal write's end**: when it did not land, the write is given up
 /// (`give_up`: its kept temporary removed), and a removal refused is said in a
 /// line of its own, after what the rounds said; `written` is the answer either
 /// way.
-fn given_up_said(
+fn given_up_said<E: fmt::Display>(
     written: Result<(), Unwritten>,
-    give_up: impl FnOnce() -> Result<(), install_txn::Failure>,
+    give_up: impl FnOnce() -> Result<(), E>,
     say: &mut dyn FnMut(&str),
 ) -> Result<(), Unwritten> {
     if written.is_err()
@@ -1171,6 +1231,32 @@ impl WaitClock for WallClock {
 
     fn pause(&self, worker: &WorkerCtx, pause: Duration) {
         bt_platform::wait::sleep_within(worker, pause);
+    }
+}
+
+/// **A file opened without delete sharing, as a scanner or an indexer opens
+/// one, until the test lets it go; whether it was let go**
+/// (T-UPDATE-STARTUP-ON-DISK-TEMP-DIR-RACE; shared with the Prepare's held
+/// journal, T-UPDATE-PREPARE-REVALIDATION-RESUME-FLAKE). Made on Windows only:
+/// the open is `bt_platform::trust_harness::hold_without_delete_sharing`'s.
+#[cfg(test)]
+#[derive(Clone)]
+pub(crate) struct ScannerHold(std::sync::Arc<std::sync::Mutex<Option<std::fs::File>>>);
+
+#[cfg(test)]
+impl ScannerHold {
+    pub(crate) fn of(file: &Path) -> Self {
+        Self(std::sync::Arc::new(std::sync::Mutex::new(Some(
+            bt_platform::trust_harness::hold_without_delete_sharing(file).unwrap(),
+        ))))
+    }
+
+    pub(crate) fn let_go(&self) {
+        self.0.lock().unwrap().take();
+    }
+
+    pub(crate) fn was_let_go(&self) -> bool {
+        self.0.lock().unwrap().is_none()
     }
 }
 
@@ -4144,7 +4230,7 @@ mod held_journal_tests {
                 Ok(()),
                 || {
                     asked = true;
-                    Ok(())
+                    Ok::<(), install_txn::Failure>(())
                 },
                 &mut |line| said.push(line.to_owned())
             )
@@ -4152,8 +4238,11 @@ mod held_journal_tests {
         );
         assert!(!asked && said.is_empty(), "a landed write asks no removal");
         assert!(
-            given_up_said(Err(unwritten()), || Ok(()), &mut |line| said
-                .push(line.to_owned()))
+            given_up_said(
+                Err(unwritten()),
+                || Ok::<(), install_txn::Failure>(()),
+                &mut |line| said.push(line.to_owned())
+            )
             .is_err()
         );
         assert!(said.is_empty(), "a removal done says nothing: {said:?}");

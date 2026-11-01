@@ -23,6 +23,7 @@ use bt_winres::digest::{hex, sha256};
 use bt_winres::release_manifest::{PROTOCOL, RESOURCE_NAME, archive_root};
 
 use crate::i18n::Text;
+use crate::update_apply::{CountedClock, ScannerHold};
 use crate::update_archive::tests::{item_under, zip_of};
 use crate::update_job::{
     Applied, Bytes, Failure, Fetching, Gathered, Job, Presenters, Progress, Request, State, Verb,
@@ -2112,4 +2113,208 @@ fn a_layout_that_refuses_its_prepare_abandons_and_leaves_nothing() {
             Some((PhaseKind::Allocated, crate::update_txn::Adapter::Ours))
         ))
     );
+}
+
+// ── a journal held by another program ───────────────────────────────────────
+
+/// **The Prepare's own tools, but `journal.json` is opened as a scanner opens
+/// it — without delete sharing — at the first copy into the staged set**:
+/// after the journal's `Allocated` write and before its `Prepared` one
+/// (T-UPDATE-PREPARE-REVALIDATION-RESUME-FLAKE). The hold is the test's to let
+/// go, from its clock's pauses.
+struct ScansTheJournal {
+    journal: PathBuf,
+    hold: Arc<Mutex<Option<ScannerHold>>>,
+}
+
+impl Tools for ScansTheJournal {
+    fn available(&self, folder: &Path) -> Result<u64, String> {
+        System.available(folder)
+    }
+
+    fn copy(&self, from: &Path, to: &Path) -> Result<(), String> {
+        let mut hold = self.hold.lock().unwrap();
+        if hold.is_none() {
+            *hold = Some(ScannerHold::of(&self.journal));
+        }
+        drop(hold);
+        System.copy(from, to)
+    }
+}
+
+impl Scene {
+    /// A driver whose tools hold the journal ([`ScansTheJournal`]) in `hold`,
+    /// and whose held writes are asked again on `clock`.
+    fn scanned(
+        &self,
+        hold: &Arc<Mutex<Option<ScannerHold>>>,
+        clock: &Arc<CountedClock>,
+    ) -> WinPrepare {
+        WinPrepare::with(
+            self.exe.clone(),
+            Some(Channel::Ours),
+            self.ca.policy(),
+            Arc::new(ScansTheJournal {
+                journal: self.home().journal(),
+                hold: Arc::clone(hold),
+            }),
+        )
+        .on_clock(Arc::clone(clock) as Arc<dyn crate::update_apply::WaitClock>)
+    }
+}
+
+/// **The phase of the journal write a held rename keeps waiting**: the one
+/// temporary `install_txn::DurableWrite` keeps beside `journal.json` while
+/// its rename is refused.
+fn pending_phase(home: &Home) -> PhaseKind {
+    let pending: Vec<PathBuf> = std::fs::read_dir(home.root())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(OsStr::to_str)
+                .is_some_and(|name| name.starts_with(".journal.json.") && name.ends_with(".tmp"))
+        })
+        .collect();
+    let [temporary] = pending.as_slice() else {
+        panic!("one pending journal write: {pending:?}");
+    };
+    Journal::parse(&std::fs::read(temporary).unwrap())
+        .expect("a whole journal")
+        .body
+        .phase
+        .kind()
+}
+
+/// RED (T-UPDATE-PREPARE-REVALIDATION-RESUME-FLAKE; Windows) — **a Prepare
+/// whose journal another program holds open (an on-access scan of the file
+/// just written, an indexer) asks its write again after each pause, and is
+/// verified once the hold lifts**: the `Prepared` write's rename is refused
+/// while the hold lasts (`ERROR_ACCESS_DENIED`), as the applier's is
+/// (`update_apply::write_journal`, U-34). The hold lifts in the second pause
+/// it is there for; every pause is the road's counted clock's — no real wait.
+///
+/// The flake this pins: a press under load stopped at `Stopped(Journal)`
+/// (row 127's ×20, round 14); a hold planted on `journal.json` here reproduced
+/// that state exactly before the fix.
+///
+/// MUTATION: in `update_prepare_windows::journal_written`, write once with
+/// `install_txn::durable_write` and stop at `Stop::Journal` on any failure
+/// (main's road before this ticket): `Stopped(Journal)`, every run.
+#[test]
+fn a_prepare_whose_journal_is_held_writes_it_once_the_hold_lifts() {
+    let Some(scene) = Scene::new("journal-held") else {
+        return refused_off_windows();
+    };
+    let hold: Arc<Mutex<Option<ScannerHold>>> = Arc::default();
+    let lifts = Arc::clone(&hold);
+    let mut held_pauses = 0;
+    let clock = Arc::new(CountedClock::new(move |_| {
+        if let Some(held) = lifts.lock().unwrap().as_ref() {
+            held_pauses += 1;
+            if held_pauses == 2 {
+                held.let_go();
+            }
+        }
+    }));
+    let job = press(
+        &scene.scanned(&hold, &clock),
+        Arc::new(Release::of(scene.archive.clone())),
+        1,
+    );
+    assert!(
+        matches!(job.state(), State::Verified(_)),
+        "{:?}",
+        job.state()
+    );
+    assert!(
+        hold.lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(ScannerHold::was_let_go),
+        "the journal was held, and let go"
+    );
+    assert!(
+        clock.pauses() >= 2,
+        "the write was asked again after each pause"
+    );
+    assert_eq!(
+        journal_on_disk(&scene.home()).body.phase.kind(),
+        PhaseKind::Prepared
+    );
+}
+
+/// RED (T-UPDATE-PREPARE-REVALIDATION-RESUME-FLAKE; Windows) — **a Cancel
+/// while the Prepare waits out a held journal ends the wait: the `Prepared`
+/// write is not asked again, the transaction is abandoned, and nothing is
+/// left**. The test cancels in the first pause the hold is there for; in the
+/// next pause, the write waiting is the abandonment — never `Prepared` — and
+/// the hold lifts there. Every pause is the counted clock's.
+///
+/// MUTATION: in `journal_written`, `asks_again` answers yes whatever the job
+/// did (the write waiting in the second pause is `Prepared`).
+#[test]
+fn a_cancel_while_the_journal_is_held_ends_the_wait() {
+    let Some(scene) = Scene::new("journal-held-cancel") else {
+        return refused_off_windows();
+    };
+    let before = scene.installed();
+    let home = scene.home();
+    let (paused, paused_seen) = mpsc::channel();
+    let (go, go_seen) = mpsc::channel::<()>();
+    let hold: Arc<Mutex<Option<ScannerHold>>> = Arc::default();
+    let lifts = Arc::clone(&hold);
+    let waiting = Arc::new(Mutex::new(None));
+    let seen = Arc::clone(&waiting);
+    let at = home.clone();
+    let mut held_pauses = 0;
+    let clock = Arc::new(CountedClock::new(move |_| {
+        let guard = lifts.lock().unwrap();
+        let Some(held) = guard.as_ref() else {
+            return;
+        };
+        held_pauses += 1;
+        match held_pauses {
+            1 => {
+                paused.send(()).unwrap();
+                go_seen
+                    .recv_timeout(Duration::from_secs(60))
+                    .expect("the test cancels");
+            }
+            2 => {
+                *seen.lock().unwrap() = Some(pending_phase(&at));
+                held.let_go();
+            }
+            _ => {}
+        }
+    }));
+    let driver = scene.scanned(&hold, &clock);
+    let mut job = offered(1);
+    let transport: SharedTransport = Arc::new(Release::of(scene.archive.clone()));
+    job.answer_verb(Verb::Press, &driver, &transport)
+        .expect("the press is taken");
+    let deadline = Instant::now() + Duration::from_secs(300);
+    while paused_seen.try_recv().is_err() {
+        job.drain_progress();
+        assert!(
+            !matches!(job.state(), State::Verified(_) | State::Failed(..)),
+            "the Prepare ended before it waited for the held journal: {:?}",
+            job.state()
+        );
+        assert!(Instant::now() < deadline, "the journal was never held");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    job.drain_progress();
+    job.answer_verb(Verb::Cancel, &driver, &transport)
+        .expect("Cancel is on the staged card");
+    go.send(()).unwrap();
+
+    last_word(&mut job, 1);
+    assert_eq!(
+        *waiting.lock().unwrap(),
+        Some(PhaseKind::Abandoned),
+        "after the Cancel, the write waiting is the abandonment"
+    );
+    scene.left_nothing(1);
+    assert_eq!(scene.installed(), before);
 }
