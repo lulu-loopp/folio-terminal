@@ -1124,20 +1124,24 @@ mod tests {
     /// **Both ends on a counted clock** (T-LAUNCH-HANDOVER-BUDGET-ON-A-CLOCK): the client's budget,
     /// the server's steps and the listener's first word await the other end within the suite's
     /// patience, so "answered in time" is the other thread's event, never a race against 2 s or
-    /// 250 ms of real time; and neither clock moved, because nothing was spent.
+    /// 250 ms of real time; and neither clock moved, because nothing was spent. The answer is
+    /// late on purpose: the listener decides only once the client has been seen waiting for it,
+    /// so the reply is certainly heard inside the client's one wait, asked for the whole budget.
     ///
-    /// MUTATION: compute `hear`'s `left` as nothing (the budget ends at once) and the handover is
-    /// `TimedOut`; wait for the listener's first word without the clock and its first bound is
-    /// not [`FIRST_WORD_WITHIN`].
+    /// MUTATION: compute `hear`'s `left` as nothing (the budget ends at once) and the one wait is
+    /// asked for no time; wait for the listener's first word without the clock and its first
+    /// bound is not [`FIRST_WORD_WITHIN`].
     #[test]
     fn a_request_crosses_the_launch_endpoint_and_is_answered() {
         let directory = scratch(line!());
         let (sender, committed) = mpsc::channel();
+        let (waits, waiting) = mpsc::channel::<()>();
         let served = Arc::new(CountedClock::answering());
         let pipe = served_on(
             &directory,
             &served,
-            |line| {
+            move |line| {
+                crate::door_skipped::received(&waiting, "the client's wait for the reply");
                 Some(Decision {
                     reply: format!("answer to {line}"),
                     admitted: Some(line.to_owned()),
@@ -1147,7 +1151,10 @@ mod tests {
                 let _ = sender.send(admitted);
             },
         );
-        let asking = CountedClock::answering();
+        let asking = CountedClock::new(move |_, _| {
+            let _ = waits.send(());
+            Turn::Await
+        });
         let mut replied = None;
         hand_over_on(pipe.name(), "one request", &asking, |server, reply| {
             assert_eq!(
@@ -1170,10 +1177,10 @@ mod tests {
             Duration::ZERO,
             "the client spent none of its budget"
         );
-        assert!(
-            asking.asked().iter().all(|bound| *bound == HANDOVER_BUDGET),
-            "and its one wait, if it waited, was for the whole budget: {:?}",
-            asking.asked()
+        assert_eq!(
+            asking.asked(),
+            vec![HANDOVER_BUDGET],
+            "and its one wait, for the reply, was asked for the whole budget"
         );
         assert_eq!(
             served.moved(),
