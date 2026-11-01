@@ -2388,7 +2388,7 @@ impl WindowRefusal {
 
     /// Whether an applier should ask the same election again inside its one
     /// existing deadline.
-    const fn retryable(&self) -> bool {
+    pub(crate) const fn retryable(&self) -> bool {
         self.retryable
     }
 
@@ -2540,6 +2540,7 @@ pub(crate) fn take_the_window_within<C: Contender>(
         within,
         contender,
         ElectionOps {
+            lock_clock: install_txn::WallLockClock,
             after_lock: || {},
             read_owner: || read_window_owner(home, txn),
             read_phase: || read_window_phase(home, txn),
@@ -2606,7 +2607,11 @@ impl MarkWriteFailure {
     }
 }
 
-struct ElectionOps<AfterLock, ReadOwner, ReadPhase, Write, Wait> {
+struct ElectionOps<Clock, AfterLock, ReadOwner, ReadPhase, Write, Wait> {
+    /// The clock the election lock's wait is read and paused on
+    /// (`install_txn::hold_by`): `install_txn::WallLockClock` in the
+    /// product, so the wait is `install_txn::hold_within`'s.
+    lock_clock: Clock,
     after_lock: AfterLock,
     read_owner: ReadOwner,
     read_phase: ReadPhase,
@@ -2738,16 +2743,17 @@ impl Contender for Applier {
     }
 }
 
-fn take_the_window_within_using<C, AfterLock, ReadOwner, ReadPhase, Write, Ask, Wait>(
+fn take_the_window_within_using<C, Clock, AfterLock, ReadOwner, ReadPhase, Write, Ask, Wait>(
     home: &Home,
     txn: TxnId,
     me: Running,
     within: Duration,
     contender: C,
-    operations: ElectionOps<AfterLock, ReadOwner, ReadPhase, Write, Wait>,
+    operations: ElectionOps<Clock, AfterLock, ReadOwner, ReadPhase, Write, Wait>,
 ) -> Window<C>
 where
     C: Contender,
+    Clock: install_txn::LockClock,
     AfterLock: FnOnce(),
     ReadOwner: FnMut() -> io::Result<Option<Running>>,
     ReadPhase: FnMut() -> Result<PhaseKind, PhaseRead>,
@@ -2756,6 +2762,7 @@ where
     Wait: FnMut(Duration) -> bool,
 {
     let ElectionOps {
+        lock_clock,
         after_lock,
         mut read_owner,
         mut read_phase,
@@ -2763,8 +2770,12 @@ where
         mut wait,
     } = operations;
     let until = Instant::now() + within;
-    let held = match install_txn::hold_within(&owner_lock_path(home, txn), Hold::Exclusive, within)
-    {
+    let held = match install_txn::hold_by(
+        &owner_lock_path(home, txn),
+        Hold::Exclusive,
+        lock_clock.now() + within,
+        &lock_clock,
+    ) {
         Ok(Some(held)) => held,
         Ok(None) => {
             return Window::Refused(WindowRefusal {
@@ -2850,6 +2861,7 @@ pub(crate) fn take_the_window_within_at(
         within,
         Applier,
         ElectionOps {
+            lock_clock: install_txn::WallLockClock,
             after_lock,
             read_owner: || read_window_owner(home, txn),
             read_phase: || read_window_phase(home, txn),
@@ -2877,6 +2889,7 @@ pub(crate) fn take_the_window_within_writes_at<C: Contender>(
         within,
         contender,
         ElectionOps {
+            lock_clock: install_txn::WallLockClock,
             after_lock: || {},
             read_owner: || read_window_owner(home, txn),
             read_phase: || read_window_phase(home, txn),
@@ -2911,6 +2924,7 @@ pub(crate) fn take_the_window_within_reads_at(
         within,
         Applier,
         ElectionOps {
+            lock_clock: install_txn::WallLockClock,
             after_lock: || {},
             read_owner: read,
             read_phase,
@@ -2919,6 +2933,61 @@ pub(crate) fn take_the_window_within_reads_at(
                 move || write(&mark, &bytes)
             },
             wait: |_| true,
+        },
+    )
+}
+
+/// **A road's [`WaitClock`], on `worker`, as a lock wait's clock**
+/// (`install_txn::LockClock`, T-STALE-MARK-RACE-ON-A-COUNTED-CLOCK): its
+/// readings are the clock's, and each pause is the clock's pause through
+/// `worker`'s wait door. The one adapter by which a wait for a lock
+/// (`install_txn::hold_by`) reads a road's clock.
+#[cfg(test)]
+pub(crate) struct LockWaitOn<'a> {
+    pub(crate) clock: &'a dyn WaitClock,
+    pub(crate) worker: &'a WorkerCtx,
+}
+
+#[cfg(test)]
+impl install_txn::LockClock for LockWaitOn<'_> {
+    fn now(&self) -> Instant {
+        self.clock.now()
+    }
+
+    fn pause(&self, pause: Duration) {
+        self.clock.pause(self.worker, pause);
+    }
+}
+
+/// [`take_the_window_within`] with no worker's pauses (as `None` there), and
+/// the election lock's wait read and paused on `clock`
+/// (T-STALE-MARK-RACE-ON-A-COUNTED-CLOCK): only that wait is the clock's — the
+/// owner read, the journal's phase and the mark write are each asked once, so
+/// their deadlines on the real clock are never spent. A test whose contender
+/// waits for a lock another one holds ends that wait inside the pause of its
+/// choosing, by the state it awaits, never by a race between two windows.
+#[cfg(test)]
+pub(crate) fn take_the_window_on(
+    worker: &WorkerCtx,
+    clock: &dyn WaitClock,
+    home: &Home,
+    txn: TxnId,
+    me: Running,
+    within: Duration,
+) -> Window {
+    take_the_window_within_using(
+        home,
+        txn,
+        me,
+        within,
+        Applier,
+        ElectionOps {
+            lock_clock: LockWaitOn { clock, worker },
+            after_lock: || {},
+            read_owner: || read_window_owner(home, txn),
+            read_phase: || read_window_phase(home, txn),
+            write: mark_writer,
+            wait: |_| false,
         },
     )
 }
