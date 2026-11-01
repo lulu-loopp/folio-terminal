@@ -5331,7 +5331,7 @@ mod birth_death_tests {
 
     fn wait_for_answer(shell: &pty_door::ShellBirth, heard: &mpsc::Receiver<()>) {
         while !shell.answered() {
-            crate::lane::receive(heard, "the birth's wake");
+            heard.recv().expect("a birth publishes before it wakes");
         }
     }
 
