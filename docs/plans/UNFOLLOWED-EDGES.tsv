@@ -5900,6 +5900,7 @@ crates/bt-app/src/text_field.rs	bt-app crate::text_field::TextField::previous_bo
 crates/bt-app/src/text_field.rs	bt-app crate::text_field::TextField::previous_boundary	Ambiguous	next_back	1	
 crates/bt-app/src/text_field.rs	bt-app crate::text_field::TextField::word_boundary	Ambiguous	collect	1	
 crates/bt-app/src/text_field.rs	bt-app crate::text_field::TextField::word_boundary	Ambiguous	unwrap_or	1	
+crates/bt-app/src/text_field.rs	bt-app crate::text_field::caret_at_x	Dynamic	seam_x	2	2026-11-02: T-TAB-RENAME-FIELD-MOUSE-CARET (0.4.9 plan row 179); the seam-position closure `caret_at_x` is handed: its one product caller, `RenameDrawn::caret_at`, passes `ChromeTextAdvances::between` over the run the painter drew, a read of a table that reaches no door
 crates/bt-app/src/text_field.rs	bt-app crate::text_field::one_line	Ambiguous	chars	1	
 crates/bt-app/src/text_field.rs	bt-app crate::text_field::one_line	Ambiguous	collect	1	
 crates/bt-app/src/text_field.rs	bt-app crate::text_field::one_line	Ambiguous	is_control	1	
@@ -8435,7 +8436,8 @@ crates/bt-platform/src/lib.rs	bt-platform crate::ProbeChild::suspended	Ambiguous
 crates/bt-platform/src/lib.rs	bt-platform crate::ProbeChild::suspended	Ambiguous	is_ok	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::ProbeChild::suspended	Ambiguous	kind	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::ProbeChild::suspended	Ambiguous	si_pid	1	
-crates/bt-platform/src/lib.rs	bt-platform crate::ProbeChild::wait_within	Dynamic	rest	2	
+crates/bt-platform/src/lib.rs	bt-platform crate::ProbeChild::wait_within_reading	Dynamic	now	2	2026-11-01: T-PROBE-RUN-BUDGET-ON-A-CLOCK (plan row 148); the look's reading through the `now` its caller hands: Instant::now from ProbeChild::wait_within, the run's ProbeClock::now from probe_output_held_to (RealProbeClock in the product: Instant::now), a monotonic read that reaches no door
+crates/bt-platform/src/lib.rs	bt-platform crate::ProbeChild::wait_within_reading	Dynamic	rest	2	2026-11-01: T-PROBE-RUN-BUDGET-ON-A-CLOCK (plan row 148, restated at the review fold, F3); the same calls moved with wait_within's body: each caller's own rest between two looks (a worker's sleep_within, the shell probe's thread::sleep, a test's rest_a_moment, or the run's ProbeClock::rest, RealProbeClock's being sleep_within)
 crates/bt-platform/src/lib.rs	bt-platform crate::ProbeGroups::groups	Ambiguous	unwrap_or_else	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::ProbePipeDrain::finish	Ambiguous	take	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::ProbePipeDrain::finish	Ambiguous	unwrap_or_else	2	
@@ -8546,8 +8548,7 @@ crates/bt-platform/src/lib.rs	bt-platform crate::probe_leader_has_exited	Ambiguo
 crates/bt-platform/src/lib.rs	bt-platform crate::probe_leader_has_exited	Ambiguous	assume_init	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::probe_leader_has_exited	Ambiguous	kind	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::probe_leader_has_exited	Ambiguous	si_pid	1	
-crates/bt-platform/src/lib.rs	bt-platform crate::probe_outputs_within	Ambiguous	elapsed	1	
-crates/bt-platform/src/lib.rs	bt-platform crate::probe_outputs_within	Ambiguous	is_zero	1	
+crates/bt-platform/src/lib.rs	bt-platform crate::probe_outputs_within_on	Ambiguous	is_zero	1	2026-11-01: T-PROBE-RUN-BUDGET-ON-A-CLOCK (plan row 148); the same call moved with probe_outputs_within's body: Duration::is_zero on what is left of the budget, which reaches no door
 crates/bt-platform/src/lib.rs	bt-platform crate::probe_pipe	Ambiguous	finish	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::probe_pipe	Ambiguous	is_invalid	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::process_image_path	Ambiguous	ok	4	
@@ -9964,13 +9965,9 @@ crates/bt-platform/src/video/mod.rs	bt-platform crate::video::swizzle	Ambiguous	
 crates/bt-platform/src/video/mod.rs	bt-platform crate::video::swizzle	Ambiguous	chunks_exact_mut	1	
 crates/bt-platform/src/video/mod.rs	bt-platform crate::video::swizzle	Ambiguous	offset	1	
 crates/bt-platform/src/video/mod.rs	bt-platform crate::video::swizzle	Ambiguous	zip	1	
-crates/bt-platform/src/video/mod.rs	bt-platform crate::video::within_budget	Ambiguous	flatten	1	
-crates/bt-platform/src/video/mod.rs	bt-platform crate::video::within_budget	Ambiguous	ok	1	
 crates/bt-platform/src/video/mod.rs	bt-platform crate::video::within_budget	Ambiguous	recv_timeout	1	
 crates/bt-platform/src/video/mod.rs	bt-platform crate::video::within_budget	Ambiguous	send	1	
 crates/bt-platform/src/video/mod.rs	bt-platform crate::video::within_budget	Dynamic	work	1	
-crates/bt-platform/src/video_portable.rs	bt-platform crate::video::within_budget	Ambiguous	flatten	1	
-crates/bt-platform/src/video_portable.rs	bt-platform crate::video::within_budget	Ambiguous	ok	1	
 crates/bt-platform/src/video_portable.rs	bt-platform crate::video::within_budget	Ambiguous	recv_timeout	1	
 crates/bt-platform/src/video_portable.rs	bt-platform crate::video::within_budget	Ambiguous	send	1	
 crates/bt-platform/src/video_portable.rs	bt-platform crate::video::within_budget	Dynamic	work	1	
@@ -10400,6 +10397,7 @@ crates/bt-render/src/lib.rs	bt-render crate::CellMetrics::measure_at	Ambiguous	m
 crates/bt-render/src/lib.rs	bt-render crate::CellMetrics::measure_at	Ambiguous	next	1	
 crates/bt-render/src/lib.rs	bt-render crate::CellMetrics::measure_at	Ambiguous	ok_or	2	
 crates/bt-render/src/lib.rs	bt-render crate::ChromeTextAdvances::from_stops	Ambiguous	collect	1	
+crates/bt-render/src/lib.rs	bt-render crate::ChromeTextAdvances::upto	Ambiguous	saturating_sub	1	2026-11-02: T-TAB-RENAME-FIELD-MOUSE-CARET (0.4.9 plan row 179); `upto`, reached from bt-app through `RenameDrawn::caret_at`, steps back one stop with `usize::saturating_sub`, arithmetic on an index
 crates/bt-render/src/lib.rs	bt-render crate::ComposedRowCache::get	Ambiguous	is_some	1	
 crates/bt-render/src/lib.rs	bt-render crate::DeviceLossPilot::answer	Dynamic	rest	1	
 crates/bt-render/src/lib.rs	bt-render crate::DeviceResources::mint	Dynamic	driver	1	2026-10-25: T-WEBVIEW-WARMUP-DROPS-THE-DEVICE; the removal-reason reader `driver_removal_reason` returned, called from the device-loss callback: one `GetDeviceRemovedReason` on a COM reference it holds, which reaches no door

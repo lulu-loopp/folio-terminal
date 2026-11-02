@@ -399,12 +399,12 @@ impl<B: Backend> Runtime<'_, B> {
     /// file (a tab closed, a pane handed another subject, a page scrolled on) are caught by the
     /// next of these.
     pub(in crate::runtime) fn let_go_unnamed_peek_records(&mut self) {
-        if !self
-            .window
-            .peek_cache
-            .iter()
-            .any(|(_, entry)| matches!(entry, PeekCacheEntry::Failed(_)))
-        {
+        if !self.window.peek_cache.iter().any(|(_, entry)| {
+            matches!(
+                entry,
+                PeekCacheEntry::Failed(_) | PeekCacheEntry::Unanswered { .. }
+            )
+        }) {
             return;
         }
         let named = self.peek_files_named();
@@ -1181,7 +1181,9 @@ impl<B: Backend> Runtime<'_, B> {
                 height_px,
                 ..
             } => Some((*width_px, *height_px)),
-            PeekCacheEntry::Pending { .. } | PeekCacheEntry::Failed(_) => None,
+            PeekCacheEntry::Pending { .. }
+            | PeekCacheEntry::Unanswered { .. }
+            | PeekCacheEntry::Failed(_) => None,
         }
     }
 
@@ -1212,8 +1214,14 @@ impl<B: Backend> Runtime<'_, B> {
                     height_px,
                     ..
                 }) => (key.clone(), Arc::clone(rgba), *width_px, *height_px),
-                Some(PeekCacheEntry::Pending { .. } | PeekCacheEntry::Failed(_)) => return None,
-                None => {
+                Some(
+                    PeekCacheEntry::Pending { .. }
+                    | PeekCacheEntry::Unanswered { asked_again: true }
+                    | PeekCacheEntry::Failed(_),
+                ) => return None,
+                // Nothing filed, or a first frame that ran out and has not been asked again
+                // (T-FIRST-FRAME-RUN-OUT-IS-NOT-A-REFUSAL): the card asks, once.
+                None | Some(PeekCacheEntry::Unanswered { asked_again: false }) => {
                     // The one door files what it asked: the read under its identity, or the
                     // unstarted record.
                     self.request_peek_pixels(path);
@@ -3203,6 +3211,11 @@ pub(crate) fn peek_body_kind(
 /// verified again at the next command's end; a hover that settles on it again reads it again. The
 /// re-entries of one peek (its decode or its resample landing) never re-read, and one read is out
 /// at a time (`Pending`). A subject with no file behind it (`readable` false) is never read.
+///
+/// **A first frame that ran out is not a failure** (T-FIRST-FRAME-RUN-OUT-IS-NOT-A-REFUSAL): one
+/// not yet asked again is read now, on a re-entry too — the one automatic ask
+/// [`PeekCacheEntry::Unanswered`] allows; one asked again already is read on a new peek only,
+/// as a failure is.
 pub(crate) fn peek_reads_the_file(
     entry: Option<&PeekCacheEntry>,
     readable: bool,
@@ -3210,8 +3223,10 @@ pub(crate) fn peek_reads_the_file(
 ) -> bool {
     readable
         && match entry {
-            None => true,
-            Some(PeekCacheEntry::Failed(_)) => settled,
+            None | Some(PeekCacheEntry::Unanswered { asked_again: false }) => true,
+            Some(PeekCacheEntry::Failed(_) | PeekCacheEntry::Unanswered { asked_again: true }) => {
+                settled
+            }
             Some(PeekCacheEntry::Pending { .. } | PeekCacheEntry::Ready { .. }) => false,
         }
 }
@@ -3256,7 +3271,8 @@ pub(crate) fn peek_files_named(
 /// **A failed peek no surface names any more is let go of** (T-PEEK-CACHE-QUESTION-RECORDS) —
 /// [`crate::AnimationCache::let_go_unnamed`]'s rule, for the peek cache.
 ///
-/// A `Failed` record is kept exactly as long as some surface names its file (`named`, from
+/// A `Failed` record — or an `Unanswered` one, a first frame that ran out — is kept exactly as
+/// long as some surface names its file (`named`, from
 /// [`peek_files_named`]): while one does, its redraws read the failure and ask nothing; when the
 /// last one has gone, the file's next showing is new input and asks. A decode in flight is kept
 /// until its answer, which [`super::preview::file_peek_answer`] files nowhere if the file is
@@ -3265,7 +3281,10 @@ pub(crate) fn let_go_unnamed_peek_records(peek_cache: &mut PeekCache, named: &BT
     let unnamed: Vec<String> = peek_cache
         .iter()
         .filter(|(key, entry)| {
-            matches!(entry, PeekCacheEntry::Failed(_)) && !named.contains(key.as_str())
+            matches!(
+                entry,
+                PeekCacheEntry::Failed(_) | PeekCacheEntry::Unanswered { .. }
+            ) && !named.contains(key.as_str())
         })
         .map(|(key, _)| key.clone())
         .collect();
@@ -3322,6 +3341,10 @@ pub(crate) fn remember_decode(
 /// **And it files what it asked**: a read admitted is `Pending` under the identity the lane
 /// minted, which its answer is filed by ([`super::preview::file_peek_answer`]); a thread that could
 /// not be started is the unstarted record. A full lane or a refusal files nothing.
+///
+/// **A read that replaces a first frame not yet asked again is the one more ask**
+/// (T-FIRST-FRAME-RUN-OUT-IS-NOT-A-REFUSAL): its `Pending` says so (`once_more`), which is how
+/// its answer knows that a second run-out has been asked again already.
 pub(crate) fn ask_for_peek_pixels(
     peek_cache: &mut PeekCache,
     computation: &computation_lane::ComputationLane,
@@ -3349,8 +3372,14 @@ pub(crate) fn ask_for_peek_pixels(
         Err(_) => PeekAsk::Refused,
     };
     let key = bt_term::normalized_local_image_path_key(path);
+    let once_more = matches!(
+        peek_cache.peek(&key),
+        Some(PeekCacheEntry::Unanswered { asked_again: false })
+    );
     match asked {
-        PeekAsk::Asked(asked) => peek_cache.insert(key, PeekCacheEntry::Pending { asked }),
+        PeekAsk::Asked(asked) => {
+            peek_cache.insert(key, PeekCacheEntry::Pending { asked, once_more });
+        }
         PeekAsk::Unstarted => peek_cache.insert(key, unstarted_pixels()),
         PeekAsk::NotNow | PeekAsk::Refused => {}
     }
@@ -3359,12 +3388,16 @@ pub(crate) fn ask_for_peek_pixels(
 
 /// **A glance card opening over a file** (T-PEEK-CACHE-QUESTION-RECORDS round 2): a new card is
 /// the card's own new input, so a failure filed for its file is let go of and the card's body
-/// asks again — [`peek_reads_the_file`]'s rule for a hover that settles, said for the card. The
+/// asks again — [`peek_reads_the_file`]'s rule for a hover that settles, said for the card, and
+/// the same for a first frame that ran out (T-FIRST-FRAME-RUN-OUT-IS-NOT-A-REFUSAL). The
 /// moment is the opening and not the teardown: a card coming down is a surface leaving, which
 /// lets a failure go only when no other surface names the file ([`let_go_unnamed_peek_records`]).
 pub(crate) fn peek_card_opened(peek_cache: &mut PeekCache, card_file: &Path) {
     let key = bt_term::normalized_local_image_path_key(card_file);
-    if matches!(peek_cache.peek(&key), Some(PeekCacheEntry::Failed(_))) {
+    if matches!(
+        peek_cache.peek(&key),
+        Some(PeekCacheEntry::Failed(_) | PeekCacheEntry::Unanswered { .. })
+    ) {
         peek_cache.remove(&key);
     }
 }

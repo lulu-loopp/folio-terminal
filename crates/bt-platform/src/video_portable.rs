@@ -4,8 +4,9 @@
 //! `bt-app` names eleven things from `video` and `video::engine`, and every one
 //! of them is here. Three of them now do something: [`first_frame`],
 //! [`decode_first_frame`] and [`decode_first_frame_measured`] reach
-//! `AVAssetImageGenerator` on macOS through `src/macos_video.rs`, and answer
-//! `None` on a third platform exactly as they did before. The rest is still
+//! `AVAssetImageGenerator` on macOS through `src/macos_video.rs`, and refuse
+//! on a third platform exactly as they did before ([`NoFrame::Refused`] from
+//! [`first_frame`], `None` from the clock-free two). The rest is still
 //! nothing: `Engine::open` answers `EngineError::Unsupported`, which the video
 //! pane reads as *this machine cannot play this*, prints under a black
 //! rectangle, and goes on.
@@ -50,6 +51,8 @@
 //! Windows machine, where only one of them can be built.
 
 use std::time::Duration;
+
+pub use crate::first_frame_answer::NoFrame;
 
 /// How far into a video the first frame is taken from — the same tenth the
 /// Windows arm seeks to, because the reason is the content and not the API: the
@@ -163,13 +166,16 @@ pub use no_decoder::{decode_first_frame, decode_first_frame_measured, first_fram
 mod no_decoder {
     use std::path::Path;
 
-    use super::{FirstFrameCost, VideoFrame};
+    use super::{FirstFrameCost, NoFrame, VideoFrame};
 
     /// **The first frame of a video, for the hover card and the preview pane.**
-    #[must_use]
-    pub fn first_frame(path: &Path, fit_width: u32, fit_height: u32) -> Option<VideoFrame> {
+    pub fn first_frame(
+        path: &Path,
+        fit_width: u32,
+        fit_height: u32,
+    ) -> Result<VideoFrame, NoFrame> {
         let _ = (path, fit_width, fit_height);
-        None
+        Err(NoFrame::Refused)
     }
 
     /// The same answer with no clock over it.
@@ -186,10 +192,8 @@ mod no_decoder {
         fit_width: u32,
         fit_height: u32,
     ) -> (Option<VideoFrame>, FirstFrameCost) {
-        (
-            first_frame(path, fit_width, fit_height),
-            FirstFrameCost::default(),
-        )
+        let _ = (path, fit_width, fit_height);
+        (None, FirstFrameCost::default())
     }
 }
 
@@ -215,9 +219,10 @@ fn contain(size: (u32, u32), fit: (u32, u32)) -> (u32, u32) {
 
 /// **Run `work` on a thread of its own and stop waiting for it after `budget`.**
 ///
-/// The Windows arm's `within_budget`, and the same two endings a caller cannot
-/// tell apart and does not need to: the work answered `None`, or it had not
-/// answered at all when the budget ran out.
+/// The Windows arm's `within_budget`, and the same two endings told apart the
+/// same way (T-FIRST-FRAME-RUN-OUT-IS-NOT-A-REFUSAL): the work answered `None`
+/// or panicked — [`NoFrame::Refused`] — or it had not answered when the budget
+/// ran out, or its thread could not be started — [`NoFrame::RanOut`].
 ///
 /// The thread that overran is **not** cancelled. `AVAssetImageGenerator` does
 /// have a `cancelAllCGImageGeneration`, and it is not used here, because it
@@ -231,17 +236,24 @@ fn contain(size: (u32, u32), fit: (u32, u32)) -> (u32, u32) {
 fn within_budget<T: Send + 'static>(
     budget: Duration,
     work: impl FnOnce() -> Option<T> + Send + 'static,
-) -> Option<T> {
+) -> Result<T, NoFrame> {
     let (answer, wait) = std::sync::mpsc::channel();
-    crate::spawn_at_priority(
+    if crate::spawn_at_priority(
         "folio-video-frame",
         crate::ThreadPriority::Normal,
         move |_ctx| {
             let _ = answer.send(work());
         },
     )
-    .ok()?;
-    wait.recv_timeout(budget).ok().flatten()
+    .is_err()
+    {
+        return Err(NoFrame::RanOut);
+    }
+    match wait.recv_timeout(budget) {
+        Ok(Some(found)) => Ok(found),
+        Ok(None) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(NoFrame::Refused),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(NoFrame::RanOut),
+    }
 }
 
 /// **The macOS `within_budget`, stated the way the Windows arm's is**
@@ -258,7 +270,7 @@ mod macos_budget_tests {
     use std::sync::mpsc;
     use std::time::Duration;
 
-    use super::within_budget;
+    use super::{NoFrame, within_budget};
 
     /// The suite's patience for planted work that is held: a wait that never
     /// ends turns into a late answer and a red, never a hang. The Windows arm's
@@ -271,25 +283,34 @@ mod macos_budget_tests {
         let _ = release.recv_timeout(PATIENCE);
     }
 
-    /// PIN — **an answer inside the budget is the answer, and work that has not
-    /// answered when the budget ends is the module's one silence.**
+    /// RED — **an answer inside the budget is the answer, a refusal inside it is
+    /// a refusal, and work that has not answered when the budget ends ran out —
+    /// which is not a refusal** (T-FIRST-FRAME-RUN-OUT-IS-NOT-A-REFUSAL).
     ///
-    /// The first arm hands [`within_budget`] work that answers at once under an
-    /// hour; the second hands it work held until the test has the answer, so no
-    /// budget and no machine can let it answer first. Neither arm can be made red
-    /// or green by a busy machine.
+    /// The first two arms hand [`within_budget`] work that answers at once under
+    /// an hour; the third hands it work held until the test has the answer, so no
+    /// budget and no machine can let it answer first. No arm can be made red or
+    /// green by a busy machine.
     ///
-    /// MUTATIONS: answer `None` whatever the work said (or wait with a zero
+    /// MUTATIONS: answer `RanOut` whatever the work said (or wait with a zero
     /// budget, which a thread spawn and a send cannot meet before the wait has
     /// looked — this one is caught by chance, not by construction) — the first
-    /// arm reads `None`. Swap `recv_timeout` for `recv` — the second arm waits
-    /// for the held work to let itself go after [`PATIENCE`] and reads `Some`.
+    /// two arms read `RanOut`. Swap `recv_timeout` for `recv` — the third arm
+    /// waits for the held work to let itself go after [`PATIENCE`] and reads
+    /// `Ok`. Map the timeout to `Refused` (plant
+    /// `plant-164-runout-mapped-to-refused.py`) — the third arm reads the
+    /// refusal a good file under load used to be filed as.
     #[test]
     fn a_question_that_cannot_finish_is_given_up_on() {
         assert_eq!(
             within_budget(Duration::from_secs(3_600), || Some(7_u32)),
-            Some(7),
+            Ok(7),
             "an answer inside the budget is the answer"
+        );
+        assert_eq!(
+            within_budget(Duration::from_secs(3_600), || None::<u32>),
+            Err(NoFrame::Refused),
+            "work that answers with nothing inside the budget is a refusal"
         );
         let (release, held) = mpsc::channel::<()>();
         let (finished, done) = mpsc::channel();
@@ -303,8 +324,9 @@ mod macos_budget_tests {
         let _ = release.send(());
         let _ = done.recv();
         assert_eq!(
-            answer, None,
-            "work that has not answered by the end of the budget is the module's one silence"
+            answer,
+            Err(NoFrame::RanOut),
+            "work that has not answered by the end of the budget ran out, which is not a refusal"
         );
         assert!(
             still_running,

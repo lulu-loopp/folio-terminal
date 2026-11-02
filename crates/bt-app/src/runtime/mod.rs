@@ -141,20 +141,22 @@ pub(crate) use pointer::{
     is_wheel_event, pointer_in_native_window, station_of,
 };
 #[cfg(test)]
+pub(crate) use preview::video_facts_to_file;
+#[cfg(test)]
 pub(crate) use preview::{
     animation_layer_key, animation_refusal_notice, animation_surface_exists, answer_one_picture,
     ask_to_open, build_preview_diff_body, build_preview_markdown_body, build_preview_table_body,
     build_preview_text_body, crumb_segments, crumb_segments_on, deliver_clipboard_picture,
-    documents_held_in, documents_held_mut_in, file_peek_answer, files_a_tab_stands_on,
-    folded_levels, foot_revealed_label, forget_a_picture, forget_standing_answers,
-    image_clamped_pan, image_destination, image_is_pannable, image_meta_sentence, image_pan_key,
-    image_raster_cap, image_zoom_caption, image_zoom_key, image_zoom_notch, image_zoom_settles,
-    image_zoom_toggled, markdown_chip_ground, markdown_empty_page_offset,
-    markdown_prose_paragraphs, markdown_source_cell, markdown_source_offset_at,
-    owe_sharpened_rasters, page_address_hand_off, page_foot_flash, page_foot_lead,
-    page_source_file, peek_awaits, picture_errand, picture_files_of, pictures_awaited_by,
-    pictures_need_handing_over, preview_block_bar_at, preview_block_wheel, preview_caret_row,
-    preview_copies_on_select, preview_document_height, preview_document_key,
+    documents_held_in, documents_held_mut_in, file_peek_answer, file_peek_video_answer,
+    files_a_tab_stands_on, folded_levels, foot_revealed_label, forget_a_picture,
+    forget_standing_answers, image_clamped_pan, image_destination, image_is_pannable,
+    image_meta_sentence, image_pan_key, image_raster_cap, image_zoom_caption, image_zoom_key,
+    image_zoom_notch, image_zoom_settles, image_zoom_toggled, markdown_chip_ground,
+    markdown_empty_page_offset, markdown_prose_paragraphs, markdown_source_cell,
+    markdown_source_offset_at, owe_sharpened_rasters, page_address_hand_off, page_foot_flash,
+    page_foot_lead, page_source_file, peek_awaits, picture_errand, picture_files_of,
+    pictures_awaited_by, pictures_need_handing_over, preview_block_bar_at, preview_block_wheel,
+    preview_caret_row, preview_copies_on_select, preview_document_height, preview_document_key,
     preview_document_max_scroll, preview_edit_bands, preview_image_placement,
     preview_link_activation, preview_link_answers_a_press, preview_opened_label,
     preview_page_browser_hand_off, preview_page_hand_off, preview_press_opens_its_link,

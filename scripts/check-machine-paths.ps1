@@ -10,7 +10,8 @@
 #     spell out a home directory; they are not allowed to spell out *a* home
 #     directory. The placeholder list below is the whole permitted vocabulary.
 #   * an e-mail address outside the reserved example domains (RFC 2606/6761).
-#   * the checkout path this product was developed in.
+#   * the checkout path this product was developed in, and the owner's
+#     synced-documents folder that his other projects live under.
 #   * the author's account name, in any case — except on a line that names them
 #     as the holder of something: a copyright notice, or, since 0.2.0, the
 #     sentence that says who signed the release. Both are the attribution rather
@@ -22,8 +23,9 @@
 #   * `vendor/`, `licenses/` and `THIRD-PARTY-NOTICES.md` — third-party code and
 #     licence texts carry their own authors' names and addresses. Those addresses
 #     are the attribution; removing them is the breach, not the fix.
-#   * the dated record inside `docs/` — the folders listed in
-#     `$docsNotScanned` below, each with its reason. They are verbatim history
+#   * the dated record inside `docs/` — the folders and files listed in
+#     `$docsNotScanned` below, each with its reason (and, inside `docs/plans/`,
+#     the date it was last changed). They are verbatim history
 #     (transcripts, evidence logs, quoted prompts, handoffs), and a
 #     record rewritten to pass a scan is no longer the record. One more file,
 #     listed in `$authorNameAllowed`, is scanned in full except for the
@@ -78,9 +80,61 @@ try {
     # name, so a machine path landed in `docs/ARCHITECTURE-GUARDS.md` unseen (row
     # 113's review, N3). Each entry is a prefix and says why it may hold what the
     # rest of the tree may not.
+    #
+    # **`docs/plans/` is scanned, all but its frozen record** (2026-11-01, 0.4.9
+    # row 158; until then the whole folder sat here). It is the one dated folder
+    # still written to: the generated lists, the release notes and their template,
+    # the runbooks and the design notes code rows keep editing. Those are scanned
+    # like any other file, so a generator that writes a machine path is caught at
+    # its output and fixed at the generator. What stays out is the record that has
+    # not changed since the date its entry gives and carries the hits it was
+    # written with: a folder when the whole folder is a closed campaign, a file by
+    # name when its folder is still living. A closed folder could still take a
+    # new file unseen; a new campaign gets a new folder, and that is scanned.
+    #
+    # An entry ending in `/` is a folder; any other is one file, matched whole.
+    # An entry that names no tracked file is refused as stale, so the table
+    # cannot keep excusing a path that has moved. (An entry whose files have
+    # lost their hits is not caught: that would mean scanning what is excluded.
+    # Only a path with a hit belongs here, and a folder only when nothing in it
+    # is read by the product or by another check.)
     $docsNotScanned = [ordered]@{
-        # Plans, evidence runs (gate logs recorded verbatim) and agent transcripts.
-        "docs/plans/"    = "dated planning record and verbatim evidence, 2026-07 to date"
+        # Closed campaigns, whole: reviews and their answers, evidence runs (gate
+        # logs and `.jsonl` recorded verbatim), agent transcripts.
+        "docs/plans/review/"              = "frozen since 2026-09-24: review reports and answers quoting the reviewed tree"
+        "docs/plans/web-preview/"         = "frozen since 2026-09-07: web-preview reviews and verbatim gate evidence"
+        "docs/plans/horizontal-scroll/"   = "frozen since 2026-09-07: horizontal-scroll plan and its reviews"
+        "docs/plans/underline-hardening/" = "frozen since 2026-08-23: underline scenarios as run"
+        "docs/plans/agents/"              = "frozen since 2026-09-20: agent survey"
+        # The Mac port: its plan is living, its transcripts and probes are not.
+        "docs/plans/port/m3-5/"           = "frozen since 2026-09-12: agent transcript, verbatim"
+        "docs/plans/port/m4-7/"           = "frozen since 2026-09-12: agent transcript, verbatim"
+        "docs/plans/port/m4-9/"           = "frozen since 2026-09-12: agent transcript, verbatim"
+        "docs/plans/port/probe-x3-keyboard-ime-2026-09-12.md" = "frozen since 2026-09-12: probe record, as run"
+        "docs/plans/port/probe-x4-app-delegate-2026-09-12.md" = "frozen since 2026-09-12: probe record, as run"
+        # Attention: the evidence and the plan are record; the hook fixtures
+        # beside them are the product's `include_str!` expectations, and scanned.
+        "docs/plans/attention/evidence-2026-08-25.md"            = "frozen since 2026-08-25: verbatim evidence"
+        "docs/plans/attention/evidence-cli-survey-2026-08-25.md" = "frozen since 2026-08-26: verbatim CLI survey"
+        "docs/plans/attention/evidence-turn-end-words-2026-09-01.md" = "frozen since 2026-09-07: verbatim evidence"
+        "docs/plans/attention/plan.md"                           = "frozen since 2026-09-15: the attention plan"
+        # UI style: the audit is record; the copy guide beside it is a living rulebook.
+        "docs/plans/ui-style/audit-codex-2026-08-25.md"          = "frozen since 2026-08-25: review answer, verbatim"
+        # Dated plans in folders that are still written to.
+        "docs/plans/bt-app-split-inventory-2026-09-15.md" = "frozen since 2026-09-15: dated split inventory"
+        "docs/plans/bt-app-split-pins-2026-09-21.tsv"     = "frozen since 2026-09-21: dated split pins"
+        "docs/plans/paste-paths-design.md"                = "frozen since 2026-09-15: paste-paths design and its worked paths"
+        "docs/plans/shell-matrix-2026-09-07.md"           = "frozen since 2026-09-08: shell matrix as measured"
+        "docs/plans/design/agent-workbench-0.5-2026-09-20.md"           = "frozen since 2026-09-27: dated design note"
+        "docs/plans/design/spare-web-controller-review-codex-2026-09-25.md" = "frozen since 2026-09-24: review answer, verbatim"
+        "docs/plans/design/present-never-blocks-input-2026-09-20.md"    = "frozen since 2026-09-20: dated design note"
+        "docs/plans/design/render-handoff-2026-09-16.md"                = "frozen since 2026-09-15: dated design note"
+        "docs/plans/release/readiness-audit-2026-08-27.md"       = "frozen since 2026-09-15: dated readiness audit"
+        "docs/plans/release/readiness-review-codex-2026-08-27.md" = "frozen since 2026-09-07: review answer, verbatim"
+        "docs/plans/release/readiness-gaps-2026-08-27.md"        = "frozen since 2026-08-27: dated readiness gaps"
+        "docs/plans/release/license-review-codex-2026-08-27.md"  = "frozen since 2026-08-27: review answer, verbatim"
+        "docs/plans/release/plan.md"                             = "frozen since 2026-09-07: the 0.1 release plan"
+        "docs/plans/release/winget.md"                           = "frozen since 2026-09-20: winget submission record"
         # Review reports quote the paths of the tree they reviewed.
         "docs/reviews/"  = "dated review reports quoting the reviewed tree"
         # The prompts handed to agents, kept as sent, trailers included.
@@ -144,16 +198,31 @@ try {
     # directly under `Developer\` (`Developer\wt`, `Developer\trace`,
     # `Developer\launchers`, `Developer\build`), and the last two still do on
     # this machine. Each is named whole, so a neighbour such as `wtx` passes.
-    # Never a bare drive-letter `\Developer\`: a product fixture is meant to
-    # stand in a drive-letter `\Developer\<folder>\…` that no machine of this
-    # project's has used (`notes`, `Ledger`, `elsewhere`, …), and such a path
-    # names nobody's machine. Not every fixture does yet: some product files
-    # still stand in the product's pre-rename checkout folder (and a few in
-    # other folders this machine has used); 0.4.9 row 159 rewrites them.
+    # **And the layout before the product's rename** (2026-11-01, 0.4.9 row
+    # 159): the checkout sat in `Developer\folio-terminal`, named after the
+    # repository, and its worktrees in `Developer\bt-wt`. The repository keeps
+    # that name, so the bare word is its address in every release URL and is
+    # not refused; only the folder under `Developer\` is. Its worktree folder is
+    # refused with its hyphenated siblings (`bt-wt-build`, …, all real); the one
+    # the append-only log spells passes only by its keyed row in the DESIGN list.
+    # Never a bare drive-letter `\Developer\`: a product fixture stands in a
+    # drive-letter `\Developer\<folder>\…` that no machine of this project's
+    # has used (`notes`, `Ledger`, `elsewhere`, `lunar-workshop`, …), and such
+    # a path names nobody's machine. A fixture that replaces a recorded folder
+    # takes a neutral name of the same length, so the recording's widths hold.
     # Nor `Developer\Folio\` alone: a fixture standing in a folder named after
     # the product (`…\Developer\folio\notes.md`, `…\Developer\Folio\docs`) is a
     # placeholder like `folio` in the account list below, not this checkout.
-    $checkout_re = [regex]"(?i)Developer[\\/]{1,2}(?:BetterTerminal|Folio[\\/]{1,2}(?:BetterTerminal|trace|wt)\b|(?:wt|trace|launchers|build)\b)"
+    $checkout_re = [regex]"(?i)Developer[\\/]{1,2}(?:BetterTerminal|Folio[\\/]{1,2}(?:BetterTerminal|trace|wt)\b|(?:wt|trace|launchers|build)\b|folio-terminal\b|bt-wt\b)"
+    # **The owner's synced-documents folder** (2026-11-01, 0.4.9 row 159; row
+    # 157's review F3). Projects outside this one live under it, and recorded
+    # captions and prompts from them reached product fixtures, where neither
+    # pattern above could see them: there is no `Users\` in front of it and no
+    # listed folder behind `Developer\`. It is refused under the checkout check,
+    # in its drive-letter, `file:///` and WSL spellings. A redirected Documents
+    # folder on another drive (`X:\Documents\PowerShell\…`) is a Windows layout
+    # the product has to handle, not this machine's, and stays allowed.
+    $synced_re = [regex]"(?i)(?:[A-Za-z]:|/mnt/[a-z])[\\/]{1,2}Documents[\\/]{1,2}SyncFolder\b"
     $author_re = [regex]"(?i)weiyi|umich\.edu"
     # The three sentences the name above may appear in — see the loop below.
     $copyright_re = [regex]"(?i)copyright\b.*\bweiyi shi\b"
@@ -180,7 +249,12 @@ try {
     # `WeiyiShi.Folio` has no space in it for `weiyi shi` to match, and a test
     # that names a *different* holder beside this one to prove the comparison
     # refuses it carries no word about signing at all.
-    $publisher_re = [regex]"(?i)\b(?:CN|O)=Weiyi Shi\b|PublisherDisplayName|\bWeiyiShi\.Folio"
+    # **The winget manifest folder too** (2026-11-01, 0.4.9 row 158):
+    # `manifests/w/WeiyiShi/Folio` is the same publisher-scoped identity spelt
+    # as winget-pkgs files it, and a runbook that pastes the folder (the clean-VM
+    # one copies it into the guest) says who published the package, not whose
+    # machine it was built on.
+    $publisher_re = [regex]"(?i)\b(?:CN|O)=Weiyi Shi\b|PublisherDisplayName|\bWeiyiShi\.Folio|\bmanifests[\\/]{1,2}w[\\/]{1,2}WeiyiShi[\\/]{1,2}Folio\b"
 
     $problems = New-Object System.Collections.Generic.List[string]
 
@@ -198,7 +272,7 @@ try {
         $hash = [Security.Cryptography.SHA256]::HashData($bytes)
         ([Convert]::ToHexString($hash).Substring(0, 16)).ToLowerInvariant()
     }
-    $row_re = [regex]"^(?<key>[0-9a-f]{16}) (?<check>author|checkout|home|mail) (?<date>\d{4}-\d{2}-\d{2}) (?<reason>old-checkout example|author|runner account|false positive): (?<shape>\S.*)$"
+    $row_re = [regex]"^(?<key>[0-9a-f]{16}) (?<check>author|checkout|home|mail) (?<date>\d{4}-\d{2}-\d{2}) (?<reason>old-checkout example|synced-folder example|author|runner account|false positive): (?<shape>\S.*)$"
     $keyedRows = @{}
     if (-not $PrintKeys) {
         foreach ($listed in $keyedAllowList.Keys) {
@@ -227,7 +301,12 @@ try {
     # the other three can match across a line break, so they ask the text whole.
     $hitsIn = {
         param([string] $text, [bool] $nameAllowed)
-        foreach ($line in ($text -split "`n")) {
+        # Only a text that names the author is split into lines, and only a line
+        # that names them is asked what sentence it is (row 158: the scan of
+        # `docs/plans/` must not cost the licensing job seconds).
+        $lines = if ($author_re.IsMatch($text)) { $text -split "`n" } else { @() }
+        foreach ($line in $lines) {
+            if (-not $author_re.IsMatch($line)) { continue }
             $notice = $nameAllowed -or $copyright_re.IsMatch($line) -or
                       $signed_re.IsMatch($line) -or $publisher_re.IsMatch($line)
             foreach ($m in $author_re.Matches($line)) {
@@ -237,6 +316,9 @@ try {
         }
         foreach ($m in $checkout_re.Matches($text)) {
             [pscustomobject]@{ Check = "checkout"; Value = $m.Value; Problem = "names the development checkout: $($m.Value)" }
+        }
+        foreach ($m in $synced_re.Matches($text)) {
+            [pscustomobject]@{ Check = "checkout"; Value = $m.Value; Problem = "names the owner's synced-documents folder: $($m.Value)" }
         }
         foreach ($m in $home_re.Matches($text)) {
             $who = $m.Groups[1].Value
@@ -270,9 +352,21 @@ try {
         }
     }
 
+    # Every entry of `$docsNotScanned` that excused at least one tracked file.
+    $excusing = @{}
+    $excludedFolders = @($docsNotScanned.Keys | Where-Object { $_.EndsWith("/") })
+    $excludedFiles = [Collections.Generic.HashSet[string]]::new(
+        [string[]]@($docsNotScanned.Keys | Where-Object { -not $_.EndsWith("/") }), [StringComparer]::Ordinal)
     foreach ($rel in $tracked) {
         if ($skipPaths | Where-Object { $rel.StartsWith($_) }) { continue }
-        if ($docsNotScanned.Keys | Where-Object { $rel.StartsWith($_) }) { continue }
+        if ($excludedFiles.Contains($rel)) { $excusing[$rel] = $true; continue }
+        $folder = $null
+        if ($rel.StartsWith("docs/")) {
+            foreach ($prefix in $excludedFolders) {
+                if ($rel.StartsWith($prefix, [StringComparison]::Ordinal)) { $folder = $prefix; break }
+            }
+        }
+        if ($folder) { $excusing[$folder] = $true; continue }
         if ($skipExt -contains [IO.Path]::GetExtension($rel).ToLowerInvariant()) { continue }
 
         $full = Join-Path $repo $rel
@@ -329,6 +423,13 @@ try {
     }
 
     if ($PrintKeys) { return }
+
+    # An exclusion that excused nothing names a path that has moved or gone.
+    foreach ($entry in $docsNotScanned.Keys) {
+        if (-not $excusing.ContainsKey($entry)) {
+            $problems.Add("`$docsNotScanned entry $entry is stale - no tracked file is under it any more (remove the entry, or point it at where the record moved)")
+        }
+    }
 
     # A row left over matched no hit: the line it was taken from has changed.
     foreach ($listed in $keyedRows.Keys) {

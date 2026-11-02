@@ -17554,7 +17554,7 @@ mod tests {
     #[test]
     fn a_row_is_tipped_with_what_its_caption_left_out_and_nothing_else() {
         let scale = 1.0;
-        let vault = [term(r"D:\Developer\folio-terminal\crates", None, 30)];
+        let vault = [term(r"D:\Developer\lunar-workshop\crates", None, 30)];
         // **Laid out on the machine it is tipped on**, which since 2026-08-29 is
         // not a formality: the list a bare box gets is what it can start, so a
         // menu laid out as `equipped` and tipped as `bare` would be a fixture
@@ -17640,7 +17640,7 @@ mod tests {
             vec![(
                 MenuRow::Recent(0),
                 whole.recent[0],
-                r"D:\Developer\folio-terminal\crates".to_owned()
+                r"D:\Developer\lunar-workshop\crates".to_owned()
             )],
         );
         assert_eq!(
@@ -19334,8 +19334,8 @@ mod tests {
         for (windows, wsl) in [
             (r"C:\Users\Alice", "/mnt/c/Users/Alice"),
             (
-                r"D:\Developer\folio-terminal",
-                "/mnt/d/Developer/folio-terminal",
+                r"D:\Developer\lunar-workshop",
+                "/mnt/d/Developer/lunar-workshop",
             ),
             // The letter is lower-cased going out and upper-cased coming back:
             // `/mnt/C` is not one of WSL's mounts, and `c:\` is not how Windows
@@ -19426,8 +19426,8 @@ mod tests {
     /// at is standing" — quietly not kept for three quarters of the table.
     #[test]
     fn a_new_tab_inherits_a_folder_whenever_the_shell_it_starts_can_name_it() {
-        let windows = Path::new(r"D:\Developer\folio-terminal");
-        let mounted = Path::new("/mnt/d/Developer/folio-terminal");
+        let windows = Path::new(r"D:\Developer\lunar-workshop");
+        let mounted = Path::new("/mnt/d/Developer/lunar-workshop");
         let inside = Path::new("/home/alice/src");
         for (source, profile) in shipped_rows().iter().enumerate() {
             for (target, other) in shipped_rows().iter().enumerate() {
@@ -21112,7 +21112,7 @@ mod tests {
             // `||` in the mock-up falls through an empty string: a row captioned
             // with nothing is a row you cannot tell from the one above it.
             term("C:\\Users\\Alice\\empty", Some(""), 120),
-            files("D:\\Developer\\folio-terminal\\", 180),
+            files("D:\\Developer\\lunar-workshop\\", 180),
         ];
         let layout = layout(
             anchor(1.0),
@@ -21139,7 +21139,7 @@ mod tests {
             .iter()
             .map(|label| label.text.as_str())
             .collect();
-        for name in ["build", "notes", "empty", "folio-terminal"] {
+        for name in ["build", "notes", "empty", "lunar-workshop"] {
             assert!(drawn.contains(&name), "{name} is missing from {drawn:?}");
         }
     }

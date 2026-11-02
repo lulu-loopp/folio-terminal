@@ -583,6 +583,7 @@ impl<B: Backend> Runtime<'_, B> {
             // And an editor with no box has no caret to publish: the IME is told
             // so rather than left holding the last rectangle this tab had.
             self.window.rename_caret_line = None;
+            self.window.rename_drawn = None;
             return;
         };
         let box_width = title_box[2] - title_box[0];
@@ -597,7 +598,7 @@ impl<B: Backend> Runtime<'_, B> {
             return;
         };
         let mut shape = |text: &str| renderer.chrome_text_advances(gpu, text, font_px);
-        let fitted = editor.fit(box_width, caret_width, true, &mut shape);
+        let (fitted, drawn) = editor.fit(title_box[0], box_width, caret_width, true, &mut shape);
         let caret_px = fitted.caret_px;
         content.edit = Some(seats::TabEdit {
             placeholder: content
@@ -616,6 +617,7 @@ impl<B: Backend> Runtime<'_, B> {
         // it — one derivation still, taken at the moment it is true.
         let x = (title_box[0] + caret_px).min(title_box[2] - caret_width);
         self.window.rename_caret_line = Some([x, title_box[1], x + caret_width, title_box[3]]);
+        self.window.rename_drawn = Some(drawn);
     }
 
     /// **K124/N157 — the pane's stand-in in the strip**, and the slot it takes.
@@ -3292,6 +3294,11 @@ impl<B: Backend> Runtime<'_, B> {
         let Some(editor) = self.window.rename.take() else {
             return Ok(());
         };
+        // **The draft's drawn run and a drag across it go with the editor**
+        // (0.4.9 plan row 179): the run is a picture of this draft, and a
+        // selection being drawn is drawn in this box — every exit is this one.
+        self.window.rename_drawn = None;
+        self.drop_rename_selection();
         let commit = exit.commits();
         // **The file the preview head names** (user ruling 2026-08-19). It
         // leaves through the same two paths a tab's name does — Enter, Escape
@@ -5329,14 +5336,13 @@ mod birth_death_tests {
         )
     }
 
-    /// Waits for the birth's wake without the suite's patience: the fresh birth below starts a
-    /// real default shell, which can take longer than that to be born (plan row 167). The wait
-    /// holds nothing the test lets go, so it is not a held door: the suite's watchdog (row 113)
-    /// ends a birth that never wakes red by name, and the test shell's own setup gives up at
-    /// 180 s.
+    /// Waits for the birth's wake within the lane suite's patience: both births below are born
+    /// at once — the fallback's answer is its `CreateProcess`, the fresh birth's a shell that owes
+    /// no history refusal (`test_support::a_quiet_shell`, plan row 167) — so a birth that never
+    /// wakes is red by name here and not a hang.
     fn wait_for_answer(shell: &pty_door::ShellBirth, heard: &mpsc::Receiver<()>) {
         while !shell.answered() {
-            heard.recv().expect("a birth publishes before it wakes");
+            crate::lane::receive(heard, "the birth's wake");
         }
     }
 
@@ -5528,8 +5534,10 @@ mod birth_death_tests {
         assert!(!tab_has_ended(true, true) && tab_has_ended(true, false));
     }
 
-    /// MUTATION (observed RED in T-BIRTH-OFF-WINDOW): drop an ordinary landing's owed size and the
-    /// PTY remains at its born size. This is the no-regression twin of the fallback test above.
+    /// MUTATION (observed RED in T-BIRTH-OFF-WINDOW, again in plan row 167): drop an ordinary
+    /// landing's owed size and the PTY remains at its born size. This is the no-regression twin of
+    /// the fallback test above. Its shell is a quiet one: the claim needs a live pseudoconsole
+    /// and not the default shell, whose history refusal took ~18 s to read back (plan row 167).
     #[test]
     fn a_fresh_birth_still_lands_at_the_size_released_while_it_was_pending() {
         test_support::on_the_window_thread();
@@ -5557,12 +5565,11 @@ mod birth_death_tests {
         let shell = pty_door::request(
             move |_| {
                 worker_open.pass();
-                bt_pty::test_shell::TestShell::spawn_default(bt_pty::PtySize::cells(
+                test_support::a_quiet_shell(bt_pty::PtySize::cells(
                     born_grid.columns,
                     born_grid.rows,
                 ))
-                .map(|shell| {
-                    let (session, shell_hygiene) = shell.into_session();
+                .map(|(session, shell_hygiene)| {
                     let _ = kept.send(shell_hygiene);
                     session
                 })
@@ -5599,7 +5606,7 @@ mod birth_death_tests {
             "the fresh PTY still receives the size released while it was pending"
         );
         drop(leaf);
-        drop(hygiene.recv().expect("the fresh shell's hygiene"));
+        drop(crate::lane::receive(&hygiene, "the fresh shell's hygiene"));
     }
 
     /// MUTATION (observed RED): ignore the byte count and choose the fallback; the disposition

@@ -10,7 +10,7 @@
 //! that makes the flag load-bearing rather than decorative:
 //!
 //! ```text
-//! ARGV argv=["…\shell-probe.exe", "argv", "--cwd", "D:\\Developer\\folio-terminal\\crates"]
+//! ARGV argv=["…\shell-probe.exe", "argv", "--cwd", "D:\\Developer\\lunar-workshop\\crates"]
 //!      cwd="…\probes\target\debug"   elevated=false
 //! ```
 //!
@@ -1823,8 +1823,8 @@ mod tests {
         );
         assert_eq!(asked(Path::new("..")), host_path(r"D:\Developer"));
         assert_eq!(
-            asked(&relative(&["..", "bt-wt", "launch-window"])),
-            host_path(r"D:\Developer\bt-wt\launch-window")
+            asked(&relative(&["..", "notes", "launch-window"])),
+            host_path(r"D:\Developer\notes\launch-window")
         );
         assert_eq!(
             asked(&relative(&[".."; 6])),

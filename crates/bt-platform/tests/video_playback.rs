@@ -321,7 +321,7 @@ fn a_video_plays_and_its_clock_runs_on_either_machine() {
 /// both files.
 fn the_still_and_the_playing_picture_are_the_same_colour() {
     for name in ["folio-video-test.mp4", "folio-video-test.mov"] {
-        let still = first_frame(&fixture(name), NATIVE.0, NATIVE.1);
+        let still = first_frame(&fixture(name), NATIVE.0, NATIVE.1).ok();
         let Some(mut engine) = ready_engine(name) else {
             assert!(still.is_none(), "{name}: a still with no engine to play it");
             return;

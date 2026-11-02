@@ -286,7 +286,7 @@ through the real `EnvironmentSlot`/`SpareSlot` and a recording `EngineDoor`:
 | | |
 |---|---|
 | **target version** | **0.4.5**, two-day window (owner 2026-09-25): not CI-green by 2026-09-27 → 0.4.6, then it stays on its branch until the 0.4.5 tag (standing rules, release window) |
-| branch / worktree | `feat/spare-web-controller` · `D:\Developer\bt-wt\spare-web` |
+| branch / worktree | `feat/spare-web-controller` · `X:\<pre-rename worktrees>\spare-web` |
 | size | M |
 | who | **Opus** |
 | lane | local compile lane (name-filtered tests); the real controller only in the VM smoke; macOS arm CI-checked |
@@ -723,7 +723,7 @@ covered by the headless fault injection of tests 4–7, not left to chance in th
 | | |
 |---|---|
 | **target version** | **0.4.5 within the owner's two-day window** (dispatch day + 2). Not CI-green **and** VM-evidenced by then → **0.4.6, whole**: no partial merge, no weakened test, no extended window. It then stays on its branch until the 0.4.5 tag. |
-| branch / worktree | `feat/spare-web-controller` · `D:\Developer\bt-wt\spare-web` |
+| branch / worktree | `feat/spare-web-controller` · `X:\<pre-rename worktrees>\spare-web` |
 | size | **M, at its top edge.** It is honestly M only because every mechanism is reused: the seat, the machine, the step executor, rehost, placement, the teardown deadline and the settings store. The new code is the slot, one policy filter, an epoch, the orphan list, the exit clock at two call sites, the reconciliation and the transaction. |
 | who | **Opus** |
 | lane | local compile lane (name-filtered tests); **VM session on day 1 afternoon**, not at the end |

@@ -1135,9 +1135,10 @@ impl<B: Backend> Runtime<'_, B> {
         };
         // A file has no name under its name, so there is no layer to reveal and
         // the placeholder stays empty by construction rather than by omission.
+        let (fitted, drawn) = editor.fit(name_box[0], box_width, caret_width, true, &mut shape);
         let edit = seats::TabEdit {
             caret_lit: self.window.rename_blink.visible(),
-            ..editor.fit(box_width, caret_width, true, &mut shape)
+            ..fitted
         };
         // **Written here because here is the only place the box exists**, which
         // is `measure_open_rename`'s own sentence: the IME's candidate list has
@@ -1145,6 +1146,7 @@ impl<B: Backend> Runtime<'_, B> {
         // thing that says where that is.
         let x = (name_box[0] + edit.caret_px).min(name_box[2] - caret_width);
         self.window.rename_caret_line = Some([x, name_box[1], x + caret_width, name_box[3]]);
+        self.window.rename_drawn = Some(drawn);
         (tools, Some(edit))
     }
 
@@ -1229,9 +1231,10 @@ impl<B: Backend> Runtime<'_, B> {
         let mut shape = |text: &str| renderer.chrome_text_advances(gpu, text, font);
         // An address has no address under it either: the field is seeded with
         // the committed URL and there is no second layer to reveal.
+        let (fitted, drawn) = editor.fit(box_[0], box_width, caret_width, true, &mut shape);
         let edit = seats::TabEdit {
             caret_lit: self.window.rename_blink.visible(),
-            ..editor.fit(box_width, caret_width, true, &mut shape)
+            ..fitted
         };
         // **Written here because here is the only place the box exists** — the
         // IME's candidate list has to stand under what is being typed, and this
@@ -1240,6 +1243,7 @@ impl<B: Backend> Runtime<'_, B> {
         // ruling moved as far as an IME is concerned.
         let x = (box_[0] + edit.caret_px).min(box_[2] - caret_width);
         self.window.rename_caret_line = Some([x, box_[1], x + caret_width, box_[3]]);
+        self.window.rename_drawn = Some(drawn);
         (measure_in, Some(edit), refusal)
     }
 
@@ -1286,14 +1290,16 @@ impl<B: Backend> Runtime<'_, B> {
         // The window never leaves the start of the draft, which is what the
         // `false` says: a file has no name under its name, so there is no layer
         // to reveal and the placeholder stays empty.
+        let (fitted, drawn) = editor.fit(box_[0], box_width, caret_width, false, &mut shape);
         let edit = seats::TabEdit {
             caret_lit: self.window.rename_blink.visible(),
-            ..editor.fit(box_width, caret_width, false, &mut shape)
+            ..fitted
         };
         // **Written here because here is the only place the box exists** — the
         // IME's candidate list has to stand under what is being typed.
         let x = (box_[0] + edit.caret_px).min(box_[2] - caret_width);
         self.window.rename_caret_line = Some([x, box_[1], x + caret_width, box_[3]]);
+        self.window.rename_drawn = Some(drawn);
         Some(edit)
     }
 
@@ -11157,6 +11163,13 @@ impl<B: Backend> Runtime<'_, B> {
                     self.hide_preview_picture(surface);
                     return None;
                 }
+                // A first frame that ran out and was asked again: the pane is drawn as a video's
+                // refusal is — its fact lines, no sentence — until a new look asks
+                // (T-FIRST-FRAME-RUN-OUT-IS-NOT-A-REFUSAL).
+                SurfacePixels::Unanswered => {
+                    self.hide_preview_picture(surface);
+                    return None;
+                }
                 SurfacePixels::Nothing { asked } => {
                     self.hide_preview_picture(surface);
                     if !self.app.math_worker_running {
@@ -13929,8 +13942,10 @@ impl<B: Backend> Runtime<'_, B> {
     /// `.png` that is not one is a thing the reader should be told about. A video that will not
     /// decode is very often an ordinary file in a container this machine has no codec for, and the
     /// card and the pane have something true to draw either way: the format and the size. So the
-    /// facts are filed with the frame or without one, and the cache is marked `Failed` without
-    /// anybody's failure line being written.
+    /// facts are filed with the frame or without one, and the cache is marked `Failed` — or
+    /// `Unanswered`, for a frame that ran out — without anybody's failure line being written
+    /// ([`file_peek_video_answer`]). The facts are filed here, this method being their one
+    /// writer, by [`video_facts_to_file`]'s rule.
     ///
     /// **And only the answer to the read the window awaits** (T-PEEK-ANSWER-IDENTITY), for
     /// [`Self::complete_peek_image`]'s reason: a frame and facts read from bytes the file no
@@ -13942,45 +13957,27 @@ impl<B: Backend> Runtime<'_, B> {
         glance: VideoGlance,
     ) -> Result<()> {
         let cache_key = normalized_local_image_path_key(&path);
-        let answer = match glance.frame {
-            Some(frame) => Ok(PeekCacheEntry::Ready {
-                key: video_frame_texture_key(&path, glance.mtime, frame.width, frame.height),
-                rgba: Arc::from(frame.rgba.into_boxed_slice()),
-                width_px: frame.width,
-                height_px: frame.height,
-                // A frame is already fitted into [`VIDEO_FRAME_FIT_PX`] and the
-                // recording's own size is filed beside it in `video_facts`,
-                // which is where every surface reads it from — see
-                // [`PreviewImageState::stated_size`].
-                native_size: None,
-            }),
-            // **A container this machine has no codec for, said in the
-            // decoder's own words.** The picture lane's variants are about a
-            // picture file's size and none of them is this; `Decode` is the
-            // seam that carries a reason nobody here can translate, which is
-            // what the pane has always printed for a video that would not
-            // decode — and it prints nothing at all for one, by the paragraph
-            // above. Filed only while some surface names the file
-            // ([`file_peek_answer`]).
-            None => Err(bt_term::InlineImageDecodeError::Decode(
-                "no decoder for this container".to_owned(),
-            )),
-        };
         let named = self.peek_files_named();
-        if !file_peek_answer(
+        let VideoGlance {
+            frame,
+            facts,
+            mtime,
+        } = glance;
+        let ran_out = matches!(frame, Err(bt_platform::video::NoFrame::RanOut));
+        if !file_peek_video_answer(
             &mut self.window.peek_cache,
             &named,
-            cache_key.clone(),
+            &path,
             asked,
-            answer,
+            frame,
+            mtime,
         ) {
             return Ok(());
         }
-        // Filed with or without a frame: these outlive the pixels and are the whole of the
+        // Filed with any awaited answer: these outlive the pixels and are the whole of the
         // degraded card — see [`WindowRuntime::video_facts`].
-        self.window
-            .video_facts
-            .insert(cache_key.clone(), glance.facts);
+        let filed = video_facts_to_file(self.window.video_facts.get(&cache_key), facts, ran_out);
+        self.window.video_facts.insert(cache_key.clone(), filed);
         // Every surface standing on this file, for `complete_peek_image`'s reason: a decode is
         // addressed by path and the answer is the same pixels for a pane, for a window torn off
         // it, or for both at once.
@@ -15892,7 +15889,7 @@ pub(crate) fn peek_awaits(
 ) -> bool {
     matches!(
         peek_cache.peek(key),
-        Some(PeekCacheEntry::Pending { asked: awaited }) if *awaited == asked
+        Some(PeekCacheEntry::Pending { asked: awaited, .. }) if *awaited == asked
     )
 }
 
@@ -15916,19 +15913,115 @@ pub(crate) fn file_peek_answer(
     asked: computation_lane::ComputationId,
     answer: Result<PeekCacheEntry, bt_term::InlineImageDecodeError>,
 ) -> bool {
+    file_peek_record(
+        peek_cache,
+        named,
+        key,
+        asked,
+        answer.map_err(PeekCacheEntry::Failed),
+    )
+}
+
+/// [`file_peek_answer`] with the record a no-picture answer is filed as named (`Err`): a decode's
+/// failure is its [`PeekCacheEntry::Failed`], and a video's first frame that ran out is its
+/// [`PeekCacheEntry::Unanswered`] ([`file_peek_video_answer`]; T-FIRST-FRAME-RUN-OUT-IS-NOT-A-REFUSAL)
+/// — both records of a question, so both are filed only while some surface names the file.
+fn file_peek_record(
+    peek_cache: &mut PeekCache,
+    named: &BTreeSet<String>,
+    key: String,
+    asked: computation_lane::ComputationId,
+    answer: Result<PeekCacheEntry, PeekCacheEntry>,
+) -> bool {
     if !peek_awaits(peek_cache, &key, asked) {
         return false;
     }
     match answer {
         Ok(pixels) => peek_cache.insert(key, pixels),
-        Err(failure) if named.contains(&key) => {
-            peek_cache.insert(key, PeekCacheEntry::Failed(failure));
+        Err(record) if named.contains(&key) => {
+            peek_cache.insert(key, record);
         }
         Err(_) => {
             peek_cache.remove(&key);
         }
     }
     true
+}
+
+/// **One video's answer to the peek read `asked`, filed** (user ruling 2026-08-27, §7.23;
+/// T-FIRST-FRAME-RUN-OUT-IS-NOT-A-REFUSAL) — [`Runtime::complete_peek_video_frame`]'s whole
+/// filing, a free function so that a test can hand it the answer a busy machine gives.
+///
+/// Three answers, three records, through [`file_peek_answer`]'s identity and naming rules
+/// ([`file_peek_record`]):
+///
+/// * **a frame** is the `Ready` pixels;
+/// * **a refusal** — a container this machine has no codec for — is a `Failed`, said in the
+///   decoder's own words. The picture lane's variants are about a picture file's size and none of
+///   them is this; `Decode` is the seam that carries a reason nobody here can translate, which is
+///   what the pane has always printed for a video that would not decode — and it prints nothing
+///   at all for one ([`Runtime::complete_peek_video_frame`]);
+/// * **a run-out** — the frame not answered inside the budget — is an `Unanswered`, which says
+///   nothing about the file. It is asked again once with no new input: `asked_again` is whether
+///   the read this answers was already that one more ask ([`PeekCacheEntry::Pending`]'s
+///   `once_more`), so a second run-out waits for a new look.
+///
+/// Only the cache record is filed here; the facts the same read found are the door's to file
+/// ([`Runtime::complete_peek_video_frame`], by [`video_facts_to_file`]). `mtime` is the file's
+/// last-written time as the worker saw it, the texture key's third field. `true` when the answer
+/// was the awaited one.
+pub(crate) fn file_peek_video_answer(
+    peek_cache: &mut PeekCache,
+    named: &BTreeSet<String>,
+    path: &Path,
+    asked: computation_lane::ComputationId,
+    frame: Result<bt_platform::video::VideoFrame, bt_platform::video::NoFrame>,
+    mtime: Option<SystemTime>,
+) -> bool {
+    let key = normalized_local_image_path_key(path);
+    let answer = match frame {
+        Ok(frame) => Ok(PeekCacheEntry::Ready {
+            key: video_frame_texture_key(path, mtime, frame.width, frame.height),
+            rgba: Arc::from(frame.rgba.into_boxed_slice()),
+            width_px: frame.width,
+            height_px: frame.height,
+            // A frame is already fitted into [`VIDEO_FRAME_FIT_PX`] and the
+            // recording's own size is filed beside it in `video_facts`,
+            // which is where every surface reads it from — see
+            // [`PreviewImageState::stated_size`].
+            native_size: None,
+        }),
+        Err(bt_platform::video::NoFrame::Refused) => Err(PeekCacheEntry::Failed(
+            bt_term::InlineImageDecodeError::Decode("no decoder for this container".to_owned()),
+        )),
+        Err(bt_platform::video::NoFrame::RanOut) => Err(PeekCacheEntry::Unanswered {
+            asked_again: matches!(
+                peek_cache.peek(&key),
+                Some(PeekCacheEntry::Pending {
+                    once_more: true,
+                    ..
+                })
+            ),
+        }),
+    };
+    file_peek_record(peek_cache, named, key, asked, answer)
+}
+
+/// **The facts a video answer files** under its file's key ([`WindowRuntime::video_facts`], whose
+/// one writer is [`Runtime::complete_peek_video_frame`]): the answering read's, since they
+/// outlive the pixels and are the whole of the degraded card — except that a run-out's, which
+/// know only the file's size, never replace facts an earlier answer filed (`earlier`): an answer
+/// that did not come is not news that the recording's length and size are unknown
+/// (T-FIRST-FRAME-RUN-OUT-IS-NOT-A-REFUSAL).
+pub(crate) fn video_facts_to_file(
+    earlier: Option<&preview::VideoFacts>,
+    answered: preview::VideoFacts,
+    ran_out: bool,
+) -> preview::VideoFacts {
+    match earlier {
+        Some(earlier) if ran_out => *earlier,
+        _ => answered,
+    }
 }
 
 /// **The request [`Runtime::open_unverified_reference`] puts on the OS hand-off lane** — the files
@@ -16610,13 +16703,20 @@ pub(crate) fn answer_one_picture(
             height_px,
             ..
         }) => Some((key.clone(), Some(Arc::clone(rgba)), [*width_px, *height_px])),
-        Some(PeekCacheEntry::Failed(_)) => return PagePicture::drawn(MarkdownPicture::Failed),
+        Some(PeekCacheEntry::Failed(_) | PeekCacheEntry::Unanswered { asked_again: true }) => {
+            return PagePicture::drawn(MarkdownPicture::Failed);
+        }
         // **A read is out, or the store has let the pixels go** — and the page's
         // answer to both is the same one, which is why they are one arm. It
         // keeps drawing what it was drawing rather than going blank, and it goes
         // on down this function either way, because what it is drawing may still
         // be the soft raster the decode is wanted to sharpen.
-        Some(PeekCacheEntry::Pending { .. }) | None => match standing {
+        // A first frame that ran out and has not been asked again is asked once more, as a
+        // file never asked about is (T-FIRST-FRAME-RUN-OUT-IS-NOT-A-REFUSAL).
+        Some(
+            PeekCacheEntry::Pending { .. } | PeekCacheEntry::Unanswered { asked_again: false },
+        )
+        | None => match standing {
             // Answered once, and the cache has since let the pixels go. The
             // decode's own size and its content key are the whole of what the
             // passes below need; `rgba` is the decode's own pixels only while
@@ -17222,6 +17322,7 @@ pub(crate) fn surface_pixels(
             stated: *native_size,
         },
         Some(PeekCacheEntry::Failed(reason)) => SurfacePixels::Failed(reason.clone()),
+        Some(PeekCacheEntry::Unanswered { asked_again: true }) => SurfacePixels::Unanswered,
         // A read is out. What this surface is holding stays on the glass while
         // the answer travels, rather than the picture vanishing and coming back.
         Some(PeekCacheEntry::Pending { .. }) => match held {
@@ -17233,7 +17334,10 @@ pub(crate) fn surface_pixels(
             },
             None => SurfacePixels::Nothing { asked: true },
         },
-        None => match held {
+        // Nothing filed — or a first frame that ran out and has not been asked again, which this
+        // surface asks once, as it would a file never asked about
+        // (T-FIRST-FRAME-RUN-OUT-IS-NOT-A-REFUSAL).
+        None | Some(PeekCacheEntry::Unanswered { asked_again: false }) => match held {
             Some((content, native)) => SurfacePixels::Standing {
                 content,
                 native,
@@ -17270,7 +17374,8 @@ pub(crate) fn picture_errand(pixels: &SurfacePixels, held_exactly: bool) -> Pict
             read_is_out: true, ..
         }
         | SurfacePixels::Nothing { asked: true }
-        | SurfacePixels::Failed(_) => PictureErrand::Wait,
+        | SurfacePixels::Failed(_)
+        | SurfacePixels::Unanswered => PictureErrand::Wait,
     }
 }
 

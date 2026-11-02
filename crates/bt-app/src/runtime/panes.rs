@@ -6930,7 +6930,9 @@ pub(crate) fn card_picture_in<'a>(
             width_px: *width_px,
             height_px: *height_px,
         }),
-        PeekCacheEntry::Pending { .. } | PeekCacheEntry::Failed(_) => None,
+        PeekCacheEntry::Pending { .. }
+        | PeekCacheEntry::Unanswered { .. }
+        | PeekCacheEntry::Failed(_) => None,
     }
 }
 

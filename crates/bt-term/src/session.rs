@@ -22338,8 +22338,8 @@ mod tests {
     /// a typed, unsubmitted command long enough to wrap once the pane narrows.
     fn divider_drag_screen(session: &mut DualPlaneSession, at: Instant) {
         const NOISE: &str = "Did not find path entry D:\\App\\Base\\anaconda3\\bin";
-        const PROMPT: &str = "(base) PS D:\\Developer\\folio-terminal> ";
-        const TYPED: &str = "echo D:\\Developer\\folio-terminal\\local-images\\sunset.svg";
+        const PROMPT: &str = "(base) PS D:\\Developer\\lunar-workshop> ";
+        const TYPED: &str = "echo D:\\Developer\\lunar-workshop\\local-images\\sunset.svg";
         let mut bytes = Vec::new();
         for index in 0..14 {
             bytes.extend_from_slice(
@@ -22353,7 +22353,7 @@ mod tests {
     /// PSReadLine's own redraw: it addresses its prompt row absolutely, erases from there down, and
     /// reprints the prompt and the unsubmitted input.
     const REDRAW: &[u8] =
-        b"\x1b[13;1H\x1b[J(base) PS D:\\Developer\\folio-terminal> echo D:\\Developer\\folio-terminal\\local-images\\sunset.svg";
+        b"\x1b[13;1H\x1b[J(base) PS D:\\Developer\\lunar-workshop> echo D:\\Developer\\lunar-workshop\\local-images\\sunset.svg";
 
     /// A real drag is not one pseudoconsole commit, and the frame is not one plane.
     ///
@@ -22459,11 +22459,11 @@ mod tests {
     }
 
     /// Everything the reporting session's child wrote before the pane was narrowed, byte for byte
-    /// from `.tmp-repaint-capture/s12-rearm-verify.vt` chunks 0..13. Conda's startup line, the
-    /// shell-integration prompt with its OSC 133 `A`/`B` pair, and the line editor's first render of
-    /// the typed command at absolute row 2 column 40. Its own closing `CUP` to row 3 column 3 states
-    /// that the pane was 74 columns wide: 39 prompt cells plus 37 typed cells is 76, and 76 = 74 + 2.
-    const RECORDED_BEFORE_RESIZE: &[u8] = b"\x1b[1t\x1b[c\x1b[?1004h\x1b[?9001hDid not find path entry D:\\App\\Base\\anaconda3\\bin\r\n\x1b[0m\x1b[0m(base) \x1b[0m\x1b[0m\x1b]7;file:///D:/Developer/folio-terminal\x07\x1b]133;A\x07PS D:\\Developer\\folio-terminal> \x1b]133;B\x07\x1b[?25l\x1b[2;40H\x1b[93mWrite-Output\x1b[39;49m \x1b[37m(\x1b[36m'BT_APP_'\x1b[39;49m \x1b[90m+\x1b[39;49m \x1b[36m'INPUT_OK'\x1b[37m)\x1b[39;49m\x1b[0m\x1b[3;3H\x1b[?25h";
+    /// from `.tmp-repaint-capture/s12-rearm-verify.vt` chunks 0..13 (checkout folder renamed, same
+    /// length): conda's startup line, the OSC 133 `A`/`B` prompt and the line editor's first render
+    /// of the typed command at row 2 column 40. Its own closing `CUP` to row 3 column 3 states that
+    /// the pane was 74 columns wide: 39 prompt cells plus 37 typed cells is 76, and 76 = 74 + 2.
+    const RECORDED_BEFORE_RESIZE: &[u8] = b"\x1b[1t\x1b[c\x1b[?1004h\x1b[?9001hDid not find path entry D:\\App\\Base\\anaconda3\\bin\r\n\x1b[0m\x1b[0m(base) \x1b[0m\x1b[0m\x1b]7;file:///D:/Developer/lunar-workshop\x07\x1b]133;A\x07PS D:\\Developer\\lunar-workshop> \x1b]133;B\x07\x1b[?25l\x1b[2;40H\x1b[93mWrite-Output\x1b[39;49m \x1b[37m(\x1b[36m'BT_APP_'\x1b[39;49m \x1b[90m+\x1b[39;49m \x1b[36m'INPUT_OK'\x1b[37m)\x1b[39;49m\x1b[0m\x1b[3;3H\x1b[?25h";
 
     /// The child's own cursor-position request, and its own statement of where the reflow put the
     /// cursor: `CUP` row 3 column 16, which is 76 = 61 + 15 — the truth at the committed width.
@@ -22578,7 +22578,7 @@ mod tests {
             &reflowed[..3],
             [
                 "Did not find path entry D:\\App\\Base\\anaconda3\\bin",
-                "(base) PS D:\\Developer\\folio-terminal> Write-Output ('BT_APP_",
+                "(base) PS D:\\Developer\\lunar-workshop> Write-Output ('BT_APP_",
                 "' + 'INPUT_OK')",
             ],
             "the committed reflow puts the whole input line on rows 2 and 3"
@@ -22590,7 +22590,7 @@ mod tests {
             &composed[..4],
             [
                 "Did not find path entry D:\\App\\Base\\anaconda3\\bin",
-                "(base) PS D:\\Developer\\folio-terminal> Write-Output ('BT_APP_",
+                "(base) PS D:\\Developer\\lunar-workshop> Write-Output ('BT_APP_",
                 "' + 'INPUT_OK')                        Write-Output ('BT_APP_",
                 "' + 'INPUT_OK')",
             ],
@@ -27748,7 +27748,7 @@ mod tests {
     /// PIN (§7.1.5j, user report 2026-08-20) — **an ordinary file whose path is printed into the
     /// terminal is a link, and the promise is the disk's**.
     ///
-    /// The report was `D:\Developer\folio-terminal\README.md` and three other spellings of the same
+    /// The report was `D:\Developer\lunar-workshop\README.md` and three other spellings of the same
     /// kind of thing, printed by Claude Code, none of which the pointer could reach while the OSC 8
     /// link on the next line could. This walks the whole path of that fix inside one session: the
     /// frame that draws the name asks about it, a worker reads the real disk, and the frame after
@@ -32694,7 +32694,7 @@ mod tests {
         std::fs::remove_dir(&directory).unwrap();
     }
 
-    const OSC133_ACCEPT2_PROMPT: &str = "(base) PS D:\\Developer\\folio-terminal> ";
+    const OSC133_ACCEPT2_PROMPT: &str = "(base) PS D:\\Developer\\lunar-workshop> ";
 
     /// The recorded output line, its picture spelled the way this platform roots one.
     fn osc133_accept2_image() -> String {

@@ -725,7 +725,7 @@ fn a_composition_in_the_preview_opens_a_space_in_the_line_it_lands_in() {
 /// wording for both rows; turn the fold's tip round.
 #[test]
 fn the_breadcrumb_rows_controls_each_say_what_they_are() {
-    let path = host_path(r"D:\Developer\folio-terminal\test-assets\huge.txt");
+    let path = host_path(r"D:\Developer\lunar-workshop\test-assets\huge.txt");
     let segments = crumb_segments(&path);
     // Where each folder stands in the row is the host's row shape (a drive
     // crumb first on Windows, none off it); the three folded are the folders
@@ -736,7 +736,7 @@ fn the_breadcrumb_rows_controls_each_say_what_they_are() {
             .position(|(segment, _)| segment == name)
             .expect("every folder of the path is a segment")
     };
-    let folded = [at("Developer"), at("folio-terminal"), at("test-assets")];
+    let folded = [at("Developer"), at("lunar-workshop"), at("test-assets")];
     let tip = |tip, kind, to_source| {
         preview_rail_tip_text(
             tip,
@@ -749,11 +749,11 @@ fn the_breadcrumb_rows_controls_each_say_what_they_are() {
     };
     assert_eq!(
         tip(
-            seats::PreviewRailTip::Crumb(at("folio-terminal")),
+            seats::PreviewRailTip::Crumb(at("lunar-workshop")),
             seats::PreviewRailKind::Crumbs,
             false
         ),
-        host_spelling(r"D:\Developer\folio-terminal"),
+        host_spelling(r"D:\Developer\lunar-workshop"),
         "a segment names the whole place, not the word drawn in it"
     );
     assert_eq!(
@@ -763,7 +763,7 @@ fn the_breadcrumb_rows_controls_each_say_what_they_are() {
             false
         ),
         format!(
-            "Developer {sep} folio-terminal {sep} test-assets",
+            "Developer {sep} lunar-workshop {sep} test-assets",
             sep = seats::PREVIEW_CRUMB_SEPARATOR
         ),
         "and the chip names the run it stands for, the way the row reads"
