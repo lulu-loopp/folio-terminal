@@ -9964,13 +9964,9 @@ crates/bt-platform/src/video/mod.rs	bt-platform crate::video::swizzle	Ambiguous	
 crates/bt-platform/src/video/mod.rs	bt-platform crate::video::swizzle	Ambiguous	chunks_exact_mut	1	
 crates/bt-platform/src/video/mod.rs	bt-platform crate::video::swizzle	Ambiguous	offset	1	
 crates/bt-platform/src/video/mod.rs	bt-platform crate::video::swizzle	Ambiguous	zip	1	
-crates/bt-platform/src/video/mod.rs	bt-platform crate::video::within_budget	Ambiguous	flatten	1	
-crates/bt-platform/src/video/mod.rs	bt-platform crate::video::within_budget	Ambiguous	ok	1	
 crates/bt-platform/src/video/mod.rs	bt-platform crate::video::within_budget	Ambiguous	recv_timeout	1	
 crates/bt-platform/src/video/mod.rs	bt-platform crate::video::within_budget	Ambiguous	send	1	
 crates/bt-platform/src/video/mod.rs	bt-platform crate::video::within_budget	Dynamic	work	1	
-crates/bt-platform/src/video_portable.rs	bt-platform crate::video::within_budget	Ambiguous	flatten	1	
-crates/bt-platform/src/video_portable.rs	bt-platform crate::video::within_budget	Ambiguous	ok	1	
 crates/bt-platform/src/video_portable.rs	bt-platform crate::video::within_budget	Ambiguous	recv_timeout	1	
 crates/bt-platform/src/video_portable.rs	bt-platform crate::video::within_budget	Ambiguous	send	1	
 crates/bt-platform/src/video_portable.rs	bt-platform crate::video::within_budget	Dynamic	work	1	
