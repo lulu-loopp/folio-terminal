@@ -1274,7 +1274,7 @@ mod tests {
     /// **The parent's attempt runs out whole, on the count, when the host comes
     /// too late**: no host has connected when the clock spends the attempt's
     /// `LAUNCH_TIMEOUT`, so the parent gives up in `Connect` having asked for
-    /// that whole budget and no more; the host, let go only after the parent
+    /// that whole budget and no more; the host, started only after the parent
     /// answered, finds no endpoint. The budget's end is the count, not 15 real
     /// seconds.
     ///
@@ -1286,21 +1286,18 @@ mod tests {
     /// for falls short of `LAUNCH_TIMEOUT`.
     #[test]
     fn the_parent_gives_up_at_the_deadline_when_no_host_connects() {
-        let endpoint = ElevatedEndpoint::create().expect("an endpoint");
-        let line = endpoint.host_line().clone();
-        let (let_go, held) = mpsc::channel::<()>();
-        let host = std::thread::spawn(move || {
-            held.recv().expect("the test lets the host go");
-            let clock = CountedClock::answering();
-            connect_to_parent_on(&line, budget_on(&clock)).map(|_| ())
-        });
         let clock = Arc::new(CountedClock::new(|_, _| Turn::Spend));
         let parent = Arc::clone(&clock);
+        let (lines, line) = mpsc::channel();
         let (answered, answer) = mpsc::channel();
+        // The endpoint's handle stays on the thread that made it.
         std::thread::spawn(move || {
+            let endpoint = ElevatedEndpoint::create().expect("an endpoint");
+            let _ = lines.send(endpoint.host_line().clone());
             let refused = endpoint.accept_on(&this_process_claiming(1), budget_on(&*parent));
             let _ = answered.send(refused.err());
         });
+        let line = door_skipped::received(&line, "the attempt's host line");
         assert_eq!(
             door_skipped::received(&answer, "the parent's accept"),
             Some(HandshakeFailure::TimedOut {
@@ -1309,10 +1306,10 @@ mod tests {
         );
         assert_eq!(clock.asked(), [LAUNCH_TIMEOUT]);
         assert_eq!(clock.moved(), LAUNCH_TIMEOUT);
-        let_go.send(()).expect("the host is waiting to be let go");
+        let late = CountedClock::answering();
         assert_eq!(
-            host.join().expect("the host ends"),
-            Err(HandshakeFailure::NoEndpoint)
+            connect_to_parent_on(&line, budget_on(&late)).err(),
+            Some(HandshakeFailure::NoEndpoint)
         );
     }
 
