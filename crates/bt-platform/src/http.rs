@@ -1422,15 +1422,15 @@ mod tests {
     }
 
     /// RED (T-WINHTTP-CLOSE-DOOR-ON-A-CLOCK) — **a bound that ends before the
-    /// closing callback is answered `false`, and the callback that comes after
-    /// it still finds its context alive.**
+    /// closing callback is answered `false`, and the callback comes after it.**
     ///
     /// The same request in flight as above, on a counted clock that spends the
     /// door's one wait whole at once: the bound ends before WinHTTP is heard,
     /// whatever WinHTTP has done by then. The late answer is WinHTTP's own
     /// `HANDLE_CLOSING`, awaited afterwards as state within the door suites'
-    /// patience: the count the door left to WinHTTP is the one the callback
-    /// gives back.
+    /// patience. That the context outlives the door is `on_status`'s SAFETY
+    /// invariant (the count WinHTTP holds); this test exercises it but does not
+    /// judge it, since it holds a count of its own.
     ///
     /// MUTATION: wait beside the clock (the old `Instant` loop, or the real
     /// wait for the whole bound) and the door hears the callback and answers
@@ -1463,7 +1463,7 @@ mod tests {
         );
         assert!(
             closed_within_patience(&shared),
-            "the closing callback came after the bound and found its context alive"
+            "the closing callback came after the bound, on WinHTTP's thread"
         );
         drop((connection, session));
     }

@@ -8362,7 +8362,7 @@ crates/bt-platform/src/launch_agent.rs	bt-platform crate::launch_agent::sweep	Am
 crates/bt-platform/src/launch_agent.rs	bt-platform crate::launch_agent::sweep	Ambiguous	kind	1	
 crates/bt-platform/src/launch_agent.rs	bt-platform crate::launch_agent::sweep	Ambiguous	map	1	
 crates/bt-platform/src/launch_agent.rs	bt-platform crate::launch_agent::sweep	Ambiguous	map_err	1	
-crates/bt-platform/src/launch_conversation.rs	bt-platform crate::launch_conversation::<RealClock as LaunchClock>::wait	Dynamic	ready	1	2026-11-01: T-LAUNCH-HANDOVER-BUDGET-ON-A-CLOCK; the transport's own wait handed to the clock as a closure, written at each call site in launch_pipe (a kernel wait on an event, a channel receive) and launch_pipe_unix (one socket step); none of them reaches a door
+crates/bt-platform/src/launch_conversation.rs	bt-platform crate::launch_conversation::<RealClock as LaunchClock>::wait	Dynamic	ready	1	2026-11-01: T-LAUNCH-HANDOVER-BUDGET-ON-A-CLOCK; the transport's own wait handed to the clock as a closure, written at each call site in launch_pipe (a kernel wait on an event, a channel receive), launch_pipe_unix (one socket step) and http::Request::close_within (a condvar wait for WinHTTP's closing callback, 2026-11-01: T-WINHTTP-CLOSE-DOOR-ON-A-CLOCK); none of them reaches a door
 crates/bt-platform/src/launch_conversation.rs	bt-platform crate::launch_conversation::hand_over_on	Dynamic	on_reply	1	
 crates/bt-platform/src/launch_pipe.rs	bt-platform crate::launch_pipe::<Client as crate::launch_conversation::Connection>::hear	Ambiguous	truncate	1	
 crates/bt-platform/src/launch_pipe.rs	bt-platform crate::launch_pipe::Instance::open	Ambiguous	unwrap_or	2	
