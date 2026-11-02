@@ -4697,10 +4697,10 @@ impl<B: Backend> Runtime<'_, B> {
                     if state == ElementState::Pressed {
                         // A press in the input puts the caret at the seam under it, and a drag
                         // from there selects (0.4.9 plan row 180); the rest of the box swallows.
-                        if button == MouseButton::Left && layout.field_holds(position.x, position.y)
-                        {
-                            self.press_field(
+                        if layout.field_holds(position.x, position.y) {
+                            self.press_field_by(
                                 crate::runtime::pointer::FieldDrag::Palette,
+                                button,
                                 position,
                             )?;
                         }

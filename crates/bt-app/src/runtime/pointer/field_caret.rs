@@ -21,6 +21,7 @@ use crate::{LeafId, PreviewSurface, RenameSubject, Runtime, TabId, settings};
 use anyhow::Result;
 use std::time::Instant;
 use winit::dpi::PhysicalPosition;
+use winit::event::MouseButton;
 
 /// **Which one-line field a press went into**, and what the field is drawn on — the payload of
 /// [`super::CaptureOwner::FieldSelection`], so a drag across it ends when what it is drawn on
@@ -102,6 +103,20 @@ impl<B: Backend> Runtime<'_, B> {
             self.show_the_placed_caret(&field)?;
         }
         Ok(())
+    }
+
+    /// [`Self::press_field`] for a press of any button, taken by a field whose box swallows every
+    /// press (the palette's): only the left button puts a caret, as everywhere else.
+    pub(crate) fn press_field_by(
+        &mut self,
+        field: FieldDrag,
+        button: MouseButton,
+        position: PhysicalPosition<f64>,
+    ) -> Result<()> {
+        if button != MouseButton::Left {
+            return Ok(());
+        }
+        self.press_field(field, position)
     }
 
     /// **A press in a commit graph's search field**, after the field has taken the keyboard
