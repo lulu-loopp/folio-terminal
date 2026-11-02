@@ -463,7 +463,7 @@ pub(crate) mod fixture {
 #[cfg(target_os = "macos")]
 use fixture::{
     HOMEBREW_MARKER, Scratch, answer, attach, blank_image, bundle, bundle_needing, bundle_sealing,
-    fake_brew, homebrew_install, image_of, listing, mark, mounted, on_macos, record_version,
+    fake_brew, homebrew_install, image_of, listing, mark, mounted, record_version,
 };
 
 /// The offer every test presses: `v0.4.7`, for macOS.
