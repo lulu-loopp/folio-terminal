@@ -6,6 +6,11 @@
 #
 # **This list only shrinks.** A row that matches no hit is refused as stale. A new
 # row is not a way to excuse a new hit: a new entry spells a placeholder instead.
+# One widening, and the only kind there may be: 0.4.9 row 159 gave the scan a
+# pattern for the owner's synced-documents folder, which two old entries
+# already spelt (§7.18, §7.24). Those lines were in the file on 2026-11-01 and
+# cannot be rewritten, so they took the two `synced-folder example` rows below.
+# A new pattern meeting frozen text is the one case a row is added.
 #
 # One row per hit:
 #     <key> <check> <date> <reason class>: <shape>
@@ -13,8 +18,8 @@
 # text and the whole line (trailing whitespace dropped), joined by NUL, as the
 # scan reads them; no line number is in it, so an entry inserted above a hit
 # keeps its row. Two identical hits on one line take two rows. <check> is author,
-# checkout, home or mail. <reason class> is old-checkout example, author, runner
-# account or false positive. <shape> says what the hit is in words, with the
+# checkout, home or mail. <reason class> is old-checkout example, synced-folder
+# example, author, runner account or false positive. <shape> says what the hit is in words, with the
 # account and the drive masked; it never spells the hit, so this file passes
 # the scan it serves. `check-machine-paths.ps1 -PrintKeys` prints the key of
 # every hit in the file.
@@ -32,6 +37,8 @@ d6f430c96a9a207d checkout 2026-11-01 old-checkout example: the pre-move checkout
 cb286855d1c69f44 checkout 2026-11-01 old-checkout example: the pre-move checkout in a repro note (§7.1)
 915379c0122cdb72 author 2026-11-01 author: the account in a WSL prompt, <author> at a host (§7.1)
 b6e53b34c0c02cfa author 2026-11-01 author: the account in a tab head (§7.1)
+27e1ac0efbea591e checkout 2026-11-01 synced-folder example: the synced-documents folder in a pane-head caption the owner photographed (§7.18)
+f29f174d2db518b9 checkout 2026-11-01 synced-folder example: the synced-documents folder as a files column's root (§7.24)
 9a075153a13b304b author 2026-11-01 author: the account in a PSReadLine diagnostics line (§7.25)
 8b6f7dc640d6d362 home 2026-11-01 author: X:\Users\<author> in the same diagnostics line (§7.25)
 c09703e0c60cb46a home 2026-11-01 runner account: X:\Users\<acct>, a CI runner's account (§7.30)
