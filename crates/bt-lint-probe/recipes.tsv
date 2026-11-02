@@ -9,6 +9,16 @@ std::sync::mpsc::Receiver::recv		r: &std::sync::mpsc::Receiver<()>	r.recv()
 std::sync::mpsc::Receiver::recv_timeout		r: &std::sync::mpsc::Receiver<()>, d: std::time::Duration	r.recv_timeout(d)
 std::sync::Condvar::wait	<'a>	c: &std::sync::Condvar, g: std::sync::MutexGuard<'a, ()>	c.wait(g)
 std::sync::Condvar::wait_timeout	<'a>	c: &std::sync::Condvar, g: std::sync::MutexGuard<'a, ()>, d: std::time::Duration	c.wait_timeout(g, d)
+std::sync::Condvar::wait_while	<'a>	c: &std::sync::Condvar, g: std::sync::MutexGuard<'a, ()>, f: fn(&mut ()) -> bool	c.wait_while(g, f)
+std::sync::Condvar::wait_timeout_while	<'a>	c: &std::sync::Condvar, g: std::sync::MutexGuard<'a, ()>, d: std::time::Duration, f: fn(&mut ()) -> bool	c.wait_timeout_while(g, d, f)
+std::sync::mpsc::SyncSender::send		s: &std::sync::mpsc::SyncSender<()>	s.send(())
+std::sync::Barrier::wait		b: &std::sync::Barrier	b.wait()
+std::thread::ScopedJoinHandle::join	<'s>	h: std::thread::ScopedJoinHandle<'s, ()>	h.join()
+std::thread::scope		f: fn(&std::thread::Scope<'_, '_>)	std::thread::scope(f)
+std::thread::park			std::thread::park()
+std::thread::park_timeout		d: std::time::Duration	std::thread::park_timeout(d)
+std::sync::Once::call_once		o: &std::sync::Once, f: fn()	o.call_once(f)
+std::sync::Once::call_once_force		o: &std::sync::Once, f: fn(&std::sync::OnceState)	o.call_once_force(f)
 std::fs::rename		a: &std::path::Path, b: &std::path::Path	std::fs::rename(a, b)
 std::fs::write		p: &std::path::Path, b: &[u8]	std::fs::write(p, b)
 std::fs::copy		a: &std::path::Path, b: &std::path::Path	std::fs::copy(a, b)
@@ -35,6 +45,12 @@ bt_pty::wait_for_retirements		d: std::time::Duration	bt_pty::wait_for_retirement
 bt_platform::keyboard_layout_shift_table		worker: &bt_platform::admission::WorkerCtx, layout: &bt_platform::KeyboardLayout	bt_platform::keyboard_layout_shift_table(worker, layout)
 windows::Win32::UI::Shell::ShellExecuteW		o: windows::core::PCWSTR, n: windows::Win32::UI::WindowsAndMessaging::SHOW_WINDOW_CMD	unsafe { windows::Win32::UI::Shell::ShellExecuteW(None, o, o, o, o, n) }
 windows::Win32::UI::Shell::ShellExecuteExW		i: &mut windows::Win32::UI::Shell::SHELLEXECUTEINFOW	unsafe { windows::Win32::UI::Shell::ShellExecuteExW(i) }
+windows::Win32::System::Threading::WaitForSingleObject		h: windows::Win32::Foundation::HANDLE, d: u32	unsafe { windows::Win32::System::Threading::WaitForSingleObject(h, d) }
+windows::Win32::System::Threading::WaitForSingleObjectEx		h: windows::Win32::Foundation::HANDLE, d: u32	unsafe { windows::Win32::System::Threading::WaitForSingleObjectEx(h, d, true) }
+windows::Win32::System::Threading::WaitForMultipleObjects		h: &[windows::Win32::Foundation::HANDLE], d: u32	unsafe { windows::Win32::System::Threading::WaitForMultipleObjects(h, false, d) }
+windows::Win32::System::Threading::WaitForMultipleObjectsEx		h: &[windows::Win32::Foundation::HANDLE], d: u32	unsafe { windows::Win32::System::Threading::WaitForMultipleObjectsEx(h, false, d, true) }
+windows::Win32::System::Threading::SignalObjectAndWait		s: windows::Win32::Foundation::HANDLE, w: windows::Win32::Foundation::HANDLE, d: u32	unsafe { windows::Win32::System::Threading::SignalObjectAndWait(s, w, d, true) }
+windows::Win32::System::Threading::SleepEx		d: u32	unsafe { windows::Win32::System::Threading::SleepEx(d, true) }
 windows::Win32::System::Threading::SetEvent		h: windows::Win32::Foundation::HANDLE	unsafe { windows::Win32::System::Threading::SetEvent(h) }
 windows::Win32::Foundation::CloseHandle		h: windows::Win32::Foundation::HANDLE	unsafe { windows::Win32::Foundation::CloseHandle(h) }
 windows::Win32::Storage::FileSystem::GetDriveTypeW		r: windows::core::PCWSTR	unsafe { windows::Win32::Storage::FileSystem::GetDriveTypeW(r) }

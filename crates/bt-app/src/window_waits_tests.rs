@@ -9773,6 +9773,76 @@ fn a_site_in_a_function_taking_a_leg_is_a_bare_site() {
     );
 }
 
+/// A planted crate whose functions wait through the verbs the vocabulary took from bt-source's
+/// `BLOCKING` (plan row 176), and a door function waiting the same way (the control).
+const PLANTED_WAIT_WHILE_SITES: &str = "
+pub mod doors { pub struct TraceFlush; }
+pub struct WaitToken<'a, D> { door: &'a D }
+pub fn waits_while(c: &std::sync::Condvar, m: &std::sync::Mutex<bool>) {
+let _ = c.wait_timeout_while(m.lock().unwrap(), std::time::Duration::ZERO, |held| *held);
+let _ = c.wait_while(m.lock().unwrap(), |held| *held);
+}
+pub fn parks() { std::thread::park_timeout(std::time::Duration::ZERO); }
+pub fn sends(s: &std::sync::mpsc::SyncSender<()>) { let _ = s.send(()); }
+pub fn owned(_token: WaitToken<'_, doors::TraceFlush>, c: &std::sync::Condvar, m: &std::sync::Mutex<bool>) {
+let _ = c.wait_timeout_while(m.lock().unwrap(), std::time::Duration::ZERO, |held| *held);
+}
+";
+
+/// RED (T-BARE-SITE-VOCABULARY-WAIT-WHILE-BLIND-SPOT, plan row 176) — **a wait through
+/// `Condvar::wait_timeout_while`, `Condvar::wait_while`, `thread::park_timeout` or
+/// `SyncSender::send` outside a door is a bare site.** Row 145's first form of the WinHTTP close
+/// door waited with `wait_timeout_while`, a name the vocabulary lacked, and its row left the
+/// inventory as "delete it" with no door in sight.
+///
+/// Against the planted crate ([`PLANTED_WAIT_WHILE_SITES`]): `waits_while`, `parks` and `sends`
+/// each hold their sites, counted one each; `owned`, which takes a `WaitToken`, is a door function
+/// whose `wait_timeout_while` is a door effect (the control).
+///
+/// MUTATION: delete the registry's `std::sync::Condvar::wait_timeout_while` line and
+/// `waits_while`'s first site leaves the inventory.
+#[test]
+fn a_wait_through_a_verb_from_blocking_outside_a_door_is_a_bare_site() {
+    let world = planted_world("ww-wait-while", PLANTED_WAIT_WHILE_SITES);
+    let (bare, in_doors, _) = vocabulary_sites_in(&world, &[]);
+    let planted = |item: &str, entry: &str| {
+        (
+            "planted".to_owned(),
+            "-".to_owned(),
+            item.to_owned(),
+            entry.to_owned(),
+        )
+    };
+    let mine: BTreeMap<&BareKey, &usize> = bare
+        .iter()
+        .filter(|((package, _, item, _), _)| {
+            package == "planted"
+                && ["crate::waits_while", "crate::parks", "crate::sends", "crate::owned"]
+                    .contains(&item.as_str())
+        })
+        .collect();
+    let wanted = [
+        planted("crate::parks", "std::thread::park_timeout"),
+        planted("crate::sends", "std::sync::mpsc::SyncSender::send"),
+        planted("crate::waits_while", "std::sync::Condvar::wait_timeout_while"),
+        planted("crate::waits_while", "std::sync::Condvar::wait_while"),
+    ];
+    assert_eq!(
+        mine,
+        wanted.iter().map(|key| (key, &1)).collect::<BTreeMap<_, _>>(),
+        "the planted waits are not each one bare site"
+    );
+    assert!(
+        in_doors.contains_key(&(
+            "planted".to_owned(),
+            "-".to_owned(),
+            "crate::owned".to_owned()
+        )),
+        "the control: `owned` takes a `WaitToken` and is not a door function; door effects {:?}",
+        in_doors.keys().collect::<Vec<_>>()
+    );
+}
+
 /// RED (T-A2-R1-NONLEG; revision (q)6) — **`# graphs` admits no line**: the live registry's
 /// section is its header alone, and a planted line under it — a well-formed graph line, or one of
 /// the wrong width — is refused for what it is.
