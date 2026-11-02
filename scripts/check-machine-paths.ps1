@@ -149,9 +149,9 @@ try {
     # 159): the checkout sat in `Developer\folio-terminal`, named after the
     # repository, and its worktrees in `Developer\bt-wt`. The repository keeps
     # that name, so the bare word is its address in every release URL and is
-    # not refused; only the folder under `Developer\` is. The worktree folder is
-    # named whole, and so is the one sibling the dated record names
-    # (`bt-wt-shell-matrix`), which a `\b` alone would have caught.
+    # not refused; only the folder under `Developer\` is. Its worktree folder is
+    # refused with its hyphenated siblings (`bt-wt-build`, …, all real); the one
+    # the append-only log spells passes only by its keyed row in the DESIGN list.
     # Never a bare drive-letter `\Developer\`: a product fixture stands in a
     # drive-letter `\Developer\<folder>\…` that no machine of this project's
     # has used (`notes`, `Ledger`, `elsewhere`, `lunar-workshop`, …), and such
@@ -160,7 +160,7 @@ try {
     # Nor `Developer\Folio\` alone: a fixture standing in a folder named after
     # the product (`…\Developer\folio\notes.md`, `…\Developer\Folio\docs`) is a
     # placeholder like `folio` in the account list below, not this checkout.
-    $checkout_re = [regex]"(?i)Developer[\\/]{1,2}(?:BetterTerminal|Folio[\\/]{1,2}(?:BetterTerminal|trace|wt)\b|(?:wt|trace|launchers|build)\b|folio-terminal\b|bt-wt(?![\w-]))"
+    $checkout_re = [regex]"(?i)Developer[\\/]{1,2}(?:BetterTerminal|Folio[\\/]{1,2}(?:BetterTerminal|trace|wt)\b|(?:wt|trace|launchers|build)\b|folio-terminal\b|bt-wt\b)"
     # **The owner's synced-documents folder** (2026-11-01, 0.4.9 row 159; row
     # 157's review F3). Projects outside this one live under it, and recorded
     # captions and prompts from them reached product fixtures, where neither

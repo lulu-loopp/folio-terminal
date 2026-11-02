@@ -6,10 +6,12 @@
 #
 # **This list only shrinks.** A row that matches no hit is refused as stale. A new
 # row is not a way to excuse a new hit: a new entry spells a placeholder instead.
-# One widening, and the only kind there may be: 0.4.9 row 159 gave the scan a
-# pattern for the owner's synced-documents folder, which two old entries
-# already spelt (§7.18, §7.24). Those lines were in the file on 2026-11-01 and
-# cannot be rewritten, so they took the two `synced-folder example` rows below.
+# One widening, and the only kind there may be: 0.4.9 row 159 gave the scan
+# patterns for the owner's synced-documents folder, which two old entries
+# already spelt (§7.18, §7.24), and for the pre-rename worktree folder, which
+# one old entry spelt with a suffix (§7.40). Those lines were in the file on
+# 2026-11-01 and cannot be rewritten, so they took the two `synced-folder
+# example` rows and the one `old-checkout example` row dated with them below.
 # A new pattern meeting frozen text is the one case a row is added.
 #
 # One row per hit:
@@ -43,6 +45,7 @@ f29f174d2db518b9 checkout 2026-11-01 synced-folder example: the synced-documents
 8b6f7dc640d6d362 home 2026-11-01 author: X:\Users\<author> in the same diagnostics line (§7.25)
 c09703e0c60cb46a home 2026-11-01 runner account: X:\Users\<acct>, a CI runner's account (§7.30)
 c87c390b0081185c author 2026-11-01 author: the account in a WSL prompt, <author> at a host (§7.40)
+61baf7e06d0b4f53 checkout 2026-11-01 old-checkout example: the pre-rename worktree folder, with a suffix, in a WSL `--cd` example (§7.40)
 0e5be7d82a0c2455 home 2026-11-01 false positive: X:\Users\<acct>, a truncated example fragment, not an account (§7.47)
 81a5185300098001 checkout 2026-11-01 old-checkout example: the pre-move checkout in a repro note (§7.49)
 57f07a9fb5c40009 checkout 2026-11-01 old-checkout example: the pre-move checkout in a repro note (§7.51)

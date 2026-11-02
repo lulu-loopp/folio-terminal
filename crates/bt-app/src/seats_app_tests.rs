@@ -241,7 +241,7 @@ fn columns_of(width: u32) -> u32 {
 ///
 /// The report is a restored window in focus mode whose tab held three
 /// PowerShell panes: the third pane's first prompt read `(b` on one line and
-/// `ase) PS D:\Developer\notes> ` on the next, and that
+/// `ase) PS D:\Developer\notes> ` (path neutralised) on the next, and that
 /// tab's card drew the seat as rows of two characters. `session.json` names
 /// the cause — the window is saved `maximized: true` beside a *normal*
 /// rectangle of 960x600, and `put_the_window_on_the_glass` asks Windows to

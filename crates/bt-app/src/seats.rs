@@ -7353,7 +7353,7 @@ pub struct PaneHeadGeometry {
     ///
     /// The run is revealed by a hover and the head kept a hole for it at rest,
     /// so a long name was cut sixty pixels early to make room for three buttons
-    /// that were not on screen: 「批2进度 · D:\Developer\…\report_pa…」 beside a
+    /// that were not on screen: 「批2进度 · D:\Developer\…\report_pa…」 (path neutralised) beside a
     /// stripe of empty head. A head at rest shows one thing and it should have
     /// all of the row to show it in; when the run comes up it is drawn *over*
     /// this box, on [`Self::scrim`], and the tail it covers dissolves into the
@@ -35888,7 +35888,7 @@ mod tests {
     /// (user report, 2026-08-27).
     ///
     /// RED EVIDENCE (2026-08-27, the report, on a terminal head at `1.0`): the
-    /// caption read `批 2进度 · D:\Developer\notes\ledger\report_pa…`
+    /// caption read (path neutralised) `批 2进度 · D:\Developer\notes\ledger\report_pa…`
     /// and the pixels to the right of it were empty head. They were empty
     /// because `pane_head_geometry` subtracted the trailing run — `⌄ 🗀 ✕`,
     /// three boxes and two joints — from the title's box whether or not the run
