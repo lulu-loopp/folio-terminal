@@ -6189,9 +6189,10 @@ crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::ExitGuard::leave	A
 crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::HeldPast::words	Ambiguous	extend	1	2026-10-21: T-UPDATE-MOVE-HELD-RETRY; a standard-library method (Option, Iterator, String, Duration, Vec) on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::MarkWriteFailure::from_result	Ambiguous	to_string	1	
 crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::Opens::words	Ambiguous	extend	2	
-crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::ask_for_the_window_until	Ambiguous	is_zero	1	
-crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::ask_for_the_window_until	Dynamic	ask	1	
-crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::ask_for_the_window_until	Dynamic	wait	1	
+crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::ask_for_the_window_by	Ambiguous	is_zero	1	2026-11-01: the remaining budget's Duration::is_zero (until less the road clock's reading), carried over from ask_for_the_window_until, which this row renamed (T-WINDOWS-HANDOVER-ORDER-A-HELD-LOCK-WAIT)
+crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::ask_for_the_window_by	Dynamic	ask	1	2026-11-01: the caller's ask closure, carried over from ask_for_the_window_until, which this row renamed (T-WINDOWS-HANDOVER-ORDER-A-HELD-LOCK-WAIT)
+crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::ask_for_the_window_by	Dynamic	now	1	2026-11-01: the caller's clock read, so the ask-again budget is read on the road's wait_clock (T-WINDOWS-HANDOVER-ORDER-A-HELD-LOCK-WAIT)
+crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::ask_for_the_window_by	Dynamic	wait	1	2026-11-01: the caller's pause closure, carried over from ask_for_the_window_until, which this row renamed (T-WINDOWS-HANDOVER-ORDER-A-HELD-LOCK-WAIT)
 crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::asked_while_held	Ambiguous	as_millis	1	2026-10-21: T-UPDATE-MOVE-HELD-RETRY; write_held_within's own call, renamed asked_while_held: a standard-library method (Option, Iterator, String, Duration, Vec) on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::asked_while_held	Ambiguous	as_secs_f64	2	2026-10-21: T-UPDATE-MOVE-HELD-RETRY; write_held_within's own call, renamed asked_while_held: a standard-library method (Option, Iterator, String, Duration, Vec) on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::asked_while_held	Ambiguous	is_zero	1	2026-10-21: T-UPDATE-MOVE-HELD-RETRY; write_held_within's own call, renamed asked_while_held: a standard-library method (Option, Iterator, String, Duration, Vec) on a receiver the grammar does not type, which reaches no door
@@ -6548,7 +6549,6 @@ crates/bt-app/src/update_prepare_macos.rs	bt-app crate::update_prepare_macos::el
 crates/bt-app/src/update_prepare_macos.rs	bt-app crate::update_prepare_macos::fetch_and_attach	Dynamic	fetched	2	
 crates/bt-app/src/update_prepare_macos.rs	bt-app crate::update_prepare_macos::identity	Ambiguous	to_string	3	
 crates/bt-app/src/update_prepare_macos.rs	bt-app crate::update_prepare_macos::prepare_on	Ambiguous	is_ok	1	
-crates/bt-app/src/update_prepare_macos.rs	bt-app crate::update_prepare_macos::prepare_on	Ambiguous	ok_or	1	
 crates/bt-app/src/update_prepare_macos.rs	bt-app crate::update_prepare_macos::prepare_on	Ambiguous	to_owned	1	
 crates/bt-app/src/update_prepare_macos.rs	bt-app crate::update_prepare_macos::resumer_of_this_copy	Ambiguous	and_then	1	
 crates/bt-app/src/update_prepare_macos.rs	bt-app crate::update_prepare_macos::resumer_of_this_copy	Ambiguous	ok	1	
@@ -8362,7 +8362,7 @@ crates/bt-platform/src/launch_agent.rs	bt-platform crate::launch_agent::sweep	Am
 crates/bt-platform/src/launch_agent.rs	bt-platform crate::launch_agent::sweep	Ambiguous	kind	1	
 crates/bt-platform/src/launch_agent.rs	bt-platform crate::launch_agent::sweep	Ambiguous	map	1	
 crates/bt-platform/src/launch_agent.rs	bt-platform crate::launch_agent::sweep	Ambiguous	map_err	1	
-crates/bt-platform/src/launch_conversation.rs	bt-platform crate::launch_conversation::<RealClock as LaunchClock>::wait	Dynamic	ready	1	2026-11-01: T-LAUNCH-HANDOVER-BUDGET-ON-A-CLOCK; the transport's own wait handed to the clock as a closure, written at each call site in launch_pipe (a kernel wait on an event, a channel receive) and launch_pipe_unix (one socket step); none of them reaches a door; 2026-11-01: T-ELEVATED-HANDSHAKE-FINISH-DEADLINE-ON-A-CLOCK: and elevated_pipe::finish's one WaitForMultipleObjects; it reaches no door
+crates/bt-platform/src/launch_conversation.rs	bt-platform crate::launch_conversation::<RealClock as LaunchClock>::wait	Dynamic	ready	1	2026-11-01: T-LAUNCH-HANDOVER-BUDGET-ON-A-CLOCK; the transport's own wait handed to the clock as a closure, written at each call site in launch_pipe (a kernel wait on an event, a channel receive), launch_pipe_unix (one socket step) and http::Request::close_within (a condvar wait for WinHTTP's closing callback, 2026-11-01: T-WINHTTP-CLOSE-DOOR-ON-A-CLOCK); none of them reaches a door; 2026-11-01: T-ELEVATED-HANDSHAKE-FINISH-DEADLINE-ON-A-CLOCK: and elevated_pipe::finish's one WaitForMultipleObjects; it reaches no door
 crates/bt-platform/src/launch_conversation.rs	bt-platform crate::launch_conversation::hand_over_on	Dynamic	on_reply	1	
 crates/bt-platform/src/launch_pipe.rs	bt-platform crate::launch_pipe::<Client as crate::launch_conversation::Connection>::hear	Ambiguous	truncate	1	
 crates/bt-platform/src/launch_pipe.rs	bt-platform crate::launch_pipe::Instance::open	Ambiguous	unwrap_or	2	
