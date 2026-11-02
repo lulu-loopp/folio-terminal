@@ -51,8 +51,15 @@ windows::Win32::System::Threading::WaitForMultipleObjects		h: &[windows::Win32::
 windows::Win32::System::Threading::WaitForMultipleObjectsEx		h: &[windows::Win32::Foundation::HANDLE], d: u32	unsafe { windows::Win32::System::Threading::WaitForMultipleObjectsEx(h, false, d, true) }
 windows::Win32::System::Threading::SignalObjectAndWait		s: windows::Win32::Foundation::HANDLE, w: windows::Win32::Foundation::HANDLE, d: u32	unsafe { windows::Win32::System::Threading::SignalObjectAndWait(s, w, d, true) }
 windows::Win32::System::Threading::SleepEx		d: u32	unsafe { windows::Win32::System::Threading::SleepEx(d, true) }
+windows::Win32::UI::WindowsAndMessaging::MsgWaitForMultipleObjectsEx		d: u32	unsafe { windows::Win32::UI::WindowsAndMessaging::MsgWaitForMultipleObjectsEx(None, d, windows::Win32::UI::WindowsAndMessaging::QS_ALLINPUT, windows::Win32::UI::WindowsAndMessaging::MWMO_INPUTAVAILABLE) }
+windows::Win32::System::IO::GetOverlappedResult		h: windows::Win32::Foundation::HANDLE, o: &windows::Win32::System::IO::OVERLAPPED, n: &mut u32	unsafe { windows::Win32::System::IO::GetOverlappedResult(h, o, n, true) }
+windows::Win32::System::IO::GetQueuedCompletionStatus		h: windows::Win32::Foundation::HANDLE, n: &mut u32, k: &mut usize, o: &mut *mut windows::Win32::System::IO::OVERLAPPED, d: u32	unsafe { windows::Win32::System::IO::GetQueuedCompletionStatus(h, n, k, o, d) }
+windows::Win32::System::Pipes::WaitNamedPipeW		n: windows::core::PCWSTR, d: u32	unsafe { windows::Win32::System::Pipes::WaitNamedPipeW(n, d) }
 windows::Win32::System::Threading::SetEvent		h: windows::Win32::Foundation::HANDLE	unsafe { windows::Win32::System::Threading::SetEvent(h) }
 windows::Win32::Foundation::CloseHandle		h: windows::Win32::Foundation::HANDLE	unsafe { windows::Win32::Foundation::CloseHandle(h) }
 windows::Win32::Storage::FileSystem::GetDriveTypeW		r: windows::core::PCWSTR	unsafe { windows::Win32::Storage::FileSystem::GetDriveTypeW(r) }
+libc::poll		f: &mut [libc::pollfd], d: i32	unsafe { libc::poll(f.as_mut_ptr(), f.len() as libc::nfds_t, d) }
+libc::waitpid		p: libc::pid_t, s: &mut i32	unsafe { libc::waitpid(p, s, 0) }
+libc::waitid		p: libc::id_t, i: &mut libc::siginfo_t	unsafe { libc::waitid(libc::P_PID, p, i, libc::WEXITED) }
 libc::write		fd: i32, b: &[u8]	unsafe { libc::write(fd, b.as_ptr().cast(), b.len()) }
 libc::close		fd: i32	unsafe { libc::close(fd) }
