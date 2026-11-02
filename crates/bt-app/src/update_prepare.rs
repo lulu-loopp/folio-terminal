@@ -45,7 +45,8 @@ use bt_platform::HostPlatform;
 
 use crate::install_channel::Channel;
 use crate::update_apply::{
-    JOURNAL_HELD_WITHIN, Spelling, WaitClock, WaitWithin, WallClock, write_journal_on,
+    JOURNAL_HELD_WITHIN, Spelling, WaitClock, WaitWithin, WallClock, failure_words,
+    write_journal_on,
 };
 use crate::update_handoff::Staged;
 use crate::update_job::{Bytes, Fetching, Landed, Offer, Poster, Step, Stop};
@@ -154,6 +155,23 @@ pub(crate) fn matches_its_sum(file: &Path, sums: &Path, asset: &str) -> Result<(
 /// **One line of the update job's in `diagnostics.log`**.
 pub(crate) fn note(line: &str) {
     crate::diagnostics::note(&format!("Folio: update job — {line}"));
+}
+
+/// **[`Stop::Journal`], and its one `diagnostics.log` line**: what the
+/// Prepare could not do with its home, its folders or its journal, never a
+/// path (T-UPDATE-PREPARE-REVALIDATION-RESUME-FLAKE: every such stop was
+/// silent, so a failure seen once could not be told from any other) — on
+/// both Prepares (T-PLATFORM-ONLY-TESTS-CFG-GATED gave the macOS one its
+/// lines).
+pub(crate) fn journal_stop(what: &str) -> Stop {
+    note(&format!("the Prepare stops at its journal: {what}"));
+    Stop::Journal
+}
+
+/// [`journal_stop`] for a failure of the install door, in
+/// `update_apply::failure_words`.
+pub(crate) fn journal_failed(what: &str, failure: &install_txn::Failure) -> Stop {
+    journal_stop(&format!("{what}: {}", failure_words(failure)))
 }
 
 /// **Write `journal` durably as the job owner, riding a hold**: while another

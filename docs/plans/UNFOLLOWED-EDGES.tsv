@@ -6549,7 +6549,6 @@ crates/bt-app/src/update_prepare_macos.rs	bt-app crate::update_prepare_macos::el
 crates/bt-app/src/update_prepare_macos.rs	bt-app crate::update_prepare_macos::fetch_and_attach	Dynamic	fetched	2	
 crates/bt-app/src/update_prepare_macos.rs	bt-app crate::update_prepare_macos::identity	Ambiguous	to_string	3	
 crates/bt-app/src/update_prepare_macos.rs	bt-app crate::update_prepare_macos::prepare_on	Ambiguous	is_ok	1	
-crates/bt-app/src/update_prepare_macos.rs	bt-app crate::update_prepare_macos::prepare_on	Ambiguous	ok_or	1	
 crates/bt-app/src/update_prepare_macos.rs	bt-app crate::update_prepare_macos::prepare_on	Ambiguous	to_owned	1	
 crates/bt-app/src/update_prepare_macos.rs	bt-app crate::update_prepare_macos::resumer_of_this_copy	Ambiguous	and_then	1	
 crates/bt-app/src/update_prepare_macos.rs	bt-app crate::update_prepare_macos::resumer_of_this_copy	Ambiguous	ok	1	

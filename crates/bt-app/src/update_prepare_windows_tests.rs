@@ -23,7 +23,8 @@ use bt_winres::digest::{hex, sha256};
 use bt_winres::release_manifest::{PROTOCOL, RESOURCE_NAME, archive_root};
 
 use crate::i18n::Text;
-use crate::update_apply::{CountedClock, ScannerHold};
+#[cfg(windows)]
+use crate::update_apply::CountedClock;
 use crate::update_archive::tests::{item_under, zip_of};
 use crate::update_job::{
     Applied, Bytes, Failure, Fetching, Gathered, Job, Presenters, Progress, Request, State, Verb,
@@ -2114,16 +2115,44 @@ fn a_layout_that_refuses_its_prepare_abandons_and_leaves_nothing() {
 
 // ── a journal held by another program ───────────────────────────────────────
 
+/// **A file opened without delete sharing, as a scanner or an indexer opens
+/// one, until the test lets it go; whether it was let go**
+/// (T-UPDATE-STARTUP-ON-DISK-TEMP-DIR-RACE; shared with `update_startup`'s
+/// retirement tests, T-UPDATE-PREPARE-REVALIDATION-RESUME-FLAKE). Windows only:
+/// the open is `bt_platform::trust_harness::hold_without_delete_sharing`'s.
+#[cfg(windows)]
+#[derive(Clone)]
+pub(crate) struct ScannerHold(std::sync::Arc<std::sync::Mutex<Option<std::fs::File>>>);
+
+#[cfg(windows)]
+impl ScannerHold {
+    pub(crate) fn of(file: &Path) -> Self {
+        Self(std::sync::Arc::new(std::sync::Mutex::new(Some(
+            bt_platform::trust_harness::hold_without_delete_sharing(file).unwrap(),
+        ))))
+    }
+
+    pub(crate) fn let_go(&self) {
+        self.0.lock().unwrap().take();
+    }
+
+    pub(crate) fn was_let_go(&self) -> bool {
+        self.0.lock().unwrap().is_none()
+    }
+}
+
 /// **The Prepare's own tools, but `journal.json` is opened as a scanner opens
 /// it — without delete sharing — at the first copy into the staged set**:
 /// after the journal's `Allocated` write and before its `Prepared` one
 /// (T-UPDATE-PREPARE-REVALIDATION-RESUME-FLAKE). The hold is the test's to let
 /// go, from its clock's pauses.
+#[cfg(windows)]
 struct ScansTheJournal {
     journal: PathBuf,
     hold: Arc<Mutex<Option<ScannerHold>>>,
 }
 
+#[cfg(windows)]
 impl Tools for ScansTheJournal {
     fn available(&self, folder: &Path) -> Result<u64, String> {
         System.available(folder)
@@ -2142,6 +2171,7 @@ impl Tools for ScansTheJournal {
 impl Scene {
     /// A driver whose tools hold the journal ([`ScansTheJournal`]) in `hold`,
     /// and whose held writes are asked again on `clock`.
+    #[cfg(windows)]
     fn scanned(
         &self,
         hold: &Arc<Mutex<Option<ScannerHold>>>,
@@ -2163,6 +2193,7 @@ impl Scene {
 /// **The phase of the journal write a held rename keeps waiting**: the one
 /// temporary `install_txn::DurableWrite` keeps beside `journal.json` while
 /// its rename is refused.
+#[cfg(windows)]
 fn pending_phase(home: &Home) -> PhaseKind {
     let pending: Vec<PathBuf> = std::fs::read_dir(home.root())
         .unwrap()
@@ -2198,11 +2229,10 @@ fn pending_phase(home: &Home) -> PhaseKind {
 /// MUTATION: in `update_prepare_windows::journal_written`, write once with
 /// `install_txn::durable_write` and stop at `Stop::Journal` on any failure
 /// (main's road before this ticket): `Stopped(Journal)`, every run.
+#[cfg(windows)]
 #[test]
 fn a_prepare_whose_journal_is_held_writes_it_once_the_hold_lifts() {
-    let Some(scene) = Scene::new("journal-held") else {
-        return refused_off_windows();
-    };
+    let scene = Scene::new("journal-held").expect("Windows has a test root");
     let hold: Arc<Mutex<Option<ScannerHold>>> = Arc::default();
     let lifts = Arc::clone(&hold);
     let mut held_pauses = 0;
@@ -2251,11 +2281,10 @@ fn a_prepare_whose_journal_is_held_writes_it_once_the_hold_lifts() {
 /// MUTATION: in `journal_written`, hand `write_journal_on` no cancel flag
 /// (`None`: asked again whatever the job did) — the write waiting in the
 /// second pause is `Prepared`.
+#[cfg(windows)]
 #[test]
 fn a_cancel_while_the_journal_is_held_ends_the_wait() {
-    let Some(scene) = Scene::new("journal-held-cancel") else {
-        return refused_off_windows();
-    };
+    let scene = Scene::new("journal-held-cancel").expect("Windows has a test root");
     let before = scene.installed();
     let home = scene.home();
     let (paused, paused_seen) = mpsc::channel();

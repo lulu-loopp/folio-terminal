@@ -58312,7 +58312,7 @@ mod platform_gate_tests {
 
     /// **The list.** One file per line, in the order `ls` gives them, each with
     /// the reason it is allowed to ask.
-    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 36] = [
+    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 40] = [
         // Windows-only test fixture: the `pi` row, which only the Windows table ships, reopened
         // from a Recent row, beside its every-platform twin on the host's fallback shell.
         "app_files_tests.rs",
@@ -58342,6 +58342,9 @@ mod platform_gate_tests {
         "git.rs",
         // The same question one layer up, in the panel.
         "git_panel.rs",
+        // macOS-only test fixtures: a bundle Homebrew's default Caskroom records, with its
+        // attributes taken off by `xattr`; the channel's derivation is portable.
+        "install_channel.rs",
         // The startup path: the native-window door's two arms, and the five
         // platform calls M1-1 made non-fatal.
         "main.rs",
@@ -58378,14 +58381,22 @@ mod platform_gate_tests {
         "shell_literal.rs",
         // Windows-only test fixtures: a share handed over under `Ctrl`.
         "tests.rs",
-        // Native junction and sharing-mode fixtures, never product platform policy.
+        // Native junction and sharing-mode fixtures, and the macOS update home's mounted
+        // image, never product platform policy.
         "uninstall_tests.rs",
+        // macOS-only test fixtures: the applier's road over real bundles, exchanges, trials and
+        // LaunchServices launches; the road's platform-free points run everywhere.
+        "update_apply_macos_tests.rs",
         // Only the held-journal fixtures: a hold that refuses a replacing rename is a
         // Windows fact; their platform-free halves run beside the door everywhere.
         "update_apply_windows_tests.rs",
-        // macOS-only test fixture: the guard that detaches a disk image mounted under a
-        // test's folder (`hdiutil`), gated with the only tests that mount one.
+        // macOS-only test fixtures: the Prepare over real disk images, signed bundles and
+        // Homebrew records, and the guard that detaches an image mounted under a test's folder
+        // (`hdiutil`); the Prepare's pure parts run everywhere.
         "update_prepare_macos_tests.rs",
+        // Windows-only test fixtures: a journal another program holds open (`ScannerHold`, shared
+        // with `update_startup`'s retirement tests); the Prepare's refusal elsewhere is portable.
+        "update_prepare_windows_tests.rs",
         // Only test fixtures: the rescue build running from `H\<txn>` and the scanner holds
         // its retirement's worker waits out (Windows), and the mounted image a retirement
         // detaches (macOS); the start's pass itself is portable.
@@ -58393,6 +58404,9 @@ mod platform_gate_tests {
         // Windows-only test fixture: a trial's watch in a process of its own handing back
         // to a real rescue program; the watch and the hand-back are portable.
         "update_trial.rs",
+        // macOS-only test fixture: the LaunchAgent entrance's proof arming the journal; the
+        // journal's grammar is portable.
+        "update_txn.rs",
         // Only the symlinked-log regression fixture; the recovery road is portable.
         "update_recover.rs",
         // Only the real detached-handoff regression fixture; the handoff API is portable.

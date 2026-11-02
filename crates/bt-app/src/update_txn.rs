@@ -5511,11 +5511,9 @@ mod tests {
     /// written into a temporary folder standing in for `~/Library/LaunchAgents`.
     ///
     /// MUTATION: in `next`, answer `Ok(Phase::Armed)` for any proof.
+    #[cfg(target_os = "macos")]
     #[test]
     fn a_launch_agent_proof_arms_the_journal_too() {
-        if bt_platform::host_platform() != HostPlatform::MacOs {
-            return;
-        }
         let agents = bt_testpath::temp_path("bt-u26-armed");
         let _ = std::fs::remove_dir_all(&agents);
         std::fs::create_dir_all(&agents).unwrap();
