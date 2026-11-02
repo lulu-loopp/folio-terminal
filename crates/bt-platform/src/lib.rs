@@ -3916,12 +3916,24 @@ impl ProbeChild {
         patience: ProbePatience,
         rest: &mut dyn FnMut(),
     ) -> std::io::Result<Result<std::process::ExitStatus, ProbeOverdue>> {
-        let mut watch = ProbeWatch::new(patience, std::time::Instant::now());
+        self.wait_within_reading(patience, &std::time::Instant::now, rest)
+    }
+
+    /// [`Self::wait_within`] with each look's time read on `now` (T-PROBE-RUN-BUDGET-ON-A-CLOCK):
+    /// the monotonic clock for every caller but a run of probes, which reads its run's
+    /// [`ProbeClock`] — the real one in the product, a counted one in its tests.
+    fn wait_within_reading(
+        &mut self,
+        patience: ProbePatience,
+        now: &dyn Fn() -> std::time::Instant,
+        rest: &mut dyn FnMut(),
+    ) -> std::io::Result<Result<std::process::ExitStatus, ProbeOverdue>> {
+        let mut watch = ProbeWatch::new(patience, now());
         loop {
             if let Some(status) = self.try_wait()? {
                 return Ok(Ok(status));
             }
-            let overdue = match watch.look(std::time::Instant::now(), self.processor_time().ok()) {
+            let overdue = match watch.look(now(), self.processor_time().ok()) {
                 ProbeLook::Wait => {
                     rest();
                     continue;
@@ -5619,20 +5631,59 @@ pub enum ProbeRun {
 /// spent is ended with everything it started, and the run answers [`ProbeRun::Overran`] without
 /// starting the rest. Looked at every 20 ms on the worker through [`wait::sleep_within`], as
 /// [`probe_output_with_raw_tail`] is. Takes a [`admission::WorkerCtx`], so it cannot run on the
-/// window thread.
+/// window thread. The budget is read on the monotonic clock (T-PROBE-RUN-BUDGET-ON-A-CLOCK: the
+/// run's clock is a seam its tests count).
 pub fn probe_outputs_within(
     worker: &admission::WorkerCtx,
     commands: Vec<std::process::Command>,
     total: std::time::Duration,
 ) -> ProbeRun {
-    let began = std::time::Instant::now();
+    probe_outputs_within_on(worker, commands, total, &RealProbeClock)
+}
+
+/// **The clock a run of probes reads its budget on, and its rest between two looks at a child**
+/// (T-PROBE-RUN-BUDGET-ON-A-CLOCK). The run's start, what is left of its budget before each
+/// command, and every look at the running child ([`ProbeChild::wait_within`]'s) are read on
+/// [`ProbeClock::now`]; the wait between two looks is [`ProbeClock::rest`]. [`RealProbeClock`] in
+/// the product, through [`probe_outputs_within`]; a test hands a counted clock, so "the budget is
+/// spent" is a count of the test's and "the child ended" is the child's own event, never a race
+/// between a real child and a real budget.
+pub(crate) trait ProbeClock {
+    /// The monotonic reading the run's budget is set and read on.
+    fn now(&self) -> std::time::Instant;
+    /// The wait between two looks at the running child, on the worker `worker` lends.
+    fn rest(&self, worker: &admission::WorkerCtx);
+}
+
+/// **The product's [`ProbeClock`]**: the monotonic clock, and a 20 ms rest through
+/// [`wait::sleep_within`].
+pub(crate) struct RealProbeClock;
+
+impl ProbeClock for RealProbeClock {
+    fn now(&self) -> std::time::Instant {
+        std::time::Instant::now()
+    }
+
+    fn rest(&self, worker: &admission::WorkerCtx) {
+        wait::sleep_within(worker, std::time::Duration::from_millis(20));
+    }
+}
+
+/// [`probe_outputs_within`] with the run's budget read on `clock`.
+pub(crate) fn probe_outputs_within_on(
+    worker: &admission::WorkerCtx,
+    commands: Vec<std::process::Command>,
+    total: std::time::Duration,
+    clock: &dyn ProbeClock,
+) -> ProbeRun {
+    let began = clock.now();
     let mut finished = Vec::with_capacity(commands.len());
     for mut command in commands {
-        let remaining = total.saturating_sub(began.elapsed());
+        let remaining = total.saturating_sub(clock.now().saturating_duration_since(began));
         if remaining.is_zero() {
             return ProbeRun::Overran { finished };
         }
-        match probe_output_held_to(worker, &mut command, remaining) {
+        match probe_output_held_to(worker, &mut command, remaining, clock) {
             Ok(ProbeEnding::Finished(output)) => finished.push(Ok(output)),
             Ok(ProbeEnding::Overran) => return ProbeRun::Overran { finished },
             Err(error) => finished.push(Err(error)),
@@ -5642,19 +5693,21 @@ pub fn probe_outputs_within(
 }
 
 /// One probe of [`probe_outputs_within`]'s run: its output read while it runs (a child that fills
-/// a pipe nobody reads would otherwise look like one that hangs), held to `deadline`.
+/// a pipe nobody reads would otherwise look like one that hangs), held to `deadline` on `clock`.
 fn probe_output_held_to(
     worker: &admission::WorkerCtx,
     command: &mut std::process::Command,
     deadline: std::time::Duration,
+    clock: &dyn ProbeClock,
 ) -> std::io::Result<ProbeEnding> {
     let mut child = spawn_probe(command, ProbeStdio::ANSWER)?;
     drop(child.take_stdin());
     let stdout = drain_probe_pipe("bt-probe-stdout", child.take_stdout())?;
     let stderr = drain_probe_pipe("bt-probe-stderr", child.take_stderr())?;
-    let waited = child.wait_within(ProbePatience::fixed(deadline), &mut || {
-        wait::sleep_within(worker, std::time::Duration::from_millis(20));
-    })?;
+    let waited =
+        child.wait_within_reading(ProbePatience::fixed(deadline), &|| clock.now(), &mut || {
+            clock.rest(worker)
+        })?;
     // Ended either way by now, its contained tree with it, so both readers reach their end.
     let stdout = stdout.finish("stdout");
     let stderr = stderr.finish("stderr");
@@ -5695,10 +5748,109 @@ mod probe_run_tests {
         assert!(lines[0].contains(first), "{lines:?}");
     }
 
-    /// The run's budget in the tests below, and how long each child of the shared-budget test
-    /// runs: 70 % of it, so the first child ends inside the budget with 30 % of it to spare and the
-    /// second cannot — and with a budget of its own each, both would end.
+    /// The run's budget in the tests below: a count of a [`CountedProbeClock`]'s, never real time.
     const BUDGET: std::time::Duration = std::time::Duration::from_secs(3);
+
+    /// What a [`CountedProbeClock`] does with one rest between two looks at the running child.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Turn {
+        /// Rest a real moment without moving the count: the child's own end is awaited as state,
+        /// within the suite's patience ([`crate::door_skipped::PATIENCE`]).
+        Await,
+        /// Move the count by this much at once, without waiting.
+        Spend(std::time::Duration),
+    }
+
+    /// One awaited rest: the product's own rest between two looks.
+    const AWAITED_REST: std::time::Duration = std::time::Duration::from_millis(20);
+
+    /// How many awaited rests make the suite's patience.
+    const PATIENT_RESTS: u32 =
+        (crate::door_skipped::PATIENCE.as_millis() / AWAITED_REST.as_millis()) as u32;
+
+    /// What a [`CountedProbeClock`] counted.
+    #[derive(Clone, Copy, Debug, Default)]
+    struct Counted {
+        /// How far the spent rests moved the clock.
+        moved: std::time::Duration,
+        /// How many rests were awaited.
+        awaited: u32,
+        /// The awaited child did not end within the suite's patience.
+        gave_up: bool,
+    }
+
+    /// **A test's [`ProbeClock`]** (T-PROBE-RUN-BUDGET-ON-A-CLOCK): its reading moves only by what
+    /// `turn` spends, so a run's budget ends at a count of the test's and never on real time. An
+    /// awaited rest is a real 20 ms rest of the worker with the count unmoved; past the suite's
+    /// patience of them the clock gives up — it spends a whole hour, so the run ends — and the test
+    /// fails by name ([`Counted::gave_up`]), never hangs.
+    struct CountedProbeClock {
+        began: std::time::Instant,
+        counted: std::cell::Cell<Counted>,
+        turn: std::cell::RefCell<Box<dyn FnMut() -> Turn>>,
+    }
+
+    impl CountedProbeClock {
+        fn new(turn: impl FnMut() -> Turn + 'static) -> Self {
+            Self {
+                began: std::time::Instant::now(),
+                counted: std::cell::Cell::new(Counted::default()),
+                turn: std::cell::RefCell::new(Box::new(turn)),
+            }
+        }
+    }
+
+    impl ProbeClock for CountedProbeClock {
+        fn now(&self) -> std::time::Instant {
+            self.began + self.counted.get().moved
+        }
+
+        fn rest(&self, worker: &admission::WorkerCtx) {
+            let turn = (self.turn.borrow_mut())();
+            let mut counted = self.counted.get();
+            match turn {
+                Turn::Spend(by) => counted.moved += by,
+                Turn::Await if counted.awaited < PATIENT_RESTS => {
+                    counted.awaited += 1;
+                    wait::sleep_within(worker, AWAITED_REST);
+                }
+                Turn::Await => {
+                    counted.gave_up = true;
+                    counted.moved += std::time::Duration::from_secs(3600);
+                }
+            }
+            self.counted.set(counted);
+        }
+    }
+
+    /// A child that marks `marker` the moment it runs and then runs for ten minutes saying
+    /// nothing, through the test-shell door: an answer that comes only long after any budget here.
+    #[cfg(windows)]
+    fn a_marking_late_child(hygiene: &Hygiene, marker: &std::path::Path) -> std::process::Command {
+        let system = std::env::var_os("SystemRoot").expect("Windows names its own folder");
+        let system = std::path::Path::new(&system);
+        let mut command = hygiene.command(system.join(r"System32\cmd.exe"), quiet_command);
+        // Each word its own argument: a word with a space is quoted whole, and `cmd /C` keeps a
+        // line's quotes when its first character is not one (the probe door quotes a raw
+        // argument as it quotes any other, so a hand-quoted line would reach `cmd` escaped).
+        command.args(["/D", "/C", "type", "nul", ">"]);
+        command.arg(marker);
+        command.arg("&");
+        command.arg(system.join(r"System32\PING.EXE"));
+        command.args(["-n", "600", "127.0.0.1", ">", "nul"]);
+        command
+    }
+
+    /// A child that marks `marker` the moment it runs and then runs for ten minutes saying
+    /// nothing, through the test-shell door: an answer that comes only long after any budget here.
+    #[cfg(not(windows))]
+    fn a_marking_late_child(hygiene: &Hygiene, marker: &std::path::Path) -> std::process::Command {
+        let mut command = hygiene.command("/bin/sh", quiet_command);
+        command
+            .args(["-c", ": > \"$0\"; exec sleep 600"])
+            .arg(marker);
+        command
+    }
 
     /// A child that runs for about two seconds and says nothing, through the test-shell door.
     #[cfg(windows)]
@@ -5744,30 +5896,62 @@ mod probe_run_tests {
         command
     }
 
-    /// RED — **two children share one budget** (revision (c)4): the first runs 70 % of the run's
-    /// budget and ends; the second is given only what is left, is ended when that is spent, and
-    /// the run answers `Overran` with the first child's answer alone.
+    /// RED — **two children share one budget** (revision (c)4), on a [`CountedProbeClock`]: the
+    /// first child's first rest spends 70 % of the run's budget and its own end is then awaited as
+    /// state; the second child marks a file when it runs and would answer only after ten minutes,
+    /// and from that mark every rest spends a tenth of the budget. The second child is given only
+    /// what is left, so it is ended when the count reaches the budget exactly, and the run answers
+    /// `Overran` with the first child's answer alone. Real time never ends the budget.
     ///
-    /// MUTATION: give each child the whole `total` (`ProbePatience::fixed(total)` in
-    /// `probe_outputs_within`) — the second child ends by itself at about 140 % of the budget and
-    /// the run answers `Finished` with two answers.
+    /// MUTATION: give each child the whole `total` (`probe_output_held_to(…, total, clock)` in
+    /// `probe_outputs_within_on`; `reports/plants/plant-148-per-child-budget.py`) — the second
+    /// child is ended at 170 % of the budget on the count, and the count's assertion fails.
     ///
-    /// Real clock: two 2 s children against a 3 s budget leave about 1 s of margin, so a
-    /// severely stalled runner can fail this test falsely; the body itself neither sleeps nor
-    /// measures.
+    /// Should the first child end before its first look (a stall of two seconds between its start
+    /// and that look), the 70 % is spent on the second child's first rest, the test passes and the
+    /// mutation passes with it: a stall can hide the mutation, never fail the product.
     #[test]
     fn two_children_share_one_budget() {
         let hygiene = Hygiene::new();
-        let run = spawn_at_priority("bt-probe-run-test", ThreadPriority::Normal, move |worker| {
-            probe_outputs_within(
-                worker,
-                vec![a_two_second_child(&hygiene), a_two_second_child(&hygiene)],
-                BUDGET,
-            )
-        })
-        .expect("a worker")
-        .join()
-        .expect("the run answers");
+        let marker = hygiene.root().join("the-second-child-runs");
+        let (run, counted) =
+            spawn_at_priority("bt-probe-run-test", ThreadPriority::Normal, move |worker| {
+                let seen = marker.clone();
+                let mut planted = false;
+                let clock = CountedProbeClock::new(move || {
+                    if seen.exists() {
+                        Turn::Spend(BUDGET / 10)
+                    } else if planted {
+                        Turn::Await
+                    } else {
+                        planted = true;
+                        Turn::Spend(BUDGET * 7 / 10)
+                    }
+                });
+                let run = probe_outputs_within_on(
+                    worker,
+                    vec![
+                        a_two_second_child(&hygiene),
+                        a_marking_late_child(&hygiene, &marker),
+                    ],
+                    BUDGET,
+                    &clock,
+                );
+                (run, clock.counted.get())
+            })
+            .expect("a worker")
+            .join()
+            .expect("the run answers");
+        assert!(
+            !counted.gave_up,
+            "the first child did not end within the suite's patience: {run:?}"
+        );
+        assert_eq!(
+            counted.moved, BUDGET,
+            "the run was ended at {:?} on the count, so the second child was given more than what \
+             was left of the budget the two share: {run:?}",
+            counted.moved
+        );
         match run {
             ProbeRun::Overran { finished } => {
                 assert_eq!(
@@ -5785,28 +5969,38 @@ mod probe_run_tests {
     }
 
     /// PIN — **a run inside its budget answers every command's output, in order**, a command that
-    /// would not start among them as its own answer.
+    /// would not start among them as its own answer. On a [`CountedProbeClock`] that never spends,
+    /// so the budget cannot end while a child runs: each child's end is awaited as state, within
+    /// the suite's patience.
     #[test]
     fn a_run_inside_its_budget_answers_each_command_in_order() {
         let hygiene = Hygiene::new();
-        let run = spawn_at_priority("bt-probe-run-test", ThreadPriority::Normal, move |worker| {
-            let missing = hygiene.command(
-                std::env::temp_dir().join("folio-no-such-program-探针"),
-                quiet_command,
-            );
-            probe_outputs_within(
-                worker,
-                vec![
-                    a_saying_child(&hygiene, "first-第一"),
-                    missing,
-                    a_saying_child(&hygiene, "third-第三"),
-                ],
-                BUDGET,
-            )
-        })
-        .expect("a worker")
-        .join()
-        .expect("the run answers");
+        let (run, counted) =
+            spawn_at_priority("bt-probe-run-test", ThreadPriority::Normal, move |worker| {
+                let missing = hygiene.command(
+                    std::env::temp_dir().join("folio-no-such-program-探针"),
+                    quiet_command,
+                );
+                let clock = CountedProbeClock::new(|| Turn::Await);
+                let run = probe_outputs_within_on(
+                    worker,
+                    vec![
+                        a_saying_child(&hygiene, "first-第一"),
+                        missing,
+                        a_saying_child(&hygiene, "third-第三"),
+                    ],
+                    BUDGET,
+                    &clock,
+                );
+                (run, clock.counted.get())
+            })
+            .expect("a worker")
+            .join()
+            .expect("the run answers");
+        assert!(
+            !counted.gave_up,
+            "a child did not end within the suite's patience: {run:?}"
+        );
         let ProbeRun::Finished(answers) = run else {
             panic!("three short commands overran the budget: {run:?}");
         };
