@@ -136,6 +136,7 @@ WindowRuntime.rail_scroll	-	VIEW	panes	the 2026-09-25 table
 WindowRuntime.rename	-	VIEW	tabs	the 2026-09-25 table
 WindowRuntime.rename_blink	-	VIEW	tabs	the 2026-09-25 table
 WindowRuntime.rename_caret_line	-	PROJ	tabs	the 2026-09-25 table
+WindowRuntime.rename_drawn	-	PROJ	tabs	0.4.9 plan row 179: the drawn run of the name editor, written beside rename_caret_line by the same five painters
 WindowRuntime.renderer	-	RES	—	the 2026-09-25 table
 WindowRuntime.restore_prompt	-	VIEW	windows	proposed by census-1: the restore card, ruled a full-window gate on 2026-09-25
 WindowRuntime.revealed_foot	-	ASYNC	handoff	the 2026-09-25 table

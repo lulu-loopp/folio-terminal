@@ -10773,6 +10773,12 @@ struct WindowRuntime<B: Backend = Native> {
     /// rebuild the strip to find out where the letters went. Every other field
     /// answers [`Runtime::field_ime_caret`] from a layout the window keeps.
     rename_caret_line: Option<[f32; 4]>,
+    /// **The open editor's draft as the painter last drew it**, for a press to
+    /// put the caret in (0.4.9 plan row 179): the same pass and the same reason
+    /// as [`Self::rename_caret_line`], one field over. Written beside it by
+    /// every surface that draws the editor, emptied by
+    /// [`Runtime::finish_rename`].
+    rename_drawn: Option<RenameDrawn>,
     cursor_blink: CursorBlink,
     /// Whether the window holds focus.
     ///
@@ -19025,6 +19031,44 @@ enum EditorRefusal {
     Address(webhost::AddressRefusal),
 }
 
+/// **What one painter drew the open editor's draft as** (0.4.9 plan row 179):
+/// where the drawn window starts in the window, which string it is a window
+/// onto, and where each of that string's boundaries fell — what a press inside
+/// the box reads to find the seam under the pointer.
+///
+/// **Left behind by the painter, as [`WindowRuntime::rename_caret_line`] is**,
+/// and for its reason: the box is a share of a solve that lives and dies inside
+/// one chrome build, on five surfaces with five geometries, so the press reads
+/// the run the ink was laid out from instead of rebuilding any of them. The
+/// table is the very one [`TabRename::fit`] measured the frame with — one
+/// shaping pass, the frame's own.
+#[derive(Clone, Debug, PartialEq)]
+struct RenameDrawn {
+    /// The window pixel the drawn window's first seam stands on — the box's
+    /// left edge.
+    left: f32,
+    /// The string on the glass, composition included ([`TextField::composed`]).
+    ///
+    /// [`TextField::composed`]: crate::text_field::TextField::composed
+    shown: String,
+    /// The byte of [`Self::shown`] the drawn window starts at
+    /// ([`TabRename::first_visible`] as this frame left it).
+    from: usize,
+    /// Every boundary of [`Self::shown`], as the shaper placed it.
+    advances: bt_render::ChromeTextAdvances,
+}
+
+impl RenameDrawn {
+    /// **The byte a press at window pixel `x` names** — the seam nearest the
+    /// pointer, by [`text_field::caret_at_x`]'s rule, counted from the drawn
+    /// window's start.
+    fn caret_at(&self, x: f32) -> usize {
+        text_field::caret_at_x(&self.shown, self.from, x - self.left, |at| {
+            self.advances.between(self.from, at)
+        })
+    }
+}
+
 impl TabRename {
     /// **The one door every editor opens through, and the invariant it exists to
     /// hold: WHEN THERE IS A SELECTION, THE CARET IS ITS FAR END.**
@@ -19300,11 +19344,12 @@ impl TabRename {
     /// [`TextField::composed`]: crate::text_field::TextField::composed
     fn fit(
         &mut self,
+        left: f32,
         box_width: f32,
         caret_width: f32,
         scrolls: bool,
         shape: &mut dyn FnMut(&str) -> bt_render::ChromeTextAdvances,
-    ) -> seats::TabEdit {
+    ) -> (seats::TabEdit, RenameDrawn) {
         let shown = self.field.composed().into_owned();
         // The caret stands **after** the composition, which is the one place the
         // next committed character can go.
@@ -19352,7 +19397,7 @@ impl TabRename {
                 advances.between(from, selection_to).min(box_width),
             )
         });
-        seats::TabEdit {
+        let edit = seats::TabEdit {
             caret_px: advances.between(from, caret),
             text: shown[from..].to_owned(),
             // Filled by whichever surface has a layer under its name to reveal,
@@ -19360,7 +19405,42 @@ impl TabRename {
             placeholder: String::new(),
             selection: band,
             caret_lit: false,
-        }
+        };
+        // **And the run itself, for a press to read** (row 179): the same table,
+        // so the seam a press finds is the seam this frame drew.
+        let drawn = RenameDrawn {
+            left,
+            shown,
+            from,
+            advances,
+        };
+        (edit, drawn)
+    }
+
+    /// Whether an IME composition is standing in the draft.
+    fn composing(&self) -> bool {
+        !self.field.preedit().is_empty()
+    }
+
+    /// **Put the caret where a press or a drag says** (0.4.9 plan row 179):
+    /// at the seam of the drawn draft nearest window pixel `x`, carrying the
+    /// selection's far end when `extend`. Answers whether the caret or the
+    /// selection moved.
+    ///
+    /// **Asked only with no composition up** (row 179 R5, the caller's
+    /// [`Self::composing`]): the IME is editing the text at the caret, and
+    /// moving the caret from under it would part the composition from what it
+    /// is composing. With none, the string on the glass is the draft itself, so
+    /// every offset `drawn` answers is an offset into [`Self::text`].
+    fn place_at(&mut self, drawn: &RenameDrawn, x: f32, extend: bool) -> bool {
+        debug_assert!(
+            !self.composing(),
+            "a press places no caret under a composition"
+        );
+        let was = (self.field.caret(), self.field.selection());
+        self.field.place(drawn.caret_at(x), extend);
+        self.clamp_scroll();
+        (self.field.caret(), self.field.selection()) != was
     }
 
     /// **Record the refusal a submission of this draft ran into**, so the box
@@ -34099,6 +34179,7 @@ fn new_window_runtime<B: Backend>(parts: NewWindowParts<B>) -> WindowRuntime<B> 
         system_caret: ImeCursorSlot::default(),
         title: TitleSlot::default(),
         rename_caret_line: None,
+        rename_drawn: None,
         cursor_blink: CursorBlink::new(Instant::now(), motion),
         // A window is focused when it opens, and `CursorBlink` starts from
         // the same assumption — the two must agree or the strip and the
