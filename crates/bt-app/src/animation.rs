@@ -704,6 +704,53 @@ impl AnimationRefusal {
     }
 }
 
+/// **Why an open of one file's frames came back with no animation**
+/// (T-HELD-FILE-IN-THE-OTHER-PICTURE-LANES): a refusal, which is a fact about the file's bytes, or
+/// a file another program holds at this moment, which is not.
+///
+/// Two kinds and not a sixth [`AnimationRefusal`], for the reason `bt_platform`'s `NoFrame` keeps
+/// `Held` apart from `Refused`: a refusal is kept while the file is named and said in the pane's
+/// foot, and a held file is a question not answered, asked again within the run-out bound of row
+/// 164 (`AnimationEntry::Unanswered`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NotOpened {
+    /// The file's bytes were read and judged.
+    Refused(AnimationRefusal),
+    /// The file's open or its read was refused because another program holds it
+    /// ([`bt_platform::file_reads::held_elsewhere`]).
+    HeldElsewhere,
+}
+
+impl From<AnimationRefusal> for NotOpened {
+    fn from(refusal: AnimationRefusal) -> Self {
+        Self::Refused(refusal)
+    }
+}
+
+impl NotOpened {
+    /// **What a failed open or read of the file is**: held, when another program holds it at this
+    /// moment, and otherwise the refusal a file that cannot be read has always been
+    /// ([`AnimationRefusal::Undecodable`]).
+    fn of_read(error: &std::io::Error) -> Self {
+        if bt_platform::file_reads::held_elsewhere(error) {
+            Self::HeldElsewhere
+        } else {
+            Self::Refused(AnimationRefusal::Undecodable)
+        }
+    }
+
+    /// **What the decoder's refusal at the header is**: its read, when the `gif` crate's error is
+    /// one ([`Self::of_read`]), and otherwise bytes that would not decode.
+    fn of_decoder(error: &gif::DecodingError) -> Self {
+        match error {
+            gif::DecodingError::Io(error) => Self::of_read(error),
+            // Every other answer (a malformed header, a memory limit, an early end) is about the
+            // bytes; the enum is `#[non_exhaustive]`, so this arm also takes any it gains.
+            _ => Self::Refused(AnimationRefusal::Undecodable),
+        }
+    }
+}
+
 /// **Read the head of `path`'s frames, or say why not.**
 ///
 /// What comes back is an animation already standing on its first frame with a
@@ -714,7 +761,7 @@ impl AnimationRefusal {
 ///
 /// **A worker, never the thread that draws.** Decoding even a ring of frames is
 /// tens of milliseconds and this window has one thread that must not spend them.
-pub fn decode(path: &Path) -> Result<Animation, AnimationRefusal> {
+pub fn decode(path: &Path) -> Result<Animation, NotOpened> {
     stream(file_source(path)?)
 }
 
@@ -726,25 +773,25 @@ pub fn decode(path: &Path) -> Result<Animation, AnimationRefusal> {
 /// `pdf::read_capped` states in the same words, for the same reason — but since
 /// 2026-09-12 the cap is a sanity bound rather than a memory one, because the
 /// bytes are not kept. See [`MAX_ANIMATION_FILE_BYTES`].
-fn file_source(path: &Path) -> Result<Box<dyn AnimationSource>, AnimationRefusal> {
+fn file_source(path: &Path) -> Result<Box<dyn AnimationSource>, NotOpened> {
     file_source_in_lane(path, bt_platform::file_reads::Lane::Animation)
 }
 
 fn file_source_in_lane(
     path: &Path,
     lane: bt_platform::file_reads::Lane,
-) -> Result<Box<dyn AnimationSource>, AnimationRefusal> {
+) -> Result<Box<dyn AnimationSource>, NotOpened> {
     if !path_names_an_animation(path) {
-        return Err(AnimationRefusal::NotAnAnimation);
+        return Err(AnimationRefusal::NotAnAnimation.into());
     }
     let source = if lane == bt_platform::file_reads::Lane::Animation {
         FileAnimationSource::open(path)
     } else {
         FileAnimationSource::open_in_lane(path, lane)
     }
-    .map_err(|_| AnimationRefusal::Undecodable)?;
+    .map_err(|error| NotOpened::of_read(&error))?;
     if source.stamp().length > MAX_ANIMATION_FILE_BYTES {
-        return Err(AnimationRefusal::FileTooLong);
+        return Err(AnimationRefusal::FileTooLong.into());
     }
     Ok(Box::new(source))
 }
@@ -755,12 +802,12 @@ fn file_source_in_lane(
 /// a looping decoder has to be able to start again, and a slice that has to
 /// outlive this call is a lifetime on a thing that crosses to a worker.
 #[cfg(test)]
-pub fn decode_bytes(bytes: Vec<u8>) -> Result<Animation, AnimationRefusal> {
+pub fn decode_bytes(bytes: Vec<u8>) -> Result<Animation, NotOpened> {
     stream(Box::new(BytesAnimationSource::over(Arc::from(bytes))))
 }
 
 /// **Open one animated file and read the ring's worth of frames behind it.**
-fn stream(source: Box<dyn AnimationSource>) -> Result<Animation, AnimationRefusal> {
+fn stream(source: Box<dyn AnimationSource>) -> Result<Animation, NotOpened> {
     let (mut cursor, width_px, height_px) = open(source)?;
     let frame_bytes = u64::from(width_px) * u64::from(height_px) * 4;
     // An empty ring, no lead, and no frame yet to read a delay off — so the
@@ -768,10 +815,10 @@ fn stream(source: Box<dyn AnimationSource>) -> Result<Animation, AnimationRefusa
     let want = frames_wanted(frame_bytes, 0, Duration::ZERO, DEFAULT_FRAME_DELAY);
     let frames = cursor.next_frames(want);
     if frames.is_empty() {
-        return Err(AnimationRefusal::Undecodable);
+        return Err(AnimationRefusal::Undecodable.into());
     }
     if cursor.frames_in_file() == Some(1) {
-        return Err(AnimationRefusal::OneFrame);
+        return Err(AnimationRefusal::OneFrame.into());
     }
     Ok(Animation::streaming(
         frames,
@@ -854,21 +901,21 @@ fn still_texture_key(
 /// different numbers of them.
 fn open(
     source: Box<dyn AnimationSource>,
-) -> Result<(Box<AnimationCursor>, u32, u32), AnimationRefusal> {
+) -> Result<(Box<AnimationCursor>, u32, u32), NotOpened> {
     // The container is judged by its own header and not by the name that led
     // here, which is the discipline `decode_image_bytes_within` already keeps: a
     // `.gif` that is a JPEG is a JPEG. Read off the front of the stream and then
     // wound back, because a stream cannot be guessed at twice.
     let mut source = source;
     let mut head = [0_u8; 16];
-    let read = read_head(&mut *source, &mut head).map_err(|_| AnimationRefusal::Undecodable)?;
+    let read = read_head(&mut *source, &mut head).map_err(|error| NotOpened::of_read(&error))?;
     if image::guess_format(&head[..read]).ok() != Some(ImageFormat::Gif) {
-        return Err(AnimationRefusal::NotAnAnimation);
+        return Err(AnimationRefusal::NotAnAnimation.into());
     }
     source
         .restart()
-        .map_err(|_| AnimationRefusal::Undecodable)?;
-    let reader = gif_reader(source).map_err(|_| AnimationRefusal::Undecodable)?;
+        .map_err(|error| NotOpened::of_read(&error))?;
+    let reader = gif_reader(source).map_err(|error| NotOpened::of_decoder(&error))?;
     // **The logical screen descriptor is the whole judgement, and it is read off
     // the header with no buffer anywhere.** A file declaring a 65535-square
     // screen asks a decoder for seventeen gigabytes on its first frame, and the
@@ -876,14 +923,14 @@ fn open(
     let width_px = u32::from(reader.width());
     let height_px = u32::from(reader.height());
     if width_px == 0 || height_px == 0 {
-        return Err(AnimationRefusal::Undecodable);
+        return Err(AnimationRefusal::Undecodable.into());
     }
     if width_px > MAX_ANIMATION_SIDE_PX || height_px > MAX_ANIMATION_SIDE_PX {
-        return Err(AnimationRefusal::FrameTooLarge);
+        return Err(AnimationRefusal::FrameTooLarge.into());
     }
     let frame_bytes = u64::from(width_px) * u64::from(height_px) * 4;
     if frame_bytes > MAX_ANIMATION_FRAME_BYTES {
-        return Err(AnimationRefusal::FrameTooLarge);
+        return Err(AnimationRefusal::FrameTooLarge.into());
     }
     let cursor = AnimationCursor::over(reader, width_px, height_px);
     Ok((Box::new(cursor), width_px, height_px))
@@ -1744,7 +1791,7 @@ mod tests {
         for side in [16_384_u16, 65_535] {
             assert_eq!(
                 decode_bytes(a_gif_declaring(side, side)).err(),
-                Some(AnimationRefusal::FrameTooLarge),
+                Some(AnimationRefusal::FrameTooLarge.into()),
                 "a {side}-square logical screen is over this window's ceiling",
             );
         }
@@ -1800,7 +1847,7 @@ mod tests {
         drop(file);
         assert_eq!(
             decode(&path).err(),
-            Some(AnimationRefusal::FileTooLong),
+            Some(AnimationRefusal::FileTooLong.into()),
             "a file past the cap is refused on its length, and says so",
         );
         let _ = std::fs::remove_file(&path);
@@ -1994,7 +2041,10 @@ mod tests {
         // `Result<Animation, _>` is deliberately not `PartialEq` — an animation
         // is megabytes of pixels and comparing two of them is never what a
         // caller means — so these read the error rather than the whole answer.
-        let refusal = |result: Result<Animation, AnimationRefusal>| result.err();
+        let refusal = |result: Result<Animation, NotOpened>| match result {
+            Err(NotOpened::Refused(refusal)) => Some(refusal),
+            Ok(_) | Err(NotOpened::HeldElsewhere) => None,
+        };
         assert_eq!(
             refusal(decode(std::path::Path::new(r"D:\shots\a.png"))),
             Some(AnimationRefusal::NotAnAnimation)
@@ -2586,6 +2636,38 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// RED — **a GIF another program holds is held, not refused, and plays once it is let go**
+    /// (T-HELD-FILE-IN-THE-OTHER-PICTURE-LANES): this lane's own open meets the sharing violation
+    /// a program holding the file exclusively gives and answers `NotOpened::HeldElsewhere`; once
+    /// the holder lets go the same file opens; a file that is not there stays the refusal it was.
+    ///
+    /// MUTATION: have `NotOpened::of_read` answer `Refused(Undecodable)` for every error — the held
+    /// open is refused again; the first assertion goes red.
+    #[cfg(windows)]
+    #[test]
+    fn a_gif_another_program_holds_is_held_and_plays_once_it_is_let_go() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let path = scratch_gif("held \u{88ab}\u{5360}\u{7528}", &fixture());
+        let holder = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&path)
+            .expect("the test holds its own file");
+        let held = decode(&path).err();
+        drop(holder);
+        let let_go = decode(&path).is_ok();
+        let missing = scratch("missing \u{4e0d}\u{5728}");
+        let refused = decode(&missing).err();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(held, Some(NotOpened::HeldElsewhere), "held, not refused");
+        assert!(let_go, "and it opens once let go");
+        assert_eq!(
+            refused,
+            Some(AnimationRefusal::Undecodable.into()),
+            "a file that is not there stays a refusal"
+        );
+    }
+
     /// RED — **a refused animation's first frame is decoded by the GIF
     /// decoder** (user report 2026-09-12).
     ///
@@ -2632,7 +2714,7 @@ mod tests {
         // ① a `.gif` with one frame in it is refused as an animation — one frame
         // is not a thing that moves — and it still has a picture, from here.
         let path = scratch_gif("one-frame", &a_gif_of(1, 16, 10));
-        assert_eq!(decode(&path).err(), Some(AnimationRefusal::OneFrame));
+        assert_eq!(decode(&path).err(), Some(AnimationRefusal::OneFrame.into()));
         let still = first_frame(&path).expect("a refused animation still has a first frame");
         assert_eq!((still.width_px, still.height_px), (16, 16));
         assert_eq!(
@@ -2691,7 +2773,7 @@ mod tests {
         // either, so the picture decoder is asked — `None`, not an empty
         // picture.
         let path = scratch_gif("frame-past-the-ceiling", &a_gif_declaring(2_048, 2_049));
-        assert_eq!(decode(&path).err(), Some(AnimationRefusal::FrameTooLarge));
+        assert_eq!(decode(&path).err(), Some(AnimationRefusal::FrameTooLarge.into()));
         assert!(
             first_frame(&path).is_none(),
             "the picture lane answers this"

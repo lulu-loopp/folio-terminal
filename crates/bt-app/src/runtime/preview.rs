@@ -20,7 +20,7 @@ use crate::runtime::web::page_destination;
 use crate::window_seam::prelude::*;
 use crate::{
     ADDRESS_FIELD_WANTS_THE_WHOLE_HEAD, AnimationEntry, AnimationWork, AppEvent, AttentionDelivery,
-    BackgroundDecode, BlockScrollPaint, BuiltMarkdown, CardWords, ClickIntent,
+    BackgroundAnswer, BackgroundDecode, BlockScrollPaint, BuiltMarkdown, CardWords, ClickIntent,
     ClipboardPictureAnswer, ClipboardPictureInbox, ClipboardPictureJob, DOCK_PREVIEW_FADE, DiffRow,
     DocumentMath, DocumentPictures, DragLatch, DrawnAnimation, DropPreview, FOOT_REVEAL_FEEDBACK,
     FileMenuTarget, FilePick, FillSent, FoldedLevel, FootSaying, ForeignPane, FormulaSwitches,
@@ -776,7 +776,10 @@ impl<B: Backend> Runtime<'_, B> {
     /// window without a picture, and says so once in a card: a wallpaper on a
     /// drive that is not plugged in today is the ordinary case, and quietly
     /// erasing the setting would mean plugging the drive back in changed nothing.
-    pub(in crate::runtime) fn reload_background_picture(&mut self) -> Result<()> {
+    ///
+    /// `once_more` says this read is the one more ask a held answer earns
+    /// ([`BackgroundDecode::answer`]); every other caller asks a first read.
+    pub(in crate::runtime) fn reload_background_picture(&mut self, once_more: bool) -> Result<()> {
         let stored = self.app.settings_store.loaded().background_image.clone();
         // Every call withdraws whatever the last one asked for, `None` included:
         // a clear that raced a slow decode must win, and the generation is how
@@ -813,6 +816,7 @@ impl<B: Backend> Runtime<'_, B> {
                     generation,
                     file,
                     result,
+                    once_more,
                 });
                 // After the answer is in the slot, never before.
                 let _ = proxy.send_event(AppEvent::BackgroundPictureReady);
@@ -857,12 +861,15 @@ impl<B: Backend> Runtime<'_, B> {
         let Some(landed) = self.window.background_decode.take_current() else {
             return Ok(());
         };
-        match landed.result {
-            Ok(image) => {
+        match (landed.answer(), landed.result) {
+            (_, Ok(image)) => {
                 self.window.background_picture = Some(image);
                 self.apply_window_ground()?;
             }
-            Err(refusal) => {
+            // Held by another program, on the first read: the picture on the glass is kept and
+            // nothing is said; the file is read once more (T-HELD-FILE-IN-THE-OTHER-PICTURE-LANES).
+            (BackgroundAnswer::AskOnceMore, Err(_)) => self.reload_background_picture(true)?,
+            (_, Err(refusal)) => {
                 self.window.background_picture = None;
                 self.apply_window_ground()?;
                 self.toast(
@@ -886,7 +893,7 @@ impl<B: Backend> Runtime<'_, B> {
         if !self.app.settings_store.store(settings) {
             return Ok(false);
         }
-        self.reload_background_picture()?;
+        self.reload_background_picture(false)?;
         self.apply_window_ground()?;
         Ok(true)
     }

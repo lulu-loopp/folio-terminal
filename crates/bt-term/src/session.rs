@@ -535,6 +535,10 @@ struct InlineImageRecord {
     failed: bool,
     /// See [`InlineImageRecordView::declined_by_host`].
     declined_by_host: bool,
+    /// **Whether this occurrence's read was asked again by itself** — once, after an answer that
+    /// another program held the file ([`InlineImageDecodeError::HeldElsewhere`]); a second held
+    /// answer is filed as a failure ([`DualPlaneSession::complete_inline_image_result`]).
+    asked_again: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -9553,6 +9557,17 @@ impl DualPlaneSession {
                 }
             }
             Ok(_) => return false,
+            // **Held by another program at this moment** (T-HELD-FILE-IN-THE-OTHER-PICTURE-LANES):
+            // an answer about the moment and not about the file, so the occurrence's first such
+            // answer files nothing — the read is asked once more by itself, and nothing on the glass
+            // changes meanwhile. A second held answer is filed as the failure below (the run-out
+            // bound of row 164: at most two reads per occurrence), and the next look is the next
+            // printing of the path, which is an occurrence of its own and asks anew.
+            Err(InlineImageDecodeError::HeldElsewhere(_)) if !record.asked_again => {
+                record.asked_again = true;
+                self.queue_local_image_path_task(task);
+                return false;
+            }
             Err(error) => {
                 record.artifact = None;
                 record.display = None;
@@ -12522,6 +12537,7 @@ impl DualPlaneSession {
                 display_declined: None,
                 failed: false,
                 declined_by_host: false,
+                asked_again: false,
             },
         );
         if self.inline_image_tasks.len() == INLINE_IMAGE_WORKER_QUEUE_CAP {
@@ -12983,19 +12999,29 @@ impl DualPlaneSession {
                 display_declined: None,
                 failed: false,
                 declined_by_host: false,
+                asked_again: false,
             },
         );
+        self.queue_local_image_path_task(InlineImageTask {
+            occurrence_id,
+            source: InlineImageSource::LocalPath(path),
+        });
+        occurrence_id
+    }
+
+    /// **Put one printed path's read in front of the worker** — the one door of the bounded
+    /// queue, for a newly registered occurrence and for the one read a held answer asks again
+    /// ([`Self::complete_inline_image_result`]). At the cap the oldest read waiting is dropped and
+    /// its occurrence filed as failed: what output can queue is bounded, and the newest reference
+    /// is the one the reader is looking at.
+    fn queue_local_image_path_task(&mut self, task: InlineImageTask) {
         if self.local_image_path_tasks.len() == LOCAL_IMAGE_PATH_WORKER_QUEUE_CAP
             && let Some(dropped) = self.local_image_path_tasks.pop_front()
             && let Some(record) = self.inline_images.get_mut(&dropped.occurrence_id)
         {
             record.failed = true;
         }
-        self.local_image_path_tasks.push_back(InlineImageTask {
-            occurrence_id,
-            source: InlineImageSource::LocalPath(path),
-        });
-        occurrence_id
+        self.local_image_path_tasks.push_back(task);
     }
 
     /// Prove and re-seat the live decorations a batched top-anchored scroll displaced, then reset
@@ -26048,6 +26074,83 @@ mod tests {
             assert!(record.failed);
             assert_eq!(record.declined_by_host, declined, "{record:?}");
         }
+    }
+
+    /// The next printed path's read the session hands out, answering every name check in front of
+    /// it off the real disk as the app's loop does; `None` when no read is queued.
+    fn next_image_read(session: &mut DualPlaneSession) -> Option<InlineImageTask> {
+        while let Some(task) = session.take_decoration_worker_task() {
+            match task {
+                SessionDecorationTask::InlineImage(task) => return Some(task),
+                SessionDecorationTask::VerifyPath(path) => {
+                    let verdict = verify_path(&path, &no_door);
+                    session.complete_path_verification(path, verdict);
+                }
+                other => panic!("the fixture asks only names and reads: {other:?}"),
+            }
+        }
+        None
+    }
+
+    /// RED — **a printed picture another program holds is asked once more by itself, and then
+    /// filed as failed** (T-HELD-FILE-IN-THE-OTHER-PICTURE-LANES): the first held answer files
+    /// nothing and queues exactly one read of the same occurrence; a second held answer files the
+    /// failure and queues nothing, however many more come; and when the second read is answered,
+    /// the reference is verified like any other.
+    ///
+    /// MUTATION: drop the `HeldElsewhere` arm of `complete_inline_image_result` — the first held
+    /// answer fails the record at once; the first assertion goes red. Or leave `asked_again` unset —
+    /// every held answer queues another read; the "once" assertions go red.
+    #[test]
+    fn a_printed_picture_another_program_holds_is_asked_once_more_and_then_failed() {
+        let held = || -> Result<DecodedInlineImage, InlineImageDecodeError> {
+            Err(InlineImageDecodeError::HeldElsewhere("held 被占用".to_owned()))
+        };
+        let (directory, path) = temporary_path_image();
+        let started = Instant::now();
+        let fresh = || {
+            let mut session = DualPlaneSession::new(nz(240), nz(4));
+            enable_path_detection(&mut session);
+            session
+                .feed_at(
+                    format!("[Image: source: \"{}\"]\r\nprompt", path.display()).as_bytes(),
+                    started,
+                )
+                .unwrap();
+            session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL);
+            session
+        };
+
+        let mut session = fresh();
+        let first = next_image_read(&mut session).expect("the printed picture is read");
+        assert!(!session.complete_inline_image_result(first.clone(), held()));
+        assert!(
+            !session.inline_image_records()[0].failed,
+            "a held answer is not a failure of the file"
+        );
+        let again = next_image_read(&mut session).expect("asked once more by itself");
+        assert_eq!(again, first, "the same occurrence's read");
+        assert!(session.complete_inline_image_result(again.clone(), held()));
+        assert!(
+            session.inline_image_records()[0].failed,
+            "a second held answer is filed as the failure"
+        );
+        assert!(next_image_read(&mut session).is_none(), "once");
+        for _ in 0..5 {
+            session.complete_inline_image_result(again.clone(), held());
+        }
+        assert!(next_image_read(&mut session).is_none(), "once, however many answers come");
+        assert_eq!(session.outstanding_decoration_work(), 0);
+
+        let mut session = fresh();
+        let first = next_image_read(&mut session).expect("the printed picture is read");
+        session.complete_inline_image_result(first, held());
+        let again = next_image_read(&mut session).expect("asked once more by itself");
+        let mut decoder = crate::inline_image::InlineImageDecoder::default();
+        let decoded = decoder.decode(again.clone());
+        assert!(session.complete_inline_image_result(again, decoded));
+        assert!(session.image_path_is_verified(&path), "the second read verifies it");
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     /// RED (S-8 rounds 2 and 3) — **a task whose work failed is held until new input that could

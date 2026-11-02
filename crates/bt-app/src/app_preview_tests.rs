@@ -976,7 +976,7 @@ fn the_windows_animations_are_bounded_by_the_frames_they_hold() {
         &mut cache,
         &still_key,
         0,
-        Err(animation::AnimationRefusal::OneFrame),
+        Err(animation::AnimationRefusal::OneFrame.into()),
     );
     assert!(matches!(
         cache.get(&still_key),
@@ -1011,7 +1011,7 @@ fn walk_asking(
 ///
 /// MUTATION: have `AnimationCache::settle` leave an unanswered open as it is
 /// — the entry stays `Pending`. Or have `ask_for_showing` ask whatever it is
-/// shown (drop its `contains_key` gate) — every redraw asks again. Or have
+/// shown (drop its `Some(_) => continue` arm) — every redraw asks again. Or have
 /// `let_go_on_open` keep `Unanswered` — the next open asks nothing.
 #[test]
 fn a_failed_open_is_unanswered_and_only_the_files_next_open_asks_again() {
@@ -1028,7 +1028,7 @@ fn a_failed_open_is_unanswered_and_only_the_files_next_open_asks_again() {
     );
     fail_awaited(&mut window, &spinner);
     assert!(
-        matches!(window.get(&key), Some(AnimationEntry::Unanswered)),
+        matches!(window.get(&key), Some(AnimationEntry::Unanswered { asked_again: true })),
         "the failed open is unanswered"
     );
     for _ in 0..3 {
@@ -1096,7 +1096,7 @@ fn records_of_questions_outlive_weight_pressure_and_no_redraw_asks_them() {
         &mut window,
         &normalized_local_image_path_key(&refused),
         1,
-        Err(animation::AnimationRefusal::OneFrame),
+        Err(animation::AnimationRefusal::OneFrame.into()),
     );
     for index in 0..6_u8 {
         shown_and_opened(
@@ -1113,7 +1113,7 @@ fn records_of_questions_outlive_weight_pressure_and_no_redraw_asks_them() {
     );
     assert!(matches!(
         window.get(&normalized_local_image_path_key(&unstarted)),
-        Some(AnimationEntry::Unanswered)
+        Some(AnimationEntry::Unanswered { asked_again: true })
     ));
     assert!(matches!(
         window.get(&normalized_local_image_path_key(&refused)),
@@ -1153,7 +1153,7 @@ fn a_refusal_shown_on(
         window,
         &key,
         1,
-        Err(animation::AnimationRefusal::Undecodable),
+        Err(animation::AnimationRefusal::Undecodable.into()),
     );
     assert!(matches!(window.get(&key), Some(AnimationEntry::Refused(_))));
     key
@@ -1323,7 +1323,7 @@ fn an_answer_for_a_file_no_surface_names_files_no_record() {
         &mut window,
         &normalized_local_image_path_key(&refused),
         1,
-        Err(animation::AnimationRefusal::Undecodable),
+        Err(animation::AnimationRefusal::Undecodable.into()),
     );
     fail_awaited(&mut window, &failed);
     answer_awaited(
@@ -1466,8 +1466,9 @@ fn a_surface_exists_while_some_tab_holds_its_view() {
 
 /// RED (T-ANIMATION-RECORDS-BOUND) — **a refused file that changed is asked again on its next
 /// showing**: the preview's file-change news lets go of the refusal (a fact about the old bytes)
-/// as it lets go of a playback, and the walk asks about the bytes there now; an open that never
-/// answered is no fact about the bytes and stays for the file's next open.
+/// as it lets go of a playback, and the walk asks about the bytes there now; so does an open that
+/// never answered, which is no fact about the bytes: the change news is a new look
+/// (T-HELD-FILE-IN-THE-OTHER-PICTURE-LANES — a writer that held the file is done with it).
 ///
 /// MUTATION: have `AnimationCache::let_go_changed_file` match only `AnimationEntry::Ready` (the
 /// file-change road ignores `Refused`) — it answers `false`, the refusal stays and the walk asks
@@ -1492,14 +1493,102 @@ fn a_refused_file_that_changed_is_asked_again_on_its_next_showing() {
 
     assert!(window.let_go_changed_file(&key), "the refusal is let go of");
     assert!(
-        !window.let_go_changed_file(&normalized_local_image_path_key(&unstarted)),
-        "an open that never answered is no fact about the bytes"
+        window.let_go_changed_file(&normalized_local_image_path_key(&unstarted)),
+        "and so is an open that never answered: the change news is a new look"
     );
     assert_eq!(
         walk_asking(&mut window, &showing, admitted),
-        vec![half_written],
-        "the file's new bytes are asked about, and nothing else"
+        vec![half_written, unstarted],
+        "each file the news named is asked about once"
     );
+}
+
+/// RED (T-HELD-FILE-IN-THE-OTHER-PICTURE-LANES) — **a GIF another program holds is not refused:
+/// it is asked once more by itself, and then only on a new look**. The held answer is filed
+/// `Unanswered { asked_again: false }` — no refusal, so no "would not play" in the pane's foot —
+/// and the next walk asks it once, as `Pending { once_more: true }`; that open's held answer is
+/// `{ asked_again: true }`, which no walk asks however often the pane is drawn. A new look asks
+/// again: the file's next open, and its change news. A once-more ask whose thread could not be
+/// started spends the one more ask too, so no walk asks after it either.
+///
+/// MUTATION: have `AnimationCache::opened` file `NotOpened::HeldElsewhere` as
+/// `Refused(Undecodable)` (`plant-184-gif-held-filed-refused.py`) — the first `Unanswered` match
+/// goes red. Or have `ask_for_showing` ask every `Unanswered` again
+/// (`plant-184-gif-retry-never-stops.py`) — the "once" walks ask, by count.
+#[test]
+fn a_gif_another_program_holds_is_asked_once_more_and_then_only_on_a_new_look() {
+    let pane = seat_of(TAB_ONE, SeatId(1));
+    let gif = PathBuf::from("D:/\u{88ab}\u{5360}\u{7528}/held \u{52a8}\u{56fe}.gif");
+    let still = PathBuf::from("D:/\u{88ab}\u{5360}\u{7528}/still.png");
+    let key = normalized_local_image_path_key(&gif);
+    let on = |path: &PathBuf| vec![(pane, Some(path.clone()))];
+    let held = || Err(animation::NotOpened::HeldElsewhere);
+    let mut window = AnimationCache::with_budget(MAX_ANIMATION_CACHE_BYTES);
+    let held_twice = |window: &mut AnimationCache| {
+        assert_eq!(walk_asking(window, &on(&gif), admitted), vec![gif.clone()]);
+        assert!(answer_awaited(window, &key, 1, held()), "a held answer is filed");
+        assert!(
+            matches!(
+                window.get(&key),
+                Some(AnimationEntry::Unanswered { asked_again: false })
+            ),
+            "held, not refused"
+        );
+        assert_eq!(
+            walk_asking(window, &on(&gif), admitted),
+            vec![gif.clone()],
+            "asked once more by the next walk"
+        );
+        assert!(matches!(
+            window.get(&key),
+            Some(AnimationEntry::Pending {
+                once_more: true,
+                ..
+            })
+        ));
+        assert!(answer_awaited(window, &key, 2, held()));
+        assert!(
+            matches!(
+                window.get(&key),
+                Some(AnimationEntry::Unanswered { asked_again: true })
+            ),
+            "held again: asked again already"
+        );
+        for _ in 0..5 {
+            assert!(
+                walk_asking(window, &on(&gif), admitted).is_empty(),
+                "once: a redraw is no new input"
+            );
+        }
+    };
+
+    held_twice(&mut window);
+    assert_eq!(walk_asking(&mut window, &on(&still), admitted).len(), 1);
+    held_twice(&mut window);
+    assert!(
+        window.let_go_changed_file(&key),
+        "the file's change news lets the unanswered open go"
+    );
+    held_twice(&mut window);
+
+    let mut window = AnimationCache::with_budget(MAX_ANIMATION_CACHE_BYTES);
+    assert_eq!(walk_asking(&mut window, &on(&gif), admitted), vec![gif.clone()]);
+    assert!(answer_awaited(&mut window, &key, 1, held()));
+    assert_eq!(
+        walk_asking(&mut window, &on(&gif), || OpenAsked::Unstarted),
+        vec![gif.clone()],
+        "the one more ask, whose thread could not be started"
+    );
+    assert!(matches!(
+        window.get(&key),
+        Some(AnimationEntry::Unanswered { asked_again: true })
+    ));
+    for _ in 0..5 {
+        assert!(
+            walk_asking(&mut window, &on(&gif), admitted).is_empty(),
+            "the one more ask was spent"
+        );
+    }
 }
 
 /// RED (T-ANIMATION-ANSWER-IDENTITY) — **an answer for an older ask is superseded, not filed**:
@@ -1534,7 +1623,7 @@ fn an_answer_for_an_older_ask_is_superseded_not_filed() {
                     key.clone(),
                     older,
                     1,
-                    Err(animation::AnimationRefusal::OneFrame)
+                    Err(animation::AnimationRefusal::OneFrame.into())
                 ),
                 "the older answer, arriving second, is superseded"
             );
