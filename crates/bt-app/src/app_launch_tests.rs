@@ -431,14 +431,14 @@ fn a_pane_that_never_reported_a_folder_is_started_again_where_it_was_born() {
     let reported = {
         let mut leaf = leaf_saying(&format!(
             "\u{1b}]7;file://localhost{}\u{7}",
-            host_uri_path(r"D:\Developer\folio-terminal")
+            host_uri_path(r"D:\Developer\lunar-workshop")
         ));
         leaf.session.launch.spawn_place = Some(born_in.clone());
         leaf
     };
     assert_eq!(
         reported.session.place_for_a_new_shell(),
-        Some(host_path(r"D:\Developer\folio-terminal")),
+        Some(host_path(r"D:\Developer\lunar-workshop")),
         "a report is the first rung and beats where the shell was born"
     );
 

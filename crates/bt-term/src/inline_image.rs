@@ -2764,7 +2764,7 @@ mod tests {
     /// continuation byte and the byte after `.png` was another one.
     #[test]
     fn path_candidates_open_after_any_non_token_character_and_close_at_any_closing_delimiter() {
-        let preview = rooted("Developer/folio-terminal/layout-preview.png");
+        let preview = rooted("Developer/lunar-workshop/layout-preview.png");
         for (open, close) in [
             ("（", "）"),
             ("见图（", "）"),
@@ -2798,7 +2798,7 @@ mod tests {
         for rejected in [
             // A root that continues a token is a suffix of that token, never a path. The `/` case
             // is load-bearing: it is what keeps a `file://` URI out of the native scan.
-            rooted_uri("Developer/folio-terminal/layout-preview.png"),
+            rooted_uri("Developer/lunar-workshop/layout-preview.png"),
             format!("见{nested}"),
             format!("v1.{nested}"),
             format!("x-{nested}"),
@@ -2827,8 +2827,8 @@ mod tests {
     fn file_uris_resolve_to_local_image_paths_under_the_same_admission_gates() {
         for (uri, expected) in [
             (
-                rooted_uri("Developer/folio-terminal/layout-preview.png"),
-                rooted("Developer/folio-terminal/layout-preview.png"),
+                rooted_uri("Developer/lunar-workshop/layout-preview.png"),
+                rooted("Developer/lunar-workshop/layout-preview.png"),
             ),
             (rooted_uri("x%20y.png"), rooted("x y.png")),
             (rooted_uri("%E5%9B%BE%E7%89%87.PNG"), rooted("图片.PNG")),
@@ -3004,8 +3004,8 @@ mod tests {
     fn working_directory_uris_decode_without_the_image_extension_gate() {
         for (uri, expected) in [
             (
-                rooted_uri("Developer/folio-terminal"),
-                rooted("Developer/folio-terminal"),
+                rooted_uri("Developer/lunar-workshop"),
+                rooted("Developer/lunar-workshop"),
             ),
             // A trailing slash is how a URI names a directory, not an empty final segment.
             (rooted_uri("Developer/"), rooted("Developer")),
@@ -3094,11 +3094,11 @@ mod tests {
     #[test]
     fn a_working_directory_may_be_spelled_the_way_a_windows_shell_can_spell_it() {
         for (uri, expected) in [
-            // `$e]7;file:///$P$e\` at `D:\Developer\folio-terminal`, measured off a real
+            // `$e]7;file:///$P$e\` at `D:\Developer\lunar-workshop`, measured off a real
             // pseudoconsole rather than composed here.
             (
-                r"file:///D:\Developer\folio-terminal",
-                r"D:\Developer\folio-terminal",
+                r"file:///D:\Developer\lunar-workshop",
+                r"D:\Developer\lunar-workshop",
             ),
             // …and in a directory whose name has a space, which `PROMPT` cannot encode.
             (r"file:///C:\Program Files", r"C:\Program Files"),
@@ -3107,8 +3107,8 @@ mod tests {
             (r"file:///C:\", r"C:\"),
             // Mixed, because nothing forbids it and a path is a path.
             (
-                r"file:///D:\Developer/folio-terminal",
-                r"D:\Developer\folio-terminal",
+                r"file:///D:\Developer/lunar-workshop",
+                r"D:\Developer\lunar-workshop",
             ),
         ] {
             assert_eq!(
@@ -3142,8 +3142,8 @@ mod tests {
         for (uri, expected) in [
             ("file:///home/alice/src", "/home/alice/src"),
             (
-                "file:///mnt/d/Developer/folio-terminal",
-                "/mnt/d/Developer/folio-terminal",
+                "file:///mnt/d/Developer/lunar-workshop",
+                "/mnt/d/Developer/lunar-workshop",
             ),
             // The trailing-slash and percent-decoding rules are the decoder's, not the drive's.
             ("file:///mnt/d/Developer/", "/mnt/d/Developer"),

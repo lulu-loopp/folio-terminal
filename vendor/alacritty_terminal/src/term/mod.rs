@@ -3890,7 +3890,7 @@ mod tests {
 
     #[test]
     fn unfinished_resize_harvest_returns_to_native_history_for_the_next_grow() {
-        let prompt = "(base) PS D:\\Developer\\folio-terminal> ";
+        let prompt = "(base) PS D:\\Developer\\lunar-workshop> ";
         let config = Config {
             scrolling_history: 0,
             ..Config::default()
@@ -3932,7 +3932,7 @@ mod tests {
         };
         let mut term = Term::new(config, &TermSize::new(44, 6), VoidListener);
         let mut processor: ansi::Processor = ansi::Processor::new();
-        let prompt = "(base) PS D:\\Developer\\folio-terminal\\dist> ";
+        let prompt = "(base) PS D:\\Developer\\lunar-workshop\\dist> ";
         assert_eq!(prompt.len(), 44);
 
         processor.advance(
@@ -3958,7 +3958,7 @@ mod tests {
     fn ordinary_cup_still_clears_pending_wrap() {
         let mut term = Term::new(Config::default(), &TermSize::new(44, 4), VoidListener);
         let mut processor: ansi::Processor = ansi::Processor::new();
-        let prompt = "(base) PS D:\\Developer\\folio-terminal\\dist> ";
+        let prompt = "(base) PS D:\\Developer\\lunar-workshop\\dist> ";
 
         processor.advance(&mut term, prompt.as_bytes());
         assert!(term.grid.cursor.input_needs_wrap);
@@ -3970,7 +3970,7 @@ mod tests {
     fn cursor_motion_between_cpr_and_cup_cancels_the_pending_wrap_echo() {
         let mut term = Term::new(Config::default(), &TermSize::new(44, 4), VoidListener);
         let mut processor: ansi::Processor = ansi::Processor::new();
-        let prompt = "(base) PS D:\\Developer\\folio-terminal\\dist> ";
+        let prompt = "(base) PS D:\\Developer\\lunar-workshop\\dist> ";
 
         processor.advance(&mut term, prompt.as_bytes());
         processor.advance(&mut term, b"\x1b[6n\r\x1b[1;44H");

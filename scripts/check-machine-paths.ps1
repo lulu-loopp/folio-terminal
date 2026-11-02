@@ -10,7 +10,8 @@
 #     spell out a home directory; they are not allowed to spell out *a* home
 #     directory. The placeholder list below is the whole permitted vocabulary.
 #   * an e-mail address outside the reserved example domains (RFC 2606/6761).
-#   * the checkout path this product was developed in.
+#   * the checkout path this product was developed in, and the owner's
+#     synced-documents folder that his other projects live under.
 #   * the author's account name, in any case — except on a line that names them
 #     as the holder of something: a copyright notice, or, since 0.2.0, the
 #     sentence that says who signed the release. Both are the attribution rather
@@ -121,6 +122,7 @@ try {
         "docs/plans/ui-style/audit-codex-2026-08-25.md"          = "frozen since 2026-08-25: review answer, verbatim"
         # Dated plans in folders that are still written to.
         "docs/plans/bt-app-split-inventory-2026-09-15.md" = "frozen since 2026-09-15: dated split inventory"
+        "docs/plans/bt-app-split-pins-2026-09-21.tsv"     = "frozen since 2026-09-21: dated split pins"
         "docs/plans/paste-paths-design.md"                = "frozen since 2026-09-15: paste-paths design and its worked paths"
         "docs/plans/shell-matrix-2026-09-07.md"           = "frozen since 2026-09-08: shell matrix as measured"
         "docs/plans/design/agent-workbench-0.5-2026-09-20.md"           = "frozen since 2026-09-27: dated design note"
@@ -196,16 +198,31 @@ try {
     # directly under `Developer\` (`Developer\wt`, `Developer\trace`,
     # `Developer\launchers`, `Developer\build`), and the last two still do on
     # this machine. Each is named whole, so a neighbour such as `wtx` passes.
-    # Never a bare drive-letter `\Developer\`: a product fixture is meant to
-    # stand in a drive-letter `\Developer\<folder>\…` that no machine of this
-    # project's has used (`notes`, `Ledger`, `elsewhere`, …), and such a path
-    # names nobody's machine. Not every fixture does yet: some product files
-    # still stand in the product's pre-rename checkout folder (and a few in
-    # other folders this machine has used); 0.4.9 row 159 rewrites them.
+    # **And the layout before the product's rename** (2026-11-01, 0.4.9 row
+    # 159): the checkout sat in `Developer\folio-terminal`, named after the
+    # repository, and its worktrees in `Developer\bt-wt`. The repository keeps
+    # that name, so the bare word is its address in every release URL and is
+    # not refused; only the folder under `Developer\` is. Its worktree folder is
+    # refused with its hyphenated siblings (`bt-wt-build`, …, all real); the one
+    # the append-only log spells passes only by its keyed row in the DESIGN list.
+    # Never a bare drive-letter `\Developer\`: a product fixture stands in a
+    # drive-letter `\Developer\<folder>\…` that no machine of this project's
+    # has used (`notes`, `Ledger`, `elsewhere`, `lunar-workshop`, …), and such
+    # a path names nobody's machine. A fixture that replaces a recorded folder
+    # takes a neutral name of the same length, so the recording's widths hold.
     # Nor `Developer\Folio\` alone: a fixture standing in a folder named after
     # the product (`…\Developer\folio\notes.md`, `…\Developer\Folio\docs`) is a
     # placeholder like `folio` in the account list below, not this checkout.
-    $checkout_re = [regex]"(?i)Developer[\\/]{1,2}(?:BetterTerminal|Folio[\\/]{1,2}(?:BetterTerminal|trace|wt)\b|(?:wt|trace|launchers|build)\b)"
+    $checkout_re = [regex]"(?i)Developer[\\/]{1,2}(?:BetterTerminal|Folio[\\/]{1,2}(?:BetterTerminal|trace|wt)\b|(?:wt|trace|launchers|build)\b|folio-terminal\b|bt-wt\b)"
+    # **The owner's synced-documents folder** (2026-11-01, 0.4.9 row 159; row
+    # 157's review F3). Projects outside this one live under it, and recorded
+    # captions and prompts from them reached product fixtures, where neither
+    # pattern above could see them: there is no `Users\` in front of it and no
+    # listed folder behind `Developer\`. It is refused under the checkout check,
+    # in its drive-letter, `file:///` and WSL spellings. A redirected Documents
+    # folder on another drive (`X:\Documents\PowerShell\…`) is a Windows layout
+    # the product has to handle, not this machine's, and stays allowed.
+    $synced_re = [regex]"(?i)(?:[A-Za-z]:|/mnt/[a-z])[\\/]{1,2}Documents[\\/]{1,2}SyncFolder\b"
     $author_re = [regex]"(?i)weiyi|umich\.edu"
     # The three sentences the name above may appear in — see the loop below.
     $copyright_re = [regex]"(?i)copyright\b.*\bweiyi shi\b"
@@ -255,7 +272,7 @@ try {
         $hash = [Security.Cryptography.SHA256]::HashData($bytes)
         ([Convert]::ToHexString($hash).Substring(0, 16)).ToLowerInvariant()
     }
-    $row_re = [regex]"^(?<key>[0-9a-f]{16}) (?<check>author|checkout|home|mail) (?<date>\d{4}-\d{2}-\d{2}) (?<reason>old-checkout example|author|runner account|false positive): (?<shape>\S.*)$"
+    $row_re = [regex]"^(?<key>[0-9a-f]{16}) (?<check>author|checkout|home|mail) (?<date>\d{4}-\d{2}-\d{2}) (?<reason>old-checkout example|synced-folder example|author|runner account|false positive): (?<shape>\S.*)$"
     $keyedRows = @{}
     if (-not $PrintKeys) {
         foreach ($listed in $keyedAllowList.Keys) {
@@ -299,6 +316,9 @@ try {
         }
         foreach ($m in $checkout_re.Matches($text)) {
             [pscustomobject]@{ Check = "checkout"; Value = $m.Value; Problem = "names the development checkout: $($m.Value)" }
+        }
+        foreach ($m in $synced_re.Matches($text)) {
+            [pscustomobject]@{ Check = "checkout"; Value = $m.Value; Problem = "names the owner's synced-documents folder: $($m.Value)" }
         }
         foreach ($m in $home_re.Matches($text)) {
             $who = $m.Groups[1].Value

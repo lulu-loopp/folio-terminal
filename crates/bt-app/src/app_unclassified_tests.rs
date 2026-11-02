@@ -584,7 +584,7 @@ fn the_landing_wash_runs_out_over_its_own_two_hundred_milliseconds() {
 /// folder from another.
 #[test]
 fn the_folded_levels_read_from_the_deepest_towards_the_root() {
-    let path = &host_path(r"D:\Developer\folio-terminal\test-assets\huge.txt");
+    let path = &host_path(r"D:\Developer\lunar-workshop\test-assets\huge.txt");
     // What `preview_rail_geometry` folds: the middle, nearest the root
     // first — the folders between the top of the host's row (a drive crumb
     // on Windows, none off it) and the file.
@@ -597,14 +597,14 @@ fn the_folded_levels_read_from_the_deepest_towards_the_root() {
     };
     let levels = folded_levels(
         path,
-        &[at("Developer"), at("folio-terminal"), at("test-assets")],
+        &[at("Developer"), at("lunar-workshop"), at("test-assets")],
     );
     assert_eq!(
         levels
             .iter()
             .map(|level| level.name.as_str())
             .collect::<Vec<_>>(),
-        vec!["test-assets", "folio-terminal", "Developer"],
+        vec!["test-assets", "lunar-workshop", "Developer"],
     );
     assert_eq!(
         levels
@@ -612,8 +612,8 @@ fn the_folded_levels_read_from_the_deepest_towards_the_root() {
             .map(|level| level.folder.clone())
             .collect::<Vec<_>>(),
         vec![
-            host_path(r"D:\Developer\folio-terminal\test-assets"),
-            host_path(r"D:\Developer\folio-terminal"),
+            host_path(r"D:\Developer\lunar-workshop\test-assets"),
+            host_path(r"D:\Developer\lunar-workshop"),
             host_path(r"D:\Developer"),
         ],
         "every row goes to the place it names"
