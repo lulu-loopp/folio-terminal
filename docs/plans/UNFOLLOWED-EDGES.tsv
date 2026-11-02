@@ -7787,10 +7787,10 @@ crates/bt-platform/src/door_skipped.rs	bt-platform crate::door_skipped::say	Ambi
 crates/bt-platform/src/door_skipped.rs	bt-platform crate::door_skipped::say	Ambiguous	set	1	
 crates/bt-platform/src/door_skipped.rs	bt-platform crate::door_skipped::say	Ambiguous	try_with	1	
 crates/bt-platform/src/door_skipped.rs	bt-platform crate::door_skipped::say	Dynamic	say	1	
-crates/bt-platform/src/elevated_pipe.rs	bt-platform crate::elevated_pipe::connect_to_parent	Ambiguous	map	1	
-crates/bt-platform/src/elevated_pipe.rs	bt-platform crate::elevated_pipe::connect_to_parent	Ambiguous	map_err	1	
-crates/bt-platform/src/elevated_pipe.rs	bt-platform crate::elevated_pipe::connect_to_parent	Ambiguous	raw_os_error	1	
-crates/bt-platform/src/elevated_pipe.rs	bt-platform crate::elevated_pipe::connect_to_parent	Ambiguous	unwrap_or	1	
+crates/bt-platform/src/elevated_pipe.rs	bt-platform crate::elevated_pipe::connect_to_parent_on	Ambiguous	map	1	2026-11-01: T-ELEVATED-HANDSHAKE-FINISH-DEADLINE-ON-A-CLOCK; moved from connect_to_parent, which is now the real-clock door over connect_to_parent_on; the same call, renamed with its item
+crates/bt-platform/src/elevated_pipe.rs	bt-platform crate::elevated_pipe::connect_to_parent_on	Ambiguous	map_err	1	2026-11-01: T-ELEVATED-HANDSHAKE-FINISH-DEADLINE-ON-A-CLOCK; moved from connect_to_parent, which is now the real-clock door over connect_to_parent_on; the same call, renamed with its item
+crates/bt-platform/src/elevated_pipe.rs	bt-platform crate::elevated_pipe::connect_to_parent_on	Ambiguous	raw_os_error	1	2026-11-01: T-ELEVATED-HANDSHAKE-FINISH-DEADLINE-ON-A-CLOCK; moved from connect_to_parent, which is now the real-clock door over connect_to_parent_on; the same call, renamed with its item
+crates/bt-platform/src/elevated_pipe.rs	bt-platform crate::elevated_pipe::connect_to_parent_on	Ambiguous	unwrap_or	1	2026-11-01: T-ELEVATED-HANDSHAKE-FINISH-DEADLINE-ON-A-CLOCK; moved from connect_to_parent, which is now the real-clock door over connect_to_parent_on; the same call, renamed with its item
 crates/bt-platform/src/elevated_pipe.rs	bt-platform crate::elevated_pipe::finish	Ambiguous	as_millis	1	
 crates/bt-platform/src/elevated_pipe.rs	bt-platform crate::elevated_pipe::finish	Ambiguous	extend	1	
 crates/bt-platform/src/elevated_pipe.rs	bt-platform crate::elevated_pipe::finish	Ambiguous	is_multiple_of	1	
