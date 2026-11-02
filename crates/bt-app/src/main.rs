@@ -21127,9 +21127,9 @@ struct ImageClicks {
 /// **The moment a press is counted at** — by the window's double-click counters
 /// ([`ImageClicks`] and [`PreviewTextClicks`], on its `pointer_clock`;
 /// T-FLOATING-VIDEO-DOUBLE-CLICK-TIMING, 0.4.9 plan row 124), and by its clipboard's
-/// pastes, whose `asked_at` and whose deadline at the next press are read on its
-/// `paste_clock` (`Runtime::ask_for_a_paste`; T-CLIPBOARD-PASTE-PAST-DESK-BUSY-NOTICE-FLAKE,
-/// 0.4.9 plan row 172).
+/// pastes, whose `asked_at`, and the moment the next press judges their deadline at, are
+/// read on its `paste_clock` (`Runtime::ask_for_a_paste`;
+/// T-CLIPBOARD-PASTE-PAST-DESK-BUSY-NOTICE-FLAKE, 0.4.9 plan row 172).
 ///
 /// The product's is the wall clock, and [`Self::moment`] answers the instant its
 /// caller has just read, unchanged: a press is counted at exactly the moment it
