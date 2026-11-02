@@ -1514,7 +1514,11 @@ fn a_refused_file_that_changed_is_asked_again_on_its_next_showing() {
 /// MUTATION: have `AnimationCache::opened` file `NotOpened::HeldElsewhere` as
 /// `Refused(Undecodable)` (`plant-184-gif-held-filed-refused.py`) — the first `Unanswered` match
 /// goes red. Or have `ask_for_showing` ask every `Unanswered` again
-/// (`plant-184-gif-retry-never-stops.py`) — the "once" walks ask, by count.
+/// (`plant-184-gif-retry-never-stops.py`) — the "once" walks ask, by count. Or have
+/// `open_unanswered` file an unstarted open only over no entry
+/// (`plant-184-gif-unstarted-once-more-left-asking.py`) — the held answer stays `{ asked_again:
+/// false }` after its unstarted once-more ask, and every walk would ask again; the match after it
+/// goes red.
 #[test]
 fn a_gif_another_program_holds_is_asked_once_more_and_then_only_on_a_new_look() {
     let pane = seat_of(TAB_ONE, SeatId(1));
