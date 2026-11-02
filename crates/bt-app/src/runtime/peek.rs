@@ -1221,8 +1221,9 @@ impl<B: Backend> Runtime<'_, B> {
                     }
                     | PeekCacheEntry::Failed(_),
                 ) => return None,
-                // Nothing filed, or a first frame that ran out and has not been asked again
-                // (T-FIRST-FRAME-RUN-OUT-IS-NOT-A-REFUSAL): the card asks, once.
+                // Nothing filed, or a read not answered (a first frame that ran out, a held
+                // file) and not asked again (T-FIRST-FRAME-RUN-OUT-IS-NOT-A-REFUSAL): the card
+                // asks, once.
                 None
                 | Some(PeekCacheEntry::Unanswered {
                     asked_again: false, ..
@@ -3273,8 +3274,9 @@ pub(crate) fn peek_files_named(
 /// **A failed peek no surface names any more is let go of** (T-PEEK-CACHE-QUESTION-RECORDS) —
 /// [`crate::AnimationCache::let_go_unnamed`]'s rule, for the peek cache.
 ///
-/// A `Failed` record — or an `Unanswered` one, a first frame that ran out — is kept exactly as
-/// long as some surface names its file (`named`, from
+/// A `Failed` record — or an `Unanswered` one, a read not answered (a first frame that ran out,
+/// a held file, a read that never started) — is kept exactly as long as some surface names its
+/// file (`named`, from
 /// [`peek_files_named`]): while one does, its redraws read the failure and ask nothing; when the
 /// last one has gone, the file's next showing is new input and asks. A decode in flight is kept
 /// until its answer, which [`super::preview::file_peek_answer`] files nowhere if the file is

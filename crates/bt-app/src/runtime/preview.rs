@@ -13963,13 +13963,12 @@ impl<B: Backend> Runtime<'_, B> {
             facts,
             mtime,
         } = glance;
-        // A run-out and a file another program is writing are both a read not answered, and
-        // neither learned anything to unsay an earlier answer's facts with
-        // (T-DECODE-UNSTARTED-FILED-AS-A-DECODE-FAILURE).
-        let unanswered = matches!(
-            frame,
-            Err(bt_platform::video::NoFrame::RanOut | bt_platform::video::NoFrame::Held)
-        );
+        // Why no frame came, for the facts' rule, which reads it as the record's filing does
+        // ([`frame_not_answered`]).
+        let no_frame = match &frame {
+            Ok(_) => None,
+            Err(no_frame) => Some(*no_frame),
+        };
         if !file_peek_video_answer(
             &mut self.window.peek_cache,
             &named,
@@ -13982,7 +13981,7 @@ impl<B: Backend> Runtime<'_, B> {
         }
         // Filed with any awaited answer: these outlive the pixels and are the whole of the
         // degraded card — see [`WindowRuntime::video_facts`].
-        let filed = video_facts_to_file(self.window.video_facts.get(&cache_key), facts, unanswered);
+        let filed = video_facts_to_file(self.window.video_facts.get(&cache_key), facts, no_frame);
         self.window.video_facts.insert(cache_key.clone(), filed);
         // Every surface standing on this file, for `complete_peek_image`'s reason: a decode is
         // addressed by path and the answer is the same pixels for a pane, for a window torn off
@@ -16026,14 +16025,15 @@ pub(crate) fn file_peek_video_answer(
             // [`PreviewImageState::stated_size`].
             native_size: None,
         }),
-        Err(bt_platform::video::NoFrame::Refused) => Err(PeekCacheEntry::Failed(
-            bt_term::InlineImageDecodeError::Decode("no decoder for this container".to_owned()),
-        )),
-        // A run-out and a file another program is writing say nothing about the file, and a
-        // video's pane says nothing about either, as it says nothing for a refusal.
-        Err(bt_platform::video::NoFrame::RanOut | bt_platform::video::NoFrame::Held) => {
+        // A run-out and a file another program is writing say nothing about the file
+        // ([`frame_not_answered`]), and a video's pane says nothing about either, as it says
+        // nothing for a refusal.
+        Err(no_frame) if frame_not_answered(no_frame) => {
             Err(unanswered_record(peek_cache, &key, None))
         }
+        Err(_refused) => Err(PeekCacheEntry::Failed(
+            bt_term::InlineImageDecodeError::Decode("no decoder for this container".to_owned()),
+        )),
     };
     file_peek_record(peek_cache, named, key, asked, answer)
 }
@@ -16041,19 +16041,33 @@ pub(crate) fn file_peek_video_answer(
 /// **The facts a video answer files** under its file's key ([`WindowRuntime::video_facts`], whose
 /// one writer is [`Runtime::complete_peek_video_frame`]): the answering read's, since they
 /// outlive the pixels and are the whole of the degraded card — except that an unanswered read's
-/// (`unanswered`: a run-out, or a file another program is writing), which know only the file's
-/// size, never replace facts an earlier answer filed (`earlier`): an answer that did not come is
-/// not news that the recording's length and size are unknown
-/// (T-FIRST-FRAME-RUN-OUT-IS-NOT-A-REFUSAL; T-DECODE-UNSTARTED-FILED-AS-A-DECODE-FAILURE).
+/// (`no_frame`, why no frame came, read by [`frame_not_answered`]: a run-out, or a file another
+/// program is writing), which know only the file's size, never replace facts an earlier answer
+/// filed (`earlier`): an answer that did not come is not news that the recording's length and
+/// size are unknown (T-FIRST-FRAME-RUN-OUT-IS-NOT-A-REFUSAL;
+/// T-DECODE-UNSTARTED-FILED-AS-A-DECODE-FAILURE). A frame's read (`None`) and a refusal's file
+/// what they found.
 pub(crate) fn video_facts_to_file(
     earlier: Option<&preview::VideoFacts>,
     answered: preview::VideoFacts,
-    unanswered: bool,
+    no_frame: Option<bt_platform::video::NoFrame>,
 ) -> preview::VideoFacts {
-    match earlier {
-        Some(earlier) if unanswered => *earlier,
+    match (earlier, no_frame) {
+        (Some(earlier), Some(no_frame)) if frame_not_answered(no_frame) => *earlier,
         _ => answered,
     }
+}
+
+/// **Whether a first frame that did not come was a read not answered** — the budget ran out, or
+/// another program is writing the file — rather than the file's refusal. One reading for the
+/// cache record ([`file_peek_video_answer`]: an `Unanswered`, asked again within row 164's bound)
+/// and for the facts ([`video_facts_to_file`]: an earlier answer's are kept) alike, so that the
+/// two cannot disagree about a held video (T-DECODE-UNSTARTED-FILED-AS-A-DECODE-FAILURE).
+pub(crate) fn frame_not_answered(no_frame: bt_platform::video::NoFrame) -> bool {
+    matches!(
+        no_frame,
+        bt_platform::video::NoFrame::RanOut | bt_platform::video::NoFrame::Held
+    )
 }
 
 /// **The request [`Runtime::open_unverified_reference`] puts on the OS hand-off lane** — the files
@@ -16748,8 +16762,8 @@ pub(crate) fn answer_one_picture(
         // keeps drawing what it was drawing rather than going blank, and it goes
         // on down this function either way, because what it is drawing may still
         // be the soft raster the decode is wanted to sharpen.
-        // A first frame that ran out and has not been asked again is asked once more, as a
-        // file never asked about is (T-FIRST-FRAME-RUN-OUT-IS-NOT-A-REFUSAL).
+        // A read not answered (a first frame that ran out, a held file) and not asked again is
+        // asked once more, as a file never asked about is (T-FIRST-FRAME-RUN-OUT-IS-NOT-A-REFUSAL).
         Some(
             PeekCacheEntry::Pending { .. }
             | PeekCacheEntry::Unanswered {
@@ -17405,8 +17419,8 @@ pub(crate) fn surface_pixels(
             },
             None => SurfacePixels::Nothing { asked: true },
         },
-        // Nothing filed — or a first frame that ran out and has not been asked again, which this
-        // surface asks once, as it would a file never asked about
+        // Nothing filed — or a read not answered (a first frame that ran out, a held file) and
+        // not asked again, which this surface asks once, as it would a file never asked about
         // (T-FIRST-FRAME-RUN-OUT-IS-NOT-A-REFUSAL).
         None
         | Some(PeekCacheEntry::Unanswered {

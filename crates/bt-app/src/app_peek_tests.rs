@@ -1822,7 +1822,10 @@ fn size_only_facts() -> preview::VideoFacts {
 ///
 /// MUTATION: file the run-out as `Failed(Decode("no decoder for this container"))` again (plant
 /// `plant-164-decode-filed-again.py`) — the first assertion names it. File a run-out's facts
-/// over the earlier answer's in `video_facts_to_file` — the first facts assertion names it.
+/// over the earlier answer's in `video_facts_to_file` — the first facts assertion names it. Read a
+/// held video's `NoFrame::Held` as a refusal in `frame_not_answered` (plant
+/// `plant-177-held-facts-arm-dropped.py`) — the held facts assertion names it
+/// (T-DECODE-UNSTARTED-FILED-AS-A-DECODE-FAILURE).
 #[test]
 fn a_first_frame_that_ran_out_is_not_filed_as_a_refusal() {
     crate::test_support::install_host_answers();
@@ -1862,12 +1865,29 @@ fn a_first_frame_that_ran_out_is_not_filed_as_a_refusal() {
         "a first frame that ran out is a question not answered, not a refusal of the file"
     );
     assert_eq!(
-        video_facts_to_file(Some(&earlier), size_only_facts(), true),
+        video_facts_to_file(
+            Some(&earlier),
+            size_only_facts(),
+            Some(bt_platform::video::NoFrame::RanOut)
+        ),
         earlier,
         "and a read that got no frame does not unsay what an earlier answer said"
     );
     assert_eq!(
-        video_facts_to_file(None, size_only_facts(), true),
+        video_facts_to_file(
+            Some(&earlier),
+            size_only_facts(),
+            Some(bt_platform::video::NoFrame::Held)
+        ),
+        earlier,
+        "nor does a read that met a file another program is writing"
+    );
+    assert_eq!(
+        video_facts_to_file(
+            None,
+            size_only_facts(),
+            Some(bt_platform::video::NoFrame::RanOut)
+        ),
         size_only_facts(),
         "though with nothing said before, the file's size is still the card's to say"
     );
@@ -1894,9 +1914,18 @@ fn a_first_frame_that_ran_out_is_not_filed_as_a_refusal() {
         "a refusal is filed as the refusal it is"
     );
     assert_eq!(
-        video_facts_to_file(Some(&earlier), size_only_facts(), false),
+        video_facts_to_file(
+            Some(&earlier),
+            size_only_facts(),
+            Some(bt_platform::video::NoFrame::Refused)
+        ),
         size_only_facts(),
         "and its facts are what the refusing read found"
+    );
+    assert_eq!(
+        video_facts_to_file(Some(&earlier), size_only_facts(), None),
+        size_only_facts(),
+        "as a frame's read files what it found"
     );
 }
 
@@ -2145,7 +2174,8 @@ fn a_read_whose_thread_could_not_be_started_is_unanswered_and_asked_again_on_a_n
 /// MUTATIONS: never file a held read as asked again (plant `plant-177-retry-never-stops.py`) —
 /// the record the second held answer leaves names it (`asked_again: true` expected), caught by
 /// state before any walk is taken over it. File `HeldElsewhere` as `Failed` in `file_peek_answer` — the
-/// first record assertion names it.
+/// first record assertion names it. Read `NoFrame::Held` as a refusal in `frame_not_answered`
+/// (plant `plant-177-held-facts-arm-dropped.py`) — the video's record assertion names it.
 #[test]
 fn a_picture_another_program_holds_is_asked_again_once_and_then_only_on_a_new_look() {
     crate::test_support::install_host_answers();
