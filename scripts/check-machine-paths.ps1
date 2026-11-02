@@ -122,6 +122,7 @@ try {
         "docs/plans/ui-style/audit-codex-2026-08-25.md"          = "frozen since 2026-08-25: review answer, verbatim"
         # Dated plans in folders that are still written to.
         "docs/plans/bt-app-split-inventory-2026-09-15.md" = "frozen since 2026-09-15: dated split inventory"
+        "docs/plans/bt-app-split-pins-2026-09-21.tsv"     = "frozen since 2026-09-21: dated split pins"
         "docs/plans/paste-paths-design.md"                = "frozen since 2026-09-15: paste-paths design and its worked paths"
         "docs/plans/shell-matrix-2026-09-07.md"           = "frozen since 2026-09-08: shell matrix as measured"
         "docs/plans/design/agent-workbench-0.5-2026-09-20.md"           = "frozen since 2026-09-27: dated design note"
