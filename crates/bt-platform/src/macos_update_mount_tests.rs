@@ -102,11 +102,9 @@ fn on_a_worker<T: Send + 'static>(
 /// child starts.
 ///
 /// MUTATION: drop the platform check at the top of `attach`.
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn off_macos_the_mount_is_refused_by_name() {
-    if crate::host_platform() == HostPlatform::MacOs {
-        return;
-    }
     on_a_worker(|worker| {
         let refused = attach(worker, Path::new("Folio.dmg"), Path::new("mnt"));
         assert!(matches!(refused, Err(Refusal::NotHere)), "{refused:?}");
