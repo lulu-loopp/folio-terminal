@@ -226,13 +226,6 @@ impl WinPrepare {
         }
     }
 
-    /// This driver with its held journal writes asked again on `clock` — a
-    /// test's counted clock, whose pauses let a hold go.
-    #[cfg(all(test, windows))]
-    pub(crate) fn on_clock(self, clock: Arc<dyn WaitClock>) -> Self {
-        Self { clock, ..self }
-    }
-
     /// This driver with `ours` in place of the road's own layout — a test's
     /// fake layout, which records or refuses (U-41a1).
     #[cfg(test)]
