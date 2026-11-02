@@ -38,6 +38,7 @@ All notable changes to Folio are recorded here. The format follows
 - On Windows, an update no longer fails to prepare when an antivirus scan or another program holds one of its files open for a moment; Folio now waits for the file to be let go and goes on. <!-- zh: 在 Windows 上，杀毒软件扫描或其他程序短暂占用更新的某个文件时，更新不再准备失败；Folio 现在会等该文件被释放后继续。 -->
 - When a video's picture takes too long to appear on a busy computer, Folio now asks for it once more by itself instead of treating the video as one it cannot show. <!-- zh: pending -->
 - While you rename a tab, a file or a page's address, clicking inside the name now puts the text cursor where you clicked, Shift-clicking extends the selection, and dragging selects. <!-- zh: pending T-TAB-RENAME-FIELD-MOUSE-CARET -->
+- On Windows, a picture or video that another program is holding open (for example a recording still being written) is no longer treated as a file Folio cannot show: Folio asks for it once more by itself, and again when you look at it anew, and a picture's preview says the file is in use by another program. <!-- zh: pending -->
 
 ## 0.4.8-preview — 2026-10-23
 

@@ -22337,7 +22337,7 @@ mod tests {
     /// The screen the user's report describes: conda's startup warning, the prompt beneath it, and
     /// a typed, unsubmitted command long enough to wrap once the pane narrows.
     fn divider_drag_screen(session: &mut DualPlaneSession, at: Instant) {
-        const NOISE: &str = "Did not find path entry D:\\App\\Base\\anaconda3\\bin";
+        const NOISE: &str = "Did not find path entry D:\\Kit\\Base\\anaconda3\\bin";
         const PROMPT: &str = "(base) PS D:\\Developer\\lunar-workshop> ";
         const TYPED: &str = "echo D:\\Developer\\lunar-workshop\\local-images\\sunset.svg";
         let mut bytes = Vec::new();
@@ -22459,11 +22459,11 @@ mod tests {
     }
 
     /// Everything the reporting session's child wrote before the pane was narrowed, byte for byte
-    /// from `.tmp-repaint-capture/s12-rearm-verify.vt` chunks 0..13 (checkout folder renamed, same
+    /// from `.tmp-repaint-capture/s12-rearm-verify.vt` chunks 0..13 (two folders renamed, same
     /// length): conda's startup line, the OSC 133 `A`/`B` prompt and the line editor's first render
     /// of the typed command at row 2 column 40. Its own closing `CUP` to row 3 column 3 states that
     /// the pane was 74 columns wide: 39 prompt cells plus 37 typed cells is 76, and 76 = 74 + 2.
-    const RECORDED_BEFORE_RESIZE: &[u8] = b"\x1b[1t\x1b[c\x1b[?1004h\x1b[?9001hDid not find path entry D:\\App\\Base\\anaconda3\\bin\r\n\x1b[0m\x1b[0m(base) \x1b[0m\x1b[0m\x1b]7;file:///D:/Developer/lunar-workshop\x07\x1b]133;A\x07PS D:\\Developer\\lunar-workshop> \x1b]133;B\x07\x1b[?25l\x1b[2;40H\x1b[93mWrite-Output\x1b[39;49m \x1b[37m(\x1b[36m'BT_APP_'\x1b[39;49m \x1b[90m+\x1b[39;49m \x1b[36m'INPUT_OK'\x1b[37m)\x1b[39;49m\x1b[0m\x1b[3;3H\x1b[?25h";
+    const RECORDED_BEFORE_RESIZE: &[u8] = b"\x1b[1t\x1b[c\x1b[?1004h\x1b[?9001hDid not find path entry D:\\Kit\\Base\\anaconda3\\bin\r\n\x1b[0m\x1b[0m(base) \x1b[0m\x1b[0m\x1b]7;file:///D:/Developer/lunar-workshop\x07\x1b]133;A\x07PS D:\\Developer\\lunar-workshop> \x1b]133;B\x07\x1b[?25l\x1b[2;40H\x1b[93mWrite-Output\x1b[39;49m \x1b[37m(\x1b[36m'BT_APP_'\x1b[39;49m \x1b[90m+\x1b[39;49m \x1b[36m'INPUT_OK'\x1b[37m)\x1b[39;49m\x1b[0m\x1b[3;3H\x1b[?25h";
 
     /// The child's own cursor-position request, and its own statement of where the reflow put the
     /// cursor: `CUP` row 3 column 16, which is 76 = 61 + 15 — the truth at the committed width.
@@ -22577,7 +22577,7 @@ mod tests {
         assert_eq!(
             &reflowed[..3],
             [
-                "Did not find path entry D:\\App\\Base\\anaconda3\\bin",
+                "Did not find path entry D:\\Kit\\Base\\anaconda3\\bin",
                 "(base) PS D:\\Developer\\lunar-workshop> Write-Output ('BT_APP_",
                 "' + 'INPUT_OK')",
             ],
@@ -22589,7 +22589,7 @@ mod tests {
         assert_eq!(
             &composed[..4],
             [
-                "Did not find path entry D:\\App\\Base\\anaconda3\\bin",
+                "Did not find path entry D:\\Kit\\Base\\anaconda3\\bin",
                 "(base) PS D:\\Developer\\lunar-workshop> Write-Output ('BT_APP_",
                 "' + 'INPUT_OK')                        Write-Output ('BT_APP_",
                 "' + 'INPUT_OK')",

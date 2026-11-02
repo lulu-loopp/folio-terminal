@@ -9419,8 +9419,8 @@ mod engine_ledger;
 /// deadline's decision — with one owner for both `video` arms.
 mod video_load;
 
-/// Why a first frame was not drawn — refused or not answered in time — with one
-/// owner for every `video` arm.
+/// Why a first frame was not drawn — refused, not answered in time, or held by
+/// another program — with one owner for every `video` arm.
 mod first_frame_answer;
 
 /// The first frame of a video, out of Media Foundation — see the module's own

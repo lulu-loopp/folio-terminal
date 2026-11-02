@@ -11,7 +11,8 @@
 #     directory. The placeholder list below is the whole permitted vocabulary.
 #   * an e-mail address outside the reserved example domains (RFC 2606/6761).
 #   * the checkout path this product was developed in, and the owner's
-#     synced-documents folder that his other projects live under.
+#     synced-documents folder that his other projects live under, and the
+#     drive-root folder his software is installed under.
 #   * the author's account name, in any case — except on a line that names them
 #     as the holder of something: a copyright notice, or, since 0.2.0, the
 #     sentence that says who signed the release. Both are the attribution rather
@@ -223,6 +224,24 @@ try {
     # folder on another drive (`X:\Documents\PowerShell\…`) is a Windows layout
     # the product has to handle, not this machine's, and stays allowed.
     $synced_re = [regex]"(?i)(?:[A-Za-z]:|/mnt/[a-z])[\\/]{1,2}Documents[\\/]{1,2}SyncFolder\b"
+    # **The owner's software-install folder** (2026-11-02, 0.4.9 row 178; row
+    # 159's R8). It sits at a drive root and holds conda and Git, so conda's
+    # startup line and Git's path reached recordings and fixtures from the
+    # owner's own panes, where no pattern above could see them. It is refused
+    # under the checkout check, at any drive and in its `file:///` and WSL
+    # spellings; a fixture stands in a same-length neutral root (`X:\Kit\…`),
+    # so a recording's widths hold. A drive letter is one standing alone: the
+    # character before it may not be a letter or a digit, so a URL whose scheme's
+    # colon is followed by the same word (a bundler's virtual module, a
+    # localhost host name) is not a drive. The folder's name is what is
+    # matched, and the drive is asked behind it: a pattern that opens on a
+    # drive letter is tried at every character of every file and cost the
+    # scan about 2.5 s, one that opens on the name is tried where the name
+    # stands (about 0.1 s). Two spellings are not covered yet (0.4.9 row
+    # 183): Git Bash's `/<d>/<root>/`, whose one-letter segment URL and Unix
+    # paths in the tree share, and a separator of three or more backslashes
+    # (a doubly escaped literal). No tracked file holds either today.
+    $install_re = [regex]"(?i)(?<=(?:(?<![A-Za-z0-9])[A-Za-z]:|/mnt/[a-z])[\\/]{1,2})App\b"
     $author_re = [regex]"(?i)weiyi|umich\.edu"
     # The three sentences the name above may appear in — see the loop below.
     $copyright_re = [regex]"(?i)copyright\b.*\bweiyi shi\b"
@@ -272,7 +291,7 @@ try {
         $hash = [Security.Cryptography.SHA256]::HashData($bytes)
         ([Convert]::ToHexString($hash).Substring(0, 16)).ToLowerInvariant()
     }
-    $row_re = [regex]"^(?<key>[0-9a-f]{16}) (?<check>author|checkout|home|mail) (?<date>\d{4}-\d{2}-\d{2}) (?<reason>old-checkout example|synced-folder example|author|runner account|false positive): (?<shape>\S.*)$"
+    $row_re = [regex]"^(?<key>[0-9a-f]{16}) (?<check>author|checkout|home|mail) (?<date>\d{4}-\d{2}-\d{2}) (?<reason>old-checkout example|synced-folder example|install-root example|author|runner account|false positive): (?<shape>\S.*)$"
     $keyedRows = @{}
     if (-not $PrintKeys) {
         foreach ($listed in $keyedAllowList.Keys) {
@@ -319,6 +338,9 @@ try {
         }
         foreach ($m in $synced_re.Matches($text)) {
             [pscustomobject]@{ Check = "checkout"; Value = $m.Value; Problem = "names the owner's synced-documents folder: $($m.Value)" }
+        }
+        foreach ($m in $install_re.Matches($text)) {
+            [pscustomobject]@{ Check = "checkout"; Value = $m.Value; Problem = "names the owner's software-install folder at a drive root: $($m.Value)" }
         }
         foreach ($m in $home_re.Matches($text)) {
             $who = $m.Groups[1].Value
@@ -417,7 +439,7 @@ try {
                     $rows["$check $key"].RemoveAt(0)
                     continue
                 }
-                $problems.Add("${rel}:$number $problem (not on $($keyedAllowList[$rel]), which lists only the hits the file held on 2026-11-01)")
+                $problems.Add("${rel}:$number $problem (not on $($keyedAllowList[$rel]), which lists only the hits the file held when each pattern first met it)")
             }
         }
     }
