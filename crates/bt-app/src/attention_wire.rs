@@ -516,6 +516,7 @@ fn payload_of(source: Option<&crate::cli::AttentionPayload>) -> Option<String> {
         crate::cli::AttentionPayload::Inline(text) => Some(text.clone()),
         crate::cli::AttentionPayload::Stdin => payload_on_stdin(
             &crate::lane::Executor::thread_door(bt_platform::ThreadPriority::Normal),
+            STDIN_BUDGET,
             |line| crate::diagnostics::stderr_line(format!("folio attention: {line}")),
         ),
     }
@@ -547,12 +548,15 @@ const STDIN_BUDGET: Duration = Duration::from_millis(200);
 /// verb at a prompt has redirected nothing, and a read of their console handle would sit there
 /// waiting for them to type a JSON object at a program that is supposed to have exited already.
 ///
-/// The read itself happens on a thread of its own so that [`STDIN_BUDGET`] can be enforced over it.
-/// Nothing is joined and nothing needs to be: this process exits within a moment of the send below,
-/// and a thread still parked on a handle nobody wrote to goes with it.
+/// The read itself happens on a thread of its own so that `budget` can be enforced over it; the
+/// verb's caller (`payload_of`) hands in [`STDIN_BUDGET`], and the suite its patience, so that a
+/// test's verdict is the reader's own send and never a race with the product's 200 ms
+/// (T-ATTENTION-WIRE-STDIN-PAYLOAD-WINDOW). Nothing is joined and nothing needs to be: this process
+/// exits within a moment of the send below, and a thread still parked on a handle nobody wrote to
+/// goes with it.
 ///
 /// **The waiting thread is a worker** (`bt_platform::admission`, design note 2026-09-26 revision
-/// (c)6): this process never has a window, and the thread that waits out [`STDIN_BUDGET`] is its
+/// (c)6): this process never has a window, and the thread that waits out the budget is its
 /// main thread, which enters as [`PAYLOAD_ENTRY`] — once, which is all a process that exits after
 /// one send ever asks. The reader it waits on comes from the thread door, as every thread Folio
 /// starts does, at `Normal` (RULES 53's standalone-process exception) — by `executor`, the thread
@@ -565,6 +569,7 @@ const STDIN_BUDGET: Duration = Duration::from_millis(200);
 #[must_use]
 fn payload_on_stdin(
     executor: &crate::lane::Executor,
+    budget: Duration,
     say: impl Fn(&str) + Send + Sync + 'static,
 ) -> Option<String> {
     use std::io::IsTerminal;
@@ -591,7 +596,7 @@ fn payload_on_stdin(
                 },
             )
             .ok()?;
-        let bytes = payload.recv_timeout(STDIN_BUDGET).ok()??;
+        let bytes = payload.recv_timeout(budget).ok()??;
         String::from_utf8(bytes).ok()
     })
     .expect(ENTERED_ONCE)
@@ -1290,6 +1295,7 @@ mod tests {
         assert_eq!(
             payload_on_stdin(
                 &crate::lane::Executor::thread_door(bt_platform::ThreadPriority::Normal),
+                crate::lane::PATIENCE,
                 |line| panic!("the reader started and returned, so nothing is said: {line}"),
             )
             .as_deref(),
@@ -1326,15 +1332,92 @@ mod tests {
         gate.refuse_next_start();
         let said = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let lines = std::sync::Arc::clone(&said);
-        let payload = payload_on_stdin(&crate::lane::Executor::scripted(gate), move |line| {
-            lines.lock().unwrap().push(line.to_owned());
-        });
+        let payload = payload_on_stdin(
+            &crate::lane::Executor::scripted(gate),
+            crate::lane::PATIENCE,
+            move |line| {
+                lines.lock().unwrap().push(line.to_owned());
+            },
+        );
         assert_eq!(payload, None, "a reader that never started read nothing");
         let said = said.lock().unwrap().clone();
         assert_eq!(said.len(), 1, "the refused start is said once: {said:?}");
         assert!(
             said[0].contains(crate::lane::REFUSED_START),
             "in the door's words: {said:?}"
+        );
+    }
+
+    /// RED (T-ATTENTION-WIRE-STDIN-PAYLOAD-WINDOW) — **the `attention` verb waits for its payload
+    /// as long as its caller says**: a reader kept from standard input past [`STDIN_BUDGET`] still
+    /// hands its payload over under the longer budget handed in. Before, the wait was on the
+    /// constant whatever the caller wanted, and a test of the reader raced the product's 200 ms.
+    ///
+    /// Alone in a process of its own, with a real payload on its real standard input. A worker of
+    /// the suite's executor holds the handle's lock, and so keeps the verb's reader off it, until
+    /// the suite's gate lets that worker go on its own after `HELD_FOR` (one lapse). The verdict
+    /// is the payload received and the one lapse, never a duration this test measured.
+    ///
+    /// MUTATION: wait on `STDIN_BUDGET` instead of `budget` — the wait ends at 200 ms with the
+    /// reader still kept off the handle, and the payload is `None`
+    /// (`reports/plants/plant-168-budget-ignored.py`).
+    #[test]
+    fn a_reader_kept_past_the_product_budget_is_waited_for_within_the_budget_handed_in() {
+        /// How long the gate keeps the verb's reader off its standard input: past the product's
+        /// budget, inside the suite's patience.
+        const HELD_FOR: Duration = Duration::from_secs(1);
+        const PAYLOAD: &str = r#"{"hook_event_name":"Stop"}"#;
+        const _: () = assert!(
+            HELD_FOR.as_millis() > STDIN_BUDGET.as_millis()
+                && HELD_FOR.as_millis() < crate::lane::PATIENCE.as_millis()
+        );
+        if !crate::test_support::alone_in_a_process(
+            "attention_wire::tests::a_reader_kept_past_the_product_budget_is_waited_for_within_the_budget_handed_in",
+            PAYLOAD.as_bytes(),
+        ) {
+            return;
+        }
+        let gate = std::sync::Arc::new(crate::lane::Gate::default());
+        gate.hold();
+        gate.lapse_after(HELD_FOR);
+        let (locked, is_locked) = std::sync::mpsc::channel();
+        crate::lane::Executor::scripted(std::sync::Arc::clone(&gate))
+            .start_worker(
+                "folio-attention-stdin-holder",
+                crate::lane::Answered::new(
+                    "the suite's holder of standard input",
+                    |line| panic!("the holder returns, so nothing is said: {line}"),
+                    |_| (),
+                ),
+                move |ctx| {
+                    let handle = std::io::stdin().lock();
+                    locked.send(()).expect("the test waits for the lock");
+                    // Held at the gate until it lets go on its own, with the lock taken.
+                    let _ = crate::lane::task(ctx, |_| Ok::<(), ()>(()));
+                    drop(handle);
+                },
+            )
+            .expect("the suite's executor starts the holder");
+        // Unbounded, and it cannot hang: a holder that fails drops the sender, nothing takes stdin's
+        // lock before the holder, and the parent stops this child after a minute.
+        is_locked
+            .recv()
+            .expect("the holder took standard input's lock");
+        let payload = payload_on_stdin(
+            &crate::lane::Executor::thread_door(bt_platform::ThreadPriority::Normal),
+            crate::lane::PATIENCE,
+            |line| panic!("the reader started and returned, so nothing is said: {line}"),
+        );
+        assert_eq!(
+            payload.as_deref(),
+            Some(PAYLOAD),
+            "the verb waited past the product's budget, as long as it was told, for a reader \
+             kept off its standard input until the gate let go"
+        );
+        assert_eq!(
+            gate.lapses(),
+            1,
+            "the reader got the handle only once the gate had let the holder go on its own"
         );
     }
 }

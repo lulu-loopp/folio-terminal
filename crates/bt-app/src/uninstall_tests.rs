@@ -1,5 +1,6 @@
 //! Every filesystem operand in these tests is below a freshly created sandbox.
 use super::*;
+use crate::update_apply::CountedClock;
 use std::fs;
 
 // ── `bt-source`, for the readers in this file that ask the program about its
@@ -1644,12 +1645,10 @@ fn uninstall_update_rows_remove_only_ours() {
 /// leaves it, under `H/<txn>/mnt`, with no record.
 ///
 /// MUTATION: in `update_home`, drop the `detach_images_under` call.
+#[cfg(target_os = "macos")]
 #[test]
 fn uninstall_update_home_detaches_before_removing() {
     use crate::update_prepare_macos::tests::fixture;
-    if !fixture::on_macos() {
-        return;
-    }
     let scratch = fixture::Scratch::new("uninstall-home");
     let home = scratch.root.join(".Folio.app.folio-update");
     let image = fixture::blank_image(&scratch.root.join("left.dmg"));
@@ -2450,6 +2449,173 @@ fn the_door_waits_for_the_folio_that_asked_before_it_touches_anything() {
     fs::remove_dir_all(root).unwrap();
 }
 
+/// **How many pauses the door's wait for its asker (`waited_for`) takes at `within`**: each
+/// [`AFTER_PID_POLL`], the last what is left.
+fn after_pid_pauses(within: Duration) -> usize {
+    usize::try_from(within.as_millis().div_ceil(AFTER_PID_POLL.as_millis())).unwrap()
+}
+
+/// **A door clock that counts its pauses against the budget `within`**
+/// (T-UNINSTALL-DOOR-AFTER-PID-WAIT-ON-A-CLOCK): a `CountedClock` that moves only by the pauses
+/// it is asked for, runs `at_pause` inside each with its number from one, and is red at a pause
+/// past `after_pid_pauses(within)`: a budget that never ends fails, never hangs.
+fn counted_within(
+    within: Duration,
+    mut at_pause: impl FnMut(usize) + Send + 'static,
+) -> CountedClock {
+    let budget = after_pid_pauses(within);
+    CountedClock::new(move |pause| {
+        assert!(
+            pause <= budget,
+            "the door paused {pause} times, past its budget ({budget} pauses)"
+        );
+        at_pause(pause);
+    })
+}
+
+/// **The door's clock while a real process it waits for ends**
+/// (T-UNINSTALL-DOOR-AFTER-PID-WAIT-ON-A-CLOCK): pause 1 lasts until `running` no longer runs —
+/// its end, as `install_flip::still_running` reads it — within the suite's patience
+/// (`lane::within_patience`); every later pause only moves the clock, and a pause past the
+/// budget `within` is red. "Ended within the budget" is the process's state at a counted pause,
+/// never a race between a real minute and its exit; an end that never comes costs the patience
+/// once, and the budget is then spent on the count.
+fn until_ended(running: Running, within: Duration) -> CountedClock {
+    counted_within(within, move |pause| {
+        if pause == 1 {
+            crate::lane::within_patience(|| !bt_platform::install_flip::still_running(running));
+        }
+    })
+}
+
+/// **A door clock on which any pause is red**: for a door that must answer at its first look
+/// (a bound of nothing, or an asker already gone).
+#[cfg(windows)]
+fn never_paused() -> CountedClock {
+    CountedClock::new(|pause| {
+        panic!("the door paused ({pause}) where it answers at its first look")
+    })
+}
+
+/// RED (T-UNINSTALL-DOOR-AFTER-PID-WAIT-ON-A-CLOCK) — **an asker still running when the door's
+/// budget ends is answered as a running Folio, with nothing touched, after exactly the budget on
+/// the door's clock.**
+///
+/// The asker is this test's own process (its pid and start instant): it runs through the whole
+/// count, the late answer that never comes. The door's wait is the real `waited_for`, read and
+/// paused on a `CountedClock` that moves only by the pauses it is asked for, so the 60 s budget
+/// is spent as `AFTER_PID_WITHIN / AFTER_PID_POLL` pauses and no real minute passes.
+///
+/// MUTATION (`reports/plants/plant-142-budget-end-removed.py`): `waited_for` no longer returns at
+/// its bound; the budget never ends, and the clock's pause past the budget is red.
+#[test]
+fn the_door_answers_a_running_folio_when_its_asker_outlives_the_budget() {
+    let (root, scope) = sandbox("uninstall-outlives");
+    let scope = std::sync::Arc::new(scope);
+    let me = std::process::id();
+    let asker = Running {
+        pid: me,
+        started: bt_platform::install_flip::started_of(me).unwrap(),
+    };
+    let clock = std::sync::Arc::new(counted_within(AFTER_PID_WITHIN, |_| {}));
+    let (code, stdout) = {
+        let (scope, clock) = (scope.clone(), clock.clone());
+        on_a_worker(move |worker| {
+            let report = uninstall_on(
+                worker,
+                &*clock,
+                &scope,
+                Some(asker),
+                AFTER_PID_WITHIN,
+                |_, _| panic!("nothing is touched while the asker runs"),
+                |_| panic!("nothing is touched while the asker runs"),
+            );
+            (report.code, report.stdout())
+        })
+    };
+    let running = Report::blocked(Why::Said(Text::CleanupRunning))
+        .in_lang(scope.lang)
+        .stdout();
+    assert_eq!((code, stdout), (2, running));
+    assert_eq!(clock.pauses(), after_pid_pauses(AFTER_PID_WITHIN));
+    assert_eq!(
+        u128::from(clock.moved_ms()),
+        AFTER_PID_WITHIN.as_millis(),
+        "the budget is spent on the clock, whole"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// **The door goes on in the pause its asker ends** (T-UNINSTALL-DOOR-AFTER-PID-WAIT-ON-A-CLOCK):
+/// the asker is a real process — a copy of this test binary that reads its stdin to its end —
+/// and the test ends it inside the door's third pause on a `CountedClock` (it closes the stdin
+/// and awaits the end within the suite's patience). The door's real `waited_for` sees it gone at
+/// the next look, after exactly three pauses, and runs the cleanup to the program's step.
+///
+/// MUTATION: in `waited_for`, answer `false` at the end of the loop (an asker that ended is
+/// taken for one still running); the door refuses with code 2.
+#[test]
+fn the_door_goes_on_in_the_pause_its_asker_ends() {
+    const ROLE: &str = "BT_UNINSTALL_ENDS_IN_A_PAUSE_CHILD";
+    const ENDS_IN: usize = 3;
+    if std::env::var_os(ROLE).is_some() {
+        let mut all = Vec::new();
+        std::io::Read::read_to_end(&mut std::io::stdin(), &mut all).unwrap();
+        std::process::exit(0);
+    }
+    let (root, scope) = sandbox("uninstall-ends-in-a-pause");
+    fs::create_dir_all(&scope.data[0]).unwrap();
+    let scope = std::sync::Arc::new(scope);
+    let mut command = bt_platform::quiet_command(std::env::current_exe().unwrap());
+    command
+        .args([
+            "--exact",
+            "uninstall::tests::the_door_goes_on_in_the_pause_its_asker_ends",
+        ])
+        .env(ROLE, "asker")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let mut child = command.spawn().unwrap();
+    let asker = Running {
+        pid: child.id(),
+        started: bt_platform::install_flip::started_of(child.id()).unwrap(),
+    };
+    let mut held = Some((child.stdin.take().unwrap(), child));
+    let clock = std::sync::Arc::new(counted_within(AFTER_PID_WITHIN, move |pause| {
+        if pause == ENDS_IN {
+            let (stdin, mut child) = held.take().unwrap();
+            drop(stdin);
+            crate::lane::wait_until("the asker's end at its stdin's end", || {
+                child.try_wait().unwrap().is_some()
+            });
+        }
+    }));
+    let reached = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (code, stdout) = {
+        let (scope, clock, reached) = (scope.clone(), clock.clone(), reached.clone());
+        on_a_worker(move |worker| {
+            let report = uninstall_on(
+                worker,
+                &*clock,
+                &scope,
+                Some(asker),
+                AFTER_PID_WITHIN,
+                |scope, program| super::execute(scope, false, system_absent, Some(program)),
+                |_| {
+                    reached.store(true, std::sync::atomic::Ordering::SeqCst);
+                    Vec::new()
+                },
+            );
+            (report.code, report.stdout())
+        })
+    };
+    assert_eq!(code, 0, "{stdout}");
+    assert!(reached.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(clock.pauses(), ENDS_IN);
+    fs::remove_dir_all(root).unwrap();
+}
+
 /// RED (0.4.7 uninstall fix) — **the door waits for the Folio that asked until that process has
 /// let go of what it held, not until it has said its exit code.**
 ///
@@ -2459,7 +2625,8 @@ fn the_door_waits_for_the_folio_that_asked_before_it_touches_anything() {
 /// said, its claim not yet let go. There the door, with the real wait (`waited_for`) at a bound of
 /// nothing and the real cleanup (`execute`, the kernel claim), answers that a Folio is running
 /// **from its wait**, before any claim is asked — and nothing is touched. Once the asker has gone,
-/// the same door completes and reaches the program's step.
+/// the same door completes and reaches the program's step. Both answers are the door's first
+/// look, on a clock where any pause is red (`never_paused`), so no real minute is waited.
 ///
 /// This is the clean-VM rehearsal's failure (two of two in-app uninstalls): the door saw the
 /// asker's exit code, took the asker for gone, and was refused the claim the asker still held —
@@ -2511,8 +2678,9 @@ fn the_door_waits_until_the_asker_has_let_go_of_its_claim() {
         let report = {
             let reached = reached.clone();
             on_a_worker(move |worker| {
-                uninstall(
+                uninstall_on(
                     worker,
+                    &never_paused(),
                     &scope,
                     Some(asker),
                     within,
@@ -2860,10 +3028,12 @@ fn every_running_installed_image_is_in_the_removers_wait_census() {
 /// with that same log as its streams (a Folio started by a Folio — an update's trial). It records
 /// its identity, starts the door through `door_command` (the way out's own builder) and leaves
 /// without waiting, as `leave_armed` does. The door says one line on each stream, waits for the
-/// asker's end with the real `waited_for` (`--after-pid`), and runs the real `uninstall` over the
+/// asker's end with the real `waited_for` (`--after-pid`; on a `CountedClock` whose first pause
+/// lasts until the asker has ended, `until_ended`), and runs the real `uninstall` over the
 /// sandbox with the door's cleanup (`execute`: the claims, the purge's preflight with the real
 /// `cleanup::probe_file`, the purge). Asked to keep the data, the log holds none of the door's
-/// words; asked to remove it, the door answers 0 and the data folder, log and all, is gone.
+/// words; asked to remove it, the door answers 0 and the data folder, log and all, is gone. The
+/// test awaits the door's end as its state, within the suite's patience.
 ///
 /// This is the clean-VM finding of 2026-10-07: every in-app uninstall with "Also remove settings
 /// and data" refused with "A process holds Folio data … (diagnostics.log)", and the holder was the
@@ -2923,8 +3093,9 @@ fn the_door_holds_nothing_of_its_askers_so_remove_data_removes_its_log() {
         let asker = identity(&root, "asker");
         let scope = std::sync::Arc::new(scope);
         let (code, stdout) = on_a_worker(move |worker| {
-            let report = uninstall(
+            let report = uninstall_on(
                 worker,
+                &until_ended(asker, AFTER_PID_WITHIN),
                 &scope,
                 Some(asker),
                 AFTER_PID_WITHIN,
@@ -2972,10 +3143,9 @@ fn the_door_holds_nothing_of_its_askers_so_remove_data_removes_its_log() {
             let case = format!("handed its streams: {handed}, remove data: {remove}");
             assert_eq!(status.code(), Some(0), "{case}");
             let door = identity(&root, "door");
-            assert!(
-                on_a_worker(move |worker| waited_for(worker, door, AFTER_PID_WITHIN)),
-                "{case}"
-            );
+            crate::lane::wait_until(&format!("the door's end ({case})"), || {
+                !bt_platform::install_flip::still_running(door)
+            });
             let said = fs::read_to_string(root.join("door-said")).unwrap();
             let (code, report) = said.split_once('\n').unwrap();
             assert_eq!(code, "0", "{case}\n{report}");
