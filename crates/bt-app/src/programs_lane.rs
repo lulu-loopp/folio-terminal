@@ -454,11 +454,9 @@ fn ordered<'a>(rows: &'a [Profile], first: &[String]) -> Vec<&'a Profile> {
     ordered
 }
 
-/// What the lane counts beside its requests: the panes waiting on a walk, and the walk out.
+/// What the lane counts beside its requests: the panes waiting on a walk.
 #[derive(Default)]
 struct Asks {
-    /// The walk out now: its number and why.
-    out: Option<(u64, Trigger)>,
     /// How many panes are in birth, each waiting on a walk's answer ([`PaneWaits`]).
     panes_waiting: usize,
 }
@@ -722,7 +720,6 @@ fn run_program_walk(ctx: &WorkerCtx, lane: &ProgramsLane) {
             ..
         } = lane.requests.next(ctx);
         let generation = newest.0;
-        lane.lock().out = Some((generation, request.trigger));
         // The walk's band is its request's. Off Windows a band is requested, not enforced
         // (RULES 53), and the answer is not consulted.
         let _ = bt_platform::set_current_thread_priority(band(urgent));
@@ -750,7 +747,6 @@ fn run_program_walk(ctx: &WorkerCtx, lane: &ProgramsLane) {
         // coalescing under the lock every admission and the worker's take hold: those the waiting
         // run stands for — the next walk answers them, its operation `Done` and the rest `Joined`
         // to it — and those a newer table displaced, whenever that happened (S-4 round 4).
-        lane.lock().out = None;
         let lane::Arrivals {
             waiting,
             superseded,
@@ -1763,8 +1759,9 @@ pub(crate) mod tests {
     /// started another: the death was a lane state, not a terminal of the requests it owed. The
     /// suite's gate ends the worker while it holds one walk out and two requests stand behind it.
     ///
-    /// MUTATION: leave `Asks::worker` set — `Ledger::worker_ended` returning at once (the death
-    /// leaves the lane as it was) — no wake comes, and the wait for it runs out of patience.
+    /// MUTATION: `Ledger::worker_ended` returning at once — the ledger never in fault and its
+    /// owed requests left owed (the death leaves the lane as it was) — no wake comes, and the
+    /// wait for it runs out of patience.
     #[test]
     fn a_dead_walk_ends_every_owed_request_worker_gone_and_the_next_request_is_refused() {
         let gate = Arc::new(Gate::default());

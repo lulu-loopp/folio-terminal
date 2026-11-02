@@ -4,7 +4,7 @@
 # name) with the number of calls behind it. Held equal to the tree by bt-source's call_graph test;
 # shrink-only against the merge base by scripts/ci/check-unfollowed-edges.ps1 - a key added or grown
 # carries a reason 'YYYY-MM-DD: <why>'. Never edit a key or a count by hand.
-# Ambiguous calls with exactly one candidate, not listed by site above or below (bt_source::call_graph::Unresolved::sole_candidate; a guard naming a callee's callers counts each as a call of its one candidate): 1730. A call whose name is renamed to one only one item declares leaves the list and is counted here.
+# Ambiguous calls with exactly one candidate, not listed by site above or below (bt_source::call_graph::Unresolved::sole_candidate; a guard naming a callee's callers counts each as a call of its one candidate): 1731. A call whose name is renamed to one only one item declares leaves the list and is counted here.
 file	item	kind	name	sites	reason
 crates/bt-app/src/animation.rs	bt-app crate::animation::<FileAnimationSource as Read>::read	Ambiguous	unwrap_or	1	
 crates/bt-app/src/animation.rs	bt-app crate::animation::AnimationCursor::start_again	Ambiguous	into_inner	1	
@@ -4358,7 +4358,7 @@ crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::re
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::refit_preview_picture	Ambiguous	matches	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::refit_preview_picture	Ambiguous	or	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::refit_preview_picture	Ambiguous	or_else	1	
-crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::refit_preview_picture	Ambiguous	text	6	
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::refit_preview_picture	Ambiguous	text	5	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::refresh_preview_body	Ambiguous	collect	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::refresh_preview_body	Ambiguous	filter_map	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::refresh_preview_file	Ambiguous	to_path_buf	1	
@@ -5900,6 +5900,7 @@ crates/bt-app/src/text_field.rs	bt-app crate::text_field::TextField::previous_bo
 crates/bt-app/src/text_field.rs	bt-app crate::text_field::TextField::previous_boundary	Ambiguous	next_back	1	
 crates/bt-app/src/text_field.rs	bt-app crate::text_field::TextField::word_boundary	Ambiguous	collect	1	
 crates/bt-app/src/text_field.rs	bt-app crate::text_field::TextField::word_boundary	Ambiguous	unwrap_or	1	
+crates/bt-app/src/text_field.rs	bt-app crate::text_field::caret_at_x	Dynamic	seam_x	2	2026-11-02: T-TAB-RENAME-FIELD-MOUSE-CARET (0.4.9 plan row 179); the seam-position closure `caret_at_x` is handed: its one product caller, `RenameDrawn::caret_at`, passes `ChromeTextAdvances::between` over the run the painter drew, a read of a table that reaches no door
 crates/bt-app/src/text_field.rs	bt-app crate::text_field::one_line	Ambiguous	chars	1	
 crates/bt-app/src/text_field.rs	bt-app crate::text_field::one_line	Ambiguous	collect	1	
 crates/bt-app/src/text_field.rs	bt-app crate::text_field::one_line	Ambiguous	is_control	1	
@@ -9918,7 +9919,6 @@ crates/bt-platform/src/video/mod.rs	bt-platform crate::video::Readers::quiet_wit
 crates/bt-platform/src/video/mod.rs	bt-platform crate::video::Readers::quiet_within	Ambiguous	unwrap_or_else	2	
 crates/bt-platform/src/video/mod.rs	bt-platform crate::video::TheFile::open	Ambiguous	SetString	1	2026-10-20: T-ANSWER-AFTER-THE-FILE-IS-CLOSED; a Media Foundation COM method (IMFAttributes::SetString) on the stream the open just made, which reaches no door
 crates/bt-platform/src/video/mod.rs	bt-platform crate::video::TheFile::open	Ambiguous	cast	1	2026-10-20: T-ANSWER-AFTER-THE-FILE-IS-CLOSED; the windows crate's Interface::cast (QueryInterface) on the stream the open just made, which reaches no door
-crates/bt-platform/src/video/mod.rs	bt-platform crate::video::TheFile::open	Ambiguous	ok	1	2026-10-20: T-ANSWER-AFTER-THE-FILE-IS-CLOSED; a standard-library Result::ok on the platform call's answer, which reaches no door
 crates/bt-platform/src/video/mod.rs	bt-platform crate::video::copy_locked_frame	Ambiguous	GetContiguousLength	1	
 crates/bt-platform/src/video/mod.rs	bt-platform crate::video::copy_locked_frame	Ambiguous	Lock2D	1	
 crates/bt-platform/src/video/mod.rs	bt-platform crate::video::copy_locked_frame	Ambiguous	Unlock2D	1	
@@ -10396,6 +10396,7 @@ crates/bt-render/src/lib.rs	bt-render crate::CellMetrics::measure_at	Ambiguous	m
 crates/bt-render/src/lib.rs	bt-render crate::CellMetrics::measure_at	Ambiguous	next	1	
 crates/bt-render/src/lib.rs	bt-render crate::CellMetrics::measure_at	Ambiguous	ok_or	2	
 crates/bt-render/src/lib.rs	bt-render crate::ChromeTextAdvances::from_stops	Ambiguous	collect	1	
+crates/bt-render/src/lib.rs	bt-render crate::ChromeTextAdvances::upto	Ambiguous	saturating_sub	1	2026-11-02: T-TAB-RENAME-FIELD-MOUSE-CARET (0.4.9 plan row 179); `upto`, reached from bt-app through `RenameDrawn::caret_at`, steps back one stop with `usize::saturating_sub`, arithmetic on an index
 crates/bt-render/src/lib.rs	bt-render crate::ComposedRowCache::get	Ambiguous	is_some	1	
 crates/bt-render/src/lib.rs	bt-render crate::DeviceLossPilot::answer	Dynamic	rest	1	
 crates/bt-render/src/lib.rs	bt-render crate::DeviceResources::mint	Dynamic	driver	1	2026-10-25: T-WEBVIEW-WARMUP-DROPS-THE-DEVICE; the removal-reason reader `driver_removal_reason` returned, called from the device-loss callback: one `GetDeviceRemovedReason` on a COM reference it holds, which reaches no door
@@ -10979,7 +10980,6 @@ crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::read_and_decode_
 crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::read_and_decode_local_image	Ambiguous	len	5	
 crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::read_and_decode_local_image	Ambiguous	map_err	3	
 crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::read_and_decode_local_image	Ambiguous	take	1	
-crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::read_and_decode_local_image	Ambiguous	to_string	3	
 crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::resize_lanczos3_rgba8_across	Ambiguous	chunks_mut	2	
 crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::resize_lanczos3_rgba8_across	Ambiguous	clamp	1	
 crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::resize_lanczos3_rgba8_across	Ambiguous	copy_from_slice	1	

@@ -188,3 +188,32 @@ pub fn whole_package(package: &Package, vendor: Vendor) -> Result<Universe, Vec<
     )
     .map_err(|rejection| vec![rejection])
 }
+
+/// **One first-party package as its real-tree guards read it**: [`whole_package`], except that
+/// this crate's own `tests/fixtures/` are declared out — they are source *about* compilation,
+/// written to be refused, and no target compiles them.
+///
+/// It is a declaration of its own, and the one every whole-package guard names (plan row 166):
+/// the guards share one process and [`crate::Index::shared`] keys its cache by the universe's
+/// value, so one function is what makes two guards' universes equal by construction rather than
+/// by copy — eight copies of this body stood in eight test files before it.
+///
+/// # Errors
+///
+/// Whatever [`Universe::declare`] and the disk walk reject.
+pub fn first_party_whole(package: &Package, vendor: Vendor) -> Result<Universe, Vec<Rejection>> {
+    if package.name() != env!("CARGO_PKG_NAME") {
+        return whole_package(package, vendor);
+    }
+    let scopes = vec![
+        DiskScope::under(package.directory().join("src")),
+        DiskScope::under(package.directory().join("tests")).excluding(&["fixtures"]),
+    ];
+    Universe::declare(
+        format!("the whole of {}, fixtures aside", package.name()),
+        package.targets().to_vec(),
+        scopes,
+        vendor,
+    )
+    .map_err(|rejection| vec![rejection])
+}
