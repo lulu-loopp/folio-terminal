@@ -2532,7 +2532,7 @@ fn the_grammar_refuses_each_shape_and_accepts_its_twin() {
 /// functions' writes of process-globals that two tests of one binary reach through resolved
 /// edges, product code included, and the unresolved edges met on the way. A measure, printed as
 /// `TEST_GLOBALS_PRODUCT_REACH` (CI's step "the tests' product reach of process-globals,
-/// measured" runs it with `--nocapture`), for a ticket that would gate product reach; never a
+/// measured, and the line printed" runs it with `--nocapture`), for a ticket that would gate product reach; never a
 /// gate, and never compared. It asks for the same indices as the gate, and the process holds one
 /// of each (`Index::shared`, plan row 166), so beside the gate it costs its own reading only.
 #[test]

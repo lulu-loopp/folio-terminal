@@ -78,6 +78,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use bt_source::{
     DiskScope, Index, ItemRecord, LiteralValue, Package, Span, TargetId, TargetKind, TargetRoot,
@@ -474,18 +475,26 @@ fn relative(path: &Path, root: &Path) -> String {
         .replace('\\', "/")
 }
 
-/// Every first-party package's scan, merged.
-fn workspace_scan() -> BTreeMap<(String, String), Reads> {
-    let root = workspace_root();
-    let workspace = Workspace::read(&root).expect("this workspace");
-    let mut found = BTreeMap::new();
-    for package in workspace
+/// Every first-party package's index: the one this process holds for each package's
+/// [`universes::first_party_whole`], shared with every other guard that asks for it.
+pub(crate) fn workspace_indices() -> Vec<Arc<Index>> {
+    let workspace = Workspace::read(&workspace_root()).expect("this workspace");
+    workspace
         .packages()
         .iter()
         .filter(|package| !is_vendored(package.directory()))
-    {
-        let index = Index::shared(&universe_for(package))
-            .unwrap_or_else(|rejections| panic!("{}", report(&rejections)));
+        .map(|package| {
+            Index::shared(&universe_for(package))
+                .unwrap_or_else(|rejections| panic!("{}", report(&rejections)))
+        })
+        .collect()
+}
+
+/// Every first-party package's scan, merged.
+fn workspace_scan() -> BTreeMap<(String, String), Reads> {
+    let root = workspace_root();
+    let mut found = BTreeMap::new();
+    for index in workspace_indices() {
         found.extend(scan(&index, &root));
     }
     found

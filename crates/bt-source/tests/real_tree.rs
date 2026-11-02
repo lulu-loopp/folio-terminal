@@ -118,7 +118,12 @@ fn the_whole_package_guards_share_one_index_per_package() {
         }
     }
 
-    let readers: [(&str, Vec<Arc<Index>>, usize); 5] = [
+    let readers: [(&str, Vec<Arc<Index>>, usize); 7] = [
+        (
+            "env_doors",
+            env_doors::workspace_indices(),
+            first_party.len(),
+        ),
         (
             "temp_paths",
             temp_paths::workspace_indices(),
@@ -132,6 +137,14 @@ fn the_whole_package_guards_share_one_index_per_package() {
                 .map(|(_, index)| index)
                 .collect(),
             first_party.len(),
+        ),
+        (
+            "test_order",
+            test_order::workspace_indices()
+                .into_iter()
+                .map(|(_, index)| index)
+                .collect(),
+            first_party.len() - 1,
         ),
         (
             "test_shells",

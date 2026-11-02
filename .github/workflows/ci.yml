@@ -534,8 +534,8 @@ jobs:
       # (`HandoffLane::submit`, on `Runtime::hand_off`'s road): a helper that writes a file, and a
       # stored `Box<dyn Fn()>` called there. Each must be refused by the guard naming the planted
       # file, the site and the door; the file is put back after each. The test is a module of
-      # bt-source's `real_tree` binary (plan row 166), built by the suite above (no bt-app build);
-      # each run lowers only what that one test asks for.
+      # bt-source's `real_tree` binary (plan row 166), built by the clock-guard canary above (no
+      # bt-app build); each run lowers only what that one test asks for.
       - name: the request-door guard can actually fail
         shell: pwsh
         run: |

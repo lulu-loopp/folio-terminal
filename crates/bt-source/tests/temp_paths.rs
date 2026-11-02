@@ -154,7 +154,6 @@ fn scan(index: &Index) -> BTreeSet<String> {
     found
 }
 
-/// Every first-party package's index but the owner's.
 /// Every first-party package's index but the owner's: the one this process holds for each
 /// package's [`universes::first_party_whole`], shared with every other guard that asks for it.
 pub(crate) fn workspace_indices() -> Vec<Arc<Index>> {
