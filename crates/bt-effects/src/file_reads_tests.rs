@@ -230,3 +230,31 @@ fn file_reads_opaque_loads_never_invent_file_bytes() {
     assert!(minute.perf_line(1, false).contains("fonts_opaque_loads=3"));
     assert!(!over_budget(&minute, false));
 }
+
+/// **A file another program holds is told apart from one the disk refuses**
+/// (T-DECODE-UNSTARTED-FILED-AS-A-DECODE-FAILURE): on Windows the two numbers of "held at this
+/// moment" — a sharing violation and a lock violation — and nothing else; off Windows, nothing,
+/// since the same numbers are other errors there.
+///
+/// MUTATION: add `5` (`ERROR_ACCESS_DENIED`) to `held_elsewhere_code`'s numbers — a file the
+/// permissions deny would be asked again as if its holder might let go; the denied row goes red.
+#[test]
+fn file_reads_held_elsewhere_is_a_sharing_or_lock_violation_and_nothing_else() {
+    for (code, held_on_windows) in [
+        (32, true),
+        (33, true),
+        (5, false),
+        (2, false),
+        (3, false),
+        (1, false),
+    ] {
+        let error = io::Error::from_raw_os_error(code);
+        assert_eq!(
+            held_elsewhere(&error),
+            cfg!(windows) && held_on_windows,
+            "os error {code}"
+        );
+        assert_eq!(held_elsewhere_code(code), cfg!(windows) && held_on_windows);
+    }
+    assert!(!held_elsewhere(&io::Error::other("no os number")));
+}

@@ -1,13 +1,19 @@
 //! **The effect vocabulary every layer shares.**
 //!
-//! Two modules, each the one owner of its facts, with no platform `cfg` and no
+//! Two modules, each the one owner of its facts, with no platform `cfg` item and no
 //! first-party dependency:
 //!
 //! - [`admission`] — which kind of thread this is ([`admission::Role`]), where the
 //!   window thread is in its run ([`admission::Phase`]), the door registry as types
 //!   ([`admission::doors`]), and the admission that lets the window thread wait at
 //!   one of those doors ([`admission::admitted`], [`admission::WaitToken`]);
-//! - [`file_reads`] — the process-wide ledger of file content read, by lane.
+//! - [`file_reads`] — the process-wide ledger of file content read, by lane, and the
+//!   one reading of a failed read as "another program holds the file"
+//!   ([`file_reads::held_elsewhere`]). That reading is the crate's one platform fact,
+//!   two Win32 error numbers read under a `cfg!(windows)` expression, so every item
+//!   still compiles on every target; it is here because both the picture decoder
+//!   (`bt-term`) and the video decoder (`bt-platform`) read it, and neither names
+//!   the other.
 //!
 //! **What is not here.** The thread door (`bt_platform::spawn_at_priority`) sets a
 //! thread's scheduling band, which is the platform's, so it stays in `bt-platform`

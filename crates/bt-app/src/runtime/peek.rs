@@ -10,8 +10,8 @@ use crate::runtime::panes::risen_frame;
 use crate::runtime::preview::documents_held_in;
 use crate::window_seam::prelude::*;
 use crate::{
-    ClickIntent, DECODE_UNSTARTED, PeekCache, PreviewDocument, PreviewOpenLane, TabState,
-    computation_lane, lane, preview_open_lane,
+    ClickIntent, PeekCache, PreviewDocument, PreviewOpenLane, TabState, computation_lane, lane,
+    preview_open_lane,
 };
 use crate::{
     DragLatch, FilePeek, FilePeekPress, FilePeekSubject, FloatDrag, FloatDragKind, FloatGrasp,
@@ -1216,12 +1216,17 @@ impl<B: Backend> Runtime<'_, B> {
                 }) => (key.clone(), Arc::clone(rgba), *width_px, *height_px),
                 Some(
                     PeekCacheEntry::Pending { .. }
-                    | PeekCacheEntry::Unanswered { asked_again: true }
+                    | PeekCacheEntry::Unanswered {
+                        asked_again: true, ..
+                    }
                     | PeekCacheEntry::Failed(_),
                 ) => return None,
                 // Nothing filed, or a first frame that ran out and has not been asked again
                 // (T-FIRST-FRAME-RUN-OUT-IS-NOT-A-REFUSAL): the card asks, once.
-                None | Some(PeekCacheEntry::Unanswered { asked_again: false }) => {
+                None
+                | Some(PeekCacheEntry::Unanswered {
+                    asked_again: false, ..
+                }) => {
                     // The one door files what it asked: the read under its identity, or the
                     // unstarted record.
                     self.request_peek_pixels(path);
@@ -2989,15 +2994,6 @@ impl<B: Backend> Runtime<'_, B> {
     }
 }
 
-/// **What a file's pixels are filed as when the lane's thread could not be started**: a failed
-/// decode, in the decoder error's words, so every surface reading the window's cache agrees and
-/// asks again only on its own new input.
-pub(crate) fn unstarted_pixels() -> PeekCacheEntry {
-    PeekCacheEntry::Failed(bt_term::InlineImageDecodeError::Decode(
-        DECODE_UNSTARTED.to_owned(),
-    ))
-}
-
 /// The `peek_cache` identity a decoration-worker decode must be remembered under, so that the
 /// hover which later asks for the same picture finds it instead of asking the disk again.
 ///
@@ -3223,10 +3219,16 @@ pub(crate) fn peek_reads_the_file(
 ) -> bool {
     readable
         && match entry {
-            None | Some(PeekCacheEntry::Unanswered { asked_again: false }) => true,
-            Some(PeekCacheEntry::Failed(_) | PeekCacheEntry::Unanswered { asked_again: true }) => {
-                settled
-            }
+            None
+            | Some(PeekCacheEntry::Unanswered {
+                asked_again: false, ..
+            }) => true,
+            Some(
+                PeekCacheEntry::Failed(_)
+                | PeekCacheEntry::Unanswered {
+                    asked_again: true, ..
+                },
+            ) => settled,
             Some(PeekCacheEntry::Pending { .. } | PeekCacheEntry::Ready { .. }) => false,
         }
 }
@@ -3340,7 +3342,10 @@ pub(crate) fn remember_decode(
 ///
 /// **And it files what it asked**: a read admitted is `Pending` under the identity the lane
 /// minted, which its answer is filed by ([`super::preview::file_peek_answer`]); a thread that could
-/// not be started is the unstarted record. A full lane or a refusal files nothing.
+/// not be started is an [`PeekCacheEntry::Unanswered`] already asked again
+/// (T-DECODE-UNSTARTED-FILED-AS-A-DECODE-FAILURE) — not a failure of the file, which it used to be
+/// filed as, and asked again only by a new look, because no answer will come back to ask again
+/// on. A full lane or a refusal files nothing.
 ///
 /// **A read that replaces a first frame not yet asked again is the one more ask**
 /// (T-FIRST-FRAME-RUN-OUT-IS-NOT-A-REFUSAL): its `Pending` says so (`once_more`), which is how
@@ -3374,13 +3379,22 @@ pub(crate) fn ask_for_peek_pixels(
     let key = bt_term::normalized_local_image_path_key(path);
     let once_more = matches!(
         peek_cache.peek(&key),
-        Some(PeekCacheEntry::Unanswered { asked_again: false })
+        Some(PeekCacheEntry::Unanswered {
+            asked_again: false,
+            ..
+        })
     );
     match asked {
         PeekAsk::Asked(asked) => {
             peek_cache.insert(key, PeekCacheEntry::Pending { asked, once_more });
         }
-        PeekAsk::Unstarted => peek_cache.insert(key, unstarted_pixels()),
+        PeekAsk::Unstarted => peek_cache.insert(
+            key,
+            PeekCacheEntry::Unanswered {
+                asked_again: true,
+                said: None,
+            },
+        ),
         PeekAsk::NotNow | PeekAsk::Refused => {}
     }
     asked

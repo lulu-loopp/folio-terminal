@@ -1140,8 +1140,8 @@ impl HeldAbout {
                 Some(PeekCacheEntry::Pending { asked, .. }) => {
                     format!("pending {}", asked.number())
                 }
-                Some(PeekCacheEntry::Unanswered { asked_again }) => {
-                    format!("unanswered, asked again: {asked_again}")
+                Some(PeekCacheEntry::Unanswered { asked_again, said }) => {
+                    format!("unanswered, asked again: {asked_again}, said: {said:?}")
                 }
                 Some(PeekCacheEntry::Ready { key, .. }) => format!("ready {key}"),
                 Some(PeekCacheEntry::Failed(failure)) => format!("failed {failure:?}"),

@@ -37,6 +37,7 @@ All notable changes to Folio are recorded here. The format follows
 - Letters begun with an input method in one place, such as a shell, a search field or a name box, no longer land somewhere else after a click or a tab switch; the composition is cancelled instead, and the commit graph's search box no longer keeps showing its half-typed letters after a click elsewhere. <!-- zh: 在一处（例如 shell、搜索框或名称框）用输入法开始输入的字母，单击别处或切换标签页后不再落到其他地方，这次输入会被取消；提交图的搜索框在单击别处后也不再继续显示输入了一半的字母。 -->
 - On Windows, an update no longer fails to prepare when an antivirus scan or another program holds one of its files open for a moment; Folio now waits for the file to be let go and goes on. <!-- zh: 在 Windows 上，杀毒软件扫描或其他程序短暂占用更新的某个文件时，更新不再准备失败；Folio 现在会等该文件被释放后继续。 -->
 - When a video's picture takes too long to appear on a busy computer, Folio now asks for it once more by itself instead of treating the video as one it cannot show. <!-- zh: pending -->
+- On Windows, a picture or video that another program is holding open (for example a recording still being written) is no longer treated as a file Folio cannot show: Folio asks for it once more by itself, and again when you look at it anew, and a picture's preview says the file is in use by another program. <!-- zh: pending -->
 
 ## 0.4.8-preview — 2026-10-23
 
