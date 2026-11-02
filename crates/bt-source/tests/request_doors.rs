@@ -135,6 +135,30 @@ const BLOCKING: &[&str] = &[
     "windows::Win32::System::Threading::SleepEx",
 ];
 
+/// The [`BLOCKING`] primitives that are not window-thread waits, each with why: every other
+/// `BLOCKING` path is a `# vocabulary` path of `crates/bt-app/src/window_waits.tsv`, and
+/// [`every_blocking_primitive_is_a_window_wait_or_named_as_not_one`] holds the two lists so
+/// (T-BARE-SITE-VOCABULARY-WAIT-WHILE-BLIND-SPOT, plan row 176, ruling R2).
+const NOT_A_WINDOW_WAIT: &[(&str, &str)] = &[
+    (
+        "std::sync::Mutex::lock",
+        "a lock is C1's concern, exempt in a row's mailbox; the window thread takes hundreds, and \
+         the vocabulary becomes the product's `disallowed-methods` at A2e",
+    ),
+    (
+        "std::sync::RwLock::read",
+        "a lock, as `Mutex::lock`",
+    ),
+    (
+        "std::sync::RwLock::write",
+        "a lock, as `Mutex::lock`",
+    ),
+    (
+        "std::sync::mpsc::Receiver::iter",
+        "bt-app's name-based `Drop` reading would take every collection's `.iter()` for it",
+    ),
+];
+
 /// The namespaces C1 names whole (ruling Q3): the file system, the network, a child process, and
 /// the standard I/O traits and handles.
 const EFFECT_NAMESPACES: &[&str] = &[
@@ -1749,6 +1773,95 @@ fn numbered_section<'r>(
             (at + 1, cells)
         })
         .collect()
+}
+
+/// [`BLOCKING`] against the `# vocabulary` of `registry` (`window_waits.tsv`'s shape) and
+/// [`NOT_A_WINDOW_WAIT`]: each failure names its path.
+fn blocking_alignment_failures(registry: &str) -> Vec<String> {
+    let vocabulary: BTreeSet<&str> =
+        numbered_section(registry, "vocabulary", &["path", "targets", "reason"])
+            .into_iter()
+            .map(|(_, cells)| cells[0])
+            .collect();
+    let not_a_wait: BTreeSet<&str> = NOT_A_WINDOW_WAIT.iter().map(|(path, _)| *path).collect();
+    let mut failures = Vec::new();
+    for path in BLOCKING {
+        match (vocabulary.contains(path), not_a_wait.contains(path)) {
+            (true, false) | (false, true) => {}
+            (false, false) => failures.push(format!(
+                "`{path}` is a blocking primitive the vocabulary does not name and \
+                 `NOT_A_WINDOW_WAIT` does not excuse"
+            )),
+            (true, true) => failures.push(format!(
+                "`{path}` is both a vocabulary path and `NOT_A_WINDOW_WAIT`"
+            )),
+        }
+    }
+    for path in &not_a_wait {
+        if !BLOCKING.contains(path) {
+            failures.push(format!(
+                "`{path}` is in `NOT_A_WINDOW_WAIT` and is no blocking primitive"
+            ));
+        }
+    }
+    failures
+}
+
+/// RED (T-BARE-SITE-VOCABULARY-WAIT-WHILE-BLIND-SPOT, plan row 176, ruling R4) — **every blocking
+/// primitive is a window-thread wait or is named as not one**: each [`BLOCKING`] path is a
+/// `# vocabulary` path of `crates/bt-app/src/window_waits.tsv` or a [`NOT_A_WINDOW_WAIT`] path,
+/// never both, and every `NOT_A_WINDOW_WAIT` path is a `BLOCKING` one. Row 145 met the gap this
+/// closes: `Condvar::wait_timeout_while` was here and not in the vocabulary, so a door written
+/// with it left the bare-site inventory without going through a door. Against the live registry
+/// it passes; with its `std::thread::park_timeout` line taken out, and with a
+/// `std::sync::Mutex::lock` line put in, each is refused by name. (`timing.rs`' `REAL_WAITS` is a
+/// census of test timing by bare name, a different subject, and is not held here: ruling R5.)
+///
+/// MUTATION: delete the registry's `std::sync::Condvar::wait_timeout_while` line and the live
+/// half names it.
+#[test]
+fn every_blocking_primitive_is_a_window_wait_or_named_as_not_one() {
+    let registry = std::fs::read_to_string(
+        workspace_root()
+            .join("crates")
+            .join("bt-app")
+            .join("src")
+            .join("window_waits.tsv"),
+    )
+    .expect("the registry");
+    let failures = blocking_alignment_failures(&registry);
+    assert!(
+        failures.is_empty(),
+        "BLOCKING and the registry's `# vocabulary` disagree:\n  {}",
+        failures.join("\n  ")
+    );
+
+    let park_timeout = "std::thread::park_timeout\tall\t";
+    let without: String = registry
+        .lines()
+        .filter(|line| !line.starts_with(park_timeout))
+        .map(|line| format!("{line}\n"))
+        .collect();
+    assert_ne!(without, registry, "the live registry names `park_timeout`");
+    assert_eq!(
+        blocking_alignment_failures(&without),
+        [
+            "`std::thread::park_timeout` is a blocking primitive the vocabulary does not name and \
+             `NOT_A_WINDOW_WAIT` does not excuse"
+        ]
+    );
+
+    let wait = "std::sync::Condvar::wait\tall\twaits for a notification\n";
+    assert!(registry.contains(wait), "the live registry names `Condvar::wait`");
+    let with_a_lock = registry.replacen(
+        wait,
+        &format!("{wait}std::sync::Mutex::lock\tall\ta planted lock\n"),
+        1,
+    );
+    assert_eq!(
+        blocking_alignment_failures(&with_a_lock),
+        ["`std::sync::Mutex::lock` is both a vocabulary path and `NOT_A_WINDOW_WAIT`"]
+    );
 }
 
 /// The kinds an `# effects` row may carry — `window_waits_tests::EFFECT_KINDS`, the registry's
