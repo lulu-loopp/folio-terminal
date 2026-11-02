@@ -2169,6 +2169,15 @@ impl Tools for ScansTheJournal {
     }
 }
 
+#[cfg(windows)]
+impl WinPrepare {
+    /// This driver with its held journal writes asked again on `clock` — a
+    /// test's counted clock, whose pauses let a hold go.
+    fn on_clock(self, clock: Arc<dyn crate::update_apply::WaitClock>) -> Self {
+        Self { clock, ..self }
+    }
+}
+
 impl Scene {
     /// A driver whose tools hold the journal ([`ScansTheJournal`]) in `hold`,
     /// and whose held writes are asked again on `clock`.
