@@ -1073,11 +1073,11 @@ where
         let mut book = lock(&self.book);
         if !book.started {
             if let Err(end) = start(Arc::new(Ran(Arc::clone(&self.ledger)))) {
-                // Said after the lane's lock is let go. A lock of the calling lane's own may still
-                // be held (the program walk's, across its admission); that is harmless: a refused
-                // start means the lane has no worker to wait on it, and a requester or consumer
-                // waiting on it waits only for one diagnostics line's write — the door answered
-                // without waiting for a thread, and nothing here waits for one either.
+                // Said after the lane's lock is let go. No caller keeps a lock of its own across
+                // the admission: the program walk's kept its lane's lock across it until row 160,
+                // and now keeps it only for its urgency read. A refused start means the lane has
+                // no worker to wait on it — the door answered without waiting for a thread, and
+                // nothing here waits for one either.
                 drop(book);
                 self.ledger.say_not_started(&end);
                 return Err(Refused::NotStarted(end.to_string()));
@@ -2766,7 +2766,8 @@ impl Gate {
 
     /// **For a planted lane only**: the gate lets go on its own after `cap` instead of
     /// [`PATIENCE`]. A lane that cannot return before its worker moves lapses once under any cap,
-    /// so a short one only spares the test the wait.
+    /// so a short one only spares the test the wait. Or for a test whose held worker keeps
+    /// something another call waits on, the lapse being that wait (`attention_wire`'s budget test).
     pub(crate) fn lapse_after(&self, cap: Duration) {
         lock(&self.state).cap = Some(cap);
     }

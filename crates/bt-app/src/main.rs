@@ -31628,8 +31628,9 @@ mod program_birth_tests {
 #[cfg(test)]
 mod shell_birth_tests {
     use super::*;
+    use crate::test_support::a_quiet_shell;
     use bt_platform::admission::WorkerCtx;
-    use bt_pty::test_shell::{Hygiene, TestShell};
+    use bt_pty::test_shell::Hygiene;
     use std::num::NonZeroU16;
     use std::sync::mpsc;
 
@@ -31732,32 +31733,9 @@ mod shell_birth_tests {
         )
     }
 
-    /// A real shell on a pseudoconsole, through the test-shell door: `cmd` on Windows, `sh`
-    /// elsewhere — neither keeps a history the account owns.
-    fn a_shell() -> Result<(PtySession, Hygiene), PtyError> {
-        #[cfg(windows)]
-        let command = bt_pty::PtyCommand::new("cmd.exe").arg("/D");
-        // A pane's shell is told the system's locale when the environment names none
-        // (`shell_integration::locale_declaration`); this one is told it the same way, or a
-        // test process with no `LANG` (an `ssh` session, a CI runner) hands `/bin/sh` the `C`
-        // locale and its line editor reads the CJK typed below as meta keys.
-        #[cfg(not(windows))]
-        let command = bt_platform::spawn_at_priority(
-            "bt-locale-test",
-            bt_platform::ThreadPriority::Normal,
-            |worker| bt_platform::read_system_locale_declaration(worker).declaration,
-        )
-        .expect("a worker")
-        .join()
-        .expect("the reading answers")
-        .iter()
-        .flat_map(bt_platform::LocaleDeclaration::variables)
-        .fold(
-            bt_pty::PtyCommand::new("/bin/sh"),
-            |command, (name, value)| command.env(*name, value),
-        );
-        let size = PtySize::cells(grid().columns, grid().rows);
-        TestShell::spawn(command, size).map(TestShell::into_session)
+    /// The size this module's shells are born at.
+    fn born_size() -> PtySize {
+        PtySize::cells(grid().columns, grid().rows)
     }
 
     /// The birth a test holds: it starts nothing until `gate` opens (or the lane suite's patience
@@ -31779,7 +31757,7 @@ mod shell_birth_tests {
         kept: mpsc::Sender<Hygiene>,
     ) -> impl FnOnce(&WorkerCtx) -> Result<PtySession, PtyError> + Send + 'static {
         held_birth(gate, move || {
-            a_shell().map(|(session, hygiene)| {
+            a_quiet_shell(born_size()).map(|(session, hygiene)| {
                 let _ = kept.send(hygiene);
                 session
             })
@@ -31937,7 +31915,7 @@ mod shell_birth_tests {
                 let resolver = share_that_waits(asked_by, share_answers);
                 let folder_gone = pty_door::gone_place(Some(spec), &resolver).is_some();
                 pty_door::Born {
-                    session: a_shell().map(|(session, hygiene)| {
+                    session: a_quiet_shell(born_size()).map(|(session, hygiene)| {
                         let _ = kept.send(hygiene);
                         session
                     }),
@@ -32249,7 +32227,7 @@ mod shell_birth_tests {
         };
         let seed = seed_of(profiles::WSL_ID);
 
-        let (at_once_shell, at_once_hygiene) = a_shell().expect("a real shell");
+        let (at_once_shell, at_once_hygiene) = a_quiet_shell(born_size()).expect("a real shell");
         let mut at_once = bare(&decision, &seed);
         finish_leaf_birth(
             &mut at_once,
