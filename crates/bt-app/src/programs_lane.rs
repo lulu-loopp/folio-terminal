@@ -1715,7 +1715,9 @@ pub(crate) mod tests {
     /// `Coalescing::ask` turned any wait there into a deadlock the suite's caps cannot free (row
     /// 111's plant C hung). Read from inside the ask: a start the thread door refuses is said by
     /// the ledger there (`Ledger::say_not_started`, called from `Coalescing::ask`), and the
-    /// ledger's `say` looks at the lane's lock as it says it.
+    /// ledger's `say` looks at the lane's lock as it says it. The request's trigger is not urgent
+    /// (a menu's), so the urgency read takes the lock and lets it go before the ask, on the road
+    /// this test names.
     ///
     /// MUTATION (observed red): `request` keeping its guard across the ask (the shape before row
     /// 160) — the lock is held when the refusal is said.
@@ -1739,7 +1741,7 @@ pub(crate) mod tests {
         gate.refuse_next_start();
         assert!(
             matches!(
-                lane.request(request(&[row("rg", "rg.exe")], Trigger::Launch)),
+                lane.request(request(&[row("rg", "rg.exe")], Trigger::ProgramMenu)),
                 Err(Refused::NotStarted(_))
             ),
             "the request whose start was refused is refused at the door"
