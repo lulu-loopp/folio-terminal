@@ -1712,11 +1712,9 @@ mod tests {
     /// name.**
     ///
     /// MUTATION: drop the platform check at the top of `short_version`.
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn off_macos_the_prepares_reads_are_refused_by_name() {
-        if crate::host_platform() == HostPlatform::MacOs {
-            return;
-        }
         let worker = crate::spawn_at_priority(
             "bt-u27-test",
             crate::ThreadPriority::BelowNormal,
@@ -1753,11 +1751,9 @@ mod tests {
     /// RED (U-26) — **off macOS the rescue clone is refused by name.**
     ///
     /// MUTATION: drop the platform check at the top of `rescue_clone`.
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn off_macos_the_rescue_clone_is_refused_by_name() {
-        if crate::host_platform() == HostPlatform::MacOs {
-            return;
-        }
         let refused = rescue_clone(Path::new("Folio.app"), Path::new("clone/Folio.app"));
         assert!(matches!(refused, Err(Refusal::NotHere)), "{refused:?}");
         assert!(refused.unwrap_err().to_string().starts_with("macos_update"));

@@ -700,7 +700,9 @@ fn a_paste_whose_pane_closes_ends_cancelled_and_writes_nothing() {
 /// RED (T-CLIPBOARD-LANE round 2) — **two pastes into one pane queue, in the order they were
 /// pressed**: `Ctrl+V`, `k`, `Ctrl+V` with the clipboard's worker held reaches the shell as the
 /// first paste, `k`, the second — what the shell is sent when the clipboard answers at once — and
-/// each ends once, taken by the window: nothing reaches the lane's sink, nothing is said.
+/// each ends once, taken by the window: nothing reaches the lane's sink, nothing is said. Its
+/// presses are counted at one held moment ([`HeadlessFolio::hold_the_paste_clock`]), so the first
+/// paste is never past its deadline at the second press however long the machine takes.
 ///
 /// MUTATION: in `Runtime::ask_for_a_paste`, supersede the paste still owed by the newer one
 /// (`self.app.clipboard_lane.supersede(older, id)` on the last owed paste) — the first press's
@@ -708,6 +710,7 @@ fn a_paste_whose_pane_closes_ends_cancelled_and_writes_nothing() {
 #[test]
 fn two_pastes_into_one_pane_queue_in_the_order_they_were_pressed() {
     let mut folio = a_window_pasting("clipboard-lane-queue", "粘贴 pasted");
+    folio.hold_the_paste_clock();
     let lane = recording_lane(
         &mut folio,
         &crate::lane::Executor::thread_door(bt_platform::ThreadPriority::Normal),
@@ -731,13 +734,15 @@ fn two_pastes_into_one_pane_queue_in_the_order_they_were_pressed() {
 
 /// RED (T-CLIPBOARD-LANE round 2) — **a paste owed to the shell is not lost to a later paste into a
 /// field**: with the worker held, a paste pressed in the shell and then one pressed in the palette
-/// that opened over it both land — the shell's in the shell, the palette's in its box.
+/// that opened over it both land — the shell's in the shell, the palette's in its box — its
+/// presses counted at one held moment ([`HeadlessFolio::hold_the_paste_clock`]).
 ///
 /// MUTATION: in `Runtime::ask_for_a_paste`, supersede the paste still owed by the newer one — the
 /// shell is sent nothing.
 #[test]
 fn a_shell_paste_still_owed_lands_beside_a_later_paste_into_a_field() {
     let mut folio = a_window_pasting("clipboard-lane-cross", "粘贴 pasted");
+    folio.hold_the_paste_clock();
     let hold = folio.window.window.clipboard.clone();
     hold.worker_hold().hold();
     chord(&mut folio, "v", KeyCode::KeyV);
@@ -763,13 +768,17 @@ fn a_shell_paste_still_owed_lands_beside_a_later_paste_into_a_field() {
 
 /// RED (T-CLIPBOARD-LANE round 2) — **a window owes at most `PASTES_OWED` pastes**: with the
 /// worker held, the press past that desk is refused on the window, says once that the clipboard
-/// was busy, and the pastes before it all land, in order, when the worker goes on.
+/// was busy, and the pastes before it all land, in order, when the worker goes on. Its presses
+/// are counted at one held moment ([`HeadlessFolio::hold_the_paste_clock`]): on the wall clock a
+/// loaded machine took more than `PASTE_DEADLINE` across the first eight once, and the first
+/// paste's deadline said the clipboard was busy before the desk was full (0.4.9 plan row 172).
 ///
 /// MUTATION: drop the desk's check in `Runtime::ask_for_a_paste` — the ninth press is queued and
 /// nothing is said.
 #[test]
 fn a_paste_past_the_windows_desk_is_refused_on_it() {
     let mut folio = a_window_pasting("clipboard-lane-desk", "粘");
+    folio.hold_the_paste_clock();
     let hold = folio.window.window.clipboard.clone();
     hold.worker_hold().hold();
     chord(&mut folio, "v", KeyCode::KeyV);
