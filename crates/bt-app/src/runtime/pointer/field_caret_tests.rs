@@ -455,10 +455,10 @@ impl Open {
             }
         }
         {
-            let field_of = field_of(&mut folio, field);
-            field_of.select_all();
-            field_of.insert(text);
-            field_of.step(TextMove::Home, false);
+            let typed = field_of(&mut folio, field);
+            typed.select_all();
+            typed.insert(text);
+            typed.step(TextMove::Home, false);
         }
         folio.runtime().refresh_chrome();
         folio.draw();
