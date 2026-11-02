@@ -107,21 +107,8 @@ fn workspace_root() -> PathBuf {
 }
 
 /// The whole of a first-party package; `bt-source`'s `tests/fixtures/` are declared out.
-fn universe_for(package: &Package) -> Universe {
-    if package.name() == "bt-source" {
-        let scopes = vec![
-            DiskScope::under(package.directory().join("src")),
-            DiskScope::under(package.directory().join("tests")).excluding(&["fixtures"]),
-        ];
-        return Universe::declare(
-            "the whole of bt-source, fixtures aside",
-            package.targets().to_vec(),
-            scopes,
-            Vendor::Excluded,
-        )
-        .expect("this crate is where it says it is");
-    }
-    universes::whole_package(package, Vendor::Excluded).expect("a package of this workspace")
+pub(crate) fn universe_for(package: &Package) -> Universe {
+    universes::first_party_whole(package, Vendor::Excluded).expect("a package of this workspace")
 }
 
 /// Every span of `pattern` in the identifier view of `index`, sorted.
@@ -390,7 +377,7 @@ fn workspace_hits() -> (BTreeSet<Hit>, usize) {
         .into_iter()
         .filter(|package| package.name() != OWNER)
     {
-        let index = Index::build(&universe_for(package))
+        let index = Index::shared(&universe_for(package))
             .unwrap_or_else(|rejections| panic!("{}", report(&rejections)));
         hits.extend(scan(&index, &root, &package.directory().join("tests")));
         read += index

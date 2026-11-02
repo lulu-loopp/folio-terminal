@@ -50,6 +50,7 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use bt_source::{
     DiskScope, Index, ItemRecord, Package, Pattern, Search, Span, TargetId, TargetKind, TargetRoot,
@@ -65,21 +66,8 @@ fn workspace_root() -> PathBuf {
 
 /// The whole of a first-party package; `bt-source`'s `tests/fixtures/` are
 /// source *about* compilation and are declared out, as `timing` does.
-fn universe_for(package: &Package) -> Universe {
-    if package.name() == "bt-source" {
-        let scopes = vec![
-            DiskScope::under(package.directory().join("src")),
-            DiskScope::under(package.directory().join("tests")).excluding(&["fixtures"]),
-        ];
-        return Universe::declare(
-            "the whole of bt-source, fixtures aside",
-            package.targets().to_vec(),
-            scopes,
-            Vendor::Excluded,
-        )
-        .expect("this crate is where it says it is");
-    }
-    universes::whole_package(package, Vendor::Excluded).expect("a package of this workspace")
+pub(crate) fn universe_for(package: &Package) -> Universe {
+    universes::first_party_whole(package, Vendor::Excluded).expect("a package of this workspace")
 }
 
 /// Every span of `pattern` in the identifier view of `index`, sorted.
@@ -167,7 +155,9 @@ fn scan(index: &Index) -> BTreeSet<String> {
 }
 
 /// Every first-party package's index but the owner's.
-fn workspace_indices() -> Vec<Index> {
+/// Every first-party package's index but the owner's: the one this process holds for each
+/// package's [`universes::first_party_whole`], shared with every other guard that asks for it.
+pub(crate) fn workspace_indices() -> Vec<Arc<Index>> {
     let workspace = Workspace::read(&workspace_root()).expect("this workspace");
     let packages: Vec<&Package> = workspace
         .packages()
@@ -182,7 +172,7 @@ fn workspace_indices() -> Vec<Index> {
         .into_iter()
         .filter(|package| package.name() != OWNER)
         .map(|package| {
-            Index::build(&universe_for(package))
+            Index::shared(&universe_for(package))
                 .unwrap_or_else(|rejections| panic!("{}", report(&rejections)))
         })
         .collect()
@@ -221,7 +211,10 @@ fn fixture() -> Index {
 /// and its `SystemTime` read — and this names that function.
 #[test]
 fn no_test_names_a_path_by_its_process_id_and_the_clock() {
-    let found: BTreeSet<String> = workspace_indices().iter().flat_map(scan).collect();
+    let found: BTreeSet<String> = workspace_indices()
+        .iter()
+        .flat_map(|index| scan(index))
+        .collect();
     assert!(
         found.is_empty(),
         "these test functions name a scratch path themselves, by the process id beside the \

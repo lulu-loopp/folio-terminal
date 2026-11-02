@@ -33,12 +33,13 @@
 //!
 //! **"Cold" here means a cold process, not a cold disk.** The lowering has not
 //! been done in this process and `Index::build` does not look in the cache, so
-//! the number is the whole of the parse and the lowering. It is not the whole of
-//! the I/O: `tests/index.rs` and `tests/real_workspace.rs` read the same 124
-//! files earlier in the same `cargo test` run, so the page cache is warm by the
-//! time this one asks. On a fresh runner reading 23 MB off a disk for the first
-//! time the build is longer by that read, and the budget has fourteen seconds of
-//! room for it.
+//! the number is the whole of the parse and the lowering. Whether it is the whole
+//! of the I/O depends on the run: cargo runs this crate's test binaries in name
+//! order, so `measure` comes before `real_tree` and `real_workspace`, the binaries
+//! that read the same 124 files (plan row 166), and in this crate's own run the
+//! page cache holds them only if an earlier run or another crate's guards read
+//! them. On a fresh runner reading 23 MB off a disk for the first time the build
+//! is longer by that read, and the budget has fourteen seconds of room for it.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -67,7 +68,7 @@ fn the_index_costs_what_the_plan_budgeted() {
     let universe = universes::crate_sources(package, Vendor::Excluded).expect("bt-app's own src");
 
     // Cold in the sense the module doc gives: this process has never lowered
-    // anything and `build` does not look in the cache. The page cache is warm.
+    // anything and `build` does not look in the cache. The page cache may be cold.
     let started = Instant::now();
     let index =
         Index::build(&universe).unwrap_or_else(|rejections| panic!("{}", report(&rejections)));

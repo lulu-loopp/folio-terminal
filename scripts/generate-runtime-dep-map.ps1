@@ -34,8 +34,8 @@ foreach ($name in $names) {
 
 Push-Location $repo
 try {
-    & cargo test -p bt-source --locked --test census -- --exact `
-        the_committed_runtime_dep_map_is_the_code | Out-Host
+    & cargo test -p bt-source --locked --test real_tree -- --exact `
+        census::the_committed_runtime_dep_map_is_the_code | Out-Host
     $commit = (& git rev-parse --short=8 HEAD).Trim()
     $dirty = [bool](& git status --porcelain --untracked-files=no)
 } finally {

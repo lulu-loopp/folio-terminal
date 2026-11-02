@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use bt_source::{
-    DiskScope, Package, Universe, Vendor, Workspace, enumerate, is_vendored, report, universes,
+    Package, Universe, Vendor, Workspace, enumerate, is_vendored, report, universes,
 };
 
 fn workspace() -> Workspace {
@@ -37,20 +37,7 @@ fn universe_for(package: &Package) -> Universe {
     } else {
         Vendor::Excluded
     };
-    if package.name() == "bt-source" {
-        let scopes = vec![
-            DiskScope::under(package.directory().join("src")),
-            DiskScope::under(package.directory().join("tests")).excluding(&["fixtures"]),
-        ];
-        return Universe::declare(
-            "the whole of bt-source, fixtures aside",
-            package.targets().to_vec(),
-            scopes,
-            vendor,
-        )
-        .expect("this crate is where it says it is");
-    }
-    universes::whole_package(package, vendor).expect("a package of this workspace")
+    universes::first_party_whole(package, vendor).expect("a package of this workspace")
 }
 
 /// RED — **every member crate enumerates with no ambiguity and no unfollowed

@@ -514,11 +514,18 @@ jobs:
 
       # T-TEST-PROCESS-GLOBALS (ruling 1): the globals the tests reach only through product
       # functions, the guard's stated blind spot, printed as `TEST_GLOBALS_PRODUCT_REACH` for the
-      # ticket that would gate them. A measure, never a gate.
-      - name: the tests' product reach of process-globals, measured
+      # ticket that would gate them. A measure, never a gate. The test is a module of bt-source's
+      # `real_tree` binary (plan row 166); a filter that matches no test runs nothing and exits 0,
+      # so the step reads its own line and goes red without it — red here, the merge left alone.
+      - name: the tests' product reach of process-globals, measured, and the line printed
         shell: pwsh
         continue-on-error: true
-        run: cargo test -p bt-source --locked --test test_globals -- --exact the_product_reach_of_the_tests_is_measured --nocapture
+        run: |
+          $output = & cargo test -p bt-source --locked --test real_tree -- --exact test_globals::the_product_reach_of_the_tests_is_measured --nocapture 2>&1 | Out-String
+          $code = $LASTEXITCODE
+          Write-Host $output
+          if ($code -ne 0) { throw "the measure did not run to its end (exit $code)" }
+          if (-not $output.Contains("TEST_GLOBALS_PRODUCT_REACH`t")) { throw "the run printed no TEST_GLOBALS_PRODUCT_REACH line: the filter matched no test, or the test no longer prints it" }
 
       # T-REQUEST-DOOR-GUARD (C1, a request door returns at once), over the real tree: bt-source's
       # `request_doors::every_request_door_returns_at_once` walks each request door of
@@ -526,8 +533,9 @@ jobs:
       # docs/plans/REQUEST-DOOR-SITES.tsv. Two plants in the hand-off lane's door
       # (`HandoffLane::submit`, on `Runtime::hand_off`'s road): a helper that writes a file, and a
       # stored `Box<dyn Fn()>` called there. Each must be refused by the guard naming the planted
-      # file, the site and the door; the file is put back after each. The test binary is the one
-      # bt-source's other tests build (no bt-app build); each run is one index of the tree.
+      # file, the site and the door; the file is put back after each. The test is a module of
+      # bt-source's `real_tree` binary (plan row 166), built by the suite above (no bt-app build);
+      # each run lowers only what that one test asks for.
       - name: the request-door guard can actually fail
         shell: pwsh
         run: |
@@ -543,7 +551,7 @@ jobs:
             try {
               $planted = $original.Replace($door, $door + $plant.body) + $plant.tail
               [IO.File]::WriteAllText($file, $planted)
-              $output = & cargo test -p bt-source --locked --test request_doors -- --exact every_request_door_returns_at_once 2>&1 | Out-String
+              $output = & cargo test -p bt-source --locked --test real_tree -- --exact request_doors::every_request_door_returns_at_once 2>&1 | Out-String
               $code = $LASTEXITCODE
               if ($code -eq 0) { throw "the request-door guard accepted $($plant.site) planted in $file" }
               $named = "in the tree, not on the list: (`"$file`""
@@ -1959,8 +1967,10 @@ jobs:
     # 41299423212, 41294422269). Two speeds of runner: the same head took 8.60
     # (41300386741) and 13.85 (41304273777). The test step is most of it, and
     # `bt-source` is about 81 % of that step (408-720 s over 322 tests,
-    # against 297 s over 165 on 2026-10-17): each of its test binaries builds
-    # the real-tree index again (plan row 166). Re-derive with the same rule
+    # against 297 s over 165 on 2026-10-17): each of its test binaries built
+    # the real-tree index again. Plan row 166 put its real-tree guards in one
+    # process (`real_tree`); the re-derivation from runs after it is a later
+    # row's. Re-derive with the same rule
     # when the cold max passes 25 / 1.36 = 18.4 min.
     timeout-minutes: 25
     # **The static C runtime is a Windows shipping rule and this job ships
