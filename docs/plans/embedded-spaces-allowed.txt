@@ -106,7 +106,6 @@ crates/bt-detect/tests/strand_lines.rs:28 terminal screen fixture: the columns a
 crates/bt-detect/tests/strand_lines.rs:44 terminal screen fixture: the columns are where the terminal draws them
 crates/bt-detect/tests/strand_lines.rs:49 terminal screen fixture: the columns are where the terminal draws them
 crates/bt-detect/tests/strand_lines.rs:54 terminal screen fixture: the columns are where the terminal draws them
-crates/bt-detect/tests/strand_lines.rs:59 terminal screen fixture: the columns are where the terminal draws them
 crates/bt-platform/src/lib.rs:22148 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-platform/src/lib.rs:22200 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-platform/src/lib.rs:22603 code sample: the indentation after an escaped line break is the sample's own

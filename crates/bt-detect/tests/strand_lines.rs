@@ -56,7 +56,7 @@ pub const STRAND: &[(u32, &str, &str)] = &[
     (
         13,
         "none",
-        "│ directory: D:\\Developer\\lunar-workshop\\dist      │",
+        "│ directory: D:\\Developer\\lunar-workshop\\dist\\site │",
     ),
     (
         14,
