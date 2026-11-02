@@ -233,8 +233,12 @@ try {
     # so a recording's widths hold. A drive letter is one standing alone: the
     # character before it may not be a letter or a digit, so a URL whose scheme's
     # colon is followed by the same word (a bundler's virtual module, a
-    # localhost host name) is not a drive.
-    $install_re = [regex]"(?i)(?:(?<![A-Za-z0-9])[A-Za-z]:|/mnt/[a-z])[\\/]{1,2}App\b"
+    # localhost host name) is not a drive. The folder's name is what is
+    # matched, and the drive is asked behind it: a pattern that opens on a
+    # drive letter is tried at every character of every file and cost the
+    # scan about 2.5 s, one that opens on the name is tried where the name
+    # stands (about 0.1 s).
+    $install_re = [regex]"(?i)(?<=(?:(?<![A-Za-z0-9])[A-Za-z]:|/mnt/[a-z])[\\/]{1,2})App\b"
     $author_re = [regex]"(?i)weiyi|umich\.edu"
     # The three sentences the name above may appear in — see the loop below.
     $copyright_re = [regex]"(?i)copyright\b.*\bweiyi shi\b"
@@ -333,7 +337,7 @@ try {
             [pscustomobject]@{ Check = "checkout"; Value = $m.Value; Problem = "names the owner's synced-documents folder: $($m.Value)" }
         }
         foreach ($m in $install_re.Matches($text)) {
-            [pscustomobject]@{ Check = "checkout"; Value = $m.Value; Problem = "names the owner's software-install folder: $($m.Value)" }
+            [pscustomobject]@{ Check = "checkout"; Value = $m.Value; Problem = "names the owner's software-install folder at a drive root: $($m.Value)" }
         }
         foreach ($m in $home_re.Matches($text)) {
             $who = $m.Groups[1].Value

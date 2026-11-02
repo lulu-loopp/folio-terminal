@@ -41,7 +41,7 @@ d6f430c96a9a207d checkout 2026-11-01 old-checkout example: the pre-move checkout
 5c16c0c16c3759f0 checkout 2026-11-01 old-checkout example: the pre-move checkout with forward slashes in a bare-path table row (§7.1)
 cb286855d1c69f44 checkout 2026-11-01 old-checkout example: the pre-move checkout in a repro note (§7.1)
 915379c0122cdb72 author 2026-11-01 author: the account in a WSL prompt, <author> at a host (§7.1)
-bf68b45dda0852cd checkout 2026-11-02 install-root example: the software-install folder in conda's startup line, quoted from a pane (§7.1)
+8e3db3d4370f996b checkout 2026-11-02 install-root example: the software-install folder in conda's startup line, quoted from a pane (§7.1)
 b6e53b34c0c02cfa author 2026-11-01 author: the account in a tab head (§7.1)
 27e1ac0efbea591e checkout 2026-11-01 synced-folder example: the synced-documents folder in a pane-head caption the owner photographed (§7.18)
 f29f174d2db518b9 checkout 2026-11-01 synced-folder example: the synced-documents folder as a files column's root (§7.24)
