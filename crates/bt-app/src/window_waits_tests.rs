@@ -1515,6 +1515,24 @@ impl Src {
             certainty: Certainty::Resolved,
         }
         .in_the_product(self.index)
+            && self.enclosing_items_permit(at)
+    }
+
+    /// Whether every item holding `at` is written for a build of the shipped program, by the
+    /// features that build sets: an item gated on a feature only a dev-dependency names
+    /// (`#[cfg(any(test, feature = "trust-harness"))]`) is not, though
+    /// [`Occurrence::in_the_product`], which reads `test` alone, keeps it (plan row 176: three
+    /// `wait_timeout_while` test helpers of bt-platform read as bare sites).
+    fn enclosing_items_permit(&self, at: usize) -> bool {
+        self.index
+            .items()
+            .iter()
+            .filter(|record| record.whole().holds(at))
+            .all(|record| {
+                record.identities().any(|identity| {
+                    product_build_permits(identity.variant.predicates(), self.features)
+                })
+            })
     }
 
     /// The smallest callable holding `at`.
@@ -9851,6 +9869,47 @@ fn a_wait_through_a_verb_from_blocking_outside_a_door_is_a_bare_site() {
         )),
         "the control: `owned` takes a `WaitToken` and is not a door function; door effects {:?}",
         in_doors.keys().collect::<Vec<_>>()
+    );
+}
+
+/// A planted crate with a wait in a function gated on a feature no product build sets, and the
+/// same wait in an ungated one (the control).
+const PLANTED_TEST_ONLY_FEATURE_SITE: &str = "
+#[cfg(any(test, feature = \"harness\"))]
+pub fn harness_only(c: &std::sync::Condvar, m: &std::sync::Mutex<bool>) {
+let _ = c.wait_timeout_while(m.lock().unwrap(), std::time::Duration::ZERO, |held| *held);
+}
+pub fn shipped(c: &std::sync::Condvar, m: &std::sync::Mutex<bool>) {
+let _ = c.wait_timeout_while(m.lock().unwrap(), std::time::Duration::ZERO, |held| *held);
+}
+";
+
+/// RED (T-BARE-SITE-VOCABULARY-WAIT-WHILE-BLIND-SPOT, plan row 176) — **a site in an item gated on
+/// a feature the product build does not set is no bare site**: the header of
+/// `window-thread-bare-sites.tsv` says so, and `bt-platform`'s `trust-harness` helpers
+/// (`engine_ledger::outstanding_reaching`, the two `state_reaching`) are written so.
+///
+/// Against the planted crate ([`PLANTED_TEST_ONLY_FEATURE_SITE`]), whose world sets no feature:
+/// `harness_only`'s wait is not in the inventory; `shipped`'s is (the control).
+///
+/// MUTATION: drop [`Src::enclosing_items_permit`] from [`Src::in_product`] and `harness_only`'s
+/// site is a bare site.
+#[test]
+fn a_site_behind_a_feature_the_product_does_not_set_is_no_bare_site() {
+    let world = planted_world("ww-test-only-feature", PLANTED_TEST_ONLY_FEATURE_SITE);
+    let (bare, _, _) = vocabulary_sites_in(&world, &[]);
+    let items: Vec<&str> = bare
+        .keys()
+        .filter(|(package, _, _, entry)| {
+            package == "planted" && entry == "std::sync::Condvar::wait_timeout_while"
+        })
+        .map(|(_, _, item, _)| item.as_str())
+        .collect();
+    assert_eq!(
+        items,
+        ["crate::shipped"],
+        "bare sites {:?}",
+        bare.keys().collect::<Vec<_>>()
     );
 }
 
