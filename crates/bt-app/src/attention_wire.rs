@@ -548,8 +548,8 @@ const STDIN_BUDGET: Duration = Duration::from_millis(200);
 /// verb at a prompt has redirected nothing, and a read of their console handle would sit there
 /// waiting for them to type a JSON object at a program that is supposed to have exited already.
 ///
-/// The read itself happens on a thread of its own so that `budget` can be enforced over it:
-/// [`STDIN_BUDGET`], from the verb's caller. The suite hands in its patience instead, so that a
+/// The read itself happens on a thread of its own so that `budget` can be enforced over it; the
+/// verb's caller (`payload_of`) hands in [`STDIN_BUDGET`], and the suite its patience, so that a
 /// test's verdict is the reader's own send and never a race with the product's 200 ms
 /// (T-ATTENTION-WIRE-STDIN-PAYLOAD-WINDOW). Nothing is joined and nothing needs to be: this process
 /// exits within a moment of the send below, and a thread still parked on a handle nobody wrote to
@@ -1398,6 +1398,8 @@ mod tests {
                 },
             )
             .expect("the suite's executor starts the holder");
+        // Unbounded, and it cannot hang: a holder that fails drops the sender, nothing takes stdin's
+        // lock before the holder, and the parent stops this child after a minute.
         is_locked
             .recv()
             .expect("the holder took standard input's lock");
