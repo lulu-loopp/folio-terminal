@@ -1713,6 +1713,100 @@ fn a_gate_that_let_go_on_its_own_makes_its_release_red() {
     assert_names_the_lapse(released, "the gate's release");
 }
 
+/// PIN (T-BARRIER-HELD-DOOR-CALLS, plan row 133) — **a latest-value lane's admission never waits
+/// for its worker**: the three roads of `Coalescing::ask` taken while a run is out — a request that
+/// waits for the next run, one joined to the waiting run, one displacing it — and the reads beside
+/// them (`count_arrivals`, `waiting`, `ended`) come back on the test's thread while the worker
+/// stands in a held hold mid-run. (The first request, which starts the worker, is not one of them:
+/// nothing is out yet.)
+///
+/// The contract suite cannot keep this: its programs adapter asks under the lane's own lock
+/// (`ProgramsLane::request`), which the walk worker takes as soon as it is free, so a wait planted
+/// in `ask` deadlocks the suite rather than lapsing (row 111's plant C). Here the test holds no
+/// lane lock. A planted wait that lets the lane's lock go while it waits lets the hold go on its
+/// own at its cap, and the test is red there, never a hang; one that keeps the lane's lock while
+/// it waits stops the worker's next take as well, and is the suite watchdog's (row 113) to end.
+///
+/// MUTATION: in `Coalescing::ask`, wait (the lane's lock let go between looks) while a run is
+/// waiting until the worker takes it — the joined request waits on the held worker, the hold
+/// lapses, and the test is red at the cap.
+#[test]
+fn a_coalescing_ask_never_waits_for_its_worker() {
+    type Answered = crate::lane::ToTheApplication<u8, String>;
+    let hold = Arc::new(crate::lane::Hold::default());
+    let ledger: Arc<Ledger<u64, Answered>> = Ledger::new(
+        "coalescing-pin",
+        Some(8),
+        crate::lane::Saying::PerRequest,
+        |_: &str| {},
+        || {},
+    );
+    let lane = Arc::new(crate::lane::Coalescing::<u64, Answered, u8>::new(ledger));
+    let ask = |op: u8| {
+        let (serving, standing) = (Arc::clone(&lane), Arc::clone(&hold));
+        lane.ask(
+            op,
+            Answered::owed(),
+            |waiting, asked| waiting == asked,
+            |_, newer| newer,
+            move |ran| {
+                crate::lane::Executor::thread_door(bt_platform::ThreadPriority::BelowNormal)
+                    .start_worker("lane-contract-coalescing-pin", ran, move |ctx| {
+                        loop {
+                            let crate::lane::Waiting { operation, op, .. } = serving.next(ctx);
+                            standing.pass();
+                            serving.ledger().publish(operation, Terminal::Done(op));
+                        }
+                    })
+            },
+        )
+        .expect("the lane admits the request")
+        .id
+    };
+    hold.hold();
+    let first = ask(1);
+    hold.wait_standing("the first run taken by the worker");
+    let after = ask(2);
+    let joined = ask(2);
+    let displacing = ask(3);
+    let _ = lane.count_arrivals();
+    assert_eq!(
+        lane.waiting(|waiting| waiting.map(|waiting| waiting.op)),
+        Some(3),
+        "the displacing request waits for the next run"
+    );
+    assert!(
+        lane.ended().is_empty(),
+        "nothing is taken while the first run is still owed"
+    );
+    hold.release();
+    let mut ended = Vec::new();
+    let all_four = crate::lane::within_patience(|| {
+        ended.extend(lane.ended());
+        ended.len() == 4
+    });
+    assert!(
+        all_four,
+        "every request ends once the worker is let go: {ended:?}"
+    );
+    assert_eq!(
+        ended,
+        vec![
+            (first, Terminal::Done(1)),
+            (after, Terminal::Superseded { by: displacing }),
+            (
+                joined,
+                Terminal::Joined {
+                    with: after,
+                    outcome: Box::new(Terminal::Superseded { by: displacing }),
+                }
+            ),
+            (displacing, Terminal::Done(3)),
+        ],
+        "each request's own terminal, in the order they were made"
+    );
+}
+
 /// RED (T-CLIPBOARD-ORDER-HOLDS-BY-SPEED, plan row 72) — **a lane built on the seam takes only
 /// what ended before its drain began**, so a request that ends while the drain is reading the
 /// requests waits for the next drain, and the declared order holds however slow the drain is

@@ -27,7 +27,9 @@ use std::{
 /// peer (noted in `docs/plans/TIMING-BOUND-TESTS.tsv`). [`RealClock`]
 /// in the product, through `hand_over` and `LaunchPipe::start`; a test hands a counted clock, so
 /// "the other end acted in time" and "the budget ran out" are facts of the test, never a race
-/// between a real window and a thread of the same process.
+/// between a real window and a thread of the same process. WinHTTP's close door
+/// (`http::Request::close_within`, Windows) is its second user: one wait, up to `http::CLOSE_WAIT`,
+/// for the handle's closing callback.
 pub(crate) trait LaunchClock: Send + Sync {
     /// The monotonic reading a deadline is set and read on.
     fn now(&self) -> Instant;
