@@ -1461,18 +1461,25 @@ mod tests {
             0,
             "the door emptied the request: its drop has nothing to close or say"
         );
+        assert!(
+            closed_within_patience(&shared),
+            "the closing callback came after the bound and found its context alive"
+        );
+        drop((connection, session));
+    }
+
+    /// Whether WinHTTP's closing callback has said the handle is gone, awaited
+    /// as state within the door suites' patience
+    /// ([`crate::door_skipped::PATIENCE`]): what a test waits on once the door
+    /// has answered, a callback that must come.
+    fn closed_within_patience(shared: &super::Shared) -> bool {
         let (signals, _) = shared
             .raised
             .wait_timeout_while(shared.locked(), crate::door_skipped::PATIENCE, |signals| {
                 !signals.closed
             })
             .expect("the download's signals are not held across a panic");
-        assert!(
-            signals.closed,
-            "the closing callback came after the bound and found its context alive"
-        );
-        drop(signals);
-        drop((connection, session));
+        signals.closed
     }
 
     /// A request on the wire to a loopback server that has read it and holds
