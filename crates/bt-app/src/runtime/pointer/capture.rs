@@ -16,9 +16,9 @@
 use crate::window_seam::prelude::*;
 use crate::{
     App, DividerDrag, Drag, FilePeekPress, FloatDrag, FloatHeadPress, ImageDrag, MouseRoute,
-    PanePress, PreviewBlockDrag, PreviewBodyDrag, PreviewSurface, PreviewTextDrag,
-    RowMiddlePress, RowPress, Runtime, TabId, TabPress, TerminalColumnDrag, TerminalThumbDrag,
-    VideoPicturePress, settings,
+    PanePress, PreviewBlockDrag, PreviewBodyDrag, PreviewSurface, PreviewTextDrag, RowMiddlePress,
+    RowPress, Runtime, TabId, TabPress, TerminalColumnDrag, TerminalThumbDrag, VideoPicturePress,
+    settings,
 };
 use winit::event::MouseButton;
 use winit::keyboard::ModifiersState;

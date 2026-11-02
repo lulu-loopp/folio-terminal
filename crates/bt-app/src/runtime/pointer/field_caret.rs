@@ -123,10 +123,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// Past either edge of a box scrolled along its text, the seam out there is reached and the
     /// box follows the caret (row 179's review F5). Answers whether a drag of a field holds the
     /// pointer.
-    pub(crate) fn drag_field_selection(
-        &mut self,
-        position: PhysicalPosition<f64>,
-    ) -> Result<bool> {
+    pub(crate) fn drag_field_selection(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
         let Some(field) = self.held_field_selection().cloned() else {
             return Ok(false);
         };

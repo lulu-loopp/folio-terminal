@@ -1257,7 +1257,10 @@ impl<B: Backend> Runtime<'_, B> {
                 | settings::SettingsTarget::EnvValue(_)),
                 _,
             ) if self.window.settings.text_field(target).is_some() => {
-                self.press_field(crate::runtime::pointer::FieldDrag::Settings(target), position)?;
+                self.press_field(
+                    crate::runtime::pointer::FieldDrag::Settings(target),
+                    position,
+                )?;
             }
             // Turning a page puts the reader at the top of it.
             (settings::SettingsTarget::Nav(_), settings::SettingsKeyVerdict::Moved) => {

@@ -47,13 +47,13 @@
 //! `WebSeat::park_for_handoff`, the seat's own button-up before a page leaves the glass, are
 //! cut 7's, with the page's own capture.
 
+use super::FieldDrag;
 use crate::window_seam::prelude::*;
 use crate::{
     FloatDragKind, FolioApp, LeafId, MouseRoute, PasteTarget, PreviewSurface, RenameSubject,
     RowHost, RowMiddlePress, RowPress, Runtime, TabId, UserInputKind, VideoPicturePress, float,
     input,
 };
-use super::FieldDrag;
 use anyhow::Result;
 use bt_layout::SeatId;
 use std::time::Instant;
@@ -482,7 +482,8 @@ fn field_pane(field: &FieldDrag) -> Option<LeafId> {
         | FieldDrag::Palette
         | FieldDrag::GitPrompt => None,
         FieldDrag::Name(
-            RenameSubject::PreviewName { surface, .. } | RenameSubject::PreviewCrumb { surface, .. },
+            RenameSubject::PreviewName { surface, .. }
+            | RenameSubject::PreviewCrumb { surface, .. },
         ) => match surface {
             PreviewSurface::Seat(leaf) => Some(*leaf),
             PreviewSurface::Float(_) | PreviewSurface::Peek => None,

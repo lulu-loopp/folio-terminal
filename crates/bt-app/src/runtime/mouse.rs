@@ -4699,7 +4699,10 @@ impl<B: Backend> Runtime<'_, B> {
                         // from there selects (0.4.9 plan row 180); the rest of the box swallows.
                         if button == MouseButton::Left && layout.field_holds(position.x, position.y)
                         {
-                            self.press_field(crate::runtime::pointer::FieldDrag::Palette, position)?;
+                            self.press_field(
+                                crate::runtime::pointer::FieldDrag::Palette,
+                                position,
+                            )?;
                         }
                         return Ok(());
                     }

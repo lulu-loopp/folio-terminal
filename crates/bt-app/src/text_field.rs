@@ -986,9 +986,21 @@ mod tests {
     #[test]
     fn a_press_finds_the_seam_under_it_in_a_scrolled_run() {
         let run = ten_a_letter(20.0);
-        assert_eq!(run.press_at(100.0), 2, "the box's edge is the first seam drawn");
-        assert_eq!(run.press_at(114.0), 3, "and a press inside it the seam under it");
-        assert_eq!(run.press_at(60.0), 2, "a press left of the box is a press on its edge");
+        assert_eq!(
+            run.press_at(100.0),
+            2,
+            "the box's edge is the first seam drawn"
+        );
+        assert_eq!(
+            run.press_at(114.0),
+            3,
+            "and a press inside it the seam under it"
+        );
+        assert_eq!(
+            run.press_at(60.0),
+            2,
+            "a press left of the box is a press on its edge"
+        );
         assert_eq!(run.press_at(400.0), 6, "and one past the text its end");
     }
 
@@ -1001,7 +1013,11 @@ mod tests {
     #[test]
     fn a_drag_past_the_left_edge_of_a_scrolled_box_reaches_the_hidden_head() {
         let run = ten_a_letter(20.0);
-        assert_eq!(run.drag_to(90.0), 1, "one letter left of the box is the seam before `b`");
+        assert_eq!(
+            run.drag_to(90.0),
+            1,
+            "one letter left of the box is the seam before `b`"
+        );
         assert_eq!(run.drag_to(-500.0), 0, "and far past it the line's start");
     }
 
@@ -1023,6 +1039,10 @@ mod tests {
             "nor the part past the box's right edge"
         );
         assert_eq!(run.selection_span(4..4, 200.0), None, "a bare caret");
-        assert_eq!(run.selection_span(0..2, 200.0), None, "a selection out of the box");
+        assert_eq!(
+            run.selection_span(0..2, 200.0),
+            None,
+            "a selection out of the box"
+        );
     }
 }

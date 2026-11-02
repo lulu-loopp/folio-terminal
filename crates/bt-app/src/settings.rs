@@ -10210,9 +10210,16 @@ impl SettingsLayout {
             .rows
             .iter()
             .map(|placed| SettingsTarget::Field(placed.row));
-        let env = self.env_rows.iter().filter_map(|line| line.index).flat_map(|index| {
-            [SettingsTarget::EnvName(index), SettingsTarget::EnvValue(index)]
-        });
+        let env = self
+            .env_rows
+            .iter()
+            .filter_map(|line| line.index)
+            .flat_map(|index| {
+                [
+                    SettingsTarget::EnvName(index),
+                    SettingsTarget::EnvValue(index),
+                ]
+            });
         rows.chain(env)
             .filter_map(|target| {
                 self.text_field_box(target)

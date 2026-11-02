@@ -549,11 +549,7 @@ fn where_the_text_stands(folio: &mut HeadlessFolio, field: Chrome) -> (f32, f32,
     let scale = runtime.window.renderer.scale_factor() as f32;
     match field {
         Chrome::FindBar => {
-            let capsule = runtime
-                .window
-                .search_layout
-                .clone()
-                .expect("the find bar is drawn");
+            let capsule = runtime.window.search_layout.expect("the find bar is drawn");
             let [left, _] = capsule.text_run(scale);
             (
                 left,
@@ -739,7 +735,10 @@ fn a_press_in_a_scrolled_settings_field_counts_from_the_first_letter_drawn() {
 #[test]
 fn a_press_in_a_settings_field_without_the_focus_moves_the_focus_and_the_caret() {
     let (mut open, _) = a_long_settings_line("field-caret-settings-unfocused");
-    assert!(quake_scroll(&open.folio) > 0.0, "the line is longer than its box");
+    assert!(
+        quake_scroll(&open.folio) > 0.0,
+        "the line is longer than its box"
+    );
     open.folio
         .window
         .settings
@@ -880,7 +879,11 @@ fn a_selection_in_a_chrome_field_is_drawn() {
         Chrome::GitPrompt,
     ] {
         let mut open = Open::new(&format!("field-caret-wash-{field:?}"), field, NAME);
-        assert_eq!(wash_of(&mut open), None, "{field:?}: a bare caret draws no wash");
+        assert_eq!(
+            wash_of(&mut open),
+            None,
+            "{field:?}: a bare caret draws no wash"
+        );
         let text = field_of(&mut open.folio, field);
         text.place(BEFORE_ZHONG, false);
         text.place(AFTER_WEN, true);
