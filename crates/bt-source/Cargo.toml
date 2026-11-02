@@ -5,6 +5,12 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 publish.workspace = true
+# Every test target is named below (plan row 166): the guards that read the real tree are
+# modules of one binary, `real_tree`, so that the index this crate keeps once per process is
+# lowered once for all of them, and a module's file must not also become a binary of its own.
+# A `tests/*.rs` file that is neither a target here nor a module of `real_tree` is compiled by
+# nothing; `tests/real_workspace.rs`'s unreached check names it.
+autotests = false
 
 # **Nothing in `folio.exe` depends on this crate and nothing ever should.** It is
 # the mechanism `docs/plans/bt-app-split-prep.md` is built on: the guards in this
@@ -32,3 +38,44 @@ bt-testpath = { path = "../bt-testpath" }
 
 [lints]
 workspace = true
+
+# The guards that read the real tree, one module each (`tests/real_tree.rs`).
+[[test]]
+name = "real_tree"
+path = "tests/real_tree.rs"
+
+# The index's cost, measured in a process that has lowered nothing: alone on purpose.
+[[test]]
+name = "measure"
+path = "tests/measure.rs"
+
+# Reads the real tree and lowers nothing: the enumeration and the unreached check.
+[[test]]
+name = "real_workspace"
+path = "tests/real_workspace.rs"
+
+# Declares the real tree's universes and lowers nothing.
+[[test]]
+name = "universes"
+path = "tests/universes.rs"
+
+# Fixtures only, from here down.
+[[test]]
+name = "dep_map"
+path = "tests/dep_map.rs"
+
+[[test]]
+name = "function_paths"
+path = "tests/function_paths.rs"
+
+[[test]]
+name = "ownership"
+path = "tests/ownership.rs"
+
+[[test]]
+name = "rejections"
+path = "tests/rejections.rs"
+
+[[test]]
+name = "views"
+path = "tests/views.rs"

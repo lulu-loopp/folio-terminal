@@ -1034,6 +1034,23 @@ mod tests {
         (steward, wakes)
     }
 
+    /// A steward of the test's own over `door` whose `diagnostics.log` lines are heard: the
+    /// wakes it sends after each publication, and every line it says, in order.
+    fn steward_saying(
+        door: &FakeDoor,
+    ) -> (&'static Steward, mpsc::Receiver<()>, mpsc::Receiver<String>) {
+        let (said, notes) = mpsc::channel::<String>();
+        let steward: &'static Steward =
+            Box::leak(Box::new(Steward::new(door.clone(), move |line: &str| {
+                let _ = said.send(line.to_owned());
+            })));
+        let (woke, wakes) = mpsc::channel();
+        steward.install_wake(move || {
+            let _ = woke.send(());
+        });
+        (steward, wakes, notes)
+    }
+
     fn quiet_ear(steward: &'static Steward) -> EarHandle {
         steward.open_ear(Depth::Shallow, Arc::new(|_: &Path, _| {}))
     }
@@ -1311,15 +1328,7 @@ mod tests {
     #[test]
     fn a_watcher_that_does_not_leave_is_said_once_and_its_member_can_be_asked_again() {
         let door = FakeDoor::default();
-        let (said, notes) = mpsc::channel::<String>();
-        let steward: &'static Steward =
-            Box::leak(Box::new(Steward::new(door.clone(), move |line: &str| {
-                let _ = said.send(line.to_owned());
-            })));
-        let (woke, wakes) = mpsc::channel();
-        steward.install_wake(move || {
-            let _ = woke.send(());
-        });
+        let (steward, wakes, notes) = steward_saying(&door);
         let mut ear = quiet_ear(steward);
         let stuck = folder("粘");
         ear.want(
@@ -1359,6 +1368,82 @@ mod tests {
             notes.try_iter().collect::<Vec<_>>(),
             Vec::<String>::new(),
             "no later round says the let-go again"
+        );
+    }
+
+    /// RED (row 173) — **a member going unheard is said in `diagnostics.log` once per
+    /// transition**: a refused start says it; a failed retry in the same state says nothing,
+    /// whether the reader's ask or a volume arrival tried it; a member heard again whose watch
+    /// then ends says it again; and a retry after that end says nothing.
+    ///
+    /// MUTATION: drop the line from `attempt` — no first line; invert its `was_failed` test — no
+    /// first line; say it on every failed attempt — the retry says it; drop the line from
+    /// `take_the_ends` — the end says nothing.
+    #[test]
+    fn a_member_going_unheard_is_said_once_per_transition() {
+        let door = FakeDoor::default();
+        let (steward, wakes, notes) = steward_saying(&door);
+        let mut ear = quiet_ear(steward);
+        let member = folder("缺");
+        let wanted = BTreeSet::from([member.clone()]);
+        let rearm = || BTreeSet::from([member.clone()]);
+        let line = format!(
+            "watch steward: {} is not heard ({}); it is tried again at the next reader's ask or \
+             volume arrival",
+            member.display(),
+            std::io::Error::from(std::io::ErrorKind::NotFound)
+        );
+
+        door.refuse(&member);
+        ear.want(&wanted, BTreeSet::new());
+        wait_for_a_wake(&wakes, "the refusal");
+        assert_eq!(
+            notes.try_iter().collect::<Vec<_>>(),
+            vec![line.clone()],
+            "a refused start is said once"
+        );
+
+        ear.want(&wanted, rearm());
+        wait_for_a_wake(&wakes, "the reader's retry");
+        assert_eq!(door.attempts(&member), 2);
+        steward.volume_arrived(PathBuf::from("/Users/alice"));
+        wait_for_a_wake(&wakes, "the volume's retry");
+        assert_eq!(door.attempts(&member), 3);
+        assert_eq!(
+            notes.try_iter().collect::<Vec<_>>(),
+            Vec::<String>::new(),
+            "a failed retry in the same state says nothing"
+        );
+
+        door.admit(&member);
+        ear.want(&wanted, rearm());
+        wait_for_a_wake(&wakes, "the member heard again");
+        assert!(
+            states(&ear).contains(&(member.clone(), MemberReport::Armed)),
+            "the member is heard again"
+        );
+        assert_eq!(
+            notes.try_iter().collect::<Vec<_>>(),
+            Vec::<String>::new(),
+            "being heard again says nothing"
+        );
+
+        door.end(&member);
+        wait_for_a_wake(&wakes, "the end");
+        assert_eq!(
+            notes.try_iter().collect::<Vec<_>>(),
+            vec![line],
+            "the second transition is said again"
+        );
+
+        door.refuse(&member);
+        ear.want(&wanted, rearm());
+        wait_for_a_wake(&wakes, "the retry after the end");
+        assert_eq!(door.attempts(&member), 5);
+        assert_eq!(
+            notes.try_iter().collect::<Vec<_>>(),
+            Vec::<String>::new(),
+            "a failed retry after the end says nothing"
         );
     }
 

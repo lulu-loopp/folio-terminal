@@ -43,6 +43,7 @@
 //! type aliases that do not come from a `use` declaration stay review-owned.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use bt_source::{
     DiskScope, Index, LiteralValue, Package, Pattern, Search, Span, TargetId, TargetKind,
@@ -97,31 +98,20 @@ fn workspace_root() -> PathBuf {
 
 /// The whole of a first-party package; `bt-source`'s `tests/fixtures/` are
 /// source *about* compilation and are declared out, as `timing.rs` does.
-fn universe_for(package: &Package) -> Universe {
-    if package.name() == "bt-source" {
-        let scopes = vec![
-            DiskScope::under(package.directory().join("src")),
-            DiskScope::under(package.directory().join("tests")).excluding(&["fixtures"]),
-        ];
-        return Universe::declare(
-            "the whole of bt-source, fixtures aside",
-            package.targets().to_vec(),
-            scopes,
-            Vendor::Excluded,
-        )
-        .expect("this crate is where it says it is");
-    }
-    universes::whole_package(package, Vendor::Excluded).expect("a package of this workspace")
+pub(crate) fn universe_for(package: &Package) -> Universe {
+    universes::first_party_whole(package, Vendor::Excluded).expect("a package of this workspace")
 }
 
-fn workspace_indices() -> Vec<Index> {
+/// Every first-party package's index: the one this process holds for each package's
+/// [`universes::first_party_whole`], shared with every other guard that asks for it.
+pub(crate) fn workspace_indices() -> Vec<Arc<Index>> {
     let workspace = Workspace::read(&workspace_root()).expect("this workspace");
     workspace
         .packages()
         .iter()
         .filter(|package| !is_vendored(package.directory()))
         .map(|package| {
-            Index::build(&universe_for(package))
+            Index::shared(&universe_for(package))
                 .unwrap_or_else(|rejections| panic!("{}", report(&rejections)))
         })
         .collect()
@@ -504,7 +494,10 @@ fn violations(index: &Index) -> Vec<String> {
 /// through `use … as …` and the same call remains a finding.
 #[test]
 fn every_real_shell_a_test_starts_goes_through_the_test_shell_door() {
-    let found: Vec<String> = workspace_indices().iter().flat_map(violations).collect();
+    let found: Vec<String> = workspace_indices()
+        .iter()
+        .flat_map(|index| violations(index))
+        .collect();
     assert!(
         found.is_empty(),
         "a test starts a real shell without bt_pty::test_shell, which is how the user's own \

@@ -38,8 +38,8 @@ foreach ($name in $names) {
 
 Push-Location $repo
 try {
-    & cargo test -p bt-source --locked --test census -- --exact `
-        the_committed_census_has_annotations_and_no_new_unknowns | Out-Host
+    & cargo test -p bt-source --locked --test real_tree -- --exact `
+        census::the_committed_census_has_annotations_and_no_new_unknowns | Out-Host
 } finally {
     Pop-Location
 }
