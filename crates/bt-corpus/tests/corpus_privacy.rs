@@ -25,6 +25,9 @@ const FORBIDDEN: &[&str] = &[
     concat!("um", "ich"),
     "c:\\users\\",
     "d:\\developer",
+    // The recording machine's software-install folder at a drive root, at any drive (2026-11-02,
+    // 0.4.9 row 178): conda's and Git's directories on a recorded `PATH`.
+    ":\\app\\",
     "welcome back",
     "organization",
     "laptop-",
