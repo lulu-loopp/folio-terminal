@@ -8436,7 +8436,7 @@ crates/bt-platform/src/lib.rs	bt-platform crate::ProbeChild::suspended	Ambiguous
 crates/bt-platform/src/lib.rs	bt-platform crate::ProbeChild::suspended	Ambiguous	kind	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::ProbeChild::suspended	Ambiguous	si_pid	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::ProbeChild::wait_within_reading	Dynamic	now	2	2026-11-01: T-PROBE-RUN-BUDGET-ON-A-CLOCK (plan row 148); the look's reading through the `now` its caller hands: Instant::now from ProbeChild::wait_within, the run's ProbeClock::now from probe_output_held_to (RealProbeClock in the product: Instant::now), a monotonic read that reaches no door
-crates/bt-platform/src/lib.rs	bt-platform crate::ProbeChild::wait_within_reading	Dynamic	rest	2	2026-11-01: T-PROBE-RUN-BUDGET-ON-A-CLOCK (plan row 148); the same calls moved with wait_within's body: the caller's rest between two looks (a worker's sleep_within, or the run's ProbeClock::rest, RealProbeClock's being the same sleep_within)
+crates/bt-platform/src/lib.rs	bt-platform crate::ProbeChild::wait_within_reading	Dynamic	rest	2	2026-11-01: T-PROBE-RUN-BUDGET-ON-A-CLOCK (plan row 148, restated at the review fold, F3); the same calls moved with wait_within's body: each caller's own rest between two looks (a worker's sleep_within, the shell probe's thread::sleep, a test's rest_a_moment, or the run's ProbeClock::rest, RealProbeClock's being sleep_within)
 crates/bt-platform/src/lib.rs	bt-platform crate::ProbeGroups::groups	Ambiguous	unwrap_or_else	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::ProbePipeDrain::finish	Ambiguous	take	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::ProbePipeDrain::finish	Ambiguous	unwrap_or_else	2	
