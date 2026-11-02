@@ -44,16 +44,23 @@
 #   * The baseline is the file at the pull request's merge base with origin/main.
 #   * current[key] <= baseline[key], a key missing from the baseline read as
 #     zero: a new effect family is refused, and so is a total that grew.
-#   * Except a revealed key: one whose entry the working tree's registry
-#     `# vocabulary` names and the baseline's does not, every row of which the
-#     inventory lists in a dated `## Revealed <YYYY-MM-DD> ...` block, one
-#     `##   crate | arm | item | entry` line per row. A widened vocabulary
-#     reveals sites that were already there, and the block says when and which
+#   * Except a revealed key: one whose entry is a verb new to the vocabulary,
+#     every row of which the inventory lists in a dated `## Revealed
+#     <YYYY-MM-DD> ...` block, one `##   crate | arm | item | entry` line per
+#     row. A verb is an entry as the bare-site guard matches a site
+#     (`window_waits_tests::effect_of`): `Parent::last`, or the last segment
+#     alone for a capitalised system call. New means the working tree's registry
+#     `# vocabulary` has the verb and the baseline's has none, so a re-spelling
+#     of an entry the baseline names (`JoinHandle::<T>::join`, a re-export path)
+#     is no new verb. A widened vocabulary reveals sites that were already
+#     there, and the block says when and which
 #     (T-BARE-SITE-VOCABULARY-WAIT-WHILE-BLIND-SPOT, plan row 176, ruling R1 and
 #     its tightening). It is reported as revealed, not refused; the equality half
 #     holds its rows to the code, and from the next merge base on it only
-#     shrinks. A key of a new entry with a row no dated block lists is refused as
-#     added: a change that widens the vocabulary cannot carry a new wait with it.
+#     shrinks. A key of a new verb with a row no dated block lists is refused as
+#     added: a change that widens the vocabulary cannot carry an unlisted new
+#     wait with it; a listed one is what the dated block asks a reviewer to
+#     check.
 #
 # No merge base at all (no origin/main in the clone) is not a pass either: the
 # comparison did not happen. CI checks out with full history on both jobs that
@@ -67,12 +74,19 @@
 # its two parents: with p1 and p2 its parents and b their merge base,
 #
 #     per (crate, entry):           merged <= min(p1, p2)
+#     per (crate, entry) b lacks
+#       whose verb b's vocabulary
+#       lacks too:                  merged <= max(p1, p2)   (a family one side revealed)
 #     per row, a row b has:         merged <= min(p1, p2)   (the resurrection check)
 #     per row, a row b lacks:       merged <= max(p1, p2)   (a rename on one side)
 #
 # a key missing from a version read as zero. Both sides removing the same site is
 # no double count (min, not p1 + p2 - b); a row one side removed comes back only
 # if it was never in b, which is a row the other side added and its own gate held.
+# A family of a verb b's vocabulary did not name cannot have been removed by a
+# side since b: the side that has it widened the vocabulary and its own gate held
+# the family (refused, or revealed through a dated block; plan row 176, review F1),
+# and the side without it never had it. A family b had keeps the min bound.
 #
 # Prove it fires before trusting it: `gates-can-fail` adds a bare site with its
 # row and requires this to go red, and builds a merge that resurrects a row the
@@ -285,6 +299,32 @@ function Get-InventoryAt([string]$revision) {
     return ($text -split "`r?`n")
 }
 
+# The `# vocabulary` paths of a registry text.
+function Read-VocabularyPaths([string[]]$lines) {
+    $paths = @()
+    $inside = $false
+    $header = $false
+    foreach ($line in $lines) {
+        if ($line.StartsWith("##")) { continue }
+        if ($line.StartsWith("# ")) { $inside = ($line -ceq "# vocabulary"); continue }
+        if (-not $inside -or $line.Length -eq 0) { continue }
+        if (-not $header) { $header = $true; continue }
+        $paths += ($line -split "`t")[0]
+    }
+    if (-not $header) { throw "the registry has no '# vocabulary' section with a header" }
+    return , $paths
+}
+
+# An entry as the bare-site guard matches a site (`window_waits_tests::effect_of`): its last
+# segment alone for a capitalised system call (`WaitForSingleObject`), otherwise `Parent::last`.
+function Get-Verb([string]$path) {
+    $segments = @($path -split '::')
+    $last = $segments[-1]
+    if ($last.Length -gt 0 -and [char]::IsUpper($last[0])) { return $last }
+    $parent = if ($segments.Count -ge 2) { $segments[-2] } else { "" }
+    return $parent + "::" + $last
+}
+
 # One merge, held to the three-way bound at both keys. Returns the failures, named.
 function Test-Merge([string]$what, [string[]]$merged, [string]$p1, [string]$p2) {
     $out = @()
@@ -292,6 +332,9 @@ function Test-Merge([string]$what, [string[]]$merged, [string]$p1, [string]$p2) 
     if ($LASTEXITCODE -ne 0 -or -not $b) { return @("[merge] $what`: its parents $p1 and $p2 have no merge base") }
     $b = @($b)[0]
     $versions = @{ p1 = (Get-InventoryAt $p1); p2 = (Get-InventoryAt $p2); b = (Get-InventoryAt $b) }
+    $registryAtB = (& git show "${b}:crates/bt-app/src/window_waits.tsv" 2>$null) | Out-String
+    if ($LASTEXITCODE -ne 0) { return @("[merge] $what`: the registry is not at its parents' merge base $b") }
+    $verbsAtB = @((Read-VocabularyPaths ($registryAtB -split "`r?`n")) | ForEach-Object { Get-Verb $_ })
     foreach ($keying in @("family", "row")) {
         $read = if ($keying -eq "row") { ${function:Read-InventoryRows} } else { ${function:Read-Inventory} }
         $m = & $read $merged "$relative at $what"
@@ -301,7 +344,9 @@ function Test-Merge([string]$what, [string[]]$merged, [string]$p1, [string]$p2) 
         foreach ($key in $m.Keys) {
             $first = if ($one.Contains($key)) { $one[$key] } else { 0 }
             $second = if ($two.Contains($key)) { $two[$key] } else { 0 }
-            $held = if ($keying -eq "row" -and -not $base.Contains($key)) {
+            $revealedSinceB = $keying -eq "family" -and -not $base.Contains($key) -and
+                ($verbsAtB -cnotcontains (Get-Verb ($key -split "`t")[1]))
+            $held = if (($keying -eq "row" -and -not $base.Contains($key)) -or $revealedSinceB) {
                 [Math]::Max($first, $second)
             } else {
                 [Math]::Min($first, $second)
@@ -369,22 +414,6 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "$registry is not at the merge base $base" }
 } finally {
     Pop-Location
-}
-
-# The `# vocabulary` paths of a registry text.
-function Read-VocabularyPaths([string[]]$lines) {
-    $paths = @()
-    $inside = $false
-    $header = $false
-    foreach ($line in $lines) {
-        if ($line.StartsWith("##")) { continue }
-        if ($line.StartsWith("# ")) { $inside = ($line -ceq "# vocabulary"); continue }
-        if (-not $inside -or $line.Length -eq 0) { continue }
-        if (-not $header) { $header = $true; continue }
-        $paths += ($line -split "`t")[0]
-    }
-    if (-not $header) { throw "the registry has no '# vocabulary' section with a header" }
-    return , $paths
 }
 
 # The rows a text of the inventory lists in its dated `## Revealed <YYYY-MM-DD> ...` blocks: each
@@ -596,8 +625,8 @@ if (-not $uncalledAtBase) {
     }
 }
 
-$vocabularyThen = Read-VocabularyPaths ($then -split "`r?`n")
-$vocabularyNow = Read-VocabularyPaths ([IO.File]::ReadAllLines((Join-Path $repo $registry)))
+$verbsThen = @((Read-VocabularyPaths ($then -split "`r?`n")) | ForEach-Object { Get-Verb $_ })
+$verbsNow = @((Read-VocabularyPaths ([IO.File]::ReadAllLines((Join-Path $repo $registry)))) | ForEach-Object { Get-Verb $_ })
 $inventoryLines = [IO.File]::ReadAllLines($inventory)
 $inventoryRowsNow = Read-InventoryRows $inventoryLines "the working tree's $relative"
 $revealedRows = Read-RevealedRows $inventoryLines
@@ -608,7 +637,8 @@ $shrunk = 0
 foreach ($key in $now.Keys) {
     $held = if ($before.Contains($key)) { $before[$key] } else { 0 }
     $crate, $entry = $key -split "`t"
-    $newEntry = ($vocabularyThen -cnotcontains $entry) -and ($vocabularyNow -ccontains $entry)
+    $verb = Get-Verb $entry
+    $newEntry = ($verbsThen -cnotcontains $verb) -and ($verbsNow -ccontains $verb)
     $undated = @($inventoryRowsNow.Keys | Where-Object {
             $cells = $_ -split "`t"
             $cells[0] -ceq $crate -and $cells[3] -ceq $entry -and -not $revealedRows.Contains($_)
