@@ -40,10 +40,11 @@
 //! after launch). The parent's waits also end when the launched host process
 //! ends, so a host that dies before it connects fails the attempt at once.
 //!
-//! The deadline is read on a [`LaunchClock`], and each operation's one kernel
-//! wait is made through it (T-ELEVATED-HANDSHAKE-FINISH-DEADLINE-ON-A-CLOCK):
-//! the product's doors, [`ElevatedEndpoint::accept`] and [`connect_to_parent`],
-//! read it on [`RealClock`]; a test hands a counted clock, so "the other end
+//! The deadline is read on a `launch_conversation::LaunchClock`, and each
+//! operation's one kernel wait is made through it
+//! (T-ELEVATED-HANDSHAKE-FINISH-DEADLINE-ON-A-CLOCK): the product's doors,
+//! [`ElevatedEndpoint::accept`] and [`connect_to_parent`], read it on
+//! `launch_conversation::RealClock`; a test hands a counted clock, so "the other end
 //! acted in time" and "the attempt ran out" are facts of the test, never a race
 //! between the real 15 s and a thread or child of the test.
 
@@ -1310,6 +1311,34 @@ mod tests {
         assert_eq!(
             connect_to_parent_on(&line, budget_on(&late)).err(),
             Some(HandshakeFailure::NoEndpoint)
+        );
+    }
+
+    /// **The product's own wait ends at its bound**: on the real clock, through
+    /// the public door, an attempt whose deadline has already passed makes its one
+    /// kernel wait of 0 ms and, with no host, gives up in `Connect`. The counted
+    /// tests never let a real wait be ended by its bound (a spent wait is never
+    /// made; an awaited one ends on the other end's event), so this is the suite's
+    /// proof that the wait handed to the clock honours the bound it is given. The
+    /// pipe's name is this attempt's alone, so nothing can connect inside the poll.
+    ///
+    /// RED MUTATION: the wait handed to the clock waits `INFINITE` instead of its
+    /// bound; the accept never returns and the test fails at the suite's patience
+    /// by name.
+    #[test]
+    fn the_real_clocks_wait_ends_at_its_bound_when_no_host_connects() {
+        let (answered, answer) = mpsc::channel();
+        // The endpoint's handle stays on the thread that made it.
+        std::thread::spawn(move || {
+            let endpoint = ElevatedEndpoint::create().expect("an endpoint");
+            let refused = endpoint.accept(&this_process_claiming(1), Instant::now());
+            let _ = answered.send(refused.err());
+        });
+        assert_eq!(
+            door_skipped::received(&answer, "the parent's accept on the real clock"),
+            Some(HandshakeFailure::TimedOut {
+                phase: HandshakePhase::Connect
+            })
         );
     }
 
