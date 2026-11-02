@@ -2146,10 +2146,13 @@ fn judge(
 
 // ── the workspace ─────────────────────────────────────────────────────────────
 
+/// Each package's name and its index, as every reading here takes them.
+type Indices = Vec<(String, Arc<Index>)>;
+
 /// Every first-party package's index — the one this process holds for each package's
 /// [`universes::first_party_whole`], shared with every other guard that asks for it — and the
 /// targets that run without the harness.
-pub(crate) fn workspace() -> (Vec<(String, Arc<Index>)>, BTreeSet<String>) {
+pub(crate) fn workspace() -> (Indices, BTreeSet<String>) {
     let workspace = Workspace::read(&workspace_root()).expect("this workspace");
     let mut without_harness = BTreeSet::new();
     let indices = workspace
@@ -2278,7 +2281,7 @@ fn a_row_needs_a_dated_reason_and_a_known_class() {
 
 /// The `test_globals` fixture: the library `globals`, and its test target `main_probe`, which
 /// runs without the harness.
-fn fixture() -> (Vec<(String, Arc<Index>)>, BTreeSet<String>, PathBuf) {
+fn fixture() -> (Indices, BTreeSet<String>, PathBuf) {
     let directory = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
         .join("fixtures")

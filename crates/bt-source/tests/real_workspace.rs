@@ -8,9 +8,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use bt_source::{
-    Package, Universe, Vendor, Workspace, enumerate, is_vendored, report, universes,
-};
+use bt_source::{Package, Universe, Vendor, Workspace, enumerate, is_vendored, report, universes};
 
 fn workspace() -> Workspace {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
