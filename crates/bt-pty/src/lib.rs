@@ -1905,7 +1905,7 @@ impl ShellProcessId {
 /// path of the program and the operating system's account of why it would not start. Both are the
 /// wrong register for the one place it is printed — the top of the user's own screen, where the
 /// shell's first line belongs. The path is not what the user picked (they picked *Git Bash*, not
-/// `D:\App\Tool\Git\bin\bash.exe`), and the OS's account arrives wrapped in the vendored
+/// `D:\Kit\Tool\Git\bin\bash.exe`), and the OS's account arrives wrapped in the vendored
 /// launcher's debugging: the whole `CreateProcessW` call, the command line `Debug`-quoted with the
 /// `NUL` terminator `CreateProcessW` requires still on the end of it, and the working directory
 /// again.
@@ -6522,7 +6522,7 @@ mod tests {
     /// The reporting host's own prompt, minus the conda prefix that the hook writes separately.
     const PROFILE_PROBE_PROMPT: &str = "PS D:\\Developer\\lunar-workshop> ";
     /// The line the user's screenshot shows being overwritten; it is conda's own startup noise.
-    const PROFILE_PROBE_NOISE: &str = "Did not find path entry D:\\App\\Base\\anaconda3\\bin";
+    const PROFILE_PROBE_NOISE: &str = "Did not find path entry D:\\Kit\\Base\\anaconda3\\bin";
     /// The command in the user's screenshot: typed, never submitted, and long enough that the
     /// prompt plus the input wraps once the pane narrows.
     const PROFILE_PROBE_TYPED: &str =

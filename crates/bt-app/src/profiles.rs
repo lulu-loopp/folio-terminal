@@ -19694,7 +19694,7 @@ mod tests {
     /// `PATH`.**
     ///
     /// Red gate, and it is not hypothetical: this ticket's own first real-machine
-    /// check ran on a box with Git at `D:\App\Tool\Git`, which is under none of
+    /// check ran on a box with Git at `D:\Kit\Tool\Git` (path neutralised), under none of
     /// the three installers' default roots. A well-known-paths list can only
     /// enumerate defaults, so on that machine — and on everyone else's who chose
     /// their own directory — the row would have been greyed `not installed` over
@@ -19717,17 +19717,17 @@ mod tests {
             &FakeMachine::default()
                 .with_var(
                     "PATH",
-                    std::env::join_paths([r"C:\Other", r"D:\App\Tool\Git\cmd"])
+                    std::env::join_paths([r"C:\Other", r"D:\Kit\Tool\Git\cmd"])
                         .expect("test PATH joins cleanly")
                         .to_str()
                         .expect("ASCII test paths"),
                 )
-                .with_file(r"D:\App\Tool\Git\cmd\git.exe")
-                .with_file(r"D:\App\Tool\Git\bin\bash.exe"),
+                .with_file(r"D:\Kit\Tool\Git\cmd\git.exe")
+                .with_file(r"D:\Kit\Tool\Git\bin\bash.exe"),
         );
         assert_eq!(
             custom.program("gitbash"),
-            Some(OsStr::new(r"D:\App\Tool\Git\bin\bash.exe")),
+            Some(OsStr::new(r"D:\Kit\Tool\Git\bin\bash.exe")),
             "a Git that is on the path is a Git we can find, wherever it was put"
         );
 
@@ -19738,12 +19738,12 @@ mod tests {
             &FakeMachine::default()
                 .with_var(
                     "PATH",
-                    std::env::join_paths([r"D:\App\Tool\Git\cmd"])
+                    std::env::join_paths([r"D:\Kit\Tool\Git\cmd"])
                         .expect("test PATH joins cleanly")
                         .to_str()
                         .expect("ASCII test paths"),
                 )
-                .with_file(r"D:\App\Tool\Git\cmd\git.exe"),
+                .with_file(r"D:\Kit\Tool\Git\cmd\git.exe"),
         );
         assert!(!tool_only.is_available("gitbash"));
 
@@ -19753,19 +19753,19 @@ mod tests {
             &FakeMachine::default()
                 .with_var(
                     "PATH",
-                    std::env::join_paths([r"D:\App\Tool\Git\cmd"])
+                    std::env::join_paths([r"D:\Kit\Tool\Git\cmd"])
                         .expect("test PATH joins cleanly")
                         .to_str()
                         .expect("ASCII test paths"),
                 )
                 .with_var("ProgramFiles", r"C:\Program Files")
-                .with_file(r"D:\App\Tool\Git\cmd\git.exe")
-                .with_file(r"D:\App\Tool\Git\bin\bash.exe")
+                .with_file(r"D:\Kit\Tool\Git\cmd\git.exe")
+                .with_file(r"D:\Kit\Tool\Git\bin\bash.exe")
                 .with_file(r"C:\Program Files\Git\bin\bash.exe"),
         );
         assert_eq!(
             both.program("gitbash"),
-            Some(OsStr::new(r"D:\App\Tool\Git\bin\bash.exe"))
+            Some(OsStr::new(r"D:\Kit\Tool\Git\bin\bash.exe"))
         );
     }
 

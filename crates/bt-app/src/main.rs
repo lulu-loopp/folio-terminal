@@ -52810,7 +52810,7 @@ fn executable_banner_name(program: &std::ffi::OsStr) -> String {
 /// executable path and the operating system's account of the failure — and both
 /// were wrong for the top of somebody's screen. The path is not the thing they
 /// picked: they picked a row of the profile menu called *Git Bash*, and
-/// `D:\App\Tool\Git\bin\bash.exe` is an implementation detail of that row that
+/// `D:\Kit\Tool\Git\bin\bash.exe` is an implementation detail of that row that
 /// changes when they reinstall Git. The OS's account arrived wrapped in the
 /// vendored launcher's own debugging — `CreateProcessW \`"…"\` in cwd \`"…"\`
 /// failed: …`, with the command line `Debug`-quoted and still carrying the `NUL`
