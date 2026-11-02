@@ -1123,11 +1123,23 @@ reads the count, so a door that waits is red, not a hang (the taskbar's held she
 read by its reading's return on a thread of its own, awaited within the suite's patience, the shell
 let go before the verdict). The cap frees holds, not locks: a door that waits while it keeps a
 product lock the held worker takes next still hangs — the program walk's admission keeps the lane's
-lock across the ask (`ProgramsLane::request`), and row 111's planted wait there hung. That, and a
+lock across the ask (`ProgramsLane::request`), and row 111's planted wait there hung. That ask is
+pinned apart from the lane's lock (`a_coalescing_ask_never_waits_for_its_worker`, row 133): its
+worker stands in a held hold while the three roads of `Coalescing::ask` taken while a run is out
+are taken on the test's thread, so a wait planted there that lets the lane's lock go is red at the
+cap (one that keeps that lock is the suite watchdog's, row 113). A worker held at a `Barrier`, at a
+channel or behind a lock a parked thread keeps is read the same way (row 133): the shell's birth
+worker, the log's writer and the update's fetch stand in a hold; the stalled sink's fill, the
+session writer that never answers and a contender held inside the election are read by their
+door's return on a thread of its own, the holder let go before the verdict; and the trace sink's
+lines are offered and its queue closed on the writer's own thread after another thread has taken
+the process `stderr` lock, so an offer, a close or a write that waits for that lock is red with the
+writer, and nothing is called under it on the test's thread. That program-walk lock, and a
 test-thread wait on something no gate or hold holds, are not read this way; wherever the suite runs
 through the suite watchdog (row 113, below), a hang of either kind ends the run red within 300 s of
 the test's start and names it (save the shapes that section says it cannot name). What such a
-verdict does not catch is a bounded wait, or a give-up that ignores its budget, shorter than the suite's patience.
+verdict does not catch is a bounded wait, or a give-up that ignores its budget, shorter than the
+suite's patience.
 
 2026-10-31 (T-FLOATING-VIDEO-DOUBLE-CLICK-TIMING, plan row 124): a double click is decided by
 the window's multi-click counters (`ImageClicks`, `PreviewTextClicks`) on the moment a press is
@@ -1185,6 +1197,18 @@ fits the pipe's quota; noted in TIMING-BOUND). The tests hand
 a `CountedClock` that awaits the other end within the door suites' patience or spends the bound on its
 count, so "answered in time" is an event and "the budget ran out" is a count. The same shape elsewhere in
 bt-platform, starting with `attention_pipe`, is plan row 163.
+
+2026-11-01 (T-CLIPBOARD-PASTE-PAST-DESK-BUSY-NOTICE-FLAKE, plan row 172): a stamp the product reads
+and a later press compares is a product window too. `Runtime::ask_for_a_paste` stamped each paste with its
+own `Instant::now()` and settled what the window owed at it, so a paste held on the clipboard lane's worker
+since an earlier press was past `PASTE_DEADLINE` (1 s) at a later press whenever a loaded machine took that
+long between them, and said the clipboard was busy. Row 124's `PointerClock` is now `PressClock`, the one
+type for "the moment a press is counted at": the window keeps two, `pointer_clock` for the double-click
+counters and `paste_clock` for the paste press, both `Wall` in the product (`moment(wall)` answers the
+instant just read, unchanged). The three clipboard tests that press a paste again while one is held hold the
+paste clock (`HeadlessFolio::hold_the_paste_clock`); a test that means the deadline passes its own clock to
+`Runtime::settle_clipboard`. Row 125's sweep counted the read as a stamp handed down, and the comparison
+sits in a private function (`paste_withdrawn`); noted in TIMING-BOUND.
 
 ## Suite watchdog
 
