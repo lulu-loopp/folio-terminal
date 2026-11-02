@@ -51,8 +51,10 @@
 #     (`window_waits_tests::effect_of`): `Parent::last`, or the last segment
 #     alone for a capitalised system call. New means the working tree's registry
 #     `# vocabulary` has the verb and the baseline's has none, so a re-spelling
-#     of an entry the baseline names (`JoinHandle::<T>::join`, a re-export path)
-#     is no new verb. A widened vocabulary reveals sites that were already
+#     that keeps `Parent::last` (a re-export path: `mpsc::Receiver::recv` for
+#     `std::sync::mpsc::Receiver::recv`) is no new verb, and one that changes it
+#     is (`JoinHandle::<T>::join` reads as `<T>::join`, so it needs a dated
+#     block like any new verb). A widened vocabulary reveals sites that were already
 #     there, and the block says when and which
 #     (T-BARE-SITE-VOCABULARY-WAIT-WHILE-BLIND-SPOT, plan row 176, ruling R1 and
 #     its tightening). It is reported as revealed, not refused; the equality half
@@ -317,7 +319,7 @@ function Read-VocabularyPaths([string[]]$lines) {
 
 # An entry as the bare-site guard matches a site (`window_waits_tests::effect_of`): its last
 # segment alone for a capitalised system call (`WaitForSingleObject`), otherwise `Parent::last`.
-function Get-Verb([string]$path) {
+function Get-WaitVerb([string]$path) {
     $segments = @($path -split '::')
     $last = $segments[-1]
     if ($last.Length -gt 0 -and [char]::IsUpper($last[0])) { return $last }
@@ -334,7 +336,7 @@ function Test-Merge([string]$what, [string[]]$merged, [string]$p1, [string]$p2) 
     $versions = @{ p1 = (Get-InventoryAt $p1); p2 = (Get-InventoryAt $p2); b = (Get-InventoryAt $b) }
     $registryAtB = (& git show "${b}:crates/bt-app/src/window_waits.tsv" 2>$null) | Out-String
     if ($LASTEXITCODE -ne 0) { return @("[merge] $what`: the registry is not at its parents' merge base $b") }
-    $verbsAtB = @((Read-VocabularyPaths ($registryAtB -split "`r?`n")) | ForEach-Object { Get-Verb $_ })
+    $verbsAtB = @((Read-VocabularyPaths ($registryAtB -split "`r?`n")) | ForEach-Object { Get-WaitVerb $_ })
     foreach ($keying in @("family", "row")) {
         $read = if ($keying -eq "row") { ${function:Read-InventoryRows} } else { ${function:Read-Inventory} }
         $m = & $read $merged "$relative at $what"
@@ -345,7 +347,7 @@ function Test-Merge([string]$what, [string[]]$merged, [string]$p1, [string]$p2) 
             $first = if ($one.Contains($key)) { $one[$key] } else { 0 }
             $second = if ($two.Contains($key)) { $two[$key] } else { 0 }
             $revealedSinceB = $keying -eq "family" -and -not $base.Contains($key) -and
-                ($verbsAtB -cnotcontains (Get-Verb ($key -split "`t")[1]))
+                ($verbsAtB -cnotcontains (Get-WaitVerb ($key -split "`t")[1]))
             $held = if (($keying -eq "row" -and -not $base.Contains($key)) -or $revealedSinceB) {
                 [Math]::Max($first, $second)
             } else {
@@ -625,8 +627,8 @@ if (-not $uncalledAtBase) {
     }
 }
 
-$verbsThen = @((Read-VocabularyPaths ($then -split "`r?`n")) | ForEach-Object { Get-Verb $_ })
-$verbsNow = @((Read-VocabularyPaths ([IO.File]::ReadAllLines((Join-Path $repo $registry)))) | ForEach-Object { Get-Verb $_ })
+$verbsThen = @((Read-VocabularyPaths ($then -split "`r?`n")) | ForEach-Object { Get-WaitVerb $_ })
+$verbsNow = @((Read-VocabularyPaths ([IO.File]::ReadAllLines((Join-Path $repo $registry)))) | ForEach-Object { Get-WaitVerb $_ })
 $inventoryLines = [IO.File]::ReadAllLines($inventory)
 $inventoryRowsNow = Read-InventoryRows $inventoryLines "the working tree's $relative"
 $revealedRows = Read-RevealedRows $inventoryLines
@@ -637,7 +639,7 @@ $shrunk = 0
 foreach ($key in $now.Keys) {
     $held = if ($before.Contains($key)) { $before[$key] } else { 0 }
     $crate, $entry = $key -split "`t"
-    $verb = Get-Verb $entry
+    $verb = Get-WaitVerb $entry
     $newEntry = ($verbsThen -cnotcontains $verb) -and ($verbsNow -ccontains $verb)
     $undated = @($inventoryRowsNow.Keys | Where-Object {
             $cells = $_ -split "`t"
