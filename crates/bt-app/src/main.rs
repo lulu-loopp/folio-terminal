@@ -19429,7 +19429,10 @@ impl TabRename {
     /// is composing. With none, the string on the glass is the draft itself, so
     /// every offset `drawn` answers is an offset into [`Self::text`].
     fn place_at(&mut self, drawn: &RenameDrawn, x: f32, extend: bool) -> bool {
-        debug_assert!(!self.composing(), "a press places no caret under a composition");
+        debug_assert!(
+            !self.composing(),
+            "a press places no caret under a composition"
+        );
         let was = (self.field.caret(), self.field.selection());
         self.field.place(drawn.caret_at(x), extend);
         self.clamp_scroll();

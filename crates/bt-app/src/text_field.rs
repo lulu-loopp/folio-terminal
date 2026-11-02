@@ -798,11 +798,7 @@ mod tests {
         let at = |x: f32| caret_at_x(text, 0, x, seam_x(0));
         assert_eq!(at(4.0), 0, "the left half of `a`");
         assert_eq!(at(6.0), 1, "the right half of `a`");
-        assert_eq!(
-            at(5.0),
-            0,
-            "the middle of `a` belongs to the seam in front"
-        );
+        assert_eq!(at(5.0), 0, "the middle of `a` belongs to the seam in front");
         assert_eq!(at(29.0), 2, "the left half of the ideograph");
         assert_eq!(at(31.0), 5, "the right half of the ideograph");
         assert_eq!(
@@ -824,7 +820,8 @@ mod tests {
         assert_eq!(at(-30.0), 2, "left of the window is the window's start");
         assert_eq!(at(1.0), 2);
         assert_eq!(at(21.0), 5, "past the ideograph's middle");
-        assert_eq!(at(31.0), 7, "past `d`'s middle is the end");
+        assert_eq!(at(31.0), 6, "just right of the seam after `c`");
+        assert_eq!(at(36.0), 7, "past `d`'s middle is the end");
     }
 
     /// RED (row 179) — **a seam is a grapheme boundary**: `e` with a combining

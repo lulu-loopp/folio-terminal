@@ -30,9 +30,10 @@ impl<B: Backend> Runtime<'_, B> {
     /// its mark is still a press in the editor, never a blur.
     pub(crate) fn press_rename_draft(&mut self, position: PhysicalPosition<f64>) -> Result<()> {
         let extend = self.window.modifiers.shift_key();
-        let (Some(editor), Some(drawn)) =
-            (self.window.rename.as_mut(), self.window.rename_drawn.as_ref())
-        else {
+        let (Some(editor), Some(drawn)) = (
+            self.window.rename.as_mut(),
+            self.window.rename_drawn.as_ref(),
+        ) else {
             return Ok(());
         };
         if editor.composing() {
@@ -59,9 +60,10 @@ impl<B: Backend> Runtime<'_, B> {
         if self.held_rename_selection().is_none() {
             return Ok(false);
         }
-        let (Some(editor), Some(drawn)) =
-            (self.window.rename.as_mut(), self.window.rename_drawn.as_ref())
-        else {
+        let (Some(editor), Some(drawn)) = (
+            self.window.rename.as_mut(),
+            self.window.rename_drawn.as_ref(),
+        ) else {
             return Ok(true);
         };
         if !editor.composing() && editor.place_at(drawn, position.x as f32, true) {

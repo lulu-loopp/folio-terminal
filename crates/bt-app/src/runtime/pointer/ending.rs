@@ -451,12 +451,11 @@ impl CaptureOwner {
 fn rename_pane(subject: &RenameSubject) -> Option<LeafId> {
     match subject {
         RenameSubject::Tab(_) => None,
-        RenameSubject::PreviewName { surface, .. } | RenameSubject::PreviewCrumb { surface, .. } => {
-            match surface {
-                PreviewSurface::Seat(leaf) => Some(*leaf),
-                PreviewSurface::Float(_) | PreviewSurface::Peek => None,
-            }
-        }
+        RenameSubject::PreviewName { surface, .. }
+        | RenameSubject::PreviewCrumb { surface, .. } => match surface {
+            PreviewSurface::Seat(leaf) => Some(*leaf),
+            PreviewSurface::Float(_) | PreviewSurface::Peek => None,
+        },
         RenameSubject::WebAddress { leaf }
         | RenameSubject::FilesRow { leaf, .. }
         | RenameSubject::FilesNew { leaf, .. } => Some(*leaf),

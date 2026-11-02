@@ -46,10 +46,12 @@ impl Renaming {
             let mut editor = TabRename::open(tab, Some(name));
             editor.field.step(TextMove::Home, false);
             runtime.window.rename = Some(editor);
+            // As `open_rename` does once the editor is in place.
+            runtime.refresh_chrome();
         }
         folio.draw();
         let (left, top, bottom, advances) = {
-            let mut runtime = folio.runtime();
+            let runtime = folio.runtime();
             let [left, top, _, bottom] = runtime
                 .window
                 .rename_caret_line
@@ -60,7 +62,12 @@ impl Renaming {
                 seats::TabLayoutMode::Horizontal => bt_render::WINDOW_TAB_FONT_LOGICAL_PX,
             } * scale;
             let (gpu, renderer) = (&mut runtime.app.gpu, &mut runtime.window.renderer);
-            (left, top, bottom, renderer.chrome_text_advances(gpu, name, font))
+            (
+                left,
+                top,
+                bottom,
+                renderer.chrome_text_advances(gpu, name, font),
+            )
         };
         assert!(
             advances.width() > 0.0,
@@ -176,11 +183,7 @@ fn a_press_past_the_names_end_puts_the_caret_at_its_end() {
 /// MUTATION: answer `Ok(false)` from `Runtime::drag_rename_selection` — the selection is empty.
 #[test]
 fn a_drag_inside_the_name_selects_what_it_crossed() {
-    let mut renaming = Renaming::open(
-        "rename-caret-drag",
-        seats::TabLayoutMode::Vertical,
-        NAME,
-    );
+    let mut renaming = Renaming::open("rename-caret-drag", seats::TabLayoutMode::Vertical, NAME);
     renaming.folio.press(renaming.at(1, 1.0));
     assert_eq!(held(&renaming.folio.runtime()), Some("RenameSelection"));
     renaming.folio.move_to(renaming.at(AFTER_ZHONG, 1.0));
@@ -203,11 +206,7 @@ fn a_drag_inside_the_name_selects_what_it_crossed() {
 /// MUTATION: pass `false` for `extend` in `Runtime::press_rename_draft` — the selection is empty.
 #[test]
 fn a_shift_press_carries_the_selection_to_the_pressed_seam() {
-    let mut renaming = Renaming::open(
-        "rename-caret-shift",
-        seats::TabLayoutMode::Vertical,
-        NAME,
-    );
+    let mut renaming = Renaming::open("rename-caret-shift", seats::TabLayoutMode::Vertical, NAME);
     renaming.click(renaming.at(1, 1.0));
     renaming.folio.runtime().window.modifiers = ModifiersState::SHIFT;
     renaming.click(renaming.at(AFTER_ZHONG, 1.0));
@@ -233,7 +232,12 @@ fn a_press_in_a_scrolled_name_counts_from_the_first_letter_drawn() {
         let editor = runtime.window.rename.as_mut().expect("the editor is open");
         editor.field.step(TextMove::End, false);
         runtime.refresh_chrome();
-        runtime.window.rename.as_ref().expect("the editor is open").first_visible
+        runtime
+            .window
+            .rename
+            .as_ref()
+            .expect("the editor is open")
+            .first_visible
     };
     renaming.folio.draw();
     assert!(start > 0, "the name is longer than its box");
