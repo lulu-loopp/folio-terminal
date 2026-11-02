@@ -606,11 +606,9 @@ mod tests {
     /// is written.**
     ///
     /// MUTATION: drop the platform check at the top of `arm`.
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn off_macos_arming_is_refused_by_name() {
-        if crate::host_platform() == HostPlatform::MacOs {
-            return;
-        }
         let agents = scratch("elsewhere");
         let refused = arm(&agents, &TXN, &rescue(), &home());
         assert!(matches!(refused, Err(Refusal::NotHere)), "{refused:?}");

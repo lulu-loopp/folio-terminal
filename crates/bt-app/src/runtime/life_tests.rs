@@ -8,6 +8,7 @@
 //! (`PtySession::fake_exited`) and births the worker answers with one.
 
 use crate::headless::HeadlessFolio;
+use crate::lane::Hold;
 use crate::test_support::{self, leaf_saying, tab_holding};
 use crate::{
     BirthDeathFallback, BirthDecision, BirthWait, LeafSeed, PaneBirth, Phase, ShellLanding,
@@ -16,7 +17,7 @@ use crate::{
 use bt_pty::PtySession;
 use std::num::NonZeroU16;
 use std::path::PathBuf;
-use std::sync::{Arc, Barrier, mpsc};
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 /// The nine phases, Deciding and Bearing told apart by what their birth waits for.
@@ -77,12 +78,14 @@ fn waking() -> (bt_pty::OutputWake, mpsc::Receiver<()>) {
     )
 }
 
-/// A shell asked of `bt-pty-birth`, whose worker answers with a fake shell once `gate` opens.
-fn asked(gate: Arc<Barrier>) -> (pty_door::ShellBirth, mpsc::Receiver<()>) {
+/// A shell asked of `bt-pty-birth`, whose worker answers with a fake shell once it has passed
+/// `gate`: at once when the gate is not held, else at its release, or at the hold's cap, which
+/// makes the release red (a call waited on the held birth).
+fn asked(gate: Arc<Hold>) -> (pty_door::ShellBirth, mpsc::Receiver<()>) {
     let (wake, heard) = waking();
     let shell = pty_door::request(
         move |_| {
-            gate.wait();
+            gate.pass();
             Ok::<_, bt_pty::PtyError>(fake(
                 Duration::from_secs(60),
                 "第一 first".as_bytes(),
@@ -97,10 +100,9 @@ fn asked(gate: Arc<Barrier>) -> (pty_door::ShellBirth, mpsc::Receiver<()>) {
 
 /// A shell asked of `bt-pty-birth` and already answered.
 fn answered() -> pty_door::ShellBirth {
-    let gate = Arc::new(Barrier::new(1));
-    let (shell, heard) = asked(gate);
+    let (shell, heard) = asked(Arc::new(Hold::default()));
     while !shell.answered() {
-        heard.recv().expect("a birth publishes before it wakes");
+        crate::lane::receive(&heard, "the birth's wake");
     }
     shell
 }
@@ -650,7 +652,8 @@ fn a_second_restart_while_one_is_in_birth_is_ignored() {
 #[test]
 fn a_restart_over_a_pending_birth_abandons_the_old_birth() {
     test_support::on_the_window_thread();
-    let gate = Arc::new(Barrier::new(2));
+    let gate = Arc::new(Hold::default());
+    gate.hold();
     let (shell, _heard) = asked(Arc::clone(&gate));
     let generation = shell.generation();
     let mut leaf = leaf_saying("诞生中 being born");
@@ -671,5 +674,5 @@ fn a_restart_over_a_pending_birth_abandons_the_old_birth() {
         pty_door::holds(generation),
         "the old birth's number is abandoned, not forgotten"
     );
-    gate.wait();
+    gate.release();
 }
