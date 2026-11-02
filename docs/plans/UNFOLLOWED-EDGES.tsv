@@ -8435,7 +8435,8 @@ crates/bt-platform/src/lib.rs	bt-platform crate::ProbeChild::suspended	Ambiguous
 crates/bt-platform/src/lib.rs	bt-platform crate::ProbeChild::suspended	Ambiguous	is_ok	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::ProbeChild::suspended	Ambiguous	kind	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::ProbeChild::suspended	Ambiguous	si_pid	1	
-crates/bt-platform/src/lib.rs	bt-platform crate::ProbeChild::wait_within	Dynamic	rest	2	
+crates/bt-platform/src/lib.rs	bt-platform crate::ProbeChild::wait_within_reading	Dynamic	now	2	
+crates/bt-platform/src/lib.rs	bt-platform crate::ProbeChild::wait_within_reading	Dynamic	rest	2	
 crates/bt-platform/src/lib.rs	bt-platform crate::ProbeGroups::groups	Ambiguous	unwrap_or_else	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::ProbePipeDrain::finish	Ambiguous	take	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::ProbePipeDrain::finish	Ambiguous	unwrap_or_else	2	
@@ -8546,8 +8547,7 @@ crates/bt-platform/src/lib.rs	bt-platform crate::probe_leader_has_exited	Ambiguo
 crates/bt-platform/src/lib.rs	bt-platform crate::probe_leader_has_exited	Ambiguous	assume_init	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::probe_leader_has_exited	Ambiguous	kind	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::probe_leader_has_exited	Ambiguous	si_pid	1	
-crates/bt-platform/src/lib.rs	bt-platform crate::probe_outputs_within	Ambiguous	elapsed	1	
-crates/bt-platform/src/lib.rs	bt-platform crate::probe_outputs_within	Ambiguous	is_zero	1	
+crates/bt-platform/src/lib.rs	bt-platform crate::probe_outputs_within_on	Ambiguous	is_zero	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::probe_pipe	Ambiguous	finish	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::probe_pipe	Ambiguous	is_invalid	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::process_image_path	Ambiguous	ok	4	
