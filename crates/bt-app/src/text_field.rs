@@ -301,6 +301,25 @@ impl TextField {
         self.caret = self.text.len();
     }
 
+    /// **Put the caret at `at`**, keeping the selection's other end where it is
+    /// when `extend` and dropping it onto the caret otherwise: a press puts a
+    /// caret, a drag or a `Shift`+press carries the far end of a selection that
+    /// began wherever the anchor stands (0.4.9 plan row 179).
+    ///
+    /// `at` is the pointer's answer ([`caret_at_x`]) and lands on a character
+    /// boundary for the reason every motion above does: an offset past the end
+    /// is the end, and one inside a character is the boundary in front of it.
+    pub fn place(&mut self, at: usize, extend: bool) {
+        let mut at = at.min(self.text.len());
+        while !self.text.is_char_boundary(at) {
+            at -= 1;
+        }
+        self.caret = at;
+        if !extend {
+            self.anchor = at;
+        }
+    }
+
     /// Empty the field and the composition with it.
     pub fn clear(&mut self) {
         self.text.clear();
@@ -408,6 +427,40 @@ impl TextField {
 /// beside it.
 fn is_word(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
+}
+
+/// **Where a press at `x` puts the caret in a line drawn from `from` on**
+/// (0.4.9 plan row 179): the byte offset of the seam nearest `x`, where a seam
+/// is a grapheme boundary of `text[from..]` and `seam_x(at)` is how far the
+/// seam at byte `at` stands from the drawn window's left edge.
+///
+/// **The nearest seam and not the letter the pointer is inside**, which is this
+/// window's rule on every face it has (§7.1.3q, `preview_edit::byte_at_x`): a
+/// press on the right half of a character puts the caret after it, and a press
+/// exactly on a character's middle belongs to the seam in front of it. A seam
+/// is a grapheme boundary and never a `char` one, so a press never lands inside
+/// a cluster — between a letter and its accent, or inside an emoji sequence.
+///
+/// A press left of the first seam is the first seam — the drawn window's own
+/// start, which is where a box scrolled along a long draft begins — and one
+/// past the last is the end of the line.
+///
+/// A free function over a closure because this module knows nothing about
+/// fonts: the caller has the shaped run, and this is only the walk along it.
+pub fn caret_at_x(text: &str, from: usize, x: f32, seam_x: impl Fn(usize) -> f32) -> usize {
+    let mut best = from;
+    let mut best_distance = (seam_x(from) - x).abs();
+    let mut at = from;
+    for cluster in bt_unicode::graphemes(&text[from..]) {
+        at += cluster.len();
+        let distance = (seam_x(at) - x).abs();
+        // Strictly nearer: a tie stays with the seam in front.
+        if distance < best_distance {
+            best = at;
+            best_distance = distance;
+        }
+    }
+    best
 }
 
 /// **What a clipboard can put into a field that holds one line.**
@@ -706,5 +759,108 @@ mod tests {
             "\u{4f60}\u{597d}",
             "the cut is by line and not by byte"
         );
+    }
+
+    /// The seams of `ab中cd` as a font would draw them: ten pixels a letter,
+    /// twenty for the ideograph — `(byte offset, pixels from the line's start)`.
+    const SEAMS: [(usize, f32); 6] = [
+        (0, 0.0),
+        (1, 10.0),
+        (2, 20.0),
+        (5, 40.0),
+        (6, 50.0),
+        (7, 60.0),
+    ];
+
+    /// How far the seam at a byte offset stands from the left edge of a window
+    /// drawn from `from` on, read off [`SEAMS`].
+    fn seam_x(from: usize) -> impl Fn(usize) -> f32 {
+        let x = |at: usize| {
+            SEAMS
+                .iter()
+                .find(|(offset, _)| *offset == at)
+                .map(|(_, x)| *x)
+                .expect("asked only at a seam")
+        };
+        move |at| x(at) - x(from)
+    }
+
+    /// RED (0.4.9 plan row 179) — **a press lands on the nearest seam, and a
+    /// press exactly on a character's middle on the seam in front of it**,
+    /// ideographs included: the left half of `中` puts the caret before it, the
+    /// right half after it.
+    ///
+    /// MUTATION: take a tie to the far seam (`<=` for `<`) — the middle of `a`
+    /// and the middle of `中` go red.
+    #[test]
+    fn a_press_lands_on_the_nearest_seam_and_a_middle_on_the_one_in_front() {
+        let text = "ab\u{4e2d}cd";
+        let at = |x: f32| caret_at_x(text, 0, x, seam_x(0));
+        assert_eq!(at(4.0), 0, "the left half of `a`");
+        assert_eq!(at(6.0), 1, "the right half of `a`");
+        assert_eq!(
+            at(5.0),
+            0,
+            "the middle of `a` belongs to the seam in front"
+        );
+        assert_eq!(at(29.0), 2, "the left half of the ideograph");
+        assert_eq!(at(31.0), 5, "the right half of the ideograph");
+        assert_eq!(
+            at(30.0),
+            2,
+            "the ideograph's middle belongs to the seam in front"
+        );
+        assert_eq!(at(-8.0), 0, "left of the text is its start");
+        assert_eq!(at(400.0), text.len(), "past the text is its end");
+    }
+
+    /// RED (row 179) — **a line drawn from `from` on is measured from there**:
+    /// a box scrolled along its draft has its first visible seam at its left
+    /// edge, and nothing in front of `from` is a seam a press can reach.
+    #[test]
+    fn a_press_in_a_scrolled_line_counts_from_the_first_seam_drawn() {
+        let text = "ab\u{4e2d}cd";
+        let at = |x: f32| caret_at_x(text, 2, x, seam_x(2));
+        assert_eq!(at(-30.0), 2, "left of the window is the window's start");
+        assert_eq!(at(1.0), 2);
+        assert_eq!(at(21.0), 5, "past the ideograph's middle");
+        assert_eq!(at(31.0), 7, "past `d`'s middle is the end");
+    }
+
+    /// RED (row 179) — **a seam is a grapheme boundary**: `e` with a combining
+    /// acute is one cluster of three bytes, and no press lands between the
+    /// letter and its accent, however close to the letter's edge it is.
+    #[test]
+    fn a_press_never_lands_inside_a_cluster() {
+        let text = "e\u{301}x";
+        let seams = |at: usize| match at {
+            0 => 0.0,
+            3 => 10.0,
+            4 => 20.0,
+            _ => panic!("byte {at} is no seam"),
+        };
+        assert_eq!(caret_at_x(text, 0, 9.0, seams), 3);
+        assert_eq!(caret_at_x(text, 0, 1.0, seams), 0);
+    }
+
+    /// RED (row 179) — **a placed caret drops the selection, and an extended
+    /// one carries its far end**, and either lands on a character boundary.
+    #[test]
+    fn placing_the_caret_collapses_or_extends_the_selection() {
+        let mut field = TextField::holding_selected("ab\u{4e2d}cd", 7);
+        field.place(1, false);
+        assert_eq!((field.caret(), field.selection()), (1, 1..1));
+        field.place(5, true);
+        assert_eq!((field.caret(), field.selection()), (5, 1..5));
+        field.place(0, true);
+        assert_eq!((field.caret(), field.selection()), (0, 0..1));
+        field.place(3, false);
+        assert_eq!(
+            field.caret(),
+            2,
+            "inside the ideograph is the seam in front of it"
+        );
+        field.place(99, false);
+        assert_eq!(field.caret(), 7, "past the end is the end");
     }
 }

@@ -2816,7 +2816,7 @@ impl<B: Backend> Runtime<'_, B> {
             return;
         };
         let mut shape = |text: &str| renderer.chrome_text_advances(gpu, text, font);
-        let fitted = editor.fit(box_width, caret_width, true, &mut shape);
+        let (fitted, drawn) = editor.fit(name_box[0], box_width, caret_width, true, &mut shape);
         edit.text = fitted.text;
         edit.caret_px = fitted.caret_px;
         edit.selection = fitted.selection;
@@ -2824,6 +2824,7 @@ impl<B: Backend> Runtime<'_, B> {
         edit.refused = refused;
         let x = (name_box[0] + edit.caret_px).min(name_box[2] - caret_width);
         self.window.rename_caret_line = Some([x, name_box[1], x + caret_width, name_box[3]]);
+        self.window.rename_drawn = Some(drawn);
     }
 
     /// C35, applied only where a landed directory has proved a selection gone.

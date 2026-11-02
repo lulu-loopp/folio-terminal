@@ -16,9 +16,9 @@
 use crate::window_seam::prelude::*;
 use crate::{
     App, DividerDrag, Drag, FilePeekPress, FloatDrag, FloatHeadPress, ImageDrag, MouseRoute,
-    PanePress, PreviewBlockDrag, PreviewBodyDrag, PreviewSurface, PreviewTextDrag, RowMiddlePress,
-    RowPress, Runtime, TabId, TabPress, TerminalColumnDrag, TerminalThumbDrag, VideoPicturePress,
-    settings,
+    PanePress, PreviewBlockDrag, PreviewBodyDrag, PreviewSurface, PreviewTextDrag, RenameSubject,
+    RowMiddlePress, RowPress, Runtime, TabId, TabPress, TerminalColumnDrag, TerminalThumbDrag,
+    VideoPicturePress, settings,
 };
 use winit::event::MouseButton;
 use winit::keyboard::ModifiersState;
@@ -79,6 +79,9 @@ pub(crate) enum CaptureOwner {
     /// 2026-10-23, 0.4.9 plan row 45). The one owner latched by the middle
     /// button.
     RowMiddlePress(RowMiddlePress),
+    /// C25, a selection being drawn across the open name editor's draft, and the
+    /// subject that editor was open on (0.4.9 plan row 179).
+    RenameSelection(RenameSubject),
 }
 
 /// **One latched gesture** (§2.2).
@@ -508,6 +511,18 @@ impl<B: Backend> Runtime<'_, B> {
 
     pub(crate) fn latch_settings_menu_bar_drag(&mut self, value: f32) {
         gesture_door!(@window latch self SettingsMenuBar value)
+    }
+
+    pub(crate) fn held_rename_selection(&self) -> Option<&RenameSubject> {
+        gesture_door!(@window held self RenameSelection)
+    }
+
+    pub(crate) fn latch_rename_selection(&mut self, value: RenameSubject) {
+        gesture_door!(@window latch self RenameSelection value)
+    }
+
+    pub(crate) fn drop_rename_selection(&mut self) {
+        gesture_door!(@window drop self RenameSelection)
     }
 
     pub(crate) fn held_pane_press(&self) -> Option<&PanePress> {

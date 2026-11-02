@@ -49,8 +49,9 @@
 
 use crate::window_seam::prelude::*;
 use crate::{
-    FloatDragKind, FolioApp, LeafId, MouseRoute, PasteTarget, PreviewSurface, RowHost,
-    RowMiddlePress, RowPress, Runtime, TabId, UserInputKind, VideoPicturePress, float, input,
+    FloatDragKind, FolioApp, LeafId, MouseRoute, PasteTarget, PreviewSurface, RenameSubject,
+    RowHost, RowMiddlePress, RowPress, Runtime, TabId, UserInputKind, VideoPicturePress, float,
+    input,
 };
 use anyhow::Result;
 use bt_layout::SeatId;
@@ -223,7 +224,8 @@ impl CaptureOwner {
             | Self::SettingsSlider(_)
             | Self::SettingsMenuBar(_)
             | Self::VideoPicture(_)
-            | Self::RowMiddlePress(_) => true,
+            | Self::RowMiddlePress(_)
+            | Self::RenameSelection(_) => true,
         }
     }
 
@@ -254,6 +256,7 @@ impl CaptureOwner {
             Self::SettingsMenuBar(_) => "SettingsMenuBar",
             Self::VideoPicture(_) => "VideoPicture",
             Self::RowMiddlePress(_) => "RowMiddlePress",
+            Self::RenameSelection(_) => "RenameSelection",
         }
     }
 
@@ -266,7 +269,17 @@ impl CaptureOwner {
             Self::BlockThumb(_, drag) => Some(drag.surface),
             Self::PicturePan(_, drag) => Some(drag.surface),
             Self::RenderedSelection(_, drag) => Some(drag.surface),
-            Self::Divider(_)
+            Self::RenameSelection(
+                RenameSubject::PreviewName { surface, .. }
+                | RenameSubject::PreviewCrumb { surface, .. },
+            ) => Some(*surface),
+            Self::RenameSelection(
+                RenameSubject::Tab(_)
+                | RenameSubject::WebAddress { .. }
+                | RenameSubject::FilesRow { .. }
+                | RenameSubject::FilesNew { .. },
+            )
+            | Self::Divider(_)
             | Self::TabPress(_)
             | Self::PanePress(..)
             | Self::RowPress(_)
@@ -314,7 +327,8 @@ impl CaptureOwner {
             | Self::VideoBar(_)
             | Self::EditSelection(..)
             | Self::Route(_)
-            | Self::SettingsSlider(_) => false,
+            | Self::SettingsSlider(_)
+            | Self::RenameSelection(_) => false,
         }
     }
 
@@ -357,6 +371,11 @@ impl CaptureOwner {
             }
             Self::Route(MouseRoute::Forward { owner, .. }) => glass.takes(owner.tab, owner.seat),
             Self::Route(MouseRoute::MathBlock) => active == glass.tab && glass.kept.is_none(),
+            // A box drawn on a pane leaves with its pane; a tab's name is the strip's, which is
+            // the window's.
+            Self::RenameSelection(subject) => {
+                rename_pane(subject).is_some_and(|leaf| glass.takes(leaf.tab, leaf.seat))
+            }
             Self::Drag(_)
             | Self::TabPress(_)
             | Self::FloatHeadPress(_)
@@ -408,7 +427,39 @@ impl CaptureOwner {
             Self::Route(MouseRoute::Local(selection)) => goes_with_its_shell(gone, selection.owner),
             Self::Route(MouseRoute::Forward { owner, .. }) => goes_with_its_shell(gone, *owner),
             Self::SettingsSlider(_) | Self::SettingsMenuBar(_) => gone == Gone::SettingsSheet,
+            // The editor's own exit lets go of it first ([`Runtime::finish_rename`]); what is
+            // left here is the thing its box was drawn on going under it.
+            Self::RenameSelection(subject) => match subject {
+                RenameSubject::Tab(tab) => the_tab(gone, *tab),
+                RenameSubject::PreviewName { surface, .. }
+                | RenameSubject::PreviewCrumb { surface, .. } => {
+                    surface_goes(gone, *surface)
+                        || matches!(surface, PreviewSurface::Seat(leaf) if the_tab(gone, leaf.tab))
+                }
+                RenameSubject::WebAddress { leaf }
+                | RenameSubject::FilesRow { leaf, .. }
+                | RenameSubject::FilesNew { leaf, .. } => {
+                    the_tab(gone, leaf.tab) || pane_of(gone, leaf.tab, leaf.seat)
+                }
+            },
         }
+    }
+}
+
+/// **The pane a name editor's box is drawn on**, or `None` for a tab's name (the strip's) and for
+/// a box in a floating window's or the glance card's head.
+fn rename_pane(subject: &RenameSubject) -> Option<LeafId> {
+    match subject {
+        RenameSubject::Tab(_) => None,
+        RenameSubject::PreviewName { surface, .. } | RenameSubject::PreviewCrumb { surface, .. } => {
+            match surface {
+                PreviewSurface::Seat(leaf) => Some(*leaf),
+                PreviewSurface::Float(_) | PreviewSurface::Peek => None,
+            }
+        }
+        RenameSubject::WebAddress { leaf }
+        | RenameSubject::FilesRow { leaf, .. }
+        | RenameSubject::FilesNew { leaf, .. } => Some(*leaf),
     }
 }
 
@@ -608,6 +659,7 @@ impl<B: Backend> Runtime<'_, B> {
             | CaptureOwner::VideoPicture(_)
             | CaptureOwner::RowMiddlePress(_)
             | CaptureOwner::EditSelection(..)
+            | CaptureOwner::RenameSelection(_)
             | CaptureOwner::TabPress(_)
             | CaptureOwner::PanePress(..)
             | CaptureOwner::RowPress(_)
@@ -644,7 +696,8 @@ impl<B: Backend> Runtime<'_, B> {
             | CaptureOwner::SettingsSlider(_)
             | CaptureOwner::SettingsMenuBar(_)
             | CaptureOwner::VideoPicture(_)
-            | CaptureOwner::RowMiddlePress(_) => {}
+            | CaptureOwner::RowMiddlePress(_)
+            | CaptureOwner::RenameSelection(_) => {}
         }
     }
 

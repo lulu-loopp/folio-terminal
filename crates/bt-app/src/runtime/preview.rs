@@ -1135,9 +1135,10 @@ impl<B: Backend> Runtime<'_, B> {
         };
         // A file has no name under its name, so there is no layer to reveal and
         // the placeholder stays empty by construction rather than by omission.
+        let (fitted, drawn) = editor.fit(name_box[0], box_width, caret_width, true, &mut shape);
         let edit = seats::TabEdit {
             caret_lit: self.window.rename_blink.visible(),
-            ..editor.fit(box_width, caret_width, true, &mut shape)
+            ..fitted
         };
         // **Written here because here is the only place the box exists**, which
         // is `measure_open_rename`'s own sentence: the IME's candidate list has
@@ -1145,6 +1146,7 @@ impl<B: Backend> Runtime<'_, B> {
         // thing that says where that is.
         let x = (name_box[0] + edit.caret_px).min(name_box[2] - caret_width);
         self.window.rename_caret_line = Some([x, name_box[1], x + caret_width, name_box[3]]);
+        self.window.rename_drawn = Some(drawn);
         (tools, Some(edit))
     }
 
@@ -1229,9 +1231,10 @@ impl<B: Backend> Runtime<'_, B> {
         let mut shape = |text: &str| renderer.chrome_text_advances(gpu, text, font);
         // An address has no address under it either: the field is seeded with
         // the committed URL and there is no second layer to reveal.
+        let (fitted, drawn) = editor.fit(box_[0], box_width, caret_width, true, &mut shape);
         let edit = seats::TabEdit {
             caret_lit: self.window.rename_blink.visible(),
-            ..editor.fit(box_width, caret_width, true, &mut shape)
+            ..fitted
         };
         // **Written here because here is the only place the box exists** — the
         // IME's candidate list has to stand under what is being typed, and this
@@ -1240,6 +1243,7 @@ impl<B: Backend> Runtime<'_, B> {
         // ruling moved as far as an IME is concerned.
         let x = (box_[0] + edit.caret_px).min(box_[2] - caret_width);
         self.window.rename_caret_line = Some([x, box_[1], x + caret_width, box_[3]]);
+        self.window.rename_drawn = Some(drawn);
         (measure_in, Some(edit), refusal)
     }
 
@@ -1286,14 +1290,16 @@ impl<B: Backend> Runtime<'_, B> {
         // The window never leaves the start of the draft, which is what the
         // `false` says: a file has no name under its name, so there is no layer
         // to reveal and the placeholder stays empty.
+        let (fitted, drawn) = editor.fit(box_[0], box_width, caret_width, false, &mut shape);
         let edit = seats::TabEdit {
             caret_lit: self.window.rename_blink.visible(),
-            ..editor.fit(box_width, caret_width, false, &mut shape)
+            ..fitted
         };
         // **Written here because here is the only place the box exists** — the
         // IME's candidate list has to stand under what is being typed.
         let x = (box_[0] + edit.caret_px).min(box_[2] - caret_width);
         self.window.rename_caret_line = Some([x, box_[1], x + caret_width, box_[3]]);
+        self.window.rename_drawn = Some(drawn);
         Some(edit)
     }
 

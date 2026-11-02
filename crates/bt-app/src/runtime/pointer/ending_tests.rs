@@ -161,6 +161,7 @@ fn every_owner(on: On) -> Vec<CaptureOwner> {
             key: "notes.md".to_owned(),
             latch,
         }),
+        CaptureOwner::RenameSelection(RenameSubject::Tab(on.tab)),
     ]
 }
 
@@ -191,6 +192,7 @@ fn every_name() -> Vec<&'static str> {
         "SettingsSlider",
         "SettingsMenuBar",
         "RowMiddlePress",
+        "RenameSelection",
     ]
 }
 
@@ -724,6 +726,8 @@ fn each_door_ends_a_held_capture() {
             // And the glance card, which the tab that comes in front takes down by its own door.
             "GlanceHeadPress",
             "GlanceThumb",
+            // A drag across the tab's name editor, gone with the tab its name is.
+            "RenameSelection",
         ],
         |runtime| every_owner(on_pane(runtime, 0)),
         |application| {
