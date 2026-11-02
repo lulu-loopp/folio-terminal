@@ -24429,12 +24429,12 @@ mod tests {
     /// path in a strip narrower than one, and a right cut would give
     /// `C:\Users\Alice\Developer\foli…` — every character of which the user
     /// already knew. The user's own screenshot of what they wanted is the second
-    /// assertion here: `…ers\Alice\Developer\folio-terminal`.
+    /// assertion here: `…ers\Alice\Developer\lunar-workshop`.
     #[test]
     fn the_left_ellipsis_keeps_the_longest_suffix_that_fits() {
         let font = 10.0;
         let advance = font * TEST_ADVANCE_PER_EM;
-        let text = r"C:\Users\Alice\Developer\folio-terminal";
+        let text = r"C:\Users\Alice\Developer\lunar-workshop";
         assert_eq!(
             ellipsized_left(text, advance * 100.0, font, &mut measure),
             text,
@@ -24444,7 +24444,7 @@ mod tests {
         // characters, which is exactly where their own screenshot cut.
         assert_eq!(
             ellipsized_left(text, advance * 35.0, font, &mut measure),
-            format!("{ELLIPSIS}ers\\Alice\\Developer\\folio-terminal"),
+            format!("{ELLIPSIS}ers\\Alice\\Developer\\lunar-workshop"),
             "the folder you are in survives; the drive letter is what goes"
         );
         for characters in 1..text.chars().count() {

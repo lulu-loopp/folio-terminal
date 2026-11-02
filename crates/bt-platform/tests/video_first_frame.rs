@@ -268,9 +268,11 @@ fn a_frame_asked_for_smaller_keeps_its_proportions() {
 ///
 /// The refusal path through whichever real platform this is: a file that is not
 /// there, a file that is empty, and a file whose bytes are text with a video's
-/// name on it. All three must be the module's one silence, on the caller's
-/// thread, with whatever the platform was given back — and the last of the three
-/// is the one that actually reaches the decoder and is turned away by it.
+/// name on it. None of them is drawn, on the caller's thread, with whatever the
+/// platform was given back — and the last of the three is the one that actually
+/// reaches the decoder and is turned away by it. Whether each is a refusal or a
+/// run-out is the budget's question on a loaded machine, and is stated on
+/// planted work beside each arm's `within_budget`, not here.
 ///
 /// MUTATION: `unwrap` any of the `?`s in either arm's decode and the third case
 /// takes the decoration worker down, which on the machine is a hover over a
@@ -281,22 +283,22 @@ fn nothing_that_is_not_a_video_is_drawn() {
     std::fs::create_dir_all(&dir).expect("a scratch directory");
 
     let missing = dir.join("no-such-file.mp4");
-    assert_eq!(first_frame(&missing, CARD.0, CARD.1), None);
+    assert_eq!(first_frame(&missing, CARD.0, CARD.1).ok(), None);
 
     let empty = dir.join("empty.mp4");
     std::fs::write(&empty, b"").expect("an empty file");
-    assert_eq!(first_frame(&empty, CARD.0, CARD.1), None);
+    assert_eq!(first_frame(&empty, CARD.0, CARD.1).ok(), None);
 
     let text = dir.join("renamed.mp4");
     std::fs::write(&text, b"this is not a video at all, whatever it is called")
         .expect("a text file");
-    assert_eq!(first_frame(&text, CARD.0, CARD.1), None);
+    assert_eq!(first_frame(&text, CARD.0, CARD.1).ok(), None);
 
     // A directory carrying a video's name, which is the one shape a file column
     // can hand this that is not a file at all.
     let folder = dir.join("folder.mp4");
     std::fs::create_dir_all(&folder).expect("a directory with a video's name");
-    assert_eq!(first_frame(&folder, CARD.0, CARD.1), None);
+    assert_eq!(first_frame(&folder, CARD.0, CARD.1).ok(), None);
 
     let _ = std::fs::remove_dir_all(&dir);
 }

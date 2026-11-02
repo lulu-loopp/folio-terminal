@@ -348,6 +348,8 @@ use preview_viewport::{
     markdown_fence_highlight, markdown_fence_width, measure_markdown_intrinsics,
 };
 #[cfg(test)]
+use runtime::video_facts_to_file;
+#[cfg(test)]
 use runtime::{
     a_bare_redraw_still_owes_a_present, a_capture_still_holds_its_pointer, a_page_is_off_the_glass,
     a_page_still_has_a_pane, a_page_was_replaced, a_retirement_happens_on_this_turn,
@@ -367,27 +369,27 @@ use runtime::{
     dispatch_tab_decoration_tasks, document_formulas, documents_held_in, documents_held_mut_in,
     drain_may_take_another_slice, drain_whole_units, dropped_files_seat_at, dwm_dark_mode_owed,
     earliest_named_deadline, end_leaves_of, exited_tabs_the_loop_may_close, file_menu_powers,
-    file_peek_answer, file_peek_promotion, files_a_tab_stands_on, files_float_content_height,
-    files_key_under, files_key_within, files_keyboard_seat_of, files_locate, files_open_chain,
-    files_root_of, files_row_activation, files_row_counts_clicks, files_row_entry,
-    files_row_menu_subject, float_git_page_shown, float_grasp, float_viewport_rect,
-    focus_leaf_index, folded_levels, folder_foot_notice, folder_pick_outcome, foot_revealed_label,
-    forget_a_picture, forget_standing_answers, frame_row_of_anchor, gate_title_over,
-    git_answer_notice, git_full_path, git_roots_on_glass, git_surfaces_the_kernel_moved,
-    git_surfaces_wanting_reread, glance_may_arm, glass_allows_a_drop, glass_allows_a_text_write,
-    goto_tab_index, grabbed_offset, graph_key_of, ground_overlay_layers, hold_failed_in_tabs,
-    hole_for, host_screen_after, image_clamped_pan, image_destination, image_is_pannable,
-    image_meta_sentence, image_pan_key, image_raster_cap, image_zoom_caption, image_zoom_key,
-    image_zoom_notch, image_zoom_settles, image_zoom_toggled, ime_caret_source, ime_commit_bytes,
-    ime_cursor_area_of, ime_owner, in_drain_feed_turn, input_line_needs_a_space_first,
-    keyboard_owner_is_a_shell, land_shell_birth, land_successor, landed_source, landing_for_aim,
-    leaf_resize_plan, let_go_unnamed_peek_records, lines_phrase, link_target_to_ask_about,
-    live_viewport_mouse_hit, local_image_activation, mark_leaf_painted, markdown_chip_ground,
-    markdown_empty_page_offset, markdown_prose_paragraphs, markdown_source_cell,
-    markdown_source_offset_at, math_copy_window, math_worker_stopped_notice, merge_notice_card,
-    new_tab_cwd, new_tab_leaf_seed, new_tab_tip, next_attention_stop, offer_pty_input,
-    output_revision, over_home_ground, owe_sharpened_rasters, page_address_hand_off,
-    page_destination, page_foot_flash, page_foot_lead, page_source_file,
+    file_peek_answer, file_peek_promotion, file_peek_video_answer, files_a_tab_stands_on,
+    files_float_content_height, files_key_under, files_key_within, files_keyboard_seat_of,
+    files_locate, files_open_chain, files_root_of, files_row_activation, files_row_counts_clicks,
+    files_row_entry, files_row_menu_subject, float_git_page_shown, float_grasp,
+    float_viewport_rect, focus_leaf_index, folded_levels, folder_foot_notice, folder_pick_outcome,
+    foot_revealed_label, forget_a_picture, forget_standing_answers, frame_row_of_anchor,
+    gate_title_over, git_answer_notice, git_full_path, git_roots_on_glass,
+    git_surfaces_the_kernel_moved, git_surfaces_wanting_reread, glance_may_arm,
+    glass_allows_a_drop, glass_allows_a_text_write, goto_tab_index, grabbed_offset, graph_key_of,
+    ground_overlay_layers, hold_failed_in_tabs, hole_for, host_screen_after, image_clamped_pan,
+    image_destination, image_is_pannable, image_meta_sentence, image_pan_key, image_raster_cap,
+    image_zoom_caption, image_zoom_key, image_zoom_notch, image_zoom_settles, image_zoom_toggled,
+    ime_caret_source, ime_commit_bytes, ime_cursor_area_of, ime_owner, in_drain_feed_turn,
+    input_line_needs_a_space_first, keyboard_owner_is_a_shell, land_shell_birth, land_successor,
+    landed_source, landing_for_aim, leaf_resize_plan, let_go_unnamed_peek_records, lines_phrase,
+    link_target_to_ask_about, live_viewport_mouse_hit, local_image_activation, mark_leaf_painted,
+    markdown_chip_ground, markdown_empty_page_offset, markdown_prose_paragraphs,
+    markdown_source_cell, markdown_source_offset_at, math_copy_window, math_worker_stopped_notice,
+    merge_notice_card, new_tab_cwd, new_tab_leaf_seed, new_tab_tip, next_attention_stop,
+    offer_pty_input, output_revision, over_home_ground, owe_sharpened_rasters,
+    page_address_hand_off, page_destination, page_foot_flash, page_foot_lead, page_source_file,
     pages_that_move_with_their_panes, pane_can_become_a_tab, pane_fade_veil_layers, pane_into_tab,
     pane_strip_landing, panel_opacity, paste_answer_text, paste_body, paste_card_key,
     paste_card_step, paste_offer_is_kept, paste_target_is_live, paste_text, peek_awaits,
@@ -2360,12 +2362,14 @@ const VIDEO_FRAME_FIT_PX: (u32, u32) = (1920, 1080);
 /// them would be a second parse of the same container for facts the first one had already seen —
 /// and the file's own size is a `metadata` call this worker hop is making anyway.
 ///
-/// **`facts` survives a `frame` of `None`, and that is the degradation path.** A `.webm` carrying
+/// **`facts` survives a `frame` with no picture, and that is the degradation path.** A `.webm` carrying
 /// AV1 on a machine with no AV1 decoder gives up no picture at all; what it still gives up is how
 /// large the file is, and that is the line the card then prints beside its format
 /// (`preview::video_fact_lines`).
 struct VideoGlance {
-    frame: Option<bt_platform::video::VideoFrame>,
+    /// The picture, or why there is none: refused — a fact about the file — or not answered in
+    /// time, which is not (T-FIRST-FRAME-RUN-OUT-IS-NOT-A-REFUSAL).
+    frame: Result<bt_platform::video::VideoFrame, bt_platform::video::NoFrame>,
     facts: preview::VideoFacts,
     /// When the file said it was last written, as the worker that decoded it saw it — the third
     /// field of the texture's own name ([`runtime::preview::video_frame_texture_key`]) and nothing
@@ -20047,7 +20051,27 @@ enum PeekCacheEntry {
     /// set aside, never filed ([`runtime::preview::peek_awaits`]).
     Pending {
         asked: computation_lane::ComputationId,
+        /// **Whether this read is the one more ask after a video's first frame ran out**
+        /// (T-FIRST-FRAME-RUN-OUT-IS-NOT-A-REFUSAL): set by the one door
+        /// ([`runtime::peek::ask_for_peek_pixels`]) when the record it replaces is an
+        /// [`Self::Unanswered`] not yet asked again, and read by the answer
+        /// ([`runtime::preview::file_peek_video_answer`]) so that a second run-out is filed as
+        /// asked again — the bound on the automatic asking, held here and nowhere else.
+        once_more: bool,
     },
+    /// **A video's first frame that was not answered in time** (T-FIRST-FRAME-RUN-OUT-IS-NOT-A-REFUSAL):
+    /// the decode ran out of `bt_platform::video::FIRST_FRAME_BUDGET` — on a busy machine a good
+    /// recording can — or its thread could not be started. It is not a [`Self::Failed`], because
+    /// it says nothing about the file: it used to be filed as "no decoder for this container", and
+    /// a good recording stayed pictureless on every surface that kept standing on it.
+    ///
+    /// Every surface draws it as a video's refusal is drawn — no picture, and the fact lines — and
+    /// it is let go of on every road a `Failed` is. What differs is the asking: while
+    /// `asked_again` is false, the first surface that resolves the file asks once more, through
+    /// the one door, with no new input; the answer to that ask, if it runs out too, is filed with
+    /// `asked_again` true, and then only a new look asks (a hover that settles, a card that
+    /// opens, a surface that names the file anew). At most two reads per look, held in state.
+    Unanswered { asked_again: bool },
     /// **And why it failed** (owner's ruling 2026-09-12). The entry used to be a
     /// bare word, so the only surface that ever heard the reason was one that
     /// happened to be on the glass at the moment the answer landed; a pane that
@@ -20072,12 +20096,13 @@ enum PeekCacheEntry {
 ///
 /// A `Ready` weighs its native decode's pixels and is the one thing eviction chooses: the cost of
 /// having let it go is one worker read of a file that is still on the disk, and the surfaces
-/// drawing it keep the answer they were given (§7.1.3u). A `Pending` and a `Failed` — the
-/// unstarted record ([`DECODE_UNSTARTED`]) is a `Failed` — hold no pixels: each counts only the
+/// drawing it keep the answer they were given (§7.1.3u). A `Pending`, an `Unanswered` and a
+/// `Failed` — the unstarted record ([`DECODE_UNSTARTED`]) is a `Failed` — hold no pixels: each counts only the
 /// map's flat overhead per entry (`bt_term::BoundedCache`'s `ENTRY_OVERHEAD_BYTES`, 128 B), and
 /// neither is ever evicted, because each is the record of a question and an evicted record
 /// reads as *never asked*: the pane's, the page's and the flyout's next resolve would ask the
-/// worker again with no new input. A `Pending` leaves by its answer; a `Failed` leaves with the
+/// worker again with no new input. A `Pending` leaves by its answer; a `Failed` or an
+/// `Unanswered` leaves with the
 /// last surface that names its file ([`runtime::peek::let_go_unnamed_peek_records`]), by
 /// the file-change road ([`runtime::preview::forget_a_picture`]), or by a new peek over its file —
 /// a hover that settles ([`runtime::peek::peek_reads_the_file`]) or a glance card that opens
@@ -20085,7 +20110,7 @@ enum PeekCacheEntry {
 impl bt_term::Weighed for PeekCacheEntry {
     fn bytes_held(&self) -> u64 {
         match self {
-            Self::Pending { .. } | Self::Failed(_) => 0,
+            Self::Pending { .. } | Self::Unanswered { .. } | Self::Failed(_) => 0,
             Self::Ready { rgba, .. } => rgba.len() as u64,
         }
     }
@@ -21423,6 +21448,10 @@ enum SurfacePixels {
     },
     /// This file will not decode, and the reason the decoder gave.
     Failed(bt_term::InlineImageDecodeError),
+    /// A video's first frame was not answered in time and has been asked again
+    /// once already ([`PeekCacheEntry::Unanswered`]): nothing to draw, and
+    /// nothing to ask until a new look.
+    Unanswered,
 }
 
 /// **What one picture surface must do about its pixels this frame** — see
@@ -31708,8 +31737,9 @@ mod program_birth_tests {
 #[cfg(test)]
 mod shell_birth_tests {
     use super::*;
+    use crate::test_support::a_quiet_shell;
     use bt_platform::admission::WorkerCtx;
-    use bt_pty::test_shell::{Hygiene, TestShell};
+    use bt_pty::test_shell::Hygiene;
     use std::num::NonZeroU16;
     use std::sync::mpsc;
 
@@ -31812,32 +31842,9 @@ mod shell_birth_tests {
         )
     }
 
-    /// A real shell on a pseudoconsole, through the test-shell door: `cmd` on Windows, `sh`
-    /// elsewhere — neither keeps a history the account owns.
-    fn a_shell() -> Result<(PtySession, Hygiene), PtyError> {
-        #[cfg(windows)]
-        let command = bt_pty::PtyCommand::new("cmd.exe").arg("/D");
-        // A pane's shell is told the system's locale when the environment names none
-        // (`shell_integration::locale_declaration`); this one is told it the same way, or a
-        // test process with no `LANG` (an `ssh` session, a CI runner) hands `/bin/sh` the `C`
-        // locale and its line editor reads the CJK typed below as meta keys.
-        #[cfg(not(windows))]
-        let command = bt_platform::spawn_at_priority(
-            "bt-locale-test",
-            bt_platform::ThreadPriority::Normal,
-            |worker| bt_platform::read_system_locale_declaration(worker).declaration,
-        )
-        .expect("a worker")
-        .join()
-        .expect("the reading answers")
-        .iter()
-        .flat_map(bt_platform::LocaleDeclaration::variables)
-        .fold(
-            bt_pty::PtyCommand::new("/bin/sh"),
-            |command, (name, value)| command.env(*name, value),
-        );
-        let size = PtySize::cells(grid().columns, grid().rows);
-        TestShell::spawn(command, size).map(TestShell::into_session)
+    /// The size this module's shells are born at.
+    fn born_size() -> PtySize {
+        PtySize::cells(grid().columns, grid().rows)
     }
 
     /// The birth a test holds: it starts nothing until `gate` opens (or the lane suite's patience
@@ -31859,7 +31866,7 @@ mod shell_birth_tests {
         kept: mpsc::Sender<Hygiene>,
     ) -> impl FnOnce(&WorkerCtx) -> Result<PtySession, PtyError> + Send + 'static {
         held_birth(gate, move || {
-            a_shell().map(|(session, hygiene)| {
+            a_quiet_shell(born_size()).map(|(session, hygiene)| {
                 let _ = kept.send(hygiene);
                 session
             })
@@ -32017,7 +32024,7 @@ mod shell_birth_tests {
                 let resolver = share_that_waits(asked_by, share_answers);
                 let folder_gone = pty_door::gone_place(Some(spec), &resolver).is_some();
                 pty_door::Born {
-                    session: a_shell().map(|(session, hygiene)| {
+                    session: a_quiet_shell(born_size()).map(|(session, hygiene)| {
                         let _ = kept.send(hygiene);
                         session
                     }),
@@ -32329,7 +32336,7 @@ mod shell_birth_tests {
         };
         let seed = seed_of(profiles::WSL_ID);
 
-        let (at_once_shell, at_once_hygiene) = a_shell().expect("a real shell");
+        let (at_once_shell, at_once_hygiene) = a_quiet_shell(born_size()).expect("a real shell");
         let mut at_once = bare(&decision, &seed);
         finish_leaf_birth(
             &mut at_once,
@@ -52381,9 +52388,9 @@ const TITLE_MAX_CHARS: usize = 40;
 /// of thing. Forty characters is a sane cap on a *name*: a name is something a
 /// person or a program chose to be read at a glance, and forty of them is a
 /// generous glance. It is a nonsensical cap on a *path*, because nearly every
-/// real working directory is longer — `D:\Developer\folio-terminal\crates\bt-app`
+/// real working directory is longer — `D:\Developer\lunar-workshop\crates\bt-app`
 /// is already forty-one — so capping the head's cwd layer at `TITLE_MAX` would
-/// print `D:\Developer\folio-terminal\crates\bt-ap` and stop, which defeats the
+/// print `D:\Developer\lunar-workshop\crates\bt-ap` and stop, which defeats the
 /// exact thing C28 puts a whole path in a head for. A head that answers "where
 /// is this" with a path cut off before its last segment has answered nothing,
 /// and has done it while looking like a complete answer.

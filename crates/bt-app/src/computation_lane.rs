@@ -628,7 +628,9 @@ pub(crate) fn read_video_glance(
         bt_transcript::paths::PathNamer::ThisWindow,
     ) {
         return VideoGlance {
-            frame: None,
+            // Not read, and never will be unasked: the same answer every time, which is a
+            // refusal's.
+            frame: Err(bt_platform::video::NoFrame::Refused),
             facts: preview::VideoFacts::default(),
             mtime: None,
         };
@@ -640,12 +642,18 @@ pub(crate) fn read_video_glance(
         let _ = worker;
         bt_platform::video::first_frame(path, VIDEO_FRAME_FIT_PX.0, VIDEO_FRAME_FIT_PX.1)
     };
+    // What the open learned about the recording, which only a frame carries.
+    let (duration_ms, native) = match &frame {
+        Ok(frame) => (
+            frame.duration_ms,
+            Some((frame.native_width, frame.native_height)),
+        ),
+        Err(_) => (None, None),
+    };
     VideoGlance {
         facts: preview::VideoFacts {
-            duration_ms: frame.as_ref().and_then(|frame| frame.duration_ms),
-            native: frame
-                .as_ref()
-                .map(|frame| (frame.native_width, frame.native_height)),
+            duration_ms,
+            native,
             bytes,
         },
         frame,

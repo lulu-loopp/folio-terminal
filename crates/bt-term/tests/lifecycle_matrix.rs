@@ -450,7 +450,7 @@ fn g1_vendor_tail_harvests_once_at_transaction_finish() {
 #[test]
 fn g1_width_reflow_keeps_the_displaced_banner_reachable_through_history() {
     const WARNING: &str = "Did not find path entry D:\\App\\Base\\anaconda3\\bin";
-    const PROMPT: &str = "(base) PS D:\\Developer\\folio-terminal> ";
+    const PROMPT: &str = "(base) PS D:\\Developer\\lunar-workshop> ";
 
     let start = Instant::now();
     let mut session = new_session(80, 2);
@@ -541,7 +541,7 @@ fn g1_sparse_width_reflow_grows_down_into_blank_rows() {
 #[test]
 fn g1_full_width_reflow_stages_only_the_rows_that_cannot_fit() {
     const WARNING: &str = "Did not find path entry D:\\App\\Base\\anaconda3\\bin";
-    const PROMPT: &str = "(base) PS D:\\Developer\\folio-terminal> ";
+    const PROMPT: &str = "(base) PS D:\\Developer\\lunar-workshop> ";
 
     let start = Instant::now();
     let mut session = new_session(80, 4);
@@ -589,7 +589,7 @@ fn g1_full_width_reflow_stages_only_the_rows_that_cannot_fit() {
 #[test]
 fn recalled_input_keeps_its_prompt_head_and_never_welds_to_the_banner_after_widen() {
     const WARNING: &str = "Did not find path entry D:\\App\\Base\\anaconda3\\bin";
-    const PROMPT: &str = "(base) PS D:\\Developer\\folio-terminal\\dist> ";
+    const PROMPT: &str = "(base) PS D:\\Developer\\lunar-workshop\\dist> ";
     const RECALLED: &str =
         "echo \"[Image: source: C:\\Windows\\Web\\Wallpaper\\Windows\\img0.jpg]\"";
     const REPAINTED: &str = "Write-Output ('BT_APP_' + 'INPUT_OK')";
@@ -1131,7 +1131,7 @@ fn g1_no_output_resize_jitter_does_not_duplicate_captured_rows() {
 
 #[test]
 fn g1_no_output_shrink_grow_storm_harvests_no_history_and_keeps_bottom_following() {
-    const PROMPT: &str = "(base) PS D:\\Developer\\folio-terminal>";
+    const PROMPT: &str = "(base) PS D:\\Developer\\lunar-workshop>";
     let mut session = new_session(64, 8);
     session
         .feed(
@@ -1230,7 +1230,7 @@ fn m1_8_six_line_resize_can_never_manufacture_five_lines_below() {
 
 fn replay_r2_extreme_shrink_grow_and_recall(start: Instant) -> Vec<bt_term::ResizeTraceEvent> {
     const WARNING: &str = "Did not find path entry D:\\App\\Base\\anaconda3\\bin";
-    const PROMPT: &str = "(base) PS D:\\Developer\\folio-terminal> ";
+    const PROMPT: &str = "(base) PS D:\\Developer\\lunar-workshop> ";
     const RECALL: &str = "Write-Output ('BT_APP_' + 'INPUT_OK')";
     let mut session = new_session(104, 26);
     session
@@ -1492,7 +1492,7 @@ fn g3_active_narrow_harvest_widen_returns_every_wrapline_to_vendor() {
 
 #[test]
 fn s9_separate_resize_transactions_return_the_active_prompt_to_vendor_reflow() {
-    let prompt = "(base) PS D:\\Developer\\folio-terminal> ";
+    let prompt = "(base) PS D:\\Developer\\lunar-workshop> ";
     let start = Instant::now();
     let mut session = new_session(40, 4);
     session.feed_at(prompt.as_bytes(), start).unwrap();
@@ -1552,8 +1552,8 @@ fn s9_separate_resize_transactions_return_the_active_prompt_to_vendor_reflow() {
 fn narrowing_an_idle_wrapped_prompt_keeps_the_cursor_after_its_trailing_space() {
     const STARTUP: &[u8] = b"Did not find path entry D:\\App\\Base\\anaconda3\\bin\r\n\
 \x1b[0m\x1b[0m(base) \x1b[0m\x1b[0m\
-\x1b]7;file:///D:/Developer/folio-terminal/dist\x07\
-\x1b]133;A\x07PS D:\\Developer\\folio-terminal\\dist> \x1b]133;B\x07";
+\x1b]7;file:///D:/Developer/lunar-workshop/dist\x07\
+\x1b]133;A\x07PS D:\\Developer\\lunar-workshop\\dist> \x1b]133;B\x07";
 
     let start = Instant::now();
     let mut session = new_session(104, 39);
@@ -1586,8 +1586,8 @@ fn narrowing_an_idle_wrapped_prompt_keeps_the_cursor_after_its_trailing_space() 
 fn repeated_idle_prompt_cpr_resize_dance_keeps_the_cursor_after_the_prompt() {
     const STARTUP: &[u8] = b"Did not find path entry D:\\App\\Base\\anaconda3\\bin\r\n\
 \x1b[0m\x1b[0m(base) \x1b[0m\x1b[0m\
-\x1b]7;file:///D:/Developer/folio-terminal/dist\x07\
-\x1b]133;A\x07PS D:\\Developer\\folio-terminal\\dist> \x1b]133;B\x07";
+\x1b]7;file:///D:/Developer/lunar-workshop/dist\x07\
+\x1b]133;A\x07PS D:\\Developer\\lunar-workshop\\dist> \x1b]133;B\x07";
     const RESIZE_BURSTS: &[&[u32]] = &[
         &[27],
         &[41, 44],
@@ -1907,7 +1907,7 @@ proptest! {
             "same-prefix-but-a-second-hard-line".to_owned(),
             "spaces inside this logical line stay intact".to_owned(),
             "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ".to_owned(),
-            "(base) PS D:\\Developer\\folio-terminal>".to_owned(),
+            "(base) PS D:\\Developer\\lunar-workshop>".to_owned(),
         ];
         let mut session = new_session(72, 12);
         session.feed(expected.join("\r\n").as_bytes()).unwrap();

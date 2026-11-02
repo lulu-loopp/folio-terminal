@@ -7353,7 +7353,7 @@ pub struct PaneHeadGeometry {
     ///
     /// The run is revealed by a hover and the head kept a hole for it at rest,
     /// so a long name was cut sixty pixels early to make room for three buttons
-    /// that were not on screen: 「批2进度 · D:\Documents\…\user_pa…」 beside a
+    /// that were not on screen: 「批2进度 · D:\Developer\…\report_pa…」 (path neutralised) beside a
     /// stripe of empty head. A head at rest shows one thing and it should have
     /// all of the row to show it in; when the run comes up it is drawn *over*
     /// this box, on [`Self::scrim`], and the tail it covers dissolves into the
@@ -9655,7 +9655,7 @@ pub struct ChromeGroup {
 /// icon rail overlaps the terminal for 174 of its 220 pixels). Being last in the
 /// fill channel was never enough. A pane head's caption is *text*, the text
 /// channel runs after every fill in the same run, and so the path a pane is
-/// showing — `D:\Developer\folio-terminal` — printed straight through the face
+/// showing — `D:\Developer\lunar-workshop` — printed straight through the face
 /// of the rail lying over it, which is what a real window showed.
 ///
 /// Splitting the run is the same fix `353f1aa` made for the settings dialog, for
@@ -31439,7 +31439,7 @@ mod tests {
     /// was handed, in `--ink3` over the body it stands on.
     #[test]
     fn the_foot_draws_a_hairline_a_folder_and_the_path() {
-        let path = r"C:\Users\Alice\Developer\folio-terminal";
+        let path = r"C:\Users\Alice\Developer\lunar-workshop";
         let (_, layout, column, chrome) = files_chrome(footed_tree(path), None);
         let palette = chrome_palette();
         let geometry = files_pane_geometry(
@@ -35888,7 +35888,7 @@ mod tests {
     /// (user report, 2026-08-27).
     ///
     /// RED EVIDENCE (2026-08-27, the report, on a terminal head at `1.0`): the
-    /// caption read `批 2进度 · D:\Documents\SyncFolder\Developer\WorldQuant\user_pa…`
+    /// caption read (path neutralised) `批 2进度 · D:\Developer\notes\ledger\report_pa…`
     /// and the pixels to the right of it were empty head. They were empty
     /// because `pane_head_geometry` subtracted the trailing run — `⌄ 🗀 ✕`,
     /// three boxes and two joints — from the title's box whether or not the run
@@ -39581,7 +39581,7 @@ mod tests {
     /// refuse.
     #[test]
     fn a_terminal_pane_head_prints_its_own_name_and_falls_back_honestly() {
-        let name = r"D:\Developer\folio-terminal\crates\bt-app";
+        let name = r"D:\Developer\lunar-workshop\crates\bt-app";
         assert_eq!(
             seat_caption(SeatKind::Terminal, None, Some(name), None),
             name,
@@ -40048,7 +40048,7 @@ mod tests {
     /// while the first stays green, which is the exact shape of the regression.
     #[test]
     fn the_ghost_cuts_a_name_at_its_last_separator_where_the_head_prints_it_whole() {
-        let path = r"D:\Developer\folio-terminal\crates\bt-app";
+        let path = r"D:\Developer\lunar-workshop\crates\bt-app";
         assert_eq!(
             seat_short_caption(SeatKind::Terminal, None, Some(path), None),
             "bt-app",
@@ -40896,7 +40896,7 @@ mod tests {
     ///
     /// It is handed a raw path here because a path is the one input on which the
     /// two spellings differ, and the closing assertion spends that difference:
-    /// the same `cwd`, on a bar, is cut to `folio-terminal`, and on a head is
+    /// the same `cwd`, on a bar, is cut to `lunar-workshop`, and on a head is
     /// printed whole. A collapsed bar is 24 logical pixels of the other axis and
     /// is a label in the same sense the drag ghost is, so it takes the ghost's
     /// length; C28's own comparison between the two lengths is stated in full at
@@ -40906,7 +40906,7 @@ mod tests {
     /// and the first assertion reads the whole path.
     #[test]
     fn a_collapsed_bar_names_its_seat_by_the_short_name() {
-        let cwd = "C:\\Users\\Alice\\Developer\\folio-terminal";
+        let cwd = "C:\\Users\\Alice\\Developer\\lunar-workshop";
         let seats = Seats::lone_terminal();
         let bar = LogicalRect::new(
             LogicalPx::ZERO,
@@ -40928,7 +40928,7 @@ mod tests {
             .collect();
         assert_eq!(named.len(), 1, "one name on the bar");
         assert_eq!(
-            named[0].text, "folio-terminal",
+            named[0].text, "lunar-workshop",
             "the last segment, not the path"
         );
         let mark = parts
@@ -49357,7 +49357,7 @@ mod tests {
     /// printed through the rail.**
     ///
     /// A real window in icon mode, rail hovered open: the path a pane was showing
-    /// — `D:\Developer\folio-terminal` — lay across the rail's first row, on top
+    /// — `D:\Developer\lunar-workshop` — lay across the rail's first row, on top
     /// of the panel, in full ink. Nothing was mis-positioned. The rail was
     /// painted last, exactly as R1 asks, and last was not enough: chrome reaches
     /// the glass in three channels with a fixed order over the whole run, so
@@ -49385,7 +49385,7 @@ mod tests {
         let names: BTreeMap<SeatId, String> = seats
             .terminals()
             .into_iter()
-            .map(|seat| (seat, r"D:\Developer\folio-terminal".to_owned()))
+            .map(|seat| (seat, r"D:\Developer\lunar-workshop".to_owned()))
             .collect();
         let tabs = [TabContent {
             mark_kind: ChromeMark::ProfilePowerShell,
@@ -49468,7 +49468,7 @@ mod tests {
             .seats
             .labels
             .iter()
-            .find(|label| label.text.contains("folio-terminal"))
+            .find(|label| label.text.contains("lunar-workshop"))
             .expect("a two-pane tab wears its panes' names over their heads");
         assert!(
             covered.rect[0] < face,
