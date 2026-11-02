@@ -184,10 +184,42 @@ try {
                     "htm", "md", "rs", "txt", "json", "toml", "yml", "yaml", "exe",
                     "dll", "ps1", "sh", "bat", "ttf", "otf", "woff", "woff2", "log")
 
+    # **What the patterns below open on** (2026-11-02, 0.4.9 row 183). .NET skips
+    # ahead to the first thing a pattern can start with, so a pattern that opens on
+    # a letter (a drive) or on a run of word characters (a mailbox) is tried at
+    # nearly every character of every file: the home, synced-folder and mail
+    # patterns cost the scan about 5 s that way, three quarters of its time. Each
+    # now opens on what is rare (a separator, the folder's name, the `@`) and asks
+    # for the rest behind it, in a lookbehind group named `lead`; a hit reports
+    # `lead` and the match together, so its text — and its key in a keyed list —
+    # is the span it always was.
+    #
+    # **A drive letter stands alone**: the character before it is not a letter or
+    # a digit, so a URL whose scheme's colon is followed by a path (`webpack:/`,
+    # `file:/`, a host name with a port) is not a drive. An escape in a source
+    # literal (`\n`, `\r`, `\t`, `\0`, `\xHH`) counts as standing alone: a
+    # recorded `…\r\nX:\…` is a drive at the start of a line.
+    $escapeBefore = '(?<=\\[nrt0]|\\x[0-9A-Fa-f]{2})'
+    $standsAlone = '(?:(?<![A-Za-z0-9])|' + $escapeBefore + ')'
+    # **A drive, in every spelling a tool prints one** (row 183): `X:` with any
+    # run of separators after it (one, two, or the three and four of a doubly
+    # escaped literal; `file:///X:/` and `\\?\X:\` are the same drive), WSL's
+    # `/mnt/x/`, Cygwin's `/cygdrive/x/` and Git Bash's `/x/`. The last has a
+    # one-letter segment that URLs and Unix paths share, so it counts only where
+    # it is not inside a path or a URL: not after a word character, `/`, `\`,
+    # `.`, `~` or `-`. After `:`, `=`, `;`, a space or a quote it does count —
+    # that is how a Git Bash `PATH` lists it.
+    # Not covered, and named so that no one takes them for covered: a UNC admin
+    # share (`\\host\x$\…`) and a drive spelt as an environment variable
+    # (`%SystemDrive%\…`). No tracked file holds either.
+    $driveLead = '(?:' + $standsAlone + '[A-Za-z]:|/(?:mnt|cygdrive)/[a-z])[\\/]+|' +
+                 '(?:(?<![\w/\\.~-])|' + $escapeBefore + ')/[a-z]/'
     # The `/home/` and `/Users/` spellings are case-sensitive on purpose: `/Home/End`
-    # is a pair of key names, not a directory.
-    $home_re = [regex]"(?:[A-Za-z]:[\\/]{1,2}[Uu]sers[\\/]{1,2}|/home/|/Users/)(%[A-Za-z_]+%|[A-Za-z0-9_.$-]{1,32})"
-    $mail_re = [regex]"[A-Za-z0-9._%+-]+@([A-Za-z0-9.-]+\.([A-Za-z]{2,24}))"
+    # is a pair of key names, not a directory. The drive spelling opens on the
+    # separator after the drive, so a `X:/Users/` hit keeps its drive rather than
+    # being taken by the `/Users/` alternative.
+    $home_re = [regex]('(?:(?<=(?<lead>' + $standsAlone + '[A-Za-z]:))[\\/]+[Uu]sers[\\/]+|/home/|/Users/)(%[A-Za-z_]+%|[A-Za-z0-9_.$-]{1,32})')
+    $mail_re = [regex]'(?<=(?<lead>[A-Za-z0-9._%+-]+))@([A-Za-z0-9.-]+\.([A-Za-z]{2,24}))'
     # The checkout this product was developed in, before and after the 2026-10-23
     # disk move: `Developer\BetterTerminal`, and the three folders under
     # `Developer\Folio\` this project's work has run from since — the checkout,
@@ -214,34 +246,27 @@ try {
     # Nor `Developer\Folio\` alone: a fixture standing in a folder named after
     # the product (`…\Developer\folio\notes.md`, `…\Developer\Folio\docs`) is a
     # placeholder like `folio` in the account list below, not this checkout.
-    $checkout_re = [regex]"(?i)Developer[\\/]{1,2}(?:BetterTerminal|Folio[\\/]{1,2}(?:BetterTerminal|trace|wt)\b|(?:wt|trace|launchers|build)\b|folio-terminal\b|bt-wt\b)"
+    $checkout_re = [regex]"(?i)Developer[\\/]+(?:BetterTerminal|Folio[\\/]+(?:BetterTerminal|trace|wt)\b|(?:wt|trace|launchers|build)\b|folio-terminal\b|bt-wt\b)"
     # **The owner's synced-documents folder** (2026-11-01, 0.4.9 row 159; row
     # 157's review F3). Projects outside this one live under it, and recorded
     # captions and prompts from them reached product fixtures, where neither
     # pattern above could see them: there is no `Users\` in front of it and no
     # listed folder behind `Developer\`. It is refused under the checkout check,
-    # in its drive-letter, `file:///` and WSL spellings. A redirected Documents
+    # at any drive in every spelling `$driveLead` knows. A redirected Documents
     # folder on another drive (`X:\Documents\PowerShell\…`) is a Windows layout
     # the product has to handle, not this machine's, and stays allowed.
-    $synced_re = [regex]"(?i)(?:[A-Za-z]:|/mnt/[a-z])[\\/]{1,2}Documents[\\/]{1,2}SyncFolder\b"
+    $synced_re = [regex]('(?i)(?<=(?<lead>(?:' + $driveLead + ')Documents[\\/]+))SyncFolder\b')
     # **The owner's software-install folder** (2026-11-02, 0.4.9 row 178; row
     # 159's R8). It sits at a drive root and holds conda and Git, so conda's
     # startup line and Git's path reached recordings and fixtures from the
     # owner's own panes, where no pattern above could see them. It is refused
-    # under the checkout check, at any drive and in its `file:///` and WSL
-    # spellings; a fixture stands in a same-length neutral root (`X:\Kit\…`),
-    # so a recording's widths hold. A drive letter is one standing alone: the
-    # character before it may not be a letter or a digit, so a URL whose scheme's
-    # colon is followed by the same word (a bundler's virtual module, a
-    # localhost host name) is not a drive. The folder's name is what is
-    # matched, and the drive is asked behind it: a pattern that opens on a
-    # drive letter is tried at every character of every file and cost the
-    # scan about 2.5 s, one that opens on the name is tried where the name
-    # stands (about 0.1 s). Two spellings are not covered yet (0.4.9 row
-    # 183): Git Bash's `/<d>/<root>/`, whose one-letter segment URL and Unix
-    # paths in the tree share, and a separator of three or more backslashes
-    # (a doubly escaped literal). No tracked file holds either today.
-    $install_re = [regex]"(?i)(?<=(?:(?<![A-Za-z0-9])[A-Za-z]:|/mnt/[a-z])[\\/]{1,2})App\b"
+    # under the checkout check, at any drive in every spelling `$driveLead`
+    # knows; a fixture stands in a same-length neutral root (`X:\Kit\…`), so a
+    # recording's widths hold. A bundler's virtual module or a localhost host
+    # name with the same word after a scheme's colon is not a drive (see
+    # `$standsAlone`). Its hit reports the drive with the name (row 183; row 178
+    # reported the name alone, and its one keyed row was re-keyed for it).
+    $install_re = [regex]('(?i)(?<=(?<lead>(?:' + $driveLead + ')))App\b')
     $author_re = [regex]"(?i)weiyi|umich\.edu"
     # The three sentences the name above may appear in — see the loop below.
     $copyright_re = [regex]"(?i)copyright\b.*\bweiyi shi\b"
@@ -336,24 +361,31 @@ try {
         foreach ($m in $checkout_re.Matches($text)) {
             [pscustomobject]@{ Check = "checkout"; Value = $m.Value; Problem = "names the development checkout: $($m.Value)" }
         }
+        # The four patterns below ask for part of their hit behind them, in
+        # `lead`; the hit is that and the match. (`lead` is numbered after the
+        # unnamed groups, so `Groups[1]` and `Groups[2]` keep their meaning.)
         foreach ($m in $synced_re.Matches($text)) {
-            [pscustomobject]@{ Check = "checkout"; Value = $m.Value; Problem = "names the owner's synced-documents folder: $($m.Value)" }
+            $hit = $m.Groups["lead"].Value + $m.Value
+            [pscustomobject]@{ Check = "checkout"; Value = $hit; Problem = "names the owner's synced-documents folder: $hit" }
         }
         foreach ($m in $install_re.Matches($text)) {
-            [pscustomobject]@{ Check = "checkout"; Value = $m.Value; Problem = "names the owner's software-install folder at a drive root: $($m.Value)" }
+            $hit = $m.Groups["lead"].Value + $m.Value
+            [pscustomobject]@{ Check = "checkout"; Value = $hit; Problem = "names the owner's software-install folder at a drive root: $hit" }
         }
         foreach ($m in $home_re.Matches($text)) {
             $who = $m.Groups[1].Value
             $ok = ($placeholders -contains $who.ToLowerInvariant()) -or ($who -match "^%[A-Za-z_]+%$")
             if (-not $ok) {
-                [pscustomobject]@{ Check = "home"; Value = $m.Value; Problem = "names a real account directory: $($m.Value) (use one of: $($placeholders -join ', '))" }
+                $hit = $m.Groups["lead"].Value + $m.Value
+                [pscustomobject]@{ Check = "home"; Value = $hit; Problem = "names a real account directory: $hit (use one of: $($placeholders -join ', '))" }
             }
         }
         foreach ($m in $mail_re.Matches($text)) {
             $domain = $m.Groups[1].Value.ToLowerInvariant()
             if ($notDomains -contains $m.Groups[2].Value.ToLowerInvariant()) { continue }
             if ($domain -notmatch $exampleDomains) {
-                [pscustomobject]@{ Check = "mail"; Value = $m.Value; Problem = "carries a deliverable e-mail address: $($m.Value)" }
+                $hit = $m.Groups["lead"].Value + $m.Value
+                [pscustomobject]@{ Check = "mail"; Value = $hit; Problem = "carries a deliverable e-mail address: $hit" }
             }
         }
     }
