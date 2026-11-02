@@ -49,6 +49,48 @@ impl Renaming {
             // As `open_rename` does once the editor is in place.
             runtime.refresh_chrome();
         }
+        let font = match layout {
+            seats::TabLayoutMode::Vertical => bt_render::RAIL_TAB_FONT_LOGICAL_PX,
+            seats::TabLayoutMode::Horizontal => bt_render::WINDOW_TAB_FONT_LOGICAL_PX,
+        };
+        Self::drawn(folio, name, font)
+    }
+
+    /// **A window whose page pane has its address field open on `draft`**, the caret at the
+    /// draft's start, drawn: the field is the preview rail's own cell, measured by
+    /// `dress_preview_address_editor` in the rail's face — another painter, another target
+    /// (`ChromeTarget::PreviewAddress`) and another box than a tab's. A headless window hosts no
+    /// web engine, so the page is a seat standing shown with none behind it.
+    fn address(tag: &str, draft: &str) -> Self {
+        let (tab, page) = crate::test_support::tab_with_a_preview(1, Vec::new());
+        let mut folio = HeadlessFolio::with_tabs(tag, vec![tab], 0);
+        {
+            let mut runtime = folio.runtime();
+            let leaf = crate::LeafId {
+                tab: runtime.id,
+                seat: page,
+            };
+            runtime.window.web.insert(
+                leaf,
+                crate::webhost::WebSeat::shown_without_an_engine(crate::webhost::WebBounds {
+                    x: 0,
+                    y: 0,
+                    width: 200,
+                    height: 200,
+                }),
+            );
+            let mut editor = TabRename::open_address(leaf, draft);
+            editor.field.step(TextMove::Home, false);
+            runtime.window.rename = Some(editor);
+            runtime.refresh_chrome();
+        }
+        Self::drawn(folio, draft, seats::PREVIEW_RAIL_FONT_LOGICAL_PX)
+    }
+
+    /// The window drawn, and where its open editor's draft stands: the left edge of the caret
+    /// line the painter left (the caret is at the draft's start), its vertical middle, and the
+    /// draft shaped at `font_logical_px` in the window's scale.
+    fn drawn(mut folio: HeadlessFolio, name: &str, font_logical_px: f32) -> Self {
         folio.draw();
         let (left, top, bottom, advances) = {
             let runtime = folio.runtime();
@@ -56,11 +98,7 @@ impl Renaming {
                 .window
                 .rename_caret_line
                 .expect("the open editor is drawn with its caret");
-            let scale = runtime.window.renderer.scale_factor() as f32;
-            let font = match layout {
-                seats::TabLayoutMode::Vertical => bt_render::RAIL_TAB_FONT_LOGICAL_PX,
-                seats::TabLayoutMode::Horizontal => bt_render::WINDOW_TAB_FONT_LOGICAL_PX,
-            } * scale;
+            let font = font_logical_px * runtime.window.renderer.scale_factor() as f32;
             let (gpu, renderer) = (&mut runtime.app.gpu, &mut runtime.window.renderer);
             (
                 left,
@@ -161,6 +199,29 @@ fn a_press_inside_a_sidebar_tabs_name_puts_the_caret_at_the_pressed_seam() {
 #[test]
 fn a_press_inside_a_strip_tabs_name_puts_the_caret_at_the_pressed_seam() {
     presses_land_on_their_seams("rename-caret-strip", seats::TabLayoutMode::Horizontal);
+}
+
+/// RED (row 179, ruling R1; review F1) — **a press inside a page's address field puts the
+/// caret at the pressed seam**: the field is the same editor as a tab's name, drawn by the
+/// preview rail's own painter into its own box, and the press reads the run that painter left.
+///
+/// MUTATION: drop the `rename_drawn` record in `Runtime::dress_preview_address_editor` — the
+/// press finds no run and the caret stays at 0.
+#[test]
+fn a_press_inside_a_pages_address_field_puts_the_caret_at_the_pressed_seam() {
+    let mut renaming = Renaming::address("rename-caret-address", NAME);
+    renaming.click(renaming.at(AFTER_ZHONG, 1.0));
+    assert_eq!(
+        renaming.caret(),
+        (AFTER_ZHONG, AFTER_ZHONG..AFTER_ZHONG),
+        "a press just right of the seam after the first ideograph puts the caret there"
+    );
+    renaming.click(renaming.across(BEFORE_ZHONG, AFTER_ZHONG, 0.25));
+    assert_eq!(
+        renaming.caret().0,
+        BEFORE_ZHONG,
+        "and the left half of an ideograph is the seam in front of it"
+    );
 }
 
 /// RED (row 179, ruling R6) — **a press in the tab body past the name's last letter puts the

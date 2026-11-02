@@ -162,7 +162,27 @@ fn every_owner(on: On) -> Vec<CaptureOwner> {
             latch,
         }),
         CaptureOwner::RenameSelection(RenameSubject::Tab(on.tab)),
+        CaptureOwner::RenameSelection(RenameSubject::WebAddress {
+            leaf: crate::LeafId {
+                tab: on.shell.tab,
+                seat: on.shell.seat,
+            },
+        }),
     ]
+}
+
+/// **A drag across a name editor drawn on a pane** (C25 with a pane-bound subject, here a page's
+/// address field on `on`'s pane). It shares its kind's name with the drag across a tab's name, and
+/// the doors part the two: this one leaves the glass with its pane and goes with it, a tab's name
+/// does neither (0.4.9 plan row 179, review F2). The doors' lists name it by this label.
+const PANE_RENAME: &str = "RenameSelection on a pane";
+
+/// The name the doors' lists know `owner` by: its kind's name, except for [`PANE_RENAME`].
+fn label(owner: &CaptureOwner) -> &'static str {
+    match owner {
+        CaptureOwner::RenameSelection(RenameSubject::WebAddress { .. }) => PANE_RENAME,
+        owner => owner.name(),
+    }
 }
 
 /// Every owner kind's name, in §1.2's order.
@@ -193,6 +213,7 @@ fn every_name() -> Vec<&'static str> {
         "SettingsMenuBar",
         "RowMiddlePress",
         "RenameSelection",
+        PANE_RENAME,
     ]
 }
 
@@ -287,13 +308,13 @@ fn each_owner_against_and_gone(
     let count = owners(&application.runtime()).len();
     for which in 0..count {
         let owner = owners(&application.runtime()).swap_remove(which);
-        let name = owner.name();
+        let (name, label) = (owner.name(), label(&owner));
         hold(&mut application.runtime(), owner);
         run(application);
         let (held, ended) = after(&mut application.runtime());
-        let expected = if ends.contains(&name) {
+        let expected = if ends.contains(&label) {
             (None, vec![(name, ending)])
-        } else if gone_too.contains(&name) {
+        } else if gone_too.contains(&label) {
             (None, vec![(name, "owner gone")])
         } else {
             (Some(name), Vec::new())
@@ -303,7 +324,7 @@ fn each_owner_against_and_gone(
 }
 
 /// The owner kinds whose payload names a tab-bound surface (R-9's *off the glass*).
-const TAB_BOUND: [&str; 16] = [
+const TAB_BOUND: [&str; 17] = [
     "Divider",
     "PanePress",
     "RowPress",
@@ -317,6 +338,7 @@ const TAB_BOUND: [&str; 16] = [
     "RenderedSelection",
     "TerminalThumb",
     "TerminalFootMark",
+    PANE_RENAME,
     "Route::Local",
     "Route::Forward",
     "Route::MathBlock",
@@ -489,7 +511,7 @@ fn each_door_ends_a_held_capture() {
         &mut application,
         "a zoom",
         "off the glass",
-        &TAB_BOUND[..15],
+        &TAB_BOUND[..16],
         |runtime| every_owner(on_pane(runtime, 1)),
         |application| {
             let mut runtime = application.runtime();
@@ -667,16 +689,17 @@ fn each_door_ends_a_held_capture() {
         "TerminalFootMark",
         "Route::Local",
         "Route::Forward",
+        PANE_RENAME,
     ];
     for which in 0..all.len() {
         let mut application = two_tabs("ending-doors-pane");
         let owner = every_owner(on_pane(&application.runtime(), 1)).swap_remove(which);
-        let name = owner.name();
+        let (name, label) = (owner.name(), label(&owner));
         hold(&mut application.runtime(), owner);
         let mut runtime = application.runtime();
         let closing = shell(&runtime, 1).seat;
         runtime.close_pane(closing).expect("the pane closes");
-        let expected = if held_on_the_pane.contains(&name) {
+        let expected = if held_on_the_pane.contains(&label) {
             (None, vec![(name, "owner gone")])
         } else if name == "Divider" {
             // Not the pane's: the seat set's settle drops a divider whose layout changed, as it
@@ -726,8 +749,10 @@ fn each_door_ends_a_held_capture() {
             // And the glance card, which the tab that comes in front takes down by its own door.
             "GlanceHeadPress",
             "GlanceThumb",
-            // A drag across the tab's name editor, gone with the tab its name is.
+            // A drag across the tab's name editor, gone with the tab its name is, and one across
+            // a name drawn on one of its panes, gone with the tab that pane is in.
             "RenameSelection",
+            PANE_RENAME,
         ],
         |runtime| every_owner(on_pane(runtime, 0)),
         |application| {
