@@ -5642,7 +5642,9 @@ refs/tags/v1.0\x00b1\x00\x00\x00 \x002026-08-01T09:00:00-04:00\n";
         assert_eq!(fault, Some(GitFault::TimedOut));
         assert_eq!(
             pauses,
-            BUDGET.as_millis() / GIT_POLL_INTERVAL.as_millis(),
+            // Looked at, then paused: the deadline is reached on the pause that first carries
+            // the clock to or past it, so the count rounds up.
+            BUDGET.as_millis().div_ceil(GIT_POLL_INTERVAL.as_millis()),
             "the budget ran out after the looks it allows, and not one more"
         );
     }
@@ -5710,6 +5712,8 @@ refs/tags/v1.0\x00b1\x00\x00\x00 \x002026-08-01T09:00:00-04:00\n";
     /// the reaping usually wins; this states the fact.
     #[test]
     fn a_child_killed_past_its_time_has_let_go_of_its_pipes_when_the_fault_is_answered() {
+        const BUDGET: Duration = Duration::from_millis(150);
+
         let (program, arguments) = match bt_platform::host_platform() {
             bt_platform::HostPlatform::Windows => (
                 bt_platform::program_on_path(Path::new("ping")).expect("ping is on PATH"),
@@ -5725,13 +5729,19 @@ refs/tags/v1.0\x00b1\x00\x00\x00 \x002026-08-01T09:00:00-04:00\n";
         thread::spawn(move || {
             let (let_go, heard) = mpsc::channel();
             PIPES_LET_GO.with(|slot| *slot.borrow_mut() = Some(let_go));
-            let fault = run_git(command, &Counted::new(), Duration::from_millis(150)).err();
+            let clock = Counted::new();
+            let fault = run_git(command, &clock, BUDGET).err();
             // Asked at once, with no wait: what has let go by now let go before the answer.
             let pipes = heard.try_iter().count();
-            let _ = tx.send((fault, pipes));
+            let _ = tx.send((fault, pipes, clock.pauses()));
         });
-        let (fault, pipes) = crate::lane::receive(&rx, "the guard's fault");
+        let (fault, pipes, pauses) = crate::lane::receive(&rx, "the guard's fault");
         assert_eq!(fault, Some(GitFault::TimedOut));
+        assert_eq!(
+            pauses,
+            BUDGET.as_millis().div_ceil(GIT_POLL_INTERVAL.as_millis()),
+            "the budget ran out after the looks it allows, and not one more"
+        );
         assert_eq!(
             pipes, 2,
             "both pipes were let go before the fault was answered"
