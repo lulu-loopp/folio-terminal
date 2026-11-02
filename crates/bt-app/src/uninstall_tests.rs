@@ -2457,6 +2457,24 @@ fn after_pid_pauses(within: Duration) -> usize {
     usize::try_from(within.as_millis().div_ceil(AFTER_PID_POLL.as_millis())).unwrap()
 }
 
+/// **A door clock that counts its pauses against the budget `within`**
+/// (T-UNINSTALL-DOOR-AFTER-PID-WAIT-ON-A-CLOCK): a `CountedClock` that moves only by the pauses
+/// it is asked for, runs `at_pause` inside each with its number from one, and is red at a pause
+/// past `after_pid_pauses(within)`: a budget that never ends fails, never hangs.
+fn counted_within(
+    within: Duration,
+    mut at_pause: impl FnMut(usize) + Send + 'static,
+) -> CountedClock {
+    let budget = after_pid_pauses(within);
+    CountedClock::new(move |pause| {
+        assert!(
+            pause <= budget,
+            "the door paused {pause} times, past its budget ({budget} pauses)"
+        );
+        at_pause(pause);
+    })
+}
+
 /// **The door's clock while a real process it waits for ends**
 /// (T-UNINSTALL-DOOR-AFTER-PID-WAIT-ON-A-CLOCK): pause 1 lasts until `running` no longer runs —
 /// its end, as `install_flip::still_running` reads it — within the suite's patience
@@ -2465,12 +2483,7 @@ fn after_pid_pauses(within: Duration) -> usize {
 /// never a race between a real minute and its exit; an end that never comes costs the patience
 /// once, and the budget is then spent on the count.
 fn until_ended(running: Running, within: Duration) -> CountedClock {
-    let budget = after_pid_pauses(within);
-    CountedClock::new(move |pause| {
-        assert!(
-            pause <= budget,
-            "the door paused {pause} times, past its budget ({budget} pauses)"
-        );
+    counted_within(within, move |pause| {
         if pause == 1 {
             crate::lane::within_patience(|| !bt_platform::install_flip::still_running(running));
         }
@@ -2506,13 +2519,7 @@ fn the_door_answers_a_running_folio_when_its_asker_outlives_the_budget() {
         pid: me,
         started: bt_platform::install_flip::started_of(me).unwrap(),
     };
-    let budget = after_pid_pauses(AFTER_PID_WITHIN);
-    let clock = std::sync::Arc::new(CountedClock::new(move |pause| {
-        assert!(
-            pause <= budget,
-            "the door paused {pause} times, past its budget ({budget} pauses)"
-        );
-    }));
+    let clock = std::sync::Arc::new(counted_within(AFTER_PID_WITHIN, |_| {}));
     let (code, stdout) = {
         let (scope, clock) = (scope.clone(), clock.clone());
         on_a_worker(move |worker| {
@@ -2532,7 +2539,7 @@ fn the_door_answers_a_running_folio_when_its_asker_outlives_the_budget() {
         .in_lang(scope.lang)
         .stdout();
     assert_eq!((code, stdout), (2, running));
-    assert_eq!(clock.pauses(), budget);
+    assert_eq!(clock.pauses(), after_pid_pauses(AFTER_PID_WITHIN));
     assert_eq!(
         u128::from(clock.moved_ms()),
         AFTER_PID_WITHIN.as_millis(),
@@ -2577,12 +2584,7 @@ fn the_door_goes_on_in_the_pause_its_asker_ends() {
         started: bt_platform::install_flip::started_of(child.id()).unwrap(),
     };
     let mut held = Some((child.stdin.take().unwrap(), child));
-    let budget = after_pid_pauses(AFTER_PID_WITHIN);
-    let clock = std::sync::Arc::new(CountedClock::new(move |pause| {
-        assert!(
-            pause <= budget,
-            "the door paused {pause} times, past its budget ({budget} pauses)"
-        );
+    let clock = std::sync::Arc::new(counted_within(AFTER_PID_WITHIN, move |pause| {
         if pause == ENDS_IN {
             let (stdin, mut child) = held.take().unwrap();
             drop(stdin);
