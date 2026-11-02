@@ -1369,12 +1369,20 @@ impl Capsule {
     /// is four pixels of the field the candidate list is allowed to sit on.
     #[must_use]
     pub fn caret_line(&self, caret_x: f32, scale: f32) -> [f32; 4] {
-        let px = |logical: f32| logical * scale;
-        let caret = px(FIELD_CARET_LOGICAL_PX).round().max(1.0);
-        let text_left = self.field[0] + px(FIELD_PADDING_LOGICAL_PX);
-        let text_right = (self.field[2] - px(FIELD_PADDING_LOGICAL_PX)).max(text_left);
+        let caret = (FIELD_CARET_LOGICAL_PX * scale).round().max(1.0);
+        let [text_left, text_right] = self.text_run(scale);
         let x = (text_left + caret_x).min(text_right - caret);
         [x, self.field[1], x + caret, self.field[3]]
+    }
+
+    /// **The run the field's text is laid out in**, its left and right edge: the field inside its
+    /// own padding. One derivation for the painter, the caret and the run a press reads
+    /// (0.4.9 plan row 180).
+    #[must_use]
+    pub fn text_run(&self, scale: f32) -> [f32; 2] {
+        let padding = FIELD_PADDING_LOGICAL_PX * scale;
+        let left = self.field[0] + padding;
+        [left, (self.field[2] - padding).max(left)]
     }
 
     /// One toggle's box.
@@ -1550,6 +1558,10 @@ pub struct CapsuleLook<'a> {
     pub caret_x: f32,
     /// Whether the field holds the keyboard, which is whether a caret is drawn at all.
     pub focused: bool,
+    /// **Where the selection is washed**, in window pixels cut to the field's run — `None` for a
+    /// bare caret (0.4.9 plan row 180, ruling 1: a selection the field holds is drawn, whether
+    /// the keyboard, a reopening (B76) or a drag made it).
+    pub selection: Option<[f32; 2]>,
     /// The regex did not parse: the typed text turns red **where it is typed** (A28).
     pub broken: bool,
     /// What the counter box reads.
@@ -1602,13 +1614,17 @@ pub fn build(
     );
 
     // The field's text, at the field's own left padding.
-    let text_left = capsule.field[0] + px(FIELD_PADDING_LOGICAL_PX);
-    let text_rect = [
-        text_left,
-        capsule.field[1],
-        capsule.field[2] - px(FIELD_PADDING_LOGICAL_PX),
-        capsule.field[3],
-    ];
+    let [text_left, text_right] = capsule.text_run(scale);
+    let text_rect = [text_left, capsule.field[1], text_right, capsule.field[3]];
+    // The selection behind it, at the caret bar's own height — the settings dialog's wash.
+    if let Some([from, to]) = look.selection {
+        let inset = px(FIELD_CARET_INSET_LOGICAL_PX).round();
+        quads.push(OverlayQuad {
+            rect: [from, capsule.field[1] + inset, to, capsule.field[3] - inset],
+            color: palette.accent,
+            alpha: crate::text_field::SELECTION_WASH_ALPHA,
+        });
+    }
     labels.push(ChromeLabel {
         mono: false,
         text: look.text.to_owned(),
@@ -3271,6 +3287,7 @@ mod second_host_tests {
                 typed: true,
                 caret_x: 20.0,
                 focused: true,
+                selection: None,
                 broken: false,
                 counter: "1/4",
                 flags,

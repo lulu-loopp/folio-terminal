@@ -9882,6 +9882,10 @@ pub struct GitPromptLook<'a> {
     /// the field you are typing into, and a toast at the corner of the window
     /// would be the answer arriving somewhere other than the question.
     pub fault: Option<crate::git::RefNameFault>,
+    /// **Where the field's selection is washed**, in window pixels cut to the name's run — `None`
+    /// for a bare caret (0.4.9 plan row 180, ruling 1). The window reads it off the run it keeps
+    /// for a press; the layout never needs it.
+    pub selection: Option<[f32; 2]>,
 }
 
 /// Everything the menu needs to lay itself out and draw.
@@ -9927,6 +9931,14 @@ impl GitPromptRects {
         let left = self.field[0] + px(GIT_PROMPT_FIELD_PADDING_X_LOGICAL_PX);
         let right = self.field[2] - px(GIT_PROMPT_FIELD_PADDING_X_LOGICAL_PX);
         [left, self.field[1], right.max(left), self.field[3]]
+    }
+
+    /// Whether a point is inside the field — the part of the prompt a press puts a caret in
+    /// (0.4.9 plan row 180); the rest of the menu only swallows a press.
+    #[must_use]
+    pub fn field_holds(&self, x: f64, y: f64) -> bool {
+        let (x, y) = (x as f32, y as f32);
+        contains(self.field, x, y)
     }
 
     /// **The caret's line box** — its x from [`Self::caret_x`], its top and bottom
@@ -9987,7 +9999,7 @@ const GIT_PROMPT_MIN_WIDTH_LOGICAL_PX: f32 = 230.0;
 const GIT_PROMPT_FIELD_HEIGHT_LOGICAL_PX: f32 = 26.0;
 const GIT_PROMPT_FIELD_RADIUS_LOGICAL_PX: f32 = 5.0;
 const GIT_PROMPT_FIELD_PADDING_X_LOGICAL_PX: f32 = 8.0;
-const GIT_PROMPT_FONT_LOGICAL_PX: f32 = 12.5;
+pub(crate) const GIT_PROMPT_FONT_LOGICAL_PX: f32 = 12.5;
 const GIT_PROMPT_CAPTION_LINE_LOGICAL_PX: f32 = 14.0;
 const GIT_PROMPT_HINT_LINE_LOGICAL_PX: f32 = 14.0;
 const GIT_PROMPT_GAP_LOGICAL_PX: f32 = 5.0;
@@ -10201,6 +10213,15 @@ pub fn git_menu_build(layout: &GitMenuLayout, look: &GitMenuLook<'_>) -> Vec<Ove
         ));
         let typed = !prompt.text.is_empty();
         let text_rect = rects.text_run(layout.scale);
+        // The selection behind the name, at the caret bar's height — the settings dialog's wash.
+        if let Some([from, to]) = prompt.selection {
+            let inset = px(GIT_PROMPT_CARET_INSET_LOGICAL_PX).round();
+            quads.push(OverlayQuad {
+                rect: [from, rects.field[1] + inset, to, rects.field[3] - inset],
+                color: palette.accent,
+                alpha: crate::text_field::SELECTION_WASH_ALPHA,
+            });
+        }
         labels.push(ChromeLabel {
             mono: false,
             text: if typed {
@@ -25772,6 +25793,7 @@ mod tests {
             before_caret: "feature",
             preedit: "",
             fault: None,
+            selection: None,
         };
         let look = GitMenuLook {
             target: &target,

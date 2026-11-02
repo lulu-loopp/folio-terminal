@@ -1231,6 +1231,7 @@ impl<B: Backend> Runtime<'_, B> {
             Popup::Palette => {
                 self.window.palette = None;
                 self.window.palette_layout = None;
+                self.window.drawn_fields.palette = None;
             }
         }
         // **And the rail is asked again, because its answer just changed under a

@@ -53,6 +53,7 @@ use crate::{
     RowHost, RowMiddlePress, RowPress, Runtime, TabId, UserInputKind, VideoPicturePress, float,
     input,
 };
+use super::FieldDrag;
 use anyhow::Result;
 use bt_layout::SeatId;
 use std::time::Instant;
@@ -225,7 +226,7 @@ impl CaptureOwner {
             | Self::SettingsMenuBar(_)
             | Self::VideoPicture(_)
             | Self::RowMiddlePress(_)
-            | Self::RenameSelection(_) => true,
+            | Self::FieldSelection(_) => true,
         }
     }
 
@@ -256,7 +257,7 @@ impl CaptureOwner {
             Self::SettingsMenuBar(_) => "SettingsMenuBar",
             Self::VideoPicture(_) => "VideoPicture",
             Self::RowMiddlePress(_) => "RowMiddlePress",
-            Self::RenameSelection(_) => "RenameSelection",
+            Self::FieldSelection(_) => "FieldSelection",
         }
     }
 
@@ -269,15 +270,24 @@ impl CaptureOwner {
             Self::BlockThumb(_, drag) => Some(drag.surface),
             Self::PicturePan(_, drag) => Some(drag.surface),
             Self::RenderedSelection(_, drag) => Some(drag.surface),
-            Self::RenameSelection(
-                RenameSubject::PreviewName { surface, .. }
-                | RenameSubject::PreviewCrumb { surface, .. },
+            Self::FieldSelection(
+                FieldDrag::Name(
+                    RenameSubject::PreviewName { surface, .. }
+                    | RenameSubject::PreviewCrumb { surface, .. },
+                )
+                | FieldDrag::GraphSearch(_, surface),
             ) => Some(*surface),
-            Self::RenameSelection(
-                RenameSubject::Tab(_)
-                | RenameSubject::WebAddress { .. }
-                | RenameSubject::FilesRow { .. }
-                | RenameSubject::FilesNew { .. },
+            Self::FieldSelection(
+                FieldDrag::Name(
+                    RenameSubject::Tab(_)
+                    | RenameSubject::WebAddress { .. }
+                    | RenameSubject::FilesRow { .. }
+                    | RenameSubject::FilesNew { .. },
+                )
+                | FieldDrag::FindBar(_)
+                | FieldDrag::Settings(_)
+                | FieldDrag::Palette
+                | FieldDrag::GitPrompt,
             )
             | Self::Divider(_)
             | Self::TabPress(_)
@@ -328,7 +338,7 @@ impl CaptureOwner {
             | Self::EditSelection(..)
             | Self::Route(_)
             | Self::SettingsSlider(_)
-            | Self::RenameSelection(_) => false,
+            | Self::FieldSelection(_) => false,
         }
     }
 
@@ -371,10 +381,14 @@ impl CaptureOwner {
             }
             Self::Route(MouseRoute::Forward { owner, .. }) => glass.takes(owner.tab, owner.seat),
             Self::Route(MouseRoute::MathBlock) => active == glass.tab && glass.kept.is_none(),
-            // A box drawn on a pane leaves with its pane; a tab's name is the strip's, which is
-            // the window's.
-            Self::RenameSelection(subject) => {
-                rename_pane(subject).is_some_and(|leaf| glass.takes(leaf.tab, leaf.seat))
+            // A field drawn on a pane leaves with its pane, and a graph's search with its
+            // surface, as a selection on that surface does; a tab's name is the strip's, and the
+            // dialog, the palette and a menu are the window's.
+            Self::FieldSelection(FieldDrag::GraphSearch(tab, surface)) => {
+                glass.takes_the_surface(*tab, *surface)
+            }
+            Self::FieldSelection(field) => {
+                field_pane(field).is_some_and(|leaf| glass.takes(leaf.tab, leaf.seat))
             }
             Self::Drag(_)
             | Self::TabPress(_)
@@ -429,36 +443,56 @@ impl CaptureOwner {
             Self::SettingsSlider(_) | Self::SettingsMenuBar(_) => gone == Gone::SettingsSheet,
             // The editor's own exit lets go of it first ([`Runtime::finish_rename`]); what is
             // left here is the thing its box was drawn on going under it.
-            Self::RenameSelection(subject) => match subject {
-                RenameSubject::Tab(tab) => the_tab(gone, *tab),
-                RenameSubject::PreviewName { surface, .. }
-                | RenameSubject::PreviewCrumb { surface, .. } => {
+            Self::FieldSelection(field) => match field {
+                FieldDrag::Name(RenameSubject::Tab(tab)) => the_tab(gone, *tab),
+                FieldDrag::Name(
+                    RenameSubject::PreviewName { surface, .. }
+                    | RenameSubject::PreviewCrumb { surface, .. },
+                ) => {
                     surface_goes(gone, *surface)
                         || matches!(surface, PreviewSurface::Seat(leaf) if the_tab(gone, leaf.tab))
                 }
-                RenameSubject::WebAddress { leaf }
-                | RenameSubject::FilesRow { leaf, .. }
-                | RenameSubject::FilesNew { leaf, .. } => {
+                FieldDrag::GraphSearch(tab, surface) => on_surface(gone, *tab, *surface),
+                FieldDrag::Name(
+                    RenameSubject::WebAddress { leaf }
+                    | RenameSubject::FilesRow { leaf, .. }
+                    | RenameSubject::FilesNew { leaf, .. },
+                )
+                | FieldDrag::FindBar(leaf) => {
                     the_tab(gone, leaf.tab) || pane_of(gone, leaf.tab, leaf.seat)
                 }
+                FieldDrag::Settings(_) => gone == Gone::SettingsSheet,
+                // The palette and a git menu are put away by a press or a key, never by a pane
+                // or a tab going; a move after one went finds no field and does nothing, and
+                // the button's release lets go.
+                FieldDrag::Palette | FieldDrag::GitPrompt => false,
             },
         }
     }
 }
 
-/// **The pane a name editor's box is drawn on**, or `None` for a tab's name (the strip's) and for
-/// a box in a floating window's or the glance card's head.
-fn rename_pane(subject: &RenameSubject) -> Option<LeafId> {
-    match subject {
-        RenameSubject::Tab(_) => None,
-        RenameSubject::PreviewName { surface, .. }
-        | RenameSubject::PreviewCrumb { surface, .. } => match surface {
+/// **The pane a field is drawn on**, or `None` for a field of the window's own: a tab's name (the
+/// strip's), a box in a floating window's or the glance card's head, the settings dialog, the
+/// palette and a git menu's prompt. A graph's search is asked by its surface instead.
+fn field_pane(field: &FieldDrag) -> Option<LeafId> {
+    match field {
+        FieldDrag::Name(RenameSubject::Tab(_))
+        | FieldDrag::GraphSearch(..)
+        | FieldDrag::Settings(_)
+        | FieldDrag::Palette
+        | FieldDrag::GitPrompt => None,
+        FieldDrag::Name(
+            RenameSubject::PreviewName { surface, .. } | RenameSubject::PreviewCrumb { surface, .. },
+        ) => match surface {
             PreviewSurface::Seat(leaf) => Some(*leaf),
             PreviewSurface::Float(_) | PreviewSurface::Peek => None,
         },
-        RenameSubject::WebAddress { leaf }
-        | RenameSubject::FilesRow { leaf, .. }
-        | RenameSubject::FilesNew { leaf, .. } => Some(*leaf),
+        FieldDrag::Name(
+            RenameSubject::WebAddress { leaf }
+            | RenameSubject::FilesRow { leaf, .. }
+            | RenameSubject::FilesNew { leaf, .. },
+        )
+        | FieldDrag::FindBar(leaf) => Some(*leaf),
     }
 }
 
@@ -658,7 +692,7 @@ impl<B: Backend> Runtime<'_, B> {
             | CaptureOwner::VideoPicture(_)
             | CaptureOwner::RowMiddlePress(_)
             | CaptureOwner::EditSelection(..)
-            | CaptureOwner::RenameSelection(_)
+            | CaptureOwner::FieldSelection(_)
             | CaptureOwner::TabPress(_)
             | CaptureOwner::PanePress(..)
             | CaptureOwner::RowPress(_)
@@ -696,7 +730,7 @@ impl<B: Backend> Runtime<'_, B> {
             | CaptureOwner::SettingsMenuBar(_)
             | CaptureOwner::VideoPicture(_)
             | CaptureOwner::RowMiddlePress(_)
-            | CaptureOwner::RenameSelection(_) => {}
+            | CaptureOwner::FieldSelection(_) => {}
         }
     }
 

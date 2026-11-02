@@ -2824,7 +2824,7 @@ impl<B: Backend> Runtime<'_, B> {
         edit.refused = refused;
         let x = (name_box[0] + edit.caret_px).min(name_box[2] - caret_width);
         self.window.rename_caret_line = Some([x, name_box[1], x + caret_width, name_box[3]]);
-        self.window.rename_drawn = Some(drawn);
+        self.window.drawn_fields.name = Some(drawn);
     }
 
     /// C35, applied only where a landed directory has proved a selection gone.

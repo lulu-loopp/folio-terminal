@@ -979,6 +979,10 @@ impl<B: Backend> Runtime<'_, B> {
                 self.window.tab_clicks.interrupt();
                 self.window.files_row_clicks.interrupt();
                 self.press_graph_tool(PreviewSurface::Float(id), tool)?;
+                // A press in the search field puts the caret there too (0.4.9 plan row 180).
+                if matches!(tool, crate::git_graph::GraphTool::Search) {
+                    self.press_graph_search(PreviewSurface::Float(id), position)?;
+                }
             }
             float::FloatPart::GraphDetail { part, .. } => {
                 self.window.tab_clicks.interrupt();
@@ -1681,9 +1685,11 @@ impl<B: Backend> Runtime<'_, B> {
         if self.drag_preview_selection(position)? {
             return Ok(());
         }
-        // A selection being drawn across the open name editor's draft, on the same terms and
-        // outside its own box for the same reason (row 179).
-        if self.drag_rename_selection(position)? {
+        // A selection being drawn across one of the window's one-line fields — the open name
+        // editor's draft, the find bar, a graph's search, a settings field, the palette's box, a
+        // git prompt — on the same terms and outside its own box for the same reason (rows 179
+        // and 180).
+        if self.drag_field_selection(position)? {
             return Ok(());
         }
         // A selection being drawn across a **rendered** page owns the pointer on
@@ -3447,7 +3453,14 @@ impl<B: Backend> Runtime<'_, B> {
                 // **And the caret goes where the press is** (0.4.9 plan row 179): consumed
                 // whole is not ignored — the press is the editor's, and what it does to the
                 // draft is a caret at the seam under the pointer and the drag that follows.
-                self.press_rename_draft(position)?;
+                let subject = self
+                    .window
+                    .rename
+                    .as_ref()
+                    .map(|editor| editor.subject.clone());
+                if let Some(subject) = subject {
+                    self.press_field(crate::runtime::pointer::FieldDrag::Name(subject), position)?;
+                }
                 self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=press-in-rename-editor state={state:?} button={button:?} target={traced_target:?}"));
                 return Ok(true);
             }
@@ -3797,6 +3810,10 @@ impl<B: Backend> Runtime<'_, B> {
                 self.window.tab_clicks.interrupt();
                 self.window.files_row_clicks.interrupt();
                 self.press_graph_tool(self.preview_here(seat), tool)?;
+                // A press in the search field puts the caret there too (0.4.9 plan row 180).
+                if matches!(tool, crate::git_graph::GraphTool::Search) {
+                    self.press_graph_search(self.preview_here(seat), position)?;
+                }
             }
             // A part of the open row's detail block (v2 ②). It breaks a click
             // chain for `.files-foot`'s reason — a chain of clicks on a button is
@@ -4448,11 +4465,22 @@ impl<B: Backend> Runtime<'_, B> {
         {
             match profiles::git_menu_hit(&layout, position.x, position.y) {
                 Some(row) => {
-                    if state == ElementState::Pressed
-                        && button == MouseButton::Left
-                        && let Some(row) = row
-                    {
-                        self.run_git_menu_row(row)?;
+                    if state == ElementState::Pressed && button == MouseButton::Left {
+                        match row {
+                            Some(row) => self.run_git_menu_row(row)?,
+                            // A press in the prompt's field puts the caret at the seam under
+                            // it, and a drag from there selects (0.4.9 plan row 180).
+                            None if layout
+                                .prompt_rects()
+                                .is_some_and(|rects| rects.field_holds(position.x, position.y)) =>
+                            {
+                                self.press_field(
+                                    crate::runtime::pointer::FieldDrag::GitPrompt,
+                                    position,
+                                )?;
+                            }
+                            None => {}
+                        }
                     }
                     return Ok(());
                 }
@@ -4667,6 +4695,12 @@ impl<B: Backend> Runtime<'_, B> {
                 }
                 Some(None) => {
                     if state == ElementState::Pressed {
+                        // A press in the input puts the caret at the seam under it, and a drag
+                        // from there selects (0.4.9 plan row 180); the rest of the box swallows.
+                        if button == MouseButton::Left && layout.field_holds(position.x, position.y)
+                        {
+                            self.press_field(crate::runtime::pointer::FieldDrag::Palette, position)?;
+                        }
                         return Ok(());
                     }
                 }

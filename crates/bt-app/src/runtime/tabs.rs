@@ -583,7 +583,7 @@ impl<B: Backend> Runtime<'_, B> {
             // And an editor with no box has no caret to publish: the IME is told
             // so rather than left holding the last rectangle this tab had.
             self.window.rename_caret_line = None;
-            self.window.rename_drawn = None;
+            self.window.drawn_fields.name = None;
             return;
         };
         let box_width = title_box[2] - title_box[0];
@@ -617,7 +617,7 @@ impl<B: Backend> Runtime<'_, B> {
         // it — one derivation still, taken at the moment it is true.
         let x = (title_box[0] + caret_px).min(title_box[2] - caret_width);
         self.window.rename_caret_line = Some([x, title_box[1], x + caret_width, title_box[3]]);
-        self.window.rename_drawn = Some(drawn);
+        self.window.drawn_fields.name = Some(drawn);
     }
 
     /// **K124/N157 — the pane's stand-in in the strip**, and the slot it takes.
@@ -3297,8 +3297,8 @@ impl<B: Backend> Runtime<'_, B> {
         // **The draft's drawn run and a drag across it go with the editor**
         // (0.4.9 plan row 179): the run is a picture of this draft, and a
         // selection being drawn is drawn in this box — every exit is this one.
-        self.window.rename_drawn = None;
-        self.drop_rename_selection();
+        self.window.drawn_fields.name = None;
+        self.let_go_of_the_name_selection();
         let commit = exit.commits();
         // **The file the preview head names** (user ruling 2026-08-19). It
         // leaves through the same two paths a tab's name does — Enter, Escape
