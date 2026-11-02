@@ -1329,24 +1329,20 @@ fn cleanup_waited_on(
             CleanupRegistration::Refused(format!("{} ({end})", Text::CleanupSystemUnknown.text())),
         )];
     }
-    receive
-        .recv_timeout(within)
-        .unwrap_or_else(|unanswered| {
-            let reason = match unanswered {
-                mpsc::RecvTimeoutError::Disconnected => {
-                    Text::CleanupSystemUnknown.text().to_owned()
-                }
-                mpsc::RecvTimeoutError::Timeout => format!(
-                    "{} ({}s)",
-                    Text::CleanupSystemUnknown.text(),
-                    within.as_secs()
-                ),
-            };
-            vec![(
-                Text::CleanupMarkExplorer,
-                CleanupRegistration::Refused(reason),
-            )]
-        })
+    receive.recv_timeout(within).unwrap_or_else(|unanswered| {
+        let reason = match unanswered {
+            mpsc::RecvTimeoutError::Disconnected => Text::CleanupSystemUnknown.text().to_owned(),
+            mpsc::RecvTimeoutError::Timeout => format!(
+                "{} ({}s)",
+                Text::CleanupSystemUnknown.text(),
+                within.as_secs()
+            ),
+        };
+        vec![(
+            Text::CleanupMarkExplorer,
+            CleanupRegistration::Refused(reason),
+        )]
+    })
 }
 
 fn cleanup_package() -> CleanupRegistration {
@@ -4055,7 +4051,10 @@ mod tests {
             std::sync::LazyLock::new(crate::lane::Hold::default);
         fn held() -> Vec<(Text, CleanupRegistration)> {
             HELD.pass();
-            vec![(Text::CleanupMarkExplorerPackage, CleanupRegistration::Absent)]
+            vec![(
+                Text::CleanupMarkExplorerPackage,
+                CleanupRegistration::Absent,
+            )]
         }
         if !crate::test_support::alone_in_a_process(
             "explorer_menu::tests::a_cleanup_nobody_answers_gives_up_within_the_bound_it_is_handed",
@@ -4073,7 +4072,10 @@ mod tests {
         else {
             panic!("the cleanup nobody answered is reported as refused, not as its own answer");
         };
-        assert_eq!(reason, &format!("{} (0s)", Text::CleanupSystemUnknown.text()));
+        assert_eq!(
+            reason,
+            &format!("{} (0s)", Text::CleanupSystemUnknown.text())
+        );
         HELD.wait_standing("the cleanup held in its work after the wait gave up");
         HELD.release();
         let said = lines.iter().collect::<Vec<_>>();
