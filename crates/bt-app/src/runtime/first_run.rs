@@ -111,6 +111,7 @@ impl<B: Backend> Runtime<'_, B> {
             &mut self.app.agent_takeovers[0],
             install,
             config.as_deref(),
+            std::time::Instant::now(),
         );
         let exe = std::env::current_exe().ok();
         let outcome = match attention_ownership::stable_executable(exe.as_deref()) {
@@ -118,7 +119,11 @@ impl<B: Backend> Runtime<'_, B> {
             Err(reason) => attention_hooks::Outcome::Refused(reason),
         };
         if let attention_hooks::Outcome::TakeOverRequired(owners) = &outcome {
-            self.app.agent_takeovers[0] = attention_ownership::Pending::new(config, owners.clone());
+            self.app.agent_takeovers[0] = attention_ownership::Pending::new(
+                config,
+                owners.clone(),
+                std::time::Instant::now(),
+            );
         }
         (
             self.app.claude_hooks_installed,
@@ -190,6 +195,7 @@ impl<B: Backend> Runtime<'_, B> {
             &mut self.app.agent_takeovers[1],
             install,
             config.as_deref(),
+            std::time::Instant::now(),
         );
         let exe = std::env::current_exe().ok();
         let outcome = match attention_ownership::stable_executable(exe.as_deref()) {
@@ -197,7 +203,11 @@ impl<B: Backend> Runtime<'_, B> {
             Err(reason) => attention_codex::Outcome::Refused(reason),
         };
         if let attention_codex::Outcome::TakeOverRequired(owners) = &outcome {
-            self.app.agent_takeovers[1] = attention_ownership::Pending::new(config, owners.clone());
+            self.app.agent_takeovers[1] = attention_ownership::Pending::new(
+                config,
+                owners.clone(),
+                std::time::Instant::now(),
+            );
         }
         (
             self.app.codex_notify_installed,
@@ -276,6 +286,7 @@ impl<B: Backend> Runtime<'_, B> {
             &mut self.app.agent_takeovers[2],
             install,
             config.as_deref(),
+            std::time::Instant::now(),
         );
         let exe = std::env::current_exe().ok();
         let outcome = match attention_ownership::stable_executable(exe.as_deref()) {
@@ -283,7 +294,11 @@ impl<B: Backend> Runtime<'_, B> {
             Err(reason) => attention_copilot::Outcome::Refused(reason),
         };
         if let attention_copilot::Outcome::TakeOverRequired(owners) = &outcome {
-            self.app.agent_takeovers[2] = attention_ownership::Pending::new(config, owners.clone());
+            self.app.agent_takeovers[2] = attention_ownership::Pending::new(
+                config,
+                owners.clone(),
+                std::time::Instant::now(),
+            );
         }
         (
             self.app.copilot_hooks_installed,

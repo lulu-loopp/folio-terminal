@@ -10387,8 +10387,13 @@ struct WindowRuntime<B: Backend = Native> {
     /// because a floating window's picture is clicked as a pane's is.
     video_click: Option<VideoPictureClick>,
     /// **The clock the double-click counters count presses on** — the wall
-    /// clock in the product; see [`PointerClock`].
-    pointer_clock: PointerClock,
+    /// clock in the product; see [`PressClock`].
+    pointer_clock: PressClock,
+    /// **The clock a paste press is stamped and settled on**
+    /// (`Runtime::ask_for_a_paste`) — the wall clock in the product; see
+    /// [`PressClock`]. Its own field, so that a test holding the pointer clock
+    /// does not hold this one too.
+    paste_clock: PressClock,
     /// **Every animated picture this window has looked inside**, by the same
     /// normalised path key the decode cache beside it uses (user ruling
     /// 2026-08-28; §7.44 ⑤).
@@ -21119,17 +21124,21 @@ struct ImageClicks {
     last: Option<(PreviewSurface, [f32; 2], Instant)>,
 }
 
-/// **The moment a press is counted at by the window's double-click counters**
-/// ([`ImageClicks`] and [`PreviewTextClicks`]; T-FLOATING-VIDEO-DOUBLE-CLICK-TIMING,
-/// 0.4.9 plan row 124).
+/// **The moment a press is counted at** — by the window's double-click counters
+/// ([`ImageClicks`] and [`PreviewTextClicks`], on its `pointer_clock`;
+/// T-FLOATING-VIDEO-DOUBLE-CLICK-TIMING, 0.4.9 plan row 124), and by its clipboard's
+/// pastes, whose `asked_at`, and the moment the next press judges their deadline at, are
+/// read on its `paste_clock` (`Runtime::ask_for_a_paste`;
+/// T-CLIPBOARD-PASTE-PAST-DESK-BUSY-NOTICE-FLAKE, 0.4.9 plan row 172).
 ///
 /// The product's is the wall clock, and [`Self::moment`] answers the instant its
 /// caller has just read, unchanged: a press is counted at exactly the moment it
 /// was before this seam existed. A test holds it instead, so that whether two
-/// presses are one double click is decided by the clock the test moves and not
+/// presses are one double click, or whether a paste owed since the first press has
+/// outlived its deadline at the next, is decided by the clock the test moves and not
 /// by how long a loaded machine took between them.
 #[derive(Clone, Copy, Debug, Default)]
-enum PointerClock {
+enum PressClock {
     #[default]
     Wall,
     /// A test's: every press is counted at this moment until the test moves it.
@@ -21137,7 +21146,7 @@ enum PointerClock {
     Held(Instant),
 }
 
-impl PointerClock {
+impl PressClock {
     /// The moment a press read at `wall` is counted at.
     fn moment(self, wall: Instant) -> Instant {
         match self {
@@ -34032,7 +34041,8 @@ fn new_window_runtime<B: Backend>(parts: NewWindowParts<B>) -> WindowRuntime<B> 
         web: BTreeMap::new(),
         video: video_seat::VideoSeats::default(),
         video_click: None,
-        pointer_clock: PointerClock::Wall,
+        pointer_clock: PressClock::Wall,
+        paste_clock: PressClock::Wall,
         animations: AnimationCache::with_budget(MAX_ANIMATION_CACHE_BYTES),
         animations_drawn: BTreeMap::new(),
         pictures_owe_a_frame: false,
@@ -58312,7 +58322,7 @@ mod platform_gate_tests {
 
     /// **The list.** One file per line, in the order `ls` gives them, each with
     /// the reason it is allowed to ask.
-    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 36] = [
+    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 40] = [
         // Windows-only test fixture: the `pi` row, which only the Windows table ships, reopened
         // from a Recent row, beside its every-platform twin on the host's fallback shell.
         "app_files_tests.rs",
@@ -58342,6 +58352,9 @@ mod platform_gate_tests {
         "git.rs",
         // The same question one layer up, in the panel.
         "git_panel.rs",
+        // macOS-only test fixtures: a bundle Homebrew's default Caskroom records, with its
+        // attributes taken off by `xattr`; the channel's derivation is portable.
+        "install_channel.rs",
         // The startup path: the native-window door's two arms, and the five
         // platform calls M1-1 made non-fatal.
         "main.rs",
@@ -58378,14 +58391,22 @@ mod platform_gate_tests {
         "shell_literal.rs",
         // Windows-only test fixtures: a share handed over under `Ctrl`.
         "tests.rs",
-        // Native junction and sharing-mode fixtures, never product platform policy.
+        // Native junction and sharing-mode fixtures, and the macOS update home's mounted
+        // image, never product platform policy.
         "uninstall_tests.rs",
+        // macOS-only test fixtures: the applier's road over real bundles, exchanges, trials and
+        // LaunchServices launches; the road's platform-free points run everywhere.
+        "update_apply_macos_tests.rs",
         // Only the held-journal fixtures: a hold that refuses a replacing rename is a
         // Windows fact; their platform-free halves run beside the door everywhere.
         "update_apply_windows_tests.rs",
-        // macOS-only test fixture: the guard that detaches a disk image mounted under a
-        // test's folder (`hdiutil`), gated with the only tests that mount one.
+        // macOS-only test fixtures: the Prepare over real disk images, signed bundles and
+        // Homebrew records, and the guard that detaches an image mounted under a test's folder
+        // (`hdiutil`); the Prepare's pure parts run everywhere.
         "update_prepare_macos_tests.rs",
+        // Windows-only test fixtures: a journal another program holds open (`ScannerHold`, shared
+        // with `update_startup`'s retirement tests); the Prepare's refusal elsewhere is portable.
+        "update_prepare_windows_tests.rs",
         // Only test fixtures: the rescue build running from `H\<txn>` and the scanner holds
         // its retirement's worker waits out (Windows), and the mounted image a retirement
         // detaches (macOS); the start's pass itself is portable.
@@ -58393,6 +58414,9 @@ mod platform_gate_tests {
         // Windows-only test fixture: a trial's watch in a process of its own handing back
         // to a real rescue program; the watch and the hand-back are portable.
         "update_trial.rs",
+        // macOS-only test fixture: the LaunchAgent entrance's proof arming the journal; the
+        // journal's grammar is portable.
+        "update_txn.rs",
         // Only the symlinked-log regression fixture; the recovery road is portable.
         "update_recover.rs",
         // Only the real detached-handoff regression fixture; the handoff API is portable.

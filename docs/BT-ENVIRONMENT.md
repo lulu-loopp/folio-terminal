@@ -203,7 +203,10 @@ and leaves; `BT_UNINSTALL_ASKER_CHILD` names the sandbox data folder `bt-app`'s
 copy of its own test binary that claims it and leaves as a Folio does;
 `BT_UNINSTALL_SELFHOLD_CHILD` names the part (`asker` or `door`), whether data is removed and the
 sandbox `bt-app`'s `uninstall::tests::the_door_holds_nothing_of_its_askers_so_remove_data_removes_its_log`
-sets on the copies of its own test binary that play the asking Folio and the door it starts. Only those
+sets on the copies of its own test binary that play the asking Folio and the door it starts;
+`BT_UNINSTALL_ENDS_IN_A_PAUSE_CHILD` marks the copy of its own test binary `bt-app`'s
+`uninstall::tests::the_door_goes_on_in_the_pause_its_asker_ends` starts as the asker, which reads
+its stdin to its end and leaves, writing nothing. Only those
 tests' child halves read them, and they write only into the test's own temporary folder. `BT_U37_ROAD_CHILD`, `BT_U37_ROAD_ROOT` and `BT_U37_ROAD_LINE` name the part
 (`trial` or `rescue`), the private folder and the hand-back line `bt-app`'s
 `update_apply_windows::tests::a_trial_hands_back_to_a_real_recovery_which_adopts_ends_or_defers`

@@ -1539,20 +1539,30 @@ impl HeadlessFolio {
     }
 
     /// **The window's double-click counters count every press from here on at one held
-    /// moment** ([`crate::PointerClock::Held`], T-FLOATING-VIDEO-DOUBLE-CLICK-TIMING): two
+    /// moment** ([`crate::PressClock::Held`], T-FLOATING-VIDEO-DOUBLE-CLICK-TIMING): two
     /// presses in one place are a double click however long the machine takes between them,
     /// until [`Self::pointer_clock_runs`] moves the moment on.
     pub(crate) fn hold_the_pointer_clock(&mut self) {
-        self.window.pointer_clock = crate::PointerClock::Held(Instant::now());
+        self.window.pointer_clock = crate::PressClock::Held(Instant::now());
     }
 
     /// **The held pointer clock moves on by `span`**, as the wall clock would have between
     /// two presses — past [`crate::MULTI_CLICK_INTERVAL`], the next press is a first one.
     pub(crate) fn pointer_clock_runs(&mut self, span: Duration) {
-        let crate::PointerClock::Held(at) = self.window.pointer_clock else {
+        let crate::PressClock::Held(at) = self.window.pointer_clock else {
             panic!("the test holds the pointer clock before it moves it");
         };
-        self.window.pointer_clock = crate::PointerClock::Held(at + span);
+        self.window.pointer_clock = crate::PressClock::Held(at + span);
+    }
+
+    /// **Every paste press of the window's is stamped and settled at one held moment from here
+    /// on** ([`crate::PressClock::Held`] on its `paste_clock`,
+    /// T-CLIPBOARD-PASTE-PAST-DESK-BUSY-NOTICE-FLAKE): a paste owed since an earlier press is
+    /// never past [`crate::clipboard_lane::PASTE_DEADLINE`] at a later one, however long the
+    /// machine takes between them. A test that means the deadline passes its own clock to
+    /// `Runtime::settle_clipboard`.
+    pub(crate) fn hold_the_paste_clock(&mut self) {
+        self.window.paste_clock = crate::PressClock::Held(Instant::now());
     }
 
     /// The facade over the two layers, as every event's handler gets it.
