@@ -3643,7 +3643,9 @@ impl<B: Backend> Runtime<'_, B> {
                                 let rows = leaf.conpty_grid.rows;
                                 let worker_wake = wake.clone();
                                 match pty_door::request(
-                                    move |_| fallback.spawn(columns, rows, worker_wake, why),
+                                    move |_| {
+                                        fallback.spawn_last_resort(columns, rows, worker_wake, why)
+                                    },
                                     wake,
                                 ) {
                                     Ok(shell) => {
@@ -5379,8 +5381,8 @@ mod birth_death_tests {
 
     /// MUTATION (observed RED): drop `owed_physical` at the fallback landing and the PTY remains at
     /// its born size; make a silent birth death answer `Keep` and the disposition assertion fails;
-    /// drop the record from `BirthFallback::spawn` and the landing writes no banner and keeps the
-    /// asked-for program; ask the reaper's liveness rule anything but `ShellLife::holds_its_tab`
+    /// drop the record from `BirthFallback::spawn_through` and the landing writes no banner and
+    /// keeps the asked-for program; ask the reaper's liveness rule anything but `ShellLife::holds_its_tab`
     /// (whose answer in each phase `every_life_transition_is_one_method_and_no_other` pins), or let
     /// the birth-death arm fall through to the retirement road, and the wiring pin fails.
     /// MUTATION (T-WINDOWS-SHELL-NAMESPACES, observed RED): drop `finish_leaf_birth`'s reset of the
@@ -5411,15 +5413,24 @@ mod birth_death_tests {
         let open = Arc::new(Hold::default());
         open.hold();
         let worker_open = Arc::clone(&open);
+        // The retained last-resort command is the claim, so it is the real one that starts — but
+        // through the test-shell door (plan row 174): the product's `spawn_last_resort` refuses a
+        // fallback a test made, and the door starts it without the account's startup files.
+        let (kept, hygiene) = mpsc::channel();
         let shell = pty_door::request(
             move |_| {
                 worker_open.pass();
-                fallback.spawn(
+                bt_pty::test_shell::TestShell::spawn_birth_fallback(
+                    fallback,
                     born_grid.columns,
                     born_grid.rows,
                     worker_wake,
                     "exited".to_owned(),
                 )
+                .map(|(session, shell_hygiene)| {
+                    let _ = kept.send(shell_hygiene);
+                    session
+                })
             },
             wake,
         )
@@ -5525,6 +5536,11 @@ mod birth_death_tests {
             "a pane whose fallback is being born, or which was kept, keeps its tab: {reap}"
         );
         assert!(!tab_has_ended(true, true) && tab_has_ended(true, false));
+        drop(leaf);
+        drop(crate::lane::receive(
+            &hygiene,
+            "the fallback shell's hygiene",
+        ));
     }
 
     /// MUTATION (observed RED in T-BIRTH-OFF-WINDOW, again in plan row 167): drop an ordinary

@@ -83,8 +83,10 @@ use std::{
 
 use portable_pty::ExitStatus;
 
+use std::num::NonZeroU16;
+
 use crate::{
-    OutputWake, PtyCommand, PtyError, PtyRecording, PtySession, PtySize, RingStats,
+    BirthFallback, OutputWake, PtyCommand, PtyError, PtyRecording, PtySession, PtySize, RingStats,
     ShellEnvironment, ShellFallback, SystemShellEnvironment, upsert_environment,
 };
 
@@ -672,6 +674,7 @@ pub struct Hygiene {
     root: PathBuf,
     reads_startup_files: bool,
     powershell_shape: Option<PowerShellShape>,
+    never_typed: bool,
 }
 
 /// **A PowerShell command line's shape, as an authoritative classifier read it** — for a test
@@ -718,6 +721,7 @@ impl Hygiene {
             root,
             reads_startup_files: false,
             powershell_shape: None,
+            never_typed: false,
         };
         for directory in hygiene.directories() {
             std::fs::create_dir_all(&directory).unwrap_or_else(|error| {
@@ -746,6 +750,20 @@ impl Hygiene {
     #[must_use]
     pub fn with_powershell_shape(mut self, shape: PowerShellShape) -> Self {
         self.powershell_shape = Some(shape);
+        self
+    }
+
+    /// For a shell **nobody types into** (plan row 174, ruling R2): every flag and every location
+    /// of the rule is kept — the startup files are still skipped, the account's folders are still
+    /// this directory's, and a PowerShell's history refusal is still in its startup script — but
+    /// nothing waits for what only typing needs. A PowerShell's module analysis cache is this
+    /// directory's own, cold, instead of the shared one warmed before the edition's first child
+    /// (`warmed_module_analysis_cache`): the warm-up buys a fast first command, and no command is
+    /// ever given. Whoever starts such a shell does not read its history refusal back either
+    /// ([`TestShell::spawn_birth_fallback`]).
+    #[must_use]
+    pub fn never_typed(mut self) -> Self {
+        self.never_typed = true;
         self
     }
 
@@ -834,7 +852,11 @@ impl Hygiene {
         );
         match family {
             Family::PowerShell => {
-                let cache = warmed_module_analysis_cache(program);
+                let cache = if self.never_typed {
+                    self.root.join("ModuleAnalysisCache")
+                } else {
+                    warmed_module_analysis_cache(program)
+                };
                 environment.push((MODULE_ANALYSIS_CACHE, cache.into_os_string(), false));
                 environment.push(("POWERSHELL_TELEMETRY_OPTOUT", "1".into(), false));
                 environment.push(("POWERSHELL_UPDATECHECK", "Off".into(), false));
@@ -1398,13 +1420,18 @@ impl TestShell {
 
     fn through(hygiene: Hygiene, door: Box<Door<'_>>) -> Result<Self, PtyError> {
         let mut started = None;
-        let session = door(&mut |command, size, wake| {
+        let mut session = door(&mut |command, size, wake| {
             let (command, gate) = hygiene.prepare(command);
             let program = command.program.clone();
             let session = PtySession::spawn(command, size, wake)?;
             started = Some((gate, program));
             Ok(session)
         })?;
+        // The door's own fallback retry went through the rule above, but the last-resort command
+        // it retains for a birth death was built beside it and never did: the product's road
+        // refuses it from here on, and only [`Self::spawn_birth_fallback`] starts it (plan row
+        // 174's L2).
+        session.mark_birth_fallback_for_a_test();
         let (gate, program) = started.expect("a door that answered a session spawned one");
         Ok(Self {
             session: Some(session),
@@ -1412,6 +1439,36 @@ impl TestShell {
             program,
             hygiene: Some(hygiene),
         })
+    }
+
+    /// **A retained birth fallback, started under the rule** (plan row 174) — the test's road to
+    /// what [`BirthFallback::spawn_last_resort`] starts for a pane, which refuses a fallback a
+    /// test made: the same command, size and [`ShellFallback`] record
+    /// (`BirthFallback::spawn_through`), with the command rewritten by a fresh
+    /// [`Hygiene::never_typed`] first.
+    ///
+    /// For a test whose claim is that the retained last-resort command is what starts and lands,
+    /// and which types nothing into it: the session is handed over at once, without waiting for a
+    /// PowerShell's history refusal to be read back, so its answer is its `CreateProcess`. Drop
+    /// the [`Hygiene`] after the session, so the child is ended before its directory is removed.
+    pub fn spawn_birth_fallback(
+        fallback: BirthFallback,
+        columns: NonZeroU16,
+        rows: NonZeroU16,
+        wake: OutputWake,
+        why: String,
+    ) -> Result<(PtySession, Hygiene), PtyError> {
+        let hygiene = Hygiene::new().never_typed();
+        let session = birth_fallback_through(
+            &hygiene,
+            fallback,
+            columns,
+            rows,
+            wake,
+            why,
+            PtySession::spawn,
+        )?;
+        Ok((session, hygiene))
     }
 
     /// The program that was started, after any fallback.
@@ -1652,6 +1709,24 @@ impl TestShell {
     pub fn inbox_conpty_reason(&self) -> Option<String> {
         self.held().inbox_conpty_reason()
     }
+}
+
+/// [`TestShell::spawn_birth_fallback`] with the one `spawn` it makes handed in, so the command the
+/// rule made of the fallback can be read without starting a process.
+fn birth_fallback_through(
+    hygiene: &Hygiene,
+    fallback: BirthFallback,
+    columns: NonZeroU16,
+    rows: NonZeroU16,
+    wake: OutputWake,
+    why: String,
+    spawn: impl FnOnce(PtyCommand, PtySize, OutputWake) -> Result<PtySession, PtyError>,
+) -> Result<PtySession, PtyError> {
+    fallback.spawn_through(columns, rows, wake, why, |command, size, wake| {
+        // No gate: nothing is typed into this shell (`Hygiene::never_typed`).
+        let (command, _gate) = hygiene.prepare(command);
+        spawn(command, size, wake)
+    })
 }
 
 /// A test reads its child's output by asking; nothing is woken.
@@ -2291,5 +2366,120 @@ mod tests {
             .and_then(|(_, value)| value)
             .expect("HOME is set");
         assert!(Path::new(home).starts_with(hygiene.root()));
+    }
+
+    fn cells(count: u16) -> NonZeroU16 {
+        NonZeroU16::new(count).expect("a nonzero count")
+    }
+
+    /// The last-resort command a fake birth death retains, as a test's runtime holds it.
+    fn fallback_a_test_made() -> BirthFallback {
+        let mut pty = PtySession::fake_exited(Duration::ZERO, 23, b"", true);
+        pty.take_birth_fallback()
+            .expect("the fake retains its one last-resort command")
+    }
+
+    /// RED (plan row 174, ruling R3) — **a birth fallback a test made is refused by the product's
+    /// road**: [`BirthFallback::spawn_last_resort`] answers it with the door's name and starts
+    /// nothing, so a test's reaper (or a test that skipped the door) lands a refusal instead of
+    /// the account's own shell. Nothing is started here.
+    ///
+    /// MUTATION: `refused_outside_the_door` answering `None`, or `fake_exited` retaining its
+    /// command with `made_for_a_test: false` — no refusal (`plant-174-marker-not-read.py`).
+    #[test]
+    fn a_birth_fallback_made_for_a_test_is_refused_outside_the_door() {
+        let refusal = fallback_a_test_made().refused_outside_the_door();
+        assert!(
+            matches!(
+                &refusal,
+                Some(PtyError::Backend(said)) if said == crate::BIRTH_FALLBACK_OUTSIDE_THE_DOOR
+            ),
+            "{refusal:?}"
+        );
+    }
+
+    /// RED (plan row 174, L2) — **a shell the door started retains a fallback only the door
+    /// starts**: the last-resort command `spawn_interactive_with` retains beside the door's
+    /// attempt never went through the rule, so the door marks it and the product's road refuses
+    /// it. A quiet shell (`cmd /D`; `cat` elsewhere), born at once.
+    ///
+    /// MUTATION: drop `session.mark_birth_fallback_for_a_test()` from `TestShell::through` — the
+    /// retained command is the product's to start (`plant-174-marker-not-read.py` covers the read).
+    #[test]
+    fn a_shell_the_door_started_retains_a_fallback_only_the_door_starts() {
+        let (program, arguments): (&str, Vec<OsString>) = if cfg!(windows) {
+            ("cmd.exe", vec![OsString::from("/D")])
+        } else {
+            ("/bin/cat", Vec::new())
+        };
+        let mut shell = TestShell::spawn_shell_in(
+            Hygiene::new(),
+            program,
+            &arguments,
+            &crate::last_resort_arguments,
+            &[],
+            PtySize::cells(cells(40), cells(4)),
+            None,
+        )
+        .expect("a quiet shell through the door");
+        let fallback = shell
+            .session_mut()
+            .take_birth_fallback()
+            .expect("a program other than the last resort retains it");
+        assert!(
+            fallback.refused_outside_the_door().is_some(),
+            "the door's retained fallback is refused by the product's road"
+        );
+    }
+
+    /// RED (plan row 174, ruling R2) — **a birth fallback through the door starts under the rule
+    /// and waits for nothing**: the retained command, its size and its record are the product's
+    /// (`BirthFallback::spawn_through`), the command rewritten by a never-typed [`Hygiene`] —
+    /// `-NoProfile`, the account's folders this directory's, and a PowerShell's module analysis
+    /// cache its own cold one rather than the shared warm-up. Nothing is started.
+    ///
+    /// MUTATION: hand `birth_fallback_through`'s spawn the command unprepared — no `HOME` of the
+    /// test's (`plant-174-hygiene-skipped.py`); drop `never_typed`'s arm in `environment` — the
+    /// cache is the shared warmed one.
+    #[test]
+    fn a_birth_fallback_through_the_door_starts_under_the_rule_and_waits_for_nothing() {
+        let hygiene = Hygiene::new().never_typed();
+        let mut started = None;
+        let refused = birth_fallback_through(
+            &hygiene,
+            fallback_a_test_made(),
+            cells(57),
+            cells(9),
+            quiet(),
+            "exited at birth".to_owned(),
+            |command, size, _| {
+                started = Some((command, size));
+                Err(PtyError::Backend("scripted: nothing is started".to_owned()))
+            },
+        );
+        assert!(
+            refused.is_err(),
+            "the scripted spawn's answer is the door's"
+        );
+        let (command, size) = started.expect("the door made its one spawn");
+        assert_eq!(command.program, OsString::from(crate::LAST_RESORT_SHELL));
+        assert_eq!((size.columns, size.rows), (cells(57), cells(9)));
+        let home = value(&command, "HOME").expect("HOME is the test's");
+        assert!(Path::new(&home).starts_with(hygiene.root()), "{home:?}");
+        if cfg!(windows) {
+            let words = arguments(&command);
+            assert!(
+                words.iter().any(|word| word == "-NoProfile")
+                    && words.iter().any(|word| word == "-NoLogo"),
+                "{words:?}"
+            );
+            let data = value(&command, "APPDATA").expect("APPDATA is the test's");
+            assert!(Path::new(&data).starts_with(hygiene.root()), "{data:?}");
+            assert_eq!(
+                value(&command, MODULE_ANALYSIS_CACHE).map(PathBuf::from),
+                Some(hygiene.root().join("ModuleAnalysisCache")),
+                "a shell nobody types into owes no warm-up"
+            );
+        }
     }
 }
