@@ -717,7 +717,9 @@ fn a_method_door_is_the_one_function_of_its_name() {
         found,
         [
             "77: fn spawn_last_resort — a second function of a method door's name: its calls would \
-          read as BirthFallback::spawn_last_resort's"
+          read as BirthFallback::spawn_last_resort's",
+            "99: fn spawn_last_resort — a second function of a method door's name: its calls would \
+          read as BirthFallback::spawn_last_resort's",
         ],
         "{found:#?}"
     );

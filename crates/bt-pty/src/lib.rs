@@ -1963,10 +1963,24 @@ impl BirthFallback {
         wake: OutputWake,
         why: String,
     ) -> Result<PtySession, PtyError> {
+        self.last_resort_through(columns, rows, wake, why, PtySession::spawn)
+    }
+
+    /// [`Self::spawn_last_resort`] with the one `spawn` it makes handed in: the refusal of a
+    /// fallback a test made first, and only then [`Self::spawn_through`], so a test can drive the
+    /// product's road against a `spawn` that must never be called.
+    pub(crate) fn last_resort_through(
+        self,
+        columns: NonZeroU16,
+        rows: NonZeroU16,
+        wake: OutputWake,
+        why: String,
+        spawn: impl FnOnce(PtyCommand, PtySize, OutputWake) -> Result<PtySession, PtyError>,
+    ) -> Result<PtySession, PtyError> {
         if let Some(refusal) = self.refused_outside_the_door() {
             return Err(refusal);
         }
-        self.spawn_through(columns, rows, wake, why, PtySession::spawn)
+        self.spawn_through(columns, rows, wake, why, spawn)
     }
 
     /// The product road's refusal of a fallback a test made ([`BIRTH_FALLBACK_OUTSIDE_THE_DOOR`]).
@@ -1982,8 +1996,9 @@ impl BirthFallback {
         None
     }
 
-    /// [`Self::spawn_last_resort`] with the one `spawn` it makes handed in: the size the pane asks
-    /// for and the [`ShellFallback`] record, kept once for the product's road and the test door's.
+    /// The start both roads share, with the one `spawn` it makes handed in: the size the pane asks
+    /// for and the [`ShellFallback`] record, kept once for the product's road
+    /// ([`Self::last_resort_through`]) and the test door's.
     pub(crate) fn spawn_through(
         mut self,
         columns: NonZeroU16,

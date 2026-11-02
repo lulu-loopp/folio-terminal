@@ -94,3 +94,6 @@ mod birth_fallbacks {
         let _ = fallback().spawn();
     }
 }
+
+/// A free function of the door's name: its calls would read as the door's too.
+pub fn spawn_last_resort() {}

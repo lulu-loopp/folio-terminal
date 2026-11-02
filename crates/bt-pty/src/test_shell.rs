@@ -76,14 +76,13 @@
 
 use std::{
     ffi::{OsStr, OsString},
+    num::NonZeroU16,
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
 };
 
 use portable_pty::ExitStatus;
-
-use std::num::NonZeroU16;
 
 use crate::{
     BirthFallback, OutputWake, PtyCommand, PtyError, PtyRecording, PtySession, PtySize, RingStats,
@@ -1458,17 +1457,7 @@ impl TestShell {
         wake: OutputWake,
         why: String,
     ) -> Result<(PtySession, Hygiene), PtyError> {
-        let hygiene = Hygiene::new().never_typed();
-        let session = birth_fallback_through(
-            &hygiene,
-            fallback,
-            columns,
-            rows,
-            wake,
-            why,
-            PtySession::spawn,
-        )?;
-        Ok((session, hygiene))
+        birth_fallback_through(fallback, columns, rows, wake, why, PtySession::spawn)
     }
 
     /// The program that was started, after any fallback.
@@ -1712,21 +1701,23 @@ impl TestShell {
 }
 
 /// [`TestShell::spawn_birth_fallback`] with the one `spawn` it makes handed in, so the command the
-/// rule made of the fallback can be read without starting a process.
+/// rule made of the fallback, and the door's own [`Hygiene`], can be read without starting a
+/// process.
 fn birth_fallback_through(
-    hygiene: &Hygiene,
     fallback: BirthFallback,
     columns: NonZeroU16,
     rows: NonZeroU16,
     wake: OutputWake,
     why: String,
     spawn: impl FnOnce(PtyCommand, PtySize, OutputWake) -> Result<PtySession, PtyError>,
-) -> Result<PtySession, PtyError> {
-    fallback.spawn_through(columns, rows, wake, why, |command, size, wake| {
+) -> Result<(PtySession, Hygiene), PtyError> {
+    let hygiene = Hygiene::new().never_typed();
+    let session = fallback.spawn_through(columns, rows, wake, why, |command, size, wake| {
         // No gate: nothing is typed into this shell (`Hygiene::never_typed`).
         let (command, _gate) = hygiene.prepare(command);
         spawn(command, size, wake)
-    })
+    })?;
+    Ok((session, hygiene))
 }
 
 /// A test reads its child's output by asking; nothing is woken.
@@ -2379,22 +2370,49 @@ mod tests {
             .expect("the fake retains its one last-resort command")
     }
 
+    /// What the product's road answers `fallback`: `BirthFallback::last_resort_through`, which
+    /// [`BirthFallback::spawn_last_resort`] is with `PtySession::spawn`, driven against a scripted
+    /// `spawn` that must never be called — the road refuses a fallback a test made before it
+    /// spawns anything. Nothing is started, whatever the road does.
+    fn the_product_roads_answer(fallback: BirthFallback) -> Result<(), PtyError> {
+        let mut spawned = false;
+        let answer = fallback
+            .last_resort_through(
+                cells(80),
+                cells(24),
+                quiet(),
+                "exited".to_owned(),
+                |_, _, _| {
+                    spawned = true;
+                    Ok(PtySession::fake_exited(Duration::ZERO, 0, b"", false))
+                },
+            )
+            .map(drop);
+        assert!(
+            !spawned,
+            "the product's road spawned a fallback a test made: {answer:?}"
+        );
+        answer
+    }
+
     /// RED (plan row 174, ruling R3) — **a birth fallback a test made is refused by the product's
-    /// road**: [`BirthFallback::spawn_last_resort`] answers it with the door's name and starts
-    /// nothing, so a test's reaper (or a test that skipped the door) lands a refusal instead of
-    /// the account's own shell. Nothing is started here.
+    /// road**: [`BirthFallback::spawn_last_resort`] answers it with the door's name before it
+    /// spawns anything, so a test's reaper (or a test that skipped the door) lands a refusal
+    /// instead of the account's own shell. Nothing is started here.
     ///
     /// MUTATION: `refused_outside_the_door` answering `None`, or `fake_exited` retaining its
-    /// command with `made_for_a_test: false` — no refusal (`plant-174-marker-not-read.py`).
+    /// command with `made_for_a_test: false` — no refusal (`plant-174-marker-not-read.py`); the
+    /// refusal dropped from `last_resort_through`, or moved after its spawn — the scripted spawn
+    /// is called (`plant-174-refusal-after-spawn.py`).
     #[test]
     fn a_birth_fallback_made_for_a_test_is_refused_outside_the_door() {
-        let refusal = fallback_a_test_made().refused_outside_the_door();
+        let answer = the_product_roads_answer(fallback_a_test_made());
         assert!(
             matches!(
-                &refusal,
-                Some(PtyError::Backend(said)) if said == crate::BIRTH_FALLBACK_OUTSIDE_THE_DOOR
+                &answer,
+                Err(PtyError::Backend(said)) if said == crate::BIRTH_FALLBACK_OUTSIDE_THE_DOOR
             ),
-            "{refusal:?}"
+            "{answer:?}"
         );
     }
 
@@ -2427,7 +2445,7 @@ mod tests {
             .take_birth_fallback()
             .expect("a program other than the last resort retains it");
         assert!(
-            fallback.refused_outside_the_door().is_some(),
+            the_product_roads_answer(fallback).is_err(),
             "the door's retained fallback is refused by the product's road"
         );
     }
@@ -2439,14 +2457,13 @@ mod tests {
     /// cache its own cold one rather than the shared warm-up. Nothing is started.
     ///
     /// MUTATION: hand `birth_fallback_through`'s spawn the command unprepared — no `HOME` of the
-    /// test's (`plant-174-hygiene-skipped.py`); drop `never_typed`'s arm in `environment` — the
-    /// cache is the shared warmed one.
+    /// test's (`plant-174-hygiene-skipped.py`); drop `.never_typed()` from the door, or
+    /// `never_typed`'s arm in `environment` — the door's hygiene owes a warm-up, its cache the
+    /// shared warmed one.
     #[test]
     fn a_birth_fallback_through_the_door_starts_under_the_rule_and_waits_for_nothing() {
-        let hygiene = Hygiene::new().never_typed();
         let mut started = None;
-        let refused = birth_fallback_through(
-            &hygiene,
+        let (mut session, hygiene) = birth_fallback_through(
             fallback_a_test_made(),
             cells(57),
             cells(9),
@@ -2454,13 +2471,22 @@ mod tests {
             "exited at birth".to_owned(),
             |command, size, _| {
                 started = Some((command, size));
-                Err(PtyError::Backend("scripted: nothing is started".to_owned()))
+                Ok(PtySession::fake_exited(Duration::ZERO, 0, b"", false))
             },
-        );
+        )
+        .expect("the scripted spawn's answer is the door's");
         assert!(
-            refused.is_err(),
-            "the scripted spawn's answer is the door's"
+            hygiene.never_typed,
+            "the door's hygiene is a never-typed one: no proof to wait for, no warm-up"
         );
+        let record = session
+            .take_shell_fallback()
+            .expect("the door's session carries the product's fallback record");
+        assert_eq!(
+            (record.started, record.error.as_str()),
+            (crate::LAST_RESORT_SHELL, "exited at birth")
+        );
+        drop(session);
         let (command, size) = started.expect("the door made its one spawn");
         assert_eq!(command.program, OsString::from(crate::LAST_RESORT_SHELL));
         assert_eq!((size.columns, size.rows), (cells(57), cells(9)));
