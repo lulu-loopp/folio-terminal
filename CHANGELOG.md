@@ -36,6 +36,7 @@ All notable changes to Folio are recorded here. The format follows
 - On Windows, when an antivirus scan or the copy of Folio that finished an update still holds the update's leftover files for a moment, Folio now removes them in the background once they are let go, while it goes on starting, so the card that says changes were not kept is no longer shown again at the next start. <!-- zh: Windows 上，更新留下的文件若仍被杀毒软件扫描或被完成更新的那份 Folio 短暂占用，Folio 现在会在后台等它们被释放后再清除，启动照常进行，说明更改没有保留的卡片不再在下次启动时再次显示。 -->
 - Letters begun with an input method in one place, such as a shell, a search field or a name box, no longer land somewhere else after a click or a tab switch; the composition is cancelled instead, and the commit graph's search box no longer keeps showing its half-typed letters after a click elsewhere. <!-- zh: 在一处（例如 shell、搜索框或名称框）用输入法开始输入的字母，单击别处或切换标签页后不再落到其他地方，这次输入会被取消；提交图的搜索框在单击别处后也不再继续显示输入了一半的字母。 -->
 - On Windows, an update no longer fails to prepare when an antivirus scan or another program holds one of its files open for a moment; Folio now waits for the file to be let go and goes on. <!-- zh: 在 Windows 上，杀毒软件扫描或其他程序短暂占用更新的某个文件时，更新不再准备失败；Folio 现在会等该文件被释放后继续。 -->
+- While you rename a tab, a file or a page's address, clicking inside the name now puts the text cursor where you clicked, Shift-clicking extends the selection, and dragging selects. <!-- zh: pending T-TAB-RENAME-FIELD-MOUSE-CARET -->
 
 ## 0.4.8-preview — 2026-10-23
 
