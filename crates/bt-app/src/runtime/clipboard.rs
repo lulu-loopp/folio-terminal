@@ -544,8 +544,11 @@ impl<B: Backend> Runtime<'_, B> {
     /// ([`PasteHold`]), so `Ctrl+V`, `k`, `Ctrl+V` reaches the shell as the first paste, `k`, the
     /// second. A window owes at most [`PASTES_OWED`]; a paste past that desk, or one the lane
     /// refuses at its door, is said once in the log and, for a terminal, once on screen.
+    ///
+    /// The press is stamped, and what is owed settled, at the moment the window's `paste_clock`
+    /// counts it at ([`crate::PressClock`]): the wall clock in the product.
     pub(in crate::runtime) fn ask_for_a_paste(&mut self, into: PasteInto, ask: Ask) -> Result<()> {
-        let now = Instant::now();
+        let now = self.window.paste_clock.moment(Instant::now());
         self.settle_clipboard(now)?;
         if self.window.clipboard.pastes.len() >= PASTES_OWED {
             self.window.window.note(&format!(

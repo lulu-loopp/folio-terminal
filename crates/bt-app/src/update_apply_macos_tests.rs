@@ -24,32 +24,40 @@
 use super::*;
 
 use std::collections::VecDeque;
+#[cfg(target_os = "macos")]
 use std::ffi::OsStr;
+#[cfg(target_os = "macos")]
 use std::io::{BufRead, BufReader, Read, Write};
-use std::process::{Child, ExitStatus, Stdio};
+use std::process::Child;
+#[cfg(target_os = "macos")]
+use std::process::{ExitStatus, Stdio};
+#[cfg(target_os = "macos")]
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 use bt_platform::trust_harness::done_once_let_go;
 
-use crate::update_apply::{CountedClock, WatchedWallClock, now_ms};
+use crate::update_apply::{CountedClock, now_ms};
 
+#[cfg(target_os = "macos")]
 use crate::update_prepare_macos::tests::fixture::{
-    HOMEBREW_MARKER, Scratch, fake_brew, homebrew_install, on_macos, run, sign, version_of,
+    HOMEBREW_MARKER, fake_brew, homebrew_install, run, sign, version_of,
 };
-use crate::update_txn::{
-    Body, Cdhash, Class, Header, HeaderOutcome, Outcome, STUCK_ATTEMPT_LIMIT, StartAction,
-    TrialSight,
-};
+use crate::update_prepare_macos::tests::fixture::{Scratch, on_macos};
+use crate::update_txn::{Body, Cdhash, Outcome, STUCK_ATTEMPT_LIMIT};
+#[cfg(target_os = "macos")]
+use crate::update_txn::{Class, Header, HeaderOutcome, StartAction, TrialSight};
 
 /// The synthetic bundles' identifier.
+#[cfg(target_os = "macos")]
 const IDENTIFIER: &str = "io.github.lulu-loopp.folio.u28-test";
 
 /// The main executable's place in every synthetic bundle.
 const EXE: &str = "Contents/MacOS/folio";
 
 /// The synthetic executable (see the module header).
+#[cfg(target_os = "macos")]
 const SOURCE: &str = "#include <fcntl.h>\n#include <signal.h>\n#include <stdio.h>\n\
 #include <string.h>\n#include <unistd.h>\n\
 static const char *mark;\n\
@@ -72,6 +80,7 @@ int main(int argc, char **argv) {\n\
 }\n";
 
 /// **A signed synthetic bundle** `<parent>/<name>` of `version`.
+#[cfg(target_os = "macos")]
 fn bundle(parent: &Path, name: &str, version: &str) -> PathBuf {
     let bundle = parent.join(name);
     let macos = bundle.join("Contents").join("MacOS");
@@ -114,6 +123,7 @@ fn bundle(parent: &Path, name: &str, version: &str) -> PathBuf {
 /// trial LaunchServices started does), its exit status kept, and every one
 /// still unreaped ended by its recorded pid when the test is over, pass or
 /// fail.
+#[cfg(target_os = "macos")]
 #[derive(Clone, Default)]
 struct Children {
     started: Arc<Mutex<Vec<u32>>>,
@@ -121,6 +131,7 @@ struct Children {
     pids: Arc<Mutex<Vec<u32>>>,
 }
 
+#[cfg(target_os = "macos")]
 impl Children {
     /// Start `bundle`'s executable with one argument: it stays up.
     fn start(&self, bundle: &Path, word: &str) -> u32 {
@@ -218,6 +229,7 @@ impl Children {
     }
 }
 
+#[cfg(target_os = "macos")]
 impl Drop for Children {
     fn drop(&mut self) {
         if Arc::strong_count(&self.started) > 1 {
@@ -357,6 +369,7 @@ impl World for Fake {
 }
 
 /// A stand-in world whose launch is `launch`.
+#[cfg(target_os = "macos")]
 fn launching(launch: LaunchHook) -> Fake {
     Fake {
         on_launch: Some(launch),
@@ -370,6 +383,7 @@ fn said(world: &Fake, words: &str) -> bool {
 }
 
 impl Fake {
+    #[cfg(target_os = "macos")]
     fn wrote(&self) -> &str {
         self.said
             .iter()
@@ -397,6 +411,7 @@ struct Install {
 }
 
 impl Install {
+    #[cfg(target_os = "macos")]
     fn new(tag: &str) -> Self {
         let scratch = Scratch::new(&format!("u28-{tag}"));
         let root = scratch.root.clone();
@@ -524,6 +539,7 @@ impl Install {
     /// still owns it; without the mark it would stage a *later* contender,
     /// which the election turns away (`Window::RoadTaken`). The Windows
     /// fixtures' twin is `Install::claim_window` there.
+    #[cfg(target_os = "macos")]
     fn claim_window(&self) {
         assert!(
             crate::update_apply::take_the_window(
@@ -539,11 +555,13 @@ impl Install {
 
     /// The installation after the exchange: the new bundle live, the old one
     /// in `stage/`.
+    #[cfg(target_os = "macos")]
     fn exchanged(&self) {
         install_flip::exchange(&self.installed, &self.stage()).unwrap();
     }
 
     /// The new build's executable wherever it is now.
+    #[cfg(target_os = "macos")]
     fn new_program(&self) -> PathBuf {
         if version_of(&self.installed) == "2.0" {
             self.installed.clone()
@@ -552,6 +570,7 @@ impl Install {
         }
     }
 
+    #[cfg(target_os = "macos")]
     fn stage(&self) -> PathBuf {
         self.home.stage_bundle(self.txn).unwrap()
     }
@@ -562,6 +581,7 @@ impl Install {
 
     /// The receipt the trial writes, as `update_trial` writes it: the real
     /// encoder, created durably and never over an existing one.
+    #[cfg(target_os = "macos")]
     fn receipt(&self, nonce: Nonce, carried: Nonce, pid: u32) {
         let receipt = Receipt {
             txn: self.txn,
@@ -639,6 +659,7 @@ fn limits(old_within_ms: u64, trial_within_ms: u64) -> Limits {
 }
 
 /// The rescue build as recovery on its own worker, over `road`.
+#[cfg(target_os = "macos")]
 fn recovered(road: Road, mut hands: Fake) -> (Option<Ended>, Fake) {
     on_a_worker(move |worker| {
         let ended = recover(worker, &road, &mut hands, None).ended;
@@ -647,6 +668,7 @@ fn recovered(road: Road, mut hands: Fake) -> (Option<Ended>, Fake) {
 }
 
 /// The trial's nonce, from the arguments the launch was given.
+#[cfg(target_os = "macos")]
 fn trial_nonce(args: &[OsString]) -> Nonce {
     assert_eq!(args[0], OsString::from(cli::UPDATE_TRIAL_FLAG));
     Nonce::parse(&args[2].to_string_lossy()).unwrap()
@@ -723,6 +745,7 @@ fn applied_while_held<H>(road: Road, world: Fake, held: H) -> (Ended, Fake) {
 /// a road that stops moving for one patience before it ends is red, naming
 /// the line that awaited it, never a hang of the whole run. A journal caught
 /// mid-replace counts as the step last seen.
+#[cfg(target_os = "macos")]
 #[track_caller]
 fn ended_while_committing<T>(install: &Install, road: JoinHandle<T>) -> T {
     let at = std::panic::Location::caller();
@@ -751,32 +774,30 @@ fn ended_while_committing<T>(install: &Install, road: JoinHandle<T>) -> T {
     }
 }
 
-/// **P is at its wait for the transaction lock**: its election is over — the
-/// window's mark names this process and the election lock is free — and the
-/// road's next step is the lock (`Txn::hold`). Awaited as state within the
-/// suite's patience; an applier that ends first is red.
-fn until_past_the_election<T>(install: &Install, applier: &JoinHandle<T>) {
+/// **P is past its election**: the window's mark names this process and the
+/// election lock is free — the road's next wait is the transaction lock's
+/// (`Txn::hold`). The state a test's road clock stops P at, in a pause of that
+/// wait (T-WINDOWS-HANDOVER-ORDER-A-HELD-LOCK-WAIT): P is then past its
+/// election while the lock is still held, as a fact of the test.
+#[cfg(target_os = "macos")]
+fn past_the_election(install: &Install) -> impl FnMut() -> bool + Send + 'static {
+    let (home, txn) = (install.home.clone(), install.txn);
     let me = crate::update_apply::this_process();
-    let elected = crate::lane::within_patience(|| {
-        applier.is_finished()
-            || (crate::update_apply::window_owner(&install.home, install.txn) == Some(me)
-                && install_txn::try_hold(
-                    &crate::update_apply::owner_lock_path(&install.home, install.txn),
-                    Hold::Exclusive,
-                )
-                .ok()
-                .flatten()
-                .is_some())
-    });
-    assert!(elected, "P never took the window");
-    assert!(
-        !applier.is_finished(),
-        "the applier ended before its wait for the lock"
-    );
+    move || {
+        crate::update_apply::window_owner(&home, txn) == Some(me)
+            && install_txn::try_hold(
+                &crate::update_apply::owner_lock_path(&home, txn),
+                Hold::Exclusive,
+            )
+            .ok()
+            .flatten()
+            .is_some()
+    }
 }
 
 /// A launch that starts the new bundle's executable and writes the receipt
 /// for the trial's nonce, carrying `carried` (the trial's own when `None`).
+#[cfg(target_os = "macos")]
 fn a_healthy_trial(install: &Install, children: &Children, carried: Option<Nonce>) -> LaunchHook {
     let home = install.home.clone();
     let txn = install.txn;
@@ -802,6 +823,7 @@ fn a_healthy_trial(install: &Install, children: &Children, carried: Option<Nonce
 /// Run the product watch beside a synthetic live trial. Once it reads
 /// `Committed`, it removes the receipt to acknowledge that its final mark
 /// decision is complete, just as the real trial does.
+#[cfg(target_os = "macos")]
 fn watch_receipt_decision(home: Home, txn: TxnId, nonce: Nonce) {
     let journal = home.journal();
     let mark = home.unkept(txn);
@@ -829,6 +851,7 @@ fn watch_receipt_decision(home: Home, txn: TxnId, nonce: Nonce) {
 /// road: the applier ending first is red at once, and nothing else bounds the wait. The wait is
 /// bounded only by the applier thread's end: an applier stuck alive hangs the test rather than
 /// turning it red.
+#[cfg(target_os = "macos")]
 fn journal_reaches<T>(
     install: &Install,
     applier: &JoinHandle<T>,
@@ -859,11 +882,9 @@ fn journal_reaches<T>(
 ///
 /// MUTATION: in `install_txn`'s macOS arm, perform `Replace::Swap` as three
 /// renames through a name beside `a` (a → aside, b → a, aside → b).
+#[cfg(target_os = "macos")]
 #[test]
 fn swap_leaves_no_instant_without_a_bundle() {
-    if !on_macos() {
-        return;
-    }
     let install = Install::new("swap");
     let (installed, stage) = (install.installed.clone(), install.stage());
     let mut old = bt_platform::quiet_command(installed.join(EXE))
@@ -946,38 +967,64 @@ fn swap_leaves_no_instant_without_a_bundle() {
 /// If 60 s pass, P journals `Failed`, deletes staging, and exits without
 /// touching anything."
 ///
-/// O lets go of the lock once P is at its wait for it (its election over),
-/// and of the claim in the pause of P's first refused ask of it (the road's
-/// `wait_clock`, watched): whether the entrance is armed then is what P did
-/// while the claim was held, and an exchange before that pause is red where
-/// it happens. The holds kept to the end are awaited while still held, within
-/// the suite's patience.
+/// O lets go of the lock in a pause of P's wait for it, P's election over,
+/// and of the claim in the pause of P's first refused ask of it — both pauses
+/// of the road's `wait_clock`, a counted clock, picked by state
+/// (T-WINDOWS-HANDOVER-ORDER-A-HELD-LOCK-WAIT): what the disk says then is
+/// what P did while each was held, and an exchange before the claim's pause
+/// is red where it happens. The holds kept to the end are awaited while still
+/// held, within the suite's patience.
 ///
 /// MUTATION: in `wait_for_the_claim`, answer `Ok(())` for a held claim.
+#[cfg(target_os = "macos")]
 #[test]
 fn p_waits_for_o_and_releases_the_claim() {
-    if !on_macos() {
-        return;
-    }
     // O alive: its lock, then its claim, let go one after the other.
     let install = Install::new("wait");
-    let lock = install_txn::try_hold(&install.home.lock(), Hold::Exclusive)
-        .unwrap()
-        .unwrap();
+    let lock = Arc::new(Mutex::new(Some(
+        install_txn::try_hold(&install.home.lock(), Hold::Exclusive)
+            .unwrap()
+            .unwrap(),
+    )));
     let claim = Arc::new(Mutex::new(Some(
         bt_platform::instance::claim_data_directory(&install.data).unwrap(),
     )));
+    // The journal's phase in the pause of P's wait for the lock, its election
+    // over, where O lets go of the lock.
+    let at_the_lock = Arc::new(Mutex::new(None::<PhaseKind>));
     // Whether the entrance was armed in the pause of P's first refused ask of
     // the claim.
     let armed_at_the_claim = Arc::new(Mutex::new(None::<bool>));
     let clock = {
-        let (claim, seen, plist) = (
+        let (o_lock, claim, at_lock, seen, plist, journal, home) = (
+            Arc::clone(&lock),
             Arc::clone(&claim),
+            Arc::clone(&at_the_lock),
             Arc::clone(&armed_at_the_claim),
             install.plist(),
+            install.home.journal(),
+            install.home.clone(),
         );
-        Arc::new(WatchedWallClock::new(move |pause| {
-            if pause == 1 {
+        let mut elected = past_the_election(&install);
+        Arc::new(CountedClock::new(move |_| {
+            let mut o_lock = o_lock.lock().unwrap();
+            if o_lock.is_some() {
+                if elected() {
+                    *at_lock.lock().unwrap() = Some(
+                        Journal::parse(&std::fs::read(&journal).unwrap())
+                            .unwrap()
+                            .body
+                            .phase
+                            .kind(),
+                    );
+                    o_lock.take();
+                }
+            } else if claim.lock().unwrap().is_some()
+                && install_txn::try_hold(&home.lock(), Hold::Exclusive)
+                    .unwrap()
+                    .is_none()
+            {
+                // O's lock let go, P holds it: P's ask of the claim.
                 *seen.lock().unwrap() = Some(plist.exists());
                 claim.lock().unwrap().take();
             }
@@ -1001,15 +1048,13 @@ fn p_waits_for_o_and_releases_the_claim() {
         ..install.road(limits(10_000, 10_000))
     };
     let applier = start(road, world);
-    until_past_the_election(&install, &applier);
-    assert_eq!(
-        install.on_disk().unwrap().body.phase.kind(),
-        PhaseKind::Handoff,
-        "nothing is written while O holds the lock"
-    );
-    drop(lock);
     let (ended, _) = ended_while_committing(&install, applier);
     assert_eq!(ended, Ended::Committed);
+    assert_eq!(
+        *at_the_lock.lock().unwrap(),
+        Some(PhaseKind::Handoff),
+        "P waited for the lock past its election, and nothing is written while O holds it"
+    );
     assert!(*swapped_at.lock().unwrap());
     assert_eq!(
         *armed_at_the_claim.lock().unwrap(),
@@ -1054,16 +1099,17 @@ fn p_waits_for_o_and_releases_the_claim() {
 /// names it"; M4: the LaunchAgent plist durable, then the admission and the
 /// process check, then `Exchanging`. A running copy holds the admission shared
 /// while the test reads the disk: the journal says `Armed` and the plist
-/// names the rescue executable and the home, and no bundle has moved. At the
-/// exchange itself the journal says `Moving`.
+/// names the rescue executable and the home, and no bundle has moved — read in
+/// a pause of the applier's wait for the admission (the road's `wait_clock`,
+/// counted, stopped there by state; T-WINDOWS-HANDOVER-ORDER-A-HELD-LOCK-WAIT),
+/// the copy let go before the road goes on. At the exchange itself the journal
+/// says `Moving`.
 ///
 /// MUTATION: in `at_handoff`, go on to `at_armed` before recording
 /// `Armed` (record it after the call returns).
+#[cfg(target_os = "macos")]
 #[test]
 fn armed_is_durable_before_exchanging() {
-    if !on_macos() {
-        return;
-    }
     let install = Install::new("armed");
     std::fs::write(install.home.admission(), b"").unwrap();
     let copy = install_txn::try_hold(&install.home.admission(), Hold::Shared)
@@ -1082,10 +1128,24 @@ fn armed_is_durable_before_exchanging() {
             .kind();
         *seen.lock().unwrap() = Some(phase);
     }));
-    let applier = start(install.road(limits(10_000, 10_000)), world);
-    journal_reaches(&install, &applier, |journal| {
-        journal.body.phase == Phase::Armed
-    });
+    let at_armed = {
+        let journal = install.home.journal();
+        move || {
+            Journal::parse(&std::fs::read(&journal).unwrap())
+                .unwrap()
+                .body
+                .phase
+                == Phase::Armed
+        }
+    };
+    let (clock, stopped) = CountedClock::stopping_where(at_armed);
+    let road = Road {
+        wait_clock: Arc::new(clock),
+        ..install.road(limits(10_000, 10_000))
+    };
+    let applier = start(road, world);
+    stopped.until_stopped("the applier at its wait for the admission, at `Armed`");
+    assert_eq!(install.on_disk().unwrap().body.phase, Phase::Armed);
     let plist = std::fs::read_to_string(install.plist()).expect("the plist is there at Armed");
     let rescue = install.home.rescue_executable(install.txn).unwrap();
     assert!(plist.contains(&*rescue.to_string_lossy()));
@@ -1093,6 +1153,7 @@ fn armed_is_durable_before_exchanging() {
     assert!(plist.contains("--update-recover"));
     assert_eq!(version_of(&install.installed), "1.0", "nothing moved yet");
     drop(copy);
+    stopped.go();
     let (ended, world) = applier.join().unwrap();
     assert_eq!(ended, Ended::Committed, "{:?}", world.said);
     assert_eq!(*at_exchange.lock().unwrap(), Some(PhaseKind::Moving));
@@ -1119,11 +1180,9 @@ fn armed_is_durable_before_exchanging() {
 /// MUTATION: in `trial`, give the receipt read the trial's own nonce before it
 /// is offered to the journal. RED by a late answer: the trial keeps `SIGTERM`
 /// (row 136's plant A) — asked to end, on every run.
+#[cfg(target_os = "macos")]
 #[test]
 fn a_receipt_for_another_nonce_is_refused() {
-    if !on_macos() {
-        return;
-    }
     let install = Install::new("nonce");
     let children = Children::default();
     let world = launching(a_healthy_trial(
@@ -1171,11 +1230,9 @@ fn a_receipt_for_another_nonce_is_refused() {
 ///
 /// MUTATION: in `trial`, never record `TrialBegan` (filter every process
 /// found out): the receipt then has no `Trial` to be accepted in.
+#[cfg(target_os = "macos")]
 #[test]
 fn committed_is_written_only_on_a_matching_receipt_while_trial() {
-    if !on_macos() {
-        return;
-    }
     let install = Install::new("commit");
     let (home, txn) = (install.home.clone(), install.txn);
     let world = launching(Box::new(move |_, args| {
@@ -1221,11 +1278,9 @@ fn committed_is_written_only_on_a_matching_receipt_while_trial() {
 /// mark and calling `next.noting_unkept(unkept)` when `phase == Committed`:
 /// the retired field is `Some` and startup returns a false `ChangesNotKept`
 /// card.
+#[cfg(target_os = "macos")]
 #[test]
 fn a_live_trial_that_takes_its_mark_back_leaves_no_not_kept_card() {
-    if !on_macos() {
-        return;
-    }
     let install = Install::new("commit-kept-设置");
     let children = Children::default();
     let watcher = Arc::new(Mutex::new(None));
@@ -1323,11 +1378,9 @@ fn a_live_trial_that_takes_its_mark_back_leaves_no_not_kept_card() {
 /// MUTATIONS: make `note_settled_unkept` record `None` (the folder removes the
 /// only fact, so no card); make `changes_not_kept` ignore the field (the field
 /// is present, but no card).
+#[cfg(target_os = "macos")]
 #[test]
 fn a_commit_after_a_trial_held_a_change_notes_it_and_the_next_start_says_so() {
-    if !on_macos() {
-        return;
-    }
     let install = Install::new("commit-unkept-设置");
     let (home, txn) = (install.home.clone(), install.txn);
     let version = crate::version::VERSION;
@@ -1418,11 +1471,9 @@ fn a_commit_after_a_trial_held_a_change_notes_it_and_the_next_start_says_so() {
 ///
 /// MUTATION: in `trial`, remove the old bundle from `stage/` before recording
 /// `ReceiptAccepted`.
+#[cfg(target_os = "macos")]
 #[test]
 fn the_old_bundle_is_removed_only_after_committed() {
-    if !on_macos() {
-        return;
-    }
     let install = Install::new("removed");
     let children = Children::default();
     let world = launching(a_healthy_trial(&install, &children, None));
@@ -1470,22 +1521,37 @@ fn the_old_bundle_is_removed_only_after_committed() {
 ///
 /// MUTATION: in `Txn::at_armed`, revert at the first sighting of a process
 /// of the installed executable (the rule before U-40).
+#[cfg(target_os = "macos")]
 #[test]
 fn a_persons_start_at_the_process_check_is_waited_for() {
-    if !on_macos() {
-        return;
-    }
     let install = Install::new("armed-person");
     let children = Children::default();
     let person = children.start(&install.installed, "person");
     let mut world = launching(a_healthy_trial(&install, &children, None));
-    let leaves = children.clone();
+    let (leaves, asked_to_leave) = (children.clone(), Arc::new(AtomicBool::new(false)));
+    let asked = Arc::clone(&asked_to_leave);
     world.on_say = Some(Box::new(move |line| {
         if line.contains("the exchange waits for it to leave") {
             leaves.end(person);
+            asked.store(true, Ordering::SeqCst);
         }
     }));
-    let (ended, world) = applied(install.road(limits(5_000, 5_000)), world);
+    // The window is the road's `wait_clock`'s, counted: a pause after the
+    // person was ended lasts until it has left and been reaped, so "gone
+    // within the window" is the event, never the machine's speed
+    // (T-WINDOWS-HANDOVER-ORDER-A-HELD-LOCK-WAIT).
+    let gone = children.clone();
+    let road = Road {
+        wait_clock: Arc::new(CountedClock::new(move |_| {
+            if asked_to_leave.load(Ordering::SeqCst) {
+                crate::lane::wait_until("the person's start to leave", || {
+                    gone.status(person).is_some()
+                });
+            }
+        })),
+        ..install.road(limits(5_000, 5_000))
+    };
+    let (ended, world) = applied(road, world);
     assert_eq!(ended, Ended::Committed, "{:?}", world.said);
     assert!(
         said(&world, &format!("(pid {person}) runs; the exchange waits")),
@@ -1513,6 +1579,7 @@ fn a_persons_start_at_the_process_check_is_waited_for() {
 /// **Where a person's start of the new build falls in the applier's road**
 /// (U-40): each instant between the exchange and the receipt at which a
 /// second start can meet a live applier.
+#[cfg(target_os = "macos")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Beside {
     /// At the exchange: started from the old bundle, which is exchanged under
@@ -1525,6 +1592,7 @@ enum Beside {
 }
 
 /// **One road with a person's start beside it**, up to the trial's record.
+#[cfg(target_os = "macos")]
 struct BesideRoad {
     install: Install,
     children: Children,
@@ -1540,6 +1608,7 @@ struct BesideRoad {
 
 /// **The applier's road with a person's start of the new build at
 /// `beside`**, run until the journal records its trial.
+#[cfg(target_os = "macos")]
 fn a_start_beside(beside: Beside) -> BesideRoad {
     let install = Install::new(&format!("beside-{beside:?}"));
     let children = Children::default();
@@ -1607,11 +1676,9 @@ fn a_start_beside(beside: Beside) -> BesideRoad {
 /// MUTATION: in `update_apply::launched_trial`, answer the earliest-started
 /// process of `program` (the rule before U-40 took the earliest one started
 /// after the launch).
+#[cfg(target_os = "macos")]
 #[test]
 fn a_persons_start_anywhere_in_the_window_never_fails_a_healthy_trial() {
-    if !on_macos() {
-        return;
-    }
     for beside in [Beside::Exchange, Beside::Launch, Beside::Record] {
         let row = a_start_beside(beside);
         assert_eq!(
@@ -1649,11 +1716,9 @@ fn a_persons_start_anywhere_in_the_window_never_fails_a_healthy_trial() {
 ///
 /// MUTATION: in `Txn::watch_trial`, take the trial to be alive while any
 /// process of the installed executable runs.
+#[cfg(target_os = "macos")]
 #[test]
 fn a_dead_trial_beside_a_persons_start_is_still_rolled_back() {
-    if !on_macos() {
-        return;
-    }
     for beside in [Beside::Exchange, Beside::Launch, Beside::Record] {
         let row = a_start_beside(beside);
         assert_eq!(row.recorded.pid, row.trial, "{beside:?}");
@@ -1697,15 +1762,13 @@ fn a_dead_trial_beside_a_persons_start_is_still_rolled_back() {
 /// trusting the phase" (§C.4).
 ///
 /// MUTATION: in `at_moving_again`, revert whatever is live.
+#[cfg(target_os = "macos")]
 #[test]
 #[expect(
     non_snake_case,
     reason = "the M-rows are named as the design note names them"
 )]
 fn reentry_at_M4_M5_M6_continues_from_the_live_identity() {
-    if !on_macos() {
-        return;
-    }
     // M4.
     let install = Install::new("m4");
     install.claim_window();
@@ -1815,11 +1878,9 @@ fn reentry_at_M4_M5_M6_continues_from_the_live_identity() {
 ///
 /// MUTATION: in `update_apply::window_duty_is_open`, count `Armed` as open (a
 /// later applier resumes a road it does not own).
+#[cfg(target_os = "macos")]
 #[test]
 fn an_unmarked_later_applier_stands_down_and_the_recovery_finishes_the_road() {
-    if !on_macos() {
-        return;
-    }
     let install = Install::new("later");
     install.arm();
     install.write(Phase::Armed);
@@ -1866,11 +1927,9 @@ fn an_unmarked_later_applier_stands_down_and_the_recovery_finishes_the_road() {
 ///
 /// MUTATION: in `trial`, take no pid from the process list (only a
 /// receipt's).
+#[cfg(target_os = "macos")]
 #[test]
 fn the_trial_is_launched_through_launch_services_and_found_by_its_image() {
-    if !on_macos() {
-        return;
-    }
     let install = Install::new("open");
     let children = Children::default();
     let world = Fake {
@@ -1912,11 +1971,9 @@ fn the_trial_is_launched_through_launch_services_and_found_by_its_image() {
 ///
 /// MUTATION: `retire_entrance_in` answers `Ok(())` without calling
 /// `launch_agent::disarm`.
+#[cfg(target_os = "macos")]
 #[test]
 fn an_ordinary_start_retires_the_macos_entrance() {
-    if !on_macos() {
-        return;
-    }
     let scratch = Scratch::new("u28-retire");
     let agents = scratch.root.join("LaunchAgents");
     std::fs::create_dir_all(&agents).unwrap();
@@ -1961,7 +2018,7 @@ impl crate::update_recover::World for Fake {
 /// **The recovery door over `install`** on a worker, handed `then_launch`:
 /// its exit code and what it asked of `hands`.
 fn recover_door(install: &Install, then_launch: Vec<OsString>, hands: Fake) -> (i32, Fake) {
-    match start_recover_door(install, then_launch, hands).join() {
+    match start_recover_door(install, then_launch, hands, Arc::new(WallClock)).join() {
         Ok(answer) => answer,
         Err(panic) => std::panic::resume_unwind(panic),
     }
@@ -1972,6 +2029,7 @@ fn start_recover_door(
     install: &Install,
     then_launch: Vec<OsString>,
     hands: Fake,
+    wait_clock: Arc<dyn crate::update_apply::WaitClock>,
 ) -> JoinHandle<(i32, Fake)> {
     let (home, installed, data, agents) = (
         install.home.clone(),
@@ -1990,6 +2048,7 @@ fn start_recover_door(
             limits: limits(5_000, 5_000),
             starter: None,
             handed_back: None,
+            wait_clock,
         };
         let code = crate::update_recover::run(worker, &door, &mut hands);
         (code, hands)
@@ -2008,6 +2067,7 @@ fn stuck(attempts: u8) -> Phase {
 }
 
 /// The words after a rollback, then `rest`.
+#[cfg(target_os = "macos")]
 fn failed_then(install: &Install, rest: &[&str]) -> Vec<OsString> {
     let mut words = failed_words(&install.home).to_vec();
     words.extend(rest.iter().map(OsString::from));
@@ -2015,6 +2075,7 @@ fn failed_then(install: &Install, rest: &[&str]) -> Vec<OsString> {
 }
 
 /// A running process of `program`, by its pid, as the journal records a trial.
+#[cfg(target_os = "macos")]
 fn recorded(program: &Path, pid: u32) -> TrialProcess {
     let listed = install_flip::running_from(program)
         .unwrap()
@@ -2041,11 +2102,9 @@ fn recorded(program: &Path, pid: u32) -> TrialProcess {
 ///
 /// MUTATION: in `declare_rollback`, answer `Ok(Ended::Stuck(..))` right after
 /// recording `RollbackDeclared` (the rollback never runs).
+#[cfg(target_os = "macos")]
 #[test]
 fn a_failed_health_swaps_back() {
-    if !on_macos() {
-        return;
-    }
     let install = Install::new("health");
     let children = Children::default();
     let started = children.clone();
@@ -2113,11 +2172,9 @@ fn a_failed_health_swaps_back() {
 ///
 /// MUTATION: in `trial`, treat the recorded process as alive whatever
 /// `still_running` answers (the watch pauses its way to the deadline).
+#[cfg(target_os = "macos")]
 #[test]
 fn a_dead_trial_rolls_back_at_once() {
-    if !on_macos() {
-        return;
-    }
     let install = Install::new("dead");
     let children = Children::default();
     let started = children.clone();
@@ -2202,11 +2259,9 @@ fn a_dead_trial_rolls_back_at_once() {
 ///
 /// MUTATION: in `update_txn::restore`, answer `SwapBack` whenever the
 /// staged bundle is the old one or the new one (whatever is live).
+#[cfg(target_os = "macos")]
 #[test]
 fn rollback_from_the_new_live_swaps_and_from_the_old_live_does_not() {
-    if !on_macos() {
-        return;
-    }
     let install = Install::new("new-live");
     install.exchanged();
     install.write(Phase::RollbackIntent {
@@ -2251,11 +2306,9 @@ fn rollback_from_the_new_live_swaps_and_from_the_old_live_does_not() {
 ///
 /// MUTATION: in `stuck`, answer `Ended::Stuck` without recording
 /// `RollbackFailed`.
+#[cfg(target_os = "macos")]
 #[test]
 fn a_failed_swap_back_is_stuck_with_everything_kept() {
-    if !on_macos() {
-        return;
-    }
     let install = Install::new("stuck");
     let world = Fake {
         refuse_from: 1,
@@ -2331,11 +2384,9 @@ fn a_failed_swap_back_is_stuck_with_everything_kept() {
 ///
 /// MUTATION: drop the `attempts >= STUCK_ATTEMPT_LIMIT` arm of
 /// `update_txn::decide`.
+#[cfg(target_os = "macos")]
 #[test]
 fn stuck_is_retried_on_the_next_start_and_stops_after_the_bound() {
-    if !on_macos() {
-        return;
-    }
     let install = Install::new("bound");
     install.exchanged();
     install.write(stuck(1));
@@ -2404,11 +2455,13 @@ fn stuck_is_retried_on_the_next_start_and_stops_after_the_bound() {
 /// **The ordinary start, over a macOS home, with the start's effects
 /// performed for real where they are files** (the entrance through its door,
 /// in the test's LaunchAgents folder).
+#[cfg(target_os = "macos")]
 struct StartWorld {
     agents: PathBuf,
     said: Vec<String>,
 }
 
+#[cfg(target_os = "macos")]
 impl crate::update_startup::World for StartWorld {
     fn say(&mut self, line: &str) {
         self.said.push(line.to_owned());
@@ -2444,11 +2497,9 @@ impl crate::update_startup::World for StartWorld {
 /// state is durable." The power went after `RolledBack` was durable.
 ///
 /// MUTATION: in `finish_rollback`, skip `disarm`.
+#[cfg(target_os = "macos")]
 #[test]
 fn rolled_back_is_retired_at_the_next_start() {
-    if !on_macos() {
-        return;
-    }
     let install = Install::new("m11");
     install.write(Phase::RolledBack { untried: false });
     install.arm();
@@ -2502,11 +2553,9 @@ fn rolled_back_is_retired_at_the_next_start() {
 /// MUTATION: in `Txn::retire`, record `Retired` without reading the mark: the
 /// folder and the mark are gone, and the start says only that the previous
 /// version was restored.
+#[cfg(target_os = "macos")]
 #[test]
 fn a_rollback_notes_what_it_did_not_keep_before_its_folder_goes() {
-    if !on_macos() {
-        return;
-    }
     let install = Install::new("e5-undone");
     install.write(Phase::RolledBack { untried: false });
     install.arm();
@@ -2577,11 +2626,9 @@ fn a_rollback_notes_what_it_did_not_keep_before_its_folder_goes() {
 /// read when the stop asks for the end (`CountedClock::at_the_end_ask`): row
 /// 136's plants B (the grace skipped), B′ (only the quit grace skipped) and C
 /// (the grace never ends).
+#[cfg(target_os = "macos")]
 #[test]
 fn the_trial_is_asked_to_quit_before_it_is_killed() {
-    if !on_macos() {
-        return;
-    }
     let install = Install::new("stubborn");
     install.exchanged();
     let children = Children::default();
@@ -2669,11 +2716,9 @@ fn the_trial_is_asked_to_quit_before_it_is_killed() {
 ///
 /// MUTATION: in `apply`, give the revert's relaunch the words
 /// `failed_words` gives a rollback's.
+#[cfg(target_os = "macos")]
 #[test]
 fn a_plain_relaunch_after_abandoned_and_after_a_revert() {
-    if !on_macos() {
-        return;
-    }
     let install = Install::new("abandoned");
     let claim = bt_platform::instance::claim_data_directory(&install.data).unwrap();
     let (ended, world) =
@@ -2721,11 +2766,9 @@ fn a_plain_relaunch_after_abandoned_and_after_a_revert() {
 /// (`update_txn::tests`' frozen-header cases).
 ///
 /// MUTATION: in `retire`, skip the removal of `H/<txn>`.
+#[cfg(target_os = "macos")]
 #[test]
 fn rolled_back_leaves_only_what_the_old_build_reads() {
-    if !on_macos() {
-        return;
-    }
     let install = Install::new("leaves");
     let (ended, world) = applied(install.road(limits(5_000, 1_000)), Fake::default());
     assert_eq!(ended, Ended::RolledBack, "{:?}", world.said);
@@ -2774,12 +2817,14 @@ fn rolled_back_leaves_only_what_the_old_build_reads() {
 /// **An ordinary start's world over a macOS home**: the entrance removed
 /// through its door in the test's LaunchAgents folder, nothing mounted, and
 /// the hand-over recorded — the test runs the door the line names itself.
+#[cfg(target_os = "macos")]
 struct Starting {
     agents: PathBuf,
     said: Vec<String>,
     spawned: Vec<(PathBuf, Vec<OsString>)>,
 }
 
+#[cfg(target_os = "macos")]
 impl crate::update_startup::World for Starting {
     fn say(&mut self, line: &str) {
         self.said.push(line.to_owned());
@@ -2816,6 +2861,7 @@ impl crate::update_startup::World for Starting {
 /// **What one person's start opened**: the start itself going on (with its
 /// card), or — once it handed itself over — what the recovery door started:
 /// the installed program with its words, and trials through `open`.
+#[cfg(target_os = "macos")]
 struct Opened {
     continued: Option<Option<crate::update_job::Failure>>,
     started: Vec<(PathBuf, Vec<OsString>)>,
@@ -2823,6 +2869,7 @@ struct Opened {
     hands: Fake,
 }
 
+#[cfg(target_os = "macos")]
 impl Opened {
     /// Every start that happened: the start's own, the door's, the trials.
     fn launches(&self) -> usize {
@@ -2835,6 +2882,7 @@ impl Opened {
 /// the command line's own parser and the rescue clone's own home finder, and
 /// the recovery door run on a worker with `hands` within `limits`. No
 /// applier runs.
+#[cfg(target_os = "macos")]
 fn start_then_recover(install: &Install, argv: &[&str], hands: Fake, limits: Limits) -> Opened {
     start_then_recover_on(install, argv, hands, limits, |recovery| {
         on_a_worker(recovery)
@@ -2843,6 +2891,7 @@ fn start_then_recover(install: &Install, argv: &[&str], hands: Fake, limits: Lim
 
 /// [`start_then_recover`], with the recovery it hands itself to awaited while
 /// this test holds `held` ([`ended_while_held`]).
+#[cfg(target_os = "macos")]
 fn start_then_recover_while_held<H>(
     install: &Install,
     argv: &[&str],
@@ -2856,10 +2905,12 @@ fn start_then_recover_while_held<H>(
 }
 
 /// The recovery door's run on a worker, as [`start_then_recover_on`] hands it.
+#[cfg(target_os = "macos")]
 type Recovery = Box<dyn FnOnce(&WorkerCtx) -> (i32, Fake) + Send>;
 
 /// [`start_then_recover`], with the recovery door's run on a worker handed to
 /// `run`.
+#[cfg(target_os = "macos")]
 fn start_then_recover_on(
     install: &Install,
     argv: &[&str],
@@ -2925,6 +2976,7 @@ fn start_then_recover_on(
             limits,
             starter: None,
             handed_back: None,
+            wait_clock: Arc::new(WallClock),
         };
         let code = crate::update_recover::run(worker, &door, &mut hands);
         (code, hands)
@@ -2942,6 +2994,7 @@ fn start_then_recover_on(
 /// the new bundle live, the entrance armed, the new build's process started
 /// and recorded by its pid and start instant, `Trial` begun now — its receipt
 /// on disk when `answered`, and the process ended again unless `alive`.
+#[cfg(target_os = "macos")]
 fn a_recorded_trial(install: &Install, children: &Children, alive: bool, answered: bool) {
     install.exchanged();
     install.arm();
@@ -2965,6 +3018,7 @@ fn a_recorded_trial(install: &Install, children: &Children, alive: bool, answere
 
 /// **What `decide` leaves a holder to do over `install` now**, from its disk
 /// as the door reads it; `None` with no journal.
+#[cfg(target_os = "macos")]
 fn left_to_do(install: &Install) -> Option<Action> {
     let journal = install.on_disk()?;
     let (installed, stage) = (install.installed.clone(), install.stage());
@@ -3000,6 +3054,7 @@ fn left_to_do(install: &Install) -> Option<Action> {
 }
 
 /// What the table expects one start to open.
+#[cfg(target_os = "macos")]
 #[derive(Clone, Copy, Debug)]
 enum Expect {
     /// The start went on itself: it retired a terminal journal.
@@ -3029,11 +3084,9 @@ enum Expect {
 ///
 /// MUTATION: in `update_recover::run`, recover only a `destructive` header
 /// whose outcome is decided (`&& header.outcome != HeaderOutcome::None`).
+#[cfg(target_os = "macos")]
 #[test]
 fn every_phase_left_by_a_dead_applier_still_opens_folio() {
-    if !on_macos() {
-        return;
-    }
     type Setup = fn(&Install, &Children);
     let healthy = |install: &Install, children: &Children| {
         launching(a_healthy_trial(install, children, None))
@@ -3249,11 +3302,9 @@ fn every_phase_left_by_a_dead_applier_still_opens_folio() {
 ///
 /// MUTATION: in `opens_now`, answer `Opens::Installed { failed }` whatever
 /// is live.
+#[cfg(target_os = "macos")]
 #[test]
 fn a_new_live_bundle_is_never_started_plainly_before_committed() {
-    if !on_macos() {
-        return;
-    }
     let is_trial =
         |words: &[OsString]| words.first() == Some(&OsString::from(cli::UPDATE_TRIAL_FLAG));
     let no_open = || -> LaunchHook { Box::new(|_, _| Err(io::Error::other("no open (test)"))) };
@@ -3353,11 +3404,9 @@ fn a_new_live_bundle_is_never_started_plainly_before_committed() {
 ///
 /// MUTATION: in `update_txn::decide`, drop the `Commit` arm of a `Stuck`
 /// with a retrial.
+#[cfg(target_os = "macos")]
 #[test]
 fn a_receipt_found_by_recovery_commits_forward() {
-    if !on_macos() {
-        return;
-    }
     let install = Install::new("forward-trial");
     let children = Children::default();
     a_recorded_trial(&install, &children, false, true);
@@ -3458,11 +3507,9 @@ fn a_receipt_found_by_recovery_commits_forward() {
 ///
 /// MUTATION: in `recover`, answer `waiting: false` for a start's recovery
 /// that failed (the exit guard then starts nothing).
+#[cfg(target_os = "macos")]
 #[test]
 fn recovery_failure_still_opens_with_the_incomplete_card() {
-    if !on_macos() {
-        return;
-    }
     let card_of = |install: &Install, words: &[OsString]| {
         let request = cli::parse(words.to_vec()).expect("the words parse");
         let exe = install.installed.join(EXE);
@@ -3567,11 +3614,9 @@ fn recovery_failure_still_opens_with_the_incomplete_card() {
 /// `Stuck` is not a rollback attempt, and it gives the bound no way round.
 ///
 /// MUTATION: in `update_txn::next`, let `RetrialBegan` record `attempts: 0`.
+#[cfg(target_os = "macos")]
 #[test]
 fn the_stuck_bound_still_holds_when_the_new_bundle_is_live() {
-    if !on_macos() {
-        return;
-    }
     let install = Install::new("bound-new-live");
     install.exchanged();
     install.write(stuck(STUCK_ATTEMPT_LIMIT));
@@ -3630,6 +3675,7 @@ fn the_stuck_bound_still_holds_when_the_new_bundle_is_live() {
 /// journal write fails at its temporary (the macOS form of a refused write:
 /// a rename here is never refused for an open target) — and the permissions
 /// it had, to put back.
+#[cfg(target_os = "macos")]
 fn unwritable(home: &Home) -> std::fs::Permissions {
     let before = std::fs::metadata(home.root()).unwrap().permissions();
     let mut shut = before.clone();
@@ -3651,11 +3697,9 @@ fn unwritable(home: &Home) -> std::fs::Permissions {
 ///
 /// MUTATION: in `update_apply_macos::apply`, tell the guard nobody is waiting
 /// after `Ended::Failed` (U-23's "a failed applier owes no window").
+#[cfg(target_os = "macos")]
 #[test]
 fn a_failed_applier_still_opens_the_live_bundle_with_the_incomplete_card() {
-    if !on_macos() {
-        return;
-    }
     let install = Install::new("fail-unlockable");
     let journal = std::fs::read(install.home.journal()).unwrap();
     std::fs::create_dir(install.home.lock()).unwrap();
@@ -3709,11 +3753,9 @@ fn a_failed_applier_still_opens_the_live_bundle_with_the_incomplete_card() {
 ///
 /// MUTATION: in `Txn::watch_trial`, answer `Watched::Unrecorded` with
 /// `Err(why)` whatever the phase (the trial runs on, unrecorded).
+#[cfg(target_os = "macos")]
 #[test]
 fn a_trial_whose_start_cannot_be_recorded_is_ended_and_swapped_back() {
-    if !on_macos() {
-        return;
-    }
     let install = Install::new("unrecorded");
     let children = Children::default();
     let started = children.clone();
@@ -3796,12 +3838,10 @@ fn a_trial_whose_start_cannot_be_recorded_is_ended_and_swapped_back() {
 ///
 /// No MUTATION: this is the twin the addendum asks to be checked, and it
 /// holds on BASE.
+#[cfg(target_os = "macos")]
 #[test]
 fn what_another_program_holds_open_never_stops_the_macos_exchange() {
     use std::io::Read;
-    if !on_macos() {
-        return;
-    }
     let install = Install::new("held-open");
     let plist = install.installed.join("Contents").join("Info.plist");
     let before = std::fs::read(&plist).unwrap();
@@ -3849,11 +3889,9 @@ fn what_another_program_holds_open_never_stops_the_macos_exchange() {
 /// `a_trial_whose_start_cannot_be_recorded_is_ended_and_swapped_back` and
 /// `a_new_live_bundle_is_never_started_plainly_before_committed`; this is
 /// the twin the addendum asks to be checked.
+#[cfg(target_os = "macos")]
 #[test]
 fn a_home_unwritable_after_the_exchange_leaves_the_new_build_as_a_trial_with_the_card() {
-    if !on_macos() {
-        return;
-    }
     let install = Install::new("unwritable-long");
     let children = Children::default();
     let started = children.clone();
@@ -3916,6 +3954,7 @@ fn a_home_unwritable_after_the_exchange_leaves_the_new_build_as_a_trial_with_the
 /// installed executable and its receipt at its own nonce. The home is
 /// writable again. What is returned: the installation, the processes, the
 /// second trial and the applier's world.
+#[cfg(target_os = "macos")]
 fn failed_with_the_home_shut(tag: &str) -> (Install, Children, TrialProcess, Fake) {
     let install = Install::new(tag);
     let children = Children::default();
@@ -3974,11 +4013,9 @@ fn failed_with_the_home_shut(tag: &str) -> (Install, Children, TrialProcess, Fak
 ///
 /// MUTATION: in `update_apply::before_deciding`, answer `Decide` for
 /// `Survey::Adoptable` (never record it).
+#[cfg(target_os = "macos")]
 #[test]
 fn a_running_trial_the_journal_could_not_record_is_recorded_and_committed_by_the_next_holder() {
-    if !on_macos() {
-        return;
-    }
     let (install, children, second, _applier) = failed_with_the_home_shut("d14");
     let (ended, world) = recovered(install.recovery(limits(5_000, 5_000)), Fake::default());
     assert_eq!(ended, Some(Ended::Committed), "{:?}", world.said);
@@ -4008,11 +4045,9 @@ fn a_running_trial_the_journal_could_not_record_is_recorded_and_committed_by_the
 ///
 /// MUTATION: in `update_apply::before_deciding`, answer `Decide` for
 /// `Survey::Adoptable` (never record it).
+#[cfg(target_os = "macos")]
 #[test]
 fn a_start_beside_an_unrecorded_trial_commits_it_and_starts_nothing_more() {
-    if !on_macos() {
-        return;
-    }
     let (install, children, second, _applier) = failed_with_the_home_shut("defect9");
     let (code, world) = recover_door(&install, Vec::new(), Fake::default());
     assert_eq!(code, 0, "{:?}", world.said);
@@ -4049,11 +4084,9 @@ fn a_start_beside_an_unrecorded_trial_commits_it_and_starts_nothing_more() {
 /// watch pauses its way to the deadline: 750 pauses, 30 000 ms); or in
 /// `watch_trial`, pause until the deadline rather than one poll (the first
 /// pause alone takes the clock to 30 000 ms).
+#[cfg(target_os = "macos")]
 #[test]
 fn a_trial_that_ends_before_it_is_seen_ends_the_wait_at_once() {
-    if !on_macos() {
-        return;
-    }
     let install = Install::new("unseen");
     const TRIAL_WITHIN_MS: u64 = 30_000;
     type Pipes = (std::process::ChildStdin, std::process::ChildStdout);
@@ -4120,6 +4153,7 @@ fn a_trial_that_ends_before_it_is_seen_ends_the_wait_at_once() {
 
 /// **The exchange done, the entrance armed, the journal at `Moving`**: the
 /// new bundle live, the old one in `stage/`, no trial recorded.
+#[cfg(target_os = "macos")]
 fn exchanged_at_moving(tag: &str) -> Install {
     let install = Install::new(tag);
     install.arm();
@@ -4140,11 +4174,9 @@ fn exchanged_at_moving(tag: &str) -> Install {
 ///
 /// MUTATION: give `MacLeave` round 1's `fallback` (the rescue clone through
 /// LaunchServices) or its `last_trial` (a reservation).
+#[cfg(target_os = "macos")]
 #[test]
 fn u35_does_not_apply_on_macos() {
-    if !on_macos() {
-        return;
-    }
     let install = exchanged_at_moving("u35-not-on-macos");
     let home = install.home.clone();
     let data = install.data.clone();
@@ -4175,6 +4207,7 @@ fn u35_does_not_apply_on_macos() {
 
 /// A process of the installed (new) bundle's executable, running, recorded
 /// by its pid and start instant.
+#[cfg(target_os = "macos")]
 fn a_candidate(install: &Install, children: &Children) -> TrialProcess {
     let pid = children.start(&install.installed, "trial");
     recorded(&install.installed.join(EXE), pid)
@@ -4190,11 +4223,9 @@ fn a_candidate(install: &Install, children: &Children) -> TrialProcess {
 ///
 /// MUTATION: in `update_apply::before_deciding`, answer `Decide` for
 /// `Survey::Candidates`.
+#[cfg(target_os = "macos")]
 #[test]
 fn a_candidate_that_has_not_claimed_the_data_directory_yet_defers_the_recovery() {
-    if !on_macos() {
-        return;
-    }
     let install = exchanged_at_moving("pre-claim");
     let children = Children::default();
     let candidate = a_candidate(&install, &children);
@@ -4238,11 +4269,9 @@ fn a_candidate_that_has_not_claimed_the_data_directory_yet_defers_the_recovery()
 ///
 /// MUTATION: in `update_apply::before_deciding`, take a claim refusal other
 /// than `Held` for a free claim (answer `Decide`).
+#[cfg(target_os = "macos")]
 #[test]
 fn a_claim_that_cannot_be_asked_about_defers_and_a_persons_start_is_still_delivered() {
-    if !on_macos() {
-        return;
-    }
     let install = exchanged_at_moving("denied");
     let _squat = bt_platform::trust_harness::squat_the_claim(&install.data).unwrap();
     let (ended, world) = recovered(install.recovery(limits(5_000, 3_000)), Fake::default());
@@ -4277,11 +4306,9 @@ fn a_claim_that_cannot_be_asked_about_defers_and_a_persons_start_is_still_delive
 ///
 /// MUTATION: in `update_apply::survey`, answer `Survey::Nothing` when
 /// `H/<txn>` cannot be listed.
+#[cfg(target_os = "macos")]
 #[test]
 fn an_unlistable_transaction_folder_defers_the_recovery() {
-    if !on_macos() {
-        return;
-    }
     let install = exchanged_at_moving("unlistable");
     let children = Children::default();
     let _candidate = a_candidate(&install, &children);
@@ -4308,11 +4335,9 @@ fn an_unlistable_transaction_folder_defers_the_recovery() {
 ///
 /// MUTATION: in `Txn::before_deciding`, leave `road.starter` out of the
 /// excluded processes.
+#[cfg(target_os = "macos")]
 #[test]
 fn the_recoverys_own_starter_is_no_candidate() {
-    if !on_macos() {
-        return;
-    }
     let install = exchanged_at_moving("starter");
     let children = Children::default();
     let starter = a_candidate(&install, &children);
@@ -4341,11 +4366,9 @@ fn the_recoverys_own_starter_is_no_candidate() {
 /// of it (the product's is 0.4.7).
 ///
 /// MUTATION: in `update_trial::hand_back`, skip the version check.
+#[cfg(target_os = "macos")]
 #[test]
 fn a_trial_hands_back_only_to_a_rescue_build_that_knows_the_word() {
-    if !on_macos() {
-        return;
-    }
     let install = Install::new("hand-back");
     install.write(Phase::Moving);
     struct Recorded(Vec<(PathBuf, Vec<OsString>)>);
@@ -4394,11 +4417,9 @@ fn a_trial_hands_back_only_to_a_rescue_build_that_knows_the_word() {
 /// beside a trial that might still appear.
 ///
 /// MUTATION: in `Launch::over`, answer `true` for any status.
+#[cfg(target_os = "macos")]
 #[test]
 fn a_launch_ended_by_a_signal_is_unknown_not_over() {
-    if !on_macos() {
-        return;
-    }
     let exited = bt_platform::quiet_command("/usr/bin/false")
         .spawn()
         .unwrap();
@@ -4428,6 +4449,7 @@ fn a_launch_ended_by_a_signal_is_unknown_not_over() {
 }
 
 /// The words of a command line.
+#[cfg(target_os = "macos")]
 fn args(words: &[&str]) -> Vec<OsString> {
     words.iter().map(OsString::from).collect()
 }
@@ -4435,6 +4457,7 @@ fn args(words: &[&str]) -> Vec<OsString> {
 // ── design revision (h), round 5 (Codex's review of 153f7cb2) ───────────────
 
 /// A receipt at `nonce`'s name carrying exactly `receipt`'s fields.
+#[cfg(target_os = "macos")]
 fn receipt_as(install: &Install, nonce: Nonce, receipt: &Receipt) {
     install_txn::durable_create(
         &install.home.receipt_path(install.txn, &nonce),
@@ -4453,11 +4476,9 @@ fn receipt_as(install: &Install, nonce: Nonce, receipt: &Receipt) {
 ///
 /// MUTATION: in `update_apply::survey`, match a receipt to a running process
 /// by its pid alone.
+#[cfg(target_os = "macos")]
 #[test]
 fn adoption_needs_a_receipt_naming_the_exact_process() {
-    if !on_macos() {
-        return;
-    }
     let receipt = |install: &Install, nonce: Nonce, txn: TxnId, pid: u32, started: Option<u64>| {
         receipt_as(
             install,
@@ -4538,6 +4559,7 @@ fn adoption_needs_a_receipt_naming_the_exact_process() {
 }
 
 /// The claim of the data directory, as a row of H.3's table wants it.
+#[cfg(target_os = "macos")]
 enum MacClaim {
     Held,
     Free,
@@ -4546,12 +4568,14 @@ enum MacClaim {
 
 /// **The row's world**: the claim held here or squatted, and `H/<txn>` made
 /// unlistable (and put back when dropped).
+#[cfg(target_os = "macos")]
 struct MacRow {
     _held: Option<bt_platform::instance::DataDirectoryClaim>,
     _squat: Option<bt_platform::trust_harness::Squat>,
     shut: Option<PathBuf>,
 }
 
+#[cfg(target_os = "macos")]
 impl Drop for MacRow {
     fn drop(&mut self) {
         if let Some(folder) = self.shut.take() {
@@ -4560,6 +4584,7 @@ impl Drop for MacRow {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn mac_row(install: &Install, claim: &MacClaim, unlistable: bool) -> MacRow {
     let (held, squat) = match claim {
         MacClaim::Held => (
@@ -4595,11 +4620,9 @@ fn mac_row(install: &Install, claim: &MacClaim, unlistable: bool) -> MacRow {
 ///
 /// MUTATION: in `update_apply::before_deciding`, ask the claim before the
 /// candidates.
+#[cfg(target_os = "macos")]
 #[test]
 fn the_nine_rows_of_h3_each_end_as_the_table_says() {
-    if !on_macos() {
-        return;
-    }
     // (candidate seen, unlistable, claim, the deferral said, delivered)
     let rows: [(bool, bool, MacClaim, Option<&str>, bool); 9] = [
         (
@@ -4747,11 +4770,9 @@ fn the_nine_rows_of_h3_each_end_as_the_table_says() {
 ///
 /// MUTATION: in `Txn::retry_as_trial`, answer the earlier `ended` for
 /// `Pre::Stop` (the round-4 code).
+#[cfg(target_os = "macos")]
 #[test]
 fn a_deferral_before_a_fresh_stuck_retrial_is_the_roads_end() {
-    if !on_macos() {
-        return;
-    }
     for (tag, claim, unlistable, expected) in [
         ("held", MacClaim::Held, false, "Deferred(Held)"),
         ("denied", MacClaim::Denied, false, "Deferred(Denied("),
@@ -5273,8 +5294,12 @@ fn the_macos_recovery_carries_a_start_it_defers_to_an_election_in_flight() {
         .unwrap()
         .expect("the election lock is free");
         let recorder = Recorder::of(&install);
+        // Recovery's wait for the election is spent on the road's counted
+        // clock (T-WINDOWS-HANDOVER-ORDER-A-HELD-LOCK-WAIT).
+        let clock = Arc::new(CountedClock::new(|_| {}));
         let road = Road {
             nonce: None,
+            wait_clock: clock.clone(),
             ..recorded_road(&install, &recorder, limits(5_000, 0))
         };
         let person = start.is_some();
@@ -5291,6 +5316,11 @@ fn the_macos_recovery_carries_a_start_it_defers_to_an_election_in_flight() {
             recovered.ended,
             Ended::Deferred(Deferral::WindowDuty),
             "the transaction is left to the election in flight"
+        );
+        assert_eq!(
+            Duration::from_millis(clock.moved_ms()),
+            crate::update_apply::ELECTION_WITHIN,
+            "recovery waited out the election in flight on its road's clock, once"
         );
         assert_eq!(
             recovered.deferred_to,
@@ -5329,12 +5359,19 @@ fn the_macos_recovery_door_hands_a_deferred_start_to_the_window() {
         OsString::from("/工作/文件夹"),
     ];
     // The door's wait for the election ends at `ELECTION_WITHIN`, with the
-    // election still held.
+    // election still held: spent on the door's counted clock
+    // (T-WINDOWS-HANDOVER-ORDER-A-HELD-LOCK-WAIT).
+    let clock = Arc::new(CountedClock::new(|_| {}));
     let (code, hands) = ended_while_held(
         in_flight,
-        start_recover_door(&install, handed.clone(), Fake::default()),
+        start_recover_door(&install, handed.clone(), Fake::default(), clock.clone()),
     );
     assert_eq!(code, 0, "{:?}", hands.said);
+    assert_eq!(
+        Duration::from_millis(clock.moved_ms()),
+        crate::update_apply::ELECTION_WITHIN,
+        "the door waited out the election in flight on its clock, once"
+    );
     let here = std::env::current_dir().ok();
     assert_eq!(
         hands.carried,
@@ -5369,11 +5406,9 @@ fn the_macos_recovery_door_hands_a_deferred_start_to_the_window() {
 /// MUTATION: in `Txn::at_armed`, exchange through `world.exchange` in place
 /// of the layout the journal names (`self.layout.activate`) — the recorder
 /// hears no `Activate` and the sequences go red.
+#[cfg(target_os = "macos")]
 #[test]
 fn the_road_calls_each_point_of_the_layout_the_journal_names_once_per_phase() {
-    if !on_macos() {
-        return;
-    }
     let install = Install::new("points");
     let (home, txn) = (install.home.clone(), install.txn);
     let world = launching(Box::new(move |_, args| {
@@ -5472,11 +5507,9 @@ fn the_road_calls_each_point_of_the_layout_the_journal_names_once_per_phase() {
 ///
 /// MUTATION: in `Txn::at_armed`, put the direct installed-bundle identity read
 /// back after the refused `Activate` — `Locate@Moving` is absent.
+#[cfg(target_os = "macos")]
 #[test]
 fn a_layout_that_refuses_to_activate_is_reverted_with_the_old_bundle_live() {
-    if !on_macos() {
-        return;
-    }
     let install = Install::new("refuses");
     let recorder = Recorder {
         refuse_activate: true,
@@ -5927,6 +5960,7 @@ impl Install {
     /// bundle through the Prepare's own door, and the journal naming the
     /// Homebrew adapter and the marks it recorded. Answers the installation
     /// and the stand-in `brew`'s record of calls.
+    #[cfg(target_os = "macos")]
     fn homebrew(tag: &str) -> (Self, PathBuf) {
         let mut install = Self::new(tag);
         let prefix = install._scratch.root.join("homebrew 前缀");
@@ -5958,6 +5992,7 @@ impl Install {
     }
 
     /// The marks on the bundle at `bundle`, as the journal records them.
+    #[cfg(target_os = "macos")]
     fn marks_on(&self, bundle: &Path) -> Option<Carried> {
         crate::install_channel::homebrew_marks(bundle)
             .ok()
@@ -5968,12 +6003,14 @@ impl Install {
     }
 
     /// How a start of the installed executable reads its channel now.
+    #[cfg(target_os = "macos")]
     fn channel_now(&self) -> crate::install_channel::Channel {
         crate::install_channel::channel_of(&self.installed.join(EXE))
     }
 }
 
 /// The channel the cask's marker gives a copy.
+#[cfg(target_os = "macos")]
 const HOMEBREW: crate::install_channel::Channel = crate::install_channel::Channel::Managed {
     manager: crate::install_channel::Manager::Homebrew,
     uninstall_hook: false,
@@ -5989,11 +6026,9 @@ const HOMEBREW: crate::install_channel::Channel = crate::install_channel::Channe
 ///
 /// MUTATION: `own_layouts` without `.with_homebrew(..)` — the journal's
 /// adapter has no layout and the road is refused.
+#[cfg(target_os = "macos")]
 #[test]
 fn a_homebrew_copy_commits_with_its_marks_and_stays_homebrews() {
-    if !on_macos() {
-        return;
-    }
     let (install, calls) = Install::homebrew("hb-commit");
     let children = Children::default();
     let world = launching(a_healthy_trial(&install, &children, None));
@@ -6025,11 +6060,9 @@ fn a_homebrew_copy_commits_with_its_marks_and_stays_homebrews() {
 ///
 /// MUTATION: in `Homebrew::activate`, drop the last `Self::carries(places,
 /// places.installed)` — the road commits a bundle with no marks.
+#[cfg(target_os = "macos")]
 #[test]
 fn a_new_bundle_without_the_recorded_marks_is_never_left_live() {
-    if !on_macos() {
-        return;
-    }
     let (install, _calls) = Install::homebrew("hb-unmarked");
     let stage = install.stage();
     let first = AtomicBool::new(true);
@@ -6070,11 +6103,9 @@ fn a_new_bundle_without_the_recorded_marks_is_never_left_live() {
 /// MUTATION: in `Homebrew::activate_back`, after the exchange, remove the
 /// marker from the live bundle (a rollback that rebuilds the old bundle
 /// instead of moving it back) — the old bundle comes back without it.
+#[cfg(target_os = "macos")]
 #[test]
 fn rollback_restores_the_old_marks_unchanged() {
-    if !on_macos() {
-        return;
-    }
     let (install, calls) = Install::homebrew("hb-rollback");
     let before = install.marks_on(&install.installed);
     assert_eq!(before, install.carried);
@@ -6114,11 +6145,9 @@ fn rollback_restores_the_old_marks_unchanged() {
 ///
 /// MUTATION: in `Homebrew::activate`, drop the two `Self::carries` checks
 /// before `Ours.activate` — the bundles are exchanged and the road goes on.
+#[cfg(target_os = "macos")]
 #[test]
 fn marks_changed_since_allocation_refuse_the_exchange() {
-    if !on_macos() {
-        return;
-    }
     let (install, _calls) = Install::homebrew("hb-changed");
     let other = HOMEBREW_MARKER.replace("false", "true");
     run(
@@ -6149,11 +6178,9 @@ fn marks_changed_since_allocation_refuse_the_exchange() {
 /// MUTATION: in `bt_platform::macos_update::carry_attributes`, write only
 /// the last attribute (`attributes.last()`) — the new bundle has no marker,
 /// and a start after the exchange reads the copy as Folio's own.
+#[cfg(target_os = "macos")]
 #[test]
 fn every_start_at_every_homebrew_row_reads_the_same_managed_channel() {
-    if !on_macos() {
-        return;
-    }
     let (install, _calls) = Install::homebrew("hb-rows");
     assert_eq!(install.channel_now(), HOMEBREW, "before the exchange");
     install.exchanged();

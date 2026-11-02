@@ -3838,7 +3838,7 @@ mod tests {
         }
 
         #[cfg(windows)]
-        use crate::update_apply::ScannerHold;
+        use crate::update_prepare_windows::tests::ScannerHold;
 
         /// RED (T-UNKEPT-CARD-ONCE, F2; Windows) — **the start the rescue
         /// build opens retires on a worker once the rescue has ended**: the

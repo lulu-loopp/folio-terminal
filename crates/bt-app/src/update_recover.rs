@@ -117,7 +117,7 @@ use bt_platform::admission::WorkerCtx;
 use bt_platform::file_reads::{self, Lane};
 
 use crate::cli;
-use crate::update_apply::{Ahead, Carried, ExitGuard, Leave, Left, Opens};
+use crate::update_apply::{Ahead, Carried, ExitGuard, Leave, Left, Opens, WaitClock, WallClock};
 use crate::update_apply_macos::{self, Hands, Limits, Road};
 use crate::update_txn::{Actor, Class, Header, Home, Role, Sight};
 
@@ -152,6 +152,11 @@ pub(crate) struct Door<'a> {
     pub(crate) starter: Option<bt_platform::install_flip::Running>,
     /// The trial that handed its transaction back (`--from-trial`, H.4).
     pub(crate) handed_back: Option<crate::update_apply::HandedBack>,
+    /// **The clock the recovery road's waits are read and paused on**
+    /// (`update_apply_macos::Road::wait_clock`; its lock, its wait for an
+    /// election in flight, a rollback's admission) — [`WallClock`] in the
+    /// product (T-WINDOWS-HANDOVER-ORDER-A-HELD-LOCK-WAIT).
+    pub(crate) wait_clock: std::sync::Arc<dyn WaitClock>,
 }
 
 /// **The door, for this process**: this executable must be a rescue build.
@@ -217,6 +222,7 @@ pub(crate) fn run_here(
         limits: Limits::PRODUCT,
         starter: bt_platform::install_flip::parent_of_this_process(),
         handed_back,
+        wait_clock: std::sync::Arc::new(WallClock),
     };
     match bt_platform::admission::enter_standalone_main("folio-update-recover", |worker| {
         // The road's guard takes the duty over as its first statement.
@@ -446,7 +452,7 @@ pub(crate) fn run(worker: &WorkerCtx, door: &Door<'_>, world: &mut impl World) -
                 limits: door.limits,
                 trial_clock: std::sync::Arc::new(crate::update_apply::WallClock),
                 decision_clock: std::sync::Arc::new(crate::update_apply::WallClock),
-                wait_clock: std::sync::Arc::new(crate::update_apply::WallClock),
+                wait_clock: std::sync::Arc::clone(&door.wait_clock),
                 stop_clock: std::sync::Arc::new(crate::update_apply::WallClock),
                 starter: door.starter,
                 handed_back: door.handed_back,
@@ -983,6 +989,7 @@ mod tests {
                     limits: Limits::PRODUCT,
                     starter: None,
                     handed_back: None,
+                    wait_clock: std::sync::Arc::new(WallClock),
                 };
                 let code = run(worker, &door, &mut world);
                 (code, world)
