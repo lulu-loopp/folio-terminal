@@ -1759,9 +1759,9 @@ pub(crate) mod tests {
     /// started another: the death was a lane state, not a terminal of the requests it owed. The
     /// suite's gate ends the worker while it holds one walk out and two requests stand behind it.
     ///
-    /// MUTATION: leave the ledger's worker mark set — `Ledger::worker_ended` returning at once
-    /// (the death leaves the lane as it was) — no wake comes, and the wait for it runs out of
-    /// patience.
+    /// MUTATION: `Ledger::worker_ended` returning at once — the ledger never in fault and its
+    /// owed requests left owed (the death leaves the lane as it was) — no wake comes, and the
+    /// wait for it runs out of patience.
     #[test]
     fn a_dead_walk_ends_every_owed_request_worker_gone_and_the_next_request_is_refused() {
         let gate = Arc::new(Gate::default());
