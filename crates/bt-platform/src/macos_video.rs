@@ -124,12 +124,13 @@ use objc2_core_graphics::{
 use objc2_core_media::{CMTime, CMTimeFlags, kCMTimePositiveInfinity, kCMTimeZero};
 
 use super::{
-    FIRST_FRAME_BUDGET, FirstFrameCost, SEEK_FRACTION, VideoFrame, contain, within_budget,
+    FIRST_FRAME_BUDGET, FirstFrameCost, NoFrame, SEEK_FRACTION, VideoFrame, contain, within_budget,
 };
 use crate::macos_files::file_url;
 
 /// **A frame out of the video at `path`, fitted inside `fit_width` ×
-/// `fit_height`**, or `None` for every refusal in the module's own note.
+/// `fit_height`**, or the [`NoFrame`] that says why there is none: refused, or
+/// not answered inside [`FIRST_FRAME_BUDGET`].
 ///
 /// The fit is a **request and a cap, not a promise**. It is given to
 /// `AVAssetImageGenerator` as its `maximumSize`, already contained and already
@@ -144,8 +145,7 @@ use crate::macos_files::file_url;
 /// **Never the thread that draws.** See the module note: the decode blocks, and
 /// this door's answer is bounded by [`FIRST_FRAME_BUDGET`] rather than by the
 /// file.
-#[must_use]
-pub fn first_frame(path: &Path, fit_width: u32, fit_height: u32) -> Option<VideoFrame> {
+pub fn first_frame(path: &Path, fit_width: u32, fit_height: u32) -> Result<VideoFrame, NoFrame> {
     // Resolved before the thread, so what crosses is an owned path and not a
     // borrow. The thread that overruns the budget is abandoned, so it may not
     // hold anything the caller is still using.

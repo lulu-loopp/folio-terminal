@@ -1086,7 +1086,7 @@ fn read_awaited(folio: &HeadlessFolio, file: &Path) -> Option<ComputationId> {
         .peek_cache
         .peek(&normalized_local_image_path_key(file))
     {
-        Some(PeekCacheEntry::Pending { asked }) => Some(*asked),
+        Some(PeekCacheEntry::Pending { asked, .. }) => Some(*asked),
         _ => None,
     }
 }
@@ -1137,7 +1137,12 @@ impl HeldAbout {
         owed.sort();
         Self {
             entry: match folio.window.peek_cache.peek(&key) {
-                Some(PeekCacheEntry::Pending { asked }) => format!("pending {}", asked.number()),
+                Some(PeekCacheEntry::Pending { asked, .. }) => {
+                    format!("pending {}", asked.number())
+                }
+                Some(PeekCacheEntry::Unanswered { asked_again }) => {
+                    format!("unanswered, asked again: {asked_again}")
+                }
                 Some(PeekCacheEntry::Ready { key, .. }) => format!("ready {key}"),
                 Some(PeekCacheEntry::Failed(failure)) => format!("failed {failure:?}"),
                 None => "nothing".to_owned(),

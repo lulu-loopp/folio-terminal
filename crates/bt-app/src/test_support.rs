@@ -1797,6 +1797,7 @@ pub(crate) fn a_read_out() -> PeekCacheEntry {
         asked: computation_lane::ComputationId::from(
             NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         ),
+        once_more: false,
     }
 }
 

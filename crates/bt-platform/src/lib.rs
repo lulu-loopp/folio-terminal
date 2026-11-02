@@ -9179,6 +9179,10 @@ mod engine_ledger;
 /// deadline's decision — with one owner for both `video` arms.
 mod video_load;
 
+/// Why a first frame was not drawn — refused or not answered in time — with one
+/// owner for every `video` arm.
+mod first_frame_answer;
+
 /// The first frame of a video, out of Media Foundation — see the module's own
 /// note for the apartment it runs in and for why the set of files it can draw is
 /// not the set that could be played.
@@ -28612,6 +28616,10 @@ mod macos_video_signature_tests {
 
     use crate::source_test;
 
+    /// The door's signature with its paths and its layout taken out: rustfmt
+    /// wraps a signature that an arm's indentation pushes past the line width
+    /// (`fn f(\n    a: A,\n) -> R`), and the wrap — the opening break and the
+    /// trailing comma — is the file's layout, not a different door.
     fn signature(query: &ItemQuery) -> String {
         source_test::signature(source_test::declaration(query))
             .replace("std::path::", "")
@@ -28620,6 +28628,8 @@ mod macos_video_signature_tests {
             .split_whitespace()
             .collect::<Vec<_>>()
             .join(" ")
+            .replace("( ", "(")
+            .replace(", )", ")")
     }
 
     /// RED — **each of the three first-frame doors has the same signature on
@@ -28631,7 +28641,9 @@ mod macos_video_signature_tests {
     /// bt-platform` runs on both machines.
     ///
     /// MUTATION: drop the `fit_height` from the macOS arm, or give it a
-    /// `Result` where the others have an `Option`, and this names the door.
+    /// different return type (an `Option` where the others have a `Result`, or
+    /// the reverse), and this names the door. The normaliser takes out only
+    /// rustfmt's wrap, so neither change is read as layout.
     #[test]
     fn every_first_frame_door_keeps_its_signature_on_every_machine() {
         for door in [

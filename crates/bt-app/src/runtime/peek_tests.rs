@@ -122,7 +122,8 @@ fn a_failure() -> crate::PeekCacheEntry {
     ))
 }
 
-/// What the window's cache holds for `file`: `"failed"`, `"pending"`, `"ready"` or `"nothing"`.
+/// What the window's cache holds for `file`: `"failed"`, `"unanswered"`, `"pending"`, `"ready"`
+/// or `"nothing"`.
 fn held_for(folio: &HeadlessFolio, file: &std::path::Path) -> &'static str {
     match folio
         .window
@@ -130,6 +131,7 @@ fn held_for(folio: &HeadlessFolio, file: &std::path::Path) -> &'static str {
         .peek(&bt_term::normalized_local_image_path_key(file))
     {
         Some(crate::PeekCacheEntry::Failed(_)) => "failed",
+        Some(crate::PeekCacheEntry::Unanswered { .. }) => "unanswered",
         Some(crate::PeekCacheEntry::Pending { .. }) => "pending",
         Some(crate::PeekCacheEntry::Ready { .. }) => "ready",
         None => "nothing",
