@@ -5914,7 +5914,7 @@ mod probe_run_tests {
     fn two_children_share_one_budget() {
         let hygiene = Hygiene::new();
         let marker = hygiene.root().join("the-second-child-runs");
-        let (run, counted) =
+        let (run, counted, marked) =
             spawn_at_priority("bt-probe-run-test", ThreadPriority::Normal, move |worker| {
                 let seen = marker.clone();
                 let mut planted = false;
@@ -5937,14 +5937,20 @@ mod probe_run_tests {
                     BUDGET,
                     &clock,
                 );
-                (run, clock.counted.get())
+                // Read before the scratch folder goes with `hygiene`.
+                let marked = marker.exists();
+                (run, clock.counted.get(), marked)
             })
             .expect("a worker")
             .join()
             .expect("the run answers");
         assert!(
             !counted.gave_up,
-            "the first child did not end within the suite's patience: {run:?}"
+            "a child did not end, or the second never marked, within the suite's patience: {run:?}"
+        );
+        assert!(
+            marked,
+            "the second child never ran (no mark), so the run says nothing of the budget: {run:?}"
         );
         assert_eq!(
             counted.moved, BUDGET,
@@ -6021,6 +6027,46 @@ mod probe_run_tests {
         assert_eq!(said(&answers[0]), "first-第一");
         assert!(answers[1].is_err(), "{:?}", answers[1]);
         assert_eq!(said(&answers[2]), "third-第三");
+    }
+
+    /// PIN — **a run whose budget is already spent starts nothing** (review F1): with no time
+    /// left, the run answers `Overran` with no answers before it tries a command — here two that
+    /// would not start, which would otherwise each be an answer of their own.
+    ///
+    /// MUTATION: drop the `remaining.is_zero()` arm in `probe_outputs_within_on` — both starts
+    /// fail, each is pushed as its answer, and the run answers `Finished` with two errors.
+    ///
+    /// Only the first command's arm is pinned: for a later one the count would have to reach the
+    /// budget in a rest after the earlier child ended, and the clock cannot see that end, so no
+    /// counted clock places it deterministically.
+    #[test]
+    fn a_run_whose_budget_is_spent_starts_nothing() {
+        let hygiene = Hygiene::new();
+        let run = spawn_at_priority("bt-probe-run-test", ThreadPriority::Normal, move |worker| {
+            let missing = |name: &str| {
+                hygiene.command(
+                    std::env::temp_dir().join(format!("folio-no-such-program-{name}")),
+                    quiet_command,
+                )
+            };
+            probe_outputs_within_on(
+                worker,
+                vec![missing("first-第一"), missing("second-第二")],
+                std::time::Duration::ZERO,
+                &CountedProbeClock::new(|| Turn::Await),
+            )
+        })
+        .expect("a worker")
+        .join()
+        .expect("the run answers");
+        match run {
+            ProbeRun::Overran { finished } => {
+                assert!(finished.is_empty(), "a command was tried: {finished:?}");
+            }
+            ProbeRun::Finished(answers) => {
+                panic!("the spent run still tried its commands: {answers:?}")
+            }
+        }
     }
 
     /// A probe's output pipe whose read panics, after saying whether the panic is contained —
