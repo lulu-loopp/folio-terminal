@@ -241,7 +241,7 @@ fn columns_of(width: u32) -> u32 {
 ///
 /// The report is a restored window in focus mode whose tab held three
 /// PowerShell panes: the third pane's first prompt read `(b` on one line and
-/// `ase) PS D:\Documents\SyncFolder\Application> ` on the next, and that
+/// `ase) PS D:\Developer\notes> ` on the next, and that
 /// tab's card drew the seat as rows of two characters. `session.json` names
 /// the cause — the window is saved `maximized: true` beside a *normal*
 /// rectangle of 960x600, and `put_the_window_on_the_glass` asks Windows to
@@ -2958,7 +2958,7 @@ fn a_tables_heading_row_stands_on_its_own_fill() {
 fn a_long_path_is_cut_and_the_phrase_beside_it_is_not() {
     let run = [0.0, 0.0, 300.0, 28.0];
     let gap = 12.0;
-    let long = r"C:\Users\somebody\Developer\folio-terminal\crates\bt-app\src\main.rs";
+    let long = r"C:\Users\somebody\Developer\lunar-workshop\crates\bt-app\src\main.rs";
     let words = seats::dress_foot(
         seats::FootDress {
             dissolved: 0.0,

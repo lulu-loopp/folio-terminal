@@ -52300,9 +52300,9 @@ const TITLE_MAX_CHARS: usize = 40;
 /// of thing. Forty characters is a sane cap on a *name*: a name is something a
 /// person or a program chose to be read at a glance, and forty of them is a
 /// generous glance. It is a nonsensical cap on a *path*, because nearly every
-/// real working directory is longer — `D:\Developer\folio-terminal\crates\bt-app`
+/// real working directory is longer — `D:\Developer\lunar-workshop\crates\bt-app`
 /// is already forty-one — so capping the head's cwd layer at `TITLE_MAX` would
-/// print `D:\Developer\folio-terminal\crates\bt-ap` and stop, which defeats the
+/// print `D:\Developer\lunar-workshop\crates\bt-ap` and stop, which defeats the
 /// exact thing C28 puts a whole path in a head for. A head that answers "where
 /// is this" with a path cut off before its last segment has answered nothing,
 /// and has done it while looking like a complete answer.

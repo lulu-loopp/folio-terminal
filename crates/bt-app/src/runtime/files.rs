@@ -1078,7 +1078,7 @@ impl<B: Backend> Runtime<'_, B> {
     ///
     /// **The cut lives here** because the strip's width and the font are both
     /// here, and it is `settings::ellipsized_left` — the same cut the float's
-    /// foot takes, from the *front*, so `…ers\Alice\Developer\folio-terminal`
+    /// foot takes, from the *front*, so `…ers\Alice\Developer\lunar-workshop`
     /// keeps the segment that answers "where am I" (B23). The mock-up reaches it
     /// with `direction: rtl` and a `<bdi>` around the path; we draw our own text,
     /// so we simply cut the string and lay it out left to right, and the bidi

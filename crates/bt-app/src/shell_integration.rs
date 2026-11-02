@@ -162,7 +162,7 @@ const CMD_DEFAULT_PROMPT: &str = "$P$G";
 /// both terminators are accepted (`osc_7_reports_its_working_directory_uri_…`).
 ///
 /// **The URI is Win32-spelled, and that is forced rather than chosen.** `$P`
-/// expands to `D:\Developer\folio-terminal`, and `PROMPT` has no substitution,
+/// expands to `D:\Developer\lunar-workshop`, and `PROMPT` has no substitution,
 /// no loop and no escape hatch that could turn those separators into `/` or
 /// percent-encode a space — measured, not assumed: `cmd.exe` under ConPTY puts
 /// `file:///C:\Program Files` on the wire for a directory with a space in it. So
@@ -11800,7 +11800,7 @@ mod tests {
             profile_marks::MANAGED_LINE
         ));
         assert!(profile_suppresses_integration_offer(
-            r". 'D:\Developer\folio-terminal\scripts\shell-integration\FOLIO.PS1'"
+            r". 'D:\Developer\lunar-workshop\scripts\shell-integration\FOLIO.PS1'"
         ));
         for user in ["# my note about folio.ps1", "\r\n", ""] {
             assert!(!profile_suppresses_integration_offer(user), "{user}");

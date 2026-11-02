@@ -1581,7 +1581,7 @@ fn is_closing_delimiter(character: char) -> bool {
 /// [`is_closing_delimiter`], §7.30 (user report 2026-09-17).
 ///
 /// The line that settled it is an agent's, printed into a pane standing in the directory it names:
-/// `文件还是 docs/…/advisor_status_202609.html（commit e0bfcfe）。` A full-width `（` with no space
+/// `文件还是 docs/…/weekly_status_202609.html（commit a1b2c3d）。` A full-width `（` with no space
 /// in front of it, and the reference went dark — the token ran past the bracket to the space behind
 /// `commit`, and a bare reading may carry no character a path is not spelled with.
 ///
@@ -3804,12 +3804,12 @@ mod tests {
     #[test]
     fn a_drive_rooted_path_is_read_whole_in_either_slash() {
         assert_eq!(
-            spans("D:\\Developer\\folio-terminal\\README.md"),
-            ["D:\\Developer\\folio-terminal\\README.md"]
+            spans("D:\\Developer\\lunar-workshop\\README.md"),
+            ["D:\\Developer\\lunar-workshop\\README.md"]
         );
         assert_eq!(
-            spans("D:/Developer/folio-terminal/README.md"),
-            ["D:/Developer/folio-terminal/README.md"]
+            spans("D:/Developer/lunar-workshop/README.md"),
+            ["D:/Developer/lunar-workshop/README.md"]
         );
     }
 
@@ -3918,9 +3918,9 @@ mod tests {
     #[test]
     fn a_printed_file_uri_is_one_candidate_of_its_own_spelling() {
         assert_eq!(
-            candidates("file:///D:/Developer/folio-terminal/test.md"),
+            candidates("file:///D:/Developer/lunar-workshop/test.md"),
             [(
-                "file:///D:/Developer/folio-terminal/test.md",
+                "file:///D:/Developer/lunar-workshop/test.md",
                 PrintedPathSpelling::Uri
             )]
         );
@@ -3943,7 +3943,7 @@ mod tests {
     #[test]
     fn the_uri_a_path_is_folded_into_decodes_back_to_it() {
         for path in [
-            "D:\\Developer\\folio-terminal\\README.md",
+            "D:\\Developer\\lunar-workshop\\README.md",
             "D:\\a b\\c.md",
             "D:\\文档\\说明.md",
             "D:\\p#q\\r%s.md",
@@ -6042,8 +6042,8 @@ mod tests {
         let links = ledger(
             "D:\\case",
             &[
-                ("D:\\Developer\\folio-terminal\\README.md", true),
-                ("D:\\Developer\\folio-terminal\\test.md", true),
+                ("D:\\Developer\\lunar-workshop\\README.md", true),
+                ("D:\\Developer\\lunar-workshop\\test.md", true),
                 ("D:\\case\\docs\\HANDOFF-2026-08-20.md", true),
                 ("D:\\case\\test.md", true),
                 ("D:\\x\\a.md", true),
@@ -6058,11 +6058,11 @@ mod tests {
         // reference runs to the end of the line, so at the edge it is pressed down and inside the
         // row it is untouched.
         for line in [
-            "D:\\Developer\\folio-terminal\\README.md",
-            "D:/Developer/folio-terminal/README.md",
+            "D:\\Developer\\lunar-workshop\\README.md",
+            "D:/Developer/lunar-workshop/README.md",
             "docs/HANDOFF-2026-08-20.md",
             "./test.md",
-            "file:///D:/Developer/folio-terminal/test.md",
+            "file:///D:/Developer/lunar-workshop/test.md",
             "file://localhost/D:/x/a.md",
             "见 D:\\x\\a.md.",
             "docs/a.md:13",
@@ -6228,7 +6228,7 @@ mod tests {
     /// sighting below becomes a question. Step ② is that step for both boundaries.
     ///
     /// **The conflict was not hypothetical, and 2026-08-25 is the day it was photographed.** The
-    /// reader reported that `D:\Developer\folio-terminal\test-assets\folio-pdf-test.pdf` — an
+    /// reader reported that `D:\Developer\lunar-workshop\test-assets\folio-pdf-test.pdf` — an
     /// indented, unadorned, drive-rooted path to a file that exists — carried no underline at all.
     /// Reproduced in a fresh pane the same line lights on the first frame, so nothing lexical or
     /// geometric was refusing it. What refused it was this arm: minutes earlier the same screen had
@@ -6952,25 +6952,25 @@ mod tests {
     #[test]
     fn a_name_printed_in_front_of_an_opening_bracket_is_read_without_it() {
         let printed = "改完了，你说的每一条都落了，现在是 6 页，中英各页截图都过了。文件还是 \
-                       docs/deliverables/slides/dist/advisor_status_202609.html（commit e0bfcfe）。";
+                       docs/deliverables/slides/dist/weekly_status_202609.html（commit a1b2c3d）。";
         assert_eq!(
             spans(printed),
-            ["docs/deliverables/slides/dist/advisor_status_202609.html"]
+            ["docs/deliverables/slides/dist/weekly_status_202609.html"]
         );
         // The same line at the disk, through a ledger that says that one name is a file.
         let links = ledger(
-            "D:\\Documents\\SyncFolder\\Research\\MPC",
+            "D:\\Developer\\notes",
             &[(
-                "D:\\Documents\\SyncFolder\\Research\\MPC\\docs\\deliverables\\slides\\dist\\advisor_status_202609.html",
+                "D:\\Developer\\notes\\docs\\deliverables\\slides\\dist\\weekly_status_202609.html",
                 true,
             )],
         );
         assert_eq!(
             linked(&links, printed, None),
             [(
-                "docs/deliverables/slides/dist/advisor_status_202609.html",
-                "file:///D:/Documents/SyncFolder/Research/MPC/docs/deliverables/slides/dist/\
-                 advisor_status_202609.html"
+                "docs/deliverables/slides/dist/weekly_status_202609.html",
+                "file:///D:/Developer/notes/docs/deliverables/slides/dist/\
+                 weekly_status_202609.html"
                     .to_owned()
             )]
         );
@@ -8115,8 +8115,8 @@ mod posix_tests {
     #[test]
     fn a_rooted_path_is_read_whole() {
         assert_eq!(
-            spans("/Users/alice/folio-terminal/README.md"),
-            ["/Users/alice/folio-terminal/README.md"]
+            spans("/Users/alice/lunar-workshop/README.md"),
+            ["/Users/alice/lunar-workshop/README.md"]
         );
     }
 
@@ -8125,11 +8125,11 @@ mod posix_tests {
     /// a backslash, and nothing in it is a separator.
     #[test]
     fn a_drive_letter_is_a_filename_and_not_a_root() {
-        assert_eq!(spans("D:\\Developer\\folio-terminal\\README.md"), NO_SPANS);
+        assert_eq!(spans("D:\\Developer\\lunar-workshop\\README.md"), NO_SPANS);
         // The forward-slash spelling is not rooted either — it is a relative reference whose first
         // segment happens to contain a colon, which `is_relative_reference` refuses for the reason
         // it always refused it: a colon is what makes text absolute or schemed somewhere else.
-        assert_eq!(spans("D:/Developer/folio-terminal/README.md"), NO_SPANS);
+        assert_eq!(spans("D:/Developer/lunar-workshop/README.md"), NO_SPANS);
     }
 
     /// Boundary table rows 3 and 4, **as the 2026-09-21 entry leaves them**: quoting is still the

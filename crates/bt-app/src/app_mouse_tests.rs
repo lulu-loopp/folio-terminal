@@ -2451,7 +2451,7 @@ fn an_osc_8_link_on_the_alternate_screen_is_found_and_keeps_its_press() {
         .feed(b"\x1b[?1049h\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h")
         .unwrap();
     session
-        .feed(b"\x1b]8;;file:///D:/Developer/folio-terminal/test.md\x1b\\test.md\x1b]8;;\x1b\\")
+        .feed(b"\x1b]8;;file:///D:/Developer/lunar-workshop/test.md\x1b\\test.md\x1b]8;;\x1b\\")
         .unwrap();
     let modes = session.terminal_modes();
     assert!(modes.alternate_screen);
@@ -2463,7 +2463,7 @@ fn an_osc_8_link_on_the_alternate_screen_is_found_and_keeps_its_press() {
     let link = frame
         .hyperlink_at(hit.row, hit.column)
         .expect("the alternate screen is scanned, so the label is a link there");
-    assert_eq!(link.uri, "file:///D:/Developer/folio-terminal/test.md");
+    assert_eq!(link.uri, "file:///D:/Developer/lunar-workshop/test.md");
 
     // Same reading `pressed_cell_target` makes of that cell, and the press
     // that follows from it.
