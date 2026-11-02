@@ -1131,6 +1131,7 @@ pub fn remove_from_explorer_menu() -> MenuRemovalReport {
             ))
         },
         both_registrations_removed,
+        REMOVAL_TIMEOUT,
     )
 }
 
@@ -1148,6 +1149,11 @@ const ENTERED_ONCE: &str =
 /// started by, the voice its end is said in (standard error, as the timeout's line) and the
 /// removal it waits on handed in — the real ones there, and in a test one that removes nothing.
 ///
+/// **The bound is the caller's** (`within`, T-EXPLORER-MENU-REMOVAL-CLEANUP-WAITS): the door
+/// passes [`REMOVAL_TIMEOUT`], and the seconds the timeout's line names are the bound's. A test
+/// passes the suite's patience, so an answer it awaits is state awaited within that patience,
+/// and a give-up it shows is on a removal it holds.
+///
 /// **A thread the door refuses is answered, not thrown** (T-PROFILE-INSTALL-REFUSED-START): it is
 /// said once in `say` and the report says nothing was removed, exit code 1, as a removal nobody
 /// answered does; before, the refusal panicked this process's main thread.
@@ -1159,6 +1165,7 @@ fn removal_waited_on(
     executor: &crate::lane::Executor,
     say: impl Fn(&str) + Send + Sync + 'static,
     remove: fn() -> MenuRemovalReport,
+    within: Duration,
 ) -> MenuRemovalReport {
     let say = std::sync::Arc::new(say);
     let ended = std::sync::Arc::clone(&say);
@@ -1180,7 +1187,7 @@ fn removal_waited_on(
             };
         }
         waiting
-            .recv_timeout(REMOVAL_TIMEOUT)
+            .recv_timeout(within)
             .unwrap_or_else(|unanswered| match unanswered {
                 mpsc::RecvTimeoutError::Disconnected => MenuRemovalReport {
                     line: "Folio Explorer menu: the removal stopped before it answered, \
@@ -1189,7 +1196,7 @@ fn removal_waited_on(
                     exit_code: 1,
                 },
                 mpsc::RecvTimeoutError::Timeout => {
-                    let seconds = REMOVAL_TIMEOUT.as_secs();
+                    let seconds = within.as_secs();
                     say(&format!("nothing answered within {seconds} seconds"));
                     MenuRemovalReport {
                         line: format!(
@@ -1271,6 +1278,7 @@ pub(crate) fn cleanup_registrations(worker: &WorkerCtx) -> Vec<(Text, CleanupReg
         &crate::lane::Executor::thread_door(bt_platform::ThreadPriority::Normal),
         |line| crate::diagnostics::stderr_line(format!("folio: {line}")),
         both_registrations_cleaned,
+        REMOVAL_TIMEOUT,
     )
 }
 
@@ -1297,11 +1305,15 @@ fn both_registrations_cleaned() -> Vec<(Text, CleanupRegistration)> {
 /// cleanup thread that ends without answering closes the channel at once: its
 /// end was said by its `Answered`, and the registrations read as not read,
 /// with no wait named (T-PROFILE-INSTALL-REFUSED-START review).
+///
+/// **The bound is the caller's** (`within`), as [`removal_waited_on`]'s: the door passes
+/// [`REMOVAL_TIMEOUT`], and the seconds a cleanup nobody answered names are the bound's.
 fn cleanup_waited_on(
     _worker: &WorkerCtx,
     executor: &crate::lane::Executor,
     say: impl Fn(&str) + Send + Sync + 'static,
     clean: fn() -> Vec<(Text, CleanupRegistration)>,
+    within: Duration,
 ) -> Vec<(Text, CleanupRegistration)> {
     let (send, receive) = mpsc::channel();
     let started = executor.start_worker(
@@ -1317,24 +1329,20 @@ fn cleanup_waited_on(
             CleanupRegistration::Refused(format!("{} ({end})", Text::CleanupSystemUnknown.text())),
         )];
     }
-    receive
-        .recv_timeout(REMOVAL_TIMEOUT)
-        .unwrap_or_else(|unanswered| {
-            let reason = match unanswered {
-                mpsc::RecvTimeoutError::Disconnected => {
-                    Text::CleanupSystemUnknown.text().to_owned()
-                }
-                mpsc::RecvTimeoutError::Timeout => format!(
-                    "{} ({}s)",
-                    Text::CleanupSystemUnknown.text(),
-                    REMOVAL_TIMEOUT.as_secs()
-                ),
-            };
-            vec![(
-                Text::CleanupMarkExplorer,
-                CleanupRegistration::Refused(reason),
-            )]
-        })
+    receive.recv_timeout(within).unwrap_or_else(|unanswered| {
+        let reason = match unanswered {
+            mpsc::RecvTimeoutError::Disconnected => Text::CleanupSystemUnknown.text().to_owned(),
+            mpsc::RecvTimeoutError::Timeout => format!(
+                "{} ({}s)",
+                Text::CleanupSystemUnknown.text(),
+                within.as_secs()
+            ),
+        };
+        vec![(
+            Text::CleanupMarkExplorer,
+            CleanupRegistration::Refused(reason),
+        )]
+    })
 }
 
 fn cleanup_package() -> CleanupRegistration {
@@ -3008,6 +3016,7 @@ mod tests {
             &crate::lane::Executor::thread_door(bt_platform::ThreadPriority::Normal),
             |line| panic!("the removal started and returned, so nothing is said: {line}"),
             removes_nothing,
+            crate::lane::PATIENCE,
         );
         assert_eq!(report.line, r#"Worker("folio-explorer-removal")"#);
         assert_eq!(report.exit_code, 0);
@@ -3058,6 +3067,7 @@ mod tests {
                 &crate::lane::Executor::thread_door(bt_platform::ThreadPriority::Normal),
                 |line| panic!("the cleanup started and returned, so nothing is said: {line}"),
                 cleans_nothing,
+                crate::lane::PATIENCE,
             )
         });
         let [(Text::CleanupMarkExplorer, CleanupRegistration::Refused(ran_as))] =
@@ -3856,7 +3866,7 @@ mod tests {
             return;
         }
         let (executor, say, said) = refusing();
-        let report = removal_waited_on(&executor, say, never_runs);
+        let report = removal_waited_on(&executor, say, never_runs, crate::lane::PATIENCE);
         assert_eq!(report.exit_code, 1);
         assert!(
             report.line.contains("nothing was removed")
@@ -3886,7 +3896,7 @@ mod tests {
         }
         let (executor, say, said) = refusing();
         let cleaned = crate::uninstall::standalone(|worker| {
-            cleanup_waited_on(worker, &executor, say, never_runs)
+            cleanup_waited_on(worker, &executor, say, never_runs, crate::lane::PATIENCE)
         });
         let [(Text::CleanupMarkExplorer, CleanupRegistration::Refused(reason))] =
             cleaned.as_slice()
@@ -3921,8 +3931,8 @@ mod tests {
     /// second line that nothing answered within the wait, which did not run out. Alone in a
     /// process of its own, because the entry is once per process.
     ///
-    /// MUTATION: read a closed channel as a timeout — a second line, "nothing answered within 30
-    /// seconds", and a report naming the wait.
+    /// MUTATION: read a closed channel as a timeout — a second line, that nothing answered within
+    /// the wait's seconds, and a report naming the wait.
     #[test]
     fn a_removal_thread_that_panicked_is_said_once() {
         fn panics() -> MenuRemovalReport {
@@ -3935,7 +3945,7 @@ mod tests {
             return;
         }
         let (executor, say, lines) = starting();
-        let report = removal_waited_on(&executor, say, panics);
+        let report = removal_waited_on(&executor, say, panics, crate::lane::PATIENCE);
         let said = lines.iter().collect::<Vec<_>>();
         assert_eq!(report.exit_code, 1);
         assert!(
@@ -3953,8 +3963,8 @@ mod tests {
     /// RED (T-PROFILE-INSTALL-REFUSED-START review) — **a cleanup thread that panicked reads as
     /// not read, with no wait named**, and its end is said once. Alone in a process of its own.
     ///
-    /// MUTATION: read a closed channel as a timeout — the reason names thirty seconds nobody
-    /// waited.
+    /// MUTATION: read a closed channel as a timeout — the reason names the wait's seconds, which
+    /// nobody waited.
     #[test]
     fn a_cleanup_thread_that_panicked_names_no_wait() {
         fn panics() -> Vec<(Text, CleanupRegistration)> {
@@ -3968,7 +3978,7 @@ mod tests {
         }
         let (executor, say, lines) = starting();
         let cleaned = crate::uninstall::standalone(|worker| {
-            cleanup_waited_on(worker, &executor, say, panics)
+            cleanup_waited_on(worker, &executor, say, panics, crate::lane::PATIENCE)
         });
         let said = lines.iter().collect::<Vec<_>>();
         let [(Text::CleanupMarkExplorer, CleanupRegistration::Refused(reason))] =
@@ -3978,6 +3988,101 @@ mod tests {
         };
         assert_eq!(reason, Text::CleanupSystemUnknown.text());
         assert_eq!(said.len(), 1, "one line for one end: {said:?}");
+    }
+
+    /// RED (T-EXPLORER-MENU-REMOVAL-CLEANUP-WAITS) — **the `--remove-explorer-menu` process gives
+    /// up within the bound its caller passes**: a removal held in its work, a bound of zero, and
+    /// the report is the timeout's — nothing is known to have been removed, exit code 1, the
+    /// line and the one thing said both naming the bound's seconds — while the removal is still
+    /// held. Alone in a process of its own, because the entry is once per process.
+    ///
+    /// The give-up is shown on work held until the test has the answer: a zero bound is a poll,
+    /// so no clock decides the verdict, and the held removal is let go only after it.
+    ///
+    /// MUTATION: wait on `REMOVAL_TIMEOUT` instead of the bound handed in — the hold's cap (the
+    /// suite's patience) runs out first, the removal answers, and the report is its exit code 0.
+    #[test]
+    fn a_removal_nobody_answers_gives_up_within_the_bound_it_is_handed() {
+        static HELD: std::sync::LazyLock<crate::lane::Hold> =
+            std::sync::LazyLock::new(crate::lane::Hold::default);
+        fn held() -> MenuRemovalReport {
+            HELD.pass();
+            MenuRemovalReport {
+                line: "the held removal answered".to_owned(),
+                exit_code: 0,
+            }
+        }
+        if !crate::test_support::alone_in_a_process(
+            "explorer_menu::tests::a_removal_nobody_answers_gives_up_within_the_bound_it_is_handed",
+            b"",
+        ) {
+            return;
+        }
+        let (executor, say, lines) = starting();
+        HELD.hold();
+        let report = removal_waited_on(&executor, say, held, Duration::ZERO);
+        assert_eq!(report.exit_code, 1, "{}", report.line);
+        assert_eq!(
+            report.line,
+            "Folio Explorer menu: nothing answered within 0 seconds, \
+             so nothing is known to have been removed."
+        );
+        HELD.wait_standing("the removal held in its work after the wait gave up");
+        HELD.release();
+        let said = lines.iter().collect::<Vec<_>>();
+        assert_eq!(
+            said,
+            ["nothing answered within 0 seconds"],
+            "the give-up is said once, and the held removal's return says nothing"
+        );
+    }
+
+    /// RED (T-EXPLORER-MENU-REMOVAL-CLEANUP-WAITS) — **the uninstaller's door gives up on the
+    /// Explorer registrations within the bound its caller passes**: a cleanup held in its work, a
+    /// bound of zero, and the registrations read as not read, the reason naming the bound's
+    /// seconds, while the cleanup is still held. Alone in a process of its own, through the
+    /// door's own entry.
+    ///
+    /// MUTATION: wait on `REMOVAL_TIMEOUT` instead of the bound handed in — the hold's cap runs
+    /// out first, and the held cleanup's own answer is what the door reads.
+    #[test]
+    fn a_cleanup_nobody_answers_gives_up_within_the_bound_it_is_handed() {
+        static HELD: std::sync::LazyLock<crate::lane::Hold> =
+            std::sync::LazyLock::new(crate::lane::Hold::default);
+        fn held() -> Vec<(Text, CleanupRegistration)> {
+            HELD.pass();
+            vec![(
+                Text::CleanupMarkExplorerPackage,
+                CleanupRegistration::Absent,
+            )]
+        }
+        if !crate::test_support::alone_in_a_process(
+            "explorer_menu::tests::a_cleanup_nobody_answers_gives_up_within_the_bound_it_is_handed",
+            b"",
+        ) {
+            return;
+        }
+        let (executor, say, lines) = starting();
+        HELD.hold();
+        let cleaned = crate::uninstall::standalone(|worker| {
+            cleanup_waited_on(worker, &executor, say, held, Duration::ZERO)
+        });
+        let [(Text::CleanupMarkExplorer, CleanupRegistration::Refused(reason))] =
+            cleaned.as_slice()
+        else {
+            panic!("the cleanup nobody answered is reported as refused, not as its own answer");
+        };
+        assert_eq!(
+            reason,
+            &format!("{} (0s)", Text::CleanupSystemUnknown.text())
+        );
+        HELD.wait_standing("the cleanup held in its work after the wait gave up");
+        HELD.release();
+        let said = lines.iter().collect::<Vec<_>>();
+        assert!(
+            said.is_empty(),
+            "a cleanup nobody answered says nothing, and its return nothing either: {said:?}"
+        );
     }
 
     /// RED (T-PROFILE-INSTALL-REFUSED-START review) — **a probe that panics while it holds the

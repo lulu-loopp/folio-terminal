@@ -2636,6 +2636,45 @@ pub(crate) fn card_restore_settle(leaf: &mut TerminalPane) {
         .unwrap();
 }
 
+/// **A real shell on a pseudoconsole that is born at once**, through the test-shell door: `cmd`
+/// on Windows, `sh` elsewhere — neither keeps a history the account owns, so neither owes the
+/// history refusal a PowerShell is read back for before it is handed over (plan row 167: a
+/// default-shell birth waited ~18 s for that proof). For a test whose claim needs a live
+/// pseudoconsole and not any one program. Drop the [`bt_pty::test_shell::Hygiene`] after the
+/// session, so the child is ended before its directory is removed.
+pub(crate) fn a_quiet_shell(
+    size: bt_pty::PtySize,
+) -> Result<(PtySession, bt_pty::test_shell::Hygiene), PtyError> {
+    // The platform is asked of `bt-platform` (as `host_spelling` asks it), not decided by a `cfg`
+    // here: this file is not one of those that may name a platform
+    // (`platform_gate_tests::only_the_named_files_decide_what_platform_this_is`).
+    let command = match bt_platform::host_platform() {
+        bt_platform::HostPlatform::Windows => bt_pty::PtyCommand::new("cmd.exe").arg("/D"),
+        // A pane's shell is told the system's locale when the environment names none
+        // (`shell_integration::locale_declaration`); this one is told it the same way, or a
+        // test process with no `LANG` (an `ssh` session, a CI runner) hands `/bin/sh` the `C`
+        // locale and its line editor reads typed CJK as meta keys.
+        bt_platform::HostPlatform::MacOs | bt_platform::HostPlatform::OtherUnix => {
+            bt_platform::spawn_at_priority(
+                "bt-locale-test",
+                bt_platform::ThreadPriority::Normal,
+                |worker| bt_platform::read_system_locale_declaration(worker).declaration,
+            )
+            .expect("a worker")
+            .join()
+            .expect("the reading answers")
+            .iter()
+            .flat_map(bt_platform::LocaleDeclaration::variables)
+            .fold(
+                bt_pty::PtyCommand::new("/bin/sh"),
+                |command, (name, value)| command.env(*name, value),
+            )
+        }
+    };
+    bt_pty::test_shell::TestShell::spawn(command, size)
+        .map(bt_pty::test_shell::TestShell::into_session)
+}
+
 /// One shell with a word in it that no other shell in the test has.
 ///
 /// `pty: None` — this is the same shell-less mode `BT_PROBE_INPUT` uses, so

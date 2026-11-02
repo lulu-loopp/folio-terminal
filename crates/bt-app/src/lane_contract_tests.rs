@@ -1720,16 +1720,21 @@ fn a_gate_that_let_go_on_its_own_makes_its_release_red() {
 /// stands in a held hold mid-run. (The first request, which starts the worker, is not one of them:
 /// nothing is out yet.)
 ///
-/// The contract suite cannot keep this: its programs adapter asks under the lane's own lock
-/// (`ProgramsLane::request`), which the walk worker takes as soon as it is free, so a wait planted
-/// in `ask` deadlocks the suite rather than lapsing (row 111's plant C). Here the test holds no
-/// lane lock. A planted wait that lets the lane's lock go while it waits lets the hold go on its
-/// own at its cap, and the test is red there, never a hang; one that keeps the lane's lock while
-/// it waits stops the worker's next take as well, and is the suite watchdog's (row 113) to end.
+/// The contract suite could not keep this until row 160: its programs adapter asked under the
+/// program lane's own lock (`ProgramsLane::request`), which the walk worker takes as soon as it is
+/// free, so a wait planted in `ask` deadlocked the suite rather than lapsing (row 111's plant C).
+/// The admission now keeps that lock only for its urgency read, so the suite is red there too (its
+/// programs verdict `SubmissionWaited`); this pin is the direct witness, with no product lane in
+/// the way. Here the test holds no lane lock. A planted wait that lets the coalescing's book lock
+/// go while it waits lets the hold go on its own at its cap, and the test is red there, never a
+/// hang; one that keeps the book lock while it waits stops the worker's next take as well, and is
+/// the suite watchdog's (row 113) to end.
 ///
-/// MUTATION: in `Coalescing::ask`, wait (the lane's lock let go between looks) while a run is
+/// MUTATION: in `Coalescing::ask`, wait (the book lock let go between looks) while a run is
 /// waiting until the worker takes it — the joined request waits on the held worker, the hold
-/// lapses, and the test is red at the cap.
+/// lapses at the cap, and the test is red after it at a mid-run assert, before the release ("the
+/// displacing request waits for the next run" or "nothing is taken while the first run is still
+/// owed", as the race with the let-go worker falls).
 #[test]
 fn a_coalescing_ask_never_waits_for_its_worker() {
     type Answered = crate::lane::ToTheApplication<u8, String>;

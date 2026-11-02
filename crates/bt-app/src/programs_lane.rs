@@ -603,9 +603,14 @@ impl ProgramsLane {
     /// it already owes [`BOUND`], or the worker ran and has ended; or the thread door refused to
     /// start the worker for this request (`Refused::NotStarted`, said once per streak), which
     /// leaves the lane as it was, so the next request starts the worker again.
+    ///
+    /// The lane's lock is kept only for the urgency read, never across the ask: the worker takes
+    /// it on its own as a walk begins, publishes and ends, so an admission that kept it would turn
+    /// any wait in the ask into a deadlock (row 160). A pane that starts waiting after the read is
+    /// the worker's to raise ([`Self::a_pane_waits`]), as one that starts just after the
+    /// admission is; the ids, the joins and the order are the coalescing's, under its own lock.
     pub(crate) fn request(&'static self, request: WalkRequest) -> Result<u64, Refused> {
-        let asks = self.lock();
-        let urgent = request.trigger.urgent() || asks.panes_waiting > 0;
+        let urgent = request.trigger.urgent() || self.lock().panes_waiting > 0;
         self.requests
             .ask(
                 Walk { request, urgent },
@@ -1701,6 +1706,53 @@ pub(crate) mod tests {
         assert_eq!(
             answers.verdicts[0].generation, next,
             "and the worker it started walks"
+        );
+    }
+
+    /// RED (T-PROGRAMS-LANE-ASKS-HOLD-SHRUNK, plan row 160) — **the admission keeps the lane's
+    /// lock only for its urgency read, never across the ask.** The walk worker takes that lock on
+    /// its own as a walk begins, publishes and ends, so an admission that kept it across
+    /// `Coalescing::ask` turned any wait there into a deadlock the suite's caps cannot free (row
+    /// 111's plant C hung). Read from inside the ask: a start the thread door refuses is said by
+    /// the ledger there (`Ledger::say_not_started`, called from `Coalescing::ask`), and the
+    /// ledger's `say` looks at the lane's lock as it says it. The request's trigger is not urgent
+    /// (a menu's), so the urgency read takes the lock and lets it go before the ask, on the road
+    /// this test names.
+    ///
+    /// MUTATION (observed red): `request` keeping its guard across the ask (the shape before row
+    /// 160) — the lock is held when the refusal is said.
+    #[test]
+    fn the_admission_keeps_the_lanes_lock_only_for_its_urgency_read() {
+        let gate = Arc::new(Gate::default());
+        let seen: Arc<OnceLock<&'static ProgramsLane>> = Arc::new(OnceLock::new());
+        let (looked, looks) = mpsc::channel();
+        let looked = Mutex::new(looked);
+        let probe = Arc::clone(&seen);
+        let lane: &'static ProgramsLane = Box::leak(Box::new(ProgramsLane::start_with(
+            Executor::scripted(Arc::clone(&gate)),
+            FakeMachine::with_path(&[bin_dir()]),
+            Arc::new(|_: &str| {}),
+            move |line: &str| {
+                let free = probe.get().map(|lane| lane.asks.try_lock().is_ok());
+                let _ = looked.lock().unwrap().send((line.to_owned(), free));
+            },
+        )));
+        let _ = seen.set(lane);
+        gate.refuse_next_start();
+        assert!(
+            matches!(
+                lane.request(request(&[row("rg", "rg.exe")], Trigger::ProgramMenu)),
+                Err(Refused::NotStarted(_))
+            ),
+            "the request whose start was refused is refused at the door"
+        );
+        let said: Vec<(String, Option<bool>)> = looks.try_iter().collect();
+        assert_eq!(said.len(), 1, "the refusal said once: {said:?}");
+        assert!(said[0].0.contains(crate::lane::REFUSED_START), "{said:?}");
+        assert_eq!(
+            said[0].1,
+            Some(true),
+            "the refusal is said inside the ask with the program lane's lock let go: {said:?}"
         );
     }
 

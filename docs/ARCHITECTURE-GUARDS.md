@@ -1122,24 +1122,27 @@ holds a lane's worker — at the suite's gate or a fake's hold — and calls a d
 reads the count, so a door that waits is red, not a hang (the taskbar's held shell, a channel, is
 read by its reading's return on a thread of its own, awaited within the suite's patience, the shell
 let go before the verdict). The cap frees holds, not locks: a door that waits while it keeps a
-product lock the held worker takes next still hangs — the program walk's admission keeps the lane's
-lock across the ask (`ProgramsLane::request`), and row 111's planted wait there hung. That ask is
-pinned apart from the lane's lock (`a_coalescing_ask_never_waits_for_its_worker`, row 133): its
-worker stands in a held hold while the three roads of `Coalescing::ask` taken while a run is out
-are taken on the test's thread, so a wait planted there that lets the lane's lock go is red at the
-cap (one that keeps that lock is the suite watchdog's, row 113). A worker held at a `Barrier`, at a
-channel or behind a lock a parked thread keeps is read the same way (row 133): the shell's birth
-worker, the log's writer and the update's fetch stand in a hold; the stalled sink's fill, the
-session writer that never answers and a contender held inside the election are read by their
-door's return on a thread of its own, the holder let go before the verdict; and the trace sink's
-lines are offered and its queue closed on the writer's own thread after another thread has taken
-the process `stderr` lock, so an offer, a close or a write that waits for that lock is red with the
-writer, and nothing is called under it on the test's thread. That program-walk lock, and a
-test-thread wait on something no gate or hold holds, are not read this way; wherever the suite runs
-through the suite watchdog (row 113, below), a hang of either kind ends the run red within 300 s of
-the test's start and names it (save the shapes that section says it cannot name). What such a
-verdict does not catch is a bounded wait, or a give-up that ignores its budget, shorter than the
-suite's patience.
+product lock the held worker takes next still hangs. The program walk's admission was one until row
+160: it kept the lane's lock across the ask (`ProgramsLane::request`), and row 111's planted wait
+there hung; it now keeps that lock only for its urgency read
+(`the_admission_keeps_the_lanes_lock_only_for_its_urgency_read`), so the same plant is red at the
+cap in the programs tests and the contract suite. That ask is also pinned apart from any lane's own
+lock (`a_coalescing_ask_never_waits_for_its_worker`, row 133): its worker stands in a held hold
+while the three roads of `Coalescing::ask` taken while a run is out are taken on the test's thread,
+so a wait planted there that lets the coalescing's book lock go is red at the cap (one that keeps
+the book lock is the suite watchdog's, row 113). A worker held at a `Barrier`, at a channel or
+behind a lock a parked thread keeps is read the same way (row 133): the shell's birth worker, the
+log's writer and the update's fetch stand in a hold; the stalled sink's fill, the session writer
+that never answers and a contender held inside the election are read by their door's return on a
+thread of its own, the holder let go before the verdict; and the trace sink's lines are offered and
+its queue closed on the writer's own thread after another thread has taken the process `stderr`
+lock, so an offer, a close or a write that waits for that lock is red with the writer, and nothing
+is called under it on the test's thread. A product lock kept across a door call (the program walk's
+was, until row 160), and a test-thread wait on something no gate or hold holds, are not read this
+way; wherever the suite runs through the suite watchdog (row 113, below), a hang of either kind ends
+the run red within 300 s of the test's start and names it (save the shapes that section says it
+cannot name). What such a verdict does not catch is a bounded wait, or a give-up that ignores its
+budget, shorter than the suite's patience.
 
 2026-10-31 (T-FLOATING-VIDEO-DOUBLE-CLICK-TIMING, plan row 124): a double click is decided by
 the window's multi-click counters (`ImageClicks`, `PreviewTextClicks`) on the moment a press is
