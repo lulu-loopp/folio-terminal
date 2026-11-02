@@ -719,7 +719,9 @@ fn finish(
             return Finished::Io(Err(code));
         }
     }
-    let remaining = attempt.deadline.saturating_duration_since(attempt.clock.now());
+    let remaining = attempt
+        .deadline
+        .saturating_duration_since(attempt.clock.now());
     let mut handles = vec![event.handle()];
     handles.extend(watched);
     // A wait the clock spends without making it leaves the answer a timeout.
@@ -1165,8 +1167,10 @@ mod tests {
             read_message(&pipe, budget_on(&clock), None, HandshakePhase::Authenticate)
         });
         let clock = CountedClock::answering();
-        let refused =
-            endpoint.accept_on(&this_process_claiming(std::process::id()), budget_on(&clock));
+        let refused = endpoint.accept_on(
+            &this_process_claiming(std::process::id()),
+            budget_on(&clock),
+        );
         assert_eq!(
             refused.err(),
             Some(HandshakeFailure::Refused(PaneFailure::WrongCapability))
@@ -1189,7 +1193,10 @@ mod tests {
         let host = host_thread(line.clone());
         let clock = CountedClock::answering();
         let connection = endpoint
-            .accept_on(&this_process_claiming(std::process::id()), budget_on(&clock))
+            .accept_on(
+                &this_process_claiming(std::process::id()),
+                budget_on(&clock),
+            )
             .expect("the honest host is admitted");
         assert_eq!(host.join().expect("the host ends"), Ok(()));
         let replay = Frame {
@@ -1223,8 +1230,13 @@ mod tests {
             let host = host_thread(line.clone());
             let clock = CountedClock::answering();
             connect(&endpoint.pipe, budget_on(&clock), None).expect("the host connects");
-            read_message(&endpoint.pipe, budget_on(&clock), None, HandshakePhase::Hello)
-                .expect("the host says hello");
+            read_message(
+                &endpoint.pipe,
+                budget_on(&clock),
+                None,
+                HandshakePhase::Hello,
+            )
+            .expect("the host says hello");
             let (capability, parent_start, expected) = if forge_the_capability {
                 (
                     Capability::new([0x11; 32]),
@@ -1401,8 +1413,13 @@ mod tests {
         let host = host_thread(line.clone());
         let clock = CountedClock::answering();
         connect(&endpoint.pipe, budget_on(&clock), None).expect("the host connects");
-        read_message(&endpoint.pipe, budget_on(&clock), None, HandshakePhase::Hello)
-            .expect("the host says hello");
+        read_message(
+            &endpoint.pipe,
+            budget_on(&clock),
+            None,
+            HandshakePhase::Hello,
+        )
+        .expect("the host says hello");
         let identity = client_identity(&endpoint.pipe);
         assert_eq!(identity.level, SecurityIdentification);
         assert!(identity.user.starts_with("S-1-5-"), "{}", identity.user);
