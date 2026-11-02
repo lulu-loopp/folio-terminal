@@ -1311,19 +1311,20 @@ mod tests {
     fn a_watcher_that_does_not_leave_is_said_once_and_its_member_can_be_asked_again() {
         let door = FakeDoor::default();
         let (said, notes) = mpsc::channel::<String>();
-        let steward: &'static Steward = Box::leak(Box::new(Steward::new(
-            door.clone(),
-            move |line: &str| {
+        let steward: &'static Steward =
+            Box::leak(Box::new(Steward::new(door.clone(), move |line: &str| {
                 let _ = said.send(line.to_owned());
-            },
-        )));
+            })));
         let (woke, wakes) = mpsc::channel();
         steward.install_wake(move || {
             let _ = woke.send(());
         });
         let mut ear = quiet_ear(steward);
         let stuck = folder("粘");
-        ear.want(&BTreeSet::from([stuck.clone(), folder("走")]), BTreeSet::new());
+        ear.want(
+            &BTreeSet::from([stuck.clone(), folder("走")]),
+            BTreeSet::new(),
+        );
         wait_for_a_wake(&wakes, "the arming");
         let _ = states(&ear);
 
