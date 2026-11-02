@@ -466,7 +466,7 @@ pwsh -File scripts/release/cleanvm/new-vm.ps1 -Name win11 -Stage install -VmPass
 
 ```powershell
 pwsh -File scripts/release/cleanvm/new-vm.ps1 -Name win10 -Stage install `
-    -Iso <checkout>\target\cleanvm\Win10_22H2-noprompt.iso -InstallTimeoutMinutes 120
+    -Iso target\cleanvm\Win10_22H2-noprompt.iso -InstallTimeoutMinutes 120
 ```
 
 **Win11 的 `.vmx` 是 partial 加密的,手改明文键照样认。** 那台机的文件里有

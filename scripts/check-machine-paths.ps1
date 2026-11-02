@@ -93,15 +93,16 @@ try {
     #
     # An entry ending in `/` is a folder; any other is one file, matched whole.
     # An entry that names no tracked file is refused as stale, so the table
-    # cannot keep excusing a path that has moved.
+    # cannot keep excusing a path that has moved. (An entry whose files have
+    # lost their hits is not caught: that would mean scanning what is excluded.
+    # Only a path with a hit belongs here, and a folder only when nothing in it
+    # is read by the product or by another check.)
     $docsNotScanned = [ordered]@{
         # Closed campaigns, whole: reviews and their answers, evidence runs (gate
         # logs and `.jsonl` recorded verbatim), agent transcripts.
         "docs/plans/review/"              = "frozen since 2026-09-24: review reports and answers quoting the reviewed tree"
-        "docs/plans/attention/"           = "frozen since 2026-09-20: attention plan and its verbatim evidence"
         "docs/plans/web-preview/"         = "frozen since 2026-09-07: web-preview reviews and verbatim gate evidence"
         "docs/plans/horizontal-scroll/"   = "frozen since 2026-09-07: horizontal-scroll plan and its reviews"
-        "docs/plans/ui-style/"            = "frozen since 2026-09-16: UI style audit"
         "docs/plans/underline-hardening/" = "frozen since 2026-08-23: underline scenarios as run"
         "docs/plans/agents/"              = "frozen since 2026-09-20: agent survey"
         # The Mac port: its plan is living, its transcripts and probes are not.
@@ -110,6 +111,14 @@ try {
         "docs/plans/port/m4-9/"           = "frozen since 2026-09-12: agent transcript, verbatim"
         "docs/plans/port/probe-x3-keyboard-ime-2026-09-12.md" = "frozen since 2026-09-12: probe record, as run"
         "docs/plans/port/probe-x4-app-delegate-2026-09-12.md" = "frozen since 2026-09-12: probe record, as run"
+        # Attention: the evidence and the plan are record; the hook fixtures
+        # beside them are the product's `include_str!` expectations, and scanned.
+        "docs/plans/attention/evidence-2026-08-25.md"            = "frozen since 2026-08-25: verbatim evidence"
+        "docs/plans/attention/evidence-cli-survey-2026-08-25.md" = "frozen since 2026-08-26: verbatim CLI survey"
+        "docs/plans/attention/evidence-turn-end-words-2026-09-01.md" = "frozen since 2026-09-07: verbatim evidence"
+        "docs/plans/attention/plan.md"                           = "frozen since 2026-09-15: the attention plan"
+        # UI style: the audit is record; the copy guide beside it is a living rulebook.
+        "docs/plans/ui-style/audit-codex-2026-08-25.md"          = "frozen since 2026-08-25: review answer, verbatim"
         # Dated plans in folders that are still written to.
         "docs/plans/bt-app-split-inventory-2026-09-15.md" = "frozen since 2026-09-15: dated split inventory"
         "docs/plans/paste-paths-design.md"                = "frozen since 2026-09-15: paste-paths design and its worked paths"
@@ -124,7 +133,6 @@ try {
         "docs/plans/release/license-review-codex-2026-08-27.md"  = "frozen since 2026-08-27: review answer, verbatim"
         "docs/plans/release/plan.md"                             = "frozen since 2026-09-07: the 0.1 release plan"
         "docs/plans/release/winget.md"                           = "frozen since 2026-09-20: winget submission record"
-        "docs/plans/release/winget-install-test-2026-09-07.md"   = "frozen since 2026-09-07: install test as run"
         # Review reports quote the paths of the tree they reviewed.
         "docs/reviews/"  = "dated review reports quoting the reviewed tree"
         # The prompts handed to agents, kept as sent, trailers included.
