@@ -14,6 +14,7 @@
 use super::*;
 
 use std::sync::Mutex;
+#[cfg(windows)]
 use std::sync::mpsc;
 
 use bt_persist::UpdateCheckV1;

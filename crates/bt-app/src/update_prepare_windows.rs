@@ -228,7 +228,7 @@ impl WinPrepare {
 
     /// This driver with its held journal writes asked again on `clock` — a
     /// test's counted clock, whose pauses let a hold go.
-    #[cfg(test)]
+    #[cfg(all(test, windows))]
     pub(crate) fn on_clock(self, clock: Arc<dyn WaitClock>) -> Self {
         Self { clock, ..self }
     }
