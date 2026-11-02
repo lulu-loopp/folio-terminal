@@ -747,6 +747,37 @@ jobs:
           }
           exit 0
 
+      # A key of a vocabulary entry the merge base does not name is revealed,
+      # not added, only when a dated `## Revealed` block lists its every row
+      # (plan row 176). Plant a new entry and its row: with no block line the
+      # gate refuses it; with one it passes (the control).
+      - name: the bare-site revealed rule can actually fail
+        shell: pwsh
+        run: |
+          $file = "docs/plans/window-thread-bare-sites.tsv"
+          $registry = "crates/bt-app/src/window_waits.tsv"
+          $original = [IO.File]::ReadAllText($file)
+          $registryOriginal = [IO.File]::ReadAllText($registry)
+          $wait = "std::thread::planted_wait"
+          try {
+            $marker = "`n# entrances`n"
+            if (-not $registryOriginal.Contains($marker)) { throw "the registry has no '# entrances' section to plant before" }
+            $index = $registryOriginal.IndexOf($marker)
+            [IO.File]::WriteAllText($registry, $registryOriginal.Substring(0, $index) + "`n$wait`tall`ta planted wait" + $registryOriginal.Substring($index))
+            [IO.File]::AppendAllText($file, "bt-app`t-`tcrate::planted`t$wait`t1`n")
+            $failed = $false
+            try { & ./scripts/ci/check-window-waits.ps1 } catch { $failed = $true }
+            if (-not $failed) {
+              throw "the bare-site inventory took a new entry's row that no dated '## Revealed' block lists"
+            }
+            [IO.File]::AppendAllText($file, "## Revealed 2026-11-02 by the gates-can-fail plant`n##   bt-app | - | crate::planted | $wait`n")
+            & ./scripts/ci/check-window-waits.ps1
+          } finally {
+            [IO.File]::WriteAllText($file, $original)
+            [IO.File]::WriteAllText($registry, $registryOriginal)
+          }
+          exit 0
+
       # A merge keeps both sides' removals (A2s). Three plants, each two sides
       # committed from HEAD and their merge: both sides dropping one row passes
       # (the control); one side dropping a row and the other its twin of the

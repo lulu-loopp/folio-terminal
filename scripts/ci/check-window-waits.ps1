@@ -44,6 +44,16 @@
 #   * The baseline is the file at the pull request's merge base with origin/main.
 #   * current[key] <= baseline[key], a key missing from the baseline read as
 #     zero: a new effect family is refused, and so is a total that grew.
+#   * Except a revealed key: one whose entry the working tree's registry
+#     `# vocabulary` names and the baseline's does not, every row of which the
+#     inventory lists in a dated `## Revealed <YYYY-MM-DD> ...` block, one
+#     `##   crate | arm | item | entry` line per row. A widened vocabulary
+#     reveals sites that were already there, and the block says when and which
+#     (T-BARE-SITE-VOCABULARY-WAIT-WHILE-BLIND-SPOT, plan row 176, ruling R1 and
+#     its tightening). It is reported as revealed, not refused; the equality half
+#     holds its rows to the code, and from the next merge base on it only
+#     shrinks. A key of a new entry with a row no dated block lists is refused as
+#     added: a change that widens the vocabulary cannot carry a new wait with it.
 #
 # No merge base at all (no origin/main in the clone) is not a pass either: the
 # comparison did not happen. CI checks out with full history on both jobs that
@@ -361,6 +371,40 @@ try {
     Pop-Location
 }
 
+# The `# vocabulary` paths of a registry text.
+function Read-VocabularyPaths([string[]]$lines) {
+    $paths = @()
+    $inside = $false
+    $header = $false
+    foreach ($line in $lines) {
+        if ($line.StartsWith("##")) { continue }
+        if ($line.StartsWith("# ")) { $inside = ($line -ceq "# vocabulary"); continue }
+        if (-not $inside -or $line.Length -eq 0) { continue }
+        if (-not $header) { $header = $true; continue }
+        $paths += ($line -split "`t")[0]
+    }
+    if (-not $header) { throw "the registry has no '# vocabulary' section with a header" }
+    return , $paths
+}
+
+# The rows a text of the inventory lists in its dated `## Revealed <YYYY-MM-DD> ...` blocks: each
+# block's `##   crate | arm | item | entry` lines, keyed as Read-InventoryRows keys a row.
+function Read-RevealedRows([string[]]$lines) {
+    $rows = New-OrdinalMap
+    $inside = $false
+    foreach ($line in $lines) {
+        if ($line -cmatch '^## Revealed 20[0-9][0-9]-[0-9][0-9]-[0-9][0-9] ') { $inside = $true; continue }
+        if ($inside -and $line.StartsWith("##   ")) {
+            $cells = $line.Substring(5) -split ' \| '
+            if ($cells.Count -ne 4) { throw "$relative`: a revealed line is not four cells: $line" }
+            $rows[($cells -join "`t")] = $true
+            continue
+        }
+        $inside = $false
+    }
+    return $rows
+}
+
 # The `# rows` section of a registry text: row -> (status, disposition).
 function Read-RegistryRows([string[]]$lines) {
     $rows = New-OrdinalMap
@@ -552,12 +596,28 @@ if (-not $uncalledAtBase) {
     }
 }
 
+$vocabularyThen = Read-VocabularyPaths ($then -split "`r?`n")
+$vocabularyNow = Read-VocabularyPaths ([IO.File]::ReadAllLines((Join-Path $repo $registry)))
+$inventoryLines = [IO.File]::ReadAllLines($inventory)
+$inventoryRowsNow = Read-InventoryRows $inventoryLines "the working tree's $relative"
+$revealedRows = Read-RevealedRows $inventoryLines
 $added = @()
 $grown = @()
+$revealed = @()
 $shrunk = 0
 foreach ($key in $now.Keys) {
     $held = if ($before.Contains($key)) { $before[$key] } else { 0 }
-    if ($held -eq 0) {
+    $crate, $entry = $key -split "`t"
+    $newEntry = ($vocabularyThen -cnotcontains $entry) -and ($vocabularyNow -ccontains $entry)
+    $undated = @($inventoryRowsNow.Keys | Where-Object {
+            $cells = $_ -split "`t"
+            $cells[0] -ceq $crate -and $cells[3] -ceq $entry -and -not $revealedRows.Contains($_)
+        })
+    if ($newEntry -and $undated.Count -eq 0) {
+        $revealed += "    $($key -replace "`t", ' | ') ($($now[$key]))"
+    } elseif ($newEntry) {
+        $added += "    $($key -replace "`t", ' | ') ($($now[$key])): a new vocabulary entry, and no dated '## Revealed' block lists $(($undated | ForEach-Object { $_ -replace "`t", ' | ' }) -join '; ')"
+    } elseif ($held -eq 0) {
         $added += "    $($key -replace "`t", ' | ') ($($now[$key]))"
     } elseif ($now[$key] -gt $held) {
         $grown += "    $($key -replace "`t", ' | '): $held -> $($now[$key])"
@@ -574,6 +634,10 @@ foreach ($count in $now.Values) { $total += $count }
 $was = 0
 foreach ($count in $before.Values) { $was += $count }
 Write-Host "$relative against $against`: $was sites -> $total, $($added.Count) key(s) added, $($grown.Count) grown, $shrunk site(s) removed."
+if ($revealed.Count -gt 0) {
+    Write-Host "revealed by a vocabulary entry the merge base's registry does not name (sites already there, none added):"
+    $revealed | ForEach-Object { Write-Host $_ }
+}
 
 if ($added.Count -gt 0 -or $grown.Count -gt 0) {
     $details = @()
