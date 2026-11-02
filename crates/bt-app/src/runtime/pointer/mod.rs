@@ -15,6 +15,7 @@
 mod capture;
 mod ending;
 mod release;
+mod rename_caret;
 mod router;
 mod row_middle;
 pub(crate) mod touch;

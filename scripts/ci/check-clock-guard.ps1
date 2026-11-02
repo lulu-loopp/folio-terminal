@@ -26,10 +26,11 @@
 #
 # "Product" is bt-source's production view (`Occurrence::in_the_product`): test
 # files, `#[cfg(test)]` items and inline `#[cfg(test)]` modules are not read. The
-# reading itself is `crates/bt-source/tests/clock_guard.rs`, which also runs in
-# the workspace test; this script runs it alone, relays what it refused, and
-# refuses a run that did not report reading the set (a filtered-out or renamed
-# test passes with nothing read, which is not a pass).
+# reading itself is `crates/bt-source/tests/clock_guard.rs` (a module of the
+# `real_tree` test binary), which also runs in the workspace test; this script
+# runs it alone, relays what it refused, and refuses a run that did not report
+# reading the set (a filtered-out or renamed test passes with nothing read,
+# which is not a pass).
 
 $ErrorActionPreference = "Stop"
 if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -Scope Global -ErrorAction SilentlyContinue) {
@@ -37,13 +38,13 @@ if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -Scope Global -Er
 }
 
 $repo = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-$test = "no_clock_of_the_standard_library_is_named_where_a_browser_build_reads"
+$test = "clock_guard::no_clock_of_the_standard_library_is_named_where_a_browser_build_reads"
 
 $previous = [Console]::OutputEncoding
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 Push-Location $repo
 try {
-    $output = @(& cargo test -p bt-source --locked --color never --test clock_guard -- --exact $test --nocapture 2>&1 |
+    $output = @(& cargo test -p bt-source --locked --color never --test real_tree -- --exact $test --nocapture 2>&1 |
         ForEach-Object { "$_" })
     $status = $LASTEXITCODE
 } finally {

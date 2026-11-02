@@ -77,6 +77,7 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use bt_source::{
     DiskScope, Index, ItemRecord, LiteralValue, Package, Pattern, Search, Span, TargetId,
@@ -107,21 +108,8 @@ fn workspace_root() -> PathBuf {
 }
 
 /// The whole of a first-party package; `bt-source`'s `tests/fixtures/` are declared out.
-fn universe_for(package: &Package) -> Universe {
-    if package.name() == "bt-source" {
-        let scopes = vec![
-            DiskScope::under(package.directory().join("src")),
-            DiskScope::under(package.directory().join("tests")).excluding(&["fixtures"]),
-        ];
-        return Universe::declare(
-            "the whole of bt-source, fixtures aside",
-            package.targets().to_vec(),
-            scopes,
-            Vendor::Excluded,
-        )
-        .expect("this crate is where it says it is");
-    }
-    universes::whole_package(package, Vendor::Excluded).expect("a package of this workspace")
+pub(crate) fn universe_for(package: &Package) -> Universe {
+    universes::first_party_whole(package, Vendor::Excluded).expect("a package of this workspace")
 }
 
 /// Every span of `pattern` in the identifier view of `index`, sorted.
@@ -370,11 +358,11 @@ fn scan(index: &Index, root: &Path, tests: &Path) -> BTreeSet<Hit> {
     found
 }
 
-/// Every refusal in every first-party package but the owner's, and how many test-code
-/// functions were read.
-fn workspace_hits() -> (BTreeSet<Hit>, usize) {
-    let root = normalized(&workspace_root());
-    let workspace = Workspace::read(&root).expect("this workspace");
+/// Every first-party package's directory and index but the owner's: the index is the one this
+/// process holds for each package's [`universes::first_party_whole`], shared with every other
+/// guard that asks for it.
+pub(crate) fn workspace_indices() -> Vec<(PathBuf, Arc<Index>)> {
+    let workspace = Workspace::read(&normalized(&workspace_root())).expect("this workspace");
     let packages: Vec<&Package> = workspace
         .packages()
         .iter()
@@ -384,15 +372,25 @@ fn workspace_hits() -> (BTreeSet<Hit>, usize) {
         packages.iter().any(|package| package.name() == OWNER),
         "{OWNER} is a member of this workspace"
     );
-    let mut hits = BTreeSet::new();
-    let mut read = 0;
-    for package in packages
+    packages
         .into_iter()
         .filter(|package| package.name() != OWNER)
-    {
-        let index = Index::build(&universe_for(package))
-            .unwrap_or_else(|rejections| panic!("{}", report(&rejections)));
-        hits.extend(scan(&index, &root, &package.directory().join("tests")));
+        .map(|package| {
+            let index = Index::shared(&universe_for(package))
+                .unwrap_or_else(|rejections| panic!("{}", report(&rejections)));
+            (package.directory().to_path_buf(), index)
+        })
+        .collect()
+}
+
+/// Every refusal in every first-party package but the owner's, and how many test-code
+/// functions were read.
+fn workspace_hits() -> (BTreeSet<Hit>, usize) {
+    let root = normalized(&workspace_root());
+    let mut hits = BTreeSet::new();
+    let mut read = 0;
+    for (directory, index) in workspace_indices() {
+        hits.extend(scan(&index, &root, &directory.join("tests")));
         read += index
             .items()
             .iter()

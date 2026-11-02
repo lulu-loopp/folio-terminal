@@ -106,6 +106,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use bt_source::call_graph::{Arms, CallGraph, ItemId, Node, Resolver, Target, Unresolved};
 use bt_source::{
@@ -145,21 +146,8 @@ fn workspace_root() -> PathBuf {
 
 /// The whole of a first-party package; `bt-source`'s `tests/fixtures/` are
 /// source *about* compilation and are declared out, as `real_workspace` does.
-fn universe_for(package: &Package) -> Universe {
-    if package.name() == "bt-source" {
-        let scopes = vec![
-            DiskScope::under(package.directory().join("src")),
-            DiskScope::under(package.directory().join("tests")).excluding(&["fixtures"]),
-        ];
-        return Universe::declare(
-            "the whole of bt-source, fixtures aside",
-            package.targets().to_vec(),
-            scopes,
-            Vendor::Excluded,
-        )
-        .expect("this crate is where it says it is");
-    }
-    universes::whole_package(package, Vendor::Excluded).expect("a package of this workspace")
+pub(crate) fn universe_for(package: &Package) -> Universe {
+    universes::first_party_whole(package, Vendor::Excluded).expect("a package of this workspace")
 }
 
 /// Every span of `pattern` in `view`, sorted.
@@ -704,13 +692,13 @@ fn defined_macro<'i>(index: &'i Index, record: &bt_source::MacroRecord) -> Optio
 /// Every test of every package that reaches a test-only helper that measures
 /// (shape 3), added to `found`; what the walk cannot decide goes to `refusals`.
 fn scan_helpers(
-    indices: &[(String, Index)],
+    indices: &[(String, Arc<Index>)],
     found: &mut BTreeMap<String, Found>,
     refusals: &mut Vec<String>,
 ) {
     let packages: Vec<(&str, &Index)> = indices
         .iter()
-        .map(|(name, index)| (name.as_str(), index))
+        .map(|(name, index)| (name.as_str(), &**index))
         .collect();
     let resolver = Resolver::new(&packages, Arms::filtered(|_| true))
         .unwrap_or_else(|refused| panic!("{refused:?}"));
@@ -752,15 +740,16 @@ fn declared_triggers(index: &Index) -> Vec<String> {
         .collect()
 }
 
-/// Every first-party package's index.
-fn workspace_indices() -> Vec<(String, Index)> {
+/// Every first-party package's index: the one this process holds for each package's
+/// [`universes::first_party_whole`], shared with every other guard that asks for it.
+pub(crate) fn workspace_indices() -> Vec<(String, Arc<Index>)> {
     let workspace = Workspace::read(&workspace_root()).expect("this workspace");
     workspace
         .packages()
         .iter()
         .filter(|package| !is_vendored(package.directory()))
         .map(|package| {
-            let index = Index::build(&universe_for(package))
+            let index = Index::shared(&universe_for(package))
                 .unwrap_or_else(|rejections| panic!("{}", report(&rejections)));
             (package.name().to_owned(), index)
         })
@@ -1000,7 +989,7 @@ fn clock_arithmetic_is_two_readings_and_a_clock_in_an_unparsed_macro_is_refused(
 #[test]
 fn a_budget_measured_in_a_helper_is_found_through_the_call_graph() {
     let index = fixture_named("timing_strays", "strays");
-    let held = vec![("strays".to_owned(), index)];
+    let held = vec![("strays".to_owned(), Arc::new(index))];
     let mut found = BTreeMap::new();
     let mut refusals = Vec::new();
     scan_helpers(&held, &mut found, &mut refusals);
@@ -1182,7 +1171,7 @@ fn no_product_function_reads_again_the_clock_it_was_handed() {
     let held = workspace_indices();
     let indices: Vec<(&str, &Index)> = held
         .iter()
-        .map(|(name, index)| (name.as_str(), index))
+        .map(|(name, index)| (name.as_str(), &**index))
         .collect();
     let (found, refusals) = handed_now(&indices);
     assert!(

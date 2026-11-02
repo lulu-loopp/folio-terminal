@@ -1681,6 +1681,11 @@ impl<B: Backend> Runtime<'_, B> {
         if self.drag_preview_selection(position)? {
             return Ok(());
         }
+        // A selection being drawn across the open name editor's draft, on the same terms and
+        // outside its own box for the same reason (row 179).
+        if self.drag_rename_selection(position)? {
+            return Ok(());
+        }
         // A selection being drawn across a **rendered** page owns the pointer on
         // exactly those terms, and outside its own body for the same reason.
         if self.drag_preview_text(position)? {
@@ -3439,6 +3444,10 @@ impl<B: Backend> Runtime<'_, B> {
                 // is consumed whole — no promise armed, no click recorded.
                 self.window.tab_clicks.interrupt();
                 self.window.preview_name_clicks.interrupt();
+                // **And the caret goes where the press is** (0.4.9 plan row 179): consumed
+                // whole is not ignored — the press is the editor's, and what it does to the
+                // draft is a caret at the seam under the pointer and the drag that follows.
+                self.press_rename_draft(position)?;
                 self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=press-in-rename-editor state={state:?} button={button:?} target={traced_target:?}"));
                 return Ok(true);
             }

@@ -19,6 +19,7 @@
 # scripts/ci/check-test-globals.ps1 admits an added row of a checked class with its dated reason,
 # and an added row of a by-hand class only under a new "# widened <date> by <ticket> (+n rows)"
 # line, in a change to the scan. A reason is "YYYY-MM-DD: why".
+# widened 2026-11-01 by T-BT-SOURCE-REAL-TREE-GUARDS-ONE-PROCESS (+2 rows): the census's and the tripwire's write-once rows, re-keyed to the real_tree binary their modules now share (plan row 166); the same two globals, each still made once by get_or_init
 file	global	binary	class	reason
 crates/bt-app/src/diagnostics.rs	crate::diagnostics::RESIDENT_CHANNEL	bt-app:bin:folio	single writer	2026-10-30: set only in the child arm of its test (T-PANIC-ANNOUNCED-ONCE-FLAG-REVIEW), a process of its own (a_process_of_its_own) for each of its two children, so the stop's alert is owed to its box as in a resident run; the parent never writes it
 crates/bt-app/src/explorer_menu.rs	crate::explorer_menu::BUSY	bt-app:bin:folio	lock:DEPLOYMENT	2026-10-24: the deployment latch; the one test that takes it holds the explorer-menu tests' DEPLOYMENT turn first
@@ -58,8 +59,8 @@ crates/bt-pty/src/test_shell.rs	crate::test_shell::WARM_UP	bt-pty:lib:bt-pty	per
 crates/bt-render/src/lib.rs	crate::CJK_FALLBACK_FAMILIES	bt-render:lib:bt-render	write-once	2026-10-24: a LazyLock of a fixed list (census row 19)
 crates/bt-render/src/lib.rs	crate::GRID_CJK_FALLBACK_FAMILIES	bt-render:lib:bt-render	write-once	2026-10-24: a LazyLock of a fixed list (census row 20)
 crates/bt-render/src/lib.rs	crate::tests::source_without_prose::SQUEEZED	bt-render:lib:bt-render	write-once	2026-10-24: the squeezed source, made once by get_or_init from a fixed text (census row 22)
-crates/bt-source/tests/census.rs	crate::the_census::CENSUS	bt-source:test:census	write-once	2026-10-24: the tree's census, made once by get_or_init; the tree does not change during a run (census row 23)
-crates/bt-source/tests/tripwire.rs	crate::the_code::CODE	bt-source:test:tripwire	write-once	2026-10-24: the tree's code, read once by get_or_init; the tree does not change during a run (census row 24)
+crates/bt-source/tests/census.rs	crate::census::the_census::CENSUS	bt-source:test:real_tree	write-once	2026-10-24: the tree's census, made once by get_or_init; the tree does not change during a run (census row 23)
+crates/bt-source/tests/tripwire.rs	crate::tripwire::the_code::CODE	bt-source:test:real_tree	write-once	2026-10-24: the tree's code, read once by get_or_init; the tree does not change during a run (census row 24)
 crates/bt-term/src/inline_image.rs	crate::inline_image::tests::STARTED_ON	bt-term:lib:bt-term	single writer	2026-10-24: one test records the threads its decodes start on (census row 15)
 crates/bt-term/tests/bounded_bytes_from_the_child.rs	crate::ALLOCATED	bt-term:test:bounded_bytes_from_the_child	lock:ONE_AT_A_TIME	2026-10-24: every measurement takes ONE_AT_A_TIME first (census row 36)
 crates/bt-term/tests/bounded_bytes_from_the_child.rs	crate::MEASURING	bt-term:test:bounded_bytes_from_the_child	lock:ONE_AT_A_TIME	2026-10-24: every measurement takes ONE_AT_A_TIME first (census row 37)
