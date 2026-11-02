@@ -145,14 +145,8 @@ const NOT_A_WINDOW_WAIT: &[(&str, &str)] = &[
         "a lock is C1's concern, exempt in a row's mailbox; the window thread takes hundreds, and \
          the vocabulary becomes the product's `disallowed-methods` at A2e",
     ),
-    (
-        "std::sync::RwLock::read",
-        "a lock, as `Mutex::lock`",
-    ),
-    (
-        "std::sync::RwLock::write",
-        "a lock, as `Mutex::lock`",
-    ),
+    ("std::sync::RwLock::read", "a lock, as `Mutex::lock`"),
+    ("std::sync::RwLock::write", "a lock, as `Mutex::lock`"),
     (
         "std::sync::mpsc::Receiver::iter",
         "bt-app's name-based `Drop` reading would take every collection's `.iter()` for it",
@@ -1852,7 +1846,10 @@ fn every_blocking_primitive_is_a_window_wait_or_named_as_not_one() {
     );
 
     let wait = "std::sync::Condvar::wait\tall\twaits for a notification\n";
-    assert!(registry.contains(wait), "the live registry names `Condvar::wait`");
+    assert!(
+        registry.contains(wait),
+        "the live registry names `Condvar::wait`"
+    );
     let with_a_lock = registry.replacen(
         wait,
         &format!("{wait}std::sync::Mutex::lock\tall\ta planted lock\n"),

@@ -9817,19 +9817,30 @@ fn a_wait_through_a_verb_from_blocking_outside_a_door_is_a_bare_site() {
         .iter()
         .filter(|((package, _, item, _), _)| {
             package == "planted"
-                && ["crate::waits_while", "crate::parks", "crate::sends", "crate::owned"]
-                    .contains(&item.as_str())
+                && [
+                    "crate::waits_while",
+                    "crate::parks",
+                    "crate::sends",
+                    "crate::owned",
+                ]
+                .contains(&item.as_str())
         })
         .collect();
     let wanted = [
         planted("crate::parks", "std::thread::park_timeout"),
         planted("crate::sends", "std::sync::mpsc::SyncSender::send"),
-        planted("crate::waits_while", "std::sync::Condvar::wait_timeout_while"),
+        planted(
+            "crate::waits_while",
+            "std::sync::Condvar::wait_timeout_while",
+        ),
         planted("crate::waits_while", "std::sync::Condvar::wait_while"),
     ];
     assert_eq!(
         mine,
-        wanted.iter().map(|key| (key, &1)).collect::<BTreeMap<_, _>>(),
+        wanted
+            .iter()
+            .map(|key| (key, &1))
+            .collect::<BTreeMap<_, _>>(),
         "the planted waits are not each one bare site"
     );
     assert!(
