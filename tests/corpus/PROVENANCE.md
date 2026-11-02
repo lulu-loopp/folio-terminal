@@ -26,7 +26,9 @@ Scrub classes, without the original values:
 | software-install folder at a drive root (2026-11-02, the 36 `PATH` entries under it in `cargo-build-flood.btcr`) | a same-length neutral folder name; the folders and programs below it are left as recorded |
 
 The project's own name, crate names, tool versions and every control sequence are untouched: they
-identify the software, not a person. The program folders on the recorded `PATH` (operating-system, vendor and tool directories) are untouched for the same reason: they name software any machine may have installed, and only the folder this machine installs it under was replaced.
+identify the software, not a person. The program folders on the recorded `PATH` (operating-system,
+vendor and tool directories) are untouched for the same reason: they name software any machine
+may have installed, and only the folder this machine installs it under was replaced.
 
 ## Recordings
 

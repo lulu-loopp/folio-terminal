@@ -237,7 +237,10 @@ try {
     # matched, and the drive is asked behind it: a pattern that opens on a
     # drive letter is tried at every character of every file and cost the
     # scan about 2.5 s, one that opens on the name is tried where the name
-    # stands (about 0.1 s).
+    # stands (about 0.1 s). Two spellings are not covered yet (0.4.9 row
+    # 183): Git Bash's `/<d>/<root>/`, whose one-letter segment URL and Unix
+    # paths in the tree share, and a separator of three or more backslashes
+    # (a doubly escaped literal). No tracked file holds either today.
     $install_re = [regex]"(?i)(?<=(?:(?<![A-Za-z0-9])[A-Za-z]:|/mnt/[a-z])[\\/]{1,2})App\b"
     $author_re = [regex]"(?i)weiyi|umich\.edu"
     # The three sentences the name above may appear in — see the loop below.
@@ -436,7 +439,7 @@ try {
                     $rows["$check $key"].RemoveAt(0)
                     continue
                 }
-                $problems.Add("${rel}:$number $problem (not on $($keyedAllowList[$rel]), which lists only the hits the file held on 2026-11-01)")
+                $problems.Add("${rel}:$number $problem (not on $($keyedAllowList[$rel]), which lists only the hits the file held when each pattern first met it)")
             }
         }
     }
