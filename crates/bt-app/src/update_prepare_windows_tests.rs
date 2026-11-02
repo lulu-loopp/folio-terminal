@@ -319,8 +319,10 @@ struct Release {
     refuse: Option<String>,
     /// Where each file was asked to go.
     into: Mutex<Vec<PathBuf>>,
-    /// Told when the archive's fetch begins, and waited on before it goes on.
-    gate: Option<(mpsc::Sender<()>, Mutex<mpsc::Receiver<()>>)>,
+    /// Where the archive's fetch stands before it goes on, while the test holds it (a
+    /// `crate::lane::Hold`: a call that waits on the held fetch lets it go at its cap, and the
+    /// test's release is red).
+    gate: Option<Arc<crate::lane::Hold>>,
 }
 
 impl Release {
@@ -348,9 +350,8 @@ impl Transport for Release {
         }
         let target = into.join(&request.file_name);
         if request.file_name.ends_with(".zip") {
-            if let Some((entered, go)) = &self.gate {
-                entered.send(()).unwrap();
-                go.lock().unwrap().recv().unwrap();
+            if let Some(gate) = &self.gate {
+                gate.pass();
             }
             std::fs::write(&target, &self.archive).map_err(|e| e.to_string())?;
             let length = self.archive.len() as u64;
@@ -931,10 +932,10 @@ fn cancel_leaves_no_transaction() {
         return refused_off_windows();
     };
     let before = scene.installed();
-    let (entered, entered_seen) = mpsc::channel();
-    let (go, go_seen) = mpsc::channel();
+    let gate = Arc::new(crate::lane::Hold::default());
+    gate.hold();
     let release = Arc::new(Release {
-        gate: Some((entered, Mutex::new(go_seen))),
+        gate: Some(Arc::clone(&gate)),
         ..Release::of(scene.archive.clone())
     });
     let driver = scene.driver(TestTools::real());
@@ -942,9 +943,7 @@ fn cancel_leaves_no_transaction() {
     let transport: SharedTransport = release;
     job.answer_verb(Verb::Press, &driver, &transport)
         .expect("the press is taken");
-    entered_seen
-        .recv_timeout(Duration::from_secs(60))
-        .expect("the archive's fetch began");
+    gate.wait_standing("the archive's fetch");
     assert!(
         scene.home().journal().exists(),
         "the transaction exists while it downloads"
@@ -952,7 +951,7 @@ fn cancel_leaves_no_transaction() {
     job.answer_verb(Verb::Cancel, &driver, &transport)
         .expect("Cancel is on the download's card");
     assert_eq!(job.state(), &State::Idle);
-    go.send(()).unwrap();
+    gate.release();
 
     let reports = last_word(&mut job, 1);
     scene.left_nothing(1);
@@ -989,22 +988,20 @@ fn a_cancelled_prepare_reports_only_after_it_lets_the_lock_go() {
     let driver = scene.driver(TestTools::real());
     let home = scene.home();
     for txn in 1..=12u8 {
-        let (entered, entered_seen) = mpsc::channel();
-        let (go, go_seen) = mpsc::channel();
+        let gate = Arc::new(crate::lane::Hold::default());
+        gate.hold();
         let release = Arc::new(Release {
-            gate: Some((entered, Mutex::new(go_seen))),
+            gate: Some(Arc::clone(&gate)),
             ..Release::of(scene.archive.clone())
         });
         let mut job = offered(txn);
         let transport: SharedTransport = release;
         job.answer_verb(Verb::Press, &driver, &transport)
             .expect("the press is taken");
-        entered_seen
-            .recv_timeout(Duration::from_secs(60))
-            .expect("the archive's fetch began");
+        gate.wait_standing("the archive's fetch");
         job.answer_verb(Verb::Cancel, &driver, &transport)
             .expect("Cancel is on the download's card");
-        go.send(()).unwrap();
+        gate.release();
 
         last_word(&mut job, txn);
         assert!(
