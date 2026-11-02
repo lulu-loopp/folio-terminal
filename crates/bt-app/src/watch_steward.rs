@@ -725,8 +725,9 @@ pub fn volume_arrived() {
 }
 
 /// **A door a test writes** (T-DIRWATCH-LIFECYCLE): starts that succeed or are refused by path,
-/// counted per path; watches that a test can end as the platform would (`Ended`); and a gate that
-/// holds a start or a drop where it happens, recording the thread it happens on.
+/// counted per path; watches that a test can end as the platform would (`Ended`); watches whose
+/// watcher outstays its bound when retired, by path (`outstay`); and a gate that holds a start or
+/// a drop where it happens, recording the thread it happens on.
 #[cfg(test)]
 pub(crate) mod fake {
     use std::collections::{BTreeMap, BTreeSet};
