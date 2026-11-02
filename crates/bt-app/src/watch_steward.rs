@@ -725,8 +725,9 @@ pub fn volume_arrived() {
 }
 
 /// **A door a test writes** (T-DIRWATCH-LIFECYCLE): starts that succeed or are refused by path,
-/// counted per path; watches that a test can end as the platform would (`Ended`); and a gate that
-/// holds a start or a drop where it happens, recording the thread it happens on.
+/// counted per path; watches that a test can end as the platform would (`Ended`); watches whose
+/// watcher outstays its bound when retired, by path (`outstay`); and a gate that holds a start or
+/// a drop where it happens, recording the thread it happens on.
 #[cfg(test)]
 pub(crate) mod fake {
     use std::collections::{BTreeMap, BTreeSet};
@@ -746,6 +747,8 @@ pub(crate) mod fake {
     #[derive(Default)]
     struct State {
         refused: BTreeSet<PathBuf>,
+        /// The members whose watcher does not leave within its bound when retired.
+        outstaying: BTreeSet<PathBuf>,
         attempts: BTreeMap<PathBuf, usize>,
         live: BTreeSet<PathBuf>,
         ended: BTreeMap<PathBuf, std::io::Error>,
@@ -815,6 +818,12 @@ pub(crate) mod fake {
         /// Let `path` start again: the folder is back.
         pub(crate) fn admit(&self, path: &Path) {
             self.state().refused.remove(path);
+        }
+
+        /// **The watcher of `path` does not leave within its bound** from now on: its door
+        /// answers `false`, as the platform's does once the bound has passed, and at once.
+        pub(crate) fn outstay(&self, path: &Path) {
+            self.state().outstaying.insert(path.to_path_buf());
         }
 
         /// How many starts of `path` were attempted.
@@ -969,7 +978,8 @@ pub(crate) mod fake {
             self.door.state().ended.remove(&self.path)
         }
 
-        /// The retirement: held where it happens while the test says so, then counted.
+        /// The retirement: held where it happens while the test says so, then counted. Answers
+        /// whether the watcher left in time: it did, unless the test said it outstays.
         fn retire_within(mut self: Box<Self>, _ctx: &WorkerCtx, _bound: Duration) -> bool {
             self.retired = true;
             self.door.state().drop_threads.push(thread_name());
@@ -985,7 +995,7 @@ pub(crate) mod fake {
             state.live.remove(&self.path);
             state.drops += 1;
             self.door.0.changed.notify_all();
-            true
+            !state.outstaying.contains(&self.path)
         }
     }
 
@@ -1290,6 +1300,66 @@ mod tests {
             "a watch the steward let go of was dropped without its door"
         );
         assert_eq!(door.threads().1, vec!["watch-steward".to_owned(); 3]);
+    }
+
+    /// RED (row 162) — **a watcher that does not leave within its bound is said once in
+    /// `diagnostics.log`, by its path and the bound, and its member can be asked for again.** A
+    /// departure whose watcher leaves says nothing, and no later round says the let-go again.
+    ///
+    /// MUTATION: drop the note from `retire` — no line; invert its test — the line names the
+    /// watcher that left; say it twice — two lines.
+    #[test]
+    fn a_watcher_that_does_not_leave_is_said_once_and_its_member_can_be_asked_again() {
+        let door = FakeDoor::default();
+        let (said, notes) = mpsc::channel::<String>();
+        let steward: &'static Steward =
+            Box::leak(Box::new(Steward::new(door.clone(), move |line: &str| {
+                let _ = said.send(line.to_owned());
+            })));
+        let (woke, wakes) = mpsc::channel();
+        steward.install_wake(move || {
+            let _ = woke.send(());
+        });
+        let mut ear = quiet_ear(steward);
+        let stuck = folder("粘");
+        ear.want(
+            &BTreeSet::from([stuck.clone(), folder("走")]),
+            BTreeSet::new(),
+        );
+        wait_for_a_wake(&wakes, "the arming");
+        let _ = states(&ear);
+
+        door.outstay(&stuck);
+        ear.want(&BTreeSet::from([folder("新")]), BTreeSet::new());
+        wait_for_a_wake(&wakes, "the new member's arming");
+        // The worker serves in order: once the new member's answer is in, both departures
+        // have been retired.
+        assert_eq!(
+            notes.try_iter().collect::<Vec<_>>(),
+            vec![format!(
+                "watch steward: the watcher of {} did not leave within {:?} of being told to \
+                 stop; it is let go",
+                stuck.display(),
+                bt_platform::DIR_WATCH_RETIRE_BUDGET
+            )],
+            "one line, for the watcher that stayed, and none for the one that left"
+        );
+
+        ear.want(
+            &BTreeSet::from([folder("新"), stuck.clone()]),
+            BTreeSet::new(),
+        );
+        wait_for_a_wake(&wakes, "the member asked for again");
+        assert!(
+            states(&ear).contains(&(stuck.clone(), MemberReport::Armed)),
+            "the member let go of is started again"
+        );
+        assert_eq!(door.attempts(&stuck), 2);
+        assert_eq!(
+            notes.try_iter().collect::<Vec<_>>(),
+            Vec::<String>::new(),
+            "no later round says the let-go again"
+        );
     }
 
     /// PIN (B5 design note, revisions (b)4, (c)3 and (e)3) — **only the steward starts or drops a

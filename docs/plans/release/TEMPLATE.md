@@ -59,8 +59,8 @@ has and Windows 10 usually does.
 
 `folio.exe` and `folio.msix` are signed by **Weiyi Shi**, as they have been since
 0.2.0, but a signature is not a reputation, so SmartScreen can still raise
-**"Windows protected your PC"** on the first run: **More info** names **Weiyi
-Shi** as the publisher, and **Run anyway** is the way through.
+**"Windows protected your PC"** on the first run: **More info** names
+**Weiyi Shi** as the publisher, and **Run anyway** is the way through.
 
 To check the download, with the zip and `SHA256SUMS.txt` in the same folder:
 

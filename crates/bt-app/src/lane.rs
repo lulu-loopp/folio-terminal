@@ -2766,7 +2766,8 @@ impl Gate {
 
     /// **For a planted lane only**: the gate lets go on its own after `cap` instead of
     /// [`PATIENCE`]. A lane that cannot return before its worker moves lapses once under any cap,
-    /// so a short one only spares the test the wait.
+    /// so a short one only spares the test the wait. Or for a test whose held worker keeps
+    /// something another call waits on, the lapse being that wait (`attention_wire`'s budget test).
     pub(crate) fn lapse_after(&self, cap: Duration) {
         lock(&self.state).cap = Some(cap);
     }

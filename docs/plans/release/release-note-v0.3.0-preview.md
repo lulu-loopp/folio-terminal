@@ -154,8 +154,8 @@ newer, or Windows 11, 64-bit**.
 
 `folio.exe` and `folio.msix` are signed by **Weiyi Shi**, as they have been since
 0.2.0, but a new signature has no reputation, so SmartScreen can still raise
-**"Windows protected your PC"** on the first run: **More info** names **Weiyi
-Shi** as the publisher, and **Run anyway** is the way through. Folio is not on
+**"Windows protected your PC"** on the first run: **More info** names
+**Weiyi Shi** as the publisher, and **Run anyway** is the way through. Folio is not on
 winget yet.
 
 **Folio has no telemetry, no analytics and no crash reporting.** Two things reach

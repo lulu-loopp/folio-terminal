@@ -39,6 +39,14 @@
 //! Every wait takes the attempt's one absolute deadline (`LAUNCH_TIMEOUT`
 //! after launch). The parent's waits also end when the launched host process
 //! ends, so a host that dies before it connects fails the attempt at once.
+//!
+//! The deadline is read on a `launch_conversation::LaunchClock`, and each
+//! operation's one kernel wait is made through it
+//! (T-ELEVATED-HANDSHAKE-FINISH-DEADLINE-ON-A-CLOCK): the product's doors,
+//! [`ElevatedEndpoint::accept`] and [`connect_to_parent`], read it on
+//! `launch_conversation::RealClock`; a test hands a counted clock, so "the other end
+//! acted in time" and "the attempt ran out" are facts of the test, never a race
+//! between the real 15 s and a thread or child of the test.
 
 use std::{ffi::OsStr, os::windows::ffi::OsStrExt as _, path::Path, time::Instant};
 
@@ -46,7 +54,7 @@ use windows::Win32::{
     Foundation::{
         ERROR_BROKEN_PIPE, ERROR_FILE_NOT_FOUND, ERROR_IO_PENDING, ERROR_MORE_DATA, ERROR_NO_DATA,
         ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED, ERROR_PIPE_NOT_CONNECTED, GENERIC_READ,
-        GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
+        GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0, WAIT_TIMEOUT,
     },
     Security::Cryptography::{BCRYPT_USE_SYSTEM_PREFERRED_RNG, BCryptGenRandom},
     Storage::FileSystem::{
@@ -83,6 +91,7 @@ use crate::elevated_protocol::{
     PaneFailure, ParentEvent, ParentStartId, ParentState, ReaderRole, decode,
     elevated_endpoint_name, encode, transition_host, transition_parent,
 };
+use crate::launch_conversation::{LaunchClock, RealClock};
 
 /// Each direction's pipe buffer, the largest output frame plus its header.
 const PIPE_BUFFER_BYTES: u32 = 64 * 1024 + 32;
@@ -92,6 +101,14 @@ const MAX_MESSAGE_BYTES: usize = FRAME_HEADER_LENGTH + CONTROL_MAX_PAYLOAD;
 
 /// One read's chunk; a longer message continues through `ERROR_MORE_DATA`.
 const READ_CHUNK_BYTES: usize = 4096;
+
+/// **One attempt's deadline and the clock it is read on**: every wait of the
+/// handshake takes it whole.
+#[derive(Clone, Copy)]
+struct Attempt<'c> {
+    deadline: Instant,
+    clock: &'c dyn LaunchClock,
+}
 
 /// The descriptor of an elevated pane's pipe: protected, the parent's logon
 /// SID and Builtin Administrators, read and write, nothing else.
@@ -152,15 +169,30 @@ impl ElevatedEndpoint {
         host: &LaunchedHost,
         deadline: Instant,
     ) -> Result<ParentConnection, HandshakeFailure> {
-        connect(&self.pipe, deadline, Some(host.process.0))?;
-        self.accept_connected(host, deadline)
+        self.accept_on(
+            host,
+            Attempt {
+                deadline,
+                clock: &RealClock,
+            },
+        )
+    }
+
+    /// [`ElevatedEndpoint::accept`], its deadline read on `attempt`'s clock.
+    fn accept_on(
+        self,
+        host: &LaunchedHost,
+        attempt: Attempt<'_>,
+    ) -> Result<ParentConnection, HandshakeFailure> {
+        connect(&self.pipe, attempt, Some(host.process.0))?;
+        self.accept_connected(host, attempt)
     }
 
     /// [`ElevatedEndpoint::accept`] after the connection has been made.
     fn accept_connected(
         self,
         host: &LaunchedHost,
-        deadline: Instant,
+        attempt: Attempt<'_>,
     ) -> Result<ParentConnection, HandshakeFailure> {
         let Self { line, pipe } = self;
         let actual = peer_process_id(&pipe, Peer::Client)?;
@@ -174,7 +206,7 @@ impl ElevatedEndpoint {
         let hello = read_frame(
             &pipe,
             ReaderRole::Parent,
-            deadline,
+            attempt,
             Some(host.process.0),
             HandshakePhase::Hello,
         )?;
@@ -184,7 +216,7 @@ impl ElevatedEndpoint {
             &pipe,
             effects,
             ready,
-            deadline,
+            attempt,
             Some(host.process.0),
             HandshakePhase::Hello,
         )?;
@@ -249,6 +281,20 @@ pub fn connect_to_parent(
     line: &HostLine,
     deadline: Instant,
 ) -> Result<HostConnection, HandshakeFailure> {
+    connect_to_parent_on(
+        line,
+        Attempt {
+            deadline,
+            clock: &RealClock,
+        },
+    )
+}
+
+/// [`connect_to_parent`], its deadline read on `attempt`'s clock.
+fn connect_to_parent_on(
+    line: &HostLine,
+    attempt: Attempt<'_>,
+) -> Result<HostConnection, HandshakeFailure> {
     let pipe =
         open_client(&wide(&line.pipe_name), (GENERIC_READ | GENERIC_WRITE).0).map_err(|error| {
             match error.raw_os_error().map(|code| code as u32) {
@@ -286,14 +332,14 @@ pub fn connect_to_parent(
         &pipe,
         effects,
         saying_hello,
-        deadline,
+        attempt,
         None,
         HandshakePhase::Authenticate,
     )?;
     let authenticate = read_frame(
         &pipe,
         ReaderRole::Host,
-        deadline,
+        attempt,
         None,
         HandshakePhase::Authenticate,
     )?;
@@ -303,7 +349,7 @@ pub fn connect_to_parent(
         &pipe,
         effects,
         ready,
-        deadline,
+        attempt,
         None,
         HandshakePhase::Authenticate,
     )?;
@@ -439,14 +485,14 @@ fn settle_handshake(
     pipe: &OwnedHandle,
     effects: Vec<Effect>,
     reached: bool,
-    deadline: Instant,
+    attempt: Attempt<'_>,
     watched: Option<HANDLE>,
     phase: HandshakePhase,
 ) -> Result<(), HandshakeFailure> {
     let mut refusal: Option<PaneFailure> = None;
     for effect in effects {
         match effect {
-            Effect::WriteFrame(frame) => write_frame(pipe, &frame, deadline, watched, phase)?,
+            Effect::WriteFrame(frame) => write_frame(pipe, &frame, attempt, watched, phase)?,
             Effect::FailPane(reason) => refusal = Some(reason),
             _ => {}
         }
@@ -483,10 +529,10 @@ fn peer_process_id(pipe: &OwnedHandle, peer: Peer) -> Result<u32, HandshakeFailu
     Ok(pid)
 }
 
-/// Wait, within `deadline`, for the one client this instance will admit.
+/// Wait, within `attempt`, for the one client this instance will admit.
 fn connect(
     pipe: &OwnedHandle,
-    deadline: Instant,
+    attempt: Attempt<'_>,
     watched: Option<HANDLE>,
 ) -> Result<(), HandshakeFailure> {
     let event = overlapped_event()?;
@@ -510,7 +556,7 @@ fn connect(
         &event,
         &overlapped,
         &mut ignored,
-        deadline,
+        attempt,
         watched,
     ) {
         Finished::Io(Ok(())) => Ok(()),
@@ -528,18 +574,18 @@ fn connect(
 fn read_frame(
     pipe: &OwnedHandle,
     role: ReaderRole,
-    deadline: Instant,
+    attempt: Attempt<'_>,
     watched: Option<HANDLE>,
     phase: HandshakePhase,
 ) -> Result<Frame, HandshakeFailure> {
-    let message = read_message(pipe, deadline, watched, phase)?;
+    let message = read_message(pipe, attempt, watched, phase)?;
     decode(&message, role).map_err(|_| HandshakeFailure::Malformed)
 }
 
 /// One whole pipe message, assembled across `ERROR_MORE_DATA`.
 fn read_message(
     pipe: &OwnedHandle,
-    deadline: Instant,
+    attempt: Attempt<'_>,
     watched: Option<HANDLE>,
     phase: HandshakePhase,
 ) -> Result<Vec<u8>, HandshakeFailure> {
@@ -565,7 +611,7 @@ fn read_message(
             &event,
             &overlapped,
             &mut read,
-            deadline,
+            attempt,
             watched,
         );
         let taken = chunk.get(..read as usize).unwrap_or_default();
@@ -598,7 +644,7 @@ fn read_message(
 fn write_frame(
     pipe: &OwnedHandle,
     frame: &Frame,
-    deadline: Instant,
+    attempt: Attempt<'_>,
     watched: Option<HANDLE>,
     phase: HandshakePhase,
 ) -> Result<(), HandshakeFailure> {
@@ -623,7 +669,7 @@ fn write_frame(
         &event,
         &overlapped,
         &mut written,
-        deadline,
+        attempt,
         watched,
     ) {
         Finished::Io(Ok(())) => Ok(()),
@@ -651,16 +697,18 @@ enum Finished {
     Watched,
 }
 
-/// Wait for an issued overlapped operation within `deadline`, also ending
+/// Wait for an issued overlapped operation within `attempt`, also ending
 /// when `watched` is signalled, and always collect it before returning: the
-/// buffer and the structure are the caller's again afterwards.
+/// buffer and the structure are the caller's again afterwards. What is left
+/// of the deadline is read on the attempt's clock, and the one kernel wait is
+/// made through it.
 fn finish(
     pipe: HANDLE,
     issued: windows::core::Result<()>,
     event: &Overlapped,
     overlapped: &OVERLAPPED,
     transferred: &mut u32,
-    deadline: Instant,
+    attempt: Attempt<'_>,
     watched: Option<HANDLE>,
 ) -> Finished {
     // A pending operation and one that completed at once (wholly, or with `ERROR_MORE_DATA`)
@@ -672,16 +720,24 @@ fn finish(
             return Finished::Io(Err(code));
         }
     }
-    let remaining = deadline.saturating_duration_since(Instant::now());
-    // Rounded up: the deadline is the one number this module promises.
-    let milliseconds = u32::try_from(
-        remaining.as_millis() + u128::from(!remaining.subsec_nanos().is_multiple_of(1_000_000)),
-    )
-    .unwrap_or(u32::MAX);
+    let remaining = attempt
+        .deadline
+        .saturating_duration_since(attempt.clock.now());
     let mut handles = vec![event.handle()];
     handles.extend(watched);
-    // SAFETY: both handles outlive the wait.
-    let answer = unsafe { WaitForMultipleObjects(&handles, false, milliseconds) };
+    // A wait the clock spends without making it leaves the answer a timeout.
+    let mut answer = WAIT_TIMEOUT;
+    attempt.clock.wait(remaining, &mut |bound| {
+        // Rounded up: the deadline is the one number this module promises.
+        let milliseconds = u32::try_from(
+            bound.as_millis() + u128::from(!bound.subsec_nanos().is_multiple_of(1_000_000)),
+        )
+        .unwrap_or(u32::MAX);
+        // SAFETY: both handles outlive the wait.
+        answer = unsafe { WaitForMultipleObjects(&handles, false, milliseconds) };
+        // The operation's event or the watched process: either is the other end acting.
+        answer != WAIT_TIMEOUT
+    });
     let completed = answer == WAIT_OBJECT_0;
     if !completed {
         // SAFETY: cancelling this thread's own outstanding operation on a handle it borrows.
@@ -721,9 +777,12 @@ fn wide_os(text: &OsStr) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::door_skipped;
     use crate::elevated_protocol::{LAUNCH_TIMEOUT, Message, PaneFailure, ParentStartId};
+    use crate::launch_conversation::{CountedClock, Turn};
     use std::path::PathBuf;
     use std::process::Child;
+    use std::sync::{Arc, mpsc};
     use std::time::Duration;
     use windows::Win32::{
         Foundation::{HLOCAL, LocalFree},
@@ -755,8 +814,15 @@ mod tests {
     const ANSWER_ENV: &str = "BT_ELEVATED_HOST_TEST_ANSWER";
     const AUTHENTICATED: &str = "authenticated";
 
-    fn far_deadline() -> Instant {
-        Instant::now() + LAUNCH_TIMEOUT
+    /// **The attempt's whole budget from now, read on `clock`.** On a
+    /// [`CountedClock::answering`] clock every wait awaits the other end within the
+    /// suite's patience, so "the other end acted in time" is its event, never a race
+    /// against the real `LAUNCH_TIMEOUT`.
+    fn budget_on(clock: &dyn LaunchClock) -> Attempt<'_> {
+        Attempt {
+            deadline: clock.now() + LAUNCH_TIMEOUT,
+            clock,
+        }
     }
 
     fn open_process(pid: u32) -> OwnedHandle {
@@ -808,16 +874,18 @@ mod tests {
         said
     }
 
-    /// The host side of a test, on a thread of this process.
-    fn host_thread(
-        line: HostLine,
-        deadline: Instant,
-    ) -> std::thread::JoinHandle<Result<(), HandshakeFailure>> {
-        std::thread::spawn(move || connect_to_parent(&line, deadline).map(|_| ()))
+    /// The host side of a test, on a thread of this process, its waits on an
+    /// answering clock of its own.
+    fn host_thread(line: HostLine) -> std::thread::JoinHandle<Result<(), HandshakeFailure>> {
+        std::thread::spawn(move || {
+            let clock = CountedClock::answering();
+            connect_to_parent_on(&line, budget_on(&clock)).map(|_| ())
+        })
     }
 
     fn write_raw(pipe: &OwnedHandle, frame: &Frame) {
-        write_frame(pipe, frame, far_deadline(), None, HandshakePhase::Hello)
+        let clock = CountedClock::answering();
+        write_frame(pipe, frame, budget_on(&clock), None, HandshakePhase::Hello)
             .expect("the test side writes");
     }
 
@@ -914,8 +982,9 @@ mod tests {
                 .expect("a host line is ASCII")
                 .split(' ')
                 .map(std::ffi::OsString::from);
+            let clock = CountedClock::answering();
             let said = match HostLine::parse(words) {
-                Some(Ok(line)) => match connect_to_parent(&line, far_deadline()) {
+                Some(Ok(line)) => match connect_to_parent_on(&line, budget_on(&clock)) {
                     Ok(_) => AUTHENTICATED.to_owned(),
                     Err(failure) => format!("{failure:?}"),
                 },
@@ -930,7 +999,8 @@ mod tests {
         let (child, host, parameters) = launch_honest_child(&line, &answer);
         assert_eq!(parameters, line.arguments().join(" "));
         assert!(parameters.starts_with(r"--elevated-host 1 \\.\pipe\folio-elevated-"));
-        let connection = endpoint.accept(&host, far_deadline());
+        let clock = CountedClock::answering();
+        let connection = endpoint.accept_on(&host, budget_on(&clock));
         assert_eq!(
             connection.as_ref().map(ParentConnection::host_pid).ok(),
             Some(child.id()),
@@ -1031,10 +1101,11 @@ mod tests {
     #[test]
     fn a_connection_from_any_process_but_the_launched_one_is_refused_by_its_kernel_pid() {
         let endpoint = ElevatedEndpoint::create().expect("an endpoint");
-        let host = host_thread(endpoint.host_line().clone(), far_deadline());
+        let host = host_thread(endpoint.host_line().clone());
         let me = std::process::id();
         let claimed = me + 4;
-        let refused = endpoint.accept(&this_process_claiming(claimed), far_deadline());
+        let clock = CountedClock::answering();
+        let refused = endpoint.accept_on(&this_process_claiming(claimed), budget_on(&clock));
         assert_eq!(
             refused.err(),
             Some(HandshakeFailure::WrongPeer {
@@ -1093,9 +1164,14 @@ mod tests {
                     },
                 },
             );
-            read_message(&pipe, far_deadline(), None, HandshakePhase::Authenticate)
+            let clock = CountedClock::answering();
+            read_message(&pipe, budget_on(&clock), None, HandshakePhase::Authenticate)
         });
-        let refused = endpoint.accept(&this_process_claiming(std::process::id()), far_deadline());
+        let clock = CountedClock::answering();
+        let refused = endpoint.accept_on(
+            &this_process_claiming(std::process::id()),
+            budget_on(&clock),
+        );
         assert_eq!(
             refused.err(),
             Some(HandshakeFailure::Refused(PaneFailure::WrongCapability))
@@ -1115,9 +1191,13 @@ mod tests {
     fn the_capability_is_spent_by_the_first_hello() {
         let endpoint = ElevatedEndpoint::create().expect("an endpoint");
         let line = endpoint.host_line().clone();
-        let host = host_thread(line.clone(), far_deadline());
+        let host = host_thread(line.clone());
+        let clock = CountedClock::answering();
         let connection = endpoint
-            .accept(&this_process_claiming(std::process::id()), far_deadline())
+            .accept_on(
+                &this_process_claiming(std::process::id()),
+                budget_on(&clock),
+            )
             .expect("the honest host is admitted");
         assert_eq!(host.join().expect("the host ends"), Ok(()));
         let replay = Frame {
@@ -1148,10 +1228,16 @@ mod tests {
         for forge_the_capability in [true, false] {
             let endpoint = ElevatedEndpoint::create().expect("an endpoint");
             let line = endpoint.host_line().clone();
-            let host = host_thread(line.clone(), far_deadline());
-            connect(&endpoint.pipe, far_deadline(), None).expect("the host connects");
-            read_message(&endpoint.pipe, far_deadline(), None, HandshakePhase::Hello)
-                .expect("the host says hello");
+            let host = host_thread(line.clone());
+            let clock = CountedClock::answering();
+            connect(&endpoint.pipe, budget_on(&clock), None).expect("the host connects");
+            read_message(
+                &endpoint.pipe,
+                budget_on(&clock),
+                None,
+                HandshakePhase::Hello,
+            )
+            .expect("the host says hello");
             let (capability, parent_start, expected) = if forge_the_capability {
                 (
                     Capability::new([0x11; 32]),
@@ -1186,41 +1272,111 @@ mod tests {
         }
     }
 
-    /// The parent's wait ends at the attempt's deadline when no host comes.
+    /// **The parent's attempt runs out whole, on the count, when the host comes
+    /// too late**: no host has connected when the clock spends the attempt's
+    /// `LAUNCH_TIMEOUT`, so the parent gives up in `Connect` having asked for
+    /// that whole budget and no more; the host, started only after the parent
+    /// answered, finds no endpoint. The budget's end is the count, not 15 real
+    /// seconds.
     ///
-    /// RED MUTATION: in `finish`, report a cancelled wait as the operation's
+    /// RED MUTATIONS: in `finish`, report a cancelled wait as the operation's
     /// own result; the parent reports `ERROR_OPERATION_ABORTED` instead of the
-    /// deadline.
+    /// deadline. Make `finish`'s wait outside the clock, unbounded; the accept
+    /// never returns and the test fails at the suite's patience by name. Read
+    /// what is left on `Instant::now()` instead of the clock; the wait asked
+    /// for falls short of `LAUNCH_TIMEOUT`.
     #[test]
     fn the_parent_gives_up_at_the_deadline_when_no_host_connects() {
-        let endpoint = ElevatedEndpoint::create().expect("an endpoint");
+        let clock = Arc::new(CountedClock::new(|_, _| Turn::Spend));
+        let parent = Arc::clone(&clock);
+        let (lines, line) = mpsc::channel();
+        let (answered, answer) = mpsc::channel();
+        // The endpoint's handle stays on the thread that made it.
+        std::thread::spawn(move || {
+            let endpoint = ElevatedEndpoint::create().expect("an endpoint");
+            let _ = lines.send(endpoint.host_line().clone());
+            let refused = endpoint.accept_on(&this_process_claiming(1), budget_on(&*parent));
+            let _ = answered.send(refused.err());
+        });
+        let line = door_skipped::received(&line, "the attempt's host line");
         assert_eq!(
-            endpoint
-                .accept(&this_process_claiming(1), Instant::now())
-                .err(),
+            door_skipped::received(&answer, "the parent's accept"),
+            Some(HandshakeFailure::TimedOut {
+                phase: HandshakePhase::Connect
+            })
+        );
+        assert_eq!(clock.asked(), [LAUNCH_TIMEOUT]);
+        assert_eq!(clock.moved(), LAUNCH_TIMEOUT);
+        let late = CountedClock::answering();
+        assert_eq!(
+            connect_to_parent_on(&line, budget_on(&late)).err(),
+            Some(HandshakeFailure::NoEndpoint)
+        );
+    }
+
+    /// **The product's own wait ends at its bound**: on the real clock, through
+    /// the public door, an attempt whose deadline has already passed makes its one
+    /// kernel wait of 0 ms and, with no host, gives up in `Connect`. The counted
+    /// tests never let a real wait be ended by its bound (a spent wait is never
+    /// made; an awaited one ends on the other end's event), so this is the suite's
+    /// proof that the wait handed to the clock honours the bound it is given. The
+    /// pipe's name is this attempt's alone, so nothing can connect inside the poll.
+    ///
+    /// RED MUTATION: the wait handed to the clock waits `INFINITE` instead of its
+    /// bound; the accept never returns and the test fails at the suite's patience
+    /// by name.
+    #[test]
+    fn the_real_clocks_wait_ends_at_its_bound_when_no_host_connects() {
+        let (answered, answer) = mpsc::channel();
+        // The endpoint's handle stays on the thread that made it.
+        std::thread::spawn(move || {
+            let endpoint = ElevatedEndpoint::create().expect("an endpoint");
+            let refused = endpoint.accept(&this_process_claiming(1), Instant::now());
+            let _ = answered.send(refused.err());
+        });
+        assert_eq!(
+            door_skipped::received(&answer, "the parent's accept on the real clock"),
             Some(HandshakeFailure::TimedOut {
                 phase: HandshakePhase::Connect
             })
         );
     }
 
-    /// The host's wait for `Authenticate` ends at its deadline when the
-    /// parent connects and never answers.
+    /// **The host's attempt runs out whole, on the count, when the parent
+    /// connects and never answers**: the host's `Hello` is written in time (its
+    /// first wait is awaited), and its wait for `Authenticate` spends the rest
+    /// of `LAUNCH_TIMEOUT`, which is all of it.
     ///
-    /// RED MUTATION: in `finish`, report a cancelled wait as the operation's
-    /// own result; the host reports `ERROR_OPERATION_ABORTED`.
+    /// RED MUTATIONS: in `finish`, report a cancelled wait as the operation's
+    /// own result; the host reports `ERROR_OPERATION_ABORTED`. Read what is
+    /// left on `Instant::now()` instead of the clock; the waits asked for fall
+    /// short of `LAUNCH_TIMEOUT`.
     #[test]
     fn the_host_gives_up_at_the_deadline_when_the_parent_never_answers() {
         let endpoint = ElevatedEndpoint::create().expect("an endpoint");
         let line = endpoint.host_line().clone();
-        let host = host_thread(line, Instant::now());
-        connect(&endpoint.pipe, far_deadline(), None).expect("the host connects");
+        let clock = Arc::new(CountedClock::new(|number, _| {
+            if number == 1 {
+                Turn::Await
+            } else {
+                Turn::Spend
+            }
+        }));
+        let host_clock = Arc::clone(&clock);
+        let (answered, answer) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = answered.send(connect_to_parent_on(&line, budget_on(&*host_clock)).map(|_| ()));
+        });
+        let parent = CountedClock::answering();
+        connect(&endpoint.pipe, budget_on(&parent), None).expect("the host connects");
         assert_eq!(
-            host.join().expect("the host ends"),
+            door_skipped::received(&answer, "the host's handshake"),
             Err(HandshakeFailure::TimedOut {
                 phase: HandshakePhase::Authenticate
             })
         );
+        assert_eq!(clock.asked(), [LAUNCH_TIMEOUT, LAUNCH_TIMEOUT]);
+        assert_eq!(clock.moved(), LAUNCH_TIMEOUT);
     }
 
     /// A launched host that ends before it connects fails the attempt at
@@ -1243,8 +1399,9 @@ mod tests {
             pid: child.id(),
             process: open_process(child.id()),
         };
+        let clock = CountedClock::answering();
         assert_eq!(
-            endpoint.accept(&host, far_deadline()).err(),
+            endpoint.accept_on(&host, budget_on(&clock)).err(),
             Some(HandshakeFailure::HostExited)
         );
         child.wait().expect("the child is reaped");
@@ -1262,8 +1419,9 @@ mod tests {
             parent_start: ParentStartId(1),
             capability: Capability::new([1; 32]),
         };
+        let clock = CountedClock::answering();
         assert_eq!(
-            connect_to_parent(&line, far_deadline()).err(),
+            connect_to_parent_on(&line, budget_on(&clock)).err(),
             Some(HandshakeFailure::NoEndpoint)
         );
     }
@@ -1278,10 +1436,16 @@ mod tests {
     fn the_host_lends_the_parent_an_identification_token_only() {
         let endpoint = ElevatedEndpoint::create().expect("an endpoint");
         let line = endpoint.host_line().clone();
-        let host = host_thread(line.clone(), far_deadline());
-        connect(&endpoint.pipe, far_deadline(), None).expect("the host connects");
-        read_message(&endpoint.pipe, far_deadline(), None, HandshakePhase::Hello)
-            .expect("the host says hello");
+        let host = host_thread(line.clone());
+        let clock = CountedClock::answering();
+        connect(&endpoint.pipe, budget_on(&clock), None).expect("the host connects");
+        read_message(
+            &endpoint.pipe,
+            budget_on(&clock),
+            None,
+            HandshakePhase::Hello,
+        )
+        .expect("the host says hello");
         let identity = client_identity(&endpoint.pipe);
         assert_eq!(identity.level, SecurityIdentification);
         assert!(identity.user.starts_with("S-1-5-"), "{}", identity.user);
@@ -1358,14 +1522,20 @@ mod tests {
     /// `process=unavailable (<code>)` and the handshake's waits watch this process's own handle,
     /// which is never signalled while the row runs: they end at the deadline or when the pipe
     /// breaks, and the admission (kernel pid, `Hello`, `Authenticate`, the lent identity) is the
-    /// same either way.
+    /// same either way. Its waits are read on `clock`: the real one in `vm_row`, an answering
+    /// one in the suite.
     fn observe(
         endpoint: ElevatedEndpoint,
+        clock: &dyn LaunchClock,
         waited: Instant,
         open: impl FnOnce(u32) -> windows::core::Result<OwnedHandle>,
     ) -> Vec<String> {
         let mut said = Vec::new();
-        if let Err(failure) = connect(&endpoint.pipe, waited, None) {
+        let connected = Attempt {
+            deadline: waited,
+            clock,
+        };
+        if let Err(failure) = connect(&endpoint.pipe, connected, None) {
             said.push(format!("connect=Err({failure:?})"));
             return said;
         }
@@ -1383,7 +1553,7 @@ mod tests {
             }
         };
         let host = LaunchedHost { pid, process };
-        match endpoint.accept_connected(&host, far_deadline()) {
+        match endpoint.accept_connected(&host, budget_on(clock)) {
             Ok(connection) => {
                 said.push("accept=Ok".to_owned());
                 let identity = client_identity(&connection.pipe);
@@ -1410,8 +1580,10 @@ mod tests {
     #[test]
     fn the_observe_row_completes_without_the_clients_process_handle() {
         let endpoint = ElevatedEndpoint::create().expect("an endpoint");
-        let host = host_thread(endpoint.host_line().clone(), far_deadline());
-        let said = observe(endpoint, far_deadline(), |_| {
+        let host = host_thread(endpoint.host_line().clone());
+        let clock = CountedClock::answering();
+        let waited = budget_on(&clock).deadline;
+        let said = observe(endpoint, &clock, waited, |_| {
             Err(windows::core::Error::from(
                 windows::Win32::Foundation::ERROR_ACCESS_DENIED.to_hresult(),
             ))
@@ -1484,7 +1656,7 @@ mod tests {
                 match launched {
                     Ok(host) => {
                         said.push(format!("launched pid={}", host.pid()));
-                        match endpoint.accept(&host, far_deadline()) {
+                        match endpoint.accept(&host, Instant::now() + LAUNCH_TIMEOUT) {
                             Ok(connection) => {
                                 said.push("accept=Ok".to_owned());
                                 identify(&connection, &mut said);
@@ -1502,7 +1674,7 @@ mod tests {
                 )
                 .expect("the line is written");
                 let waited = Instant::now() + Duration::from_secs(240);
-                said.extend(observe(endpoint, waited, try_open_process));
+                said.extend(observe(endpoint, &RealClock, waited, try_open_process));
             }
             other => said.push(format!("unknown row {other}")),
         }

@@ -5,6 +5,7 @@ use crate::{
     attention_ownership::{Decision, Outcome},
     i18n::{Lang, Text},
     shell_integration::profile_marks::Marks,
+    update_apply::{WaitClock, WallClock},
 };
 use bt_platform::HostPlatform;
 use bt_platform::admission::WorkerCtx;
@@ -15,7 +16,7 @@ use std::{
     fs, io,
     path::{Path, PathBuf},
     sync::Mutex,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1601,15 +1602,19 @@ fn door_language(scope: &Scope, os: &str) -> Lang {
 
 /// **Whether `asker` has ended within `within`**, looked at every
 /// [`AFTER_PID_POLL`] on the door's worker: by its pid and start instant, so a
-/// pid handed to another process is not waited for.
-fn waited_for(worker: &WorkerCtx, asker: Running, within: Duration) -> bool {
-    let until = Instant::now() + within;
+/// pid handed to another process is not waited for. The deadline is set and
+/// read on `clock`, and each pause is the clock's
+/// (T-UNINSTALL-DOOR-AFTER-PID-WAIT-ON-A-CLOCK): [`WallClock`] in the product
+/// ([`uninstall`]); a test hands `update_apply::CountedClock`, so the budget's
+/// end is a count of pauses, never a real minute.
+fn waited_for(worker: &WorkerCtx, clock: &dyn WaitClock, asker: Running, within: Duration) -> bool {
+    let until = clock.now() + within;
     while bt_platform::install_flip::still_running(asker) {
-        let left = until.saturating_duration_since(Instant::now());
+        let left = until.saturating_duration_since(clock.now());
         if left.is_zero() {
             return false;
         }
-        bt_platform::wait::sleep_within(worker, AFTER_PID_POLL.min(left));
+        clock.pause(worker, AFTER_PID_POLL.min(left));
     }
     true
 }
@@ -1619,7 +1624,9 @@ fn waited_for(worker: &WorkerCtx, asker: Running, within: Duration) -> bool {
 /// `execute`), which runs the program's own files (`program`) as its step
 /// after its removal rows and before any purge, only when no row refused. A
 /// cleanup that did not complete keeps the program — it is the one thing that
-/// can run the cleanup again — and says so.
+/// can run the cleanup again — and says so. The asker's end is waited for on
+/// the real clock ([`WallClock`]); [`uninstall_on`] is the same door on the
+/// clock it is handed.
 fn uninstall(
     worker: &WorkerCtx,
     scope: &Scope,
@@ -1628,7 +1635,29 @@ fn uninstall(
     cleanup: impl FnOnce(&Scope, ProgramStep<'_>) -> Report,
     program: impl FnOnce(&Scope) -> Vec<Entry>,
 ) -> Report {
-    uninstall_waiting(worker, scope, asker, within, waited_for, cleanup, program)
+    uninstall_on(worker, &WallClock, scope, asker, within, cleanup, program)
+}
+
+/// [`uninstall`], with the wait for the asker's end ([`waited_for`]) set,
+/// read and paused on `clock` (T-UNINSTALL-DOOR-AFTER-PID-WAIT-ON-A-CLOCK).
+fn uninstall_on(
+    worker: &WorkerCtx,
+    clock: &dyn WaitClock,
+    scope: &Scope,
+    asker: Option<Running>,
+    within: Duration,
+    cleanup: impl FnOnce(&Scope, ProgramStep<'_>) -> Report,
+    program: impl FnOnce(&Scope) -> Vec<Entry>,
+) -> Report {
+    uninstall_waiting(
+        worker,
+        scope,
+        asker,
+        within,
+        |worker, asker, within| waited_for(worker, clock, asker, within),
+        cleanup,
+        program,
+    )
 }
 
 /// The same ordering with the process wait supplied as a behavior seam. Tests
