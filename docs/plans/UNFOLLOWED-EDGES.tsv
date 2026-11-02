@@ -1114,7 +1114,7 @@ crates/bt-app/src/git_graph.rs	bt-app crate::git_graph::push_lanes	Dynamic	ink	3
 crates/bt-app/src/git_graph.rs	bt-app crate::git_graph::push_lanes	Dynamic	lane_x	5	
 crates/bt-app/src/git_graph.rs	bt-app crate::git_graph::push_lanes	Dynamic	segment	2	
 crates/bt-app/src/git_graph.rs	bt-app crate::git_graph::push_row_ground	Dynamic	crop	1	
-crates/bt-app/src/git_graph.rs	bt-app crate::git_graph::push_toolbar	Dynamic	clip	13	
+crates/bt-app/src/git_graph.rs	bt-app crate::git_graph::push_toolbar	Dynamic	clip	14	2026-11-02: T-CHROME-FIELDS-CARET-BY-POINTER (0.4.9 plan row 180); grown 13 -> 14: the search field's selection wash, cut to the toolbar's clip like every mark beside it
 crates/bt-app/src/git_graph.rs	bt-app crate::git_graph::push_toolbar	Dynamic	middle	2	
 crates/bt-app/src/git_graph.rs	bt-app crate::git_graph::push_toolbar	Dynamic	refresh_middle	2	
 crates/bt-app/src/git_graph.rs	bt-app crate::git_graph::push_toolbar	Dynamic	tool_ground	3	
@@ -2356,7 +2356,7 @@ crates/bt-app/src/palette.rs	bt-app crate::palette::build	Ambiguous	filter_map	2
 crates/bt-app/src/palette.rs	bt-app crate::palette::build	Ambiguous	text	1	
 crates/bt-app/src/palette.rs	bt-app crate::palette::build	Ambiguous	to_owned	3	
 crates/bt-app/src/palette.rs	bt-app crate::palette::build	Dynamic	alpha	4	
-crates/bt-app/src/palette.rs	bt-app crate::palette::build	Dynamic	px	11	
+crates/bt-app/src/palette.rs	bt-app crate::palette::build	Dynamic	px	9	2026-11-02: T-CHROME-FIELDS-CARET-BY-POINTER (0.4.9 plan row 180); shrunk 11 -> 9: the input's text run is read from PaletteLayout::text_run (its padding is multiplied there) instead of two px() calls
 crates/bt-app/src/palette.rs	bt-app crate::palette::cut_runs	Ambiguous	enumerate	1	
 crates/bt-app/src/palette.rs	bt-app crate::palette::cut_runs	Ambiguous	to_string	1	
 crates/bt-app/src/palette.rs	bt-app crate::palette::fold	Ambiguous	next	1	
@@ -3078,9 +3078,9 @@ crates/bt-app/src/profiles.rs	bt-app crate::profiles::git_filter_rows	Ambiguous	
 crates/bt-app/src/profiles.rs	bt-app crate::profiles::git_filter_tags_text	Ambiguous	text	1	
 crates/bt-app/src/profiles.rs	bt-app crate::profiles::git_menu	Ambiguous	map	1	
 crates/bt-app/src/profiles.rs	bt-app crate::profiles::git_menu	Ambiguous	push	2	
-crates/bt-app/src/profiles.rs	bt-app crate::profiles::git_menu_build	Ambiguous	round	1	
+crates/bt-app/src/profiles.rs	bt-app crate::profiles::git_menu_build	Ambiguous	round	2	2026-11-02: T-CHROME-FIELDS-CARET-BY-POINTER (0.4.9 plan row 180); grown 1 -> 2: the prompt's selection wash, inset to the caret bar's height (px(...).round())
 crates/bt-app/src/profiles.rs	bt-app crate::profiles::git_menu_build	Dynamic	alpha	3	
-crates/bt-app/src/profiles.rs	bt-app crate::profiles::git_menu_build	Dynamic	px	7	
+crates/bt-app/src/profiles.rs	bt-app crate::profiles::git_menu_build	Dynamic	px	8	2026-11-02: T-CHROME-FIELDS-CARET-BY-POINTER (0.4.9 plan row 180); grown 7 -> 8: the prompt's selection wash, inset to the caret bar's height
 crates/bt-app/src/profiles.rs	bt-app crate::profiles::git_menu_checkout_text	Ambiguous	text	1	
 crates/bt-app/src/profiles.rs	bt-app crate::profiles::git_menu_checkout_tracking_text	Ambiguous	text	1	
 crates/bt-app/src/profiles.rs	bt-app crate::profiles::git_menu_compare_selected_text	Ambiguous	text	1	
@@ -3807,9 +3807,9 @@ crates/bt-app/src/runtime/git.rs	bt-app crate::runtime::git::Runtime::ask_git_fo
 crates/bt-app/src/runtime/git.rs	bt-app crate::runtime::git::Runtime::ask_git_for_floats	Ambiguous	map	1	
 crates/bt-app/src/runtime/git.rs	bt-app crate::runtime::git::Runtime::ask_to_checkout	Ambiguous	is_empty	1	
 crates/bt-app/src/runtime/git.rs	bt-app crate::runtime::git::Runtime::ask_to_checkout	Ambiguous	is_some_and	1	
-crates/bt-app/src/runtime/git.rs	bt-app crate::runtime::git::Runtime::build_git_graph	Ambiguous	and_then	2	
+crates/bt-app/src/runtime/git.rs	bt-app crate::runtime::git::Runtime::build_git_graph	Ambiguous	and_then	3	2026-11-02: T-CHROME-FIELDS-CARET-BY-POINTER (0.4.9 plan row 180); grown 2 -> 3: the search field's run, laid out by graph_geometry -> graph_toolbar_rects -> graph_search_field for a press to read
 crates/bt-app/src/runtime/git.rs	bt-app crate::runtime::git::Runtime::build_git_graph	Ambiguous	clone	1	
-crates/bt-app/src/runtime/git.rs	bt-app crate::runtime::git::Runtime::build_git_graph	Ambiguous	map	1	
+crates/bt-app/src/runtime/git.rs	bt-app crate::runtime::git::Runtime::build_git_graph	Ambiguous	map	2	2026-11-02: T-CHROME-FIELDS-CARET-BY-POINTER (0.4.9 plan row 180); grown 1 -> 2: the search field's run (DrawnRun) built from the laid-out field
 crates/bt-app/src/runtime/git.rs	bt-app crate::runtime::git::Runtime::build_git_graph	Ambiguous	search	1	
 crates/bt-app/src/runtime/git.rs	bt-app crate::runtime::git::Runtime::checkout_from_float	Ambiguous	and_then	1	
 crates/bt-app/src/runtime/git.rs	bt-app crate::runtime::git::Runtime::checkout_from_float	Ambiguous	id	1	
@@ -3819,6 +3819,7 @@ crates/bt-app/src/runtime/git.rs	bt-app crate::runtime::git::Runtime::git_cache_
 crates/bt-app/src/runtime/git.rs	bt-app crate::runtime::git::Runtime::git_graphs	Ambiguous	collect	1	
 crates/bt-app/src/runtime/git.rs	bt-app crate::runtime::git::Runtime::git_graphs	Ambiguous	filter_map	1	
 crates/bt-app/src/runtime/git.rs	bt-app crate::runtime::git::Runtime::git_menu_key	Ambiguous	map	1	
+crates/bt-app/src/runtime/git.rs	bt-app crate::runtime::git::Runtime::git_menu_layer	Ambiguous	map	1	2026-11-02: T-CHROME-FIELDS-CARET-BY-POINTER (0.4.9 plan row 180); added: the prompt's field read off the open menu (Option::map) for the run a press reads
 crates/bt-app/src/runtime/git.rs	bt-app crate::runtime::git::Runtime::git_menu_target_at	Ambiguous	as_deref	2	
 crates/bt-app/src/runtime/git.rs	bt-app crate::runtime::git::Runtime::git_menu_target_at	Ambiguous	is_some_and	2	
 crates/bt-app/src/runtime/git.rs	bt-app crate::runtime::git::Runtime::git_menu_target_at	Ambiguous	map	1	
@@ -3938,9 +3939,10 @@ crates/bt-app/src/runtime/math.rs	bt-app crate::runtime::math::Runtime::refresh_
 crates/bt-app/src/runtime/math.rs	bt-app crate::runtime::math::Runtime::refresh_overlay_with_formula	Ambiguous	as_deref	1	
 crates/bt-app/src/runtime/math.rs	bt-app crate::runtime::math::Runtime::refresh_overlay_with_formula	Ambiguous	as_slice	1	
 crates/bt-app/src/runtime/math.rs	bt-app crate::runtime::math::Runtime::refresh_overlay_with_formula	Ambiguous	clone	2	
-crates/bt-app/src/runtime/math.rs	bt-app crate::runtime::math::Runtime::refresh_overlay_with_formula	Ambiguous	map	4	2026-10-30: T-SETTINGS-FIELDS-IME-POSITION (plan row 98); grown 3 -> 4: the painter now hands EditorInk the fields' composed text (TextField::composed, the pre-edit spliced at the caret) where it handed the stored text, and the summon command is read through text_field(QuakeCommand).map(composed).unwrap_or_default(): Cow and Option reads on the window's own thread, no new door
+crates/bt-app/src/runtime/math.rs	bt-app crate::runtime::math::Runtime::refresh_overlay_with_formula	Ambiguous	map	5	2026-10-30: T-SETTINGS-FIELDS-IME-POSITION (plan row 98); grown 3 -> 4: the painter now hands EditorInk the fields' composed text (TextField::composed, the pre-edit spliced at the caret) where it handed the stored text, and the summon command is read through text_field(QuakeCommand).map(composed).unwrap_or_default(): Cow and Option reads on the window's own thread, no new door; grown 4 -> 5 by 2026-11-02: T-CHROME-FIELDS-CARET-BY-POINTER (0.4.9 plan row 180): the editor's caret mapped into a settings::FieldCaret carrying the settled scroll
 crates/bt-app/src/runtime/math.rs	bt-app crate::runtime::math::Runtime::refresh_overlay_with_formula	Ambiguous	to_vec	1	
 crates/bt-app/src/runtime/math.rs	bt-app crate::runtime::math::Runtime::refresh_overlay_with_formula	Ambiguous	unwrap_or_default	5	2026-10-30: T-SETTINGS-FIELDS-IME-POSITION (plan row 98); grown 4 -> 5: the painter now hands EditorInk the fields' composed text (TextField::composed, the pre-edit spliced at the caret) where it handed the stored text, and the summon command is read through text_field(QuakeCommand).map(composed).unwrap_or_default(): Cow and Option reads on the window's own thread, no new door
+crates/bt-app/src/runtime/math.rs	bt-app crate::runtime::math::Runtime::refresh_overlay_with_formula	Dynamic	field_caret	1	2026-11-02: T-CHROME-FIELDS-CARET-BY-POINTER (0.4.9 plan row 180); added: the local closure that pairs a field's caret with the frame's settled scroll (settings::FieldCaret); pure arithmetic
 crates/bt-app/src/runtime/math.rs	bt-app crate::runtime::math::Runtime::search_hit_line_text	Ambiguous	ok	1	
 crates/bt-app/src/runtime/math.rs	bt-app crate::runtime::math::Runtime::tab_surface_tip_text	Ambiguous	text	4	
 crates/bt-app/src/runtime/math.rs	bt-app crate::runtime::math::Runtime::tab_surface_tip_text	Ambiguous	to_owned	3	
@@ -4001,6 +4003,7 @@ crates/bt-app/src/runtime/mouse.rs	bt-app crate::runtime::mouse::wheel_points_si
 crates/bt-app/src/runtime/palette.rs	bt-app crate::runtime::palette::Runtime::arrange_palette	Ambiguous	unwrap_or_default	1	
 crates/bt-app/src/runtime/palette.rs	bt-app crate::runtime::palette::Runtime::palette_field_look	Ambiguous	text	1	
 crates/bt-app/src/runtime/palette.rs	bt-app crate::runtime::palette::Runtime::palette_field_look	Ambiguous	to_owned	1	
+crates/bt-app/src/runtime/palette.rs	bt-app crate::runtime::palette::Runtime::palette_layer	Ambiguous	unwrap_or_default	1	2026-11-02: T-CHROME-FIELDS-CARET-BY-POINTER (0.4.9 plan row 180); added: the palette's shown text and selection, empty when no palette state is held, for the run a press reads
 crates/bt-app/src/runtime/palette.rs	bt-app crate::runtime::palette::Runtime::push_action_candidates	Ambiguous	then_some	1	2026-10-25: T-SPLIT-2B batch 5; the same site, moved with `Runtime::push_action_candidates` from main.rs into runtime/palette.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/palette.rs	bt-app crate::runtime::palette::Runtime::push_action_candidates	Ambiguous	to_owned	1	2026-10-25: T-SPLIT-2B batch 5; the same site, moved with `Runtime::push_action_candidates` from main.rs into runtime/palette.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/palette.rs	bt-app crate::runtime::palette::Runtime::push_command_candidates	Ambiguous	map	1	2026-10-25: T-SPLIT-2B batch 5; the same site, moved with `Runtime::push_command_candidates` from main.rs into runtime/palette.rs: K2 moves the item, not the call
@@ -4797,17 +4800,15 @@ crates/bt-app/src/schemes.rs	bt-app crate::schemes::user_sources	Ambiguous	is_so
 crates/bt-app/src/schemes.rs	bt-app crate::schemes::user_sources	Ambiguous	map	1	
 crates/bt-app/src/schemes.rs	bt-app crate::schemes::user_sources	Ambiguous	path	2	
 crates/bt-app/src/schemes.rs	bt-app crate::schemes::user_sources	Ambiguous	to_string_lossy	1	
-crates/bt-app/src/search.rs	bt-app crate::search::Capsule::caret_line	Ambiguous	round	1	
-crates/bt-app/src/search.rs	bt-app crate::search::Capsule::caret_line	Dynamic	px	3	
 crates/bt-app/src/search.rs	bt-app crate::search::SearchState::first_at_or_after	Ambiguous	unwrap_or	1	
 crates/bt-app/src/search.rs	bt-app crate::search::SearchState::install	Ambiguous	cloned	1	
 crates/bt-app/src/search.rs	bt-app crate::search::SearchState::install	Ambiguous	flatten	1	
 crates/bt-app/src/search.rs	bt-app crate::search::SearchState::install	Ambiguous	or_else	1	
 crates/bt-app/src/search.rs	bt-app crate::search::SearchState::install	Ambiguous	unwrap_or	1	
 crates/bt-app/src/search.rs	bt-app crate::search::SearchState::rebuild_highlights	Ambiguous	map	1	
-crates/bt-app/src/search.rs	bt-app crate::search::build	Ambiguous	round	1	
+crates/bt-app/src/search.rs	bt-app crate::search::build	Ambiguous	round	2	2026-11-02: T-CHROME-FIELDS-CARET-BY-POINTER (0.4.9 plan row 180); grown 1 -> 2: the find bar's selection wash, inset to the caret bar's height
 crates/bt-app/src/search.rs	bt-app crate::search::build	Dynamic	alpha	4	
-crates/bt-app/src/search.rs	bt-app crate::search::build	Dynamic	px	14	
+crates/bt-app/src/search.rs	bt-app crate::search::build	Dynamic	px	13	2026-11-02: T-CHROME-FIELDS-CARET-BY-POINTER (0.4.9 plan row 180); shrunk 14 -> 13: the field's text run is read from Capsule::text_run instead of px() here
 crates/bt-app/src/search.rs	bt-app crate::search::case_tip	Ambiguous	text	1	
 crates/bt-app/src/search.rs	bt-app crate::search::close_tip	Ambiguous	text	1	
 crates/bt-app/src/search.rs	bt-app crate::search::field_placeholder	Ambiguous	text	1	
@@ -5191,8 +5192,6 @@ crates/bt-app/src/settings.rs	bt-app crate::settings::everyday_cap	Ambiguous	map
 crates/bt-app/src/settings.rs	bt-app crate::settings::family_index	Ambiguous	or_else	1	
 crates/bt-app/src/settings.rs	bt-app crate::settings::family_index	Ambiguous	unwrap_or	1	
 crates/bt-app/src/settings.rs	bt-app crate::settings::field_caret_line	Dynamic	measure	1	2026-10-30: T-SETTINGS-FIELDS-IME-POSITION (plan row 98); added: the one caret rectangle the painter and the input method share: the text before the caret measured through the caller's measure closure (the chrome text measure the painter already called), no new door
-crates/bt-app/src/settings.rs	bt-app crate::settings::field_run	Ambiguous	map_or	1	2026-10-30: T-SETTINGS-FIELDS-IME-POSITION (plan row 98); added: the field's text run (font, left and right edges, scroll offset) pulled out of push_field so the painter and the caret share it: the same filter, map_or, measure and px calls push_field made, moved with their sites, no new door
-crates/bt-app/src/settings.rs	bt-app crate::settings::field_run	Dynamic	measure	1	2026-10-30: T-SETTINGS-FIELDS-IME-POSITION (plan row 98); added: the field's text run (font, left and right edges, scroll offset) pulled out of push_field so the painter and the caret share it: the same filter, map_or, measure and px calls push_field made, moved with their sites, no new door
 crates/bt-app/src/settings.rs	bt-app crate::settings::field_run	Dynamic	px	3	2026-10-30: T-SETTINGS-FIELDS-IME-POSITION (plan row 98); added: the field's text run (font, left and right edges, scroll offset) pulled out of push_field so the painter and the caret share it: the same filter, map_or, measure and px calls push_field made, moved with their sites, no new door
 crates/bt-app/src/settings.rs	bt-app crate::settings::font_size_index	Ambiguous	unwrap_or	1	
 crates/bt-app/src/settings.rs	bt-app crate::settings::font_size_index	Ambiguous	unwrap_or_else	1	
@@ -5267,7 +5266,6 @@ crates/bt-app/src/settings.rs	bt-app crate::settings::push_editor_page	Ambiguous
 crates/bt-app/src/settings.rs	bt-app crate::settings::push_editor_page	Ambiguous	text	7	
 crates/bt-app/src/settings.rs	bt-app crate::settings::push_editor_page	Ambiguous	unwrap_or_default	2	
 crates/bt-app/src/settings.rs	bt-app crate::settings::push_editor_page	Dynamic	px	1	
-crates/bt-app/src/settings.rs	bt-app crate::settings::push_field	Ambiguous	map	1	2026-10-30: T-SETTINGS-FIELDS-IME-POSITION (plan row 98); added: push_field now asks field_run and field_caret_line; its one Option::map is the caret's selection range read, no new door
 crates/bt-app/src/settings.rs	bt-app crate::settings::push_field	Dynamic	measure	2	
 crates/bt-app/src/settings.rs	bt-app crate::settings::push_field	Dynamic	px	1	
 crates/bt-app/src/settings.rs	bt-app crate::settings::push_glyph_verb	Dynamic	px	2	
@@ -5298,6 +5296,7 @@ crates/bt-app/src/settings.rs	bt-app crate::settings::row_menu_items	Ambiguous	t
 crates/bt-app/src/settings.rs	bt-app crate::settings::run_font_lane	Dynamic	(value)	2	
 crates/bt-app/src/settings.rs	bt-app crate::settings::scheme_index	Ambiguous	or_else	1	
 crates/bt-app/src/settings.rs	bt-app crate::settings::scheme_index	Ambiguous	unwrap_or	1	
+crates/bt-app/src/settings.rs	bt-app crate::settings::settle_field_scroll	Dynamic	measure	2	2026-11-02: T-CHROME-FIELDS-CARET-BY-POINTER (0.4.9 plan row 180); added: the focused field's sticky scroll measures the text before the caret and the whole text with the measure it is handed (the chrome text measure)
 crates/bt-app/src/settings.rs	bt-app crate::settings::shipped_notices_near	Ambiguous	join	2	
 crates/bt-app/src/settings.rs	bt-app crate::settings::shipped_notices_near	Ambiguous	then_some	1	
 crates/bt-app/src/settings.rs	bt-app crate::settings::shortcut_undelivered_note	Ambiguous	text	1	
