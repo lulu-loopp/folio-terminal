@@ -586,8 +586,9 @@ fn the_rung_has_one_owner() {
         "step_leaf_text_scale",
         "pane_cell_metrics",
         "apply_tabs_leaf_metrics",
-        // the restart reads the rung it hands the constructor
-        "Runtime::restart_shell",
+        // a restart's and an ended agent's hand-back's successor reads the rung it hands the
+        // constructor (row 195)
+        "Runtime::bear_successor",
         // and so does a pane in birth's landing, which is born at the rung it already has
         // (T-PROGRAMS-REFRESH)
         "Runtime::land_pane_birth",

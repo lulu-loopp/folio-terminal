@@ -477,6 +477,7 @@ fn a_saved_files_root_comes_back_and_goes_out_again_unchanged() {
             manual_name: None,
             card_skip: 0,
             last_command: String::new(),
+            agent: None,
         },
         &|seat| files.get(&seat).cloned().unwrap_or_default(),
     );
@@ -518,6 +519,7 @@ fn a_files_column_with_no_root_writes_an_honest_empty_leaf() {
             manual_name: None,
             card_skip: 0,
             last_command: String::new(),
+            agent: None,
         },
         &|seat| files.get(&seat).cloned().unwrap_or_default(),
     );
@@ -572,6 +574,7 @@ fn two_saved_files_columns_come_back_to_their_own_roots() {
                             manual_name: None,
                             card_skip: 0,
                             last_command: String::new(),
+                            agent: None,
                         }))),
                         files(r"D:\right", 300),
                     ],

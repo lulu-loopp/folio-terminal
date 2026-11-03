@@ -90,6 +90,7 @@ fn a_waits_ten_minutes_are_armed_on_arrival_forgotten_on_its_clear_and_spent_whe
         event: event.to_owned(),
         id: None,
         text: None,
+        resume: None,
     };
     let mut places = attention::Places::default();
     let start = Instant::now();
