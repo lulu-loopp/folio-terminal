@@ -2416,6 +2416,7 @@ crates/bt-app/src/pdf.rs	bt-app crate::pdf::Scan::collecting	Ambiguous	checked_a
 crates/bt-app/src/pdf.rs	bt-app crate::pdf::Scan::collecting	Ambiguous	then_some	1	
 crates/bt-app/src/pdf.rs	bt-app crate::pdf::Scan::finish	Ambiguous	ok	1	
 crates/bt-app/src/pdf.rs	bt-app crate::pdf::Scan::finish	Ambiguous	or_else	1	
+crates/bt-app/src/pdf.rs	bt-app crate::pdf::capped_buffer	Ambiguous	ok	1	2026-11-03: T-HELD-FILE-IN-THE-PDF-LANE; read_capped's length guard moved into capped_buffer with its `?` shape, so one of its two Result::ok calls (on the handle's metadata answer or on usize::try_from) moves with it: a std conversion, no door behind it
 crates/bt-app/src/pdf.rs	bt-app crate::pdf::count_pages	Ambiguous	read	1	
 crates/bt-app/src/pdf.rs	bt-app crate::pdf::count_pages	Dynamic	take	1	
 crates/bt-app/src/pdf.rs	bt-app crate::pdf::parse_page_count	Ambiguous	len	1	
@@ -2430,7 +2431,6 @@ crates/bt-app/src/pdf.rs	bt-app crate::pdf::raster_page	Ambiguous	render_dimensi
 crates/bt-app/src/pdf.rs	bt-app crate::pdf::raster_page	Ambiguous	take_unpremultiplied	1	
 crates/bt-app/src/pdf.rs	bt-app crate::pdf::raster_page	Ambiguous	to_u8_array	1	
 crates/bt-app/src/pdf.rs	bt-app crate::pdf::raster_page	Dynamic	edge	2	
-crates/bt-app/src/pdf.rs	bt-app crate::pdf::read_capped	Ambiguous	ok	2	
 crates/bt-app/src/peek_strip.rs	bt-app crate::peek_strip::PeekHost::retain	Dynamic	eligible	2	
 crates/bt-app/src/peek_strip.rs	bt-app crate::peek_strip::build	Dynamic	alpha	3	
 crates/bt-app/src/peek_strip.rs	bt-app crate::peek_strip::build	Dynamic	label	2	
