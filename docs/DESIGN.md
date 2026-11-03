@@ -16291,3 +16291,18 @@ Every exit of the name editor lets go of a `Name` drag only (`let_go_of_the_name
 - `settings::tests::a_fields_scroll_holds_still_until_the_caret_needs_it_to_move`;
 - `runtime::pointer::ending::tests`, whose owner lists now name every `FieldSelection` arm;
 - the plants `plant-180-press-places-nothing.py`, `plant-180-drag-ignored.py`, `plant-180-shift-ignored.py`, `plant-180-settings-scroll-not-sticky.py`, `plant-180-selection-ink-off.py` and `plant-180-f5-drag-clamped.py` in the row's report.
+
+### 2026-11-03 — The decoration worker makes its formula engine for the first formula, not at its start (T-LANE-SUITE-PATIENCE-UNDER-LOAD, 0.4.9 plan row 198; note to the 2026-10-12 S-8 T-COMPUTATION-LANE entry's `bt-math-worker`)
+
+**Why.** `run_decoration_worker` used to make its `MathEngine` where the door was made, before the worker served anything. `MathEngine::new()` reads typst-assets' faces and then scans every font the machine has installed. So a worker that only decoded pictures, glances, video frames, animations and pages paid that whole scan before its first answer. In the suite this put the scan inside the first wait for a picture's terminal, which is one `lane::PATIENCE` (10 s). Row 181's whole-`bt-app` run, beside three busy cargo lanes, had seven of the eight `runtime::preview::tests` on the `two_panes_on_a_watched_lane` fixture run out of it. They all passed on a re-run.
+
+**What is built.** The door is `run_decoration_worker_with(ctx, make_engine)`, and the product's `run_decoration_worker` passes `MathEngine::new`. The engine is a `std::cell::LazyCell` over `make_engine`, so it is made on the worker the first time a formula arm needs it: `Math`, or a `PreviewMath` whose key is drawable. The other arms never touch it, and `FnOnce` makes it at most once.
+
+What a person sees is unchanged. Only when the scan happens moves: a session that previews only pictures never pays it, and a session that showed a picture first pays it at its first formula.
+
+**Not done.**
+- The lane suite's patience stays as it was. It is a red-only cap on a signal from a real thread, which no counted clock can replace, and CONVENTIONS forbids raising it.
+- `TIMING-BOUND-TESTS.tsv` moves no row; its `# noted` line records the window this closes.
+- Tests that typeset still scan inside their patience, because the system faces are part of what they test: `runtime::math_tests`, `tests::hostile_math_is_refused_and_the_real_decoration_worker_survives`, `install_channel_app_tests`' math dispatch, and `runtime::frame_tests`. They are the row's listed residual.
+
+**Pinned by** `computation_lane::tests::a_picture_is_answered_before_the_formula_engine_is_made`. The test holds the engine factory until a glance is answered and checks that no engine was made; then it lets the factory go, has one formula typeset, and checks the factory ran exactly once. The plant `plant-198-engine-made-at-door-start.py` in the row's report puts the engine back at the door's start, and the glance's terminal then never comes within the patience. The two source guards that read the worker's body, `the_lane_typesets_a_terminal_formula_through_the_composition_crate` and `the_reduction_happens_on_the_worker_not_the_window_thread`, now read `run_decoration_worker_with`.

@@ -759,15 +759,30 @@ pub(crate) fn run_path_verify_worker(
     }
 }
 
-/// **The formula and picture worker** (`computation_lane`, `bt-math-worker`): the engine and the
-/// decoder are made once, on the worker, and the door it returns answers each request — the
-/// production decoration work, also exercised without a window by regression tests.
+/// **The formula and picture worker** (`computation_lane`, `bt-math-worker`): the product's door,
+/// [`run_decoration_worker_with`] with the desktop engine ([`MathEngine::new`]) — the production
+/// decoration work, also exercised without a window by regression tests.
 pub(crate) fn run_decoration_worker(
     worker: &bt_platform::admission::WorkerCtx,
 ) -> Door<MathWorkerRequest> {
+    run_decoration_worker_with(worker, MathEngine::new)
+}
+
+/// **The decoration worker, its formula engine made by `make_engine`**: the decoder is made once,
+/// on the worker, and the door it returns answers each request.
+///
+/// The engine is made the first time a formula arm needs it (`Math`, or a `PreviewMath` whose
+/// key is drawable), on the worker, and never again (T-LANE-SUITE-PATIENCE-UNDER-LOAD): the
+/// desktop engine scans every font the machine has, which a worker that only decodes pictures,
+/// glances, video frames, animations and pages never needs, and which no answer of theirs waits
+/// for.
+pub(crate) fn run_decoration_worker_with(
+    worker: &bt_platform::admission::WorkerCtx,
+    make_engine: impl FnOnce() -> MathEngine + 'static,
+) -> Door<MathWorkerRequest> {
     // The door is made on the worker; each request is handed the same capability again.
     let _ = worker;
-    let engine = MathEngine::new();
+    let engine = std::cell::LazyCell::new(make_engine);
     let mut image_decoder = InlineImageDecoder::default();
     Box::new(
         move |worker: &bt_platform::admission::WorkerCtx, work: MathWorkerRequest| {
@@ -1902,6 +1917,75 @@ mod tests {
                 DecorationWorkerCompletion::Math { result: Ok(_), .. }
             ),
             "the formula asked again is typeset"
+        );
+    }
+
+    /// RED (T-LANE-SUITE-PATIENCE-UNDER-LOAD) — **the decoration worker answers a picture before
+    /// its formula engine is made, and makes it once, for the first formula.**
+    ///
+    /// The worker's engine comes from a factory the test holds: it returns only once the test
+    /// lets it go, with an engine the test made on its own thread before the lane was asked
+    /// anything, so no scan of the machine's fonts runs inside the suite's patience. A glance at a
+    /// missing file is answered while the factory is held, and no engine has been made; once the
+    /// factory is let go, a terminal formula is typeset, and the factory has run once.
+    ///
+    /// MUTATION: make the engine where the door is made (`let engine = make_engine();` in
+    /// `run_decoration_worker_with`) — the worker stands in the held factory before it serves
+    /// anything, and the glance's terminal never comes within the suite's patience.
+    #[test]
+    fn a_picture_is_answered_before_the_formula_engine_is_made() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let (mut lane, _gate) = gated();
+        let engine = MathEngine::new();
+        let (let_go, held) = std::sync::mpsc::channel::<()>();
+        let made = Arc::new(AtomicUsize::new(0));
+        let making = Arc::clone(&made);
+        let glance = lane
+            .lane
+            .decorate_through(
+                MathWorkerRequest::PeekImage {
+                    leaf: probe_leaf(),
+                    path: PathBuf::from("不在这里/先答图片 picture first.png"),
+                },
+                move |ctx: &WorkerCtx| {
+                    run_decoration_worker_with(ctx, move || {
+                        // Let go by the test's send, or by its end on a red.
+                        let _ = held.recv();
+                        making.fetch_add(1, Ordering::SeqCst);
+                        engine
+                    })
+                },
+            )
+            .ok()
+            .expect("admitted");
+        let answered = lane.terminal(Share::Decoration, glance, nobody);
+        assert!(
+            matches!(
+                answer(answered).map(|result| result.completion),
+                Some(DecorationWorkerCompletion::PeekImage { .. })
+            ),
+            "the glance is answered while the factory is held"
+        );
+        assert_eq!(
+            made.load(Ordering::SeqCst),
+            0,
+            "no formula engine was made for a picture"
+        );
+        let_go.send(()).expect("the held factory is still there to be let go");
+        let mut session = a_pane_with_a_formula();
+        hand_out(&mut session, &lane.lane);
+        let (_, _, typeset, _) = lane.next_ended(Share::Decoration, nobody);
+        assert!(
+            matches!(
+                answer(typeset).map(|result| result.completion),
+                Some(DecorationWorkerCompletion::Math { result: Ok(_), .. })
+            ),
+            "the formula is typeset once the factory is let go"
+        );
+        assert_eq!(
+            made.load(Ordering::SeqCst),
+            1,
+            "the engine was made once, for the formula"
         );
     }
 
