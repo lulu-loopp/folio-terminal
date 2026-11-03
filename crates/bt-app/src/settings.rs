@@ -28609,7 +28609,12 @@ mod tests {
     fn a_mac_is_not_offered_a_row_about_a_facility_it_has_not_got() {
         use bt_platform::HostPlatform::{MacOs, Windows};
 
-        const NOT_ON_A_MAC: [SettingsRow; 2] = [SettingsRow::ContextMenu, SettingsRow::Acrylic];
+        // `ResumeAgents` since row 195: 0.4.9 resumes agents on Windows only (plan row 197).
+        const NOT_ON_A_MAC: [SettingsRow; 3] = [
+            SettingsRow::ContextMenu,
+            SettingsRow::Acrylic,
+            SettingsRow::ResumeAgents,
+        ];
         for layout in [TabLayoutMode::Horizontal, TabLayoutMode::Vertical] {
             let mac = visible_rows_for(MacOs, layout);
             let windows = visible_rows_for(Windows, layout);
