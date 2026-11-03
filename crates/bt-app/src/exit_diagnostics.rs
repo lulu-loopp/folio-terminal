@@ -353,9 +353,10 @@ mod tests {
     }
 
     /// RED (plan row 199) — **an exit the reaper judges carries the probe read at that instant**:
-    /// `Some(false)` on Windows (a test run is not a sign-out), `None` off Windows, where the line
-    /// keeps its old shape. Every exit the reaper decides is built through
-    /// [`ShellExit::observed`].
+    /// what `bt_platform::session_end::shutting_down` answers — `Some(false)` on Windows (a test
+    /// run is not a sign-out), `None` off Windows, where the line keeps its old shape; which
+    /// platform this is stays bt-platform's to say. Every exit the reaper decides is built
+    /// through [`ShellExit::observed`].
     ///
     /// MUTATION: `observed` stores `None` — the Windows lines lose their field
     /// (red on Windows only).
@@ -369,8 +370,10 @@ mod tests {
             2,
             ShellExitDisposition::TabKept,
         );
-        let expected = if cfg!(windows) { Some(false) } else { None };
-        assert_eq!(exit.shutting_down, expected);
+        assert_eq!(
+            exit.shutting_down,
+            bt_platform::session_end::shutting_down()
+        );
     }
 
     /// MUTATION (observed RED): omit the stored OS error, keep bt-pty's stderr-only line, or write
