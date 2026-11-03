@@ -4,7 +4,7 @@
 # name) with the number of calls behind it. Held equal to the tree by bt-source's call_graph test;
 # shrink-only against the merge base by scripts/ci/check-unfollowed-edges.ps1 - a key added or grown
 # carries a reason 'YYYY-MM-DD: <why>'. Never edit a key or a count by hand.
-# Ambiguous calls with exactly one candidate, not listed by site above or below (bt_source::call_graph::Unresolved::sole_candidate; a guard naming a callee's callers counts each as a call of its one candidate): 1732. A call whose name is renamed to one only one item declares leaves the list and is counted here.
+# Ambiguous calls with exactly one candidate, not listed by site above or below (bt_source::call_graph::Unresolved::sole_candidate; a guard naming a callee's callers counts each as a call of its one candidate): 1733. A call whose name is renamed to one only one item declares leaves the list and is counted here.
 file	item	kind	name	sites	reason
 crates/bt-app/src/animation.rs	bt-app crate::animation::<FileAnimationSource as Read>::read	Ambiguous	unwrap_or	1	
 crates/bt-app/src/animation.rs	bt-app crate::animation::AnimationCursor::start_again	Ambiguous	into_inner	1	
@@ -4615,12 +4615,13 @@ crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::Runtime::tab_menu
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::Runtime::withdraw_a_blank_page	Ambiguous	unwrap_or_default	1	
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::exited_tabs_the_loop_may_close	Ambiguous	collect	1	2026-10-26: T-SPLIT-2B batch 16; the same site, moved by K2 batch 16 with `exited_tabs_the_loop_may_close` from main.rs into runtime/tabs.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::keep_birth_death_face	Ambiguous	and_then	1	
-crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::keep_birth_death_face	Ambiguous	as_bytes	1	
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::keep_birth_death_face	Ambiguous	into_owned	1	
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::keep_birth_death_face	Ambiguous	is_empty	1	
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::keep_birth_death_face	Ambiguous	map_or_else	1	
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::keep_birth_death_face	Ambiguous	text	1	
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::keep_birth_death_face	Ambiguous	to_string_lossy	1	
+crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::keep_face	Ambiguous	as_bytes	1	2026-11-03: T-SHUTDOWN-KILLS-SHELLS-BEFORE-THE-LAYOUT-IS-SAVED (plan row 191); the same standard-library call (Option, str, Path, Cow) on a receiver the grammar does not type, moved with the body of keep_birth_death_face into keep_face, which both kept deaths now share; it reaches no door
+crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::keep_system_ended_face	Ambiguous	text	1	2026-11-03: T-SHUTDOWN-KILLS-SHELLS-BEFORE-THE-LAYOUT-IS-SAVED (plan row 191); the note's words, looked up in the i18n table (Text::text, a match on the language); no door
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::pane_into_new_tab	Ambiguous	unwrap_or_default	6	2026-10-29: T-SPLIT-2B batch 26; the same site, moved by K2 batch 26 with `pane_into_new_tab` from main.rs into runtime/tabs.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::pane_into_new_tab	Dynamic	solve	1	2026-10-29: T-SPLIT-2B batch 26; the same site, moved by K2 batch 26 with `pane_into_new_tab` from main.rs into runtime/tabs.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::pane_into_tab	Dynamic	solve	2	2026-10-29: T-SPLIT-2B batch 26; the same site, moved by K2 batch 26 with `pane_into_tab` from main.rs into runtime/tabs.rs: K2 moves the item, not the call
@@ -9754,6 +9755,9 @@ crates/bt-platform/src/pump.rs	bt-platform crate::pump::windows_pump::timed_disp
 crates/bt-platform/src/pump.rs	bt-platform crate::pump::windows_pump::timed_dispatch	Dynamic	(value)	2	
 crates/bt-platform/src/pump.rs	bt-platform crate::pump::windows_pump::timed_dispatch	Dynamic	inner	1	
 crates/bt-platform/src/session_end.rs	bt-platform crate::session_end::answer	Dynamic	hear	1	
+crates/bt-platform/src/session_end.rs	bt-platform crate::session_end::arrival_line	Ambiguous	collect	1	2026-11-03: T-SHUTDOWN-KILLS-SHELLS-BEFORE-THE-LAYOUT-IS-SAVED (plan row 191); Iterator::map / Iterator::collect over a fixed array of (flag, word) pairs in arrival_line, a pure formatter of the session-end message: no door
+crates/bt-platform/src/session_end.rs	bt-platform crate::session_end::arrival_line	Ambiguous	map	1	2026-11-03: T-SHUTDOWN-KILLS-SHELLS-BEFORE-THE-LAYOUT-IS-SAVED (plan row 191); Iterator::map / Iterator::collect over a fixed array of (flag, word) pairs in arrival_line, a pure formatter of the session-end message: no door
+crates/bt-platform/src/session_end.rs	bt-platform crate::session_end::ask_to_be_ended_first	Ambiguous	map_err	1	2026-11-03: T-SHUTDOWN-KILLS-SHELLS-BEFORE-THE-LAYOUT-IS-SAVED (plan row 191); Result::map_err on SetProcessShutdownParameters' answer, a kernel32 call that returns at once; no door
 crates/bt-platform/src/session_end.rs	bt-platform crate::session_end::register_restart	Ambiguous	map_err	1	2026-10-27: T-RESTART-REGISTRATION: Result::map_err on RegisterApplicationRestart's answer (a kernel32 call that returns at once), formatting the refusal into a String; no door
 crates/bt-platform/src/session_end.rs	bt-platform crate::session_end::windows_session_end::SessionEndWatch::install	Ambiguous	as_bool	1	
 crates/bt-platform/src/session_end.rs	bt-platform crate::session_end::windows_session_end::session_end_subclass	Ambiguous	is_null	1	

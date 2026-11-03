@@ -34,6 +34,9 @@ use std::{
 /// The elevated pane's handshake (`crate::elevated_pipe`, Windows) is its third user
 /// (T-ELEVATED-HANDSHAKE-FINISH-DEADLINE-ON-A-CLOCK): its attempt's deadline is read on
 /// [`LaunchClock::now`] and each overlapped operation's one wait is a [`LaunchClock::wait`].
+///
+/// The macOS update check (`http::Exchange::wait`, macOS) is its fourth user (0.4.9 plan row 150):
+/// one wait, up to the request's `budget + phase_timeout`, for the session delegate's completion.
 pub(crate) trait LaunchClock: Send + Sync {
     /// The monotonic reading a deadline is set and read on.
     fn now(&self) -> Instant;
