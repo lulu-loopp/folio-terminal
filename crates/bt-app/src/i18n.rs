@@ -7827,8 +7827,14 @@ fn refusal_in_lang(lang: Lang, file: &str, error: &bt_term::BackgroundImageError
             format!("{file} is not a picture file this window can open")
         }
         (Lang::Chinese, Refusal::InvalidPath) => format!("{file} 不是这扇窗能打开的图片文件"),
-        (Lang::English, Refusal::Io(reason)) => format!("{file} could not be read: {reason}"),
-        (Lang::Chinese, Refusal::Io(reason)) => format!("{file} 无法读取：{reason}"),
+        // A held file says what an unreadable one says, in the operating system's own words: no
+        // sentence of its own (T-HELD-FILE-IN-THE-OTHER-PICTURE-LANES).
+        (Lang::English, Refusal::Io(reason) | Refusal::HeldElsewhere(reason)) => {
+            format!("{file} could not be read: {reason}")
+        }
+        (Lang::Chinese, Refusal::Io(reason) | Refusal::HeldElsewhere(reason)) => {
+            format!("{file} 无法读取：{reason}")
+        }
         (Lang::English, Refusal::TooLarge { bytes, limit }) => format!(
             "{file} is {} and a background picture may be up to {}",
             bt_term::mebibytes(*bytes),
@@ -10157,6 +10163,7 @@ mod tests {
         for error in [
             Refusal::InvalidPath,
             Refusal::Io("access is denied".to_owned()),
+            Refusal::HeldElsewhere("being used by another process".to_owned()),
             Refusal::TooLarge {
                 bytes: 200 * 1024 * 1024,
                 limit: bt_term::MAX_BACKGROUND_IMAGE_BYTES,

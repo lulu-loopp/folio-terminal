@@ -532,7 +532,9 @@ widen the grammar in its own change with a planted case.
 before `parse`, and in the claim after the update pass, after `parse`; and
 `explorer_menu::settle_package` (T-EXPLORER-MENU-PROBE-OFF-THE-WINDOW-THREAD,
 2026-10-25) in the loop's process once the running image is resolved, after
-`hand_over`. Every
+`hand_over`, and `settings::settle_notices`
+(T-NOTICES-DESTINATION-OFF-THE-WINDOW-THREAD, 2026-11-02) on the line after it,
+after `hand_over`. Every
 pinned writer is spelled only as the call through its pin's module path,
 `module::writer(…)` (`admission::` for the role and phase writers): an import, a
 value or a rename is refused by name and path
