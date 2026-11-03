@@ -3647,23 +3647,6 @@ impl<B: Backend> Runtime<'_, B> {
                     // **A shell is on its way into this pane's place** (row 195): it holds its tab.
                     Some(_) if leaf.agent.handing_back() => any_live = true,
                     Some(status) => {
-                        // **The pane's own child ended by itself** (row 195): its record ends, and
-                        // a resumed agent's end hands back the shell the pane was — before any
-                        // birth-death reading, because a resume that is refused prints its reason
-                        // and exits at once, which is that resume's failure and no shell's death.
-                        match leaf.agent.child_ended() {
-                            crate::agent_resume::Ended::Unchanged => {}
-                            crate::agent_resume::Ended::Cleared => records_ended = true,
-                            crate::agent_resume::Ended::HandBack {
-                                profile,
-                                cwd,
-                                failed,
-                            } => {
-                                hand_backs.push((index, *seat, profile, cwd, failed));
-                                any_live = true;
-                                continue;
-                            }
-                        }
                         let elapsed = seen.unwrap_or_else(|| pty.age_at(now));
                         let code = status.signal().is_none().then(|| status.exit_code());
                         let program = leaf.launch.program.clone();
@@ -3696,6 +3679,25 @@ impl<B: Backend> Runtime<'_, B> {
                             exits.push((index, exit));
                             any_live = true;
                             continue;
+                        }
+                        // **The pane's own child ended by itself** (row 195) — read after the
+                        // system's end above, which keeps the record with the pane (row 191's kept
+                        // pane: the agent comes back at the next start), and before any birth-death
+                        // reading, because a resume that is refused prints its reason and exits at
+                        // once, which is that resume's failure and no shell's death. Its record
+                        // ends, and a resumed agent's end hands back the shell the pane was.
+                        match leaf.agent.child_ended() {
+                            crate::agent_resume::Ended::Unchanged => {}
+                            crate::agent_resume::Ended::Cleared => records_ended = true,
+                            crate::agent_resume::Ended::HandBack {
+                                profile,
+                                cwd,
+                                failed,
+                            } => {
+                                hand_backs.push((index, *seat, profile, cwd, failed));
+                                any_live = true;
+                                continue;
+                            }
                         }
                         if let Some(birth_death) =
                             birth_death_disposition(elapsed, had_output, pty.has_birth_fallback())

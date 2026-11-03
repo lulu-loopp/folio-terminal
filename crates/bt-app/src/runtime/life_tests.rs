@@ -916,3 +916,49 @@ fn a_pane_the_systems_end_kept_restarts_or_closes_like_a_kept_pane() {
     assert_eq!(tab_ids(&mut application), [1], "the kept tab closes");
     assert_eq!(recent_rows(&application), 1, "and goes into Recent, as a close does");
 }
+
+/// RED (plan rows 195 and 191) — **an agent pane the system's end kept keeps its session's
+/// record**: the record is what the next start resumes, and the system ending the agent is not the
+/// agent ending by itself (`AgentAccount::child_ended` is read only after the system's end has
+/// been told apart). The document the question writes then holds it.
+///
+/// MUTATION (plant `plant-195-system-end-clears-the-record.py`): read `child_ended` on the
+/// system-ended road too (before `keep_system_ended_face`), and the record is gone with the
+/// system's end.
+#[test]
+fn an_agent_pane_the_systems_end_kept_keeps_its_session_record() {
+    let home = test_support::EndSessionHome::new("row195-system-end");
+    let mut application = a_window_of("row195-system-end", &home, &[true, true]);
+    let vendor = &crate::agent_resume::VENDORS[0];
+    let heard = crate::agent_resume::Heard {
+        id: "0b9c7e1a-4f3d-4c2b-9a8e-5d6f7a8b9c0d".to_owned(),
+        cwd: "C:/work/resume".to_owned(),
+        home: None,
+    };
+    let seat = {
+        let mut runtime = application.runtime();
+        let seat = runtime.seats.identity();
+        let leaf = &mut runtime.sessions.get_mut(&seat).expect("the pane").session;
+        leaf.launch.program = Some(PathBuf::from("claude.exe"));
+        assert!(leaf.agent.hear(
+            vendor,
+            &heard,
+            crate::agent_resume::Child::Agent(vendor)
+        ));
+        seat
+    };
+    ends(&mut application, 1, SYSTEM_ENDED);
+    let runtime = application.runtime();
+    let leaf = &runtime.sessions[&seat].session;
+    assert_eq!(name_of(&leaf.life), Name::Kept, "the pane is kept");
+    assert_eq!(
+        leaf.agent.record(),
+        Some(&heard.record(vendor)),
+        "and its session's record with it"
+    );
+    assert_eq!(
+        runtime.window.tabs[0].term_leaf(seat, false).agent,
+        Some(heard.record(vendor)),
+        "which the layout writes"
+    );
+}
