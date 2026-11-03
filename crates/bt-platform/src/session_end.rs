@@ -242,7 +242,7 @@ mod windows_session_end {
     use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
     use windows::core::HSTRING;
 
-    use super::{SessionEnd, answer, heard};
+    use super::{SessionEnd, answer, arrival_line, heard};
     use crate::NativeWindow;
 
     /// "BTSE". Distinct from every other subclass id in this crate.
@@ -598,9 +598,15 @@ mod tests {
         );
         assert_eq!(
             arrival_line(WM_ENDSESSION, 1, ENDSESSION_CLOSEAPP).as_deref(),
-            Some("BT_SESSION_END the system sent WM_ENDSESSION(TRUE), lParam 0x00000001 (CLOSEAPP)")
+            Some(
+                "BT_SESSION_END the system sent WM_ENDSESSION(TRUE), lParam 0x00000001 (CLOSEAPP)"
+            )
         );
-        assert_eq!(arrival_line(0x0010, 0, ENDSESSION_CLOSEAPP), None, "WM_CLOSE is not one");
+        assert_eq!(
+            arrival_line(0x0010, 0, ENDSESSION_CLOSEAPP),
+            None,
+            "WM_CLOSE is not one"
+        );
     }
 
     /// `ENDSESSION_CRITICAL | ENDSESSION_LOGOFF`, the other two bits a session-end `lParam`

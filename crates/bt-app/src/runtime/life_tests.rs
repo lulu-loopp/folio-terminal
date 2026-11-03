@@ -696,6 +696,8 @@ fn a_window_of(tag: &str, home: &test_support::EndSessionHome, pinned: &[bool]) 
         .map(|(at, pin)| {
             let mut tab = test_support::ringing_tab(at as u64 + 1, 1);
             tab.pinned = *pin;
+            // A name of its own, so a retired tab is a row Recent keeps (`Seed::names_itself`).
+            tab.manual_name = Some(format!("tab {}", at + 1));
             tab
         })
         .collect();
@@ -786,27 +788,32 @@ fn a_shell_the_system_ends_keeps_its_pinned_tab_in_the_document() {
         .clone();
     ends(&mut application, 2, SYSTEM_ENDED);
     assert_eq!(tab_ids(&mut application), [1, 2], "the tab stays");
-    let mut runtime = application.runtime();
-    let pane = runtime.window.tabs[1]
-        .panes_mut()
-        .next()
-        .expect("the tab's pane")
-        .1;
-    assert_eq!(name_of(&pane.session.life), Name::Kept, "kept, without a shell");
-    let visible: String = pane
-        .session
-        .session
-        .terminal()
-        .visible_text()
-        .join("")
-        .chars()
-        .filter(|character| !character.is_whitespace())
-        .collect();
-    assert!(
-        visible.contains("wasendedbythesystem(code1073807364,"),
-        "the pane says why: {visible:?}"
-    );
-    drop(runtime);
+    {
+        let runtime = application.runtime();
+        let pane = runtime.window.tabs[1]
+            .panes_mut()
+            .next()
+            .expect("the tab's pane")
+            .1;
+        assert_eq!(
+            name_of(&pane.session.life),
+            Name::Kept,
+            "kept, without a shell"
+        );
+        let visible: String = pane
+            .session
+            .session
+            .terminal()
+            .visible_text()
+            .join("")
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect();
+        assert!(
+            visible.contains("wasendedbythesystem(code1073807364,"),
+            "the pane says why: {visible:?}"
+        );
+    }
     assert_eq!(recent_rows(&application), 0, "nothing goes into Recent");
     let app = application.folio.app.as_ref().expect("the application");
     assert_eq!(
@@ -892,29 +899,35 @@ fn a_shells_own_exit_still_retires_its_tab() {
 fn a_pane_the_systems_end_kept_restarts_or_closes_like_a_kept_pane() {
     let home = test_support::EndSessionHome::new("row191-restart");
     let mut application = a_window_of("row191-restart", &home, &[true, true]);
-    ends(&mut application, 1, SYSTEM_ENDED);
-    {
-        let mut runtime = application.runtime();
-        let seat = runtime.seats.identity();
-        assert_eq!(name_of(&runtime.sessions[&seat].session.life), Name::Kept);
-        runtime
-            .restart_shell(seat)
-            .expect("the restart is asked for");
-        let pane = runtime.sessions.get_mut(&seat).expect("the pane");
-        pane.take_successor().expect("the replacement");
-        pane.await_successor(answered_successor());
-        runtime.land_births().expect("the landing");
-        let life = &runtime.sessions[&seat].session.life;
-        assert_eq!(name_of(life), Name::Live, "the kept pane runs a shell again");
-        assert!(life.pty().is_some());
-    }
     ends(&mut application, 2, SYSTEM_ENDED);
     application
         .runtime()
         .close_tab(1)
         .expect("the person closes the kept tab");
     assert_eq!(tab_ids(&mut application), [1], "the kept tab closes");
-    assert_eq!(recent_rows(&application), 1, "and goes into Recent, as a close does");
+    assert_eq!(
+        recent_rows(&application),
+        1,
+        "and goes into Recent, as a close does"
+    );
+    ends(&mut application, 1, SYSTEM_ENDED);
+    let mut runtime = application.runtime();
+    let seat = runtime.seats.identity();
+    assert_eq!(name_of(&runtime.sessions[&seat].session.life), Name::Kept);
+    runtime
+        .restart_shell(seat)
+        .expect("the restart is asked for");
+    let pane = runtime.sessions.get_mut(&seat).expect("the pane");
+    pane.take_successor().expect("the replacement");
+    pane.await_successor(answered_successor());
+    runtime.land_births().expect("the landing");
+    let life = &runtime.sessions[&seat].session.life;
+    assert_eq!(
+        name_of(life),
+        Name::Live,
+        "the kept pane runs a shell again"
+    );
+    assert!(life.pty().is_some());
 }
 
 /// RED (plan rows 195 and 191) — **an agent pane the system's end kept keeps its session's
