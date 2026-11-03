@@ -1086,18 +1086,22 @@ const READ_AGAIN: [(&str, usize, &str); 2] = [
 fn clock_traits(
     indices: &[(&str, &Index)],
     resolver: &TraitResolver<'_>,
-) -> (BTreeSet<TraitId>, Vec<String>) {
-    let mut clocks = BTreeSet::new();
+) -> (BTreeMap<TraitId, reading::Kinds>, Vec<String>) {
+    let mut clocks: BTreeMap<TraitId, reading::Kinds> = BTreeMap::new();
     let mut every = BTreeSet::new();
     let mut refusals = Vec::new();
     for (package, index) in indices {
         for declaration in index.traits() {
             let identities = resolver.identities(package, declaration);
             match syn::parse_str::<syn::ItemTrait>(index.text(declaration.whole())) {
-                Ok(declared) if reading::clock_trait(&declared) => {
-                    clocks.extend(identities.iter().cloned());
+                Ok(declared) => {
+                    let kinds = reading::clock_trait(&declared);
+                    if !kinds.is_empty() {
+                        for id in &identities {
+                            clocks.insert(id.clone(), kinds);
+                        }
+                    }
                 }
-                Ok(_) => {}
                 Err(error) => refusals.push(format!(
                     "{}: the trait `{}` does not parse ({error})",
                     place(index, declaration.whole().start()),
@@ -1109,15 +1113,23 @@ fn clock_traits(
     }
     loop {
         let mut grew = false;
-        for id in every.difference(&clocks.clone()) {
+        for id in &every {
             let supertraits = resolver.supertraits_checked(id).unwrap_or_else(|cutoff| {
                 refusals.push(format!(
                     "the trait {id}: its supertraits chain past the trait resolver's hop limit"
                 ));
                 cutoff.0
             });
-            if !supertraits.is_disjoint(&clocks) {
-                clocks.insert(id.clone());
+            let inherited = supertraits
+                .iter()
+                .filter_map(|supertrait| clocks.get(supertrait))
+                .fold(reading::Kinds::default(), |kinds, more| kinds.union(*more));
+            if inherited.is_empty() {
+                continue;
+            }
+            let known = clocks.get(id).copied().unwrap_or_default();
+            if known.union(inherited) != known {
+                clocks.insert(id.clone(), known.union(inherited));
                 grew = true;
             }
         }
@@ -1356,9 +1368,9 @@ impl TypeResolver {
 /// outside crate's type or an associated type, carries none).
 struct Reader<'r, 'i> {
     resolver: &'r TraitResolver<'i>,
-    clocks: &'r BTreeSet<TraitId>,
+    clocks: &'r BTreeMap<TraitId, reading::Kinds>,
     types: &'r TypeResolver,
-    owners: &'r BTreeSet<TypeKey>,
+    owners: &'r BTreeMap<TypeKey, reading::Kinds>,
     owner_names: &'r BTreeSet<String>,
     package: &'r str,
     at: usize,
@@ -1381,10 +1393,16 @@ impl Reader<'_, '_> {
                 .resolver
                 .resolve_checked(self.package, module, &segments)
             {
-                Ok(found) if !found.is_disjoint(self.clocks) => {
-                    return reading::Bound::Clock("trait");
+                Ok(found) => {
+                    let kinds = found
+                        .iter()
+                        .filter_map(|id| self.clocks.get(id))
+                        .fold(reading::Kinds::default(), |kinds, more| kinds.union(*more));
+                    if !kinds.is_empty() {
+                        return reading::Bound::Clock("trait", kinds);
+                    }
+                    named |= !found.is_empty();
                 }
-                Ok(found) => named |= !found.is_empty(),
                 Err(_) => {
                     return reading::Bound::Unread(format!(
                         "the bound `{}` chains past the trait resolver's hop limit",
@@ -1394,7 +1412,7 @@ impl Reader<'_, '_> {
             }
         }
         let last = segments.last().map(String::as_str);
-        if !named && self.clocks.iter().any(|id| Some(id.name.as_str()) == last) {
+        if !named && self.clocks.keys().any(|id| Some(id.name.as_str()) == last) {
             return reading::Bound::Unread(format!(
                 "the bound `{}` names a clock trait by a path the trait resolver cannot follow",
                 segments.join("::")
@@ -1414,8 +1432,12 @@ impl Reader<'_, '_> {
         let mut named = false;
         for module in &self.modules {
             let (found, outside) = self.types.resolve(self.at, module, &segments);
-            if !found.is_disjoint(self.owners) {
-                return reading::Bound::Clock("carrier");
+            let kinds = found
+                .iter()
+                .filter_map(|key| self.owners.get(key))
+                .fold(reading::Kinds::default(), |kinds, more| kinds.union(*more));
+            if !kinds.is_empty() {
+                return reading::Bound::Clock("carrier", kinds);
             }
             named |= !found.is_empty() || outside;
         }
@@ -1434,8 +1456,8 @@ impl Reader<'_, '_> {
 /// What one `impl` or trait block hands its methods: the type parameters its
 /// header bounds by a clock, and how its `self` is handed, if it is.
 struct BlockClock {
-    generics: BTreeSet<String>,
-    self_how: Option<&'static str>,
+    generics: reading::ClockParameters,
+    self_how: Option<(&'static str, reading::Kinds)>,
 }
 
 /// What the handed-`now` reading found in one set of indices.
@@ -1444,8 +1466,9 @@ struct HandedSet {
     found: BTreeMap<String, Vec<String>>,
     /// What it refuses.
     refusals: Vec<String>,
-    /// Every function handed a clock: how, and how many readings again.
-    handed: BTreeMap<String, (String, usize)>,
+    /// Every function handed a clock: how, the kinds, and how many readings
+    /// again.
+    handed: BTreeMap<String, (String, &'static str, usize)>,
 }
 
 /// What the handed-`now` reading finds in one set of indices: the functions
@@ -1485,21 +1508,13 @@ fn handed_now(indices: &[(&str, &Index)]) -> HandedSet {
     }
     // The types that carry a clock, to a fixed point: a field of a type that
     // carries one makes its holder carry one too.
-    let mut owners: BTreeSet<TypeKey> = BTreeSet::new();
+    let mut owners: BTreeMap<TypeKey, reading::Kinds> = BTreeMap::new();
     let mut owner_names: BTreeSet<String> = BTreeSet::new();
     let mut last_pass = false;
     loop {
         let mut grew = false;
         for (at, record, declared) in &data {
             let key_of = |module: &str| (*at, module.to_owned(), record.name().to_owned());
-            if !last_pass
-                && record
-                    .module_paths()
-                    .iter()
-                    .all(|module| owners.contains(&key_of(module)))
-            {
-                continue;
-            }
             let reader = Reader {
                 resolver: &resolver,
                 clocks: &clocks,
@@ -1525,10 +1540,13 @@ fn handed_now(indices: &[(&str, &Index)]) -> HandedSet {
                         .iter()
                         .map(|(offset, why)| format!("{}: {why}", place(index, base + offset))),
                 );
-            } else if carries {
-                grew = true;
+            } else if !carries.is_empty() {
                 for module in record.module_paths() {
-                    owners.insert(key_of(module));
+                    let known = owners.get(&key_of(module)).copied().unwrap_or_default();
+                    if known.union(carries) != known {
+                        owners.insert(key_of(module), known.union(carries));
+                        grew = true;
+                    }
                 }
                 owner_names.insert(record.name().to_owned());
             }
@@ -1637,7 +1655,7 @@ fn handed_now(indices: &[(&str, &Index)]) -> HandedSet {
                 })
                 .flatten();
             let (generics, self_how) = match enclosing {
-                None => (BTreeSet::new(), None),
+                None => (reading::ClockParameters::new(), None),
                 Some(key) => {
                     let read = read_blocks.entry(key).or_insert_with(|| {
                         let (n, is_impl) = key;
@@ -1649,9 +1667,12 @@ fn handed_now(indices: &[(&str, &Index)]) -> HandedSet {
                                 .map(str::to_owned)
                                 .collect();
                             let owner = block.type_owner();
-                            let carried = modules.iter().any(|module| {
-                                owners.contains(&(at, module.clone(), owner.to_owned()))
-                            });
+                            let carried = modules
+                                .iter()
+                                .filter_map(|module| {
+                                    owners.get(&(at, module.clone(), owner.to_owned()))
+                                })
+                                .fold(reading::Kinds::default(), |kinds, more| kinds.union(*more));
                             if owner_names.contains(owner)
                                 && !modules.iter().any(|module| {
                                     types
@@ -1670,7 +1691,7 @@ fn handed_now(indices: &[(&str, &Index)]) -> HandedSet {
                                 block.whole(),
                                 block.body(),
                                 modules,
-                                carried.then_some("self field"),
+                                (!carried.is_empty()).then_some(("self field", carried)),
                             )
                         } else {
                             let declaration = &index.traits()[n];
@@ -1679,14 +1700,16 @@ fn handed_now(indices: &[(&str, &Index)]) -> HandedSet {
                                 .into_iter()
                                 .map(str::to_owned)
                                 .collect();
-                            let clock = !resolver
+                            let clock = resolver
                                 .identities(package, declaration)
-                                .is_disjoint(&clocks);
+                                .iter()
+                                .filter_map(|id| clocks.get(id))
+                                .fold(reading::Kinds::default(), |kinds, more| kinds.union(*more));
                             (
                                 declaration.whole(),
                                 declaration.body(),
                                 modules,
-                                clock.then_some("trait default"),
+                                (!clock.is_empty()).then_some(("trait default", clock)),
                             )
                         };
                         let header = &index.text(whole)[..body.start() - whole.start()];
@@ -1710,13 +1733,17 @@ fn handed_now(indices: &[(&str, &Index)]) -> HandedSet {
                                     "{}: the header of a block does not parse ({error})",
                                     place(index, whole.start())
                                 ));
-                                BTreeSet::new()
+                                reading::ClockParameters::new()
                             }
                         };
-                        let self_how = self_how
-                            .or_else(|| (is_impl && !generics.is_empty()).then_some("impl bound"));
-                        if self_how.is_some() {
-                            generics.insert("Self".to_owned());
+                        let bounded = generics
+                            .values()
+                            .fold(reading::Kinds::default(), |kinds, more| kinds.union(*more));
+                        let self_how = self_how.or_else(|| {
+                            (is_impl && !bounded.is_empty()).then_some(("impl bound", bounded))
+                        });
+                        if let Some((_, kinds)) = self_how {
+                            generics.insert("Self".to_owned(), kinds);
                         }
                         BlockClock { generics, self_how }
                     });
@@ -1755,7 +1782,10 @@ fn handed_now(indices: &[(&str, &Index)]) -> HandedSet {
             } else {
                 read.how.iter().copied().collect()
             };
-            handed.insert(key.clone(), (how.join(","), read.again.len()));
+            handed.insert(
+                key.clone(),
+                (how.join(","), read.kinds.label(), read.again.len()),
+            );
             if !read.again.is_empty() {
                 found.insert(
                     key,
@@ -1778,13 +1808,15 @@ fn handed_now(indices: &[(&str, &Index)]) -> HandedSet {
 
 /// Leaves the handed set where a reviewer or the next row can read it:
 /// `target/timing-bound-tests/HANDED-CLOCKS.tsv`, one row per product function
-/// handed a clock, with how it is handed and how many readings it holds again.
-fn leave_handed(handed: &BTreeMap<String, (String, usize)>) {
+/// handed a clock, with how it is handed, the kinds of clock (`instant`,
+/// `wall`, `both`; `none` for a function handed none whose closure or nested
+/// `fn` is) and how many readings it holds again.
+fn leave_handed(handed: &BTreeMap<String, (String, &'static str, usize)>) {
     let out = workspace_root().join("target").join("timing-bound-tests");
     std::fs::create_dir_all(&out).expect("target/ is writable");
-    let mut text = String::from("function\thanded_by\treadings_again\n");
-    for (function, (how, again)) in handed {
-        text.push_str(&format!("{function}\t{how}\t{again}\n"));
+    let mut text = String::from("function\thanded_by\tclock\treadings_again\n");
+    for (function, (how, kinds, again)) in handed {
+        text.push_str(&format!("{function}\t{how}\t{kinds}\t{again}\n"));
     }
     std::fs::write(out.join("HANDED-CLOCKS.tsv"), text).expect("written");
 }
@@ -1853,7 +1885,12 @@ fn leave_handed(handed: &BTreeMap<String, (String, usize)>) {
 /// * **Reading again**: in a handed body, closures included, a call of a path
 ///   ending `Instant::now` or `SystemTime::now`, either handed on as a function
 ///   value (a reading deferred), and every `.elapsed()` (it is `now()` minus its
-///   receiver), whatever the receiver, but an admitted origin's (below).
+///   receiver), whatever the receiver, but an admitted origin's (below). **A
+///   reading counts by kind** (plan row 205 R8): `Instant::now()` and
+///   `.elapsed()` count in a body handed an instant (a `now` holding one, or a
+///   clock answering one), `SystemTime::now()` in a body handed a wall time,
+///   both in a body handed both — a first reading of the other clock is no
+///   second answer for the one handed.
 ///   **Calling the handed clock is never a reading again**: a counted clock
 ///   answers every call.
 /// * **Admitted**: a reading bound by `let x = Instant::now();` where every use
@@ -2015,9 +2052,12 @@ fn the_handed_now_reading_finds_refuses_and_admits_what_it_says() {
 /// clock in its `where` clause, and a closure or a nested `fn` handed a clock
 /// inside a function handed none. An owner whose method calls only its clock,
 /// the real clock's own `now`, a trait or closure with inputs, a `now: u64`, a
-/// closure `now: u64` in a handed body, a `Token![,]`-like macro type, and a
+/// closure `now: u64` in a handed body, a `Token![,]`-like macro type, a
 /// carrier's name led by an outside crate, through an associated type or
-/// through a type alias are not; an unread type, a `now` in an unpairable pattern, a clock trait by an
+/// through a type alias, and a reading of the other kind than the one handed
+/// (an instant handed, the wall clock read, and the other way round, through a
+/// `now`, a closure, a carrier and a trait) are not; a body handed both kinds
+/// is found for each; an unread type, a `now` in an unpairable pattern, a clock trait by an
 /// unfollowable path, an `impl` written away from its type, a macro type naming
 /// a `Fn` trait or a clock trait, a `where` clause bounding a non-parameter by
 /// a clock and a carrier's name by an unfollowable path are refused.
@@ -2084,9 +2124,12 @@ fn the_handed_clock_reading_reads_every_clock_shape() {
         "by_nested_fn",
         "by_other_trait",
         "by_other_carrier",
+        "by_wall_carrier",
+        "by_wall_trait",
     ]
     .iter()
     .map(|name| (format!("clocks crate::{name}"), 1))
+    .chain([("clocks crate::handed_both".to_owned(), 2)])
     .collect();
     assert_eq!(counts, expected);
     assert_eq!(refusals.len(), 8, "{refusals:#?}");
@@ -2825,6 +2868,54 @@ mod reading {
 
     // ── the handed-now reading ──
 
+    /// **Which kinds of clock** a type answers or a body is handed: the
+    /// monotonic one (`Instant`) and the wall one (`SystemTime`).
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct Kinds {
+        pub instant: bool,
+        pub wall: bool,
+    }
+
+    impl Kinds {
+        pub const INSTANT: Self = Self {
+            instant: true,
+            wall: false,
+        };
+        pub const WALL: Self = Self {
+            instant: false,
+            wall: true,
+        };
+
+        pub const fn union(self, other: Self) -> Self {
+            Self {
+                instant: self.instant || other.instant,
+                wall: self.wall || other.wall,
+            }
+        }
+
+        pub const fn is_empty(self) -> bool {
+            !self.instant && !self.wall
+        }
+
+        /// Whether a reading of `clock` is of a kind in this set.
+        pub const fn has(self, clock: Clock) -> bool {
+            match clock {
+                Clock::Instant => self.instant,
+                Clock::SystemTime => self.wall,
+            }
+        }
+
+        /// The set, as `HANDED-CLOCKS.tsv` writes it.
+        pub const fn label(self) -> &'static str {
+            match (self.instant, self.wall) {
+                (true, true) => "both",
+                (true, false) => "instant",
+                (false, true) => "wall",
+                (false, false) => "none",
+            }
+        }
+    }
+
     /// What the handed-now reading says of one function.
     #[derive(Debug, Default)]
     pub struct Handed {
@@ -2832,9 +2923,12 @@ mod reading {
         /// `trait`, `generic`, `carrier`, `self field`, `impl bound`,
         /// `trait default`.
         pub how: BTreeSet<&'static str>,
-        /// Readings of a real clock in a body handed one — `Instant::now()` or
-        /// `SystemTime::now()`, either handed on as a function value, or an
-        /// `.elapsed()` — measurement origins aside.
+        /// The kinds of clock its signature hands it.
+        pub kinds: Kinds,
+        /// Readings of a real clock of a kind the body it stands in is handed —
+        /// `Instant::now()` or `.elapsed()` when handed an instant,
+        /// `SystemTime::now()` when handed a wall time, either `now` handed on
+        /// as a function value too — measurement origins aside.
         pub again: Vec<Offset>,
         /// What it cannot decide, and why.
         pub refusals: Vec<(Offset, String)>,
@@ -2844,9 +2938,9 @@ mod reading {
     /// reading, as the caller reads it in the writer's module.
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub enum Bound {
-        /// A clock, and how it was told: `closure`, `trait`, `generic`,
-        /// `carrier`.
-        Clock(&'static str),
+        /// A clock, how it was told (`closure`, `trait`, `generic`,
+        /// `carrier`), and the kinds it answers.
+        Clock(&'static str, Kinds),
         /// Not a clock.
         Not,
         /// What the reading cannot tell, and why.
@@ -2854,10 +2948,14 @@ mod reading {
     }
 
     impl Bound {
-        /// The two answers together: a clock over a refusal over nothing.
+        /// The two answers together: a clock over a refusal over nothing; two
+        /// clocks answer both their kinds.
         fn or(self, other: Self) -> Self {
             match (self, other) {
-                (Self::Clock(how), _) | (_, Self::Clock(how)) => Self::Clock(how),
+                (Self::Clock(how, one), Self::Clock(_, two)) => Self::Clock(how, one.union(two)),
+                (Self::Clock(how, kinds), _) | (_, Self::Clock(how, kinds)) => {
+                    Self::Clock(how, kinds)
+                }
                 (Self::Unread(why), _) | (_, Self::Unread(why)) => Self::Unread(why),
                 (Self::Not, Self::Not) => Self::Not,
             }
@@ -2882,44 +2980,60 @@ mod reading {
     /// is handed, if it is.
     pub struct Scope<'s> {
         pub names: Names<'s>,
-        pub generics: BTreeSet<String>,
-        pub self_how: Option<&'static str>,
+        pub generics: ClockParameters,
+        pub self_how: Option<(&'static str, Kinds)>,
     }
+
+    /// The type parameters in force that are bounded by a clock, with the
+    /// kinds each answers.
+    pub type ClockParameters = BTreeMap<String, Kinds>;
 
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum Handedness {
         No,
-        Yes,
+        /// Handed these kinds of clock.
+        Yes(Kinds),
         /// A closure parameter `now` with no written type.
         Unknown,
     }
 
-    /// Whether a path names a clock reading's type: its last segment is
-    /// `Instant` or `SystemTime`.
-    fn names_a_time(path: &syn::Path) -> bool {
-        path.segments
-            .last()
-            .is_some_and(|segment| segment.ident == "Instant" || segment.ident == "SystemTime")
+    /// The clock reading's type a path names: its last segment is `Instant`
+    /// (the monotonic clock) or `SystemTime` (the wall clock).
+    fn names_a_time(path: &syn::Path) -> Kinds {
+        match path.segments.last() {
+            Some(segment) if segment.ident == "Instant" => Kinds::INSTANT,
+            Some(segment) if segment.ident == "SystemTime" => Kinds::WALL,
+            _ => Kinds::default(),
+        }
     }
 
-    /// **Whether a type holds an instant anywhere**: an `Instant` or a
+    /// **The kinds of instant a type holds anywhere**: an `Instant` or a
     /// `SystemTime`, behind a reference or a pointer, in a tuple, an array, a
     /// slice, or any path's type arguments (`Option<Instant>`, `Box<Instant>`,
-    /// `Result<Instant, E>`, `(Instant, u64)`, `[Instant]`).
-    fn holds_an_instant(ty: &Type) -> bool {
+    /// `Result<Instant, E>`, `(Instant, u64)`, `[SystemTime]`).
+    fn time_kinds(ty: &Type) -> Kinds {
         match ty {
-            Type::Reference(reference) => holds_an_instant(&reference.elem),
-            Type::Ptr(pointer) => holds_an_instant(&pointer.elem),
-            Type::Paren(inner) => holds_an_instant(&inner.elem),
-            Type::Group(inner) => holds_an_instant(&inner.elem),
-            Type::Array(array) => holds_an_instant(&array.elem),
-            Type::Slice(slice) => holds_an_instant(&slice.elem),
-            Type::Tuple(tuple) => tuple.elems.iter().any(holds_an_instant),
-            Type::Path(path) => {
-                names_a_time(&path.path) || type_arguments(&path.path).any(holds_an_instant)
-            }
-            _ => false,
+            Type::Reference(reference) => time_kinds(&reference.elem),
+            Type::Ptr(pointer) => time_kinds(&pointer.elem),
+            Type::Paren(inner) => time_kinds(&inner.elem),
+            Type::Group(inner) => time_kinds(&inner.elem),
+            Type::Array(array) => time_kinds(&array.elem),
+            Type::Slice(slice) => time_kinds(&slice.elem),
+            Type::Tuple(tuple) => tuple
+                .elems
+                .iter()
+                .fold(Kinds::default(), |kinds, ty| kinds.union(time_kinds(ty))),
+            Type::Path(path) => type_arguments(&path.path)
+                .fold(names_a_time(&path.path), |kinds, ty| {
+                    kinds.union(time_kinds(ty))
+                }),
+            _ => Kinds::default(),
         }
+    }
+
+    /// Whether a type holds an instant of either kind anywhere.
+    fn holds_an_instant(ty: &Type) -> bool {
+        !time_kinds(ty).is_empty()
     }
 
     /// Every type argument a path's segments carry.
@@ -2937,8 +3051,12 @@ mod reading {
             })
     }
 
-    fn answers_an_instant(output: &ReturnType) -> bool {
-        matches!(output, ReturnType::Type(_, ty) if holds_an_instant(ty))
+    /// The kinds of instant an answer holds.
+    fn answer_kinds(output: &ReturnType) -> Kinds {
+        match output {
+            ReturnType::Type(_, ty) => time_kinds(ty),
+            ReturnType::Default => Kinds::default(),
+        }
     }
 
     /// What one bound is: `Fn() -> A`, `FnMut() -> A` or `FnOnce() -> A`
@@ -2962,8 +3080,9 @@ mod reading {
         if let syn::PathArguments::Parenthesized(arguments) = &last.arguments
             && matches!(last.ident.to_string().as_str(), "Fn" | "FnMut" | "FnOnce")
         {
-            return if arguments.inputs.is_empty() && answers_an_instant(&arguments.output) {
-                Bound::Clock("closure")
+            let kinds = answer_kinds(&arguments.output);
+            return if arguments.inputs.is_empty() && !kinds.is_empty() {
+                Bound::Clock("closure", kinds)
             } else {
                 Bound::Not
             };
@@ -2982,7 +3101,7 @@ mod reading {
 
     fn kinds<'t>(
         types: impl Iterator<Item = &'t Type>,
-        generics: &BTreeSet<String>,
+        generics: &ClockParameters,
         names: Names<'_>,
     ) -> Bound {
         types.fold(Bound::Not, |kind, ty| {
@@ -2996,7 +3115,7 @@ mod reading {
     /// a type that carries a clock — or holds one, behind a reference or a
     /// pointer, in a tuple, an array, a slice, or a path's type arguments
     /// (`Box<dyn Fn() -> Instant>`, `Option<&Deadline>`, `Ops<Clock>`).
-    fn type_kind(ty: &Type, generics: &BTreeSet<String>, names: Names<'_>) -> Bound {
+    fn type_kind(ty: &Type, generics: &ClockParameters, names: Names<'_>) -> Bound {
         match ty {
             Type::ImplTrait(bounded) => bounds_kind(&bounded.bounds, names),
             Type::TraitObject(bounded) => bounds_kind(&bounded.bounds, names),
@@ -3008,8 +3127,9 @@ mod reading {
             Type::Slice(slice) => type_kind(&slice.elem, generics, names),
             Type::Tuple(tuple) => kinds(tuple.elems.iter(), generics, names),
             Type::BareFn(pointer) => {
-                if pointer.inputs.is_empty() && answers_an_instant(&pointer.output) {
-                    Bound::Clock("closure")
+                let kinds = answer_kinds(&pointer.output);
+                if pointer.inputs.is_empty() && !kinds.is_empty() {
+                    Bound::Clock("closure", kinds)
                 } else {
                     Bound::Not
                 }
@@ -3017,9 +3137,10 @@ mod reading {
             Type::Path(path) => {
                 if path.qself.is_none()
                     && let Some(name) = path.path.get_ident()
-                    && generics.contains(&name.to_string())
+                    && let Some(kinds) = generics.get(&name.to_string())
                 {
-                    return Bound::Clock(if name == "Self" { "carrier" } else { "generic" });
+                    let how = if name == "Self" { "carrier" } else { "generic" };
+                    return Bound::Clock(how, *kinds);
                 }
                 let carried = if path.qself.is_none() {
                     (names.carrier)(&path.path)
@@ -3062,18 +3183,19 @@ mod reading {
     }
 
     /// The type parameters a header bounds by a clock, and what it cannot read.
-    pub type ClockGenerics = (BTreeSet<String>, Vec<(Offset, String)>);
+    pub type ClockGenerics = (ClockParameters, Vec<(Offset, String)>);
 
     /// **The type parameters `generics` bounds by a clock**, inline or in its
     /// `where` clause, and what it cannot read: a bound it cannot follow, and a
     /// `where` clause that bounds by a clock a type that is not a parameter.
     pub fn clock_generics(generics: &syn::Generics, names: Names<'_>) -> ClockGenerics {
-        let mut clocks = BTreeSet::new();
+        let mut clocks = ClockParameters::new();
         let mut refusals = Vec::new();
         for param in generics.type_params() {
             match bounds_kind(&param.bounds, names) {
-                Bound::Clock(_) => {
-                    clocks.insert(param.ident.to_string());
+                Bound::Clock(_, kinds) => {
+                    let known = clocks.entry(param.ident.to_string()).or_default();
+                    *known = known.union(kinds);
                 }
                 Bound::Unread(why) => refusals.push((offset(param), why)),
                 Bound::Not => {}
@@ -3092,10 +3214,11 @@ mod reading {
                 _ => None,
             };
             match (bounds_kind(&predicate.bounds, names), named) {
-                (Bound::Clock(_), Some(name)) => {
-                    clocks.insert(name.to_string());
+                (Bound::Clock(_, kinds), Some(name)) => {
+                    let known = clocks.entry(name.to_string()).or_default();
+                    *known = known.union(kinds);
                 }
-                (Bound::Clock(_), None) => refusals.push((
+                (Bound::Clock(..), None) => refusals.push((
                     offset(predicate),
                     "a `where` clause bounds by a clock a type that is not a parameter".to_owned(),
                 )),
@@ -3106,13 +3229,13 @@ mod reading {
         (clocks, refusals)
     }
 
-    /// Whether a pattern binds `now` to a type that holds an instant, through
-    /// tuple patterns over tuple types: `Some(true)` it does, `Some(false)` it
-    /// binds `now` to another type, `None` it binds no `now` the reading can
-    /// pair with a type.
-    fn binds_now(pattern: &Pat, ty: &Type) -> Option<bool> {
+    /// The kinds of instant a pattern binds `now` to, through tuple patterns
+    /// over tuple types: `Some` of them (none when `now` is of a type holding
+    /// no instant), `None` when it binds no `now` the reading can pair with a
+    /// type.
+    fn binds_now(pattern: &Pat, ty: &Type) -> Option<Kinds> {
         match (pattern, ty) {
-            (Pat::Ident(ident), _) if ident.ident == "now" => Some(holds_an_instant(ty)),
+            (Pat::Ident(ident), _) if ident.ident == "now" => Some(time_kinds(ty)),
             (Pat::Tuple(patterns), Type::Tuple(types))
                 if patterns.elems.len() == types.elems.len() =>
             {
@@ -3121,7 +3244,7 @@ mod reading {
                     .iter()
                     .zip(&types.elems)
                     .filter_map(|(pattern, ty)| binds_now(pattern, ty))
-                    .reduce(|one, other| one || other)
+                    .reduce(Kinds::union)
             }
             _ => None,
         }
@@ -3129,8 +3252,8 @@ mod reading {
 
     /// What one typed parameter hands its body, of a signature or a closure.
     enum Gives {
-        /// A clock, and how it was told.
-        Clock(&'static str),
+        /// A clock, how it was told, and its kinds.
+        Clock(&'static str, Kinds),
         /// A `now` of a type that holds no instant.
         OtherNow,
         /// Nothing to say.
@@ -3144,18 +3267,18 @@ mod reading {
     fn parameter(
         pattern: &Pat,
         ty: &Type,
-        generics: &BTreeSet<String>,
+        generics: &ClockParameters,
         names: Names<'_>,
         refusals: &mut Vec<(Offset, String)>,
     ) -> Gives {
         match type_kind(ty, generics, names) {
-            Bound::Clock(how) => return Gives::Clock(how),
+            Bound::Clock(how, kinds) => return Gives::Clock(how, kinds),
             Bound::Unread(why) => refusals.push((offset(ty), why)),
             Bound::Not => {}
         }
         match binds_now(pattern, ty) {
-            Some(true) => Gives::Clock("now"),
-            Some(false) => Gives::OtherNow,
+            Some(kinds) if !kinds.is_empty() => Gives::Clock("now", kinds),
+            Some(_) => Gives::OtherNow,
             None => {
                 let mut bound = Vec::new();
                 pattern_names(pattern, &mut bound);
@@ -3172,42 +3295,66 @@ mod reading {
         }
     }
 
-    /// How a signature hands its body a clock (see the guard's grammar), with
-    /// the clock-bounded type parameters in force inside it.
+    /// How a signature hands its body a clock.
+    struct Signed {
+        how: BTreeSet<&'static str>,
+        kinds: Kinds,
+        /// The clock-bounded type parameters in force inside it.
+        generics: ClockParameters,
+    }
+
+    /// How a signature hands its body a clock (see the guard's grammar), the
+    /// kinds, and the clock-bounded type parameters in force inside it.
     fn signature_handed(
         signature: &syn::Signature,
         scope: &Scope<'_>,
         refusals: &mut Vec<(Offset, String)>,
-    ) -> (BTreeSet<&'static str>, BTreeSet<String>) {
+    ) -> Signed {
         let (mut generics, unread) = clock_generics(&signature.generics, scope.names);
         refusals.extend(unread);
-        generics.extend(scope.generics.iter().cloned());
+        for (name, kinds) in &scope.generics {
+            generics.entry(name.clone()).or_insert(*kinds);
+        }
         let mut how = BTreeSet::new();
-        if let Some(handed) = scope.self_how
+        let mut handed_kinds = Kinds::default();
+        if let Some((handed, kinds)) = scope.self_how
             && signature.receiver().is_some()
         {
             how.insert(handed);
+            handed_kinds = handed_kinds.union(kinds);
         }
         for input in &signature.inputs {
             if let FnArg::Typed(typed) = input
-                && let Gives::Clock(handed) =
+                && let Gives::Clock(handed, kinds) =
                     parameter(&typed.pat, &typed.ty, &generics, scope.names, refusals)
             {
                 how.insert(handed);
+                handed_kinds = handed_kinds.union(kinds);
             }
         }
-        (how, generics)
+        Signed {
+            how,
+            kinds: handed_kinds,
+            generics,
+        }
     }
 
-    /// **Whether a trait declaration is a clock of its own**: one of its
-    /// methods takes its receiver and nothing else and answers an instant.
-    pub fn clock_trait(declared: &syn::ItemTrait) -> bool {
-        declared.items.iter().any(|item| {
-            matches!(item, syn::TraitItem::Fn(method)
-                if method.sig.receiver().is_some()
-                    && method.sig.inputs.len() == 1
-                    && answers_an_instant(&method.sig.output))
-        })
+    /// **The kinds of clock a trait declaration is of its own**: those its
+    /// methods that take their receiver and nothing else answer (none when it
+    /// is no clock).
+    pub fn clock_trait(declared: &syn::ItemTrait) -> Kinds {
+        declared
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                syn::TraitItem::Fn(method)
+                    if method.sig.receiver().is_some() && method.sig.inputs.len() == 1 =>
+                {
+                    Some(answer_kinds(&method.sig.output))
+                }
+                _ => None,
+            })
+            .fold(Kinds::default(), Kinds::union)
     }
 
     /// A data type's whole text, parsed as an item (the caller reads only
@@ -3216,13 +3363,13 @@ mod reading {
         syn::parse_str::<syn::Item>(text)
     }
 
-    /// **Whether a data type declares a field that holds a clock** (its own
-    /// clock-bounded parameters counted, and types that carry a clock as
-    /// `names` reads them), and what it cannot read.
+    /// **The kinds of clock a data type's fields hold** (its own clock-bounded
+    /// parameters counted, and types that carry a clock as `names` reads them;
+    /// none when it carries no clock), and what it cannot read.
     pub fn carries_a_clock(
         declared: &syn::Item,
         names: Names<'_>,
-    ) -> (bool, Vec<(Offset, String)>) {
+    ) -> (Kinds, Vec<(Offset, String)>) {
         let (generics, fields): (&syn::Generics, Vec<&syn::Field>) = match declared {
             syn::Item::Struct(item) => (&item.generics, item.fields.iter().collect()),
             syn::Item::Enum(item) => (
@@ -3233,13 +3380,13 @@ mod reading {
                     .collect(),
             ),
             syn::Item::Union(item) => (&item.generics, item.fields.named.iter().collect()),
-            _ => return (false, Vec::new()),
+            _ => return (Kinds::default(), Vec::new()),
         };
         let (clocks, mut refusals) = clock_generics(generics, names);
-        let mut carries = false;
+        let mut carries = Kinds::default();
         for field in fields {
             match type_kind(&field.ty, &clocks, names) {
-                Bound::Clock(_) => carries = true,
+                Bound::Clock(_, kinds) => carries = carries.union(kinds),
                 Bound::Unread(why) => refusals.push((offset(&field.ty), why)),
                 Bound::Not => {}
             }
@@ -3268,9 +3415,10 @@ mod reading {
         names: Names<'s>,
         handed: Vec<Handedness>,
         /// The clock-bounded type parameters in force, innermost last.
-        generics: Vec<BTreeSet<String>>,
-        /// Readings found, with whether the body they stand in is handed one.
-        readings: Vec<(Offset, Handedness)>,
+        generics: Vec<ClockParameters>,
+        /// Readings found, of which clock, with whether the body they stand in
+        /// is handed one.
+        readings: Vec<(Offset, Handedness, Clock)>,
         /// `.elapsed()` calls, with the lone name of their receiver if it is one.
         elapsed: Vec<(Offset, Handedness, Option<String>)>,
         /// `let x = Instant::now();` origins, by name.
@@ -3287,8 +3435,8 @@ mod reading {
 
     impl<'ast> Visit<'ast> for HandedWalk<'_> {
         fn visit_expr(&mut self, expr: &'ast Expr) {
-            if read_of(expr).is_some() {
-                self.readings.push((offset(expr), self.current()));
+            if let Some(clock) = read_of(expr) {
+                self.readings.push((offset(expr), self.current(), clock));
                 return;
             }
             match expr {
@@ -3300,15 +3448,16 @@ mod reading {
                     self.elapsed.push((offset(expr), self.current(), receiver));
                 }
                 Expr::Path(path) => {
-                    if named_now(path).is_some() {
-                        self.readings.push((offset(expr), self.current()));
+                    if let Some(clock) = named_now(path) {
+                        self.readings.push((offset(expr), self.current(), clock));
                     } else if let Some(name) = lone_name(expr) {
                         self.uses.entry(name).or_default().other += 1;
                     }
                 }
                 Expr::Closure(closure) => {
                     let generics = self.generics.last().cloned().unwrap_or_default();
-                    let (mut clock, mut other_now, mut untyped_now) = (false, false, false);
+                    let (mut clock, mut other_now, mut untyped_now) =
+                        (Kinds::default(), false, false);
                     for input in &closure.inputs {
                         match input {
                             Pat::Type(typed) => match parameter(
@@ -3318,7 +3467,7 @@ mod reading {
                                 self.names,
                                 &mut self.refusals,
                             ) {
-                                Gives::Clock(_) => clock = true,
+                                Gives::Clock(_, kinds) => clock = clock.union(kinds),
                                 Gives::OtherNow => other_now = true,
                                 Gives::Nothing => {}
                             },
@@ -3326,8 +3475,8 @@ mod reading {
                             _ => {}
                         }
                     }
-                    let handed = if clock {
-                        Handedness::Yes
+                    let handed = if !clock.is_empty() {
+                        Handedness::Yes(clock)
                     } else if other_now {
                         Handedness::No
                     } else if untyped_now {
@@ -3386,16 +3535,16 @@ mod reading {
         fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
             let scope = Scope {
                 names: self.names,
-                generics: BTreeSet::new(),
+                generics: ClockParameters::new(),
                 self_how: None,
             };
-            let (how, generics) = signature_handed(&item.sig, &scope, &mut self.refusals);
-            self.handed.push(if how.is_empty() {
+            let signed = signature_handed(&item.sig, &scope, &mut self.refusals);
+            self.handed.push(if signed.how.is_empty() {
                 Handedness::No
             } else {
-                Handedness::Yes
+                Handedness::Yes(signed.kinds)
             });
-            self.generics.push(generics);
+            self.generics.push(signed.generics);
             self.visit_block(&item.block);
             self.generics.pop();
             self.handed.pop();
@@ -3405,13 +3554,17 @@ mod reading {
     /// The handed-now reading of one function (see the guard's grammar).
     pub fn handed_now(signature: &syn::Signature, block: &syn::Block, scope: &Scope<'_>) -> Handed {
         let mut refusals = Vec::new();
-        let (how, generics) = signature_handed(signature, scope, &mut refusals);
+        let Signed {
+            how,
+            kinds,
+            generics,
+        } = signature_handed(signature, scope, &mut refusals);
         let mut walk = HandedWalk {
             names: scope.names,
             handed: vec![if how.is_empty() {
                 Handedness::No
             } else {
-                Handedness::Yes
+                Handedness::Yes(kinds)
             }],
             generics: vec![generics],
             readings: Vec::new(),
@@ -3435,6 +3588,7 @@ mod reading {
             .collect();
         let mut out = Handed {
             how,
+            kinds,
             again: Vec::new(),
             refusals: walk.refusals,
         };
@@ -3446,16 +3600,17 @@ mod reading {
                     .as_deref()
                     .is_none_or(|name| !admitted_names.contains(name))
             })
-            .map(|(at, handed, _)| (at, handed));
-        let readings: Vec<(Offset, Handedness)> = walk
+            .map(|(at, handed, _)| (at, handed, Clock::Instant));
+        let readings: Vec<(Offset, Handedness, Clock)> = walk
             .readings
             .into_iter()
-            .filter(|(at, _)| !admitted.contains(at))
+            .filter(|(at, ..)| !admitted.contains(at))
             .chain(measured)
             .collect();
-        for (at, handed) in readings {
+        for (at, handed, clock) in readings {
             match handed {
-                Handedness::Yes => out.again.push(at),
+                Handedness::Yes(kinds) if kinds.has(clock) => out.again.push(at),
+                Handedness::Yes(_) => {}
                 Handedness::Unknown => out.refusals.push((
                     at,
                     "a closure handed a `now` whose type is not written reads the clock".to_owned(),

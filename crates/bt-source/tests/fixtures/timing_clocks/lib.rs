@@ -432,3 +432,46 @@ pub fn with_an_alias(held: &Ticks) -> Instant {
     let _ = held;
     Instant::now()
 }
+
+// ── R8: a reading counts by kind ──
+
+/// Handed the wall clock, reads the monotonic one: a first reading, not found.
+pub fn wall_handed_reads_instant(now: SystemTime) -> Instant {
+    let _ = now;
+    Instant::now()
+}
+
+/// Handed an instant, reads the wall clock: a first reading, not found.
+pub fn instant_handed_reads_wall(now: Instant) -> SystemTime {
+    let _ = now;
+    SystemTime::now()
+}
+
+/// Handed a wall clock, measures an instant with `.elapsed()`: the monotonic clock, not found.
+pub fn wall_clock_handed_measures(clock: impl Fn() -> SystemTime, at: Instant) -> bool {
+    clock() > SystemTime::UNIX_EPOCH && at.elapsed() > Duration::ZERO
+}
+
+/// Handed both kinds, reads both again: found twice.
+pub fn handed_both(now: (Instant, SystemTime)) -> bool {
+    now.0 > Instant::now() || now.1 > SystemTime::now()
+}
+
+/// A carrier of the wall clock: its wall reading is found, its monotonic one is not.
+pub struct WallBeat {
+    clock: fn() -> SystemTime,
+}
+
+pub fn by_wall_carrier(held: &WallBeat) -> bool {
+    let _ = held;
+    Instant::now().elapsed() > Duration::ZERO || SystemTime::now() > SystemTime::UNIX_EPOCH
+}
+
+/// A wall clock trait: its wall reading is found, its monotonic ones are not.
+pub trait Wall {
+    fn wall(&self) -> SystemTime;
+}
+
+pub fn by_wall_trait(clock: &dyn Wall) -> bool {
+    clock.wall() <= SystemTime::now() || Instant::now().elapsed() > Duration::ZERO
+}
