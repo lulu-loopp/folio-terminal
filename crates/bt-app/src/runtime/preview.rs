@@ -20,7 +20,7 @@ use crate::runtime::web::page_destination;
 use crate::window_seam::prelude::*;
 use crate::{
     ADDRESS_FIELD_WANTS_THE_WHOLE_HEAD, AnimationEntry, AnimationWork, AppEvent, AttentionDelivery,
-    BackgroundDecode, BlockScrollPaint, BuiltMarkdown, CardWords, ClickIntent,
+    BackgroundAnswer, BackgroundAsk, BlockScrollPaint, BuiltMarkdown, CardWords, ClickIntent,
     ClipboardPictureAnswer, ClipboardPictureInbox, ClipboardPictureJob, DOCK_PREVIEW_FADE, DiffRow,
     DocumentMath, DocumentPictures, DragLatch, DrawnAnimation, DropPreview, FOOT_REVEAL_FEEDBACK,
     FileMenuTarget, FilePick, FillSent, FoldedLevel, FootSaying, ForeignPane, FormulaSwitches,
@@ -776,7 +776,13 @@ impl<B: Backend> Runtime<'_, B> {
     /// window without a picture, and says so once in a card: a wallpaper on a
     /// drive that is not plugged in today is the ordinary case, and quietly
     /// erasing the setting would mean plugging the drive back in changed nothing.
-    pub(in crate::runtime) fn reload_background_picture(&mut self) -> Result<()> {
+    ///
+    /// `asked` says which read this is: [`BackgroundAsk::FIRST`] from every caller but one, and the
+    /// one more ask [`crate::BackgroundDecode::answer`] names for a held first read.
+    pub(in crate::runtime) fn reload_background_picture(
+        &mut self,
+        asked: BackgroundAsk,
+    ) -> Result<()> {
         let stored = self.app.settings_store.loaded().background_image.clone();
         // Every call withdraws whatever the last one asked for, `None` included:
         // a clear that raced a slow decode must win, and the generation is how
@@ -809,11 +815,8 @@ impl<B: Backend> Runtime<'_, B> {
                 });
                 *slot
                     .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(BackgroundDecode {
-                    generation,
-                    file,
-                    result,
-                });
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    Some(asked.answered(generation, file, result));
                 // After the answer is in the slot, never before.
                 let _ = proxy.send_event(AppEvent::BackgroundPictureReady);
             },
@@ -857,12 +860,16 @@ impl<B: Backend> Runtime<'_, B> {
         let Some(landed) = self.window.background_decode.take_current() else {
             return Ok(());
         };
-        match landed.result {
-            Ok(image) => {
+        match (landed.answer(), landed.result) {
+            (_, Ok(image)) => {
                 self.window.background_picture = Some(image);
                 self.apply_window_ground()?;
             }
-            Err(refusal) => {
+            // Held by another program, on the first read: the picture on the glass is kept and
+            // nothing is said; the file is read again as the question the answer names, the one
+            // more ask (T-HELD-FILE-IN-THE-OTHER-PICTURE-LANES).
+            (BackgroundAnswer::Ask(next), Err(_)) => self.reload_background_picture(next)?,
+            (_, Err(refusal)) => {
                 self.window.background_picture = None;
                 self.apply_window_ground()?;
                 self.toast(
@@ -886,7 +893,7 @@ impl<B: Backend> Runtime<'_, B> {
         if !self.app.settings_store.store(settings) {
             return Ok(false);
         }
-        self.reload_background_picture()?;
+        self.reload_background_picture(BackgroundAsk::FIRST)?;
         self.apply_window_ground()?;
         Ok(true)
     }
@@ -1146,7 +1153,7 @@ impl<B: Backend> Runtime<'_, B> {
         // thing that says where that is.
         let x = (name_box[0] + edit.caret_px).min(name_box[2] - caret_width);
         self.window.rename_caret_line = Some([x, name_box[1], x + caret_width, name_box[3]]);
-        self.window.rename_drawn = Some(drawn);
+        self.window.drawn_fields.name = Some(drawn);
         (tools, Some(edit))
     }
 
@@ -1243,7 +1250,7 @@ impl<B: Backend> Runtime<'_, B> {
         // ruling moved as far as an IME is concerned.
         let x = (box_[0] + edit.caret_px).min(box_[2] - caret_width);
         self.window.rename_caret_line = Some([x, box_[1], x + caret_width, box_[3]]);
-        self.window.rename_drawn = Some(drawn);
+        self.window.drawn_fields.name = Some(drawn);
         (measure_in, Some(edit), refusal)
     }
 
@@ -1299,7 +1306,7 @@ impl<B: Backend> Runtime<'_, B> {
         // IME's candidate list has to stand under what is being typed.
         let x = (box_[0] + edit.caret_px).min(box_[2] - caret_width);
         self.window.rename_caret_line = Some([x, box_[1], x + caret_width, box_[3]]);
-        self.window.rename_drawn = Some(drawn);
+        self.window.drawn_fields.name = Some(drawn);
         Some(edit)
     }
 

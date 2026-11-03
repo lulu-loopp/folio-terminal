@@ -402,6 +402,11 @@ pub mod engine {
         Unsupported,
         /// Something else went wrong, and it says what.
         Other(&'static str),
+        /// The engine thread did not build its player inside [`OPEN_BUDGET`]
+        /// and has said nothing — the Windows arm's variant, so the open
+        /// budget's run-out is its own cause on both arms rather than one more
+        /// `Other` (plan row 152).
+        Unresponsive,
         /// **The engine's own refusal**: the source said neither what it is
         /// nor why it could not be opened within [`LOAD_BUDGET`] of the open.
         NotLoaded,

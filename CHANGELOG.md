@@ -16,6 +16,7 @@ All notable changes to Folio are recorded here. The format follows
 - A video that has ended plays again from the start, whether you press the play button, press Space or click the picture. <!-- zh: 已播完的视频再次播放时从头开始，无论是按播放按钮、按空格还是单击画面。 -->
 - When a picture is zoomed in past its pane, the arrow keys move around it, and Shift with an arrow moves further. <!-- zh: 图片放大到超出窗格时，方向键可在图上移动，按住 Shift 再按方向键移动得更远。 -->
 - Middle-clicking a file in the files column opens it in a new preview pane beside the current one, which keeps what it shows. <!-- zh: 在文件列中用鼠标中键单击文件，会在当前预览窗格旁新开一个窗格显示它，当前窗格的内容保持不变。 -->
+- On Windows, a pane where Claude Code or Codex was running comes back after Folio or Windows restarts with that agent resuming the same conversation in the same folder; when the session cannot be resumed, the pane opens its shell and says so. Settings > Agents > Resume agents after restart turns this off. <!-- zh: pending T-AGENT-RESUME-AFTER-RESTART -->
 
 ### Fixed
 
@@ -38,7 +39,11 @@ All notable changes to Folio are recorded here. The format follows
 - On Windows, an update no longer fails to prepare when an antivirus scan or another program holds one of its files open for a moment; Folio now waits for the file to be let go and goes on. <!-- zh: 在 Windows 上，杀毒软件扫描或其他程序短暂占用更新的某个文件时，更新不再准备失败；Folio 现在会等该文件被释放后继续。 -->
 - When a video's picture takes too long to appear on a busy computer, Folio now asks for it once more by itself instead of treating the video as one it cannot show. <!-- zh: pending -->
 - While you rename a tab, a file or a page's address, clicking inside the name now puts the text cursor where you clicked, Shift-clicking extends the selection, and dragging selects. <!-- zh: pending T-TAB-RENAME-FIELD-MOUSE-CARET -->
+- On Windows, tabs come back after a restart or a shutdown again: the system ends the tabs' shells before it asks Folio to close, and each of those shells used to close its tab, pinned or not, so the layout Folio then saved was missing them. A shell the system ends now leaves its pane in place, with the note "Ended by the system at shutdown", and the tab is restored at the next start, pinned or offered by the restore card. If you run 0.4.8, install this version by hand (or with `winget upgrade`): 0.4.8 cannot update itself to it. <!-- zh: pending T-SHUTDOWN-KILLS-SHELLS-BEFORE-THE-LAYOUT-IS-SAVED -->
 - On Windows, a picture or video that another program is holding open (for example a recording still being written) is no longer treated as a file Folio cannot show: Folio asks for it once more by itself, and again when you look at it anew, and a picture's preview says the file is in use by another program. <!-- zh: pending -->
+- Clicking inside the find bar, a commit graph's search, a Settings field, the command palette or a git branch prompt now puts the text cursor where you clicked, Shift-clicking extends the selection, and dragging selects; a selection in any of them is now shown highlighted, and a long Settings field no longer shifts its text under the pointer when you click in it. <!-- zh: pending T-CHROME-FIELDS-CARET-BY-POINTER -->
+- On Windows, three more pictures are no longer given up on while another program holds the file: an animated GIF is no longer marked "would not play" and plays when you open it again or the file changes; a picture path printed in the terminal gets its underline and Ctrl+click when Folio's second read finds the file free; and a background picture is read once more before Folio says it could not be read. <!-- zh: pending -->
+- When Folio is started through the `folio` link an older winget (before 1.9) makes, Settings > About > Licences now opens the notices file that came with the copy instead of the web page. <!-- zh: pending T-NOTICES-DESTINATION-OFF-THE-WINDOW-THREAD -->
 
 ## 0.4.8-preview — 2026-10-23
 

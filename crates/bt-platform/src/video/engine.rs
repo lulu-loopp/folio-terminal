@@ -159,7 +159,7 @@ use windows::core::{BSTR, Interface, implement};
 
 use crate::engine_ledger;
 use crate::engine_ledger::LedgerEntry;
-use crate::video_load::{Load, LoadDeadline};
+use crate::video_load::{Load, LoadDeadline, OpenDeadline};
 
 /// **How often the engine thread asks whether a new picture has arrived, while
 /// one is expected.**
@@ -422,10 +422,10 @@ pub struct Engine {
     thread: Option<std::thread::JoinHandle<()>>,
     source: PathBuf,
     seen_generation: u64,
-    /// When [`Engine::open`] returned — which, since it waits for nothing, is
-    /// also when the engine thread was asked to build one. [`Self::state`]
-    /// measures [`OPEN_BUDGET`] from here.
-    opened_at: Instant,
+    /// [`OPEN_BUDGET`] after [`Engine::open`] was asked — which, since it waits
+    /// for nothing, is also when the engine thread was asked to build one.
+    /// [`Self::state`] reads it.
+    open: OpenDeadline,
 }
 
 impl std::fmt::Debug for Engine {
@@ -508,7 +508,7 @@ impl Engine {
             thread: Some(thread),
             source,
             seen_generation: 0,
-            opened_at: asked_at,
+            open: OpenDeadline::from_open(asked_at),
         })
     }
 
@@ -539,7 +539,7 @@ impl Engine {
             thread: Some(thread),
             source: PathBuf::from("scripted"),
             seen_generation: 0,
-            opened_at: Instant::now(),
+            open: OpenDeadline::from_open(Instant::now()),
         }
     }
 
@@ -558,19 +558,33 @@ impl Engine {
     /// returns, a device stuck in a reset. This reading is what ends that: past
     /// the budget with nothing built and nothing said, the answer is
     /// [`EngineError::Unresponsive`], which is a sentence a surface already
-    /// knows how to print. Stable once it is true, so it is as sticky as the
-    /// errors the engine thread publishes itself.
+    /// knows how to print.
+    ///
+    /// **It is a reading, not a latch** (plan row 152): an engine thread that
+    /// builds its engine late, or publishes a refusal of its own, replaces it on
+    /// the next reading. The window retires a seat at the first reading that
+    /// says it, so no surface sees it change. The decision is
+    /// `video_load::OpenDeadline::missed`'s, the macOS arm's too; this reads it at the
+    /// real clock (`state_at`).
     #[must_use]
     pub fn state(&self) -> EngineState {
+        self.state_at(Instant::now)
+    }
+
+    /// [`Self::state`] read at `now`: the real clock from [`Self::state`], an
+    /// instant a test chose in a test. `now` is asked only when due — while
+    /// nothing has been said and nothing is built.
+    fn state_at(&self, now: impl FnOnce() -> Instant) -> EngineState {
         let state = *self
             .shared
             .state
             .lock()
             .unwrap_or_else(|held| held.into_inner());
-        if state.error.is_none()
-            && !self.shared.built.load(Ordering::Acquire)
-            && self.opened_at.elapsed() > OPEN_BUDGET
-        {
+        if self.open.missed(
+            now,
+            || self.shared.built.load(Ordering::Acquire),
+            state.error.is_some(),
+        ) {
             return EngineState {
                 error: Some(EngineError::Unresponsive),
                 ..state
@@ -1908,6 +1922,23 @@ mod tests {
         reached
     }
 
+    /// **Wait for a real engine's terminal answer about its load** — ready, or
+    /// refused — on the engine thread's own publications, within
+    /// [`LOAD_ANSWER_PATIENCE`], and answer the state the wait ended on.
+    ///
+    /// Not [`Engine::wait_for_metadata`]: that reads [`Engine::state`], whose
+    /// open budget is read on the real clock, so a build a loaded runner took
+    /// past [`OPEN_BUDGET`] to schedule would end the wait on
+    /// `EngineError::Unresponsive` and turn a test about a file red for the
+    /// machine (plan row 152). The published state never carries that reading,
+    /// and the wait is woken by each publication, not by a poll.
+    fn its_load_answered(engine: &Engine) -> EngineState {
+        engine.state_reaching(
+            |state| state.ready || state.error.is_some(),
+            LOAD_ANSWER_PATIENCE,
+        )
+    }
+
     /// RED — **opening a video never blocks the thread that asked** (the freeze
     /// of 2026-08-28; §7.42's rule about the drawing thread).
     ///
@@ -1974,11 +2005,8 @@ mod tests {
     fn an_engine_reports_the_duration_and_size_of_a_file_it_opened() {
         let _ledger = ledger_gate();
         let mut engine = Engine::open(&fixture("folio-video-test.mp4")).expect("an engine opens");
-        assert!(
-            engine.wait_for_metadata(LOAD_ANSWER_PATIENCE),
-            "metadata: {:?}",
-            engine.state()
-        );
+        let loaded = its_load_answered(&engine);
+        assert!(loaded.ready, "metadata: {loaded:?}");
         let state = engine.state();
         assert_eq!(
             state.natural_size,
@@ -2037,7 +2065,8 @@ mod tests {
     fn a_frame_arrives_after_play_and_position_advances() {
         let _ledger = ledger_gate();
         let mut engine = Engine::open(&fixture("folio-video-test.mp4")).expect("an engine opens");
-        assert!(engine.wait_for_metadata(LOAD_ANSWER_PATIENCE));
+        let loaded = its_load_answered(&engine);
+        assert!(loaded.ready, "metadata: {loaded:?}");
         engine.set_muted(true);
         engine.play();
         let deadline = Instant::now() + Duration::from_secs(15);
@@ -2110,11 +2139,8 @@ mod tests {
     fn a_quicktime_file_plays_where_the_browser_would_not_open_it() {
         let _ledger = ledger_gate();
         let mut engine = Engine::open(&fixture("folio-video-test.mov")).expect("an engine opens");
-        assert!(
-            engine.wait_for_metadata(LOAD_ANSWER_PATIENCE),
-            "metadata: {:?}",
-            engine.state()
-        );
+        let loaded = its_load_answered(&engine);
+        assert!(loaded.ready, "metadata: {loaded:?}");
         assert_eq!(engine.state().natural_size, Some((160, 120)));
         engine.set_muted(true);
         engine.play();
@@ -2148,11 +2174,8 @@ mod tests {
         let _ledger = ledger_gate();
         let mut engine = Engine::open_on(&fixture("folio-video-test.mp4"), Adapter::Software)
             .expect("a WARP engine opens");
-        assert!(
-            engine.wait_for_metadata(LOAD_ANSWER_PATIENCE),
-            "metadata: {:?}",
-            engine.state()
-        );
+        let loaded = its_load_answered(&engine);
+        assert!(loaded.ready, "metadata: {loaded:?}");
         // Asked once the metadata is in and not on the line after the open: the
         // device is chosen on the engine's own thread, and since the open stopped
         // waiting for that thread there is nothing to have chosen it yet.
@@ -2318,10 +2341,10 @@ mod tests {
         );
         let mut engine = Engine::open(&fixture("folio-video-test.mov"))
             .expect("the same platform opens the file the table refused");
+        let loaded = its_load_answered(&engine);
         assert!(
-            engine.wait_for_metadata(LOAD_ANSWER_PATIENCE),
-            "a type answered `No` still loaded: {:?}",
-            engine.state()
+            loaded.ready,
+            "a type answered `No` still loaded: {loaded:?}"
         );
         assert_eq!(engine.state().natural_size, Some((160, 120)));
         engine.shutdown();
@@ -2391,7 +2414,8 @@ mod tests {
     fn the_verbs_reach_the_engine() {
         let _ledger = ledger_gate();
         let mut engine = Engine::open(&fixture("folio-video-test.mp4")).expect("an engine opens");
-        assert!(engine.wait_for_metadata(LOAD_ANSWER_PATIENCE));
+        let loaded = its_load_answered(&engine);
+        assert!(loaded.ready, "metadata: {loaded:?}");
         engine.set_muted(true);
         engine.set_volume(0.25);
         engine.set_rate(1.5);
@@ -2615,6 +2639,64 @@ mod tests {
         let known = script.turns(&engine, 2);
         assert_eq!(known.length(), Length::Known(5.0), "{known:?}");
         engine.shutdown();
+    }
+
+    /// **An engine whose thread never started**, asked for at `asked` — the
+    /// handle's own parts and nothing behind them, so what [`Engine::state_at`]
+    /// reads is only what the test puts in `shared`. No thread, so its drop
+    /// says nothing and waits for nothing.
+    fn unbuilt_at(asked: Instant) -> Engine {
+        let (commands, _inbox) = mpsc::channel();
+        Engine {
+            commands,
+            shared: Arc::new(Shared::default()),
+            thread: None,
+            source: PathBuf::from("unbuilt"),
+            seen_generation: 0,
+            open: OpenDeadline::from_open(asked),
+        }
+    }
+
+    /// RED — **an engine that has not come up is unresponsive only past its
+    /// budget, a late build un-says it, and a refusal the thread said is never
+    /// covered by it** (plan row 152).
+    ///
+    /// On instants the test chooses, not on the real clock: [`Engine::state`]
+    /// is [`Engine::state_at`] read at `Instant::now()`, and this reads it at the
+    /// budget, a nanosecond past it and an hour past it. The late build is the
+    /// planted late answer — `built` set after the reading past the budget.
+    ///
+    /// MUTATION: read the real clock in `state_at` and the reading past the
+    /// budget is in time; drop the `built` from the decision and the late build
+    /// is still unresponsive; drop the `errored` and the refusal reads as
+    /// `Unresponsive`.
+    #[test]
+    fn an_engine_that_has_not_come_up_is_unresponsive_only_past_its_budget() {
+        let asked = Instant::now();
+        let due = asked + OPEN_BUDGET;
+        let past = due + Duration::from_nanos(1);
+
+        let late = unbuilt_at(asked);
+        assert_eq!(late.state_at(|| due).error, None, "at the budget, in time");
+        assert_eq!(
+            late.state_at(|| past).error,
+            Some(EngineError::Unresponsive),
+            "past the budget with nothing built and nothing said"
+        );
+        late.shared.built.store(true, Ordering::Release);
+        assert_eq!(
+            late.state_at(|| past).error,
+            None,
+            "an engine built after the budget is a reading, not a latch"
+        );
+
+        let refused = unbuilt_at(asked);
+        publish_failure(&refused.shared, EngineError::Unsupported);
+        assert_eq!(
+            refused.state_at(|| due + OPEN_BUDGET * 720).error,
+            Some(EngineError::Unsupported),
+            "the thread's own refusal keeps its cause past the budget"
+        );
     }
 
     /// RED (T-DROP-DOORS, D-80) — **an engine dropped without its door says so

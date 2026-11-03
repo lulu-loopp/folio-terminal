@@ -9469,16 +9469,17 @@ mod tests {
         assert_eq!(
             owners,
             [
+                "Runtime::bear_successor",
                 "Runtime::land_pane_birth",
                 "Runtime::pop_out_preview",
-                "Runtime::restart_shell",
                 "Runtime::split_seat",
                 "create_leaf_session",
                 "create_tab_state",
             ],
-            "new tab, restore, Recent and Duplicate enter through create_tab_state; split, \
-             Restart shell and preview stand-in enter directly; every terminal birth still \
-             reaches the constructor that composes PowerShell"
+            "new tab, restore, Recent and Duplicate enter through create_tab_state; split and \
+             preview stand-in enter directly, and Restart shell and an ended agent's hand-back \
+             through their one successor; every terminal birth still reaches the constructor \
+             that composes PowerShell"
         );
     }
 

@@ -307,6 +307,11 @@ impl<B: Backend> Runtime<'_, B> {
             // arrangement, and its chassis. No scrim.
             (self.uninstall_card_build(&layout), ModalBand::Fixed)
         } else if let Some(layout) = self.settings_layout() {
+            // **The focused field's scroll, settled once for the frame** (0.4.9 plan row 180,
+            // ruling 2): the painter draws the field pushed left by it and the run a press
+            // reads is recorded with it. Settled before the readings below borrow the
+            // window.
+            let field_scroll = self.settle_settings_field_scroll(&layout);
             // The hover and the readings first, then the renderer: a combo whose
             // value outgrows its 118px button is ellipsised, and only the font
             // knows where the cut falls. Same division, and same hoist, as the
@@ -343,6 +348,16 @@ impl<B: Backend> Runtime<'_, B> {
             // the caret, and the caret past the pre-edit — the palette's and the capsule's
             // picture of a composition, and the string `settings_field_caret_line`
             // measures the input method's rectangle off.
+            let field_caret = |(target, from, to): (settings::SettingsTarget, usize, usize)| {
+                (
+                    target,
+                    settings::FieldCaret {
+                        from,
+                        to,
+                        scroll_px: field_scroll,
+                    },
+                )
+            };
             let editor = self.window.settings.editor();
             let editor_env: Vec<(String, String)> = editor.map_or_else(Vec::new, |editor| {
                 editor
@@ -353,7 +368,9 @@ impl<B: Backend> Runtime<'_, B> {
                     })
                     .collect()
             });
-            let editor_caret = editor.and_then(|editor| editor.caret_of(focus_for_caret));
+            let editor_caret = editor
+                .and_then(|editor| editor.caret_of(focus_for_caret))
+                .map(field_caret);
             let editor_shown = editor.map(|editor| {
                 (
                     editor.name.composed(),
@@ -402,7 +419,7 @@ impl<B: Backend> Runtime<'_, B> {
                 .filter(|(held, _, _)| {
                     *held == settings::SettingsTarget::Field(settings::SettingsRow::QuakeCommand)
                 })
-                .map(|(_, from, to)| (from, to));
+                .map(|caret| field_caret(caret).1);
             let summon = settings::SummonInk {
                 caps: &summon_caps,
                 listening: summon_listening,
@@ -411,22 +428,22 @@ impl<B: Backend> Runtime<'_, B> {
             };
             let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
             let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
-            (
-                settings::build(
-                    &layout,
-                    hover,
-                    focus,
-                    values,
-                    &shortcuts,
-                    &profile_lines,
-                    &background_image,
-                    recording,
-                    editor,
-                    summon,
-                    &mut measure,
-                ),
-                ModalBand::Settings,
-            )
+            let built = settings::build(
+                &layout,
+                hover,
+                focus,
+                values,
+                &shortcuts,
+                &profile_lines,
+                &background_image,
+                recording,
+                editor,
+                summon,
+                &mut measure,
+            );
+            // Every field the page drew, as it drew it, for a press to read (row 180).
+            self.record_settings_field_runs(&layout, field_scroll);
+            (built, ModalBand::Settings)
         } else if let Some(layout) = self.restore_layout() {
             // Above the strip but under no scrim: the window behind it is not
             // dimmed (mock-up 2219-2221), though since 0.4.5 ticket 57 nothing
