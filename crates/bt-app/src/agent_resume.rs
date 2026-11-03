@@ -332,6 +332,7 @@ impl AgentAccount {
     }
 
     /// Whether this pane's child is a resumed agent.
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn is_resumed(&self) -> bool {
         self.resumed.is_some()
@@ -467,7 +468,9 @@ pub(crate) struct Restore {
 }
 
 impl Restore {
-    /// No resume: what every revive that is not a launch's or the card's asks for.
+    /// No resume: what every revive that is not a launch's or the card's asks for — today only the
+    /// tests' `revive_plan`, every product revive being one of those two.
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn off() -> Self {
         Self {

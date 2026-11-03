@@ -386,7 +386,7 @@ fn a_record_is_cleared_by_the_agents_own_exit_and_not_by_session_end() {
 /// every turn.
 #[test]
 fn a_typed_agents_record_ends_with_the_command_it_was_typed_as() {
-    let mut tabs = vec![ringing_tab(1, 1)];
+    let mut tabs = [ringing_tab(1, 1)];
     let seat = tabs[0].seats.terminals()[0];
     let leaf = &mut tabs[0]
         .sessions
@@ -422,7 +422,7 @@ fn a_typed_agents_record_ends_with_the_command_it_was_typed_as() {
 /// hands back.
 #[test]
 fn the_layout_writes_a_panes_record_and_the_shell_it_was() {
-    let mut tabs = vec![ringing_tab(1, 1)];
+    let mut tabs = [ringing_tab(1, 1)];
     let seat = tabs[0].seats.terminals()[0];
     let seed = SeedAgent::Resume(crate::agent_resume::Resume {
         record: claude_record(),

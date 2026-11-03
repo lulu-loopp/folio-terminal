@@ -35563,7 +35563,14 @@ impl Runtime<'_, Native> {
                             PreviewRestore::default(),
                         )]
                     } else {
-                        let mut roots: Vec<_> = plan.open.iter().map(revive_plan).collect();
+                        // A launch's pinned tabs resume their agents as this run's settings say
+                        // (row 195), on the same road as a later window's and the card's.
+                        let resuming = agent_resume::Restore::of_this_run(settings_store.loaded());
+                        let mut roots: Vec<_> = plan
+                            .open
+                            .iter()
+                            .map(|tab| revive_plan_with(tab, resuming))
+                            .collect();
                         if let (Some(cli_root), Some(slot)) = (cli_root, cli_slot) {
                             roots.insert(slot, cli_root);
                         }
