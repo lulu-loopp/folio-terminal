@@ -58517,8 +58517,8 @@ mod platform_gate_tests {
         // Homebrew records, and the guard that detaches an image mounted under a test's folder
         // (`hdiutil`); the Prepare's pure parts run everywhere.
         "update_prepare_macos_tests.rs",
-        // Windows-only test fixtures: a journal another program holds open (`ScannerHold`, shared
-        // with `update_startup`'s retirement tests); the Prepare's refusal elsewhere is portable.
+        // Windows-only test fixtures: the Prepare over a release a test root signed, a journal held
+        // open (`ScannerHold`, shared with `update_startup`); one test pins its refusal elsewhere.
         "update_prepare_windows_tests.rs",
         // Only test fixtures: the rescue build running from `H\<txn>` and the scanner holds
         // its retirement's worker waits out (Windows), and the mounted image a retirement
