@@ -611,7 +611,7 @@ impl<B: Backend> Runtime<'_, B> {
         // its first present would flash opaque; the picture is decoded here for
         // the same reason. A missing or unreadable file costs a card and an
         // ordinary window, never a failed launch.
-        self.reload_background_picture()?;
+        self.reload_background_picture(crate::BackgroundAsk::FIRST)?;
         self.apply_window_ground()?;
         // The two postures, re-applied because they are postures: a window that
         // was told to stay in front last week is a window that stays in front
