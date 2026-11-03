@@ -52,13 +52,14 @@
 #     `Reader::path_entries` in window_waits_tests.rs) names a site by the
 #     entry's canonical path, its receiver typed; the verb is coarser, so two
 #     entries that share it read as one verb, and the gate then refuses their
-#     rows rather than admits them (plan row 185). New means the working
-#     tree's registry `# vocabulary` has the verb and the baseline's has none, so a re-spelling
-#     that keeps `Parent::last` (a re-export path: `mpsc::Receiver::recv` for
-#     `std::sync::mpsc::Receiver::recv`) is no new verb, and one that changes it
-#     is (`JoinHandle::<T>::join` reads as `<T>::join`, so it needs a dated
-#     block like any new verb). A widened vocabulary reveals sites that were already
-#     there, and the block says when and which
+#     rows rather than admits them (plan row 185). New means the working tree's
+#     registry `# vocabulary` has the verb and the baseline's has none, so a
+#     re-spelling that keeps `Parent::last` (a re-export path:
+#     `mpsc::Receiver::recv` for `std::sync::mpsc::Receiver::recv`) is no new
+#     verb, and one that changes it is (`JoinHandle::<T>::join` reads as
+#     `<T>::join`, so it needs a dated block like any new verb). A widened
+#     vocabulary reveals sites that were already there, and the block says when
+#     and which
 #     (T-BARE-SITE-VOCABULARY-WAIT-WHILE-BLIND-SPOT, plan row 176, ruling R1 and
 #     its tightening). It is reported as revealed, not refused; the equality half
 #     holds its rows to the code, and from the next merge base on it only
