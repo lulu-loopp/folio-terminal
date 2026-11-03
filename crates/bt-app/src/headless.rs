@@ -2129,7 +2129,11 @@ mod tests {
         assert!(window.watch_system_settings(Box::new(|_| {})).is_none());
         assert!(
             window
-                .watch_session_end(Box::new(|_| {}), Box::new(String::new))
+                .watch_session_end(
+                    Box::new(|_| {}),
+                    Box::new(String::new),
+                    std::rc::Rc::new(|| {})
+                )
                 .is_none()
         );
         assert!(
