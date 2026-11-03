@@ -202,25 +202,29 @@ fn parse_page_count(bytes: Vec<u8>) -> Option<u32> {
 /// The open and the read go through [`refused`]; the length is asked of the
 /// handle already open, which no other program can refuse.
 fn read_capped(path: &Path) -> Result<Option<Vec<u8>>, Held> {
-    let file = match bt_platform::file_reads::open(bt_platform::file_reads::Lane::Pdf, path) {
-        Ok(file) => file,
-        Err(error) => return refused(&error),
-    };
-    let Ok(metadata) = file.metadata() else {
+    let file: bt_platform::file_reads::Reader<'_, std::fs::File> =
+        match bt_platform::file_reads::open(bt_platform::file_reads::Lane::Pdf, path) {
+            Ok(file) => file,
+            Err(error) => return refused(&error),
+        };
+    let Some(mut bytes) = capped_buffer(&file) else {
         return Ok(None);
     };
-    let len = metadata.len();
-    if len == 0 || len > MAX_RASTER_BYTES {
-        return Ok(None);
-    }
-    let Ok(capacity) = usize::try_from(len) else {
-        return Ok(None);
-    };
-    let mut bytes = Vec::with_capacity(capacity);
     if let Err(error) = file.take(MAX_RASTER_BYTES).read_to_end(&mut bytes) {
         return refused(&error);
     }
     Ok(Some(bytes))
+}
+
+/// [`read_capped`]'s buffer, sized from the open handle's length — or `None` for a file that is
+/// empty, over [`MAX_RASTER_BYTES`], or whose length cannot be asked, each of which is the
+/// module's one silence.
+fn capped_buffer(file: &bt_platform::file_reads::Reader<'_, std::fs::File>) -> Option<Vec<u8>> {
+    let len = file.metadata().ok()?.len();
+    if len == 0 || len > MAX_RASTER_BYTES {
+        return None;
+    }
+    Some(Vec::with_capacity(usize::try_from(len).ok()?))
 }
 
 /// **The largest file this module will parse** — [`page_raster`], and the

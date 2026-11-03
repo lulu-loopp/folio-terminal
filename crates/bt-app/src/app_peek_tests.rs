@@ -885,7 +885,11 @@ fn a_pdf_another_program_holds_is_asked_once_more_and_then_only_on_a_new_card() 
             PeekFactsAnswer::Unanswered { asked_again: false },
             "held, not a file with no count"
         );
-        assert_eq!(facts.pages(), None, "and the card prints the size alone");
+        assert_eq!(
+            facts.stated_pages(),
+            None,
+            "and the card prints the size alone"
+        );
         assert!(facts.ask_once_more(), "asked once more by the next rebuild");
         assert_eq!(facts.answer, PeekFactsAnswer::Asked { once_more: true });
         facts.hear(held());
@@ -907,7 +911,11 @@ fn a_pdf_another_program_holds_is_asked_once_more_and_then_only_on_a_new_card() 
     facts.hear(held());
     assert!(facts.ask_once_more());
     facts.hear(Ok(Some(3)));
-    assert_eq!(facts.pages(), Some(3), "let go of: the count the file says");
+    assert_eq!(
+        facts.stated_pages(),
+        Some(3),
+        "let go of: the count the file says"
+    );
     assert!(!facts.ask_once_more(), "and an answer is never asked again");
 
     // A page.

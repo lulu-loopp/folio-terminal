@@ -1304,7 +1304,7 @@ impl<B: Backend> Runtime<'_, B> {
             .as_mut()
             .filter(|facts| facts.path == path)
         {
-            Some(facts) => (facts.pages(), facts.ask_once_more()),
+            Some(facts) => (facts.stated_pages(), facts.ask_once_more()),
             None => {
                 self.window.peek_facts = Some(PeekFacts::asked(path.to_owned()));
                 (None, true)

@@ -20280,7 +20280,7 @@ struct PeekThumbnail {
 /// in this window performs by comparing what came back against what is being
 /// looked at now.
 ///
-/// The card reads [`Self::pages`]: `None` while the read is out, and that is also what it stays as
+/// The card reads [`Self::stated_pages`]: `None` while the read is out, and that is also what it stays as
 /// when the read comes back with nothing to say — a card that told the two apart would need a word
 /// for "asking", and a word that appears for two frames and is replaced is worse than the space it
 /// occupied ([`file_peek::PeekBody::Facts`]). A file another program held is drawn the same way.
@@ -20315,7 +20315,7 @@ impl PeekFacts {
     }
 
     /// The count the card prints, if the file has said one.
-    fn pages(&self) -> Option<u32> {
+    fn stated_pages(&self) -> Option<u32> {
         match self.answer {
             PeekFactsAnswer::Answered(pages) => pages,
             PeekFactsAnswer::Asked { .. } | PeekFactsAnswer::Unanswered { .. } => None,
