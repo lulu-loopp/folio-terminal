@@ -363,7 +363,8 @@ pub fn by_nested_fn() -> Instant {
 
 // ── the review fold: admitted, or not handed ──
 
-/// A closure whose `now` is a number, in a handed body: its reading is not one again.
+/// A closure whose `now` is a number, in a handed body: it clears nothing, so its reading is
+/// found (round 2, RR-F1).
 pub fn a_number_now_in_a_handed_body(clock: impl Fn() -> Instant) -> Instant {
     let shift = |now: u64| Instant::now() + Duration::from_secs(now);
     clock().max(shift(1))
@@ -474,4 +475,48 @@ pub trait Wall {
 
 pub fn by_wall_trait(clock: &dyn Wall) -> bool {
     clock.wall() <= SystemTime::now() || Instant::now().elapsed() > Duration::ZERO
+}
+
+// ── round 2: a closure keeps its body's clock, `.elapsed()` reads its receiver's kind, an
+// origin is matched by scope ──
+
+/// A wall clock closure in a body handed an instant: the instant reading in it is found.
+pub fn instant_body_wall_closure(now: Instant) -> bool {
+    let read =
+        |wall: &dyn Fn() -> SystemTime| wall() > SystemTime::UNIX_EPOCH && Instant::now() > now;
+    read(&SystemTime::now)
+}
+
+/// A closure handed a wall `now` in a body handed an instant: both its readings are found.
+pub fn both_inside_a_closure(now: Instant) -> bool {
+    let earlier = now;
+    let judge = |now: SystemTime| now <= SystemTime::now() || Instant::now() > earlier;
+    judge(SystemTime::UNIX_EPOCH)
+}
+
+/// Handed a wall time, measures a wall time with `.elapsed()`: a wall reading, found.
+pub fn wall_elapsed(now: SystemTime, at: SystemTime) -> bool {
+    let _ = now;
+    at.elapsed().is_ok()
+}
+
+/// A stored wall time, of no written type at the `.elapsed()`.
+pub struct Stamped {
+    at: SystemTime,
+}
+
+/// Handed a wall time, measures a receiver whose type is not written: both kinds, found.
+pub fn untyped_elapsed(now: SystemTime, held: &Stamped) -> bool {
+    let _ = now;
+    held.at.elapsed().is_ok()
+}
+
+/// An origin in an inner block admits its own `.elapsed()`, not a same-named binding outside it.
+pub fn origin_in_an_inner_block(now: Instant, started: Instant) -> bool {
+    let _ = now;
+    {
+        let started = Instant::now();
+        let _ = started.elapsed();
+    }
+    started.elapsed() > Duration::ZERO
 }

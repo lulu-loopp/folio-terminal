@@ -1878,25 +1878,32 @@ fn leave_handed(handed: &BTreeMap<String, (String, &'static str, usize)>) {
 ///   clock (`Heartbeat::clock`, `update_archive::Deadline::now`), when its
 ///   `impl` header bounds a type parameter by a clock (`impl<M: Media>
 ///   Pump<M>`), or when it is a default method of a clock trait. A closure
-///   parameter of a clock type hands its body a clock; a closure parameter
-///   `now` of another written type hands it nothing; a closure with neither
-///   inherits its body's. `target/timing-bound-tests/HANDED-CLOCKS.tsv` lists
-///   every handed product function, how, and its readings again, each run.
+///   keeps what its enclosing body is handed and adds the kinds of its own
+///   clock-typed parameters; a closure parameter `now` of a written type that
+///   holds no instant clears nothing. A nested `fn` captures nothing: it is
+///   handed what its own signature hands it.
+///   `target/timing-bound-tests/HANDED-CLOCKS.tsv` lists every handed product
+///   function, how, the kinds and its readings again, each run.
 /// * **Reading again**: in a handed body, closures included, a call of a path
 ///   ending `Instant::now` or `SystemTime::now`, either handed on as a function
 ///   value (a reading deferred), and every `.elapsed()` (it is `now()` minus its
 ///   receiver), whatever the receiver, but an admitted origin's (below). **A
-///   reading counts by kind** (plan row 205 R8): `Instant::now()` and
-///   `.elapsed()` count in a body handed an instant (a `now` holding one, or a
-///   clock answering one), `SystemTime::now()` in a body handed a wall time,
-///   both in a body handed both — a first reading of the other clock is no
-///   second answer for the one handed.
+///   reading counts by kind** (plan row 205 R8): `Instant::now()` counts in a
+///   body handed an instant (a `now` holding one, or a clock answering one),
+///   `SystemTime::now()` in a body handed a wall time, both in a body handed
+///   both — a first reading of the other clock is no second answer for the one
+///   handed. An `.elapsed()` is a reading of its receiver's kind when the
+///   receiver's type is known (a binding written `Instant` or `SystemTime`, an
+///   origin, a reading), and of both kinds when it is not — erring toward
+///   handed.
 ///   **Calling the handed clock is never a reading again**: a counted clock
 ///   answers every call.
-/// * **Admitted**: a reading bound by `let x = Instant::now();` where every use
-///   of `x` in the function is the receiver of `.elapsed()`, and those
-///   `.elapsed()` calls — one measurement of real time spent, its origin and
-///   its end, not a second answer for the turn. An admitted origin's own
+/// * **Admitted**: a reading bound by `let x = Instant::now();` (or
+///   `SystemTime::now()`) where every use of that binding is the receiver of
+///   `.elapsed()`, and those `.elapsed()` calls — one measurement of real time
+///   spent, its origin and its end, not a second answer for the turn. A use is
+///   matched to the binding by scope: a later name `x` that a pattern, a
+///   parameter or another `let` binds is another binding. An admitted origin's own
 ///   `.elapsed()` is the end of that same admitted measurement, so it is never
 ///   a reading again; every other `.elapsed()` is.
 /// * **Refused**, by file and line: a product body, data type, trait or block
@@ -2050,9 +2057,14 @@ fn the_handed_now_reading_finds_refuses_and_admits_what_it_says() {
 /// in a `Box`, a borrowed `Option` or a slice, the wall clock read again, a
 /// clock behind a pointer, in an array or a slice, an `impl` bounding by a
 /// clock in its `where` clause, and a closure or a nested `fn` handed a clock
-/// inside a function handed none. An owner whose method calls only its clock,
-/// the real clock's own `now`, a trait or closure with inputs, a `now: u64`, a
-/// closure `now: u64` in a handed body, a `Token![,]`-like macro type, a
+/// inside a function handed none; since the second review, a closure `now: u64`
+/// in a handed body (it clears nothing), an instant read in a wall-clock closure
+/// of a body handed an instant, both kinds read in a closure handed a wall `now`
+/// in a body handed an instant, `.elapsed()` of a written wall time and of a
+/// receiver whose type is not written in a body handed a wall time, and an
+/// `.elapsed()` on a binding an inner block's origin shares a name with. An
+/// owner whose method calls only its clock, the real clock's own `now`, a
+/// trait or closure with inputs, a `now: u64`, a `Token![,]`-like macro type, a
 /// carrier's name led by an outside crate, through an associated type or
 /// through a type alias, and a reading of the other kind than the one handed
 /// (an instant handed, the wall clock read, and the other way round, through a
@@ -2060,7 +2072,11 @@ fn the_handed_now_reading_finds_refuses_and_admits_what_it_says() {
 /// is found for each; an unread type, a `now` in an unpairable pattern, a clock trait by an
 /// unfollowable path, an `impl` written away from its type, a macro type naming
 /// a `Fn` trait or a clock trait, a `where` clause bounding a non-parameter by
-/// a clock and a carrier's name by an unfollowable path are refused.
+/// a clock and a carrier's name by an unfollowable path are refused. Two
+/// refusals have no case here, as building one would mean a fixture past a
+/// resolver's hop limit or a header the index accepts and `syn` does not: a
+/// trait or type resolution cut off at its hop limit, and an `impl` or trait
+/// header that does not parse.
 ///
 /// MUTATIONS: read a clock type only on a parameter named `now` — `by_dyn_fn`
 /// is gone; drop the supertrait walk — `by_supertrait` and `by_deep_supertrait`
@@ -2068,7 +2084,12 @@ fn the_handed_now_reading_finds_refuses_and_admits_what_it_says() {
 /// `by_where_generic` are gone; drop the field owners — `Beat::late` is gone;
 /// stop the owner fixed point after one pass — `Outermost::late` is gone; read
 /// carriers only as `self` — `by_carrier` is gone; exempt `.elapsed()` on any
-/// receiver — `Beat::by_stored_elapsed` and `forwards` are gone.
+/// receiver — `Beat::by_stored_elapsed` and `forwards` are gone; let a closure
+/// replace its body's kinds — `instant_body_wall_closure` is gone; let a closure
+/// `now` of a non-clock type clear its body — `a_number_now_in_a_handed_body` is
+/// gone; read every `.elapsed()` as monotonic — `wall_elapsed` and
+/// `untyped_elapsed` are gone; match origins by name — `origin_in_an_inner_block`
+/// is gone.
 #[test]
 fn the_handed_clock_reading_reads_every_clock_shape() {
     let index = fixture_named("timing_clocks", "clocks");
@@ -2126,10 +2147,18 @@ fn the_handed_clock_reading_reads_every_clock_shape() {
         "by_other_carrier",
         "by_wall_carrier",
         "by_wall_trait",
+        "a_number_now_in_a_handed_body",
+        "instant_body_wall_closure",
+        "wall_elapsed",
+        "untyped_elapsed",
+        "origin_in_an_inner_block",
     ]
     .iter()
     .map(|name| (format!("clocks crate::{name}"), 1))
-    .chain([("clocks crate::handed_both".to_owned(), 2)])
+    .chain([
+        ("clocks crate::handed_both".to_owned(), 2),
+        ("clocks crate::both_inside_a_closure".to_owned(), 2),
+    ])
     .collect();
     assert_eq!(counts, expected);
     assert_eq!(refusals.len(), 8, "{refusals:#?}");
@@ -2885,6 +2914,18 @@ mod reading {
             instant: false,
             wall: true,
         };
+        pub const BOTH: Self = Self {
+            instant: true,
+            wall: true,
+        };
+
+        /// The kind a reading of `clock` is.
+        pub const fn of(clock: Clock) -> Self {
+            match clock {
+                Clock::Instant => Self::INSTANT,
+                Clock::SystemTime => Self::WALL,
+            }
+        }
 
         pub const fn union(self, other: Self) -> Self {
             Self {
@@ -2897,12 +2938,9 @@ mod reading {
             !self.instant && !self.wall
         }
 
-        /// Whether a reading of `clock` is of a kind in this set.
-        pub const fn has(self, clock: Clock) -> bool {
-            match clock {
-                Clock::Instant => self.instant,
-                Clock::SystemTime => self.wall,
-            }
+        /// Whether the two sets share a kind.
+        pub const fn meets(self, other: Self) -> bool {
+            (self.instant && other.instant) || (self.wall && other.wall)
         }
 
         /// The set, as `HANDED-CLOCKS.tsv` writes it.
@@ -2926,9 +2964,10 @@ mod reading {
         /// The kinds of clock its signature hands it.
         pub kinds: Kinds,
         /// Readings of a real clock of a kind the body it stands in is handed —
-        /// `Instant::now()` or `.elapsed()` when handed an instant,
-        /// `SystemTime::now()` when handed a wall time, either `now` handed on
-        /// as a function value too — measurement origins aside.
+        /// `Instant::now()` when handed an instant, `SystemTime::now()` when
+        /// handed a wall time, either `now` handed on as a function value too,
+        /// and `.elapsed()` of its receiver's kind (both kinds when the
+        /// receiver's type is not written) — measurement origins aside.
         pub again: Vec<Offset>,
         /// What it cannot decide, and why.
         pub refusals: Vec<(Offset, String)>,
@@ -2988,13 +3027,19 @@ mod reading {
     /// kinds each answers.
     pub type ClockParameters = BTreeMap<String, Kinds>;
 
-    #[derive(Clone, Copy, PartialEq, Eq)]
-    enum Handedness {
-        No,
-        /// Handed these kinds of clock.
-        Yes(Kinds),
-        /// A closure parameter `now` with no written type.
-        Unknown,
+    /// **What a body is handed**: the kinds of clock, and whether a closure
+    /// parameter `now` with no written type stands over it (a reading of a
+    /// kind it is not handed is then refused, not passed).
+    #[derive(Clone, Copy, Default, PartialEq, Eq)]
+    struct Hand {
+        kinds: Kinds,
+        unknown: bool,
+    }
+
+    impl Hand {
+        const fn is_handed(self) -> bool {
+            !self.kinds.is_empty() || self.unknown
+        }
     }
 
     /// The clock reading's type a path names: its last segment is `Instant`
@@ -3405,104 +3450,251 @@ mod reading {
         Ok(clock_generics(&declared.generics, names))
     }
 
-    #[derive(Default)]
-    struct Uses {
-        /// Uses of a name other than as the receiver of `.elapsed()`.
+    /// **What a name in a handed walk is bound to**: the kinds of instant its
+    /// written type names (`None` when its type is not written, or names
+    /// neither), and the measurement origin it holds, when it was bound by
+    /// `let x = Instant::now();` or `let x = SystemTime::now();`.
+    #[derive(Clone, Copy, Default)]
+    struct Name {
+        kinds: Option<Kinds>,
+        origin: Option<usize>,
+    }
+
+    /// One measurement origin: where its reading stands, the kind it read, and
+    /// how often its binding is used other than as the receiver of
+    /// `.elapsed()`.
+    struct Origin {
+        at: Offset,
+        kinds: Kinds,
         other: usize,
+    }
+
+    /// The kinds of instant a written type is, behind references: `Instant`,
+    /// `SystemTime`, or `None` for any other type.
+    fn written_kinds(ty: &Type) -> Option<Kinds> {
+        match ty {
+            Type::Reference(reference) => written_kinds(&reference.elem),
+            Type::Paren(inner) => written_kinds(&inner.elem),
+            Type::Group(inner) => written_kinds(&inner.elem),
+            Type::Path(path) if path.qself.is_none() => {
+                let kinds = names_a_time(&path.path);
+                (!kinds.is_empty()).then_some(kinds)
+            }
+            _ => None,
+        }
     }
 
     struct HandedWalk<'s> {
         names: Names<'s>,
-        handed: Vec<Handedness>,
+        /// What each body in force is handed, innermost last.
+        handed: Vec<Hand>,
         /// The clock-bounded type parameters in force, innermost last.
         generics: Vec<ClockParameters>,
-        /// Readings found, of which clock, with whether the body they stand in
-        /// is handed one.
-        readings: Vec<(Offset, Handedness, Clock)>,
-        /// `.elapsed()` calls, with the lone name of their receiver if it is one.
-        elapsed: Vec<(Offset, Handedness, Option<String>)>,
-        /// `let x = Instant::now();` origins, by name.
-        origins: BTreeMap<String, Vec<Offset>>,
-        uses: BTreeMap<String, Uses>,
+        /// The names in scope, innermost block last.
+        scopes: Vec<BTreeMap<String, Name>>,
+        /// Readings found: where, what the body they stand in is handed, and
+        /// the kind read.
+        readings: Vec<(Offset, Hand, Kinds)>,
+        /// `.elapsed()` calls: where, what the body is handed, the kinds read,
+        /// and the origin its receiver holds, if it holds one.
+        elapsed: Vec<(Offset, Hand, Kinds, Option<usize>)>,
+        origins: Vec<Origin>,
         refusals: Vec<(Offset, String)>,
     }
 
     impl HandedWalk<'_> {
-        fn current(&self) -> Handedness {
-            *self.handed.last().unwrap_or(&Handedness::No)
+        fn current(&self) -> Hand {
+            self.handed.last().copied().unwrap_or_default()
+        }
+
+        fn lookup(&self, name: &str) -> Option<Name> {
+            self.scopes
+                .iter()
+                .rev()
+                .find_map(|scope| scope.get(name).copied())
+        }
+
+        fn bind(&mut self, name: String, held: Name) {
+            if let Some(scope) = self.scopes.last_mut() {
+                scope.insert(name, held);
+            }
+        }
+
+        /// Binds every name a pattern binds in the innermost scope: a lone
+        /// name of a written type with that type's kinds, any other with none.
+        fn bind_pattern(&mut self, pattern: &Pat, ty: Option<&Type>) {
+            match (pattern, ty) {
+                (Pat::Type(typed), _) => self.bind_pattern(&typed.pat, Some(&typed.ty)),
+                (Pat::Ident(ident), Some(ty)) if ident.subpat.is_none() => {
+                    let held = Name {
+                        kinds: written_kinds(ty),
+                        origin: None,
+                    };
+                    self.bind(ident.ident.to_string(), held);
+                }
+                _ => {
+                    let mut bound = Vec::new();
+                    pattern_names(pattern, &mut bound);
+                    for name in bound {
+                        self.bind(name, Name::default());
+                    }
+                }
+            }
+        }
+
+        fn scoped(&mut self, walk: impl FnOnce(&mut Self)) {
+            self.scopes.push(BTreeMap::new());
+            walk(self);
+            self.scopes.pop();
         }
     }
 
     impl<'ast> Visit<'ast> for HandedWalk<'_> {
         fn visit_expr(&mut self, expr: &'ast Expr) {
             if let Some(clock) = read_of(expr) {
-                self.readings.push((offset(expr), self.current(), clock));
+                self.readings
+                    .push((offset(expr), self.current(), Kinds::of(clock)));
                 return;
             }
             match expr {
                 Expr::MethodCall(call) if call.method == "elapsed" && call.args.is_empty() => {
-                    let receiver = lone_name(&call.receiver);
-                    if receiver.is_none() {
+                    let (kinds, origin) = if let Some(clock) = read_of(&call.receiver) {
                         self.visit_expr(&call.receiver);
-                    }
-                    self.elapsed.push((offset(expr), self.current(), receiver));
+                        (Kinds::of(clock), None)
+                    } else if let Some(name) = lone_name(&call.receiver) {
+                        match self.lookup(&name) {
+                            Some(Name {
+                                origin: Some(origin),
+                                ..
+                            }) => (self.origins[origin].kinds, Some(origin)),
+                            Some(Name {
+                                kinds: Some(kinds), ..
+                            }) => (kinds, None),
+                            _ => (Kinds::BOTH, None),
+                        }
+                    } else {
+                        self.visit_expr(&call.receiver);
+                        (Kinds::BOTH, None)
+                    };
+                    self.elapsed
+                        .push((offset(expr), self.current(), kinds, origin));
                 }
                 Expr::Path(path) => {
                     if let Some(clock) = named_now(path) {
-                        self.readings.push((offset(expr), self.current(), clock));
-                    } else if let Some(name) = lone_name(expr) {
-                        self.uses.entry(name).or_default().other += 1;
+                        self.readings
+                            .push((offset(expr), self.current(), Kinds::of(clock)));
+                    } else if let Some(name) = lone_name(expr)
+                        && let Some(Name {
+                            origin: Some(origin),
+                            ..
+                        }) = self.lookup(&name)
+                    {
+                        self.origins[origin].other += 1;
                     }
                 }
                 Expr::Closure(closure) => {
                     let generics = self.generics.last().cloned().unwrap_or_default();
-                    let (mut clock, mut other_now, mut untyped_now) =
-                        (Kinds::default(), false, false);
+                    let (mut own, mut untyped_now) = (Kinds::default(), false);
                     for input in &closure.inputs {
                         match input {
-                            Pat::Type(typed) => match parameter(
-                                &typed.pat,
-                                &typed.ty,
-                                &generics,
-                                self.names,
-                                &mut self.refusals,
-                            ) {
-                                Gives::Clock(_, kinds) => clock = clock.union(kinds),
-                                Gives::OtherNow => other_now = true,
-                                Gives::Nothing => {}
-                            },
+                            Pat::Type(typed) => {
+                                if let Gives::Clock(_, kinds) = parameter(
+                                    &typed.pat,
+                                    &typed.ty,
+                                    &generics,
+                                    self.names,
+                                    &mut self.refusals,
+                                ) {
+                                    own = own.union(kinds);
+                                }
+                            }
                             Pat::Ident(ident) if ident.ident == "now" => untyped_now = true,
                             _ => {}
                         }
                     }
-                    let handed = if !clock.is_empty() {
-                        Handedness::Yes(clock)
-                    } else if other_now {
-                        Handedness::No
-                    } else if untyped_now {
-                        Handedness::Unknown
-                    } else {
-                        self.current()
-                    };
-                    self.handed.push(handed);
-                    self.visit_expr(&closure.body);
+                    let outer = self.current();
+                    self.handed.push(Hand {
+                        kinds: outer.kinds.union(own),
+                        unknown: outer.unknown || untyped_now,
+                    });
+                    self.scoped(|walk| {
+                        for input in &closure.inputs {
+                            walk.bind_pattern(input, None);
+                        }
+                        walk.visit_expr(&closure.body);
+                    });
                     self.handed.pop();
+                }
+                Expr::If(branch) => {
+                    self.scoped(|walk| {
+                        walk.visit_expr(&branch.cond);
+                        walk.visit_block(&branch.then_branch);
+                    });
+                    if let Some((_, otherwise)) = &branch.else_branch {
+                        self.visit_expr(otherwise);
+                    }
+                }
+                Expr::While(looped) => self.scoped(|walk| {
+                    walk.visit_expr(&looped.cond);
+                    walk.visit_block(&looped.body);
+                }),
+                Expr::Let(bound) => {
+                    self.visit_expr(&bound.expr);
+                    self.bind_pattern(&bound.pat, None);
+                }
+                Expr::ForLoop(looped) => {
+                    self.visit_expr(&looped.expr);
+                    self.scoped(|walk| {
+                        walk.bind_pattern(&looped.pat, None);
+                        walk.visit_block(&looped.body);
+                    });
                 }
                 _ => visit::visit_expr(self, expr),
             }
         }
 
+        fn visit_arm(&mut self, arm: &'ast syn::Arm) {
+            self.scoped(|walk| {
+                walk.bind_pattern(&arm.pat, None);
+                if let Some((_, guard)) = &arm.guard {
+                    walk.visit_expr(guard);
+                }
+                walk.visit_expr(&arm.body);
+            });
+        }
+
+        fn visit_block(&mut self, block: &'ast syn::Block) {
+            self.scoped(|walk| visit::visit_block(walk, block));
+        }
+
         fn visit_local(&mut self, local: &'ast syn::Local) {
-            if let (Pat::Ident(ident), Some(init)) = (&local.pat, &local.init)
-                && read_of(&init.expr).is_some()
-                && init.diverge.is_none()
-            {
-                self.origins
-                    .entry(ident.ident.to_string())
-                    .or_default()
-                    .push(offset(&*init.expr));
+            if let Some(init) = &local.init {
+                self.visit_expr(&init.expr);
+                if let Some((_, diverge)) = &init.diverge {
+                    self.visit_expr(diverge);
+                }
             }
-            visit::visit_local(self, local);
+            match (&local.pat, &local.init) {
+                (Pat::Ident(ident), Some(init))
+                    if ident.subpat.is_none() && init.diverge.is_none() =>
+                {
+                    if let Some(clock) = read_of(&init.expr) {
+                        self.origins.push(Origin {
+                            at: offset(&*init.expr),
+                            kinds: Kinds::of(clock),
+                            other: 0,
+                        });
+                        let held = Name {
+                            kinds: Some(Kinds::of(clock)),
+                            origin: Some(self.origins.len() - 1),
+                        };
+                        self.bind(ident.ident.to_string(), held);
+                    } else {
+                        self.bind(ident.ident.to_string(), Name::default());
+                    }
+                }
+                (pattern, _) => self.bind_pattern(pattern, None),
+            }
         }
 
         fn visit_macro(&mut self, mac: &'ast syn::Macro) {
@@ -3515,7 +3707,7 @@ mod reading {
                 None => {
                     let mut names = Vec::new();
                     names_in(mac.tokens.clone(), &mut names);
-                    if self.current() != Handedness::No
+                    if self.current().is_handed()
                         && names.iter().any(|name| {
                             name == "Instant" || name == "SystemTime" || name == "elapsed"
                         })
@@ -3539,15 +3731,22 @@ mod reading {
                 self_how: None,
             };
             let signed = signature_handed(&item.sig, &scope, &mut self.refusals);
-            self.handed.push(if signed.how.is_empty() {
-                Handedness::No
-            } else {
-                Handedness::Yes(signed.kinds)
+            // A nested `fn` captures nothing: its names are its own.
+            let outer = std::mem::replace(&mut self.scopes, vec![BTreeMap::new()]);
+            for input in &item.sig.inputs {
+                if let FnArg::Typed(typed) = input {
+                    self.bind_pattern(&typed.pat, Some(&typed.ty));
+                }
+            }
+            self.handed.push(Hand {
+                kinds: signed.kinds,
+                unknown: false,
             });
             self.generics.push(signed.generics);
             self.visit_block(&item.block);
             self.generics.pop();
             self.handed.pop();
+            self.scopes = outer;
         }
     }
 
@@ -3561,30 +3760,29 @@ mod reading {
         } = signature_handed(signature, scope, &mut refusals);
         let mut walk = HandedWalk {
             names: scope.names,
-            handed: vec![if how.is_empty() {
-                Handedness::No
-            } else {
-                Handedness::Yes(kinds)
+            handed: vec![Hand {
+                kinds,
+                unknown: false,
             }],
             generics: vec![generics],
+            scopes: vec![BTreeMap::new()],
             readings: Vec::new(),
             elapsed: Vec::new(),
-            origins: BTreeMap::new(),
-            uses: BTreeMap::new(),
+            origins: Vec::new(),
             refusals,
         };
+        for input in &signature.inputs {
+            if let FnArg::Typed(typed) = input {
+                walk.bind_pattern(&typed.pat, Some(&typed.ty));
+            }
+        }
         walk.visit_block(block);
-        let admitted_names: BTreeSet<&str> = walk
-            .origins
-            .keys()
-            .filter(|name| walk.uses.get(*name).is_none_or(|uses| uses.other == 0))
-            .map(String::as_str)
+        let admitted: BTreeSet<usize> = (0..walk.origins.len())
+            .filter(|origin| walk.origins[*origin].other == 0)
             .collect();
-        let admitted: BTreeSet<Offset> = walk
-            .origins
+        let admitted_at: BTreeSet<Offset> = admitted
             .iter()
-            .filter(|(name, _)| admitted_names.contains(name.as_str()))
-            .flat_map(|(_, at)| at.iter().copied())
+            .map(|origin| walk.origins[*origin].at)
             .collect();
         let mut out = Handed {
             how,
@@ -3595,27 +3793,22 @@ mod reading {
         let measured = walk
             .elapsed
             .into_iter()
-            .filter(|(_, _, receiver)| {
-                receiver
-                    .as_deref()
-                    .is_none_or(|name| !admitted_names.contains(name))
-            })
-            .map(|(at, handed, _)| (at, handed, Clock::Instant));
-        let readings: Vec<(Offset, Handedness, Clock)> = walk
+            .filter(|(.., origin)| origin.is_none_or(|origin| !admitted.contains(&origin)))
+            .map(|(at, hand, read, _)| (at, hand, read));
+        let readings: Vec<(Offset, Hand, Kinds)> = walk
             .readings
             .into_iter()
-            .filter(|(at, ..)| !admitted.contains(at))
+            .filter(|(at, ..)| !admitted_at.contains(at))
             .chain(measured)
             .collect();
-        for (at, handed, clock) in readings {
-            match handed {
-                Handedness::Yes(kinds) if kinds.has(clock) => out.again.push(at),
-                Handedness::Yes(_) => {}
-                Handedness::Unknown => out.refusals.push((
+        for (at, hand, read) in readings {
+            if hand.kinds.meets(read) {
+                out.again.push(at);
+            } else if hand.unknown {
+                out.refusals.push((
                     at,
                     "a closure handed a `now` whose type is not written reads the clock".to_owned(),
-                )),
-                Handedness::No => {}
+                ));
             }
         }
         out.again.sort_unstable();
