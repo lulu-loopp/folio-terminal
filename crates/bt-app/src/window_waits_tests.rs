@@ -3390,10 +3390,11 @@ fn vocabulary() -> Vec<Word> {
 /// `writeln!` are `Write::write_fmt`.
 ///
 /// A site reads untyped, so it answers **every** line it matches, not the first: the name is the
-/// matches' names in registry order, joined by ` | ` (`Condvar::wait | Barrier::wait |
-/// Child::wait` for a `.wait()`), and it waits when any of them does. The verdict therefore does
-/// not hang on the registry's order, and a line that does not wait cannot silence one that does
-/// by sharing its name (T-BARE-SITE-VOCABULARY-LAST-NAME-TAKEOVER, plan row 185). The inventory
+/// matches' names, sorted and joined by ` | ` (`Barrier::wait | Child::wait | Condvar::wait` for
+/// a `.wait()`), and it waits when any of them does. Neither the name nor the verdict hangs on
+/// the registry's order, and a line that does not wait cannot silence one that does by sharing
+/// its name (T-BARE-SITE-VOCABULARY-LAST-NAME-TAKEOVER, plan row 185). A pinned body's effect
+/// key is that whole name, so a new line of the same name changes it. The inventory
 /// (`Reader::sites`) types its receivers and needs no such reading.
 fn effect_of(words: &[Word], site: &Site) -> Option<(String, bool)> {
     let capitalised = |name: &str| name.starts_with(|c: char| c.is_ascii_uppercase());
@@ -3418,25 +3419,26 @@ fn effect_of(words: &[Word], site: &Site) -> Option<(String, bool)> {
             .filter(|word| word.last == site.name && capitalised(site.name))
             .collect(),
     };
-    let mut names: Vec<String> = Vec::new();
-    for word in &lines {
-        let name = if matches!(site.form, Form::Bare) {
-            word.last.clone()
-        } else {
-            format!("{}::{}", word.parent, word.last)
-        };
-        if !names.contains(&name) {
-            names.push(name);
-        }
-    }
+    let mut names: Vec<String> = lines
+        .iter()
+        .map(|word| {
+            if matches!(site.form, Form::Bare) {
+                word.last.clone()
+            } else {
+                format!("{}::{}", word.parent, word.last)
+            }
+        })
+        .collect();
+    names.sort_unstable();
+    names.dedup();
     (!lines.is_empty()).then(|| (names.join(" | "), lines.iter().any(|word| word.waits)))
 }
 
-/// RED (row 185) — **a site that matches several vocabulary lines answers all of them, in any
-/// order: it waits when one of them waits.** A method `.wait()` matches every typed `wait` line,
-/// a path `Child::wait(..)` every `Child::wait`, a bare `CloseHandle(..)` every `CloseHandle`;
-/// a line that does not wait, listed first, used to name the site alone and read it as not
-/// waiting, so the `Drop` guard passed a `Drop` that waits.
+/// RED (row 185) — **a site that matches several vocabulary lines answers all of them, the same
+/// in any order: it waits when one of them waits, and its name is theirs, sorted.** A method
+/// `.wait()` matches every typed `wait` line, a path `Child::wait(..)` every `Child::wait`, a bare
+/// `CloseHandle(..)` every `CloseHandle`; a line that does not wait, listed first, used to name
+/// the site alone and read it as not waiting, so the `Drop` guard passed a `Drop` that waits.
 ///
 /// MUTATION: take the first match again (`.find(..)` in the method arm) and the first case reads
 /// `Foo::wait`, not waiting.
@@ -3452,7 +3454,7 @@ fn a_site_matching_several_vocabulary_lines_answers_all_of_them_in_any_order() {
         (
             site("wait", Form::Method(None)),
             [word("Foo", "wait", false), word("Condvar", "wait", true)],
-            "Foo::wait | Condvar::wait",
+            "Condvar::wait | Foo::wait",
         ),
         (
             site("wait", Form::Path(vec!["process", "Child"])),
@@ -3482,11 +3484,12 @@ fn a_site_matching_several_vocabulary_lines_answers_all_of_them_in_any_order() {
             site.name,
             site.form
         );
-        let backwards = effect_of(&reversed, &site).expect("the reversed lines match too");
-        assert!(
-            backwards.1,
-            "`{}` ({:?}) waits whatever the lines' order",
-            site.name, site.form
+        assert_eq!(
+            effect_of(&reversed, &site),
+            answer,
+            "`{}` ({:?}) answers the same whatever the lines' order",
+            site.name,
+            site.form
         );
     }
     let alone = [
