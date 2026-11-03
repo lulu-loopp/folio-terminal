@@ -613,8 +613,8 @@ pub(crate) enum Resume {
     /// The payload's top-level `id` field is the vendor's session id and `cwd` its folder.
     /// `only_client`, when declared, is a field naming the client that ran the turn and the value
     /// the vendor's interactive client gives it: a payload whose field says any other client names
-    /// no session this pane can resume (row 195, review F1). A payload without the field is from a
-    /// version that did not say, and is read as before.
+    /// no session this pane can resume (row 195, review F1). Nor does a payload without the field
+    /// (re-review RN1): the survey's recording of the interactive client carries it.
     Fields {
         id: &'static str,
         cwd: &'static str,

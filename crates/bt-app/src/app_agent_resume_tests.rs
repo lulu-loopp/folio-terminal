@@ -664,9 +664,10 @@ fn a_resume_whose_program_is_missing_comes_back_as_the_shell_it_hands_back() {
 }
 
 /// RED (row 195, review F5) — **a resumed shell pane's own profile is the shell it hands back**:
-/// a Git Bash pane whose typed `claude` was resumed runs the `claude` profile, and *Restart
-/// shell*, *Duplicate tab* and a split of it start the Git Bash the layout writes it as, read
-/// through the one accessor that answers the hand-back — never a fresh agent.
+/// a Git Bash pane whose typed `claude` was resumed runs the `claude` profile, and its own profile
+/// is the Git Bash the layout writes it as — the one accessor *Restart shell*, *Duplicate tab* and
+/// a split read (`runtime::tabs::life_tests::a_resumed_shell_panes_restart_duplicate_and_split_start_its_shell`
+/// drives the three).
 ///
 /// MUTATION: `ShellSession::own_profile` answering the launch's profile, and the first assertion
 /// goes red.
@@ -698,10 +699,4 @@ fn a_resumed_shell_panes_own_profile_is_the_shell_it_hands_back() {
         "claude",
         "and a pane with no resumed agent's is its launch's"
     );
-    for name in ["restart_shell", "duplicate_tab", "split_seat"] {
-        assert!(
-            crate::test_support::squeezed_body("Runtime", name).contains(".own_profile()"),
-            "{name} reads the pane's own profile"
-        );
-    }
 }

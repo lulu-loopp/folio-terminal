@@ -978,3 +978,185 @@ fn an_agent_pane_the_systems_end_kept_keeps_its_session_record() {
         "which the layout writes"
     );
 }
+
+/// The Claude Code record the row 195 tests below resume: a made-up session in a folder that is
+/// only a name.
+fn resumed_claude(hand_back: &str) -> crate::agent_resume::SeedAgent {
+    crate::agent_resume::SeedAgent::Resume(crate::agent_resume::Resume {
+        record: bt_persist::AgentRecordV1 {
+            vendor: crate::attention_map::CLAUDE_CODE.to_owned(),
+            resume_id: "0b9c7e1a-4f3d-4c2b-9a8e-5d6f7a8b9c0d".to_owned(),
+            cwd: "C:/work/resume-gone".to_owned(),
+            home: None,
+        },
+        hand_back: Some(hand_back.to_owned()),
+    })
+}
+
+/// The profile a pane in birth was asked to be born as.
+fn asked_profile(life: &ShellLife) -> String {
+    life.birth()
+        .expect("a shell is being born")
+        .seed
+        .profile
+        .clone()
+}
+
+/// RED (row 195, review F5, re-review RN3) — **Restart shell, Duplicate tab and a split of a
+/// resumed shell pane start its shell**: a Git Bash pane whose typed `claude` came back runs the
+/// `claude` profile, and each of the three asks for Git Bash, never a fresh agent.
+///
+/// MUTATION (plant `plant-195-restart-starts-fresh-agent.py`): `ShellSession::own_profile`
+/// answering the launch's profile, and each of the three asks for `claude`.
+#[test]
+fn a_resumed_shell_panes_restart_duplicate_and_split_start_its_shell() {
+    let home = test_support::EndSessionHome::new("row195-own-profile");
+    let mut application = a_window_of("row195-own-profile", &home, &[true]);
+    let mut runtime = application.runtime();
+    let seat = runtime.seats.identity();
+    {
+        let leaf = &mut runtime.sessions.get_mut(&seat).expect("the pane").session;
+        leaf.launch.profile = "claude".to_owned();
+        leaf.agent = crate::agent_resume::AgentAccount::born(&resumed_claude("gitbash"), true);
+    }
+    runtime
+        .restart_shell(seat)
+        .expect("the restart is asked for");
+    let restarted = runtime
+        .sessions
+        .get_mut(&seat)
+        .expect("the pane")
+        .take_successor()
+        .expect("the replacement");
+    assert_eq!(
+        asked_profile(&restarted.session.life),
+        "gitbash",
+        "Restart shell"
+    );
+    runtime
+        .split_seat(
+            seat,
+            bt_layout::Axis::Horizontal,
+            false,
+            crate::SplitSeed::Inherit,
+        )
+        .expect("the split is asked for");
+    let arrived = runtime
+        .sessions
+        .keys()
+        .copied()
+        .find(|other| *other != seat)
+        .expect("the split's pane");
+    assert_eq!(
+        asked_profile(&runtime.sessions[&arrived].session.life),
+        "gitbash",
+        "the split"
+    );
+    let tab = runtime.window.tabs[runtime.window.active_tab].id;
+    runtime
+        .duplicate_tab(tab)
+        .expect("the duplicate is asked for");
+    let duplicate = runtime
+        .window
+        .tabs
+        .iter()
+        .find(|other| other.id != tab)
+        .expect("the duplicate tab");
+    assert_eq!(
+        asked_profile(&duplicate.focused().expect("its pane").life),
+        "gitbash",
+        "Duplicate tab"
+    );
+}
+
+/// RED (row 195, review F3, re-review RN4) — **the gone-folder road, end to end**: a resume whose
+/// birth found its folder gone and started nothing lands as a pane with no shell, saying so in
+/// `diagnostics.log`; the reaper's next turn hands the pane its own shell, asked for with the
+/// could-not-resume line, and the record is gone.
+///
+/// MUTATION (plants `plant-195-gone-folder-landing-marks-nothing.py`,
+/// `plant-195-gone-folder-reaper-owes-nothing.py`): the landing not marking the account, or the
+/// reaper not queueing the hand-back it is owed, and no shell is asked for.
+#[test]
+fn a_resume_whose_folder_is_gone_lands_and_is_handed_its_shell_with_the_line() {
+    let home = test_support::EndSessionHome::new("row195-gone-road");
+    let mut application = a_window_of("row195-gone-road", &home, &[true]);
+    let mut runtime = application.runtime();
+    let seat = runtime.seats.identity();
+    let gone = crate::profiles::GoneFolder {
+        folder: PathBuf::from("C:/work/resume-gone"),
+        place: crate::profiles::spawn_place(
+            crate::profiles::index_of_id(crate::profiles::fallback_profile_id()),
+            None,
+            &bt_pty::SystemShellEnvironment,
+        )
+        .place,
+    };
+    let (wake, heard) = waking();
+    let shell = pty_door::request(
+        move |_| pty_door::Born {
+            session: None,
+            folder_gone: true,
+        },
+        wake,
+    )
+    .expect("the birth worker starts");
+    while !shell.answered() {
+        crate::lane::receive(&heard, "the birth's wake");
+    }
+    let seed = LeafSeed {
+        profile: "claude".to_owned(),
+        agent: resumed_claude("gitbash"),
+        ..LeafSeed::default()
+    };
+    let mut notes = Vec::new();
+    {
+        let pane = runtime.sessions.get_mut(&seat).expect("the pane");
+        crate::await_shell(
+            &mut pane.session,
+            shell,
+            BirthDecision {
+                spawn_profile: "claude".to_owned(),
+                spawn_place: Some(PathBuf::from("C:/work/resume-gone")),
+                unless_gone: Some(Box::new(gone)),
+                ..decision()
+            },
+            &seed,
+        );
+        pane.session.agent = crate::agent_resume::AgentAccount::born(&seed.agent, true);
+        let refusal = crate::runtime::panes::land_shell_birth(pane, |line| {
+            notes.push(line.to_owned());
+        })
+        .expect("the landing");
+        assert!(refusal.is_none(), "{refusal:?}");
+        assert!(pane.session.life.pty().is_none(), "nothing was started");
+    }
+    assert!(
+        notes.len() == 1 && notes[0].contains("resume-gone") && notes[0].contains("not resumed"),
+        "the landing says so: {notes:?}"
+    );
+    runtime
+        .reap_exited_tabs(Instant::now())
+        .expect("the reaper takes its turn");
+    drop(runtime);
+    assert_eq!(tab_ids(&mut application), [1], "the tab is kept meanwhile");
+    let mut runtime = application.runtime();
+    let pane = runtime.sessions.get_mut(&seat).expect("the pane");
+    assert_eq!(pane.session.agent.record(), None, "the record is gone");
+    let shell = pane
+        .take_successor()
+        .expect("the hand-back's shell is asked for");
+    let birth = shell.session.life.birth().expect("a shell is being born");
+    assert_eq!(birth.seed.profile, "gitbash", "the pane's own shell");
+    let crate::agent_resume::SeedAgent::CouldNotResume(could) = &birth.seed.agent else {
+        panic!(
+            "the shell is asked for with the line: {:?}",
+            birth.seed.agent
+        );
+    };
+    assert!(
+        could.text().contains("Claude Code session 0b9c7e1a"),
+        "{}",
+        could.text()
+    );
+}

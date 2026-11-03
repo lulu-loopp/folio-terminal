@@ -567,11 +567,9 @@ fn heard(
     };
     let payload = payload?;
     // A turn another client ran — `codex exec`, started by an agent in the pane — is not the
-    // pane's session (review F1).
+    // pane's session (review F1), and neither is one whose payload does not say (re-review RN1).
     if let Some((field, interactive)) = only_client
-        && payload
-            .get(field)
-            .is_some_and(|client| client.as_str() != Some(interactive))
+        && payload.get(field).and_then(serde_json::Value::as_str) != Some(interactive)
     {
         return None;
     }
@@ -1604,7 +1602,11 @@ mod tests {
                 .map(|heard| heard.id),
             Some(SESSION.to_owned())
         );
-        let codex = serde_json::json!({ "thread-id": SESSION, "cwd": "/srv/work" });
+        let codex = serde_json::json!({
+            "thread-id": SESSION,
+            "cwd": "/srv/work",
+            "client": "codex-tui",
+        });
         assert_eq!(
             message_for("c".to_owned(), CODEX, "agent-turn-complete", Some(&codex))
                 .resume
@@ -1612,7 +1614,14 @@ mod tests {
             Some("/srv/work".to_owned())
         );
         // **Only the interactive client's turn names the pane's session** (review F1): a turn a
-        // `codex exec` ran — started by an agent in the pane, its notify inherited — names none.
+        // `codex exec` ran — started by an agent in the pane, its notify inherited — names none,
+        // and nor does a turn whose payload names no client (re-review RN1).
+        let unsaid = serde_json::json!({ "thread-id": SESSION, "cwd": "/srv/work" });
+        assert_eq!(
+            message_for("c".to_owned(), CODEX, "agent-turn-complete", Some(&unsaid)).resume,
+            None,
+            "a turn that names no client"
+        );
         for (client, names_one) in [
             (serde_json::json!("codex-tui"), true),
             (serde_json::json!("codex-exec"), false),
