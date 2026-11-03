@@ -782,7 +782,7 @@ pub(crate) fn run_decoration_worker_with(
 ) -> Door<MathWorkerRequest> {
     // The door is made on the worker; each request is handed the same capability again.
     let _ = worker;
-    let mut formulas = FormulaEngine::beside(make_engine);
+    let mut formulas = FormulaEngine::beside(worker, make_engine);
     let mut image_decoder = InlineImageDecoder::default();
     Box::new(
         move |worker: &bt_platform::admission::WorkerCtx, work: MathWorkerRequest| {
@@ -885,7 +885,9 @@ pub(crate) fn run_decoration_worker_with(
 type EngineFactory = Box<dyn FnOnce() -> MathEngine + Send>;
 
 /// **The decoration door's formula engine, made beside the worker**: the factory runs on a thread
-/// of its own (`bt-math-fonts`, below normal) from the moment the door is made, and the worker
+/// of its own (`bt-math-fonts`, in the band the worker stands in: below normal in the product, so
+/// the scan is no more in a frame's way than it was on the worker, and no lower than the worker
+/// where a suite's executor starts it at normal) from the moment the door is made, and the worker
 /// waits for it only at the first formula arm that needs the engine ([`Self::engine`]), never at
 /// a picture's answer. A thread the door refuses leaves the factory here, and the first formula
 /// makes the engine on the worker. The factory's panic is a panic of its thread, outside every
@@ -900,19 +902,24 @@ struct FormulaEngine {
 }
 
 impl FormulaEngine {
-    /// The engine `make_engine` makes, its making begun now on `bt-math-fonts`.
-    fn beside(make_engine: impl FnOnce() -> MathEngine + Send + 'static) -> Self {
+    /// The engine `make_engine` makes, its making begun now on `bt-math-fonts`, from the worker
+    /// (`worker`) whose band it takes. Off Windows a thread has no band (`current_thread_priority`
+    /// answers `None`) and the thread door sets none, so the band handed there is `Normal`, which
+    /// sets nothing either.
+    fn beside(
+        worker: &bt_platform::admission::WorkerCtx,
+        make_engine: impl FnOnce() -> MathEngine + Send + 'static,
+    ) -> Self {
+        let _ = worker;
+        let band =
+            bt_platform::current_thread_priority().unwrap_or(bt_platform::ThreadPriority::Normal);
         let factory: Arc<Mutex<Option<EngineFactory>>> =
             Arc::new(Mutex::new(Some(Box::new(make_engine))));
         let on_its_thread = Arc::clone(&factory);
-        let beside = bt_platform::spawn_at_priority(
-            "bt-math-fonts",
-            bt_platform::ThreadPriority::BelowNormal,
-            move |_ctx| {
-                let make = locked(&on_its_thread).take();
-                make.map(|make| make())
-            },
-        )
+        let beside = bt_platform::spawn_at_priority("bt-math-fonts", band, move |_ctx| {
+            let make = locked(&on_its_thread).take();
+            make.map(|make| make())
+        })
         .ok();
         Self {
             made: None,
