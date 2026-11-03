@@ -475,8 +475,8 @@ watch steward	EarHandle::want	watch-steward	WatchStewardAnswered	a failed start 
 # request-doors
 door	asked on	boundary	handed	mailbox
 pty_door::request_shell	window	pty_door::request@0, bt_platform::spawn_at_priority@2, bt_platform::spawn_at_priority_with_stack@3	—	lane::lock, pty_door::births
-Runtime::reap_exited_tabs	window	std::sync::Condvar::notify_one, std::sync::Condvar::notify_all, bt_platform::spawn_at_priority@2, bt_platform::spawn_at_priority_with_stack@3, lane::Executor::start_worker@2, trace_sink::Queue::offer	—	lane::lock, lane::Ledger::earliest_owed, lane::Ledger::mint, lane::Ledger::publish, lane::Ledger::say_not_started, lane::Ledger::worker_ended, lane::Queue::ask
-Runtime::close_pane	window	std::sync::Condvar::notify_one, std::sync::Condvar::notify_all, bt_platform::spawn_at_priority@2, bt_platform::spawn_at_priority_with_stack@3, lane::Executor::start_worker@2, trace_sink::Queue::offer	—	lane::lock, lane::Ledger::earliest_owed, lane::Ledger::mint, lane::Ledger::publish, lane::Ledger::say_not_started, lane::Ledger::worker_ended, lane::Queue::ask
+Runtime::reap_exited_tabs	window	pty_door::request@0, bt_platform::spawn_at_priority@2, bt_platform::spawn_at_priority_with_stack@3, bt_pty::retire_within@1, std::thread::Builder::spawn@0	—	lane::lock, pty_door::births, bt_pty::Retirements::begin, bt_pty::Retirements::end
+Runtime::close_pane	window	bt_pty::retire_within@1, std::thread::Builder::spawn@0, trace_sink::Queue::offer	—	lane::lock, bt_pty::Retirements::begin, bt_pty::Retirements::end
 spawn_profile_observation	window	bt_platform::spawn_at_priority_with_stack@3, lane::Executor::start_worker@2, shell_integration::profile_runtime::start_profile_observation@4	—	lane::lock, lane::Ledger::earliest_owed, lane::Ledger::worker_ended
 request_page_environment	window	bt_platform::spawn_at_priority@2, bt_platform::spawn_at_priority_with_stack@3	—	lane::lock, shell_integration::page_environment_cell
 attention_copilot::begin_probe	window	bt_platform::spawn_at_priority@2, bt_platform::spawn_at_priority_with_stack@3	attention_copilot::run_probe	lane::lock, attention_copilot::CopilotProbe::lock
@@ -516,13 +516,13 @@ psreadline::begin_legacy_observation	window	bt_platform::spawn_at_priority_with_
 psreadline::begin_legacy_removal	window	bt_platform::spawn_at_priority_with_stack@3, lane::Executor::start_worker@2	—	lane::lock, update_trial::Gate::state, lane::Ledger::earliest_owed, lane::Ledger::worker_ended
 spawn_powershell_preparation	window	bt_platform::spawn_at_priority@2, bt_platform::spawn_at_priority_with_stack@3	—	lane::lock
 schedule_parse_retry	window	spawn_powershell_preparation	—	lane::lock
-Runtime::submit_clipboard_write	window	std::sync::Condvar::notify_one, bt_platform::spawn_at_priority_with_stack@3, lane::Executor::start_worker@2	—	lane::lock, lane::Ledger::earliest_owed, lane::Ledger::mint, lane::Ledger::publish, lane::Ledger::say_not_started, lane::Ledger::take, lane::Ledger::worker_ended, lane::Queue::ask, lane::Queue::withdraw
+Runtime::submit_clipboard_write	window	std::sync::Condvar::notify_one, bt_platform::spawn_at_priority_with_stack@3, lane::Executor::start_worker@2	—	lane::lock, lane::Ledger::earliest_owed, lane::Ledger::mint, lane::Ledger::publish, lane::Ledger::say_not_started, lane::Ledger::take, lane::Ledger::worker_ended, lane::Queue::ask, lane::Queue::withdraw, clipboard_lane::ClipboardLane::submit, clipboard_lane::ClipboardLane::a_paste_was_asked_after
 Runtime::copy_math_latex	window	Runtime::submit_clipboard_write	—	lane::lock
-Runtime::ask_for_a_paste	window	std::sync::Condvar::notify_one, bt_platform::spawn_at_priority@2, bt_platform::spawn_at_priority_with_stack@3, lane::Executor::start_worker@2, trace_sink::Queue::offer	—	lane::lock, lane::Ledger::earliest_owed, lane::Ledger::mint, lane::Ledger::publish, lane::Ledger::say_not_started, lane::Ledger::take, lane::Ledger::worker_ended, lane::Queue::ask, lane::Queue::withdraw
+Runtime::ask_for_a_paste	window	std::sync::Condvar::notify_one, bt_platform::spawn_at_priority@2, bt_platform::spawn_at_priority_with_stack@3, lane::Executor::start_worker@2, trace_sink::Queue::offer	—	lane::lock, lane::Ledger::earliest_owed, lane::Ledger::mint, lane::Ledger::publish, lane::Ledger::say_not_started, lane::Ledger::take, lane::Ledger::worker_ended, lane::Queue::ask, lane::Queue::withdraw, clipboard_lane::ClipboardLane::submit
 Runtime::paste_into_field	window	Runtime::ask_for_a_paste	—	lane::lock
 Runtime::paste_into_preview	window	Runtime::ask_for_a_paste	—	lane::lock
-Runtime::paste_from_clipboard_into	window	bt_platform::spawn_at_priority@2, bt_platform::spawn_at_priority_with_stack@3, Runtime::ask_for_a_paste	—	lane::lock
-Runtime::save_clipboard_picture	window	std::sync::Condvar::notify_one, bt_platform::spawn_at_priority@2, bt_platform::spawn_at_priority_with_stack@3, lane::Executor::start_worker@2, trace_sink::Queue::offer	—	lane::lock, lane::Ledger::earliest_owed, lane::Ledger::mint, lane::Ledger::publish, lane::Ledger::say_not_started, lane::Ledger::worker_ended, lane::Queue::ask
+Runtime::paste_from_clipboard_into	window	Runtime::ask_for_a_paste	—	lane::lock
+Runtime::save_clipboard_picture	window	bt_platform::spawn_at_priority@2, bt_platform::spawn_at_priority_with_stack@3	—	lane::lock, ClipboardPictureMailbox::withdraw, ClipboardPictureMailbox::refuse
 update::spawn_check	window	bt_platform::spawn_at_priority@2, bt_platform::spawn_at_priority_with_stack@3	—	lane::lock, update_trial::Gate::state
 Job::answer_verb	window	bt_platform::spawn_at_priority@2, bt_platform::spawn_at_priority_with_stack@3	—	lane::lock, update_job::Job::stop_the_driver
 Job::consider	window	bt_platform::spawn_at_priority@2, bt_platform::spawn_at_priority_with_stack@3	—	lane::lock
@@ -538,3 +538,21 @@ diagnostics::stderr_line	window	bt_platform::spawn_at_priority@2, diagnostics::Q
 diagnostics::note	window	bt_platform::spawn_at_priority@2, diagnostics::Queue::offer	—	—
 PageShrinker::send	window	std::sync::mpsc::Sender::send	—	lane::lock
 EarHandle::want	window	std::sync::Condvar::notify_one, bt_platform::spawn_at_priority@2, bt_platform::spawn_at_priority_with_stack@3	—	lane::lock, watch_steward::lock, watch_steward::Steward::lock
+
+## `# request-door-cuts` — where a gesture door's C1 walk is cut (plan row 52, owner 2026-11-02): one
+## line per cut `# request-doors` door asked on the window. `enqueue` names the door's direct callees
+## walked under C1 to the row's boundary, as a door is; `beside` names the ones the C1 walk does not
+## enter: the gesture's own window work, walked once more by the beside walk, which keeps a breach
+## (an effect, a blocking primitive, a door-level finding) and a row the list has read. Every direct
+## first-party callee of the door's body is in one cell or is already a stop; an enqueue is called in
+## the body itself, never only inside a closure literal; a closure handed to a `beside` call is
+## beside's. The reason is dated. Read by bt-source's request-door guard; held to `# request-doors`
+## by `hang_watch::window_waits_tests`.
+
+# request-door-cuts
+door	enqueue	beside	reason
+Runtime::hand_off	<Arc as WindowHost>::hand_off, handoff_lane::Pending::owe	Runtime::answer_handoff	2026-11-02: plan row 52 (owner rulings R1–R3): the press is put on the hand-off lane and owed; a refusal at the lane's door is answered on the press's turn, beside the enqueue (the 0.5 debt: answered on a later turn)
+Runtime::ask_for_a_paste	Runtime::ask_the_clipboard, Runtime::paste_leaf_mut, clipboard_lane::PasteHold::queue_paste, PressClock::moment	Runtime::settle_clipboard, Runtime::say_the_clipboard_busy	2026-11-02: plan row 52 (owner rulings R1–R3): the paste is asked of the clipboard lane and its place held; what the window owes is settled before the ask and a refused ask said on its turn, beside the enqueue (the 0.5 debt: settle_clipboard runs before the enqueue, which C1 forbids)
+Runtime::paste_from_clipboard_into	Runtime::ask_for_a_paste	Runtime::a_surface_above_the_clipboard_rung_holds_the_keyboard	2026-11-02: plan row 52 (owner rulings R1–R3): the keyboard ladder is asked beside the paste, which is its own door's walk
+Runtime::reap_exited_tabs	pty_door::request, bt_pty::retire_session	keep_birth_death_face, birth_death_disposition, tab_has_ended, exited_tabs_the_loop_may_close, settle_exit_dispositions, exit_diagnostics::say_shell_exits, exit_diagnostics::say_spawn_failure, BirthDeathFallback::waiting, Runtime::close_tab	2026-11-02: plan row 52 (owner rulings R1–R3): a birth death's last-resort shell is asked of the PTY door and a dead shell handed to its retirement thread; the exit poll, the faces and the tab's close are the window's own, beside the enqueue (one level only: a hand-over inside close_tab is not followed; the 0.5 debt: try_wait polls before the enqueue)
+Runtime::close_pane	end_leaves_of, attention_trace::global, Runtime::cargo_in_flight	Runtime::raise_dirty_gate, restore::GateRaise::proceeds, closing_this_pane_closes_the_tab, Seats::pane_count, Runtime::close_tab, Runtime::end_capture, TabState::leaf_here, Runtime::leave_hovered_math, Runtime::seat_metrics, Seats::close_seat, TabState::preview_here, Runtime::clear_preview_image, Runtime::clear_preview_view, TabState::refocus_after_losing, TabState::sessions_match_terminals, TabState::files_match_files_seats, Runtime::settle_seat_set_change, Runtime::update_chrome_hover	2026-11-02: plan row 52 (owner rulings R1–R3): the leaf's shell is handed to its retirement thread through end_leaves_of; the gates, the layout and the frame are the window's own, beside the enqueue (one level only: the last pane's close_tab is not followed)

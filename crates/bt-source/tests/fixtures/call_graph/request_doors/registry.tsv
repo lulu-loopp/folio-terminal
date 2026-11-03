@@ -49,4 +49,16 @@ submit_probes_typed	window	std::sync::Condvar::notify_one, spawn@0	—	Lane::mai
 submit_reads_a_value	window	std::sync::Condvar::notify_one, spawn@0	—	Lane::mailbox
 submit_reads_a_status	window	std::sync::Condvar::notify_one, spawn@0	—	Lane::mailbox
 submit_waits_for_a_child	window	std::sync::Condvar::notify_one, spawn@0	—	Lane::mailbox
+gesture	window	std::sync::Condvar::notify_one, spawn@0	—	Lane::mailbox
+gesture_strays	window	std::sync::Condvar::notify_one, spawn@0	—	Lane::mailbox
+gesture_in_a_closure	window	std::sync::Condvar::notify_one, spawn@0	—	Lane::mailbox
+gesture_hands_beside	window	std::sync::Condvar::notify_one, spawn@0	—	Lane::mailbox
+submit_on_a_builder	window	std::sync::Condvar::notify_one, std::thread::Builder::spawn@0	—	Lane::mailbox
 prewarm	main (before the loop)	—	—	—
+
+# request-door-cuts
+door	enqueue	beside	reason
+gesture	gesture_enqueue	gesture_answer, gesture_glances	2026-11-02: the fixture's gesture, cut at its enqueue
+gesture_strays	gesture_enqueue	gesture_answer	2026-11-02: a direct callee in neither cell
+gesture_in_a_closure	gesture_enqueue	answer_with	2026-11-02: an enqueue only in a closure literal
+gesture_hands_beside	gesture_enqueue	answer_with	2026-11-02: a closure handed to a beside call
