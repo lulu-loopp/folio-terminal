@@ -192,23 +192,32 @@ try {
     # now opens on what is rare (a separator, the folder's name, the `@`) and asks
     # for the rest behind it, in a lookbehind group named `lead`; a hit reports
     # `lead` and the match together, so its text — and its key in a keyed list —
-    # is the span it always was.
+    # is the span it always was. (A lookbehind may look back into the match
+    # before it; the mail loop below keeps a mailbox from starting inside the
+    # address before it, so a run of addresses gives the hits it always gave.)
     #
     # **A drive letter stands alone**: the character before it is not a letter or
     # a digit, so a URL whose scheme's colon is followed by a path (`webpack:/`,
     # `file:/`, a host name with a port) is not a drive. An escape in a source
-    # literal (`\n`, `\r`, `\t`, `\0`, `\xHH`) counts as standing alone: a
-    # recorded `…\r\nX:\…` is a drive at the start of a line.
-    $escapeBefore = '(?<=\\[nrt0]|\\x[0-9A-Fa-f]{2})'
+    # literal counts as standing alone, so a recorded `…\r\nX:\…` is a drive at
+    # the start of a line in every language the tree is written in: a backslash
+    # escape of one letter (`\n`, `\r`, `\t`, `\0`, `\a`, `\b`, `\f`, `\v`,
+    # `\e`), `\xHH`, `\uHHHH` (JSON, JavaScript, C#) and `\u{H…}` (Rust), and
+    # PowerShell's backtick escapes (`` `n ``, `` `r ``, `` `t ``, `` `0 ``,
+    # `` `a ``, `` `b ``, `` `f ``, `` `v ``, `` `e ``).
+    $escapeBefore = '(?<=\\[nrt0abfve]|\\x[0-9A-Fa-f]{2}|\\u[0-9A-Fa-f]{4}|\\u\{[0-9A-Fa-f]{1,6}\}|`[nrt0abfve])'
     $standsAlone = '(?:(?<![A-Za-z0-9])|' + $escapeBefore + ')'
     # **A drive, in every spelling a tool prints one** (row 183): `X:` with any
     # run of separators after it (one, two, or the three and four of a doubly
     # escaped literal; `file:///X:/` and `\\?\X:\` are the same drive), WSL's
     # `/mnt/x/`, Cygwin's `/cygdrive/x/` and Git Bash's `/x/`. The last has a
-    # one-letter segment that URLs and Unix paths share, so it counts only where
-    # it is not inside a path or a URL: not after a word character, `/`, `\`,
-    # `.`, `~` or `-`. After `:`, `=`, `;`, a space or a quote it does count —
-    # that is how a Git Bash `PATH` lists it.
+    # one-letter segment that URLs and Unix paths share, so it does not count
+    # after a word character, `/`, `\`, `.`, `~` or `-` (`https://host/x/…`,
+    # `a/x/…`, `./x/…`). After any other character it counts: after `:`, `=`,
+    # `;`, a space or a quote, which is how a Git Bash `PATH` lists it, and also,
+    # failing closed, after a single-slash scheme (`file:/x/…`), a forward-slash
+    # drive's one-letter folder (`X:/a/…`, reported as `/a/…`) and a variable
+    # (`${R}/x/…`, `$(pwd)/x/…`, `%R%/x/…`).
     # Not covered, and named so that no one takes them for covered: a UNC admin
     # share (`\\host\x$\…`) and a drive spelt as an environment variable
     # (`%SystemDrive%\…`). No tracked file holds either.
@@ -380,11 +389,20 @@ try {
                 [pscustomobject]@{ Check = "home"; Value = $hit; Problem = "names a real account directory: $hit (use one of: $($placeholders -join ', '))" }
             }
         }
+        # A mailbox starts no earlier than the end of the address before it: the
+        # lookbehind would otherwise read `x@y.com@z.org` as two addresses, the
+        # second one's mailbox being the first one's domain. One `@` with no
+        # mailbox left after that is no address, as it was not for the old
+        # pattern either.
+        $mailEnd = 0
         foreach ($m in $mail_re.Matches($text)) {
+            $from = [Math]::Max($m.Groups["lead"].Index, $mailEnd)
+            if ($from -ge $m.Index) { continue }
+            $mailEnd = $m.Index + $m.Length
             $domain = $m.Groups[1].Value.ToLowerInvariant()
             if ($notDomains -contains $m.Groups[2].Value.ToLowerInvariant()) { continue }
             if ($domain -notmatch $exampleDomains) {
-                $hit = $m.Groups["lead"].Value + $m.Value
+                $hit = $text.Substring($from, $mailEnd - $from)
                 [pscustomobject]@{ Check = "mail"; Value = $hit; Problem = "carries a deliverable e-mail address: $hit" }
             }
         }

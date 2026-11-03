@@ -68,9 +68,10 @@ fn is_separator(byte: u8) -> bool {
 /// - `x:`, a letter standing alone (no letter or digit before it, so a URL scheme's colon is not
 ///   a drive) — with any run of separators, so `file:///x:/` and `\\?\x:\` count too;
 /// - WSL's `/mnt/x` and Cygwin's `/cygdrive/x`;
-/// - Git Bash's `/x`, where it is not inside a path or a URL (no word character, `/`, `\`, `.`,
-///   `~` or `-` before it); after `:`, `=`, `;`, a space or a quote it counts, which is how a Git
-///   Bash `PATH` lists it.
+/// - Git Bash's `/x`, except after a word character, `/`, `\`, `.`, `~` or `-` (`https://host/x/`,
+///   `a/x/`, `./x/`). After any other byte it counts: after `:`, `=`, `;`, a space or a quote,
+///   which is how a Git Bash `PATH` lists it, and also, failing closed, after a single-slash scheme
+///   (`file:/x/`), a forward-slash drive's one-letter folder (`x:/a/`) and a variable (`${r}/x/`).
 ///
 /// The view is the recording's bytes, so a line break before a drive is a real control byte, not
 /// a source escape; it stands alone without the scan's escape rule.
