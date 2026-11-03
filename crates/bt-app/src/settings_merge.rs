@@ -203,6 +203,7 @@ pub(crate) fn merge(
         launch_opens,
         option_sends_alt,
         multiline_paste_ask,
+        resume_agents,
         web_color_scheme,
     } = theirs.clone();
     let document = SettingsV1 {
@@ -352,6 +353,7 @@ pub(crate) fn merge(
             |s| &mut s.multiline_paste_ask,
             multiline_paste_ask,
         ),
+        resume_agents: m.field("resume_agents", |s| &mut s.resume_agents, resume_agents),
         web_color_scheme: m.field(
             "web_color_scheme",
             |s| &mut s.web_color_scheme,

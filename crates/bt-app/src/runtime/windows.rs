@@ -11,15 +11,16 @@ use crate::{
     HandoverInto, INITIAL_HEIGHT, INITIAL_WIDTH, LaunchPlan, LeafSeed, NewWindowParts,
     NewWindowPlan, PreviewRestore, PtyWakeSignal, RAIL_TRANSITION, RenameExit, RenameSubject,
     RevealTween, Runtime, TabSeed, TabState, TearGrip, WindowPosture, WindowRuntime, active_item,
-    attention_trace, close_wait_over, create_tab_state, dpi_snapshot,
+    agent_resume, attention_trace, close_wait_over, create_tab_state, dpi_snapshot,
     ensure_metrics_match_authoritative_scale, ensure_swapchain_matches_inner, first_term_leaf,
     float, git, hang_watch, i18n, ime_outbound, ime_report, install_page_ground_color,
     install_theme_class_background, marks, mouse_trace, new_window_runtime, notify,
     opening_window_attributes, plan_launch, presentation_physical_size, preview, profiles, quit,
     rail_state_for, render_sidebar_mode, render_tab_layout, restore, restore_row_seed,
-    restore_window_placement, revive_plan, scrollback_quota, seats, seed, session_sidebar_mode,
-    session_tab_layout, set_option_as_alt, solve_seats, stand_the_window_at, startup_window_rect,
-    tabs_a_close_loses, toast, webnav, where_a_save_stands, window_surface_target,
+    restore_window_placement, revive_plan_with, scrollback_quota, seats, seed,
+    session_sidebar_mode, session_tab_layout, set_option_as_alt, solve_seats, stand_the_window_at,
+    startup_window_rect, tabs_a_close_loses, toast, webnav, where_a_save_stands,
+    window_surface_target,
 };
 use crate::{LeafView, TextScale, owner_door, revived_profile};
 use anyhow::Context;
@@ -366,7 +367,15 @@ impl Runtime<'_, Native> {
         let roots: Vec<_> = plan_launched
             .as_ref()
             .filter(|plan| !plan.open.is_empty())
-            .map(|plan| plan.open.iter().map(revive_plan).collect())
+            .map(|plan| {
+                // **A launch's pinned tabs bring their agents back** (row 195), as the switch on
+                // the Agents page says.
+                let resuming = agent_resume::Restore::of_this_run(app.settings_store.loaded());
+                plan.open
+                    .iter()
+                    .map(|tab| revive_plan_with(tab, resuming))
+                    .collect()
+            })
             .unwrap_or_else(|| {
                 vec![(
                     // **A window opened to *receive* a tab opens no shell** (user
@@ -1005,7 +1014,11 @@ impl<B: Backend> Runtime<'_, B> {
         let placeholder = self.window.placeholder_tab.take();
         let first_revived = self.window.tabs.len();
         for tab in &pending {
-            let (seats, seed, leaves, files, preview) = revive_plan(tab);
+            // **And so do the tabs the reader asked back** (row 195): the card is their "yes".
+            let (seats, seed, leaves, files, preview) = revive_plan_with(
+                tab,
+                agent_resume::Restore::of_this_run(self.app.settings_store.loaded()),
+            );
             let wake = &self.window.pty_wake;
             let id = self.app.tab_ids.mint();
             let born = LeafView::at(&mut self.app.gpu, &self.window.renderer, TextScale::ACTUAL)?;
@@ -2575,6 +2588,7 @@ pub(crate) fn seeded_tab(seed: &seed::Seed) -> TabV1 {
                 manual_name: manual_name.clone(),
                 card_skip: 0,
                 last_command: String::new(),
+                agent: None,
             })),
             None,
         ),
@@ -3055,6 +3069,7 @@ pub(crate) fn recent_term_leaf_seed(profile_id: &str, cwd: String) -> LeafSeed {
         card_skip: 0,
         prefill: None,
         carried_environment: None,
+        agent: crate::agent_resume::SeedAgent::None,
     }
 }
 

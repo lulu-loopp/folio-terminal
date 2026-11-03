@@ -485,7 +485,8 @@ pub(crate) fn rows_to_install() -> Vec<MappingRow> {
 /// Direct argv, with stdin only for events whose mapping reads a payload.
 fn args_for(event: &str) -> Vec<String> {
     let mut args = vec!["attention".to_owned(), format!("{CLAUDE_CODE}:{event}")];
-    if attention_map::turn_end_row(CLAUDE_CODE, event).is_some_and(|row| row.words.are_somewhere())
+    if attention_map::turn_end_row(CLAUDE_CODE, event)
+        .is_some_and(|row| row.words.are_somewhere() || row.resume.is_declared())
     {
         args.extend(["--json".to_owned(), crate::cli::STDIN_PAYLOAD.to_owned()]);
     }

@@ -80,6 +80,7 @@ fn settle_exit_dispositions(
             exit_diagnostics::ShellExitDisposition::BirthDeathFellBack(_)
                 | exit_diagnostics::ShellExitDisposition::BirthDeathPaneKept
                 | exit_diagnostics::ShellExitDisposition::SystemEndedPaneKept
+                | exit_diagnostics::ShellExitDisposition::HandedBack
         ) {
             continue;
         }
@@ -185,15 +186,21 @@ pub(super) fn land_birth_death_fallback(
         return Ok(BirthDeathLanding::Waiting);
     };
     match answer.session {
-        Ok(pty) => {
+        Some(Ok(pty)) => {
             let crate::BirthDeathFallback { landing, exit } = pending;
             land_birth_death_fallback_shell(leaf, pty, landing)?;
             Ok(BirthDeathLanding::FellBack(exit))
         }
-        Err(error) => {
+        refused => {
+            // A last resort carries no folder to find gone, so its birth always asks `bt-pty`;
+            // an answer that started nothing is kept as a refused one is.
+            let why = match refused {
+                Some(Err(error)) => error.to_string(),
+                _ => "nothing was started".to_owned(),
+            };
             pending.exit.disposition = exit_diagnostics::ShellExitDisposition::BirthDeathPaneKept;
             keep_birth_death_face(&mut leaf.session, &pending.exit, false)?;
-            Ok(BirthDeathLanding::Kept(pending.exit, error.to_string()))
+            Ok(BirthDeathLanding::Kept(pending.exit, why))
         }
     }
 }
@@ -1456,7 +1463,9 @@ impl<B: Backend> Runtime<'_, B> {
         let Some(leaf) = state.focused() else {
             return Ok(());
         };
-        let profile = leaf.launch.profile.clone();
+        // The pane's own profile: the shell it was, for a pane whose agent was resumed in it (row
+        // 195).
+        let profile = leaf.own_profile().to_owned();
         // Where the pane stands, the one `Restart shell` reads: its report, else its shell
         // process's folder (T-CWD-FROM-PROCESS), else the folder it was put down in.
         let cwd = leaf.seed_place_for_a_new_shell();
@@ -3619,6 +3628,9 @@ impl<B: Backend> Runtime<'_, B> {
         let mut exits = Vec::new();
         let mut active_exited_panes = Vec::new();
         let mut exited = Vec::new();
+        // **Panes whose agent's end hands their shell back** (row 195), and whether a record ended.
+        let mut hand_backs = Vec::new();
+        let mut records_ended = false;
         for (index, tab) in self.window.tabs.iter_mut().enumerate() {
             // A tab has ended when every shell it holds has ended. A tab in
             // probe mode holds no PTY at all and never ends this way.
@@ -3626,6 +3638,24 @@ impl<B: Backend> Runtime<'_, B> {
             let mut any_pty = false;
             let tab_id = tab.id;
             for (seat, leaf) in tab.leaves_mut() {
+                // **A typed agent's record ends with its command** (row 195): the shell marked the
+                // next prompt.
+                records_ended |= leaf.agent.settle_command(leaf.session.command_marks());
+                // **A resume whose folder was gone started nothing** (row 195, review F3): the
+                // pane's shell is owed in its place now, with the could-not-resume line.
+                match leaf.agent.take_not_started() {
+                    Some(crate::agent_resume::Ended::HandBack {
+                        profile,
+                        cwd,
+                        failed,
+                    }) => {
+                        hand_backs.push((index, *seat, profile, cwd, failed));
+                        any_live = true;
+                        continue;
+                    }
+                    Some(crate::agent_resume::Ended::Cleared) => records_ended = true,
+                    Some(crate::agent_resume::Ended::Unchanged) | None => {}
+                }
                 // A shell still being born is a shell this tab is about to have: the tab has not
                 // ended while one of its panes is in birth.
                 if leaf.life.holds_its_tab() {
@@ -3638,6 +3668,8 @@ impl<B: Backend> Runtime<'_, B> {
                 any_pty = true;
                 match pty.try_wait()? {
                     None => any_live = true,
+                    // **A shell is on its way into this pane's place** (row 195): it holds its tab.
+                    Some(_) if leaf.agent.handing_back() => any_live = true,
                     Some(status) => {
                         let elapsed = seen.unwrap_or_else(|| pty.age_at(now));
                         let code = status.signal().is_none().then(|| status.exit_code());
@@ -3670,6 +3702,39 @@ impl<B: Backend> Runtime<'_, B> {
                             exits.push((index, exit));
                             any_live = true;
                             continue;
+                        }
+                        // **The pane's own child ended by itself** (row 195) — read after the
+                        // system's end above, which keeps the record with the pane (row 191's kept
+                        // pane: the agent comes back at the next start), and before any birth-death
+                        // reading, because a resume that is refused prints its reason and exits at
+                        // once, which is that resume's failure and no shell's death. Its record
+                        // ends, and a resumed agent's end hands back the shell the pane was.
+                        match leaf.agent.child_ended() {
+                            crate::agent_resume::Ended::Unchanged => {}
+                            crate::agent_resume::Ended::Cleared => records_ended = true,
+                            crate::agent_resume::Ended::HandBack {
+                                profile,
+                                cwd,
+                                failed,
+                            } => {
+                                // Said like every other exit (review F6): what the reaper saw end,
+                                // that the pane's shell is handed back in its place, and the
+                                // session-end probe every exit carries (row 199).
+                                exits.push((
+                                    index,
+                                    exit_diagnostics::ShellExit::observed(
+                                        seat.0,
+                                        code,
+                                        elapsed,
+                                        program,
+                                        tab_id.0,
+                                        exit_diagnostics::ShellExitDisposition::HandedBack,
+                                    ),
+                                ));
+                                hand_backs.push((index, *seat, profile, cwd, failed));
+                                any_live = true;
+                                continue;
+                            }
                         }
                         if let Some(birth_death) =
                             birth_death_disposition(elapsed, had_output, pty.has_birth_fallback())
@@ -3775,6 +3840,12 @@ impl<B: Backend> Runtime<'_, B> {
         // Only the ones whose close is nothing to ask: a tab that still holds an
         // unsaved preview waits for the reader, and the question is never put
         // from here (ticket 58).
+        if records_ended {
+            self.mark_session_dirty(now);
+        }
+        for (index, seat, profile, cwd, failed) in hand_backs {
+            self.hand_back_shell(index, seat, profile, cwd, failed)?;
+        }
         let ended = exited.clone();
         let exited = exited_tabs_the_loop_may_close(
             &self.window.dirty_gate,
@@ -5303,6 +5374,7 @@ pub(crate) fn new_tab_leaf_seed(
         card_skip: 0,
         prefill: None,
         carried_environment: None,
+        agent: crate::agent_resume::SeedAgent::None,
     }
 }
 
@@ -5749,6 +5821,39 @@ mod birth_death_tests {
                 "settle_exit_dispositions(&mutexits,&retired_tabs,active,active_retires_panes);"
             ),
             "the reaper names its exits through the settling rule: {reap}"
+        );
+    }
+
+    /// RED (row 195, review F6) — **a resumed agent's own end is said as handed back**: the reaper
+    /// writes its `shell exited` line with the disposition `handed back`, and the turn's settling
+    /// leaves it so even where the same turn retires the active tab's panes.
+    ///
+    /// MUTATION: drop `HandedBack` from the dispositions `settle_exit_dispositions` leaves as
+    /// written, and the line says `retired pane`.
+    #[test]
+    fn a_resumed_agents_own_end_is_said_as_handed_back() {
+        let handed_back = exit_diagnostics::ShellExit::unprobed(
+            6,
+            Some(1),
+            Duration::from_secs(90),
+            Some(PathBuf::from("claude.exe")),
+            9,
+            exit_diagnostics::ShellExitDisposition::HandedBack,
+        );
+        let mut exits = vec![(0, handed_back)];
+        settle_exit_dispositions(&mut exits, &BTreeSet::new(), 0, true);
+        let mut lines = Vec::new();
+        exit_diagnostics::say_shell_exits(exits.iter().map(|(_, exit)| exit), |line| {
+            lines.push(line.to_owned());
+        });
+        assert_eq!(
+            lines,
+            ["Folio: pane 6 shell exited code=1 after 90000 ms (claude.exe, tab 9, handed back)"]
+        );
+        let reap = test_support::squeezed_body("Runtime", "reap_exited_tabs");
+        assert!(
+            reap.contains("exit_diagnostics::ShellExitDisposition::HandedBack,),"),
+            "the reaper says the hand-back, through the probe every exit carries: {reap}"
         );
     }
 

@@ -2149,6 +2149,10 @@ text_entries! {
     /// screen), and **what does not change** — the marks inside the window,
     /// which are not this row's to switch off.
     DescTurnEndNotifications,
+    /// `Agents ▸ Resume agents after restart` — the row (0.4.9 plan row 195).
+    RowResumeAgents,
+    /// Its sentence: what comes back, and when.
+    DescResumeAgents,
     /// The body of a turn-end interruption from a source that wrote no sentence
     /// of its own. States the fact; names nothing to act on.
     ToastTurnFinished,
@@ -5203,6 +5207,18 @@ impl Text {
                 "Bounces the Dock icon when an agent finishes a turn in a window out of sight. Minimised windows get a desktop message.",
                 "agent 回合结束而窗口不可见时，跳动程序坞图标。窗口最小化时改为发送桌面通知。",
             ),
+            // zh: pending T-AGENT-RESUME-AFTER-RESTART
+            Self::RowResumeAgents => pick(
+                lang,
+                "Resume agents after restart",
+                "Resume agents after restart",
+            ),
+            // zh: pending T-AGENT-RESUME-AFTER-RESTART
+            Self::DescResumeAgents => pick(
+                lang,
+                "When Folio reopens, panes that were running Claude Code or Codex resume their sessions.",
+                "When Folio reopens, panes that were running Claude Code or Codex resume their sessions.",
+            ),
             Self::ToastTurnFinished => pick(lang, "Turn finished", "回合结束"),
             Self::ToastWaitingForYou => pick(lang, "Waiting for you", "正在等你回答"),
             Self::NotifyRefusedTitle => {
@@ -6572,6 +6588,11 @@ impl Text {
 
     #[cfg(test)]
     const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
+        // T-AGENT-RESUME-AFTER-RESTART (0.4.9 plan row 195): the Agents page's resume switch.
+        (Self::RowResumeAgents, HostPlatform::Windows),
+        (Self::RowResumeAgents, HostPlatform::MacOs),
+        (Self::DescResumeAgents, HostPlatform::Windows),
+        (Self::DescResumeAgents, HostPlatform::MacOs),
         // zh: pending T-SHUTDOWN-KILLS-SHELLS-BEFORE-THE-LAYOUT-IS-SAVED — the note a pane keeps
         // when the system ended its shell at shutdown (plan row 191).
         (Self::ShellEndedBySystem, HostPlatform::Windows),
@@ -6584,6 +6605,18 @@ impl Text {
 // A separate family rather than a `Text` variant with holes in it, because these
 // return `String` and every one of the table's entries is `&'static str`. Mixing
 // the two would make the whole table allocate to serve fifteen of its members.
+
+/// **The line a pane opens with when its agent's session did not come back** (0.4.9 plan row
+/// 195): the vendor's title and the first eight characters of the session id, so two panes that
+/// say it can be told apart.
+#[must_use]
+pub fn could_not_resume_text(title: &str, id: &str) -> String {
+    match current() {
+        Lang::English => format!("{title} session {id} could not be resumed."),
+        // zh: pending T-AGENT-RESUME-AFTER-RESTART
+        Lang::Chinese => format!("{title} session {id} could not be resumed."),
+    }
+}
 
 /// The refused address's fact line when its scheme is why it was refused
 /// (§7.7 ④; the card's headline since 2026-10-09 is `Cannot open`). The scheme comes from `webnav::scheme_of` and from nowhere else —
