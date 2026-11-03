@@ -51,6 +51,15 @@
 //! they came down a different lane and a file with no readable picture very
 //! often still has a readable size.
 //!
+//! **A file another program holds at this moment is not a refusal**
+//! (T-HELD-FILE-IN-THE-PDF-LANE, 2026-11-03). `None` is a fact about the file,
+//! and the same read would answer it again; a sharing or lock violation is a
+//! fact about the moment, and the same read may succeed once the holder lets
+//! go. So both readers answer `Result<Option<_>, Held>`: [`Held`] for that one
+//! case, minted by [`refused`] at every open and read of the file, and `Ok`
+//! around the one silence for everything else. The card asks a held answer once
+//! more by itself, and after that only a new card asks.
+//!
 //! # What it reads, in the order it trusts them
 //!
 //! 1. **The page tree's own `/Count`.** A `/Type /Pages` dictionary declares how
@@ -131,20 +140,42 @@ const HEADER_WINDOW_BYTES: usize = 1024;
 /// over it costs only the `/Count` of something nested past any real document.
 const MAX_DICT_DEPTH: usize = 64;
 
+/// **Another program holds the file at this moment** (T-HELD-FILE-IN-THE-PDF-LANE) — the one
+/// answer of this module that is about the moment rather than the file. See the module's own note.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Held;
+
+/// **What a refused open or read of the file is answered with** — [`Held`] when another program
+/// holds the file at this moment (`bt_platform::file_reads::held_elsewhere`, the one predicate),
+/// and the module's one silence for every other error. The one classifier of this module: every
+/// open and read of the file goes through it, so the count and the raster cannot disagree about
+/// what a held file is.
+fn refused<T>(error: &std::io::Error) -> Result<Option<T>, Held> {
+    if bt_platform::file_reads::held_elsewhere(error) {
+        Err(Held)
+    } else {
+        Ok(None)
+    }
+}
+
 /// How many pages the PDF at `path` holds, or `None` when neither of its two
-/// readers can say — see the module's own note for what each of them reads.
+/// readers can say — see the module's own note for what each of them reads —
+/// or [`Held`] when another program holds the file at this moment.
 ///
 /// The scan first, because it is a stream over the file and answers most
 /// documents; the parse behind it, because a document that packs its structure
 /// into object streams is unreadable to any scan and is not thereby a document
-/// without pages.
-#[must_use]
-pub fn page_count(path: &Path) -> Option<u32> {
-    let file = bt_platform::file_reads::open(bt_platform::file_reads::Lane::Pdf, path).ok()?;
-    if let Some(count) = count_pages(file) {
-        return Some(count);
+/// without pages. A held scan is the answer: the parse would open the same file
+/// a moment later and meet the same holder.
+pub fn page_count(path: &Path) -> Result<Option<u32>, Held> {
+    let file = match bt_platform::file_reads::open(bt_platform::file_reads::Lane::Pdf, path) {
+        Ok(file) => file,
+        Err(error) => return refused(&error),
+    };
+    if let Some(count) = count_pages(file)? {
+        return Ok(Some(count));
     }
-    parse_page_count(read_capped(path)?)
+    Ok(read_capped(path)?.and_then(parse_page_count))
 }
 
 /// [`page_count`]'s second reader: the page list of a parsed document.
@@ -167,15 +198,29 @@ fn parse_page_count(bytes: Vec<u8>) -> Option<u32> {
 /// read is bounded by the cap rather than by that length: a file being appended
 /// to between the two calls is a file this window may not be handed
 /// unboundedly much of.
-fn read_capped(path: &Path) -> Option<Vec<u8>> {
-    let file = bt_platform::file_reads::open(bt_platform::file_reads::Lane::Pdf, path).ok()?;
-    let len = file.metadata().ok()?.len();
+///
+/// The open and the read go through [`refused`]; the length is asked of the
+/// handle already open, which no other program can refuse.
+fn read_capped(path: &Path) -> Result<Option<Vec<u8>>, Held> {
+    let file = match bt_platform::file_reads::open(bt_platform::file_reads::Lane::Pdf, path) {
+        Ok(file) => file,
+        Err(error) => return refused(&error),
+    };
+    let Ok(metadata) = file.metadata() else {
+        return Ok(None);
+    };
+    let len = metadata.len();
     if len == 0 || len > MAX_RASTER_BYTES {
-        return None;
+        return Ok(None);
     }
-    let mut bytes = Vec::with_capacity(usize::try_from(len).ok()?);
-    file.take(MAX_RASTER_BYTES).read_to_end(&mut bytes).ok()?;
-    Some(bytes)
+    let Ok(capacity) = usize::try_from(len) else {
+        return Ok(None);
+    };
+    let mut bytes = Vec::with_capacity(capacity);
+    if let Err(error) = file.take(MAX_RASTER_BYTES).read_to_end(&mut bytes) {
+        return refused(&error);
+    }
+    Ok(Some(bytes))
 }
 
 /// **The largest file this module will parse** — [`page_raster`], and the
@@ -220,7 +265,7 @@ pub struct PageRaster {
 
 /// **The first page of the PDF at `path`, fitted inside `fit_width` ×
 /// `fit_height`**, or `None` for every one of the refusals in the module's own
-/// note.
+/// note, or [`Held`] when another program holds the file at this moment.
 ///
 /// # Fitted, not resampled
 ///
@@ -240,9 +285,13 @@ pub struct PageRaster {
 /// [`page_count`] on the preview worker. Its one caller is the decoration
 /// worker, beside the formula engine and the image decoder, which is where this
 /// window puts CPU work that answers a pointer.
-#[must_use]
-pub fn page_raster(path: &Path, index: u32, fit_width: u32, fit_height: u32) -> Option<PageRaster> {
-    raster_page(read_capped(path)?, index, fit_width, fit_height)
+pub fn page_raster(
+    path: &Path,
+    index: u32,
+    fit_width: u32,
+    fit_height: u32,
+) -> Result<Option<PageRaster>, Held> {
+    Ok(read_capped(path)?.and_then(|bytes| raster_page(bytes, index, fit_width, fit_height)))
 }
 
 /// [`page_raster`] over bytes already in hand — the seam the tests feed.
@@ -322,7 +371,7 @@ fn raster_page(bytes: Vec<u8>, index: u32, fit_width: u32, fit_height: u32) -> O
 /// free to answer anything else. The cap is the module's own, the one the parse
 /// behind this already refuses past: a file this window will not parse is a file
 /// it will not read whole either.
-fn count_pages(reader: impl Read) -> Option<u32> {
+fn count_pages(reader: impl Read) -> Result<Option<u32>, Held> {
     let mut reader = reader.take(MAX_RASTER_BYTES);
     let mut scan = Scan::default();
     let mut buffer = vec![0_u8; CHUNK_BYTES];
@@ -336,8 +385,9 @@ fn count_pages(reader: impl Read) -> Option<u32> {
             }
             // A file that stopped answering half way through is a file this
             // question has no answer about. The card says the size, which came
-            // from a `metadata` call that already succeeded.
-            Err(_) => return None,
+            // from a `metadata` call that already succeeded. A byte-range lock
+            // another program holds is the one exception ([`refused`]).
+            Err(error) => return refused(&error),
         }
     }
     // The budget ran out rather than the file: everything past here is unread,
@@ -348,9 +398,9 @@ fn count_pages(reader: impl Read) -> Option<u32> {
     // same number, so a file at the cap is answered by neither, which is the
     // shape [`MAX_RASTER_BYTES`] already states.
     if pulled >= MAX_RASTER_BYTES {
-        return None;
+        return Ok(None);
     }
-    scan.finish()
+    Ok(scan.finish())
 }
 
 /// One dictionary the scan is inside.
@@ -677,7 +727,7 @@ mod tests {
     const OBJSTM_FIXTURE: &[u8] = include_bytes!("../../../tests/assets/folio-pdf-objstm-test.pdf");
 
     fn count(bytes: &[u8]) -> Option<u32> {
-        count_pages(bytes)
+        count_pages(bytes).expect("bytes in hand are held by nobody")
     }
 
     /// A fixture's path on this disk — what [`page_count`] takes, since its
@@ -865,7 +915,7 @@ mod tests {
         // which is exactly the file the guard has to answer about.
         file.set_len(MAX_RASTER_BYTES + 1).expect("a stated length");
         drop(file);
-        assert_eq!(page_raster(&path, 0, FIT.0, FIT.1), None);
+        assert_eq!(page_raster(&path, 0, FIT.0, FIT.1), Ok(None));
         // And the guard is about the size and not about the emptiness: the same
         // file one byte under the cap is read, and answers `None` because it is
         // zeros rather than because it was refused unopened.
@@ -878,7 +928,7 @@ mod tests {
     #[test]
     fn a_missing_or_empty_file_has_no_first_page() {
         let missing = bt_testpath::temp_path("folio-no-such-file-at-all").with_extension("pdf");
-        assert_eq!(page_raster(&missing, 0, FIT.0, FIT.1), None);
+        assert_eq!(page_raster(&missing, 0, FIT.0, FIT.1), Ok(None));
     }
 
     /// RED — **every page of the fixture draws, and the page after the last one
@@ -970,7 +1020,7 @@ mod tests {
         );
         assert_eq!(
             page_count(&fixture_path("folio-pdf-objstm-test.pdf")),
-            Some(5)
+            Ok(Some(5))
         );
     }
 
@@ -989,7 +1039,7 @@ mod tests {
     fn a_document_in_the_clear_is_counted_without_being_parsed() {
         let path = fixture_path("folio-pdf-test.pdf");
         assert_eq!(count(FIXTURE), Some(3), "the scan answers this one alone");
-        assert_eq!(page_count(&path), Some(3));
+        assert_eq!(page_count(&path), Ok(Some(3)));
     }
 
     /// PIN — **a document with nothing in it is `None` through both readers.**
@@ -1025,9 +1075,9 @@ mod tests {
         ] {
             let path = dir.join(name);
             std::fs::write(&path, bytes).expect("a fixture written under the temp dir");
-            assert_eq!(page_count(&path), None, "{name}");
+            assert_eq!(page_count(&path), Ok(None), "{name}");
         }
-        assert_eq!(page_count(&dir.join("no-such-file.pdf")), None);
+        assert_eq!(page_count(&dir.join("no-such-file.pdf")), Ok(None));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1204,7 +1254,7 @@ mod tests {
         };
         assert_eq!(
             count_pages(&mut filler),
-            None,
+            Ok(None),
             "a file this window declined to finish reading has no count to give",
         );
         assert!(
@@ -1212,5 +1262,48 @@ mod tests {
             "the scan reads at most its own cap: it pulled {} bytes",
             filler.pulled,
         );
+    }
+
+    /// A reader every read of which is refused with one raw operating-system error — the scan's
+    /// read loop (`count_pages`) meeting a lock, or anything else, without a real file.
+    struct Refusing(i32);
+
+    impl Read for Refusing {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::from_raw_os_error(self.0))
+        }
+    }
+
+    /// RED (T-HELD-FILE-IN-THE-PDF-LANE) — **a read another program holds is [`Held`], and every
+    /// other refused read is the module's one silence.** The classifier ([`refused`]) is the one
+    /// predicate's (`bt_platform::file_reads::held_elsewhere`) and nothing of its own: held exactly
+    /// where the predicate says so (on Windows the sharing and lock violations, 32 and 33; off
+    /// Windows nothing), `Ok(None)` for every other error — and the scan's read loop answers
+    /// through it, so a lock met half way through a file is held too. A file that is not there is
+    /// no hold, through both readers. The predicate itself, and a real file held by a handle that
+    /// shares nothing, are pinned in `bt-effects` and `bt-term`; this crate names no platform.
+    ///
+    /// MUTATION: have `refused` answer `Ok(None)` for every error
+    /// (`plant-187-pdf-held-is-none.py`, the `.ok()?` put back) — on Windows the held reads are
+    /// refused again and the first assertion goes red.
+    #[test]
+    fn a_read_another_program_holds_is_held_and_every_other_refused_read_is_none() {
+        for code in [2, 3, 5, 32, 33] {
+            let error = || std::io::Error::from_raw_os_error(code);
+            let expected = if bt_platform::file_reads::held_elsewhere(&error()) {
+                Err(Held)
+            } else {
+                Ok(None)
+            };
+            assert_eq!(refused::<u32>(&error()), expected, "os error {code}");
+            assert_eq!(
+                count_pages(Refusing(code)),
+                expected,
+                "os error {code}, met by the scan's read"
+            );
+        }
+        let missing = bt_testpath::temp_path("folio-pdf-held-missing").with_extension("pdf");
+        assert_eq!(page_count(&missing), Ok(None), "a missing file is no hold");
+        assert_eq!(page_raster(&missing, 0, FIT.0, FIT.1), Ok(None));
     }
 }

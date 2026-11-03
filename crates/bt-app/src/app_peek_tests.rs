@@ -804,6 +804,7 @@ fn the_cards_page_cache_keeps_what_the_hand_is_nearest() {
         fit: (280, 160),
         mtime: None,
         asked: BTreeSet::new(),
+        asked_again: BTreeSet::new(),
         pages: Vec::new(),
     };
     for page in 0..PEEK_PAGE_CACHE as u32 {
@@ -853,6 +854,85 @@ fn the_cards_page_cache_keeps_what_the_hand_is_nearest() {
         !slot.wanted(0),
         "a page that is not held is not made recent by being asked about"
     );
+}
+
+/// RED (T-HELD-FILE-IN-THE-PDF-LANE) — **a PDF another program holds is not refused by the
+/// glance card: it is asked once more by itself, and then only on a new card.** Both of the card's
+/// records carry the class's pair. The count: a held answer is filed `Unanswered { asked_again:
+/// false }` — the card prints no count, as for a file whose structure would not say — and the next
+/// rebuild asks it once (`ask_once_more`, filing `Asked { once_more: true }`); that ask's held
+/// answer is `{ asked_again: true }`, which no rebuild asks however often the card is drawn, and a
+/// new card (a new record) asks again. A page: a held answer leaves `asked` once
+/// (`hear_held`), so the next rebuild's ask — `file_peek_pages`'s `slot.asked.insert` — goes out;
+/// a second held answer stays asked; the card coming down (`card_down`) lets it be asked again.
+/// The file's own answer after a hold is filed as itself.
+///
+/// MUTATION: have `PeekPageSlot::hear_held` and `PeekFacts::hear` file a held answer as a
+/// refusal (`plant-187-pdf-held-filed-as-refused.py`) — the first "asked once more" assertion goes
+/// red. Or have them ask every held answer again (`plant-187-pdf-retry-never-stops.py`) — the
+/// "once: a redraw is no new input" assertions go red, by count.
+#[test]
+fn a_pdf_another_program_holds_is_asked_once_more_and_then_only_on_a_new_card() {
+    let path = PathBuf::from("D:/\u{88ab}\u{5360}\u{7528}/held \u{62a5}\u{544a}.pdf");
+    let held = || Err(crate::pdf::Held);
+
+    // The count.
+    let held_twice = |facts: &mut PeekFacts| {
+        assert!(!facts.ask_once_more(), "the first read is still out");
+        facts.hear(held());
+        assert_eq!(
+            facts.answer,
+            PeekFactsAnswer::Unanswered { asked_again: false },
+            "held, not a file with no count"
+        );
+        assert_eq!(facts.pages(), None, "and the card prints the size alone");
+        assert!(facts.ask_once_more(), "asked once more by the next rebuild");
+        assert_eq!(facts.answer, PeekFactsAnswer::Asked { once_more: true });
+        facts.hear(held());
+        assert_eq!(
+            facts.answer,
+            PeekFactsAnswer::Unanswered { asked_again: true },
+            "held again: asked again already"
+        );
+        for _ in 0..5 {
+            assert!(!facts.ask_once_more(), "once: a redraw is no new input");
+        }
+    };
+    let mut facts = PeekFacts::asked(path.clone());
+    held_twice(&mut facts);
+    // A new card is a new record, and asks.
+    let mut facts = PeekFacts::asked(path.clone());
+    held_twice(&mut facts);
+    let mut facts = PeekFacts::asked(path.clone());
+    facts.hear(held());
+    assert!(facts.ask_once_more());
+    facts.hear(Ok(Some(3)));
+    assert_eq!(facts.pages(), Some(3), "let go of: the count the file says");
+    assert!(!facts.ask_once_more(), "and an answer is never asked again");
+
+    // A page.
+    let mut slot = PeekPageSlot {
+        path,
+        fit: (280, 160),
+        mtime: None,
+        asked: BTreeSet::new(),
+        asked_again: BTreeSet::new(),
+        pages: Vec::new(),
+    };
+    let held_twice = |slot: &mut PeekPageSlot| {
+        assert!(slot.asked.insert(0), "the card asks for its cover");
+        slot.hear_held(0);
+        assert!(slot.asked.insert(0), "asked once more by the next rebuild");
+        slot.hear_held(0);
+        for _ in 0..5 {
+            assert!(!slot.asked.insert(0), "once: a redraw is no new input");
+        }
+    };
+    held_twice(&mut slot);
+    slot.card_down();
+    held_twice(&mut slot);
+    slot.card_down();
+    assert!(slot.asked.insert(0), "and a new card asks again");
 }
 
 /// RED (35) — **a second press on a `⌄` pins a peek, and closes only a pinned

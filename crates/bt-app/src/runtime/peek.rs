@@ -1023,7 +1023,7 @@ impl<B: Backend> Runtime<'_, B> {
         // asks the disk once more whether it is still that file. See
         // [`PeekPageSlot`].
         if let Some(slot) = self.window.peek_page.as_mut() {
-            slot.asked.clear();
+            slot.card_down();
         }
         // (A hand that was on a block inside it was let go of by the ending at the top: the
         // card's surface is the one the sweep deliberately never retires
@@ -1296,30 +1296,31 @@ impl<B: Backend> Runtime<'_, B> {
     /// Either one on the thread that draws is a hover over a large document
     /// freezing the window.
     fn file_peek_facts(&mut self, path: &Path, scale: f32) -> file_peek::PeekBody {
-        let pages = match self
+        // A file another program held is asked once more by the first rebuild after its answer
+        // ([`PeekFacts::ask_once_more`]; T-HELD-FILE-IN-THE-PDF-LANE), and then only by a new card.
+        let (pages, ask) = match self
             .window
             .peek_facts
-            .as_ref()
+            .as_mut()
             .filter(|facts| facts.path == path)
         {
-            Some(facts) => facts.answer,
+            Some(facts) => (facts.pages(), facts.ask_once_more()),
             None => {
-                self.window.peek_facts = Some(PeekFacts {
-                    path: path.to_owned(),
-                    answer: None,
-                });
-                let (tab, window) = (self.id, self.window_id());
-                if !self.app.preview_worker.request(preview::PreviewRequest {
-                    window,
-                    tab,
-                    source: preview::PreviewSource::file(path.to_owned()),
-                    want: preview::PreviewWant::PageCount,
-                }) {
-                    self.disable_preview_worker();
-                }
-                None
+                self.window.peek_facts = Some(PeekFacts::asked(path.to_owned()));
+                (None, true)
             }
         };
+        if ask {
+            let (tab, window) = (self.id, self.window_id());
+            if !self.app.preview_worker.request(preview::PreviewRequest {
+                window,
+                tab,
+                source: preview::PreviewSource::file(path.to_owned()),
+                want: preview::PreviewWant::PageCount,
+            }) {
+                self.disable_preview_worker();
+            }
+        }
         // **Clamped here, against the number this very line just read.** The
         // reach grows the frame a page count lands and shrinks the frame a file
         // turns out to be shorter than the one before it; both are answered by
@@ -1375,6 +1376,7 @@ impl<B: Backend> Runtime<'_, B> {
                 fit,
                 mtime: None,
                 asked: BTreeSet::new(),
+                asked_again: BTreeSet::new(),
                 pages: Vec::new(),
             });
         }
@@ -2903,8 +2905,8 @@ impl<B: Backend> Runtime<'_, B> {
             slot.asked.insert(page);
         }
         slot.mtime = mtime;
-        if let Some(raster) = raster {
-            slot.keep(
+        match raster {
+            Ok(Some(raster)) => slot.keep(
                 page,
                 PeekPageRaster {
                     key: peek_page_texture_key(path, mtime, page, raster.width, raster.height),
@@ -2912,7 +2914,11 @@ impl<B: Backend> Runtime<'_, B> {
                     width_px: raster.width,
                     height_px: raster.height,
                 },
-            );
+            ),
+            Ok(None) => {}
+            // Another program held the file: asked once more by the rebuild just below, and then
+            // only by a new card (T-HELD-FILE-IN-THE-PDF-LANE).
+            Err(crate::pdf::Held) => slot.hear_held(page),
         }
         // The card is chrome, and a page that lands while it is up owes the frame that shows it —
         // nothing else is going to move the pointer.
