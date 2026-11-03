@@ -219,6 +219,7 @@ Minutes.
 | `gates-can-fail` | Windows | 6.4 / 7.4 | 8.1 / 10.15 (38693069271) | 14 | 20 |
 | `licensing` | Windows | 2.9 / 3.35 | 6.3 / 7.92 (39014776542) | 11 | 16 |
 | `wasm-lib-check` | Windows | 1.3 / 2.5 | 3.8 / 4.77 (38720519586) | 7 | 30 |
+| `docs` (2026-11-02, below) | Windows | not yet measured | not yet measured | 14 (provisional) | - |
 | `release-script-tests` | Windows | no cache: 1.8 / 2.53 (38687157155) | - | 10 (floor; the rule gives 4) | 10 |
 | `cask-audit` | macOS | no cache: 1.1 / 1.80 (38665182697) | - | 10 (floor; the rule gives 3) | 10 |
 
@@ -238,6 +239,16 @@ next `main` push, 41316493392, was cold as well. Cold: 13.87-17.73 min, p50
 16.6, max 17.73 (41315751889). 17.73 x 1.36 = 24.11, so 25. Restored, over the
 34 attempts 41220186308 to 41315580382: green p50 13.5, max 14.97
 (41220409108). Re-derive when the cold max passes 25 / 1.36 = 18.4.
+
+**`docs` is new on 2026-11-02 (T-DOC-LINK-DEBT, plan row 78) and its budget is
+provisional.** It builds bt-app's documentation (`cargo doc -p bt-app
+--no-deps`, which compiles every dependency's metadata) and bt-source's
+`doc_link_debt` target, and holds `docs/plans/DOC-LINK-DEBT.tsv` to the
+warnings. No run had measured it, so the budget is the 10-minute ceiling ruled
+for it as a separate job (plan row 78), x 1.36, rounded up: 14. Its first cold
+runs re-derive it by the rule above; a cold total past 10 minutes is reported,
+and the ruling decides whether it stays a job of its own or becomes a step of
+`logic`. Its cache entry joins `main`'s set (the store's budget below).
 
 The 1.36 was, when `logic`'s budget was first derived, the slowest cold `test`
 step over the fastest (47.8 / 35.1 min; cause unknown: the fast ones were

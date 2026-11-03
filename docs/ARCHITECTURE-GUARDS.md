@@ -372,7 +372,10 @@ Since 2026-10-29 (T-GENERATED-STAMP-REFUSES-DIRTY-TREES, plan row 99)
 test skips and refuses a file without exactly one, a line off the grammar, the
 ` with uncommitted changes` suffix, a sha that is no commit or not an ancestor
 of HEAD, and four files naming different commits; a shallow clone exits 2.
-When red: commit everything, run the generator, commit its output.
+When red: commit everything, run the generator, commit its output. Since
+2026-11-02 (T-DOC-LINK-DEBT, plan row 78) it reads `docs/plans/DOC-LINK-DEBT.tsv`'s
+stamp by the same rules, as a set of its own: it may name another commit than
+the map's.
 
 ## Call graph
 
@@ -1706,6 +1709,39 @@ expansion of a macro on `MACROS`, an item a derive or an attribute macro generat
 blanket impl (`impl<T: Bound> Trait for T`, whose self type no body names, so an
 implicit call running one is never taken in), and
 what a foreign function or a foreign macro's expansion does with the words.
+
+## Doc-link debt
+
+The rule: no broken intra-doc link is added to bt-app's documentation, and the
+ones that predate the rule only go (T-DOC-LINK-DEBT, 0.4.9 plan row 78, from
+row 59's judgement). `docs/plans/DOC-LINK-DEBT.tsv` holds each, one row per
+rustdoc warning: `owner`, `target`, `shape`, then `module` (where the owner is
+written, for the move rule) and `file` (informative). No line numbers.
+
+Two halves. The `docs` CI job runs `scripts/ci/measure-doc-links.ps1`:
+`cargo doc -p bt-app --no-deps --locked --message-format=json` on Windows,
+keeping the warnings whose lint code is `rustdoc::broken_intra_doc_links`, then
+bt-source's `doc_link_debt` target (`test = false`, run by name), which keys
+each to the item whose documentation holds it through the index and fails on a
+broken link the list does not hold and on a row no broken link is. Its module
+doc is the grammar: three message forms (`unresolved`, `ambiguous`,
+`incompatible`), the positions it reads (an item, field, variant, `const`,
+`static`, alias, `impl` or trait declaration; `<module> (outside any item)` for
+a doc in no record), and the positions it refuses by name (a macro's tokens, a
+function body, a type's, `impl`'s or trait's braces outside any recorded member,
+a byte in no doc comment, a file reached twice or not at all). The other rustdoc
+lints are counted and printed, not gated. `scripts/ci/check-doc-link-debt.ps1`
+(CI `logic`; its cases in `check-doc-link-debt-tests.ps1`; a planted row in
+`gates-can-fail`) refuses a row the merge base did not have, with
+`moved-rows.ps1`'s rule for an owner moved to another module and no rename arm.
+
+When red in `docs`: a new broken link is fixed (a path that resolves where the
+doc is, a code span for a name that is no item, or words), never listed; a
+fixed link's row leaves the list; an owner that moved module is regenerated
+with `scripts/dev/generate-doc-link-debt.ps1` (a lane only; commit first, it
+stamps the commit), and a renamed owner's links are fixed in the renaming
+commit. When the list is empty, `[workspace.lints.rustdoc]
+broken_intra_doc_links = "deny"` replaces both halves (a later row).
 
 ## Machine-independent paths
 

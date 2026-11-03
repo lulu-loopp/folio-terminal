@@ -605,6 +605,44 @@ jobs:
         shell: pwsh
         run: ./scripts/ci/check-migration-debt-tests.ps1
 
+      # `docs/plans/DOC-LINK-DEBT.tsv` (T-DOC-LINK-DEBT, plan row 78) only shrinks: plant a row
+      # and require the refusal that names it. In a local clone whose `origin/main` is its own
+      # head, so the planted row is judged against a base that has the list whatever the real
+      # merge base holds (the branch that introduces the list has none to compare against), and
+      # this checkout's refs are never touched.
+      - name: the doc-link debt gate can actually fail
+        shell: pwsh
+        run: |
+          $clone = Join-Path $env:RUNNER_TEMP "doc-link-debt-plant"
+          git clone -q --local . $clone
+          if ($LASTEXITCODE -ne 0) { throw "git clone --local exited $LASTEXITCODE" }
+          try {
+            git -C $clone update-ref refs/remotes/origin/main HEAD
+            if ($LASTEXITCODE -ne 0) { throw "git update-ref exited $LASTEXITCODE" }
+            $file = Join-Path $clone "docs/plans/DOC-LINK-DEBT.tsv"
+            [IO.File]::AppendAllText($file, "crate::planted_owner`tplanted_no_such_item`tunresolved`tcrate`tplanted`n")
+            $failed = $false
+            $said = ""
+            try {
+              & ./scripts/ci/check-doc-link-debt.ps1 -Repo $clone
+            } catch {
+              $failed = $true
+              $said = "$_"
+            }
+            if (-not $failed) {
+              throw "the doc-link debt list accepted a row its base does not have"
+            }
+            # Red for the shrink rule, naming the planted row: a row the gate cannot read would
+            # be red for another reason.
+            if ($said -notmatch "only shrinks" -or $said -notmatch "planted_no_such_item") {
+              throw "the planted row was refused for another reason: $said"
+            }
+            Write-Host "refused as required: $said"
+          } finally {
+            Remove-Item -LiteralPath $clone -Recurse -Force
+          }
+          exit 0
+
       # The embedded-spaces gate refuses a run of spaces inside a literal by its
       # file:line: plant one in a tracked crate file and require exactly that
       # refusal, then run its scratch-repository suite (the allow-list's
@@ -1335,6 +1373,17 @@ jobs:
           ./scripts/ci/check-pointer-debt-tests.ps1
           ./scripts/ci/check-pointer-debt.ps1
 
+      # `docs/plans/DOC-LINK-DEBT.tsv` (T-DOC-LINK-DEBT, plan row 78): every broken intra-doc
+      # link in bt-app, one row per rustdoc warning. The `docs` job holds it equal to what
+      # `cargo doc` reports; this refuses a row added to it to let a new broken link past that.
+      # Same whole-row, merge-base rule as the pointer-debt list, with its move rule; its
+      # scratch-repository suite runs first, one case per rule.
+      - name: the doc-link debt list only shrinks
+        shell: pwsh
+        run: |
+          ./scripts/ci/check-doc-link-debt-tests.ps1
+          ./scripts/ci/check-doc-link-debt.ps1
+
       # The runtime dependency map's four `# measured at` lines (T-GENERATED-STAMP-REFUSES-DIRTY-TREES,
       # plan row 99): each names one clean commit, the same for all four, and an ancestor of this
       # checkout. Here and not in `licensing` because the ancestry needs the whole history, which this
@@ -1560,6 +1609,29 @@ jobs:
       - name: the library crates check for wasm32
         shell: pwsh
         run: ./scripts/ci/check-wasm-lib.ps1
+
+  # bt-app's documentation, built the way `cargo doc` builds it, against
+  # `docs/plans/DOC-LINK-DEBT.tsv` (T-DOC-LINK-DEBT, plan row 78): a broken intra-doc link the
+  # list does not hold is red, and so is a row no broken link is. A job of its own, beside
+  # `logic` rather than in it (ruling R1), so the rustdoc build is off `logic`'s long pole; on
+  # Windows alone, because the list is the Windows build's documentation and a link can resolve
+  # on one platform and not another. The keyer (bt-source's `doc_link_debt` target) is
+  # `test = false`, which `clippy --all-targets` leaves out, so it is linted here by name first.
+  docs:
+    if: github.event_name != 'workflow_dispatch' || github.ref != 'refs/heads/main'
+    runs-on: windows-2025
+    # Provisional, until runs measure it (docs/WINDOWS-CI-RELEASE.md, "Job budgets"): the
+    # 10-minute ceiling ruled for a separate job (plan row 78), x 1.36, rounded up. Re-derive by
+    # the rule from the first cold runs.
+    timeout-minutes: 14
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: ./.github/actions/toolchain
+      - name: clippy on the doc-link keyer
+        run: cargo clippy -p bt-source --locked --test doc_link_debt -- -D warnings
+      - name: every broken doc link is a row and every row a broken link
+        shell: pwsh
+        run: ./scripts/ci/measure-doc-links.ps1
 
   # ── real ConPTY, real child processes ─────────────────────────────────────
   conpty:
