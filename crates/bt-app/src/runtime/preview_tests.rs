@@ -2880,6 +2880,10 @@ fn the_volumes_flash_goes_out_on_a_paused_recording() {
 /// nothing; and wake again at exactly one more `OPEN_BUDGET`, where the seat is retired and the
 /// pane says the player did not start.
 ///
+/// The web warm-up is marked as already fired for this window, because its allowance is read on
+/// the real clock and a headless turn never starts it, so on this held clock its ask is refused
+/// and it books its own past instant again (`WebWarmup::already_fired`).
+///
 /// MUTATION: drop `seat_wait` from `Runtime::strip_animation_work`'s fold — the window books no
 /// wake for the late seat, the turns run out of instants with the loading face still standing,
 /// and the "books a wake" expectation goes red. MUTATION: retire the first late reading in
@@ -2889,6 +2893,7 @@ fn the_volumes_flash_goes_out_on_a_paused_recording() {
 fn a_player_that_never_comes_up_is_said_at_its_deadlines_by_the_windows_own_wakes() {
     use bt_platform::video::engine::OPEN_BUDGET;
     let (mut folio, surface) = a_recording_beside_a_shell("video-player-never-up");
+    folio.app.web_warmup.already_fired();
     let t0 = Instant::now();
     folio.window.video.put(
         surface,
