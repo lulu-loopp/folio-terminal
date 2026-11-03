@@ -4,7 +4,7 @@
 # name) with the number of calls behind it. Held equal to the tree by bt-source's call_graph test;
 # shrink-only against the merge base by scripts/ci/check-unfollowed-edges.ps1 - a key added or grown
 # carries a reason 'YYYY-MM-DD: <why>'. Never edit a key or a count by hand.
-# Ambiguous calls with exactly one candidate, not listed by site above or below (bt_source::call_graph::Unresolved::sole_candidate; a guard naming a callee's callers counts each as a call of its one candidate): 1733. A call whose name is renamed to one only one item declares leaves the list and is counted here.
+# Ambiguous calls with exactly one candidate, not listed by site above or below (bt_source::call_graph::Unresolved::sole_candidate; a guard naming a callee's callers counts each as a call of its one candidate): 1732. A call whose name is renamed to one only one item declares leaves the list and is counted here.
 file	item	kind	name	sites	reason
 crates/bt-app/src/animation.rs	bt-app crate::animation::<FileAnimationSource as Read>::read	Ambiguous	unwrap_or	1	
 crates/bt-app/src/animation.rs	bt-app crate::animation::AnimationCursor::start_again	Ambiguous	into_inner	1	
@@ -9374,8 +9374,9 @@ crates/bt-platform/src/macos_player.rs	bt-platform crate::video::macos_player::E
 crates/bt-platform/src/macos_player.rs	bt-platform crate::video::macos_player::Engine::frame	Ambiguous	into_inner	1	
 crates/bt-platform/src/macos_player.rs	bt-platform crate::video::macos_player::Engine::frame	Ambiguous	unwrap_or_else	1	
 crates/bt-platform/src/macos_player.rs	bt-platform crate::video::macos_player::Engine::open	Ambiguous	clone	1	
-crates/bt-platform/src/macos_player.rs	bt-platform crate::video::macos_player::Engine::state	Ambiguous	into_inner	1	
-crates/bt-platform/src/macos_player.rs	bt-platform crate::video::macos_player::Engine::state	Ambiguous	unwrap_or_else	1	
+crates/bt-platform/src/macos_player.rs	bt-platform crate::video::macos_player::Engine::state_at	Ambiguous	into_inner	1	2026-11-03: T-VIDEO-ENGINE-OPEN-BUDGET-ON-A-CLOCK (plan row 152); re-keyed from Engine::state, the same site: Engine::state's reading moved into the private Engine::state_at
+crates/bt-platform/src/macos_player.rs	bt-platform crate::video::macos_player::Engine::state_at	Ambiguous	is_some	1	2026-11-03: T-VIDEO-ENGINE-OPEN-BUDGET-ON-A-CLOCK (plan row 152); added: is_some in the private Engine::state_at, where Engine::state's reading moved
+crates/bt-platform/src/macos_player.rs	bt-platform crate::video::macos_player::Engine::state_at	Ambiguous	unwrap_or_else	1	2026-11-03: T-VIDEO-ENGINE-OPEN-BUDGET-ON-A-CLOCK (plan row 152); re-keyed from Engine::state, the same site: Engine::state's reading moved into the private Engine::state_at
 crates/bt-platform/src/macos_player.rs	bt-platform crate::video::macos_player::Machinery::build	Ambiguous	and_then	2	
 crates/bt-platform/src/macos_player.rs	bt-platform crate::video::macos_player::Machinery::build	Ambiguous	firstObject	1	
 crates/bt-platform/src/macos_player.rs	bt-platform crate::video::macos_player::Machinery::build	Ambiguous	is_empty	2	
@@ -9881,11 +9882,11 @@ crates/bt-platform/src/video/engine.rs	bt-platform crate::video::engine::Engine:
 crates/bt-platform/src/video/engine.rs	bt-platform crate::video::engine::Engine::set_volume	Ambiguous	send	1	
 crates/bt-platform/src/video/engine.rs	bt-platform crate::video::engine::Engine::shutdown	Ambiguous	send	1	
 crates/bt-platform/src/video/engine.rs	bt-platform crate::video::engine::Engine::shutdown	Ambiguous	take	1	
-crates/bt-platform/src/video/engine.rs	bt-platform crate::video::engine::Engine::state	Ambiguous	elapsed	1	
-crates/bt-platform/src/video/engine.rs	bt-platform crate::video::engine::Engine::state	Ambiguous	into_inner	1	
-crates/bt-platform/src/video/engine.rs	bt-platform crate::video::engine::Engine::state	Ambiguous	load	1	
-crates/bt-platform/src/video/engine.rs	bt-platform crate::video::engine::Engine::state	Ambiguous	lock	1	
-crates/bt-platform/src/video/engine.rs	bt-platform crate::video::engine::Engine::state	Ambiguous	unwrap_or_else	1	
+crates/bt-platform/src/video/engine.rs	bt-platform crate::video::engine::Engine::state_at	Ambiguous	into_inner	1	2026-11-03: T-VIDEO-ENGINE-OPEN-BUDGET-ON-A-CLOCK (plan row 152); re-keyed from Engine::state, the same site: Engine::state's reading moved into the private Engine::state_at
+crates/bt-platform/src/video/engine.rs	bt-platform crate::video::engine::Engine::state_at	Ambiguous	is_some	1	2026-11-03: T-VIDEO-ENGINE-OPEN-BUDGET-ON-A-CLOCK (plan row 152); added: is_some in the private Engine::state_at, where Engine::state's reading moved
+crates/bt-platform/src/video/engine.rs	bt-platform crate::video::engine::Engine::state_at	Ambiguous	load	1	2026-11-03: T-VIDEO-ENGINE-OPEN-BUDGET-ON-A-CLOCK (plan row 152); re-keyed from Engine::state, the same site: Engine::state's reading moved into the private Engine::state_at
+crates/bt-platform/src/video/engine.rs	bt-platform crate::video::engine::Engine::state_at	Ambiguous	lock	1	2026-11-03: T-VIDEO-ENGINE-OPEN-BUDGET-ON-A-CLOCK (plan row 152); re-keyed from Engine::state, the same site: Engine::state's reading moved into the private Engine::state_at
+crates/bt-platform/src/video/engine.rs	bt-platform crate::video::engine::Engine::state_at	Ambiguous	unwrap_or_else	1	2026-11-03: T-VIDEO-ENGINE-OPEN-BUDGET-ON-A-CLOCK (plan row 152); re-keyed from Engine::state, the same site: Engine::state's reading moved into the private Engine::state_at
 crates/bt-platform/src/video/engine.rs	bt-platform crate::video::engine::Machinery::build	Ambiguous	SetAutoPlay	1	
 crates/bt-platform/src/video/engine.rs	bt-platform crate::video::engine::Machinery::build	Ambiguous	SetPreload	1	
 crates/bt-platform/src/video/engine.rs	bt-platform crate::video::engine::Machinery::build	Ambiguous	SetSource	1	
@@ -9977,6 +9978,8 @@ crates/bt-platform/src/video/mod.rs	bt-platform crate::video::swizzle	Ambiguous	
 crates/bt-platform/src/video/mod.rs	bt-platform crate::video::within_budget	Ambiguous	recv_timeout	1	
 crates/bt-platform/src/video/mod.rs	bt-platform crate::video::within_budget	Ambiguous	send	1	
 crates/bt-platform/src/video/mod.rs	bt-platform crate::video::within_budget	Dynamic	work	1	
+crates/bt-platform/src/video_load.rs	bt-platform crate::video_load::OpenDeadline::missed	Dynamic	built	1	2026-11-03: T-VIDEO-ENGINE-OPEN-BUDGET-ON-A-CLOCK (plan row 152); added: OpenDeadline::missed asks its lazy `built` closure (an FnOnce parameter) only when due; each arm's Engine::state_at hands it the engine thread's built flag (an atomic load) in the product, a fixed instant or flag in a test
+crates/bt-platform/src/video_load.rs	bt-platform crate::video_load::OpenDeadline::missed	Dynamic	now	1	2026-11-03: T-VIDEO-ENGINE-OPEN-BUDGET-ON-A-CLOCK (plan row 152); added: OpenDeadline::missed asks its lazy `now` closure (an FnOnce parameter) only when due; each arm's Engine::state_at hands it Instant::now in the product, a fixed instant or flag in a test
 crates/bt-platform/src/video_portable.rs	bt-platform crate::video::within_budget	Ambiguous	recv_timeout	1	
 crates/bt-platform/src/video_portable.rs	bt-platform crate::video::within_budget	Ambiguous	send	1	
 crates/bt-platform/src/video_portable.rs	bt-platform crate::video::within_budget	Dynamic	work	1	

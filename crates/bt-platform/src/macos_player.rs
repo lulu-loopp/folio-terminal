@@ -192,11 +192,11 @@ use objc2_foundation::{NSDictionary, NSNotification, NSNotificationCenter, NSNum
 
 use super::engine::{
     EngineError, EngineState, FRAME_POLL_INTERVAL, Frame, FrameCost, IDLE_POLL_INTERVAL,
-    LedgerEntry, OPEN_BUDGET, note_engine_shut_down,
+    LedgerEntry, note_engine_shut_down,
 };
 use super::macos_video::displayed_size;
 use crate::macos_files::file_url;
-use crate::video_load::{Load, LoadDeadline};
+use crate::video_load::{Load, LoadDeadline, OpenDeadline};
 
 /// **The timescale an arbitrary number of seconds is asked for in.**
 ///
@@ -228,10 +228,12 @@ pub struct Engine {
     thread: Option<std::thread::JoinHandle<()>>,
     source: PathBuf,
     seen_generation: u64,
-    /// When [`Engine::open`] returned — which, since it waits for nothing, is
-    /// also when the engine thread was asked to build one. [`Self::state`]
-    /// measures [`OPEN_BUDGET`] from here.
-    opened_at: Instant,
+    /// [`OPEN_BUDGET`] after [`Engine::open`] was asked — which, since it waits
+    /// for nothing, is also when the engine thread was asked to build one.
+    /// [`Self::state`] reads it.
+    ///
+    /// [`OPEN_BUDGET`]: super::engine::OPEN_BUDGET
+    open: OpenDeadline,
 }
 
 impl std::fmt::Debug for Engine {
@@ -295,7 +297,7 @@ impl Engine {
             thread: Some(thread),
             source,
             seen_generation: 0,
-            opened_at: asked_at,
+            open: OpenDeadline::from_open(asked_at),
         })
     }
 
@@ -313,20 +315,35 @@ impl Engine {
     /// for the Windows arm's reason: [`Self::open`] waits for nothing, so nobody
     /// is left holding a timer when an engine fails to come into being. Past the
     /// budget with nothing built and nothing said, the answer is an error a
-    /// surface already knows how to print.
+    /// surface already knows how to print, [`EngineError::Unresponsive`] — the
+    /// Windows arm's cause for it, so neither arm says it as some other error.
+    ///
+    /// **A reading, not a latch**, for the Windows arm's reason (plan row 152),
+    /// and the decision is the same `video_load::OpenDeadline::missed`, read
+    /// here at the real clock (`state_at`).
+    ///
+    /// [`OPEN_BUDGET`]: super::engine::OPEN_BUDGET
     #[must_use]
     pub fn state(&self) -> EngineState {
+        self.state_at(Instant::now)
+    }
+
+    /// [`Self::state`] read at `now`: the real clock from [`Self::state`], an
+    /// instant a test chose in a test. `now` is asked only when due — while
+    /// nothing has been said and nothing is built.
+    fn state_at(&self, now: impl FnOnce() -> Instant) -> EngineState {
         let state = *self
             .shared
             .state
             .lock()
             .unwrap_or_else(|held| held.into_inner());
-        if state.error.is_none()
-            && !self.shared.built.load(Ordering::Acquire)
-            && self.opened_at.elapsed() > OPEN_BUDGET
-        {
+        if self.open.missed(
+            now,
+            || self.shared.built.load(Ordering::Acquire),
+            state.error.is_some(),
+        ) {
             return EngineState {
-                error: Some(EngineError::Other("the engine did not come up")),
+                error: Some(EngineError::Unresponsive),
                 ..state
             };
         }
@@ -516,6 +533,8 @@ struct Shared {
     /// **Whether the engine thread got as far as having a player.** Set once,
     /// immediately before the pump starts; [`Engine::state`] reads it to decide
     /// whether [`OPEN_BUDGET`] has been missed.
+    ///
+    /// [`OPEN_BUDGET`]: super::engine::OPEN_BUDGET
     built: std::sync::atomic::AtomicBool,
 }
 
@@ -1293,6 +1312,7 @@ impl EndWatch {
 
 #[cfg(test)]
 mod tests {
+    use super::super::engine::OPEN_BUDGET;
     use super::*;
 
     /// PIN — **a padded row is copied by its width and not by its stride.**
@@ -1351,5 +1371,63 @@ mod tests {
         let store = vec![0_u8; 64];
         assert!(copy_tight(&store, 4, 2, 2).is_none());
         assert!(copy_tight(&store, 8, 2, 9).is_none(), "past the store");
+    }
+
+    /// **An engine whose thread never started**, asked for at `asked` — the
+    /// handle's own parts and nothing behind them, so what [`Engine::state_at`]
+    /// reads is only what the test puts in `shared`. No thread, so its drop
+    /// says nothing and waits for nothing.
+    fn unbuilt_at(asked: Instant) -> Engine {
+        let (commands, _inbox) = mpsc::channel();
+        Engine {
+            commands,
+            shared: Arc::new(Shared::default()),
+            thread: None,
+            source: PathBuf::from("unbuilt"),
+            seen_generation: 0,
+            open: OpenDeadline::from_open(asked),
+        }
+    }
+
+    /// RED — **an engine that has not come up is unresponsive only past its
+    /// budget, a late build un-says it, and a refusal the thread said is never
+    /// covered by it** (plan row 152).
+    ///
+    /// On instants the test chooses, not on the real clock: [`Engine::state`]
+    /// is [`Engine::state_at`] read at `Instant::now()`, and this reads it at the
+    /// budget, a nanosecond past it and an hour past it. The late build is the
+    /// planted late answer — `built` set after the reading past the budget.
+    ///
+    /// MUTATION: read the real clock in `state_at` and the reading past the
+    /// budget is in time; drop the `built` from the decision and the late build
+    /// is still unresponsive; drop the `errored` and the refusal reads as
+    /// `Unresponsive`.
+    #[test]
+    fn an_engine_that_has_not_come_up_is_unresponsive_only_past_its_budget() {
+        let asked = Instant::now();
+        let due = asked + OPEN_BUDGET;
+        let past = due + Duration::from_nanos(1);
+
+        let late = unbuilt_at(asked);
+        assert_eq!(late.state_at(|| due).error, None, "at the budget, in time");
+        assert_eq!(
+            late.state_at(|| past).error,
+            Some(EngineError::Unresponsive),
+            "past the budget with nothing built and nothing said"
+        );
+        late.shared.built.store(true, Ordering::Release);
+        assert_eq!(
+            late.state_at(|| past).error,
+            None,
+            "an engine built after the budget is a reading, not a latch"
+        );
+
+        let refused = unbuilt_at(asked);
+        publish_failure(&refused.shared, EngineError::Unsupported);
+        assert_eq!(
+            refused.state_at(|| due + OPEN_BUDGET * 720).error,
+            Some(EngineError::Unsupported),
+            "the thread's own refusal keeps its cause past the budget"
+        );
     }
 }
