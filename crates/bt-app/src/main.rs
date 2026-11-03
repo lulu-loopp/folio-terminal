@@ -2394,10 +2394,12 @@ enum PeekPageOutcome {
     Unchanged,
     /// It has been — or the window was holding none — and this is what it looks like now. `raster`
     /// is `None` for a file this process will not draw, which is the card's whole degradation
-    /// path: an empty ground under two lines that are still true (`pdf::page_raster`).
+    /// path: an empty ground under two lines that are still true (`pdf::page_raster`); and
+    /// [`pdf::Held`] for a file another program holds at this moment, which the card asks once
+    /// more ([`PeekPageSlot::hear_held`]; T-HELD-FILE-IN-THE-PDF-LANE).
     Drawn {
         mtime: Option<SystemTime>,
-        raster: Option<pdf::PageRaster>,
+        raster: Result<Option<pdf::PageRaster>, pdf::Held>,
     },
 }
 
@@ -20320,14 +20322,80 @@ struct PeekThumbnail {
 /// in this window performs by comparing what came back against what is being
 /// looked at now.
 ///
-/// `answer` is `None` while the read is out, and that is also what it stays as
-/// when the read comes back with nothing to say — a card that told the two apart
-/// would need a word for "asking", and a word that appears for two frames and is
-/// replaced is worse than the space it occupied
-/// ([`file_peek::PeekBody::Facts`]).
+/// The card reads [`Self::stated_pages`]: `None` while the read is out, and that is also what it stays as
+/// when the read comes back with nothing to say — a card that told the two apart would need a word
+/// for "asking", and a word that appears for two frames and is replaced is worse than the space it
+/// occupied ([`file_peek::PeekBody::Facts`]). A file another program held is drawn the same way.
 struct PeekFacts {
     path: PathBuf,
-    answer: Option<u32>,
+    answer: PeekFactsAnswer,
+}
+
+/// **Where the card's page count stands** (T-HELD-FILE-IN-THE-PDF-LANE) — the class's pair
+/// (`once_more` on the read out, `asked_again` on the read unanswered), in the card's own record:
+/// a file another program holds is not a file with no count, so its answer is asked once more by
+/// the next rebuild of the card, with no new input; that ask's held answer is filed asked again,
+/// and then only a new card asks (`hide_file_peek` drops the record). At most two
+/// reads per card.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PeekFactsAnswer {
+    /// A read is out. `once_more` when it is the one more ask after a held answer.
+    Asked { once_more: bool },
+    /// The file's own answer: a count, or `None` when its structure would not say.
+    Answered(Option<u32>),
+    /// Another program held the file. `asked_again` once the one more ask has been spent.
+    Unanswered { asked_again: bool },
+}
+
+impl PeekFacts {
+    /// The record of a count just asked about `path`.
+    fn asked(path: PathBuf) -> Self {
+        Self {
+            path,
+            answer: PeekFactsAnswer::Asked { once_more: false },
+        }
+    }
+
+    /// The count the card prints, if the file has said one.
+    fn stated_pages(&self) -> Option<u32> {
+        match self.answer {
+            PeekFactsAnswer::Answered(pages) => pages,
+            PeekFactsAnswer::Asked { .. } | PeekFactsAnswer::Unanswered { .. } => None,
+        }
+    }
+
+    /// **Whether the card asks the count once more now** — `true`, once, for a held answer not yet
+    /// asked again, and the record says a read is out again. Every rebuild of the card asks this;
+    /// only the first after a held answer is told yes.
+    fn ask_once_more(&mut self) -> bool {
+        if self.answer != (PeekFactsAnswer::Unanswered { asked_again: false }) {
+            return false;
+        }
+        self.answer = PeekFactsAnswer::Asked { once_more: true };
+        true
+    }
+
+    /// File the worker's answer: the file's own, or — for a file another program held — unanswered,
+    /// asked again when the read it answers was the one more ask.
+    ///
+    /// **A held answer is filed only while a read is out** (`Asked`), the class's rule that an
+    /// answer is filed for the read that awaits it: a duplicate held answer arriving after the
+    /// file's own answer must not take a count off the card, and one arriving after the one more
+    /// ask was spent must not open another. The file's own answer is filed whenever it comes: it
+    /// is a fact about the file.
+    fn hear(&mut self, answer: Result<Option<u32>, pdf::Held>) {
+        match (answer, self.answer) {
+            (Ok(pages), _) => self.answer = PeekFactsAnswer::Answered(pages),
+            (Err(pdf::Held), PeekFactsAnswer::Asked { once_more }) => {
+                self.answer = PeekFactsAnswer::Unanswered {
+                    asked_again: once_more,
+                };
+            }
+            // Not awaited: the file's own answer, or the one more ask's, is already in.
+            (Err(pdf::Held), PeekFactsAnswer::Answered(_) | PeekFactsAnswer::Unanswered { .. }) => {
+            }
+        }
+    }
 }
 
 /// **How many drawn pages of one document the window keeps** (user ruling 2026-08-26).
@@ -20382,6 +20450,10 @@ struct PeekPageSlot {
     /// came up. Cleared by `TabState::hide_file_peek` so the next card asks once per page and no
     /// more.
     asked: BTreeSet<u32>,
+    /// **Which pages have been asked once more since the card came up**, after an answer that
+    /// another program held the file (T-HELD-FILE-IN-THE-PDF-LANE; [`Self::hear_held`]) — the
+    /// class's `asked_again`, per page. Cleared with `asked`, so a new card is a new look.
+    asked_again: BTreeSet<u32>,
     /// The drawn pages, **least recently used first** — see [`PEEK_PAGE_CACHE`]. A page this
     /// process will not raster is simply absent, which is what leaves a blank sheet in its slot
     /// rather than a gap; see `pdf::page_raster` for the reasons and
@@ -20415,6 +20487,46 @@ impl PeekPageSlot {
         let entry = self.pages.remove(at);
         self.pages.push(entry);
         true
+    }
+
+    /// **The card came down**: every question it asked is forgotten — so the next card over the
+    /// same file asks the disk once more whether its pixels are still the file's — and so is the
+    /// one more ask a held page spent ([`Self::hear_held`]): the next card is a new look.
+    fn card_down(&mut self) {
+        self.asked.clear();
+        self.asked_again.clear();
+    }
+
+    /// **A page whose file another program held** (T-HELD-FILE-IN-THE-PDF-LANE): the first held
+    /// answer since the card came up lets the page be asked once more — it leaves `asked`, so the
+    /// next rebuild of the card, which this answer's own frame is, asks it with no new input — and
+    /// a second stays asked, so only a new card asks again. At most two reads per page per card.
+    ///
+    /// **Only for a page this card has a question out about**: the slot outlives the card (its
+    /// pixels stay), so a held answer landing after the card came down ([`Self::card_down`]) is
+    /// the answer to a question nobody is asking, and must not spend the next card's one more ask.
+    fn hear_held(&mut self, index: u32) {
+        if self.asked.contains(&index) && self.asked_again.insert(index) {
+            self.asked.remove(&index);
+        }
+    }
+
+    /// **The stamp an answer came home with** (user ruling 2026-08-26): a file that has been
+    /// written is a different document, and the pages already drawn are of the old one. A run of
+    /// pages can be half a report from before a save and half from after — a reader scrolling
+    /// through would watch the document change under the hand, page by page, as each one happened
+    /// to be re-asked. So the stamp is what the cache belongs to, and a new one empties it; and
+    /// every page has to be asked again, including the ones a question is already out about —
+    /// those answers are about the file this is no longer — with the one more ask a held page
+    /// spent: the file changing is a new look (T-HELD-FILE-IN-THE-PDF-LANE). `page` is the page
+    /// this answer is about, which is answered.
+    fn stamped(&mut self, mtime: Option<SystemTime>, page: u32) {
+        if self.mtime != mtime && !self.pages.is_empty() {
+            self.pages.clear();
+            self.card_down();
+            self.asked.insert(page);
+        }
+        self.mtime = mtime;
     }
 
     /// Put one drawn page in, evicting the least recently used while the cache is over

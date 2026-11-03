@@ -1249,15 +1249,29 @@ reads libtest's own report: stable libtest names every test still running 60 s a
 (`test <name> ... ok`). A named test not ended 300 s after its start, or a run that prints nothing
 for 300 s once its first test binary started, ends the whole process tree the script started, by its
 pid, with exit 124 and the names; the binaries a workspace run had not reached yet do not run. A
-name still tracked when the next binary's libtest report starts (its `running N tests` line, on the
-same stdout pipe as the test lines; cargo's `Running` comes on stderr, whose order against stdout is
-not kept, and only starts the silence clock: plan row 171, 2026-11-01) belonged to a binary that
-ended without its result line (a crash, an abort); it is said and dropped, not taken for a hang. A
-binary that prints no `running N tests` line (`harness = false`, a crash before libtest starts, a
-doc-test binary still compiling) leaves the previous binary's unfinished names tracked until the
-next binary that prints one: a run that passes the limit meanwhile is red naming the dead test, and
-the silence check is off while any name is tracked. A test's child process that wrote
-`running N tests` to the stdout it inherited would clear the tracked names (no test does today).
+`running N tests` line (libtest's report start, on the same stdout pipe as the test lines; cargo's
+`Running` comes on stderr, whose order against stdout is not kept, and only starts the silence clock:
+plan row 171, 2026-11-01) read while names are tracked means either that their binary ended without
+their result lines (a crash, an abort) or that a test's child process, which inherited the stdout,
+started a report of its own. Two bt-app tests re-run their own test binary that way
+(`hostile_math_is_refused_and_the_real_decoration_worker_survives`, and the Windows
+`a_real_update_handoff_is_not_probe_contained`, whose child runs `detached_handoff_helper_waits`), and
+stdout cannot tell the two cases apart. So the names are
+suspended (plan row 203, 2026-11-03): no longer timed, so a dead binary's test is never taken for a
+later binary's hang, and released without a word by their own later result line. Only names that never
+print a result line are said, at the end of the run ("ended with their binary, no result line"). The
+cost, accepted by ruling: a test still running when a child's report suspends it, which then really
+hangs, is not ended by its own 300 s clock but by the silence check, once the rest of its binary is
+done and 300 s pass with no line, and that red names the suspended tests. A binary that prints no
+`running N tests` line (`harness = false`, a crash before libtest starts, a doc-test binary still
+compiling) leaves the previous binary's unfinished names tracked until the next binary that prints
+one: a run that passes the limit meanwhile is red naming the dead test, and the silence check is off
+while any name is tracked. Named limits, all from stdout alone: an `--exact` child of a test prints a
+result line with its parent's own name, and that releases the parent's name too; a suspended name stays
+suspended for the rest of the run, not for its binary, so a dead binary's test is released by a later
+binary's test of the same name (the end note loses it, the slow list names it; cargo's non-zero exit for
+the dead binary still passes through), and a later silence red lists a dead earlier binary's suspended
+tests among those that may be the hang.
 300 s (30 x `lane::PATIENCE`) is the one limit, a default in that script and nowhere else.
 Measured 2026-10-31 on the watched runs: no bt-app test reaches 60 s on any CI runner, and the
 slowest watched test is about 61 s (bt-source on `logic`); unwatched, `core-linux`'s bt-source tests
