@@ -6,7 +6,9 @@
 # hangs, ends or exits as each case says — with a small limit, so the whole suite takes seconds. No
 # cargo is run. Each verdict is planted: a hang is ended red with its name and its process tree gone
 # (the stand-in and a grandchild it started, checked by pid), a slow test that ends is green, silence
-# is red with no name, the wait before the first test binary is not timed, cargo's exit code and every
+# is red with no name, a child process's own report in the middle of a binary suspends the named tests
+# without a false word and a hang behind it is still named (plan row 203), the wait before the first
+# test binary is not timed, cargo's exit code and every
 # word pass through, and each shape in which libtest prints no names is refused before anything runs.
 #
 # What this does not prove is that libtest 1.94.1 prints those lines; the real-binary run in the
@@ -85,6 +87,49 @@ switch ($case) {
         foreach ($i in 1..8) { Start-Sleep -Seconds 1; Out "busy line $i" }
         Out 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.00s'
         exit 101
+    }
+    'child-report' {
+        # A test's child process re-runs this binary with its stdout inherited (plan row 203): its own report
+        # comes in the middle of this binary's, then every named test ends at the start of a line.
+        Running
+        Out 'running 4 tests'
+        Out 'test planted::slow_a has been running for over 60 seconds'
+        Out 'test planted::slow_a_b has been running for over 60 seconds'
+        Out 'running 1 test'
+        Out 'test planted::parent ... ok'
+        Out 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.50s'
+        Out 'test planted::slow_a_b ... ok'
+        Out 'test planted::slow_a ... ok'
+        Out 'test planted::parent ... ok'
+        Out 'test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 61.00s'
+        exit 0
+    }
+    'child-report-one-unfinished' {
+        # The same, but one named test never prints its result line: it, and not its longer-named
+        # neighbour, is said at the end.
+        Running
+        Out 'running 3 tests'
+        Out 'test planted::slow_a has been running for over 60 seconds'
+        Out 'test planted::slow_a_b has been running for over 60 seconds'
+        Out 'running 1 test'
+        Out 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.50s'
+        Out 'test planted::slow_a_b ... ok'
+        exit 101
+    }
+    'child-report-then-hang' {
+        # A named test is suspended by a child's report and then really hangs: nothing more is printed.
+        # The 60 s line says 1 s here (the parser takes the seconds it states) so that the case is short.
+        $start = [Diagnostics.ProcessStartInfo]::new((Get-Process -Id $PID).Path)
+        foreach ($w in @('-NoProfile', '-Command', 'Start-Sleep -Seconds 600')) { $start.ArgumentList.Add($w) }
+        $start.UseShellExecute = $false
+        $start.CreateNoWindow = $true
+        $grandchild = [Diagnostics.Process]::Start($start)
+        [IO.File]::WriteAllText($env:FOLIO_STAND_IN_PIDS, "$PID $($grandchild.Id)")
+        Running
+        Out 'running 2 tests'
+        Out 'test planted::stuck has been running for over 1 seconds'
+        Out 'running 1 test'
+        Start-Sleep -Seconds 600
     }
     'silent' {
         [IO.File]::WriteAllText($env:FOLIO_STAND_IN_PIDS, "$PID")
@@ -181,6 +226,21 @@ try {
     # can arrive in on a loaded runner; plan row 171): the binary boundary is libtest's `running N tests`.
     $run = Watch 'boundary-before-name' 63 @()
     Check "a test whose binary ended is not a later binary's hang, whichever pipe is read first" ($run.code -eq 101 -and $run.output -match 'ended with their binary, no result line: planted::dies') $run
+
+    # A test's child process starts a report of its own on the inherited stdout (plan row 203): the named
+    # tests it finds running are suspended, and each one's later result line releases it without a word.
+    $run = Watch 'child-report' 70 @()
+    Check "a child's report in the middle of a binary says nothing of tests that end after it" ($run.code -eq 0 -and $run.output -notmatch 'ended with their binary' -and $run.output -match 'slow tests \(named by libtest at 60 s, ended\): planted::slow_a_b, planted::slow_a\r?\n') $run
+
+    # One of them never prints its result line: it is said at the end, and the test whose name it prefixes is not.
+    $run = Watch 'child-report-one-unfinished' 70 @()
+    Check 'a test with no result line after a child''s report is said, and not a test it is a prefix of' ($run.code -eq 101 -and $run.output -match 'ended with their binary, no result line: planted::slow_a\r?\n' -and $run.output -match 'slow tests \(named by libtest at 60 s, ended\): planted::slow_a_b\r?\n') $run
+
+    # A suspended test that really hangs: the run is red by silence, and the red names it. Limit 10: the
+    # child's `running` line has 9 s after the 1 s line to be read before the test's own clock would end it.
+    $run = Watch 'child-report-then-hang' 10 @()
+    Check 'a hang behind a child''s report is red by silence with its name' ($run.code -eq 124 -and $run.output -match 'printed nothing for 10 s' -and $run.output -match '    planted::stuck \(started \d+ s ago\)') $run
+    Gone 'a hang behind a child''s report' $run
 
     $run = Watch 'silent' 3 @()
     Check 'silence once tests run is red with no name' ($run.code -eq 124 -and $run.output -match 'no test can be named') $run

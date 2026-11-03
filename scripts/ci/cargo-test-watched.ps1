@@ -11,13 +11,32 @@
 # still running 60 s after it started is announced once — `test <name> has been running for over 60
 # seconds` — and every test that ends is announced again — `test <name> ... ok|FAILED|ignored`. This
 # script runs cargo as its child, passes every line through as text (each to the stream it came from), and
-# reads those two lines. Where one binary's report ends is read from libtest's own `running N tests` line,
-# on the same stdout pipe as those two, never from cargo's `Running` line on stderr, whose order against
-# stdout is not kept (plan row 171). A binary that prints no `running N tests` line (`harness = false`, a
-# crash before libtest starts, a doc-test binary still compiling) leaves the previous binary's unfinished
-# names tracked until the next binary that prints one: a run that passes the limit meanwhile is red naming
-# the dead test, and the silence check is off while any name is tracked. A test's child process that wrote
-# `running N tests` to the stdout it inherited would clear the tracked names (no test does today).
+# reads those two lines.
+#
+# **A `running N tests` line read while names are tracked is ambiguous** (plan row 203, 2026-11-03), and
+# the names are suspended, never dropped. It is libtest's report start, on the same stdout pipe as the
+# 60 s and end lines (never cargo's `Running` line on stderr, whose order against stdout is not kept: plan
+# row 171). It means one of two things, and stdout cannot tell them apart:
+#   * the binary before ended without those names' result lines (a crash, an abort, a kill), and a new
+#     binary's report starts; or
+#   * a test started a child process that inherited this stdout and runs a libtest report of its own: two
+#     bt-app tests re-run their own test binary that way (`hostile_math_is_refused_and_the_real_decoration_
+#     worker_survives` in tests.rs, and the Windows `detached_handoff_helper_waits` child in
+#     update_handoff.rs), and their `running 1 test` comes in the middle of the folio binary's report.
+# So at that line every tracked name is suspended: no longer timed (a dead binary's test is never taken
+# for a later binary's hang), and kept. A suspended name's result line releases it, as a tracked name's
+# does, silently. Only names that never print a result line are said, once, at the end of the run:
+# "ended with their binary, no result line". **The cost, accepted (row 203 R4):** a test that is still
+# running when a child's report suspends it, and then really hangs, is not ended by its own 300 s clock;
+# the silence check ends the run once the rest of its binary is done and 300 s pass with no line, and the
+# red names the suspended tests. A hang that no child's report came before keeps its own clock.
+# A binary that prints no `running N tests` line (`harness = false`, a crash before libtest starts, a
+# doc-test binary still compiling) leaves the previous binary's unfinished names tracked (timed) until
+# the next binary that prints one: a run that passes the limit meanwhile is red naming the dead test, and
+# the silence check is off while any name is tracked.
+# **What stdout cannot tell, named:** an `--exact` child of a test prints a result line with its parent's
+# own name, and that line releases the parent's name too, even if the parent then hangs (the one bt-app
+# test with such a child bounds it at 60 s).
 #
 # **The limit is one number, `$limit` below: 300 s per test** (30 x `lane::PATIENCE`).
 #   * A test libtest has named and that has not ended 300 s after it started ends the run.
@@ -108,6 +127,8 @@ $announced = [regex]'^test (.+) has been running for over (\d+) seconds$'
 $ended = [regex]'^test (.+?) \.\.\. (ok|FAILED|ignored)\b'
 # name -> started at (seconds on $clock); ordinal, as Rust's test names are case-sensitive
 $running = [Collections.Generic.Dictionary[string, double]]::new([StringComparer]::Ordinal)
+# name -> started at: names a later `running N tests` line suspended (not timed; see the header)
+$suspended = [Collections.Generic.Dictionary[string, double]]::new([StringComparer]::Ordinal)
 $slow = [Collections.Generic.List[string]]::new()
 $watching = $false
 $lastLine = 0.0
@@ -124,15 +145,15 @@ function Read-Line($line, [bool]$isError) {
     # its own, so it may be read before or after lines the previous binary wrote to stdout: it never says
     # where one binary's report ends (plan row 171).
     if ($binaryStarts.IsMatch($plain)) { $script:watching = $true; return }
-    # cargo runs one test binary after another, and every libtest harness (unit, integration, doc-tests) starts
-    # its report with `running N tests` on stdout, the pipe its 60 s and end lines come on, so it is read after
-    # every line of the binary before. A name still tracked then belonged to a binary that ended without its
-    # result line (a crash, an abort, a kill). It is not a hang of this one.
+    # Every libtest harness (unit, integration, doc-tests) starts its report with `running N tests` on stdout,
+    # the pipe its 60 s and end lines come on, so it is read after every line written before it. A name still
+    # tracked then belongs to a binary that ended without its result line, or to a test whose child process
+    # started a report of its own on this stdout: it is suspended, not timed and not said (the header).
     if (-not $isError -and $reportStarts.IsMatch($plain)) {
-        if ($running.Count -gt 0) {
-            [Console]::Out.WriteLine("${me}: ended with their binary, no result line: $(@($running.Keys) -join ', ')")
-            $running.Clear()
+        foreach ($known in @($running.Keys)) {
+            if (-not $suspended.ContainsKey($known)) { $suspended[$known] = $running[$known] }
         }
+        $running.Clear()
         return
     }
     $m = $announced.Match($plain)
@@ -141,10 +162,24 @@ function Read-Line($line, [bool]$isError) {
     if ($m.Success) {
         $name = $m.Groups[1].Value
         # A test with a mode is ended as `test <name> - should panic ... ok`; its 60 s line has the bare name.
-        foreach ($known in @($running.Keys)) {
-            if ($name -ceq $known -or $name.StartsWith("$known - ", [StringComparison]::Ordinal)) { [void]$running.Remove($known); $slow.Add($known) }
+        # The match is the whole name or the name and ` - `, so a name that is a prefix of another is not it.
+        foreach ($set in @($running, $suspended)) {
+            foreach ($known in @($set.Keys)) {
+                if ($name -ceq $known -or $name.StartsWith("$known - ", [StringComparison]::Ordinal)) {
+                    [void]$set.Remove($known)
+                    if (-not $slow.Contains($known)) { $slow.Add($known) }
+                }
+            }
         }
     }
+}
+
+# The suspended names, each with its age, for a red that ends the run.
+function Suspended-Lines([double]$now) {
+    if ($suspended.Count -eq 0) { return @() }
+    $lines = @('named by libtest at 60 s, with no result line since a later `running N tests` (not timed since; one may be the hang):')
+    foreach ($name in $suspended.Keys) { $lines += "    $name (started $([int]($now - $suspended[$name])) s ago)" }
+    return $lines
 }
 
 function End-Run([string[]]$said) {
@@ -185,13 +220,21 @@ while ($outTask -or $errTask) {
     if ($over.Count -gt 0) {
         $said = @("these tests were still running $limit s after they started:")
         foreach ($name in $running.Keys) { $said += "    $name (running for $([int]($now - $running[$name])) s)" }
-        End-Run $said
+        End-Run ($said + @(Suspended-Lines $now))
     }
     if ($watching -and $running.Count -eq 0 -and $now - $lastLine -ge $limit) {
-        End-Run @("the run printed nothing for $limit s; no test can be named (a hang that holds the process's stdout, or a binary that did not exit)", "the last line was: $lastText")
+        if ($suspended.Count -eq 0) {
+            $said = @("the run printed nothing for $limit s; no test can be named (a hang that holds the process's stdout, or a binary that did not exit)")
+        } else {
+            $said = @("the run printed nothing for $limit s") + @(Suspended-Lines $now)
+        }
+        End-Run ($said + @("the last line was: $lastText"))
     }
 }
 $child.WaitForExit()
+if ($suspended.Count -gt 0) {
+    [Console]::Out.WriteLine("${me}: ended with their binary, no result line: $(@($suspended.Keys) -join ', ')")
+}
 if ($slow.Count -gt 0) {
     [Console]::Out.WriteLine("${me}: slow tests (named by libtest at 60 s, ended): $($slow -join ', ')")
 }
