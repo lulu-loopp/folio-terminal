@@ -42,6 +42,7 @@ All notable changes to Folio are recorded here. The format follows
 - On Windows, a picture or video that another program is holding open (for example a recording still being written) is no longer treated as a file Folio cannot show: Folio asks for it once more by itself, and again when you look at it anew, and a picture's preview says the file is in use by another program. <!-- zh: pending -->
 - Clicking inside the find bar, a commit graph's search, a Settings field, the command palette or a git branch prompt now puts the text cursor where you clicked, Shift-clicking extends the selection, and dragging selects; a selection in any of them is now shown highlighted, and a long Settings field no longer shifts its text under the pointer when you click in it. <!-- zh: pending T-CHROME-FIELDS-CARET-BY-POINTER -->
 - On Windows, three more pictures are no longer given up on while another program holds the file: an animated GIF is no longer marked "would not play" and plays when you open it again or the file changes; a picture path printed in the terminal gets its underline and Ctrl+click when Folio's second read finds the file free; and a background picture is read once more before Folio says it could not be read. <!-- zh: pending -->
+- When Folio is started through the `folio` link an older winget (before 1.9) makes, Settings > About > Licences now opens the notices file that came with the copy instead of the web page. <!-- zh: pending T-NOTICES-DESTINATION-OFF-THE-WINDOW-THREAD -->
 
 ## 0.4.8-preview — 2026-10-23
 

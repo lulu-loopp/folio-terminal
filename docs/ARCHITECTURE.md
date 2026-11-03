@@ -1369,13 +1369,14 @@ derive for `WorkerCtx` and `WaitToken`;
 at `App::finish`'s head, in the build-error arm and after `run_app`;
 `quit_abandoned` in the `Abandon` arm; `loop_running` on `Init`; the three
 standalone entries), each spelled only as the call `admission::writer(…)`, and
-`enter_callback` at its nineteen entries; and `main`'s three settles
+`enter_callback` at its nineteen entries; and `main`'s settles
 (T-LAZY-INITIALIZERS-BEFORE-THE-LOOP) at theirs, each spelled only through its
 pin's module path: `profiles::settle_registry` as `main`'s first statement, before
 the parse, and `persist::settle_storage_dir` in the removal door, before the parse,
 and in the claim after the parse; and `explorer_menu::settle_package`
 (T-EXPLORER-MENU-PROBE-OFF-THE-WINDOW-THREAD) after the hand-over, once the running
-image is resolved;
+image is resolved, and `settings::settle_notices`
+(T-NOTICES-DESTINATION-OFF-THE-WINDOW-THREAD) after it;
 (5) no `allow` or `expect` of `clippy::disallowed_methods`, `clippy::style`,
 `clippy::all` or `warnings`, at any level, in either path spelling, inside
 `cfg_attr` at any depth — only a door's own `expect`, of which there are none until
@@ -1916,7 +1917,7 @@ process.
 | the copied native remover | `uninstall::remover_standalone` | folio-uninstall-remove | return | the removal's failure is written beside the plan and is its exit code; the remover is let go once started, with no handle kept and no completion sink; a panic is its exit with Rust's own panic code, since this process installs no panic hook | one per process | the plan's folder | D-86 |
 | stale claim sweep | `main` | folio-claim-sweep | detached | a refused start, or a panic contained by the lane executor, is said once; a sweep is one line | one per start | — | conforms |
 | video prewarm | `bt_platform::video::prewarm` | folio-video-prewarm | detached | a refused start is answered to `main`, which says it once (the first hover starts the platform itself); a panic ends the process under the resident hook | one per start | — | conforms |
-| a video seat's engine | `VideoSeats::open` | folio-video-engine | polled | a refused spawn, or an engine not built within `OPEN_BUDGET`, reads `Unresponsive`; a source neither loaded nor refused within `LOAD_BUDGET` of the open is the engine's own refusal, `NotLoaded`, said once, and the seat is retired with its sentence; a panic ends the process under the resident hook | the newest generation | the seat owns it; a replaced seat's engine is shut down | D-86, D-88 |
+| a video seat's engine | `VideoSeats::open` | folio-video-engine | polled | an engine not built within `OPEN_BUDGET` reads `Unresponsive` on both platforms, and so does a refused spawn on Windows (macOS's refused spawn is `Other`, plan row 152 R7); a source neither loaded nor refused within `LOAD_BUDGET` of the open is the engine's own refusal, `NotLoaded`, said once, and the seat is retired with its sentence; a panic ends the process under the resident hook | the newest generation | the seat owns it; a replaced seat's engine is shut down | D-86, D-88 |
 | video seat shutdown | `VideoSeats::close` | window (row 25) | return | none: the door sends `Shutdown` and lets the engine thread go, which cannot fail; a thread that does not leave is the way out's (`MediaQuiet`, row 27), which says it | — | — | conforms |
 | media quiet at exit | `bt_platform::video::shutdown_media_session` | main (row 27) | return | an engine or a reader still standing at its deadline is one line each, and the platform goes down over it; a refusal of the door leaves the platform to the process's end | — | — | row 27 |
 | trace lines | `trace_sink::offer_stderr_line` | bt-trace-sink | detached | a full queue drops the line and counts it; a writer that never started reports nothing; a panic ends the process under the resident hook | in order | — | D-86, D-87 |

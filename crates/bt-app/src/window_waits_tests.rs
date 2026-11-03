@@ -3990,7 +3990,7 @@ const LANDMARKS: [(&str, &[Landmark]); 4] = [
 /// Windows transaction since U-23. B-ENDSESSION adds the system's end's write step, `exiting`
 /// then `quit_abandoned` around the one admitted wait in `session_end::settle` (the quit's `Write`
 /// on the held document; nothing is torn down).
-const PINS: [Pin; 23] = [
+const PINS: [Pin; 24] = [
     Pin {
         module: "admission",
         writer: "enter_standalone_main",
@@ -4025,6 +4025,14 @@ const PINS: [Pin; 23] = [
     Pin {
         module: "explorer_menu",
         writer: "settle_package",
+        owner: "bt-app crate::main",
+        after: Some("hand_over"),
+    },
+    // T-NOTICES-DESTINATION-OFF-THE-WINDOW-THREAD (C1): whether the notices file is beside the
+    // running image, settled on the line after the package fact; `FolioApp::new` takes the witness.
+    Pin {
+        module: "settings",
+        writer: "settle_notices",
         owner: "bt-app crate::main",
         after: Some("hand_over"),
     },

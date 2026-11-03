@@ -2675,6 +2675,43 @@ pub(crate) fn a_quiet_shell(
         .map(bt_pty::test_shell::TestShell::into_session)
 }
 
+/// **A pane whose real shell is reaped when the pane is dropped** (plan row 188), on a passing
+/// run and on an unwinding one alike. A pane's own drop kills its shell and waits for nothing
+/// (`PtySession`'s `Drop`, D-81), so a shell's [`bt_pty::test_shell::Hygiene`] dropped straight
+/// after it could still find the dying child holding its files (a Windows PowerShell's module
+/// analysis cache was measured left behind). This waits for the seated shell to end before the
+/// pane goes: within `PtySession::shutdown`'s budgets for the reap and the reader, while the
+/// pseudoconsole's close (`ClosePseudoConsole`) has none — the same wait `TestShell`'s `Drop`
+/// makes. Declare it after the channel or binding that holds the shell's `Hygiene`, so it is
+/// dropped first.
+pub(crate) struct ReapedPane(pub(crate) TerminalPane);
+
+impl std::ops::Deref for ReapedPane {
+    type Target = TerminalPane;
+
+    fn deref(&self) -> &TerminalPane {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for ReapedPane {
+    fn deref_mut(&mut self) -> &mut TerminalPane {
+        &mut self.0
+    }
+}
+
+impl Drop for ReapedPane {
+    fn drop(&mut self) {
+        if let Some(pty) = self.0.session.life.pty_mut() {
+            // A drop cannot answer an error, so the reap's result is not read: the shell's
+            // folder is what the reap is for. A reader thread that panicked is still re-raised
+            // here (`shutdown` joins it), which aborts the test process if this drop runs while
+            // unwinding — the same exposure `TestShell`'s `Drop` has.
+            let _ = pty.shutdown();
+        }
+    }
+}
+
 /// One shell with a word in it that no other shell in the test has.
 ///
 /// `pty: None` — this is the same shell-less mode `BT_PROBE_INPUT` uses, so
