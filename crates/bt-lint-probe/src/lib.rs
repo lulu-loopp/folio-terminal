@@ -290,8 +290,12 @@ pub fn probe_48(d: u32) -> impl Sized {
 
 /// `windows::Win32::UI::WindowsAndMessaging::MsgWaitForMultipleObjectsEx` - windows
 #[cfg(windows)]
-pub fn probe_49(d: u32) -> impl Sized {
-    unsafe { windows::Win32::UI::WindowsAndMessaging::MsgWaitForMultipleObjectsEx(None, d, windows::Win32::UI::WindowsAndMessaging::QS_ALLINPUT, windows::Win32::UI::WindowsAndMessaging::MWMO_INPUTAVAILABLE) } // probe: windows::Win32::UI::WindowsAndMessaging::MsgWaitForMultipleObjectsEx
+pub fn probe_49(
+    d: u32,
+    m: windows::Win32::UI::WindowsAndMessaging::QUEUE_STATUS_FLAGS,
+    f: windows::Win32::UI::WindowsAndMessaging::MSG_WAIT_FOR_MULTIPLE_OBJECTS_EX_FLAGS,
+) -> impl Sized {
+    unsafe { windows::Win32::UI::WindowsAndMessaging::MsgWaitForMultipleObjectsEx(None, d, m, f) } // probe: windows::Win32::UI::WindowsAndMessaging::MsgWaitForMultipleObjectsEx
 }
 
 /// `windows::Win32::System::IO::GetOverlappedResult` - windows
