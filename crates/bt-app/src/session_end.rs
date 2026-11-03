@@ -136,6 +136,39 @@ pub(crate) fn settle(
     }
 }
 
+/// **The one line `diagnostics.log` is owed about what the system's end did with the layout**
+/// (plan row 191), or `None` for news that wrote nothing: the question's write — landed, with what
+/// it holds, or refused, with why — or the quit under way that writes it instead.
+///
+/// The counts are of `document`, the one the write was handed: the windows, their tabs and how
+/// many of those are pinned, which is what a next start's restore is read against. Before this
+/// line a landed save said nothing, and a diagnosis had to read the save from silence.
+#[must_use]
+pub(crate) fn outcome_line(settled: &Settled, document: &bt_persist::SessionV1) -> Option<String> {
+    let app = crate::APP_NAME;
+    match settled {
+        Settled::Saved(Ok(())) => {
+            let tabs = document.windows.iter().flat_map(|window| &window.tabs);
+            let (count, pinned) = tabs.fold((0, 0), |(count, pinned), tab| {
+                (count + 1, pinned + usize::from(tab.pinned))
+            });
+            Some(format!(
+                "{app}: the session is ending and its layout was saved: windows {}, tabs \
+                 {count}, pinned {pinned}",
+                document.windows.len()
+            ))
+        }
+        Settled::Saved(Err(refusal)) => Some(format!(
+            "{app}: the session is ending and its layout was not saved: {}",
+            refusal.message()
+        )),
+        Settled::LeftToTheQuit => Some(format!(
+            "{app}: the session is ending and the quit under way writes its layout"
+        )),
+        Settled::AlreadySaved | Settled::TakenBack | Settled::Closed => None,
+    }
+}
+
 /// **Nothing held and nothing parked**, for a test that heard the system: `--test-threads=1` runs
 /// every test on one thread, and a hold left behind would stop the next test's recordings.
 #[cfg(test)]
