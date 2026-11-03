@@ -984,8 +984,9 @@ impl FormulaEngine {
                 #[cfg(test)]
                 self.waits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 settled(
-                    thread
-                        .join()
+                    // Called by its path: the handle is bound by a pattern, whose type the effect
+                    // reader does not follow, and the path names the wait it is.
+                    std::thread::JoinHandle::join(thread)
                         .expect("the scan's panic is contained on its own thread"),
                 )
             }
@@ -2182,9 +2183,7 @@ mod tests {
         let start = Instant::now();
         animation.present(start);
         animation.advance(start + std::time::Duration::from_secs(5));
-        let (cursor, want) = animation
-            .take_cursor()
-            .expect("a played-out ring has room");
+        let (cursor, want) = animation.take_cursor().expect("a played-out ring has room");
         let filled = lane
             .lane
             .decorate(MathWorkerRequest::AnimationFill {
