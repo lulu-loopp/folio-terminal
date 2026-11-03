@@ -940,11 +940,10 @@ fn an_agent_pane_the_systems_end_kept_keeps_its_session_record() {
         let seat = runtime.seats.identity();
         let leaf = &mut runtime.sessions.get_mut(&seat).expect("the pane").session;
         leaf.launch.program = Some(PathBuf::from("claude.exe"));
-        assert!(leaf.agent.hear(
-            vendor,
-            &heard,
-            crate::agent_resume::Child::Agent(vendor)
-        ));
+        assert!(
+            leaf.agent
+                .hear(vendor, &heard, crate::agent_resume::Child::Agent(vendor))
+        );
         seat
     };
     ends(&mut application, 1, SYSTEM_ENDED);
