@@ -10580,6 +10580,20 @@ struct WindowRuntime<B: Backend = Native> {
     /// captured, projected, decorated and recomposed to say the same thing it
     /// said 16ms ago.
     chrome_present_pending: bool,
+    /// **This window's turn is running, and it pays the present it is asked for at its own end**
+    /// (T-TWO-BARE-TURNS-PER-MARK-STEP).
+    ///
+    /// Raised at the head of [`Runtime::turn`] and lowered where the turn pays
+    /// ([`Runtime::pay_the_turns_present`]). While it stands, [`Runtime::ask_for_present`] writes
+    /// [`Self::turn_owes_a_present`] instead of asking the platform for a paint. A paint asked
+    /// for from inside the turn would cost a whole second turn of the loop: a wake, the
+    /// `RedrawRequested`, and every clock of `about_to_wait` again, to present the debt this turn
+    /// already recorded.
+    turn_pays_presents: bool,
+    /// A present asked for while [`Self::turn_pays_presents`] stood. The debt itself is where it
+    /// always was (a frame in the slot, or [`Self::chrome_present_pending`]); this says that it
+    /// was asked for and is owed the turn's present.
+    turn_owes_a_present: bool,
     /// **How many frames in a row have reached the glass without their
     /// characters** (user report 2026-08-29, `docs/DESIGN.md` §7.1.3l).
     ///
@@ -34177,6 +34191,8 @@ fn new_window_runtime<B: Backend>(parts: NewWindowParts<B>) -> WindowRuntime<B> 
         terminal_content_revision: 0,
         presented_picture_revision: 0,
         chrome_present_pending: false,
+        turn_pays_presents: false,
+        turn_owes_a_present: false,
         textless_frames: 0,
         unpainted_pane_output: false,
         composed_terminal_frames: 0,
@@ -50787,6 +50803,11 @@ impl<B: Backend> FolioApp<B> {
                 wake_owner::owned(WakeOwner::ImeReport, ime_deadline),
             ]);
             let turn = runtime.turn(now, application_clocks);
+            // **A turn that left early still hands over what it was asked for**
+            // (T-TWO-BARE-TURNS-PER-MARK-STEP): a turn that returned an error before its own
+            // end has not paid the present it deferred, and the window — kept, after a lost
+            // device — must not keep deferring. On a turn that ran to its end this does nothing.
+            runtime.end_the_turns_presents();
             application_clocks = false;
             match turn {
                 Ok(window_wake) => wake = wake_owner::earliest_wake([wake, window_wake]),

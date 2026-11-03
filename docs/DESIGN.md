@@ -16291,3 +16291,22 @@ Every exit of the name editor lets go of a `Name` drag only (`let_go_of_the_name
 - `settings::tests::a_fields_scroll_holds_still_until_the_caret_needs_it_to_move`;
 - `runtime::pointer::ending::tests`, whose owner lists now name every `FieldSelection` arm;
 - the plants `plant-180-press-places-nothing.py`, `plant-180-drag-ignored.py`, `plant-180-shift-ignored.py`, `plant-180-settings-scroll-not-sticky.py`, `plant-180-selection-ink-off.py` and `plant-180-f5-drag-clamped.py` in the row's report.
+
+### 2026-11-03 — A present a window's own turn asks for is presented by that turn (T-TWO-BARE-TURNS-PER-MARK-STEP, 0.4.9 plan row 196; the station census it adds is the ground for row 200)
+
+**What it met.** A step of a tab's working mark, a blink of the text cursor and the publication of a pane's held output each happen inside `Runtime::turn`, the window's `about_to_wait`. Each then asked the platform for a paint (`request_redraw`). On Windows that ask is `RedrawWindow(RDW_INTERNALPAINT)`; on macOS it is a queued redraw and a run-loop wakeup. Either way the paint came back as a second pass of the loop: a wake, the `RedrawRequested`, and a whole second `about_to_wait` with every clock folded again. So every step of the mark cost two turns, and half of the window's wakes while a session worked were the second one. On the clean VM with three panes the second turn was about 515 µs of a 3774 µs step.
+
+**The rule, now.** While a turn runs, a present asked for from inside it is the turn's own debt (`Runtime::ask_for_present` records it on `WindowRuntime::turn_owes_a_present` while `turn_pays_presents` is up). The turn pays it once, at its end: after the PTY resize flush and before the IME caret area and the deadline fold (`Runtime::pay_the_turns_present`, which calls `redraw()`). So the caret area a present wants is told in the same turn, and the fold books no wake for a paint already made. Outside a turn the ask is the platform's, as before. Asks made while the turn pays (a refused present's retry, the skirt) go to the platform too, because the flag is lowered before the pay.
+
+**A window on no screen keeps the platform's paint (ruling R2).** A minimized or cloaked window, or one not shown yet, is not presented by its turn: the turn hands its debt to the platform with `request_redraw`, exactly as before, and the platform sends the paint when the window can be seen.
+
+**A turn that leaves early hands its debt over.** A turn that returns an error never reaches its end. `FolioApp` calls `Runtime::end_the_turns_presents` after every `runtime.turn`: it lowers the flag and, if a present is still owed, asks the platform for it. A window kept after a lost device therefore never goes on deferring presents that no turn end will pay.
+
+**Its own station, and a census by station (rulings R3, R4).** The end-of-turn present is charged to its own hang_watch station, `Station::TurnPresent` (byte 224, label `pay_the_turns_present`; `STATION_COUNT` is 225), so a slow present at the turn's end is told apart from a platform ask (`WindowRedraw`). The heartbeat's charge now keeps nanoseconds; its millisecond ledger is unchanged. The census sums the time spent at each station, and under `BT_PERF_TRACE` the round prints, after its `turns` line and only when the window spent any time, one more line: `BT_PERF_TRACE stations window_ms=<ms> us_total=<µs> by_station=<Station>:<µs>,...`, the stations of at least 1 µs, longest first. Row 200 reads it to say where a turn's time goes.
+
+**Unchanged (ruling R5).** Every other `request_redraw` site (event handlers, resize, the scale change, the first paint) asks the platform as before. What is drawn, and when it reaches the glass, is unchanged; only the second pass of the loop is gone.
+
+**Pinned by**
+- `runtime::frame::turn_present_tests::{a_working_mark_step_reaches_the_glass_in_its_own_turn, a_caret_blink_reaches_the_glass_in_its_own_turn, a_panes_output_reaches_the_glass_in_the_turn_that_publishes_it, a_window_on_no_screen_still_asks_the_platform_for_its_paint, a_turn_that_left_early_hands_its_present_to_the_platform}`;
+- `hang_watch::census::tests::{the_stations_line_itemizes_the_window_to_the_microsecond, the_heartbeats_charge_feeds_each_station_to_the_nanosecond}`;
+- the plants `plant-196-a-ask-always-paints.py`, `plant-196-b-hidden-presents.py`, `plant-196-c-handover-forgets.py` and `plant-196-d-stations-unfed.py` in the row's report.

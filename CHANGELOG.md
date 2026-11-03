@@ -17,6 +17,10 @@ All notable changes to Folio are recorded here. The format follows
 - When a picture is zoomed in past its pane, the arrow keys move around it, and Shift with an arrow moves further. <!-- zh: 图片放大到超出窗格时，方向键可在图上移动，按住 Shift 再按方向键移动得更远。 -->
 - Middle-clicking a file in the files column opens it in a new preview pane beside the current one, which keeps what it shows. <!-- zh: 在文件列中用鼠标中键单击文件，会在当前预览窗格旁新开一个窗格显示它，当前窗格的内容保持不变。 -->
 
+### Changed
+
+- While a command is running in a tab, a Folio window wakes about half as often as before: each step of the tab's working mark, each blink of the text cursor and each burst of a pane's output now reaches the screen in one pass of the window's loop instead of two. What you see, and when, is unchanged. <!-- zh: pending T-TWO-BARE-TURNS-PER-MARK-STEP -->
+
 ### Fixed
 
 - On Windows, Folio follows a contrast theme (Settings > Accessibility > Contrast themes): while one is on, the terminal and the window use its colours, and turning it off brings back your own scheme. <!-- zh: 在 Windows 上，Folio 跟随对比度主题（设置 > 辅助功能 > 对比度主题）：开启时，终端与窗口使用该主题的颜色；关闭后恢复你自己的配色。 -->
