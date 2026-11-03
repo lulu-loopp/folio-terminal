@@ -79,7 +79,7 @@ Runtime::reap_exited_tabs: .output
 Runtime::settings_layout: .read
 Runtime::turn: .open
 count_pages: .read
-read_capped: .read_to_end
+read_into: .read_to_end
 SessionStore::open: SessionWriter::open
 read_up_to: .read_to_end
 Registry::table: .read
