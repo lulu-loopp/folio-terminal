@@ -8042,15 +8042,17 @@ enum Phase {
     InBirth(PaneBirth),
     /// A running shell.
     Live(PtySession),
-    /// A shell that exited inside the birth grace, held until its reader has handed over the last
-    /// byte. `exit_age` is the age its exit was first seen at.
+    /// A shell that exited inside the birth grace, or that the system ended with the session (plan
+    /// row 191), held until its reader has handed over the last byte. `exit_age` is the age its
+    /// exit was first seen at.
     ExitDraining { pty: PtySession, exit_age: Duration },
     /// A shell that exited after the birth grace: its one line is said, and the pane keeps its
     /// pseudoconsole until the pane or its tab ends.
     Exited { pty: PtySession, exit_age: Duration },
     /// The last-resort shell being born in place after a silent birth death.
     FallingBack(BirthDeathFallback),
-    /// A birth death kept with its face, without a shell, until the pane is closed or restarted.
+    /// A birth death, or a shell the system ended with the session (plan row 191), kept with its
+    /// face, without a shell, until the pane is closed or restarted.
     Kept,
     /// The shell was retired: by a road that ends the pane, or by the reaper before it decides
     /// what becomes of a birth death. Read as [`Self::Shellless`].
@@ -8120,7 +8122,8 @@ impl ShellLife {
     }
 
     /// Whether this pane keeps its tab from ending although it holds no pseudoconsole: a shell
-    /// being born, a last-resort shell being born, or a birth death kept with its face.
+    /// being born, a last-resort shell being born, or a birth death or a shell the system ended
+    /// kept with its face.
     fn holds_its_tab(&self) -> bool {
         matches!(
             self.phase,
@@ -8187,8 +8190,8 @@ impl ShellLife {
         landing.owed_physical = Some(physical);
     }
 
-    /// **Live → ExitDraining**: the shell exited inside the birth grace, first seen at
-    /// `exit_age`, and its reader has not handed over its last byte.
+    /// **Live → ExitDraining**: the shell exited inside the birth grace, or the system ended it
+    /// (plan row 191), first seen at `exit_age`, and its reader has not handed over its last byte.
     fn exit_draining(&mut self, exit_age: Duration) {
         self.phase = match std::mem::replace(&mut self.phase, Phase::Shellless) {
             Phase::Live(pty) => Phase::ExitDraining { pty, exit_age },
@@ -8210,8 +8213,8 @@ impl ShellLife {
         owed
     }
 
-    /// **Live or ExitDraining → Released**: a birth death's shell leaves the pane, handed back for
-    /// the reaper to retire.
+    /// **Live or ExitDraining → Released**: a birth death's shell, or one the system ended (plan
+    /// row 191), leaves the pane, handed back for the reaper to retire.
     fn release_dead_shell(&mut self) -> Option<PtySession> {
         match std::mem::replace(&mut self.phase, Phase::Released) {
             Phase::Live(pty) | Phase::ExitDraining { pty, .. } => Some(pty),
@@ -8243,7 +8246,8 @@ impl ShellLife {
         }
     }
 
-    /// **Shellless or Released → Kept**: a birth death is kept with its face.
+    /// **Shellless or Released → Kept**: a birth death, or a shell the system ended (plan row
+    /// 191), is kept with its face.
     fn keep_birth_death(&mut self) {
         if self.has_no_shell() {
             self.phase = Phase::Kept;
@@ -48353,6 +48357,25 @@ impl<B: Backend> FolioApp<B> {
         register_restart_now::<B>(event_loop);
     }
 
+    /// **Windows is asked to end this process before the processes at the default shutdown
+    /// level** (plan row 191): `bt_platform::session_end::SHUTDOWN_LEVEL`, above the default every
+    /// console process starts at, so that a restart or a shutdown asks Folio's windows — and
+    /// lets the question write the layout — before it ends the shells in their panes. Without it
+    /// the order between them was the system's, and on the owner's machine the shells went
+    /// first. The kept-pane rule (`runtime::tabs::ended_by_the_system`) stays as the net for that
+    /// order, which a slow window thread can still meet.
+    ///
+    /// Said in `diagnostics.log` either way, in the VM experiment's words, so that a reboot's
+    /// log shows whether the level was in force.
+    fn ask_to_be_ended_before_the_shells(&self, event_loop: &B::Loop) {
+        let level = bt_platform::session_end::SHUTDOWN_LEVEL;
+        let said = match B::ask_to_be_ended_first(event_loop, level) {
+            Ok(()) => "ok".to_owned(),
+            Err(refused) => format!("error {refused}"),
+        };
+        diagnostics::note(&format!("BT_SESSION_END shutdown level {level:#x}: {said}"));
+    }
+
     /// **The system asked this application to quit, and it is waiting** (M3-1).
     ///
     /// Folio's own quit is what runs: the card about unsaved names, the save,
@@ -48473,17 +48496,17 @@ impl<B: Backend> FolioApp<B> {
             let Some(app) = self.app.as_mut() else {
                 return kept;
             };
-            match session_end::settle(end, &mut app.session_store, a_quit_holds_it, asked_at) {
-                session_end::Settled::Saved(Ok(()))
+            let settled =
+                session_end::settle(end, &mut app.session_store, a_quit_holds_it, asked_at);
+            // **What became of the layout is said, landed or not** (plan row 191): one line, with
+            // what the document held, so a next start's restore can be read against it.
+            if let Some(line) = session_end::outcome_line(&settled, app.session_store.loaded()) {
+                diagnostics::note(&line);
+            }
+            match settled {
+                session_end::Settled::Saved(_)
                 | session_end::Settled::LeftToTheQuit
                 | session_end::Settled::AlreadySaved => {
-                    lines_down = true;
-                }
-                session_end::Settled::Saved(Err(refusal)) => {
-                    diagnostics::note(&format!(
-                        "{APP_NAME}: the session is ending and its layout was not saved: {}",
-                        refusal.message()
-                    ));
                     lines_down = true;
                 }
                 // Every change the hold kept off the document is recorded now: the windows as
@@ -51568,6 +51591,11 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 // loop. Of the starts that open one, only the data directory's owner asks, and an
                 // update's trial only once it is committed (`FolioApp::register_for_restart`).
                 self.register_for_restart(event_loop);
+                // **And to end this process before the shells in its panes** (plan row 191),
+                // once and here for the same reason: the first window is the run's own. Every
+                // start that opens a window asks, owner or not — the level is this process's
+                // place in the shutdown order, not a write anyone could roll back.
+                self.ask_to_be_ended_before_the_shells(event_loop);
                 // A shortcut file that could not be read owes the user a sentence
                 // naming it (§5.3), and this is the first moment there is a window
                 // to say it on — the store was opened before one existed. Anchored

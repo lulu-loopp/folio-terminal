@@ -148,6 +148,11 @@ pub(crate) trait Backend: Sized + 'static {
     /// **Take that back** — `bt_platform::session_end::withdraw_restart`: the process is
     /// handing itself over to an update's applier.
     fn withdraw_restart(event_loop: &Self::Loop) -> Result<(), String>;
+
+    /// **Ask the system to end this process before the processes at the default shutdown level**
+    /// (plan row 191) — `bt_platform::session_end::ask_to_be_ended_first`, once per process, by
+    /// the launch's first window (`FolioApp::ask_to_be_ended_before_the_shells`).
+    fn ask_to_be_ended_first(event_loop: &Self::Loop, level: u32) -> Result<(), String>;
 }
 
 /// **The product's backend**: winit's window, `bt-render`'s renderer over the shared device,
@@ -192,6 +197,10 @@ impl Backend for Native {
 
     fn withdraw_restart(_event_loop: &ActiveEventLoop) -> Result<(), String> {
         bt_platform::session_end::withdraw_restart()
+    }
+
+    fn ask_to_be_ended_first(_event_loop: &ActiveEventLoop, level: u32) -> Result<(), String> {
+        bt_platform::session_end::ask_to_be_ended_first(level)
     }
 }
 
