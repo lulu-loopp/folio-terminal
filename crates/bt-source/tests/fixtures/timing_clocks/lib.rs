@@ -120,7 +120,8 @@ impl<M: Clock> Pump<M> {
 
 // ── admitted, or not handed: nothing is found ──
 
-/// Forwards its clock, calls it, and measures: a measurement's origin is admitted.
+/// Forwards its clock, calls it, and measures: the measurement's origin is admitted, and
+/// `due.elapsed()` reads the real clock again (row 205 review F2), so it is found, once.
 pub fn forwards(now: impl FnOnce() -> Instant) -> bool {
     let started = Instant::now();
     let due = now();
@@ -179,4 +180,232 @@ mod away {
             true
         }
     }
+}
+
+// ── the review fold (row 205): carriers, `.elapsed()`, trait defaults, instants anywhere, the
+// wall clock, and the branches each reading takes ──
+
+use std::time::SystemTime;
+
+/// A carrier handed as a parameter (F1).
+pub fn by_carrier(beat: &Beat) -> Instant {
+    let _ = beat;
+    Instant::now()
+}
+
+pub fn by_optional_carrier(beat: Option<Box<Beat>>) -> Instant {
+    let _ = beat;
+    Instant::now()
+}
+
+/// A carrier one level down: `Outer` carries a clock through its `Beat`.
+pub struct Outer {
+    beat: Beat,
+}
+
+impl Outer {
+    pub fn late(&self) -> Instant {
+        Instant::now()
+    }
+}
+
+/// Two levels down: the fixed point.
+pub struct Outermost {
+    outers: Vec<Outer>,
+}
+
+impl Outermost {
+    pub fn late(&self) -> Instant {
+        Instant::now()
+    }
+}
+
+impl Beat {
+    /// `Self` in a block whose `self` is handed.
+    pub fn same(other: &Self) -> Instant {
+        let _ = other;
+        Instant::now()
+    }
+
+    /// `.elapsed()` on an instant that is not a fresh origin (F2).
+    pub fn by_stored_elapsed(&self, at: Instant) -> bool {
+        at.elapsed() > Duration::ZERO
+    }
+}
+
+mod deep {
+    pub struct Held {
+        pub clock: fn() -> std::time::Instant,
+    }
+}
+
+/// A carrier named by a module path.
+pub fn by_pathed_carrier(held: &deep::Held) -> Instant {
+    let _ = held;
+    Instant::now()
+}
+
+/// A carrier through a `use`, renamed.
+use self::deep::Held as Kept;
+
+pub fn by_used_carrier(held: &Kept) -> Instant {
+    let _ = held;
+    Instant::now()
+}
+
+/// A clock trait two supertraits down, with a default method (F3).
+pub trait Timed: Paced {
+    fn due_in(&self, wait: Duration) -> Instant {
+        Instant::now() + wait
+    }
+}
+
+pub trait Deep: Timed {}
+
+pub fn by_deep_supertrait(clock: &dyn Deep) -> bool {
+    clock.now() > Instant::now()
+}
+
+/// A `now` holding an instant in a type the old reading did not read (F4).
+pub fn by_boxed_now(now: Box<Instant>) -> bool {
+    *now > Instant::now()
+}
+
+pub fn by_borrowed_option_now(now: &Option<Instant>) -> bool {
+    now.is_some_and(|at| at > Instant::now())
+}
+
+pub fn by_now_slice(now: &[Instant]) -> bool {
+    now[0] > Instant::now()
+}
+
+/// The wall clock (Q1).
+pub fn by_wall_now(now: SystemTime) -> bool {
+    now > SystemTime::now()
+}
+
+pub fn by_wall_clock(clock: impl Fn() -> SystemTime) -> bool {
+    clock() > SystemTime::now()
+}
+
+/// Pointers, arrays, slices.
+pub fn by_pointer_to_clock(clock: *const dyn Fn() -> Instant) -> Instant {
+    let _ = clock;
+    Instant::now()
+}
+
+pub fn by_array(clocks: [fn() -> Instant; 2]) -> Instant {
+    clocks[0]().max(Instant::now())
+}
+
+pub fn by_slice(clocks: &[&dyn Clock]) -> bool {
+    clocks[0].now() > Instant::now()
+}
+
+/// An `impl` whose clock bound is in its `where` clause.
+pub struct Pumped<M> {
+    media: M,
+}
+
+impl<M> Pumped<M>
+where
+    M: Clock,
+{
+    pub fn late(&self) -> bool {
+        self.media.now() > Instant::now()
+    }
+}
+
+/// A struct's own clock-bounded parameter makes it a carrier.
+pub struct Bounded2<C: Clock> {
+    clock: C,
+}
+
+pub fn by_bounded_carrier(held: &Bounded2<Real>) -> Instant {
+    let _ = held;
+    Instant::now()
+}
+
+/// An enum and a union that carry a clock.
+pub enum Either {
+    Ticking(fn() -> Instant),
+    Still,
+}
+
+pub fn by_enum_carrier(either: &Either) -> Instant {
+    let _ = either;
+    Instant::now()
+}
+
+pub union Raw {
+    clock: fn() -> Instant,
+    bits: usize,
+}
+
+pub fn by_union_carrier(raw: &Raw) -> Instant {
+    let _ = raw;
+    Instant::now()
+}
+
+/// A closure handed a clock, in a function handed none: its reading is found.
+pub fn by_closure_parameter() -> Instant {
+    let read = |clock: &dyn Fn() -> Instant| clock().max(Instant::now());
+    read(&Instant::now)
+}
+
+/// A nested `fn` handed a clock, in a function handed none.
+pub fn by_nested_fn() -> Instant {
+    fn inner(clock: fn() -> Instant) -> Instant {
+        clock().max(Instant::now())
+    }
+    inner(Instant::now)
+}
+
+// ── the review fold: admitted, or not handed ──
+
+/// A closure whose `now` is a number, in a handed body: its reading is not one again.
+pub fn a_number_now_in_a_handed_body(clock: impl Fn() -> Instant) -> Instant {
+    let shift = |now: u64| Instant::now() + Duration::from_secs(now);
+    clock().max(shift(1))
+}
+
+/// A macro type naming no clock (`Token![,]`-like).
+pub fn with_a_token_type(comma: Token![,]) -> Instant {
+    let _ = comma;
+    Instant::now()
+}
+
+// ── the review fold: refused ──
+
+pub fn a_fn_macro_type(clock: boxed!(dyn Fn() -> Instant)) -> bool {
+    let _ = clock;
+    true
+}
+
+pub fn a_clock_trait_macro_type(clock: boxed!(dyn Clock)) -> bool {
+    let _ = clock;
+    true
+}
+
+pub fn a_where_on_a_type<T>(value: T) -> bool
+where
+    Vec<T>: Clock,
+{
+    let _ = value;
+    true
+}
+
+pub fn an_unfollowed_carrier(held: &elsewhere::Beat) -> bool {
+    let _ = held;
+    true
+}
+
+/// Across packages: the `other` fixture's clock trait and carrier.
+pub fn by_other_trait(clock: &dyn other::Ticker) -> bool {
+    clock.tick() > Instant::now()
+}
+
+pub fn by_other_carrier(held: &other::Carried) -> Instant {
+    let _ = held;
+    Instant::now()
 }

@@ -92,9 +92,9 @@
 //!   parameter named `now` of type `Instant`, `&Instant` or `Option<Instant>` is
 //!   read as the turn's instant; `at: Instant`, `deadline: Instant` (which a
 //!   function rightly compares with a fresh reading) and an instant carried in
-//!   another struct's field are not. A **clock** — a closure, pointer or trait
-//!   that answers an instant — is read whatever its name (plan row 205); what it
-//!   still does not see is listed on the guard.
+//!   another struct's field are not. A **clock** — a closure, pointer, trait or
+//!   clock-carrying type that answers an instant — is read whatever its name
+//!   (plan row 205); what it still does not see is listed on the guard.
 //! * **`Instant` and `Duration` as values.** Most of the tree's tests build a
 //!   controlled clock from one `Instant::now()` plus `Duration::from_*` offsets,
 //!   and their verdict does not move with the machine's speed. That is exactly
@@ -1093,9 +1093,11 @@ fn clock_traits(
     for (package, index) in indices {
         for declaration in index.traits() {
             let identities = resolver.identities(package, declaration);
-            match reading::clock_trait(index.text(declaration.whole())) {
-                Ok(true) => clocks.extend(identities.iter().cloned()),
-                Ok(false) => {}
+            match syn::parse_str::<syn::ItemTrait>(index.text(declaration.whole())) {
+                Ok(declared) if reading::clock_trait(&declared) => {
+                    clocks.extend(identities.iter().cloned());
+                }
+                Ok(_) => {}
                 Err(error) => refusals.push(format!(
                     "{}: the trait `{}` does not parse ({error})",
                     place(index, declaration.whole().start()),
@@ -1128,26 +1130,229 @@ fn clock_traits(
     (clocks, refusals)
 }
 
-/// How a bound's trait path, written in `modules` of `package`, reads: a clock
-/// when it names a clock trait in any of them; unread when the resolver gives
-/// up, or when it names nothing it can follow and its last segment is a clock
-/// trait's name.
-fn bound_reader<'r, 'i: 'r>(
+/// A first-party data type: its package's position in the indices, its module
+/// path, its name.
+type TypeKey = (usize, String, String);
+
+/// **Which first-party data type a type path names**, read from the indices'
+/// module records, their data types and their `use` items — the type
+/// counterpart of [`TraitResolver`]: `crate::`, `self::`, `super::`, another
+/// package's crate name, a child module, a name a `use` brings in (renamed
+/// or through a glob), and a `pub use` re-export, each module-and-name lookup
+/// made once. A `use` inside a function body is not read.
+struct TypeResolver {
+    crates: BTreeMap<String, usize>,
+    modules: BTreeSet<(usize, String)>,
+    declared: BTreeSet<TypeKey>,
+    names: BTreeMap<(usize, String), Vec<(String, Vec<String>)>>,
+    globs: BTreeMap<(usize, String), Vec<Vec<String>>>,
+}
+
+/// How many module-and-name lookups one type path's resolution makes before it
+/// stops: each lookup is made once (a `use` cycle ends there), and this bounds
+/// the walk.
+const TYPE_SEEN: usize = 4096;
+
+impl TypeResolver {
+    fn new(indices: &[(&str, &Index)]) -> Self {
+        let mut resolver = Self {
+            crates: BTreeMap::new(),
+            modules: BTreeSet::new(),
+            declared: BTreeSet::new(),
+            names: BTreeMap::new(),
+            globs: BTreeMap::new(),
+        };
+        for (at, (package, index)) in indices.iter().enumerate() {
+            resolver.crates.insert(package.replace('-', "_"), at);
+            for module in index.modules() {
+                for path in module.module_paths() {
+                    resolver.modules.insert((at, path.clone()));
+                }
+            }
+            for record in index
+                .items()
+                .iter()
+                .filter(|record| record.kind().is_type())
+            {
+                for module in record.module_paths() {
+                    resolver
+                        .declared
+                        .insert((at, module.to_owned(), record.name().to_owned()));
+                }
+            }
+            for used in index.uses() {
+                for module in used.module_paths() {
+                    let key = (at, module.to_owned());
+                    resolver
+                        .names
+                        .entry(key.clone())
+                        .or_default()
+                        .extend(used.names().iter().cloned());
+                    resolver
+                        .globs
+                        .entry(key)
+                        .or_default()
+                        .extend(used.globs().iter().cloned());
+                }
+            }
+        }
+        resolver
+    }
+
+    fn parent(module: &str) -> String {
+        module
+            .rsplit_once("::")
+            .map_or_else(|| module.to_owned(), |(parent, _)| parent.to_owned())
+    }
+
+    /// The modules a leading path segment names, written in `module`.
+    fn modules_named(
+        &self,
+        at: usize,
+        module: &str,
+        segment: &str,
+        seen: &mut BTreeSet<(usize, String, Vec<String>)>,
+    ) -> Vec<(usize, String)> {
+        match segment {
+            "crate" => return vec![(at, "crate".to_owned())],
+            "self" => return vec![(at, module.to_owned())],
+            "super" => return vec![(at, Self::parent(module))],
+            _ => {}
+        }
+        let mut found = Vec::new();
+        let child = format!("{module}::{segment}");
+        if self.modules.contains(&(at, child.clone())) {
+            found.push((at, child));
+        }
+        if let Some(other) = self.crates.get(segment) {
+            found.push((*other, "crate".to_owned()));
+        }
+        if !seen.insert((at, module.to_owned(), vec![segment.to_owned()])) || seen.len() > TYPE_SEEN
+        {
+            return found;
+        }
+        let key = (at, module.to_owned());
+        for (name, path) in self.names.get(&key).into_iter().flatten() {
+            if name == segment {
+                found.extend(self.module_path(at, module, path, seen));
+            }
+        }
+        for glob in self.globs.get(&key).into_iter().flatten() {
+            let mut path = glob.clone();
+            path.push(segment.to_owned());
+            found.extend(self.module_path(at, module, &path, seen));
+        }
+        found
+    }
+
+    /// The modules a whole path names, written in `module`.
+    fn module_path(
+        &self,
+        at: usize,
+        module: &str,
+        path: &[String],
+        seen: &mut BTreeSet<(usize, String, Vec<String>)>,
+    ) -> Vec<(usize, String)> {
+        let Some((first, rest)) = path.split_first() else {
+            return Vec::new();
+        };
+        let mut current = self.modules_named(at, module, first, seen);
+        for segment in rest {
+            let mut next = Vec::new();
+            for (at, module) in &current {
+                next.extend(self.modules_named(*at, module, segment, seen));
+            }
+            current = next;
+        }
+        current.sort();
+        current.dedup();
+        current
+    }
+
+    /// The data types a type path names, written in `module` of the package
+    /// at `at`.
+    fn resolve(&self, at: usize, module: &str, path: &[String]) -> BTreeSet<TypeKey> {
+        self.resolve_seen(at, module, path, &mut BTreeSet::new())
+    }
+
+    fn resolve_seen(
+        &self,
+        at: usize,
+        module: &str,
+        path: &[String],
+        seen: &mut BTreeSet<(usize, String, Vec<String>)>,
+    ) -> BTreeSet<TypeKey> {
+        let mut found = BTreeSet::new();
+        let Some((name, prefix)) = path.split_last() else {
+            return found;
+        };
+        let homes = if prefix.is_empty() {
+            vec![(at, module.to_owned())]
+        } else {
+            self.module_path(at, module, prefix, seen)
+        };
+        for (home_at, home) in homes {
+            let key = (home_at, home.clone(), name.clone());
+            if self.declared.contains(&key) {
+                found.insert(key);
+                continue;
+            }
+            let mut tag = vec![String::new()];
+            tag.push(name.clone());
+            if !seen.insert((home_at, home.clone(), tag)) || seen.len() > TYPE_SEEN {
+                continue;
+            }
+            let at_home = (home_at, home.clone());
+            for (alias, target) in self.names.get(&at_home).into_iter().flatten() {
+                if alias == name {
+                    found.extend(self.resolve_seen(home_at, &home, target, seen));
+                }
+            }
+            for glob in self.globs.get(&at_home).into_iter().flatten() {
+                let mut target = glob.clone();
+                target.push(name.clone());
+                found.extend(self.resolve_seen(home_at, &home, &target, seen));
+            }
+        }
+        found
+    }
+}
+
+/// How a path, written in `modules` of the package at `at`, reads to the
+/// handed-now reading: as a bound (a clock trait, or unread when the trait
+/// resolver gives up or cannot follow a clock trait's name) and as a type (a
+/// type that carries a clock, or unread when the type resolver cannot follow
+/// a path whose last segment names one).
+struct Reader<'r, 'i> {
     resolver: &'r TraitResolver<'i>,
     clocks: &'r BTreeSet<TraitId>,
+    types: &'r TypeResolver,
+    owners: &'r BTreeSet<TypeKey>,
+    owner_names: &'r BTreeSet<String>,
     package: &'r str,
+    at: usize,
     modules: Vec<String>,
-) -> impl Fn(&syn::Path) -> reading::Bound + 'r {
-    move |path: &syn::Path| {
-        let segments: Vec<String> = path
-            .segments
+}
+
+impl Reader<'_, '_> {
+    fn segments(path: &syn::Path) -> Vec<String> {
+        path.segments
             .iter()
             .map(|segment| segment.ident.to_string())
-            .collect();
+            .collect()
+    }
+
+    fn bound(&self, path: &syn::Path) -> reading::Bound {
+        let segments = Self::segments(path);
         let mut named = false;
-        for module in &modules {
-            match resolver.resolve_checked(package, module, &segments) {
-                Ok(found) if !found.is_disjoint(clocks) => return reading::Bound::Clock,
+        for module in &self.modules {
+            match self
+                .resolver
+                .resolve_checked(self.package, module, &segments)
+            {
+                Ok(found) if !found.is_disjoint(self.clocks) => {
+                    return reading::Bound::Clock("trait");
+                }
                 Ok(found) => named |= !found.is_empty(),
                 Err(_) => {
                     return reading::Bound::Unread(format!(
@@ -1158,7 +1363,7 @@ fn bound_reader<'r, 'i: 'r>(
             }
         }
         let last = segments.last().map(String::as_str);
-        if !named && clocks.iter().any(|id| Some(id.name.as_str()) == last) {
+        if !named && self.clocks.iter().any(|id| Some(id.name.as_str()) == last) {
             return reading::Bound::Unread(format!(
                 "the bound `{}` names a clock trait by a path the trait resolver cannot follow",
                 segments.join("::")
@@ -1166,60 +1371,79 @@ fn bound_reader<'r, 'i: 'r>(
         }
         reading::Bound::Not
     }
+
+    fn carrier(&self, path: &syn::Path) -> reading::Bound {
+        let segments = Self::segments(path);
+        let Some(last) = segments.last() else {
+            return reading::Bound::Not;
+        };
+        if !self.owner_names.contains(last) {
+            return reading::Bound::Not;
+        }
+        let mut named = false;
+        for module in &self.modules {
+            let found = self.types.resolve(self.at, module, &segments);
+            if !found.is_disjoint(self.owners) {
+                return reading::Bound::Clock("carrier");
+            }
+            named |= !found.is_empty();
+        }
+        if named {
+            reading::Bound::Not
+        } else {
+            reading::Bound::Unread(format!(
+                "the type `{}` is named like a type that carries a clock, by a path the type \
+                 resolver cannot follow",
+                segments.join("::")
+            ))
+        }
+    }
 }
 
-/// What one `impl` block hands its methods: the type parameters its header
-/// bounds by a clock, and whether its `self` carries a clock.
-struct ImplClock {
+/// What one `impl` or trait block hands its methods: the type parameters its
+/// header bounds by a clock, and how its `self` is handed, if it is.
+struct BlockClock {
     generics: BTreeSet<String>,
-    self_handed: bool,
+    self_how: Option<&'static str>,
 }
 
-/// What the handed-`now` reading found in one set of indices: per function, the
-/// places of its readings again; and what it refuses.
-fn handed_now(indices: &[(&str, &Index)]) -> (BTreeMap<String, Vec<String>>, Vec<String>) {
+/// What the handed-`now` reading found in one set of indices.
+struct HandedSet {
+    /// Per function handed a clock that reads a real clock again, the places.
+    found: BTreeMap<String, Vec<String>>,
+    /// What it refuses.
+    refusals: Vec<String>,
+    /// Every function handed a clock: how, and how many readings again.
+    handed: BTreeMap<String, (String, usize)>,
+}
+
+/// What the handed-`now` reading finds in one set of indices: the functions
+/// handed a clock, those that read a real clock again with the places, and
+/// what it refuses.
+fn handed_now(indices: &[(&str, &Index)]) -> HandedSet {
     let resolver = TraitResolver::new(indices);
     let (clocks, mut refusals) = clock_traits(indices, &resolver);
-    let mut found = BTreeMap::new();
-    for (package, index) in indices {
-        let package: &str = package;
-        let modules_of = |record: &ItemRecord| -> Vec<String> {
-            record
-                .module_paths()
-                .into_iter()
-                .map(str::to_owned)
-                .collect()
-        };
-        // The data types of this package, and those of them whose fields hold a clock.
-        let mut declared: BTreeSet<(String, String)> = BTreeSet::new();
-        let mut owners: BTreeSet<(String, String)> = BTreeSet::new();
+    let types = TypeResolver::new(indices);
+    let modules_of = |record: &ItemRecord| -> Vec<String> {
+        record
+            .module_paths()
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    };
+    // The product data types, parsed once.
+    let mut data = Vec::new();
+    for (at, (_, index)) in indices.iter().enumerate() {
         for record in index
             .items()
             .iter()
             .filter(|record| record.kind().is_type())
         {
-            let modules = modules_of(record);
-            for module in &modules {
-                declared.insert((module.clone(), record.name().to_owned()));
-            }
             if test_only(index, record) {
                 continue;
             }
-            let read = bound_reader(&resolver, &clocks, package, modules.clone());
-            match reading::carries_a_clock(index.text(record.whole()), &read) {
-                Ok((carries, unread)) => {
-                    let base = record.whole().start();
-                    refusals.extend(
-                        unread
-                            .iter()
-                            .map(|(at, why)| format!("{}: {why}", place(index, base + at))),
-                    );
-                    if carries {
-                        for module in modules {
-                            owners.insert((module, record.name().to_owned()));
-                        }
-                    }
-                }
+            match reading::data_type(index.text(record.whole())) {
+                Ok(declared) => data.push((at, record, declared)),
                 Err(error) => refusals.push(format!(
                     "{}: the text of `{}` does not parse ({error})",
                     place(index, record.whole().start()),
@@ -1227,10 +1451,92 @@ fn handed_now(indices: &[(&str, &Index)]) -> (BTreeMap<String, Vec<String>>, Vec
                 )),
             }
         }
-        let owner_names: BTreeSet<&str> = owners.iter().map(|(_, name)| name.as_str()).collect();
-        let mut blocks: Vec<usize> = (0..index.impls().len()).collect();
-        blocks.sort_by_key(|at| index.impls()[*at].whole().start());
-        let mut read_blocks: BTreeMap<usize, ImplClock> = BTreeMap::new();
+    }
+    // The types that carry a clock, to a fixed point: a field of a type that
+    // carries one makes its holder carry one too.
+    let mut owners: BTreeSet<TypeKey> = BTreeSet::new();
+    let mut owner_names: BTreeSet<String> = BTreeSet::new();
+    let mut last_pass = false;
+    loop {
+        let mut grew = false;
+        for (at, record, declared) in &data {
+            let key_of = |module: &str| (*at, module.to_owned(), record.name().to_owned());
+            if !last_pass
+                && record
+                    .module_paths()
+                    .iter()
+                    .all(|module| owners.contains(&key_of(module)))
+            {
+                continue;
+            }
+            let reader = Reader {
+                resolver: &resolver,
+                clocks: &clocks,
+                types: &types,
+                owners: &owners,
+                owner_names: &owner_names,
+                package: indices[*at].0,
+                at: *at,
+                modules: modules_of(record),
+            };
+            let bound = |path: &syn::Path| reader.bound(path);
+            let carrier = |path: &syn::Path| reader.carrier(path);
+            let names = reading::Names {
+                bound: &bound,
+                carrier: &carrier,
+            };
+            let (carries, unread) = reading::carries_a_clock(declared, names);
+            if last_pass {
+                let index = indices[*at].1;
+                let base = record.whole().start();
+                refusals.extend(
+                    unread
+                        .iter()
+                        .map(|(offset, why)| format!("{}: {why}", place(index, base + offset))),
+                );
+            } else if carries {
+                grew = true;
+                for module in record.module_paths() {
+                    owners.insert(key_of(module));
+                }
+                owner_names.insert(record.name().to_owned());
+            }
+        }
+        if last_pass {
+            break;
+        }
+        last_pass = !grew;
+    }
+    let mut found = BTreeMap::new();
+    let mut handed = BTreeMap::new();
+    for (at, (package, index)) in indices.iter().enumerate() {
+        let package: &str = package;
+        let reader_for = |modules: Vec<String>| Reader {
+            resolver: &resolver,
+            clocks: &clocks,
+            types: &types,
+            owners: &owners,
+            owner_names: &owner_names,
+            package,
+            at,
+            modules,
+        };
+        let mut blocks: Vec<(usize, usize, usize, bool)> = index
+            .impls()
+            .iter()
+            .enumerate()
+            .map(|(n, block)| (block.whole().start(), block.whole().end(), n, true))
+            .chain(index.traits().iter().enumerate().map(|(n, declaration)| {
+                (
+                    declaration.whole().start(),
+                    declaration.whole().end(),
+                    n,
+                    false,
+                )
+            }))
+            .collect();
+        blocks.sort_unstable();
+        let mut read_blocks: BTreeMap<(usize, bool), BlockClock> = BTreeMap::new();
         for record in index.items() {
             if test_only(index, record) {
                 continue;
@@ -1238,8 +1544,9 @@ fn handed_now(indices: &[(&str, &Index)]) -> (BTreeMap<String, Vec<String>>, Vec
             if record.kind() == ItemKind::Field && record.name() == "now" {
                 if reading::instant_field(index.text(record.whole())) {
                     refusals.push(format!(
-                        "{}: a product type carries `now: Instant` ({}); a function handed it \
-                         could read the clock again without a parameter named `now`",
+                        "{}: a product type carries `now` of a type holding an instant ({}); a \
+                         function handed it could read the clock again without a parameter \
+                         named `now`",
                         place(index, record.whole().start()),
                         record.type_owner().unwrap_or("?")
                     ));
@@ -1268,85 +1575,124 @@ fn handed_now(indices: &[(&str, &Index)]) -> (BTreeMap<String, Vec<String>>, Vec
             }) else {
                 continue;
             };
-            // The innermost `impl` block this method is written in, read once.
+            // The innermost `impl` or trait block a method is written in, read once.
             let whole = record.whole();
-            let enclosing = record.type_owner().and_then(|_| {
-                let before = blocks
-                    .partition_point(|at| index.impls()[*at].whole().start() <= whole.start());
-                blocks[..before]
-                    .iter()
-                    .rev()
-                    .copied()
-                    .find(|at| index.impls()[*at].whole().end() >= whole.end())
-            });
-            let (generics, self_handed) = match enclosing {
-                None => (BTreeSet::new(), false),
-                Some(at) => {
-                    let read = read_blocks.entry(at).or_insert_with(|| {
-                        let block = &index.impls()[at];
-                        let modules: Vec<String> = block
-                            .module_paths()
-                            .into_iter()
-                            .map(str::to_owned)
-                            .collect();
-                        let owner = block.type_owner();
-                        let carried = modules
-                            .iter()
-                            .any(|module| owners.contains(&(module.clone(), owner.to_owned())));
-                        if owner_names.contains(owner)
-                            && !modules.iter().any(|module| {
-                                declared.contains(&(module.clone(), owner.to_owned()))
-                            })
-                        {
-                            refusals.push(format!(
-                                "{}: an `impl` of `{owner}`, a name that carries a clock in this \
-                                 package, is written away from its type, so its methods cannot \
-                                 be matched to the clock",
-                                place(index, block.whole().start())
-                            ));
-                        }
-                        let header = &index.text(block.whole())
-                            [..block.body().start() - block.whole().start()];
-                        let reader = bound_reader(&resolver, &clocks, package, modules);
-                        let generics = match reading::impl_generics(header, &reader) {
+            let enclosing = (record.kind() == ItemKind::AssociatedFunction)
+                .then(|| {
+                    let before = blocks.partition_point(|(start, ..)| *start <= whole.start());
+                    blocks[..before]
+                        .iter()
+                        .rev()
+                        .find(|(_, end, ..)| *end >= whole.end())
+                        .map(|(_, _, n, is_impl)| (*n, *is_impl))
+                })
+                .flatten();
+            let (generics, self_how) = match enclosing {
+                None => (BTreeSet::new(), None),
+                Some(key) => {
+                    let read = read_blocks.entry(key).or_insert_with(|| {
+                        let (n, is_impl) = key;
+                        let (whole, body, modules, self_how) = if is_impl {
+                            let block = &index.impls()[n];
+                            let modules: Vec<String> = block
+                                .module_paths()
+                                .into_iter()
+                                .map(str::to_owned)
+                                .collect();
+                            let owner = block.type_owner();
+                            let carried = modules.iter().any(|module| {
+                                owners.contains(&(at, module.clone(), owner.to_owned()))
+                            });
+                            if owner_names.contains(owner)
+                                && !modules.iter().any(|module| {
+                                    types
+                                        .declared
+                                        .contains(&(at, module.clone(), owner.to_owned()))
+                                })
+                            {
+                                refusals.push(format!(
+                                    "{}: an `impl` of `{owner}`, a name that carries a clock, is \
+                                     written away from its type, so its methods cannot be \
+                                     matched to the clock",
+                                    place(index, block.whole().start())
+                                ));
+                            }
+                            (
+                                block.whole(),
+                                block.body(),
+                                modules,
+                                carried.then_some("self field"),
+                            )
+                        } else {
+                            let declaration = &index.traits()[n];
+                            let modules: Vec<String> = declaration
+                                .module_paths()
+                                .into_iter()
+                                .map(str::to_owned)
+                                .collect();
+                            let clock = !resolver
+                                .identities(package, declaration)
+                                .is_disjoint(&clocks);
+                            (
+                                declaration.whole(),
+                                declaration.body(),
+                                modules,
+                                clock.then_some("trait default"),
+                            )
+                        };
+                        let header = &index.text(whole)[..body.start() - whole.start()];
+                        let reader = reader_for(modules);
+                        let bound = |path: &syn::Path| reader.bound(path);
+                        let carrier = |path: &syn::Path| reader.carrier(path);
+                        let names = reading::Names {
+                            bound: &bound,
+                            carrier: &carrier,
+                        };
+                        let mut generics = match reading::header_generics(header, names) {
                             Ok((generics, unread)) => {
-                                let base = block.whole().start();
-                                refusals.extend(unread.iter().map(|(at, why)| {
-                                    format!("{}: {why}", place(index, base + at))
+                                let base = whole.start();
+                                refusals.extend(unread.iter().map(|(offset, why)| {
+                                    format!("{}: {why}", place(index, base + offset))
                                 }));
                                 generics
                             }
                             Err(error) => {
                                 refusals.push(format!(
-                                    "{}: the header of an `impl` of `{owner}` does not parse \
-                                     ({error})",
-                                    place(index, block.whole().start())
+                                    "{}: the header of a block does not parse ({error})",
+                                    place(index, whole.start())
                                 ));
                                 BTreeSet::new()
                             }
                         };
-                        ImplClock {
-                            self_handed: carried || !generics.is_empty(),
-                            generics,
+                        let self_how = self_how
+                            .or_else(|| (is_impl && !generics.is_empty()).then_some("impl bound"));
+                        if self_how.is_some() {
+                            generics.insert("Self".to_owned());
                         }
+                        BlockClock { generics, self_how }
                     });
-                    (read.generics.clone(), read.self_handed)
+                    (read.generics.clone(), read.self_how)
                 }
             };
-            let reader = bound_reader(&resolver, &clocks, package, modules_of(record));
+            let reader = reader_for(modules_of(record));
+            let bound = |path: &syn::Path| reader.bound(path);
+            let carrier = |path: &syn::Path| reader.carrier(path);
             let scope = reading::Scope {
-                bound: &reader,
+                names: reading::Names {
+                    bound: &bound,
+                    carrier: &carrier,
+                },
                 generics,
-                self_handed,
+                self_how,
             };
             let read = reading::handed_now(&signature, &block, &scope);
             let base = record.whole().start();
             refusals.extend(
                 read.refusals
                     .iter()
-                    .map(|(at, why)| format!("{}: {why}", place(index, base + at))),
+                    .map(|(offset, why)| format!("{}: {why}", place(index, base + offset))),
             );
-            if read.again.is_empty() {
+            if read.how.is_empty() && read.again.is_empty() {
                 continue;
             }
             let identity = record
@@ -1354,20 +1700,48 @@ fn handed_now(indices: &[(&str, &Index)]) -> (BTreeMap<String, Vec<String>>, Vec
                 .next()
                 .map(|identity| identity.to_string())
                 .unwrap_or_else(|| record.name().to_owned());
-            found.insert(
-                format!("{package} {identity}"),
-                read.again
-                    .iter()
-                    .map(|at| place(index, base + at))
-                    .collect(),
-            );
+            let key = format!("{package} {identity}");
+            let how: Vec<&str> = if read.how.is_empty() {
+                vec!["in a closure or a nested fn"]
+            } else {
+                read.how.iter().copied().collect()
+            };
+            handed.insert(key.clone(), (how.join(","), read.again.len()));
+            if !read.again.is_empty() {
+                found.insert(
+                    key,
+                    read.again
+                        .iter()
+                        .map(|offset| place(index, base + offset))
+                        .collect(),
+                );
+            }
         }
     }
-    (found, refusals)
+    refusals.sort();
+    refusals.dedup();
+    HandedSet {
+        found,
+        refusals,
+        handed,
+    }
+}
+
+/// Leaves the handed set where a reviewer or the next row can read it:
+/// `target/timing-bound-tests/HANDED-CLOCKS.tsv`, one row per product function
+/// handed a clock, with how it is handed and how many readings it holds again.
+fn leave_handed(handed: &BTreeMap<String, (String, usize)>) {
+    let out = workspace_root().join("target").join("timing-bound-tests");
+    std::fs::create_dir_all(&out).expect("target/ is writable");
+    let mut text = String::from("function\thanded_by\treadings_again\n");
+    for (function, (how, again)) in handed {
+        text.push_str(&format!("{function}\t{how}\t{again}\n"));
+    }
+    std::fs::write(out.join("HANDED-CLOCKS.tsv"), text).expect("written");
 }
 
 /// RED (T-TIMING-BOUND-STRAYS; widened by plan row 205) — **no product function
-/// handed a clock reads the real clock again, but for the named list; a reading
+/// handed a clock reads a real clock again, but for the named list; a reading
 /// that is only the origin of a measurement is not one.**
 ///
 /// A function handed the turn's `now`, or a clock to read it on, is answering
@@ -1376,61 +1750,104 @@ fn handed_now(indices: &[(&str, &Index)]) -> (BTreeMap<String, Vec<String>>, Vec
 /// handing it `now` or a counted clock cannot hold that still — the class
 /// behind `the_final_write_is_judged_and_the_verdict_is_what_decides`, whose
 /// quit judged its write on a reading of its own three seconds of a loaded
-/// fixture later.
+/// fixture later. The monotonic clock and the wall clock are both in scope:
+/// `Instant` and `SystemTime` read alike throughout.
 ///
 /// # The grammar
 ///
-/// * **An instant's answer**: a type that is a path ending `Instant`, a
-///   reference to one, an `Option` of either, or a tuple holding one.
-/// * **A clock type**: `impl B` or `dyn B` — behind `&`, `&mut`, a pointer, in
-///   any path's type arguments (`Box`, `Arc`, `Ops<C>`), a tuple, an array or a
-///   slice — where a bound `B` is `Fn() -> A`, `FnMut() -> A` or `FnOnce() -> A`
-///   with no inputs and `A` an instant's answer, or a **clock trait**; a
-///   `fn() -> A` pointer; a type parameter bounded by one of those, inline
-///   (`<F: FnOnce() -> Instant>`) or in a `where` clause, of the function or of
-///   its `impl` block. A clock trait is a first-party trait, resolved in the
-///   writer's module by [`TraitResolver`], one of whose methods takes its
-///   receiver and nothing else and answers an instant (`GitClock::now`,
-///   `Media::load_clock`), or one with such a supertrait. A getter of a stored
-///   instant (`web_spare::SpareSeat::next_deadline`) reads the same, so its
-///   trait is a clock here too: the text cannot tell a present from a stored
-///   instant, and the reading errs toward handed — stricter, never silent.
+/// * **Holding an instant**: a type that names `Instant` or `SystemTime`
+///   anywhere — behind a reference or a pointer, in a tuple, an array, a slice
+///   or any path's type arguments (`Option<Instant>`, `Box<Instant>`,
+///   `(Instant, u64)`, `[SystemTime]`).
+/// * **A clock trait**: a first-party trait, resolved in the writer's module
+///   by [`TraitResolver`], one of whose methods takes its receiver and nothing
+///   else and answers a type holding an instant (`GitClock::now`,
+///   `Media::load_clock`), or one with such a supertrait, to any depth. A
+///   getter of a stored instant (`web_spare::SpareSeat::next_deadline`) reads
+///   the same, so its trait is a clock here too: the text cannot tell a
+///   present from a stored instant, and the reading errs toward handed —
+///   stricter, never silent.
+/// * **A clock-carrying type**: a first-party struct, enum or union declaring
+///   a field of a clock type, to a fixed point (a field of a clock-carrying
+///   type carries one: `struct Outer { beat: Heartbeat }`); a type path is
+///   resolved to it from the writer's module (`crate::`, `self::`, `super::`,
+///   another package's crate name, child modules, `use` items renamed or by
+///   glob, `pub use` re-exports).
+/// * **A clock type**: `impl B` or `dyn B` where a bound `B` is `Fn() -> A`,
+///   `FnMut() -> A` or `FnOnce() -> A` with no inputs and `A` holding an
+///   instant, or a clock trait; a `fn() -> A` pointer; a clock-carrying type;
+///   `Self` in a block whose `self` is handed; a type parameter bounded by a
+///   clock, inline or in a `where` clause, of the function or of its `impl` or
+///   trait block — each also behind `&`, `&mut`, a pointer, in any path's type
+///   arguments (`Box`, `Arc`, `Option`, `Ops<C>`), a tuple, an array or a
+///   slice.
 /// * **Not a clock**: a closure with inputs (`Fn(u32) -> Instant` computes an
 ///   instant from what it is given), a trait whose instant method takes
-///   inputs, a concrete struct (what it reads, it reads in its own methods,
-///   which are read on their own).
+///   inputs, a type that carries no clock (what it reads, it reads in its own
+///   methods, which are read on their own).
 /// * **Handed**, on a product function or method, or on a closure or a nested
 ///   `fn` inside one: a parameter of a clock type, **whatever its name, called
-///   or only handed on**; a parameter named `now` of an instant's type, through
-///   tuple patterns over tuple types; and a method's `self` when its type
-///   declares, in the same module, a field of a clock type (`Heartbeat::clock`,
-///   `update_archive::Deadline::now`), or its `impl` header bounds a type
-///   parameter by a clock (`impl<M: Media> Pump<M>`). A closure parameter of a
-///   clock type hands its body a clock; a closure parameter `now` of another
-///   written type hands it nothing; a closure with neither inherits its body's.
+///   or only handed on**; a parameter named `now` of a type holding an
+///   instant, through tuple patterns over tuple types (a deadline under
+///   another name, `deadline: Instant`, is a value the function rightly
+///   compares with a fresh reading); a method's `self` when its type carries a
+///   clock (`Heartbeat::clock`, `update_archive::Deadline::now`), when its
+///   `impl` header bounds a type parameter by a clock (`impl<M: Media>
+///   Pump<M>`), or when it is a default method of a clock trait. A closure
+///   parameter of a clock type hands its body a clock; a closure parameter
+///   `now` of another written type hands it nothing; a closure with neither
+///   inherits its body's. `target/timing-bound-tests/HANDED-CLOCKS.tsv` lists
+///   every handed product function, how, and its readings again, each run.
 /// * **Reading again**: in a handed body, closures included, a call of a path
-///   ending `Instant::now`, or `Instant::now` handed on as a function value (a
-///   reading deferred). **Calling the handed clock is never a reading again**:
-///   a counted clock answers every call.
+///   ending `Instant::now` or `SystemTime::now`, either handed on as a function
+///   value (a reading deferred), and every `.elapsed()` (it is `now()` minus its
+///   receiver), whatever the receiver, but an admitted origin's (below).
+///   **Calling the handed clock is never a reading again**: a counted clock
+///   answers every call.
 /// * **Admitted**: a reading bound by `let x = Instant::now();` where every use
-///   of `x` in the function is the receiver of `.elapsed()` — the origin of a
-///   measurement, not a second answer for the turn.
-/// * **Refused**, by file and line: a product body, data type, trait or `impl`
-///   header that does not parse; macro arguments that do not parse and name
-///   `Instant` and `now` in a handed body; a reading in a closure handed a
-///   `now` whose type is not written; a product type with a field `now` of
-///   `Instant`; a parameter or field type the reading does not read (`_`,
-///   verbatim tokens, or a macro whose arguments name `Instant`, a `Fn` trait or
-///   a clock trait — `Token![,]` is read as no clock); a `now` bound by a
-///   pattern it cannot pair with the
-///   type; a bound the trait resolver gives up on, or that names a clock
-///   trait's name by a path it cannot follow; a `where` clause bounding by a
-///   clock a type that is not a parameter; an `impl` of a name that carries a
-///   clock in its package, written in a module that declares no such type.
+///   of `x` in the function is the receiver of `.elapsed()`, and those
+///   `.elapsed()` calls — one measurement of real time spent, its origin and
+///   its end, not a second answer for the turn. An admitted origin's own
+///   `.elapsed()` is the end of that same admitted measurement, so it is never
+///   a reading again; every other `.elapsed()` is.
+/// * **Refused**, by file and line: a product body, data type, trait or block
+///   header that does not parse; macro arguments that do not parse and name a
+///   clock reading in a handed body; a reading in a closure handed a `now`
+///   whose type is not written; a product type with a field `now` of a type
+///   holding an instant; a parameter or field type the reading does not read
+///   (`_`, verbatim tokens, or a macro whose arguments name `Instant`,
+///   `SystemTime`, a `Fn` trait, a clock trait or a clock-carrying type —
+///   `Token![,]` is read as no clock); a bound kept as verbatim tokens; a `now`
+///   bound by a pattern it cannot pair with the type; a bound the trait
+///   resolver gives up on, or that names a clock trait by a path it cannot
+///   follow; a type named like a clock-carrying type by a path the type
+///   resolver cannot follow; a `where` clause bounding by a clock a type that
+///   is not a parameter; an `impl` of a clock-carrying name written in a module
+///   that declares no such type.
 ///
-/// It does not see a clock behind a `type` alias, a clock a closure captures
-/// from outside the function rather than being handed it, or a clock carried
-/// in a struct parameter whose type arguments name no clock.
+/// # What it does not see
+///
+/// * A reading through a call: a helper that reads the clock, or **a concrete
+///   real clock called directly** in a handed body (`WallClock.now()` or
+///   `RealProbeClock.now()` where the handed `clock.now()` was meant) — the
+///   call graph's ground, which this scan does not walk.
+/// * `Instant` or `SystemTime` under another name: `use std::time::Instant as
+///   I;`, `type Now = Instant;`, or any `type` alias of a clock type.
+/// * An untyped closure parameter of another name than `now` (`|clock| …`).
+/// * A `use` item inside a function body, which neither resolver reads: a
+///   bound or a type named through it is read as no clock.
+/// * An associated type (`E::Clock`, `<E as Engine>::Clock`).
+/// * A method-level `where` clause on its block's own parameter (`impl<C>
+///   Pump<C> { fn f(&self) where C: Clock }`): the method's `self` is not tied
+///   to it.
+/// * An `impl` nested inside a function body: its methods are walked with the
+///   outer body's handedness, and their signatures are not read.
+/// * A clock a closure captures from outside the function rather than being
+///   handed it.
+/// * A clock that answers anything but a type holding an instant: a trait whose
+///   reading is a `u64` of milliseconds (`update_apply::TrialClock::now_ms`) is
+///   outside the grammar, so `reserve_last_trial`, handed one, is not handed,
+///   and the `&WallClock` it hands `Journaled::of` beside it is not seen.
 ///
 /// MUTATION: put `let now = Instant::now();` back in `settle_quit`'s `Write`
 /// arm — this names it, by count; drop the `elapsed` admission — this names
@@ -1444,7 +1861,16 @@ fn no_product_function_reads_again_the_clock_it_was_handed() {
         .iter()
         .map(|(name, index)| (name.as_str(), &**index))
         .collect();
-    let (found, refusals) = handed_now(&indices);
+    let HandedSet {
+        found,
+        refusals,
+        handed,
+    } = handed_now(&indices);
+    leave_handed(&handed);
+    println!(
+        "{} product functions are handed a clock (target/timing-bound-tests/HANDED-CLOCKS.tsv)",
+        handed.len()
+    );
     assert!(
         refusals.is_empty(),
         "the handed-now reading cannot decide these:\n  {}",
@@ -1490,7 +1916,9 @@ fn no_product_function_reads_again_the_clock_it_was_handed() {
 #[test]
 fn the_handed_now_reading_finds_refuses_and_admits_what_it_says() {
     let index = fixture_named("timing_strays", "strays");
-    let (found, refusals) = handed_now(&[("strays", &index)]);
+    let HandedSet {
+        found, refusals, ..
+    } = handed_now(&[("strays", &index)]);
     let names: Vec<&str> = found.keys().map(String::as_str).collect();
     assert_eq!(
         names,
@@ -1499,6 +1927,8 @@ fn the_handed_now_reading_finds_refuses_and_admits_what_it_says() {
             "strays crate::handed_maybe_and_read_again"
         ]
     );
+    let counts: Vec<usize> = found.values().map(Vec::len).collect();
+    assert_eq!(counts, [1, 2], "{found:#?}");
     assert_eq!(refusals.len(), 2, "{refusals:#?}");
     assert!(
         refusals
@@ -1521,20 +1951,38 @@ fn the_handed_now_reading_finds_refuses_and_admits_what_it_says() {
 /// parameter, a tuple answer, a clock trait and one by its supertrait, a struct
 /// parameter carrying a clock-bounded parameter, a type with a clock field, an
 /// `impl` bounding its parameter by a clock — that also reads the real clock is
-/// found, once, and so is one that hands `Instant::now` on as a value; a
-/// forwarder that measures, an owner whose method calls only its clock, the
-/// real clock's own `now`, a trait or closure with inputs and a `now: u64` are
+/// found, once, and so is one that hands `Instant::now` on as a value; and,
+/// since the row's review, a clock-carrying type handed as a parameter (by
+/// reference, in `Option<Box<_>>`, by a module path, through a renamed `use`,
+/// as `Self`, one and two fields down, a struct bounding its own parameter, an
+/// enum, a union, across the package line), every `.elapsed()` that is not an
+/// admitted origin's (`forwards`' `due.elapsed()` among them), a clock trait's
+/// default method and a trait two supertraits down, a `now` holding an instant
+/// in a `Box`, a borrowed `Option` or a slice, the wall clock read again, a
+/// clock behind a pointer, in an array or a slice, an `impl` bounding by a
+/// clock in its `where` clause, and a closure or a nested `fn` handed a clock
+/// inside a function handed none. An owner whose method calls only its clock,
+/// the real clock's own `now`, a trait or closure with inputs, a `now: u64`, a
+/// closure `now: u64` in a handed body and a `Token![,]`-like macro type are
 /// not; an unread type, a `now` in an unpairable pattern, a clock trait by an
-/// unfollowable path and an `impl` written away from its type are refused.
+/// unfollowable path, an `impl` written away from its type, a macro type naming
+/// a `Fn` trait or a clock trait, a `where` clause bounding a non-parameter by
+/// a clock and a carrier's name by an unfollowable path are refused.
 ///
 /// MUTATIONS: read a clock type only on a parameter named `now` — `by_dyn_fn`
-/// is gone; drop the supertrait walk —
-/// `by_supertrait` is gone; drop the value-path reading — `by_value_path` and
-/// `by_where_generic` are gone; drop the field owners — `Beat::late` is gone.
+/// is gone; drop the supertrait walk — `by_supertrait` and `by_deep_supertrait`
+/// are gone; drop the value-path reading — `by_value_path` and
+/// `by_where_generic` are gone; drop the field owners — `Beat::late` is gone;
+/// stop the owner fixed point after one pass — `Outermost::late` is gone; read
+/// carriers only as `self` — `by_carrier` is gone; exempt `.elapsed()` on any
+/// receiver — `Beat::by_stored_elapsed` and `forwards` are gone.
 #[test]
 fn the_handed_clock_reading_reads_every_clock_shape() {
     let index = fixture_named("timing_clocks", "clocks");
-    let (found, refusals) = handed_now(&[("clocks", &index)]);
+    let other = fixture_named("timing_clocks_other", "other");
+    let HandedSet {
+        found, refusals, ..
+    } = handed_now(&[("clocks", &index), ("other", &other)]);
     let counts: BTreeMap<String, usize> = found
         .iter()
         .map(|(key, places)| (key.clone(), places.len()))
@@ -1556,17 +2004,48 @@ fn the_handed_clock_reading_reads_every_clock_shape() {
         "by_carried",
         "Beat::late",
         "Pump::late",
+        "forwards",
+        "by_carrier",
+        "by_optional_carrier",
+        "Outer::late",
+        "Outermost::late",
+        "Beat::same",
+        "Beat::by_stored_elapsed",
+        "by_pathed_carrier",
+        "by_used_carrier",
+        "Timed::due_in",
+        "by_deep_supertrait",
+        "by_boxed_now",
+        "by_borrowed_option_now",
+        "by_now_slice",
+        "by_wall_now",
+        "by_wall_clock",
+        "by_pointer_to_clock",
+        "by_array",
+        "by_slice",
+        "Pumped::late",
+        "by_bounded_carrier",
+        "by_enum_carrier",
+        "by_union_carrier",
+        "by_closure_parameter",
+        "by_nested_fn",
+        "by_other_trait",
+        "by_other_carrier",
     ]
     .iter()
     .map(|name| (format!("clocks crate::{name}"), 1))
     .collect();
     assert_eq!(counts, expected);
-    assert_eq!(refusals.len(), 4, "{refusals:#?}");
+    assert_eq!(refusals.len(), 8, "{refusals:#?}");
     for (line, says) in [
-        (164, "written by a macro"),
-        (168, "cannot pair"),
-        (172, "cannot follow"),
-        (177, "written away"),
+        (165, "written by a macro"),
+        (169, "cannot pair"),
+        (173, "cannot follow"),
+        (178, "written away"),
+        (380, "written by a macro"),
+        (385, "written by a macro"),
+        (392, "not a parameter"),
+        (398, "type resolver cannot follow"),
     ] {
         assert!(
             refusals
@@ -1791,12 +2270,12 @@ mod reading {
         }
     }
 
-    /// Whether a field's whole text declares a field of type `Instant` (or a
-    /// reference to one).
+    /// Whether a field's whole text declares a field of a type holding an
+    /// instant ([`holds_an_instant`]).
     pub fn instant_field(text: &str) -> bool {
         syn::Field::parse_named
             .parse_str(text.trim_end_matches(','))
-            .is_ok_and(|field| is_instant(&field.ty))
+            .is_ok_and(|field| holds_an_instant(&field.ty))
     }
 
     fn names_in(tokens: TokenStream, out: &mut Vec<String>) {
@@ -2296,21 +2775,25 @@ mod reading {
     /// What the handed-now reading says of one function.
     #[derive(Debug, Default)]
     pub struct Handed {
-        /// Readings of the real clock in a body handed one — `Instant::now()`,
-        /// or `Instant::now` handed on as a function value — measurement
-        /// origins aside.
+        /// How the function is handed a clock, when it is: `now`, `closure`,
+        /// `trait`, `generic`, `carrier`, `self field`, `impl bound`,
+        /// `trait default`.
+        pub how: BTreeSet<&'static str>,
+        /// Readings of a real clock in a body handed one — `Instant::now()` or
+        /// `SystemTime::now()`, either handed on as a function value, or an
+        /// `.elapsed()` — measurement origins aside.
         pub again: Vec<Offset>,
         /// What it cannot decide, and why.
         pub refusals: Vec<(Offset, String)>,
     }
 
-    /// **What a trait path written as a bound is** to the handed-now reading,
-    /// as the caller's resolver reads it in the callable's module.
+    /// **What a path written as a bound, or a type, is** to the handed-now
+    /// reading, as the caller reads it in the writer's module.
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub enum Bound {
-        /// A clock trait: a first-party trait one of whose methods answers an
-        /// instant from its receiver alone, or one with such a supertrait.
-        Clock,
+        /// A clock, and how it was told: `closure`, `trait`, `generic`,
+        /// `carrier`.
+        Clock(&'static str),
         /// Not a clock.
         Not,
         /// What the reading cannot tell, and why.
@@ -2321,24 +2804,33 @@ mod reading {
         /// The two answers together: a clock over a refusal over nothing.
         fn or(self, other: Self) -> Self {
             match (self, other) {
-                (Self::Clock, _) | (_, Self::Clock) => Self::Clock,
+                (Self::Clock(how), _) | (_, Self::Clock(how)) => Self::Clock(how),
                 (Self::Unread(why), _) | (_, Self::Unread(why)) => Self::Unread(why),
                 (Self::Not, Self::Not) => Self::Not,
             }
         }
     }
 
-    /// How a bound's trait path reads, in the module of what is being read.
-    pub type ReadBound<'s> = &'s dyn Fn(&syn::Path) -> Bound;
+    /// How a path reads, in the module of what is being read.
+    pub type ReadPath<'s> = &'s dyn Fn(&syn::Path) -> Bound;
+
+    /// **How the reading tells a clock from a name**: `bound` reads a trait
+    /// path written as a bound (a clock trait or not); `carrier` reads a type
+    /// path (a type that carries a clock or not).
+    #[derive(Clone, Copy)]
+    pub struct Names<'s> {
+        pub bound: ReadPath<'s>,
+        pub carrier: ReadPath<'s>,
+    }
 
     /// **What the handed-now reading knows of a callable beyond its own
-    /// text**: how a bound's trait path reads in its module, the type
-    /// parameters the `impl` it is written in bounds by a clock, and whether
-    /// its `self` carries a clock.
+    /// text**: how names read in its module, the type parameters the block it
+    /// is written in (`impl` or trait) bounds by a clock, and how its `self`
+    /// is handed, if it is.
     pub struct Scope<'s> {
-        pub bound: ReadBound<'s>,
+        pub names: Names<'s>,
         pub generics: BTreeSet<String>,
-        pub self_handed: bool,
+        pub self_how: Option<&'static str>,
     }
 
     #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2349,57 +2841,67 @@ mod reading {
         Unknown,
     }
 
-    fn is_instant(ty: &Type) -> bool {
+    /// Whether a path names a clock reading's type: its last segment is
+    /// `Instant` or `SystemTime`.
+    fn names_a_time(path: &syn::Path) -> bool {
+        path.segments
+            .last()
+            .is_some_and(|segment| segment.ident == "Instant" || segment.ident == "SystemTime")
+    }
+
+    /// **Whether a type holds an instant anywhere**: an `Instant` or a
+    /// `SystemTime`, behind a reference or a pointer, in a tuple, an array, a
+    /// slice, or any path's type arguments (`Option<Instant>`, `Box<Instant>`,
+    /// `Result<Instant, E>`, `(Instant, u64)`, `[Instant]`).
+    fn holds_an_instant(ty: &Type) -> bool {
         match ty {
-            Type::Reference(reference) => is_instant(&reference.elem),
-            Type::Path(path) => path
-                .path
-                .segments
-                .last()
-                .is_some_and(|segment| segment.ident == "Instant"),
+            Type::Reference(reference) => holds_an_instant(&reference.elem),
+            Type::Ptr(pointer) => holds_an_instant(&pointer.elem),
+            Type::Paren(inner) => holds_an_instant(&inner.elem),
+            Type::Group(inner) => holds_an_instant(&inner.elem),
+            Type::Array(array) => holds_an_instant(&array.elem),
+            Type::Slice(slice) => holds_an_instant(&slice.elem),
+            Type::Tuple(tuple) => tuple.elems.iter().any(holds_an_instant),
+            Type::Path(path) => {
+                names_a_time(&path.path) || type_arguments(&path.path).any(holds_an_instant)
+            }
             _ => false,
         }
     }
 
-    /// Whether a parameter of this type hands its body an instant: `Instant`,
-    /// `&Instant`, or an `Option` of either.
-    fn hands_an_instant(ty: &Type) -> bool {
-        if is_instant(ty) {
-            return true;
-        }
-        let Type::Path(path) = ty else { return false };
-        let Some(last) = path.path.segments.last() else {
-            return false;
-        };
-        let syn::PathArguments::AngleBracketed(arguments) = &last.arguments else {
-            return false;
-        };
-        last.ident == "Option"
-            && arguments.args.len() == 1
-            && matches!(&arguments.args[0], syn::GenericArgument::Type(inner) if is_instant(inner))
-    }
-
-    /// Whether a type is an instant's answer: an instant ([`hands_an_instant`])
-    /// or a tuple holding one.
-    fn instant_answer(ty: &Type) -> bool {
-        match ty {
-            Type::Tuple(tuple) => tuple.elems.iter().any(instant_answer),
-            Type::Paren(inner) => instant_answer(&inner.elem),
-            Type::Group(inner) => instant_answer(&inner.elem),
-            _ => hands_an_instant(ty),
-        }
+    /// Every type argument a path's segments carry.
+    fn type_arguments(path: &syn::Path) -> impl Iterator<Item = &Type> {
+        path.segments
+            .iter()
+            .filter_map(|segment| match &segment.arguments {
+                syn::PathArguments::AngleBracketed(arguments) => Some(&arguments.args),
+                _ => None,
+            })
+            .flatten()
+            .filter_map(|argument| match argument {
+                syn::GenericArgument::Type(ty) => Some(ty),
+                _ => None,
+            })
     }
 
     fn answers_an_instant(output: &ReturnType) -> bool {
-        matches!(output, ReturnType::Type(_, ty) if instant_answer(ty))
+        matches!(output, ReturnType::Type(_, ty) if holds_an_instant(ty))
     }
 
-    /// What one bound is: `Fn() -> I`, `FnMut() -> I` or `FnOnce() -> I` with
-    /// no inputs is a clock and one with inputs is not; any other trait is what
-    /// `read` makes of its path.
-    fn bound_kind(bound: &TypeParamBound, read: ReadBound<'_>) -> Bound {
-        let TypeParamBound::Trait(bound) = bound else {
-            return Bound::Not;
+    /// What one bound is: `Fn() -> A`, `FnMut() -> A` or `FnOnce() -> A`
+    /// with no inputs and an answer holding an instant is a clock, one with
+    /// inputs is not; any other trait is what `bound` makes of its path; a
+    /// bound kept as verbatim tokens is not read.
+    fn bound_kind(bound: &TypeParamBound, names: Names<'_>) -> Bound {
+        let bound = match bound {
+            TypeParamBound::Trait(bound) => bound,
+            TypeParamBound::Verbatim(_) => {
+                return Bound::Unread(
+                    "a bound the handed-now reading does not read (tokens kept verbatim)"
+                        .to_owned(),
+                );
+            }
+            _ => return Bound::Not,
         };
         let Some(last) = bound.path.segments.last() else {
             return Bound::Not;
@@ -2408,52 +2910,53 @@ mod reading {
             && matches!(last.ident.to_string().as_str(), "Fn" | "FnMut" | "FnOnce")
         {
             return if arguments.inputs.is_empty() && answers_an_instant(&arguments.output) {
-                Bound::Clock
+                Bound::Clock("closure")
             } else {
                 Bound::Not
             };
         }
-        read(&bound.path)
+        (names.bound)(&bound.path)
     }
 
     fn bounds_kind<'b>(
         bounds: impl IntoIterator<Item = &'b TypeParamBound>,
-        read: ReadBound<'_>,
+        names: Names<'_>,
     ) -> Bound {
         bounds
             .into_iter()
-            .fold(Bound::Not, |kind, bound| kind.or(bound_kind(bound, read)))
+            .fold(Bound::Not, |kind, bound| kind.or(bound_kind(bound, names)))
     }
 
     fn kinds<'t>(
         types: impl Iterator<Item = &'t Type>,
         generics: &BTreeSet<String>,
-        read: ReadBound<'_>,
+        names: Names<'_>,
     ) -> Bound {
         types.fold(Bound::Not, |kind, ty| {
-            kind.or(type_kind(ty, generics, read))
+            kind.or(type_kind(ty, generics, names))
         })
     }
 
     /// **What a type hands a body** (see the guard's grammar): a clock when it
-    /// is one — a clock bound behind `impl` or `dyn`, a `fn() -> I` pointer, a
-    /// type parameter in `generics` — or holds one, behind a reference or a
+    /// is one — a clock bound behind `impl` or `dyn`, a `fn() -> A` pointer, a
+    /// type parameter in `generics` (`Self` among them when `self` is handed),
+    /// a type that carries a clock — or holds one, behind a reference or a
     /// pointer, in a tuple, an array, a slice, or a path's type arguments
-    /// (`Box<dyn Fn() -> Instant>`, `Ops<Clock>`).
-    fn type_kind(ty: &Type, generics: &BTreeSet<String>, read: ReadBound<'_>) -> Bound {
+    /// (`Box<dyn Fn() -> Instant>`, `Option<&Deadline>`, `Ops<Clock>`).
+    fn type_kind(ty: &Type, generics: &BTreeSet<String>, names: Names<'_>) -> Bound {
         match ty {
-            Type::ImplTrait(bounded) => bounds_kind(&bounded.bounds, read),
-            Type::TraitObject(bounded) => bounds_kind(&bounded.bounds, read),
-            Type::Reference(reference) => type_kind(&reference.elem, generics, read),
-            Type::Ptr(pointer) => type_kind(&pointer.elem, generics, read),
-            Type::Paren(inner) => type_kind(&inner.elem, generics, read),
-            Type::Group(inner) => type_kind(&inner.elem, generics, read),
-            Type::Array(array) => type_kind(&array.elem, generics, read),
-            Type::Slice(slice) => type_kind(&slice.elem, generics, read),
-            Type::Tuple(tuple) => kinds(tuple.elems.iter(), generics, read),
+            Type::ImplTrait(bounded) => bounds_kind(&bounded.bounds, names),
+            Type::TraitObject(bounded) => bounds_kind(&bounded.bounds, names),
+            Type::Reference(reference) => type_kind(&reference.elem, generics, names),
+            Type::Ptr(pointer) => type_kind(&pointer.elem, generics, names),
+            Type::Paren(inner) => type_kind(&inner.elem, generics, names),
+            Type::Group(inner) => type_kind(&inner.elem, generics, names),
+            Type::Array(array) => type_kind(&array.elem, generics, names),
+            Type::Slice(slice) => type_kind(&slice.elem, generics, names),
+            Type::Tuple(tuple) => kinds(tuple.elems.iter(), generics, names),
             Type::BareFn(pointer) => {
                 if pointer.inputs.is_empty() && answers_an_instant(&pointer.output) {
-                    Bound::Clock
+                    Bound::Clock("closure")
                 } else {
                     Bound::Not
                 }
@@ -2463,41 +2966,35 @@ mod reading {
                     && let Some(name) = path.path.get_ident()
                     && generics.contains(&name.to_string())
                 {
-                    return Bound::Clock;
+                    return Bound::Clock(if name == "Self" { "carrier" } else { "generic" });
                 }
-                let arguments = path
-                    .path
-                    .segments
-                    .iter()
-                    .filter_map(|segment| match &segment.arguments {
-                        syn::PathArguments::AngleBracketed(arguments) => Some(&arguments.args),
-                        _ => None,
-                    })
-                    .flatten()
-                    .filter_map(|argument| match argument {
-                        syn::GenericArgument::Type(ty) => Some(ty),
-                        _ => None,
-                    });
-                kinds(arguments, generics, read)
+                let carried = if path.qself.is_none() {
+                    (names.carrier)(&path.path)
+                } else {
+                    Bound::Not
+                };
+                carried.or(kinds(type_arguments(&path.path), generics, names))
             }
             Type::Never(_) => Bound::Not,
             Type::Macro(written) => {
-                let mut names = Vec::new();
-                names_in(written.mac.tokens.clone(), &mut names);
-                let clockish = names
+                let mut tokens = Vec::new();
+                names_in(written.mac.tokens.clone(), &mut tokens);
+                let clockish = tokens
                     .iter()
                     .filter(|name| !name.starts_with("r#"))
                     .any(|name| {
-                        matches!(name.as_str(), "Instant" | "Fn" | "FnMut" | "FnOnce")
-                            || read(&syn::Path::from(syn::Ident::new(
-                                name,
-                                proc_macro2::Span::call_site(),
-                            ))) != Bound::Not
+                        let path =
+                            syn::Path::from(syn::Ident::new(name, proc_macro2::Span::call_site()));
+                        matches!(
+                            name.as_str(),
+                            "Instant" | "SystemTime" | "Fn" | "FnMut" | "FnOnce"
+                        ) || (names.bound)(&path) != Bound::Not
+                            || (names.carrier)(&path) != Bound::Not
                     });
                 if clockish {
                     Bound::Unread(
-                        "a type written by a macro whose arguments name `Instant`, a `Fn` \
-                         trait or a clock trait"
+                        "a type written by a macro whose arguments name a clock reading's \
+                         type, a `Fn` trait, a clock trait or a type carrying a clock"
                             .to_owned(),
                     )
                 } else {
@@ -2517,12 +3014,12 @@ mod reading {
     /// **The type parameters `generics` bounds by a clock**, inline or in its
     /// `where` clause, and what it cannot read: a bound it cannot follow, and a
     /// `where` clause that bounds by a clock a type that is not a parameter.
-    pub fn clock_generics(generics: &syn::Generics, read: ReadBound<'_>) -> ClockGenerics {
+    pub fn clock_generics(generics: &syn::Generics, names: Names<'_>) -> ClockGenerics {
         let mut clocks = BTreeSet::new();
         let mut refusals = Vec::new();
         for param in generics.type_params() {
-            match bounds_kind(&param.bounds, read) {
-                Bound::Clock => {
+            match bounds_kind(&param.bounds, names) {
+                Bound::Clock(_) => {
                     clocks.insert(param.ident.to_string());
                 }
                 Bound::Unread(why) => refusals.push((offset(param), why)),
@@ -2541,11 +3038,11 @@ mod reading {
                 Type::Path(path) if path.qself.is_none() => path.path.get_ident(),
                 _ => None,
             };
-            match (bounds_kind(&predicate.bounds, read), named) {
-                (Bound::Clock, Some(name)) => {
+            match (bounds_kind(&predicate.bounds, names), named) {
+                (Bound::Clock(_), Some(name)) => {
                     clocks.insert(name.to_string());
                 }
-                (Bound::Clock, None) => refusals.push((
+                (Bound::Clock(_), None) => refusals.push((
                     offset(predicate),
                     "a `where` clause bounds by a clock a type that is not a parameter".to_owned(),
                 )),
@@ -2556,13 +3053,13 @@ mod reading {
         (clocks, refusals)
     }
 
-    /// Whether a pattern binds `now` to a type that hands an instant, through
+    /// Whether a pattern binds `now` to a type that holds an instant, through
     /// tuple patterns over tuple types: `Some(true)` it does, `Some(false)` it
     /// binds `now` to another type, `None` it binds no `now` the reading can
     /// pair with a type.
     fn binds_now(pattern: &Pat, ty: &Type) -> Option<bool> {
         match (pattern, ty) {
-            (Pat::Ident(ident), _) if ident.ident == "now" => Some(hands_an_instant(ty)),
+            (Pat::Ident(ident), _) if ident.ident == "now" => Some(holds_an_instant(ty)),
             (Pat::Tuple(patterns), Type::Tuple(types))
                 if patterns.elems.len() == types.elems.len() =>
             {
@@ -2577,85 +3074,103 @@ mod reading {
         }
     }
 
-    /// **What one typed parameter hands its body**, of a signature or a
-    /// closure: `Some(true)` a clock of any name, or `now` of an instant type;
-    /// `Some(false)` a `now` of another type the reading reads; `None` nothing
-    /// to say. A type it cannot read, and a `now` in a pattern it cannot pair
-    /// with the type, are refused.
+    /// What one typed parameter hands its body, of a signature or a closure.
+    enum Gives {
+        /// A clock, and how it was told.
+        Clock(&'static str),
+        /// A `now` of a type that holds no instant.
+        OtherNow,
+        /// Nothing to say.
+        Nothing,
+    }
+
+    /// **What one typed parameter hands its body**: a clock of any name; a
+    /// `now` of a type holding an instant (`now`); a `now` of another type;
+    /// or nothing. A type it cannot read, and a `now` in a pattern it cannot
+    /// pair with the type, are refused.
     fn parameter(
         pattern: &Pat,
         ty: &Type,
         generics: &BTreeSet<String>,
-        read: ReadBound<'_>,
+        names: Names<'_>,
         refusals: &mut Vec<(Offset, String)>,
-    ) -> Option<bool> {
-        match type_kind(ty, generics, read) {
-            Bound::Clock => return Some(true),
+    ) -> Gives {
+        match type_kind(ty, generics, names) {
+            Bound::Clock(how) => return Gives::Clock(how),
             Bound::Unread(why) => refusals.push((offset(ty), why)),
             Bound::Not => {}
         }
-        let now = binds_now(pattern, ty);
-        if now.is_none() {
-            let mut names = Vec::new();
-            pattern_names(pattern, &mut names);
-            if names.iter().any(|name| name == "now") {
-                refusals.push((
-                    offset(pattern),
-                    "a `now` bound by a pattern the handed-now reading cannot pair with its type"
-                        .to_owned(),
-                ));
+        match binds_now(pattern, ty) {
+            Some(true) => Gives::Clock("now"),
+            Some(false) => Gives::OtherNow,
+            None => {
+                let mut bound = Vec::new();
+                pattern_names(pattern, &mut bound);
+                if bound.iter().any(|name| name == "now") {
+                    refusals.push((
+                        offset(pattern),
+                        "a `now` bound by a pattern the handed-now reading cannot pair with its \
+                         type"
+                            .to_owned(),
+                    ));
+                }
+                Gives::Nothing
             }
         }
-        now
     }
 
-    /// Whether a signature hands its body a clock (see the guard's grammar),
-    /// with the clock-bounded type parameters in force inside it.
+    /// How a signature hands its body a clock (see the guard's grammar), with
+    /// the clock-bounded type parameters in force inside it.
     fn signature_handed(
         signature: &syn::Signature,
         scope: &Scope<'_>,
         refusals: &mut Vec<(Offset, String)>,
-    ) -> (Handedness, BTreeSet<String>) {
-        let (mut generics, unread) = clock_generics(&signature.generics, scope.bound);
+    ) -> (BTreeSet<&'static str>, BTreeSet<String>) {
+        let (mut generics, unread) = clock_generics(&signature.generics, scope.names);
         refusals.extend(unread);
         generics.extend(scope.generics.iter().cloned());
-        let mut handed = scope.self_handed && signature.receiver().is_some();
+        let mut how = BTreeSet::new();
+        if let Some(handed) = scope.self_how
+            && signature.receiver().is_some()
+        {
+            how.insert(handed);
+        }
         for input in &signature.inputs {
             if let FnArg::Typed(typed) = input
-                && parameter(&typed.pat, &typed.ty, &generics, scope.bound, refusals) == Some(true)
+                && let Gives::Clock(handed) =
+                    parameter(&typed.pat, &typed.ty, &generics, scope.names, refusals)
             {
-                handed = true;
+                how.insert(handed);
             }
         }
-        let handedness = if handed {
-            Handedness::Yes
-        } else {
-            Handedness::No
-        };
-        (handedness, generics)
+        (how, generics)
     }
 
     /// **Whether a trait declaration is a clock of its own**: one of its
     /// methods takes its receiver and nothing else and answers an instant.
-    pub fn clock_trait(text: &str) -> syn::Result<bool> {
-        let declared = syn::parse_str::<syn::ItemTrait>(text)?;
-        Ok(declared.items.iter().any(|item| {
+    pub fn clock_trait(declared: &syn::ItemTrait) -> bool {
+        declared.items.iter().any(|item| {
             matches!(item, syn::TraitItem::Fn(method)
                 if method.sig.receiver().is_some()
                     && method.sig.inputs.len() == 1
                     && answers_an_instant(&method.sig.output))
-        }))
+        })
     }
 
-    /// **Whether a data type's whole text declares a field that holds a
-    /// clock** (its own clock-bounded parameters counted), and what it cannot
-    /// read.
+    /// A data type's whole text, parsed as an item (the caller reads only
+    /// structs, enums and unions); an error when it does not parse.
+    pub fn data_type(text: &str) -> syn::Result<syn::Item> {
+        syn::parse_str::<syn::Item>(text)
+    }
+
+    /// **Whether a data type declares a field that holds a clock** (its own
+    /// clock-bounded parameters counted, and types that carry a clock as
+    /// `names` reads them), and what it cannot read.
     pub fn carries_a_clock(
-        text: &str,
-        read: ReadBound<'_>,
-    ) -> syn::Result<(bool, Vec<(Offset, String)>)> {
-        let declared = syn::parse_str::<syn::Item>(text)?;
-        let (generics, fields): (&syn::Generics, Vec<&syn::Field>) = match &declared {
+        declared: &syn::Item,
+        names: Names<'_>,
+    ) -> (bool, Vec<(Offset, String)>) {
+        let (generics, fields): (&syn::Generics, Vec<&syn::Field>) = match declared {
             syn::Item::Struct(item) => (&item.generics, item.fields.iter().collect()),
             syn::Item::Enum(item) => (
                 &item.generics,
@@ -2665,25 +3180,29 @@ mod reading {
                     .collect(),
             ),
             syn::Item::Union(item) => (&item.generics, item.fields.named.iter().collect()),
-            _ => return Ok((false, Vec::new())),
+            _ => return (false, Vec::new()),
         };
-        let (clocks, mut refusals) = clock_generics(generics, read);
+        let (clocks, mut refusals) = clock_generics(generics, names);
         let mut carries = false;
         for field in fields {
-            match type_kind(&field.ty, &clocks, read) {
-                Bound::Clock => carries = true,
+            match type_kind(&field.ty, &clocks, names) {
+                Bound::Clock(_) => carries = true,
                 Bound::Unread(why) => refusals.push((offset(&field.ty), why)),
                 Bound::Not => {}
             }
         }
-        Ok((carries, refusals))
+        (carries, refusals)
     }
 
-    /// **The type parameters an `impl` header bounds by a clock**, from the
-    /// header's text (everything before the block's braces).
-    pub fn impl_generics(header: &str, read: ReadBound<'_>) -> syn::Result<ClockGenerics> {
-        let block = syn::parse_str::<syn::ItemImpl>(&format!("{header}{{}}"))?;
-        Ok(clock_generics(&block.generics, read))
+    /// **The type parameters an `impl` or trait header bounds by a clock**,
+    /// from the header's text (everything before the block's braces).
+    pub fn header_generics(header: &str, names: Names<'_>) -> syn::Result<ClockGenerics> {
+        let text = format!("{header}{{}}");
+        if let Ok(block) = syn::parse_str::<syn::ItemImpl>(&text) {
+            return Ok(clock_generics(&block.generics, names));
+        }
+        let declared = syn::parse_str::<syn::ItemTrait>(&text)?;
+        Ok(clock_generics(&declared.generics, names))
     }
 
     #[derive(Default)]
@@ -2693,12 +3212,14 @@ mod reading {
     }
 
     struct HandedWalk<'s> {
-        bound: ReadBound<'s>,
+        names: Names<'s>,
         handed: Vec<Handedness>,
         /// The clock-bounded type parameters in force, innermost last.
         generics: Vec<BTreeSet<String>>,
         /// Readings found, with whether the body they stand in is handed one.
         readings: Vec<(Offset, Handedness)>,
+        /// `.elapsed()` calls, with the lone name of their receiver if it is one.
+        elapsed: Vec<(Offset, Handedness, Option<String>)>,
         /// `let x = Instant::now();` origins, by name.
         origins: BTreeMap<String, Vec<Offset>>,
         uses: BTreeMap<String, Uses>,
@@ -2713,18 +3234,20 @@ mod reading {
 
     impl<'ast> Visit<'ast> for HandedWalk<'_> {
         fn visit_expr(&mut self, expr: &'ast Expr) {
-            if read_of(expr) == Some(Clock::Instant) {
+            if read_of(expr).is_some() {
                 self.readings.push((offset(expr), self.current()));
                 return;
             }
             match expr {
                 Expr::MethodCall(call) if call.method == "elapsed" && call.args.is_empty() => {
-                    if lone_name(&call.receiver).is_none() {
+                    let receiver = lone_name(&call.receiver);
+                    if receiver.is_none() {
                         self.visit_expr(&call.receiver);
                     }
+                    self.elapsed.push((offset(expr), self.current(), receiver));
                 }
                 Expr::Path(path) => {
-                    if named_now(path) == Some(Clock::Instant) {
+                    if named_now(path).is_some() {
                         self.readings.push((offset(expr), self.current()));
                     } else if let Some(name) = lone_name(expr) {
                         self.uses.entry(name).or_default().other += 1;
@@ -2739,12 +3262,12 @@ mod reading {
                                 &typed.pat,
                                 &typed.ty,
                                 &generics,
-                                self.bound,
+                                self.names,
                                 &mut self.refusals,
                             ) {
-                                Some(true) => clock = true,
-                                Some(false) => other_now = true,
-                                None => {}
+                                Gives::Clock(_) => clock = true,
+                                Gives::OtherNow => other_now = true,
+                                Gives::Nothing => {}
                             },
                             Pat::Ident(ident) if ident.ident == "now" => untyped_now = true,
                             _ => {}
@@ -2769,7 +3292,7 @@ mod reading {
 
         fn visit_local(&mut self, local: &'ast syn::Local) {
             if let (Pat::Ident(ident), Some(init)) = (&local.pat, &local.init)
-                && read_of(&init.expr) == Some(Clock::Instant)
+                && read_of(&init.expr).is_some()
                 && init.diverge.is_none()
             {
                 self.origins
@@ -2791,12 +3314,14 @@ mod reading {
                     let mut names = Vec::new();
                     names_in(mac.tokens.clone(), &mut names);
                     if self.current() != Handedness::No
-                        && names.iter().any(|name| name == "Instant")
-                        && names.iter().any(|name| name == "now")
+                        && names.iter().any(|name| {
+                            name == "Instant" || name == "SystemTime" || name == "elapsed"
+                        })
+                        && names.iter().any(|name| name == "now" || name == "elapsed")
                     {
                         self.refusals.push((
                             offset(mac),
-                            "macro arguments that do not parse name `Instant` and `now` in a body \
+                            "macro arguments that do not parse name a clock reading in a body \
                              handed a clock"
                                 .to_owned(),
                         ));
@@ -2807,12 +3332,16 @@ mod reading {
 
         fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
             let scope = Scope {
-                bound: self.bound,
+                names: self.names,
                 generics: BTreeSet::new(),
-                self_handed: false,
+                self_how: None,
             };
-            let (handed, generics) = signature_handed(&item.sig, &scope, &mut self.refusals);
-            self.handed.push(handed);
+            let (how, generics) = signature_handed(&item.sig, &scope, &mut self.refusals);
+            self.handed.push(if how.is_empty() {
+                Handedness::No
+            } else {
+                Handedness::Yes
+            });
             self.generics.push(generics);
             self.visit_block(&item.block);
             self.generics.pop();
@@ -2823,31 +3352,55 @@ mod reading {
     /// The handed-now reading of one function (see the guard's grammar).
     pub fn handed_now(signature: &syn::Signature, block: &syn::Block, scope: &Scope<'_>) -> Handed {
         let mut refusals = Vec::new();
-        let (handed, generics) = signature_handed(signature, scope, &mut refusals);
+        let (how, generics) = signature_handed(signature, scope, &mut refusals);
         let mut walk = HandedWalk {
-            bound: scope.bound,
-            handed: vec![handed],
+            names: scope.names,
+            handed: vec![if how.is_empty() {
+                Handedness::No
+            } else {
+                Handedness::Yes
+            }],
             generics: vec![generics],
             readings: Vec::new(),
+            elapsed: Vec::new(),
             origins: BTreeMap::new(),
             uses: BTreeMap::new(),
             refusals,
         };
         walk.visit_block(block);
+        let admitted_names: BTreeSet<&str> = walk
+            .origins
+            .keys()
+            .filter(|name| walk.uses.get(*name).is_none_or(|uses| uses.other == 0))
+            .map(String::as_str)
+            .collect();
         let admitted: BTreeSet<Offset> = walk
             .origins
             .iter()
-            .filter(|(name, _)| walk.uses.get(*name).is_none_or(|uses| uses.other == 0))
+            .filter(|(name, _)| admitted_names.contains(name.as_str()))
             .flat_map(|(_, at)| at.iter().copied())
             .collect();
         let mut out = Handed {
+            how,
             again: Vec::new(),
             refusals: walk.refusals,
         };
-        for (at, handed) in walk.readings {
-            if admitted.contains(&at) {
-                continue;
-            }
+        let measured = walk
+            .elapsed
+            .into_iter()
+            .filter(|(_, _, receiver)| {
+                receiver
+                    .as_deref()
+                    .is_none_or(|name| !admitted_names.contains(name))
+            })
+            .map(|(at, handed, _)| (at, handed));
+        let readings: Vec<(Offset, Handedness)> = walk
+            .readings
+            .into_iter()
+            .filter(|(at, _)| !admitted.contains(at))
+            .chain(measured)
+            .collect();
+        for (at, handed) in readings {
             match handed {
                 Handedness::Yes => out.again.push(at),
                 Handedness::Unknown => out.refusals.push((
@@ -2857,6 +3410,7 @@ mod reading {
                 Handedness::No => {}
             }
         }
+        out.again.sort_unstable();
         out
     }
 }
