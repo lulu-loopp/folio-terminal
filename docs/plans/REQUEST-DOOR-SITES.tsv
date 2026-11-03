@@ -3092,15 +3092,16 @@ crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::Runtime::tab_inde
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::Runtime::withdraw_a_blank_page	Ambiguous	unwrap_or_default	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::exited_tabs_the_loop_may_close	Ambiguous	collect	1	unreviewed	2026-10-26: T-SPLIT-2B batch 16; the same site, moved by K2 batch 16 with `exited_tabs_the_loop_may_close` from main.rs into runtime/tabs.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::exited_tabs_the_loop_may_close	Ambiguous	filter	1	unreviewed	2026-10-26: T-SPLIT-2B batch 16; the same site, moved by K2 batch 16 with `exited_tabs_the_loop_may_close` from main.rs into runtime/tabs.rs: K2 moves the item, not the call
-crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::keep_birth_death_face	Ambiguous	and_then	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::keep_birth_death_face	Ambiguous	as_bytes	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::keep_birth_death_face	Ambiguous	filter	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::keep_birth_death_face	Ambiguous	into_owned	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::keep_birth_death_face	Ambiguous	is_empty	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::keep_birth_death_face	Ambiguous	map_or_else	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::keep_birth_death_face	Ambiguous	text	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::keep_birth_death_face	Ambiguous	to_string_lossy	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::keep_birth_death_face	Path	ShellBirthDeath	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
+crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::keep_face	Ambiguous	and_then	1	unreviewed	
+crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::keep_face	Ambiguous	as_bytes	1	unreviewed	
+crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::keep_face	Ambiguous	filter	1	unreviewed	
+crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::keep_face	Ambiguous	into_owned	1	unreviewed	
+crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::keep_face	Ambiguous	is_empty	1	unreviewed	
+crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::keep_face	Ambiguous	map_or_else	1	unreviewed	
+crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::keep_face	Ambiguous	to_string_lossy	1	unreviewed	
+crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::keep_face	Path	text	1	unreviewed	
+crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::keep_system_ended_face	Path	ShellEndedBySystem	1	unreviewed	
 crates/bt-app/src/runtime/terminal.rs	bt-app crate::runtime::terminal::Runtime::jump_to_command_mark	Ambiguous	clamp	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/runtime/terminal.rs	bt-app crate::runtime::terminal::Runtime::jump_to_command_mark	Ambiguous	clone	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/runtime/terminal.rs	bt-app crate::runtime::terminal::Runtime::jump_to_command_mark	Ambiguous	cloned	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
@@ -5710,7 +5711,7 @@ crates/bt-platform/src/process_folder.rs	bt-platform crate::process_folder::imp:
 crates/bt-platform/src/process_folder.rs	bt-platform crate::process_folder::imp::current_directory	Path	size_of_val	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-platform/src/process_folder.rs	bt-platform crate::process_folder::path_of_c_bytes	Ambiguous	into_owned	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-platform/src/process_folder.rs	bt-platform crate::process_folder::path_of_c_bytes	Ambiguous	unwrap_or	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-platform/src/session_end.rs	bt-platform crate::session_end::windows_session_end::<SessionEndWatch as Drop>::drop	Implicit	Drop	3	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
+crates/bt-platform/src/session_end.rs	bt-platform crate::session_end::windows_session_end::<SessionEndWatch as Drop>::drop	Implicit	Drop	6	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-platform/src/session_end.rs	bt-platform crate::session_end::withdraw_restart	Ambiguous	map_err	1	std	2026-10-27: T-RESTART-REGISTRATION: Result::map_err on UnregisterApplicationRestart's answer (a kernel32 call that returns at once), formatting the refusal into a String; no door
 crates/bt-platform/src/stderr_road.rs	bt-platform crate::stderr_road::say	Dynamic	road	1	unreviewed	2026-10-25: the road fn main installs, diagnostics::stderr_line (a request door of its own row): this crate's stderr lines handed to the writer that owns the run's stderr; the crate cannot name bt-app, so the call is a function value (T-TRACE-SINK-OFF-THE-CALLING-THREAD)
 crates/bt-platform/src/threads.rs	bt-platform crate::threads::each_thread_of	Ambiguous	as_raw_handle	2	unreviewed	2026-10-25: T-IDLE-TURN-COST: the thread-snapshot walk moved out of ProbeChild::suspended into threads::each_thread_of (those rows shrank), handle and ControlFlow methods, no door
