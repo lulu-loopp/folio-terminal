@@ -1121,9 +1121,38 @@ struct BackgroundDecode {
     /// not its sentence, so the card can be written in the window's language
     /// (`i18n::background_picture_refused`).
     result: Result<Arc<bt_render::BackgroundImage>, bt_term::BackgroundImageError>,
-    /// **Whether the read this answers was the one more ask** a held answer earns
-    /// (T-HELD-FILE-IN-THE-OTHER-PICTURE-LANES) — see [`BackgroundDecode::answer`].
+    /// **Which read this answers**: the first, or the one more ask a held answer earns
+    /// (T-HELD-FILE-IN-THE-OTHER-PICTURE-LANES); see [`BackgroundDecode::answer`].
+    asked: BackgroundAsk,
+}
+
+/// **Which read of the ground a question is** (T-HELD-FILE-IN-THE-OTHER-PICTURE-LANES): every
+/// caller asks [`BackgroundAsk::FIRST`]; only [`BackgroundDecode::answer`] mints the one more
+/// ask, so the bound is decided in one pure place and carried, not re-spelled, by the worker.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct BackgroundAsk {
+    /// This read is the one more ask a held first read earned.
     once_more: bool,
+}
+
+impl BackgroundAsk {
+    /// A first read: a new window, or a picture chosen.
+    const FIRST: Self = Self { once_more: false };
+
+    /// The worker's answer to this question, carrying which read it was.
+    fn answered(
+        self,
+        generation: u64,
+        file: String,
+        result: Result<Arc<bt_render::BackgroundImage>, bt_term::BackgroundImageError>,
+    ) -> BackgroundDecode {
+        BackgroundDecode {
+            generation,
+            file,
+            result,
+            asked: self,
+        }
+    }
 }
 
 /// **What the window does with one answer about its ground** — see [`BackgroundDecode::answer`].
@@ -1132,8 +1161,9 @@ enum BackgroundAnswer {
     /// The picture: put it on the glass.
     Adopt,
     /// Another program held the file, and this was the first read: the picture on the glass is
-    /// kept, nothing is said, and the file is read once more.
-    AskOnceMore,
+    /// kept, nothing is said, and the file is read again as the question named here (the one
+    /// more ask).
+    Ask(BackgroundAsk),
     /// A refusal, or a second held read: the ground goes bare and the card says why.
     Refuse,
 }
@@ -1149,8 +1179,8 @@ impl BackgroundDecode {
     fn answer(&self) -> BackgroundAnswer {
         match &self.result {
             Ok(_) => BackgroundAnswer::Adopt,
-            Err(bt_term::BackgroundImageError::HeldElsewhere(_)) if !self.once_more => {
-                BackgroundAnswer::AskOnceMore
+            Err(bt_term::BackgroundImageError::HeldElsewhere(_)) if !self.asked.once_more => {
+                BackgroundAnswer::Ask(BackgroundAsk { once_more: true })
             }
             Err(_) => BackgroundAnswer::Refuse,
         }
@@ -55826,18 +55856,18 @@ mod clipboard_picture_race_tests {
 
 #[cfg(test)]
 mod background_mailbox_tests {
-    use super::{BackgroundAnswer, BackgroundDecode, BackgroundDecodeMailbox};
+    use super::{BackgroundAnswer, BackgroundAsk, BackgroundDecodeMailbox};
 
     fn land(mailbox: &BackgroundDecodeMailbox, generation: u64) {
         *mailbox
             .slot()
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(BackgroundDecode {
-            generation,
-            file: "ridge.jpg".to_owned(),
-            result: Err(bt_term::BackgroundImageError::UnsupportedFormat),
-            once_more: false,
-        });
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(BackgroundAsk::FIRST.answered(
+                generation,
+                "ridge.jpg".to_owned(),
+                Err(bt_term::BackgroundImageError::UnsupportedFormat),
+            ));
     }
 
     /// RED — **a ground another program holds is read once more, keeping the glass and saying
@@ -55848,33 +55878,49 @@ mod background_mailbox_tests {
     ///
     /// MUTATION: drop the `HeldElsewhere` arm of `BackgroundDecode::answer` — a held first read is
     /// refused at once (the ground goes bare and a card is raised before the second read); the
-    /// first assertion goes red. Or drop its `!self.once_more` guard — every held read asks again;
-    /// the second assertion goes red.
+    /// first assertion goes red. Or drop its `!self.asked.once_more` guard — every held read asks
+    /// again, for as long as the file is held; the run below is never refused and goes red. Or let
+    /// the next ask be a first read (`once_more: false`) — the same endless run, the same red.
+    ///
+    /// The run is the bound itself: the question each answer names is the one the next read
+    /// carries (`reload_background_picture(ask)` hands it to the worker, which answers through
+    /// `BackgroundAsk::answered`), so a file held for good is read exactly twice and then refused.
     #[test]
     fn a_held_ground_is_read_once_more_before_it_is_refused() {
-        let answer = |result, once_more| {
-            BackgroundDecode {
-                generation: 1,
-                file: "ridge.jpg".to_owned(),
-                result,
-                once_more,
-            }
-            .answer()
+        let answer = |result, asked: BackgroundAsk| {
+            asked.answered(1, "ridge.jpg".to_owned(), result).answer()
         };
         let held = || {
             Err(bt_term::BackgroundImageError::HeldElsewhere(
                 "being used by another process".to_owned(),
             ))
         };
-        assert_eq!(answer(held(), false), BackgroundAnswer::AskOnceMore);
-        assert_eq!(answer(held(), true), BackgroundAnswer::Refuse);
-        for once_more in [false, true] {
+        assert_eq!(
+            answer(held(), BackgroundAsk::FIRST),
+            BackgroundAnswer::Ask(BackgroundAsk { once_more: true }),
+            "a held first read asks once more"
+        );
+        let mut asked = BackgroundAsk::FIRST;
+        let mut reads = 0;
+        let refused_after = loop {
+            reads += 1;
+            match answer(held(), asked) {
+                BackgroundAnswer::Ask(next) if reads < 3 => asked = next,
+                BackgroundAnswer::Refuse => break reads,
+                other => panic!("read {reads} of a ground held for good answered {other:?}"),
+            }
+        };
+        assert_eq!(
+            refused_after, 2,
+            "a held first read asks once more, and the held second read is refused"
+        );
+        for asked in [BackgroundAsk::FIRST, BackgroundAsk { once_more: true }] {
             assert_eq!(
                 answer(
                     Err(bt_term::BackgroundImageError::Io(
                         "access is denied".to_owned()
                     )),
-                    once_more
+                    asked
                 ),
                 BackgroundAnswer::Refuse,
                 "a refusal of the disk is said at once"
@@ -55885,7 +55931,7 @@ mod background_mailbox_tests {
                 width_px: 1,
                 height_px: 1,
             });
-            assert_eq!(answer(Ok(picture), once_more), BackgroundAnswer::Adopt);
+            assert_eq!(answer(Ok(picture), asked), BackgroundAnswer::Adopt);
         }
     }
 

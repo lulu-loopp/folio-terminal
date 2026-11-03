@@ -9562,8 +9562,13 @@ impl DualPlaneSession {
             // answer files nothing — the read is asked once more by itself, and nothing on the glass
             // changes meanwhile. A second held answer is filed as the failure below (the run-out
             // bound of row 164: at most two reads per occurrence), and the next look is the next
-            // printing of the path, which is an occurrence of its own and asks anew.
-            Err(InlineImageDecodeError::HeldElsewhere(_)) if !record.asked_again => {
+            // printing of the path, which is an occurrence of its own and asks anew. A queue at its
+            // cap asks nothing again either: the reads waiting there were printed after this one,
+            // and a re-ask never costs a newer reference its read.
+            Err(InlineImageDecodeError::HeldElsewhere(_))
+                if !record.asked_again
+                    && self.local_image_path_tasks.len() < LOCAL_IMAGE_PATH_WORKER_QUEUE_CAP =>
+            {
                 record.asked_again = true;
                 self.queue_local_image_path_task(task);
                 return false;
@@ -13013,7 +13018,8 @@ impl DualPlaneSession {
     /// queue, for a newly registered occurrence and for the one read a held answer asks again
     /// ([`Self::complete_inline_image_result`]). At the cap the oldest read waiting is dropped and
     /// its occurrence filed as failed: what output can queue is bounded, and the newest reference
-    /// is the one the reader is looking at.
+    /// is the one the reader is looking at. A held answer's re-ask is never pushed at the cap (it
+    /// is older than every read waiting), so only a newly printed reference evicts.
     fn queue_local_image_path_task(&mut self, task: InlineImageTask) {
         if self.local_image_path_tasks.len() == LOCAL_IMAGE_PATH_WORKER_QUEUE_CAP
             && let Some(dropped) = self.local_image_path_tasks.pop_front()
@@ -26157,6 +26163,69 @@ mod tests {
         assert!(
             session.image_path_is_verified(&path),
             "the second read verifies it"
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// RED — **a held picture's re-ask never evicts a read printed after it**
+    /// (T-HELD-FILE-IN-THE-OTHER-PICTURE-LANES, review N1): with the queue of printed-path reads
+    /// at its cap, a held first answer asks nothing again and is filed as the failure, and every
+    /// read waiting, all of them printed later, stays queued and unfailed. The next look is the
+    /// path printed again.
+    ///
+    /// MUTATION: drop the cap clause from the `HeldElsewhere` arm's guard — the re-ask is pushed
+    /// at the cap, the oldest waiting read is dropped and its occurrence filed failed; the
+    /// "printed later" assertion goes red.
+    #[test]
+    fn a_held_pictures_re_ask_never_evicts_a_read_printed_after_it() {
+        let (directory, path) = temporary_path_image();
+        let started = Instant::now();
+        let line = format!("[Image: source: \"{}\"]\r\n", path.display());
+        let mut session = DualPlaneSession::new(nz(240), nz(120));
+        enable_path_detection(&mut session);
+        session.feed_at(line.as_bytes(), started).unwrap();
+        session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL);
+        let first = next_image_read(&mut session).expect("the printed picture is read");
+        let later = started + LIVE_MATH_STABLE_INTERVAL;
+        session
+            .feed_at(
+                format!("{}prompt", line.repeat(LOCAL_IMAGE_PATH_WORKER_QUEUE_CAP)).as_bytes(),
+                later,
+            )
+            .unwrap();
+        session.advance_live_stability(later + LIVE_MATH_STABLE_INTERVAL);
+        assert_eq!(
+            session.local_image_path_tasks.len(),
+            LOCAL_IMAGE_PATH_WORKER_QUEUE_CAP,
+            "the fixture holds the queue at its cap"
+        );
+        let waiting: Vec<u64> = session
+            .local_image_path_tasks
+            .iter()
+            .map(|task| task.occurrence_id)
+            .collect();
+        assert!(waiting.iter().all(|id| *id > first.occurrence_id));
+
+        session.complete_inline_image_result(
+            first.clone(),
+            Err(InlineImageDecodeError::HeldElsewhere("held".to_owned())),
+        );
+        let still_waiting: Vec<u64> = session
+            .local_image_path_tasks
+            .iter()
+            .map(|task| task.occurrence_id)
+            .collect();
+        assert_eq!(
+            still_waiting, waiting,
+            "every read printed later stays queued"
+        );
+        assert!(
+            waiting.iter().all(|id| !session.inline_images[id].failed),
+            "no read printed later is filed failed"
+        );
+        assert!(
+            session.inline_images[&first.occurrence_id].failed,
+            "the held reference asks nothing again at the cap and is filed as the failure"
         );
         let _ = std::fs::remove_dir_all(&directory);
     }

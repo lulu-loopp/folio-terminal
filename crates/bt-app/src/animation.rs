@@ -2669,6 +2669,96 @@ mod tests {
         );
     }
 
+    /// Where [`RefusingSource`] refuses: its first read (the head), its rewind, or its first read
+    /// after the rewind (the `gif` crate's header read, which hands the error back wrapped).
+    #[derive(Clone, Copy, Debug)]
+    enum RefusedAt {
+        Head,
+        Rewind,
+        Decoder,
+    }
+
+    /// **A source over a GIF's first bytes that refuses one read with one OS error**, so that
+    /// a refused read reaches `stream` at each of the sites a source can refuse at.
+    struct RefusingSource {
+        at: RefusedAt,
+        code: i32,
+        rewound: bool,
+        bytes: BytesAnimationSource,
+    }
+
+    impl Read for RefusingSource {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            match (self.at, self.rewound) {
+                (RefusedAt::Head, false) | (RefusedAt::Decoder, true) => {
+                    Err(std::io::Error::from_raw_os_error(self.code))
+                }
+                _ => self.bytes.read(buffer),
+            }
+        }
+    }
+
+    impl AnimationSource for RefusingSource {
+        fn restart(&mut self) -> std::io::Result<()> {
+            if matches!(self.at, RefusedAt::Rewind) {
+                return Err(std::io::Error::from_raw_os_error(self.code));
+            }
+            self.rewound = true;
+            self.bytes.restart()
+        }
+
+        fn opened_as(&self) -> Option<AnimationStamp> {
+            None
+        }
+
+        fn looks_like_now(&self) -> Option<AnimationStamp> {
+            None
+        }
+    }
+
+    /// RED — **a refused read reaches the open road's answer through every site a source can
+    /// refuse at** (T-HELD-FILE-IN-THE-OTHER-PICTURE-LANES, review F2): the head read, the rewind
+    /// and the decoder's own header read, each driven through `stream` by a source that refuses
+    /// that one read, answer exactly what the one predicate says of the error — held where
+    /// `bt_platform::file_reads::held_elsewhere` says so (on Windows 32 and 33), `Undecodable`
+    /// otherwise. The expected value is computed from the predicate, so the test names no
+    /// platform and asserts the true fact on both hosts.
+    ///
+    /// RESIDUAL: the fourth site, `file_source_in_lane`'s open and stat, needs a file a real
+    /// handle holds; a held file at that site is pinned in `bt-effects` and `bt-term`, and this
+    /// crate's platform gate keeps a `cfg(windows)` test out of it.
+    ///
+    /// MUTATION: put any one of the three sites back to `.map_err(|_| AnimationRefusal::Undecodable.into())`
+    /// — on Windows that site's held reads are refused again and its case goes red.
+    #[test]
+    fn a_refused_read_at_each_site_of_the_open_road_is_what_the_predicate_says() {
+        let mut gif_head = b"GIF89a".to_vec();
+        gif_head.resize(32, 0);
+        let gif_head: Arc<[u8]> = Arc::from(gif_head);
+        for at in [RefusedAt::Head, RefusedAt::Rewind, RefusedAt::Decoder] {
+            for code in [2, 5, 32, 33] {
+                let expected = if bt_platform::file_reads::held_elsewhere(
+                    &std::io::Error::from_raw_os_error(code),
+                ) {
+                    NotOpened::HeldElsewhere
+                } else {
+                    NotOpened::Refused(AnimationRefusal::Undecodable)
+                };
+                let source = RefusingSource {
+                    at,
+                    code,
+                    rewound: false,
+                    bytes: BytesAnimationSource::over(Arc::clone(&gif_head)),
+                };
+                assert_eq!(
+                    stream(Box::new(source)).err(),
+                    Some(expected),
+                    "os error {code}, refused at {at:?}"
+                );
+            }
+        }
+    }
+
     /// RED — **a refused animation's first frame is decoded by the GIF
     /// decoder** (user report 2026-09-12).
     ///

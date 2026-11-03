@@ -20,7 +20,7 @@ use crate::runtime::web::page_destination;
 use crate::window_seam::prelude::*;
 use crate::{
     ADDRESS_FIELD_WANTS_THE_WHOLE_HEAD, AnimationEntry, AnimationWork, AppEvent, AttentionDelivery,
-    BackgroundAnswer, BackgroundDecode, BlockScrollPaint, BuiltMarkdown, CardWords, ClickIntent,
+    BackgroundAnswer, BackgroundAsk, BlockScrollPaint, BuiltMarkdown, CardWords, ClickIntent,
     ClipboardPictureAnswer, ClipboardPictureInbox, ClipboardPictureJob, DOCK_PREVIEW_FADE, DiffRow,
     DocumentMath, DocumentPictures, DragLatch, DrawnAnimation, DropPreview, FOOT_REVEAL_FEEDBACK,
     FileMenuTarget, FilePick, FillSent, FoldedLevel, FootSaying, ForeignPane, FormulaSwitches,
@@ -777,9 +777,12 @@ impl<B: Backend> Runtime<'_, B> {
     /// drive that is not plugged in today is the ordinary case, and quietly
     /// erasing the setting would mean plugging the drive back in changed nothing.
     ///
-    /// `once_more` says this read is the one more ask a held answer earns
-    /// ([`BackgroundDecode::answer`]); every other caller asks a first read.
-    pub(in crate::runtime) fn reload_background_picture(&mut self, once_more: bool) -> Result<()> {
+    /// `asked` says which read this is: [`BackgroundAsk::FIRST`] from every caller but one, and the
+    /// one more ask [`crate::BackgroundDecode::answer`] names for a held first read.
+    pub(in crate::runtime) fn reload_background_picture(
+        &mut self,
+        asked: BackgroundAsk,
+    ) -> Result<()> {
         let stored = self.app.settings_store.loaded().background_image.clone();
         // Every call withdraws whatever the last one asked for, `None` included:
         // a clear that raced a slow decode must win, and the generation is how
@@ -812,12 +815,8 @@ impl<B: Backend> Runtime<'_, B> {
                 });
                 *slot
                     .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(BackgroundDecode {
-                    generation,
-                    file,
-                    result,
-                    once_more,
-                });
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    Some(asked.answered(generation, file, result));
                 // After the answer is in the slot, never before.
                 let _ = proxy.send_event(AppEvent::BackgroundPictureReady);
             },
@@ -867,8 +866,9 @@ impl<B: Backend> Runtime<'_, B> {
                 self.apply_window_ground()?;
             }
             // Held by another program, on the first read: the picture on the glass is kept and
-            // nothing is said; the file is read once more (T-HELD-FILE-IN-THE-OTHER-PICTURE-LANES).
-            (BackgroundAnswer::AskOnceMore, Err(_)) => self.reload_background_picture(true)?,
+            // nothing is said; the file is read again as the question the answer names, the one
+            // more ask (T-HELD-FILE-IN-THE-OTHER-PICTURE-LANES).
+            (BackgroundAnswer::Ask(next), Err(_)) => self.reload_background_picture(next)?,
             (_, Err(refusal)) => {
                 self.window.background_picture = None;
                 self.apply_window_ground()?;
@@ -893,7 +893,7 @@ impl<B: Backend> Runtime<'_, B> {
         if !self.app.settings_store.store(settings) {
             return Ok(false);
         }
-        self.reload_background_picture(false)?;
+        self.reload_background_picture(BackgroundAsk::FIRST)?;
         self.apply_window_ground()?;
         Ok(true)
     }
