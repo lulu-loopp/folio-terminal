@@ -2634,35 +2634,38 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// RED — **a GIF another program holds is held, not refused, and plays once it is let go**
-    /// (T-HELD-FILE-IN-THE-OTHER-PICTURE-LANES): this lane's own open meets the sharing violation
-    /// a program holding the file exclusively gives and answers `NotOpened::HeldElsewhere`; once
-    /// the holder lets go the same file opens; a file that is not there stays the refusal it was.
+    /// RED — **a read another program holds is held, and every other refused read is the
+    /// refusal it was** (T-HELD-FILE-IN-THE-OTHER-PICTURE-LANES): this lane's own reading of a
+    /// failed open, stat, head read or rewind (`NotOpened::of_read`), and of the `gif` crate's
+    /// wrapped read (`of_decoder`), is the one predicate's
+    /// (`bt_platform::file_reads::held_elsewhere`) and nothing of its own — held exactly where the
+    /// predicate says so (on Windows the sharing and lock violations, 32 and 33; off Windows
+    /// nothing), `Undecodable` for every other error, and a format refusal of the decoder never
+    /// held. The predicate itself, and a real file held by a handle that shares nothing, are
+    /// pinned in `bt-effects` and `bt-term`; this crate names no platform.
     ///
-    /// MUTATION: have `NotOpened::of_read` answer `Refused(Undecodable)` for every error — the held
-    /// open is refused again; the first assertion goes red.
-    #[cfg(windows)]
+    /// MUTATION: have `NotOpened::of_read` answer `Refused(Undecodable)` for every error — on
+    /// Windows the held reads are refused again and the first assertion goes red.
     #[test]
-    fn a_gif_another_program_holds_is_held_and_plays_once_it_is_let_go() {
-        use std::os::windows::fs::OpenOptionsExt;
-        let path = scratch_gif("held \u{88ab}\u{5360}\u{7528}", &fixture());
-        let holder = std::fs::OpenOptions::new()
-            .read(true)
-            .share_mode(0)
-            .open(&path)
-            .expect("the test holds its own file");
-        let held = decode(&path).err();
-        drop(holder);
-        let let_go = decode(&path).is_ok();
-        let missing = scratch("missing \u{4e0d}\u{5728}");
-        let refused = decode(&missing).err();
-        let _ = std::fs::remove_file(&path);
-        assert_eq!(held, Some(NotOpened::HeldElsewhere), "held, not refused");
-        assert!(let_go, "and it opens once let go");
+    fn a_read_another_program_holds_is_held_and_every_other_refused_read_is_undecodable() {
+        for code in [2, 3, 5, 32, 33] {
+            let error = || std::io::Error::from_raw_os_error(code);
+            let expected = if bt_platform::file_reads::held_elsewhere(&error()) {
+                NotOpened::HeldElsewhere
+            } else {
+                NotOpened::Refused(AnimationRefusal::Undecodable)
+            };
+            assert_eq!(NotOpened::of_read(&error()), expected, "os error {code}");
+            assert_eq!(
+                NotOpened::of_decoder(&gif::DecodingError::Io(error())),
+                expected,
+                "os error {code}, wrapped by the decoder"
+            );
+        }
         assert_eq!(
-            refused,
-            Some(AnimationRefusal::Undecodable.into()),
-            "a file that is not there stays a refusal"
+            NotOpened::of_decoder(&gif::DecodingError::UnexpectedEof),
+            NotOpened::Refused(AnimationRefusal::Undecodable),
+            "a decoder's own refusal is never held"
         );
     }
 

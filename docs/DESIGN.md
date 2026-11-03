@@ -16266,7 +16266,7 @@ Owner report 2026-10-27: the `<` / `>` at a picture preview's two sides did not 
 **The bound.** The 2026-11-02 run-out bound, unchanged and shared by all three: at most two reads per look of a held file, and no timer. A look is the lane's own new input: for a GIF its next open or its change news, for a printed path its next printing, for the ground a new window or a new choice of picture.
 
 **Pinned by**
-- `app_preview_tests::a_gif_another_program_holds_is_asked_once_more_and_then_only_on_a_new_look` and the updated `a_refused_file_that_changed_is_asked_again_on_its_next_showing`; `animation::tests::a_gif_another_program_holds_is_held_and_plays_once_it_is_let_go` (Windows);
+- `app_preview_tests::a_gif_another_program_holds_is_asked_once_more_and_then_only_on_a_new_look` and the updated `a_refused_file_that_changed_is_asked_again_on_its_next_showing`; `animation::tests::a_read_another_program_holds_is_held_and_every_other_refused_read_is_undecodable` (portable: bt-app names no platform, so the real held file is bt-term's and bt-effects' test);
 - `bt_term::session::tests::a_printed_picture_another_program_holds_is_asked_once_more_and_then_failed`;
 - `background_mailbox_tests::a_held_ground_is_read_once_more_before_it_is_refused`; `bt_term::inline_image::tests::a_background_picture_another_program_holds_is_held_and_decodes_once_it_is_let_go` (Windows);
 - the plants `plant-184-gif-held-filed-refused.py`, `plant-184-gif-retry-never-stops.py`, `plant-184-inline-held-failed.py`, `plant-184-inline-requeue-every-time.py`, `plant-184-background-held-refused.py` and `plant-184-gif-unstarted-once-more-left-asking.py` in the row's report.
