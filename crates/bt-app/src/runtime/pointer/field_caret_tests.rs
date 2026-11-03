@@ -806,6 +806,9 @@ fn a_drag_in_a_chrome_field_selects_what_it_crossed() {
 /// PIN (row 180, after row 179 R5) — **a press while a composition is up moves nothing and holds
 /// nothing**, in every field: the IME is composing at the caret, and the press is still the
 /// field's.
+///
+/// MUTATION (`plant-180-composing-guard-dropped.py`): drop the composing guard from `place` —
+/// the press in the find bar puts the caret and holds the drag.
 #[test]
 fn a_press_in_a_composing_chrome_field_moves_nothing() {
     for field in EVERY_FIELD {
@@ -830,6 +833,30 @@ fn a_press_in_a_reopened_find_bar_collapses_its_select_all() {
     open.folio.draw();
     open.click(open.at(AFTER_ZHONG, 1.0));
     assert_eq!(open.caret(), (AFTER_ZHONG, AFTER_ZHONG..AFTER_ZHONG));
+}
+
+/// PIN (row 180 review N1) — **a right press in the palette's box puts no caret and holds no
+/// drag**: the box swallows every button, and only the left one is a caret put
+/// (`Runtime::press_field_by`).
+///
+/// MUTATION (`plant-180-palette-button-check-dropped.py`): drop the button check from
+/// `press_field_by` — the right press puts the caret and holds the drag.
+#[test]
+fn a_right_press_in_the_palette_box_moves_nothing() {
+    let mut open = Open::new("field-caret-palette-right", Chrome::Palette, NAME);
+    let at = open.at(AFTER_ZHONG, 1.0);
+    open.folio.move_to(at);
+    for state in [
+        winit::event::ElementState::Pressed,
+        winit::event::ElementState::Released,
+    ] {
+        open.folio
+            .runtime()
+            .mouse_input(state, winit::event::MouseButton::Right)
+            .expect("a headless right press is answered");
+        assert_eq!(held(&open.folio.runtime()), None, "{state:?}");
+    }
+    assert_eq!(open.caret(), (0, 0..0));
 }
 
 /// **The selection wash a field draws**: the span of the quad at the wash's alpha in `layers`.

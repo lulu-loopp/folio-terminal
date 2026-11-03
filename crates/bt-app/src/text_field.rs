@@ -983,6 +983,9 @@ mod tests {
     /// left by two letters, the box's edge is the seam before `c`, a press inside the box finds the
     /// seam under it, and a press left of the box (in its padding) is a press on its edge — never a
     /// letter scrolled out of sight (row 179 R6).
+    ///
+    /// MUTATION (`plant-180-a-press-finds-the-seam-under-it-in-a-scrolled-run.py`): drop the
+    /// press's clamp to the run's left edge — a press in the padding lands on a hidden letter.
     #[test]
     fn a_press_finds_the_seam_under_it_in_a_scrolled_run() {
         let run = ten_a_letter(20.0);
