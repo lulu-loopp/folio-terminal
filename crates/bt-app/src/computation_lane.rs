@@ -2177,9 +2177,14 @@ mod tests {
         else {
             panic!("the shipped GIF opens as an animation while the factory is held");
         };
+        // Played out on a made-up clock, as the window would after five seconds of drawing it, so
+        // the ring has room and the cursor is handed out.
+        let start = Instant::now();
+        animation.present(start);
+        animation.advance(start + std::time::Duration::from_secs(5));
         let (cursor, want) = animation
             .take_cursor()
-            .expect("a fresh animation's ring has room");
+            .expect("a played-out ring has room");
         let filled = lane
             .lane
             .decorate(MathWorkerRequest::AnimationFill {
