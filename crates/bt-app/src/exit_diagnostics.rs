@@ -46,6 +46,60 @@ pub(crate) struct ShellExit {
     pub(crate) program: Option<PathBuf>,
     pub(crate) tab: u64,
     pub(crate) disposition: ShellExitDisposition,
+    /// **Whether the system said the session was ending when the reaper judged this exit**
+    /// (`bt_platform::session_end::shutting_down`, plan row 199): a probe written on the exit's
+    /// line as `shutting_down=0|1`, so that a reboot's log shows whether the system's sign-out
+    /// is already set when an exit reaches the reaper before the question reaches the window.
+    /// `None` off Windows, where there is no probe and the line has no field.
+    ///
+    /// **Private to this module** (row 199's review F1), so that no exit can be built outside it
+    /// by a struct literal: every product exit goes through [`ShellExit::observed`], which reads
+    /// the probe, and a test outside this module through [`ShellExit::unprobed`].
+    shutting_down: Option<bool>,
+}
+
+impl ShellExit {
+    /// **An exit the reaper is judging now**: its facts as given, and the session-end probe read
+    /// at this instant — the one a later rule would read it at (plan row 199).
+    pub(crate) fn observed(
+        seat: u64,
+        code: Option<u32>,
+        elapsed: Duration,
+        program: Option<PathBuf>,
+        tab: u64,
+        disposition: ShellExitDisposition,
+    ) -> Self {
+        Self {
+            seat,
+            code,
+            elapsed,
+            program,
+            tab,
+            disposition,
+            shutting_down: bt_platform::session_end::shutting_down(),
+        }
+    }
+
+    /// **An exit a test built, with no probe read**: the line says what it said before row 199.
+    #[cfg(test)]
+    pub(crate) fn unprobed(
+        seat: u64,
+        code: Option<u32>,
+        elapsed: Duration,
+        program: Option<PathBuf>,
+        tab: u64,
+        disposition: ShellExitDisposition,
+    ) -> Self {
+        Self {
+            seat,
+            code,
+            elapsed,
+            program,
+            tab,
+            disposition,
+            shutting_down: None,
+        }
+    }
 }
 
 fn program_basename(program: Option<&Path>) -> String {
@@ -62,8 +116,14 @@ fn shell_exit_line(exit: &ShellExit) -> String {
     let code = exit
         .code
         .map_or_else(|| "none".to_owned(), |code| code.to_string());
+    // The probe goes last, so that every reader of the line's start reads it as before.
+    let shutting_down = match exit.shutting_down {
+        Some(true) => " shutting_down=1",
+        Some(false) => " shutting_down=0",
+        None => "",
+    };
     one_line(&format!(
-        "Folio: pane {} shell exited code={code} after {} ms ({}, tab {}, {})",
+        "Folio: pane {} shell exited code={code} after {} ms ({}, tab {}, {}){shutting_down}",
         exit.seat,
         exit.elapsed.as_millis(),
         program_basename(exit.program.as_deref()),
@@ -282,10 +342,62 @@ mod tests {
             program: Some(PathBuf::from("shells").join("pwsh.exe")),
             tab: 11,
             disposition: ShellExitDisposition::PaneRetired,
+            shutting_down: None,
         };
         assert_eq!(
             lines_for(&[exit]),
             ["Folio: pane 7 shell exited code=23 after 41 ms (pwsh.exe, tab 11, retired pane)"]
+        );
+    }
+
+    /// RED (plan row 199) — **an exit the probe read says whether the session was ending, at the
+    /// end of its line; an exit with no probe says what it always said.** The field goes last so
+    /// that every reader of the line's start (`code=<n> `) reads it as before.
+    ///
+    /// MUTATION: drop the `shutting_down` suffix from `shell_exit_line` — the two probed lines
+    /// lose their field.
+    #[test]
+    fn a_shell_exit_says_whether_the_session_was_ending() {
+        let exit = |shutting_down| ShellExit {
+            seat: 3,
+            code: Some(1),
+            elapsed: Duration::from_millis(7_234_567),
+            program: Some(PathBuf::from("agents").join("claude.exe")),
+            tab: 5,
+            disposition: ShellExitDisposition::TabRetired,
+            shutting_down,
+        };
+        assert_eq!(
+            lines_for(&[exit(Some(true)), exit(Some(false)), exit(None)]),
+            [
+                "Folio: pane 3 shell exited code=1 after 7234567 ms (claude.exe, tab 5, tab retired) shutting_down=1",
+                "Folio: pane 3 shell exited code=1 after 7234567 ms (claude.exe, tab 5, tab retired) shutting_down=0",
+                "Folio: pane 3 shell exited code=1 after 7234567 ms (claude.exe, tab 5, tab retired)",
+            ]
+        );
+    }
+
+    /// RED (plan row 199) — **an exit the reaper judges carries the probe read at that instant**:
+    /// what `bt_platform::session_end::shutting_down` answers — `Some(false)` on Windows (a test
+    /// run is not a sign-out), `None` off Windows, where the line keeps its old shape; which
+    /// platform this is stays bt-platform's to say. Every exit the reaper decides is built
+    /// through [`ShellExit::observed`].
+    ///
+    /// MUTATION: `observed` stores `None` — the Windows lines lose their field
+    /// (red on Windows only).
+    #[test]
+    fn an_observed_exit_carries_the_session_end_probe() {
+        let exit = ShellExit::observed(
+            1,
+            Some(0),
+            Duration::from_millis(5),
+            None,
+            2,
+            ShellExitDisposition::TabKept,
+        );
+        assert_eq!(
+            exit.shutting_down,
+            bt_platform::session_end::shutting_down()
         );
     }
 
@@ -340,6 +452,7 @@ mod tests {
             program: Some(PathBuf::from("pwsh.exe")),
             tab: 3,
             disposition,
+            shutting_down: None,
         };
         let lines = lines_for(&[
             exit(ShellExitDisposition::BirthDeathFellBack(
@@ -390,6 +503,7 @@ mod tests {
             program: Some(folder.join("shéll")),
             tab: 5,
             disposition: ShellExitDisposition::TabKept,
+            shutting_down: None,
         };
         let line = lines_for(&[exit]).pop().expect("the exit line");
         assert!(line.contains("(shéll, tab 5, tab kept)"), "{line}");
@@ -407,6 +521,7 @@ mod tests {
             program: Some(PathBuf::from("外壳\n程序")),
             tab: 17,
             disposition: ShellExitDisposition::TabRetired,
+            shutting_down: None,
         };
         let line = lines_for(&[exit]).pop().expect("the exit line");
         assert_eq!(
