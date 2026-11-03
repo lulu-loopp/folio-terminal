@@ -9872,11 +9872,13 @@ fn a_wait_through_a_verb_from_blocking_outside_a_door_is_a_bare_site() {
     );
 }
 
-/// A planted crate with a site of every wait plan row 181 added to the vocabulary, in each shape
-/// the product writes one: a system call imported and called bare, and called by its whole path;
-/// `GetOverlappedResult` with its wait flag `true`, `false` and a variable; a `libc` call by path
-/// and imported. `polls_its_own` calls a first-party `poll` bare and a first-party method `poll`
-/// (the control).
+/// A planted crate with a site of every wait plan row 181 added to the vocabulary:
+/// `GetOverlappedResult` imported and called bare, and called by its whole path, each with its wait
+/// flag `true`, `false` and a variable; `MsgWaitForMultipleObjectsEx`, `GetQueuedCompletionStatus`
+/// and `WaitNamedPipeW` by their whole paths only (the product imports them and calls them bare,
+/// the shape `GetOverlappedResult` stands for here); `libc::poll` and `libc::waitid` by path, and
+/// `waitpid` imported and called bare. `polls_its_own` calls a first-party `poll` bare and a
+/// first-party method `poll` (the control).
 const PLANTED_WAITS_IN_NEITHER_LIST: &str = "
 use windows::Win32::System::IO::GetOverlappedResult;
 use libc::waitpid;
@@ -9912,8 +9914,8 @@ pump.poll();
 ";
 
 /// RED (T-WAITS-IN-NEITHER-LIST, plan row 181) — **a wait neither the vocabulary nor
-/// bt-source's `BLOCKING` named before row 181 is a bare site outside a door, in every shape the
-/// product writes it, and a flag that makes the call return at once does not take it out**
+/// bt-source's `BLOCKING` named before row 181 is a bare site outside a door, imported and bare or
+/// by its whole path, and a flag that makes the call return at once does not take it out**
 /// (ruling R1: `GetOverlappedResult` and `libc::waitid` are counted at every call, whatever their
 /// flag, as the A2e lint will ban every call).
 ///
@@ -9924,8 +9926,8 @@ pump.poll();
 /// holds none (the control).
 ///
 /// MUTATION: delete the registry's `windows::Win32::System::IO::GetOverlappedResult` line and
-/// `overlapped_bare`'s and `overlapped_by_path`'s sites leave the inventory; delete
-/// `libc::waitpid`'s and `unix_waits`' imported site leaves it.
+/// `overlapped_bare`'s and `overlapped_by_path`'s sites leave the inventory; delete the
+/// `libc::waitpid` line and `unix_waits`' imported site leaves it.
 #[test]
 fn a_wait_neither_list_named_is_a_bare_site_whatever_its_flag() {
     let world = planted_world("ww-neither-list", PLANTED_WAITS_IN_NEITHER_LIST);
