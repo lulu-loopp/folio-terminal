@@ -395,7 +395,7 @@ where
     true
 }
 
-pub fn an_unfollowed_carrier(held: &elsewhere::Beat) -> bool {
+pub fn an_unfollowed_carrier(held: &crate::gone::Beat) -> bool {
     let _ = held;
     true
 }
@@ -406,6 +406,29 @@ pub fn by_other_trait(clock: &dyn other::Ticker) -> bool {
 }
 
 pub fn by_other_carrier(held: &other::Carried) -> Instant {
+    let _ = held;
+    Instant::now()
+}
+
+// ── the review fold: a path that leads outside, or an alias, carries no clock ──
+
+/// An outside crate's type named like a carrier: by the language's rules, `elsewhere` here is an
+/// outside crate, whose types carry no first-party clock.
+pub fn with_an_outside_type(held: &elsewhere::Beat) -> Instant {
+    let _ = held;
+    Instant::now()
+}
+
+/// An associated type named like a carrier: not seen (the guard's "does not see" list).
+pub fn with_an_associated_type<C: Stamps>(held: &C::Beat) -> Instant {
+    let _ = held;
+    Instant::now()
+}
+
+/// A type alias of a carrier is a type, resolved, but its target is not followed.
+pub type Ticks = Beat;
+
+pub fn with_an_alias(held: &Ticks) -> Instant {
     let _ = held;
     Instant::now()
 }

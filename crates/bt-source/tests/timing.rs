@@ -1130,23 +1130,34 @@ fn clock_traits(
     (clocks, refusals)
 }
 
-/// A first-party data type: its package's position in the indices, its module
-/// path, its name.
+/// A first-party data type or type alias: its package's position in the
+/// indices, its module path, its name.
 type TypeKey = (usize, String, String);
 
-/// **Which first-party data type a type path names**, read from the indices'
-/// module records, their data types and their `use` items — the type
-/// counterpart of [`TraitResolver`]: `crate::`, `self::`, `super::`, another
-/// package's crate name, a child module, a name a `use` brings in (renamed
-/// or through a glob), and a `pub use` re-export, each module-and-name lookup
-/// made once. A `use` inside a function body is not read.
+/// **Which first-party data type or type alias a type path names**, read from
+/// the indices' module records, their data types, their type aliases and their
+/// `use` items — the type counterpart of [`TraitResolver`]: `crate::`,
+/// `self::`, `super::`, another package's crate name, a child module, a name a
+/// `use` brings in (renamed or through a glob), and a `pub use` re-export, each
+/// module-and-name lookup made once. A `use` inside a function body is not
+/// read. A path whose leading segment names nothing first-party — no module,
+/// no package, no name a `use` brings in, not `crate`, `self` or `super` —
+/// names, by the language's rules, an outside crate's type or an associated
+/// type (`wgpu::Instance`, `C::Road`, `Self::Road`), and resolution says so.
 struct TypeResolver {
     crates: BTreeMap<String, usize>,
     modules: BTreeSet<(usize, String)>,
     declared: BTreeSet<TypeKey>,
-    names: BTreeMap<(usize, String), Vec<(String, Vec<String>)>>,
-    globs: BTreeMap<(usize, String), Vec<Vec<String>>>,
+    names: BTreeMap<ModuleKey, Vec<UsedName>>,
+    globs: BTreeMap<ModuleKey, Vec<Vec<String>>>,
 }
+
+/// A module of one package: the package's place in the indices, and the
+/// module's path.
+type ModuleKey = (usize, String);
+
+/// A name a `use` brings into a module, and the path it names.
+type UsedName = (String, Vec<String>);
 
 /// How many module-and-name lookups one type path's resolution makes before it
 /// stops: each lookup is made once (a `use` cycle ends there), and this bounds
@@ -1178,6 +1189,13 @@ impl TypeResolver {
                     resolver
                         .declared
                         .insert((at, module.to_owned(), record.name().to_owned()));
+                }
+            }
+            for alias in index.aliases() {
+                for module in alias.module_paths() {
+                    resolver
+                        .declared
+                        .insert((at, module.to_owned(), alias.name().to_owned()));
                 }
             }
             for used in index.uses() {
@@ -1269,10 +1287,14 @@ impl TypeResolver {
         current
     }
 
-    /// The data types a type path names, written in `module` of the package
-    /// at `at`.
-    fn resolve(&self, at: usize, module: &str, path: &[String]) -> BTreeSet<TypeKey> {
-        self.resolve_seen(at, module, path, &mut BTreeSet::new())
+    /// The first-party data types and type aliases a type path names, written
+    /// in `module` of the package at `at`, and whether some way of reading it
+    /// leads outside: to a path whose leading segment names nothing
+    /// first-party.
+    fn resolve(&self, at: usize, module: &str, path: &[String]) -> (BTreeSet<TypeKey>, bool) {
+        let mut outside = false;
+        let found = self.resolve_seen(at, module, path, &mut BTreeSet::new(), &mut outside);
+        (found, outside)
     }
 
     fn resolve_seen(
@@ -1281,15 +1303,23 @@ impl TypeResolver {
         module: &str,
         path: &[String],
         seen: &mut BTreeSet<(usize, String, Vec<String>)>,
+        outside: &mut bool,
     ) -> BTreeSet<TypeKey> {
         let mut found = BTreeSet::new();
         let Some((name, prefix)) = path.split_last() else {
             return found;
         };
-        let homes = if prefix.is_empty() {
-            vec![(at, module.to_owned())]
-        } else {
+        let homes = if let Some(leading) = prefix.first() {
+            if self
+                .modules_named(at, module, leading, &mut BTreeSet::new())
+                .is_empty()
+            {
+                *outside = true;
+                return found;
+            }
             self.module_path(at, module, prefix, seen)
+        } else {
+            vec![(at, module.to_owned())]
         };
         for (home_at, home) in homes {
             let key = (home_at, home.clone(), name.clone());
@@ -1305,13 +1335,13 @@ impl TypeResolver {
             let at_home = (home_at, home.clone());
             for (alias, target) in self.names.get(&at_home).into_iter().flatten() {
                 if alias == name {
-                    found.extend(self.resolve_seen(home_at, &home, target, seen));
+                    found.extend(self.resolve_seen(home_at, &home, target, seen, outside));
                 }
             }
             for glob in self.globs.get(&at_home).into_iter().flatten() {
                 let mut target = glob.clone();
                 target.push(name.clone());
-                found.extend(self.resolve_seen(home_at, &home, &target, seen));
+                found.extend(self.resolve_seen(home_at, &home, &target, seen, outside));
             }
         }
         found
@@ -1322,7 +1352,8 @@ impl TypeResolver {
 /// handed-now reading: as a bound (a clock trait, or unread when the trait
 /// resolver gives up or cannot follow a clock trait's name) and as a type (a
 /// type that carries a clock, or unread when the type resolver cannot follow
-/// a path whose last segment names one).
+/// a path whose last segment names one; a path that leads outside, to an
+/// outside crate's type or an associated type, carries none).
 struct Reader<'r, 'i> {
     resolver: &'r TraitResolver<'i>,
     clocks: &'r BTreeSet<TraitId>,
@@ -1382,11 +1413,11 @@ impl Reader<'_, '_> {
         }
         let mut named = false;
         for module in &self.modules {
-            let found = self.types.resolve(self.at, module, &segments);
+            let (found, outside) = self.types.resolve(self.at, module, &segments);
             if !found.is_disjoint(self.owners) {
                 return reading::Bound::Clock("carrier");
             }
-            named |= !found.is_empty();
+            named |= !found.is_empty() || outside;
         }
         if named {
             reading::Bound::Not
@@ -1506,6 +1537,24 @@ fn handed_now(indices: &[(&str, &Index)]) -> HandedSet {
             break;
         }
         last_pass = !grew;
+        // A name a `use` brings in under another name, for a type carrying a
+        // clock, is a carrier's name too (`use deep::Held as Kept;`).
+        loop {
+            let renamed: Vec<String> = indices
+                .iter()
+                .flat_map(|(_, index)| index.uses())
+                .flat_map(|used| used.names())
+                .filter(|(name, path)| {
+                    !owner_names.contains(name)
+                        && path.last().is_some_and(|last| owner_names.contains(last))
+                })
+                .map(|(name, _)| name.clone())
+                .collect();
+            if renamed.is_empty() {
+                break;
+            }
+            owner_names.extend(renamed);
+        }
     }
     let mut found = BTreeMap::new();
     let mut handed = BTreeMap::new();
@@ -1772,7 +1821,10 @@ fn leave_handed(handed: &BTreeMap<String, (String, usize)>) {
 ///   type carries one: `struct Outer { beat: Heartbeat }`); a type path is
 ///   resolved to it from the writer's module (`crate::`, `self::`, `super::`,
 ///   another package's crate name, child modules, `use` items renamed or by
-///   glob, `pub use` re-exports).
+///   glob, `pub use` re-exports; a type alias resolves as a type, its target
+///   not followed). A path whose leading segment names nothing first-party is,
+///   by the language's rules, an outside crate's type or an associated type
+///   (`wgpu::Instance`, `C::Road`), and carries none.
 /// * **A clock type**: `impl B` or `dyn B` where a bound `B` is `Fn() -> A`,
 ///   `FnMut() -> A` or `FnOnce() -> A` with no inputs and `A` holding an
 ///   instant, or a clock trait; a `fn() -> A` pointer; a clock-carrying type;
@@ -1963,8 +2015,9 @@ fn the_handed_now_reading_finds_refuses_and_admits_what_it_says() {
 /// clock in its `where` clause, and a closure or a nested `fn` handed a clock
 /// inside a function handed none. An owner whose method calls only its clock,
 /// the real clock's own `now`, a trait or closure with inputs, a `now: u64`, a
-/// closure `now: u64` in a handed body and a `Token![,]`-like macro type are
-/// not; an unread type, a `now` in an unpairable pattern, a clock trait by an
+/// closure `now: u64` in a handed body, a `Token![,]`-like macro type, and a
+/// carrier's name led by an outside crate, through an associated type or
+/// through a type alias are not; an unread type, a `now` in an unpairable pattern, a clock trait by an
 /// unfollowable path, an `impl` written away from its type, a macro type naming
 /// a `Fn` trait or a clock trait, a `where` clause bounding a non-parameter by
 /// a clock and a carrier's name by an unfollowable path are refused.
