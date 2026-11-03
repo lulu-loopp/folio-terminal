@@ -5237,7 +5237,6 @@ crates/bt-app/src/settings.rs	bt-app crate::settings::menu_layout	Dynamic	px	19
 crates/bt-app/src/settings.rs	bt-app crate::settings::monospace_family_files	Ambiguous	map	1	
 crates/bt-app/src/settings.rs	bt-app crate::settings::monospace_family_files	Ambiguous	unwrap_or_default	2	
 crates/bt-app/src/settings.rs	bt-app crate::settings::nav_stack_height	Dynamic	px	2	
-crates/bt-app/src/settings.rs	bt-app crate::settings::notices_beside_the_executable	Ambiguous	ok	1	
 crates/bt-app/src/settings.rs	bt-app crate::settings::notices_page	Ambiguous	into_boxed_str	1	
 crates/bt-app/src/settings.rs	bt-app crate::settings::on_off_label	Ambiguous	text	2	
 crates/bt-app/src/settings.rs	bt-app crate::settings::page_order	Ambiguous	collect	1	
@@ -5298,6 +5297,7 @@ crates/bt-app/src/settings.rs	bt-app crate::settings::scheme_index	Ambiguous	unw
 crates/bt-app/src/settings.rs	bt-app crate::settings::settle_field_scroll	Dynamic	measure	2	2026-11-02: T-CHROME-FIELDS-CARET-BY-POINTER (0.4.9 plan row 180); added: the focused field's sticky scroll measures the text before the caret and the whole text with the measure it is handed (the chrome text measure)
 crates/bt-app/src/settings.rs	bt-app crate::settings::shipped_notices_near	Ambiguous	join	2	
 crates/bt-app/src/settings.rs	bt-app crate::settings::shipped_notices_near	Ambiguous	then_some	1	
+crates/bt-app/src/settings.rs	bt-app crate::settings::shipped_notices_near	Dynamic	is_file	2	2026-11-03: the look handed in (T-NOTICES-DESTINATION-OFF-THE-WINDOW-THREAD): a typed `&Path` is_file closure at settings::look_beside_this_image, which only settings::settle_notices runs, in fn main before the loop; the tests hand their own
 crates/bt-app/src/settings.rs	bt-app crate::settings::shortcut_undelivered_note	Ambiguous	text	1	
 crates/bt-app/src/settings.rs	bt-app crate::settings::sidebar_label	Ambiguous	text	2	
 crates/bt-app/src/settings.rs	bt-app crate::settings::slider_geometry	Dynamic	px	3	
