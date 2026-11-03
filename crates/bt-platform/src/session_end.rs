@@ -27,15 +27,10 @@
 //!   which writes it.
 //! * `WM_ENDSESSION(FALSE)` — the line comes down and `hear` is told
 //!   [`SessionEnd::TakenBack`]: the session goes on, and so does the application.
-//! * `WM_ENDSESSION(TRUE)` — the last word before the system may end the process, so the one
-//!   message whose procedure holds its answer back (plan row 201): `ending` is called, and it
-//!   returns only once the question's write has its answer and `diagnostics.log` has been
-//!   fenced. The write itself stays the loop's: the question's turn blocks this thread until it
-//!   lands, so in the usual order it has landed before this message can even be dispatched.
-//!   When this message overtook the wake the question posted, `ending` runs winit's wakes already
-//!   queued on this thread ([`drain_what_is_queued`]) — that one among them — so that turn, and
-//!   its one bounded wait, happen before the answer. Only the wakes are run: every other message
-//!   stays queued for the loop. The drain itself never waits.
+//! * `WM_ENDSESSION(TRUE)` — the last word before the system may end the process (plan row
+//!   201): `ending` is called before the answer, and it says what became of the question's
+//!   save and fences `diagnostics.log`, so that what the log was owed is on the disk when the
+//!   system ends the process. It runs nothing of the loop's.
 //! * `WM_ENDSESSION(TRUE)` with `ENDSESSION_CLOSEAPP` in `lParam` — `hear` is told
 //!   [`SessionEnd::Closed`]. This is the Restart Manager closing the application (an installer
 //!   or the system's servicing needs a file it holds): **the session does not end**, so nobody
@@ -182,73 +177,24 @@ pub fn the_session_really_ends(message: u32, wparam: usize, lparam: isize) -> bo
     message == WM_ENDSESSION && wparam != 0 && lparam & ENDSESSION_CLOSEAPP == 0
 }
 
-/// **What running the messages already queued came to** ([`drain_what_is_queued`]).
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Drained {
-    /// The caller's question was answered: before the first message, or by one of them.
-    Answered,
-    /// Every wake queued before the drain began has run, and the question is still open — or
-    /// the queue could not be marked, and nothing was run.
-    NothingLeft,
-}
-
-/// **Run queued messages, one at a time, until `answered` says yes or `next` has nothing left
-/// to run** — the drain's whole rule, without a window: `next` runs one message and says whether
-/// it did. Never waits; the bound is `next`'s (the messages queued before the drain began).
-pub fn drain_with(answered: &dyn Fn() -> bool, next: &mut dyn FnMut() -> bool) -> Drained {
-    loop {
-        if answered() {
-            return Drained::Answered;
-        }
-        if !next() {
-            return Drained::NothingLeft;
-        }
-    }
-}
-
-/// **The name winit registers its wake under**: `Winit::WakeupMsg` (winit 0.30.13,
-/// `platform_impl/windows/event_loop.rs`, `USER_EVENT_MSG_ID`). `EventLoopProxy::send_event`
-/// posts it, with `wParam` and `lParam` zero, to the loop's own hidden window once for each event
-/// it sends, and the loop's procedure answers it with a placeholder that pulls the next event from
-/// the channel. A registered name is the same number for every caller in the session, so
-/// [`drain_what_is_queued`] asks for winit's wake by it. The name is winit's private one, so
-/// `tests/windows_winit_wake.rs` builds a real event loop of the locked winit and finds its
-/// proxy's post under this name.
-pub const WINIT_WAKE_MESSAGE_NAME: &str = "Winit::WakeupMsg";
-
-/// **Run winit's wakes already queued on this thread, until `answered` says yes** (plan row 201)
-/// — [`drain_with`] over this thread's queue, taking **only** the wake winit's proxy posts for
-/// each event it sends ([`WINIT_WAKE_MESSAGE_NAME`]). The question's turn rides on one of them.
-///
-/// **Nothing else is taken** (coordinator's ruling Q1, 2026-11-03). Input, paint, timers, hot
-/// keys, `WM_CLOSE`, `WM_QUIT` and every other posted message stay queued where they are, for the
-/// loop's own pump after the answer. That includes the deferred pickers' messages, whose handlers
-/// open a modal loop that waits for the person. Each wake pulls the next event from winit's
-/// channel, in the order they were sent, so the events keep their order too.
-///
-/// The bound is a mark: the same message, posted to the thread itself rather than to winit's
-/// window, at the start, behind every wake already posted. The drain stops when it takes the mark,
-/// so a wake that a drained turn posts (behind the mark) is not run, however fast new ones arrive.
-/// A mark that an early answer leaves behind is taken back before this returns.
-///
-/// `PeekMessageW` never waits, and winit's wake handler only queues a placeholder. The one wait a
-/// dispatched wake can hold is the turn's own: the question's write, inside its own budget. The
-/// wakes are dispatched without the pump's hook ([`crate::pump`]). Its summon hot key is never a
-/// wake, and the turns run here are not timed by its pair.
-///
-/// This is the system's own move/size loop's shape: the messages are dispatched from inside a
-/// window procedure, and an event loop that is not inside its handler at that moment (winit's,
-/// when this is called from the procedure of a message its pump dispatched) delivers each to the
-/// handler as it comes. Off Windows there is no such queue: nothing runs.
+/// **Whether posted messages wait on this thread's queue** (plan row 201's probe):
+/// `GetQueueStatus(QS_POSTMESSAGE)`'s high word, the kinds of message currently in the queue, read
+/// without a wait and without taking or dispatching anything. The call resets the low word (the
+/// kinds new since the last look), which no wait of this thread reads: winit waits with
+/// `MWMO_INPUTAVAILABLE`, which wakes for anything queued. `None` off Windows, where there is no
+/// such queue.
 #[must_use]
-pub fn drain_what_is_queued(answered: &dyn Fn() -> bool) -> Drained {
+pub fn posted_messages_waiting() -> Option<bool> {
     #[cfg(windows)]
     {
-        windows_session_end::drain_what_is_queued(answered)
+        use windows::Win32::UI::WindowsAndMessaging::{GetQueueStatus, QS_POSTMESSAGE};
+        // SAFETY: no pointer; the call reads this thread's own queue state.
+        let status = unsafe { GetQueueStatus(QS_POSTMESSAGE) };
+        Some(((status >> 16) & QS_POSTMESSAGE.0) != 0)
     }
     #[cfg(not(windows))]
     {
-        drain_with(answered, &mut || false)
+        None
     }
 }
 
@@ -359,17 +305,10 @@ mod windows_session_end {
 
     use windows::Win32::Foundation::{GetLastError, HWND, LPARAM, LRESULT, WPARAM};
     use windows::Win32::System::Shutdown::{ShutdownBlockReasonCreate, ShutdownBlockReasonDestroy};
-    use windows::Win32::System::Threading::GetCurrentThreadId;
     use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
-    use windows::Win32::UI::WindowsAndMessaging::{
-        DispatchMessageW, MSG, PM_QS_POSTMESSAGE, PM_REMOVE, PeekMessageW, PostThreadMessageW,
-        RegisterWindowMessageW,
-    };
     use windows::core::HSTRING;
 
-    use super::{
-        Drained, SessionEnd, answer, arrival_line, drain_with, heard, the_session_really_ends,
-    };
+    use super::{SessionEnd, answer, arrival_line, heard, the_session_really_ends};
     use crate::NativeWindow;
 
     /// "BTSE". Distinct from every other subclass id in this crate.
@@ -483,8 +422,8 @@ mod windows_session_end {
         if let Some(line) = arrival_line(message, wparam.0, lparam.0) {
             crate::stderr_road::say(line);
         }
-        // **The last word, held until the question's write has its answer** (plan row 201). The
-        // hook's own count is taken first: what `ending` runs may drop this window's watch.
+        // **The last word** (plan row 201): what became of the question's save is said and the
+        // log fenced before the answer. The call is on the procedure's own count of the hook.
         if the_session_really_ends(message, wparam.0, lparam.0) {
             let ending = Rc::clone(&hook.ending);
             ending();
@@ -509,72 +448,6 @@ mod windows_session_end {
             Some(answered) => LRESULT(answered),
             None => forwarded,
         }
-    }
-
-    /// **winit's wake, as this session numbers it**: `RegisterWindowMessageW` of
-    /// [`super::WINIT_WAKE_MESSAGE_NAME`], or `None` when the system refused the registration.
-    pub(crate) fn wake_message() -> Option<u32> {
-        let name = HSTRING::from(super::WINIT_WAKE_MESSAGE_NAME);
-        // SAFETY: the name lives across the call; the call only registers it.
-        let message = unsafe { RegisterWindowMessageW(&name) };
-        (message != 0).then_some(message)
-    }
-
-    /// [`super::drain_what_is_queued`] on Windows: the mark posted, then winit's wakes on this
-    /// thread taken in order until the mark, an empty queue or the answer, and a mark left behind
-    /// taken back.
-    pub(super) fn drain_what_is_queued(answered: &dyn Fn() -> bool) -> Drained {
-        let Some(wake) = wake_message() else {
-            return drain_with(answered, &mut || false);
-        };
-        // SAFETY: a thread message to this thread, carrying no pointer.
-        let marked =
-            unsafe { PostThreadMessageW(GetCurrentThreadId(), wake, WPARAM(0), LPARAM(0)) };
-        if marked.is_err() {
-            return drain_with(answered, &mut || false);
-        }
-        let mut at_the_mark = false;
-        let drained = drain_with(answered, &mut || {
-            let mut message = MSG::default();
-            // SAFETY: `message` is a live `MSG` this call fills in; the filter is the wake alone,
-            // and `PM_REMOVE` takes the first of them off this thread's own queue.
-            let taken = unsafe {
-                PeekMessageW(
-                    &raw mut message,
-                    None,
-                    wake,
-                    wake,
-                    PM_REMOVE | PM_QS_POSTMESSAGE,
-                )
-            };
-            if !taken.as_bool() {
-                return false;
-            }
-            // winit posts its wakes to its own window; the mark alone has none.
-            if message.hwnd.is_invalid() {
-                at_the_mark = true;
-                return false;
-            }
-            // SAFETY: `message` was just filled in by `PeekMessageW` and is not read again
-            // before it is refilled.
-            unsafe { DispatchMessageW(&raw const message) };
-            true
-        });
-        if !at_the_mark {
-            let mut message = MSG::default();
-            // SAFETY: as above. A window of -1 takes only the thread's own messages, and under
-            // this name the mark is the only one: winit posts every wake to its window.
-            let _ = unsafe {
-                PeekMessageW(
-                    &raw mut message,
-                    Some(HWND(-1_isize as *mut core::ffi::c_void)),
-                    wake,
-                    wake,
-                    PM_REMOVE | PM_QS_POSTMESSAGE,
-                )
-            };
-        }
-        drained
     }
 
     #[cfg(test)]
@@ -765,182 +638,6 @@ mod windows_session_end {
     }
 }
 
-/// **A stand-in for winit's loop on a test's own thread** (plan row 201, review F3), so that a
-/// test can run the real drain against a real queue. It is a message-only window whose procedure
-/// runs a turn for each wake it is dispatched, as winit's hidden window does, plus a reading of
-/// what is left on the thread's queue. For tests only: `bt-app` reaches it through
-/// `trust-harness` on its dev-dependency, and a build of the shipped program never has it.
-#[cfg(all(windows, any(test, feature = "trust-harness")))]
-pub mod wake_target {
-    use std::cell::RefCell;
-
-    use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
-    use windows::Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, DefWindowProcW, DestroyWindow, HWND_MESSAGE, MSG, PM_QS_POSTMESSAGE,
-        PM_REMOVE, PeekMessageW, PostMessageW, PostQuitMessage, RegisterClassW, WINDOW_EX_STYLE,
-        WINDOW_STYLE, WM_APP, WM_QUIT, WNDCLASSW,
-    };
-    use windows::core::{HSTRING, PCWSTR};
-
-    use super::windows_session_end::wake_message;
-
-    /// One wake's turn. It is handed the window's [`Waker`], so that it can post the next wake,
-    /// as a turn that sends an event does.
-    pub type Turn = Box<dyn FnMut(Waker)>;
-
-    thread_local! {
-        /// The turn of this thread's one target.
-        static TURN: RefCell<Option<Turn>> = const { RefCell::new(None) };
-    }
-
-    /// **What can be posted to a target**, from inside its turn too.
-    #[derive(Clone, Copy, Debug)]
-    pub struct Waker(HWND);
-
-    impl Waker {
-        /// One wake, posted to the window as `EventLoopProxy::send_event` posts it to winit's.
-        pub fn wake(self) {
-            let wake = wake_message().expect("the wake's name registers");
-            // SAFETY: a message to a window of this thread, carrying no pointer.
-            unsafe { PostMessageW(Some(self.0), wake, WPARAM(0), LPARAM(0)) }
-                .expect("the wake is posted");
-        }
-
-        /// A message of another kind (`WM_APP`), posted to the same window: one the drain must
-        /// leave where it is.
-        pub fn post_other(self) {
-            // SAFETY: as above.
-            unsafe { PostMessageW(Some(self.0), WM_APP, WPARAM(0), LPARAM(0)) }
-                .expect("the other message is posted");
-        }
-    }
-
-    /// **The message-only window.** One per thread; dropping it destroys the window.
-    pub struct WakeTarget {
-        hwnd: HWND,
-    }
-
-    impl WakeTarget {
-        /// A window on this thread whose procedure runs `turn` for each wake it is dispatched.
-        ///
-        /// # Errors
-        /// The system refused the window, with its error.
-        pub fn new(turn: Turn) -> Result<Self, String> {
-            let class = HSTRING::from("FolioWakeTargetForTests");
-            let wnd = WNDCLASSW {
-                lpfnWndProc: Some(procedure),
-                lpszClassName: PCWSTR(class.as_ptr()),
-                ..Default::default()
-            };
-            // Registered once per process; a second registration answers zero and the first
-            // class is the one used.
-            // SAFETY: the class name lives across the call.
-            unsafe { RegisterClassW(&wnd) };
-            let title = HSTRING::new();
-            // SAFETY: the strings live across the call; the parent makes it message-only.
-            let hwnd = unsafe {
-                CreateWindowExW(
-                    WINDOW_EX_STYLE(0),
-                    PCWSTR(class.as_ptr()),
-                    PCWSTR(title.as_ptr()),
-                    WINDOW_STYLE(0),
-                    0,
-                    0,
-                    0,
-                    0,
-                    Some(HWND_MESSAGE),
-                    None,
-                    None,
-                    None,
-                )
-            }
-            .map_err(|error| format!("CreateWindowExW(wake target) refused: {error}"))?;
-            TURN.with_borrow_mut(|slot| *slot = Some(turn));
-            Ok(Self { hwnd })
-        }
-
-        /// What posts to this window.
-        #[must_use]
-        pub fn waker(&self) -> Waker {
-            Waker(self.hwnd)
-        }
-    }
-
-    impl Drop for WakeTarget {
-        fn drop(&mut self) {
-            // SAFETY: the window is this thread's own, created above.
-            let _ = unsafe { DestroyWindow(self.hwnd) };
-            TURN.with_borrow_mut(|slot| *slot = None);
-        }
-    }
-
-    /// The target's procedure: a wake runs the turn, everything else is the default's.
-    unsafe extern "system" fn procedure(
-        hwnd: HWND,
-        message: u32,
-        wparam: WPARAM,
-        lparam: LPARAM,
-    ) -> LRESULT {
-        if Some(message) == wake_message() {
-            // Taken out for the call, so that the turn can post without re-entering the cell.
-            if let Some(mut turn) = TURN.with_borrow_mut(Option::take) {
-                turn(Waker(hwnd));
-                TURN.with_borrow_mut(|slot| *slot = Some(turn));
-            }
-            return LRESULT(0);
-        }
-        // SAFETY: the default procedure, for the window it was called for.
-        unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
-    }
-
-    /// `PostQuitMessage(code)` on this thread, as the loop's way out posts it.
-    pub fn post_quit(code: i32) {
-        // SAFETY: no pointer.
-        unsafe { PostQuitMessage(code) };
-    }
-
-    /// **What was left on this thread's queue**, counted by kind.
-    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-    pub struct Queued {
-        /// Wakes posted to a window.
-        pub wakes: usize,
-        /// Wakes posted to the thread itself: the drain's mark.
-        pub marks: usize,
-        /// Every other posted message.
-        pub others: usize,
-        /// The `WM_QUIT` code, when one was queued.
-        pub quit: Option<i32>,
-    }
-
-    /// Every posted message left on this thread's queue, taken off without being dispatched, and
-    /// counted.
-    #[must_use]
-    pub fn take_what_is_left() -> Queued {
-        let wake = wake_message().expect("the wake's name registers");
-        let mut queued = Queued::default();
-        loop {
-            let mut message = MSG::default();
-            // SAFETY: `message` is a live `MSG` this call fills in.
-            let taken = unsafe {
-                PeekMessageW(&raw mut message, None, 0, 0, PM_REMOVE | PM_QS_POSTMESSAGE)
-            };
-            if !taken.as_bool() {
-                return queued;
-            }
-            match message.message {
-                WM_QUIT => {
-                    // `PostQuitMessage` put its `int` into `wParam`; this takes the same `int`.
-                    let code = message.wParam.0 as i32;
-                    queued.quit = Some(code);
-                }
-                id if id == wake && message.hwnd.is_invalid() => queued.marks += 1,
-                id if id == wake => queued.wakes += 1,
-                _ => queued.others += 1,
-            }
-        }
-    }
-}
-
 /// **Off Windows, an ear that hears nothing** — see the module's header: the system's end arrives
 /// as `applicationShouldTerminate:` on macOS, and the caller already answers that.
 #[cfg(not(windows))]
@@ -971,9 +668,9 @@ impl SessionEndWatch {
 #[cfg(test)]
 mod tests {
     use super::{
-        Drained, ENDSESSION_CLOSEAPP, ENDSESSION_CRITICAL, ENDSESSION_LOGOFF, RESTART_FLAGS,
+        ENDSESSION_CLOSEAPP, ENDSESSION_CRITICAL, ENDSESSION_LOGOFF, RESTART_FLAGS,
         RESTART_NO_CRASH, RESTART_NO_HANG, RESTART_NO_PATCH, RESTART_NO_REBOOT, SHUTDOWN_LEVEL,
-        SessionEnd, WM_ENDSESSION, WM_QUERYENDSESSION, answer, arrival_line, drain_with, heard,
+        SessionEnd, WM_ENDSESSION, WM_QUERYENDSESSION, answer, arrival_line, heard,
         the_session_really_ends,
     };
 
@@ -1083,44 +780,6 @@ mod tests {
             "the question"
         );
         assert!(!the_session_really_ends(0x0010, 1, 0), "WM_CLOSE");
-    }
-
-    /// RED (plan row 201) — **the drain runs queued messages until the answer is there or
-    /// nothing queued is left, and runs none once it is.**
-    ///
-    /// Three queues: one whose third message answers (two more stay queued, never run); one that
-    /// runs dry with no answer; and one answered before anything runs.
-    ///
-    /// MUTATION: in `drain_with`, ask `answered` only after `next` says it has nothing left — the
-    /// messages queued behind the answer run too, and an answer is said as none.
-    #[test]
-    fn the_drain_runs_until_the_answer_or_the_end_of_what_was_queued() {
-        let queued = std::cell::Cell::new(5_u32);
-        let ran = std::cell::Cell::new(0_u32);
-        let mut next = || {
-            if queued.get() == 0 {
-                return false;
-            }
-            queued.set(queued.get() - 1);
-            ran.set(ran.get() + 1);
-            true
-        };
-        assert_eq!(drain_with(&|| ran.get() >= 3, &mut next), Drained::Answered);
-        assert_eq!(
-            (ran.get(), queued.get()),
-            (3, 2),
-            "nothing behind the answer runs"
-        );
-
-        ran.set(0);
-        queued.set(2);
-        assert_eq!(drain_with(&|| false, &mut next), Drained::NothingLeft);
-        assert_eq!(ran.get(), 2, "everything queued ran, and then it stopped");
-
-        ran.set(0);
-        queued.set(4);
-        assert_eq!(drain_with(&|| true, &mut next), Drained::Answered);
-        assert_eq!(ran.get(), 0, "an answer already there runs nothing");
     }
 
     /// RED (T-RESTART-REGISTRATION; the coordinator's interim choice, pending the owner's ruling) — **Windows starts Folio again after

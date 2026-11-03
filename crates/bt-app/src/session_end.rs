@@ -31,19 +31,18 @@
 //! `WM_ENDSESSION` says [`Settled::Closed`], and since the session goes on and nobody ends the
 //! process, the loop leaves by itself.
 //!
-//! **And the last word waits for the write** (plan row 201). After `WM_ENDSESSION(TRUE)` returns
-//! the system may end the process, so its procedure calls [`at_the_end`] and answers only after
-//! it. The write is not in flight then: the question's turn blocks this thread until it lands
-//! or its budget runs out, and a message from another process is delivered only while a thread
-//! waits for messages. What can be missing is the turn itself — the end overtook the wake the
-//! question posted, and the turn never ran — and the lines `diagnostics.log` was owed, still in
-//! its writer's queue. So the end runs winit's wakes already queued until the question's turn
-//! has run ([`hold_at_the_end`]). Only the wakes run, and every other message stays queued for the
-//! loop. Nothing is waited for there: the turn's own write waits inside its own budget. The end
-//! then says which road it took and fences the log (`doors::DiagnosticsSettle`, its own bound).
-//! The fence runs once for the process, because the system sends the end to every top-level
-//! window. On the VM reboots of 2026-11-03 Folio was ended about half a second after the question
-//! and neither outcome line was in the log.
+//! **And the last word fences the log** (plan row 201). After `WM_ENDSESSION(TRUE)` returns the
+//! system may end the process, and `fn main`'s fence never runs for a process the system ends: on
+//! the VM reboots of 2026-11-03 Folio was ended about half a second after the question and the
+//! lines `diagnostics.log` was owed were still in its writer's queue. So that procedure calls
+//! [`at_the_end`] before it answers. The end says a probe line (whether one of Folio's winit
+//! callbacks is on the stack, and where the question's wake was), says one line on what became
+//! of the question's save, and fences the log (`doors::DiagnosticsSettle`, its own bound). It does
+//! that once for the process, because the system sends the end to every top-level window. The
+//! question says its own probe line once per span. The end drives nothing of the loop's: a save
+//! the end found not landed stays not landed, and a change made in the last second before the
+//! question stays with the debounced save. Whether the question's turn can be run at the question
+//! is plan row 206's, decided on what these probe lines measure.
 //!
 //! Window-thread state, so a thread-local: the procedure and the loop are the same thread, and a
 //! test on a thread of its own starts with nothing held.
@@ -64,24 +63,45 @@ thread_local! {
     static SETTLED: Cell<bool> = const { Cell::new(false) };
     /// What the system has said and the loop has not read yet, in arrival order.
     static INBOX: RefCell<Vec<SessionEnd>> = const { RefCell::new(Vec::new()) };
-    /// **How this span's question had its turn, once it has** (plan row 201): its own write has
-    /// an answer, or a quit under way writes the layout instead. Set when [`settle`] returns from
-    /// the question, which is after the write's wait; [`SETTLED`] is set before it.
+    /// **What this span's question's save came to, once its turn has settled it** (plan row 201).
+    /// Set when [`settle`] returns from the question, which is after the write's wait; [`SETTLED`]
+    /// is set before it.
     static ANSWER: Cell<Option<Answer>> = const { Cell::new(None) };
+    /// **Where this span's question's wake is** (plan row 201's probe).
+    static WAKE: Cell<Wake> = const { Cell::new(Wake::NeverPosted) };
     /// **Whether this span's end has fenced the log** (plan row 201, review F2). The system sends
     /// `WM_ENDSESSION(TRUE)` to every top-level window, and every window is this thread's, so this
     /// thread's cell is the process's. The first window's end fences, and the rest find it fenced,
-    /// say so and return: at most four seconds for the process, however many windows there are.
+    /// say so and return: one second for the process, however many windows there are.
     static FENCED: Cell<bool> = const { Cell::new(false) };
+    /// **How many of `FolioApp`'s winit callbacks are on this thread's stack, and the innermost**
+    /// (plan row 201's probe; [`in_a_callback`]).
+    static CALLBACKS: Cell<(u32, Option<&'static str>)> = const { Cell::new((0, None)) };
 }
 
-/// **How the question had its turn** (plan row 201).
+/// **What the question's save came to** (plan row 201).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Answer {
-    /// Its own write has an answer: landed, refused or out of its budget.
-    Write,
+    /// Its write landed: the layout is on the disk and `session.lock` is gone.
+    Landed,
+    /// Its write was refused or ran out of its budget.
+    NotLanded,
     /// A quit past its photograph writes the layout, and the end does not drive that write.
     LeftToTheQuit,
+}
+
+/// **Where the question's wake is** (plan row 201's probe): what can be read without a wait.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Wake {
+    /// No question this span, so no wake.
+    NeverPosted,
+    /// The question's post was refused (the loop is gone).
+    Refused,
+    /// Posted, and its turn has not begun: still on the queue, or taken by winit and held while
+    /// its handler is in use.
+    Posted,
+    /// Its turn began: the loop took the news it brought.
+    TurnBegan,
 }
 
 /// **What the system said, on the window procedure's stack.** The question holds the document
@@ -101,6 +121,10 @@ pub(crate) fn holds_the_document() -> bool {
 /// Everything parked, in arrival order, and the inbox left empty.
 #[must_use]
 pub(crate) fn take() -> Vec<SessionEnd> {
+    // The turn the wake brings begins here (plan row 201's probe).
+    if WAKE.with(Cell::get) == Wake::Posted {
+        WAKE.with(|wake| wake.set(Wake::TurnBegan));
+    }
     INBOX.with_borrow_mut(std::mem::take)
 }
 
@@ -159,7 +183,12 @@ pub(crate) fn settle(
             bt_platform::admission::exiting();
             let landed = store.save_for_the_systems_end(asked_at);
             bt_platform::admission::quit_abandoned();
-            ANSWER.with(|answer| answer.set(Some(Answer::Write)));
+            let answer = if landed.is_ok() {
+                Answer::Landed
+            } else {
+                Answer::NotLanded
+            };
+            ANSWER.with(|cell| cell.set(Some(answer)));
             Settled::Saved(landed)
         }
         SessionEnd::Closed => Settled::Closed,
@@ -167,6 +196,7 @@ pub(crate) fn settle(
             HELD.with(|held| held.set(false));
             SETTLED.with(|settled| settled.set(false));
             ANSWER.with(|answer| answer.set(None));
+            WAKE.with(|wake| wake.set(Wake::NeverPosted));
             FENCED.with(|fenced| fenced.set(false));
             store.rearm_after_the_systems_end();
             store.wait_again_after_the_systems_end();
@@ -208,110 +238,179 @@ pub(crate) fn outcome_line(settled: &Settled, document: &bt_persist::SessionV1) 
     }
 }
 
-/// **Whether this span's question has had its turn** (plan row 201): what the end holds its
-/// answer for.
-#[must_use]
-pub(crate) fn the_question_has_its_answer() -> bool {
-    ANSWER.with(Cell::get).is_some()
-}
-
-/// **The road the end took to the question's answer** (plan row 201), said in one line.
+/// **What the end found of the question's save** (plan row 201), said in one line.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Road {
-    /// The question's turn had already run: its write had its answer before the end arrived.
-    AlreadyRan,
-    /// The end overtook the question's wake; running the queued wakes ran the turn.
-    RanItHere,
-    /// The end overtook the question's wake, and the wakes queued did not run the turn — the
-    /// loop was inside its own handler when the question came (which holds the wake for after),
-    /// or no question came.
-    CouldNotRun,
+    /// The question's write landed before the end.
+    Landed,
+    /// The question was asked and no turn has written its save: no write was made at the
+    /// question.
+    TurnNotRun,
+    /// The question's turn ran, and its write was refused or ran out of its budget.
+    NotLanded,
     /// The question's turn found a quit past its photograph, which writes the layout; the end
-    /// does not drive that write (review N3), before the drain or after it.
+    /// does not drive that write (review N3).
     LeftToTheQuit,
-    /// An earlier window's end was held for and fenced the log (review F2): nothing more here.
+    /// No question came before the end.
+    NeverAsked,
+    /// An earlier window's end fenced the log (review F2): nothing more here.
     FencedBefore,
 }
 
-/// **The one line `diagnostics.log` is owed about the road the end took** (plan row 201).
+/// **The one line `diagnostics.log` is owed about the question's save at the end** (plan row 201).
 #[must_use]
 pub(crate) fn road_line(road: Road) -> &'static str {
     match road {
-        Road::AlreadyRan => {
-            "BT_SESSION_END WM_ENDSESSION(TRUE): the question's turn had already run"
+        Road::Landed => "BT_SESSION_END WM_ENDSESSION(TRUE): the question's save had landed",
+        Road::TurnNotRun => {
+            "BT_SESSION_END WM_ENDSESSION(TRUE): the question's save had not landed: its turn had \
+             not written it"
         }
-        Road::RanItHere => {
-            "BT_SESSION_END WM_ENDSESSION(TRUE): the question's turn had not run; the wakes \
-             already queued ran it"
-        }
-        Road::CouldNotRun => {
-            "BT_SESSION_END WM_ENDSESSION(TRUE): the question's turn had not run, and the wakes \
-             already queued did not run it"
+        Road::NotLanded => {
+            "BT_SESSION_END WM_ENDSESSION(TRUE): the question's save had not landed: its write was \
+             refused or ran out of its budget"
         }
         Road::LeftToTheQuit => {
-            "BT_SESSION_END WM_ENDSESSION(TRUE): the question was left to the quit under way, \
-             whose write the end does not drive"
+            "BT_SESSION_END WM_ENDSESSION(TRUE): the question's save was left to the quit under way"
+        }
+        Road::NeverAsked => {
+            "BT_SESSION_END WM_ENDSESSION(TRUE): the question's save was never asked"
         }
         Road::FencedBefore => {
-            "BT_SESSION_END WM_ENDSESSION(TRUE): an earlier window's end was held for and fenced \
-             the log"
+            "BT_SESSION_END WM_ENDSESSION(TRUE): an earlier window's end fenced the log"
         }
     }
 }
 
-/// **Hold the end until the question has had its turn** (plan row 201): at once when it has;
-/// otherwise `drain` runs winit's wakes already queued on this thread — the question's among
-/// them — until the answer is there (it says whether it is). Nothing here waits: the bound of a
-/// write the turn runs is that write's own budget, and a budget already spent is not spent again.
-pub(crate) fn hold_at_the_end(drain: &mut dyn FnMut(&dyn Fn() -> bool) -> bool) -> Road {
-    let ran_here = !the_question_has_its_answer();
-    if ran_here && !drain(&the_question_has_its_answer) {
-        return Road::CouldNotRun;
-    }
+/// **What the end finds of the question's save** (plan row 201), read from this span's state.
+#[must_use]
+pub(crate) fn the_road() -> Road {
     match ANSWER.with(Cell::get) {
+        Some(Answer::Landed) => Road::Landed,
+        Some(Answer::NotLanded) => Road::NotLanded,
         Some(Answer::LeftToTheQuit) => Road::LeftToTheQuit,
-        _ if ran_here => Road::RanItHere,
-        _ => Road::AlreadyRan,
+        None if holds_the_document() => Road::TurnNotRun,
+        None => Road::NeverAsked,
     }
 }
 
-/// **The end's whole rule** (plan row 201): [`hold_at_the_end`], the road said, and then the
-/// fence, so that every line said before it — the question's outcome among them — is on the
-/// disk before the answer lets the system end the process. Once for the process: a later
+/// **What the probe reads, at either message** (plan row 201): whether one of `FolioApp`'s winit
+/// callbacks is on the stack, where the question's wake is, and whether posted messages wait on
+/// the queue. Nothing in it waits.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct Probe {
+    /// How many of `FolioApp`'s winit callbacks are on the stack, and the innermost.
+    pub(crate) callbacks: (u32, Option<&'static str>),
+    /// Where the question's wake is.
+    pub(crate) wake: Wake,
+    /// Whether posted messages wait on the thread's queue; `None` where there is no such queue.
+    pub(crate) queued: Option<bool>,
+}
+
+impl Probe {
+    /// What the probe reads now, on this thread.
+    #[must_use]
+    pub(crate) fn now() -> Self {
+        Self {
+            callbacks: CALLBACKS.with(Cell::get),
+            wake: WAKE.with(Cell::get),
+            queued: bt_platform::session_end::posted_messages_waiting(),
+        }
+    }
+}
+
+/// **The probe's line** (plan row 201), for `message` (`WM_QUERYENDSESSION` or
+/// `WM_ENDSESSION(TRUE)`).
+#[must_use]
+pub(crate) fn probe_line(message: &str, probe: &Probe) -> String {
+    let callbacks = match probe.callbacks {
+        (0, _) | (_, None) => probe.callbacks.0.to_string(),
+        (count, Some(innermost)) => format!("{count} (innermost {innermost})"),
+    };
+    let wake = match probe.wake {
+        Wake::NeverPosted => "never posted",
+        Wake::Refused => "its post refused",
+        Wake::Posted => "posted, its turn not begun",
+        Wake::TurnBegan => "taken by its turn",
+    };
+    let queued = match probe.queued {
+        Some(true) => "yes",
+        Some(false) => "no",
+        None => "unknown",
+    };
+    format!(
+        "BT_SESSION_END probe at {message}: Folio's winit callbacks on the stack: {callbacks}; the \
+         question's wake: {wake}; posted messages queued: {queued}"
+    )
+}
+
+/// **The question's wake was posted, or refused**, on the window procedure's stack (plan row 201):
+/// called right after [`hear`] with whether `send_event` took it. For the first question of a span
+/// it records the wake and says the question's probe line through `say`; it does nothing for any
+/// other news, or for the same question sent to the next window.
+pub(crate) fn posted_with(end: SessionEnd, taken: bool, say: &mut dyn FnMut(&str)) {
+    if end != SessionEnd::Asked || WAKE.with(Cell::get) != Wake::NeverPosted {
+        return;
+    }
+    WAKE.with(|wake| wake.set(if taken { Wake::Posted } else { Wake::Refused }));
+    say(&probe_line("WM_QUERYENDSESSION", &Probe::now()));
+}
+
+/// [`posted_with`], said to `diagnostics.log`.
+pub(crate) fn posted(end: SessionEnd, taken: bool) {
+    posted_with(end, taken, &mut crate::diagnostics::note);
+}
+
+/// **The end's whole rule** (plan row 201): the probe line, the line on the question's save, and
+/// then the fence, so that every line said before it — the question's outcome among them — is on
+/// the disk before the answer lets the system end the process. Once for the process: a later
 /// window's end finds the log fenced ([`FENCED`]), says so and holds nothing (review F2).
-pub(crate) fn end_with(
-    drain: &mut dyn FnMut(&dyn Fn() -> bool) -> bool,
-    say: &mut dyn FnMut(&str),
-    fence: &mut dyn FnMut(),
-) -> Road {
+pub(crate) fn end_with(probe: &Probe, say: &mut dyn FnMut(&str), fence: &mut dyn FnMut()) -> Road {
     if FENCED.with(Cell::get) {
         say(road_line(Road::FencedBefore));
         return Road::FencedBefore;
     }
-    let road = hold_at_the_end(drain);
+    let road = the_road();
+    say(&probe_line("WM_ENDSESSION(TRUE)", probe));
     say(road_line(road));
     fence();
     FENCED.with(|fenced| fenced.set(true));
     road
 }
 
-/// **`WM_ENDSESSION(TRUE)`, on the window procedure's stack** (plan row 201): [`end_with`] over
-/// this thread's queue, `diagnostics.log` and its fence. Answers the road it took.
+/// **`WM_ENDSESSION(TRUE)`, on the window procedure's stack** (plan row 201): [`end_with`] with
+/// what the probe reads now, `diagnostics.log` and its fence. Answers the road it found.
 pub(crate) fn at_the_end() -> Road {
     end_with(
-        &mut |answered| {
-            bt_platform::session_end::drain_what_is_queued(answered)
-                == bt_platform::session_end::Drained::Answered
-        },
+        &Probe::now(),
         &mut crate::diagnostics::note,
         &mut fence_the_log,
     )
 }
 
+/// **One of `FolioApp`'s winit callbacks, on the stack** (plan row 201's probe): counted from here
+/// until the guard drops, with `name` the innermost while it stands.
+#[must_use]
+pub(crate) fn in_a_callback(name: &'static str) -> InACallback {
+    let outer = CALLBACKS.with(Cell::get);
+    CALLBACKS.with(|callbacks| callbacks.set((outer.0 + 1, Some(name))));
+    InACallback { outer }
+}
+
+/// The guard [`in_a_callback`] answers: dropping it puts the count and the innermost back.
+pub(crate) struct InACallback {
+    outer: (u32, Option<&'static str>),
+}
+
+impl Drop for InACallback {
+    fn drop(&mut self) {
+        CALLBACKS.with(|callbacks| callbacks.set(self.outer));
+    }
+}
+
 /// **Everything said so far, on the disk**: the process is on its way out — the system may end it
 /// once the end is answered — and `diagnostics.log`'s fence is admitted there, within its own
-/// bound (`SETTLE_WITHIN`; ruled 2026-11-03, plan row 201: after the write's budget, at most four
-/// seconds in all, once for the process).
+/// bound (`SETTLE_WITHIN`, one second; ruled 2026-11-03, plan row 201: once for the process).
 fn fence_the_log() {
     bt_platform::admission::exiting();
     let _ =
@@ -325,6 +424,7 @@ pub(crate) fn forget() {
     HELD.with(|held| held.set(false));
     SETTLED.with(|settled| settled.set(false));
     ANSWER.with(|answer| answer.set(None));
+    WAKE.with(|wake| wake.set(Wake::NeverPosted));
     FENCED.with(|fenced| fenced.set(false));
     INBOX.with_borrow_mut(Vec::clear);
 }

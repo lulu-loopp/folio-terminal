@@ -34200,14 +34200,14 @@ fn new_window_runtime<B: Backend>(parts: NewWindowParts<B>) -> WindowRuntime<B> 
     // system sends the question to holds the document and parks the news; the wake brings the
     // turn that writes it. One per window because the question is sent to every top-level window,
     // and one answer is as good as another: the hold is set once and the write is idempotent.
-    // The last word, `WM_ENDSESSION(TRUE)`, is answered only after `session_end::at_the_end`: the
-    // question's turn run if the end overtook its wake, and the log fenced (plan row 201).
+    // The last word, `WM_ENDSESSION(TRUE)`, is answered only after `session_end::at_the_end`: a
+    // probe line, a line on the question's save, and the log fenced (plan row 201).
     let session_end_watch = {
         let proxy = event_proxy.clone();
         window.watch_session_end(
             Box::new(move |end| {
                 session_end::hear(end);
-                let _ = proxy.send_event(AppEvent::SessionEnding);
+                session_end::posted(end, proxy.send_event(AppEvent::SessionEnding).is_ok());
             }),
             Box::new(|| i18n::Text::ShutdownSavingWork.text().to_owned()),
             std::rc::Rc::new(|| _ = session_end::at_the_end()),
@@ -51688,6 +51688,7 @@ mod resident_run_tests {
 
 impl ApplicationHandler<AppEvent> for FolioApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        let _callback = session_end::in_a_callback("resumed");
         if self.app.is_some() {
             return;
         }
@@ -51784,6 +51785,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: AppEvent) {
+        let _callback = session_end::in_a_callback("user_event");
         if matches!(
             event,
             AppEvent::QuakeSummoned | AppEvent::NotificationClicked
@@ -52317,6 +52319,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
         window_id: WindowId,
         event: WindowEvent,
     ) {
+        let _callback = session_end::in_a_callback("window_event");
         self.on_window_event(event_loop, window_id, event);
     }
 
@@ -52340,6 +52343,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
         // took any of those states for a stopped pump would file a report on a
         // program that is working.
         hang_watch::beat();
+        let _callback = session_end::in_a_callback("about_to_wait");
         present_diagnostics::turn();
         hang_watch::run_selftest_if_due();
         panic_selftest_if_due();
@@ -52357,6 +52361,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
     /// hang, and would be excused by the deadline it was parked with if the
     /// parking outlived the park.
     fn new_events(&mut self, _event_loop: &ActiveEventLoop, cause: StartCause) {
+        let _callback = session_end::in_a_callback("new_events");
         // The cause is the turn census's (T-IDLE-TURN-COST): what woke this turn.
         hang_watch::woke(match cause {
             StartCause::ResumeTimeReached { .. } => hang_watch::WakeCause::ResumeTimeReached,
@@ -52371,6 +52376,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        let _callback = session_end::in_a_callback("exiting");
         // **A spare still standing is abandoned** (ticket 60, SW-2): the loop is stopping, and a
         // thread that has stopped pumping is not one to wait on its browser with.
         if let Some(app) = self.app.as_mut() {

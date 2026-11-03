@@ -220,8 +220,7 @@ enum AtTheEnd {
 }
 
 /// **The question's turn as the loop's wake brings it**: every piece of parked news settled on
-/// `store`, the outcome said as `FolioApp::settle_session_end_keeping_in` says it — the turn the
-/// end's drain runs when it finds the wake still queued (plan row 201).
+/// `store`, the outcome said as `FolioApp::settle_session_end_keeping_in` says it (plan row 201).
 fn the_questions_turn(
     store: &mut persist::SessionStore,
     asked_at: Instant,
@@ -235,27 +234,53 @@ fn the_questions_turn(
     }
 }
 
-/// RED (plan row 201) — **`WM_ENDSESSION(TRUE)` that overtakes the question's wake is answered
-/// only after the question's turn has run: the last-second change is on the disk, the sentinel
-/// is gone, and the outcome line and the end's own line are said before the log's fence.**
+/// The question as the window procedure hears it: the platform's answer and `hear`, then the
+/// wake taken, and the question's probe line said into `done`.
+fn the_system_asks_and_the_wake_is_posted(done: &std::cell::RefCell<Vec<AtTheEnd>>) {
+    assert_eq!(the_system_asks(), Some(1), "the question is answered TRUE");
+    session_end::posted_with(SessionEnd::Asked, true, &mut |line| {
+        done.borrow_mut().push(AtTheEnd::Said(line.to_owned()));
+    });
+}
+
+/// A probe as the end might read it, so that its line is known.
+const AT_THE_END: session_end::Probe = session_end::Probe {
+    callbacks: (0, None),
+    wake: session_end::Wake::TurnBegan,
+    queued: Some(false),
+};
+
+/// The end's probe line for [`AT_THE_END`].
+const AT_THE_END_LINE: &str = "BT_SESSION_END probe at WM_ENDSESSION(TRUE): Folio's winit \
+                               callbacks on the stack: 0; the question's wake: taken by its \
+                               turn; posted messages queued: no";
+
+/// The end, with its lines and fence recorded into `done`.
+fn the_end(done: &std::cell::RefCell<Vec<AtTheEnd>>) -> session_end::Road {
+    session_end::end_with(
+        &AT_THE_END,
+        &mut |line| done.borrow_mut().push(AtTheEnd::Said(line.to_owned())),
+        &mut || done.borrow_mut().push(AtTheEnd::Fenced),
+    )
+}
+
+/// RED (plan row 201) — **the question writes the last change and drops the sentinel, and the end
+/// says its probe line and what became of the question's save before it fences the log.**
 ///
 /// Both VM reboots of 2026-11-03 ended Folio about half a second after the question, with no
-/// outcome line in the log. Here the two messages arrive with no loop turn between them: the
-/// question (the real platform answer and `hear`), then the end, whose drain finds the question's
-/// wake still queued and runs it. The change was recorded a moment before the question, inside
-/// the debounce's quiet window, so no debounced save carried it: only the question's write can
-/// put it on the disk. The turn's instant is the test's own (`asked`), and the write's wait is
-/// the store's own budget (the suite's patience); nothing in the end waits.
+/// outcome line in the log: what the log was owed was still in its writer's queue. Here a change
+/// is recorded inside the debounce's quiet window, so no debounced save carried it; the question
+/// comes and its turn writes it (the turn's instant and the write's budget are the test's own);
+/// then the end. Every line said from the question on comes before the fence, in order.
 ///
-/// MUTATION (plant `plant-201-a-the-end-returns-at-once.py`): `hold_at_the_end` answers at once
-/// without running the queued turn — the file is absent (the first assertion), the sentinel
-/// stands, no outcome line.
-/// MUTATION (plant `plant-201-b-the-end-does-not-fence.py`): drop the `fence()` call in
-/// `end_with` — the lines are said and never fenced.
+/// MUTATION (plant `plant-201-a-the-end-says-no-road-line.py`): `end_with` drops the line on the
+/// question's save — the order has no road line. MUTATION (plant
+/// `plant-201-b-the-end-does-not-fence.py`): `end_with` drops `fence()` — the lines are said
+/// and never fenced.
 #[test]
-fn the_end_runs_the_questions_turn_and_fences_the_log_before_it_answers() {
+fn the_question_writes_and_the_end_says_its_probe_and_road_and_fences_the_log() {
     on_the_window_thread();
-    let home = EndSessionHome::new("end-runs-the-turn");
+    let home = EndSessionHome::new("end-fences-the-log");
     let mut store = persist::SessionStore::armed_at(home.session(), home.sentinel());
     store.set_save_budget(crate::lane::PATIENCE);
     let last_second = shells_document(&home.0, 2);
@@ -264,103 +289,90 @@ fn the_end_runs_the_questions_turn_and_fences_the_log_before_it_answers() {
         !home.session().exists(),
         "the change is inside its quiet window: nothing has written it"
     );
-    assert_eq!(the_system_asks(), Some(1), "the question is answered TRUE");
-
-    let asked = Instant::now();
     let done = std::cell::RefCell::new(Vec::new());
-    let mut drained = 0_u32;
-    let road = session_end::end_with(
-        &mut |answered| {
-            assert!(!answered(), "the end came before the question's turn");
-            drained += 1;
-            the_questions_turn(&mut store, asked, &done);
-            answered()
-        },
-        &mut |line| done.borrow_mut().push(AtTheEnd::Said(line.to_owned())),
-        &mut || done.borrow_mut().push(AtTheEnd::Fenced),
-    );
-
-    // The effect first (review N1): an end that answers without the turn fails here, on the
-    // write it lost, before anything is read about the road it says it took.
+    the_system_asks_and_the_wake_is_posted(&done);
+    the_questions_turn(&mut store, Instant::now(), &done);
     assert_eq!(
         windows_on_disk(&home.session()),
         last_second.windows,
-        "the last-second change is on the disk when the end is answered"
+        "the question's turn wrote the last change"
     );
     assert!(!home.sentinel().exists(), "and the run's clean exit stands");
-    assert_eq!(road, session_end::Road::RanItHere);
-    assert_eq!(drained, 1, "the queued wakes ran once");
+
+    let road = the_end(&done);
+    assert_eq!(road, session_end::Road::Landed);
+    let said = done.into_inner();
+    let Some(AtTheEnd::Said(question_probe)) = said.first() else {
+        panic!("the question's probe line comes first: {said:?}");
+    };
+    assert!(
+        question_probe.starts_with(
+            "BT_SESSION_END probe at WM_QUERYENDSESSION: Folio's winit callbacks on the stack: 0; \
+             the question's wake: posted, its turn not begun; posted messages queued: "
+        ),
+        "{question_probe}"
+    );
     assert_eq!(
-        done.into_inner(),
-        vec![
+        said[1..],
+        [
             AtTheEnd::Said(
                 "Folio: the session is ending and its layout was saved: windows 1, tabs 2, \
                  pinned 2"
                     .to_owned()
             ),
+            AtTheEnd::Said(AT_THE_END_LINE.to_owned()),
             AtTheEnd::Said(
-                "BT_SESSION_END WM_ENDSESSION(TRUE): the question's turn had not run; the \
-                 wakes already queued ran it"
-                    .to_owned()
+                "BT_SESSION_END WM_ENDSESSION(TRUE): the question's save had landed".to_owned()
             ),
             AtTheEnd::Fenced,
         ],
-        "the outcome, then the road, then the fence"
+        "the outcome, then the end's probe, then the road, then the fence"
     );
 }
 
-/// RED (plan row 201) — **an end that finds the question's turn already run runs nothing, says
-/// so and fences; one whose write ran out of its budget does not spend it again.**
+/// RED (plan row 201) — **the end says what became of the question's save on every road it can
+/// find, and fences each time**: a question whose turn never ran, a write that ran out of its
+/// budget, a question left to a quit under way (review N3), and no question at all. Each is a
+/// span of its own (a home of its own forgets the last).
 ///
-/// The first span: the question's turn runs first (the usual order: it holds the window thread
-/// until its write lands, so the end cannot be dispatched before). The second: the storage
-/// worker is held and the write's budget is zero, so the question's write did not finish — the
-/// end does not wait for it again. The second home forgets the first's news, so it is a span of
-/// its own.
-///
-/// MUTATION: in `hold_at_the_end`, take `ran_here` as true whatever the answer — the end runs
-/// the queue again, and the drain below is called.
+/// MUTATION: in `the_road`, answer `Landed` for a question with no answer — the turn that never
+/// ran is said as a landed save.
 #[test]
-fn the_end_after_the_questions_turn_runs_nothing_and_does_not_wait_again() {
+fn the_end_says_what_became_of_the_questions_save_on_every_road() {
     on_the_window_thread();
-    let home = EndSessionHome::new("end-after-the-turn");
-    let mut store = persist::SessionStore::armed_at(home.session(), home.sentinel());
-    store.set_save_budget(crate::lane::PATIENCE);
-    record_as_the_app_does(&mut store, shells_document(&home.0, 2));
-    assert_eq!(the_system_asks(), Some(1));
-    let done = std::cell::RefCell::new(Vec::new());
-    the_questions_turn(&mut store, Instant::now(), &done);
-    let mut unexpected = |_: &dyn Fn() -> bool| -> bool {
-        panic!("the question's turn had run: nothing is drained")
+    let said_at_the_end = |done: std::cell::RefCell<Vec<AtTheEnd>>| -> Vec<AtTheEnd> {
+        done.into_inner()
+            .into_iter()
+            .filter(|entry| match entry {
+                AtTheEnd::Said(line) => line.starts_with("BT_SESSION_END WM_ENDSESSION(TRUE)"),
+                AtTheEnd::Fenced => true,
+            })
+            .collect()
     };
-    let road = session_end::end_with(
-        &mut unexpected,
-        &mut |line| done.borrow_mut().push(AtTheEnd::Said(line.to_owned())),
-        &mut || done.borrow_mut().push(AtTheEnd::Fenced),
-    );
-    assert_eq!(road, session_end::Road::AlreadyRan);
+    let road = |text: &str| AtTheEnd::Said(format!("BT_SESSION_END WM_ENDSESSION(TRUE): {text}"));
+
+    // Asked, and the turn never ran: nothing written, the sentinel stands.
+    let home = EndSessionHome::new("end-turn-not-run");
+    let mut store = persist::SessionStore::armed_at(home.session(), home.sentinel());
+    record_as_the_app_does(&mut store, shells_document(&home.0, 2));
+    let done = std::cell::RefCell::new(Vec::new());
+    the_system_asks_and_the_wake_is_posted(&done);
+    assert_eq!(the_end(&done), session_end::Road::TurnNotRun);
     assert_eq!(
-        done.into_inner(),
+        said_at_the_end(done),
         vec![
-            AtTheEnd::Said(
-                "Folio: the session is ending and its layout was saved: windows 1, tabs 2, \
-                 pinned 2"
-                    .to_owned()
-            ),
-            AtTheEnd::Said(
-                "BT_SESSION_END WM_ENDSESSION(TRUE): the question's turn had already run"
-                    .to_owned()
-            ),
-            AtTheEnd::Fenced,
+            road("the question's save had not landed: its turn had not written it"),
+            AtTheEnd::Fenced
         ]
     );
-    assert_eq!(
-        windows_on_disk(&home.session()),
-        shells_document(&home.0, 2).windows
+    assert!(!home.session().exists(), "nothing was written");
+    assert!(
+        home.sentinel().is_file(),
+        "and the next start offers the layout back"
     );
 
-    // A second home: the storage worker held, the write's budget zero.
-    let stalled = EndSessionHome::new("end-after-a-spent-budget");
+    // The storage worker held and the budget zero: the question's write ran out of it.
+    let stalled = EndSessionHome::new("end-not-landed");
     let gate = std::sync::Arc::new(crate::lane::Gate::default());
     gate.hold();
     let mut store = persist::SessionStore::at_waking_started_by(
@@ -371,73 +383,53 @@ fn the_end_after_the_questions_turn_runs_nothing_and_does_not_wait_again() {
     );
     store.set_save_budget(Duration::ZERO);
     record_as_the_app_does(&mut store, shells_document(&stalled.0, 2));
-    assert_eq!(the_system_asks(), Some(1));
-    let settled: Vec<_> = session_end::take()
-        .into_iter()
-        .map(|end| session_end::settle(end, &mut store, false, Instant::now()))
-        .collect();
-    assert!(
-        matches!(
-            settled.as_slice(),
-            [session_end::Settled::Saved(Err(
-                persist::SaveRefusal::TimedOut(_)
-            ))]
-        ),
-        "the question's write ran out of its budget: {settled:?}"
-    );
-    let mut said = Vec::new();
-    let road = session_end::end_with(
-        &mut unexpected,
-        &mut |line| said.push(line.to_owned()),
-        &mut || {},
-    );
-    assert_eq!(
-        road,
-        session_end::Road::AlreadyRan,
-        "a spent budget is an answer, and it is not spent again"
-    );
-    assert_eq!(said.len(), 1);
-    gate.release();
-}
-
-/// RED (plan row 201) — **an end whose queued messages did not run the question's turn says so,
-/// and still fences.** The loop was inside its own handler when the question came, so the wake
-/// waits for after the end (winit holds an event that arrives inside its handler): the drain
-/// runs what is queued and finds no answer. Nothing is written; the sentinel stands, and the next
-/// start offers the layout back.
-///
-/// MUTATION: in `hold_at_the_end`, answer `RanItHere` whatever the drain says — the log says the
-/// turn ran when it did not.
-#[test]
-fn the_end_says_when_the_queued_messages_did_not_run_the_questions_turn() {
-    on_the_window_thread();
-    let home = EndSessionHome::new("end-could-not-run");
-    let mut store = persist::SessionStore::armed_at(home.session(), home.sentinel());
-    store.set_save_budget(crate::lane::PATIENCE);
-    record_as_the_app_does(&mut store, shells_document(&home.0, 2));
-    assert_eq!(the_system_asks(), Some(1));
     let done = std::cell::RefCell::new(Vec::new());
-    let road = session_end::end_with(
-        &mut |answered| answered(),
-        &mut |line| done.borrow_mut().push(AtTheEnd::Said(line.to_owned())),
-        &mut || done.borrow_mut().push(AtTheEnd::Fenced),
-    );
-    assert_eq!(road, session_end::Road::CouldNotRun);
+    the_system_asks_and_the_wake_is_posted(&done);
+    the_questions_turn(&mut store, Instant::now(), &done);
+    assert_eq!(the_end(&done), session_end::Road::NotLanded);
     assert_eq!(
-        done.into_inner(),
+        said_at_the_end(done),
         vec![
-            AtTheEnd::Said(
-                "BT_SESSION_END WM_ENDSESSION(TRUE): the question's turn had not run, and the \
-                 wakes already queued did not run it"
-                    .to_owned()
+            road(
+                "the question's save had not landed: its write was refused or ran out of its \
+                 budget"
             ),
-            AtTheEnd::Fenced,
+            AtTheEnd::Fenced
         ]
     );
-    assert!(!home.session().exists(), "nothing was written");
-    assert!(
-        home.sentinel().is_file(),
-        "and the next start offers the layout back"
+    gate.release();
+
+    // A quit past its photograph writes the layout.
+    let quitting = EndSessionHome::new("end-left-to-the-quit");
+    let mut store = persist::SessionStore::armed_at(quitting.session(), quitting.sentinel());
+    record_as_the_app_does(&mut store, shells_document(&quitting.0, 2));
+    let done = std::cell::RefCell::new(Vec::new());
+    the_system_asks_and_the_wake_is_posted(&done);
+    for end in session_end::take() {
+        assert_eq!(
+            session_end::settle(end, &mut store, true, Instant::now()),
+            session_end::Settled::LeftToTheQuit
+        );
+    }
+    assert_eq!(the_end(&done), session_end::Road::LeftToTheQuit);
+    assert_eq!(
+        said_at_the_end(done),
+        vec![
+            road("the question's save was left to the quit under way"),
+            AtTheEnd::Fenced
+        ]
+    );
+
+    // No question at all.
+    let _unasked = EndSessionHome::new("end-never-asked");
+    let done = std::cell::RefCell::new(Vec::new());
+    assert_eq!(the_end(&done), session_end::Road::NeverAsked);
+    assert_eq!(
+        said_at_the_end(done),
+        vec![
+            road("the question's save was never asked"),
+            AtTheEnd::Fenced
+        ]
     );
 }
 
@@ -445,9 +437,9 @@ fn the_end_says_when_the_queued_messages_did_not_run_the_questions_turn() {
 /// windows hear it; a shutdown taken back opens a span that fences again.**
 ///
 /// The system sends `WM_ENDSESSION(TRUE)` to every top-level window, and a starved log writer
-/// makes each fence wait out its second: three windows would have held the answer six seconds.
-/// Here three windows hear one end. The first holds and fences; the other two say the log was
-/// fenced and return. Then the shutdown is taken back and asked again, and the next end fences.
+/// makes each fence wait out its second. Here three windows hear one end: the first says its probe
+/// and road lines and fences; the other two say the log was fenced and return. Then the shutdown
+/// is taken back and asked again, and the next end fences.
 ///
 /// MUTATION: in `end_with`, drop the `FENCED` check — every window fences again. Drop the
 /// `FENCED` reset on `TakenBack` in `settle` — the next span's end fences nothing.
@@ -458,51 +450,34 @@ fn the_end_fences_the_log_once_however_many_windows_hear_it() {
     let mut store = persist::SessionStore::armed_at(home.session(), home.sentinel());
     store.set_save_budget(crate::lane::PATIENCE);
     record_as_the_app_does(&mut store, shells_document(&home.0, 2));
-    assert_eq!(the_system_asks(), Some(1));
+    let asked = std::cell::RefCell::new(Vec::new());
+    the_system_asks_and_the_wake_is_posted(&asked);
+    the_questions_turn(&mut store, Instant::now(), &asked);
     let done = std::cell::RefCell::new(Vec::new());
-    the_questions_turn(&mut store, Instant::now(), &done);
-    let mut unexpected = |_: &dyn Fn() -> bool| -> bool {
-        panic!("the question's turn had run: nothing is drained")
-    };
-    let roads: Vec<_> = (0..3)
-        .map(|_window| {
-            session_end::end_with(
-                &mut unexpected,
-                &mut |line| done.borrow_mut().push(AtTheEnd::Said(line.to_owned())),
-                &mut || done.borrow_mut().push(AtTheEnd::Fenced),
-            )
-        })
-        .collect();
+    let roads: Vec<_> = (0..3).map(|_window| the_end(&done)).collect();
     assert_eq!(
         roads,
         vec![
-            session_end::Road::AlreadyRan,
+            session_end::Road::Landed,
             session_end::Road::FencedBefore,
             session_end::Road::FencedBefore,
         ]
     );
     let fenced_before = AtTheEnd::Said(
-        "BT_SESSION_END WM_ENDSESSION(TRUE): an earlier window's end was held for and fenced the \
-         log"
-        .to_owned(),
+        "BT_SESSION_END WM_ENDSESSION(TRUE): an earlier window's end fenced the log".to_owned(),
     );
     assert_eq!(
         done.take(),
         vec![
+            AtTheEnd::Said(AT_THE_END_LINE.to_owned()),
             AtTheEnd::Said(
-                "Folio: the session is ending and its layout was saved: windows 1, tabs 2, \
-                 pinned 2"
-                    .to_owned()
-            ),
-            AtTheEnd::Said(
-                "BT_SESSION_END WM_ENDSESSION(TRUE): the question's turn had already run"
-                    .to_owned()
+                "BT_SESSION_END WM_ENDSESSION(TRUE): the question's save had landed".to_owned()
             ),
             AtTheEnd::Fenced,
             fenced_before.clone(),
             fenced_before,
         ],
-        "one fence for the three windows"
+        "one probe, one road line and one fence for the three windows"
     );
 
     // Taken back, then asked again: a span of its own, whose end fences.
@@ -518,156 +493,93 @@ fn the_end_fences_the_log_once_however_many_windows_hear_it() {
     for end in session_end::take() {
         let _ = session_end::settle(end, &mut store, false, Instant::now());
     }
-    assert_eq!(the_system_asks(), Some(1));
-    the_questions_turn(&mut store, Instant::now(), &done);
+    the_system_asks_and_the_wake_is_posted(&asked);
+    the_questions_turn(&mut store, Instant::now(), &asked);
     let mut fences = 0_u32;
-    let road = session_end::end_with(&mut unexpected, &mut |_| {}, &mut || fences += 1);
-    assert_eq!(road, session_end::Road::AlreadyRan);
+    let road = session_end::end_with(&AT_THE_END, &mut |_| {}, &mut || fences += 1);
+    assert_eq!(road, session_end::Road::Landed);
     assert_eq!(fences, 1, "the next span's end fences again");
 }
 
-/// RED (plan row 201, review N3) — **an end during a quit past its photograph says that the quit
-/// writes the layout**, not that the question's turn ran: the quit's write is `about_to_wait`'s,
-/// and the end does not drive it.
+/// RED (plan row 201) — **the probe counts `FolioApp`'s winit callbacks on the stack, follows the
+/// question's wake from its post to its turn, and the question's probe line is said once per
+/// span.**
 ///
-/// MUTATION: in `hold_at_the_end`, drop the `LeftToTheQuit` arm — the end says the question's
-/// turn had already run.
+/// The probe is plan row 206's evidence: whether the question can arrive inside one of Folio's
+/// callbacks, and whether its wake was still queued, held by winit or taken by its turn when the
+/// end came.
+///
+/// MUTATION: in `InACallback::drop`, leave the count where it is — the stack reads 1 after the
+/// callback returned. In `posted_with`, drop the `NeverPosted` check — the second window's
+/// question says a second probe line. In `take`, leave the wake `Posted` — the turn that took it
+/// is never seen.
 #[test]
-fn the_end_during_a_quit_says_the_quit_writes_the_layout() {
+fn the_probe_counts_folios_callbacks_and_follows_the_questions_wake() {
     on_the_window_thread();
-    let home = EndSessionHome::new("end-during-a-quit");
-    let mut store = persist::SessionStore::armed_at(home.session(), home.sentinel());
-    record_as_the_app_does(&mut store, shells_document(&home.0, 2));
-    assert_eq!(the_system_asks(), Some(1));
-    let settled: Vec<_> = session_end::take()
-        .into_iter()
-        .map(|end| session_end::settle(end, &mut store, true, Instant::now()))
-        .collect();
-    assert_eq!(settled, vec![session_end::Settled::LeftToTheQuit]);
-    let mut said = Vec::new();
-    let road = session_end::end_with(
-        &mut |_| panic!("the question's turn had run: nothing is drained"),
-        &mut |line| said.push(line.to_owned()),
-        &mut || {},
-    );
-    assert_eq!(road, session_end::Road::LeftToTheQuit);
-    assert_eq!(
-        said,
-        vec![
-            "BT_SESSION_END WM_ENDSESSION(TRUE): the question was left to the quit under way, \
-             whose write the end does not drive"
-                .to_owned()
-        ]
-    );
-}
-
-/// A wake target on this thread whose turn is the question's turn on `store`, counted in
-/// `turns`. Its first turn also posts one more wake, as a turn that sends an event does.
-#[cfg(windows)]
-fn a_target_running_the_questions_turn(
-    store: &std::rc::Rc<std::cell::RefCell<persist::SessionStore>>,
-    turns: &std::rc::Rc<std::cell::Cell<u32>>,
-) -> bt_platform::session_end::wake_target::WakeTarget {
-    let store = std::rc::Rc::clone(store);
-    let turns = std::rc::Rc::clone(turns);
-    let said = std::cell::RefCell::new(Vec::new());
-    bt_platform::session_end::wake_target::WakeTarget::new(Box::new(move |waker| {
-        turns.set(turns.get() + 1);
-        if turns.get() == 1 {
-            waker.wake();
+    let _home = EndSessionHome::new("probe");
+    assert_eq!(session_end::Probe::now().callbacks, (0, None));
+    {
+        let _outer = session_end::in_a_callback("user_event");
+        assert_eq!(session_end::Probe::now().callbacks, (1, Some("user_event")));
+        {
+            let _inner = session_end::in_a_callback("window_event");
+            assert_eq!(
+                session_end::Probe::now().callbacks,
+                (2, Some("window_event"))
+            );
         }
-        the_questions_turn(&mut store.borrow_mut(), Instant::now(), &said);
-    }))
-    .expect("a wake target on this thread")
-}
+        assert_eq!(session_end::Probe::now().callbacks, (1, Some("user_event")));
+    }
+    assert_eq!(session_end::Probe::now().callbacks, (0, None));
 
-/// RED (plan row 201, review F3) — **the product's end over a real queue: the question's wake
-/// runs, every other message stays where it was, and the drain stops at its mark.**
-///
-/// The test runs on a thread of its own, so its queue holds only what the test posts. A
-/// message-only window stands in for winit's hidden one: its procedure runs the question's turn
-/// for each wake, as winit's wake brings the loop's turn. Queued before the end: a message of
-/// another kind, the question's wake and the loop's `WM_QUIT`. The question's turn posts one more
-/// wake, behind the mark. Then the product `at_the_end` runs, with the real
-/// `drain_what_is_queued` and the real fence.
-///
-/// The second half queues the same with no question asked, so no wake answers it: the drain runs
-/// the wake it finds and stops at the mark, and the wake that turn posted stays queued.
-///
-/// MUTATION (plant `plant-201-c-the-drain-takes-every-message.py`): the drain takes every posted
-/// message — the other message is dispatched, not left. MUTATION (plant
-/// `plant-201-d-the-drain-passes-its-mark.py`): the drain does not stop at its mark — the wake
-/// posted behind it runs too.
-#[cfg(windows)]
-#[test]
-fn the_end_runs_the_wake_over_a_real_queue_and_leaves_every_other_message() {
-    use bt_platform::session_end::wake_target::{Queued, post_quit, take_what_is_left};
-    std::thread::spawn(|| {
-        on_the_window_thread();
-        let home = EndSessionHome::new("end-over-a-real-queue");
-        let store = std::rc::Rc::new(std::cell::RefCell::new(persist::SessionStore::armed_at(
-            home.session(),
-            home.sentinel(),
-        )));
-        store
-            .borrow_mut()
-            .set_save_budget(crate::lane::PATIENCE);
-        let last_second = shells_document(&home.0, 2);
-        record_as_the_app_does(&mut store.borrow_mut(), last_second.clone());
-        let turns = std::rc::Rc::new(std::cell::Cell::new(0_u32));
-        let target = a_target_running_the_questions_turn(&store, &turns);
-        assert_eq!(take_what_is_left(), Queued::default(), "the thread's queue starts empty");
-        target.waker().post_other();
-        assert_eq!(the_system_asks(), Some(1), "the question is answered TRUE");
-        target.waker().wake();
-        post_quit(0);
+    assert_eq!(
+        session_end::Probe::now().wake,
+        session_end::Wake::NeverPosted
+    );
+    let mut said = Vec::new();
+    let _callback = session_end::in_a_callback("user_event");
+    assert_eq!(the_system_asks(), Some(1));
+    session_end::posted_with(SessionEnd::Asked, true, &mut |line| {
+        said.push(line.to_owned())
+    });
+    // The same question, sent to the next window.
+    session_end::posted_with(SessionEnd::Asked, true, &mut |line| {
+        said.push(line.to_owned())
+    });
+    assert_eq!(said.len(), 1, "one probe line for the span: {said:?}");
+    assert!(
+        said[0].starts_with(
+            "BT_SESSION_END probe at WM_QUERYENDSESSION: Folio's winit callbacks on the stack: 1 \
+             (innermost user_event); the question's wake: posted, its turn not begun; posted \
+             messages queued: "
+        ),
+        "{}",
+        said[0]
+    );
+    assert_eq!(session_end::Probe::now().wake, session_end::Wake::Posted);
+    let _ = session_end::take();
+    assert_eq!(session_end::Probe::now().wake, session_end::Wake::TurnBegan);
 
-        let road = session_end::at_the_end();
-        assert_eq!(
-            windows_on_disk(&home.session()),
-            last_second.windows,
-            "the question's wake ran its turn: the last-second change is on the disk"
-        );
-        assert!(!home.sentinel().exists(), "and the run's clean exit stands");
-        assert_eq!(road, session_end::Road::RanItHere);
-        assert_eq!(turns.get(), 1, "the question's wake ran, and nothing behind it");
-        assert_eq!(
-            take_what_is_left(),
-            Queued {
-                wakes: 1,
-                marks: 0,
-                others: 1,
-                quit: Some(0)
-            },
-            "the wake its turn posted, the other message and the quit stay; the mark is taken back"
-        );
-        drop(target);
-
-        // No question: the drain runs what it finds up to its mark, and the answer never comes.
-        let unanswered = EndSessionHome::new("end-over-a-real-queue-unanswered");
-        let store = std::rc::Rc::new(std::cell::RefCell::new(persist::SessionStore::armed_at(
-            unanswered.session(),
-            unanswered.sentinel(),
-        )));
-        let turns = std::rc::Rc::new(std::cell::Cell::new(0_u32));
-        let target = a_target_running_the_questions_turn(&store, &turns);
-        target.waker().post_other();
-        target.waker().wake();
-        post_quit(0);
-        assert_eq!(session_end::at_the_end(), session_end::Road::CouldNotRun);
-        assert_eq!(turns.get(), 1, "the drain stopped at its mark");
-        assert_eq!(
-            take_what_is_left(),
-            Queued {
-                wakes: 1,
-                marks: 0,
-                others: 1,
-                quit: Some(0)
-            },
-            "the wake posted behind the mark, the other message and the quit stay; the mark was taken"
-        );
-        drop(target);
-    })
-    .join()
-    .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+    // A refused post, in a span of its own.
+    let _refused = EndSessionHome::new("probe-refused");
+    said.clear();
+    assert_eq!(the_system_asks(), Some(1));
+    session_end::posted_with(SessionEnd::Asked, false, &mut |line| {
+        said.push(line.to_owned())
+    });
+    assert_eq!(session_end::Probe::now().wake, session_end::Wake::Refused);
+    assert_eq!(said.len(), 1);
+    assert_eq!(
+        session_end::probe_line(
+            "WM_ENDSESSION(TRUE)",
+            &session_end::Probe {
+                callbacks: (2, Some("window_event")),
+                wake: session_end::Wake::Refused,
+                queued: None,
+            }
+        ),
+        "BT_SESSION_END probe at WM_ENDSESSION(TRUE): Folio's winit callbacks on the stack: 2 \
+         (innermost window_event); the question's wake: its post refused; posted messages \
+         queued: unknown"
+    );
 }
