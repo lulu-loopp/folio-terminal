@@ -51,7 +51,11 @@ pub(crate) struct ShellExit {
     /// line as `shutting_down=0|1`, so that a reboot's log shows whether the system's sign-out
     /// is already set when an exit reaches the reaper before the question reaches the window.
     /// `None` off Windows, where there is no probe and the line has no field.
-    pub(crate) shutting_down: Option<bool>,
+    ///
+    /// **Private to this module** (row 199's review F1), so that no exit can be built outside it
+    /// by a struct literal: every product exit goes through [`ShellExit::observed`], which reads
+    /// the probe, and a test outside this module through [`ShellExit::unprobed`].
+    shutting_down: Option<bool>,
 }
 
 impl ShellExit {
@@ -73,6 +77,27 @@ impl ShellExit {
             tab,
             disposition,
             shutting_down: bt_platform::session_end::shutting_down(),
+        }
+    }
+
+    /// **An exit a test built, with no probe read**: the line says what it said before row 199.
+    #[cfg(test)]
+    pub(crate) fn unprobed(
+        seat: u64,
+        code: Option<u32>,
+        elapsed: Duration,
+        program: Option<PathBuf>,
+        tab: u64,
+        disposition: ShellExitDisposition,
+    ) -> Self {
+        Self {
+            seat,
+            code,
+            elapsed,
+            program,
+            tab,
+            disposition,
+            shutting_down: None,
         }
     }
 }
