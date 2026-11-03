@@ -6392,7 +6392,11 @@ impl Text {
             }
             Self::ShellDidNotStart => pick(lang, "Shell not started", "Shell 未启动"),
             Self::ShellBirthDeath => pick(lang, "exited at birth", "启动即退出"),
-            Self::ShellEndedBySystem => pick(lang, "was ended by the system", "被系统结束"),
+            Self::ShellEndedBySystem => pick(
+                lang,
+                "Ended by the system at shutdown",
+                "Ended by the system at shutdown", // zh: pending T-SHUTDOWN-KILLS-SHELLS-BEFORE-THE-LAYOUT-IS-SAVED
+            ),
         }
     }
 
@@ -6589,6 +6593,10 @@ impl Text {
         (Self::RowResumeAgents, HostPlatform::MacOs),
         (Self::DescResumeAgents, HostPlatform::Windows),
         (Self::DescResumeAgents, HostPlatform::MacOs),
+        // zh: pending T-SHUTDOWN-KILLS-SHELLS-BEFORE-THE-LAYOUT-IS-SAVED — the note a pane keeps
+        // when the system ended its shell at shutdown (plan row 191).
+        (Self::ShellEndedBySystem, HostPlatform::Windows),
+        (Self::ShellEndedBySystem, HostPlatform::MacOs),
     ];
 }
 

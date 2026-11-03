@@ -61,7 +61,8 @@ fn a_query_end_session_freezes_writes_and_drops_the_sentinel() {
 /// write named; news that wrote nothing says nothing (its arrival is said by the platform).
 ///
 /// MUTATION (plant `plant-191-f-a-landed-save-says-nothing.py`): answer `None` for a landed save —
-/// the shutdown that saved is silent again, which is what row 191 had to diagnose from.
+/// the shutdown that saved is silent again, which is what row 191 had to diagnose from. MUTATION
+/// (plant `plant-191-h-a-refused-save-says-nothing.py`): answer `None` for a refused one.
 #[test]
 fn the_systems_end_says_what_became_of_the_layout() {
     let document = shells_document(Path::new("work"), 1);
@@ -69,6 +70,19 @@ fn the_systems_end_says_what_became_of_the_layout() {
         session_end::outcome_line(&session_end::Settled::Saved(Ok(())), &document).as_deref(),
         Some("Folio: the session is ending and its layout was saved: windows 1, tabs 2, pinned 2")
     );
+    for refusal in [
+        crate::persist::SaveRefusal::Refused("the disk refused the write".to_owned()),
+        crate::persist::SaveRefusal::TimedOut("the write did not finish in time".to_owned()),
+    ] {
+        let said = refusal.message().to_owned();
+        assert_eq!(
+            session_end::outcome_line(&session_end::Settled::Saved(Err(refusal)), &document),
+            Some(format!(
+                "Folio: the session is ending and its layout was not saved: {said}"
+            )),
+            "a refused write says so, with why"
+        );
+    }
     assert_eq!(
         session_end::outcome_line(&session_end::Settled::LeftToTheQuit, &document).as_deref(),
         Some("Folio: the session is ending and the quit under way writes its layout")

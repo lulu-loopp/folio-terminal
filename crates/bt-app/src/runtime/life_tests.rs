@@ -810,8 +810,12 @@ fn a_shell_the_system_ends_keeps_its_pinned_tab_in_the_document() {
             .filter(|character| !character.is_whitespace())
             .collect();
         assert!(
-            visible.contains("wasendedbythesystem(code1073807364,"),
+            visible.contains("[Folio]Endedbythesystematshutdown"),
             "the pane says why: {visible:?}"
+        );
+        assert!(
+            !visible.contains("1073807364"),
+            "and only why: the code and the age are the diagnostics line's (ruling R2): {visible:?}"
         );
     }
     assert_eq!(recent_rows(&application), 0, "nothing goes into Recent");
