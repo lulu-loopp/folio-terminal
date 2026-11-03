@@ -48357,6 +48357,25 @@ impl<B: Backend> FolioApp<B> {
         register_restart_now::<B>(event_loop);
     }
 
+    /// **Windows is asked to end this process before the processes at the default shutdown
+    /// level** (plan row 191): `bt_platform::session_end::SHUTDOWN_LEVEL`, above the default every
+    /// console process starts at, so that a restart or a shutdown asks Folio's windows — and
+    /// lets the question write the layout — before it ends the shells in their panes. Without it
+    /// the order between them was the system's, and on the owner's machine the shells went
+    /// first. The kept-pane rule (`runtime::tabs::ended_by_the_system`) stays as the net for that
+    /// order, which a slow window thread can still meet.
+    ///
+    /// Said in `diagnostics.log` either way, in the VM experiment's words, so that a reboot's
+    /// log shows whether the level was in force.
+    fn ask_to_be_ended_before_the_shells(&self, event_loop: &B::Loop) {
+        let level = bt_platform::session_end::SHUTDOWN_LEVEL;
+        let said = match B::ask_to_be_ended_first(event_loop, level) {
+            Ok(()) => "ok".to_owned(),
+            Err(refused) => format!("error {refused}"),
+        };
+        diagnostics::note(&format!("BT_SESSION_END shutdown level {level:#x}: {said}"));
+    }
+
     /// **The system asked this application to quit, and it is waiting** (M3-1).
     ///
     /// Folio's own quit is what runs: the card about unsaved names, the save,
@@ -51572,6 +51591,11 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 // loop. Of the starts that open one, only the data directory's owner asks, and an
                 // update's trial only once it is committed (`FolioApp::register_for_restart`).
                 self.register_for_restart(event_loop);
+                // **And to end this process before the shells in its panes** (plan row 191),
+                // once and here for the same reason: the first window is the run's own. Every
+                // start that opens a window asks, owner or not — the level is this process's
+                // place in the shutdown order, not a write anyone could roll back.
+                self.ask_to_be_ended_before_the_shells(event_loop);
                 // A shortcut file that could not be read owes the user a sentence
                 // naming it (§5.3), and this is the first moment there is a window
                 // to say it on — the store was opened before one existed. Anchored
