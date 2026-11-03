@@ -3816,6 +3816,10 @@ pub enum SettingsRow {
     /// been interrupted by their agent finishing is looking for the switch that
     /// stops it, and a switch behind a disclosure is a switch they do not find.
     TurnEndNotifications,
+    /// **Whether a restart brings back the agents that were running in panes**, each through its
+    /// own vendor's resume command (0.4.9 plan row 195; `crate::agent_resume`). On by default.
+    /// Windows only in 0.4.9 ([`Capability::AgentResume`]); the Mac is plan row 197.
+    ResumeAgents,
     /// Whether new PowerShell panes receive Folio's process-scoped integration — and, for a
     /// Windows PowerShell pane, Folio's own PSReadLine with it (T-INTEGRATION-INJECT-2-BUILD:
     /// the prefix and the loader are one decision, so this switch is also the road back to the
@@ -4012,7 +4016,8 @@ impl SettingsRow {
             Self::ClaudeHooks
             | Self::CodexNotify
             | Self::CopilotHooks
-            | Self::TurnEndNotifications => SettingsCategory::Agents,
+            | Self::TurnEndNotifications
+            | Self::ResumeAgents => SettingsCategory::Agents,
             // The mock-up files what typesetting does to a block under "Rendered
             // blocks" (2570), beside that page's own Maximum height row.
             Self::Formulas
@@ -4152,6 +4157,7 @@ impl SettingsRow {
             Self::LegacyPsReadLine => None,
             Self::Acrylic => Some(Capability::WindowBackdrop),
             Self::OptionSendsAlt => Some(Capability::OptionKey),
+            Self::ResumeAgents => Some(Capability::AgentResume),
             _ => None,
         }
     }
@@ -4172,6 +4178,7 @@ impl SettingsRow {
             Self::MultilinePaste => Text::RowMultilinePaste.text(),
             Self::Notifications => Text::RowNotifications.text(),
             Self::TurnEndNotifications => Text::RowTurnEndNotifications.text(),
+            Self::ResumeAgents => Text::RowResumeAgents.text(),
             Self::ShellIntegration => Text::RowShellIntegration.text(),
             Self::PowerShellProfileLine => Text::RowPowerShellProfileLine.text(),
             Self::LegacyPsReadLine => Text::RowLegacyPsReadLine.text(),
@@ -4345,6 +4352,7 @@ impl SettingsRow {
             Self::MultilinePaste => Text::DescMultilinePaste.text(),
             Self::Notifications => Text::DescNotifications.text(),
             Self::TurnEndNotifications => Text::DescTurnEndNotifications.text(),
+            Self::ResumeAgents => Text::DescResumeAgents.text(),
             // **The one row on this page whose line is a function of something
             // that is not its own answer** (§7.56). An intent recorded on the
             // first-run card is outstanding until a PowerShell says where its
@@ -4771,6 +4779,7 @@ impl SettingsRow {
             | Self::MultilinePaste
             | Self::Notifications
             | Self::TurnEndNotifications
+            | Self::ResumeAgents
             // The everyday half of the editor, in the order somebody decides a
             // profile: what it is called, what it runs, where it starts, what
             // colour names it.
@@ -4896,6 +4905,7 @@ impl SettingsRow {
             | Self::MultilinePaste
             | Self::Notifications
             | Self::TurnEndNotifications
+            | Self::ResumeAgents
             | Self::ShellIntegration
             | Self::ClaudeHooks
             | Self::CodexNotify
@@ -5000,6 +5010,7 @@ impl SettingsRow {
             | Self::MultilinePaste
             | Self::Notifications
             | Self::TurnEndNotifications
+            | Self::ResumeAgents
             | Self::ShellIntegration
             | Self::ClaudeHooks
             | Self::CodexNotify
@@ -5456,6 +5467,9 @@ impl SettingsRow {
             Self::TurnEndNotifications => FORMULA_OPTIONS
                 .iter()
                 .position(|it| *it == values.turn_end_notification),
+            Self::ResumeAgents => FORMULA_OPTIONS
+                .iter()
+                .position(|it| *it == values.resume_agents),
             Self::ShellIntegration => FORMULA_OPTIONS
                 .iter()
                 .position(|it| *it == values.shell_integration),
@@ -6229,6 +6243,9 @@ fn every_row_of_the_dialog(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
     // decides whether a reported one is allowed off this window and onto the
     // desktop.
     rows.push(SettingsRow::TurnEndNotifications);
+    // And under it what a restart does with the agents those rows hear from (row 195): the
+    // session a turn's end names is the one a restart resumes.
+    rows.push(SettingsRow::ResumeAgents);
     // ── About (GitHub issue #3) ──
     //
     // **What this is, then where to go about it.** The two facts first, in the
@@ -6636,6 +6653,8 @@ pub struct SettingsValues {
     /// window without the keyboard, a toast on one that is minimised
     /// (`docs/plans/attention/plan.md` §11.7).
     pub turn_end_notification: bool,
+    /// Whether a restart resumes the agents that were running in panes (row 195).
+    pub resume_agents: bool,
     /// Whether a PowerShell pane with no integration is offered one — the row
     /// the notice strip's `Don't show again` writes (§7.1.6j).
     pub shell_integration: bool,
@@ -6908,6 +6927,7 @@ impl SettingsValues {
             multiline_paste_ask: true,
             terminal_notifications: true,
             turn_end_notification: true,
+            resume_agents: true,
             shell_integration: true,
             powershell_profile_line_present: false,
             git_panel: true,
@@ -10968,6 +10988,18 @@ pub fn terminal_notifications_requested(target: SettingsTarget) -> Option<bool> 
 pub fn turn_end_notification_requested(target: SettingsTarget) -> Option<bool> {
     match target {
         SettingsTarget::Choice(SettingsRow::TurnEndNotifications, index) => {
+            FORMULA_OPTIONS.get(index).copied()
+        }
+        _ => None,
+    }
+}
+
+/// Whether a restart resumes the agents that were running in panes, as a press on its picker
+/// (0.4.9 plan row 195).
+#[must_use]
+pub fn resume_agents_requested(target: SettingsTarget) -> Option<bool> {
+    match target {
+        SettingsTarget::Choice(SettingsRow::ResumeAgents, index) => {
             FORMULA_OPTIONS.get(index).copied()
         }
         _ => None,
@@ -27588,17 +27620,20 @@ mod tests {
                 .into_iter()
                 .filter(|row| row.category() == SettingsCategory::Agents)
                 .collect::<Vec<_>>();
+            let mut expected = vec![
+                SettingsRow::ClaudeHooks,
+                SettingsRow::CodexNotify,
+                SettingsRow::CopilotHooks,
+                SettingsRow::TurnEndNotifications,
+            ];
+            // The resume switch where this build resumes (row 195; the Mac is row 197).
+            if Capability::AgentResume.on(bt_platform::host_platform()) {
+                expected.push(SettingsRow::ResumeAgents);
+            }
             assert_eq!(
-                agents,
-                vec![
-                    SettingsRow::ClaudeHooks,
-                    SettingsRow::CodexNotify,
-                    SettingsRow::CopilotHooks,
-                    SettingsRow::TurnEndNotifications
-                ],
+                agents, expected,
                 "{tab_layout:?}: the three installers in the order their upstreams \
-                 arrived, and under them the one row here that is a setting of \
-                 Folio's"
+                 arrived, and under them the rows here that are settings of Folio's"
             );
         }
         assert_eq!(
@@ -27622,6 +27657,7 @@ mod tests {
             SettingsRow::CodexNotify,
             SettingsRow::CopilotHooks,
             SettingsRow::TurnEndNotifications,
+            SettingsRow::ResumeAgents,
         ] {
             assert!(!row.advanced(), "{row:?}");
             assert!(matches!(row.control(), SettingsControl::Combo));
@@ -28793,7 +28829,12 @@ mod tests {
     fn a_mac_is_not_offered_a_row_about_a_facility_it_has_not_got() {
         use bt_platform::HostPlatform::{MacOs, Windows};
 
-        const NOT_ON_A_MAC: [SettingsRow; 2] = [SettingsRow::ContextMenu, SettingsRow::Acrylic];
+        // `ResumeAgents` since row 195: 0.4.9 resumes agents on Windows only (plan row 197).
+        const NOT_ON_A_MAC: [SettingsRow; 3] = [
+            SettingsRow::ContextMenu,
+            SettingsRow::Acrylic,
+            SettingsRow::ResumeAgents,
+        ];
         for layout in [TabLayoutMode::Horizontal, TabLayoutMode::Vertical] {
             let mac = visible_rows_for(MacOs, layout);
             let windows = visible_rows_for(Windows, layout);
@@ -29447,6 +29488,7 @@ mod tests {
                 SettingsRow::CodexNotify,
                 SettingsRow::CopilotHooks,
                 SettingsRow::TurnEndNotifications,
+                SettingsRow::ResumeAgents,
                 // ── About (GitHub issue #3) ──
                 //
                 // Last, because its page is last in the rail: the two facts a
@@ -29521,6 +29563,7 @@ mod tests {
                 SettingsRow::CodexNotify,
                 SettingsRow::CopilotHooks,
                 SettingsRow::TurnEndNotifications,
+                SettingsRow::ResumeAgents,
                 SettingsRow::AboutVersion,
                 SettingsRow::AutoCheck,
                 SettingsRow::AboutPlatform,

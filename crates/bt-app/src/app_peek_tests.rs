@@ -804,6 +804,7 @@ fn the_cards_page_cache_keeps_what_the_hand_is_nearest() {
         fit: (280, 160),
         mtime: None,
         asked: BTreeSet::new(),
+        asked_again: BTreeSet::new(),
         pages: Vec::new(),
     };
     for page in 0..PEEK_PAGE_CACHE as u32 {
@@ -853,6 +854,158 @@ fn the_cards_page_cache_keeps_what_the_hand_is_nearest() {
         !slot.wanted(0),
         "a page that is not held is not made recent by being asked about"
     );
+}
+
+/// RED (T-HELD-FILE-IN-THE-PDF-LANE) — **a PDF another program holds is not refused by the
+/// glance card: it is asked once more by itself, and then only on a new card.** Both of the card's
+/// records carry the class's pair. The count: a held answer is filed `Unanswered { asked_again:
+/// false }` — the card prints no count, as for a file whose structure would not say — and the next
+/// rebuild asks it once (`ask_once_more`, filing `Asked { once_more: true }`); that ask's held
+/// answer is `{ asked_again: true }`, which no rebuild asks however often the card is drawn, and a
+/// new card (a new record) asks again. A page: a held answer leaves `asked` once
+/// (`hear_held`), so the next rebuild's ask — `file_peek_pages`'s `slot.asked.insert` — goes out;
+/// a second held answer stays asked; the card coming down (`card_down`) lets it be asked again.
+/// The file's own answer after a hold is filed as itself.
+///
+/// **Only the answer a question awaits is filed** (the class's rule; review F1). A held count
+/// arriving after the file's own answer takes no count off the card, and one arriving after the
+/// one more ask was spent opens no other; a held page arriving after its card came down — the
+/// slot outlives the card — spends nothing of the next card's one more ask. And the file changing
+/// under the card (`stamped`, a new stamp over drawn pages) is a new look: a page that spent its
+/// one more ask is asked once more again (review N1).
+///
+/// MUTATION: have `PeekPageSlot::hear_held` and `PeekFacts::hear` file a held answer as a
+/// refusal (`plant-187-pdf-held-filed-as-refused.py`) — the first "asked once more" assertion goes
+/// red. Or have them ask every held answer again (`plant-187-pdf-retry-never-stops.py`) — the
+/// "once: a redraw is no new input" assertions go red, by count. Or plant the page half alone
+/// (`plant-187-pdf-page-held-filed-as-refused.py`) — the page's "asked once more by the next
+/// rebuild" goes red. Or drop the `asked.contains` guard from `hear_held`
+/// (`plant-187-pdf-late-page-answer-spends-the-next-cards-ask.py`) — "a late answer spends
+/// nothing" goes red.
+#[test]
+fn a_pdf_another_program_holds_is_asked_once_more_and_then_only_on_a_new_card() {
+    let path = PathBuf::from("D:/\u{88ab}\u{5360}\u{7528}/held \u{62a5}\u{544a}.pdf");
+    let held = || Err(crate::pdf::Held);
+
+    // The count.
+    let held_twice = |facts: &mut PeekFacts| {
+        assert!(!facts.ask_once_more(), "the first read is still out");
+        facts.hear(held());
+        assert_eq!(
+            facts.answer,
+            PeekFactsAnswer::Unanswered { asked_again: false },
+            "held, not a file with no count"
+        );
+        assert_eq!(
+            facts.stated_pages(),
+            None,
+            "and the card prints the size alone"
+        );
+        assert!(facts.ask_once_more(), "asked once more by the next rebuild");
+        assert_eq!(facts.answer, PeekFactsAnswer::Asked { once_more: true });
+        facts.hear(held());
+        assert_eq!(
+            facts.answer,
+            PeekFactsAnswer::Unanswered { asked_again: true },
+            "held again: asked again already"
+        );
+        for _ in 0..5 {
+            assert!(!facts.ask_once_more(), "once: a redraw is no new input");
+        }
+    };
+    let mut facts = PeekFacts::asked(path.clone());
+    held_twice(&mut facts);
+    // A new card is a new record, and asks.
+    let mut facts = PeekFacts::asked(path.clone());
+    held_twice(&mut facts);
+    let mut facts = PeekFacts::asked(path.clone());
+    facts.hear(held());
+    assert!(facts.ask_once_more());
+    facts.hear(Ok(Some(3)));
+    assert_eq!(
+        facts.stated_pages(),
+        Some(3),
+        "let go of: the count the file says"
+    );
+    assert!(!facts.ask_once_more(), "and an answer is never asked again");
+
+    // A page.
+    let mut slot = PeekPageSlot {
+        path,
+        fit: (280, 160),
+        mtime: None,
+        asked: BTreeSet::new(),
+        asked_again: BTreeSet::new(),
+        pages: Vec::new(),
+    };
+    let held_twice = |slot: &mut PeekPageSlot| {
+        assert!(slot.asked.insert(0), "the card asks for its cover");
+        slot.hear_held(0);
+        assert!(slot.asked.insert(0), "asked once more by the next rebuild");
+        slot.hear_held(0);
+        for _ in 0..5 {
+            assert!(!slot.asked.insert(0), "once: a redraw is no new input");
+        }
+    };
+    held_twice(&mut slot);
+    slot.card_down();
+    held_twice(&mut slot);
+    slot.card_down();
+    assert!(slot.asked.insert(0), "and a new card asks again");
+
+    // Late answers. A held count after the file's own answer takes no count off the card, and one
+    // after the one more ask was spent opens no other.
+    let mut facts = PeekFacts::asked(PathBuf::from("D:/late.pdf"));
+    facts.hear(Ok(Some(3)));
+    facts.hear(held());
+    assert_eq!(
+        facts.stated_pages(),
+        Some(3),
+        "a late held answer takes no count off the card"
+    );
+    assert!(!facts.ask_once_more(), "and asks nothing");
+    let mut facts = PeekFacts::asked(PathBuf::from("D:/late.pdf"));
+    facts.hear(held());
+    assert!(facts.ask_once_more());
+    facts.hear(held());
+    facts.hear(held());
+    assert_eq!(
+        facts.answer,
+        PeekFactsAnswer::Unanswered { asked_again: true }
+    );
+    assert!(
+        !facts.ask_once_more(),
+        "a late held answer opens no other ask"
+    );
+
+    // A held page landing after its card came down is the answer to a question nobody asks: the
+    // next card keeps its one more ask.
+    slot.card_down();
+    slot.hear_held(0);
+    assert!(
+        slot.asked_again.is_empty(),
+        "a late answer spends nothing of the next card's"
+    );
+    held_twice(&mut slot);
+
+    // The file changing is a new look: page 0 spent its one more ask, and a new stamp over drawn
+    // pages lets it be asked once more again.
+    slot.keep(
+        1,
+        PeekPageRaster {
+            key: "page-1".to_owned(),
+            rgba: Arc::from(vec![0_u8; 4].into_boxed_slice()),
+            width_px: 1,
+            height_px: 1,
+        },
+    );
+    slot.stamped(Some(std::time::SystemTime::UNIX_EPOCH), 1);
+    assert!(slot.pages.is_empty(), "the old document's pages go");
+    assert!(
+        slot.asked_again.is_empty(),
+        "and the one more ask a held page spent"
+    );
+    held_twice(&mut slot);
 }
 
 /// RED (35) — **a second press on a `⌄` pins a peek, and closes only a pinned

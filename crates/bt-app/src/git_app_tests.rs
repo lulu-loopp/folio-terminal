@@ -109,6 +109,7 @@ fn a_seed_is_read_from_the_first_terminal_in_the_tree() {
                 manual_name: Some("build".to_owned()),
                 card_skip: 0,
                 last_command: String::new(),
+                agent: None,
             }))),
         ],
     });

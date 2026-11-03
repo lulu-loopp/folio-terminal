@@ -435,5 +435,8 @@ fn a_store_powershell_pane_takes_its_turn_with_a_check_of_its_package() {
     hold.release();
     wait_until("the shell born once the check settled", || shell.answered());
     let born = shell.take().expect("the answer");
-    assert!(born.session.is_ok(), "the shell was not started");
+    assert!(
+        born.session.is_some_and(|session| session.is_ok()),
+        "the shell was not started"
+    );
 }
