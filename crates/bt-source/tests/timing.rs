@@ -2167,10 +2167,10 @@ fn the_handed_clock_reading_reads_every_clock_shape() {
         (169, "cannot pair"),
         (173, "cannot follow"),
         (178, "written away"),
-        (380, "written by a macro"),
-        (385, "written by a macro"),
-        (392, "not a parameter"),
-        (398, "type resolver cannot follow"),
+        (381, "written by a macro"),
+        (386, "written by a macro"),
+        (393, "not a parameter"),
+        (399, "type resolver cannot follow"),
     ] {
         assert!(
             refusals
