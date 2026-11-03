@@ -458,7 +458,11 @@ fn scan_index_reading(
         .iter()
         .chain(kernel.calls.iter())
         .map(|name| (*name, false, Pattern::call(name)))
-        .chain(MEASURES.iter().map(|name| (*name, true, Pattern::call(name))))
+        .chain(
+            MEASURES
+                .iter()
+                .map(|name| (*name, true, Pattern::call(name))),
+        )
         .chain(
             kernel
                 .paths
@@ -873,14 +877,22 @@ fn kernel_wait_refusals(index: &Index, kernel: &Kernel<'_>) -> Vec<String> {
     let tokens = index.tokens();
     let union = index.union();
     let name = |at: usize| index.text(tokens[at].name_span());
-    let file = |at: usize| index.locate(tokens[at].span().start()).map(|location| location.file);
+    let file = |at: usize| {
+        index
+            .locate(tokens[at].span().start())
+            .map(|location| location.file)
+    };
     // The bytes between a token and the next one in the same file, trimmed.
     let gap = |at: usize| {
         let next = tokens.get(at + 1)?;
         (file(at) == file(at + 1))
             .then(|| union[tokens[at].span().end()..next.span().start()].trim())
     };
-    let called = |at: usize| union[tokens[at].span().end()..].trim_start().starts_with('(');
+    let called = |at: usize| {
+        union[tokens[at].span().end()..]
+            .trim_start()
+            .starts_with('(')
+    };
     let libc_wait = |segment: &str| {
         kernel
             .paths
@@ -1193,16 +1205,34 @@ fn a_kernel_wait_in_a_test_body_is_a_real_wait_and_a_hidden_one_is_refused() {
     assert_eq!(
         waits,
         [
-            ("kernel:lib:kernel a_connect_with_a_timeout", vec!["connect_timeout"]),
-            ("kernel:lib:kernel a_libc_poll_in_a_closure", vec!["libc::poll"]),
-            ("kernel:lib:kernel a_look_at_once", vec!["WaitForSingleObject"]),
-            ("kernel:lib:kernel a_socket_read_timeout", vec!["set_read_timeout"]),
+            (
+                "kernel:lib:kernel a_connect_with_a_timeout",
+                vec!["connect_timeout"]
+            ),
+            (
+                "kernel:lib:kernel a_libc_poll_in_a_closure",
+                vec!["libc::poll"]
+            ),
+            (
+                "kernel:lib:kernel a_look_at_once",
+                vec!["WaitForSingleObject"]
+            ),
+            (
+                "kernel:lib:kernel a_socket_read_timeout",
+                vec!["set_read_timeout"]
+            ),
             (
                 "kernel:lib:kernel a_whole_path_wait_on_a_constant",
                 vec!["WaitForMultipleObjects"]
             ),
-            ("kernel:lib:kernel an_imported_bare_object_wait", vec!["WaitForSingleObject"]),
-            ("kernel:lib:kernel an_unbounded_wait", vec!["WaitForSingleObject"]),
+            (
+                "kernel:lib:kernel an_imported_bare_object_wait",
+                vec!["WaitForSingleObject"]
+            ),
+            (
+                "kernel:lib:kernel an_unbounded_wait",
+                vec!["WaitForSingleObject"]
+            ),
         ],
         "F1-F5 are real waits; F6's first-party polls and F8's helper are not"
     );
