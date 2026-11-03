@@ -27,8 +27,14 @@
 //!   which writes it.
 //! * `WM_ENDSESSION(FALSE)` — the line comes down and `hear` is told
 //!   [`SessionEnd::TakenBack`]: the session goes on, and so does the application.
-//! * `WM_ENDSESSION(TRUE)` — nothing: everything owed was handed over at the question, and the
-//!   system ends the process.
+//! * `WM_ENDSESSION(TRUE)` — the last word before the system may end the process, so the one
+//!   message whose procedure holds its answer back (plan row 201): `ending` is called, and it
+//!   returns only once the question's write has its answer and `diagnostics.log` has been
+//!   fenced. The write itself stays the loop's: the question's turn blocks this thread until it
+//!   lands, so in the usual order it has landed before this message can even be dispatched.
+//!   When this message overtook the wake the question posted, `ending` runs the messages already
+//!   queued on this thread ([`drain_what_is_queued`]) — the wake among them — so that turn, and
+//!   its one bounded wait, happen before the answer. Nothing here waits.
 //! * `WM_ENDSESSION(TRUE)` with `ENDSESSION_CLOSEAPP` in `lParam` — `hear` is told
 //!   [`SessionEnd::Closed`]. This is the Restart Manager closing the application (an installer
 //!   or the system's servicing needs a file it holds): **the session does not end**, so nobody
@@ -166,6 +172,65 @@ pub fn heard(message: u32, wparam: usize, lparam: isize) -> Option<SessionEnd> {
     }
 }
 
+/// **Whether this is `WM_ENDSESSION(TRUE)` with the session really ending** — not the Restart
+/// Manager's close ([`ENDSESSION_CLOSEAPP`]), after which nobody ends the process. The one
+/// message after which this process may be ended at any moment, and so the one the procedure
+/// holds its answer back for (plan row 201). Pure.
+#[must_use]
+pub fn the_session_really_ends(message: u32, wparam: usize, lparam: isize) -> bool {
+    message == WM_ENDSESSION && wparam != 0 && lparam & ENDSESSION_CLOSEAPP == 0
+}
+
+/// **What running the messages already queued came to** ([`drain_what_is_queued`]).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Drained {
+    /// The caller's question was answered: before the first message, or by one of them.
+    Answered,
+    /// Every message queued before the drain began has run, and the question is still open — or
+    /// the queue could not be marked, and nothing was run.
+    NothingLeft,
+}
+
+/// **Run queued messages, one at a time, until `answered` says yes or `next` has nothing left
+/// to run** — the drain's whole rule, without a window: `next` runs one message and says whether
+/// it did. Never waits; the bound is `next`'s (the messages queued before the drain began).
+pub fn drain_with(answered: &dyn Fn() -> bool, next: &mut dyn FnMut() -> bool) -> Drained {
+    loop {
+        if answered() {
+            return Drained::Answered;
+        }
+        if !next() {
+            return Drained::NothingLeft;
+        }
+    }
+}
+
+/// **Run the posted messages already queued on this thread, until `answered` says yes**
+/// (plan row 201) — [`drain_with`] over this thread's queue.
+///
+/// The bound is a mark: a thread message of this module's own, posted at the start, behind
+/// everything already posted. The drain stops when it reaches the mark, so it runs only what
+/// was queued before it began, however fast new posts arrive; a mark left behind by an early
+/// answer is a windowless thread message the loop's own pump discards. Only posted messages are
+/// taken (`PM_QS_POSTMESSAGE`: no input, no paint); a `WM_QUIT` met on the way is posted again
+/// and ends the drain, as every modal loop owes its caller. Never waits.
+///
+/// This is the system's own move/size loop's shape: the messages are dispatched from inside a
+/// window procedure, and an event loop that is not inside its handler at that moment (winit's,
+/// when this is called from the procedure of a message its pump dispatched) delivers each to the
+/// handler as it comes. Off Windows there is no such queue: nothing runs.
+#[must_use]
+pub fn drain_what_is_queued(answered: &dyn Fn() -> bool) -> Drained {
+    #[cfg(windows)]
+    {
+        windows_session_end::drain_what_is_queued(answered)
+    }
+    #[cfg(not(windows))]
+    {
+        drain_with(answered, &mut || false)
+    }
+}
+
 /// **What the window procedure answers a session-end message, once `hear` has been told.**
 ///
 /// `TRUE` (1) to the question whatever `hear` does — a layout that could not be written in time
@@ -269,12 +334,21 @@ pub use windows_session_end::SessionEndWatch;
 
 #[cfg(windows)]
 mod windows_session_end {
+    use std::rc::Rc;
+
     use windows::Win32::Foundation::{GetLastError, HWND, LPARAM, LRESULT, WPARAM};
     use windows::Win32::System::Shutdown::{ShutdownBlockReasonCreate, ShutdownBlockReasonDestroy};
+    use windows::Win32::System::Threading::GetCurrentThreadId;
     use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
-    use windows::core::HSTRING;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        DispatchMessageW, MSG, PM_QS_POSTMESSAGE, PM_REMOVE, PeekMessageW, PostQuitMessage,
+        PostThreadMessageW, RegisterWindowMessageW, TranslateMessage, WM_QUIT,
+    };
+    use windows::core::{HSTRING, w};
 
-    use super::{SessionEnd, answer, arrival_line, heard};
+    use super::{
+        Drained, SessionEnd, answer, arrival_line, drain_with, heard, the_session_really_ends,
+    };
     use crate::NativeWindow;
 
     /// "BTSE". Distinct from every other subclass id in this crate.
@@ -288,17 +362,23 @@ mod windows_session_end {
         hook: Box<SessionEndHook>,
     }
 
-    /// What the subclass calls: who to tell, and the line the shutdown screen shows meanwhile.
+    /// What the subclass calls: who to tell, the line the shutdown screen shows meanwhile, and
+    /// what holds the answer to `WM_ENDSESSION(TRUE)` back (plan row 201).
     pub(super) struct SessionEndHook {
         pub(super) hear: Box<dyn Fn(SessionEnd)>,
         pub(super) reason: Box<dyn Fn() -> String>,
+        /// Shared rather than boxed: it runs the thread's queued messages, and one of them may
+        /// drop this window's watch — and this hook with it — while it runs. The procedure calls
+        /// its own count of it and reads nothing of the hook after.
+        pub(super) ending: Rc<dyn Fn()>,
     }
 
     impl SessionEndWatch {
         /// Subclass `window`. `hear` is told what the system said, on the window's own thread
         /// and inside the system's `SendMessage`, so it may only park the news and wake the loop;
         /// `reason` is read when the question arrives, so the line is in the language in force
-        /// then.
+        /// then; `ending` is called at `WM_ENDSESSION(TRUE)` with the session really ending, and
+        /// the answer waits for it (plan row 201).
         ///
         /// # Errors
         /// `SetWindowSubclass` refused, with the system's error number.
@@ -306,9 +386,14 @@ mod windows_session_end {
             window: NativeWindow,
             hear: Box<dyn Fn(SessionEnd)>,
             reason: Box<dyn Fn() -> String>,
+            ending: Rc<dyn Fn()>,
         ) -> Result<Self, String> {
             let hwnd = window.as_hwnd();
-            let hook = Box::new(SessionEndHook { hear, reason });
+            let hook = Box::new(SessionEndHook {
+                hear,
+                reason,
+                ending,
+            });
             let reference_data = (&*hook as *const SessionEndHook) as usize;
             // SAFETY: called on the window's own thread with a live HWND, and the box above
             // outlives the subclass — `Drop` removes it first.
@@ -377,6 +462,13 @@ mod windows_session_end {
         if let Some(line) = arrival_line(message, wparam.0, lparam.0) {
             crate::stderr_road::say(line);
         }
+        // **The last word, held until the question's write has its answer** (plan row 201). The
+        // hook's own count is taken first: what `ending` runs may drop this window's watch.
+        if the_session_really_ends(message, wparam.0, lparam.0) {
+            let ending = Rc::clone(&hook.ending);
+            ending();
+            return forwarded;
+        }
         match heard(message, wparam.0, lparam.0) {
             // The line goes up before the loop is woken: the write it names is the loop's.
             Some(SessionEnd::Asked) => {
@@ -396,6 +488,46 @@ mod windows_session_end {
             Some(answered) => LRESULT(answered),
             None => forwarded,
         }
+    }
+
+    /// [`super::drain_what_is_queued`] on Windows: the mark posted, then this thread's posted
+    /// messages run in order until the mark, an empty queue, a `WM_QUIT` or the answer.
+    pub(super) fn drain_what_is_queued(answered: &dyn Fn() -> bool) -> Drained {
+        // SAFETY: a static, NUL-terminated name; the call only registers it.
+        let mark = unsafe { RegisterWindowMessageW(w!("Folio.SessionEnd.DrainMark")) };
+        if mark == 0 {
+            return drain_with(answered, &mut || false);
+        }
+        // SAFETY: a thread message to this thread, carrying no pointer.
+        let marked = unsafe { PostThreadMessageW(GetCurrentThreadId(), mark, WPARAM(0), LPARAM(0)) };
+        if marked.is_err() {
+            return drain_with(answered, &mut || false);
+        }
+        drain_with(answered, &mut || {
+            let mut message = MSG::default();
+            // SAFETY: `message` is a live `MSG` this call fills in; `PM_REMOVE` takes a posted
+            // message off this thread's own queue.
+            let taken = unsafe {
+                PeekMessageW(&raw mut message, None, 0, 0, PM_REMOVE | PM_QS_POSTMESSAGE)
+            };
+            if !taken.as_bool() || (message.message == mark && message.hwnd.is_invalid()) {
+                return false;
+            }
+            if message.message == WM_QUIT {
+                // `PostQuitMessage` put its `int` into `wParam`; this takes the same `int` back.
+                let code = message.wParam.0 as i32;
+                // SAFETY: no pointer; the quit goes back on the queue for the loop that owns it.
+                unsafe { PostQuitMessage(code) };
+                return false;
+            }
+            // SAFETY: `message` was just filled in by `PeekMessageW` and is not read again
+            // before it is refilled.
+            unsafe {
+                let _ = TranslateMessage(&raw const message);
+                DispatchMessageW(&raw const message);
+            }
+            true
+        })
     }
 
     #[cfg(test)]
@@ -456,14 +588,18 @@ mod windows_session_end {
         /// T-RESTART-REGISTRATION the close's `lParam` was never read.
         ///
         /// MUTATION: answer `answer`'s `Asked` arm with 0, or drop the `hear(end)` call; pass
-        /// `0` for `lParam` to `heard` in the subclass — the close is not heard.
+        /// `0` for `lParam` to `heard` in the subclass — the close is not heard. MUTATION (plan
+        /// row 201): drop the `ending()` call — the session really ending holds nothing back.
         #[test]
         fn the_question_is_answered_yes_and_heard() {
             let heard = Rc::new(RefCell::new(Vec::new()));
             let into = Rc::clone(&heard);
+            let ended = Rc::new(std::cell::Cell::new(0_u32));
+            let ends = Rc::clone(&ended);
             let hook = SessionEndHook {
                 hear: Box::new(move |end| into.borrow_mut().push(end)),
                 reason: Box::new(|| "Saving your layout".to_owned()),
+                ending: Rc::new(move || ends.set(ends.get() + 1)),
             };
             let reference = (&hook as *const SessionEndHook) as usize;
             let ask = |message: u32, wparam: usize, lparam: isize| {
@@ -491,11 +627,17 @@ mod windows_session_end {
                 0,
                 "a shutdown taken back is processed"
             );
+            assert_eq!(ended.get(), 0, "nothing before the end holds anything back");
             let _ = ask(WM_ENDSESSION, 1, 0);
             assert_eq!(
                 *heard.borrow(),
                 vec![SessionEnd::Asked, SessionEnd::TakenBack],
                 "the session really ending says nothing new"
+            );
+            assert_eq!(
+                ended.get(),
+                1,
+                "and the end is held for, once, before the answer"
             );
             assert_eq!(
                 ask(WM_ENDSESSION, 1, ENDSESSION_CLOSEAPP),
@@ -507,6 +649,7 @@ mod windows_session_end {
                 Some(&SessionEnd::Closed),
                 "and heard"
             );
+            assert_eq!(ended.get(), 1, "the close is not the end: nobody ends the process");
         }
 
         /// This process's restart registration as the system reads it back — its flags and its
@@ -588,8 +731,9 @@ impl SessionEndWatch {
         window: crate::NativeWindow,
         hear: Box<dyn Fn(SessionEnd)>,
         reason: Box<dyn Fn() -> String>,
+        ending: std::rc::Rc<dyn Fn()>,
     ) -> Result<Self, String> {
-        let _ = (window, hear, reason);
+        let _ = (window, hear, reason, ending);
         Ok(Self { _nothing: () })
     }
 
@@ -602,7 +746,8 @@ mod tests {
     use super::{
         ENDSESSION_CLOSEAPP, ENDSESSION_CRITICAL, ENDSESSION_LOGOFF, RESTART_FLAGS,
         RESTART_NO_CRASH, RESTART_NO_HANG, RESTART_NO_PATCH, RESTART_NO_REBOOT, SHUTDOWN_LEVEL,
-        SessionEnd, WM_ENDSESSION, WM_QUERYENDSESSION, answer, arrival_line, heard,
+        Drained, SessionEnd, WM_ENDSESSION, WM_QUERYENDSESSION, answer, arrival_line, drain_with,
+        heard, the_session_really_ends,
     };
 
     /// RED (plan row 191) — **every session-end message is said with its flags, and nothing else
@@ -685,6 +830,59 @@ mod tests {
             "the close is processed"
         );
         assert_eq!(told.get(), 1, "and told");
+    }
+
+    /// RED (plan row 201) — **only `WM_ENDSESSION(TRUE)` without the Restart Manager's close is
+    /// the session really ending**: the question, a shutdown taken back and the close are not,
+    /// whatever else their `lParam` carries.
+    ///
+    /// MUTATION: drop the `ENDSESSION_CLOSEAPP` test — the close, after which nobody ends the
+    /// process, would hold its answer for the end.
+    #[test]
+    fn only_the_session_really_ending_is_the_end() {
+        assert!(the_session_really_ends(WM_ENDSESSION, 1, 0));
+        assert!(the_session_really_ends(WM_ENDSESSION, 1, CRITICAL_AND_LOGOFF));
+        assert!(!the_session_really_ends(WM_ENDSESSION, 0, 0), "taken back");
+        assert!(
+            !the_session_really_ends(WM_ENDSESSION, 1, ENDSESSION_CLOSEAPP),
+            "the Restart Manager's close"
+        );
+        assert!(!the_session_really_ends(WM_QUERYENDSESSION, 1, 0), "the question");
+        assert!(!the_session_really_ends(0x0010, 1, 0), "WM_CLOSE");
+    }
+
+    /// RED (plan row 201) — **the drain runs queued messages until the answer is there or
+    /// nothing queued is left, and runs none once it is.**
+    ///
+    /// Three queues: one whose third message answers (two more stay queued, never run); one that
+    /// runs dry with no answer; and one answered before anything runs.
+    ///
+    /// MUTATION: in `drain_with`, ask `answered` only after `next` says it has nothing left — the
+    /// messages queued behind the answer run too, and an answer is said as none.
+    #[test]
+    fn the_drain_runs_until_the_answer_or_the_end_of_what_was_queued() {
+        let queued = std::cell::Cell::new(5_u32);
+        let ran = std::cell::Cell::new(0_u32);
+        let mut next = || {
+            if queued.get() == 0 {
+                return false;
+            }
+            queued.set(queued.get() - 1);
+            ran.set(ran.get() + 1);
+            true
+        };
+        assert_eq!(drain_with(&|| ran.get() >= 3, &mut next), Drained::Answered);
+        assert_eq!((ran.get(), queued.get()), (3, 2), "nothing behind the answer runs");
+
+        ran.set(0);
+        queued.set(2);
+        assert_eq!(drain_with(&|| false, &mut next), Drained::NothingLeft);
+        assert_eq!(ran.get(), 2, "everything queued ran, and then it stopped");
+
+        ran.set(0);
+        queued.set(4);
+        assert_eq!(drain_with(&|| true, &mut next), Drained::Answered);
+        assert_eq!(ran.get(), 0, "an answer already there runs nothing");
     }
 
     /// RED (T-RESTART-REGISTRATION; the coordinator's interim choice, pending the owner's ruling) — **Windows starts Folio again after

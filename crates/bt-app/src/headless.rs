@@ -570,6 +570,7 @@ impl WindowHost for HeadlessWindow {
         &self,
         _hear: Box<dyn Fn(bt_platform::session_end::SessionEnd)>,
         _reason: Box<dyn Fn() -> String>,
+        _ending: std::rc::Rc<dyn Fn()>,
     ) -> Option<bt_platform::session_end::SessionEndWatch> {
         self.ledger.record(WindowEffect::SessionEndWatched);
         None

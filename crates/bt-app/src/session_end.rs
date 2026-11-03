@@ -31,12 +31,25 @@
 //! `WM_ENDSESSION` says [`Settled::Closed`], and since the session goes on and nobody ends the
 //! process, the loop leaves by itself.
 //!
+//! **And the last word waits for the write** (plan row 201). After `WM_ENDSESSION(TRUE)` returns
+//! the system may end the process, so its procedure calls [`at_the_end`] and answers only after
+//! it. The write is not in flight then: the question's turn blocks this thread until it lands
+//! or its budget runs out, and a message from another process is delivered only while a thread
+//! waits for messages. What can be missing is the turn itself — the end overtook the wake the
+//! question posted, and the turn never ran — and the lines `diagnostics.log` was owed, still in
+//! its writer's queue. So the end runs the messages already queued until the question's turn has
+//! run ([`hold_at_the_end`]; nothing is waited for there: the turn's own write waits inside its
+//! own budget), says which road it took, and fences the log (`doors::DiagnosticsSettle`, its own
+//! bound). On the VM reboots of 2026-11-03 Folio was ended about half a second after the question
+//! and neither outcome line was in the log.
+//!
 //! Window-thread state, so a thread-local: the procedure and the loop are the same thread, and a
 //! test on a thread of its own starts with nothing held.
 
 use std::cell::{Cell, RefCell};
 use std::time::Instant;
 
+use bt_platform::admission::doors;
 use bt_platform::session_end::SessionEnd;
 
 use crate::persist::{SaveRefusal, SessionStore};
@@ -49,6 +62,10 @@ thread_local! {
     static SETTLED: Cell<bool> = const { Cell::new(false) };
     /// What the system has said and the loop has not read yet, in arrival order.
     static INBOX: RefCell<Vec<SessionEnd>> = const { RefCell::new(Vec::new()) };
+    /// **Whether this span's question has had its turn** (plan row 201): its write has an answer
+    /// — landed, refused or out of budget — or a quit under way writes it. Set when [`settle`]
+    /// returns from the question, which is after the write's wait; [`SETTLED`] is set before it.
+    static ANSWERED: Cell<bool> = const { Cell::new(false) };
 }
 
 /// **What the system said, on the window procedure's stack.** The question holds the document
@@ -116,19 +133,24 @@ pub(crate) fn settle(
     asked_at: Instant,
 ) -> Settled {
     match end {
-        SessionEnd::Asked if a_quit_holds_the_document => Settled::LeftToTheQuit,
+        SessionEnd::Asked if a_quit_holds_the_document => {
+            ANSWERED.with(|answered| answered.set(true));
+            Settled::LeftToTheQuit
+        }
         SessionEnd::Asked if SETTLED.with(Cell::get) => Settled::AlreadySaved,
         SessionEnd::Asked => {
             SETTLED.with(|settled| settled.set(true));
             bt_platform::admission::exiting();
             let landed = store.save_for_the_systems_end(asked_at);
             bt_platform::admission::quit_abandoned();
+            ANSWERED.with(|answered| answered.set(true));
             Settled::Saved(landed)
         }
         SessionEnd::Closed => Settled::Closed,
         SessionEnd::TakenBack => {
             HELD.with(|held| held.set(false));
             SETTLED.with(|settled| settled.set(false));
+            ANSWERED.with(|answered| answered.set(false));
             store.rearm_after_the_systems_end();
             store.wait_again_after_the_systems_end();
             Settled::TakenBack
@@ -169,11 +191,103 @@ pub(crate) fn outcome_line(settled: &Settled, document: &bt_persist::SessionV1) 
     }
 }
 
+/// **Whether this span's question has had its turn** (plan row 201): what the end holds its
+/// answer for.
+#[must_use]
+pub(crate) fn the_question_has_its_answer() -> bool {
+    ANSWERED.with(Cell::get)
+}
+
+/// **The road the end took to the question's answer** (plan row 201), said in one line.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Road {
+    /// The question's turn had already run: its write had its answer before the end arrived.
+    AlreadyRan,
+    /// The end overtook the question's wake; running the queued messages ran the turn.
+    RanItHere,
+    /// The end overtook the question's wake, and the messages queued did not run the turn — the
+    /// loop was inside its own handler when the question came (which holds the wake for after),
+    /// or no question came.
+    CouldNotRun,
+}
+
+/// **The one line `diagnostics.log` is owed about the road the end took** (plan row 201).
+#[must_use]
+pub(crate) fn road_line(road: Road) -> &'static str {
+    match road {
+        Road::AlreadyRan => {
+            "BT_SESSION_END WM_ENDSESSION(TRUE): the question's turn had already run"
+        }
+        Road::RanItHere => {
+            "BT_SESSION_END WM_ENDSESSION(TRUE): the question's turn had not run; the messages \
+             already queued ran it"
+        }
+        Road::CouldNotRun => {
+            "BT_SESSION_END WM_ENDSESSION(TRUE): the question's turn had not run, and the messages \
+             already queued did not run it"
+        }
+    }
+}
+
+/// **Hold the end until the question has had its turn** (plan row 201): at once when it has;
+/// otherwise `drain` runs the messages already queued on this thread — the question's wake among
+/// them — until the answer is there (it says whether it is). Nothing here waits: the bound of a
+/// write the turn runs is that write's own budget, and a budget already spent is not spent again.
+pub(crate) fn hold_at_the_end(drain: &mut dyn FnMut(&dyn Fn() -> bool) -> bool) -> Road {
+    if the_question_has_its_answer() {
+        return Road::AlreadyRan;
+    }
+    if drain(&the_question_has_its_answer) {
+        Road::RanItHere
+    } else {
+        Road::CouldNotRun
+    }
+}
+
+/// **The end's whole rule** (plan row 201): [`hold_at_the_end`], the road said, and then the
+/// fence, so that every line said before it — the question's outcome among them — is on the
+/// disk before the answer lets the system end the process.
+pub(crate) fn end_with(
+    drain: &mut dyn FnMut(&dyn Fn() -> bool) -> bool,
+    say: &mut dyn FnMut(&str),
+    fence: &mut dyn FnMut(),
+) -> Road {
+    let road = hold_at_the_end(drain);
+    say(road_line(road));
+    fence();
+    road
+}
+
+/// **`WM_ENDSESSION(TRUE)`, on the window procedure's stack** (plan row 201): [`end_with`] over
+/// this thread's queue, `diagnostics.log` and its fence.
+pub(crate) fn at_the_end() {
+    let _ = end_with(
+        &mut |answered| {
+            bt_platform::session_end::drain_what_is_queued(answered)
+                == bt_platform::session_end::Drained::Answered
+        },
+        &mut crate::diagnostics::note,
+        &mut fence_the_log,
+    );
+}
+
+/// **Everything said so far, on the disk**: the process is on its way out — the system may end it
+/// once the end is answered — and `diagnostics.log`'s fence is admitted there, within its own
+/// bound (`SETTLE_WITHIN`; ruled 2026-11-03, plan row 201: after the write's budget, at most four
+/// seconds in all).
+fn fence_the_log() {
+    bt_platform::admission::exiting();
+    let _ = bt_platform::admission::admitted::<doors::DiagnosticsSettle, _>(
+        crate::diagnostics::settle,
+    );
+}
+
 /// **Nothing held and nothing parked**, for a test that heard the system: `--test-threads=1` runs
 /// every test on one thread, and a hold left behind would stop the next test's recordings.
 #[cfg(test)]
 pub(crate) fn forget() {
     HELD.with(|held| held.set(false));
     SETTLED.with(|settled| settled.set(false));
+    ANSWERED.with(|answered| answered.set(false));
     INBOX.with_borrow_mut(Vec::clear);
 }

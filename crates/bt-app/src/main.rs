@@ -34082,6 +34082,8 @@ fn new_window_runtime<B: Backend>(parts: NewWindowParts<B>) -> WindowRuntime<B> 
     // system sends the question to holds the document and parks the news; the wake brings the
     // turn that writes it. One per window because the question is sent to every top-level window,
     // and one answer is as good as another: the hold is set once and the write is idempotent.
+    // The last word, `WM_ENDSESSION(TRUE)`, is answered only after `session_end::at_the_end`: the
+    // question's turn run if the end overtook its wake, and the log fenced (plan row 201).
     let session_end_watch = {
         let proxy = event_proxy.clone();
         window.watch_session_end(
@@ -34090,6 +34092,7 @@ fn new_window_runtime<B: Backend>(parts: NewWindowParts<B>) -> WindowRuntime<B> 
                 let _ = proxy.send_event(AppEvent::SessionEnding);
             }),
             Box::new(|| i18n::Text::ShutdownSavingWork.text().to_owned()),
+            std::rc::Rc::new(session_end::at_the_end),
         )
     };
     // **A window is born knowing its display's rate**, before it has drawn
