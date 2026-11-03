@@ -46174,9 +46174,10 @@ impl<B: Backend> FolioApp<B> {
     /// `_storage` and `_profiles` are the witnesses that `main` settled the data directory and the
     /// profile table (`startup::Settled`, T-LAZY-INITIALIZERS-BEFORE-THE-LOOP), `_package` that it
     /// settled whether `folio.msix` is beside the executable
-    /// (T-EXPLORER-MENU-PROBE-OFF-THE-WINDOW-THREAD), `_notices` whether the notices file is
-    /// (T-NOTICES-DESTINATION-OFF-THE-WINDOW-THREAD): nothing is read from them; that they exist
-    /// is the proof the loop does not start before any of them.
+    /// (T-EXPLORER-MENU-PROBE-OFF-THE-WINDOW-THREAD), `_notices` whether the notices file is beside
+    /// the running image (T-NOTICES-DESTINATION-OFF-THE-WINDOW-THREAD): nothing is read from them;
+    /// that they exist is the proof the loop does not start before any of them, and each has a
+    /// type of its own, so none can stand in for another.
     fn new(
         proxy: LoopProxy,
         cli: cli::CliRequest,
@@ -46184,7 +46185,7 @@ impl<B: Backend> FolioApp<B> {
         _storage: startup::Settled<persist::DataDirectory>,
         _profiles: startup::Settled<profiles::Registry>,
         _package: startup::Settled<Option<PathBuf>>,
-        _notices: startup::Settled<Option<PathBuf>>,
+        _notices: startup::Settled<settings::ShippedNotices>,
     ) -> Self {
         Self {
             app: None,
@@ -57863,8 +57864,8 @@ fn main() -> Result<()> {
     let package = explorer_menu::settle_package();
     // **And whether the notices file came with it, looked at the same moment and not by a press**
     // (T-NOTICES-DESTINATION-OFF-THE-WINDOW-THREAD; C1): the About page's licences row reads the
-    // answer on the window thread, beside the image the links lead to, so a start through
-    // winget's alias opens the file that came with it.
+    // answer on the window thread instead of looking there. The look is beside the image the
+    // links lead to, so a start through a WinGet link (winget before 1.9) finds the file too.
     let notices = settings::settle_notices();
     // **And from here no trace line is written by the thread that made it**
     // (T-TRACE-OFF-THREAD). `trace_sink` starts one writer thread — and only

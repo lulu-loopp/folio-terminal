@@ -5796,22 +5796,29 @@ pub fn notices_page() -> &'static str {
 /// after this process has gone — so [`settle_notices`]' answer, made by `fn main`
 /// before the loop, is the run's.
 fn notices_destination() -> LinkDestination {
-    match NOTICES.get() {
+    match &NOTICES.get().0 {
         Some(file) => LinkDestination::File(file.as_path()),
         None => LinkDestination::Address(notices_page()),
     }
 }
 
-/// [`notices_destination`]'s cell: the notices file this build shipped with, as this start found
-/// it, settled by [`settle_notices`].
+/// **The notices file this build shipped with, as this start found it** — [`NOTICES`]' value.
+///
+/// A type of its own rather than a bare `Option<PathBuf>`, so that its witness
+/// (`startup::Settled<ShippedNotices>`, which `FolioApp::new` takes) cannot be stood in for by
+/// `explorer_menu::settle_package`'s, whose value is also an optional path: the type, and not
+/// only the settle's pin, holds the order (row 61 review N2).
+pub(crate) struct ShippedNotices(Option<std::path::PathBuf>);
+
+/// [`notices_destination`]'s cell, settled by [`settle_notices`].
 #[cfg(not(test))]
-static NOTICES: SettledOnce<Option<std::path::PathBuf>> = SettledOnce::new(NOTICES_ARE);
+static NOTICES: SettledOnce<ShippedNotices> = SettledOnce::new(NOTICES_ARE);
 
 /// A test process has no `main`: its first read settles the cell with the look `main` settles
 /// it with, beside the test binary.
 #[cfg(test)]
-static NOTICES: SettledOnce<Option<std::path::PathBuf>> =
-    SettledOnce::settled_in_a_test_by(NOTICES_ARE, look_beside_this_image);
+static NOTICES: SettledOnce<ShippedNotices> =
+    SettledOnce::settled_in_a_test_by(NOTICES_ARE, the_look_this_start_makes);
 
 /// What [`NOTICES`] holds, for the panic of a read before it is settled.
 const NOTICES_ARE: &str =
@@ -5831,8 +5838,13 @@ thread_local! {
 /// on the line after `explorer_menu::settle_package` — the same question about the same folder,
 /// each module answering its own (its pin in `window_waits_tests`), so no press on the window
 /// thread pays for the look. A later call answers the first.
-pub(crate) fn settle_notices() -> Settled<Option<std::path::PathBuf>> {
-    NOTICES.settle(look_beside_this_image)
+pub(crate) fn settle_notices() -> Settled<ShippedNotices> {
+    NOTICES.settle(the_look_this_start_makes)
+}
+
+/// [`look_beside_this_image`]'s answer, as the cell holds it.
+fn the_look_this_start_makes() -> ShippedNotices {
+    ShippedNotices(look_beside_this_image())
 }
 
 /// The look [`settle_notices`] makes: the notices beside this process's image, links followed.
@@ -5846,12 +5858,14 @@ fn look_beside_this_image() -> Option<std::path::PathBuf> {
 /// **The notices file this build shipped with, given the image it runs from**, when `is_file`
 /// finds it.
 ///
-/// **Beside the file the image leads to, never beside the path it was started by**: winget's
-/// portable alias is a symbolic link in a folder of its own, a start through it is told the
-/// link's path, and that folder holds none of the files the archive carried — so a look beside
-/// the started path sent every winget start of the licences row to the web page
-/// (T-NOTICES-DESTINATION-OFF-THE-WINDOW-THREAD; `bt_platform::RunningImage`). The rule itself
-/// is [`shipped_notices_near`].
+/// **Beside the file the image leads to, never beside the path it was started by**: a start
+/// through a symbolic link is told the link's path, and the link's folder holds none of the files
+/// the archive carried. winget makes such a link (`WinGet\Links\folio.exe`) only where it
+/// ignores the manifest's `ArchiveBinariesDependOnPath` — a client older than 1.9 — and there a
+/// look beside the started path sent the licences row to the web page; a winget of 1.9 or newer
+/// puts the package folder on `PATH`, and a start there was already the file itself
+/// (T-NOTICES-DESTINATION-OFF-THE-WINDOW-THREAD; `bt_platform::RunningImage`;
+/// `docs/RELEASING.md`). The rule itself is [`shipped_notices_near`].
 fn notices_for(
     image: &bt_platform::RunningImage,
     is_file: &dyn Fn(&std::path::Path) -> bool,
@@ -18862,7 +18876,7 @@ mod tests {
             before,
             "the licences row's destination asked the disk nothing"
         );
-        let expected = match settled.value() {
+        let expected = match &settled.value().0 {
             Some(file) => LinkDestination::File(file.as_path()),
             None => LinkDestination::Address(notices_page()),
         };
