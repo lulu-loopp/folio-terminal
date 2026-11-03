@@ -2868,6 +2868,94 @@ fn the_volumes_flash_goes_out_on_a_paused_recording() {
     crate::test_support::engines_settling_to(before);
 }
 
+/// RED (plan row 189, T-LATE-BUILT-VIDEO-RETIRED-AS-UNPLAYABLE) — **a recording whose player
+/// never comes up is waited for once more and then said, at its two deadlines, by the window's
+/// own wakes and nothing else** — never as a format that cannot be played.
+///
+/// The seat stands on an engine whose thread never starts (`Engine::never_built`, asked for at
+/// `t0`), which is what a machine whose player does not come up looks like to the window. The
+/// window is then turned only at the instants it asks to be woken at, on a clock the test holds:
+/// no event, no sleep, no real time. The engine's open budget runs out a nanosecond past
+/// `t0 + OPEN_BUDGET`; the window must wake at exactly that instant, find the seat late and say
+/// nothing; and wake again at exactly one more `OPEN_BUDGET`, where the seat is retired and the
+/// pane says the player did not start.
+///
+/// MUTATION: drop `seat_wait` from `Runtime::strip_animation_work`'s fold — the window books no
+/// wake for the late seat, the turns run out of instants with the loading face still standing,
+/// and the "books a wake" expectation goes red. MUTATION: retire the first late reading in
+/// `video_seat::seat_answer` (`plant-189-late-engine-filed-as-a-format.py`) — the sentence is
+/// said at the first run-out, and in the format's words.
+#[test]
+fn a_player_that_never_comes_up_is_said_at_its_deadlines_by_the_windows_own_wakes() {
+    use bt_platform::video::engine::OPEN_BUDGET;
+    let (mut folio, surface) = a_recording_beside_a_shell("video-player-never-up");
+    let t0 = Instant::now();
+    folio.window.video.put(
+        surface,
+        crate::video_seat::VideoSeat::never_built(&the_recording(), 1, t0),
+    );
+    let said = |folio: &HeadlessFolio| {
+        folio.window.tabs[0]
+            .preview_panes
+            .get(surface)
+            .and_then(PreviewPane::image)
+            .and_then(|picture| picture.failure.as_ref())
+            .map(|refusal| refusal.notice.clone())
+    };
+    let runs_out = t0 + OPEN_BUDGET + Duration::from_nanos(1);
+    let mut now = t0;
+    let mut woken_at = Vec::new();
+    let said_at = loop {
+        let wake = folio
+            .runtime()
+            .turn(now, true)
+            .expect("the turn is answered");
+        if let Some(sentence) = said(&folio) {
+            break (now, sentence);
+        }
+        assert!(
+            folio.window.video.get(surface).is_some(),
+            "a seat is not retired without a sentence (at {:?})",
+            now - t0
+        );
+        let (owner, at) = wake.unwrap_or_else(|| {
+            panic!(
+                "the window books no wake for a seat whose engine has not come up (at {:?}); \
+                 its loading face would stand until something else woke the loop",
+                now - t0
+            )
+        });
+        assert!(
+            at > now,
+            "the turn at {:?} handed the loop {owner:?}'s instant, which has already come",
+            now - t0
+        );
+        assert!(
+            woken_at.len() < 10_000,
+            "the window's wakes never reach the deadlines: {woken_at:?}"
+        );
+        woken_at.push(at - t0);
+        now = at;
+    };
+    assert!(
+        woken_at.contains(&(runs_out - t0)),
+        "the window woke at the engine's first instant past its open budget: {woken_at:?}"
+    );
+    assert_eq!(
+        said_at,
+        (
+            runs_out + OPEN_BUDGET,
+            crate::i18n::Text::VideoPlayerDidNotStart.text().to_owned()
+        ),
+        "the seat was given one more budget from that instant, and at its end the pane says the \
+         player did not start"
+    );
+    assert!(
+        folio.window.video.get(surface).is_none(),
+        "and the seat is shut down: the play button comes back, and a press is a new look"
+    );
+}
+
 /// RED (T-VIDEO-POINTER-AND-KEYS review round 2) — **a click's record answers only for the seat it
 /// was made on**: once another recording has been put on the surface between a click and the
 /// press that pairs with it (file travel lands the next file's still, and its play disc opens a

@@ -13738,6 +13738,15 @@ impl<B: Backend> Runtime<'_, B> {
             .then_some(bar_deadline)
             .flatten()
             .map(|deadline| next_tick.map_or(deadline, |tick| deadline.max(tick)));
+        // **And a seat whose engine has not come up** (plan row 189): an
+        // absolute owner clock like the bar's waits, and a wake rather than a
+        // liveness — nothing moves while an engine is late. At the engine's
+        // first instant past its open budget the seat is found late and given
+        // one more; at the end of that one it is retired with its sentence.
+        // Without it the loading face stood until something unrelated woke the
+        // loop. `retire_faulted_video_seats` answers on the turn this wakes,
+        // which runs before this fold, so the instant is never left behind.
+        let seat_wait = self.window.video.answer_deadline();
         AnimationWork {
             deadline: [
                 (strip_moving || rail_waiting || pictures_owe)
@@ -13745,6 +13754,7 @@ impl<B: Backend> Runtime<'_, B> {
                     .flatten(),
                 (bar_moving || pane_moving).then_some(next_tick).flatten(),
                 bar_wait,
+                seat_wait,
             ]
             .into_iter()
             .flatten()

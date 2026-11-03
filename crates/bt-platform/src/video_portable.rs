@@ -524,7 +524,7 @@ pub mod engine {
     #[cfg(not(target_os = "macos"))]
     mod no_player {
         use std::path::Path;
-        use std::time::Duration;
+        use std::time::{Duration, Instant};
 
         use super::{EngineError, EngineState, Frame, FrameCost};
 
@@ -551,6 +551,19 @@ pub mod engine {
             /// Unreachable.
             #[must_use]
             pub fn state(&self) -> EngineState {
+                match self._never {}
+            }
+
+            /// Unreachable.
+            #[must_use]
+            pub fn state_at(&self, now: impl FnOnce() -> Instant) -> EngineState {
+                let _ = now;
+                match self._never {}
+            }
+
+            /// Unreachable.
+            #[must_use]
+            pub fn open_runs_out_at(&self) -> Option<Instant> {
                 match self._never {}
             }
 

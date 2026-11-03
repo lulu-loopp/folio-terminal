@@ -172,6 +172,24 @@ impl OpenDeadline {
     ) -> bool {
         !errored && !built() && now() > self.due
     }
+
+    /// **The first instant at which a reading would find the budget missed**,
+    /// while it still can be — nothing built and nothing said — and `None` once
+    /// it cannot (plan row 189).
+    ///
+    /// What a window wakes for: an engine that has not come up is a seat whose
+    /// loading face would otherwise stand until something unrelated woke the
+    /// loop. One nanosecond past [`Self::missed`]'s `due`, because that
+    /// comparison is strict: a wake at `due` itself would find the reading in
+    /// time and leave the same instant in the past for the loop to spin on.
+    /// `built` is asked only while nothing has been said.
+    pub(crate) fn runs_out_at(
+        self,
+        built: impl FnOnce() -> bool,
+        errored: bool,
+    ) -> Option<Instant> {
+        (!errored && !built()).then(|| self.due + Duration::from_nanos(1))
+    }
 }
 
 #[cfg(test)]
@@ -234,6 +252,43 @@ mod tests {
             (build_asks.get(), clock_reads.get()),
             (0, 0),
             "a said refusal asks neither the build nor the clock"
+        );
+    }
+
+    /// RED — **the instant an open runs out is the first one `missed` says
+    /// missed, and there is none once the engine is built or has spoken**
+    /// (plan row 189).
+    ///
+    /// What a window wakes for: at that instant the reading changes, and a
+    /// breath before it does not — so a wake there is never a wake that finds
+    /// nothing and leaves its own instant in the past.
+    ///
+    /// MUTATION: answer `due` itself — the reading at the answered instant is in
+    /// time and the first assertion goes red.
+    #[test]
+    fn an_open_runs_out_at_the_first_instant_it_is_missed_and_only_while_it_can() {
+        let asked = Instant::now();
+        let deadline = OpenDeadline::from_open(asked);
+        let at = deadline
+            .runs_out_at(|| false, false)
+            .expect("an engine neither built nor refused can run out");
+        assert!(
+            deadline.missed(|| at, || false, false),
+            "the reading at the answered instant is missed"
+        );
+        assert!(
+            !deadline.missed(|| at - Duration::from_nanos(1), || false, false),
+            "and a nanosecond before it is still in time"
+        );
+        assert_eq!(
+            deadline.runs_out_at(|| true, false),
+            None,
+            "a built engine cannot run out"
+        );
+        assert_eq!(
+            deadline.runs_out_at(|| false, true),
+            None,
+            "nor can one that has said a refusal"
         );
     }
 

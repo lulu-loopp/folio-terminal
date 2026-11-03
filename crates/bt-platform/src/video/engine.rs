@@ -587,10 +587,57 @@ impl Engine {
         self.state_at(Instant::now)
     }
 
-    /// [`Self::state`] read at `now`: the real clock from [`Self::state`], an
-    /// instant a test chose in a test. `now` is asked only when due — while
-    /// nothing has been said and nothing is built.
-    fn state_at(&self, now: impl FnOnce() -> Instant) -> EngineState {
+    /// **When this engine's open budget runs out, while it still can** — the
+    /// first instant a reading would answer [`EngineError::Unresponsive`],
+    /// while nothing is built and nothing has been said, and `None` once
+    /// either is (plan row 189; the decision is
+    /// `video_load::OpenDeadline::runs_out_at`).
+    ///
+    /// What a window wakes for, so that a seat whose engine has not come up
+    /// is answered at that instant rather than whenever something unrelated
+    /// next wakes the loop. It reads no clock.
+    #[must_use]
+    pub fn open_runs_out_at(&self) -> Option<Instant> {
+        let errored = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .error
+            .is_some();
+        self.open
+            .runs_out_at(|| self.shared.built.load(Ordering::Acquire), errored)
+    }
+
+    /// **An engine asked for at `asked_at` whose thread never starts** — the
+    /// handle's own parts and nothing behind them, so it is never built and
+    /// never says anything: what a machine whose player does not come up looks
+    /// like to a window, on instants a test chooses (plan row 189). No
+    /// thread, so the leak ledger does not count it and its shutdown and drop
+    /// wait for nothing.
+    #[cfg(any(test, feature = "trust-harness"))]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn never_built(path: &Path, asked_at: Instant) -> Self {
+        let (commands, _inbox) = mpsc::channel();
+        Self {
+            commands,
+            shared: Arc::new(Shared::default()),
+            thread: None,
+            source: path.to_path_buf(),
+            seen_generation: 0,
+            open: OpenDeadline::from_open(asked_at),
+        }
+    }
+
+    /// [`Self::state`] read at `now`: the real clock from [`Self::state`], the
+    /// instant a window's clocked pass was handed from that pass (plan row
+    /// 189: `bt-app`'s seat sweep, so the open budget's run-out and the seat's
+    /// one more budget are read on one clock), an instant a test chose in a
+    /// test. `now` is asked only when due — while nothing has been said and
+    /// nothing is built.
+    #[must_use]
+    pub fn state_at(&self, now: impl FnOnce() -> Instant) -> EngineState {
         let state = *self
             .shared
             .state
@@ -2662,15 +2709,7 @@ mod tests {
     /// reads is only what the test puts in `shared`. No thread, so its drop
     /// says nothing and waits for nothing.
     fn unbuilt_at(asked: Instant) -> Engine {
-        let (commands, _inbox) = mpsc::channel();
-        Engine {
-            commands,
-            shared: Arc::new(Shared::default()),
-            thread: None,
-            source: PathBuf::from("unbuilt"),
-            seen_generation: 0,
-            open: OpenDeadline::from_open(asked),
-        }
+        Engine::never_built(Path::new("unbuilt"), asked)
     }
 
     /// RED — **the errors that say the player did not come up on this machine
