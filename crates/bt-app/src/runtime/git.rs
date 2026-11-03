@@ -1277,6 +1277,13 @@ impl<B: Backend> Runtime<'_, B> {
                 !judged || showing.iter().any(|(shown, _)| shown == surface)
             });
         }
+        // **The docked graphs' search runs, cleared with the pictures they were
+        // drawn in** (row 180 review N3): every one still drawn is recorded
+        // again below by `build_git_graph`, so a closed graph keeps none.
+        self.window
+            .drawn_fields
+            .graph_search
+            .retain(|surface, _| !matches!(surface, PreviewSurface::Seat(_)));
         if showing.is_empty() {
             return BTreeMap::new();
         }

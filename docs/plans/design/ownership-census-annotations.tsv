@@ -91,7 +91,7 @@ WindowRuntime.composing	-	VIEW	keyboard	the 2026-09-25 table
 WindowRuntime.cursor_blink	-	VIEW	keyboard	the 2026-09-25 table
 WindowRuntime.dirty_gate	the pending destructive request	DUR	windows	revision (b)4 split
 WindowRuntime.dirty_gate	hover over the gate's card	VIEW	mouse	revision (b)4 split
-WindowRuntime.drawn_fields	-	PROJ	frame	0.4.9 plan row 180 (was rename_drawn, row 179): the drawn run of every one-line field, each part written by the pass that paints its field (the name editor's five painters, the find bar, a graph's search, the settings dialog, the palette, the git menu) and cleared where that field closes; read by runtime::pointer::field_caret
+WindowRuntime.drawn_fields	-	PROJ	frame	0.4.9 plan row 180 (was rename_drawn, row 179): the drawn run of every one-line field, each part written by the pass that paints its field (the name editor's five painters, the find bar, a graph's search, the settings dialog, the palette, the git menu) rewritten by every paint of that field and dropped by its close or by the first paint that no longer draws it; read by runtime::pointer::field_caret
 WindowRuntime.file_menu	-	VIEW	floats	the 2026-09-25 table
 WindowRuntime.files_notice	-	PROJ	files	the 2026-09-25 table
 WindowRuntime.files_row_clicks	-	VIEW	files	the 2026-09-25 table

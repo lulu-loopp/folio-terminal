@@ -16252,7 +16252,7 @@ Owner report 2026-10-27: the `<` / `>` at a picture preview's two sides did not 
 - `palette` is written by `palette_layer`.
 - `git_prompt` is written by `git_menu_layer`.
 
-Each run is cleared where its field closes. Each painter derives its run the way it lays out the ink (`Capsule::text_run`, `PaletteLayout::text_run`, `GitPromptRects::text_run`, `graph_search_field`, `settings::field_text_run`), so a press reads the seams the frame was drawn from and never measures again.
+Each run is rewritten by every paint of its field and dropped by the field's close or by the first paint that no longer draws it (a closed graph's search run goes with the pass that rebuilds the graphs' half it was in). Each painter derives its run the way it lays out the ink (`Capsule::text_run`, `PaletteLayout::text_run`, `GitPromptRects::text_run`, `graph_search_field`, `settings::field_text_run`), so a press reads the seams the frame was drawn from and never measures again.
 
 **A scrolled settings field holds still (ruling 2).** The focused field's scroll is kept on the panel (`SettingsPanel::field_scroll`). `settings::settle_field_scroll` moves it only as far as the caret needs: the text goes left when the caret runs past the right edge and right when it goes in front of the left edge, and the slack comes back when the text shrinks. The painter, the IME's caret and the recorded run all read the one scroll settled for the frame. A field without the focus is drawn from its start, and the kept scroll is dropped while no field holds the keyboard. So a field the focus comes back to starts from where it was drawn. Typing is unchanged, because a field that has just taken the focus starts from `0`, which was the old answer.
 

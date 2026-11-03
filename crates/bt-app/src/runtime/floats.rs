@@ -3194,6 +3194,12 @@ impl<B: Backend> Runtime<'_, B> {
         self.window
             .git_graphs_shown
             .retain(|surface, _| !matches!(surface, PreviewSurface::Float(_)));
+        // And their search runs with them (row 180 review N3): a window still
+        // drawn records its run again in `push_float_graph`.
+        self.window
+            .drawn_fields
+            .graph_search
+            .retain(|surface, _| !matches!(surface, PreviewSurface::Float(_)));
         let scale = self.window.renderer.scale_factor() as f32;
         let mut layers = marks::Band::default();
         for id in ids {
