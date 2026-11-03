@@ -277,9 +277,8 @@ pub(crate) fn at_the_end() {
 /// seconds in all).
 fn fence_the_log() {
     bt_platform::admission::exiting();
-    let _ = bt_platform::admission::admitted::<doors::DiagnosticsSettle, _>(
-        crate::diagnostics::settle,
-    );
+    let _ =
+        bt_platform::admission::admitted::<doors::DiagnosticsSettle, _>(crate::diagnostics::settle);
 }
 
 /// **Nothing held and nothing parked**, for a test that heard the system: `--test-threads=1` runs

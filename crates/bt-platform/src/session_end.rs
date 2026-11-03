@@ -499,7 +499,8 @@ mod windows_session_end {
             return drain_with(answered, &mut || false);
         }
         // SAFETY: a thread message to this thread, carrying no pointer.
-        let marked = unsafe { PostThreadMessageW(GetCurrentThreadId(), mark, WPARAM(0), LPARAM(0)) };
+        let marked =
+            unsafe { PostThreadMessageW(GetCurrentThreadId(), mark, WPARAM(0), LPARAM(0)) };
         if marked.is_err() {
             return drain_with(answered, &mut || false);
         }
@@ -649,7 +650,11 @@ mod windows_session_end {
                 Some(&SessionEnd::Closed),
                 "and heard"
             );
-            assert_eq!(ended.get(), 1, "the close is not the end: nobody ends the process");
+            assert_eq!(
+                ended.get(),
+                1,
+                "the close is not the end: nobody ends the process"
+            );
         }
 
         /// This process's restart registration as the system reads it back — its flags and its
@@ -744,10 +749,10 @@ impl SessionEndWatch {
 #[cfg(test)]
 mod tests {
     use super::{
-        ENDSESSION_CLOSEAPP, ENDSESSION_CRITICAL, ENDSESSION_LOGOFF, RESTART_FLAGS,
+        Drained, ENDSESSION_CLOSEAPP, ENDSESSION_CRITICAL, ENDSESSION_LOGOFF, RESTART_FLAGS,
         RESTART_NO_CRASH, RESTART_NO_HANG, RESTART_NO_PATCH, RESTART_NO_REBOOT, SHUTDOWN_LEVEL,
-        Drained, SessionEnd, WM_ENDSESSION, WM_QUERYENDSESSION, answer, arrival_line, drain_with,
-        heard, the_session_really_ends,
+        SessionEnd, WM_ENDSESSION, WM_QUERYENDSESSION, answer, arrival_line, drain_with, heard,
+        the_session_really_ends,
     };
 
     /// RED (plan row 191) — **every session-end message is said with its flags, and nothing else
@@ -841,13 +846,20 @@ mod tests {
     #[test]
     fn only_the_session_really_ending_is_the_end() {
         assert!(the_session_really_ends(WM_ENDSESSION, 1, 0));
-        assert!(the_session_really_ends(WM_ENDSESSION, 1, CRITICAL_AND_LOGOFF));
+        assert!(the_session_really_ends(
+            WM_ENDSESSION,
+            1,
+            CRITICAL_AND_LOGOFF
+        ));
         assert!(!the_session_really_ends(WM_ENDSESSION, 0, 0), "taken back");
         assert!(
             !the_session_really_ends(WM_ENDSESSION, 1, ENDSESSION_CLOSEAPP),
             "the Restart Manager's close"
         );
-        assert!(!the_session_really_ends(WM_QUERYENDSESSION, 1, 0), "the question");
+        assert!(
+            !the_session_really_ends(WM_QUERYENDSESSION, 1, 0),
+            "the question"
+        );
         assert!(!the_session_really_ends(0x0010, 1, 0), "WM_CLOSE");
     }
 
@@ -872,7 +884,11 @@ mod tests {
             true
         };
         assert_eq!(drain_with(&|| ran.get() >= 3, &mut next), Drained::Answered);
-        assert_eq!((ran.get(), queued.get()), (3, 2), "nothing behind the answer runs");
+        assert_eq!(
+            (ran.get(), queued.get()),
+            (3, 2),
+            "nothing behind the answer runs"
+        );
 
         ran.set(0);
         queued.set(2);

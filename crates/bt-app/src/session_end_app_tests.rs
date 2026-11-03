@@ -383,7 +383,11 @@ fn the_end_after_the_questions_turn_runs_nothing_and_does_not_wait_again() {
         "the question's write ran out of its budget: {settled:?}"
     );
     let mut said = Vec::new();
-    let road = session_end::end_with(&mut unexpected, &mut |line| said.push(line.to_owned()), &mut || {});
+    let road = session_end::end_with(
+        &mut unexpected,
+        &mut |line| said.push(line.to_owned()),
+        &mut || {},
+    );
     assert_eq!(
         road,
         session_end::Road::AlreadyRan,
@@ -428,5 +432,8 @@ fn the_end_says_when_the_queued_messages_did_not_run_the_questions_turn() {
         ]
     );
     assert!(!home.session().exists(), "nothing was written");
-    assert!(home.sentinel().is_file(), "and the next start offers the layout back");
+    assert!(
+        home.sentinel().is_file(),
+        "and the next start offers the layout back"
+    );
 }
