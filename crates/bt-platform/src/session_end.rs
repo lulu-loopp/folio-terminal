@@ -352,9 +352,9 @@ mod windows_session_end {
     pub(super) struct SessionEndHook {
         pub(super) hear: Box<dyn Fn(SessionEnd)>,
         pub(super) reason: Box<dyn Fn() -> String>,
-        /// Shared rather than boxed: it runs the thread's queued messages, and one of them may
-        /// drop this window's watch — and this hook with it — while it runs. The procedure calls
-        /// its own count of it and reads nothing of the hook after.
+        /// Says what became of the question's save and fences the log; it runs nothing of the
+        /// loop's. Shared rather than boxed: the procedure calls its own count of it and reads
+        /// nothing of the hook after.
         pub(super) ending: Rc<dyn Fn()>,
     }
 
@@ -711,6 +711,49 @@ mod tests {
         } else {
             assert_eq!(shutting_down(), None, "no probe off Windows");
         }
+    }
+
+    /// RED (plan row 201, re-review RR-N5) — **the probe's queue read says whether a posted
+    /// message waits, and takes nothing**: on a thread of its own, whose queue the first peek
+    /// creates, the read is `no`; a message posted to the thread makes it `yes`, twice, because the
+    /// read removes nothing; taking the message off makes it `no` again.
+    ///
+    /// MUTATION: read the low word (`status & QS_POSTMESSAGE`, the kinds new since the last look)
+    /// instead of the high word — the second read after the post says `no`.
+    #[cfg(windows)]
+    #[test]
+    fn the_queue_read_says_whether_a_posted_message_waits_and_takes_nothing() {
+        use windows::Win32::Foundation::{LPARAM, WPARAM};
+        use windows::Win32::System::Threading::GetCurrentThreadId;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            MSG, PM_NOREMOVE, PM_REMOVE, PeekMessageW, PostThreadMessageW, WM_APP,
+        };
+
+        use super::posted_messages_waiting;
+
+        let reads = std::thread::spawn(|| {
+            let mut message = MSG::default();
+            let mut reads = Vec::new();
+            // SAFETY: plain Win32 calls on this thread's own queue; the first peek creates the
+            // queue a thread message needs.
+            unsafe {
+                let _ = PeekMessageW(&mut message, None, 0, 0, PM_NOREMOVE);
+                reads.push(posted_messages_waiting());
+                PostThreadMessageW(GetCurrentThreadId(), WM_APP + 21, WPARAM(0), LPARAM(0))
+                    .expect("post to this thread");
+                reads.push(posted_messages_waiting());
+                reads.push(posted_messages_waiting());
+                assert!(
+                    PeekMessageW(&mut message, None, WM_APP + 21, WM_APP + 21, PM_REMOVE).as_bool(),
+                    "the read left the message where it was"
+                );
+                reads.push(posted_messages_waiting());
+            }
+            reads
+        })
+        .join()
+        .expect("the queue's thread");
+        assert_eq!(reads, [Some(false), Some(true), Some(true), Some(false)]);
     }
 
     /// RED (plan row 191) — **every session-end message is said with its flags, and nothing else

@@ -39,7 +39,9 @@
 //! callbacks is on the stack, and where the question's wake was), says one line on what became
 //! of the question's save, and fences the log (`doors::DiagnosticsSettle`, its own bound). It does
 //! that once for the process, because the system sends the end to every top-level window. The
-//! question says its own probe line once per span. The end drives nothing of the loop's: a save
+//! question says its own probe line once per span, with the queue as the question found it, and
+//! a question that finds no span open opens one on the procedure's stack, so that the span's
+//! probe and fence start afresh without waiting for a loop turn. The end drives nothing of the loop's: a save
 //! the end found not landed stays not landed, and a change made in the last second before the
 //! question stays with the debounced save. Whether the question's turn can be run at the question
 //! is plan row 206's, decided on what these probe lines measure.
@@ -69,6 +71,11 @@ thread_local! {
     static ANSWER: Cell<Option<Answer>> = const { Cell::new(None) };
     /// **Where this span's question's wake is** (plan row 201's probe).
     static WAKE: Cell<Wake> = const { Cell::new(Wake::NeverPosted) };
+    /// **Whether a span is open**: a question heard and not yet taken back, on the window
+    /// procedure's stack (plan row 201, re-review RR-N4). A question that finds none open opens
+    /// one and starts its probe and fence afresh itself, without waiting for a loop turn to settle
+    /// the shutdown taken back before it.
+    static SPAN_OPEN: Cell<bool> = const { Cell::new(false) };
     /// **Whether this span's end has fenced the log** (plan row 201, review F2). The system sends
     /// `WM_ENDSESSION(TRUE)` to every top-level window, and every window is this thread's, so this
     /// thread's cell is the process's. The first window's end fences, and the rest find it fenced,
@@ -107,8 +114,18 @@ pub(crate) enum Wake {
 /// **What the system said, on the window procedure's stack.** The question holds the document
 /// at once; everything is parked for [`take`]. It must do nothing else.
 pub(crate) fn hear(end: SessionEnd) {
-    if end == SessionEnd::Asked {
-        HELD.with(|held| held.set(true));
+    match end {
+        SessionEnd::Asked => {
+            if !SPAN_OPEN.with(Cell::get) {
+                SPAN_OPEN.with(|open| open.set(true));
+                FENCED.with(|fenced| fenced.set(false));
+                WAKE.with(|wake| wake.set(Wake::NeverPosted));
+                ANSWER.with(|answer| answer.set(None));
+            }
+            HELD.with(|held| held.set(true));
+        }
+        SessionEnd::TakenBack => SPAN_OPEN.with(|open| open.set(false)),
+        SessionEnd::Closed => {}
     }
     INBOX.with_borrow_mut(|inbox| inbox.push(end));
 }
@@ -193,11 +210,15 @@ pub(crate) fn settle(
         }
         SessionEnd::Closed => Settled::Closed,
         SessionEnd::TakenBack => {
-            HELD.with(|held| held.set(false));
             SETTLED.with(|settled| settled.set(false));
-            ANSWER.with(|answer| answer.set(None));
-            WAKE.with(|wake| wake.set(Wake::NeverPosted));
-            FENCED.with(|fenced| fenced.set(false));
+            // A question heard since (re-review RR-N4) has opened the next span: its hold, its
+            // wake, its answer and its fence are that span's, and stay.
+            if !SPAN_OPEN.with(Cell::get) {
+                HELD.with(|held| held.set(false));
+                ANSWER.with(|answer| answer.set(None));
+                WAKE.with(|wake| wake.set(Wake::NeverPosted));
+                FENCED.with(|fenced| fenced.set(false));
+            }
             store.rearm_after_the_systems_end();
             store.wait_again_after_the_systems_end();
             Settled::TakenBack
@@ -311,10 +332,17 @@ impl Probe {
     /// What the probe reads now, on this thread.
     #[must_use]
     pub(crate) fn now() -> Self {
+        Self::found(bt_platform::session_end::posted_messages_waiting())
+    }
+
+    /// What the probe reads now, with the queue as it was read before (`queued`): the question's
+    /// queue is read before Folio posts its own wake to it (re-review RR-F1).
+    #[must_use]
+    pub(crate) fn found(queued: Option<bool>) -> Self {
         Self {
             callbacks: CALLBACKS.with(Cell::get),
             wake: WAKE.with(Cell::get),
-            queued: bt_platform::session_end::posted_messages_waiting(),
+            queued,
         }
     }
 }
@@ -345,20 +373,27 @@ pub(crate) fn probe_line(message: &str, probe: &Probe) -> String {
 }
 
 /// **The question's wake was posted, or refused**, on the window procedure's stack (plan row 201):
-/// called right after [`hear`] with whether `send_event` took it. For the first question of a span
-/// it records the wake and says the question's probe line through `say`; it does nothing for any
-/// other news, or for the same question sent to the next window.
-pub(crate) fn posted_with(end: SessionEnd, taken: bool, say: &mut dyn FnMut(&str)) {
+/// called right after [`hear`] with whether `send_event` took it, and with `queued`, whether
+/// posted messages waited on the queue when the question came. That is read before the wake is
+/// posted, which would otherwise always be found there (re-review RR-F1). For the first question
+/// of a span it records the wake and says the question's probe line through `say`; it does nothing
+/// for any other news, or for the same question sent to the next window.
+pub(crate) fn posted_with(
+    end: SessionEnd,
+    queued: Option<bool>,
+    taken: bool,
+    say: &mut dyn FnMut(&str),
+) {
     if end != SessionEnd::Asked || WAKE.with(Cell::get) != Wake::NeverPosted {
         return;
     }
     WAKE.with(|wake| wake.set(if taken { Wake::Posted } else { Wake::Refused }));
-    say(&probe_line("WM_QUERYENDSESSION", &Probe::now()));
+    say(&probe_line("WM_QUERYENDSESSION", &Probe::found(queued)));
 }
 
 /// [`posted_with`], said to `diagnostics.log`.
-pub(crate) fn posted(end: SessionEnd, taken: bool) {
-    posted_with(end, taken, &mut crate::diagnostics::note);
+pub(crate) fn posted(end: SessionEnd, queued: Option<bool>, taken: bool) {
+    posted_with(end, queued, taken, &mut crate::diagnostics::note);
 }
 
 /// **The end's whole rule** (plan row 201): the probe line, the line on the question's save, and
@@ -426,5 +461,6 @@ pub(crate) fn forget() {
     ANSWER.with(|answer| answer.set(None));
     WAKE.with(|wake| wake.set(Wake::NeverPosted));
     FENCED.with(|fenced| fenced.set(false));
+    SPAN_OPEN.with(|open| open.set(false));
     INBOX.with_borrow_mut(Vec::clear);
 }

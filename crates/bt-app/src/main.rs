@@ -34434,8 +34434,11 @@ fn new_window_runtime<B: Backend>(parts: NewWindowParts<B>) -> WindowRuntime<B> 
         let proxy = event_proxy.clone();
         window.watch_session_end(
             Box::new(move |end| {
+                // The queue as the news found it: read before Folio posts its own wake to it.
+                let queued = bt_platform::session_end::posted_messages_waiting();
                 session_end::hear(end);
-                session_end::posted(end, proxy.send_event(AppEvent::SessionEnding).is_ok());
+                let taken = proxy.send_event(AppEvent::SessionEnding).is_ok();
+                session_end::posted(end, queued, taken);
             }),
             Box::new(|| i18n::Text::ShutdownSavingWork.text().to_owned()),
             std::rc::Rc::new(|| _ = session_end::at_the_end()),

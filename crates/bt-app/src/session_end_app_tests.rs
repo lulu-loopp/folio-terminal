@@ -235,11 +235,13 @@ fn the_questions_turn(
 }
 
 /// The question as the window procedure hears it: the platform's answer and `hear`, then the
-/// wake taken, and the question's probe line said into `done`.
+/// wake taken, and the question's probe line said into `done`, with an empty queue as the
+/// question found it.
 fn the_system_asks_and_the_wake_is_posted(done: &std::cell::RefCell<Vec<AtTheEnd>>) {
     assert_eq!(the_system_asks(), Some(1), "the question is answered TRUE");
     session_end::posted_with(
         bt_platform::session_end::SessionEnd::Asked,
+        Some(false),
         true,
         &mut |line| {
             done.borrow_mut().push(AtTheEnd::Said(line.to_owned()));
@@ -311,12 +313,10 @@ fn the_question_writes_and_the_end_says_its_probe_and_road_and_fences_the_log() 
     let Some(AtTheEnd::Said(question_probe)) = said.first() else {
         panic!("the question's probe line comes first: {said:?}");
     };
-    assert!(
-        question_probe.starts_with(
-            "BT_SESSION_END probe at WM_QUERYENDSESSION: Folio's winit callbacks on the stack: 0; \
-             the question's wake: posted, its turn not begun; posted messages queued: "
-        ),
-        "{question_probe}"
+    assert_eq!(
+        question_probe,
+        "BT_SESSION_END probe at WM_QUERYENDSESSION: Folio's winit callbacks on the stack: 0; the \
+         question's wake: posted, its turn not begun; posted messages queued: no"
     );
     assert_eq!(
         said[1..],
@@ -507,6 +507,83 @@ fn the_end_fences_the_log_once_however_many_windows_hear_it() {
     assert_eq!(fences, 1, "the next span's end fences again");
 }
 
+/// RED (plan row 201, re-review RR-N4) — **a question heard after a shutdown taken back opens
+/// the next span on the window procedure's stack**: its probe line is said and its end fences
+/// again, though no loop turn has settled the shutdown taken back between them; and when the
+/// turn comes, settling that news does not let go of the new span's hold.
+///
+/// MUTATION: in `hear`, drop the span's reset — the second end says `an earlier window's end
+/// fenced the log` and the second question says no probe line. In `settle`'s `TakenBack` arm,
+/// let go of the hold whatever span is open — the document is not held under the new question.
+#[test]
+fn a_question_after_a_shutdown_taken_back_opens_the_next_span_before_any_turn() {
+    on_the_window_thread();
+    let home = EndSessionHome::new("next-span");
+    let mut store = persist::SessionStore::armed_at(home.session(), home.sentinel());
+    store.set_save_budget(crate::lane::PATIENCE);
+    record_as_the_app_does(&mut store, shells_document(&home.0, 2));
+    let asked = std::cell::RefCell::new(Vec::new());
+    the_system_asks_and_the_wake_is_posted(&asked);
+    the_questions_turn(&mut store, Instant::now(), &asked);
+    let mut fences = 0_u32;
+    assert_eq!(
+        session_end::end_with(&AT_THE_END, &mut |_| {}, &mut || fences += 1),
+        session_end::Road::Landed
+    );
+
+    // Taken back and asked again on the procedure's stack, with no turn between them.
+    assert_eq!(
+        bt_platform::session_end::answer(
+            bt_platform::session_end::WM_ENDSESSION,
+            0,
+            0,
+            &session_end::hear,
+        ),
+        Some(0)
+    );
+    let again = std::cell::RefCell::new(Vec::new());
+    the_system_asks_and_the_wake_is_posted(&again);
+    assert!(
+        matches!(again.borrow().as_slice(), [AtTheEnd::Said(line)]
+            if line.starts_with("BT_SESSION_END probe at WM_QUERYENDSESSION:")),
+        "the next span's question says its probe line: {:?}",
+        again.borrow()
+    );
+    let mut said = Vec::new();
+    assert_eq!(
+        session_end::end_with(
+            &AT_THE_END,
+            &mut |line| said.push(line.to_owned()),
+            &mut || fences += 1
+        ),
+        session_end::Road::TurnNotRun
+    );
+    assert_eq!(fences, 2, "the next span's end fences again: {said:?}");
+
+    // The turn comes: the shutdown taken back, then the new question.
+    let news = session_end::take();
+    assert_eq!(
+        news,
+        [
+            bt_platform::session_end::SessionEnd::TakenBack,
+            bt_platform::session_end::SessionEnd::Asked
+        ]
+    );
+    assert_eq!(
+        session_end::settle(news[0], &mut store, false, Instant::now()),
+        session_end::Settled::TakenBack
+    );
+    assert!(
+        session_end::holds_the_document(),
+        "the new span's hold stands through the old span's taken-back news"
+    );
+    assert!(matches!(
+        session_end::settle(news[1], &mut store, false, Instant::now()),
+        session_end::Settled::Saved(Ok(()))
+    ));
+    assert!(!home.sentinel().exists(), "the new span's question wrote");
+}
+
 /// RED (plan row 201) — **the probe counts `FolioApp`'s winit callbacks on the stack, follows the
 /// question's wake from its post to its turn, and the question's probe line is said once per
 /// span.**
@@ -518,7 +595,9 @@ fn the_end_fences_the_log_once_however_many_windows_hear_it() {
 /// MUTATION: in `InACallback::drop`, leave the count where it is — the stack reads 1 after the
 /// callback returned. In `posted_with`, drop the `NeverPosted` check — the second window's
 /// question says a second probe line. In `take`, leave the wake `Posted` — the turn that took it
-/// is never seen.
+/// is never seen. In `posted_with`, read the queue again (`Probe::now()`) instead of the one the
+/// question found — the line says what the thread's queue holds after Folio's own post
+/// (re-review RR-F1), not `yes` as handed.
 #[test]
 fn the_probe_counts_folios_callbacks_and_follows_the_questions_wake() {
     on_the_window_thread();
@@ -547,24 +626,25 @@ fn the_probe_counts_folios_callbacks_and_follows_the_questions_wake() {
     assert_eq!(the_system_asks(), Some(1));
     session_end::posted_with(
         bt_platform::session_end::SessionEnd::Asked,
+        Some(true),
         true,
         &mut |line| said.push(line.to_owned()),
     );
     // The same question, sent to the next window.
     session_end::posted_with(
         bt_platform::session_end::SessionEnd::Asked,
+        Some(false),
         true,
         &mut |line| said.push(line.to_owned()),
     );
-    assert_eq!(said.len(), 1, "one probe line for the span: {said:?}");
-    assert!(
-        said[0].starts_with(
+    assert_eq!(
+        said,
+        [
             "BT_SESSION_END probe at WM_QUERYENDSESSION: Folio's winit callbacks on the stack: 1 \
-             (innermost user_event); the question's wake: posted, its turn not begun; posted \
-             messages queued: "
-        ),
-        "{}",
-        said[0]
+          (innermost user_event); the question's wake: posted, its turn not begun; posted \
+          messages queued: yes"
+        ],
+        "one probe line for the span, with the queue as the question found it"
     );
     assert_eq!(session_end::Probe::now().wake, session_end::Wake::Posted);
     let _ = session_end::take();
@@ -576,6 +656,7 @@ fn the_probe_counts_folios_callbacks_and_follows_the_questions_wake() {
     assert_eq!(the_system_asks(), Some(1));
     session_end::posted_with(
         bt_platform::session_end::SessionEnd::Asked,
+        None,
         false,
         &mut |line| said.push(line.to_owned()),
     );
