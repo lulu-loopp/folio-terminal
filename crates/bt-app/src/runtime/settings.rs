@@ -282,6 +282,9 @@ impl<B: Backend> Runtime<'_, B> {
         if let Some(enabled) = settings::turn_end_notification_requested(target) {
             self.apply_turn_end_notification(enabled);
         }
+        if let Some(enabled) = settings::resume_agents_requested(target) {
+            self.apply_resume_agents(enabled);
+        }
         if let Some(enabled) = settings::shell_integration_requested(target) {
             self.apply_shell_integration(enabled)?;
         }
@@ -693,6 +696,7 @@ impl<B: Backend> Runtime<'_, B> {
             | Row::MultilinePaste
             | Row::Notifications
             | Row::TurnEndNotifications
+            | Row::ResumeAgents
             | Row::ShellIntegration
             // And doubly never again, for `ContextMenu`'s reason over a different store: what a
             // reset would be putting back is not a value in this file, it is a block in the user's
@@ -2633,6 +2637,7 @@ impl<B: Backend> Runtime<'_, B> {
             multiline_paste_ask: self.app.settings_store.loaded().multiline_paste_ask,
             terminal_notifications: self.app.settings_store.loaded().terminal_notifications,
             turn_end_notification: self.app.settings_store.loaded().turn_end_notification,
+            resume_agents: self.app.settings_store.loaded().resume_agents,
             shell_integration: self.app.settings_store.loaded().shell_integration,
             powershell_profile_line_present: shell_integration::powershell_profile_line_present(),
             git_panel: self.app.settings_store.loaded().git_panel,

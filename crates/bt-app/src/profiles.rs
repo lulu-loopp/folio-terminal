@@ -18700,7 +18700,7 @@ mod tests {
                 crate::pty_door::gone_place(
                     Some(crate::pty_door::GoneSpec {
                         folder: folder.clone(),
-                        arguments: Vec::new(),
+                        arguments: Some(Vec::new()),
                         working_directory: nowhere.working_directory.clone(),
                     }),
                     &Path::is_dir,
@@ -27401,7 +27401,7 @@ mod tests {
                     .unless_gone
                     .map(|gone| crate::pty_door::GoneSpec {
                         folder: gone.folder,
-                        arguments: gone.place.arguments,
+                        arguments: Some(gone.place.arguments),
                         working_directory: gone.place.working_directory,
                     })
             };

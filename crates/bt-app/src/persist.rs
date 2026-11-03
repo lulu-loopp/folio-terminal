@@ -2190,13 +2190,15 @@ impl SessionStore {
         if !degradation.is_clean() {
             crate::diagnostics::stderr_line(format!(
                 "BT_PERSIST session.json degraded: {} clamped ratios, {} unknown leaves, \
-                 {} windows, {} tabs and {} panes past the ceiling, {} impossible commands",
+                 {} windows, {} tabs and {} panes past the ceiling, {} impossible commands, \
+                 {} impossible agent records",
                 degradation.clamped_ratios,
                 degradation.unknown_leaves,
                 degradation.dropped_windows,
                 degradation.dropped_tabs,
                 degradation.dropped_panes,
-                degradation.dropped_commands
+                degradation.dropped_commands,
+                degradation.dropped_agents
             ));
         }
         // **Only the ceiling is said out loud** (review row R4-9). A clamped

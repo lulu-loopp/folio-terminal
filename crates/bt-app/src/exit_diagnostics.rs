@@ -14,6 +14,9 @@ pub(crate) enum ShellExitDisposition {
     /// The system ended the shell with the session (`SYSTEM_ENDED_EXIT_CODE`, plan row 191): the
     /// pane is kept with its face and nothing is retired.
     SystemEndedPaneKept,
+    /// A resumed agent ended by itself and the pane's shell is handed back in its place (plan row
+    /// 195): the pane is kept.
+    HandedBack,
     PaneRetired,
     TabKept,
     TabRetired,
@@ -30,6 +33,7 @@ impl ShellExitDisposition {
             }
             Self::BirthDeathPaneKept => "birth death: pane kept".to_owned(),
             Self::SystemEndedPaneKept => "ended by the system: pane kept".to_owned(),
+            Self::HandedBack => "handed back".to_owned(),
             Self::PaneRetired => "retired pane".to_owned(),
             Self::TabKept => "tab kept".to_owned(),
             Self::TabRetired => "tab retired".to_owned(),

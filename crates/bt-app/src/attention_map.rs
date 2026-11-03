@@ -503,6 +503,15 @@ pub(crate) const TURN_END: &[TurnEnd] = &[
         event: "Stop",
         via: Via::Stop,
         words: Words::Transcript("transcript_path"),
+        // The same payload names the session the turn ended in and the folder it is filed under
+        // (row 195): `claude --resume <session_id>` in `cwd` brings it back.
+        resume: Resume::Fields {
+            id: "session_id",
+            cwd: "cwd",
+            // Claude Code's payload names no client: a nested headless `claude -p` is not told
+            // apart from the pane's own agent (a named limit, `docs/DESIGN.md` 2026-11-02).
+            only_client: None,
+        },
     },
     // **And this one deliberately cannot**, though its payload names the same file. A turn that
     // ended in failure did not end on the sentence the transcript ends with: that sentence is from
@@ -513,12 +522,18 @@ pub(crate) const TURN_END: &[TurnEnd] = &[
         event: "StopFailure",
         via: Via::StopFailure,
         words: Words::None,
+        // Its hook is spawned without the payload (`args_for`): a turn that failed is followed by
+        // the next `Stop`, which names the same session.
+        resume: Resume::None,
     },
     TurnEnd {
         family: CODEX,
         event: "stop",
         via: Via::Stop,
         words: Words::None,
+        // codex's hooks are not installed by this build; its session reaches a pane through
+        // `notify` below.
+        resume: Resume::None,
     },
     // codex's `notify` program, whose only observed `type` is `agent-turn-complete` — and which the
     // survey found **silent** while a real approval box was on screen. It says "I have finished
@@ -533,6 +548,15 @@ pub(crate) const TURN_END: &[TurnEnd] = &[
         event: "agent-turn-complete",
         via: Via::Notify,
         words: Words::Field("last-assistant-message"),
+        // The recording's payload carries `thread-id` and `cwd` (row 195): `codex resume
+        // <thread-id>` brings the session back.
+        resume: Resume::Fields {
+            id: "thread-id",
+            cwd: "cwd",
+            // The same payload says which client ran the turn (`"client":"codex-tui"` in the
+            // recording): a `codex exec` an agent in the pane started is not the pane's session.
+            only_client: Some(("client", "codex-tui")),
+        },
     },
     // pi's whole contribution. "Fires only once a run fully settles."
     TurnEnd {
@@ -540,6 +564,7 @@ pub(crate) const TURN_END: &[TurnEnd] = &[
         event: "agent_settled",
         via: Via::AgentSettled,
         words: Words::None,
+        resume: Resume::None,
     },
     // copilot's, and the only one of its thirteen hook events that says a turn is over: "The main
     // agent finishes a turn." Its payload's `stopReason` is quoted as the single value `"end_turn"`.
@@ -555,6 +580,9 @@ pub(crate) const TURN_END: &[TurnEnd] = &[
         event: "agentStop",
         via: Via::Stop,
         words: Words::None,
+        // copilot has a resume command (`copilot --resume <id>`) and its payload a `sessionId`; it
+        // lands vendor by vendor, from its own verified facts, as a row in `agent_resume::VENDORS`.
+        resume: Resume::None,
     },
 ];
 
@@ -567,6 +595,40 @@ pub(crate) struct TurnEnd {
     pub(crate) via: Via,
     /// Where the words are, when there are any.
     pub(crate) words: Words,
+    /// Where the session this turn ended in is named, when the family names one this build can
+    /// resume (0.4.9 plan row 195).
+    pub(crate) resume: Resume,
+}
+
+/// **Where a turn-end payload names its session and its folder** — the third declared field the
+/// attention wire may carry (`crate::agent_resume`).
+///
+/// Declared per row for [`Words`]'s reason: the families spell the same two facts differently
+/// (`session_id` beside `thread-id`), and a build that went looking for an id in whatever arrived
+/// would one day hand a vendor's resume command somebody else's string.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Resume {
+    /// The row names no session.
+    None,
+    /// The payload's top-level `id` field is the vendor's session id and `cwd` its folder.
+    /// `only_client`, when declared, is a field naming the client that ran the turn and the value
+    /// the vendor's interactive client gives it: a payload whose field says any other client names
+    /// no session this pane can resume (row 195, review F1). Nor does a payload without the field
+    /// (re-review RN1): the survey's recording of the interactive client carries it.
+    Fields {
+        id: &'static str,
+        cwd: &'static str,
+        only_client: Option<(&'static str, &'static str)>,
+    },
+}
+
+impl Resume {
+    /// Whether this row names a session — which, like [`Words::are_somewhere`], is also whether
+    /// its hook needs a payload at all.
+    #[must_use]
+    pub(crate) fn is_declared(self) -> bool {
+        !matches!(self, Self::None)
+    }
 }
 
 /// **Where a turn's last sentence is to be found**, declared per row (§12.1 R1's fifth column).
