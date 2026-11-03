@@ -1856,10 +1856,7 @@ fn the_session_record_is_shell_session() {
         ("process_folder", expected(&[])),
         (
             "wake",
-            expected(&[
-                ("write", "finish_leaf_birth"),
-                ("write", "keep_face"),
-            ]),
+            expected(&[("write", "finish_leaf_birth"), ("write", "keep_face")]),
         ),
     ];
     for (field, rows) in table {
@@ -2575,10 +2572,7 @@ fn each_life_transition_has_its_callers() {
             life("take_fallback"),
             &["runtime::tabs::land_birth_death_fallback"],
         ),
-        (
-            life("keep_birth_death"),
-            &["runtime::tabs::keep_face"],
-        ),
+        (life("keep_birth_death"), &["runtime::tabs::keep_face"]),
         (
             life("retire"),
             &[

@@ -786,27 +786,32 @@ fn a_shell_the_system_ends_keeps_its_pinned_tab_in_the_document() {
         .clone();
     ends(&mut application, 2, SYSTEM_ENDED);
     assert_eq!(tab_ids(&mut application), [1, 2], "the tab stays");
-    let mut runtime = application.runtime();
-    let pane = runtime.window.tabs[1]
-        .panes_mut()
-        .next()
-        .expect("the tab's pane")
-        .1;
-    assert_eq!(name_of(&pane.session.life), Name::Kept, "kept, without a shell");
-    let visible: String = pane
-        .session
-        .session
-        .terminal()
-        .visible_text()
-        .join("")
-        .chars()
-        .filter(|character| !character.is_whitespace())
-        .collect();
-    assert!(
-        visible.contains("wasendedbythesystem(code1073807364,"),
-        "the pane says why: {visible:?}"
-    );
-    drop(runtime);
+    {
+        let runtime = application.runtime();
+        let pane = runtime.window.tabs[1]
+            .panes_mut()
+            .next()
+            .expect("the tab's pane")
+            .1;
+        assert_eq!(
+            name_of(&pane.session.life),
+            Name::Kept,
+            "kept, without a shell"
+        );
+        let visible: String = pane
+            .session
+            .session
+            .terminal()
+            .visible_text()
+            .join("")
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect();
+        assert!(
+            visible.contains("wasendedbythesystem(code1073807364,"),
+            "the pane says why: {visible:?}"
+        );
+    }
     assert_eq!(recent_rows(&application), 0, "nothing goes into Recent");
     let app = application.folio.app.as_ref().expect("the application");
     assert_eq!(
@@ -905,7 +910,11 @@ fn a_pane_the_systems_end_kept_restarts_or_closes_like_a_kept_pane() {
         pane.await_successor(answered_successor());
         runtime.land_births().expect("the landing");
         let life = &runtime.sessions[&seat].session.life;
-        assert_eq!(name_of(life), Name::Live, "the kept pane runs a shell again");
+        assert_eq!(
+            name_of(life),
+            Name::Live,
+            "the kept pane runs a shell again"
+        );
         assert!(life.pty().is_some());
     }
     ends(&mut application, 2, SYSTEM_ENDED);
@@ -914,5 +923,9 @@ fn a_pane_the_systems_end_kept_restarts_or_closes_like_a_kept_pane() {
         .close_tab(1)
         .expect("the person closes the kept tab");
     assert_eq!(tab_ids(&mut application), [1], "the kept tab closes");
-    assert_eq!(recent_rows(&application), 1, "and goes into Recent, as a close does");
+    assert_eq!(
+        recent_rows(&application),
+        1,
+        "and goes into Recent, as a close does"
+    );
 }

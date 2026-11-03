@@ -118,7 +118,12 @@ fn keep_system_ended_face(
     exit: &exit_diagnostics::ShellExit,
     had_output: bool,
 ) -> Result<()> {
-    keep_face(leaf, exit, had_output, crate::i18n::Text::ShellEndedBySystem)
+    keep_face(
+        leaf,
+        exit,
+        had_output,
+        crate::i18n::Text::ShellEndedBySystem,
+    )
 }
 
 /// The face both kept deaths append: `{program} {said} (code {code}, {ms} ms).`, after the shell's
