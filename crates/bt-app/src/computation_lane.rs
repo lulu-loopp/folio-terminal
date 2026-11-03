@@ -760,29 +760,30 @@ pub(crate) fn run_path_verify_worker(
 }
 
 /// **The formula and picture worker** (`computation_lane`, `bt-math-worker`): the product's door,
-/// [`run_decoration_worker_with`] with the desktop engine ([`MathEngine::new`]) — the production
-/// decoration work, also exercised without a window by regression tests.
+/// [`run_decoration_worker_with`] with the desktop engine ([`MathEngine::new`]) made beside it —
+/// the production decoration work, also exercised without a window by regression tests.
 pub(crate) fn run_decoration_worker(
     worker: &bt_platform::admission::WorkerCtx,
 ) -> Door<MathWorkerRequest> {
-    run_decoration_worker_with(worker, MathEngine::new)
+    run_decoration_worker_with(worker, FormulaEngine::beside(MathEngine::new))
 }
 
-/// **The decoration worker, its formula engine made by `make_engine`**: the decoder is made once,
-/// on the worker, and the door it returns answers each request.
+/// **The decoration worker, its formula engine `formulas`**: the decoder is made once, on the
+/// worker, and the door it returns answers each request.
 ///
 /// The engine is made beside the worker, from the moment the door is made ([`FormulaEngine`]),
 /// and only a formula arm waits for it (`Math`, or a `PreviewMath` whose key is drawable;
 /// T-LANE-SUITE-PATIENCE-UNDER-LOAD): the desktop engine scans every font the machine has, which
 /// no answer of a picture, a glance, a video frame, an animation or a page needs or waits for,
-/// and a formula asked once the scan is over waits for nothing.
+/// and a formula asked once the scan is over waits for nothing. A scan that panicked refuses
+/// every formula (`MathRenderError::Aborted`, the formula drawn as its source text) and nothing
+/// else: the pictures go on being answered.
 pub(crate) fn run_decoration_worker_with(
     worker: &bt_platform::admission::WorkerCtx,
-    make_engine: impl FnOnce() -> MathEngine + Send + 'static,
+    mut formulas: FormulaEngine,
 ) -> Door<MathWorkerRequest> {
     // The door is made on the worker; each request is handed the same capability again.
     let _ = worker;
-    let mut formulas = FormulaEngine::beside(worker, make_engine);
     let mut image_decoder = InlineImageDecoder::default();
     Box::new(
         move |worker: &bt_platform::admission::WorkerCtx, work: MathWorkerRequest| {
@@ -792,8 +793,9 @@ pub(crate) fn run_decoration_worker_with(
                     mut task,
                     foreground_rgb,
                 } => {
-                    let engine = formulas.engine(worker);
-                    let result = bt_compose::typeset(engine, &mut task, foreground_rgb);
+                    let result = formulas
+                        .engine(worker)
+                        .and_then(|engine| bt_compose::typeset(engine, &mut task, foreground_rgb));
                     (leaf, DecorationWorkerCompletion::Math { task, result })
                 }
                 MathWorkerRequest::InlineImage { leaf, task } => {
@@ -811,7 +813,7 @@ pub(crate) fn run_decoration_worker_with(
                     )
                     .ok_or(MathRenderError::InvalidDimensions)
                     .and_then(|render_key| {
-                        let engine = formulas.engine(worker);
+                        let engine = formulas.engine(worker)?;
                         engine.render(&key.source, render_key)
                     });
                     (
@@ -884,69 +886,140 @@ pub(crate) fn run_decoration_worker_with(
 /// The factory a [`FormulaEngine`] makes its engine with.
 type EngineFactory = Box<dyn FnOnce() -> MathEngine + Send>;
 
-/// **The decoration door's formula engine, made beside the worker**: the factory runs on a thread
-/// of its own (`bt-math-fonts`, in the band the worker stands in: below normal in the product, so
+/// **The decoration door's formula engine, made beside the worker.**
+///
+/// The factory runs on a thread of its own, `bt-math-fonts`, from the moment the door is made. The
+/// thread stands in the band of the worker that makes the door: below normal in the product, so
 /// the scan is no more in a frame's way than it was on the worker, and no lower than the worker
-/// where a suite's executor starts it at normal) from the moment the door is made, and the worker
-/// waits for it only at the first formula arm that needs the engine ([`Self::engine`]), never at
-/// a picture's answer. A thread the door refuses leaves the factory here, and the first formula
-/// makes the engine on the worker. The factory's panic is a panic of its thread, outside every
-/// `contained_panic::contain`, so under the resident hook it ends the process, as it did when the
-/// worker made the engine itself before it served anything.
-struct FormulaEngine {
-    made: Option<MathEngine>,
-    /// The thread making it, when the thread door started one.
-    beside: Option<std::thread::JoinHandle<Option<MathEngine>>>,
-    /// The factory, until a thread or the first formula takes it.
-    factory: Arc<Mutex<Option<EngineFactory>>>,
+/// where a suite's executor starts it at normal. The worker waits for it only at the first formula
+/// arm that needs the engine ([`Self::engine`]), never at a picture's answer.
+///
+/// - **Nothing joins a scan no formula asked for.** A door dropped before its first formula drops
+///   the thread's handle, and the scan finishes on its own and drops its engine. In the product the
+///   door lives as long as the process; in the suite every door that answered only pictures
+///   leaves its scan running past its test, beside the tests after it.
+/// - **A scan that panics is contained on its own thread** (`contained_panic::contain`), and is
+///   the formulas' failure, not the process's and not the worker's: the failure is said once in
+///   `diagnostics.log`, every formula after it is refused (`MathRenderError::Aborted`, which
+///   draws the formula as its source text), and the worker goes on answering pictures.
+/// - **A thread the door refuses** is said once in `diagnostics.log`, and the first formula makes
+///   the engine on the worker, contained the same way.
+pub(crate) struct FormulaEngine {
+    making: Making,
+    /// How many times a formula arm has waited for the engine (a join, or a making on the worker).
+    #[cfg(test)]
+    waits: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+/// Where a [`FormulaEngine`]'s engine is.
+enum Making {
+    /// Being made on `bt-math-fonts`.
+    Beside(std::thread::JoinHandle<Result<MathEngine, String>>),
+    /// To be made on the worker by the first formula: the thread door refused `bt-math-fonts`.
+    Here(EngineFactory),
+    Made(MathEngine),
+    /// The factory panicked; every formula is refused.
+    Refused,
 }
 
 impl FormulaEngine {
-    /// The engine `make_engine` makes, its making begun now on `bt-math-fonts`, from the worker
-    /// (`worker`) whose band it takes. Off Windows a thread has no band (`current_thread_priority`
-    /// answers `None`) and the thread door sets none, so the band handed there is `Normal`, which
-    /// sets nothing either.
-    fn beside(
-        worker: &bt_platform::admission::WorkerCtx,
-        make_engine: impl FnOnce() -> MathEngine + Send + 'static,
-    ) -> Self {
-        let _ = worker;
+    /// **The engine `make_engine` makes, its making begun now on `bt-math-fonts`**, in the band of
+    /// the thread that calls this (the decoration worker, which makes its door). Off Windows a
+    /// thread has no band (`current_thread_priority` answers `None`) and the thread door sets none,
+    /// so the band handed there is `Normal`, which sets nothing either.
+    pub(crate) fn beside(make_engine: impl FnOnce() -> MathEngine + Send + 'static) -> Self {
         let band =
             bt_platform::current_thread_priority().unwrap_or(bt_platform::ThreadPriority::Normal);
+        // Held outside the thread's closure: a spawn the door refuses drops its closure, and the
+        // factory with it, without calling it.
         let factory: Arc<Mutex<Option<EngineFactory>>> =
             Arc::new(Mutex::new(Some(Box::new(make_engine))));
         let on_its_thread = Arc::clone(&factory);
-        let beside = bt_platform::spawn_at_priority("bt-math-fonts", band, move |_ctx| {
-            let make = locked(&on_its_thread).take();
-            make.map(|make| make())
-        })
-        .ok();
+        let making = match bt_platform::spawn_at_priority("bt-math-fonts", band, move |_ctx| {
+            scanned(move || {
+                let make = locked(&on_its_thread)
+                    .take()
+                    .expect("a started thread is the only taker of its factory");
+                make()
+            })
+        }) {
+            Ok(thread) => Making::Beside(thread),
+            Err(error) => {
+                crate::diagnostics::note(&format!(
+                    "computation lane: the formula engine's font scan could not start a thread \
+                     of its own ({error}); the first formula makes the engine on the worker"
+                ));
+                Making::Here(
+                    locked(&factory)
+                        .take()
+                        .expect("a refused spawn drops its closure without calling it"),
+                )
+            }
+        };
         Self {
-            made: None,
-            beside,
-            factory,
+            making,
+            #[cfg(test)]
+            waits: Arc::default(),
         }
     }
 
-    /// **The engine, waited for on the worker** (`worker`, the capability its thread was lent):
-    /// the thread's, joined the first time a formula arm asks, or made here when no thread took
-    /// the factory.
-    fn engine(&mut self, worker: &bt_platform::admission::WorkerCtx) -> &MathEngine {
+    /// The count of the formula arms' waits for the engine, kept for a test to read.
+    #[cfg(test)]
+    pub(crate) fn waits(&self) -> Arc<std::sync::atomic::AtomicUsize> {
+        Arc::clone(&self.waits)
+    }
+
+    /// **The engine, waited for on the worker** (`worker`, the capability that says this wait is a
+    /// worker's and not the window's; nothing else is read from it): the thread's, joined the first
+    /// time a formula arm asks, or made here when no thread took the factory. A scan that panicked
+    /// answers `MathRenderError::Aborted`, now and for every formula after it.
+    fn engine(
+        &mut self,
+        worker: &bt_platform::admission::WorkerCtx,
+    ) -> Result<&MathEngine, MathRenderError> {
         let _ = worker;
-        let (beside, factory) = (&mut self.beside, &self.factory);
-        self.made.get_or_insert_with(|| {
-            let built = beside.take().and_then(|thread| {
-                thread
-                    .join()
-                    .expect("the font scan's panic ends the process under the resident hook")
-            });
-            built.unwrap_or_else(|| {
-                let make = locked(factory)
-                    .take()
-                    .expect("a factory no thread took is still here");
-                make()
-            })
-        })
+        self.making = match std::mem::replace(&mut self.making, Making::Refused) {
+            Making::Beside(thread) => {
+                #[cfg(test)]
+                self.waits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                settled(
+                    thread
+                        .join()
+                        .expect("the scan's panic is contained on its own thread"),
+                )
+            }
+            Making::Here(make) => {
+                #[cfg(test)]
+                self.waits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                settled(scanned(make))
+            }
+            settled @ (Making::Made(_) | Making::Refused) => settled,
+        };
+        match &self.making {
+            Making::Made(engine) => Ok(engine),
+            Making::Beside(_) | Making::Here(_) | Making::Refused => Err(MathRenderError::Aborted),
+        }
+    }
+}
+
+/// **The engine `make` makes, its panic contained** (`contained_panic::contain`): the panic's
+/// message when it panicked.
+fn scanned(make: impl FnOnce() -> MathEngine) -> Result<MathEngine, String> {
+    crate::contained_panic::contain(make)
+        .map_err(|panic| crate::pty_door::panic_message(panic.as_ref()).to_owned())
+}
+
+/// What a scan's end leaves a [`FormulaEngine`] with; a panic is said here, once.
+fn settled(scan: Result<MathEngine, String>) -> Making {
+    match scan {
+        Ok(engine) => Making::Made(engine),
+        Err(cause) => {
+            crate::diagnostics::note(&format!(
+                "computation lane: the formula engine's font scan failed ({cause}); every formula \
+                 is drawn as its source text, and pictures are still answered"
+            ));
+            Making::Refused
+        }
     }
 }
 
@@ -1993,58 +2066,142 @@ mod tests {
         );
     }
 
-    /// RED (T-LANE-SUITE-PATIENCE-UNDER-LOAD) — **the decoration worker answers a picture before
-    /// its formula engine is made, and makes it once, for the first formula.**
+    /// RED (T-LANE-SUITE-PATIENCE-UNDER-LOAD) — **the decoration worker answers every picture arm
+    /// before its formula engine is made, and waits for the engine once, at the first formula.**
     ///
     /// The worker's engine comes from a factory the test holds: it returns only once the test
     /// lets it go, with an engine the test made on its own thread before the lane was asked
-    /// anything, so no scan of the machine's fonts runs inside the suite's patience. A glance at a
-    /// missing file is answered while the factory is held, and no engine has been made; once the
-    /// factory is let go, a terminal formula is typeset, and the factory has run once.
+    /// anything, so no scan of the machine's fonts runs inside the suite's patience. While it is
+    /// held, every picture arm is asked and answered — a still's pixels, a printed picture, a
+    /// recording's glance, a page, an animation's open and its next frames — so an arm that waited
+    /// for the engine would stand on the held factory, and its terminal would never come within
+    /// the patience. Once the factory is let go, a terminal formula is typeset, the worker has
+    /// waited for the engine once, and a second formula waits for nothing more.
     ///
-    /// MUTATION: wait for the engine where the door is made (`formulas.engine(worker)` right after
-    /// `FormulaEngine::beside` in `run_decoration_worker_with`) — the worker stands on the held
-    /// factory before it serves anything, and the glance's terminal never comes within the suite's
-    /// patience.
+    /// MUTATION: wait for the engine where the door is made (`formulas.engine(worker)` at the top
+    /// of `run_decoration_worker_with`) — the worker stands on the held factory before it serves
+    /// anything, and the first picture's terminal never comes within the suite's patience. Wait for
+    /// it in any picture arm instead — that arm's terminal never comes.
     #[test]
     fn a_picture_is_answered_before_the_formula_engine_is_made() {
         use std::sync::atomic::{AtomicUsize, Ordering};
+        let gif = scratch_copy("folio-anim-test.gif", "先答动图 animation first");
         let (mut lane, _gate) = gated();
         let engine = MathEngine::new();
         let (let_go, held) = std::sync::mpsc::channel::<()>();
+        let (hand_waits, waits) = std::sync::mpsc::channel();
         let made = Arc::new(AtomicUsize::new(0));
         let making = Arc::clone(&made);
-        let glance = lane
+        let missing = |name: &str| PathBuf::from("不在这里 not here").join(name);
+        let first = lane
             .lane
             .decorate_through(
                 MathWorkerRequest::PeekImage {
                     leaf: probe_leaf(),
-                    path: PathBuf::from("不在这里/先答图片 picture first.png"),
+                    path: missing("先答图片 picture first.png"),
                 },
                 move |ctx: &WorkerCtx| {
-                    run_decoration_worker_with(ctx, move || {
+                    let formulas = FormulaEngine::beside(move || {
                         // Let go by the test's send, or by its end on a red.
                         let _ = held.recv();
                         making.fetch_add(1, Ordering::SeqCst);
                         engine
-                    })
+                    });
+                    let _ = hand_waits.send(formulas.waits());
+                    run_decoration_worker_with(ctx, formulas)
                 },
             )
             .ok()
             .expect("admitted");
-        let answered = lane.terminal(Share::Decoration, glance, nobody);
+        let answered = lane.terminal(Share::Decoration, first, nobody);
         assert!(
             matches!(
                 answer(answered).map(|result| result.completion),
                 Some(DecorationWorkerCompletion::PeekImage { .. })
             ),
-            "the glance is answered while the factory is held"
+            "a still's pixels are answered while the factory is held"
         );
-        assert_eq!(
-            made.load(Ordering::SeqCst),
-            0,
-            "no formula engine was made for a picture"
+        let waits = waits.recv().expect("the door was made");
+        let pictures = [
+            (
+                "a printed picture",
+                MathWorkerRequest::InlineImage {
+                    leaf: probe_leaf(),
+                    task: bt_term::InlineImageTask {
+                        occurrence_id: 1,
+                        source: bt_term::InlineImageSource::LocalPath(missing("印出 printed.png")),
+                    },
+                },
+            ),
+            (
+                "a recording's glance",
+                MathWorkerRequest::PeekVideoFrame {
+                    leaf: probe_leaf(),
+                    path: missing("录像 recording.mp4"),
+                },
+            ),
+            (
+                "a page",
+                MathWorkerRequest::PeekPage {
+                    leaf: probe_leaf(),
+                    path: missing("页 page.pdf"),
+                    page: 0,
+                    fit: (160, 160),
+                    known: None,
+                },
+            ),
+        ];
+        for (what, request) in pictures {
+            let id = lane.lane.decorate(request).ok().expect("admitted");
+            let answered = lane.terminal(Share::Decoration, id, nobody);
+            assert!(
+                answer(answered).is_some(),
+                "{what} is answered while the factory is held"
+            );
+        }
+        let opened = lane
+            .lane
+            .decorate(MathWorkerRequest::PeekAnimation {
+                leaf: probe_leaf(),
+                path: gif.0.clone(),
+            })
+            .ok()
+            .expect("admitted");
+        let opened = answer(lane.terminal(Share::Decoration, opened, nobody))
+            .map(|result| result.completion);
+        let Some(DecorationWorkerCompletion::PeekAnimation {
+            frames: Ok(mut animation),
+            ..
+        }) = opened
+        else {
+            panic!("the shipped GIF opens as an animation while the factory is held");
+        };
+        let (cursor, want) = animation
+            .take_cursor()
+            .expect("a fresh animation's ring has room");
+        let filled = lane
+            .lane
+            .decorate(MathWorkerRequest::AnimationFill {
+                leaf: probe_leaf(),
+                path: gif.0.clone(),
+                serial: 1,
+                cursor,
+                want,
+            })
+            .ok()
+            .expect("admitted");
+        assert!(
+            matches!(
+                answer(lane.terminal(Share::Decoration, filled, nobody))
+                    .map(|result| result.completion),
+                Some(DecorationWorkerCompletion::AnimationFill { .. })
+            ),
+            "an animation's next frames are answered while the factory is held"
         );
+        // The shape, said: no picture made an engine, and none waited for one (an arm that had
+        // waited would have stood on the held factory, and its terminal would not have come).
+        assert_eq!(made.load(Ordering::SeqCst), 0, "no engine for a picture");
+        assert_eq!(waits.load(Ordering::SeqCst), 0, "no wait for a picture");
         let_go
             .send(())
             .expect("the held factory is still there to be let go");
@@ -2058,10 +2215,103 @@ mod tests {
             ),
             "the formula is typeset once the factory is let go"
         );
+        assert_eq!(made.load(Ordering::SeqCst), 1, "the engine was made once");
         assert_eq!(
-            made.load(Ordering::SeqCst),
+            waits.load(Ordering::SeqCst),
             1,
-            "the engine was made once, for the formula"
+            "the first formula waited for the engine"
+        );
+        let mut again = a_pane_with_a_formula();
+        hand_out(&mut again, &lane.lane);
+        let (_, _, typeset, _) = lane.next_ended(Share::Decoration, nobody);
+        assert!(
+            matches!(
+                answer(typeset).map(|result| result.completion),
+                Some(DecorationWorkerCompletion::Math { result: Ok(_), .. })
+            ),
+            "a second formula is typeset"
+        );
+        assert_eq!(
+            waits.load(Ordering::SeqCst),
+            1,
+            "and waits for nothing: the engine is kept"
+        );
+    }
+
+    /// RED (T-LANE-SUITE-PATIENCE-UNDER-LOAD review F1) — **a font scan that panics is every
+    /// formula's refusal, and nothing else's: the pictures go on being answered, the worker is not
+    /// faulted, and the process lives.**
+    ///
+    /// The factory panics on `bt-math-fonts`, inside `contained_panic::contain`. A formula is then
+    /// answered `MathRenderError::Aborted` (drawn as its source text) — `Done`, not `Failed`: the
+    /// worker did not end, and no share was faulted — a picture asked after it is answered, and a
+    /// second formula is refused the same way without a second scan.
+    ///
+    /// MUTATION: run the factory on its thread without `contain` — the hook (the suite's, here)
+    /// sees the panic, the join's `expect` carries it onto the worker inside the formula's task,
+    /// and the formula's terminal is `Failed`, not an answer; and under the resident hook the
+    /// process ends.
+    #[test]
+    fn a_font_scan_that_panics_refuses_each_formula_and_answers_pictures() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let (mut lane, _gate) = gated();
+        let (hand_waits, waits) = std::sync::mpsc::channel();
+        let first = lane
+            .lane
+            .decorate_through(
+                MathWorkerRequest::PeekImage {
+                    leaf: probe_leaf(),
+                    path: PathBuf::from("不在这里 not here/字体坏了 a bad font.png"),
+                },
+                move |ctx: &WorkerCtx| {
+                    let formulas = FormulaEngine::beside(|| -> MathEngine {
+                        panic!("a font file the scan could not read (planted by the test)")
+                    });
+                    let _ = hand_waits.send(formulas.waits());
+                    run_decoration_worker_with(ctx, formulas)
+                },
+            )
+            .ok()
+            .expect("admitted");
+        assert!(
+            answer(lane.terminal(Share::Decoration, first, nobody)).is_some(),
+            "a picture is answered"
+        );
+        let waits: Arc<AtomicUsize> = waits.recv().expect("the door was made");
+        for which in ["the first formula", "a second formula"] {
+            let mut session = a_pane_with_a_formula();
+            hand_out(&mut session, &lane.lane);
+            let (_, _, refused, _) = lane.next_ended(Share::Decoration, nobody);
+            let completion = answer(refused)
+                .unwrap_or_else(|| panic!("{which} is answered, not failed"))
+                .completion;
+            assert!(
+                matches!(
+                    completion,
+                    DecorationWorkerCompletion::Math {
+                        result: Err(MathRenderError::Aborted),
+                        ..
+                    }
+                ),
+                "{which} is refused"
+            );
+            let after = lane
+                .lane
+                .decorate(MathWorkerRequest::PeekImage {
+                    leaf: probe_leaf(),
+                    path: PathBuf::from("不在这里 not here/之后 after.png"),
+                })
+                .ok()
+                .expect("the share is not faulted: a picture is still admitted");
+            assert!(
+                answer(lane.terminal(Share::Decoration, after, nobody)).is_some(),
+                "a picture after {which} is answered"
+            );
+        }
+        assert_eq!(
+            waits.load(Ordering::SeqCst),
+            1,
+            "the failed scan was waited for once and kept"
         );
     }
 
