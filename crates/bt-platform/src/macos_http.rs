@@ -996,8 +996,8 @@ mod tests {
     /// `a_plain_http_address_is_refused_without_a_round_trip` below pin, and
     /// what makes a loopback port unreachable *through* the door. So the two
     /// halves are asked separately: those two cases are about the address, and
-    /// these three are about everything the session and its delegate do once
-    /// there is one.
+    /// the loopback cases that call this are about everything the session and
+    /// its delegate do once there is one.
     ///
     /// **App Transport Security does not stand in the way, and the reason is
     /// worth writing down rather than discovering twice.** ATS reads
@@ -1008,8 +1008,8 @@ mod tests {
     /// host that is an IP literal (which is the gap `NSAllowsLocalNetworking`
     /// exists to cover for names like `localhost` and `*.local`). The address
     /// below is `127.0.0.1`, so a plaintext request to it is not a request ATS
-    /// has anything to say about. If that ever stops being true, these three
-    /// fail together with `NSURLSession: … App Transport Security policy
+    /// has anything to say about. If that ever stops being true, every loopback
+    /// case fails together with `NSURLSession: … App Transport Security policy
     /// requires the use of a secure connection`, which names itself.
     ///
     /// The wait is read on `clock` (0.4.9 plan row 150): a counted clock, so
@@ -1041,6 +1041,14 @@ mod tests {
     /// **The answer ended every wait, and the budget ended none** — the
     /// counted clock was asked `asks` times for the product's own
     /// `budget + phase_timeout`, and none of those waits ran out.
+    ///
+    /// Under [`Turn::Await`] each of those waits is awaited within the suite's
+    /// patience (`door_skipped::PATIENCE`, 10 s), not the product's 20 s, so a
+    /// case is called "the budget ran out" after 10 s of real time where it
+    /// used to be 20 s. That cannot bite: Foundation's own timers
+    /// (`phase_timeout`, 5 s idle, and `budget`, 15 s whole) end a stalled
+    /// request first, with its own sentence, and this wait only ever sees the
+    /// delegate's completion after them.
     fn the_answer_ended_the_wait(clock: &CountedClock, asks: usize) {
         assert_eq!(
             clock.asked(),
