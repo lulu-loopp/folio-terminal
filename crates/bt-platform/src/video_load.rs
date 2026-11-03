@@ -161,9 +161,9 @@ impl OpenDeadline {
     ///
     /// It is a reading, not a latch: once the thread builds its engine late, or
     /// publishes a refusal, the next reading at the same `now` no longer says
-    /// missed. Each arm's window retires a seat at the first reading that does
-    /// (`bt-app`'s `video_seat::retirement`), so no surface sees the reading
-    /// change.
+    /// missed. Each arm's window reads it through `bt-app`'s
+    /// `video_seat::seat_answer`, which gives a late engine one more budget
+    /// before it retires the seat, so no surface sees the reading change.
     pub(crate) fn missed(
         self,
         now: impl FnOnce() -> Instant,

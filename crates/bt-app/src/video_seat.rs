@@ -1427,22 +1427,6 @@ impl VideoSeat {
     }
 }
 
-/// **Why a seat whose engine stands at `state` is retired, and the sentence its
-/// surface prints in the player's place** — `None` while it is still a player:
-/// loading, playing, ended, or loaded with no length to show.
-///
-/// An engine's refusal is sticky, so a seat on one is a rectangle that will
-/// never receive another picture (§7.44 ⑥). The one error that is not is
-/// [`EngineError::Unresponsive`] — the open budget's run-out is a reading, not a
-/// latch — and the sweep reads it through [`seat_answer`], which gives a late
-/// engine one more budget before this sentence is said. The sentence is
-/// [`refusal_sentence`]'s.
-#[must_use]
-pub fn retirement(state: &EngineState) -> Option<(EngineError, crate::i18n::Text)> {
-    let error = state.error?;
-    Some((error, refusal_sentence(error)))
-}
-
 /// **The sentence a surface prints for an engine's `error`** — three, because
 /// they are three facts (plan row 189):
 ///
@@ -2901,50 +2885,60 @@ mod tests {
     ///
     /// The platform refuses a source that said nothing within its load budget
     /// as `EngineError::NotLoaded`. Until then a surface showing it was a player
-    /// at `0:00` that never started; the sweep (`Runtime::sweep_video_seats`)
-    /// takes every seat [`retirement`] names off its surface and prints the
-    /// sentence it names in the player's place. A refusal of the *format* and a
+    /// at `0:00` that never started; the clocked pass
+    /// (`Runtime::retire_faulted_video_seats`) takes every seat [`seat_answer`]
+    /// retires off its surface and prints the sentence it names in the
+    /// player's place. A refusal of the *format* and a
     /// load that never finished are two sentences, because they are two facts;
     /// a player still loading, and one loaded with no length, are not retired.
     ///
-    /// MUTATION: answer `None` for `EngineError::NotLoaded` in [`retirement`] —
-    /// the never-starting player kept on the surface — and the first assertion
-    /// goes red.
+    /// MUTATION: answer `Player` for `EngineError::NotLoaded` in [`seat_answer`]
+    /// — the never-starting player kept on the surface — and the first
+    /// assertion goes red.
     #[test]
     fn a_video_that_never_loaded_is_retired_with_its_own_sentence() {
+        let now = Instant::now();
         let refused = EngineState {
             error: Some(EngineError::NotLoaded),
             ..EngineState::default()
         };
         assert_eq!(
-            retirement(&refused),
-            Some((EngineError::NotLoaded, crate::i18n::Text::VideoDidNotLoad)),
+            seat_answer(&refused, None, now),
+            SeatAnswer::Retire(EngineError::NotLoaded, crate::i18n::Text::VideoDidNotLoad),
             "a load that never finished is retired, and says so"
         );
         assert_eq!(
-            retirement(&EngineState {
-                error: Some(EngineError::Unsupported),
-                ..EngineState::default()
-            }),
-            Some((
+            seat_answer(
+                &EngineState {
+                    error: Some(EngineError::Unsupported),
+                    ..EngineState::default()
+                },
+                None,
+                now
+            ),
+            SeatAnswer::Retire(
                 EngineError::Unsupported,
                 crate::i18n::Text::VideoFormatCannotPlay
-            )),
+            ),
             "a format the decoder refused keeps its own sentence"
         );
         assert_eq!(
-            retirement(&EngineState::default()),
-            None,
+            seat_answer(&EngineState::default(), None, now),
+            SeatAnswer::Player,
             "a player still loading is still a player"
         );
         assert_eq!(
-            retirement(&EngineState {
-                ready: true,
-                has_video: true,
-                natural_size: Some((160, 120)),
-                ..EngineState::default()
-            }),
-            None,
+            seat_answer(
+                &EngineState {
+                    ready: true,
+                    has_video: true,
+                    natural_size: Some((160, 120)),
+                    ..EngineState::default()
+                },
+                None,
+                now
+            ),
+            SeatAnswer::Player,
             "a player with no length is still a player"
         );
     }
