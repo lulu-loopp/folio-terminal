@@ -161,7 +161,7 @@ pub fn a_number_now(now: u64) -> u64 {
 
 // ── refused ──
 
-pub fn an_unread_type(clock: some_clock!()) -> bool {
+pub fn an_unread_type(clock: clock_of!(Instant)) -> bool {
     clock() > Instant::now()
 }
 

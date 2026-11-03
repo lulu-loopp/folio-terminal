@@ -1416,8 +1416,10 @@ fn handed_now(indices: &[(&str, &Index)]) -> (BTreeMap<String, Vec<String>>, Vec
 ///   header that does not parse; macro arguments that do not parse and name
 ///   `Instant` and `now` in a handed body; a reading in a closure handed a
 ///   `now` whose type is not written; a product type with a field `now` of
-///   `Instant`; a parameter or field type the reading does not read (a macro,
-///   `_`, verbatim tokens); a `now` bound by a pattern it cannot pair with the
+///   `Instant`; a parameter or field type the reading does not read (`_`,
+///   verbatim tokens, or a macro whose arguments name `Instant`, a `Fn` trait or
+///   a clock trait — `Token![,]` is read as no clock); a `now` bound by a
+///   pattern it cannot pair with the
 ///   type; a bound the trait resolver gives up on, or that names a clock
 ///   trait's name by a path it cannot follow; a `where` clause bounding by a
 ///   clock a type that is not a parameter; an `impl` of a name that carries a
@@ -1558,7 +1560,7 @@ fn the_handed_clock_reading_reads_every_clock_shape() {
     assert_eq!(counts, expected);
     assert_eq!(refusals.len(), 4, "{refusals:#?}");
     for (line, says) in [
-        (164, "does not read"),
+        (164, "written by a macro"),
         (168, "cannot pair"),
         (172, "cannot follow"),
         (177, "written away"),
@@ -2476,21 +2478,43 @@ mod reading {
                 kinds(arguments, generics, read)
             }
             Type::Never(_) => Bound::Not,
+            Type::Macro(written) => {
+                let mut names = Vec::new();
+                names_in(written.mac.tokens.clone(), &mut names);
+                let clockish = names
+                    .iter()
+                    .filter(|name| !name.starts_with("r#"))
+                    .any(|name| {
+                        matches!(name.as_str(), "Instant" | "Fn" | "FnMut" | "FnOnce")
+                            || read(&syn::Path::from(syn::Ident::new(
+                                name,
+                                proc_macro2::Span::call_site(),
+                            ))) != Bound::Not
+                    });
+                if clockish {
+                    Bound::Unread(
+                        "a type written by a macro whose arguments name `Instant`, a `Fn` \
+                         trait or a clock trait"
+                            .to_owned(),
+                    )
+                } else {
+                    Bound::Not
+                }
+            }
             _ => Bound::Unread(
-                "a type the handed-now reading does not read (a macro, `_`, or tokens kept \
-                 verbatim)"
+                "a type the handed-now reading does not read (`_`, or tokens kept verbatim)"
                     .to_owned(),
             ),
         }
     }
 
+    /// The type parameters a header bounds by a clock, and what it cannot read.
+    pub type ClockGenerics = (BTreeSet<String>, Vec<(Offset, String)>);
+
     /// **The type parameters `generics` bounds by a clock**, inline or in its
     /// `where` clause, and what it cannot read: a bound it cannot follow, and a
     /// `where` clause that bounds by a clock a type that is not a parameter.
-    pub fn clock_generics(
-        generics: &syn::Generics,
-        read: ReadBound<'_>,
-    ) -> (BTreeSet<String>, Vec<(Offset, String)>) {
+    pub fn clock_generics(generics: &syn::Generics, read: ReadBound<'_>) -> ClockGenerics {
         let mut clocks = BTreeSet::new();
         let mut refusals = Vec::new();
         for param in generics.type_params() {
@@ -2654,10 +2678,7 @@ mod reading {
 
     /// **The type parameters an `impl` header bounds by a clock**, from the
     /// header's text (everything before the block's braces).
-    pub fn impl_generics(
-        header: &str,
-        read: ReadBound<'_>,
-    ) -> syn::Result<(BTreeSet<String>, Vec<(Offset, String)>)> {
+    pub fn impl_generics(header: &str, read: ReadBound<'_>) -> syn::Result<ClockGenerics> {
         let block = syn::parse_str::<syn::ItemImpl>(&format!("{header}{{}}"))?;
         Ok(clock_generics(&block.generics, read))
     }
