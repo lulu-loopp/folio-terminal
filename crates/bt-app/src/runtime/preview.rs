@@ -2304,19 +2304,38 @@ impl<B: Backend> Runtime<'_, B> {
             })
             .map(|(surface, _)| surface)
             .collect();
-        let mut membership_moved = !doomed.is_empty();
+        let membership_moved = !doomed.is_empty();
         for surface in doomed {
             self.window.video.close(surface);
         }
-        // **And an engine that gave up after it had opened** (§7.44 ⑥).
-        //
-        // `EngineError` is sticky — an engine that has errored does not
-        // un-error — and it can arrive at any time: a codec that fails on a
-        // frame a minute in, a file that was replaced under the decoder, a
-        // container that turned out to be truncated, a source that never
-        // finished loading. A seat left standing on one is a rectangle that will
-        // never receive another picture, so it is shut down and the surface is
-        // given the sentence `video_seat::retirement` names for it.
+        membership_moved
+    }
+
+    /// **Shut down every recording whose engine gave up, and give its surface
+    /// the sentence for it** (§7.44 ⑥; plan row 189) — the other half of
+    /// [`Self::sweep_video_seats`], and the half that reads `now`, so it runs on
+    /// the clocked pass ([`Self::service_pictures`]) with the instant that pass
+    /// was handed. Answers whether the set of seats moved.
+    ///
+    /// An engine's refusal is sticky — an engine that has refused does not
+    /// un-refuse — and it can arrive at any time: a codec that fails on a frame
+    /// a minute in, a file that was replaced under the decoder, a container that
+    /// turned out to be truncated, a source that never finished loading. A seat
+    /// left standing on one is a rectangle that will never receive another
+    /// picture, so it is shut down and the surface is given the sentence
+    /// `video_seat::refusal_sentence` names for it.
+    ///
+    /// **An engine that has not come up yet is not one of them** (plan row
+    /// 189). The open budget's run-out is a reading, not a latch: the seat is
+    /// given one more `OPEN_BUDGET` from the first late reading
+    /// (`video_seat::seat_answer`), keeps its loading face and says nothing, and
+    /// is retired — saying the player did not start — only if it is still late
+    /// after that. It used to be retired at the first reading, as "this format
+    /// cannot be played".
+    fn retire_faulted_video_seats(&mut self, now: Instant) -> bool {
+        if self.window.video.is_empty() {
+            return false;
+        }
         let faulted: Vec<(
             PreviewSurface,
             bt_platform::video::engine::EngineError,
@@ -2324,13 +2343,13 @@ impl<B: Backend> Runtime<'_, B> {
         )> = self
             .window
             .video
-            .iter()
+            .iter_mut()
             .filter_map(|(surface, seat)| {
-                let (error, says) = seat.retirement()?;
+                let (error, says) = seat.answer(now)?;
                 Some((surface, error, says))
             })
             .collect();
-        membership_moved |= !faulted.is_empty();
+        let membership_moved = !faulted.is_empty();
         for (surface, error, says) in faulted {
             self.mouse_trace(|| format!("video_seat surface={surface:?} fault={error:?}"));
             self.window.video.close(surface);
@@ -2955,8 +2974,14 @@ impl<B: Backend> Runtime<'_, B> {
             // Filed on the `PreviewImageState`, which is the one place a
             // surface's failures already live and already draw — the same slot a
             // picture that would not decode writes into.
+            //
+            // **In the sentence of the error that came back**, which at the
+            // open is an engine thread that could not be started
+            // (`Unresponsive`) and says the player did not start — not that the
+            // format cannot be played (plan row 189). There is no engine to give
+            // one more budget to, so the next press is the next look.
             self.preview_pane_mut(surface).refuse_picture(Some(
-                PictureRefusal::this_window_cannot(i18n::Text::VideoFormatCannotPlay.text()),
+                PictureRefusal::this_window_cannot(video_seat::refusal_sentence(error).text()),
             ));
         } else {
             // And a play that worked clears whatever the last one said.
@@ -12929,7 +12954,7 @@ impl<B: Backend> Runtime<'_, B> {
         // float being dragged, a window resized — and a picture that stayed
         // where the layout used to be would be the FLIP's own defect with a
         // recording in it.
-        let membership_moved = self.sweep_video_seats();
+        let membership_moved = self.sweep_video_seats() | self.retire_faulted_video_seats(now);
         let frames_arrived = self.window.video.pump(now) | self.advance_animations(now);
         // **And a box that is moving on a clock rather than on an event**
         // (closure review 2, 2026-09-18). Every *event* that moves a picture's

@@ -845,6 +845,13 @@ text_entries! {
     /// (T-VIDEO-ENGINE-NO-DURATION). The surface stops showing a player that
     /// will never start and prints this instead.
     VideoDidNotLoad,
+    /// **What a surface says when the video player did not come up on this
+    /// machine** (plan row 189): an engine not built within its open budget
+    /// even after one more, an engine thread that could not be started, or a
+    /// platform, device or engine factory that refused. It says nothing about
+    /// the file, because nothing was learned about it; until row 189 these
+    /// printed [`Self::VideoFormatCannotPlay`].
+    VideoPlayerDidNotStart,
     /// **What a video's bar says in place of its scrubber** when the recording
     /// has loaded and declares no length — a live stream, or a container
     /// written without a duration (T-VIDEO-ENGINE-NO-DURATION). There is
@@ -3836,6 +3843,11 @@ impl Text {
                 "This video did not finish loading",
                 "此视频未能加载完成",
             ),
+            Self::VideoPlayerDidNotStart => pick(
+                lang,
+                "The video player did not start",
+                "The video player did not start", // zh: pending T-LATE-BUILT-VIDEO-RETIRED-AS-UNPLAYABLE
+            ),
             Self::VideoNoLength => pick(lang, "No length", "无时长"),
             Self::PreviewFlipToRendered => pick(lang, "View rendered", "查看渲染结果"),
             Self::PreviewFlipToPage => pick(lang, "View page", "查看页面"),
@@ -6576,6 +6588,10 @@ impl Text {
         // when the system ended its shell at shutdown (plan row 191).
         (Self::ShellEndedBySystem, HostPlatform::Windows),
         (Self::ShellEndedBySystem, HostPlatform::MacOs),
+        // zh: pending T-LATE-BUILT-VIDEO-RETIRED-AS-UNPLAYABLE — what a video's surface says when
+        // the player did not come up on this machine (plan row 189).
+        (Self::VideoPlayerDidNotStart, HostPlatform::Windows),
+        (Self::VideoPlayerDidNotStart, HostPlatform::MacOs),
     ];
 }
 

@@ -288,8 +288,11 @@ impl Engine {
                 },
             )
             // The one thing that can still fail here, and it fails without
-            // having started anything: a process out of thread handles.
-            .map_err(|_| EngineError::Other("no thread for the engine"))?
+            // having started anything: a process out of thread handles. The
+            // Windows arm's cause for it (plan row 189, closing row 152's R7),
+            // so a surface says the player did not start rather than calling
+            // the format unplayable.
+            .map_err(|_| EngineError::Unresponsive)?
         };
         Ok(Self {
             commands,

@@ -292,6 +292,22 @@ impl EngineError {
             _ => Self::Unsupported,
         }
     }
+
+    /// **Whether this says the player did not come up on this machine, and
+    /// nothing about the file** (plan row 189): an engine not built within
+    /// [`OPEN_BUDGET`] or whose thread could not be started
+    /// ([`Self::Unresponsive`]), Media Foundation that would not start
+    /// ([`Self::NoPlatform`]), no Direct3D device ([`Self::NoDevice`]), or an
+    /// engine factory that refused ([`Self::NoEngine`]). A surface says so in
+    /// those words rather than calling the format unplayable. The macOS arm
+    /// answers the same question of its own variants.
+    #[must_use]
+    pub fn is_about_the_machine(self) -> bool {
+        matches!(
+            self,
+            Self::Unresponsive | Self::NoPlatform | Self::NoDevice | Self::NoEngine
+        )
+    }
 }
 
 /// **Everything a caller may know about a playing video without touching COM.**
@@ -2654,6 +2670,41 @@ mod tests {
             source: PathBuf::from("unbuilt"),
             seen_generation: 0,
             open: OpenDeadline::from_open(asked),
+        }
+    }
+
+    /// RED — **the errors that say the player did not come up on this machine
+    /// are the four about the machine, and none about the file** (plan row 189):
+    /// a surface prints "the video player did not start" for exactly these, and
+    /// "this format cannot be played" for none of them.
+    ///
+    /// MUTATION: drop `NoEngine` from `is_about_the_machine` — its assertion goes
+    /// red, and the factory's refusal is called the file's format again.
+    #[test]
+    fn only_the_machines_own_failures_say_the_player_did_not_come_up() {
+        for error in [
+            EngineError::Unresponsive,
+            EngineError::NoPlatform,
+            EngineError::NoDevice,
+            EngineError::NoEngine,
+        ] {
+            assert!(
+                error.is_about_the_machine(),
+                "{error:?} is about this machine, not the file"
+            );
+        }
+        for error in [
+            EngineError::Aborted,
+            EngineError::Network,
+            EngineError::Decode,
+            EngineError::Unsupported,
+            EngineError::Encrypted,
+            EngineError::NotLoaded,
+        ] {
+            assert!(
+                !error.is_about_the_machine(),
+                "{error:?} is an answer about the file"
+            );
         }
     }
 

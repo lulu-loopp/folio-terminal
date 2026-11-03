@@ -412,6 +412,17 @@ pub mod engine {
         NotLoaded,
     }
 
+    impl EngineError {
+        /// **Whether this says the player did not come up on this machine,
+        /// and nothing about the file** — the Windows arm's question (plan
+        /// row 189). Here that is [`Self::Unresponsive`] alone: an engine not
+        /// built within [`OPEN_BUDGET`], or whose thread could not be started.
+        #[must_use]
+        pub fn is_about_the_machine(self) -> bool {
+            matches!(self, Self::Unresponsive)
+        }
+    }
+
     /// What the engine is doing right now. See the module note.
     #[derive(Clone, Copy, Debug, Default, PartialEq)]
     pub struct EngineState {
