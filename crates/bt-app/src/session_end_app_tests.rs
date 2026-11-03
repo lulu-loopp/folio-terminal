@@ -56,6 +56,36 @@ fn a_query_end_session_freezes_writes_and_drops_the_sentinel() {
     assert_eq!(windows_on_disk(&home.session()), whole.windows);
 }
 
+/// RED (plan row 191) — **the system's end says what became of the layout, in one line**: a
+/// landed write with the windows, tabs and pins it held, a refused one with why, the quit's own
+/// write named; news that wrote nothing says nothing (its arrival is said by the platform).
+///
+/// MUTATION (plant `plant-191-f-a-landed-save-says-nothing.py`): answer `None` for a landed save —
+/// the shutdown that saved is silent again, which is what row 191 had to diagnose from.
+#[test]
+fn the_systems_end_says_what_became_of_the_layout() {
+    let document = shells_document(Path::new("work"), 1);
+    assert_eq!(
+        session_end::outcome_line(&session_end::Settled::Saved(Ok(())), &document).as_deref(),
+        Some("Folio: the session is ending and its layout was saved: windows 1, tabs 2, pinned 2")
+    );
+    assert_eq!(
+        session_end::outcome_line(&session_end::Settled::LeftToTheQuit, &document).as_deref(),
+        Some("Folio: the session is ending and the quit under way writes its layout")
+    );
+    for silent in [
+        session_end::Settled::AlreadySaved,
+        session_end::Settled::TakenBack,
+        session_end::Settled::Closed,
+    ] {
+        assert_eq!(
+            session_end::outcome_line(&silent, &document),
+            None,
+            "{silent:?} wrote nothing"
+        );
+    }
+}
+
 /// RED (B-ENDSESSION) — **a shutdown taken back lets the document go and puts the sentinel
 /// back: the run goes on, and so do its saves.**
 ///

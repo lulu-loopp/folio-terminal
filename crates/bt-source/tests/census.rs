@@ -1453,7 +1453,7 @@ const SUCCESSOR_MOVES: [&str; 3] = ["await_successor", "successor_mut", "take_su
 /// successor's three on the record). And `TerminalPane.successor`'s every non-read site is in the
 /// pane's three methods that move it (the record's until O-5b moved the successor to the pane).
 ///
-/// MUTATION: `leaf.life.phase = Phase::Kept` written in `keep_birth_death_face` (an assign row);
+/// MUTATION: `leaf.life.phase = Phase::Kept` written in `keep_face` (an assign row);
 /// `match &mut leaf.life.phase` in the reaper (an unlisted access row); `leaf.successor =
 /// Some(..)` written in `restart_shell` — each is named.
 #[test]
@@ -1549,7 +1549,7 @@ fn the_shell_life_is_one_fact_written_only_by_its_transitions() {
             ("crate::runtime::panes", "end_leaves_of"),
             ("crate::runtime::panes", "land_shell_birth"),
             ("crate::runtime::tabs", "Runtime::reap_exited_tabs"),
-            ("crate::runtime::tabs", "keep_birth_death_face"),
+            ("crate::runtime::tabs", "keep_face"),
             ("crate::runtime::tabs", "land_birth_death_fallback"),
             ("crate::runtime::tabs", "land_birth_death_fallback_shell"),
             (
@@ -1740,7 +1740,7 @@ fn non_read_rows(census: &FieldCensus, fact: &str) -> Vec<(&'static str, String)
 /// function `release_due_leaf_resize` had are `ShellSession::release_due_size`'s, unchanged.
 ///
 /// MUTATION (observed red): keep the old name on the struct, and the first assertion names every
-/// field; drop `keep_birth_death_face`'s `leaf.wake = None`, and `wake`'s rows differ; write
+/// field; drop `keep_face`'s `leaf.wake = None`, and `wake`'s rows differ; write
 /// `leaf.has_rail = true` in `drain_leaf_pty`, and `has_rail`'s rows differ; leave `view` on
 /// `ShellSession` beside the pane's (O-5b), and the record's facts differ.
 #[test]
@@ -1858,7 +1858,7 @@ fn the_session_record_is_shell_session() {
             "wake",
             expected(&[
                 ("write", "finish_leaf_birth"),
-                ("write", "keep_birth_death_face"),
+                ("write", "keep_face"),
             ]),
         ),
     ];
@@ -1928,7 +1928,7 @@ fn the_session_record_is_shell_session() {
             ("write", "drain_leaf_pty"),
             ("write", "finish_leaf_birth"),
             ("write", "forget_work_in_flight_for_seat"),
-            ("write", "keep_birth_death_face"),
+            ("write", "keep_face"),
             ("write", "mark_leaf_seen"),
             ("write", "place_leaf"),
             ("write", "request"),
@@ -2533,7 +2533,7 @@ impl Callers {
 /// candidate or a name it spells is one of them.
 ///
 /// MUTATION: have `land_birth_death_fallback` call `leaf.life.keep_birth_death()` itself instead of going
-/// through `keep_birth_death_face`; have `end_leaves_of` call `release_dead_shell`; have
+/// through `keep_face`; have `end_leaves_of` call `release_dead_shell`; have
 /// `restart_shell` call `take_successor` — each is named.
 #[test]
 fn each_life_transition_has_its_callers() {
@@ -2577,7 +2577,7 @@ fn each_life_transition_has_its_callers() {
         ),
         (
             life("keep_birth_death"),
-            &["runtime::tabs::keep_birth_death_face"],
+            &["runtime::tabs::keep_face"],
         ),
         (
             life("retire"),

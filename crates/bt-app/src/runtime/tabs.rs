@@ -79,6 +79,7 @@ fn settle_exit_dispositions(
             exit.disposition,
             exit_diagnostics::ShellExitDisposition::BirthDeathFellBack(_)
                 | exit_diagnostics::ShellExitDisposition::BirthDeathPaneKept
+                | exit_diagnostics::ShellExitDisposition::SystemEndedPaneKept
         ) {
             continue;
         }
@@ -98,6 +99,36 @@ pub(super) fn keep_birth_death_face(
     exit: &exit_diagnostics::ShellExit,
     had_output: bool,
 ) -> Result<()> {
+    keep_face(leaf, exit, had_output, crate::i18n::Text::ShellBirthDeath)
+}
+
+/// **Whether a shell's exit was the system ending the session** (plan row 191): its code is the
+/// one a console process is ended with when its session ends
+/// ([`bt_platform::session_end::SYSTEM_ENDED_EXIT_CODE`]). Such a shell did not end itself, and
+/// its pane is not the reader's to have closed.
+fn ended_by_the_system(code: Option<u32>) -> bool {
+    code == Some(bt_platform::session_end::SYSTEM_ENDED_EXIT_CODE)
+}
+
+/// **Leave the transcript of a shell the system ended in place and append the one-line face that
+/// says so** (plan row 191) — a birth death's face, with its own sentence: the pane is kept,
+/// without a shell, until it is restarted or closed, and its tab is not retired.
+fn keep_system_ended_face(
+    leaf: &mut crate::ShellSession,
+    exit: &exit_diagnostics::ShellExit,
+    had_output: bool,
+) -> Result<()> {
+    keep_face(leaf, exit, had_output, crate::i18n::Text::ShellEndedBySystem)
+}
+
+/// The face both kept deaths append: `{program} {said} (code {code}, {ms} ms).`, after the shell's
+/// own output when it wrote any, and the pane's life moved to Kept.
+fn keep_face(
+    leaf: &mut crate::ShellSession,
+    exit: &exit_diagnostics::ShellExit,
+    had_output: bool,
+    said: crate::i18n::Text,
+) -> Result<()> {
     let program = exit
         .program
         .as_deref()
@@ -112,7 +143,7 @@ pub(super) fn keep_birth_death_face(
         .map_or_else(|| "none".to_owned(), |code| code.to_string());
     let face = banner_line(&format!(
         "{program} {} (code {code}, {} ms).",
-        crate::i18n::Text::ShellBirthDeath.text(),
+        said.text(),
         exit.elapsed.as_millis()
     ));
     let face = if had_output {
@@ -122,7 +153,7 @@ pub(super) fn keep_birth_death_face(
     };
     leaf.session
         .feed(face.as_bytes())
-        .context("append the birth-death face to its pane")?;
+        .context("append the kept death's face to its pane")?;
     leaf.wake = None;
     leaf.life.keep_birth_death();
     Ok(())
@@ -3612,6 +3643,35 @@ impl<B: Backend> Runtime<'_, B> {
                         let code = status.signal().is_none().then(|| status.exit_code());
                         let program = leaf.launch.program.clone();
                         let had_output = pty.output_bytes_received() != 0;
+                        // **A shell the system ended is not an edit** (B-ENDSESSION ruling 2,
+                        // from the first such exit rather than from the question; plan row 191):
+                        // the system ends the panes' shells before it asks the window, so this
+                        // exit, at any age, keeps its pane with its face and retires nothing —
+                        // no pane closes, no tab goes into Recent, nothing is recorded, and the
+                        // layout the question then writes is the one the reader left.
+                        if ended_by_the_system(code) {
+                            if !pty.output_is_drained() {
+                                leaf.life.exit_draining(elapsed);
+                                any_live = true;
+                                continue;
+                            }
+                            let exit = exit_diagnostics::ShellExit {
+                                seat: seat.0,
+                                code,
+                                elapsed,
+                                program,
+                                tab: tab_id.0,
+                                disposition:
+                                    exit_diagnostics::ShellExitDisposition::SystemEndedPaneKept,
+                            };
+                            if let Some(old) = leaf.life.release_dead_shell() {
+                                bt_pty::retire_session(old);
+                            }
+                            keep_system_ended_face(leaf, &exit, had_output)?;
+                            exits.push((index, exit));
+                            any_live = true;
+                            continue;
+                        }
                         if let Some(birth_death) =
                             birth_death_disposition(elapsed, had_output, pty.has_birth_fallback())
                         {

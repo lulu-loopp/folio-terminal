@@ -83,6 +83,64 @@ pub const RESTART_NO_REBOOT: u32 = 0x8;
 /// of a write; the next start the person makes reopens the layout anyway.
 pub const RESTART_FLAGS: u32 = RESTART_NO_CRASH | RESTART_NO_HANG;
 
+/// `ENDSESSION_CRITICAL`, the bit of a session-end message's `lParam` that says the session is
+/// ending whatever any application answers.
+pub const ENDSESSION_CRITICAL: isize = 0x4000_0000;
+/// `ENDSESSION_LOGOFF`, the bit of a session-end message's `lParam` that says the person is
+/// signing out (a shutdown and a restart sign out first).
+pub const ENDSESSION_LOGOFF: isize = 0x8000_0000;
+
+/// **The exit code of a process the system ended with the session**: `DBG_TERMINATE_PROCESS`
+/// (0x40010004), which a console process — a pane's shell — is ended with when the session it
+/// runs in ends (T-SHUTDOWN-KILLS-SHELLS-BEFORE-THE-LAYOUT-IS-SAVED, plan row 191).
+///
+/// **It arrives before the question does.** The owner's three shutdowns of 2026-11-02, on 0.4.8:
+/// every pane's shell ended with this code, one turn after another, while Folio's own windows had
+/// not yet been sent `WM_QUERYENDSESSION` — so the hold the question takes (B-ENDSESSION) came
+/// after every shell had gone, and each of those exits had already closed its tab. A shell that
+/// ends with this code did not end itself: it is the system's end of the session reaching the
+/// pane before it reached the window, and `bt-app` keeps the pane rather than retiring it.
+///
+/// Off Windows no process ends with it (an exit status there is eight bits, and the system's end
+/// arrives as `applicationShouldTerminate:` before any shell is ended), so the rule it carries is
+/// inert there.
+pub const SYSTEM_ENDED_EXIT_CODE: u32 = 0x4001_0004;
+
+/// **One line for `diagnostics.log` saying a session-end message arrived** — which one, its
+/// `wParam`, and the bits of its `lParam` named — or `None` for any other message.
+///
+/// Written for every session-end message, `WM_ENDSESSION(TRUE)` included, which nothing else
+/// hears: it is the last thing the system tells this process before it may end it, and a
+/// diagnosis that has to infer whether it came from silence is the diagnosis plan row 191 had to
+/// make. Pure, so its shape is a thing a test can state.
+#[must_use]
+pub fn arrival_line(message: u32, wparam: usize, lparam: isize) -> Option<String> {
+    let name = match message {
+        WM_QUERYENDSESSION => "WM_QUERYENDSESSION",
+        WM_ENDSESSION if wparam == 0 => "WM_ENDSESSION(FALSE)",
+        WM_ENDSESSION => "WM_ENDSESSION(TRUE)",
+        _ => return None,
+    };
+    let named: Vec<&str> = [
+        (ENDSESSION_CLOSEAPP, "CLOSEAPP"),
+        (ENDSESSION_CRITICAL, "CRITICAL"),
+        (ENDSESSION_LOGOFF, "LOGOFF"),
+    ]
+    .into_iter()
+    .filter(|(bit, _)| lparam & bit != 0)
+    .map(|(_, word)| word)
+    .collect();
+    let flags = if named.is_empty() {
+        "none".to_owned()
+    } else {
+        named.join("|")
+    };
+    Some(format!(
+        "BT_SESSION_END the system sent {name}, lParam {:#010x} ({flags})",
+        lparam.cast_unsigned()
+    ))
+}
+
 /// **What the system said about the session ending.**
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SessionEnd {
@@ -282,6 +340,11 @@ mod windows_session_end {
         // SAFETY: the owning `SessionEndWatch` holds this box for the whole installed interval
         // and removes the subclass before freeing it, on this same thread.
         let hook = unsafe { &*hook };
+        // Said before anything is done about it, so the line stands where it arrived among the
+        // shells' exit lines (plan row 191): one queue, in order, written by the log's own thread.
+        if let Some(line) = arrival_line(message, wparam.0, lparam.0) {
+            crate::stderr_road::say(line);
+        }
         match heard(message, wparam.0, lparam.0) {
             // The line goes up before the loop is woken: the write it names is the loop's.
             Some(SessionEnd::Asked) => {
@@ -312,8 +375,9 @@ mod windows_session_end {
         use windows::Win32::UI::WindowsAndMessaging;
 
         use super::super::{
-            ENDSESSION_CLOSEAPP, RESTART_FLAGS, RESTART_NO_CRASH, RESTART_NO_HANG,
-            RESTART_NO_PATCH, RESTART_NO_REBOOT, SessionEnd, WM_ENDSESSION, WM_QUERYENDSESSION,
+            ENDSESSION_CLOSEAPP, ENDSESSION_CRITICAL, ENDSESSION_LOGOFF, RESTART_FLAGS,
+            RESTART_NO_CRASH, RESTART_NO_HANG, RESTART_NO_PATCH, RESTART_NO_REBOOT,
+            SYSTEM_ENDED_EXIT_CODE, SessionEnd, WM_ENDSESSION, WM_QUERYENDSESSION,
             register_restart, withdraw_restart,
         };
         use super::{SESSION_END_SUBCLASS_ID, SessionEndHook, session_end_subclass};
@@ -333,6 +397,21 @@ mod windows_session_end {
             assert_eq!(RESTART_NO_HANG, Recovery::RESTART_NO_HANG.0);
             assert_eq!(RESTART_NO_PATCH, Recovery::RESTART_NO_PATCH.0);
             assert_eq!(RESTART_NO_REBOOT, Recovery::RESTART_NO_REBOOT.0);
+            assert_eq!(
+                ENDSESSION_CRITICAL.cast_unsigned(),
+                WindowsAndMessaging::ENDSESSION_CRITICAL as usize
+            );
+            assert_eq!(
+                ENDSESSION_LOGOFF.cast_unsigned(),
+                WindowsAndMessaging::ENDSESSION_LOGOFF as usize
+            );
+            assert_eq!(
+                SYSTEM_ENDED_EXIT_CODE,
+                windows::Win32::Foundation::DBG_TERMINATE_PROCESS
+                    .0
+                    .cast_unsigned(),
+                "the code a console process is ended with when its session ends"
+            );
         }
 
         /// RED (B-ENDSESSION; T-RESTART-REGISTRATION) — **the window procedure answers the
@@ -489,13 +568,44 @@ impl SessionEndWatch {
 #[cfg(test)]
 mod tests {
     use super::{
-        ENDSESSION_CLOSEAPP, RESTART_FLAGS, RESTART_NO_CRASH, RESTART_NO_HANG, RESTART_NO_PATCH,
-        RESTART_NO_REBOOT, SessionEnd, WM_ENDSESSION, WM_QUERYENDSESSION, answer, heard,
+        ENDSESSION_CLOSEAPP, ENDSESSION_CRITICAL, ENDSESSION_LOGOFF, RESTART_FLAGS,
+        RESTART_NO_CRASH, RESTART_NO_HANG, RESTART_NO_PATCH, RESTART_NO_REBOOT, SessionEnd,
+        WM_ENDSESSION, WM_QUERYENDSESSION, answer, arrival_line, heard,
     };
+
+    /// RED (plan row 191) — **every session-end message is said with its flags, and nothing else
+    /// is**: the question, a shutdown taken back, the session really ending — which nothing else
+    /// hears — and the Restart Manager's close, each with the bits of its `lParam` named.
+    ///
+    /// MUTATION: answer `None` for `WM_ENDSESSION(TRUE)` — the last message before the system may
+    /// end the process is not said; drop the `LOGOFF` row — a restart's sign-out reads `none`.
+    #[test]
+    fn every_session_end_message_is_said_with_its_flags() {
+        assert_eq!(
+            arrival_line(WM_QUERYENDSESSION, 0, ENDSESSION_LOGOFF).as_deref(),
+            Some("BT_SESSION_END the system sent WM_QUERYENDSESSION, lParam 0x80000000 (LOGOFF)")
+        );
+        assert_eq!(
+            arrival_line(WM_ENDSESSION, 1, ENDSESSION_CRITICAL | ENDSESSION_LOGOFF).as_deref(),
+            Some(
+                "BT_SESSION_END the system sent WM_ENDSESSION(TRUE), lParam 0xc0000000 \
+                 (CRITICAL|LOGOFF)"
+            )
+        );
+        assert_eq!(
+            arrival_line(WM_ENDSESSION, 0, 0).as_deref(),
+            Some("BT_SESSION_END the system sent WM_ENDSESSION(FALSE), lParam 0x00000000 (none)")
+        );
+        assert_eq!(
+            arrival_line(WM_ENDSESSION, 1, ENDSESSION_CLOSEAPP).as_deref(),
+            Some("BT_SESSION_END the system sent WM_ENDSESSION(TRUE), lParam 0x00000001 (CLOSEAPP)")
+        );
+        assert_eq!(arrival_line(0x0010, 0, ENDSESSION_CLOSEAPP), None, "WM_CLOSE is not one");
+    }
 
     /// `ENDSESSION_CRITICAL | ENDSESSION_LOGOFF`, the other two bits a session-end `lParam`
     /// carries.
-    const CRITICAL_AND_LOGOFF: isize = 0xC000_0000;
+    const CRITICAL_AND_LOGOFF: isize = ENDSESSION_CRITICAL | ENDSESSION_LOGOFF;
 
     /// RED (B-ENDSESSION; T-RESTART-REGISTRATION) — **the question, a shutdown taken back and
     /// the Restart Manager's close are heard; the session really ending, and everything else, is
