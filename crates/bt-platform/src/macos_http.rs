@@ -1205,7 +1205,13 @@ mod tests {
             loopback::{Entry, Step, begun, body, head, ok, serve},
         };
 
-        const IDLE: Duration = Duration::from_secs(5);
+        /// The idle bound every download here that must get an answer is handed:
+        /// the suite's patience, not a 5 s race with the loopback server's thread
+        /// (plan row 163). It is both the session's request and resource timeouts
+        /// and the silence deadline, so an outcome the server decides is never
+        /// turned into a timeout by a slow machine; the tests that are about a
+        /// deadline hand their own (`stretch`, `DOWNLOAD_IDLE_TIMEOUT`).
+        const IDLE: Duration = crate::door_skipped::PATIENCE;
 
         fn scratch(name: &str) -> PathBuf {
             let directory = std::env::temp_dir()

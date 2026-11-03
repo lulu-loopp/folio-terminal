@@ -20,7 +20,21 @@
 //!    one of [`REAL_WAITS`] or [`MEASURES`]: a stable standard-library wait whose
 //!    length is real time (`thread::sleep`, `Receiver::recv_timeout`,
 //!    `Condvar::wait_timeout`, `thread::park_timeout` and their variants) or a
-//!    reading of how much real time passed (`Instant::elapsed`).
+//!    reading of how much real time passed (`Instant::elapsed`). Widened by
+//!    T-FIXED-MILLISECOND-KERNEL-WAITS-IN-BT-PLATFORM (2026-11-02, plan row 163)
+//!    to the kernel's waits: a call of one of [`KERNEL_WAITS`] — a Win32 wait or
+//!    timeout (`WaitForSingleObject`, `WaitForMultipleObjects`, `WaitNamedPipeW`,
+//!    `GetQueuedCompletionStatus`, `WinHttpSetTimeouts`, … and their variants) or
+//!    a std socket timeout (`set_read_timeout`, `set_write_timeout`,
+//!    `connect_timeout`), matched by the called name as the std waits are; or a
+//!    use of one of [`KERNEL_WAIT_PATHS`] (`libc::poll`, `libc::select`,
+//!    `libc::kevent`, …), matched by that path, because their last names are
+//!    common words the workspace declares (`HangWatch::poll`, `select`). The
+//!    bound argument is not read: a literal, a constant, an expression,
+//!    `INFINITE` and `0` all count, as `recv_timeout(Duration::ZERO)` does.
+//!    `GetOverlappedResult`, `waitpid` and `waitid` are not real waits here: they
+//!    take no length of time — they wait for an event, or not at all — and a
+//!    test stuck in one is the suite watchdog's hang, not a timing verdict.
 //! 2. **Clock arithmetic in its own body** (T-TIMING-BOUND-STRAYS): an operand
 //!    of `<`, `<=`, `>`, `>=` or binary `-`, or the receiver and the argument of
 //!    `duration_since` / `saturating_duration_since` / `checked_duration_since`,
@@ -69,6 +83,15 @@
 //!   such a callable; an unparsed body or a cutoff on the
 //!   walk; a macro whose `macro_rules!` definition in the package names
 //!   `elapsed` or `Instant`.
+//! * Anywhere in a first-party package, product code included (a test module's
+//!   `use super::*` brings its parent's imports): a [`KERNEL_WAIT_PATHS`] wait
+//!   named by its path and not called right there (`use libc::poll;`,
+//!   `use libc::poll as p;`, `let f = libc::poll;`); a group or a glob of `libc`
+//!   (`use libc::{…}`, `use libc::*`) and a rename of `libc` itself
+//!   (`use libc as c`), each of which could bring a `libc` wait in under a name
+//!   its path does not spell; and a [`KERNEL_WAITS`] name renamed (`use …::
+//!   WaitForSingleObject as wait`). Imported and called under its own name, a
+//!   [`KERNEL_WAITS`] wait is found, so an import of one is not refused.
 //!
 //! # What it does not see, and who does
 //!
@@ -93,6 +116,15 @@
 //!   read as the turn's instant; `at: Instant`, `deadline: Instant` (which a
 //!   function rightly compares with a fresh reading) and an instant carried in
 //!   another struct's field are not.
+//! * **A kernel wait in a test-only helper** (shape 1 reads the test's own
+//!   body). `Witness::wait_gone`'s 10 s `WaitForSingleObject` is not seen, as a
+//!   `recv_timeout` in a helper is not; a [`KERNEL_WAITS`] function taken as a
+//!   value under its own name (`let wait = WaitForSingleObject;`), as a std wait
+//!   taken that way, is not either.
+//! * **A product function's own kernel wait** (`attention_pipe`'s
+//!   `READ_DEADLINE`, `open_client`'s busy wait, WinHTTP's phase timeouts): a
+//!   product window, swept by hand by plan row 163 on 2026-11-02 and recorded in
+//!   the list's `# noted` line, as rows 125 and 153 swept theirs.
 //! * **`Instant` and `Duration` as values.** Most of the tree's tests build a
 //!   controlled clock from one `Instant::now()` plus `Duration::from_*` offsets,
 //!   and their verdict does not move with the machine's speed. That is exactly
@@ -139,6 +171,60 @@ const REAL_WAITS: [&str; 8] = [
 
 /// Calls that read how much real time passed.
 const MEASURES: [&str; 1] = ["elapsed"];
+
+/// **The kernel's waits, matched by the called name** (plan row 163): calls
+/// that wait for a length of real time, or arm one on a stream's next read,
+/// write or connect. Win32: the object waits (`WaitForSingleObject`,
+/// `WaitForSingleObjectEx`, `WaitForMultipleObjects`, `WaitForMultipleObjectsEx`,
+/// `MsgWaitForMultipleObjects`, `MsgWaitForMultipleObjectsEx`,
+/// `SignalObjectAndWait`), the sleeps (`SleepEx`, `Sleep`), a busy pipe's wait
+/// (`WaitNamedPipeW`), a completion port's (`GetQueuedCompletionStatus`,
+/// `GetQueuedCompletionStatusEx`), an overlapped result's with a timeout
+/// (`GetOverlappedResultEx`) and WinHTTP's phase timeouts
+/// (`WinHttpSetTimeouts`); std: a socket's timeouts (`set_read_timeout`,
+/// `set_write_timeout`, `connect_timeout`). Bare, imported or by whole
+/// `windows::Win32::…` path, a call is one shape: the name followed by `(`. No
+/// workspace function may be declared by one of these names
+/// ([`no_workspace_function_is_named_like_a_real_wait`]).
+///
+/// Left out on purpose: `GetOverlappedResult` (no timeout argument), `waitpid`
+/// and `waitid` (blocking or `WNOHANG`). Each waits for an event or not at all;
+/// none waits for a length of time.
+const KERNEL_WAITS: [&str; 17] = [
+    "WaitForSingleObject",
+    "WaitForSingleObjectEx",
+    "WaitForMultipleObjects",
+    "WaitForMultipleObjectsEx",
+    "MsgWaitForMultipleObjects",
+    "MsgWaitForMultipleObjectsEx",
+    "SignalObjectAndWait",
+    "SleepEx",
+    "Sleep",
+    "WaitNamedPipeW",
+    "GetQueuedCompletionStatus",
+    "GetQueuedCompletionStatusEx",
+    "GetOverlappedResultEx",
+    "WinHttpSetTimeouts",
+    "set_read_timeout",
+    "set_write_timeout",
+    "connect_timeout",
+];
+
+/// **The `libc` waits, matched by path** (plan row 163): their last names are
+/// common words (bt-app declares `HangWatch::poll` and `select` methods), so a
+/// use of one is `libc::<name>` — `::libc::poll` and a longer path ending so
+/// included — and every other spelling that could hide one is refused
+/// ([`kernel_wait_refusals`]). `libc::sleep` is [`REAL_WAITS`]' `sleep`.
+const KERNEL_WAIT_PATHS: [&str; 8] = [
+    "libc::poll",
+    "libc::ppoll",
+    "libc::select",
+    "libc::pselect",
+    "libc::kevent",
+    "libc::epoll_wait",
+    "libc::nanosleep",
+    "libc::usleep",
+];
 
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
@@ -333,6 +419,21 @@ impl Found {
     }
 }
 
+/// The kernel waits a scan reads: [`KERNEL`] in every scan of the tree; a test
+/// of the scan hands an empty one to show what the widening alone finds.
+struct Kernel<'a> {
+    /// Matched by the called name, as [`KERNEL_WAITS`].
+    calls: &'a [&'static str],
+    /// Matched by path, as [`KERNEL_WAIT_PATHS`].
+    paths: &'a [&'static str],
+}
+
+/// The kernel waits of plan row 163.
+const KERNEL: Kernel<'static> = Kernel {
+    calls: &KERNEL_WAITS,
+    paths: &KERNEL_WAIT_PATHS,
+};
+
 /// Every test of one index whose own body holds shape 1 or shape 2, added to
 /// `found` by identity; what shape 2's reading cannot decide goes to `refusals`.
 fn scan_index(
@@ -341,16 +442,35 @@ fn scan_index(
     found: &mut BTreeMap<String, Found>,
     refusals: &mut Vec<String>,
 ) {
+    scan_index_reading(index, package, &KERNEL, found, refusals);
+}
+
+/// [`scan_index`] with the kernel waits `kernel`.
+fn scan_index_reading(
+    index: &Index,
+    package: &str,
+    kernel: &Kernel<'_>,
+    found: &mut BTreeMap<String, Found>,
+    refusals: &mut Vec<String>,
+) {
     let attributes = test_attributes(index);
     let hits: Vec<(&'static str, bool, Vec<Span>)> = REAL_WAITS
         .iter()
-        .map(|name| (*name, false))
-        .chain(MEASURES.iter().map(|name| (*name, true)))
-        .map(|(name, measures)| {
-            let search = Search::new(needle!(Pattern::call(name)), View::Identifiers);
+        .chain(kernel.calls.iter())
+        .map(|name| (*name, false, Pattern::call(name)))
+        .chain(MEASURES.iter().map(|name| (*name, true, Pattern::call(name))))
+        .chain(
+            kernel
+                .paths
+                .iter()
+                .map(|path| (*path, false, Pattern::path(path))),
+        )
+        .map(|(name, measures, pattern)| {
+            let search = Search::new(needle!(pattern), View::Identifiers);
             (name, measures, spans(index, &search))
         })
         .collect();
+    refusals.extend(kernel_wait_refusals(index, kernel));
     for item in index.items() {
         let Some(body) = item.body() else { continue };
         if !is_test(&attributes, item) {
@@ -735,9 +855,82 @@ fn declared_triggers(index: &Index) -> Vec<String> {
         .items()
         .iter()
         .filter(|item| item.kind().is_callable())
-        .filter(|item| REAL_WAITS.contains(&item.name()) || MEASURES.contains(&item.name()))
+        .filter(|item| {
+            REAL_WAITS.contains(&item.name())
+                || KERNEL_WAITS.contains(&item.name())
+                || MEASURES.contains(&item.name())
+        })
         .flat_map(|item| item.identities().map(|identity| identity.to_string()))
         .collect()
+}
+
+/// **What [`KERNEL_WAITS`] and [`KERNEL_WAIT_PATHS`] cannot read, refused by
+/// file and line** (plan row 163), anywhere in `index`: a `libc` wait named by
+/// its path and not called right there, a group or glob of `libc`, a rename of
+/// `libc`, and a renamed kernel wait. Each would let a test call a wait under a
+/// name the scan does not match; none is written in the tree.
+fn kernel_wait_refusals(index: &Index, kernel: &Kernel<'_>) -> Vec<String> {
+    let tokens = index.tokens();
+    let union = index.union();
+    let name = |at: usize| index.text(tokens[at].name_span());
+    let file = |at: usize| index.locate(tokens[at].span().start()).map(|location| location.file);
+    // The bytes between a token and the next one in the same file, trimmed.
+    let gap = |at: usize| {
+        let next = tokens.get(at + 1)?;
+        (file(at) == file(at + 1))
+            .then(|| union[tokens[at].span().end()..next.span().start()].trim())
+    };
+    let called = |at: usize| union[tokens[at].span().end()..].trim_start().starts_with('(');
+    let libc_wait = |segment: &str| {
+        kernel
+            .paths
+            .iter()
+            .any(|path| path.strip_prefix("libc::") == Some(segment))
+    };
+    let mut refusals = Vec::new();
+    for (at, token) in tokens.iter().enumerate() {
+        let here = index.text(token.name_span());
+        let why = if kernel.calls.contains(&here) && gap(at) == Some("") && name(at + 1) == "as" {
+            Some(format!(
+                "`{here}` is renamed; the timing scan reads a kernel wait by its own called \
+                 name, so a test calling the new name would not be seen — call it as `{here}`"
+            ))
+        } else if here == "libc" && !kernel.paths.is_empty() {
+            match gap(at) {
+                Some("") if name(at + 1) == "as" => Some(
+                    "`libc` is renamed; the timing scan reads a libc wait by its `libc::` path, \
+                     so a wait under the new name would not be seen"
+                        .to_owned(),
+                ),
+                Some("::") if libc_wait(name(at + 1)) && !called(at + 1) => Some(format!(
+                    "`libc::{}` is named and not called here (an import, a rename or a value); \
+                     the timing scan reads a libc wait only as a call of its path, so a test \
+                     calling it under another name would not be seen — call `libc::{}(` where \
+                     it waits",
+                    name(at + 1),
+                    name(at + 1)
+                )),
+                Some(between)
+                    if between.starts_with("::")
+                        && (between.contains('{') || between.contains('*')) =>
+                {
+                    Some(
+                        "a group or a glob of `libc` is imported; it could bring a libc wait in \
+                         under a name the timing scan does not read — name each libc item by \
+                         its path"
+                            .to_owned(),
+                    )
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+        if let Some(why) = why {
+            refusals.push(format!("{}: {why}", place(index, token.span().start())));
+        }
+    }
+    refusals
 }
 
 /// Every first-party package's index: the one this process holds for each package's
@@ -966,6 +1159,84 @@ fn clock_arithmetic_is_two_readings_and_a_clock_in_an_unparsed_macro_is_refused(
             && refusals[0].contains("`late_by!`"),
         "the refusal names the macro by file and line: {refusals:#?}"
     );
+}
+
+/// RED (T-FIXED-MILLISECOND-KERNEL-WAITS-IN-BT-PLATFORM, plan row 163) — **a
+/// kernel wait in a test's own body is a real wait, whatever its bound and
+/// however its name is reached; a first-party `poll` is not; a wait only in a
+/// helper is outside shape 1; each spelling that would hide a wait is refused by
+/// file and line; and a function declared by a kernel wait's name is a declared
+/// trigger.**
+///
+/// The fixture's shapes: F1 an imported bare `WaitForSingleObject` with a
+/// literal bound, F2 a whole-path `WaitForMultipleObjects` on a constant, F3 the
+/// same wait on `INFINITE` and on `0`, F4 `set_read_timeout` and
+/// `TcpStream::connect_timeout`, F5 `libc::poll` in a closure — each found; F6 a
+/// first-party `poll` called bare and as a method, F8 a wait only in a helper —
+/// neither found; F7 `use libc::poll;` and a renamed `WaitForMultipleObjectsEx`
+/// — refused; F9 a function named `WaitNamedPipeW` — a declared trigger.
+///
+/// MUTATION (the removal check, run here): scan with no kernel waits and every
+/// one of F1–F5 leaves the found set, and F7's refusals with them; match the
+/// `libc` waits by their last name instead of their path and F6's first-party
+/// `poll`s are found.
+#[test]
+fn a_kernel_wait_in_a_test_body_is_a_real_wait_and_a_hidden_one_is_refused() {
+    let index = fixture_named("timing_kernel_waits", "kernel");
+    let mut found = BTreeMap::new();
+    let mut refusals = Vec::new();
+    scan_index(&index, "kernel", &mut found, &mut refusals);
+    let waits: Vec<(&str, Vec<&str>)> = found
+        .iter()
+        .map(|(identity, test)| (identity.as_str(), test.waits.iter().copied().collect()))
+        .collect();
+    assert_eq!(
+        waits,
+        [
+            ("kernel:lib:kernel a_connect_with_a_timeout", vec!["connect_timeout"]),
+            ("kernel:lib:kernel a_libc_poll_in_a_closure", vec!["libc::poll"]),
+            ("kernel:lib:kernel a_look_at_once", vec!["WaitForSingleObject"]),
+            ("kernel:lib:kernel a_socket_read_timeout", vec!["set_read_timeout"]),
+            (
+                "kernel:lib:kernel a_whole_path_wait_on_a_constant",
+                vec!["WaitForMultipleObjects"]
+            ),
+            ("kernel:lib:kernel an_imported_bare_object_wait", vec!["WaitForSingleObject"]),
+            ("kernel:lib:kernel an_unbounded_wait", vec!["WaitForSingleObject"]),
+        ],
+        "F1-F5 are real waits; F6's first-party polls and F8's helper are not"
+    );
+    let file = "crates/bt-source/tests/fixtures/timing_kernel_waits/lib.rs";
+    assert_eq!(refusals.len(), 2, "{refusals:#?}");
+    assert!(
+        refusals[0].starts_with(&format!("{file}:85: "))
+            && refusals[0].contains("`libc::poll` is named and not called"),
+        "F7: the libc import is refused by file and line: {refusals:#?}"
+    );
+    assert!(
+        refusals[1].starts_with(&format!("{file}:86: "))
+            && refusals[1].contains("`WaitForMultipleObjectsEx` is renamed"),
+        "F7: the rename is refused by file and line: {refusals:#?}"
+    );
+    let declared = declared_triggers(&index);
+    assert!(
+        declared.len() == 1 && declared[0].contains("WaitNamedPipeW"),
+        "F9: a function named like a kernel wait is a declared trigger: {declared:#?}"
+    );
+
+    let mut unwidened = BTreeMap::new();
+    let mut unrefused = Vec::new();
+    let none = Kernel {
+        calls: &[],
+        paths: &[],
+    };
+    scan_index_reading(&index, "kernel", &none, &mut unwidened, &mut unrefused);
+    assert_eq!(
+        unwidened.keys().collect::<Vec<_>>(),
+        Vec::<&String>::new(),
+        "the removal check: with no kernel waits the fixture holds no timing-bound test"
+    );
+    assert_eq!(unrefused, Vec::<String>::new(), "and nothing is refused");
 }
 
 /// RED (T-TIMING-BOUND-STRAYS) — **a test that reaches a test-only helper that

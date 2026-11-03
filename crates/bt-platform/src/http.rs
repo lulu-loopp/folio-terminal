@@ -877,7 +877,13 @@ mod tests {
     };
     use crate::launch_conversation::{CountedClock, Turn};
 
-    const IDLE: Duration = Duration::from_secs(5);
+    /// The idle bound every download here that must get an answer is handed: the
+    /// suite's patience, not a 5 s race with the loopback server's thread (plan
+    /// row 163). It is both WinHTTP's four phase timeouts (`WinHttpSetTimeouts`)
+    /// and the silence deadline, so an outcome the server decides is never
+    /// turned into a timeout by a slow machine; the tests that are about a
+    /// deadline hand their own (`stretch`, `DOWNLOAD_IDLE_TIMEOUT`).
+    const IDLE: Duration = crate::door_skipped::PATIENCE;
     /// Longer than any of these exchanges takes: the redirect loop's bound.
     const BUDGET: Duration = Duration::from_secs(20);
 

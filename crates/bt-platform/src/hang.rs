@@ -1133,6 +1133,10 @@ mod macos_handshake_tests {
 
     /// **A loop that is turning answers, well inside the bound.**
     ///
+    /// The bound handed in is the suite's patience (plan row 163): the answer
+    /// comes as soon as the loop turns, so a slow machine only makes it later,
+    /// never `Silent`; a 5 s bound raced the turning thread.
+    ///
     /// MUTATION: drop the `wake_up` in `ask_run_loop_to_answer` and this hangs
     /// until the timeout, because a loop asleep in `mach_msg` is not told the
     /// queue has something in it.
@@ -1140,7 +1144,8 @@ mod macos_handshake_tests {
     fn a_run_loop_that_is_turning_answers_inside_the_bound() {
         let (address, handle) = a_thread_whose_run_loop_turns();
         // SAFETY: `borrow`'s contract — the thread is still in its loop.
-        let answer = ask_run_loop_to_answer(unsafe { borrow(address) }, Duration::from_secs(5));
+        let answer =
+            ask_run_loop_to_answer(unsafe { borrow(address) }, crate::door_skipped::PATIENCE);
         assert_eq!(answer, Answer::Answered);
         assert_eq!(
             answer.phrase(),
