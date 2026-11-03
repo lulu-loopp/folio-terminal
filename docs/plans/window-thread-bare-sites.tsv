@@ -14,7 +14,23 @@
 ##
 ## Held equal to the code by `hang_watch::window_waits_tests::every_bare_site_is_a_row_and_every_row_a_site`, which
 ## says how a site is recognised. This file only shrinks: a row goes when its site goes through a door (A2b-A2d); no
-## ticket adds one. At A2e the file is proven empty and deleted, and the lint takes its place.
+## ticket adds a site. A widened vocabulary adds the sites it reveals, which were already there, each listed under a
+## dated `## Revealed <YYYY-MM-DD> ...` line below, one `##   crate | arm | item | entry` line per row
+## (`scripts/ci/check-window-waits.ps1` admits a new entry's rows against the merge base only so). At A2e the file is
+## proven empty and deleted, and the lint takes its place.
+##
+## Revealed 2026-11-02 by T-BARE-SITE-VOCABULARY-WAIT-WHILE-BLIND-SPOT (plan row 176): the waits of bt-source's request-door `BLOCKING` list the vocabulary lacked; sites that were there before it.
+##   bt-app | - | crate::layout_tables::WorkerRoad::build | std::sync::mpsc::SyncSender::send
+##   bt-app | - | crate::shell_integration::prune_psreadline_artefacts_once | std::sync::Once::call_once
+##   bt-platform | [windows] | crate::ProbePipeEnd::read_once | windows::Win32::System::Threading::WaitForMultipleObjects
+##   bt-platform | [windows] | crate::attention_pipe::listen | windows::Win32::System::Threading::WaitForMultipleObjects
+##   bt-platform | [windows] | crate::attention_pipe::write_bounded | windows::Win32::System::Threading::WaitForMultipleObjects
+##   bt-platform | [windows] | crate::elevated_pipe::finish | windows::Win32::System::Threading::WaitForMultipleObjects
+##   bt-platform | [windows] | crate::launch_pipe::Instance::wait_for_a_caller | windows::Win32::System::Threading::WaitForMultipleObjects
+##   bt-platform | [windows] | crate::launch_pipe::signalled_within | windows::Win32::System::Threading::WaitForMultipleObjects
+##   bt-platform | [windows] | crate::exit_witness::ExitWitness::ended_within | windows::Win32::System::Threading::WaitForSingleObject
+##   bt-platform | [windows] | crate::install_flip::imp::creation_of | windows::Win32::System::Threading::WaitForSingleObject
+##   bt-platform | [windows] | crate::probe_leader_has_exited | windows::Win32::System::Threading::WaitForSingleObject
 crate	arm	item	entry	count
 bt-app	-	crate::FolioApp::recovered_from_a_lost_device	std::thread::sleep	1
 bt-app	-	crate::animation::AnimationStamp::of	std::fs::metadata	1
@@ -45,6 +61,7 @@ bt-app	-	crate::hang_watch::prune_reports	std::fs::read_dir	1
 bt-app	-	crate::hang_watch::watch_forever	std::thread::sleep	1
 bt-app	-	crate::hang_watch::write_report	std::fs::File::create	1
 bt-app	-	crate::hang_watch::write_report	std::fs::create_dir_all	1
+bt-app	-	crate::layout_tables::WorkerRoad::build	std::sync::mpsc::SyncSender::send	1
 bt-app	-	crate::palette_index::IndexWorker::spawn	std::sync::mpsc::Receiver::recv	1
 bt-app	-	crate::palette_index::canonical	std::fs::canonicalize	1
 bt-app	-	crate::palette_index::walk_bounded	std::fs::metadata	1
@@ -75,6 +92,7 @@ bt-app	-	crate::shell_integration::profile_marks::OurTurn::take	std::sync::Condv
 bt-app	-	crate::shell_integration::profile_marks::lock	std::fs::canonicalize	1
 bt-app	-	crate::shell_integration::profile_marks::lock	std::fs::create_dir_all	1
 bt-app	-	crate::shell_integration::profile_marks::lock	std::thread::sleep	1
+bt-app	-	crate::shell_integration::prune_psreadline_artefacts_once	std::sync::Once::call_once	1
 bt-app	-	crate::shell_integration::replace_profile	std::fs::File::sync_all	1
 bt-app	-	crate::shell_integration::replace_profile	std::fs::create_dir_all	1
 bt-app	-	crate::shell_integration::run_powershell_probe	std::thread::sleep	1
@@ -143,6 +161,7 @@ bt-platform	[unix]	crate::launch_pipe::LaunchPipe::hang_up	libc::write	1
 bt-platform	[unix]	crate::launch_pipe::LaunchPipe::retire_within	std::thread::JoinHandle::join	1
 bt-platform	[unix]	crate::launch_pipe::LaunchPipe::start_on	libc::close	2
 bt-platform	[unix]	crate::launch_pipe::listen	libc::close	1
+bt-platform	[windows]	crate::ProbePipeEnd::read_once	windows::Win32::System::Threading::WaitForMultipleObjects	1
 bt-platform	[windows]	crate::attention_pipe::<Overlapped as Drop>::drop	windows::Win32::Foundation::CloseHandle	1
 bt-platform	[windows]	crate::attention_pipe::<OwnedHandle as Drop>::drop	windows::Win32::Foundation::CloseHandle	1
 bt-platform	[windows]	crate::attention_pipe::AttentionPipe::retire_within	std::thread::JoinHandle::join	1
@@ -151,21 +170,29 @@ bt-platform	[windows]	crate::attention_pipe::AttentionPipe::start	std::thread::J
 bt-platform	[windows]	crate::attention_pipe::AttentionPipe::start	windows::Win32::Foundation::CloseHandle	2
 bt-platform	[windows]	crate::attention_pipe::AttentionPipe::start	windows::Win32::System::Threading::SetEvent	1
 bt-platform	[windows]	crate::attention_pipe::AttentionPipe::stop_listening	windows::Win32::System::Threading::SetEvent	1
+bt-platform	[windows]	crate::attention_pipe::listen	windows::Win32::System::Threading::WaitForMultipleObjects	1
+bt-platform	[windows]	crate::attention_pipe::write_bounded	windows::Win32::System::Threading::WaitForMultipleObjects	1
+bt-platform	[windows]	crate::elevated_pipe::finish	windows::Win32::System::Threading::WaitForMultipleObjects	1
+bt-platform	[windows]	crate::exit_witness::ExitWitness::ended_within	windows::Win32::System::Threading::WaitForSingleObject	1
 bt-platform	[windows]	crate::file_replace::carry_metadata	std::fs::metadata	1
 bt-platform	[windows]	crate::file_replace::rename_path	std::fs::rename	1
 bt-platform	[windows]	crate::file_replace::replace_keeping_backup_with	std::fs::metadata	1
 bt-platform	[windows]	crate::http::Request::close_within	std::sync::Condvar::wait_timeout	1
 bt-platform	[windows]	crate::http::Shared::wait	std::sync::Condvar::wait_timeout	1
 bt-platform	[windows]	crate::install_evidence::imp::current_account	windows::Win32::Foundation::CloseHandle	1
+bt-platform	[windows]	crate::install_flip::imp::creation_of	windows::Win32::System::Threading::WaitForSingleObject	1
 bt-platform	[windows]	crate::instance::<DataDirectoryClaim as Drop>::drop	windows::Win32::Foundation::CloseHandle	1
 bt-platform	[windows]	crate::instance::try_claim_data_directory	windows::Win32::Foundation::CloseHandle	1
 bt-platform	[windows]	crate::launch_pipe::Instance::arm_connect	windows::Win32::System::Threading::SetEvent	1
+bt-platform	[windows]	crate::launch_pipe::Instance::wait_for_a_caller	windows::Win32::System::Threading::WaitForMultipleObjects	1
 bt-platform	[windows]	crate::launch_pipe::LaunchPipe::retire_within	std::thread::JoinHandle::join	1
 bt-platform	[windows]	crate::launch_pipe::LaunchPipe::retire_within	windows::Win32::Foundation::CloseHandle	1
 bt-platform	[windows]	crate::launch_pipe::LaunchPipe::start_on	std::thread::JoinHandle::join	2
 bt-platform	[windows]	crate::launch_pipe::LaunchPipe::start_on	windows::Win32::Foundation::CloseHandle	2
 bt-platform	[windows]	crate::launch_pipe::LaunchPipe::start_on	windows::Win32::System::Threading::SetEvent	1
 bt-platform	[windows]	crate::launch_pipe::LaunchPipe::stop_listening	windows::Win32::System::Threading::SetEvent	1
+bt-platform	[windows]	crate::launch_pipe::signalled_within	windows::Win32::System::Threading::WaitForMultipleObjects	1
+bt-platform	[windows]	crate::probe_leader_has_exited	windows::Win32::System::Threading::WaitForSingleObject	1
 bt-platform	[windows]	crate::process_image_path	windows::Win32::Foundation::CloseHandle	1
 bt-platform	[windows]	crate::video::Readers::quiet_within	std::sync::Condvar::wait_timeout	1
 bt-platform	[windows]	crate::video::engine::Engine::wait_for_metadata	std::thread::sleep	1
