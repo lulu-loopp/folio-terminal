@@ -280,7 +280,9 @@ fn the_end(done: &std::cell::RefCell<Vec<AtTheEnd>>) -> session_end::Road {
 /// MUTATION (plant `plant-201-a-the-end-says-no-road-line.py`): `end_with` drops the line on the
 /// question's save — the order has no road line. MUTATION (plant
 /// `plant-201-b-the-end-does-not-fence.py`): `end_with` drops `fence()` — the lines are said
-/// and never fenced.
+/// and never fenced. MUTATION (plants `plant-201-c-the-end-says-no-probe-line.py` and
+/// `plant-201-d-the-question-says-no-probe-line.py`): the end's, or the question's, probe line is
+/// not said — the order is short of it.
 #[test]
 fn the_question_writes_and_the_end_says_its_probe_and_road_and_fences_the_log() {
     on_the_window_thread();
