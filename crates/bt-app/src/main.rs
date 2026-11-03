@@ -32039,7 +32039,7 @@ mod shell_birth_tests {
         // Declared before the pane, so an unwinding assertion drops the pane (and its shell)
         // before the shell's folder, as the passing teardown below does (plan row 188).
         let (kept, hygiene) = mpsc::channel();
-        let mut leaf = bare(&decision, &seed);
+        let mut leaf = crate::test_support::ReapedPane(bare(&decision, &seed));
         let (asked_by, asked) = mpsc::channel();
         let (answer, share_answers) = mpsc::channel();
         let (wake, heard) = waking();
@@ -32071,10 +32071,12 @@ mod shell_birth_tests {
             "and waits on it, not the window"
         );
         assert_eq!(leaf.session.launch.spawn_place.as_ref(), Some(&share));
+        // The pane itself (`.0`), so the session and the projection are borrowed apart.
         let frame = leaf
+            .0
             .session
             .session
-            .viewport_frame(&mut leaf.view.projection)
+            .viewport_frame(&mut leaf.0.view.projection)
             .expect("the pane draws while its folder is asked about");
         assert!(frame_matches_grid(&frame, leaf.session.grid));
         assert_eq!(
@@ -32146,7 +32148,7 @@ mod shell_birth_tests {
         // Declared before the pane, so an unwinding assertion drops the pane (and its shell)
         // before the shell's folder, as the passing teardown below does (plan row 188).
         let (kept, hygiene) = mpsc::channel();
-        let mut leaf = bare(&decision, &seed);
+        let mut leaf = crate::test_support::ReapedPane(bare(&decision, &seed));
         let (open, gate) = mpsc::channel();
         let (wake, heard) = waking();
         let shell = pty_door::request(shell_once(gate, kept), wake).expect("a birth worker");
@@ -32156,10 +32158,12 @@ mod shell_birth_tests {
             leaf.session.life.pty().is_none() && !leaf.session.shell_answered(),
             "nothing is born yet"
         );
+        // The pane itself (`.0`), so the session and the projection are borrowed apart.
         let frame = leaf
+            .0
             .session
             .session
-            .viewport_frame(&mut leaf.view.projection)
+            .viewport_frame(&mut leaf.0.view.projection)
             .expect("a pane in birth projects a frame");
         assert!(
             frame_matches_grid(&frame, leaf.session.grid),
@@ -32368,7 +32372,7 @@ mod shell_birth_tests {
         let seed = seed_of(profiles::WSL_ID);
 
         let (at_once_shell, at_once_hygiene) = a_quiet_shell(born_size()).expect("a real shell");
-        let mut at_once = bare(&decision, &seed);
+        let mut at_once = crate::test_support::ReapedPane(bare(&decision, &seed));
         finish_leaf_birth(
             &mut at_once,
             Some(at_once_shell),
@@ -32382,7 +32386,7 @@ mod shell_birth_tests {
         // Declared before the pane, so an unwinding assertion drops the pane (and its shell)
         // before the shell's folder, as the passing teardown below does (plan row 188).
         let (kept, hygiene) = mpsc::channel();
-        let mut later = bare(&decision, &seed);
+        let mut later = crate::test_support::ReapedPane(bare(&decision, &seed));
         let (open, gate) = mpsc::channel();
         let (wake, heard) = waking();
         let shell = pty_door::request(shell_once(gate, kept), wake).expect("a birth worker");
@@ -32491,6 +32495,7 @@ mod shell_birth_tests {
         else {
             panic!("the successor's shell was born");
         };
+        let successor = crate::test_support::ReapedPane(*successor);
         assert!(successor.session.life.pty().is_some() && successor.session.life.birth().is_none());
         assert!(!leaf.restart_in_flight(), "the menu row is offered again");
         drop((leaf, successor));

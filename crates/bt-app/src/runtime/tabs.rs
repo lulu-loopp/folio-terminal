@@ -5473,7 +5473,7 @@ mod birth_death_tests {
         // Declared before the pane, so an unwinding assertion drops the pane (and its shell)
         // before the shell's folder, as the passing teardown below does (plan row 188).
         let (kept, hygiene) = mpsc::channel();
-        let mut leaf = test_support::leaf_saying("");
+        let mut leaf = test_support::ReapedPane(test_support::leaf_saying(""));
         leaf.session.launch.program = Some(PathBuf::from("preferred-shell"));
         // The program that died was a Cygwin bash; the one that lands is Windows PowerShell.
         leaf.session.launch.program_kind = profiles::ShellProgram::Cygwin;
@@ -5622,7 +5622,7 @@ mod birth_death_tests {
         // Declared before the pane, so an unwinding assertion drops the pane (and its shell)
         // before the shell's folder, as the passing teardown below does (plan row 188).
         let (kept, hygiene) = mpsc::channel();
-        let mut leaf = test_support::leaf_saying("");
+        let mut leaf = test_support::ReapedPane(test_support::leaf_saying(""));
         let born_grid = leaf.session.conpty_grid;
         let decision = crate::BirthDecision {
             started: crate::Started::AsAsked,
