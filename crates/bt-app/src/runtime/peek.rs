@@ -1517,10 +1517,8 @@ impl<B: Backend> Runtime<'_, B> {
                 .is_some_and(|peek| peek.clock.is_shown())
                 && self.file_peek_subject().is_none()
                 && self.hide_file_peek());
-        if !moved && !self.animation_frame_is_due() {
-            return Ok(());
-        }
-        if !moved && !self.file_peek_owes_frame(now) {
+        // Asked only with work: a card that owes no frame asks the gate nothing.
+        if !self.paced_frame(moved, |rt| rt.file_peek_owes_frame(now)) {
             return Ok(());
         }
         if self.refresh_overlay() {

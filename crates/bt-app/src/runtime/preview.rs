@@ -13446,12 +13446,40 @@ impl<B: Backend> Runtime<'_, B> {
     /// A fade has no service: it is a number read off a clock, so there is
     /// nothing to bring forward and nothing to lose by a refusal. That is why
     /// eleven of the thirteen advancers are gated whole.
+    ///
+    /// # Ask only with work (T-ADVANCERS-ASK-ONLY-WITH-WORK)
+    ///
+    /// A refusal is a debt, and a debt books a wake: asked by an advancer that
+    /// holds nothing, it buys the window a turn that draws nothing. Row 12's
+    /// idle census found seven advancers asking before they had looked at
+    /// their own work, and one empty `RefusedFrame` wake after every caret
+    /// frame for it. So an advancer asks only once it owes a frame — the
+    /// shape [`Self::paced_frame`] writes down for the seven that have news of
+    /// their own, and the shape the other five spell out above their ask.
     pub(crate) fn animation_frame_is_due(&mut self) -> bool {
         if self.window.frame_clock.admits() {
             return true;
         }
         self.window.frame_clock.refuse();
         false
+    }
+
+    /// **Whether an advancer draws on this turn**: news goes through, a debt
+    /// asks the frame gate, and nothing asks nothing.
+    ///
+    /// `news` is what the advancer's state clocks changed on this turn — never
+    /// paced (closure review O4), because what it has to say is new. `owes` is
+    /// the advancer's pure frame-debt question (the picture on the glass
+    /// against the one its clock now gives), read only when there is no news,
+    /// and the gate is asked only when it answers yes: a refusal on a turn
+    /// with no debt would book a wake for a frame nobody owes. See
+    /// [`Self::animation_frame_is_due`].
+    pub(in crate::runtime) fn paced_frame(
+        &mut self,
+        news: bool,
+        owes: impl FnOnce(&Self) -> bool,
+    ) -> bool {
+        news || (owes(self) && self.animation_frame_is_due())
     }
 
     pub(in crate::runtime) fn strip_animation_work(&self, now: Instant) -> AnimationWork {

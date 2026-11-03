@@ -74,15 +74,13 @@ impl<B: Backend> Runtime<'_, B> {
         // the gate a printing pane would leave the sentence on the glass for as
         // long as it printed.
         let ended = self.window.card_hint.expire(now) != cardhint::CardHint::Unchanged;
-        // The nudge's own frames are the paced half.
-        if !ended && !self.animation_frame_is_due() {
+        // The nudge's own frames are the paced half, asked only while it moves.
+        if !self.paced_frame(ended, |rt| {
+            rt.window.card_hint.nudge_moving(now, rt.app.motion)
+        }) {
             return Ok(());
         }
-        let nudging = self.window.card_hint.nudge_moving(now, self.app.motion);
-        if ended || nudging {
-            self.repaint_card_hint()?;
-        }
-        Ok(())
+        self.repaint_card_hint()
     }
 
     /// **Both surfaces, because this hint is two things on two levels**: the

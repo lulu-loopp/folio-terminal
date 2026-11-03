@@ -598,10 +598,11 @@ impl<B: Backend> Runtime<'_, B> {
         let promoted = self.window.tooltip.activate_if_due(now);
         // And then the fade's own frame, which is the only paced thing here — a
         // turn that promoted a tip has something new to say and goes through.
-        if !promoted && !self.animation_frame_is_due() {
+        // Asked only with work: a tip that owes no frame asks the gate nothing.
+        if !self.paced_frame(promoted, |rt| rt.tooltip_owes_frame(now)) {
             return Ok(());
         }
-        if (promoted || self.tooltip_owes_frame(now)) && self.refresh_overlay() {
+        if self.refresh_overlay() {
             self.present_chrome_change()?;
         }
         Ok(())
