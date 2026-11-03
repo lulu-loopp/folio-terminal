@@ -1034,12 +1034,7 @@ fn a_resumed_shell_panes_restart_duplicate_and_split_start_its_shell() {
         "Restart shell"
     );
     runtime
-        .split_seat(
-            seat,
-            bt_layout::Axis::Horizontal,
-            false,
-            crate::SplitSeed::Inherit,
-        )
+        .split_seat(seat, bt_layout::Axis::Row, false, crate::SplitSeed::Inherit)
         .expect("the split is asked for");
     let arrived = runtime
         .sessions
@@ -1138,7 +1133,6 @@ fn a_resume_whose_folder_is_gone_lands_and_is_handed_its_shell_with_the_line() {
     runtime
         .reap_exited_tabs(Instant::now())
         .expect("the reaper takes its turn");
-    drop(runtime);
     assert_eq!(tab_ids(&mut application), [1], "the tab is kept meanwhile");
     let mut runtime = application.runtime();
     let pane = runtime.sessions.get_mut(&seat).expect("the pane");
