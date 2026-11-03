@@ -6,19 +6,6 @@
 # carries a reason 'YYYY-MM-DD: <why>'. Never edit a key or a count by hand.
 # Ambiguous calls with exactly one candidate, not listed by site above or below (bt_source::call_graph::Unresolved::sole_candidate; a guard naming a callee's callers counts each as a call of its one candidate): 1733. A call whose name is renamed to one only one item declares leaves the list and is counted here.
 file	item	kind	name	sites	reason
-crates/bt-app/src/agent_resume.rs	bt-app crate::agent_resume::AgentAccount::saved_profile	Ambiguous	unwrap_or	1	2026-11-03: T-AGENT-RESUME-AFTER-RESTART (plan row 195); the profile the layout writes for an agent pane: the hand-back's shell or the pane's own (Option::unwrap_or on the account's own field); an in-memory read of values the call already holds, no wait
-crates/bt-app/src/agent_resume.rs	bt-app crate::agent_resume::Heard::is_well_formed	Ambiguous	is_none_or	1	2026-11-03: T-AGENT-RESUME-AFTER-RESTART (plan row 195); a heard session's optional configuration folder checked for shape (Option::is_none_or); an in-memory read of values the call already holds, no wait
-crates/bt-app/src/agent_resume.rs	bt-app crate::agent_resume::Vendor::runs	Ambiguous	and_then	1	2026-11-03: T-AGENT-RESUME-AFTER-RESTART (plan row 195); whether a pane's foreground program is this vendor's: the program's file stem compared without case (Path, OsStr and Option adaptors over the pane's own launch facts); an in-memory read of values the call already holds, no wait
-crates/bt-app/src/agent_resume.rs	bt-app crate::agent_resume::Vendor::runs	Ambiguous	eq_ignore_ascii_case	1	2026-11-03: T-AGENT-RESUME-AFTER-RESTART (plan row 195); whether a pane's foreground program is this vendor's: the program's file stem compared without case (Path, OsStr and Option adaptors over the pane's own launch facts); an in-memory read of values the call already holds, no wait
-crates/bt-app/src/agent_resume.rs	bt-app crate::agent_resume::Vendor::runs	Ambiguous	is_some_and	1	2026-11-03: T-AGENT-RESUME-AFTER-RESTART (plan row 195); whether a pane's foreground program is this vendor's: the program's file stem compared without case (Path, OsStr and Option adaptors over the pane's own launch facts); an in-memory read of values the call already holds, no wait
-crates/bt-app/src/agent_resume.rs	bt-app crate::agent_resume::Vendor::runs	Ambiguous	to_str	1	2026-11-03: T-AGENT-RESUME-AFTER-RESTART (plan row 195); whether a pane's foreground program is this vendor's: the program's file stem compared without case (Path, OsStr and Option adaptors over the pane's own launch facts); an in-memory read of values the call already holds, no wait
-crates/bt-app/src/agent_resume.rs	bt-app crate::agent_resume::child_of	Ambiguous	map_or	1	2026-11-03: T-AGENT-RESUME-AFTER-RESTART (plan row 195); which child a pane runs: the vendor whose program its foreground program is, or its shell (Option::map_or); an in-memory read of values the call already holds, no wait
-crates/bt-app/src/agent_resume.rs	bt-app crate::agent_resume::folder_is_absolute	Ambiguous	is_ascii_alphabetic	1	2026-11-03: T-AGENT-RESUME-AFTER-RESTART (plan row 195); a recorded folder's drive or root prefix checked on its bytes (str::len, u8::is_ascii_alphabetic); an in-memory read of values the call already holds, no wait
-crates/bt-app/src/agent_resume.rs	bt-app crate::agent_resume::folder_is_absolute	Ambiguous	len	1	2026-11-03: T-AGENT-RESUME-AFTER-RESTART (plan row 195); a recorded folder's drive or root prefix checked on its bytes (str::len, u8::is_ascii_alphabetic); an in-memory read of values the call already holds, no wait
-crates/bt-app/src/agent_resume.rs	bt-app crate::agent_resume::folder_is_well_formed	Ambiguous	any	1	2026-11-03: T-AGENT-RESUME-AFTER-RESTART (plan row 195); a recorded folder checked for control characters and its length (chars, Iterator::any, Iterator::count); an in-memory read of values the call already holds, no wait
-crates/bt-app/src/agent_resume.rs	bt-app crate::agent_resume::folder_is_well_formed	Ambiguous	count	1	2026-11-03: T-AGENT-RESUME-AFTER-RESTART (plan row 195); a recorded folder checked for control characters and its length (chars, Iterator::any, Iterator::count); an in-memory read of values the call already holds, no wait
-crates/bt-app/src/agent_resume.rs	bt-app crate::agent_resume::folder_is_well_formed	Ambiguous	is_control	1	2026-11-03: T-AGENT-RESUME-AFTER-RESTART (plan row 195); a recorded folder checked for control characters and its length (chars, Iterator::any, Iterator::count); an in-memory read of values the call already holds, no wait
-crates/bt-app/src/agent_resume.rs	bt-app crate::agent_resume::short_id	Ambiguous	unwrap_or	1	2026-11-03: T-AGENT-RESUME-AFTER-RESTART (plan row 195); the first eight characters of a session id for the could-not-resume line (str::get, Option::unwrap_or); an in-memory read of values the call already holds, no wait
 crates/bt-app/src/animation.rs	bt-app crate::animation::<FileAnimationSource as Read>::read	Ambiguous	unwrap_or	1	
 crates/bt-app/src/animation.rs	bt-app crate::animation::AnimationCursor::start_again	Ambiguous	into_inner	1	
 crates/bt-app/src/animation.rs	bt-app crate::animation::AnimationCursor::start_again	Ambiguous	is_err	1	
@@ -279,22 +266,16 @@ crates/bt-app/src/attention_ownership.rs	bt-app crate::attention_ownership::stab
 crates/bt-app/src/attention_ownership.rs	bt-app crate::attention_ownership::translocated	Ambiguous	any	1	
 crates/bt-app/src/attention_ownership.rs	bt-app crate::attention_ownership::translocated	Ambiguous	as_os_str	1	
 crates/bt-app/src/attention_trace.rs	bt-app crate::attention_trace::GATE	Ambiguous	as_deref	1	2026-10-20: T-DIAGNOSTIC-DOORS-AT-THE-ENTRY; a standard-library method (Option, Iterator, OsStr, Path) on a receiver the grammar does not type, which reaches no door
-crates/bt-app/src/attention_wire.rs	bt-app crate::attention_wire::Message::decode	Ambiguous	all	1	2026-11-03: T-AGENT-RESUME-AFTER-RESTART (plan row 195); the wire's third field, resume {id, cwd, home?}, read from the decoded JSON object and refused whole when any key is unknown or ill-formed (serde_json Value::as_object, get, as_str, Iterator::all, Option::map, str::to_owned, and the field-name closure); a parse of the line already read, no wait
-crates/bt-app/src/attention_wire.rs	bt-app crate::attention_wire::Message::decode	Ambiguous	as_object	1	2026-11-03: T-AGENT-RESUME-AFTER-RESTART (plan row 195); the wire's third field, resume {id, cwd, home?}, read from the decoded JSON object and refused whole when any key is unknown or ill-formed (serde_json Value::as_object, get, as_str, Iterator::all, Option::map, str::to_owned, and the field-name closure); a parse of the line already read, no wait
-crates/bt-app/src/attention_wire.rs	bt-app crate::attention_wire::Message::decode	Ambiguous	as_str	5	2026-11-03: T-AGENT-RESUME-AFTER-RESTART (plan row 195); the wire's third field, resume {id, cwd, home?}, read from the decoded JSON object and refused whole when any key is unknown or ill-formed (serde_json Value::as_object, get, as_str, Iterator::all, Option::map, str::to_owned, and the field-name closure); a parse of the line already read, no wait
+crates/bt-app/src/attention_wire.rs	bt-app crate::attention_wire::Message::decode	Ambiguous	as_str	3	
 crates/bt-app/src/attention_wire.rs	bt-app crate::attention_wire::Message::decode	Ambiguous	as_u64	1	
-crates/bt-app/src/attention_wire.rs	bt-app crate::attention_wire::Message::decode	Ambiguous	get	6	2026-11-03: T-AGENT-RESUME-AFTER-RESTART (plan row 195); the wire's third field, resume {id, cwd, home?}, read from the decoded JSON object and refused whole when any key is unknown or ill-formed (serde_json Value::as_object, get, as_str, Iterator::all, Option::map, str::to_owned, and the field-name closure); a parse of the line already read, no wait
+crates/bt-app/src/attention_wire.rs	bt-app crate::attention_wire::Message::decode	Ambiguous	get	4	
 crates/bt-app/src/attention_wire.rs	bt-app crate::attention_wire::Message::decode	Ambiguous	is_empty	1	
 crates/bt-app/src/attention_wire.rs	bt-app crate::attention_wire::Message::decode	Ambiguous	len	1	
-crates/bt-app/src/attention_wire.rs	bt-app crate::attention_wire::Message::decode	Ambiguous	map	1	2026-11-03: T-AGENT-RESUME-AFTER-RESTART (plan row 195); the wire's third field, resume {id, cwd, home?}, read from the decoded JSON object and refused whole when any key is unknown or ill-formed (serde_json Value::as_object, get, as_str, Iterator::all, Option::map, str::to_owned, and the field-name closure); a parse of the line already read, no wait
 crates/bt-app/src/attention_wire.rs	bt-app crate::attention_wire::Message::decode	Ambiguous	ok	1	
-crates/bt-app/src/attention_wire.rs	bt-app crate::attention_wire::Message::decode	Ambiguous	to_owned	4	2026-11-03: T-AGENT-RESUME-AFTER-RESTART (plan row 195); the wire's third field, resume {id, cwd, home?}, read from the decoded JSON object and refused whole when any key is unknown or ill-formed (serde_json Value::as_object, get, as_str, Iterator::all, Option::map, str::to_owned, and the field-name closure); a parse of the line already read, no wait
-crates/bt-app/src/attention_wire.rs	bt-app crate::attention_wire::Message::decode	Dynamic	field	3	2026-11-03: T-AGENT-RESUME-AFTER-RESTART (plan row 195); the wire's third field, resume {id, cwd, home?}, read from the decoded JSON object and refused whole when any key is unknown or ill-formed (serde_json Value::as_object, get, as_str, Iterator::all, Option::map, str::to_owned, and the field-name closure); a parse of the line already read, no wait
+crates/bt-app/src/attention_wire.rs	bt-app crate::attention_wire::Message::decode	Ambiguous	to_owned	3	
 crates/bt-app/src/attention_wire.rs	bt-app crate::attention_wire::Message::decode	Dynamic	text	3	
 crates/bt-app/src/attention_wire.rs	bt-app crate::attention_wire::Message::encode	Ambiguous	to_string	1	
 crates/bt-app/src/attention_wire.rs	bt-app crate::attention_wire::endpoint_name	Ambiguous	map	1	
-crates/bt-app/src/attention_wire.rs	bt-app crate::attention_wire::heard	Ambiguous	as_str	2	2026-11-03: T-AGENT-RESUME-AFTER-RESTART (plan row 195); a hook payload's session id and folder copied into the message (Value::as_str, str::to_owned); a parse of the payload the hook was handed, no wait
-crates/bt-app/src/attention_wire.rs	bt-app crate::attention_wire::heard	Ambiguous	to_owned	2	2026-11-03: T-AGENT-RESUME-AFTER-RESTART (plan row 195); a hook payload's session id and folder copied into the message (Value::as_str, str::to_owned); a parse of the payload the hook was handed, no wait
 crates/bt-app/src/attention_wire.rs	bt-app crate::attention_wire::identifier	Ambiguous	as_str	1	
 crates/bt-app/src/attention_wire.rs	bt-app crate::attention_wire::identifier	Ambiguous	to_owned	1	
 crates/bt-app/src/attention_wire.rs	bt-app crate::attention_wire::known_events	Ambiguous	dedup	1	
@@ -1133,7 +1114,7 @@ crates/bt-app/src/git_graph.rs	bt-app crate::git_graph::push_lanes	Dynamic	ink	3
 crates/bt-app/src/git_graph.rs	bt-app crate::git_graph::push_lanes	Dynamic	lane_x	5	
 crates/bt-app/src/git_graph.rs	bt-app crate::git_graph::push_lanes	Dynamic	segment	2	
 crates/bt-app/src/git_graph.rs	bt-app crate::git_graph::push_row_ground	Dynamic	crop	1	
-crates/bt-app/src/git_graph.rs	bt-app crate::git_graph::push_toolbar	Dynamic	clip	13	
+crates/bt-app/src/git_graph.rs	bt-app crate::git_graph::push_toolbar	Dynamic	clip	14	2026-11-02: T-CHROME-FIELDS-CARET-BY-POINTER (0.4.9 plan row 180); grown 13 -> 14: the search field's selection wash, cut to the toolbar's clip like every mark beside it
 crates/bt-app/src/git_graph.rs	bt-app crate::git_graph::push_toolbar	Dynamic	middle	2	
 crates/bt-app/src/git_graph.rs	bt-app crate::git_graph::push_toolbar	Dynamic	refresh_middle	2	
 crates/bt-app/src/git_graph.rs	bt-app crate::git_graph::push_toolbar	Dynamic	tool_ground	3	
@@ -2260,13 +2241,14 @@ crates/bt-app/src/main.rs	bt-app crate::restore_monitors	Ambiguous	position	1
 crates/bt-app/src/main.rs	bt-app crate::restore_monitors	Ambiguous	saturating_add	2	
 crates/bt-app/src/main.rs	bt-app crate::restore_monitors	Ambiguous	scale_factor	1	
 crates/bt-app/src/main.rs	bt-app crate::restore_monitors	Ambiguous	size	1	
-crates/bt-app/src/main.rs	bt-app crate::revive_plan_with	Ambiguous	clone	2	2026-11-03: T-AGENT-RESUME-AFTER-RESTART (plan row 195); the revive pass now takes the restore switch and reads each saved leaf's agent record beside its profile and folder: the existing iterator chain (iter, zip, map, collect, clone, cloned, str::is_empty) over the saved tab moved into the new signature; an in-memory read of values the call already holds, no wait
-crates/bt-app/src/main.rs	bt-app crate::revive_plan_with	Ambiguous	cloned	1	2026-11-03: T-AGENT-RESUME-AFTER-RESTART (plan row 195); the revive pass now takes the restore switch and reads each saved leaf's agent record beside its profile and folder: the existing iterator chain (iter, zip, map, collect, clone, cloned, str::is_empty) over the saved tab moved into the new signature; an in-memory read of values the call already holds, no wait
-crates/bt-app/src/main.rs	bt-app crate::revive_plan_with	Ambiguous	collect	3	2026-11-03: T-AGENT-RESUME-AFTER-RESTART (plan row 195); the revive pass now takes the restore switch and reads each saved leaf's agent record beside its profile and folder: the existing iterator chain (iter, zip, map, collect, clone, cloned, str::is_empty) over the saved tab moved into the new signature; an in-memory read of values the call already holds, no wait
-crates/bt-app/src/main.rs	bt-app crate::revive_plan_with	Ambiguous	is_empty	1	2026-11-03: T-AGENT-RESUME-AFTER-RESTART (plan row 195); the revive pass now takes the restore switch and reads each saved leaf's agent record beside its profile and folder: the existing iterator chain (iter, zip, map, collect, clone, cloned, str::is_empty) over the saved tab moved into the new signature; an in-memory read of values the call already holds, no wait
-crates/bt-app/src/main.rs	bt-app crate::revive_plan_with	Ambiguous	iter	1	2026-11-03: T-AGENT-RESUME-AFTER-RESTART (plan row 195); the revive pass now takes the restore switch and reads each saved leaf's agent record beside its profile and folder: the existing iterator chain (iter, zip, map, collect, clone, cloned, str::is_empty) over the saved tab moved into the new signature; an in-memory read of values the call already holds, no wait
-crates/bt-app/src/main.rs	bt-app crate::revive_plan_with	Ambiguous	map	2	2026-11-03: T-AGENT-RESUME-AFTER-RESTART (plan row 195); the revive pass now takes the restore switch and reads each saved leaf's agent record beside its profile and folder: the existing iterator chain (iter, zip, map, collect, clone, cloned, str::is_empty) over the saved tab moved into the new signature; an in-memory read of values the call already holds, no wait
-crates/bt-app/src/main.rs	bt-app crate::revive_plan_with	Ambiguous	zip	2	2026-11-03: T-AGENT-RESUME-AFTER-RESTART (plan row 195); the revive pass now takes the restore switch and reads each saved leaf's agent record beside its profile and folder: the existing iterator chain (iter, zip, map, collect, clone, cloned, str::is_empty) over the saved tab moved into the new signature; an in-memory read of values the call already holds, no wait
+crates/bt-app/src/main.rs	bt-app crate::revive_plan	Ambiguous	as_str	1	
+crates/bt-app/src/main.rs	bt-app crate::revive_plan	Ambiguous	clone	3	
+crates/bt-app/src/main.rs	bt-app crate::revive_plan	Ambiguous	cloned	1	
+crates/bt-app/src/main.rs	bt-app crate::revive_plan	Ambiguous	collect	3	
+crates/bt-app/src/main.rs	bt-app crate::revive_plan	Ambiguous	is_empty	2	
+crates/bt-app/src/main.rs	bt-app crate::revive_plan	Ambiguous	iter	1	
+crates/bt-app/src/main.rs	bt-app crate::revive_plan	Ambiguous	map	2	
+crates/bt-app/src/main.rs	bt-app crate::revive_plan	Ambiguous	zip	2	
 crates/bt-app/src/main.rs	bt-app crate::session_title	Ambiguous	or_else	1	
 crates/bt-app/src/main.rs	bt-app crate::sessions_match_terminals	Ambiguous	sort_unstable	2	
 crates/bt-app/src/main.rs	bt-app crate::settle_pin_partition	Ambiguous	unwrap_or	1	
@@ -2374,7 +2356,7 @@ crates/bt-app/src/palette.rs	bt-app crate::palette::build	Ambiguous	filter_map	2
 crates/bt-app/src/palette.rs	bt-app crate::palette::build	Ambiguous	text	1	
 crates/bt-app/src/palette.rs	bt-app crate::palette::build	Ambiguous	to_owned	3	
 crates/bt-app/src/palette.rs	bt-app crate::palette::build	Dynamic	alpha	4	
-crates/bt-app/src/palette.rs	bt-app crate::palette::build	Dynamic	px	11	
+crates/bt-app/src/palette.rs	bt-app crate::palette::build	Dynamic	px	9	2026-11-02: T-CHROME-FIELDS-CARET-BY-POINTER (0.4.9 plan row 180); shrunk 11 -> 9: the input's text run is read from PaletteLayout::text_run (its padding is multiplied there) instead of two px() calls
 crates/bt-app/src/palette.rs	bt-app crate::palette::cut_runs	Ambiguous	enumerate	1	
 crates/bt-app/src/palette.rs	bt-app crate::palette::cut_runs	Ambiguous	to_string	1	
 crates/bt-app/src/palette.rs	bt-app crate::palette::fold	Ambiguous	next	1	
@@ -3096,9 +3078,9 @@ crates/bt-app/src/profiles.rs	bt-app crate::profiles::git_filter_rows	Ambiguous	
 crates/bt-app/src/profiles.rs	bt-app crate::profiles::git_filter_tags_text	Ambiguous	text	1	
 crates/bt-app/src/profiles.rs	bt-app crate::profiles::git_menu	Ambiguous	map	1	
 crates/bt-app/src/profiles.rs	bt-app crate::profiles::git_menu	Ambiguous	push	2	
-crates/bt-app/src/profiles.rs	bt-app crate::profiles::git_menu_build	Ambiguous	round	1	
+crates/bt-app/src/profiles.rs	bt-app crate::profiles::git_menu_build	Ambiguous	round	2	2026-11-02: T-CHROME-FIELDS-CARET-BY-POINTER (0.4.9 plan row 180); grown 1 -> 2: the prompt's selection wash, inset to the caret bar's height (px(...).round())
 crates/bt-app/src/profiles.rs	bt-app crate::profiles::git_menu_build	Dynamic	alpha	3	
-crates/bt-app/src/profiles.rs	bt-app crate::profiles::git_menu_build	Dynamic	px	7	
+crates/bt-app/src/profiles.rs	bt-app crate::profiles::git_menu_build	Dynamic	px	8	2026-11-02: T-CHROME-FIELDS-CARET-BY-POINTER (0.4.9 plan row 180); grown 7 -> 8: the prompt's selection wash, inset to the caret bar's height
 crates/bt-app/src/profiles.rs	bt-app crate::profiles::git_menu_checkout_text	Ambiguous	text	1	
 crates/bt-app/src/profiles.rs	bt-app crate::profiles::git_menu_checkout_tracking_text	Ambiguous	text	1	
 crates/bt-app/src/profiles.rs	bt-app crate::profiles::git_menu_compare_selected_text	Ambiguous	text	1	
@@ -3825,9 +3807,9 @@ crates/bt-app/src/runtime/git.rs	bt-app crate::runtime::git::Runtime::ask_git_fo
 crates/bt-app/src/runtime/git.rs	bt-app crate::runtime::git::Runtime::ask_git_for_floats	Ambiguous	map	1	
 crates/bt-app/src/runtime/git.rs	bt-app crate::runtime::git::Runtime::ask_to_checkout	Ambiguous	is_empty	1	
 crates/bt-app/src/runtime/git.rs	bt-app crate::runtime::git::Runtime::ask_to_checkout	Ambiguous	is_some_and	1	
-crates/bt-app/src/runtime/git.rs	bt-app crate::runtime::git::Runtime::build_git_graph	Ambiguous	and_then	2	
+crates/bt-app/src/runtime/git.rs	bt-app crate::runtime::git::Runtime::build_git_graph	Ambiguous	and_then	3	2026-11-02: T-CHROME-FIELDS-CARET-BY-POINTER (0.4.9 plan row 180); grown 2 -> 3: the search field's run, laid out by graph_geometry -> graph_toolbar_rects -> graph_search_field for a press to read
 crates/bt-app/src/runtime/git.rs	bt-app crate::runtime::git::Runtime::build_git_graph	Ambiguous	clone	1	
-crates/bt-app/src/runtime/git.rs	bt-app crate::runtime::git::Runtime::build_git_graph	Ambiguous	map	1	
+crates/bt-app/src/runtime/git.rs	bt-app crate::runtime::git::Runtime::build_git_graph	Ambiguous	map	2	2026-11-02: T-CHROME-FIELDS-CARET-BY-POINTER (0.4.9 plan row 180); grown 1 -> 2: the search field's run (DrawnRun) built from the laid-out field
 crates/bt-app/src/runtime/git.rs	bt-app crate::runtime::git::Runtime::build_git_graph	Ambiguous	search	1	
 crates/bt-app/src/runtime/git.rs	bt-app crate::runtime::git::Runtime::checkout_from_float	Ambiguous	and_then	1	
 crates/bt-app/src/runtime/git.rs	bt-app crate::runtime::git::Runtime::checkout_from_float	Ambiguous	id	1	
@@ -3837,6 +3819,7 @@ crates/bt-app/src/runtime/git.rs	bt-app crate::runtime::git::Runtime::git_cache_
 crates/bt-app/src/runtime/git.rs	bt-app crate::runtime::git::Runtime::git_graphs	Ambiguous	collect	1	
 crates/bt-app/src/runtime/git.rs	bt-app crate::runtime::git::Runtime::git_graphs	Ambiguous	filter_map	1	
 crates/bt-app/src/runtime/git.rs	bt-app crate::runtime::git::Runtime::git_menu_key	Ambiguous	map	1	
+crates/bt-app/src/runtime/git.rs	bt-app crate::runtime::git::Runtime::git_menu_layer	Ambiguous	map	1	2026-11-02: T-CHROME-FIELDS-CARET-BY-POINTER (0.4.9 plan row 180); added: the prompt's field read off the open menu (Option::map) for the run a press reads
 crates/bt-app/src/runtime/git.rs	bt-app crate::runtime::git::Runtime::git_menu_target_at	Ambiguous	as_deref	2	
 crates/bt-app/src/runtime/git.rs	bt-app crate::runtime::git::Runtime::git_menu_target_at	Ambiguous	is_some_and	2	
 crates/bt-app/src/runtime/git.rs	bt-app crate::runtime::git::Runtime::git_menu_target_at	Ambiguous	map	1	
@@ -3956,9 +3939,10 @@ crates/bt-app/src/runtime/math.rs	bt-app crate::runtime::math::Runtime::refresh_
 crates/bt-app/src/runtime/math.rs	bt-app crate::runtime::math::Runtime::refresh_overlay_with_formula	Ambiguous	as_deref	1	
 crates/bt-app/src/runtime/math.rs	bt-app crate::runtime::math::Runtime::refresh_overlay_with_formula	Ambiguous	as_slice	1	
 crates/bt-app/src/runtime/math.rs	bt-app crate::runtime::math::Runtime::refresh_overlay_with_formula	Ambiguous	clone	2	
-crates/bt-app/src/runtime/math.rs	bt-app crate::runtime::math::Runtime::refresh_overlay_with_formula	Ambiguous	map	4	2026-10-30: T-SETTINGS-FIELDS-IME-POSITION (plan row 98); grown 3 -> 4: the painter now hands EditorInk the fields' composed text (TextField::composed, the pre-edit spliced at the caret) where it handed the stored text, and the summon command is read through text_field(QuakeCommand).map(composed).unwrap_or_default(): Cow and Option reads on the window's own thread, no new door
+crates/bt-app/src/runtime/math.rs	bt-app crate::runtime::math::Runtime::refresh_overlay_with_formula	Ambiguous	map	5	2026-10-30: T-SETTINGS-FIELDS-IME-POSITION (plan row 98); grown 3 -> 4: the painter now hands EditorInk the fields' composed text (TextField::composed, the pre-edit spliced at the caret) where it handed the stored text, and the summon command is read through text_field(QuakeCommand).map(composed).unwrap_or_default(): Cow and Option reads on the window's own thread, no new door; grown 4 -> 5 by 2026-11-02: T-CHROME-FIELDS-CARET-BY-POINTER (0.4.9 plan row 180): the editor's caret mapped into a settings::FieldCaret carrying the settled scroll
 crates/bt-app/src/runtime/math.rs	bt-app crate::runtime::math::Runtime::refresh_overlay_with_formula	Ambiguous	to_vec	1	
 crates/bt-app/src/runtime/math.rs	bt-app crate::runtime::math::Runtime::refresh_overlay_with_formula	Ambiguous	unwrap_or_default	5	2026-10-30: T-SETTINGS-FIELDS-IME-POSITION (plan row 98); grown 4 -> 5: the painter now hands EditorInk the fields' composed text (TextField::composed, the pre-edit spliced at the caret) where it handed the stored text, and the summon command is read through text_field(QuakeCommand).map(composed).unwrap_or_default(): Cow and Option reads on the window's own thread, no new door
+crates/bt-app/src/runtime/math.rs	bt-app crate::runtime::math::Runtime::refresh_overlay_with_formula	Dynamic	field_caret	1	2026-11-02: T-CHROME-FIELDS-CARET-BY-POINTER (0.4.9 plan row 180); added: the local closure that pairs a field's caret with the frame's settled scroll (settings::FieldCaret); pure arithmetic
 crates/bt-app/src/runtime/math.rs	bt-app crate::runtime::math::Runtime::search_hit_line_text	Ambiguous	ok	1	
 crates/bt-app/src/runtime/math.rs	bt-app crate::runtime::math::Runtime::tab_surface_tip_text	Ambiguous	text	4	
 crates/bt-app/src/runtime/math.rs	bt-app crate::runtime::math::Runtime::tab_surface_tip_text	Ambiguous	to_owned	3	
@@ -4019,6 +4003,7 @@ crates/bt-app/src/runtime/mouse.rs	bt-app crate::runtime::mouse::wheel_points_si
 crates/bt-app/src/runtime/palette.rs	bt-app crate::runtime::palette::Runtime::arrange_palette	Ambiguous	unwrap_or_default	1	
 crates/bt-app/src/runtime/palette.rs	bt-app crate::runtime::palette::Runtime::palette_field_look	Ambiguous	text	1	
 crates/bt-app/src/runtime/palette.rs	bt-app crate::runtime::palette::Runtime::palette_field_look	Ambiguous	to_owned	1	
+crates/bt-app/src/runtime/palette.rs	bt-app crate::runtime::palette::Runtime::palette_layer	Ambiguous	unwrap_or_default	1	2026-11-02: T-CHROME-FIELDS-CARET-BY-POINTER (0.4.9 plan row 180); added: the palette's shown text and selection, empty when no palette state is held, for the run a press reads
 crates/bt-app/src/runtime/palette.rs	bt-app crate::runtime::palette::Runtime::push_action_candidates	Ambiguous	then_some	1	2026-10-25: T-SPLIT-2B batch 5; the same site, moved with `Runtime::push_action_candidates` from main.rs into runtime/palette.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/palette.rs	bt-app crate::runtime::palette::Runtime::push_action_candidates	Ambiguous	to_owned	1	2026-10-25: T-SPLIT-2B batch 5; the same site, moved with `Runtime::push_action_candidates` from main.rs into runtime/palette.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/palette.rs	bt-app crate::runtime::palette::Runtime::push_command_candidates	Ambiguous	map	1	2026-10-25: T-SPLIT-2B batch 5; the same site, moved with `Runtime::push_command_candidates` from main.rs into runtime/palette.rs: K2 moves the item, not the call
@@ -4611,7 +4596,6 @@ crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::Runtime::reap_exi
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::Runtime::reap_exited_tabs	Ambiguous	flatten	1	
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::Runtime::reap_exited_tabs	Ambiguous	map_or_else	1	
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::Runtime::reap_exited_tabs	Ambiguous	rev	1	
-crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::Runtime::reap_exited_tabs	Ambiguous	spawn	1	
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::Runtime::reap_exited_tabs	Ambiguous	then	2	
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::Runtime::reap_exited_tabs	Ambiguous	to_string	1	
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::Runtime::row_adopt_fits	Ambiguous	is_some	2	2026-10-26: T-SPLIT-2B batch 16; the same site, moved by K2 batch 16 with `row_adopt_fits` from main.rs into runtime/tabs.rs: K2 moves the item, not the call
@@ -4637,7 +4621,7 @@ crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::keep_birth_death_
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::keep_birth_death_face	Ambiguous	text	1	
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::keep_birth_death_face	Ambiguous	to_string_lossy	1	
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::keep_face	Ambiguous	as_bytes	1	2026-11-03: T-SHUTDOWN-KILLS-SHELLS-BEFORE-THE-LAYOUT-IS-SAVED (plan row 191); the same standard-library call (Option, str, Path, Cow) on a receiver the grammar does not type, moved with the body of keep_birth_death_face into keep_face, which both kept deaths now share; it reaches no door
-crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::keep_system_ended_face	Ambiguous	text	1	2026-11-03: T-AGENT-RESUME-AFTER-RESTART (plan row 195); row 191's review fold (a15644a4b) reads the kept note through Text::text, measured at row 195's merge of it; an i18n table read, no wait
+crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::keep_system_ended_face	Ambiguous	text	1	2026-11-03: T-SHUTDOWN-KILLS-SHELLS-BEFORE-THE-LAYOUT-IS-SAVED (plan row 191); the note's words, looked up in the i18n table (Text::text, a match on the language); no door
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::pane_into_new_tab	Ambiguous	unwrap_or_default	6	2026-10-29: T-SPLIT-2B batch 26; the same site, moved by K2 batch 26 with `pane_into_new_tab` from main.rs into runtime/tabs.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::pane_into_new_tab	Dynamic	solve	1	2026-10-29: T-SPLIT-2B batch 26; the same site, moved by K2 batch 26 with `pane_into_new_tab` from main.rs into runtime/tabs.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::pane_into_tab	Dynamic	solve	2	2026-10-29: T-SPLIT-2B batch 26; the same site, moved by K2 batch 26 with `pane_into_tab` from main.rs into runtime/tabs.rs: K2 moves the item, not the call
@@ -4652,7 +4636,6 @@ crates/bt-app/src/runtime/terminal.rs	bt-app crate::runtime::terminal::Runtime::
 crates/bt-app/src/runtime/terminal.rs	bt-app crate::runtime::terminal::Runtime::finish_local_selection	Ambiguous	is_some_and	1	
 crates/bt-app/src/runtime/terminal.rs	bt-app crate::runtime::terminal::Runtime::finish_local_selection	Ambiguous	map_or_else	1	
 crates/bt-app/src/runtime/terminal.rs	bt-app crate::runtime::terminal::Runtime::finish_local_selection	Ambiguous	then	1	
-crates/bt-app/src/runtime/terminal.rs	bt-app crate::runtime::terminal::Runtime::hand_back_shell	Ambiguous	is_empty	1	2026-11-03: T-AGENT-RESUME-AFTER-RESTART (plan row 195); an empty recorded folder is handed back as no folder (OsStr::is_empty on the record's own path); an in-memory read of values the call already holds, no wait
 crates/bt-app/src/runtime/terminal.rs	bt-app crate::runtime::terminal::Runtime::jump_to_command_mark	Ambiguous	clamp	1	
 crates/bt-app/src/runtime/terminal.rs	bt-app crate::runtime::terminal::Runtime::jump_to_command_mark	Ambiguous	clone	1	
 crates/bt-app/src/runtime/terminal.rs	bt-app crate::runtime::terminal::Runtime::jump_to_command_mark	Ambiguous	cloned	1	
@@ -4817,17 +4800,15 @@ crates/bt-app/src/schemes.rs	bt-app crate::schemes::user_sources	Ambiguous	is_so
 crates/bt-app/src/schemes.rs	bt-app crate::schemes::user_sources	Ambiguous	map	1	
 crates/bt-app/src/schemes.rs	bt-app crate::schemes::user_sources	Ambiguous	path	2	
 crates/bt-app/src/schemes.rs	bt-app crate::schemes::user_sources	Ambiguous	to_string_lossy	1	
-crates/bt-app/src/search.rs	bt-app crate::search::Capsule::caret_line	Ambiguous	round	1	
-crates/bt-app/src/search.rs	bt-app crate::search::Capsule::caret_line	Dynamic	px	3	
 crates/bt-app/src/search.rs	bt-app crate::search::SearchState::first_at_or_after	Ambiguous	unwrap_or	1	
 crates/bt-app/src/search.rs	bt-app crate::search::SearchState::install	Ambiguous	cloned	1	
 crates/bt-app/src/search.rs	bt-app crate::search::SearchState::install	Ambiguous	flatten	1	
 crates/bt-app/src/search.rs	bt-app crate::search::SearchState::install	Ambiguous	or_else	1	
 crates/bt-app/src/search.rs	bt-app crate::search::SearchState::install	Ambiguous	unwrap_or	1	
 crates/bt-app/src/search.rs	bt-app crate::search::SearchState::rebuild_highlights	Ambiguous	map	1	
-crates/bt-app/src/search.rs	bt-app crate::search::build	Ambiguous	round	1	
+crates/bt-app/src/search.rs	bt-app crate::search::build	Ambiguous	round	2	2026-11-02: T-CHROME-FIELDS-CARET-BY-POINTER (0.4.9 plan row 180); grown 1 -> 2: the find bar's selection wash, inset to the caret bar's height
 crates/bt-app/src/search.rs	bt-app crate::search::build	Dynamic	alpha	4	
-crates/bt-app/src/search.rs	bt-app crate::search::build	Dynamic	px	14	
+crates/bt-app/src/search.rs	bt-app crate::search::build	Dynamic	px	13	2026-11-02: T-CHROME-FIELDS-CARET-BY-POINTER (0.4.9 plan row 180); shrunk 14 -> 13: the field's text run is read from Capsule::text_run instead of px() here
 crates/bt-app/src/search.rs	bt-app crate::search::case_tip	Ambiguous	text	1	
 crates/bt-app/src/search.rs	bt-app crate::search::close_tip	Ambiguous	text	1	
 crates/bt-app/src/search.rs	bt-app crate::search::field_placeholder	Ambiguous	text	1	
@@ -5135,7 +5116,7 @@ crates/bt-app/src/settings.rs	bt-app crate::settings::SettingsPanel::step_in	Amb
 crates/bt-app/src/settings.rs	bt-app crate::settings::SettingsPanel::step_nav	Ambiguous	unwrap_or	1	
 crates/bt-app/src/settings.rs	bt-app crate::settings::SettingsPanel::toggle	Ambiguous	flatten	1	
 crates/bt-app/src/settings.rs	bt-app crate::settings::SettingsRow::control	Ambiguous	unwrap_or	1	
-crates/bt-app/src/settings.rs	bt-app crate::settings::SettingsRow::literal_description	Ambiguous	text	76	2026-10-20: T-INTEGRATION-INJECT-2-BUILD (Folio's PSReadLine per pane, the 5.1 language question, the earlier copy's removal row), written before the call graph landed: standard, collection and string methods and same-named methods of this branch's own types the grammar does not resolve by receiver; none is a door, and every worker door body they sit beside is reached from its completions row; 2026-10-29: T-HIGH-CONTRAST (plan row 90): grown 73 -> 75: the Theme and scheme rows' two contrast-theme sentences (`Text::DescThemeHighContrast` / `DescSchemeHighContrast`), a string-table lookup; grown 75 -> 76 by T-AGENT-RESUME-AFTER-RESTART (plan row 195) (2026-11-03): the Agents page's resume switch's sentence, one more row of the table (i18n Text::text); a table read, no wait
+crates/bt-app/src/settings.rs	bt-app crate::settings::SettingsRow::literal_description	Ambiguous	text	75	2026-10-20: T-INTEGRATION-INJECT-2-BUILD (Folio's PSReadLine per pane, the 5.1 language question, the earlier copy's removal row), written before the call graph landed: standard, collection and string methods and same-named methods of this branch's own types the grammar does not resolve by receiver; none is a door, and every worker door body they sit beside is reached from its completions row; 2026-10-29: T-HIGH-CONTRAST (plan row 90): grown 73 -> 75: the Theme and scheme rows' two contrast-theme sentences (`Text::DescThemeHighContrast` / `DescSchemeHighContrast`), a string-table lookup
 crates/bt-app/src/settings.rs	bt-app crate::settings::SettingsRow::literal_description	Ambiguous	unwrap_or_default	1	
 crates/bt-app/src/settings.rs	bt-app crate::settings::SettingsRow::literal_description	Ambiguous	unwrap_or_else	2	
 crates/bt-app/src/settings.rs	bt-app crate::settings::SettingsRow::menu_action	Ambiguous	text	3	
@@ -5152,7 +5133,7 @@ crates/bt-app/src/settings.rs	bt-app crate::settings::SettingsRow::selected_inde
 crates/bt-app/src/settings.rs	bt-app crate::settings::SettingsRow::selected_index	Ambiguous	then	1	
 crates/bt-app/src/settings.rs	bt-app crate::settings::SettingsRow::slider_value	Ambiguous	unwrap_or	1	
 crates/bt-app/src/settings.rs	bt-app crate::settings::SettingsRow::stated_value	Ambiguous	text	7	2026-10-20: T-INTEGRATION-INJECT-2-BUILD (Folio's PSReadLine per pane, the 5.1 language question, the earlier copy's removal row), written before the call graph landed: standard, collection and string methods and same-named methods of this branch's own types the grammar does not resolve by receiver; none is a door, and every worker door body they sit beside is reached from its completions row
-crates/bt-app/src/settings.rs	bt-app crate::settings::SettingsRow::title	Ambiguous	text	73	2026-11-03: T-AGENT-RESUME-AFTER-RESTART (plan row 195); the Agents page's resume switch's title, one more row of the table (i18n Text::text); a table read, no wait
+crates/bt-app/src/settings.rs	bt-app crate::settings::SettingsRow::title	Ambiguous	text	72	
 crates/bt-app/src/settings.rs	bt-app crate::settings::SettingsRow::value_text	Ambiguous	text	2	
 crates/bt-app/src/settings.rs	bt-app crate::settings::SettingsRow::value_text	Ambiguous	then	1	
 crates/bt-app/src/settings.rs	bt-app crate::settings::StackMetrics::control_stack_height	Dynamic	px	1	
@@ -5204,15 +5185,13 @@ crates/bt-app/src/settings.rs	bt-app crate::settings::ellipsized_middle	Ambiguou
 crates/bt-app/src/settings.rs	bt-app crate::settings::ellipsized_middle	Ambiguous	map	1	
 crates/bt-app/src/settings.rs	bt-app crate::settings::ellipsized_middle	Dynamic	kept	2	
 crates/bt-app/src/settings.rs	bt-app crate::settings::ellipsized_middle	Dynamic	measure	2	
-crates/bt-app/src/settings.rs	bt-app crate::settings::every_row_of_the_dialog	Ambiguous	push	54	2026-11-03: T-AGENT-RESUME-AFTER-RESTART (plan row 195); the resume switch is one more row the dialog lists (Vec::push); an in-memory read of values the call already holds, no wait
+crates/bt-app/src/settings.rs	bt-app crate::settings::every_row_of_the_dialog	Ambiguous	push	53	
 crates/bt-app/src/settings.rs	bt-app crate::settings::everyday_cap	Ambiguous	fold	1	
 crates/bt-app/src/settings.rs	bt-app crate::settings::everyday_cap	Ambiguous	into_iter	1	
 crates/bt-app/src/settings.rs	bt-app crate::settings::everyday_cap	Ambiguous	map	1	
 crates/bt-app/src/settings.rs	bt-app crate::settings::family_index	Ambiguous	or_else	1	
 crates/bt-app/src/settings.rs	bt-app crate::settings::family_index	Ambiguous	unwrap_or	1	
 crates/bt-app/src/settings.rs	bt-app crate::settings::field_caret_line	Dynamic	measure	1	2026-10-30: T-SETTINGS-FIELDS-IME-POSITION (plan row 98); added: the one caret rectangle the painter and the input method share: the text before the caret measured through the caller's measure closure (the chrome text measure the painter already called), no new door
-crates/bt-app/src/settings.rs	bt-app crate::settings::field_run	Ambiguous	map_or	1	2026-10-30: T-SETTINGS-FIELDS-IME-POSITION (plan row 98); added: the field's text run (font, left and right edges, scroll offset) pulled out of push_field so the painter and the caret share it: the same filter, map_or, measure and px calls push_field made, moved with their sites, no new door
-crates/bt-app/src/settings.rs	bt-app crate::settings::field_run	Dynamic	measure	1	2026-10-30: T-SETTINGS-FIELDS-IME-POSITION (plan row 98); added: the field's text run (font, left and right edges, scroll offset) pulled out of push_field so the painter and the caret share it: the same filter, map_or, measure and px calls push_field made, moved with their sites, no new door
 crates/bt-app/src/settings.rs	bt-app crate::settings::field_run	Dynamic	px	3	2026-10-30: T-SETTINGS-FIELDS-IME-POSITION (plan row 98); added: the field's text run (font, left and right edges, scroll offset) pulled out of push_field so the painter and the caret share it: the same filter, map_or, measure and px calls push_field made, moved with their sites, no new door
 crates/bt-app/src/settings.rs	bt-app crate::settings::font_size_index	Ambiguous	unwrap_or	1	
 crates/bt-app/src/settings.rs	bt-app crate::settings::font_size_index	Ambiguous	unwrap_or_else	1	
@@ -5259,7 +5238,6 @@ crates/bt-app/src/settings.rs	bt-app crate::settings::menu_layout	Dynamic	px	19
 crates/bt-app/src/settings.rs	bt-app crate::settings::monospace_family_files	Ambiguous	map	1	
 crates/bt-app/src/settings.rs	bt-app crate::settings::monospace_family_files	Ambiguous	unwrap_or_default	2	
 crates/bt-app/src/settings.rs	bt-app crate::settings::nav_stack_height	Dynamic	px	2	
-crates/bt-app/src/settings.rs	bt-app crate::settings::notices_beside_the_executable	Ambiguous	ok	1	
 crates/bt-app/src/settings.rs	bt-app crate::settings::notices_page	Ambiguous	into_boxed_str	1	
 crates/bt-app/src/settings.rs	bt-app crate::settings::on_off_label	Ambiguous	text	2	
 crates/bt-app/src/settings.rs	bt-app crate::settings::page_order	Ambiguous	collect	1	
@@ -5287,7 +5265,6 @@ crates/bt-app/src/settings.rs	bt-app crate::settings::push_editor_page	Ambiguous
 crates/bt-app/src/settings.rs	bt-app crate::settings::push_editor_page	Ambiguous	text	7	
 crates/bt-app/src/settings.rs	bt-app crate::settings::push_editor_page	Ambiguous	unwrap_or_default	2	
 crates/bt-app/src/settings.rs	bt-app crate::settings::push_editor_page	Dynamic	px	1	
-crates/bt-app/src/settings.rs	bt-app crate::settings::push_field	Ambiguous	map	1	2026-10-30: T-SETTINGS-FIELDS-IME-POSITION (plan row 98); added: push_field now asks field_run and field_caret_line; its one Option::map is the caret's selection range read, no new door
 crates/bt-app/src/settings.rs	bt-app crate::settings::push_field	Dynamic	measure	2	
 crates/bt-app/src/settings.rs	bt-app crate::settings::push_field	Dynamic	px	1	
 crates/bt-app/src/settings.rs	bt-app crate::settings::push_glyph_verb	Dynamic	px	2	
@@ -5318,8 +5295,10 @@ crates/bt-app/src/settings.rs	bt-app crate::settings::row_menu_items	Ambiguous	t
 crates/bt-app/src/settings.rs	bt-app crate::settings::run_font_lane	Dynamic	(value)	2	
 crates/bt-app/src/settings.rs	bt-app crate::settings::scheme_index	Ambiguous	or_else	1	
 crates/bt-app/src/settings.rs	bt-app crate::settings::scheme_index	Ambiguous	unwrap_or	1	
+crates/bt-app/src/settings.rs	bt-app crate::settings::settle_field_scroll	Dynamic	measure	2	2026-11-02: T-CHROME-FIELDS-CARET-BY-POINTER (0.4.9 plan row 180); added: the focused field's sticky scroll measures the text before the caret and the whole text with the measure it is handed (the chrome text measure)
 crates/bt-app/src/settings.rs	bt-app crate::settings::shipped_notices_near	Ambiguous	join	2	
 crates/bt-app/src/settings.rs	bt-app crate::settings::shipped_notices_near	Ambiguous	then_some	1	
+crates/bt-app/src/settings.rs	bt-app crate::settings::shipped_notices_near	Dynamic	is_file	2	2026-11-03: the look handed in (T-NOTICES-DESTINATION-OFF-THE-WINDOW-THREAD): a typed `&Path` is_file closure at settings::look_beside_this_image, which only settings::settle_notices runs, in fn main before the loop; the tests hand their own
 crates/bt-app/src/settings.rs	bt-app crate::settings::shortcut_undelivered_note	Ambiguous	text	1	
 crates/bt-app/src/settings.rs	bt-app crate::settings::sidebar_label	Ambiguous	text	2	
 crates/bt-app/src/settings.rs	bt-app crate::settings::slider_geometry	Dynamic	px	3	
@@ -5348,7 +5327,7 @@ crates/bt-app/src/settings_bundle.rs	bt-app crate::settings_bundle::plan_setting
 crates/bt-app/src/settings_bundle.rs	bt-app crate::settings_bundle::plan_settings	Ambiguous	on	1	
 crates/bt-app/src/settings_bundle.rs	bt-app crate::settings_bundle::plan_settings	Ambiguous	partition	1	
 crates/bt-app/src/settings_bundle.rs	bt-app crate::settings_bundle::plan_settings	Ambiguous	row	1	
-crates/bt-app/src/settings_bundle.rs	bt-app crate::settings_bundle::plan_settings	Dynamic	offer	44	2026-11-03: T-AGENT-RESUME-AFTER-RESTART (plan row 195); the resume switch is one more setting the bundle plans (the offer closure of its row); an in-memory read of values the call already holds, no wait
+crates/bt-app/src/settings_bundle.rs	bt-app crate::settings_bundle::plan_settings	Dynamic	offer	43	
 crates/bt-app/src/settings_bundle.rs	bt-app crate::settings_bundle::read_keybindings	Ambiguous	clone	2	
 crates/bt-app/src/settings_bundle.rs	bt-app crate::settings_bundle::read_keybindings	Ambiguous	map	1	
 crates/bt-app/src/settings_bundle.rs	bt-app crate::settings_bundle::read_keybindings	Ambiguous	to_owned	1	
@@ -7309,6 +7288,7 @@ crates/bt-effects/src/file_reads.rs	bt-effects crate::file_reads::Minute::line	A
 crates/bt-effects/src/file_reads.rs	bt-effects crate::file_reads::Minute::perf_line	Ambiguous	iter	1	
 crates/bt-effects/src/file_reads.rs	bt-effects crate::file_reads::Minute::perf_line	Ambiguous	label	3	
 crates/bt-effects/src/file_reads.rs	bt-effects crate::file_reads::Minute::perf_line	Ambiguous	zip	1	
+crates/bt-effects/src/file_reads.rs	bt-effects crate::file_reads::held_elsewhere	Ambiguous	is_some_and	1	2026-11-02: T-HELD-FILE-IN-THE-OTHER-PICTURE-LANES; Option::is_some_and over the error's raw OS code (io::Error::raw_os_error), which the grammar does not type, comparing it in the const held_elsewhere_code: reaches no door
 crates/bt-effects/src/file_reads.rs	bt-effects crate::file_reads::opaque	Dynamic	work	1	
 crates/bt-effects/src/file_reads.rs	bt-effects crate::file_reads::open	Ambiguous	map	1	
 crates/bt-effects/src/file_reads.rs	bt-effects crate::file_reads::over_budget	Dynamic	exceeds	2	
@@ -7466,11 +7446,6 @@ crates/bt-persist/src/export.rs	bt-persist crate::export::read_part	Ambiguous	ma
 crates/bt-persist/src/export.rs	bt-persist crate::export::read_part	Ambiguous	to_string	1	
 crates/bt-persist/src/export.rs	bt-persist crate::export::serialize_export	Ambiguous	map_err	1	
 crates/bt-persist/src/export.rs	bt-persist crate::export::serialize_export	Ambiguous	push	1	
-crates/bt-persist/src/layout.rs	bt-persist crate::layout::resume_id_is_well_formed	Ambiguous	all	2	2026-11-03: T-AGENT-RESUME-AFTER-RESTART (plan row 195); a session id checked for the 8-4-4-4-12 hex shape (str::split, bytes, len, Iterator::all, u8::is_ascii_hexdigit, collect); an in-memory read of values the call already holds, no wait
-crates/bt-persist/src/layout.rs	bt-persist crate::layout::resume_id_is_well_formed	Ambiguous	bytes	1	2026-11-03: T-AGENT-RESUME-AFTER-RESTART (plan row 195); a session id checked for the 8-4-4-4-12 hex shape (str::split, bytes, len, Iterator::all, u8::is_ascii_hexdigit, collect); an in-memory read of values the call already holds, no wait
-crates/bt-persist/src/layout.rs	bt-persist crate::layout::resume_id_is_well_formed	Ambiguous	collect	1	2026-11-03: T-AGENT-RESUME-AFTER-RESTART (plan row 195); a session id checked for the 8-4-4-4-12 hex shape (str::split, bytes, len, Iterator::all, u8::is_ascii_hexdigit, collect); an in-memory read of values the call already holds, no wait
-crates/bt-persist/src/layout.rs	bt-persist crate::layout::resume_id_is_well_formed	Ambiguous	is_ascii_hexdigit	1	2026-11-03: T-AGENT-RESUME-AFTER-RESTART (plan row 195); a session id checked for the 8-4-4-4-12 hex shape (str::split, bytes, len, Iterator::all, u8::is_ascii_hexdigit, collect); an in-memory read of values the call already holds, no wait
-crates/bt-persist/src/layout.rs	bt-persist crate::layout::resume_id_is_well_formed	Ambiguous	len	1	2026-11-03: T-AGENT-RESUME-AFTER-RESTART (plan row 195); a session id checked for the 8-4-4-4-12 hex shape (str::split, bytes, len, Iterator::all, u8::is_ascii_hexdigit, collect); an in-memory read of values the call already holds, no wait
 crates/bt-persist/src/lib.rs	bt-persist crate::read_session_keeping_bytes	Ambiguous	degrade_in_place	1	
 crates/bt-persist/src/lib.rs	bt-persist crate::serialize_keybindings	Ambiguous	map_err	1	
 crates/bt-persist/src/lib.rs	bt-persist crate::serialize_pins	Ambiguous	map_err	1	
@@ -7500,7 +7475,6 @@ crates/bt-persist/src/migrate.rs	bt-persist crate::migrate::migrate_session_v11_
 crates/bt-persist/src/migrate.rs	bt-persist crate::migrate::migrate_session_v12_to_v13	Ambiguous	insert	1	
 crates/bt-persist/src/migrate.rs	bt-persist crate::migrate::migrate_session_v13_to_v14	Ambiguous	insert	1	
 crates/bt-persist/src/migrate.rs	bt-persist crate::migrate::migrate_session_v14_to_v15	Ambiguous	insert	1	
-crates/bt-persist/src/migrate.rs	bt-persist crate::migrate::migrate_session_v15_to_v16	Ambiguous	insert	1	2026-11-03: T-AGENT-RESUME-AFTER-RESTART (plan row 195); the session migration writes its new schema number into the JSON object (Map::insert); a value rewrite in memory, no wait
 crates/bt-persist/src/migrate.rs	bt-persist crate::migrate::migrate_session_v1_to_v2	Ambiguous	insert	2	
 crates/bt-persist/src/migrate.rs	bt-persist crate::migrate::migrate_session_v2_to_v3	Ambiguous	insert	2	
 crates/bt-persist/src/migrate.rs	bt-persist crate::migrate::migrate_session_v3_to_v4	Ambiguous	insert	1	
@@ -7553,7 +7527,6 @@ crates/bt-persist/src/migrate.rs	bt-persist crate::migrate::migrate_settings_v36
 crates/bt-persist/src/migrate.rs	bt-persist crate::migrate::migrate_settings_v37_to_v38	Ambiguous	insert	2	
 crates/bt-persist/src/migrate.rs	bt-persist crate::migrate::migrate_settings_v38_to_v39	Ambiguous	expect	1	
 crates/bt-persist/src/migrate.rs	bt-persist crate::migrate::migrate_settings_v38_to_v39	Ambiguous	insert	2	
-crates/bt-persist/src/migrate.rs	bt-persist crate::migrate::migrate_settings_v39_to_v40	Ambiguous	insert	2	2026-11-03: T-AGENT-RESUME-AFTER-RESTART (plan row 195); the settings migration writes resume_agents' default and its new schema number into the JSON object (Map::insert); a value rewrite in memory, no wait
 crates/bt-persist/src/migrate.rs	bt-persist crate::migrate::migrate_settings_v3_to_v4	Ambiguous	insert	2	
 crates/bt-persist/src/migrate.rs	bt-persist crate::migrate::migrate_settings_v4_to_v5	Ambiguous	insert	2	
 crates/bt-persist/src/migrate.rs	bt-persist crate::migrate::migrate_settings_v5_to_v6	Ambiguous	insert	2	
@@ -9784,6 +9757,7 @@ crates/bt-platform/src/pump.rs	bt-platform crate::pump::windows_pump::timed_disp
 crates/bt-platform/src/session_end.rs	bt-platform crate::session_end::answer	Dynamic	hear	1	
 crates/bt-platform/src/session_end.rs	bt-platform crate::session_end::arrival_line	Ambiguous	collect	1	2026-11-03: T-SHUTDOWN-KILLS-SHELLS-BEFORE-THE-LAYOUT-IS-SAVED (plan row 191); Iterator::map / Iterator::collect over a fixed array of (flag, word) pairs in arrival_line, a pure formatter of the session-end message: no door
 crates/bt-platform/src/session_end.rs	bt-platform crate::session_end::arrival_line	Ambiguous	map	1	2026-11-03: T-SHUTDOWN-KILLS-SHELLS-BEFORE-THE-LAYOUT-IS-SAVED (plan row 191); Iterator::map / Iterator::collect over a fixed array of (flag, word) pairs in arrival_line, a pure formatter of the session-end message: no door
+crates/bt-platform/src/session_end.rs	bt-platform crate::session_end::ask_to_be_ended_first	Ambiguous	map_err	1	2026-11-03: T-SHUTDOWN-KILLS-SHELLS-BEFORE-THE-LAYOUT-IS-SAVED (plan row 191); Result::map_err on SetProcessShutdownParameters' answer, a kernel32 call that returns at once; no door
 crates/bt-platform/src/session_end.rs	bt-platform crate::session_end::register_restart	Ambiguous	map_err	1	2026-10-27: T-RESTART-REGISTRATION: Result::map_err on RegisterApplicationRestart's answer (a kernel32 call that returns at once), formatting the refusal into a String; no door
 crates/bt-platform/src/session_end.rs	bt-platform crate::session_end::windows_session_end::SessionEndWatch::install	Ambiguous	as_bool	1	
 crates/bt-platform/src/session_end.rs	bt-platform crate::session_end::windows_session_end::session_end_subclass	Ambiguous	is_null	1	
@@ -10954,7 +10928,7 @@ crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::decode_backgroun
 crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::decode_background_image	Ambiguous	len	6	
 crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::decode_background_image	Ambiguous	map_err	3	
 crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::decode_background_image	Ambiguous	take	1	
-crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::decode_background_image	Ambiguous	to_string	4	
+crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::decode_background_image	Ambiguous	to_string	1	
 crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::decode_image_bytes_within	Ambiguous	and_then	3	
 crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::decode_image_bytes_within	Ambiguous	checked_mul	2	
 crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::decode_image_bytes_within	Ambiguous	decode	1	

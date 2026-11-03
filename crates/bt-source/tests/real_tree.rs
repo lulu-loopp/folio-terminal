@@ -148,7 +148,10 @@ fn the_whole_package_guards_share_one_index_per_package() {
         ),
         (
             "test_shells",
-            test_shells::workspace_indices(),
+            test_shells::workspace_indices()
+                .into_iter()
+                .map(|(_, index)| index)
+                .collect(),
             first_party.len(),
         ),
         (

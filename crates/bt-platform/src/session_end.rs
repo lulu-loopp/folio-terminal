@@ -214,6 +214,38 @@ pub fn register_restart(flags: u32) -> Result<(), String> {
     }
 }
 
+/// **The shutdown level Folio asks for: the top of the application range** (plan row 191,
+/// adopted on the clean-VM reboot of 2026-11-03). Windows ends a session's processes in
+/// descending level order, and every process starts at the default, `0x280` — Folio and the
+/// console processes it hosts alike. At one level the order between them is the system's, and on
+/// the owner's machine the shells were ended first. At `0x300` Folio is ended before any
+/// process at the default level; on the VM's reboot Folio was ended first, its shells exited
+/// with code 0 after it, and the layout on disk was unchanged. The range above `0x3FF` is the
+/// system's own.
+pub const SHUTDOWN_LEVEL: u32 = 0x300;
+
+/// **Ask Windows to end this process before the processes at the default shutdown level** —
+/// `SetProcessShutdownParameters(level, 0)` ([`SHUTDOWN_LEVEL`] in the product), so that the end
+/// of the session reaches Folio's windows before it reaches the shells in its panes. Once per
+/// process; nothing off Windows, where the system's end is AppKit's.
+///
+/// # Errors
+/// The system refused the level, with its error.
+pub fn ask_to_be_ended_first(level: u32) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use windows::Win32::System::Threading::SetProcessShutdownParameters;
+        // SAFETY: two integers; it sets this process's own place in the shutdown order.
+        unsafe { SetProcessShutdownParameters(level, 0) }
+            .map_err(|error| format!("SetProcessShutdownParameters refused: {error}"))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = level;
+        Ok(())
+    }
+}
+
 /// **Take the registration back** — `UnregisterApplicationRestart`: this process is handing
 /// itself over (an update's applier), and the system's restart is no longer its to ask for.
 ///
@@ -569,8 +601,8 @@ impl SessionEndWatch {
 mod tests {
     use super::{
         ENDSESSION_CLOSEAPP, ENDSESSION_CRITICAL, ENDSESSION_LOGOFF, RESTART_FLAGS,
-        RESTART_NO_CRASH, RESTART_NO_HANG, RESTART_NO_PATCH, RESTART_NO_REBOOT, SessionEnd,
-        WM_ENDSESSION, WM_QUERYENDSESSION, answer, arrival_line, heard,
+        RESTART_NO_CRASH, RESTART_NO_HANG, RESTART_NO_PATCH, RESTART_NO_REBOOT, SHUTDOWN_LEVEL,
+        SessionEnd, WM_ENDSESSION, WM_QUERYENDSESSION, answer, arrival_line, heard,
     };
 
     /// RED (plan row 191) — **every session-end message is said with its flags, and nothing else
@@ -677,6 +709,22 @@ mod tests {
             RESTART_FLAGS & (RESTART_NO_REBOOT | RESTART_NO_PATCH),
             0,
             "a restart after the update's reboot and the installer's close"
+        );
+    }
+
+    /// RED (plan row 191) — **the level Folio asks for is above the default and inside the
+    /// application range**: `0x280` is every process's default, so a level at or below it would
+    /// leave the order between Folio and its shells to the system again, and a level above
+    /// `0x3FF` is reserved for the system's own components.
+    ///
+    /// MUTATION: `SHUTDOWN_LEVEL = 0x280` — the default, and the order is the system's again.
+    #[test]
+    fn folio_asks_to_be_ended_before_the_default_level_and_inside_the_application_range() {
+        // Above the default (`0x280`), and no higher than the application range's top (`0x3FF`).
+        const ABOVE_THE_DEFAULT: std::ops::RangeInclusive<u32> = 0x281..=0x3FF;
+        assert!(
+            ABOVE_THE_DEFAULT.contains(&SHUTDOWN_LEVEL),
+            "{SHUTDOWN_LEVEL:#x} is not above the default inside the application range"
         );
     }
 }

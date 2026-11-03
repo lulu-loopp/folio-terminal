@@ -49,6 +49,7 @@ use crate::i18n::Text;
 use crate::marks::{ChromeMark, ChromeSprite, MarkColour, OverlayLayer};
 use crate::profiles::{self, Integration, IntegrationChoice};
 use crate::seats::{RailMode, TabLayoutMode};
+use crate::startup::{Settled, SettledOnce};
 use crate::text_field::TextField;
 
 // ── `.settings`, `.overlay` ────────────────────────────────────────────────
@@ -5678,7 +5679,7 @@ impl SettingsRow {
 
     /// **Whether this row's button wears the `↗`**: a door whose press is
     /// answered outside this window. The control form and not the destination
-    /// — resolving *where* a row goes touches the disk, and the width solve and
+    /// — *where* a row goes is the press's question, and the width solve and
     /// the draw ask this on every frame.
     #[must_use]
     pub fn leaves_the_window(self) -> bool {
@@ -5802,31 +5803,94 @@ pub fn notices_page() -> &'static str {
 /// against `Cargo.lock` by `scripts/check-notices.ps1` in the same run that
 /// built the binary. An address can only ever be a very good guess at that.
 ///
-/// **Resolved once per process**, which is what makes it safe to ask from a
-/// dialog that redraws on hover: this is one `current_exe` and one or two
-/// `is_file`, and the file beside a running executable does not move under it —
-/// `SettingsValues`' own `explorer_menu::package_file().is_some()` rests on the
-/// same fact, settled by `main` before the loop since 2026-10-25.
+/// **A read, not a look** (T-NOTICES-DESTINATION-OFF-THE-WINDOW-THREAD; C1): the
+/// row's press asks this on the window thread, and until 2026-11-02 its first ask
+/// was a `current_exe` and one or two `is_file` there. The file beside the
+/// running image does not move under it — an update replaces the folder only
+/// after this process has gone — so [`settle_notices`]' answer, made by `fn main`
+/// before the loop, is the run's.
 fn notices_destination() -> LinkDestination {
-    static WHERE: std::sync::OnceLock<LinkDestination> = std::sync::OnceLock::new();
-    *WHERE.get_or_init(|| match notices_beside_the_executable() {
-        Some(file) => LinkDestination::File(Box::leak(file.into_boxed_path())),
+    match &NOTICES.get().0 {
+        Some(file) => LinkDestination::File(file.as_path()),
         None => LinkDestination::Address(notices_page()),
-    })
+    }
 }
 
-/// The notices file this build shipped with, if it shipped with one.
+/// **The notices file this build shipped with, as this start found it** — [`NOTICES`]' value.
 ///
-/// The impure half: which executable is running. The rule itself is
-/// [`shipped_notices_near`], which takes the path and can therefore be stated
-/// over a tree a test builds — the same split `visible_rows_for` makes for the
-/// platform.
-fn notices_beside_the_executable() -> Option<std::path::PathBuf> {
-    shipped_notices_near(&std::env::current_exe().ok()?)
+/// A type of its own rather than a bare `Option<PathBuf>`, so that its witness
+/// (`startup::Settled<ShippedNotices>`, which `FolioApp::new` takes) cannot be stood in for by
+/// `explorer_menu::settle_package`'s, whose value is also an optional path: the type, and not
+/// only the settle's pin, holds the order (row 61 review N2).
+pub(crate) struct ShippedNotices(Option<std::path::PathBuf>);
+
+/// [`notices_destination`]'s cell, settled by [`settle_notices`].
+#[cfg(not(test))]
+static NOTICES: SettledOnce<ShippedNotices> = SettledOnce::new(NOTICES_ARE);
+
+/// A test process has no `main`: its first read settles the cell with the look `main` settles
+/// it with, beside the test binary.
+#[cfg(test)]
+static NOTICES: SettledOnce<ShippedNotices> =
+    SettledOnce::settled_in_a_test_by(NOTICES_ARE, the_look_this_start_makes);
+
+/// What [`NOTICES`] holds, for the panic of a read before it is settled.
+const NOTICES_ARE: &str =
+    "the notices file beside the running image (settings::notices_destination)";
+
+#[cfg(test)]
+thread_local! {
+    /// **How many looks [`notices_for`] made on this thread**, for the test that holds the
+    /// licences row's press to making none
+    /// (`the_licences_row_reads_the_start_s_answer_and_asks_the_disk_nothing`). Per thread, so a
+    /// test counts its own looks and no other test's.
+    static NOTICE_LOOKS_ON_THIS_THREAD: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// **Settle [`notices_destination`]: one look beside the running image, before the loop**
+/// (T-NOTICES-DESTINATION-OFF-THE-WINDOW-THREAD; C1). `fn main` calls this in the loop's process
+/// on the line after `explorer_menu::settle_package` — the same question about the same folder,
+/// each module answering its own (its pin in `window_waits_tests`), so no press on the window
+/// thread pays for the look. A later call answers the first.
+pub(crate) fn settle_notices() -> Settled<ShippedNotices> {
+    NOTICES.settle(the_look_this_start_makes)
+}
+
+/// [`look_beside_this_image`]'s answer, as the cell holds it.
+fn the_look_this_start_makes() -> ShippedNotices {
+    ShippedNotices(look_beside_this_image())
+}
+
+/// The look [`settle_notices`] makes: the notices beside this process's image, links followed.
+fn look_beside_this_image() -> Option<std::path::PathBuf> {
+    notices_for(
+        bt_platform::running_image().ok()?,
+        &|path: &std::path::Path| path.is_file(),
+    )
+}
+
+/// **The notices file this build shipped with, given the image it runs from**, when `is_file`
+/// finds it.
+///
+/// **Beside the file the image leads to, never beside the path it was started by**: a start
+/// through a symbolic link is told the link's path, and the link's folder holds none of the files
+/// the archive carried. winget makes such a link (`WinGet\Links\folio.exe`) only where it
+/// ignores the manifest's `ArchiveBinariesDependOnPath` — a client older than 1.9 — and there a
+/// look beside the started path sent the licences row to the web page; a winget of 1.9 or newer
+/// puts the package folder on `PATH`, and a start there was already the file itself
+/// (T-NOTICES-DESTINATION-OFF-THE-WINDOW-THREAD; `bt_platform::RunningImage`;
+/// `docs/RELEASING.md`). The rule itself is [`shipped_notices_near`].
+fn notices_for(
+    image: &bt_platform::RunningImage,
+    is_file: &dyn Fn(&std::path::Path) -> bool,
+) -> Option<std::path::PathBuf> {
+    #[cfg(test)]
+    NOTICE_LOOKS_ON_THIS_THREAD.with(|looks| looks.set(looks.get() + 1));
+    shipped_notices_near(&image.path, is_file)
 }
 
 /// **Where a build's own copy of the notices would be, given where its
-/// executable is** (owner ruling 2026-09-15).
+/// executable is** (owner ruling 2026-09-15), when `is_file` finds it there.
 ///
 /// **Two places, because this program has two shapes.** A Windows archive is a
 /// folder, and `scripts/release/package.ps1` lays the file down beside
@@ -5840,17 +5904,20 @@ fn notices_beside_the_executable() -> Option<std::path::PathBuf> {
 /// `None` is the ordinary answer for a development build and is not a failure:
 /// `cargo run` puts the executable in `target/debug`, where no release script
 /// has ever been.
-fn shipped_notices_near(executable: &std::path::Path) -> Option<std::path::PathBuf> {
+fn shipped_notices_near(
+    executable: &std::path::Path,
+    is_file: &dyn Fn(&std::path::Path) -> bool,
+) -> Option<std::path::PathBuf> {
     let beside: &std::path::Path = executable.parent()?;
     let shipped = beside.join(NOTICES_FILE);
-    if shipped.is_file() {
+    if is_file(&shipped) {
         return Some(shipped);
     }
     if beside.file_name()? != "MacOS" {
         return None;
     }
     let in_resources: std::path::PathBuf = beside.parent()?.join("Resources").join(NOTICES_FILE);
-    in_resources.is_file().then_some(in_resources)
+    is_file(&in_resources).then_some(in_resources)
 }
 
 /// **The one sentence every diagnostic file opens with**, on a row a person can
@@ -7131,6 +7198,12 @@ pub struct SettingsPanel {
     /// any other. Seeded from `settings.json` when the dialog opens and pushed back to it on every
     /// keystroke, which is this dialog's own rule — there is no commit and nothing to save.
     quake_command: TextField,
+    /// **How far the focused field's text is pushed left inside its box**, and which field that
+    /// is (0.4.9 plan row 180, ruling 2): kept from frame to frame and moved only as far as the
+    /// caret needs ([`settle_field_scroll`]), so a press that puts the caret on a letter in a
+    /// scrolled path leaves the letters where they were. A field without the focus is drawn from
+    /// its start.
+    field_scroll: Option<(SettingsTarget, f32)>,
     /// Which row's `⋯` is open, by its index in the profile table.
     row_menu: Option<usize>,
     /// **`Also remove settings and data`** (T-UNINSTALL-UX): the uninstall's one
@@ -7304,6 +7377,22 @@ impl SettingsPanel {
             return Some(&self.quake_command);
         }
         self.editor.as_ref()?.field_of(target)
+    }
+
+    /// **How far the field `target` was pushed left** the last time it was drawn holding the
+    /// caret — `0` for any field that is not the one kept ([`Self::keep_field_scroll`]).
+    #[must_use]
+    pub fn field_scroll(&self, target: SettingsTarget) -> f32 {
+        self.field_scroll
+            .filter(|(kept, _)| *kept == target)
+            .map_or(0.0, |(_, scroll)| scroll)
+    }
+
+    /// Keep how far the focused field is pushed left, and which field that is, for the next frame
+    /// to start from — `None` when no field holds the keyboard, so a field the focus comes back
+    /// to starts from its start, as it was drawn while the focus was away.
+    pub fn keep_field_scroll(&mut self, kept: Option<(SettingsTarget, f32)>) {
+        self.field_scroll = kept;
     }
 
     /// The same field, to type into.
@@ -10195,6 +10284,35 @@ impl SettingsLayout {
             SettingsTarget::EnvValue(index) => env_row(index).map(|line| (line.value, true)),
             _ => None,
         }
+    }
+
+    /// **Every text field this layout places**, with its box and whether it is set in the mono
+    /// face — the fields the painter draws with [`push_field`] that a press can put a caret in:
+    /// the page's field rows and the reader's own environment rows (a ghost row is the
+    /// terminal's, and no target). What the window records a drawn run for, one per field
+    /// (0.4.9 plan row 180, ruling 3); [`Self::text_field_box`] answers for each.
+    #[must_use]
+    pub fn text_fields(&self) -> Vec<(SettingsTarget, [f32; 4], bool)> {
+        let rows = self
+            .rows
+            .iter()
+            .map(|placed| SettingsTarget::Field(placed.row));
+        let env = self
+            .env_rows
+            .iter()
+            .filter_map(|line| line.index)
+            .flat_map(|index| {
+                [
+                    SettingsTarget::EnvName(index),
+                    SettingsTarget::EnvValue(index),
+                ]
+            });
+        rows.chain(env)
+            .filter_map(|target| {
+                self.text_field_box(target)
+                    .map(|(rect, mono)| (target, rect, mono))
+            })
+            .collect()
     }
 
     /// What a press or a drag at `x` is asking a slider row for (§7.1.6c-4b).
@@ -15536,7 +15654,18 @@ pub struct SummonInk<'a> {
     /// What the startup-command row is holding.
     pub command: &'a str,
     /// The selection the caret is holding in it, when the caret is in it.
-    pub command_caret: Option<(usize, usize)>,
+    pub command_caret: Option<FieldCaret>,
+}
+
+/// **The caret a field of this dialog is holding**, as the painter draws it: the selection as
+/// byte offsets into what the field shows — its text with any composition spliced in
+/// ([`TextField::composed_selection`]); both ends equal is a bare caret — and how far the text
+/// is pushed left inside the box to keep that caret in it ([`settle_field_scroll`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FieldCaret {
+    pub from: usize,
+    pub to: usize,
+    pub scroll_px: f32,
 }
 
 /// What the profile editor's fields are holding this frame (§7.1.6c-6b).
@@ -15562,7 +15691,7 @@ pub struct EditorInk<'a> {
     /// One answer for every field rather than a caret per field, because there
     /// is one keyboard: the field with the caret is the field with the focus,
     /// and a second copy of that fact is a second thing to keep in step.
-    pub caret: Option<(SettingsTarget, usize, usize)>,
+    pub caret: Option<(SettingsTarget, FieldCaret)>,
     // **The `Name` field's refusal is not here** (moved 2026-08-25). It is a
     // sentence, and since a sentence decides a row's height it has to be
     // somewhere the *layout* can read — which is `EditorSubject::refusal`, on the
@@ -15583,10 +15712,10 @@ impl<'a> EditorInk<'a> {
 
     /// The selection this control is holding, if the caret is in it.
     #[must_use]
-    fn caret_in(self, target: SettingsTarget) -> Option<(usize, usize)> {
+    fn caret_in(self, target: SettingsTarget) -> Option<FieldCaret> {
         self.caret
-            .filter(|(held, _, _)| *held == target)
-            .map(|(_, from, to)| (from, to))
+            .filter(|(held, _)| *held == target)
+            .map(|(_, caret)| caret)
     }
 }
 
@@ -15840,16 +15969,9 @@ struct FieldRun {
     offset: f32,
 }
 
-/// [`FieldRun`] for the field at `rect`, given the text in front of its caret
-/// (`None` while the caret is elsewhere).
-fn field_run(
-    rect: [f32; 4],
-    before_caret: Option<&str>,
-    mono: bool,
-    scale: f32,
-    border: f32,
-    measure: &mut dyn FnMut(&str, f32) -> f32,
-) -> FieldRun {
+/// [`FieldRun`] for the field at `rect`, pushed left by `scroll` — the focused
+/// field's settled scroll ([`settle_field_scroll`]), `0` for every other.
+fn field_run(rect: [f32; 4], scroll: f32, mono: bool, scale: f32, border: f32) -> FieldRun {
     let px = |value: f32| value * scale;
     let font = px(if mono {
         FIELD_MONO_FONT_LOGICAL_PX
@@ -15858,20 +15980,55 @@ fn field_run(
     });
     let left = rect[0] + border + px(FIELD_PADDING_X_LOGICAL_PX);
     let right = rect[2] - border - px(FIELD_PADDING_X_LOGICAL_PX);
-    let width = (right - left).max(0.0);
-    // How far into the text the view has been pushed, so that the caret is
-    // always inside the box. Zero whenever the whole string fits, which is every
-    // field on the page until somebody types a path into one.
-    let offset = before_caret
-        .map(|before| measure(before, font))
-        .filter(|caret_x| *caret_x > width)
-        .map_or(0.0, |caret_x| caret_x - width);
     FieldRun {
         font,
         left,
         right,
-        offset,
+        offset: scroll,
     }
+}
+
+/// **Where the field at `rect` lays its text out**: the left and right edge of its run and the
+/// size its text is set at — what the window records the drawn run of a field with, for a press
+/// to read (0.4.9 plan row 180). [`field_run`]'s own answer, so the run a press reads and the ink
+/// are one derivation.
+#[must_use]
+pub fn field_text_run(rect: [f32; 4], mono: bool, scale: f32) -> ([f32; 2], f32) {
+    let FieldRun {
+        font, left, right, ..
+    } = field_run(rect, 0.0, mono, scale, dialog_border(scale));
+    ([left, right], font)
+}
+
+/// **How far the focused field's text is pushed left this frame**, given how far it was
+/// (`held`) and the caret at byte `caret` of what it shows (0.4.9 plan row 180, ruling 2).
+///
+/// **Sticky, and moved only as far as the caret needs**: the caret stays inside the box (the
+/// text goes left when the caret runs past the right edge, right when it goes in front of the
+/// left one), and the slack is given back when the text shrinks under it, so deleting from the
+/// end shows the head again. A box that holds still is a box a press can aim at: before this the
+/// scroll was worked out from the caret alone on every frame, and a press that moved the caret
+/// left in a scrolled path moved every letter right under the pointer. A field that has just
+/// taken the focus starts from `0`, which is exactly the old answer — typing is unchanged.
+#[must_use]
+pub fn settle_field_scroll(
+    rect: [f32; 4],
+    shown: &str,
+    caret: usize,
+    held: f32,
+    mono: bool,
+    scale: f32,
+    measure: &mut dyn FnMut(&str, f32) -> f32,
+) -> f32 {
+    let FieldRun {
+        font, left, right, ..
+    } = field_run(rect, 0.0, mono, scale, dialog_border(scale));
+    let width = (right - left).max(0.0);
+    let caret_x = measure(&shown[..caret.min(shown.len())], font);
+    let whole = measure(shown, font);
+    // The least the text can be pushed with the caret still inside the right edge.
+    let least = (caret_x - width).max(0.0);
+    held.min(caret_x).max(least).min((whole - width).max(least))
 }
 
 /// **The caret a field of this dialog strikes**, in window pixels: one physical
@@ -15888,6 +16045,7 @@ fn field_run(
 pub fn field_caret_line(
     rect: [f32; 4],
     before_caret: &str,
+    scroll: f32,
     mono: bool,
     scale: f32,
     measure: &mut dyn FnMut(&str, f32) -> f32,
@@ -15898,7 +16056,7 @@ pub fn field_caret_line(
         left,
         right,
         offset,
-    } = field_run(rect, Some(before_caret), mono, scale, border, measure);
+    } = field_run(rect, scroll, mono, scale, border);
     let caret_x = (left + measure(before_caret, font) - offset).clamp(left, right);
     let thickness = scale.round().max(1.0);
     let inset = FIELD_CARET_INSET_LOGICAL_PX * scale;
@@ -15941,7 +16099,7 @@ fn push_field(
     ghost: bool,
     mono: bool,
     hovered: bool,
-    caret: Option<(usize, usize)>,
+    caret: Option<FieldCaret>,
     scale: f32,
     border: f32,
     palette: bt_render::ChromePalette,
@@ -15970,21 +16128,16 @@ fn push_field(
         },
         1.0,
     ));
-    let caret =
-        caret.map(|(from, to)| (from.min(to).min(text.len()), from.max(to).min(text.len())));
+    let scroll = caret.map_or(0.0, |caret| caret.scroll_px);
+    let caret = caret.map(|FieldCaret { from, to, .. }| {
+        (from.min(to).min(text.len()), from.max(to).min(text.len()))
+    });
     let FieldRun {
         font,
         left,
         right,
         offset,
-    } = field_run(
-        rect,
-        caret.map(|(_, to)| &text[..to]),
-        mono,
-        scale,
-        border,
-        measure,
-    );
+    } = field_run(rect, scroll, mono, scale, border);
     if let Some((from, to)) = caret {
         if from < to {
             let start = left + measure(&text[..from], font) - offset;
@@ -15997,7 +16150,7 @@ fn push_field(
                     rect[3] - border,
                 ],
                 color: palette.accent,
-                alpha: 0.30,
+                alpha: crate::text_field::SELECTION_WASH_ALPHA,
             });
         }
         // The caret itself: one physical pixel of accent, full height inside the
@@ -16006,7 +16159,7 @@ fn push_field(
         // [`field_caret_line`], the rectangle the input method is told
         // (T-SETTINGS-FIELDS-IME-POSITION).
         stack.quads.push(OverlayQuad {
-            rect: field_caret_line(rect, &text[..to], mono, scale, measure),
+            rect: field_caret_line(rect, &text[..to], scroll, mono, scale, measure),
             color: palette.accent,
             alpha: 1.0,
         });
@@ -18690,6 +18843,7 @@ mod tests {
     /// `bin` directory would start answering out of a sibling `Resources`.
     #[test]
     fn the_shipped_notices_are_looked_for_beside_the_binary_and_in_a_bundles_resources() {
+        let on_disk = |path: &std::path::Path| path.is_file();
         let root = bt_testpath::temp_path("folio-notices");
         let beside = root.join("archive");
         let bundle = root.join("Folio.app").join("Contents");
@@ -18699,13 +18853,13 @@ mod tests {
 
         // The archive's shape: the file beside the executable.
         assert_eq!(
-            shipped_notices_near(&beside.join("folio.exe")),
+            shipped_notices_near(&beside.join("folio.exe"), &on_disk),
             None,
             "nothing is claimed before the file is there"
         );
         std::fs::write(beside.join(NOTICES_FILE), "notices").expect("write the archive's copy");
         assert_eq!(
-            shipped_notices_near(&beside.join("folio.exe")),
+            shipped_notices_near(&beside.join("folio.exe"), &on_disk),
             Some(beside.join(NOTICES_FILE)),
             "the copy that shipped beside the executable is the one that opens"
         );
@@ -18713,25 +18867,91 @@ mod tests {
         // The bundle's shape: one directory over, and only under that name.
         let executable = bundle.join("MacOS").join("folio");
         assert_eq!(
-            shipped_notices_near(&executable),
+            shipped_notices_near(&executable, &on_disk),
             None,
             "an empty bundle claims nothing"
         );
         std::fs::write(bundle.join("Resources").join(NOTICES_FILE), "notices")
             .expect("write the bundle's copy");
         assert_eq!(
-            shipped_notices_near(&executable),
+            shipped_notices_near(&executable, &on_disk),
             Some(bundle.join("Resources").join(NOTICES_FILE)),
             "a bundle keeps it in Contents/Resources"
         );
         let elsewhere = root.join("Folio.app").join("Contents").join("Helpers");
         std::fs::create_dir_all(&elsewhere).expect("some other directory in the same bundle");
         assert_eq!(
-            shipped_notices_near(&elsewhere.join("folio")),
+            shipped_notices_near(&elsewhere.join("folio"), &on_disk),
             None,
             "only Contents/MacOS looks in Contents/Resources"
         );
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// RED (T-NOTICES-DESTINATION-OFF-THE-WINDOW-THREAD; C1) — **the licences row's press reads
+    /// the start's answer and asks the disk nothing**: once the notices fact is settled, as
+    /// `fn main` settles it before the loop, the row's destination — what the press on the window
+    /// thread asks — makes no look, and it is the settled answer. Before, the first press asked
+    /// `current_exe` and one or two `is_file` on the window thread.
+    ///
+    /// MUTATION: make `notices_destination` look each time it is read (`look_beside_this_image()`,
+    /// the shape before) — the press makes looks.
+    #[test]
+    fn the_licences_row_reads_the_start_s_answer_and_asks_the_disk_nothing() {
+        let settled = settle_notices();
+        let looks = || NOTICE_LOOKS_ON_THIS_THREAD.with(std::cell::Cell::get);
+        let before = looks();
+        let first = SettingsRow::AboutLicences.link_destination();
+        let second = SettingsRow::AboutLicences.link_destination();
+        assert_eq!(
+            looks(),
+            before,
+            "the licences row's destination asked the disk nothing"
+        );
+        let expected = match &settled.value().0 {
+            Some(file) => LinkDestination::File(file.as_path()),
+            None => LinkDestination::Address(notices_page()),
+        };
+        assert_eq!(
+            first,
+            Some(expected),
+            "the row goes where the start found the file"
+        );
+        assert_eq!(second, first, "and every press after it goes there too");
+    }
+
+    /// RED (T-NOTICES-DESTINATION-OFF-THE-WINDOW-THREAD) — **the notices are looked for beside
+    /// the file the alias leads to, not beside the alias**: a start through winget's portable
+    /// alias is told the link's path, in a folder that holds none of the archive's files; the
+    /// archive's copy is beside the file the link leads to. Stated over a `RunningImage` built
+    /// by hand and a look handed in, so no link, no privilege and no disk.
+    ///
+    /// MUTATION: look beside `image.started_as` in `notices_for` (the shape before, which asked
+    /// `current_exe`) — the alias's start answers `None` and the row would open the web page.
+    #[test]
+    fn the_notices_are_looked_for_beside_the_file_the_alias_leads_to() {
+        let links = std::path::Path::new("links");
+        let package = std::path::Path::new("package").join("folio-0.4.9");
+        let shipped = package.join(NOTICES_FILE);
+        let only_the_package = |path: &std::path::Path| path == shipped.as_path();
+        let through_the_alias = bt_platform::RunningImage {
+            started_as: links.join("folio.exe"),
+            path: package.join("folio.exe"),
+        };
+        assert_eq!(
+            notices_for(&through_the_alias, &only_the_package),
+            Some(shipped.clone()),
+            "a start through the alias opens the copy beside the file the link leads to"
+        );
+        let from_the_alias_s_folder = bt_platform::RunningImage {
+            started_as: links.join("folio.exe"),
+            path: links.join("folio.exe"),
+        };
+        assert_eq!(
+            notices_for(&from_the_alias_s_folder, &only_the_package),
+            None,
+            "the alias's own folder holds no copy"
+        );
     }
 
     /// The window every geometry claim below is stated against — an ordinary
@@ -35120,6 +35340,51 @@ mod tests {
             ..SettingsValues::sample()
         };
         assert_eq!(SettingsRow::UninstallData.selected_index(&values), Some(on));
+    }
+
+    /// RED (0.4.9 plan row 180, ruling 2) — **a field's scroll is sticky and moves only as far as
+    /// the caret needs**: a caret put inside the box leaves the text where it was (before this, the
+    /// scroll was worked out from the caret alone, and a caret put left of the box's width moved
+    /// every letter right under the pointer that put it), a caret put in front of the box's left
+    /// edge brings the text right to it, and text that shrinks under the box gives the slack back.
+    ///
+    /// MUTATION (`plant-180-settings-scroll-not-sticky.py`): settle from `0` instead of `held` —
+    /// the caret put inside the box scrolls the text back to its start.
+    #[test]
+    fn a_fields_scroll_holds_still_until_the_caret_needs_it_to_move() {
+        let rect = [0.0, 0.0, 300.0, 28.0];
+        let ([left, right], _) = field_text_run(rect, false, 1.0);
+        let width = right - left;
+        // Ten pixels a letter, every letter one byte.
+        let mut measure = |text: &str, _: f32| 10.0 * text.len() as f32;
+        let long = "a".repeat(100);
+        let settle =
+            |shown: &str, caret: usize, held: f32, measure: &mut dyn FnMut(&str, f32) -> f32| {
+                settle_field_scroll(rect, shown, caret, held, false, 1.0, measure)
+            };
+        let end = settle(&long, long.len(), 0.0, &mut measure);
+        assert!(
+            (end - (1000.0 - width)).abs() < 0.01,
+            "the caret at the end of a long line brings the end into the box: {end}"
+        );
+        // A caret put halfway across the box: on a letter the reader can see.
+        let halfway = ((end + width / 2.0) / 10.0) as usize;
+        assert_eq!(
+            settle(&long, halfway, end, &mut measure),
+            end,
+            "a caret put inside the box leaves every letter where it was"
+        );
+        assert_eq!(
+            settle(&long, 0, end, &mut measure),
+            0.0,
+            "a caret put in front of the box brings the text right to it"
+        );
+        let short = "a".repeat(50);
+        let shrunk = settle(&short, short.len(), end, &mut measure);
+        assert!(
+            (shrunk - (500.0 - width).max(0.0)).abs() < 0.01,
+            "text that shrinks under the box gives the slack back: {shrunk}"
+        );
     }
 }
 

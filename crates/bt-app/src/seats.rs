@@ -161,7 +161,10 @@ pub const INLINE_RENAME_LINE_LOGICAL_PX: f32 = bt_render::WINDOW_TAB_MARK_LOGICA
 /// applications. It is the accent rather than a neutral grey because the field
 /// under it is now a neutral grey: the wash has to be told from its own ground,
 /// and an accent is the one ink this window guarantees will be in both themes.
-pub const INLINE_RENAME_SELECTION_ALPHA: f32 = 0.30;
+///
+/// The window's one selection wash since 0.4.9 plan row 180, which every
+/// one-line field now draws its selection in ([`crate::text_field::SELECTION_WASH_ALPHA`]).
+pub const INLINE_RENAME_SELECTION_ALPHA: f32 = crate::text_field::SELECTION_WASH_ALPHA;
 
 /// **The three rectangles an inline name editor draws besides its text.**
 ///

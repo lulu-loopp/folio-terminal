@@ -3388,33 +3388,119 @@ fn vocabulary() -> Vec<Word> {
 /// whether it waits. A method call matches a line whose parent is a type; a path matches by its
 /// last qualifier; a bare call matches only a system call's capitalised name; `write!` and
 /// `writeln!` are `Write::write_fmt`.
+///
+/// A site reads untyped, so it answers **every** line it matches, not the first: the name is the
+/// matches' names, sorted and joined by ` | ` (`Barrier::wait | Child::wait | Condvar::wait` for
+/// a `.wait()`), and it waits when any of them does. Neither the name nor the verdict hangs on
+/// the registry's order, and a line that does not wait cannot silence one that does by sharing
+/// its name (T-BARE-SITE-VOCABULARY-LAST-NAME-TAKEOVER, plan row 185). A pinned body's effect
+/// key is that whole name, so a new line of the same name changes it. The inventory
+/// (`Reader::sites`) types its receivers and needs no such reading.
 fn effect_of(words: &[Word], site: &Site) -> Option<(String, bool)> {
-    let typed = |word: &&Word| word.parent.starts_with(|c: char| c.is_ascii_uppercase());
-    let named = |word: &Word| (format!("{}::{}", word.parent, word.last), word.waits);
-    match &site.form {
+    let capitalised = |name: &str| name.starts_with(|c: char| c.is_ascii_uppercase());
+    let lines: Vec<&Word> = match &site.form {
         Form::Macro if ["write", "writeln"].contains(&site.name) => {
-            Some(("Write::write_fmt".to_owned(), true))
+            return Some(("Write::write_fmt".to_owned(), true));
         }
-        Form::Macro | Form::Value => None,
+        Form::Macro | Form::Value => return None,
         Form::Method(_) => words
             .iter()
-            .filter(typed)
-            .find(|word| word.last == site.name)
-            .map(named),
+            .filter(|word| capitalised(word.parent.as_str()) && word.last == site.name)
+            .collect(),
         Form::Path(quals) => {
             let qualifier = quals.last().copied().unwrap_or_default();
             words
                 .iter()
-                .find(|word| word.last == site.name && word.parent == qualifier)
-                .map(named)
+                .filter(|word| word.last == site.name && word.parent == qualifier)
+                .collect()
         }
         Form::Bare => words
             .iter()
-            .find(|word| {
-                word.last == site.name && site.name.starts_with(|c: char| c.is_ascii_uppercase())
-            })
-            .map(|word| (word.last.clone(), word.waits)),
+            .filter(|word| word.last == site.name && capitalised(site.name))
+            .collect(),
+    };
+    let mut names: Vec<String> = lines
+        .iter()
+        .map(|word| {
+            if matches!(site.form, Form::Bare) {
+                word.last.clone()
+            } else {
+                format!("{}::{}", word.parent, word.last)
+            }
+        })
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    (!lines.is_empty()).then(|| (names.join(" | "), lines.iter().any(|word| word.waits)))
+}
+
+/// RED (row 185) — **a site that matches several vocabulary lines answers all of them, the same
+/// in any order: it waits when one of them waits, and its name is theirs, sorted.** A method
+/// `.wait()` matches every typed `wait` line, a path `Child::wait(..)` every `Child::wait`, a bare
+/// `CloseHandle(..)` every `CloseHandle`; a line that does not wait, listed first, used to name
+/// the site alone and read it as not waiting, so the `Drop` guard passed a `Drop` that waits.
+///
+/// MUTATION: take the first match again (`.find(..)` in the method arm) and the first case reads
+/// `Foo::wait`, not waiting.
+#[test]
+fn a_site_matching_several_vocabulary_lines_answers_all_of_them_in_any_order() {
+    let word = |parent: &str, last: &str, waits: bool| Word {
+        parent: parent.to_owned(),
+        last: last.to_owned(),
+        waits,
+    };
+    let site = |name: &'static str, form: Form| Site { at: 0, name, form };
+    let cases = [
+        (
+            site("wait", Form::Method(None)),
+            [word("Foo", "wait", false), word("Condvar", "wait", true)],
+            "Condvar::wait | Foo::wait",
+        ),
+        (
+            site("wait", Form::Path(vec!["process", "Child"])),
+            [word("Child", "wait", false), word("Child", "wait", true)],
+            "Child::wait",
+        ),
+        (
+            site("CloseHandle", Form::Bare),
+            [
+                word("Foundation", "CloseHandle", false),
+                word("Planted", "CloseHandle", true),
+            ],
+            "CloseHandle",
+        ),
+    ];
+    for (site, words, named) in cases {
+        let reversed: Vec<Word> = words
+            .iter()
+            .rev()
+            .map(|w| word(&w.parent, &w.last, w.waits))
+            .collect();
+        let answer = effect_of(&words, &site);
+        assert_eq!(
+            answer,
+            Some((named.to_owned(), true)),
+            "`{}` ({:?}) against two lines of its name",
+            site.name,
+            site.form
+        );
+        assert_eq!(
+            effect_of(&reversed, &site),
+            answer,
+            "`{}` ({:?}) answers the same whatever the lines' order",
+            site.name,
+            site.form
+        );
     }
+    let alone = [
+        word("Foo", "wait", false),
+        word("Condvar", "wait_timeout", true),
+    ];
+    assert_eq!(
+        effect_of(&alone, &site("wait", Form::Method(None))),
+        Some(("Foo::wait".to_owned(), false)),
+        "a site matching one line that does not wait is that line, counted"
+    );
 }
 
 // ── assertion 0: the declared universe ──────────────────────────────────────────────────────
@@ -3904,7 +3990,7 @@ const LANDMARKS: [(&str, &[Landmark]); 4] = [
 /// Windows transaction since U-23. B-ENDSESSION adds the system's end's write step, `exiting`
 /// then `quit_abandoned` around the one admitted wait in `session_end::settle` (the quit's `Write`
 /// on the held document; nothing is torn down).
-const PINS: [Pin; 23] = [
+const PINS: [Pin; 24] = [
     Pin {
         module: "admission",
         writer: "enter_standalone_main",
@@ -3939,6 +4025,14 @@ const PINS: [Pin; 23] = [
     Pin {
         module: "explorer_menu",
         writer: "settle_package",
+        owner: "bt-app crate::main",
+        after: Some("hand_over"),
+    },
+    // T-NOTICES-DESTINATION-OFF-THE-WINDOW-THREAD (C1): whether the notices file is beside the
+    // running image, settled on the line after the package fact; `FolioApp::new` takes the witness.
+    Pin {
+        module: "settings",
+        writer: "settle_notices",
         owner: "bt-app crate::main",
         after: Some("hand_over"),
     },

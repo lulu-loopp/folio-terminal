@@ -24,10 +24,7 @@ const FORBIDDEN: &[&str] = &[
     concat!("wei", "yi"),
     concat!("um", "ich"),
     "c:\\users\\",
-    "d:\\developer",
-    // The recording machine's software-install folder at a drive root, at any drive (2026-11-02,
-    // 0.4.9 row 178): conda's and Git's directories on a recorded `PATH`.
-    ":\\app\\",
+    // The recording machine's folders at a drive root are not substrings: see `DRIVE_ROOT_FOLDERS`.
     "welcome back",
     "organization",
     "laptop-",
@@ -38,6 +35,97 @@ const FORBIDDEN: &[&str] = &[
     "github_pat_",
     "-----begin ",
 ];
+
+/// The recording machine's own folders, each refused where it stands at a drive root: what the
+/// folder is, and its path below the drive, lower-case, one segment per entry (spelled in halves,
+/// as above). The development checkout's parent, the synced-documents folder, and the
+/// software-install folder that conda's and Git's directories on a recorded `PATH` sit in.
+///
+/// A fixed substring cannot say "at a drive root": until 2026-11-02 (0.4.9 row 183) the
+/// checkout needle named one drive only and the install needle wanted a backslash after the
+/// name, so another drive, a forward slash, the folder last in a path and the Unix-style
+/// spellings of a drive all passed. `folder_at_drive_root` asks what
+/// `scripts/check-machine-paths.ps1` asks: any drive, in every spelling a tool prints one.
+const DRIVE_ROOT_FOLDERS: &[(&str, &[&str])] = &[
+    ("the development checkout's parent folder", &["developer"]),
+    (
+        "the synced-documents folder",
+        &["documents", concat!("sync", "folder")],
+    ),
+    ("the software-install folder", &[concat!("a", "pp")]),
+];
+
+fn is_word(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+fn is_separator(byte: u8) -> bool {
+    byte == b'\\' || byte == b'/'
+}
+
+/// Whether a path segment starting at `at` stands at a drive root: one or more separators, and in
+/// front of them a drive, in any of the spellings a tool prints:
+/// - `x:`, a letter standing alone (no letter or digit before it, so a URL scheme's colon is not
+///   a drive) — with any run of separators, so `file:///x:/` and `\\?\x:\` count too;
+/// - WSL's `/mnt/x` and Cygwin's `/cygdrive/x`;
+/// - Git Bash's `/x`, except after a word character, `/`, `\`, `.`, `~` or `-` (`https://host/x/`,
+///   `a/x/`, `./x/`). After any other byte it counts: after `:`, `=`, `;`, a space or a quote,
+///   which is how a Git Bash `PATH` lists it, and also, failing closed, after a single-slash scheme
+///   (`file:/x/`), a forward-slash drive's one-letter folder (`x:/a/`) and a variable (`${r}/x/`).
+///
+/// The view is the recording's bytes, so a line break before a drive is a real control byte, not
+/// a source escape; it stands alone without the scan's escape rule.
+fn at_drive_root(view: &[u8], at: usize) -> bool {
+    let mut cursor = at;
+    while cursor > 0 && is_separator(view[cursor - 1]) {
+        cursor -= 1;
+    }
+    if cursor == at || cursor == 0 {
+        return false;
+    }
+    let letter_at = cursor - 1;
+    if view[letter_at] == b':' {
+        return letter_at >= 1
+            && view[letter_at - 1].is_ascii_alphabetic()
+            && (letter_at == 1 || !view[letter_at - 2].is_ascii_alphanumeric());
+    }
+    if !view[letter_at].is_ascii_alphabetic() || letter_at == 0 || view[letter_at - 1] != b'/' {
+        return false;
+    }
+    let slash = letter_at - 1;
+    let unix_mount =
+        view[..letter_at].ends_with(b"/mnt/") || view[..letter_at].ends_with(b"/cygdrive/");
+    let git_bash = at - cursor == 1
+        && view[at - 1] == b'/'
+        && (slash == 0
+            || !(is_word(view[slash - 1])
+                || matches!(view[slash - 1], b'/' | b'\\' | b'.' | b'~' | b'-')));
+    unix_mount || git_bash
+}
+
+/// Whether the lower-case `view` holds the folder whose path below the drive is `segments`: the
+/// segments in order, joined by runs of separators, the last one ending at a non-word byte or at
+/// the end, and the first one at a drive root.
+fn folder_at_drive_root(view: &[u8], segments: &[&str]) -> bool {
+    let first = segments[0].as_bytes();
+    (0..view.len()).any(|at| {
+        if !view[at..].starts_with(first) || !at_drive_root(view, at) {
+            return false;
+        }
+        let mut cursor = at + first.len();
+        for segment in &segments[1..] {
+            let run = view[cursor..]
+                .iter()
+                .take_while(|byte| is_separator(**byte))
+                .count();
+            if run == 0 || !view[cursor + run..].starts_with(segment.as_bytes()) {
+                return false;
+            }
+            cursor += run + segment.len();
+        }
+        view.get(cursor).is_none_or(|byte| !is_word(*byte))
+    })
+}
 
 /// The one mail domain a scrubbed recording is allowed to name.
 const PLACEHOLDER_MAIL_DOMAIN: &str = "example.com";
@@ -191,6 +279,14 @@ fn no_recording_carries_a_person() {
                     }
                 }
             }
+            for (folder, segments) in DRIVE_ROOT_FOLDERS {
+                if folder_at_drive_root(&view, segments) {
+                    let offence = format!("{name} names {folder} at a drive root");
+                    if !offences.contains(&offence) {
+                        offences.push(offence);
+                    }
+                }
+            }
             for domain in foreign_mail_domains(&view) {
                 let offence = format!("{name} names the mail domain `{domain}`");
                 if !offences.contains(&offence) {
@@ -216,7 +312,65 @@ fn the_gate_reads_through_conpty_line_wrapping() {
         &lowercased(&unwrapped(&wrapped)),
         b"d:\\developer"
     ));
+    // The drive-root folders are asked of the same two views.
+    assert!(!folder_at_drive_root(&lowercased(&wrapped), &["developer"]));
+    assert!(folder_at_drive_root(
+        &lowercased(&unwrapped(&wrapped)),
+        &["developer"]
+    ));
     // An ordinary line break is data, not a wrap, and is left alone.
     let plain = b"first\r\nsecond".to_vec();
     assert_eq!(unwrapped(&plain), plain);
+}
+
+#[test]
+fn a_folder_at_a_drive_root_is_found_in_every_spelling_a_tool_prints() {
+    // A stand-in folder, so that this file names none of the machine's: the grammar is the same
+    // for every entry of `DRIVE_ROOT_FOLDERS`.
+    let found = |text: &str| folder_at_drive_root(&lowercased(text.as_bytes()), &["kit"]);
+    for spelling in [
+        "d:\\kit\\conda",
+        "x:/kit/git",
+        "file:///d:/kit/git",
+        "\\\\?\\d:\\kit\\git",
+        "d:\\\\kit\\\\git",
+        "d:\\\\\\\\kit",
+        "path d:\\kit;c:\\tools",
+        "\"d:\\kit\"",
+        "\r\nd:\\kit",
+        "/mnt/d/kit/git",
+        "/cygdrive/d/kit",
+        "PATH=/c/x:/d/kit/git/bin:/usr/bin",
+        "cd /d/kit",
+        "D:\\Kit-old",
+    ] {
+        assert!(found(spelling), "{spelling:?} is a folder at a drive root");
+    }
+    for spelling in [
+        "webpack://kit/src",
+        "webpack:/kit/src",
+        "node:\\kit",
+        "ad:\\kit",
+        "9d:\\kit",
+        "https://host/a/kit",
+        "http://a/kit",
+        "./x/kit",
+        "~/x/kit",
+        "$U/kit",
+        "d:\\kits",
+        "d:\\kit_old",
+        "d:\\tools\\kit",
+        "\":\\kit\\\"",
+    ] {
+        assert!(
+            !found(spelling),
+            "{spelling:?} is not a folder at a drive root"
+        );
+    }
+    // A folder two segments below the drive is matched segment by segment.
+    let nested = |text: &str| folder_at_drive_root(&lowercased(text.as_bytes()), &["docs", "kit"]);
+    assert!(nested("d:\\Docs\\Kit\\notes"));
+    assert!(nested("/d/docs//kit"));
+    assert!(!nested("d:\\docs\\kitchen"));
+    assert!(!nested("d:\\tools\\docs\\kit"));
 }

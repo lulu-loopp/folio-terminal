@@ -3901,7 +3901,7 @@ pub(crate) fn shown_and_opened(
     seat: u64,
     key: &str,
     serial: u64,
-    frames: Result<animation::Animation, animation::AnimationRefusal>,
+    frames: Result<animation::Animation, animation::NotOpened>,
 ) {
     let path = PathBuf::from(key);
     assert_eq!(
@@ -3931,7 +3931,7 @@ pub(crate) fn answer_awaited(
     cache: &mut AnimationCache,
     key: &str,
     serial: u64,
-    frames: Result<animation::Animation, animation::AnimationRefusal>,
+    frames: Result<animation::Animation, animation::NotOpened>,
 ) -> bool {
     let asked = cache
         .awaited(key)
