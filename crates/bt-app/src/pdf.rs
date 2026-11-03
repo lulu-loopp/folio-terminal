@@ -168,7 +168,16 @@ fn refused<T>(error: &std::io::Error) -> Result<Option<T>, Held> {
 /// without pages. A held scan is the answer: the parse would open the same file
 /// a moment later and meet the same holder.
 pub fn page_count(path: &Path) -> Result<Option<u32>, Held> {
-    let file = match bt_platform::file_reads::open(bt_platform::file_reads::Lane::Pdf, path) {
+    count_opened(
+        bt_platform::file_reads::open(bt_platform::file_reads::Lane::Pdf, path),
+        path,
+    )
+}
+
+/// [`page_count`] over its scan's open, as the open answered — the seam a test hands a refused
+/// open, so that the open's refusal is pinned by a held case and not by its type alone.
+fn count_opened(opened: std::io::Result<impl Read>, path: &Path) -> Result<Option<u32>, Held> {
+    let file = match opened {
         Ok(file) => file,
         Err(error) => return refused(&error),
     };
@@ -202,15 +211,30 @@ fn parse_page_count(bytes: Vec<u8>) -> Option<u32> {
 /// The open and the read go through [`refused`]; the length is asked of the
 /// handle already open, which no other program can refuse.
 fn read_capped(path: &Path) -> Result<Option<Vec<u8>>, Held> {
-    let file: bt_platform::file_reads::Reader<'_, std::fs::File> =
-        match bt_platform::file_reads::open(bt_platform::file_reads::Lane::Pdf, path) {
-            Ok(file) => file,
-            Err(error) => return refused(&error),
-        };
-    let Some(mut bytes) = capped_buffer(&file) else {
+    read_opened(bt_platform::file_reads::open(
+        bt_platform::file_reads::Lane::Pdf,
+        path,
+    ))
+}
+
+/// [`read_capped`] over its open, as the open answered — the seam a test hands a refused open.
+fn read_opened(
+    opened: std::io::Result<bt_platform::file_reads::Reader<'_, std::fs::File>>,
+) -> Result<Option<Vec<u8>>, Held> {
+    let file = match opened {
+        Ok(file) => file,
+        Err(error) => return refused(&error),
+    };
+    let Some(bytes) = capped_buffer(&file) else {
         return Ok(None);
     };
-    if let Err(error) = file.take(MAX_RASTER_BYTES).read_to_end(&mut bytes) {
+    read_into(bytes, file)
+}
+
+/// The whole read of an open handle into a buffer already sized for it, bounded by
+/// [`MAX_RASTER_BYTES`] — the seam a test hands a refused read (a byte-range lock).
+fn read_into(mut bytes: Vec<u8>, reader: impl Read) -> Result<Option<Vec<u8>>, Held> {
+    if let Err(error) = reader.take(MAX_RASTER_BYTES).read_to_end(&mut bytes) {
         return refused(&error);
     }
     Ok(Some(bytes))
@@ -1284,29 +1308,57 @@ mod tests {
     /// where the predicate says so (on Windows the sharing and lock violations, 32 and 33; off
     /// Windows nothing), `Ok(None)` for every other error — and the scan's read loop answers
     /// through it, so a lock met half way through a file is held too. A file that is not there is
-    /// no hold, through both readers. The predicate itself, and a real file held by a handle that
-    /// shares nothing, are pinned in `bt-effects` and `bt-term`; this crate names no platform.
+    /// no hold, through both readers. Every site of the classifier meets each code through its
+    /// own seam — the scan's open (`count_opened`), `read_capped`'s open (`read_opened`), its
+    /// `read_to_end` (`read_into`) and the scan's read loop (`count_pages`) — so a site that went
+    /// back to a silence of its own would be red here, not only a site whose type changed. The
+    /// predicate itself, and a real file held by a handle that shares nothing, are pinned in
+    /// `bt-effects` and `bt-term`; this crate names no platform, so a real held file is not
+    /// opened here.
     ///
     /// MUTATION: have `refused` answer `Ok(None)` for every error
     /// (`plant-187-pdf-held-is-none.py`, the `.ok()?` put back) — on Windows the held reads are
-    /// refused again and the first assertion goes red.
+    /// refused again and the first assertion goes red. Or answer one site's refusal `Ok(None)`
+    /// without the classifier (`let Ok(file) = opened else { return Ok(None) };`) — that site's
+    /// assertion goes red on Windows.
     #[test]
     fn a_read_another_program_holds_is_held_and_every_other_refused_read_is_none() {
-        for code in [2, 3, 5, 32, 33] {
-            let error = || std::io::Error::from_raw_os_error(code);
-            let expected = if bt_platform::file_reads::held_elsewhere(&error()) {
+        fn expected<T>(error: &std::io::Error) -> Result<Option<T>, Held> {
+            if bt_platform::file_reads::held_elsewhere(error) {
                 Err(Held)
             } else {
                 Ok(None)
-            };
-            assert_eq!(refused::<u32>(&error()), expected, "os error {code}");
-            assert_eq!(
-                count_pages(Refusing(code)),
-                expected,
-                "os error {code}, met by the scan's read"
-            );
+            }
         }
         let missing = bt_testpath::temp_path("folio-pdf-held-missing").with_extension("pdf");
+        for code in [2, 3, 5, 32, 33] {
+            let error = || std::io::Error::from_raw_os_error(code);
+            assert_eq!(
+                refused::<u32>(&error()),
+                expected(&error()),
+                "os error {code}"
+            );
+            assert_eq!(
+                count_pages(Refusing(code)),
+                expected(&error()),
+                "os error {code}, met by the scan's read"
+            );
+            assert_eq!(
+                count_opened(Err::<&[u8], _>(error()), &missing),
+                expected(&error()),
+                "os error {code}, met by the scan's open"
+            );
+            assert_eq!(
+                read_opened(Err(error())),
+                expected(&error()),
+                "os error {code}, met by read_capped's open"
+            );
+            assert_eq!(
+                read_into(Vec::new(), Refusing(code)),
+                expected(&error()),
+                "os error {code}, met by read_capped's read_to_end"
+            );
+        }
         assert_eq!(page_count(&missing), Ok(None), "a missing file is no hold");
         assert_eq!(page_raster(&missing, 0, FIT.0, FIT.1), Ok(None));
     }

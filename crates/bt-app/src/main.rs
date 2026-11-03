@@ -20335,13 +20335,24 @@ impl PeekFacts {
 
     /// File the worker's answer: the file's own, or — for a file another program held — unanswered,
     /// asked again when the read it answers was the one more ask.
+    ///
+    /// **A held answer is filed only while a read is out** (`Asked`), the class's rule that an
+    /// answer is filed for the read that awaits it: a duplicate held answer arriving after the
+    /// file's own answer must not take a count off the card, and one arriving after the one more
+    /// ask was spent must not open another. The file's own answer is filed whenever it comes: it
+    /// is a fact about the file.
     fn hear(&mut self, answer: Result<Option<u32>, pdf::Held>) {
-        self.answer = match answer {
-            Ok(pages) => PeekFactsAnswer::Answered(pages),
-            Err(pdf::Held) => PeekFactsAnswer::Unanswered {
-                asked_again: self.answer == (PeekFactsAnswer::Asked { once_more: true }),
-            },
-        };
+        match (answer, self.answer) {
+            (Ok(pages), _) => self.answer = PeekFactsAnswer::Answered(pages),
+            (Err(pdf::Held), PeekFactsAnswer::Asked { once_more }) => {
+                self.answer = PeekFactsAnswer::Unanswered {
+                    asked_again: once_more,
+                };
+            }
+            // Not awaited: the file's own answer, or the one more ask's, is already in.
+            (Err(pdf::Held), PeekFactsAnswer::Answered(_) | PeekFactsAnswer::Unanswered { .. }) => {
+            }
+        }
     }
 }
 
@@ -20448,10 +20459,32 @@ impl PeekPageSlot {
     /// answer since the card came up lets the page be asked once more — it leaves `asked`, so the
     /// next rebuild of the card, which this answer's own frame is, asks it with no new input — and
     /// a second stays asked, so only a new card asks again. At most two reads per page per card.
+    ///
+    /// **Only for a page this card has a question out about**: the slot outlives the card (its
+    /// pixels stay), so a held answer landing after the card came down ([`Self::card_down`]) is
+    /// the answer to a question nobody is asking, and must not spend the next card's one more ask.
     fn hear_held(&mut self, index: u32) {
-        if self.asked_again.insert(index) {
+        if self.asked.contains(&index) && self.asked_again.insert(index) {
             self.asked.remove(&index);
         }
+    }
+
+    /// **The stamp an answer came home with** (user ruling 2026-08-26): a file that has been
+    /// written is a different document, and the pages already drawn are of the old one. A run of
+    /// pages can be half a report from before a save and half from after — a reader scrolling
+    /// through would watch the document change under the hand, page by page, as each one happened
+    /// to be re-asked. So the stamp is what the cache belongs to, and a new one empties it; and
+    /// every page has to be asked again, including the ones a question is already out about —
+    /// those answers are about the file this is no longer — with the one more ask a held page
+    /// spent: the file changing is a new look (T-HELD-FILE-IN-THE-PDF-LANE). `page` is the page
+    /// this answer is about, which is answered.
+    fn stamped(&mut self, mtime: Option<SystemTime>, page: u32) {
+        if self.mtime != mtime && !self.pages.is_empty() {
+            self.pages.clear();
+            self.card_down();
+            self.asked.insert(page);
+        }
+        self.mtime = mtime;
     }
 
     /// Put one drawn page in, evicting the least recently used while the cache is over

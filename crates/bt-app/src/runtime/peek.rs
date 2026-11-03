@@ -2891,20 +2891,10 @@ impl<B: Backend> Runtime<'_, B> {
         let PeekPageOutcome::Drawn { mtime, raster } = outcome else {
             return Ok(());
         };
-        // **A file that has been written is a different document, and the pages already drawn are
-        // of the old one** (user ruling 2026-08-26). The single-slot version could not meet this:
-        // it held one page, so replacing it *was* the whole cache. A run of pages can be half a
-        // report from before a save and half from after — a reader scrolling through would watch
-        // the document change under the hand, page by page, as each one happened to be re-asked.
-        // So the stamp is what the cache belongs to, and a new one empties it.
-        if slot.mtime != mtime && !slot.pages.is_empty() {
-            slot.pages.clear();
-            // And every page has to be asked again, including the ones a question is already out
-            // about — those answers are about the file this is no longer.
-            slot.asked.clear();
-            slot.asked.insert(page);
-        }
-        slot.mtime = mtime;
+        // **A file that has been written is a different document** ([`PeekPageSlot::stamped`]).
+        // The single-slot version could not meet this: it held one page, so replacing it *was*
+        // the whole cache.
+        slot.stamped(mtime, page);
         match raster {
             Ok(Some(raster)) => slot.keep(
                 page,
