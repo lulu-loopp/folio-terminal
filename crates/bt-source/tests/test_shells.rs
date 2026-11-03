@@ -63,6 +63,7 @@
 //! type aliases that do not come from a `use` declaration stay review-owned.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use bt_source::{
     DiskScope, Index, ItemKind, LiteralValue, Package, Pattern, Search, Span, TargetId, TargetKind,
@@ -137,32 +138,20 @@ fn workspace_root() -> PathBuf {
 
 /// The whole of a first-party package; `bt-source`'s `tests/fixtures/` are
 /// source *about* compilation and are declared out, as `timing.rs` does.
-fn universe_for(package: &Package) -> Universe {
-    if package.name() == "bt-source" {
-        let scopes = vec![
-            DiskScope::under(package.directory().join("src")),
-            DiskScope::under(package.directory().join("tests")).excluding(&["fixtures"]),
-        ];
-        return Universe::declare(
-            "the whole of bt-source, fixtures aside",
-            package.targets().to_vec(),
-            scopes,
-            Vendor::Excluded,
-        )
-        .expect("this crate is where it says it is");
-    }
-    universes::whole_package(package, Vendor::Excluded).expect("a package of this workspace")
+pub(crate) fn universe_for(package: &Package) -> Universe {
+    universes::first_party_whole(package, Vendor::Excluded).expect("a package of this workspace")
 }
 
-/// Every first-party package's index, by the package's name.
-fn workspace_indices() -> Vec<(String, Index)> {
+/// Every first-party package's name and index: the index is the one this process holds for each
+/// package's [`universes::first_party_whole`], shared with every other guard that asks for it.
+pub(crate) fn workspace_indices() -> Vec<(String, Arc<Index>)> {
     let workspace = Workspace::read(&workspace_root()).expect("this workspace");
     workspace
         .packages()
         .iter()
         .filter(|package| !is_vendored(package.directory()))
         .map(|package| {
-            let index = Index::build(&universe_for(package))
+            let index = Index::shared(&universe_for(package))
                 .unwrap_or_else(|rejections| panic!("{}", report(&rejections)));
             (package.name().to_owned(), index)
         })
@@ -559,7 +548,7 @@ fn violations(index: &Index) -> Vec<String> {
 /// that `home` no longer defines is one, because the call shape would then read nothing.
 /// `home` is the door's package — the fixture names its own.
 fn door_definitions(
-    indices: &[(String, Index)],
+    indices: &[(String, Arc<Index>)],
     home: impl Fn(&MethodDoor) -> String,
 ) -> Vec<String> {
     let mut found = Vec::new();
@@ -703,7 +692,7 @@ fn the_guard_names_each_raw_shell_start_and_nothing_else() {
 /// definition disappears; drop the `defined != 1` line — the doorless home is silent.
 #[test]
 fn a_method_door_is_the_one_function_of_its_name() {
-    let indices = vec![("test_shells".to_owned(), fixture())];
+    let indices = vec![("test_shells".to_owned(), Arc::new(fixture()))];
     let line_of = |line: &String| -> String {
         let (place, rest) = line.split_once(": ").expect("a place, then the finding");
         let line_number = place.rsplit(':').nth(1).expect("file:line:column");

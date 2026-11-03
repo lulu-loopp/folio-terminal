@@ -468,7 +468,7 @@ fn a_pane_that_fell_back_to_another_shell_says_so_in_its_first_line() {
     // `bt-pty` ever writes there; the profile that would not start is a row
     // this platform ships that is not the floor.
     let (requested_profile, requested_program) = on_this_host(
-        ("gitbash", "D:\\App\\Tool\\Git\\bin\\bash.exe\0"),
+        ("gitbash", "D:\\Kit\\Tool\\Git\\bin\\bash.exe\0"),
         ("zsh", "/opt/工具/bin/zsh\0"),
     );
     let fallback = bt_pty::ShellFallback {
@@ -499,7 +499,7 @@ fn a_pane_that_fell_back_to_another_shell_says_so_in_its_first_line() {
     // Red gate on the whole point of the rework: the executable path, the
     // operating system's account of the failure, and the `NUL` the command
     // line carried are all diagnosis, and diagnosis belongs in the log.
-    let path_debris = on_this_host([r"D:\App", "bash.exe"], ["/opt/", "工具"]);
+    let path_debris = on_this_host([r"D:\Kit", "bash.exe"], ["/opt/", "工具"]);
     for debris in path_debris
         .into_iter()
         .chain(["os error", "CreateProcess", "\0", "/bin/sh"])

@@ -7684,7 +7684,9 @@ pub fn picture_refused(error: &bt_term::InlineImageDecodeError) -> String {
     match error {
         Refusal::FileTooLarge { .. } => Text::PreviewFailedFileTooLarge.text().to_owned(),
         Refusal::TooManyPixels => Text::PreviewFailedTooManyPixels.text().to_owned(),
-        Refusal::Io(reason) | Refusal::Decode(reason) => preview_failed(reason),
+        Refusal::Io(reason) | Refusal::HeldElsewhere(reason) | Refusal::Decode(reason) => {
+            preview_failed(reason)
+        }
         Refusal::InvalidBase64
         | Refusal::TooLarge
         | Refusal::InvalidPath

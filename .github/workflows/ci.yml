@@ -514,11 +514,18 @@ jobs:
 
       # T-TEST-PROCESS-GLOBALS (ruling 1): the globals the tests reach only through product
       # functions, the guard's stated blind spot, printed as `TEST_GLOBALS_PRODUCT_REACH` for the
-      # ticket that would gate them. A measure, never a gate.
-      - name: the tests' product reach of process-globals, measured
+      # ticket that would gate them. A measure, never a gate. The test is a module of bt-source's
+      # `real_tree` binary (plan row 166); a filter that matches no test runs nothing and exits 0,
+      # so the step reads its own line and goes red without it — red here, the merge left alone.
+      - name: the tests' product reach of process-globals, measured, and the line printed
         shell: pwsh
         continue-on-error: true
-        run: cargo test -p bt-source --locked --test test_globals -- --exact the_product_reach_of_the_tests_is_measured --nocapture
+        run: |
+          $output = & cargo test -p bt-source --locked --test real_tree -- --exact test_globals::the_product_reach_of_the_tests_is_measured --nocapture 2>&1 | Out-String
+          $code = $LASTEXITCODE
+          Write-Host $output
+          if ($code -ne 0) { throw "the measure did not run to its end (exit $code)" }
+          if (-not $output.Contains("TEST_GLOBALS_PRODUCT_REACH`t")) { throw "the run printed no TEST_GLOBALS_PRODUCT_REACH line: the filter matched no test, or the test no longer prints it" }
 
       # T-REQUEST-DOOR-GUARD (C1, a request door returns at once), over the real tree: bt-source's
       # `request_doors::every_request_door_returns_at_once` walks each request door of
@@ -526,8 +533,9 @@ jobs:
       # docs/plans/REQUEST-DOOR-SITES.tsv. Two plants in the hand-off lane's door
       # (`HandoffLane::submit`, on `Runtime::hand_off`'s road): a helper that writes a file, and a
       # stored `Box<dyn Fn()>` called there. Each must be refused by the guard naming the planted
-      # file, the site and the door; the file is put back after each. The test binary is the one
-      # bt-source's other tests build (no bt-app build); each run is one index of the tree.
+      # file, the site and the door; the file is put back after each. The test is a module of
+      # bt-source's `real_tree` binary (plan row 166), built by the clock-guard canary above (no
+      # bt-app build); each run lowers only what that one test asks for.
       - name: the request-door guard can actually fail
         shell: pwsh
         run: |
@@ -543,7 +551,7 @@ jobs:
             try {
               $planted = $original.Replace($door, $door + $plant.body) + $plant.tail
               [IO.File]::WriteAllText($file, $planted)
-              $output = & cargo test -p bt-source --locked --test request_doors -- --exact every_request_door_returns_at_once 2>&1 | Out-String
+              $output = & cargo test -p bt-source --locked --test real_tree -- --exact request_doors::every_request_door_returns_at_once 2>&1 | Out-String
               $code = $LASTEXITCODE
               if ($code -eq 0) { throw "the request-door guard accepted $($plant.site) planted in $file" }
               $named = "in the tree, not on the list: (`"$file`""
@@ -747,6 +755,37 @@ jobs:
           }
           exit 0
 
+      # A key of a vocabulary entry the merge base does not name is revealed,
+      # not added, only when a dated `## Revealed` block lists its every row
+      # (plan row 176). Plant a new entry and its row: with no block line the
+      # gate refuses it; with one it passes (the control).
+      - name: the bare-site revealed rule can actually fail
+        shell: pwsh
+        run: |
+          $file = "docs/plans/window-thread-bare-sites.tsv"
+          $registry = "crates/bt-app/src/window_waits.tsv"
+          $original = [IO.File]::ReadAllText($file)
+          $registryOriginal = [IO.File]::ReadAllText($registry)
+          $wait = "std::thread::planted_wait"
+          try {
+            $marker = "`n# entrances`n"
+            if (-not $registryOriginal.Contains($marker)) { throw "the registry has no '# entrances' section to plant before" }
+            $index = $registryOriginal.IndexOf($marker)
+            [IO.File]::WriteAllText($registry, $registryOriginal.Substring(0, $index) + "`n$wait`tall`ta planted wait" + $registryOriginal.Substring($index))
+            [IO.File]::AppendAllText($file, "bt-app`t-`tcrate::planted`t$wait`t1`n")
+            $failed = $false
+            try { & ./scripts/ci/check-window-waits.ps1 } catch { $failed = $true }
+            if (-not $failed) {
+              throw "the bare-site inventory took a new entry's row that no dated '## Revealed' block lists"
+            }
+            [IO.File]::AppendAllText($file, "## Revealed 2026-11-02 by the gates-can-fail plant`n##   bt-app | - | crate::planted | $wait`n")
+            & ./scripts/ci/check-window-waits.ps1
+          } finally {
+            [IO.File]::WriteAllText($file, $original)
+            [IO.File]::WriteAllText($registry, $registryOriginal)
+          }
+          exit 0
+
       # A merge keeps both sides' removals (A2s). Three plants, each two sides
       # committed from HEAD and their merge: both sides dropping one row passes
       # (the control); one side dropping a row and the other its twin of the
@@ -781,10 +820,15 @@ jobs:
           $cc = & $cells $c
           $renamed = "$($cc[0])`t$($cc[1])`t$($cc[2].Substring(0, $cc[2].Length - 1))$($cc[2].Substring($cc[2].Length - 1).ToUpperInvariant())`t$($cc[3])`t$($cc[4])"
           $d = $rows | Where-Object { $_ -cne $a -and $_ -cne $b -and $_ -cne $c } | Select-Object -Last 1
+          # The registry, for the plant that widens the vocabulary on one side.
+          $registry = "crates/bt-app/src/window_waits.tsv"
+          $registryText = [IO.File]::ReadAllText($registry)
           # One plant: two sides from HEAD, their merge written as `merged`, the check's refusal (or none).
-          function Plant([string]$one, [string]$two, [string]$merged) {
+          # A side's registry text, when given, is written with it; otherwise the registry stays HEAD's.
+          function Plant([string]$one, [string]$two, [string]$merged, [string]$oneRegistry = $registryText, [string]$mergedRegistry = $registryText) {
             git switch --quiet --detach $here
             [IO.File]::WriteAllText($file, $one)
+            [IO.File]::WriteAllText($registry, $oneRegistry)
             git @git commit --quiet -am "plant: one side"
             $side = (git rev-parse HEAD)
             git switch --quiet --detach $here
@@ -792,7 +836,8 @@ jobs:
             git @git commit --quiet -am "plant: the other side"
             git @git merge --quiet --no-ff --no-commit $side *> $null
             [IO.File]::WriteAllText($file, $merged)
-            git add $file
+            [IO.File]::WriteAllText($registry, $mergedRegistry)
+            git add $file $registry
             git @git commit --quiet -m "plant: the merge"
             try { & ./scripts/ci/check-window-waits.ps1 | Out-Null; $verdict = $null } catch { $verdict = $_.Exception.Message }
             Write-Host "plant verdict: $(if ($verdict) { $verdict } else { 'passed' })"
@@ -820,6 +865,32 @@ jobs:
             $row = (($c -split "`t")[0..3] -join ' | ')
             if (-not $verdict -or $verdict -cnotmatch [regex]::Escape("brings back what a side removed: the row $row holds")) {
               $failures += "a merge that keeps a row one side renamed by its case was not refused by its row: $verdict"
+            }
+            # One side widens the vocabulary by a verb HEAD's does not name and reveals its one row through a
+            # dated block; the other drops d. The merge keeps both: the family is on one side only, and its
+            # verb is new since the sides' merge base, so it is held to the larger side, not the smaller
+            # (plan row 176, review F1). It passes.
+            $wait = "std::thread::planted_wait"
+            $marker = "`n# entrances`n"
+            if (-not $registryText.Contains($marker)) { throw "the registry has no '# entrances' section to plant before" }
+            $at = $registryText.IndexOf($marker)
+            $widened = $registryText.Substring(0, $at) + "`n$wait`tall`ta planted wait" + $registryText.Substring($at)
+            $revealedRow = "bt-app`t-`tcrate::planted`t$wait`t1"
+            $header = "crate`tarm`titem`tentry`tcount"
+            $block = "## Revealed 2026-11-02 by the gates-can-fail plant`n##   bt-app | - | crate::planted | $wait"
+            $reveal = { param($text) $text.Replace("$header`n", "$block`n$header`n$revealedRow`n") }
+            $oneSide = & $reveal ($lines -join "`n")
+            $merged = & $reveal (& $without $d)
+            $verdict = Plant $oneSide (& $without $d) $merged $widened $widened
+            if ($verdict) { $failures += "a merge keeping a family one side revealed through a dated block is refused: $verdict" }
+            # The control: one side drops every row of a's (crate, entry), a family the merge base has, and the
+            # merge brings the family back. Its bound stays the smaller side's, so it is refused.
+            $fa = & $cells $a
+            $family = @($rows | Where-Object { (& $cells $_)[0] -ceq $fa[0] -and (& $cells $_)[3] -ceq $fa[3] })
+            $dropped = (@($lines | Where-Object { $family -cnotcontains $_ })) -join "`n"
+            $verdict = Plant $dropped (& $without $d) (& $without $d)
+            if (-not $verdict -or $verdict -notmatch [regex]::Escape("brings back what a side removed: the (crate, entry) $($fa[0]) | $($fa[3]) holds")) {
+              $failures += "a merge that brings back the family $($fa[0]) | $($fa[3]) one side removed was not refused by its family: $verdict"
             }
           } finally {
             & git rev-parse -q --verify MERGE_HEAD *> $null
@@ -1959,8 +2030,10 @@ jobs:
     # 41299423212, 41294422269). Two speeds of runner: the same head took 8.60
     # (41300386741) and 13.85 (41304273777). The test step is most of it, and
     # `bt-source` is about 81 % of that step (408-720 s over 322 tests,
-    # against 297 s over 165 on 2026-10-17): each of its test binaries builds
-    # the real-tree index again (plan row 166). Re-derive with the same rule
+    # against 297 s over 165 on 2026-10-17): each of its test binaries built
+    # the real-tree index again. Plan row 166 put its real-tree guards in one
+    # process (`real_tree`); the re-derivation from runs after it is a later
+    # row's. Re-derive with the same rule
     # when the cold max passes 25 / 1.36 = 18.4 min.
     timeout-minutes: 25
     # **The static C runtime is a Windows shipping rule and this job ships

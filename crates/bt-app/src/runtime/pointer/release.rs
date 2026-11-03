@@ -210,6 +210,9 @@ impl<B: Backend> Runtime<'_, B> {
             // opens the file beside the preview (row 45). Wherever the button comes up: the
             // press named its row.
             CaptureOwner::RowMiddlePress(_) => self.release_files_row_middle(),
+            // A selection drawn across the name editor's draft ends wherever the button comes up
+            // (row 179).
+            CaptureOwner::RenameSelection(_) => self.release_rename_selection(),
             // "Pressed and let go without moving" is the absence of a gesture.
             CaptureOwner::FloatHeadPress(_) => {
                 self.drop_float_head_press();
