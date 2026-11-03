@@ -26,10 +26,12 @@
 //!    timeout (`WaitForSingleObject`, `WaitForMultipleObjects`, `WaitNamedPipeW`,
 //!    `GetQueuedCompletionStatus`, `WinHttpSetTimeouts`, … and their variants) or
 //!    a std socket timeout (`set_read_timeout`, `set_write_timeout`,
-//!    `connect_timeout`), matched by the called name as the std waits are; or a
-//!    use of one of [`KERNEL_WAIT_PATHS`] (`libc::poll`, `libc::select`,
-//!    `libc::kevent`, …), matched by that path, because their last names are
-//!    common words the workspace declares (`HangWatch::poll`, `select`). The
+//!    `connect_timeout`), `WaitForInputIdle`, `WaitForDebugEvent`, `WSAPoll` or
+//!    macOS's `CFRunLoop::run_in_mode`, matched by the called name as the std
+//!    waits are; or a call of one of [`KERNEL_WAIT_PATHS`] (`libc::poll`,
+//!    `libc::select`, `libc::kevent`, …, and Winsock's `WinSock::select`),
+//!    matched by that path, because their last names are common words the
+//!    workspace declares (`HangWatch::poll`, `select`). The
 //!    bound argument is not read: a literal, a constant, an expression,
 //!    `INFINITE` and `0` all count, as `recv_timeout(Duration::ZERO)` does.
 //!    `GetOverlappedResult`, `waitpid` and `waitid` are not real waits here: they
@@ -86,12 +88,18 @@
 //! * Anywhere in a first-party package, product code included (a test module's
 //!   `use super::*` brings its parent's imports): a [`KERNEL_WAIT_PATHS`] wait
 //!   named by its path and not called right there (`use libc::poll;`,
-//!   `use libc::poll as p;`, `let f = libc::poll;`); a group or a glob of `libc`
-//!   (`use libc::{…}`, `use libc::*`) and a rename of `libc` itself
-//!   (`use libc as c`), each of which could bring a `libc` wait in under a name
-//!   its path does not spell; and a [`KERNEL_WAITS`] name renamed (`use …::
-//!   WaitForSingleObject as wait`). Imported and called under its own name, a
-//!   [`KERNEL_WAITS`] wait is found, so an import of one is not refused.
+//!   `use libc::poll as p;`, `let f = libc::poll;`), except that a path which
+//!   also names a type ([`KERNEL_WAIT_TYPES`]: the `libc::kevent` struct) is
+//!   refused only where it is imported; a group or a glob of a path's root
+//!   (`use libc::{…}`, `use libc::*`, `WinSock::{…}`), on a file's last line
+//!   too, and a rename of the root itself (`use libc as c`), each of which
+//!   could bring a wait in under a name its path does not spell; a
+//!   [`KERNEL_WAITS`] name renamed (`use …::WaitForSingleObject as wait`); and a
+//!   [`KERNEL_WAITS`] name taken as a value (`let wait = WaitForSingleObject;`),
+//!   which a call through the value would hide. Imported (inside a `use` tree)
+//!   and called under its own name, a [`KERNEL_WAITS`] wait is found, so an
+//!   import of one is not refused; a function declared by one is
+//!   [`no_workspace_function_is_named_like_a_real_wait`]'s.
 //!
 //! # What it does not see, and who does
 //!
@@ -118,9 +126,13 @@
 //!   another struct's field are not.
 //! * **A kernel wait in a test-only helper** (shape 1 reads the test's own
 //!   body). `Witness::wait_gone`'s 10 s `WaitForSingleObject` is not seen, as a
-//!   `recv_timeout` in a helper is not; a [`KERNEL_WAITS`] function taken as a
-//!   value under its own name (`let wait = WaitForSingleObject;`), as a std wait
-//!   taken that way, is not either.
+//!   `recv_timeout` in a helper is not (plan row 208 follows them). A std wait
+//!   ([`REAL_WAITS`]) taken as a value is not seen either; a kernel wait taken
+//!   that way is refused.
+//! * **A kernel wait outside the closed lists** ([`KERNEL_WAITS`],
+//!   [`KERNEL_WAIT_PATHS`]), and a first-party `extern "C"` wait called bare:
+//!   a new wait name in a test body is review's, and joins a list when it is
+//!   first written.
 //! * **A product function's own kernel wait** (`attention_pipe`'s
 //!   `READ_DEADLINE`, `open_client`'s busy wait, WinHTTP's phase timeouts): a
 //!   product window, swept by hand by plan row 163 on 2026-11-02 and recorded in
@@ -181,8 +193,15 @@ const MEASURES: [&str; 1] = ["elapsed"];
 /// (`WaitNamedPipeW`), a completion port's (`GetQueuedCompletionStatus`,
 /// `GetQueuedCompletionStatusEx`), an overlapped result's with a timeout
 /// (`GetOverlappedResultEx`) and WinHTTP's phase timeouts
-/// (`WinHttpSetTimeouts`); std: a socket's timeouts (`set_read_timeout`,
-/// `set_write_timeout`, `connect_timeout`). Bare, imported or by whole
+/// (`WinHttpSetTimeouts`), a new process's input idle (`WaitForInputIdle`), a
+/// debuggee's next event (`WaitForDebugEvent`, `WaitForDebugEventEx`), the
+/// condition, address and COM waits (`SleepConditionVariableSRW`,
+/// `SleepConditionVariableCS`, `WaitOnAddress`, `CoWaitForMultipleHandles`) and
+/// Winsock's (`WSAPoll`, `WSAWaitForMultipleEvents`; `select` is a path, in
+/// [`KERNEL_WAIT_PATHS`]); macOS: a run loop's turn for a length of time
+/// (`CFRunLoopRunInMode`, `CFRunLoop::run_in_mode`); std: a socket's timeouts
+/// (`set_read_timeout`, `set_write_timeout`, `connect_timeout`). Bare, imported
+/// (inside a `use` tree) or by whole
 /// `windows::Win32::…` path, a call is one shape: the name followed by `(`. No
 /// workspace function may be declared by one of these names
 /// ([`no_workspace_function_is_named_like_a_real_wait`]).
@@ -190,7 +209,7 @@ const MEASURES: [&str; 1] = ["elapsed"];
 /// Left out on purpose: `GetOverlappedResult` (no timeout argument), `waitpid`
 /// and `waitid` (blocking or `WNOHANG`). Each waits for an event or not at all;
 /// none waits for a length of time.
-const KERNEL_WAITS: [&str; 17] = [
+const KERNEL_WAITS: [&str; 28] = [
     "WaitForSingleObject",
     "WaitForSingleObjectEx",
     "WaitForMultipleObjects",
@@ -205,17 +224,29 @@ const KERNEL_WAITS: [&str; 17] = [
     "GetQueuedCompletionStatusEx",
     "GetOverlappedResultEx",
     "WinHttpSetTimeouts",
+    "WaitForInputIdle",
+    "WaitForDebugEvent",
+    "WaitForDebugEventEx",
+    "SleepConditionVariableSRW",
+    "SleepConditionVariableCS",
+    "WaitOnAddress",
+    "CoWaitForMultipleHandles",
+    "WSAPoll",
+    "WSAWaitForMultipleEvents",
+    "CFRunLoopRunInMode",
+    "run_in_mode",
     "set_read_timeout",
     "set_write_timeout",
     "connect_timeout",
 ];
 
-/// **The `libc` waits, matched by path** (plan row 163): their last names are
-/// common words (bt-app declares `HangWatch::poll` and `select` methods), so a
-/// use of one is `libc::<name>` — `::libc::poll` and a longer path ending so
-/// included — and every other spelling that could hide one is refused
-/// ([`kernel_wait_refusals`]). `libc::sleep` is [`REAL_WAITS`]' `sleep`.
-const KERNEL_WAIT_PATHS: [&str; 8] = [
+/// **The `libc` waits and Winsock's `select`, matched by path** (plan row 163):
+/// their last names are common words (bt-app declares `HangWatch::poll` and
+/// `select` methods), so a use of one is a call of `<root>::<name>` —
+/// `::libc::poll` and a longer path ending so included — and every other
+/// spelling that could hide one is refused ([`kernel_wait_refusals`]).
+/// `libc::sleep` is [`REAL_WAITS`]' `sleep`.
+const KERNEL_WAIT_PATHS: [&str; 13] = [
     "libc::poll",
     "libc::ppoll",
     "libc::select",
@@ -224,7 +255,17 @@ const KERNEL_WAIT_PATHS: [&str; 8] = [
     "libc::epoll_wait",
     "libc::nanosleep",
     "libc::usleep",
+    "libc::pthread_cond_timedwait",
+    "libc::sem_timedwait",
+    "libc::clock_nanosleep",
+    "libc::sigtimedwait",
+    "WinSock::select",
 ];
+
+/// The [`KERNEL_WAIT_PATHS`] that also name a type: `libc::kevent` is the
+/// kqueue event struct as well as the wait, so only its call is the wait, and
+/// only its import (which brings the function in too) is refused.
+const KERNEL_WAIT_TYPES: [&str; 1] = ["libc::kevent"];
 
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
@@ -426,12 +467,15 @@ struct Kernel<'a> {
     calls: &'a [&'static str],
     /// Matched by path, as [`KERNEL_WAIT_PATHS`].
     paths: &'a [&'static str],
+    /// The paths that also name a type, as [`KERNEL_WAIT_TYPES`].
+    typed: &'a [&'static str],
 }
 
 /// The kernel waits of plan row 163.
 const KERNEL: Kernel<'static> = Kernel {
     calls: &KERNEL_WAITS,
     paths: &KERNEL_WAIT_PATHS,
+    typed: &KERNEL_WAIT_TYPES,
 };
 
 /// Every test of one index whose own body holds shape 1 or shape 2, added to
@@ -470,8 +514,15 @@ fn scan_index_reading(
                 .map(|path| (*path, false, Pattern::path(path))),
         )
         .map(|(name, measures, pattern)| {
+            let path = matches!(pattern, Pattern::Path(_));
             let search = Search::new(needle!(pattern), View::Identifiers);
-            (name, measures, spans(index, &search))
+            let mut sites = spans(index, &search);
+            // A path wait is a wait where it is called: `libc::kevent` is a
+            // struct as well, and every other mention is refused.
+            if path {
+                sites.retain(|site| called_after(index, *site));
+            }
+            (name, measures, sites)
         })
         .collect();
     refusals.extend(kernel_wait_refusals(index, kernel));
@@ -868,70 +919,174 @@ fn declared_triggers(index: &Index) -> Vec<String> {
         .collect()
 }
 
+/// Where the file holding `span` ends, in the union.
+fn file_end(index: &Index, span: Span) -> usize {
+    index
+        .file_at(span.start())
+        .map_or(index.union().len(), |file| file.span().end())
+}
+
+/// The code of the union from `start` to `end`, its comments left out.
+fn code_between(index: &Index, start: usize, end: usize) -> String {
+    let union = index.union();
+    let comments = index.comments();
+    let first = comments.partition_point(|comment| comment.span().end() <= start);
+    let mut code = String::new();
+    let mut at = start;
+    for comment in comments[first..]
+        .iter()
+        .take_while(|comment| comment.span().start() < end)
+    {
+        let span = comment.span();
+        code.push_str(&union[at..span.start().max(at)]);
+        at = at.max(span.end().min(end));
+    }
+    code.push_str(&union[at..end]);
+    code
+}
+
+/// Whether the code right after `span`, in its file and past any comment,
+/// opens a call.
+fn called_after(index: &Index, span: Span) -> bool {
+    let union = index.union();
+    let comments = index.comments();
+    let stop = file_end(index, span);
+    let mut next_comment = comments.partition_point(|comment| comment.span().end() <= span.end());
+    let mut at = span.end();
+    while at < stop {
+        if let Some(comment) = comments.get(next_comment)
+            && comment.span().start() <= at
+        {
+            at = at.max(comment.span().end());
+            next_comment += 1;
+            continue;
+        }
+        let Some(next) = union[at..stop].chars().next() else {
+            return false;
+        };
+        if !next.is_whitespace() {
+            return next == '(';
+        }
+        at += next.len_utf8();
+    }
+    false
+}
+
 /// **What [`KERNEL_WAITS`] and [`KERNEL_WAIT_PATHS`] cannot read, refused by
-/// file and line** (plan row 163), anywhere in `index`: a `libc` wait named by
-/// its path and not called right there, a group or glob of `libc`, a rename of
-/// `libc`, and a renamed kernel wait. Each would let a test call a wait under a
-/// name the scan does not match; none is written in the tree.
+/// file and line** (plan row 163), anywhere in `index`: a path wait named by its
+/// path and not called right there (a [`KERNEL_WAIT_TYPES`] path only where it
+/// is imported), a group or glob of a path's root, a rename of the root, a
+/// renamed kernel wait, and a kernel wait taken as a value. Each would let a
+/// test call a wait under a name the scan does not match; none is written in the
+/// tree.
 fn kernel_wait_refusals(index: &Index, kernel: &Kernel<'_>) -> Vec<String> {
     let tokens = index.tokens();
-    let union = index.union();
     let name = |at: usize| index.text(tokens[at].name_span());
     let file = |at: usize| {
         index
-            .locate(tokens[at].span().start())
-            .map(|location| location.file)
+            .file_at(tokens[at].span().start())
+            .map(|file| file.span().start())
     };
-    // The bytes between a token and the next one in the same file, trimmed.
+    // The token after `at` when it is in the same file.
+    let next = |at: usize| (at + 1 < tokens.len() && file(at) == file(at + 1)).then_some(at + 1);
+    // The code between `at` and the next token in its file, or the rest of the
+    // file after the last one, comments left out and trimmed.
     let gap = |at: usize| {
-        let next = tokens.get(at + 1)?;
-        (file(at) == file(at + 1))
-            .then(|| union[tokens[at].span().end()..next.span().start()].trim())
+        let end = match next(at) {
+            Some(after) => tokens[after].span().start(),
+            None => file_end(index, tokens[at].span()),
+        };
+        code_between(index, tokens[at].span().end(), end)
+            .trim()
+            .to_owned()
     };
-    let called = |at: usize| {
-        union[tokens[at].span().end()..]
-            .trim_start()
-            .starts_with('(')
+    let called = |at: usize| called_after(index, tokens[at].span());
+    let renamed =
+        |at: usize| next(at).is_some_and(|after| name(after) == "as") && gap(at).is_empty();
+    // Inside a `use` tree: back to a `use`, only names (`as` among them), the
+    // tree's own punctuation and comments stand between.
+    let imported = |at: usize| {
+        let mut at = at;
+        while at > 0 && file(at - 1) == file(at) {
+            let between = code_between(
+                index,
+                tokens[at - 1].span().end(),
+                tokens[at].span().start(),
+            );
+            if !between
+                .chars()
+                .all(|c| c.is_whitespace() || matches!(c, ':' | '{' | '}' | ','))
+            {
+                return false;
+            }
+            at -= 1;
+            if name(at) == "use" {
+                return true;
+            }
+        }
+        false
     };
-    let libc_wait = |segment: &str| {
-        kernel
-            .paths
-            .iter()
-            .any(|path| path.strip_prefix("libc::") == Some(segment))
+    let declared = |at: usize| at > 0 && file(at - 1) == file(at) && name(at - 1) == "fn";
+    let roots: BTreeSet<&str> = kernel
+        .paths
+        .iter()
+        .filter_map(|path| path.split("::").next())
+        .collect();
+    let path_wait = |root: &str, segment: &str| {
+        kernel.paths.iter().copied().find(|path| {
+            path.strip_prefix(root)
+                .and_then(|rest| rest.strip_prefix("::"))
+                == Some(segment)
+        })
     };
     let mut refusals = Vec::new();
     for (at, token) in tokens.iter().enumerate() {
         let here = index.text(token.name_span());
-        let why = if kernel.calls.contains(&here) && gap(at) == Some("") && name(at + 1) == "as" {
-            Some(format!(
-                "`{here}` is renamed; the timing scan reads a kernel wait by its own called \
-                 name, so a test calling the new name would not be seen — call it as `{here}`"
-            ))
-        } else if here == "libc" && !kernel.paths.is_empty() {
-            match gap(at) {
-                Some("") if name(at + 1) == "as" => Some(
-                    "`libc` is renamed; the timing scan reads a libc wait by its `libc::` path, \
-                     so a wait under the new name would not be seen"
-                        .to_owned(),
-                ),
-                Some("::") if libc_wait(name(at + 1)) && !called(at + 1) => Some(format!(
-                    "`libc::{}` is named and not called here (an import, a rename or a value); \
-                     the timing scan reads a libc wait only as a call of its path, so a test \
-                     calling it under another name would not be seen — call `libc::{}(` where \
-                     it waits",
-                    name(at + 1),
-                    name(at + 1)
+        let why = if kernel.calls.contains(&here) {
+            if renamed(at) {
+                Some(format!(
+                    "`{here}` is renamed; the timing scan reads a kernel wait by its own called \
+                     name, so a test calling the new name would not be seen — call it as `{here}`"
+                ))
+            } else if !called(at) && !imported(at) && !declared(at) {
+                Some(format!(
+                    "`{here}` is taken as a value here, not called; the timing scan reads a \
+                     kernel wait as a call of its own name, so a call through the value would \
+                     not be seen — call `{here}(` where it waits"
+                ))
+            } else {
+                None
+            }
+        } else if roots.contains(here) {
+            let segment = next(at).map(|after| (after, name(after)));
+            let between = gap(at);
+            match (between.as_str(), segment) {
+                ("", Some((_, "as"))) => Some(format!(
+                    "`{here}` is renamed; the timing scan reads a {here} wait by its `{here}::` \
+                     path, so a wait under the new name would not be seen"
                 )),
-                Some(between)
+                ("::", Some((after, segment))) => match path_wait(here, segment) {
+                    Some(path)
+                        if !called(after) && (imported(at) || !kernel.typed.contains(&path)) =>
+                    {
+                        Some(format!(
+                            "`{path}` is named and not called here (an import, a rename or a \
+                             value); the timing scan reads a {here} wait only as a call of its \
+                             path, so a test calling it under another name would not be seen — \
+                             call `{path}(` where it waits"
+                        ))
+                    }
+                    _ => None,
+                },
+                (between, _)
                     if between.starts_with("::")
                         && (between.contains('{') || between.contains('*')) =>
                 {
-                    Some(
-                        "a group or a glob of `libc` is imported; it could bring a libc wait in \
-                         under a name the timing scan does not read — name each libc item by \
-                         its path"
-                            .to_owned(),
-                    )
+                    Some(format!(
+                        "a group or a glob of `{here}` is imported; it could bring a {here} wait \
+                         in under a name the timing scan does not read — name each {here} item \
+                         by its path"
+                    ))
                 }
                 _ => None,
             }
@@ -1186,7 +1341,14 @@ fn clock_arithmetic_is_two_readings_and_a_clock_in_an_unparsed_macro_is_refused(
 /// `TcpStream::connect_timeout`, F5 `libc::poll` in a closure — each found; F6 a
 /// first-party `poll` called bare and as a method, F8 a wait only in a helper —
 /// neither found; F7 `use libc::poll;` and a renamed `WaitForMultipleObjectsEx`
-/// — refused; F9 a function named `WaitNamedPipeW` — a declared trigger.
+/// — refused; F9 a function named `WaitNamedPipeW` — a declared trigger; F10
+/// `::libc::poll` and a longer path ending in `libc::poll`, F11 the rest of the
+/// closed list (`WaitForInputIdle`, `WaitForDebugEvent`, `WSAPoll`, Winsock's
+/// `select` by path, `CFRunLoop::run_in_mode`, `CFRunLoopRunInMode`) — found;
+/// F12 a `libc::kevent` struct — neither found nor refused; F13 a libc wait and
+/// a kernel wait taken as values, a group of `libc`, a rename of `libc`, an
+/// import of `libc::kevent` and of Winsock's `select`, and F14 a glob of `libc`
+/// on the file's last line with no newline — each refused.
 ///
 /// MUTATION (the removal check, run here): scan with no kernel waits and every
 /// one of F1–F5 leaves the found set, and F7's refusals with them; match the
@@ -1213,10 +1375,12 @@ fn a_kernel_wait_in_a_test_body_is_a_real_wait_and_a_hidden_one_is_refused() {
                 "kernel:lib:kernel a_libc_poll_in_a_closure",
                 vec!["libc::poll"]
             ),
+            ("kernel:lib:kernel a_longer_libc_path", vec!["libc::poll"]),
             (
                 "kernel:lib:kernel a_look_at_once",
                 vec!["WaitForSingleObject"]
             ),
+            ("kernel:lib:kernel a_rooted_libc_path", vec!["libc::poll"]),
             (
                 "kernel:lib:kernel a_socket_read_timeout",
                 vec!["set_read_timeout"]
@@ -1233,11 +1397,23 @@ fn a_kernel_wait_in_a_test_body_is_a_real_wait_and_a_hidden_one_is_refused() {
                 "kernel:lib:kernel an_unbounded_wait",
                 vec!["WaitForSingleObject"]
             ),
+            (
+                "kernel:lib:kernel the_other_kernel_waits",
+                vec![
+                    "CFRunLoopRunInMode",
+                    "WSAPoll",
+                    "WaitForDebugEvent",
+                    "WaitForInputIdle",
+                    "WinSock::select",
+                    "run_in_mode"
+                ]
+            ),
         ],
-        "F1-F5 are real waits; F6's first-party polls and F8's helper are not"
+        "F1-F5, F10 and F11 are real waits; F6's first-party polls, F8's helper, \
+         F12's struct and F13's values are not"
     );
     let file = "crates/bt-source/tests/fixtures/timing_kernel_waits/lib.rs";
-    assert_eq!(refusals.len(), 2, "{refusals:#?}");
+    assert_eq!(refusals.len(), 9, "{refusals:#?}");
     assert!(
         refusals[0].starts_with(&format!("{file}:85: "))
             && refusals[0].contains("`libc::poll` is named and not called"),
@@ -1248,6 +1424,21 @@ fn a_kernel_wait_in_a_test_body_is_a_real_wait_and_a_hidden_one_is_refused() {
             && refusals[1].contains("`WaitForMultipleObjectsEx` is renamed"),
         "F7: the rename is refused by file and line: {refusals:#?}"
     );
+    let rest = [
+        (138, "`libc::poll` is named and not called"),
+        (143, "`WaitForSingleObject` is taken as a value"),
+        (147, "a group or a glob of `libc`"),
+        (151, "`libc` is renamed"),
+        (155, "`libc::kevent` is named and not called"),
+        (159, "`WinSock::select` is named and not called"),
+        (163, "a group or a glob of `libc`"),
+    ];
+    for ((line, why), refusal) in rest.iter().zip(&refusals[2..]) {
+        assert!(
+            refusal.starts_with(&format!("{file}:{line}: ")) && refusal.contains(why),
+            "F13/F14: {why} at line {line}: {refusals:#?}"
+        );
+    }
     let declared = declared_triggers(&index);
     assert!(
         declared.len() == 1 && declared[0].contains("WaitNamedPipeW"),
@@ -1259,6 +1450,7 @@ fn a_kernel_wait_in_a_test_body_is_a_real_wait_and_a_hidden_one_is_refused() {
     let none = Kernel {
         calls: &[],
         paths: &[],
+        typed: &[],
     };
     scan_index_reading(&index, "kernel", &none, &mut unwidened, &mut unrefused);
     assert_eq!(

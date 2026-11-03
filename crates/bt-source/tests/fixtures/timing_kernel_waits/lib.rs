@@ -102,3 +102,62 @@ fn a_wait_only_in_a_helper() {
 fn WaitNamedPipeW(_name: &str, _milliseconds: u32) -> bool {
     true
 }
+
+// F10: a libc wait by a rooted path and by a longer path ending so — found.
+#[test]
+fn a_rooted_libc_path() {
+    let _ = unsafe { ::libc::poll(std::ptr::null_mut(), 0, 250) };
+}
+
+#[test]
+fn a_longer_libc_path() {
+    let _ = unsafe { crate::ffi::libc::poll(std::ptr::null_mut(), 0, 250) };
+}
+
+// F11: the other kernel waits of the closed list — found.
+#[test]
+fn the_other_kernel_waits() {
+    let _ = unsafe { WaitForInputIdle(handle(), 250) };
+    let _ = unsafe { WaitForDebugEvent(std::ptr::null_mut(), 250) };
+    let _ = unsafe { WSAPoll(&mut [], 250) };
+    let _ = unsafe { windows::Win32::Networking::WinSock::select(0, None, None, None, None) };
+    CFRunLoop::run_in_mode(unsafe { kCFRunLoopDefaultMode }, 0.25, false);
+    let _ = unsafe { CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.25, 0) };
+}
+
+// F12: `libc::kevent` is a struct as well as a wait; built, it is neither found
+// nor refused.
+#[test]
+fn a_kevent_built_not_waited() {
+    let _events: [libc::kevent; 0] = [];
+}
+
+// F13: the other spellings that would hide a wait, each refused.
+#[test]
+fn a_libc_wait_as_a_value() {
+    let _wait = libc::poll;
+}
+
+#[test]
+fn a_kernel_wait_as_a_value() {
+    let _wait = WaitForSingleObject;
+}
+
+mod grouped {
+    use libc::{c_int, poll};
+}
+
+mod renamed_crate {
+    use libc as c;
+}
+
+mod kqueue {
+    use libc::kevent;
+}
+
+mod winsock {
+    use windows::Win32::Networking::WinSock::select;
+}
+
+// F14: a glob of libc on the file's last line, with no newline after it.
+use libc::*;

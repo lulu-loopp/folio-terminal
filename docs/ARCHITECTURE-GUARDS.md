@@ -1218,12 +1218,16 @@ sits in a private function (`paste_withdrawn`); noted in TIMING-BOUND.
 2026-11-02 (T-FIXED-MILLISECOND-KERNEL-WAITS-IN-BT-PLATFORM, plan row 163): the timing scan's first shape
 reads the kernel's waits as it reads the standard library's. A test whose own body calls a Win32 object,
 pipe, port or sleep wait (`WaitForSingleObject`, `WaitForMultipleObjects`, `WaitNamedPipeW`,
-`GetQueuedCompletionStatus` and their kin), WinHTTP's timeouts or a std socket timeout (`set_read_timeout`,
-`set_write_timeout`, `connect_timeout`) is a row, matched by the called name whatever the bound (a literal, a
-constant, `INFINITE`, `0`); a `libc` wait (`libc::poll`, `select`, `kevent`, ...) is matched by its `libc::`
-path, because bt-app declares a `poll` and `select`s of its own, and a `libc` wait named and not called, a
-group, glob or rename of `libc`, and a renamed kernel wait are refused by file and line, anywhere in a
-package. `GetOverlappedResult`, `waitpid` and `waitid` are not read: they wait for an event or not at all,
+`GetQueuedCompletionStatus` and their kin), a debuggee's, a new process's input idle, a condition, address,
+COM or Winsock wait (`WSAPoll`), WinHTTP's timeouts, a macOS run loop run for a time
+(`CFRunLoop::run_in_mode`) or a std socket timeout (`set_read_timeout`, `set_write_timeout`,
+`connect_timeout`) is a row, matched by the called name whatever the bound (a literal, a constant,
+`INFINITE`, `0`); a `libc` wait (`libc::poll`, `select`, `kevent`, ...) or Winsock's `select` is matched by
+the call of its path (`libc::`, `WinSock::`), because bt-app declares a `poll` and `select`s of its own. A
+path wait named and not called (`libc::kevent`, a struct too, only where it is imported), a group, glob or
+rename of `libc` or `WinSock` (on a file's last line too), a renamed kernel wait and a kernel wait taken as
+a value are refused by file and line, anywhere in a package. The lists are closed: a wait not on them is
+review's, and joins them when it is first written. `GetOverlappedResult`, `waitpid` and `waitid` are not read: they wait for an event or not at all,
 and a test stuck in one is the watchdog's. The product half stays a hand sweep, as rows 125 and 153 ruled:
 row 163 judged bt-platform's product kernel waits at `f641b0064` and recorded them in TIMING-BOUND's
 `# noted` line (the attention endpoint's first word, `READ_DEADLINE` and busy wait are plan row 192;

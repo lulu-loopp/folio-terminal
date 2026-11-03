@@ -1134,8 +1134,9 @@ mod macos_handshake_tests {
     /// **A loop that is turning answers, well inside the bound.**
     ///
     /// The bound handed in is the suite's patience (plan row 163): the answer
-    /// comes as soon as the loop turns, so a slow machine only makes it later,
-    /// never `Silent`; a 5 s bound raced the turning thread.
+    /// comes as soon as the loop turns. Running out of the patience is still a
+    /// real bound, the suite's convention: the test's red, by name, not the 5 s
+    /// race with the turning thread it was.
     ///
     /// MUTATION: drop the `wake_up` in `ask_run_loop_to_answer` and this hangs
     /// until the timeout, because a loop asleep in `mach_msg` is not told the

@@ -1345,9 +1345,10 @@ mod tests {
         /// The idle bound every download here that must get an answer is handed:
         /// the suite's patience, not a 5 s race with the loopback server's thread
         /// (plan row 163). It is both the session's request and resource timeouts
-        /// and the silence deadline, so an outcome the server decides is never
-        /// turned into a timeout by a slow machine; the tests that are about a
-        /// deadline hand their own (`stretch`, `DOWNLOAD_IDLE_TIMEOUT`).
+        /// and the silence deadline. Running out of it is still a real bound, the
+        /// suite's convention: the test's red, by name, not a 5 s race. The tests
+        /// that are about a deadline hand their own (`stretch`,
+        /// `DOWNLOAD_IDLE_TIMEOUT`).
         const IDLE: Duration = crate::door_skipped::PATIENCE;
 
         fn scratch(name: &str) -> PathBuf {
@@ -1487,14 +1488,17 @@ mod tests {
         /// RED (U-7) — **a `Content-Length` over the ceiling is refused at the
         /// headers, before any body or file.**
         ///
-        /// MUTATION: drop `admit_length` from `didReceiveResponse:`.
+        /// MUTATION: drop `admit_length` from `didReceiveResponse:`, and this
+        /// waits for the idle timeout instead. The
+        /// server's pause is twice the idle bound, so it is the idle deadline
+        /// that ends the wait, never the server's close.
         #[test]
         fn an_announced_length_over_the_ceiling_is_refused_before_the_body() {
             let directory = scratch("announced-over");
             let server = serve(|_| {
                 vec![
                     Step::Send(begun(&["Content-Length: 1073741824".to_owned()])),
-                    Step::Pause(Duration::from_secs(10)),
+                    Step::Pause(IDLE * 2),
                 ]
             });
             let port = server.port();
