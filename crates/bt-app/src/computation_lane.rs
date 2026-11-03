@@ -771,18 +771,18 @@ pub(crate) fn run_decoration_worker(
 /// **The decoration worker, its formula engine made by `make_engine`**: the decoder is made once,
 /// on the worker, and the door it returns answers each request.
 ///
-/// The engine is made the first time a formula arm needs it (`Math`, or a `PreviewMath` whose
-/// key is drawable), on the worker, and never again (T-LANE-SUITE-PATIENCE-UNDER-LOAD): the
-/// desktop engine scans every font the machine has, which a worker that only decodes pictures,
-/// glances, video frames, animations and pages never needs, and which no answer of theirs waits
-/// for.
+/// The engine is made beside the worker, from the moment the door is made ([`made_beside`]), and
+/// only a formula arm waits for it (`Math`, or a `PreviewMath` whose key is drawable;
+/// T-LANE-SUITE-PATIENCE-UNDER-LOAD): the desktop engine scans every font the machine has, which
+/// no answer of a picture, a glance, a video frame, an animation or a page needs or waits for,
+/// and a formula asked once the scan is over waits for nothing.
 pub(crate) fn run_decoration_worker_with(
     worker: &bt_platform::admission::WorkerCtx,
-    make_engine: impl FnOnce() -> MathEngine + 'static,
+    make_engine: impl FnOnce() -> MathEngine + Send + 'static,
 ) -> Door<MathWorkerRequest> {
     // The door is made on the worker; each request is handed the same capability again.
     let _ = worker;
-    let engine = std::cell::LazyCell::new(make_engine);
+    let engine = std::cell::LazyCell::new(made_beside(make_engine));
     let mut image_decoder = InlineImageDecoder::default();
     Box::new(
         move |worker: &bt_platform::admission::WorkerCtx, work: MathWorkerRequest| {
@@ -875,6 +875,42 @@ pub(crate) fn run_decoration_worker_with(
             MathWorkerResult { leaf, completion }
         },
     )
+}
+
+/// **The formula engine, made beside the decoration worker**: `make_engine` runs on a thread of
+/// its own (`bt-math-fonts`, below normal) from the moment the door is made, and the closure
+/// returned waits for it — called by the door's `LazyCell` at the first formula arm that needs the
+/// engine, never by a picture's answer. A thread the door refuses leaves the factory here, and the
+/// first formula makes the engine on the worker. A panic in the factory is the formula's: it
+/// reaches the formula arm's own catch (`lane::task`), and every later formula fails the same way.
+fn made_beside<F>(make_engine: F) -> impl FnOnce() -> MathEngine
+where
+    F: FnOnce() -> MathEngine + Send + 'static,
+{
+    let factory = Arc::new(Mutex::new(Some(make_engine)));
+    let on_its_thread = Arc::clone(&factory);
+    let building = bt_platform::spawn_at_priority(
+        "bt-math-fonts",
+        bt_platform::ThreadPriority::BelowNormal,
+        move |_ctx| {
+            let make = locked(&on_its_thread).take();
+            make.map(|make| make())
+        },
+    );
+    move || {
+        let built = match building {
+            Ok(thread) => thread
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
+            Err(_) => None,
+        };
+        built.unwrap_or_else(|| {
+            let make = locked(&factory)
+                .take()
+                .expect("a factory no thread took is still here");
+            make()
+        })
+    }
 }
 
 /// **A lane under a test's eye** — the lane, its wakes, the lines its ledgers said, what its sink
@@ -1929,8 +1965,8 @@ mod tests {
     /// missing file is answered while the factory is held, and no engine has been made; once the
     /// factory is let go, a terminal formula is typeset, and the factory has run once.
     ///
-    /// MUTATION: make the engine where the door is made (`let engine = make_engine();` in
-    /// `run_decoration_worker_with`) — the worker stands in the held factory before it serves
+    /// MUTATION: wait for the engine where the door is made (`LazyCell::force(&engine)` after it
+    /// in `run_decoration_worker_with`) — the worker stands on the held factory before it serves
     /// anything, and the glance's terminal never comes within the suite's patience.
     #[test]
     fn a_picture_is_answered_before_the_formula_engine_is_made() {
@@ -1971,7 +2007,9 @@ mod tests {
             0,
             "no formula engine was made for a picture"
         );
-        let_go.send(()).expect("the held factory is still there to be let go");
+        let_go
+            .send(())
+            .expect("the held factory is still there to be let go");
         let mut session = a_pane_with_a_formula();
         hand_out(&mut session, &lane.lane);
         let (_, _, typeset, _) = lane.next_ended(Share::Decoration, nobody);
