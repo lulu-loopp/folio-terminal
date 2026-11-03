@@ -232,8 +232,13 @@ fn read_opened(
 }
 
 /// The whole read of an open handle into a buffer already sized for it, bounded by
-/// [`MAX_RASTER_BYTES`] — the seam a test hands a refused read (a byte-range lock).
-fn read_into(mut bytes: Vec<u8>, reader: impl Read) -> Result<Option<Vec<u8>>, Held> {
+/// [`MAX_RASTER_BYTES`] — the seam a test hands a refused read (a byte-range lock). It takes the
+/// counting reader `file_reads::open` hands out, over any source, so the bytes it reads are the
+/// ledger's in a test as in the product.
+fn read_into<R: Read>(
+    mut bytes: Vec<u8>,
+    reader: bt_platform::file_reads::Reader<'_, R>,
+) -> Result<Option<Vec<u8>>, Held> {
     if let Err(error) = reader.take(MAX_RASTER_BYTES).read_to_end(&mut bytes) {
         return refused(&error);
     }
@@ -1354,7 +1359,14 @@ mod tests {
                 "os error {code}, met by read_capped's open"
             );
             assert_eq!(
-                read_into(Vec::new(), Refusing(code)),
+                read_into(
+                    Vec::new(),
+                    bt_platform::file_reads::Reader::new(
+                        Refusing(code),
+                        bt_platform::file_reads::Lane::Pdf,
+                        None
+                    )
+                ),
                 expected(&error()),
                 "os error {code}, met by read_capped's read_to_end"
             );
