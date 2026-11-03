@@ -899,9 +899,7 @@ fn still_texture_key(
 /// the header is decided here, **before** [`AnimationCursor::over`] allocates a
 /// canvas — and no frame is pulled here at all, because the two callers want
 /// different numbers of them.
-fn open(
-    source: Box<dyn AnimationSource>,
-) -> Result<(Box<AnimationCursor>, u32, u32), NotOpened> {
+fn open(source: Box<dyn AnimationSource>) -> Result<(Box<AnimationCursor>, u32, u32), NotOpened> {
     // The container is judged by its own header and not by the name that led
     // here, which is the discipline `decode_image_bytes_within` already keeps: a
     // `.gif` that is a JPEG is a JPEG. Read off the front of the stream and then
@@ -2773,7 +2771,10 @@ mod tests {
         // either, so the picture decoder is asked — `None`, not an empty
         // picture.
         let path = scratch_gif("frame-past-the-ceiling", &a_gif_declaring(2_048, 2_049));
-        assert_eq!(decode(&path).err(), Some(AnimationRefusal::FrameTooLarge.into()));
+        assert_eq!(
+            decode(&path).err(),
+            Some(AnimationRefusal::FrameTooLarge.into())
+        );
         assert!(
             first_frame(&path).is_none(),
             "the picture lane answers this"

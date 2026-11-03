@@ -26104,7 +26104,9 @@ mod tests {
     #[test]
     fn a_printed_picture_another_program_holds_is_asked_once_more_and_then_failed() {
         let held = || -> Result<DecodedInlineImage, InlineImageDecodeError> {
-            Err(InlineImageDecodeError::HeldElsewhere("held 被占用".to_owned()))
+            Err(InlineImageDecodeError::HeldElsewhere(
+                "held 被占用".to_owned(),
+            ))
         };
         let (directory, path) = temporary_path_image();
         let started = Instant::now();
@@ -26139,7 +26141,10 @@ mod tests {
         for _ in 0..5 {
             session.complete_inline_image_result(again.clone(), held());
         }
-        assert!(next_image_read(&mut session).is_none(), "once, however many answers come");
+        assert!(
+            next_image_read(&mut session).is_none(),
+            "once, however many answers come"
+        );
         assert_eq!(session.outstanding_decoration_work(), 0);
 
         let mut session = fresh();
@@ -26149,7 +26154,10 @@ mod tests {
         let mut decoder = crate::inline_image::InlineImageDecoder::default();
         let decoded = decoder.decode(again.clone());
         assert!(session.complete_inline_image_result(again, decoded));
-        assert!(session.image_path_is_verified(&path), "the second read verifies it");
+        assert!(
+            session.image_path_is_verified(&path),
+            "the second read verifies it"
+        );
         let _ = std::fs::remove_dir_all(&directory);
     }
 

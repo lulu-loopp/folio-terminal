@@ -25428,9 +25428,7 @@ impl AnimationCache {
             // (T-HELD-FILE-IN-THE-OTHER-PICTURE-LANES; row 164's bound).
             let once_more = match self.playbacks.peek(&key) {
                 None => false,
-                Some(AnimationEntry::Unanswered {
-                    asked_again: false,
-                }) => true,
+                Some(AnimationEntry::Unanswered { asked_again: false }) => true,
                 Some(_) => continue,
             };
             match ask(path) {
@@ -55873,7 +55871,9 @@ mod background_mailbox_tests {
         for once_more in [false, true] {
             assert_eq!(
                 answer(
-                    Err(bt_term::BackgroundImageError::Io("access is denied".to_owned())),
+                    Err(bt_term::BackgroundImageError::Io(
+                        "access is denied".to_owned()
+                    )),
                     once_more
                 ),
                 BackgroundAnswer::Refuse,

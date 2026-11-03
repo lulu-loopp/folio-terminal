@@ -1239,9 +1239,7 @@ pub fn decode_background_image(
     }
     let mut file = bt_effects::file_reads::open(bt_effects::file_reads::Lane::InlineImage, path)
         .map_err(background_read_refused)?;
-    let metadata = file
-        .metadata()
-        .map_err(background_read_refused)?;
+    let metadata = file.metadata().map_err(background_read_refused)?;
     if !metadata.is_file() {
         return Err(BackgroundImageError::InvalidPath);
     }

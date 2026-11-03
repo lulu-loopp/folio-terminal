@@ -51,12 +51,12 @@ crates/bt-app/src/i18n.rs:7959 the command-line usage text: option descriptions 
 crates/bt-app/src/install_channel.rs:1440 a Scoop manifest sample: JSON indentation after an escaped line break
 crates/bt-app/src/install_channel.rs:1896 the Homebrew cask's own key alignment, as the cask writes it
 crates/bt-app/src/runtime/math.rs:3124 the chrome dump's tag column: `quad` padded to the width of the other tags
-crates/bt-app/src/main.rs:41609 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-app/src/main.rs:44221 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-app/src/main.rs:44670 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-app/src/main.rs:44670 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-app/src/main.rs:44862 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-app/src/main.rs:45788 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-app/src/main.rs:41607 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-app/src/main.rs:44219 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-app/src/main.rs:44668 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-app/src/main.rs:44668 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-app/src/main.rs:44860 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-app/src/main.rs:45786 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-app/src/main.rs:59579 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-app/src/preview_live.rs:1686 table fixture: each cell padded to its column
 crates/bt-app/src/preview_select.rs:777 code sample: the indentation after an escaped line break is the sample's own
@@ -131,8 +131,8 @@ crates/bt-source/tests/tripwire.rs:9024 code sample: the indentation after an es
 crates/bt-source/tests/tripwire.rs:9406 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-term/src/session.rs:22503 recorded terminal byte stream: the blank cells a repaint wrote
 crates/bt-term/src/session.rs:22620 terminal screen fixture: the columns are where the terminal draws them
-crates/bt-term/src/session.rs:35832 terminal screen fixture: the columns are where the terminal draws them
-crates/bt-term/src/session.rs:38671 terminal screen fixture: the columns are where the terminal draws them
+crates/bt-term/src/session.rs:35840 terminal screen fixture: the columns are where the terminal draws them
+crates/bt-term/src/session.rs:38679 terminal screen fixture: the columns are where the terminal draws them
 crates/bt-term/src/session/pane_columns_tests.rs:135 terminal screen fixture: the columns are where the terminal draws them
 crates/bt-term/src/session/pane_columns_tests.rs:137 terminal screen fixture: the columns are where the terminal draws them
 crates/bt-term/src/session/pane_columns_tests.rs:144 terminal screen fixture: the columns are where the terminal draws them

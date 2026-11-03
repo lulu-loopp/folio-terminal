@@ -1028,7 +1028,10 @@ fn a_failed_open_is_unanswered_and_only_the_files_next_open_asks_again() {
     );
     fail_awaited(&mut window, &spinner);
     assert!(
-        matches!(window.get(&key), Some(AnimationEntry::Unanswered { asked_again: true })),
+        matches!(
+            window.get(&key),
+            Some(AnimationEntry::Unanswered { asked_again: true })
+        ),
         "the failed open is unanswered"
     );
     for _ in 0..3 {
@@ -1530,7 +1533,10 @@ fn a_gif_another_program_holds_is_asked_once_more_and_then_only_on_a_new_look() 
     let mut window = AnimationCache::with_budget(MAX_ANIMATION_CACHE_BYTES);
     let held_twice = |window: &mut AnimationCache| {
         assert_eq!(walk_asking(window, &on(&gif), admitted), vec![gif.clone()]);
-        assert!(answer_awaited(window, &key, 1, held()), "a held answer is filed");
+        assert!(
+            answer_awaited(window, &key, 1, held()),
+            "a held answer is filed"
+        );
         assert!(
             matches!(
                 window.get(&key),
@@ -1576,7 +1582,10 @@ fn a_gif_another_program_holds_is_asked_once_more_and_then_only_on_a_new_look() 
     held_twice(&mut window);
 
     let mut window = AnimationCache::with_budget(MAX_ANIMATION_CACHE_BYTES);
-    assert_eq!(walk_asking(&mut window, &on(&gif), admitted), vec![gif.clone()]);
+    assert_eq!(
+        walk_asking(&mut window, &on(&gif), admitted),
+        vec![gif.clone()]
+    );
     assert!(answer_awaited(&mut window, &key, 1, held()));
     assert_eq!(
         walk_asking(&mut window, &on(&gif), || OpenAsked::Unstarted),
