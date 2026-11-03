@@ -6,7 +6,8 @@
 //!
 //! `crate::settings` is the sheet's model (rows, layout, geometry, values, and the trait the window
 //! drives it through); this file reads it, and it never reads this one. Moved out of `main.rs` by
-//! K2 (T-SPLIT-2B) batches 23 and 24. Bodies unchanged.
+//! K2 (T-SPLIT-2B) batches 23, 24 and 27 (batch 27: the scheme verbs and the schemes folder's
+//! watch). Bodies unchanged.
 
 use crate::runtime;
 use crate::window_seam::prelude::*;
