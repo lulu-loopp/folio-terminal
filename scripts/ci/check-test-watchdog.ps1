@@ -8,8 +8,8 @@
 # (the stand-in and a grandchild it started, checked by pid), a slow test that ends is green, silence
 # is red with no name, a child process's own report in the middle of a binary suspends the named tests
 # without a false word and a hang behind it is still named (plan row 203), the wait before the first
-# test binary is not timed, cargo's exit code and every
-# word pass through, and each shape in which libtest prints no names is refused before anything runs.
+# test binary is not timed, cargo's exit code and every word pass through, and each shape in which
+# libtest prints no names is refused before anything runs.
 #
 # What this does not prove is that libtest 1.94.1 prints those lines; the real-binary run in the
 # ticket's report does, and is re-run when rust-toolchain.toml moves (docs/ARCHITECTURE-GUARDS.md,

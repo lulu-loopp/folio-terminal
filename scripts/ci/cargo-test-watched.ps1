@@ -21,8 +21,9 @@
 #     binary's report starts; or
 #   * a test started a child process that inherited this stdout and runs a libtest report of its own: two
 #     bt-app tests re-run their own test binary that way (`hostile_math_is_refused_and_the_real_decoration_
-#     worker_survives` in tests.rs, and the Windows `detached_handoff_helper_waits` child in
-#     update_handoff.rs), and their `running 1 test` comes in the middle of the folio binary's report.
+#     worker_survives` in tests.rs, and the Windows `a_real_update_handoff_is_not_probe_contained` in
+#     update_handoff.rs, whose child runs `detached_handoff_helper_waits`), and the child's `running 1 test`
+#     comes in the middle of the folio binary's report.
 # So at that line every tracked name is suspended: no longer timed (a dead binary's test is never taken
 # for a later binary's hang), and kept. A suspended name's result line releases it, as a tracked name's
 # does, silently. Only names that never print a result line are said, once, at the end of the run:
@@ -34,9 +35,16 @@
 # doc-test binary still compiling) leaves the previous binary's unfinished names tracked (timed) until
 # the next binary that prints one: a run that passes the limit meanwhile is red naming the dead test, and
 # the silence check is off while any name is tracked.
-# **What stdout cannot tell, named:** an `--exact` child of a test prints a result line with its parent's
-# own name, and that line releases the parent's name too, even if the parent then hangs (the one bt-app
-# test with such a child bounds it at 60 s).
+# **What stdout cannot tell, named:**
+#   * an `--exact` child of a test prints a result line with its parent's own name, and that line
+#     releases the parent's name too, even if the parent then hangs (the one bt-app test with such a
+#     child bounds it at 60 s);
+#   * a suspended name stays suspended for the rest of the run, not for its binary: a dead binary's test
+#     is released by a later binary's test of the same name (another crate's `tests::x`), so the end note
+#     loses it and the slow list names it, while cargo's non-zero exit for the dead binary still passes
+#     through;
+#   * for the same reason, a later silence red lists a dead earlier binary's suspended tests among those
+#     that "may be the hang"; their ages say how long ago they were named.
 #
 # **The limit is one number, `$limit` below: 300 s per test** (30 x `lane::PATIENCE`).
 #   * A test libtest has named and that has not ended 300 s after it started ends the run.

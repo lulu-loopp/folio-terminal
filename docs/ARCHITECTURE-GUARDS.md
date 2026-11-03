@@ -1235,7 +1235,8 @@ plan row 171, 2026-11-01) read while names are tracked means either that their b
 their result lines (a crash, an abort) or that a test's child process, which inherited the stdout,
 started a report of its own. Two bt-app tests re-run their own test binary that way
 (`hostile_math_is_refused_and_the_real_decoration_worker_survives`, and the Windows
-`detached_handoff_helper_waits` child), and stdout cannot tell the two cases apart. So the names are
+`a_real_update_handoff_is_not_probe_contained`, whose child runs `detached_handoff_helper_waits`), and
+stdout cannot tell the two cases apart. So the names are
 suspended (plan row 203, 2026-11-03): no longer timed, so a dead binary's test is never taken for a
 later binary's hang, and released without a word by their own later result line. Only names that never
 print a result line are said, at the end of the run ("ended with their binary, no result line"). The
@@ -1245,8 +1246,12 @@ done and 300 s pass with no line, and that red names the suspended tests. A bina
 `running N tests` line (`harness = false`, a crash before libtest starts, a doc-test binary still
 compiling) leaves the previous binary's unfinished names tracked until the next binary that prints
 one: a run that passes the limit meanwhile is red naming the dead test, and the silence check is off
-while any name is tracked. An `--exact` child of a test prints a result line with its parent's own
-name, and that releases the parent's name too (stdout cannot tell them apart).
+while any name is tracked. Named limits, all from stdout alone: an `--exact` child of a test prints a
+result line with its parent's own name, and that releases the parent's name too; a suspended name stays
+suspended for the rest of the run, not for its binary, so a dead binary's test is released by a later
+binary's test of the same name (the end note loses it, the slow list names it; cargo's non-zero exit for
+the dead binary still passes through), and a later silence red lists a dead earlier binary's suspended
+tests among those that may be the hang.
 300 s (30 x `lane::PATIENCE`) is the one limit, a default in that script and nowhere else.
 Measured 2026-10-31 on the watched runs: no bt-app test reaches 60 s on any CI runner, and the
 slowest watched test is about 61 s (bt-source on `logic`); unwatched, `core-linux`'s bt-source tests
