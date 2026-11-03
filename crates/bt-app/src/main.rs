@@ -8044,15 +8044,17 @@ enum Phase {
     InBirth(PaneBirth),
     /// A running shell.
     Live(PtySession),
-    /// A shell that exited inside the birth grace, held until its reader has handed over the last
-    /// byte. `exit_age` is the age its exit was first seen at.
+    /// A shell that exited inside the birth grace, or that the system ended with the session (plan
+    /// row 191), held until its reader has handed over the last byte. `exit_age` is the age its
+    /// exit was first seen at.
     ExitDraining { pty: PtySession, exit_age: Duration },
     /// A shell that exited after the birth grace: its one line is said, and the pane keeps its
     /// pseudoconsole until the pane or its tab ends.
     Exited { pty: PtySession, exit_age: Duration },
     /// The last-resort shell being born in place after a silent birth death.
     FallingBack(BirthDeathFallback),
-    /// A birth death kept with its face, without a shell, until the pane is closed or restarted.
+    /// A birth death, or a shell the system ended with the session (plan row 191), kept with its
+    /// face, without a shell, until the pane is closed or restarted.
     Kept,
     /// The shell was retired: by a road that ends the pane, or by the reaper before it decides
     /// what becomes of a birth death. Read as [`Self::Shellless`].
@@ -8122,7 +8124,8 @@ impl ShellLife {
     }
 
     /// Whether this pane keeps its tab from ending although it holds no pseudoconsole: a shell
-    /// being born, a last-resort shell being born, or a birth death kept with its face.
+    /// being born, a last-resort shell being born, or a birth death or a shell the system ended
+    /// kept with its face.
     fn holds_its_tab(&self) -> bool {
         matches!(
             self.phase,
@@ -8189,8 +8192,8 @@ impl ShellLife {
         landing.owed_physical = Some(physical);
     }
 
-    /// **Live → ExitDraining**: the shell exited inside the birth grace, first seen at
-    /// `exit_age`, and its reader has not handed over its last byte.
+    /// **Live → ExitDraining**: the shell exited inside the birth grace, or the system ended it
+    /// (plan row 191), first seen at `exit_age`, and its reader has not handed over its last byte.
     fn exit_draining(&mut self, exit_age: Duration) {
         self.phase = match std::mem::replace(&mut self.phase, Phase::Shellless) {
             Phase::Live(pty) => Phase::ExitDraining { pty, exit_age },
@@ -8212,8 +8215,8 @@ impl ShellLife {
         owed
     }
 
-    /// **Live or ExitDraining → Released**: a birth death's shell leaves the pane, handed back for
-    /// the reaper to retire.
+    /// **Live or ExitDraining → Released**: a birth death's shell, or one the system ended (plan
+    /// row 191), leaves the pane, handed back for the reaper to retire.
     fn release_dead_shell(&mut self) -> Option<PtySession> {
         match std::mem::replace(&mut self.phase, Phase::Released) {
             Phase::Live(pty) | Phase::ExitDraining { pty, .. } => Some(pty),
@@ -8245,7 +8248,8 @@ impl ShellLife {
         }
     }
 
-    /// **Shellless or Released → Kept**: a birth death is kept with its face.
+    /// **Shellless or Released → Kept**: a birth death, or a shell the system ended (plan row
+    /// 191), is kept with its face.
     fn keep_birth_death(&mut self) {
         if self.has_no_shell() {
             self.phase = Phase::Kept;
@@ -48626,17 +48630,17 @@ impl<B: Backend> FolioApp<B> {
             let Some(app) = self.app.as_mut() else {
                 return kept;
             };
-            match session_end::settle(end, &mut app.session_store, a_quit_holds_it, asked_at) {
-                session_end::Settled::Saved(Ok(()))
+            let settled =
+                session_end::settle(end, &mut app.session_store, a_quit_holds_it, asked_at);
+            // **What became of the layout is said, landed or not** (plan row 191): one line, with
+            // what the document held, so a next start's restore can be read against it.
+            if let Some(line) = session_end::outcome_line(&settled, app.session_store.loaded()) {
+                diagnostics::note(&line);
+            }
+            match settled {
+                session_end::Settled::Saved(_)
                 | session_end::Settled::LeftToTheQuit
                 | session_end::Settled::AlreadySaved => {
-                    lines_down = true;
-                }
-                session_end::Settled::Saved(Err(refusal)) => {
-                    diagnostics::note(&format!(
-                        "{APP_NAME}: the session is ending and its layout was not saved: {}",
-                        refusal.message()
-                    ));
                     lines_down = true;
                 }
                 // Every change the hold kept off the document is recorded now: the windows as
