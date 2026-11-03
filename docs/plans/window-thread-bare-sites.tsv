@@ -37,6 +37,7 @@
 ##   bt-platform | [unix] | crate::launch_pipe::listen | libc::poll
 ##   bt-platform | [unix] | crate::probe_leader_has_exited | libc::waitid
 ##   bt-platform | [unix] | crate::reap_probe_leader | libc::waitpid
+##   bt-platform | [windows] | crate::ProbePipeEnd::read_once | windows::Win32::System::IO::GetOverlappedResult
 ##   bt-platform | [windows] | crate::attention_pipe::Instance::complete_read | windows::Win32::System::IO::GetOverlappedResult
 ##   bt-platform | [windows] | crate::attention_pipe::Instance::settle | windows::Win32::System::IO::GetOverlappedResult
 ##   bt-platform | [windows] | crate::attention_pipe::open_client | windows::Win32::System::Pipes::WaitNamedPipeW
@@ -183,6 +184,7 @@ bt-platform	[unix]	crate::launch_pipe::listen	libc::close	1
 bt-platform	[unix]	crate::launch_pipe::listen	libc::poll	1
 bt-platform	[unix]	crate::probe_leader_has_exited	libc::waitid	1
 bt-platform	[unix]	crate::reap_probe_leader	libc::waitpid	1
+bt-platform	[windows]	crate::ProbePipeEnd::read_once	windows::Win32::System::IO::GetOverlappedResult	1
 bt-platform	[windows]	crate::ProbePipeEnd::read_once	windows::Win32::System::Threading::WaitForMultipleObjects	1
 bt-platform	[windows]	crate::attention_pipe::<Overlapped as Drop>::drop	windows::Win32::Foundation::CloseHandle	1
 bt-platform	[windows]	crate::attention_pipe::<OwnedHandle as Drop>::drop	windows::Win32::Foundation::CloseHandle	1
