@@ -3078,7 +3078,6 @@ crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::Runtime::reap_exi
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::Runtime::reap_exited_tabs	Ambiguous	is_none	2	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::Runtime::reap_exited_tabs	Ambiguous	map_or_else	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::Runtime::reap_exited_tabs	Ambiguous	rev	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::Runtime::reap_exited_tabs	Ambiguous	spawn	1	violation	2026-10-24: (c) the gesture doors answer and draw inline: this site is on the synchronous answer road of Runtime::reap_exited_tabs: a file, process or thread call
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::Runtime::reap_exited_tabs	Ambiguous	then	2	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::Runtime::reap_exited_tabs	Ambiguous	to_string	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::Runtime::settle_home	Ambiguous	len	1	unreviewed	2026-10-26: T-SPLIT-2B batch 17; the same site, moved by K2 batch 17 with `settle_home` from main.rs into runtime/tabs.rs: K2 moves the item, not the call
