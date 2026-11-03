@@ -47,15 +47,19 @@
 #   * Except a revealed key: one whose entry is a verb new to the vocabulary,
 #     every row of which the inventory lists in a dated `## Revealed
 #     <YYYY-MM-DD> ...` block, one `##   crate | arm | item | entry` line per
-#     row. A verb is an entry as the bare-site guard matches a site
-#     (`window_waits_tests::effect_of`): `Parent::last`, or the last segment
-#     alone for a capitalised system call. New means the working tree's registry
-#     `# vocabulary` has the verb and the baseline's has none, so a re-spelling
-#     that keeps `Parent::last` (a re-export path: `mpsc::Receiver::recv` for
-#     `std::sync::mpsc::Receiver::recv`) is no new verb, and one that changes it
-#     is (`JoinHandle::<T>::join` reads as `<T>::join`, so it needs a dated
-#     block like any new verb). A widened vocabulary reveals sites that were already
-#     there, and the block says when and which
+#     row. A verb is an entry keyed `Parent::last`, or the last segment alone
+#     for a capitalised system call. The inventory itself (`Reader::sites` and
+#     `Reader::path_entries` in window_waits_tests.rs) names a site by the
+#     entry's canonical path, its receiver typed; the verb is coarser, so two
+#     entries that share it read as one verb, and the gate then refuses their
+#     rows rather than admits them (plan row 185). New means the working tree's
+#     registry `# vocabulary` has the verb and the baseline's has none, so a
+#     re-spelling that keeps `Parent::last` (a re-export path:
+#     `mpsc::Receiver::recv` for `std::sync::mpsc::Receiver::recv`) is no new
+#     verb, and one that changes it is (`JoinHandle::<T>::join` reads as
+#     `<T>::join`, so it needs a dated block like any new verb). A widened
+#     vocabulary reveals sites that were already there, and the block says when
+#     and which
 #     (T-BARE-SITE-VOCABULARY-WAIT-WHILE-BLIND-SPOT, plan row 176, ruling R1 and
 #     its tightening). It is reported as revealed, not refused; the equality half
 #     holds its rows to the code, and from the next merge base on it only
@@ -317,8 +321,10 @@ function Read-VocabularyPaths([string[]]$lines) {
     return , $paths
 }
 
-# An entry as the bare-site guard matches a site (`window_waits_tests::effect_of`): its last
-# segment alone for a capitalised system call (`WaitForSingleObject`), otherwise `Parent::last`.
+# An entry's verb: its last segment alone for a capitalised system call (`WaitForSingleObject`),
+# otherwise `Parent::last`. It is coarser than the canonical path the inventory keys a site by
+# (`Reader::sites`, `Reader::path_entries`), so a shared verb makes the gate refuse, never
+# admit (plan row 185).
 function Get-WaitVerb([string]$path) {
     $segments = @($path -split '::')
     $last = $segments[-1]
