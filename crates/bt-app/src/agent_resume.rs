@@ -430,7 +430,6 @@ impl AgentAccount {
         if kept.is_some_and(|kept| kept.vendor != vendor.family) {
             return false;
         }
-        self.spoke();
         let record = match kept {
             Some(kept) => AgentRecordV1 {
                 resume_id: heard.id.clone(),
@@ -438,6 +437,7 @@ impl AgentAccount {
             },
             None => heard.record(vendor),
         };
+        self.spoke();
         let changed = self.record.as_ref() != Some(&record) || self.command != command;
         self.record = Some(record);
         self.command = command;
@@ -481,6 +481,7 @@ impl AgentAccount {
                 heard: false,
                 hand_back,
                 title,
+                ..
             }) => match record {
                 Some(record) => Ended::HandBack {
                     profile: hand_back,
