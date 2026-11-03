@@ -40,6 +40,7 @@ All notable changes to Folio are recorded here. The format follows
 - While you rename a tab, a file or a page's address, clicking inside the name now puts the text cursor where you clicked, Shift-clicking extends the selection, and dragging selects. <!-- zh: pending T-TAB-RENAME-FIELD-MOUSE-CARET -->
 - On Windows, a picture or video that another program is holding open (for example a recording still being written) is no longer treated as a file Folio cannot show: Folio asks for it once more by itself, and again when you look at it anew, and a picture's preview says the file is in use by another program. <!-- zh: pending -->
 - Clicking inside the find bar, a commit graph's search, a Settings field, the command palette or a git branch prompt now puts the text cursor where you clicked, Shift-clicking extends the selection, and dragging selects; a selection in any of them is now shown highlighted, and a long Settings field no longer shifts its text under the pointer when you click in it. <!-- zh: pending T-CHROME-FIELDS-CARET-BY-POINTER -->
+- While a tab's mark breathes or turns for a running command, Folio now spends less processor time on each step of it: the panes are no longer drawn again when nothing in them has changed. The mark moves as often as before, and Folio wakes as often as before. <!-- zh: pending T-WORKING-MARK-CADENCE -->
 
 ## 0.4.8-preview — 2026-10-23
 
