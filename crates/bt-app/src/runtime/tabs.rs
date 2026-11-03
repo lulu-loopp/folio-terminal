@@ -3655,15 +3655,14 @@ impl<B: Backend> Runtime<'_, B> {
                                 any_live = true;
                                 continue;
                             }
-                            let exit = exit_diagnostics::ShellExit {
-                                seat: seat.0,
+                            let exit = exit_diagnostics::ShellExit::observed(
+                                seat.0,
                                 code,
                                 elapsed,
                                 program,
-                                tab: tab_id.0,
-                                disposition:
-                                    exit_diagnostics::ShellExitDisposition::SystemEndedPaneKept,
-                            };
+                                tab_id.0,
+                                exit_diagnostics::ShellExitDisposition::SystemEndedPaneKept,
+                            );
                             if let Some(old) = leaf.life.release_dead_shell() {
                                 bt_pty::retire_session(old);
                             }
@@ -3686,15 +3685,14 @@ impl<B: Backend> Runtime<'_, B> {
                             let fallback = (birth_death == BirthDeathDisposition::FallBack)
                                 .then(|| pty.take_birth_fallback())
                                 .flatten();
-                            let mut exit = exit_diagnostics::ShellExit {
-                                seat: seat.0,
+                            let mut exit = exit_diagnostics::ShellExit::observed(
+                                seat.0,
                                 code,
                                 elapsed,
                                 program,
-                                tab: tab_id.0,
-                                disposition:
-                                    exit_diagnostics::ShellExitDisposition::BirthDeathPaneKept,
-                            };
+                                tab_id.0,
+                                exit_diagnostics::ShellExitDisposition::BirthDeathPaneKept,
+                            );
                             if let Some(old) = leaf.life.release_dead_shell() {
                                 bt_pty::retire_session(old);
                             }
@@ -3747,14 +3745,14 @@ impl<B: Backend> Runtime<'_, B> {
                         if leaf.life.exited(elapsed) {
                             exits.push((
                                 index,
-                                exit_diagnostics::ShellExit {
-                                    seat: seat.0,
-                                    code: status.signal().is_none().then(|| status.exit_code()),
+                                exit_diagnostics::ShellExit::observed(
+                                    seat.0,
+                                    code,
                                     elapsed,
-                                    program: leaf.launch.program.clone(),
-                                    tab: tab_id.0,
-                                    disposition: exit_diagnostics::ShellExitDisposition::TabKept,
-                                },
+                                    program,
+                                    tab_id.0,
+                                    exit_diagnostics::ShellExitDisposition::TabKept,
+                                ),
                             ));
                         }
                     }
@@ -5511,6 +5509,7 @@ mod birth_death_tests {
             disposition: exit_diagnostics::ShellExitDisposition::BirthDeathFellBack(
                 bt_pty::LAST_RESORT_SHELL,
             ),
+            shutting_down: None,
         };
         let pending = crate::BirthDeathFallback::waiting(&leaf.session, shell, exit);
         leaf.session.life.fall_back(pending);
@@ -5705,6 +5704,7 @@ mod birth_death_tests {
             program: Some(PathBuf::from("tools").join("broken-shell")),
             tab: 8,
             disposition: exit_diagnostics::ShellExitDisposition::BirthDeathPaneKept,
+            shutting_down: None,
         };
         keep_birth_death_face(&mut leaf.session, &exit, true).expect("the face is appended");
         let visible = leaf.session.session.terminal().visible_text().join("\n");
@@ -5734,6 +5734,7 @@ mod birth_death_tests {
             program: Some(PathBuf::from("sh")),
             tab: 8,
             disposition: exit_diagnostics::ShellExitDisposition::TabKept,
+            shutting_down: None,
         };
         let mut exits = vec![(0, exit), (0, ordinary)];
         settle_exit_dispositions(&mut exits, &BTreeSet::new(), 0, true);

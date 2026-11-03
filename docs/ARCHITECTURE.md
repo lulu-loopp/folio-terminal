@@ -2481,7 +2481,7 @@ is a description of what was **measured**, not of what is **allowed**, and this
 file is where what is allowed now lives.
 
 Two resident lifecycle events have stable one-line payloads. A pane's shell exit is
-`Folio: pane <seat> shell exited code=<n|none> after <ms> ms (<program basename>, tab <id>, <retired pane|tab kept|tab retired>)`; the program is its basename only, and the elapsed time begins at the PTY birth. A run's last ordinary window is
+`Folio: pane <seat> shell exited code=<n|none> after <ms> ms (<program basename>, tab <id>, <retired pane|tab kept|tab retired|birth death: fell back to <program>|birth death: pane kept|ended by the system: pane kept>) shutting_down=<0|1>`; the program is its basename only, the elapsed time begins at the PTY birth, and `shutting_down` (Windows only, last so that the line's start reads as before; absent elsewhere) is `GetSystemMetrics(SM_SHUTTINGDOWN)` read when the reaper judged the exit (plan row 199). A run's last ordinary window is
 `Folio: last window closed — <why>`, where the closed cause is the shell-exit sweep, the person's close, an ordinary quit, the launch wire's quit, an update restart, or a controlled failure. Both complete payloads are reduced to one physical line. A controlled failure reduces each drive-rooted or POSIX-rooted absolute path in its error to the final component and caps that error at 240 characters. Both events go through `diagnostics::note` from the window thread; neither adds a wait or a lane.
 
 `AppEvent` has thirty-one wake variants and `AppEvent::station` maps each to a

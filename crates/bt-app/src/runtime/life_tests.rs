@@ -157,6 +157,7 @@ fn pending(shell: pty_door::ShellBirth) -> BirthDeathFallback {
             disposition: crate::exit_diagnostics::ShellExitDisposition::BirthDeathFellBack(
                 bt_pty::LAST_RESORT_SHELL,
             ),
+            shutting_down: None,
         },
     }
 }
