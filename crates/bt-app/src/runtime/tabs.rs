@@ -3718,18 +3718,18 @@ impl<B: Backend> Runtime<'_, B> {
                                 failed,
                             } => {
                                 // Said like every other exit (review F6): what the reaper saw end,
-                                // and that the pane's shell is handed back in its place.
+                                // that the pane's shell is handed back in its place, and the
+                                // session-end probe every exit carries (row 199).
                                 exits.push((
                                     index,
-                                    exit_diagnostics::ShellExit {
-                                        seat: seat.0,
+                                    exit_diagnostics::ShellExit::observed(
+                                        seat.0,
                                         code,
                                         elapsed,
                                         program,
-                                        tab: tab_id.0,
-                                        disposition:
-                                            exit_diagnostics::ShellExitDisposition::HandedBack,
-                                    },
+                                        tab_id.0,
+                                        exit_diagnostics::ShellExitDisposition::HandedBack,
+                                    ),
                                 ));
                                 hand_backs.push((index, *seat, profile, cwd, failed));
                                 any_live = true;
@@ -5832,14 +5832,14 @@ mod birth_death_tests {
     /// written, and the line says `retired pane`.
     #[test]
     fn a_resumed_agents_own_end_is_said_as_handed_back() {
-        let handed_back = exit_diagnostics::ShellExit {
-            seat: 6,
-            code: Some(1),
-            elapsed: Duration::from_secs(90),
-            program: Some(PathBuf::from("claude.exe")),
-            tab: 9,
-            disposition: exit_diagnostics::ShellExitDisposition::HandedBack,
-        };
+        let handed_back = exit_diagnostics::ShellExit::unprobed(
+            6,
+            Some(1),
+            Duration::from_secs(90),
+            Some(PathBuf::from("claude.exe")),
+            9,
+            exit_diagnostics::ShellExitDisposition::HandedBack,
+        );
         let mut exits = vec![(0, handed_back)];
         settle_exit_dispositions(&mut exits, &BTreeSet::new(), 0, true);
         let mut lines = Vec::new();
@@ -5852,8 +5852,8 @@ mod birth_death_tests {
         );
         let reap = test_support::squeezed_body("Runtime", "reap_exited_tabs");
         assert!(
-            reap.contains("disposition:exit_diagnostics::ShellExitDisposition::HandedBack,"),
-            "the reaper says the hand-back: {reap}"
+            reap.contains("exit_diagnostics::ShellExitDisposition::HandedBack,),"),
+            "the reaper says the hand-back, through the probe every exit carries: {reap}"
         );
     }
 
