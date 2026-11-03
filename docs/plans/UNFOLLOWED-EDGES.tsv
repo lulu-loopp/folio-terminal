@@ -7289,7 +7289,7 @@ crates/bt-effects/src/file_reads.rs	bt-effects crate::file_reads::Minute::line	A
 crates/bt-effects/src/file_reads.rs	bt-effects crate::file_reads::Minute::perf_line	Ambiguous	iter	1	
 crates/bt-effects/src/file_reads.rs	bt-effects crate::file_reads::Minute::perf_line	Ambiguous	label	3	
 crates/bt-effects/src/file_reads.rs	bt-effects crate::file_reads::Minute::perf_line	Ambiguous	zip	1	
-crates/bt-effects/src/file_reads.rs	bt-effects crate::file_reads::held_elsewhere	Ambiguous	is_some_and	1	
+crates/bt-effects/src/file_reads.rs	bt-effects crate::file_reads::held_elsewhere	Ambiguous	is_some_and	1	2026-11-02: T-HELD-FILE-IN-THE-OTHER-PICTURE-LANES; Option::is_some_and over the error's raw OS code (io::Error::raw_os_error), which the grammar does not type, comparing it in the const held_elsewhere_code: reaches no door
 crates/bt-effects/src/file_reads.rs	bt-effects crate::file_reads::opaque	Dynamic	work	1	
 crates/bt-effects/src/file_reads.rs	bt-effects crate::file_reads::open	Ambiguous	map	1	
 crates/bt-effects/src/file_reads.rs	bt-effects crate::file_reads::over_budget	Dynamic	exceeds	2	
