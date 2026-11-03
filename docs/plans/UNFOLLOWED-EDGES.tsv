@@ -4,7 +4,7 @@
 # name) with the number of calls behind it. Held equal to the tree by bt-source's call_graph test;
 # shrink-only against the merge base by scripts/ci/check-unfollowed-edges.ps1 - a key added or grown
 # carries a reason 'YYYY-MM-DD: <why>'. Never edit a key or a count by hand.
-# Ambiguous calls with exactly one candidate, not listed by site above or below (bt_source::call_graph::Unresolved::sole_candidate; a guard naming a callee's callers counts each as a call of its one candidate): 1733. A call whose name is renamed to one only one item declares leaves the list and is counted here.
+# Ambiguous calls with exactly one candidate, not listed by site above or below (bt_source::call_graph::Unresolved::sole_candidate; a guard naming a callee's callers counts each as a call of its one candidate): 1734. A call whose name is renamed to one only one item declares leaves the list and is counted here.
 file	item	kind	name	sites	reason
 crates/bt-app/src/animation.rs	bt-app crate::animation::<FileAnimationSource as Read>::read	Ambiguous	unwrap_or	1	
 crates/bt-app/src/animation.rs	bt-app crate::animation::AnimationCursor::start_again	Ambiguous	into_inner	1	
@@ -545,6 +545,11 @@ crates/bt-app/src/computation_lane.rs	bt-app crate::computation_lane::ShareOf::n
 crates/bt-app/src/computation_lane.rs	bt-app crate::computation_lane::ShareOf::new	Dynamic	wake	1	
 crates/bt-app/src/computation_lane.rs	bt-app crate::computation_lane::ShareOf::serve	Dynamic	door	1	
 crates/bt-app/src/computation_lane.rs	bt-app crate::computation_lane::locked	Ambiguous	unwrap_or_else	1	
+crates/bt-app/src/computation_lane.rs	bt-app crate::computation_lane::made_beside	Ambiguous	expect	1	
+crates/bt-app/src/computation_lane.rs	bt-app crate::computation_lane::made_beside	Ambiguous	map	1	
+crates/bt-app/src/computation_lane.rs	bt-app crate::computation_lane::made_beside	Ambiguous	take	2	
+crates/bt-app/src/computation_lane.rs	bt-app crate::computation_lane::made_beside	Ambiguous	unwrap_or_else	2	
+crates/bt-app/src/computation_lane.rs	bt-app crate::computation_lane::made_beside	Dynamic	make	2	
 crates/bt-app/src/computation_lane.rs	bt-app crate::computation_lane::raster_peek_page	Ambiguous	and_then	1	2026-10-26: T-SPLIT-2B batch 22; the same site, moved by K2 batch 22 with `raster_peek_page` from main.rs into computation_lane.rs: K2 moves the item, not the call
 crates/bt-app/src/computation_lane.rs	bt-app crate::computation_lane::raster_peek_page	Ambiguous	ok	1	2026-10-26: T-SPLIT-2B batch 22; the same site, moved by K2 batch 22 with `raster_peek_page` from main.rs into computation_lane.rs: K2 moves the item, not the call
 crates/bt-app/src/computation_lane.rs	bt-app crate::computation_lane::read_video_glance	Ambiguous	and_then	1	2026-10-26: T-SPLIT-2B batch 22; the same site, moved by K2 batch 22 with `read_video_glance` from main.rs into computation_lane.rs: K2 moves the item, not the call
