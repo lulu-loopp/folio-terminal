@@ -213,7 +213,7 @@ fn a_shutdown_taken_back_after_its_wait_ran_out_is_waited_for_again() {
 }
 
 /// What the end did, in order: each line it said and its fence (plan row 201).
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum AtTheEnd {
     Said(String),
     Fenced,
@@ -248,7 +248,8 @@ fn the_questions_turn(
 /// the store's own budget (the suite's patience); nothing in the end waits.
 ///
 /// MUTATION (plant `plant-201-a-the-end-returns-at-once.py`): `hold_at_the_end` answers at once
-/// without running the queued turn — the file is absent, the sentinel stands, no outcome line.
+/// without running the queued turn — the file is absent (the first assertion), the sentinel
+/// stands, no outcome line.
 /// MUTATION (plant `plant-201-b-the-end-does-not-fence.py`): drop the `fence()` call in
 /// `end_with` — the lines are said and never fenced.
 #[test]
@@ -279,14 +280,16 @@ fn the_end_runs_the_questions_turn_and_fences_the_log_before_it_answers() {
         &mut || done.borrow_mut().push(AtTheEnd::Fenced),
     );
 
-    assert_eq!(road, session_end::Road::RanItHere);
-    assert_eq!(drained, 1, "the queued messages ran once");
+    // The effect first (review N1): an end that answers without the turn fails here, on the
+    // write it lost, before anything is read about the road it says it took.
     assert_eq!(
         windows_on_disk(&home.session()),
         last_second.windows,
         "the last-second change is on the disk when the end is answered"
     );
     assert!(!home.sentinel().exists(), "and the run's clean exit stands");
+    assert_eq!(road, session_end::Road::RanItHere);
+    assert_eq!(drained, 1, "the queued wakes ran once");
     assert_eq!(
         done.into_inner(),
         vec![
@@ -297,7 +300,7 @@ fn the_end_runs_the_questions_turn_and_fences_the_log_before_it_answers() {
             ),
             AtTheEnd::Said(
                 "BT_SESSION_END WM_ENDSESSION(TRUE): the question's turn had not run; the \
-                 messages already queued ran it"
+                 wakes already queued ran it"
                     .to_owned()
             ),
             AtTheEnd::Fenced,
@@ -315,8 +318,8 @@ fn the_end_runs_the_questions_turn_and_fences_the_log_before_it_answers() {
 /// end does not wait for it again. The second home forgets the first's news, so it is a span of
 /// its own.
 ///
-/// MUTATION: in `hold_at_the_end`, drop the `the_question_has_its_answer()` check before the
-/// drain — the end runs the queue again, and the drain below is called.
+/// MUTATION: in `hold_at_the_end`, take `ran_here` as true whatever the answer — the end runs
+/// the queue again, and the drain below is called.
 #[test]
 fn the_end_after_the_questions_turn_runs_nothing_and_does_not_wait_again() {
     on_the_window_thread();
@@ -425,7 +428,7 @@ fn the_end_says_when_the_queued_messages_did_not_run_the_questions_turn() {
         vec![
             AtTheEnd::Said(
                 "BT_SESSION_END WM_ENDSESSION(TRUE): the question's turn had not run, and the \
-                 messages already queued did not run it"
+                 wakes already queued did not run it"
                     .to_owned()
             ),
             AtTheEnd::Fenced,
@@ -436,4 +439,235 @@ fn the_end_says_when_the_queued_messages_did_not_run_the_questions_turn() {
         home.sentinel().is_file(),
         "and the next start offers the layout back"
     );
+}
+
+/// RED (plan row 201, review F2) — **the end fences the log once for the process, however many
+/// windows hear it; a shutdown taken back opens a span that fences again.**
+///
+/// The system sends `WM_ENDSESSION(TRUE)` to every top-level window, and a starved log writer
+/// makes each fence wait out its second: three windows would have held the answer six seconds.
+/// Here three windows hear one end. The first holds and fences; the other two say the log was
+/// fenced and return. Then the shutdown is taken back and asked again, and the next end fences.
+///
+/// MUTATION: in `end_with`, drop the `FENCED` check — every window fences again. Drop the
+/// `FENCED` reset on `TakenBack` in `settle` — the next span's end fences nothing.
+#[test]
+fn the_end_fences_the_log_once_however_many_windows_hear_it() {
+    on_the_window_thread();
+    let home = EndSessionHome::new("end-fences-once");
+    let mut store = persist::SessionStore::armed_at(home.session(), home.sentinel());
+    store.set_save_budget(crate::lane::PATIENCE);
+    record_as_the_app_does(&mut store, shells_document(&home.0, 2));
+    assert_eq!(the_system_asks(), Some(1));
+    let done = std::cell::RefCell::new(Vec::new());
+    the_questions_turn(&mut store, Instant::now(), &done);
+    let mut unexpected = |_: &dyn Fn() -> bool| -> bool {
+        panic!("the question's turn had run: nothing is drained")
+    };
+    let roads: Vec<_> = (0..3)
+        .map(|_window| {
+            session_end::end_with(
+                &mut unexpected,
+                &mut |line| done.borrow_mut().push(AtTheEnd::Said(line.to_owned())),
+                &mut || done.borrow_mut().push(AtTheEnd::Fenced),
+            )
+        })
+        .collect();
+    assert_eq!(
+        roads,
+        vec![
+            session_end::Road::AlreadyRan,
+            session_end::Road::FencedBefore,
+            session_end::Road::FencedBefore,
+        ]
+    );
+    let fenced_before = AtTheEnd::Said(
+        "BT_SESSION_END WM_ENDSESSION(TRUE): an earlier window's end was held for and fenced the \
+         log"
+        .to_owned(),
+    );
+    assert_eq!(
+        done.take(),
+        vec![
+            AtTheEnd::Said(
+                "Folio: the session is ending and its layout was saved: windows 1, tabs 2, \
+                 pinned 2"
+                    .to_owned()
+            ),
+            AtTheEnd::Said(
+                "BT_SESSION_END WM_ENDSESSION(TRUE): the question's turn had already run"
+                    .to_owned()
+            ),
+            AtTheEnd::Fenced,
+            fenced_before.clone(),
+            fenced_before,
+        ],
+        "one fence for the three windows"
+    );
+
+    // Taken back, then asked again: a span of its own, whose end fences.
+    assert_eq!(
+        bt_platform::session_end::answer(
+            bt_platform::session_end::WM_ENDSESSION,
+            0,
+            0,
+            &session_end::hear,
+        ),
+        Some(0)
+    );
+    for end in session_end::take() {
+        let _ = session_end::settle(end, &mut store, false, Instant::now());
+    }
+    assert_eq!(the_system_asks(), Some(1));
+    the_questions_turn(&mut store, Instant::now(), &done);
+    let mut fences = 0_u32;
+    let road = session_end::end_with(&mut unexpected, &mut |_| {}, &mut || fences += 1);
+    assert_eq!(road, session_end::Road::AlreadyRan);
+    assert_eq!(fences, 1, "the next span's end fences again");
+}
+
+/// RED (plan row 201, review N3) — **an end during a quit past its photograph says that the quit
+/// writes the layout**, not that the question's turn ran: the quit's write is `about_to_wait`'s,
+/// and the end does not drive it.
+///
+/// MUTATION: in `hold_at_the_end`, drop the `LeftToTheQuit` arm — the end says the question's
+/// turn had already run.
+#[test]
+fn the_end_during_a_quit_says_the_quit_writes_the_layout() {
+    on_the_window_thread();
+    let home = EndSessionHome::new("end-during-a-quit");
+    let mut store = persist::SessionStore::armed_at(home.session(), home.sentinel());
+    record_as_the_app_does(&mut store, shells_document(&home.0, 2));
+    assert_eq!(the_system_asks(), Some(1));
+    let settled: Vec<_> = session_end::take()
+        .into_iter()
+        .map(|end| session_end::settle(end, &mut store, true, Instant::now()))
+        .collect();
+    assert_eq!(settled, vec![session_end::Settled::LeftToTheQuit]);
+    let mut said = Vec::new();
+    let road = session_end::end_with(
+        &mut |_| panic!("the question's turn had run: nothing is drained"),
+        &mut |line| said.push(line.to_owned()),
+        &mut || {},
+    );
+    assert_eq!(road, session_end::Road::LeftToTheQuit);
+    assert_eq!(
+        said,
+        vec![
+            "BT_SESSION_END WM_ENDSESSION(TRUE): the question was left to the quit under way, \
+             whose write the end does not drive"
+                .to_owned()
+        ]
+    );
+}
+
+/// A wake target on this thread whose turn is the question's turn on `store`, counted in
+/// `turns`. Its first turn also posts one more wake, as a turn that sends an event does.
+#[cfg(windows)]
+fn a_target_running_the_questions_turn(
+    store: &std::rc::Rc<std::cell::RefCell<persist::SessionStore>>,
+    turns: &std::rc::Rc<std::cell::Cell<u32>>,
+) -> bt_platform::session_end::wake_target::WakeTarget {
+    let store = std::rc::Rc::clone(store);
+    let turns = std::rc::Rc::clone(turns);
+    let said = std::cell::RefCell::new(Vec::new());
+    bt_platform::session_end::wake_target::WakeTarget::new(Box::new(move |waker| {
+        turns.set(turns.get() + 1);
+        if turns.get() == 1 {
+            waker.wake();
+        }
+        the_questions_turn(&mut store.borrow_mut(), Instant::now(), &said);
+    }))
+    .expect("a wake target on this thread")
+}
+
+/// RED (plan row 201, review F3) — **the product's end over a real queue: the question's wake
+/// runs, every other message stays where it was, and the drain stops at its mark.**
+///
+/// The test runs on a thread of its own, so its queue holds only what the test posts. A
+/// message-only window stands in for winit's hidden one: its procedure runs the question's turn
+/// for each wake, as winit's wake brings the loop's turn. Queued before the end: a message of
+/// another kind, the question's wake and the loop's `WM_QUIT`. The question's turn posts one more
+/// wake, behind the mark. Then the product `at_the_end` runs, with the real
+/// `drain_what_is_queued` and the real fence.
+///
+/// The second half queues the same with no question asked, so no wake answers it: the drain runs
+/// the wake it finds and stops at the mark, and the wake that turn posted stays queued.
+///
+/// MUTATION (plant `plant-201-c-the-drain-takes-every-message.py`): the drain takes every posted
+/// message — the other message is dispatched, not left. MUTATION (plant
+/// `plant-201-d-the-drain-passes-its-mark.py`): the drain does not stop at its mark — the wake
+/// posted behind it runs too.
+#[cfg(windows)]
+#[test]
+fn the_end_runs_the_wake_over_a_real_queue_and_leaves_every_other_message() {
+    use bt_platform::session_end::wake_target::{Queued, post_quit, take_what_is_left};
+    std::thread::spawn(|| {
+        on_the_window_thread();
+        let home = EndSessionHome::new("end-over-a-real-queue");
+        let store = std::rc::Rc::new(std::cell::RefCell::new(persist::SessionStore::armed_at(
+            home.session(),
+            home.sentinel(),
+        )));
+        store
+            .borrow_mut()
+            .set_save_budget(crate::lane::PATIENCE);
+        let last_second = shells_document(&home.0, 2);
+        record_as_the_app_does(&mut store.borrow_mut(), last_second.clone());
+        let turns = std::rc::Rc::new(std::cell::Cell::new(0_u32));
+        let target = a_target_running_the_questions_turn(&store, &turns);
+        assert_eq!(take_what_is_left(), Queued::default(), "the thread's queue starts empty");
+        target.waker().post_other();
+        assert_eq!(the_system_asks(), Some(1), "the question is answered TRUE");
+        target.waker().wake();
+        post_quit(0);
+
+        let road = session_end::at_the_end();
+        assert_eq!(
+            windows_on_disk(&home.session()),
+            last_second.windows,
+            "the question's wake ran its turn: the last-second change is on the disk"
+        );
+        assert!(!home.sentinel().exists(), "and the run's clean exit stands");
+        assert_eq!(road, session_end::Road::RanItHere);
+        assert_eq!(turns.get(), 1, "the question's wake ran, and nothing behind it");
+        assert_eq!(
+            take_what_is_left(),
+            Queued {
+                wakes: 1,
+                marks: 0,
+                others: 1,
+                quit: Some(0)
+            },
+            "the wake its turn posted, the other message and the quit stay; the mark is taken back"
+        );
+        drop(target);
+
+        // No question: the drain runs what it finds up to its mark, and the answer never comes.
+        let unanswered = EndSessionHome::new("end-over-a-real-queue-unanswered");
+        let store = std::rc::Rc::new(std::cell::RefCell::new(persist::SessionStore::armed_at(
+            unanswered.session(),
+            unanswered.sentinel(),
+        )));
+        let turns = std::rc::Rc::new(std::cell::Cell::new(0_u32));
+        let target = a_target_running_the_questions_turn(&store, &turns);
+        target.waker().post_other();
+        target.waker().wake();
+        post_quit(0);
+        assert_eq!(session_end::at_the_end(), session_end::Road::CouldNotRun);
+        assert_eq!(turns.get(), 1, "the drain stopped at its mark");
+        assert_eq!(
+            take_what_is_left(),
+            Queued {
+                wakes: 1,
+                marks: 0,
+                others: 1,
+                quit: Some(0)
+            },
+            "the wake posted behind the mark, the other message and the quit stay; the mark was taken"
+        );
+        drop(target);
+    })
+    .join()
+    .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
 }

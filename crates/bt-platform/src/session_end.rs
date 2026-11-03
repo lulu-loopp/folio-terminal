@@ -32,9 +32,10 @@
 //!   returns only once the question's write has its answer and `diagnostics.log` has been
 //!   fenced. The write itself stays the loop's: the question's turn blocks this thread until it
 //!   lands, so in the usual order it has landed before this message can even be dispatched.
-//!   When this message overtook the wake the question posted, `ending` runs the messages already
-//!   queued on this thread ([`drain_what_is_queued`]) — the wake among them — so that turn, and
-//!   its one bounded wait, happen before the answer. Nothing here waits.
+//!   When this message overtook the wake the question posted, `ending` runs winit's wakes already
+//!   queued on this thread ([`drain_what_is_queued`]) — that one among them — so that turn, and
+//!   its one bounded wait, happen before the answer. Only the wakes are run: every other message
+//!   stays queued for the loop. The drain itself never waits.
 //! * `WM_ENDSESSION(TRUE)` with `ENDSESSION_CLOSEAPP` in `lParam` — `hear` is told
 //!   [`SessionEnd::Closed`]. This is the Restart Manager closing the application (an installer
 //!   or the system's servicing needs a file it holds): **the session does not end**, so nobody
@@ -186,7 +187,7 @@ pub fn the_session_really_ends(message: u32, wparam: usize, lparam: isize) -> bo
 pub enum Drained {
     /// The caller's question was answered: before the first message, or by one of them.
     Answered,
-    /// Every message queued before the drain began has run, and the question is still open — or
+    /// Every wake queued before the drain began has run, and the question is still open — or
     /// the queue could not be marked, and nothing was run.
     NothingLeft,
 }
@@ -205,15 +206,35 @@ pub fn drain_with(answered: &dyn Fn() -> bool, next: &mut dyn FnMut() -> bool) -
     }
 }
 
-/// **Run the posted messages already queued on this thread, until `answered` says yes**
-/// (plan row 201) — [`drain_with`] over this thread's queue.
+/// **The name winit registers its wake under**: `Winit::WakeupMsg` (winit 0.30.13,
+/// `platform_impl/windows/event_loop.rs`, `USER_EVENT_MSG_ID`). `EventLoopProxy::send_event`
+/// posts it, with `wParam` and `lParam` zero, to the loop's own hidden window once for each event
+/// it sends, and the loop's procedure answers it with a placeholder that pulls the next event from
+/// the channel. A registered name is the same number for every caller in the session, so
+/// [`drain_what_is_queued`] asks for winit's wake by it. The name is winit's private one, so
+/// `tests/windows_winit_wake.rs` builds a real event loop of the locked winit and finds its
+/// proxy's post under this name.
+pub const WINIT_WAKE_MESSAGE_NAME: &str = "Winit::WakeupMsg";
+
+/// **Run winit's wakes already queued on this thread, until `answered` says yes** (plan row 201)
+/// — [`drain_with`] over this thread's queue, taking **only** the wake winit's proxy posts for
+/// each event it sends ([`WINIT_WAKE_MESSAGE_NAME`]). The question's turn rides on one of them.
 ///
-/// The bound is a mark: a thread message of this module's own, posted at the start, behind
-/// everything already posted. The drain stops when it reaches the mark, so it runs only what
-/// was queued before it began, however fast new posts arrive; a mark left behind by an early
-/// answer is a windowless thread message the loop's own pump discards. Only posted messages are
-/// taken (`PM_QS_POSTMESSAGE`: no input, no paint); a `WM_QUIT` met on the way is posted again
-/// and ends the drain, as every modal loop owes its caller. Never waits.
+/// **Nothing else is taken** (coordinator's ruling Q1, 2026-11-03). Input, paint, timers, hot
+/// keys, `WM_CLOSE`, `WM_QUIT` and every other posted message stay queued where they are, for the
+/// loop's own pump after the answer. That includes the deferred pickers' messages, whose handlers
+/// open a modal loop that waits for the person. Each wake pulls the next event from winit's
+/// channel, in the order they were sent, so the events keep their order too.
+///
+/// The bound is a mark: the same message, posted to the thread itself rather than to winit's
+/// window, at the start, behind every wake already posted. The drain stops when it takes the mark,
+/// so a wake that a drained turn posts (behind the mark) is not run, however fast new ones arrive.
+/// A mark that an early answer leaves behind is taken back before this returns.
+///
+/// `PeekMessageW` never waits, and winit's wake handler only queues a placeholder. The one wait a
+/// dispatched wake can hold is the turn's own: the question's write, inside its own budget. The
+/// wakes are dispatched without the pump's hook ([`crate::pump`]). Its summon hot key is never a
+/// wake, and the turns run here are not timed by its pair.
 ///
 /// This is the system's own move/size loop's shape: the messages are dispatched from inside a
 /// window procedure, and an event loop that is not inside its handler at that moment (winit's,
@@ -341,10 +362,10 @@ mod windows_session_end {
     use windows::Win32::System::Threading::GetCurrentThreadId;
     use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
     use windows::Win32::UI::WindowsAndMessaging::{
-        DispatchMessageW, MSG, PM_QS_POSTMESSAGE, PM_REMOVE, PeekMessageW, PostQuitMessage,
-        PostThreadMessageW, RegisterWindowMessageW, TranslateMessage, WM_QUIT,
+        DispatchMessageW, MSG, PM_QS_POSTMESSAGE, PM_REMOVE, PeekMessageW, PostThreadMessageW,
+        RegisterWindowMessageW,
     };
-    use windows::core::{HSTRING, w};
+    use windows::core::HSTRING;
 
     use super::{
         Drained, SessionEnd, answer, arrival_line, drain_with, heard, the_session_really_ends,
@@ -490,45 +511,70 @@ mod windows_session_end {
         }
     }
 
-    /// [`super::drain_what_is_queued`] on Windows: the mark posted, then this thread's posted
-    /// messages run in order until the mark, an empty queue, a `WM_QUIT` or the answer.
+    /// **winit's wake, as this session numbers it**: `RegisterWindowMessageW` of
+    /// [`super::WINIT_WAKE_MESSAGE_NAME`], or `None` when the system refused the registration.
+    pub(crate) fn wake_message() -> Option<u32> {
+        let name = HSTRING::from(super::WINIT_WAKE_MESSAGE_NAME);
+        // SAFETY: the name lives across the call; the call only registers it.
+        let message = unsafe { RegisterWindowMessageW(&name) };
+        (message != 0).then_some(message)
+    }
+
+    /// [`super::drain_what_is_queued`] on Windows: the mark posted, then winit's wakes on this
+    /// thread taken in order until the mark, an empty queue or the answer, and a mark left behind
+    /// taken back.
     pub(super) fn drain_what_is_queued(answered: &dyn Fn() -> bool) -> Drained {
-        // SAFETY: a static, NUL-terminated name; the call only registers it.
-        let mark = unsafe { RegisterWindowMessageW(w!("Folio.SessionEnd.DrainMark")) };
-        if mark == 0 {
+        let Some(wake) = wake_message() else {
             return drain_with(answered, &mut || false);
-        }
+        };
         // SAFETY: a thread message to this thread, carrying no pointer.
         let marked =
-            unsafe { PostThreadMessageW(GetCurrentThreadId(), mark, WPARAM(0), LPARAM(0)) };
+            unsafe { PostThreadMessageW(GetCurrentThreadId(), wake, WPARAM(0), LPARAM(0)) };
         if marked.is_err() {
             return drain_with(answered, &mut || false);
         }
-        drain_with(answered, &mut || {
+        let mut at_the_mark = false;
+        let drained = drain_with(answered, &mut || {
             let mut message = MSG::default();
-            // SAFETY: `message` is a live `MSG` this call fills in; `PM_REMOVE` takes a posted
-            // message off this thread's own queue.
+            // SAFETY: `message` is a live `MSG` this call fills in; the filter is the wake alone,
+            // and `PM_REMOVE` takes the first of them off this thread's own queue.
             let taken = unsafe {
-                PeekMessageW(&raw mut message, None, 0, 0, PM_REMOVE | PM_QS_POSTMESSAGE)
+                PeekMessageW(
+                    &raw mut message,
+                    None,
+                    wake,
+                    wake,
+                    PM_REMOVE | PM_QS_POSTMESSAGE,
+                )
             };
-            if !taken.as_bool() || (message.message == mark && message.hwnd.is_invalid()) {
+            if !taken.as_bool() {
                 return false;
             }
-            if message.message == WM_QUIT {
-                // `PostQuitMessage` put its `int` into `wParam`; this takes the same `int` back.
-                let code = message.wParam.0 as i32;
-                // SAFETY: no pointer; the quit goes back on the queue for the loop that owns it.
-                unsafe { PostQuitMessage(code) };
+            // winit posts its wakes to its own window; the mark alone has none.
+            if message.hwnd.is_invalid() {
+                at_the_mark = true;
                 return false;
             }
             // SAFETY: `message` was just filled in by `PeekMessageW` and is not read again
             // before it is refilled.
-            unsafe {
-                let _ = TranslateMessage(&raw const message);
-                DispatchMessageW(&raw const message);
-            }
+            unsafe { DispatchMessageW(&raw const message) };
             true
-        })
+        });
+        if !at_the_mark {
+            let mut message = MSG::default();
+            // SAFETY: as above. A window of -1 takes only the thread's own messages, and under
+            // this name the mark is the only one: winit posts every wake to its window.
+            let _ = unsafe {
+                PeekMessageW(
+                    &raw mut message,
+                    Some(HWND(-1_isize as *mut core::ffi::c_void)),
+                    wake,
+                    wake,
+                    PM_REMOVE | PM_QS_POSTMESSAGE,
+                )
+            };
+        }
+        drained
     }
 
     #[cfg(test)]
@@ -715,6 +761,182 @@ mod windows_session_end {
             );
             withdraw_restart().expect("the system takes it back");
             assert_eq!(registration(), None, "nothing is left registered");
+        }
+    }
+}
+
+/// **A stand-in for winit's loop on a test's own thread** (plan row 201, review F3), so that a
+/// test can run the real drain against a real queue. It is a message-only window whose procedure
+/// runs a turn for each wake it is dispatched, as winit's hidden window does, plus a reading of
+/// what is left on the thread's queue. For tests only: `bt-app` reaches it through
+/// `trust-harness` on its dev-dependency, and a build of the shipped program never has it.
+#[cfg(all(windows, any(test, feature = "trust-harness")))]
+pub mod wake_target {
+    use std::cell::RefCell;
+
+    use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DefWindowProcW, DestroyWindow, HWND_MESSAGE, MSG, PM_QS_POSTMESSAGE,
+        PM_REMOVE, PeekMessageW, PostMessageW, PostQuitMessage, RegisterClassW, WINDOW_EX_STYLE,
+        WINDOW_STYLE, WM_APP, WM_QUIT, WNDCLASSW,
+    };
+    use windows::core::{HSTRING, PCWSTR};
+
+    use super::windows_session_end::wake_message;
+
+    /// One wake's turn. It is handed the window's [`Waker`], so that it can post the next wake,
+    /// as a turn that sends an event does.
+    pub type Turn = Box<dyn FnMut(Waker)>;
+
+    thread_local! {
+        /// The turn of this thread's one target.
+        static TURN: RefCell<Option<Turn>> = const { RefCell::new(None) };
+    }
+
+    /// **What can be posted to a target**, from inside its turn too.
+    #[derive(Clone, Copy, Debug)]
+    pub struct Waker(HWND);
+
+    impl Waker {
+        /// One wake, posted to the window as `EventLoopProxy::send_event` posts it to winit's.
+        pub fn wake(self) {
+            let wake = wake_message().expect("the wake's name registers");
+            // SAFETY: a message to a window of this thread, carrying no pointer.
+            unsafe { PostMessageW(Some(self.0), wake, WPARAM(0), LPARAM(0)) }
+                .expect("the wake is posted");
+        }
+
+        /// A message of another kind (`WM_APP`), posted to the same window: one the drain must
+        /// leave where it is.
+        pub fn post_other(self) {
+            // SAFETY: as above.
+            unsafe { PostMessageW(Some(self.0), WM_APP, WPARAM(0), LPARAM(0)) }
+                .expect("the other message is posted");
+        }
+    }
+
+    /// **The message-only window.** One per thread; dropping it destroys the window.
+    pub struct WakeTarget {
+        hwnd: HWND,
+    }
+
+    impl WakeTarget {
+        /// A window on this thread whose procedure runs `turn` for each wake it is dispatched.
+        ///
+        /// # Errors
+        /// The system refused the window, with its error.
+        pub fn new(turn: Turn) -> Result<Self, String> {
+            let class = HSTRING::from("FolioWakeTargetForTests");
+            let wnd = WNDCLASSW {
+                lpfnWndProc: Some(procedure),
+                lpszClassName: PCWSTR(class.as_ptr()),
+                ..Default::default()
+            };
+            // Registered once per process; a second registration answers zero and the first
+            // class is the one used.
+            // SAFETY: the class name lives across the call.
+            unsafe { RegisterClassW(&wnd) };
+            let title = HSTRING::new();
+            // SAFETY: the strings live across the call; the parent makes it message-only.
+            let hwnd = unsafe {
+                CreateWindowExW(
+                    WINDOW_EX_STYLE(0),
+                    PCWSTR(class.as_ptr()),
+                    PCWSTR(title.as_ptr()),
+                    WINDOW_STYLE(0),
+                    0,
+                    0,
+                    0,
+                    0,
+                    Some(HWND_MESSAGE),
+                    None,
+                    None,
+                    None,
+                )
+            }
+            .map_err(|error| format!("CreateWindowExW(wake target) refused: {error}"))?;
+            TURN.with_borrow_mut(|slot| *slot = Some(turn));
+            Ok(Self { hwnd })
+        }
+
+        /// What posts to this window.
+        #[must_use]
+        pub fn waker(&self) -> Waker {
+            Waker(self.hwnd)
+        }
+    }
+
+    impl Drop for WakeTarget {
+        fn drop(&mut self) {
+            // SAFETY: the window is this thread's own, created above.
+            let _ = unsafe { DestroyWindow(self.hwnd) };
+            TURN.with_borrow_mut(|slot| *slot = None);
+        }
+    }
+
+    /// The target's procedure: a wake runs the turn, everything else is the default's.
+    unsafe extern "system" fn procedure(
+        hwnd: HWND,
+        message: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        if Some(message) == wake_message() {
+            // Taken out for the call, so that the turn can post without re-entering the cell.
+            if let Some(mut turn) = TURN.with_borrow_mut(Option::take) {
+                turn(Waker(hwnd));
+                TURN.with_borrow_mut(|slot| *slot = Some(turn));
+            }
+            return LRESULT(0);
+        }
+        // SAFETY: the default procedure, for the window it was called for.
+        unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+    }
+
+    /// `PostQuitMessage(code)` on this thread, as the loop's way out posts it.
+    pub fn post_quit(code: i32) {
+        // SAFETY: no pointer.
+        unsafe { PostQuitMessage(code) };
+    }
+
+    /// **What was left on this thread's queue**, counted by kind.
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    pub struct Queued {
+        /// Wakes posted to a window.
+        pub wakes: usize,
+        /// Wakes posted to the thread itself: the drain's mark.
+        pub marks: usize,
+        /// Every other posted message.
+        pub others: usize,
+        /// The `WM_QUIT` code, when one was queued.
+        pub quit: Option<i32>,
+    }
+
+    /// Every posted message left on this thread's queue, taken off without being dispatched, and
+    /// counted.
+    #[must_use]
+    pub fn take_what_is_left() -> Queued {
+        let wake = wake_message().expect("the wake's name registers");
+        let mut queued = Queued::default();
+        loop {
+            let mut message = MSG::default();
+            // SAFETY: `message` is a live `MSG` this call fills in.
+            let taken = unsafe {
+                PeekMessageW(&raw mut message, None, 0, 0, PM_REMOVE | PM_QS_POSTMESSAGE)
+            };
+            if !taken.as_bool() {
+                return queued;
+            }
+            match message.message {
+                WM_QUIT => {
+                    // `PostQuitMessage` put its `int` into `wParam`; this takes the same `int`.
+                    let code = message.wParam.0 as i32;
+                    queued.quit = Some(code);
+                }
+                id if id == wake && message.hwnd.is_invalid() => queued.marks += 1,
+                id if id == wake => queued.wakes += 1,
+                _ => queued.others += 1,
+            }
         }
     }
 }

@@ -34210,7 +34210,7 @@ fn new_window_runtime<B: Backend>(parts: NewWindowParts<B>) -> WindowRuntime<B> 
                 let _ = proxy.send_event(AppEvent::SessionEnding);
             }),
             Box::new(|| i18n::Text::ShutdownSavingWork.text().to_owned()),
-            std::rc::Rc::new(session_end::at_the_end),
+            std::rc::Rc::new(|| _ = session_end::at_the_end()),
         )
     };
     // **A window is born knowing its display's rate**, before it has drawn
