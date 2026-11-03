@@ -49,6 +49,7 @@ use crate::i18n::Text;
 use crate::marks::{ChromeMark, ChromeSprite, MarkColour, OverlayLayer};
 use crate::profiles::{self, Integration, IntegrationChoice};
 use crate::seats::{RailMode, TabLayoutMode};
+use crate::startup::{Settled, SettledOnce};
 use crate::text_field::TextField;
 
 // ── `.settings`, `.overlay` ────────────────────────────────────────────────
@@ -5664,7 +5665,7 @@ impl SettingsRow {
 
     /// **Whether this row's button wears the `↗`**: a door whose press is
     /// answered outside this window. The control form and not the destination
-    /// — resolving *where* a row goes touches the disk, and the width solve and
+    /// — *where* a row goes is the press's question, and the width solve and
     /// the draw ask this on every frame.
     #[must_use]
     pub fn leaves_the_window(self) -> bool {
@@ -5788,31 +5789,80 @@ pub fn notices_page() -> &'static str {
 /// against `Cargo.lock` by `scripts/check-notices.ps1` in the same run that
 /// built the binary. An address can only ever be a very good guess at that.
 ///
-/// **Resolved once per process**, which is what makes it safe to ask from a
-/// dialog that redraws on hover: this is one `current_exe` and one or two
-/// `is_file`, and the file beside a running executable does not move under it —
-/// `SettingsValues`' own `explorer_menu::package_file().is_some()` rests on the
-/// same fact, settled by `main` before the loop since 2026-10-25.
+/// **A read, not a look** (T-NOTICES-DESTINATION-OFF-THE-WINDOW-THREAD; C1): the
+/// row's press asks this on the window thread, and until 2026-11-02 its first ask
+/// was a `current_exe` and one or two `is_file` there. The file beside the
+/// running image does not move under it — an update replaces the folder only
+/// after this process has gone — so [`settle_notices`]' answer, made by `fn main`
+/// before the loop, is the run's.
 fn notices_destination() -> LinkDestination {
-    static WHERE: std::sync::OnceLock<LinkDestination> = std::sync::OnceLock::new();
-    *WHERE.get_or_init(|| match notices_beside_the_executable() {
-        Some(file) => LinkDestination::File(Box::leak(file.into_boxed_path())),
+    match NOTICES.get() {
+        Some(file) => LinkDestination::File(file.as_path()),
         None => LinkDestination::Address(notices_page()),
-    })
+    }
 }
 
-/// The notices file this build shipped with, if it shipped with one.
+/// [`notices_destination`]'s cell: the notices file this build shipped with, as this start found
+/// it, settled by [`settle_notices`].
+#[cfg(not(test))]
+static NOTICES: SettledOnce<Option<std::path::PathBuf>> = SettledOnce::new(NOTICES_ARE);
+
+/// A test process has no `main`: its first read settles the cell with the look `main` settles
+/// it with, beside the test binary.
+#[cfg(test)]
+static NOTICES: SettledOnce<Option<std::path::PathBuf>> =
+    SettledOnce::settled_in_a_test_by(NOTICES_ARE, look_beside_this_image);
+
+/// What [`NOTICES`] holds, for the panic of a read before it is settled.
+const NOTICES_ARE: &str =
+    "the notices file beside the running image (settings::notices_destination)";
+
+#[cfg(test)]
+thread_local! {
+    /// **How many looks [`notices_for`] made on this thread**, for the test that holds the
+    /// licences row's press to making none
+    /// (`the_licences_row_reads_the_start_s_answer_and_asks_the_disk_nothing`). Per thread, so a
+    /// test counts its own looks and no other test's.
+    static NOTICE_LOOKS_ON_THIS_THREAD: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// **Settle [`notices_destination`]: one look beside the running image, before the loop**
+/// (T-NOTICES-DESTINATION-OFF-THE-WINDOW-THREAD; C1). `fn main` calls this in the loop's process
+/// on the line after `explorer_menu::settle_package` — the same question about the same folder,
+/// each module answering its own (its pin in `window_waits_tests`), so no press on the window
+/// thread pays for the look. A later call answers the first.
+pub(crate) fn settle_notices() -> Settled<Option<std::path::PathBuf>> {
+    NOTICES.settle(look_beside_this_image)
+}
+
+/// The look [`settle_notices`] makes: the notices beside this process's image, links followed.
+fn look_beside_this_image() -> Option<std::path::PathBuf> {
+    notices_for(
+        bt_platform::running_image().ok()?,
+        &|path: &std::path::Path| path.is_file(),
+    )
+}
+
+/// **The notices file this build shipped with, given the image it runs from**, when `is_file`
+/// finds it.
 ///
-/// The impure half: which executable is running. The rule itself is
-/// [`shipped_notices_near`], which takes the path and can therefore be stated
-/// over a tree a test builds — the same split `visible_rows_for` makes for the
-/// platform.
-fn notices_beside_the_executable() -> Option<std::path::PathBuf> {
-    shipped_notices_near(&std::env::current_exe().ok()?)
+/// **Beside the file the image leads to, never beside the path it was started by**: winget's
+/// portable alias is a symbolic link in a folder of its own, a start through it is told the
+/// link's path, and that folder holds none of the files the archive carried — so a look beside
+/// the started path sent every winget start of the licences row to the web page
+/// (T-NOTICES-DESTINATION-OFF-THE-WINDOW-THREAD; `bt_platform::RunningImage`). The rule itself
+/// is [`shipped_notices_near`].
+fn notices_for(
+    image: &bt_platform::RunningImage,
+    is_file: &dyn Fn(&std::path::Path) -> bool,
+) -> Option<std::path::PathBuf> {
+    #[cfg(test)]
+    NOTICE_LOOKS_ON_THIS_THREAD.with(|looks| looks.set(looks.get() + 1));
+    shipped_notices_near(&image.path, is_file)
 }
 
 /// **Where a build's own copy of the notices would be, given where its
-/// executable is** (owner ruling 2026-09-15).
+/// executable is** (owner ruling 2026-09-15), when `is_file` finds it there.
 ///
 /// **Two places, because this program has two shapes.** A Windows archive is a
 /// folder, and `scripts/release/package.ps1` lays the file down beside
@@ -5826,17 +5876,20 @@ fn notices_beside_the_executable() -> Option<std::path::PathBuf> {
 /// `None` is the ordinary answer for a development build and is not a failure:
 /// `cargo run` puts the executable in `target/debug`, where no release script
 /// has ever been.
-fn shipped_notices_near(executable: &std::path::Path) -> Option<std::path::PathBuf> {
+fn shipped_notices_near(
+    executable: &std::path::Path,
+    is_file: &dyn Fn(&std::path::Path) -> bool,
+) -> Option<std::path::PathBuf> {
     let beside: &std::path::Path = executable.parent()?;
     let shipped = beside.join(NOTICES_FILE);
-    if shipped.is_file() {
+    if is_file(&shipped) {
         return Some(shipped);
     }
     if beside.file_name()? != "MacOS" {
         return None;
     }
     let in_resources: std::path::PathBuf = beside.parent()?.join("Resources").join(NOTICES_FILE);
-    in_resources.is_file().then_some(in_resources)
+    is_file(&in_resources).then_some(in_resources)
 }
 
 /// **The one sentence every diagnostic file opens with**, on a row a person can
@@ -18658,6 +18711,7 @@ mod tests {
     /// `bin` directory would start answering out of a sibling `Resources`.
     #[test]
     fn the_shipped_notices_are_looked_for_beside_the_binary_and_in_a_bundles_resources() {
+        let on_disk = |path: &std::path::Path| path.is_file();
         let root = bt_testpath::temp_path("folio-notices");
         let beside = root.join("archive");
         let bundle = root.join("Folio.app").join("Contents");
@@ -18667,13 +18721,13 @@ mod tests {
 
         // The archive's shape: the file beside the executable.
         assert_eq!(
-            shipped_notices_near(&beside.join("folio.exe")),
+            shipped_notices_near(&beside.join("folio.exe"), &on_disk),
             None,
             "nothing is claimed before the file is there"
         );
         std::fs::write(beside.join(NOTICES_FILE), "notices").expect("write the archive's copy");
         assert_eq!(
-            shipped_notices_near(&beside.join("folio.exe")),
+            shipped_notices_near(&beside.join("folio.exe"), &on_disk),
             Some(beside.join(NOTICES_FILE)),
             "the copy that shipped beside the executable is the one that opens"
         );
@@ -18681,25 +18735,91 @@ mod tests {
         // The bundle's shape: one directory over, and only under that name.
         let executable = bundle.join("MacOS").join("folio");
         assert_eq!(
-            shipped_notices_near(&executable),
+            shipped_notices_near(&executable, &on_disk),
             None,
             "an empty bundle claims nothing"
         );
         std::fs::write(bundle.join("Resources").join(NOTICES_FILE), "notices")
             .expect("write the bundle's copy");
         assert_eq!(
-            shipped_notices_near(&executable),
+            shipped_notices_near(&executable, &on_disk),
             Some(bundle.join("Resources").join(NOTICES_FILE)),
             "a bundle keeps it in Contents/Resources"
         );
         let elsewhere = root.join("Folio.app").join("Contents").join("Helpers");
         std::fs::create_dir_all(&elsewhere).expect("some other directory in the same bundle");
         assert_eq!(
-            shipped_notices_near(&elsewhere.join("folio")),
+            shipped_notices_near(&elsewhere.join("folio"), &on_disk),
             None,
             "only Contents/MacOS looks in Contents/Resources"
         );
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// RED (T-NOTICES-DESTINATION-OFF-THE-WINDOW-THREAD; C1) — **the licences row's press reads
+    /// the start's answer and asks the disk nothing**: once the notices fact is settled, as
+    /// `fn main` settles it before the loop, the row's destination — what the press on the window
+    /// thread asks — makes no look, and it is the settled answer. Before, the first press asked
+    /// `current_exe` and one or two `is_file` on the window thread.
+    ///
+    /// MUTATION: make `notices_destination` look each time it is read (`look_beside_this_image()`,
+    /// the shape before) — the press makes looks.
+    #[test]
+    fn the_licences_row_reads_the_start_s_answer_and_asks_the_disk_nothing() {
+        let settled = settle_notices();
+        let looks = || NOTICE_LOOKS_ON_THIS_THREAD.with(std::cell::Cell::get);
+        let before = looks();
+        let first = SettingsRow::AboutLicences.link_destination();
+        let second = SettingsRow::AboutLicences.link_destination();
+        assert_eq!(
+            looks(),
+            before,
+            "the licences row's destination asked the disk nothing"
+        );
+        let expected = match settled.value() {
+            Some(file) => LinkDestination::File(file.as_path()),
+            None => LinkDestination::Address(notices_page()),
+        };
+        assert_eq!(
+            first,
+            Some(expected),
+            "the row goes where the start found the file"
+        );
+        assert_eq!(second, first, "and every press after it goes there too");
+    }
+
+    /// RED (T-NOTICES-DESTINATION-OFF-THE-WINDOW-THREAD) — **the notices are looked for beside
+    /// the file the alias leads to, not beside the alias**: a start through winget's portable
+    /// alias is told the link's path, in a folder that holds none of the archive's files; the
+    /// archive's copy is beside the file the link leads to. Stated over a `RunningImage` built
+    /// by hand and a look handed in, so no link, no privilege and no disk.
+    ///
+    /// MUTATION: look beside `image.started_as` in `notices_for` (the shape before, which asked
+    /// `current_exe`) — the alias's start answers `None` and the row would open the web page.
+    #[test]
+    fn the_notices_are_looked_for_beside_the_file_the_alias_leads_to() {
+        let links = std::path::Path::new("links");
+        let package = std::path::Path::new("package").join("folio-0.4.9");
+        let shipped = package.join(NOTICES_FILE);
+        let only_the_package = |path: &std::path::Path| path == shipped.as_path();
+        let through_the_alias = bt_platform::RunningImage {
+            started_as: links.join("folio.exe"),
+            path: package.join("folio.exe"),
+        };
+        assert_eq!(
+            notices_for(&through_the_alias, &only_the_package),
+            Some(shipped.clone()),
+            "a start through the alias opens the copy beside the file the link leads to"
+        );
+        let from_the_alias_s_folder = bt_platform::RunningImage {
+            started_as: links.join("folio.exe"),
+            path: links.join("folio.exe"),
+        };
+        assert_eq!(
+            notices_for(&from_the_alias_s_folder, &only_the_package),
+            None,
+            "the alias's own folder holds no copy"
+        );
     }
 
     /// The window every geometry claim below is stated against — an ordinary

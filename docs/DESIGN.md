@@ -16253,3 +16253,13 @@ Owner report 2026-10-27: the `<` / `>` at a picture preview's two sides did not 
 - `app_peek_tests::{a_read_whose_thread_could_not_be_started_is_unanswered_and_asked_again_on_a_new_look, a_picture_another_program_holds_is_asked_again_once_and_then_only_on_a_new_look}` and the updated `a_peek_records_of_questions_outlive_weight_pressure_and_no_redraw_asks_them` and `a_first_frame_that_ran_out_is_not_filed_as_a_refusal` (its `NoFrame::Held` facts row);
 - `bt_effects::file_reads::tests::file_reads_held_elsewhere_is_a_sharing_or_lock_violation_and_nothing_else`; `bt_term::inline_image::tests::a_picture_another_program_holds_is_held_and_decodes_once_it_is_let_go` (Windows); `bt_platform::video::tests::a_video_another_program_is_writing_is_held_and_opens_once_let_go` (Windows);
 - the plants `plant-177-unstarted-filed-as-decode.py`, `plant-177-retry-never-stops.py` and `plant-177-held-facts-arm-dropped.py` in the row's report.
+
+### 2026-11-02 — The licences row's destination is what the start found, beside the file the links lead to (T-NOTICES-DESTINATION-OFF-THE-WINDOW-THREAD, 0.4.9 plan row 61; addendum to the owner ruling of 2026-09-15 on where the licences row goes)
+
+**What changed.** The About page's licences row opens the notices file that shipped with the build, or the repository's copy at the build's tag when there is none. Until now the first press found out which, on the window thread: `current_exe` and one or two `is_file`. Now `fn main` asks once, before the loop (`settings::settle_notices`, on the line after `explorer_menu::settle_package`, pinned after the hand-over), and the press reads that answer.
+
+**Where it looks.** Beside the running image with its links followed (`bt_platform::running_image`), no longer beside the path the process was started by. winget's portable alias is a symbolic link in a folder of its own, and a start through it is told the link's path; that folder holds none of the archive's files, so every winget start of the row opened the web page. It now opens the copy beside the file the link leads to, as an extracted archive already did. A macOS bundle is found from its own executable's path as before.
+
+**What a person can see.** On a winget copy, the local file instead of the web page. A notices file deleted or added by hand while Folio runs is noticed at the next start; an update replaces the folder only after this process has gone.
+
+**Pinned by** `settings::tests::{the_licences_row_reads_the_start_s_answer_and_asks_the_disk_nothing, the_notices_are_looked_for_beside_the_file_the_alias_leads_to, the_shipped_notices_are_looked_for_beside_the_binary_and_in_a_bundles_resources}`, the settle's pin in `window_waits_tests`, and the witness `FolioApp::new` takes.

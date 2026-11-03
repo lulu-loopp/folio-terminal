@@ -46174,7 +46174,8 @@ impl<B: Backend> FolioApp<B> {
     /// `_storage` and `_profiles` are the witnesses that `main` settled the data directory and the
     /// profile table (`startup::Settled`, T-LAZY-INITIALIZERS-BEFORE-THE-LOOP), `_package` that it
     /// settled whether `folio.msix` is beside the executable
-    /// (T-EXPLORER-MENU-PROBE-OFF-THE-WINDOW-THREAD): nothing is read from them; that they exist
+    /// (T-EXPLORER-MENU-PROBE-OFF-THE-WINDOW-THREAD), `_notices` whether the notices file is
+    /// (T-NOTICES-DESTINATION-OFF-THE-WINDOW-THREAD): nothing is read from them; that they exist
     /// is the proof the loop does not start before any of them.
     fn new(
         proxy: LoopProxy,
@@ -46183,6 +46184,7 @@ impl<B: Backend> FolioApp<B> {
         _storage: startup::Settled<persist::DataDirectory>,
         _profiles: startup::Settled<profiles::Registry>,
         _package: startup::Settled<Option<PathBuf>>,
+        _notices: startup::Settled<Option<PathBuf>>,
     ) -> Self {
         Self {
             app: None,
@@ -57859,6 +57861,11 @@ fn main() -> Result<()> {
     // first-run card read the answer on the window thread, and a press's job looks again for
     // itself on its worker.
     let package = explorer_menu::settle_package();
+    // **And whether the notices file came with it, looked at the same moment and not by a press**
+    // (T-NOTICES-DESTINATION-OFF-THE-WINDOW-THREAD; C1): the About page's licences row reads the
+    // answer on the window thread, beside the image the links lead to, so a start through
+    // winget's alias opens the file that came with it.
+    let notices = settings::settle_notices();
     // **And from here no trace line is written by the thread that made it**
     // (T-TRACE-OFF-THREAD). `trace_sink` starts one writer thread — and only
     // for a run that asked for a trace — behind a bounded queue that drops and
@@ -58094,6 +58101,7 @@ fn main() -> Result<()> {
         settled,
         registry,
         package,
+        notices,
     );
     let outcome = event_loop
         .run_app(&mut application)

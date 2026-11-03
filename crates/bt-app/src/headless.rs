@@ -1643,6 +1643,7 @@ impl HeadlessApplication {
             ))),
             crate::profiles::settle_registry(),
             crate::explorer_menu::settle_package(),
+            crate::settings::settle_notices(),
         );
         application.app = Some(app);
         application.windows.insert(id, window);
