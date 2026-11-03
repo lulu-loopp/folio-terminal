@@ -8053,9 +8053,11 @@ fn the_tick_that_empties_the_picture_list_still_hands_it_over() {
     );
     // And the sweep is above it, which is what makes the gap reachable at
     // all — a sweep that ran afterwards would leave the stale list for one
-    // tick and no longer.
+    // tick and no longer. Since plan row 189 the sweep is two halves on one
+    // line, the membership and the clocked retirement, and either can remove
+    // the last seat.
     let sweep = tick
-        .find("self.sweep_video_seats();")
+        .find("self.sweep_video_seats() | self.retire_faulted_video_seats(now);")
         .expect("the service sweeps the seats");
     assert!(
         sweep < guard,
