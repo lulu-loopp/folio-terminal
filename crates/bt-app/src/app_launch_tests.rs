@@ -620,7 +620,8 @@ fn the_restart_is_registered_from_the_first_window_alone() {
 /// RED (plan row 191; the coordinator's ruling of 2026-11-03 on the clean-VM reboot) — **the
 /// launch asks the system to end Folio before the processes at the default shutdown level, once,
 /// at `SHUTDOWN_LEVEL`**: on the VM's reboot without it the shells' fate was the system's order;
-/// with it Folio was asked, wrote its layout and ended, and its shells ended after it with code 0.
+/// with it Folio was ended first, its shells exited with code 0 after it, and the layout on disk
+/// was unchanged.
 ///
 /// MUTATION: ask at `0x280` (the default) — the level is not above every console process's;
 /// ask twice — two records.

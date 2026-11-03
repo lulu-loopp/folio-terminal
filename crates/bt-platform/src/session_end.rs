@@ -218,9 +218,10 @@ pub fn register_restart(flags: u32) -> Result<(), String> {
 /// adopted on the clean-VM reboot of 2026-11-03). Windows ends a session's processes in
 /// descending level order, and every process starts at the default, `0x280` — Folio and the
 /// console processes it hosts alike. At one level the order between them is the system's, and on
-/// the owner's machine the shells were ended first. At `0x300` Folio is asked, and writes its
-/// layout, before any process at the default level is told to end; on the VM its shells then
-/// ended after it, with code 0. The range above `0x3FF` is the system's own.
+/// the owner's machine the shells were ended first. At `0x300` Folio is ended before any
+/// process at the default level; on the VM's reboot Folio was ended first, its shells exited
+/// with code 0 after it, and the layout on disk was unchanged. The range above `0x3FF` is the
+/// system's own.
 pub const SHUTDOWN_LEVEL: u32 = 0x300;
 
 /// **Ask Windows to end this process before the processes at the default shutdown level** —
