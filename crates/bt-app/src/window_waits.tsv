@@ -209,12 +209,12 @@ windows::Win32::System::Threading::SignalObjectAndWait	windows	signals one kerne
 windows::Win32::System::Threading::SleepEx	windows	waits for a duration, alertable
 windows::Win32::UI::WindowsAndMessaging::MsgWaitForMultipleObjectsEx	windows	waits for kernel objects or a message to this thread, bounded
 windows::Win32::System::IO::GetOverlappedResult	windows	waits for an overlapped operation when its wait flag is set; counted at every call, whatever the flag
-windows::Win32::System::IO::GetQueuedCompletionStatus	windows	waits for a completion packet, bounded
+windows::Win32::System::IO::GetQueuedCompletionStatus	windows	waits for a completion packet, with no bound when the timeout is INFINITE
 windows::Win32::System::Pipes::WaitNamedPipeW	windows	waits for a pipe instance to come free, bounded
 windows::Win32::System::Threading::SetEvent	windows	counted by call site, does not wait
 windows::Win32::Foundation::CloseHandle	windows	counted by call site, does not wait
 windows::Win32::Storage::FileSystem::GetDriveTypeW	windows	counted by call site, does not wait
-libc::poll	macos	waits for a descriptor, bounded
+libc::poll	macos	waits for a descriptor, with no bound when the timeout is -1
 libc::waitpid	macos	waits for a child process
 libc::waitid	macos	waits for a child process unless WNOHANG is set; counted at every call, whatever the flag
 libc::write	macos	counted by call site, does not wait
