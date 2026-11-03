@@ -696,6 +696,8 @@ fn a_window_of(tag: &str, home: &test_support::EndSessionHome, pinned: &[bool]) 
         .map(|(at, pin)| {
             let mut tab = test_support::ringing_tab(at as u64 + 1, 1);
             tab.pinned = *pin;
+            // A name of its own, so a retired tab is a row Recent keeps (`Seed::names_itself`).
+            tab.manual_name = Some(format!("tab {}", at + 1));
             tab
         })
         .collect();
@@ -897,26 +899,6 @@ fn a_shells_own_exit_still_retires_its_tab() {
 fn a_pane_the_systems_end_kept_restarts_or_closes_like_a_kept_pane() {
     let home = test_support::EndSessionHome::new("row191-restart");
     let mut application = a_window_of("row191-restart", &home, &[true, true]);
-    ends(&mut application, 1, SYSTEM_ENDED);
-    {
-        let mut runtime = application.runtime();
-        let seat = runtime.seats.identity();
-        assert_eq!(name_of(&runtime.sessions[&seat].session.life), Name::Kept);
-        runtime
-            .restart_shell(seat)
-            .expect("the restart is asked for");
-        let pane = runtime.sessions.get_mut(&seat).expect("the pane");
-        pane.take_successor().expect("the replacement");
-        pane.await_successor(answered_successor());
-        runtime.land_births().expect("the landing");
-        let life = &runtime.sessions[&seat].session.life;
-        assert_eq!(
-            name_of(life),
-            Name::Live,
-            "the kept pane runs a shell again"
-        );
-        assert!(life.pty().is_some());
-    }
     ends(&mut application, 2, SYSTEM_ENDED);
     application
         .runtime()
@@ -928,4 +910,22 @@ fn a_pane_the_systems_end_kept_restarts_or_closes_like_a_kept_pane() {
         1,
         "and goes into Recent, as a close does"
     );
+    ends(&mut application, 1, SYSTEM_ENDED);
+    let mut runtime = application.runtime();
+    let seat = runtime.seats.identity();
+    assert_eq!(name_of(&runtime.sessions[&seat].session.life), Name::Kept);
+    runtime
+        .restart_shell(seat)
+        .expect("the restart is asked for");
+    let pane = runtime.sessions.get_mut(&seat).expect("the pane");
+    pane.take_successor().expect("the replacement");
+    pane.await_successor(answered_successor());
+    runtime.land_births().expect("the landing");
+    let life = &runtime.sessions[&seat].session.life;
+    assert_eq!(
+        name_of(life),
+        Name::Live,
+        "the kept pane runs a shell again"
+    );
+    assert!(life.pty().is_some());
 }
