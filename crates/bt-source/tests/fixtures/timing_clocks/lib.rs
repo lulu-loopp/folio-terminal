@@ -520,3 +520,16 @@ pub fn origin_in_an_inner_block(now: Instant, started: Instant) -> bool {
     }
     started.elapsed() > Duration::ZERO
 }
+
+// ── round 3: an untyped closure `now` in a handed body ──
+
+/// An untyped closure `now` in a body handed an instant: its instant reading is found, its wall
+/// reading (a kind the body is not handed, and the closure's `now` might be) is refused.
+pub fn untyped_now_of_the_other_kind(now: Instant) -> bool {
+    let judge = |now| {
+        let _ = now;
+        Instant::now() > Instant::now() - Duration::ZERO
+            || SystemTime::now() > SystemTime::UNIX_EPOCH
+    };
+    judge(now)
+}

@@ -1925,8 +1925,10 @@ fn leave_handed(handed: &BTreeMap<String, (String, &'static str, usize)>) {
 ///
 /// * A reading through a call: a helper that reads the clock, or **a concrete
 ///   real clock called directly** in a handed body (`WallClock.now()` or
-///   `RealProbeClock.now()` where the handed `clock.now()` was meant) — the
-///   call graph's ground, which this scan does not walk.
+///   `RealProbeClock.now()` where the handed `clock.now()` was meant), or one
+///   held in a `static` or `const` (`static CLOCK: fn() -> Instant =
+///   Instant::now;`, then `CLOCK()`) — the call graph's ground, which this scan
+///   does not walk.
 /// * `Instant` or `SystemTime` under another name: `use std::time::Instant as
 ///   I;`, `type Now = Instant;`, or any `type` alias of a clock type.
 /// * An untyped closure parameter of another name than `now` (`|clock| …`).
@@ -2062,7 +2064,9 @@ fn the_handed_now_reading_finds_refuses_and_admits_what_it_says() {
 /// of a body handed an instant, both kinds read in a closure handed a wall `now`
 /// in a body handed an instant, `.elapsed()` of a written wall time and of a
 /// receiver whose type is not written in a body handed a wall time, and an
-/// `.elapsed()` on a binding an inner block's origin shares a name with. An
+/// `.elapsed()` on a binding an inner block's origin shares a name with; and an
+/// untyped closure `now` in a body handed an instant, whose instant readings are
+/// found and whose wall reading is refused. An
 /// owner whose method calls only its clock, the real clock's own `now`, a
 /// trait or closure with inputs, a `now: u64`, a `Token![,]`-like macro type, a
 /// carrier's name led by an outside crate, through an associated type or
@@ -2158,10 +2162,11 @@ fn the_handed_clock_reading_reads_every_clock_shape() {
     .chain([
         ("clocks crate::handed_both".to_owned(), 2),
         ("clocks crate::both_inside_a_closure".to_owned(), 2),
+        ("clocks crate::untyped_now_of_the_other_kind".to_owned(), 2),
     ])
     .collect();
     assert_eq!(counts, expected);
-    assert_eq!(refusals.len(), 8, "{refusals:#?}");
+    assert_eq!(refusals.len(), 9, "{refusals:#?}");
     for (line, says) in [
         (165, "written by a macro"),
         (169, "cannot pair"),
@@ -2171,6 +2176,7 @@ fn the_handed_clock_reading_reads_every_clock_shape() {
         (386, "written by a macro"),
         (393, "not a parameter"),
         (399, "type resolver cannot follow"),
+        (532, "whose type is not written"),
     ] {
         assert!(
             refusals
