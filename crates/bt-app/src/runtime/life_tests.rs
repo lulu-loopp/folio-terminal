@@ -1033,6 +1033,28 @@ fn a_resumed_shell_panes_restart_duplicate_and_split_start_its_shell() {
         "gitbash",
         "Restart shell"
     );
+    let tab = runtime.window.tabs[runtime.window.active_tab].id;
+    assert!(
+        runtime
+            .tab_state(tab)
+            .and_then(|state| state.focused())
+            .is_some(),
+        "the tab's focused pane is the resumed one"
+    );
+    runtime
+        .duplicate_tab(tab)
+        .expect("the duplicate is asked for");
+    assert_eq!(runtime.window.tabs.len(), 2, "the duplicate tab");
+    let duplicate = &runtime.window.tabs[runtime.window.active_tab];
+    assert_eq!(
+        asked_profile(&duplicate.focused().expect("its pane").life),
+        "gitbash",
+        "Duplicate tab"
+    );
+    // Back to the resumed pane's tab, the first, for the split.
+    runtime
+        .activate_tab(0, true)
+        .expect("the source tab is in front");
     runtime
         .split_seat(seat, bt_layout::Axis::Row, false, crate::SplitSeed::Inherit)
         .expect("the split is asked for");
@@ -1046,21 +1068,6 @@ fn a_resumed_shell_panes_restart_duplicate_and_split_start_its_shell() {
         asked_profile(&runtime.sessions[&arrived].session.life),
         "gitbash",
         "the split"
-    );
-    let tab = runtime.window.tabs[runtime.window.active_tab].id;
-    runtime
-        .duplicate_tab(tab)
-        .expect("the duplicate is asked for");
-    let duplicate = runtime
-        .window
-        .tabs
-        .iter()
-        .find(|other| other.id != tab)
-        .expect("the duplicate tab");
-    assert_eq!(
-        asked_profile(&duplicate.focused().expect("its pane").life),
-        "gitbash",
-        "Duplicate tab"
     );
 }
 
