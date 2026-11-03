@@ -568,12 +568,13 @@ impl Engine {
     /// real clock (`state_at`).
     #[must_use]
     pub fn state(&self) -> EngineState {
-        self.state_at(Instant::now())
+        self.state_at(Instant::now)
     }
 
     /// [`Self::state`] read at `now`: the real clock from [`Self::state`], an
-    /// instant a test chose in a test.
-    fn state_at(&self, now: Instant) -> EngineState {
+    /// instant a test chose in a test. `now` is asked only when due — while
+    /// nothing has been said and nothing is built.
+    fn state_at(&self, now: impl FnOnce() -> Instant) -> EngineState {
         let state = *self
             .shared
             .state
@@ -581,7 +582,7 @@ impl Engine {
             .unwrap_or_else(|held| held.into_inner());
         if self.open.missed(
             now,
-            self.shared.built.load(Ordering::Acquire),
+            || self.shared.built.load(Ordering::Acquire),
             state.error.is_some(),
         ) {
             return EngineState {
@@ -2676,15 +2677,15 @@ mod tests {
         let past = due + Duration::from_nanos(1);
 
         let late = unbuilt_at(asked);
-        assert_eq!(late.state_at(due).error, None, "at the budget, in time");
+        assert_eq!(late.state_at(|| due).error, None, "at the budget, in time");
         assert_eq!(
-            late.state_at(past).error,
+            late.state_at(|| past).error,
             Some(EngineError::Unresponsive),
             "past the budget with nothing built and nothing said"
         );
         late.shared.built.store(true, Ordering::Release);
         assert_eq!(
-            late.state_at(past).error,
+            late.state_at(|| past).error,
             None,
             "an engine built after the budget is a reading, not a latch"
         );
@@ -2692,7 +2693,7 @@ mod tests {
         let refused = unbuilt_at(asked);
         publish_failure(&refused.shared, EngineError::Unsupported);
         assert_eq!(
-            refused.state_at(due + OPEN_BUDGET * 720).error,
+            refused.state_at(|| due + OPEN_BUDGET * 720).error,
             Some(EngineError::Unsupported),
             "the thread's own refusal keeps its cause past the budget"
         );

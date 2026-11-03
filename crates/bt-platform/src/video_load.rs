@@ -148,6 +148,11 @@ impl OpenDeadline {
 
     /// **Whether a reading at `now` finds the build's budget missed.**
     ///
+    /// `built` and `now` are asked lazily, in that order and only when due —
+    /// the build only while nothing has been said, the clock only while
+    /// nothing is built — so a built engine's every reading costs no clock read
+    /// at all, as the `&&` chain this replaced did not.
+    ///
     /// Only while nothing is built and nothing has been said: an engine thread
     /// that has published a refusal of its own keeps that refusal as the
     /// answer, whenever it is read, and one that has built its engine is no
@@ -159,8 +164,13 @@ impl OpenDeadline {
     /// missed. Each arm's window retires a seat at the first reading that does
     /// (`bt-app`'s `video_seat::retirement`), so no surface sees the reading
     /// change.
-    pub(crate) fn missed(self, now: Instant, built: bool, errored: bool) -> bool {
-        !errored && !built && now > self.due
+    pub(crate) fn missed(
+        self,
+        now: impl FnOnce() -> Instant,
+        built: impl FnOnce() -> bool,
+        errored: bool,
+    ) -> bool {
+        !errored && !built() && now() > self.due
     }
 }
 
@@ -174,30 +184,56 @@ mod tests {
     /// The one decision both playback arms' `Engine::state` makes on every
     /// reading, tested once on every machine on instants the test chooses.
     ///
+    /// And **lazily**: the clock is not read once the engine is built, and
+    /// neither the build nor the clock once a refusal has been said — each
+    /// counted by the closure that would have answered it.
+    ///
     /// MUTATION: compare with `>=` and the reading at the budget is missed; drop
-    /// `!built` and the late build is still missed; drop `!errored` and the
-    /// refusal is masked.
+    /// `!built()` and the late build is still missed; drop `!errored` and the
+    /// refusal is masked; read the clock first and the built engine's count is
+    /// one.
     #[test]
     fn an_open_is_missed_only_past_its_budget_while_nothing_is_built_or_said() {
+        use std::cell::Cell;
         let asked = Instant::now();
         let deadline = OpenDeadline::from_open(asked);
         let due = asked + OPEN_BUDGET;
         let past = due + Duration::from_nanos(1);
         assert!(
-            !deadline.missed(due, false, false),
+            !deadline.missed(|| due, || false, false),
             "a reading at the budget itself is still in time"
         );
         assert!(
-            deadline.missed(past, false, false),
+            deadline.missed(|| past, || false, false),
             "past the budget with nothing built and nothing said is missed"
         );
+        let clock_reads = Cell::new(0);
+        let at_past = || {
+            clock_reads.set(clock_reads.get() + 1);
+            past
+        };
         assert!(
-            !deadline.missed(past, true, false),
+            !deadline.missed(at_past, || true, false),
             "an engine built late is not missed"
         );
+        assert_eq!(
+            clock_reads.get(),
+            0,
+            "a built engine's reading reads no clock"
+        );
+        let build_asks = Cell::new(0);
+        let unbuilt = || {
+            build_asks.set(build_asks.get() + 1);
+            false
+        };
         assert!(
-            !deadline.missed(due + OPEN_BUDGET * 720, false, true),
+            !deadline.missed(at_past, unbuilt, true),
             "a refusal the engine thread said keeps its own cause"
+        );
+        assert_eq!(
+            (build_asks.get(), clock_reads.get()),
+            (0, 0),
+            "a said refusal asks neither the build nor the clock"
         );
     }
 
