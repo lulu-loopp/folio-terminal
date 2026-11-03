@@ -4,7 +4,7 @@
 # name) with the number of calls behind it. Held equal to the tree by bt-source's call_graph test;
 # shrink-only against the merge base by scripts/ci/check-unfollowed-edges.ps1 - a key added or grown
 # carries a reason 'YYYY-MM-DD: <why>'. Never edit a key or a count by hand.
-# Ambiguous calls with exactly one candidate, not listed by site above or below (bt_source::call_graph::Unresolved::sole_candidate; a guard naming a callee's callers counts each as a call of its one candidate): 1733. A call whose name is renamed to one only one item declares leaves the list and is counted here.
+# Ambiguous calls with exactly one candidate, not listed by site above or below (bt_source::call_graph::Unresolved::sole_candidate; a guard naming a callee's callers counts each as a call of its one candidate): 1732. A call whose name is renamed to one only one item declares leaves the list and is counted here.
 file	item	kind	name	sites	reason
 crates/bt-app/src/animation.rs	bt-app crate::animation::<FileAnimationSource as Read>::read	Ambiguous	unwrap_or	1	
 crates/bt-app/src/animation.rs	bt-app crate::animation::AnimationCursor::start_again	Ambiguous	into_inner	1	
@@ -5238,7 +5238,6 @@ crates/bt-app/src/settings.rs	bt-app crate::settings::menu_layout	Dynamic	px	19
 crates/bt-app/src/settings.rs	bt-app crate::settings::monospace_family_files	Ambiguous	map	1	
 crates/bt-app/src/settings.rs	bt-app crate::settings::monospace_family_files	Ambiguous	unwrap_or_default	2	
 crates/bt-app/src/settings.rs	bt-app crate::settings::nav_stack_height	Dynamic	px	2	
-crates/bt-app/src/settings.rs	bt-app crate::settings::notices_beside_the_executable	Ambiguous	ok	1	
 crates/bt-app/src/settings.rs	bt-app crate::settings::notices_page	Ambiguous	into_boxed_str	1	
 crates/bt-app/src/settings.rs	bt-app crate::settings::on_off_label	Ambiguous	text	2	
 crates/bt-app/src/settings.rs	bt-app crate::settings::page_order	Ambiguous	collect	1	
@@ -5299,6 +5298,7 @@ crates/bt-app/src/settings.rs	bt-app crate::settings::scheme_index	Ambiguous	unw
 crates/bt-app/src/settings.rs	bt-app crate::settings::settle_field_scroll	Dynamic	measure	2	2026-11-02: T-CHROME-FIELDS-CARET-BY-POINTER (0.4.9 plan row 180); added: the focused field's sticky scroll measures the text before the caret and the whole text with the measure it is handed (the chrome text measure)
 crates/bt-app/src/settings.rs	bt-app crate::settings::shipped_notices_near	Ambiguous	join	2	
 crates/bt-app/src/settings.rs	bt-app crate::settings::shipped_notices_near	Ambiguous	then_some	1	
+crates/bt-app/src/settings.rs	bt-app crate::settings::shipped_notices_near	Dynamic	is_file	2	2026-11-03: the look handed in (T-NOTICES-DESTINATION-OFF-THE-WINDOW-THREAD): a typed `&Path` is_file closure at settings::look_beside_this_image, which only settings::settle_notices runs, in fn main before the loop; the tests hand their own
 crates/bt-app/src/settings.rs	bt-app crate::settings::shortcut_undelivered_note	Ambiguous	text	1	
 crates/bt-app/src/settings.rs	bt-app crate::settings::sidebar_label	Ambiguous	text	2	
 crates/bt-app/src/settings.rs	bt-app crate::settings::slider_geometry	Dynamic	px	3	
@@ -7288,6 +7288,7 @@ crates/bt-effects/src/file_reads.rs	bt-effects crate::file_reads::Minute::line	A
 crates/bt-effects/src/file_reads.rs	bt-effects crate::file_reads::Minute::perf_line	Ambiguous	iter	1	
 crates/bt-effects/src/file_reads.rs	bt-effects crate::file_reads::Minute::perf_line	Ambiguous	label	3	
 crates/bt-effects/src/file_reads.rs	bt-effects crate::file_reads::Minute::perf_line	Ambiguous	zip	1	
+crates/bt-effects/src/file_reads.rs	bt-effects crate::file_reads::held_elsewhere	Ambiguous	is_some_and	1	2026-11-02: T-HELD-FILE-IN-THE-OTHER-PICTURE-LANES; Option::is_some_and over the error's raw OS code (io::Error::raw_os_error), which the grammar does not type, comparing it in the const held_elsewhere_code: reaches no door
 crates/bt-effects/src/file_reads.rs	bt-effects crate::file_reads::opaque	Dynamic	work	1	
 crates/bt-effects/src/file_reads.rs	bt-effects crate::file_reads::open	Ambiguous	map	1	
 crates/bt-effects/src/file_reads.rs	bt-effects crate::file_reads::over_budget	Dynamic	exceeds	2	
@@ -9366,8 +9367,9 @@ crates/bt-platform/src/macos_player.rs	bt-platform crate::video::macos_player::E
 crates/bt-platform/src/macos_player.rs	bt-platform crate::video::macos_player::Engine::frame	Ambiguous	into_inner	1	
 crates/bt-platform/src/macos_player.rs	bt-platform crate::video::macos_player::Engine::frame	Ambiguous	unwrap_or_else	1	
 crates/bt-platform/src/macos_player.rs	bt-platform crate::video::macos_player::Engine::open	Ambiguous	clone	1	
-crates/bt-platform/src/macos_player.rs	bt-platform crate::video::macos_player::Engine::state	Ambiguous	into_inner	1	
-crates/bt-platform/src/macos_player.rs	bt-platform crate::video::macos_player::Engine::state	Ambiguous	unwrap_or_else	1	
+crates/bt-platform/src/macos_player.rs	bt-platform crate::video::macos_player::Engine::state_at	Ambiguous	into_inner	1	2026-11-03: T-VIDEO-ENGINE-OPEN-BUDGET-ON-A-CLOCK (plan row 152); re-keyed from Engine::state, the same site: Engine::state's reading moved into the private Engine::state_at
+crates/bt-platform/src/macos_player.rs	bt-platform crate::video::macos_player::Engine::state_at	Ambiguous	is_some	1	2026-11-03: T-VIDEO-ENGINE-OPEN-BUDGET-ON-A-CLOCK (plan row 152); added: is_some in the private Engine::state_at, where Engine::state's reading moved
+crates/bt-platform/src/macos_player.rs	bt-platform crate::video::macos_player::Engine::state_at	Ambiguous	unwrap_or_else	1	2026-11-03: T-VIDEO-ENGINE-OPEN-BUDGET-ON-A-CLOCK (plan row 152); re-keyed from Engine::state, the same site: Engine::state's reading moved into the private Engine::state_at
 crates/bt-platform/src/macos_player.rs	bt-platform crate::video::macos_player::Machinery::build	Ambiguous	and_then	2	
 crates/bt-platform/src/macos_player.rs	bt-platform crate::video::macos_player::Machinery::build	Ambiguous	firstObject	1	
 crates/bt-platform/src/macos_player.rs	bt-platform crate::video::macos_player::Machinery::build	Ambiguous	is_empty	2	
@@ -9873,11 +9875,11 @@ crates/bt-platform/src/video/engine.rs	bt-platform crate::video::engine::Engine:
 crates/bt-platform/src/video/engine.rs	bt-platform crate::video::engine::Engine::set_volume	Ambiguous	send	1	
 crates/bt-platform/src/video/engine.rs	bt-platform crate::video::engine::Engine::shutdown	Ambiguous	send	1	
 crates/bt-platform/src/video/engine.rs	bt-platform crate::video::engine::Engine::shutdown	Ambiguous	take	1	
-crates/bt-platform/src/video/engine.rs	bt-platform crate::video::engine::Engine::state	Ambiguous	elapsed	1	
-crates/bt-platform/src/video/engine.rs	bt-platform crate::video::engine::Engine::state	Ambiguous	into_inner	1	
-crates/bt-platform/src/video/engine.rs	bt-platform crate::video::engine::Engine::state	Ambiguous	load	1	
-crates/bt-platform/src/video/engine.rs	bt-platform crate::video::engine::Engine::state	Ambiguous	lock	1	
-crates/bt-platform/src/video/engine.rs	bt-platform crate::video::engine::Engine::state	Ambiguous	unwrap_or_else	1	
+crates/bt-platform/src/video/engine.rs	bt-platform crate::video::engine::Engine::state_at	Ambiguous	into_inner	1	2026-11-03: T-VIDEO-ENGINE-OPEN-BUDGET-ON-A-CLOCK (plan row 152); re-keyed from Engine::state, the same site: Engine::state's reading moved into the private Engine::state_at
+crates/bt-platform/src/video/engine.rs	bt-platform crate::video::engine::Engine::state_at	Ambiguous	is_some	1	2026-11-03: T-VIDEO-ENGINE-OPEN-BUDGET-ON-A-CLOCK (plan row 152); added: is_some in the private Engine::state_at, where Engine::state's reading moved
+crates/bt-platform/src/video/engine.rs	bt-platform crate::video::engine::Engine::state_at	Ambiguous	load	1	2026-11-03: T-VIDEO-ENGINE-OPEN-BUDGET-ON-A-CLOCK (plan row 152); re-keyed from Engine::state, the same site: Engine::state's reading moved into the private Engine::state_at
+crates/bt-platform/src/video/engine.rs	bt-platform crate::video::engine::Engine::state_at	Ambiguous	lock	1	2026-11-03: T-VIDEO-ENGINE-OPEN-BUDGET-ON-A-CLOCK (plan row 152); re-keyed from Engine::state, the same site: Engine::state's reading moved into the private Engine::state_at
+crates/bt-platform/src/video/engine.rs	bt-platform crate::video::engine::Engine::state_at	Ambiguous	unwrap_or_else	1	2026-11-03: T-VIDEO-ENGINE-OPEN-BUDGET-ON-A-CLOCK (plan row 152); re-keyed from Engine::state, the same site: Engine::state's reading moved into the private Engine::state_at
 crates/bt-platform/src/video/engine.rs	bt-platform crate::video::engine::Machinery::build	Ambiguous	SetAutoPlay	1	
 crates/bt-platform/src/video/engine.rs	bt-platform crate::video::engine::Machinery::build	Ambiguous	SetPreload	1	
 crates/bt-platform/src/video/engine.rs	bt-platform crate::video::engine::Machinery::build	Ambiguous	SetSource	1	
@@ -9969,6 +9971,8 @@ crates/bt-platform/src/video/mod.rs	bt-platform crate::video::swizzle	Ambiguous	
 crates/bt-platform/src/video/mod.rs	bt-platform crate::video::within_budget	Ambiguous	recv_timeout	1	
 crates/bt-platform/src/video/mod.rs	bt-platform crate::video::within_budget	Ambiguous	send	1	
 crates/bt-platform/src/video/mod.rs	bt-platform crate::video::within_budget	Dynamic	work	1	
+crates/bt-platform/src/video_load.rs	bt-platform crate::video_load::OpenDeadline::missed	Dynamic	built	1	2026-11-03: T-VIDEO-ENGINE-OPEN-BUDGET-ON-A-CLOCK (plan row 152); added: OpenDeadline::missed asks its lazy `built` closure (an FnOnce parameter) only when due; each arm's Engine::state_at hands it the engine thread's built flag (an atomic load) in the product, a fixed instant or flag in a test
+crates/bt-platform/src/video_load.rs	bt-platform crate::video_load::OpenDeadline::missed	Dynamic	now	1	2026-11-03: T-VIDEO-ENGINE-OPEN-BUDGET-ON-A-CLOCK (plan row 152); added: OpenDeadline::missed asks its lazy `now` closure (an FnOnce parameter) only when due; each arm's Engine::state_at hands it Instant::now in the product, a fixed instant or flag in a test
 crates/bt-platform/src/video_portable.rs	bt-platform crate::video::within_budget	Ambiguous	recv_timeout	1	
 crates/bt-platform/src/video_portable.rs	bt-platform crate::video::within_budget	Ambiguous	send	1	
 crates/bt-platform/src/video_portable.rs	bt-platform crate::video::within_budget	Dynamic	work	1	
@@ -10927,7 +10931,7 @@ crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::decode_backgroun
 crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::decode_background_image	Ambiguous	len	6	
 crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::decode_background_image	Ambiguous	map_err	3	
 crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::decode_background_image	Ambiguous	take	1	
-crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::decode_background_image	Ambiguous	to_string	4	
+crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::decode_background_image	Ambiguous	to_string	1	
 crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::decode_image_bytes_within	Ambiguous	and_then	3	
 crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::decode_image_bytes_within	Ambiguous	checked_mul	2	
 crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::decode_image_bytes_within	Ambiguous	decode	1	
