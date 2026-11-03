@@ -5410,6 +5410,9 @@ mod birth_death_tests {
         };
         let banner = crate::fallback_banner(&record, profiles::fallback_profile_id());
         assert!(banner.contains("failed to start"), "{banner:?}");
+        // Declared before the pane, so an unwinding assertion drops the pane (and its shell)
+        // before the shell's folder, as the passing teardown below does (plan row 188).
+        let (kept, hygiene) = mpsc::channel();
         let mut leaf = test_support::leaf_saying("");
         leaf.session.launch.program = Some(PathBuf::from("preferred-shell"));
         // The program that died was a Cygwin bash; the one that lands is Windows PowerShell.
@@ -5423,7 +5426,6 @@ mod birth_death_tests {
         // The retained last-resort command is the claim, so it is the real one that starts — but
         // through the test-shell door (plan row 174): the product's `spawn_last_resort` refuses a
         // fallback a test made, and the door starts it without the account's startup files.
-        let (kept, hygiene) = mpsc::channel();
         let shell = pty_door::request(
             move |_| {
                 worker_open.pass();
@@ -5557,6 +5559,9 @@ mod birth_death_tests {
     #[test]
     fn a_fresh_birth_still_lands_at_the_size_released_while_it_was_pending() {
         test_support::on_the_window_thread();
+        // Declared before the pane, so an unwinding assertion drops the pane (and its shell)
+        // before the shell's folder, as the passing teardown below does (plan row 188).
+        let (kept, hygiene) = mpsc::channel();
         let mut leaf = test_support::leaf_saying("");
         let born_grid = leaf.session.conpty_grid;
         let decision = crate::BirthDecision {
@@ -5577,7 +5582,6 @@ mod birth_death_tests {
         let open = Arc::new(Hold::default());
         open.hold();
         let worker_open = Arc::clone(&open);
-        let (kept, hygiene) = mpsc::channel();
         let shell = pty_door::request(
             move |_| {
                 worker_open.pass();
