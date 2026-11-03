@@ -522,11 +522,7 @@ pub fn https_get(request: &HttpsGet<'_>) -> Result<String, String> {
 /// on: [`https_get`] hands [`RealClock`], and the tests a counted clock (see
 /// [`Exchange::wait`]). The session's own two timeouts are Foundation's timers
 /// on real time either way.
-fn fetch(
-    url: &NSURL,
-    request: &HttpsGet<'_>,
-    clock: &dyn LaunchClock,
-) -> Result<String, String> {
+fn fetch(url: &NSURL, request: &HttpsGet<'_>, clock: &dyn LaunchClock) -> Result<String, String> {
     let exchange = Arc::new(Exchange::new(request.cap));
     let transport = Transport::new(Arc::clone(&exchange));
 
