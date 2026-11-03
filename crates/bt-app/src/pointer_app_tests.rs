@@ -880,7 +880,7 @@ const CAPTURE_OWNER_ARMS: [&str; 23] = [
     "SettingsMenuBar",
     "VideoPicture",
     "RowMiddlePress",
-    "RenameSelection",
+    "FieldSelection",
 ];
 
 /// Owners of every ending policy the slot has had: a tab's surface, a
