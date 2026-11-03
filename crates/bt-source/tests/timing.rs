@@ -1391,7 +1391,10 @@ fn handed_now(indices: &[(&str, &Index)]) -> (BTreeMap<String, Vec<String>>, Vec
 ///   its `impl` block. A clock trait is a first-party trait, resolved in the
 ///   writer's module by [`TraitResolver`], one of whose methods takes its
 ///   receiver and nothing else and answers an instant (`GitClock::now`,
-///   `Media::load_clock`), or one with such a supertrait.
+///   `Media::load_clock`), or one with such a supertrait. A getter of a stored
+///   instant (`web_spare::SpareSeat::next_deadline`) reads the same, so its
+///   trait is a clock here too: the text cannot tell a present from a stored
+///   instant, and the reading errs toward handed — stricter, never silent.
 /// * **Not a clock**: a closure with inputs (`Fn(u32) -> Instant` computes an
 ///   instant from what it is given), a trait whose instant method takes
 ///   inputs, a concrete struct (what it reads, it reads in its own methods,
