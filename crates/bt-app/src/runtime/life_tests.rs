@@ -148,16 +148,16 @@ fn birth(waiting: BirthWait) -> PaneBirth {
 fn pending(shell: pty_door::ShellBirth) -> BirthDeathFallback {
     BirthDeathFallback {
         landing: landing(shell),
-        exit: crate::exit_diagnostics::ShellExit {
-            seat: 1,
-            code: Some(23),
-            elapsed: Duration::from_millis(400),
-            program: Some(PathBuf::from("壳 shell")),
-            tab: 1,
-            disposition: crate::exit_diagnostics::ShellExitDisposition::BirthDeathFellBack(
+        exit: crate::exit_diagnostics::ShellExit::unprobed(
+            1,
+            Some(23),
+            Duration::from_millis(400),
+            Some(PathBuf::from("壳 shell")),
+            1,
+            crate::exit_diagnostics::ShellExitDisposition::BirthDeathFellBack(
                 bt_pty::LAST_RESORT_SHELL,
             ),
-        },
+        ),
     }
 }
 

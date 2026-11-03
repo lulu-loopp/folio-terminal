@@ -3655,15 +3655,14 @@ impl<B: Backend> Runtime<'_, B> {
                                 any_live = true;
                                 continue;
                             }
-                            let exit = exit_diagnostics::ShellExit {
-                                seat: seat.0,
+                            let exit = exit_diagnostics::ShellExit::observed(
+                                seat.0,
                                 code,
                                 elapsed,
                                 program,
-                                tab: tab_id.0,
-                                disposition:
-                                    exit_diagnostics::ShellExitDisposition::SystemEndedPaneKept,
-                            };
+                                tab_id.0,
+                                exit_diagnostics::ShellExitDisposition::SystemEndedPaneKept,
+                            );
                             if let Some(old) = leaf.life.release_dead_shell() {
                                 bt_pty::retire_session(old);
                             }
@@ -3686,15 +3685,14 @@ impl<B: Backend> Runtime<'_, B> {
                             let fallback = (birth_death == BirthDeathDisposition::FallBack)
                                 .then(|| pty.take_birth_fallback())
                                 .flatten();
-                            let mut exit = exit_diagnostics::ShellExit {
-                                seat: seat.0,
+                            let mut exit = exit_diagnostics::ShellExit::observed(
+                                seat.0,
                                 code,
                                 elapsed,
                                 program,
-                                tab: tab_id.0,
-                                disposition:
-                                    exit_diagnostics::ShellExitDisposition::BirthDeathPaneKept,
-                            };
+                                tab_id.0,
+                                exit_diagnostics::ShellExitDisposition::BirthDeathPaneKept,
+                            );
                             if let Some(old) = leaf.life.release_dead_shell() {
                                 bt_pty::retire_session(old);
                             }
@@ -3747,14 +3745,14 @@ impl<B: Backend> Runtime<'_, B> {
                         if leaf.life.exited(elapsed) {
                             exits.push((
                                 index,
-                                exit_diagnostics::ShellExit {
-                                    seat: seat.0,
-                                    code: status.signal().is_none().then(|| status.exit_code()),
+                                exit_diagnostics::ShellExit::observed(
+                                    seat.0,
+                                    code,
                                     elapsed,
-                                    program: leaf.launch.program.clone(),
-                                    tab: tab_id.0,
-                                    disposition: exit_diagnostics::ShellExitDisposition::TabKept,
-                                },
+                                    program,
+                                    tab_id.0,
+                                    exit_diagnostics::ShellExitDisposition::TabKept,
+                                ),
                             ));
                         }
                     }
@@ -5504,16 +5502,14 @@ mod birth_death_tests {
             wake,
         )
         .expect("the fallback birth worker starts");
-        let exit = exit_diagnostics::ShellExit {
-            seat: 4,
-            code: Some(23),
-            elapsed: Duration::from_millis(400),
-            program: leaf.session.launch.program.clone(),
-            tab: 8,
-            disposition: exit_diagnostics::ShellExitDisposition::BirthDeathFellBack(
-                bt_pty::LAST_RESORT_SHELL,
-            ),
-        };
+        let exit = exit_diagnostics::ShellExit::unprobed(
+            4,
+            Some(23),
+            Duration::from_millis(400),
+            leaf.session.launch.program.clone(),
+            8,
+            exit_diagnostics::ShellExitDisposition::BirthDeathFellBack(bt_pty::LAST_RESORT_SHELL),
+        );
         let pending = crate::BirthDeathFallback::waiting(&leaf.session, shell, exit);
         leaf.session.life.fall_back(pending);
 
@@ -5702,14 +5698,14 @@ mod birth_death_tests {
         );
         assert_eq!(disposition(&mut pty), Some(BirthDeathDisposition::Keep));
         let mut leaf = test_support::leaf_saying("先说出的错误");
-        let exit = exit_diagnostics::ShellExit {
-            seat: 4,
-            code: Some(23),
-            elapsed: Duration::from_millis(900),
-            program: Some(PathBuf::from("tools").join("broken-shell")),
-            tab: 8,
-            disposition: exit_diagnostics::ShellExitDisposition::BirthDeathPaneKept,
-        };
+        let exit = exit_diagnostics::ShellExit::unprobed(
+            4,
+            Some(23),
+            Duration::from_millis(900),
+            Some(PathBuf::from("tools").join("broken-shell")),
+            8,
+            exit_diagnostics::ShellExitDisposition::BirthDeathPaneKept,
+        );
         keep_birth_death_face(&mut leaf.session, &exit, true).expect("the face is appended");
         let visible = leaf.session.session.terminal().visible_text().join("\n");
         let compact: String = visible
@@ -5731,14 +5727,14 @@ mod birth_death_tests {
         // The reaper settles every collected exit once the turn's retirements are known; a kept
         // birth death beside an ordinary exit in the same active tab, whose pane that turn
         // retires, still says what happened to it.
-        let ordinary = exit_diagnostics::ShellExit {
-            seat: 5,
-            code: Some(0),
-            elapsed: Duration::from_secs(60),
-            program: Some(PathBuf::from("sh")),
-            tab: 8,
-            disposition: exit_diagnostics::ShellExitDisposition::TabKept,
-        };
+        let ordinary = exit_diagnostics::ShellExit::unprobed(
+            5,
+            Some(0),
+            Duration::from_secs(60),
+            Some(PathBuf::from("sh")),
+            8,
+            exit_diagnostics::ShellExitDisposition::TabKept,
+        );
         let mut exits = vec![(0, exit), (0, ordinary)];
         settle_exit_dispositions(&mut exits, &BTreeSet::new(), 0, true);
         let mut lines = Vec::new();
