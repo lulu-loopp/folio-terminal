@@ -719,12 +719,11 @@ mod tests {
     /// MUTATION: `SHUTDOWN_LEVEL = 0x280` — the default, and the order is the system's again.
     #[test]
     fn folio_asks_to_be_ended_before_the_default_level_and_inside_the_application_range() {
-        const DEFAULT_LEVEL: u32 = 0x280;
-        const APPLICATION_RANGE: std::ops::RangeInclusive<u32> = 0x100..=0x3FF;
-        assert!(SHUTDOWN_LEVEL > DEFAULT_LEVEL, "{SHUTDOWN_LEVEL:#x}");
+        // Above the default (`0x280`), and no higher than the application range's top (`0x3FF`).
+        const ABOVE_THE_DEFAULT: std::ops::RangeInclusive<u32> = 0x281..=0x3FF;
         assert!(
-            APPLICATION_RANGE.contains(&SHUTDOWN_LEVEL),
-            "{SHUTDOWN_LEVEL:#x}"
+            ABOVE_THE_DEFAULT.contains(&SHUTDOWN_LEVEL),
+            "{SHUTDOWN_LEVEL:#x} is not above the default inside the application range"
         );
     }
 }
