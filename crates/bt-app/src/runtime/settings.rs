@@ -1247,6 +1247,21 @@ impl<B: Backend> Runtime<'_, B> {
                 }
                 self.latch_settings_slider_drag(row);
             }
+            // **A press in a field puts the caret at the seam under it**, once the focus is
+            // there, and a drag from there selects (0.4.9 plan row 180): the field the press
+            // landed in reads the run it was drawn as — from its start, when it did not hold the
+            // focus until now.
+            (
+                target @ (settings::SettingsTarget::Field(_)
+                | settings::SettingsTarget::EnvName(_)
+                | settings::SettingsTarget::EnvValue(_)),
+                _,
+            ) if self.window.settings.text_field(target).is_some() => {
+                self.press_field(
+                    crate::runtime::pointer::FieldDrag::Settings(target),
+                    position,
+                )?;
+            }
             // Turning a page puts the reader at the top of it.
             (settings::SettingsTarget::Nav(_), settings::SettingsKeyVerdict::Moved) => {
                 self.window.settings_scroll = 0.0;
@@ -1987,15 +2002,90 @@ impl<B: Backend> Runtime<'_, B> {
         let layout = self.settings_layout()?;
         let (rect, mono) = layout.text_field_box(target)?;
         let scale = layout.scale();
+        let scroll = self.settle_settings_field_scroll(&layout);
         let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
         let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
         Some(settings::field_caret_line(
             rect,
             &shown[..caret],
+            scroll,
             mono,
             scale,
             &mut measure,
         ))
+    }
+
+    /// **How far the focused field's text is pushed left this frame**, settled from how far it
+    /// was and kept for the next (0.4.9 plan row 180, ruling 2; [`settings::settle_field_scroll`]).
+    /// `0` when no field holds the keyboard. Asked by the painter and by the input method's
+    /// caret, so the two read one scroll.
+    pub(in crate::runtime) fn settle_settings_field_scroll(
+        &mut self,
+        layout: &settings::SettingsLayout,
+    ) -> f32 {
+        let settled = self.settled_settings_field_scroll(layout);
+        // Kept only while a field holds the keyboard: a field drawn without the focus is drawn
+        // from its start, and one the focus comes back to must start from where it was drawn.
+        self.window.settings.keep_field_scroll(settled);
+        settled.map_or(0.0, |(_, scroll)| scroll)
+    }
+
+    /// [`Self::settle_settings_field_scroll`]'s answer before it is kept: the focused field and
+    /// its settled scroll, or `None` when the focus is on no text field this layout places.
+    fn settled_settings_field_scroll(
+        &mut self,
+        layout: &settings::SettingsLayout,
+    ) -> Option<(settings::SettingsTarget, f32)> {
+        let target = self.window.settings.focus()?;
+        let field = self.window.settings.text_field(target)?;
+        let (rect, mono) = layout.text_field_box(target)?;
+        let shown = field.composed().into_owned();
+        let caret = field.composed_selection().end;
+        let held = self.window.settings.field_scroll(target);
+        let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+        let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
+        let scroll = settings::settle_field_scroll(
+            rect,
+            &shown,
+            caret,
+            held,
+            mono,
+            layout.scale(),
+            &mut measure,
+        );
+        Some((target, scroll))
+    }
+
+    /// **Every text field the dialog drew, as it drew it**, left for a press to read (0.4.9 plan
+    /// row 180, ruling 3): the focused one pushed left by its settled `scroll`, every other from
+    /// its start, each shaped in the face its field is set in — what the painter laid out.
+    pub(in crate::runtime) fn record_settings_field_runs(
+        &mut self,
+        layout: &settings::SettingsLayout,
+        scroll: f32,
+    ) {
+        let focus = self.window.settings.focus();
+        let scale = layout.scale();
+        let mut runs = Vec::new();
+        for (target, rect, mono) in layout.text_fields() {
+            let Some(field) = self.window.settings.text_field(target) else {
+                continue;
+            };
+            let shown = field.composed().into_owned();
+            let ([left, _], font) = settings::field_text_run(rect, mono, scale);
+            let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+            let advances = renderer.chrome_text_advances(gpu, &shown, font);
+            runs.push((
+                target,
+                crate::text_field::DrawnRun {
+                    left,
+                    scroll_px: if focus == Some(target) { scroll } else { 0.0 },
+                    shown,
+                    advances,
+                },
+            ));
+        }
+        self.window.drawn_fields.settings = runs;
     }
 
     /// **Open the settings dialog on one row.**

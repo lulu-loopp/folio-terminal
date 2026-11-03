@@ -1277,6 +1277,13 @@ impl<B: Backend> Runtime<'_, B> {
                 !judged || showing.iter().any(|(shown, _)| shown == surface)
             });
         }
+        // **The docked graphs' search runs, cleared with the pictures they were
+        // drawn in** (row 180 review N3): every one still drawn is recorded
+        // again below by `build_git_graph`, so a closed graph keeps none.
+        self.window
+            .drawn_fields
+            .graph_search
+            .retain(|surface, _| !matches!(surface, PreviewSurface::Seat(_)));
         if showing.is_empty() {
             return BTreeMap::new();
         }
@@ -1324,7 +1331,7 @@ impl<B: Backend> Runtime<'_, B> {
         // the end, which is why this is a block and not a straight run: every one
         // of them wants `&mut self`, and the build in the middle of it is holding
         // the renderer.
-        let (asking, built) = {
+        let (asking, built, search_run) = {
             // **The tab whose plane holds this document**, which for a seat is
             // the tab on screen and for a window is the tab it was opened in
             // (§7.1.3). Reading `active` here would have a floating graph change
@@ -1358,6 +1365,10 @@ impl<B: Backend> Runtime<'_, B> {
             let typed = view.search.text().to_owned();
             let before_caret = view.search.before_caret().to_owned();
             let preedit = view.search.preedit().to_owned();
+            // What the search field shows and the selection in it, for the run a press reads
+            // and the wash the selection is drawn as (0.4.9 plan row 180).
+            let search_shown = view.search.composed().into_owned();
+            let search_selected = view.search.composed_selection();
             let search_focused = view.search_focused;
             let search_at = view.search_at;
             let asked = view.search_asked.clone();
@@ -1415,6 +1426,37 @@ impl<B: Backend> Runtime<'_, B> {
             // otherwise leave the selected ground on a row that is not there.
             let selected = selected.filter(|row| *row < content.total_rows);
             content.selected = selected;
+            // **The search field's run, left for a press to read** (0.4.9 plan row 180): the
+            // field's insides by the derivation the painter and the press router both lay the
+            // toolbar out with, the query shaped in the face the painter sets it in, and the
+            // selection's wash read off that table.
+            let search_field = git_graph::graph_geometry(body, &content, scale)
+                .head
+                .zip(content.toolbar.as_ref())
+                .and_then(|(head, toolbar)| {
+                    git_graph::graph_search_field(
+                        git_graph::graph_toolbar_rects(head, toolbar, scale),
+                        toolbar,
+                        scale,
+                    )
+                });
+            let search_run = search_field.map(|inside| {
+                let advances = renderer.chrome_text_advances(
+                    gpu,
+                    &search_shown,
+                    git_graph::GRAPH_TOOL_FONT_LOGICAL_PX * scale,
+                );
+                let run = crate::text_field::DrawnRun {
+                    left: inside.text[0],
+                    scroll_px: 0.0,
+                    shown: search_shown,
+                    advances,
+                };
+                if let Some(toolbar) = content.toolbar.as_mut() {
+                    toolbar.search_selection = run.selection_span(search_selected, inside.text[2]);
+                }
+                run
+            });
             if content.wants_more {
                 extend.push((index, root.clone()));
             }
@@ -1437,8 +1479,16 @@ impl<B: Backend> Runtime<'_, B> {
             if let Some((a, b)) = content.compare_pair.clone() {
                 compares.push((index, root.clone(), a, b));
             }
-            (index, content)
+            (index, content, search_run)
         };
+        match search_run {
+            Some(run) => {
+                self.window.drawn_fields.graph_search.insert(surface, run);
+            }
+            None => {
+                self.window.drawn_fields.graph_search.remove(&surface);
+            }
+        }
         for (index, root) in extend {
             self.extend_graph(index, &root);
         }
@@ -2289,6 +2339,7 @@ impl<B: Backend> Runtime<'_, B> {
                 before_caret: prompt.field.before_caret().to_owned(),
                 preedit: prompt.field.preedit().to_owned(),
                 fault: prompt.fault(),
+                selection: None,
             }),
         })
     }
@@ -2316,12 +2367,42 @@ impl<B: Backend> Runtime<'_, B> {
 
     /// The git menu's own level of the overlay stack.
     pub(in crate::runtime) fn git_menu_layer(&mut self) -> MenuPaint {
-        let Some(draw) = self.git_menu_draw() else {
+        self.window.drawn_fields.git_prompt = None;
+        let Some(mut draw) = self.git_menu_draw() else {
             return MenuPaint::none();
         };
         let Some(layout) = self.git_menu_layout() else {
             return MenuPaint::none();
         };
+        // **The prompt's run, left for a press to read** (0.4.9 plan row 180), and the selection's
+        // wash read off the same table — shaped in the face the painter sets the name in.
+        if let (Some(prompt), Some(rects), Some(field)) = (
+            draw.prompt.as_mut(),
+            layout.prompt_rects(),
+            self.window
+                .git_menu
+                .as_ref()
+                .and_then(|menu| menu.prompt.as_ref())
+                .map(|prompt| &prompt.field),
+        ) {
+            let scale = self.window.renderer.scale_factor() as f32;
+            let text = rects.text_run(scale);
+            let selected = field.composed_selection();
+            let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+            let advances = renderer.chrome_text_advances(
+                gpu,
+                &prompt.text,
+                profiles::GIT_PROMPT_FONT_LOGICAL_PX * scale,
+            );
+            let run = crate::text_field::DrawnRun {
+                left: text[0],
+                scroll_px: 0.0,
+                shown: prompt.text.clone(),
+                advances,
+            };
+            prompt.selection = run.selection_span(selected, text[2]);
+            self.window.drawn_fields.git_prompt = Some(run);
+        }
         let travel = layout.travel();
         MenuPaint::plain(profiles::git_menu_build(&layout, &draw.look()), travel)
     }

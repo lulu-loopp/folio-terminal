@@ -449,7 +449,7 @@ fn g1_vendor_tail_harvests_once_at_transaction_finish() {
 
 #[test]
 fn g1_width_reflow_keeps_the_displaced_banner_reachable_through_history() {
-    const WARNING: &str = "Did not find path entry D:\\App\\Base\\anaconda3\\bin";
+    const WARNING: &str = "Did not find path entry D:\\Kit\\Base\\anaconda3\\bin";
     const PROMPT: &str = "(base) PS D:\\Developer\\lunar-workshop> ";
 
     let start = Instant::now();
@@ -540,7 +540,7 @@ fn g1_sparse_width_reflow_grows_down_into_blank_rows() {
 
 #[test]
 fn g1_full_width_reflow_stages_only_the_rows_that_cannot_fit() {
-    const WARNING: &str = "Did not find path entry D:\\App\\Base\\anaconda3\\bin";
+    const WARNING: &str = "Did not find path entry D:\\Kit\\Base\\anaconda3\\bin";
     const PROMPT: &str = "(base) PS D:\\Developer\\lunar-workshop> ";
 
     let start = Instant::now();
@@ -588,7 +588,7 @@ fn g1_full_width_reflow_stages_only_the_rows_that_cannot_fit() {
 /// absent from a PTY-output capture.
 #[test]
 fn recalled_input_keeps_its_prompt_head_and_never_welds_to_the_banner_after_widen() {
-    const WARNING: &str = "Did not find path entry D:\\App\\Base\\anaconda3\\bin";
+    const WARNING: &str = "Did not find path entry D:\\Kit\\Base\\anaconda3\\bin";
     const PROMPT: &str = "(base) PS D:\\Developer\\lunar-workshop\\dist> ";
     const RECALLED: &str =
         "echo \"[Image: source: C:\\Windows\\Web\\Wallpaper\\Windows\\img0.jpg]\"";
@@ -1136,7 +1136,7 @@ fn g1_no_output_shrink_grow_storm_harvests_no_history_and_keeps_bottom_following
     session
         .feed(
             format!(
-                "Did not find path entry D:\\App\\Base\\anaconda3\\bin\r\n\
+                "Did not find path entry D:\\Kit\\Base\\anaconda3\\bin\r\n\
                  alpha\r\nbeta\r\ngamma\r\ndelta\r\nepsilon\r\n{PROMPT}"
             )
             .as_bytes(),
@@ -1183,7 +1183,7 @@ fn g1_no_output_shrink_grow_storm_harvests_no_history_and_keeps_bottom_following
             .terminal()
             .visible_text()
             .iter()
-            .any(|line| line == "Did not find path entry D:\\App\\Base\\anaconda3\\bin")
+            .any(|line| line == "Did not find path entry D:\\Kit\\Base\\anaconda3\\bin")
     );
 }
 
@@ -1229,7 +1229,7 @@ fn m1_8_six_line_resize_can_never_manufacture_five_lines_below() {
 }
 
 fn replay_r2_extreme_shrink_grow_and_recall(start: Instant) -> Vec<bt_term::ResizeTraceEvent> {
-    const WARNING: &str = "Did not find path entry D:\\App\\Base\\anaconda3\\bin";
+    const WARNING: &str = "Did not find path entry D:\\Kit\\Base\\anaconda3\\bin";
     const PROMPT: &str = "(base) PS D:\\Developer\\lunar-workshop> ";
     const RECALL: &str = "Write-Output ('BT_APP_' + 'INPUT_OK')";
     let mut session = new_session(104, 26);
@@ -1550,7 +1550,7 @@ fn s9_separate_resize_transactions_return_the_active_prompt_to_vendor_reflow() {
 
 #[test]
 fn narrowing_an_idle_wrapped_prompt_keeps_the_cursor_after_its_trailing_space() {
-    const STARTUP: &[u8] = b"Did not find path entry D:\\App\\Base\\anaconda3\\bin\r\n\
+    const STARTUP: &[u8] = b"Did not find path entry D:\\Kit\\Base\\anaconda3\\bin\r\n\
 \x1b[0m\x1b[0m(base) \x1b[0m\x1b[0m\
 \x1b]7;file:///D:/Developer/lunar-workshop/dist\x07\
 \x1b]133;A\x07PS D:\\Developer\\lunar-workshop\\dist> \x1b]133;B\x07";
@@ -1584,7 +1584,7 @@ fn narrowing_an_idle_wrapped_prompt_keeps_the_cursor_after_its_trailing_space() 
 
 #[test]
 fn repeated_idle_prompt_cpr_resize_dance_keeps_the_cursor_after_the_prompt() {
-    const STARTUP: &[u8] = b"Did not find path entry D:\\App\\Base\\anaconda3\\bin\r\n\
+    const STARTUP: &[u8] = b"Did not find path entry D:\\Kit\\Base\\anaconda3\\bin\r\n\
 \x1b[0m\x1b[0m(base) \x1b[0m\x1b[0m\
 \x1b]7;file:///D:/Developer/lunar-workshop/dist\x07\
 \x1b]133;A\x07PS D:\\Developer\\lunar-workshop\\dist> \x1b]133;B\x07";
@@ -1902,7 +1902,7 @@ proptest! {
         sizes in prop::collection::vec((6_u32..72, 2_u32..12), 8..80),
     ) {
         let expected = vec![
-            "Did not find path entry D:\\App\\Base\\anaconda3\\bin".to_owned(),
+            "Did not find path entry D:\\Kit\\Base\\anaconda3\\bin".to_owned(),
             "same-prefix-but-a-hard-line".to_owned(),
             "same-prefix-but-a-second-hard-line".to_owned(),
             "spaces inside this logical line stay intact".to_owned(),

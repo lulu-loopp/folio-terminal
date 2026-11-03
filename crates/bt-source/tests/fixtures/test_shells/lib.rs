@@ -60,3 +60,40 @@ mod tests {
         let named = "powershell.exe";
     }
 }
+
+/// The method door, defined where the fixture says its home is, and called from product code.
+impl BirthFallback {
+    pub fn spawn_last_resort(self) -> Session {
+        self.spawn_through()
+    }
+}
+
+pub fn the_reaper_starts_a_fallback(fallback: BirthFallback) {
+    let _ = fallback.spawn_last_resort();
+}
+
+/// A second function of the door's name: its calls would read as the door's.
+impl Elsewhere {
+    fn spawn_last_resort(&self) {}
+}
+
+#[cfg(test)]
+mod birth_fallbacks {
+    #[test]
+    fn a_birth_fallback_through_the_product_road() {
+        let _ = fallback().spawn_last_resort();
+        let _ = BirthFallback::spawn_last_resort(fallback());
+        let _ = fallback()
+            .spawn_last_resort();
+    }
+
+    #[test]
+    fn allowed_through_the_door_and_for_other_spawns() {
+        let _ = TestShell::spawn_birth_fallback(fallback(), columns(), rows(), wake(), why());
+        let _ = std::thread::spawn(|| ());
+        let _ = fallback().spawn();
+    }
+}
+
+/// A free function of the door's name: its calls would read as the door's too.
+pub fn spawn_last_resort() {}

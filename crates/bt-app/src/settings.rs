@@ -7111,6 +7111,12 @@ pub struct SettingsPanel {
     /// any other. Seeded from `settings.json` when the dialog opens and pushed back to it on every
     /// keystroke, which is this dialog's own rule — there is no commit and nothing to save.
     quake_command: TextField,
+    /// **How far the focused field's text is pushed left inside its box**, and which field that
+    /// is (0.4.9 plan row 180, ruling 2): kept from frame to frame and moved only as far as the
+    /// caret needs ([`settle_field_scroll`]), so a press that puts the caret on a letter in a
+    /// scrolled path leaves the letters where they were. A field without the focus is drawn from
+    /// its start.
+    field_scroll: Option<(SettingsTarget, f32)>,
     /// Which row's `⋯` is open, by its index in the profile table.
     row_menu: Option<usize>,
     /// **`Also remove settings and data`** (T-UNINSTALL-UX): the uninstall's one
@@ -7284,6 +7290,22 @@ impl SettingsPanel {
             return Some(&self.quake_command);
         }
         self.editor.as_ref()?.field_of(target)
+    }
+
+    /// **How far the field `target` was pushed left** the last time it was drawn holding the
+    /// caret — `0` for any field that is not the one kept ([`Self::keep_field_scroll`]).
+    #[must_use]
+    pub fn field_scroll(&self, target: SettingsTarget) -> f32 {
+        self.field_scroll
+            .filter(|(kept, _)| *kept == target)
+            .map_or(0.0, |(_, scroll)| scroll)
+    }
+
+    /// Keep how far the focused field is pushed left, and which field that is, for the next frame
+    /// to start from — `None` when no field holds the keyboard, so a field the focus comes back
+    /// to starts from its start, as it was drawn while the focus was away.
+    pub fn keep_field_scroll(&mut self, kept: Option<(SettingsTarget, f32)>) {
+        self.field_scroll = kept;
     }
 
     /// The same field, to type into.
@@ -10175,6 +10197,35 @@ impl SettingsLayout {
             SettingsTarget::EnvValue(index) => env_row(index).map(|line| (line.value, true)),
             _ => None,
         }
+    }
+
+    /// **Every text field this layout places**, with its box and whether it is set in the mono
+    /// face — the fields the painter draws with [`push_field`] that a press can put a caret in:
+    /// the page's field rows and the reader's own environment rows (a ghost row is the
+    /// terminal's, and no target). What the window records a drawn run for, one per field
+    /// (0.4.9 plan row 180, ruling 3); [`Self::text_field_box`] answers for each.
+    #[must_use]
+    pub fn text_fields(&self) -> Vec<(SettingsTarget, [f32; 4], bool)> {
+        let rows = self
+            .rows
+            .iter()
+            .map(|placed| SettingsTarget::Field(placed.row));
+        let env = self
+            .env_rows
+            .iter()
+            .filter_map(|line| line.index)
+            .flat_map(|index| {
+                [
+                    SettingsTarget::EnvName(index),
+                    SettingsTarget::EnvValue(index),
+                ]
+            });
+        rows.chain(env)
+            .filter_map(|target| {
+                self.text_field_box(target)
+                    .map(|(rect, mono)| (target, rect, mono))
+            })
+            .collect()
     }
 
     /// What a press or a drag at `x` is asking a slider row for (§7.1.6c-4b).
@@ -15504,7 +15555,18 @@ pub struct SummonInk<'a> {
     /// What the startup-command row is holding.
     pub command: &'a str,
     /// The selection the caret is holding in it, when the caret is in it.
-    pub command_caret: Option<(usize, usize)>,
+    pub command_caret: Option<FieldCaret>,
+}
+
+/// **The caret a field of this dialog is holding**, as the painter draws it: the selection as
+/// byte offsets into what the field shows — its text with any composition spliced in
+/// ([`TextField::composed_selection`]); both ends equal is a bare caret — and how far the text
+/// is pushed left inside the box to keep that caret in it ([`settle_field_scroll`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FieldCaret {
+    pub from: usize,
+    pub to: usize,
+    pub scroll_px: f32,
 }
 
 /// What the profile editor's fields are holding this frame (§7.1.6c-6b).
@@ -15530,7 +15592,7 @@ pub struct EditorInk<'a> {
     /// One answer for every field rather than a caret per field, because there
     /// is one keyboard: the field with the caret is the field with the focus,
     /// and a second copy of that fact is a second thing to keep in step.
-    pub caret: Option<(SettingsTarget, usize, usize)>,
+    pub caret: Option<(SettingsTarget, FieldCaret)>,
     // **The `Name` field's refusal is not here** (moved 2026-08-25). It is a
     // sentence, and since a sentence decides a row's height it has to be
     // somewhere the *layout* can read — which is `EditorSubject::refusal`, on the
@@ -15551,10 +15613,10 @@ impl<'a> EditorInk<'a> {
 
     /// The selection this control is holding, if the caret is in it.
     #[must_use]
-    fn caret_in(self, target: SettingsTarget) -> Option<(usize, usize)> {
+    fn caret_in(self, target: SettingsTarget) -> Option<FieldCaret> {
         self.caret
-            .filter(|(held, _, _)| *held == target)
-            .map(|(_, from, to)| (from, to))
+            .filter(|(held, _)| *held == target)
+            .map(|(_, caret)| caret)
     }
 }
 
@@ -15808,16 +15870,9 @@ struct FieldRun {
     offset: f32,
 }
 
-/// [`FieldRun`] for the field at `rect`, given the text in front of its caret
-/// (`None` while the caret is elsewhere).
-fn field_run(
-    rect: [f32; 4],
-    before_caret: Option<&str>,
-    mono: bool,
-    scale: f32,
-    border: f32,
-    measure: &mut dyn FnMut(&str, f32) -> f32,
-) -> FieldRun {
+/// [`FieldRun`] for the field at `rect`, pushed left by `scroll` — the focused
+/// field's settled scroll ([`settle_field_scroll`]), `0` for every other.
+fn field_run(rect: [f32; 4], scroll: f32, mono: bool, scale: f32, border: f32) -> FieldRun {
     let px = |value: f32| value * scale;
     let font = px(if mono {
         FIELD_MONO_FONT_LOGICAL_PX
@@ -15826,20 +15881,55 @@ fn field_run(
     });
     let left = rect[0] + border + px(FIELD_PADDING_X_LOGICAL_PX);
     let right = rect[2] - border - px(FIELD_PADDING_X_LOGICAL_PX);
-    let width = (right - left).max(0.0);
-    // How far into the text the view has been pushed, so that the caret is
-    // always inside the box. Zero whenever the whole string fits, which is every
-    // field on the page until somebody types a path into one.
-    let offset = before_caret
-        .map(|before| measure(before, font))
-        .filter(|caret_x| *caret_x > width)
-        .map_or(0.0, |caret_x| caret_x - width);
     FieldRun {
         font,
         left,
         right,
-        offset,
+        offset: scroll,
     }
+}
+
+/// **Where the field at `rect` lays its text out**: the left and right edge of its run and the
+/// size its text is set at — what the window records the drawn run of a field with, for a press
+/// to read (0.4.9 plan row 180). [`field_run`]'s own answer, so the run a press reads and the ink
+/// are one derivation.
+#[must_use]
+pub fn field_text_run(rect: [f32; 4], mono: bool, scale: f32) -> ([f32; 2], f32) {
+    let FieldRun {
+        font, left, right, ..
+    } = field_run(rect, 0.0, mono, scale, dialog_border(scale));
+    ([left, right], font)
+}
+
+/// **How far the focused field's text is pushed left this frame**, given how far it was
+/// (`held`) and the caret at byte `caret` of what it shows (0.4.9 plan row 180, ruling 2).
+///
+/// **Sticky, and moved only as far as the caret needs**: the caret stays inside the box (the
+/// text goes left when the caret runs past the right edge, right when it goes in front of the
+/// left one), and the slack is given back when the text shrinks under it, so deleting from the
+/// end shows the head again. A box that holds still is a box a press can aim at: before this the
+/// scroll was worked out from the caret alone on every frame, and a press that moved the caret
+/// left in a scrolled path moved every letter right under the pointer. A field that has just
+/// taken the focus starts from `0`, which is exactly the old answer — typing is unchanged.
+#[must_use]
+pub fn settle_field_scroll(
+    rect: [f32; 4],
+    shown: &str,
+    caret: usize,
+    held: f32,
+    mono: bool,
+    scale: f32,
+    measure: &mut dyn FnMut(&str, f32) -> f32,
+) -> f32 {
+    let FieldRun {
+        font, left, right, ..
+    } = field_run(rect, 0.0, mono, scale, dialog_border(scale));
+    let width = (right - left).max(0.0);
+    let caret_x = measure(&shown[..caret.min(shown.len())], font);
+    let whole = measure(shown, font);
+    // The least the text can be pushed with the caret still inside the right edge.
+    let least = (caret_x - width).max(0.0);
+    held.min(caret_x).max(least).min((whole - width).max(least))
 }
 
 /// **The caret a field of this dialog strikes**, in window pixels: one physical
@@ -15856,6 +15946,7 @@ fn field_run(
 pub fn field_caret_line(
     rect: [f32; 4],
     before_caret: &str,
+    scroll: f32,
     mono: bool,
     scale: f32,
     measure: &mut dyn FnMut(&str, f32) -> f32,
@@ -15866,7 +15957,7 @@ pub fn field_caret_line(
         left,
         right,
         offset,
-    } = field_run(rect, Some(before_caret), mono, scale, border, measure);
+    } = field_run(rect, scroll, mono, scale, border);
     let caret_x = (left + measure(before_caret, font) - offset).clamp(left, right);
     let thickness = scale.round().max(1.0);
     let inset = FIELD_CARET_INSET_LOGICAL_PX * scale;
@@ -15909,7 +16000,7 @@ fn push_field(
     ghost: bool,
     mono: bool,
     hovered: bool,
-    caret: Option<(usize, usize)>,
+    caret: Option<FieldCaret>,
     scale: f32,
     border: f32,
     palette: bt_render::ChromePalette,
@@ -15938,21 +16029,16 @@ fn push_field(
         },
         1.0,
     ));
-    let caret =
-        caret.map(|(from, to)| (from.min(to).min(text.len()), from.max(to).min(text.len())));
+    let scroll = caret.map_or(0.0, |caret| caret.scroll_px);
+    let caret = caret.map(|FieldCaret { from, to, .. }| {
+        (from.min(to).min(text.len()), from.max(to).min(text.len()))
+    });
     let FieldRun {
         font,
         left,
         right,
         offset,
-    } = field_run(
-        rect,
-        caret.map(|(_, to)| &text[..to]),
-        mono,
-        scale,
-        border,
-        measure,
-    );
+    } = field_run(rect, scroll, mono, scale, border);
     if let Some((from, to)) = caret {
         if from < to {
             let start = left + measure(&text[..from], font) - offset;
@@ -15965,7 +16051,7 @@ fn push_field(
                     rect[3] - border,
                 ],
                 color: palette.accent,
-                alpha: 0.30,
+                alpha: crate::text_field::SELECTION_WASH_ALPHA,
             });
         }
         // The caret itself: one physical pixel of accent, full height inside the
@@ -15974,7 +16060,7 @@ fn push_field(
         // [`field_caret_line`], the rectangle the input method is told
         // (T-SETTINGS-FIELDS-IME-POSITION).
         stack.quads.push(OverlayQuad {
-            rect: field_caret_line(rect, &text[..to], mono, scale, measure),
+            rect: field_caret_line(rect, &text[..to], scroll, mono, scale, measure),
             color: palette.accent,
             alpha: 1.0,
         });
@@ -35077,6 +35163,51 @@ mod tests {
             ..SettingsValues::sample()
         };
         assert_eq!(SettingsRow::UninstallData.selected_index(&values), Some(on));
+    }
+
+    /// RED (0.4.9 plan row 180, ruling 2) — **a field's scroll is sticky and moves only as far as
+    /// the caret needs**: a caret put inside the box leaves the text where it was (before this, the
+    /// scroll was worked out from the caret alone, and a caret put left of the box's width moved
+    /// every letter right under the pointer that put it), a caret put in front of the box's left
+    /// edge brings the text right to it, and text that shrinks under the box gives the slack back.
+    ///
+    /// MUTATION (`plant-180-settings-scroll-not-sticky.py`): settle from `0` instead of `held` —
+    /// the caret put inside the box scrolls the text back to its start.
+    #[test]
+    fn a_fields_scroll_holds_still_until_the_caret_needs_it_to_move() {
+        let rect = [0.0, 0.0, 300.0, 28.0];
+        let ([left, right], _) = field_text_run(rect, false, 1.0);
+        let width = right - left;
+        // Ten pixels a letter, every letter one byte.
+        let mut measure = |text: &str, _: f32| 10.0 * text.len() as f32;
+        let long = "a".repeat(100);
+        let settle =
+            |shown: &str, caret: usize, held: f32, measure: &mut dyn FnMut(&str, f32) -> f32| {
+                settle_field_scroll(rect, shown, caret, held, false, 1.0, measure)
+            };
+        let end = settle(&long, long.len(), 0.0, &mut measure);
+        assert!(
+            (end - (1000.0 - width)).abs() < 0.01,
+            "the caret at the end of a long line brings the end into the box: {end}"
+        );
+        // A caret put halfway across the box: on a letter the reader can see.
+        let halfway = ((end + width / 2.0) / 10.0) as usize;
+        assert_eq!(
+            settle(&long, halfway, end, &mut measure),
+            end,
+            "a caret put inside the box leaves every letter where it was"
+        );
+        assert_eq!(
+            settle(&long, 0, end, &mut measure),
+            0.0,
+            "a caret put in front of the box brings the text right to it"
+        );
+        let short = "a".repeat(50);
+        let shrunk = settle(&short, short.len(), end, &mut measure);
+        assert!(
+            (shrunk - (500.0 - width).max(0.0)).abs() < 0.01,
+            "text that shrinks under the box gives the slack back: {shrunk}"
+        );
     }
 }
 

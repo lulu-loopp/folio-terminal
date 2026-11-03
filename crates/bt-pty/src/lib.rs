@@ -1905,7 +1905,7 @@ impl ShellProcessId {
 /// path of the program and the operating system's account of why it would not start. Both are the
 /// wrong register for the one place it is printed — the top of the user's own screen, where the
 /// shell's first line belongs. The path is not what the user picked (they picked *Git Bash*, not
-/// `D:\App\Tool\Git\bin\bash.exe`), and the OS's account arrives wrapped in the vendored
+/// `D:\Kit\Tool\Git\bin\bash.exe`), and the OS's account arrives wrapped in the vendored
 /// launcher's debugging: the whole `CreateProcessW` call, the command line `Debug`-quoted with the
 /// `NUL` terminator `CreateProcessW` requires still on the end of it, and the working directory
 /// again.
@@ -1930,6 +1930,14 @@ pub struct BirthFallback {
     requested: OsString,
     command: PtyCommand,
     size: PtySize,
+    /// **A fallback a test made is started only through the test's door** (plan row 174): set by
+    /// [`PtySession::fake_exited`] and by every session `test_shell` starts, so the product road
+    /// ([`BirthFallback::spawn_last_resort`]) refuses it instead of starting the account's own
+    /// shell from a test — with its startup files and its environment — and
+    /// `test_shell::TestShell::spawn_birth_fallback` is the one road that starts it. Test builds
+    /// only: `folio.exe` never has the `test-shell` feature.
+    #[cfg(any(test, feature = "test-shell"))]
+    made_for_a_test: bool,
 }
 
 impl BirthFallback {
@@ -1942,16 +1950,66 @@ impl BirthFallback {
     /// Start the retained last-resort command on a birth worker. The session carries the same
     /// [`ShellFallback`] record a spawn-time fallback leaves, with `why` as its reason, so the
     /// caller lands it on the road that already turns that record into the pane's first line.
-    pub fn spawn(
-        mut self,
+    ///
+    /// The name is this workspace's only `spawn_last_resort`: `bt-source`'s test-shell guard
+    /// refuses it in test code by its call shape (`.spawn_last_resort(`) as well as by its path,
+    /// which a method call never spells (plan row 174). In a test build a fallback a test made is
+    /// refused here and starts nothing; a test starts it through
+    /// `test_shell::TestShell::spawn_birth_fallback`.
+    pub fn spawn_last_resort(
+        self,
         columns: NonZeroU16,
         rows: NonZeroU16,
         wake: OutputWake,
         why: String,
     ) -> Result<PtySession, PtyError> {
+        self.last_resort_through(columns, rows, wake, why, PtySession::spawn)
+    }
+
+    /// [`Self::spawn_last_resort`] with the one `spawn` it makes handed in: the refusal of a
+    /// fallback a test made first, and only then [`Self::spawn_through`], so a test can drive the
+    /// product's road against a `spawn` that must never be called.
+    pub(crate) fn last_resort_through(
+        self,
+        columns: NonZeroU16,
+        rows: NonZeroU16,
+        wake: OutputWake,
+        why: String,
+        spawn: impl FnOnce(PtyCommand, PtySize, OutputWake) -> Result<PtySession, PtyError>,
+    ) -> Result<PtySession, PtyError> {
+        if let Some(refusal) = self.refused_outside_the_door() {
+            return Err(refusal);
+        }
+        self.spawn_through(columns, rows, wake, why, spawn)
+    }
+
+    /// The product road's refusal of a fallback a test made ([`BIRTH_FALLBACK_OUTSIDE_THE_DOOR`]).
+    #[cfg(any(test, feature = "test-shell"))]
+    fn refused_outside_the_door(&self) -> Option<PtyError> {
+        self.made_for_a_test
+            .then(|| PtyError::Backend(BIRTH_FALLBACK_OUTSIDE_THE_DOOR.to_owned()))
+    }
+
+    /// Never, in a build without the test shell: no test made anything there.
+    #[cfg(not(any(test, feature = "test-shell")))]
+    fn refused_outside_the_door(&self) -> Option<PtyError> {
+        None
+    }
+
+    /// The start both roads share, with the one `spawn` it makes handed in: the size the pane asks
+    /// for and the [`ShellFallback`] record, kept once for the product's road
+    /// ([`Self::last_resort_through`]) and the test door's.
+    pub(crate) fn spawn_through(
+        mut self,
+        columns: NonZeroU16,
+        rows: NonZeroU16,
+        wake: OutputWake,
+        why: String,
+        spawn: impl FnOnce(PtyCommand, PtySize, OutputWake) -> Result<PtySession, PtyError>,
+    ) -> Result<PtySession, PtyError> {
         self.size.columns = columns;
         self.size.rows = rows;
-        let mut session = PtySession::spawn(self.command, self.size, wake)?;
+        let mut session = spawn(self.command, self.size, wake)?;
         session.shell_fallback = Some(ShellFallback {
             requested: self.requested,
             started: LAST_RESORT_SHELL,
@@ -1960,6 +2018,11 @@ impl BirthFallback {
         Ok(session)
     }
 }
+
+/// What [`BirthFallback::spawn_last_resort`] answers, in a test build, for a fallback a test made.
+#[cfg(any(test, feature = "test-shell"))]
+pub const BIRTH_FALLBACK_OUTSIDE_THE_DOOR: &str = "a test's birth fallback is started through \
+     bt_pty::test_shell::TestShell::spawn_birth_fallback, never the product's spawn_last_resort";
 
 /// The command interpreter, and the arguments it needs, when `program` is a
 /// **batch file** — `None` for everything else, which is nearly everything.
@@ -2129,6 +2192,7 @@ impl PtySession {
                 requested: OsString::from("preferred-shell"),
                 command: PtyCommand::last_resort_shell(&last_resort_arguments()),
                 size,
+                made_for_a_test: true,
             }),
         }
     }
@@ -2447,6 +2511,8 @@ impl PtySession {
                     requested: program,
                     command: fallback,
                     size,
+                    #[cfg(any(test, feature = "test-shell"))]
+                    made_for_a_test: false,
                 });
                 Ok(session)
             }
@@ -2480,6 +2546,15 @@ impl PtySession {
     /// Take the one delayed fallback available to a shell that dies at birth.
     pub fn take_birth_fallback(&mut self) -> Option<BirthFallback> {
         self.birth_fallback.take()
+    }
+
+    /// Mark the session's retained birth fallback, if it has one, as a test's: the session was
+    /// started through `test_shell`, whose rule its retained command never went through.
+    #[cfg(any(test, feature = "test-shell"))]
+    pub(crate) fn mark_birth_fallback_for_a_test(&mut self) {
+        if let Some(fallback) = self.birth_fallback.as_mut() {
+            fallback.made_for_a_test = true;
+        }
     }
 
     /// Whether this session still has its one delayed birth fallback.
@@ -6522,7 +6597,7 @@ mod tests {
     /// The reporting host's own prompt, minus the conda prefix that the hook writes separately.
     const PROFILE_PROBE_PROMPT: &str = "PS D:\\Developer\\lunar-workshop> ";
     /// The line the user's screenshot shows being overwritten; it is conda's own startup noise.
-    const PROFILE_PROBE_NOISE: &str = "Did not find path entry D:\\App\\Base\\anaconda3\\bin";
+    const PROFILE_PROBE_NOISE: &str = "Did not find path entry D:\\Kit\\Base\\anaconda3\\bin";
     /// The command in the user's screenshot: typed, never submitted, and long enough that the
     /// prompt plus the input wraps once the pane narrows.
     const PROFILE_PROBE_TYPED: &str =

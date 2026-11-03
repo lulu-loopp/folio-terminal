@@ -165,6 +165,16 @@ std::sync::mpsc::Receiver::recv	all	waits for a message
 std::sync::mpsc::Receiver::recv_timeout	all	waits for a message, bounded
 std::sync::Condvar::wait	all	waits for a notification
 std::sync::Condvar::wait_timeout	all	waits for a notification, bounded
+std::sync::Condvar::wait_while	all	waits for a notification until a predicate holds
+std::sync::Condvar::wait_timeout_while	all	waits for a notification until a predicate holds, bounded
+std::sync::mpsc::SyncSender::send	all	waits for room in a bounded channel
+std::sync::Barrier::wait	all	waits for the other threads to arrive
+std::thread::ScopedJoinHandle::join	all	waits for a scoped thread to end
+std::thread::scope	all	waits for every thread of the scope to end
+std::thread::park	all	waits for an unpark
+std::thread::park_timeout	all	waits for an unpark, bounded
+std::sync::Once::call_once	all	waits while another thread runs the initializer
+std::sync::Once::call_once_force	all	waits while another thread runs the initializer
 std::fs::rename	all	the file system
 std::fs::write	all	the file system
 std::fs::copy	all	the file system
@@ -191,6 +201,12 @@ bt_pty::wait_for_retirements	all	a cross-crate entrance that waits inside
 bt_platform::keyboard_layout_shift_table	windows	the worker-only keyboard-layout-table door: one registry read and one System32 DLL load, copied and freed before return
 windows::Win32::UI::Shell::ShellExecuteW	windows	waits for the shell
 windows::Win32::UI::Shell::ShellExecuteExW	windows	waits for the shell and its UAC surface
+windows::Win32::System::Threading::WaitForSingleObject	windows	waits for a kernel object
+windows::Win32::System::Threading::WaitForSingleObjectEx	windows	waits for a kernel object, alertable
+windows::Win32::System::Threading::WaitForMultipleObjects	windows	waits for kernel objects
+windows::Win32::System::Threading::WaitForMultipleObjectsEx	windows	waits for kernel objects, alertable
+windows::Win32::System::Threading::SignalObjectAndWait	windows	signals one kernel object and waits for another
+windows::Win32::System::Threading::SleepEx	windows	waits for a duration, alertable
 windows::Win32::System::Threading::SetEvent	windows	counted by call site, does not wait
 windows::Win32::Foundation::CloseHandle	windows	counted by call site, does not wait
 windows::Win32::Storage::FileSystem::GetDriveTypeW	windows	counted by call site, does not wait
@@ -244,7 +260,7 @@ bt-platform	-	crate::deferred_removal::failure_without_plan	std::io::Write::writ
 bt-platform	-	crate::deferred_removal::finish_with	std::fs::write 2	worker-door-body	WorkerCtx	
 bt-platform	-	crate::deferred_removal::removal_from_environment	std::fs::canonicalize 2	worker-door-body	WorkerCtx	
 bt-platform	-	crate::deferred_removal::run_from_environment	std::io::Write::write_fmt 1	worker-door-body	WorkerCtx	
-bt-platform	-	crate::deferred_removal::schedule	std::fs::create_dir_all 1, std::sync::mpsc::Receiver::recv_timeout 1	worker-door-body	WorkerCtx	
+bt-platform	-	crate::deferred_removal::schedule	std::fs::create_dir_all 1, std::sync::mpsc::Receiver::recv_timeout 1, std::sync::mpsc::SyncSender::send 1	worker-door-body	WorkerCtx	
 bt-platform	[windows]	crate::elevated_pipe::shell_execute_runas	windows::Win32::UI::Shell::ShellExecuteExW 1	worker-door-body	WorkerCtx	
 bt-platform	-	crate::deferred_removal::stop_child	std::process::Child::wait 1	worker-door-body	WorkerCtx	
 bt-platform	-	crate::exchange::flush_directory	std::fs::File::sync_all 1	worker-door-body	WorkerCtx	
@@ -459,7 +475,7 @@ watch steward	EarHandle::want	watch-steward	WatchStewardAnswered	a failed start 
 # request-doors
 door	asked on	boundary	handed	mailbox
 pty_door::request_shell	window	pty_door::request@0, bt_platform::spawn_at_priority@2, bt_platform::spawn_at_priority_with_stack@3	—	lane::lock, pty_door::births
-Runtime::reap_exited_tabs	window	std::sync::Condvar::notify_one, std::sync::Condvar::notify_all, bt_platform::spawn_at_priority@2, bt_platform::spawn_at_priority_with_stack@3, lane::Executor::start_worker@2, trace_sink::Queue::offer	—	lane::lock, lane::Ledger::earliest_owed, lane::Ledger::mint, lane::Ledger::publish, lane::Ledger::say_not_started, lane::Ledger::worker_ended, lane::Queue::ask
+Runtime::reap_exited_tabs	window	std::sync::Condvar::notify_one, std::sync::Condvar::notify_all, pty_door::request@0, bt_platform::spawn_at_priority@2, bt_platform::spawn_at_priority_with_stack@3, lane::Executor::start_worker@2, trace_sink::Queue::offer	—	lane::lock, lane::Ledger::earliest_owed, lane::Ledger::mint, lane::Ledger::publish, lane::Ledger::say_not_started, lane::Ledger::worker_ended, lane::Queue::ask
 Runtime::close_pane	window	std::sync::Condvar::notify_one, std::sync::Condvar::notify_all, bt_platform::spawn_at_priority@2, bt_platform::spawn_at_priority_with_stack@3, lane::Executor::start_worker@2, trace_sink::Queue::offer	—	lane::lock, lane::Ledger::earliest_owed, lane::Ledger::mint, lane::Ledger::publish, lane::Ledger::say_not_started, lane::Ledger::worker_ended, lane::Queue::ask
 spawn_profile_observation	window	bt_platform::spawn_at_priority_with_stack@3, lane::Executor::start_worker@2, shell_integration::profile_runtime::start_profile_observation@4	—	lane::lock, lane::Ledger::earliest_owed, lane::Ledger::worker_ended
 request_page_environment	window	bt_platform::spawn_at_priority@2, bt_platform::spawn_at_priority_with_stack@3	—	lane::lock, shell_integration::page_environment_cell

@@ -1153,7 +1153,7 @@ impl<B: Backend> Runtime<'_, B> {
         // thing that says where that is.
         let x = (name_box[0] + edit.caret_px).min(name_box[2] - caret_width);
         self.window.rename_caret_line = Some([x, name_box[1], x + caret_width, name_box[3]]);
-        self.window.rename_drawn = Some(drawn);
+        self.window.drawn_fields.name = Some(drawn);
         (tools, Some(edit))
     }
 
@@ -1250,7 +1250,7 @@ impl<B: Backend> Runtime<'_, B> {
         // ruling moved as far as an IME is concerned.
         let x = (box_[0] + edit.caret_px).min(box_[2] - caret_width);
         self.window.rename_caret_line = Some([x, box_[1], x + caret_width, box_[3]]);
-        self.window.rename_drawn = Some(drawn);
+        self.window.drawn_fields.name = Some(drawn);
         (measure_in, Some(edit), refusal)
     }
 
@@ -1306,7 +1306,7 @@ impl<B: Backend> Runtime<'_, B> {
         // IME's candidate list has to stand under what is being typed.
         let x = (box_[0] + edit.caret_px).min(box_[2] - caret_width);
         self.window.rename_caret_line = Some([x, box_[1], x + caret_width, box_[3]]);
-        self.window.rename_drawn = Some(drawn);
+        self.window.drawn_fields.name = Some(drawn);
         Some(edit)
     }
 

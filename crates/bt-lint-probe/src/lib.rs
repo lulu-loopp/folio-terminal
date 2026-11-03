@@ -41,103 +41,162 @@ pub fn probe_06<'a>(
     c.wait_timeout(g, d) // probe: std::sync::Condvar::wait_timeout
 }
 
+/// `std::sync::Condvar::wait_while` - all
+pub fn probe_07<'a>(
+    c: &std::sync::Condvar,
+    g: std::sync::MutexGuard<'a, ()>,
+    f: fn(&mut ()) -> bool,
+) -> impl Sized {
+    c.wait_while(g, f) // probe: std::sync::Condvar::wait_while
+}
+
+/// `std::sync::Condvar::wait_timeout_while` - all
+pub fn probe_08<'a>(
+    c: &std::sync::Condvar,
+    g: std::sync::MutexGuard<'a, ()>,
+    d: std::time::Duration,
+    f: fn(&mut ()) -> bool,
+) -> impl Sized {
+    c.wait_timeout_while(g, d, f) // probe: std::sync::Condvar::wait_timeout_while
+}
+
+/// `std::sync::mpsc::SyncSender::send` - all
+pub fn probe_09(s: &std::sync::mpsc::SyncSender<()>) -> impl Sized {
+    s.send(()) // probe: std::sync::mpsc::SyncSender::send
+}
+
+/// `std::sync::Barrier::wait` - all
+pub fn probe_10(b: &std::sync::Barrier) -> impl Sized {
+    b.wait() // probe: std::sync::Barrier::wait
+}
+
+/// `std::thread::ScopedJoinHandle::join` - all
+pub fn probe_11<'s>(h: std::thread::ScopedJoinHandle<'s, ()>) -> impl Sized {
+    h.join() // probe: std::thread::ScopedJoinHandle::join
+}
+
+/// `std::thread::scope` - all
+pub fn probe_12(f: fn(&std::thread::Scope<'_, '_>)) -> impl Sized {
+    std::thread::scope(f) // probe: std::thread::scope
+}
+
+/// `std::thread::park` - all
+pub fn probe_13() -> impl Sized {
+    std::thread::park() // probe: std::thread::park
+}
+
+/// `std::thread::park_timeout` - all
+pub fn probe_14(d: std::time::Duration) -> impl Sized {
+    std::thread::park_timeout(d) // probe: std::thread::park_timeout
+}
+
+/// `std::sync::Once::call_once` - all
+pub fn probe_15(o: &std::sync::Once, f: fn()) -> impl Sized {
+    o.call_once(f) // probe: std::sync::Once::call_once
+}
+
+/// `std::sync::Once::call_once_force` - all
+pub fn probe_16(o: &std::sync::Once, f: fn(&std::sync::OnceState)) -> impl Sized {
+    o.call_once_force(f) // probe: std::sync::Once::call_once_force
+}
+
 /// `std::fs::rename` - all
-pub fn probe_07(a: &std::path::Path, b: &std::path::Path) -> impl Sized {
+pub fn probe_17(a: &std::path::Path, b: &std::path::Path) -> impl Sized {
     std::fs::rename(a, b) // probe: std::fs::rename
 }
 
 /// `std::fs::write` - all
-pub fn probe_08(p: &std::path::Path, b: &[u8]) -> impl Sized {
+pub fn probe_18(p: &std::path::Path, b: &[u8]) -> impl Sized {
     std::fs::write(p, b) // probe: std::fs::write
 }
 
 /// `std::fs::copy` - all
-pub fn probe_09(a: &std::path::Path, b: &std::path::Path) -> impl Sized {
+pub fn probe_19(a: &std::path::Path, b: &std::path::Path) -> impl Sized {
     std::fs::copy(a, b) // probe: std::fs::copy
 }
 
 /// `std::fs::canonicalize` - all
-pub fn probe_10(p: &std::path::Path) -> impl Sized {
+pub fn probe_20(p: &std::path::Path) -> impl Sized {
     std::fs::canonicalize(p) // probe: std::fs::canonicalize
 }
 
 /// `std::fs::metadata` - all
-pub fn probe_11(p: &std::path::Path) -> impl Sized {
+pub fn probe_21(p: &std::path::Path) -> impl Sized {
     std::fs::metadata(p) // probe: std::fs::metadata
 }
 
 /// `std::fs::read_dir` - all
-pub fn probe_12(p: &std::path::Path) -> impl Sized {
+pub fn probe_22(p: &std::path::Path) -> impl Sized {
     std::fs::read_dir(p) // probe: std::fs::read_dir
 }
 
 /// `std::fs::create_dir_all` - all
-pub fn probe_13(p: &std::path::Path) -> impl Sized {
+pub fn probe_23(p: &std::path::Path) -> impl Sized {
     std::fs::create_dir_all(p) // probe: std::fs::create_dir_all
 }
 
 /// `std::fs::File::create` - all
-pub fn probe_14(p: &std::path::Path) -> impl Sized {
+pub fn probe_24(p: &std::path::Path) -> impl Sized {
     std::fs::File::create(p) // probe: std::fs::File::create
 }
 
 /// `std::fs::File::sync_data` - all
-pub fn probe_15(f: &std::fs::File) -> impl Sized {
+pub fn probe_25(f: &std::fs::File) -> impl Sized {
     f.sync_data() // probe: std::fs::File::sync_data
 }
 
 /// `std::fs::File::sync_all` - all
-pub fn probe_16(f: &std::fs::File) -> impl Sized {
+pub fn probe_26(f: &std::fs::File) -> impl Sized {
     f.sync_all() // probe: std::fs::File::sync_all
 }
 
 /// `std::io::Write::write_fmt` - all
-pub fn probe_17(w: &mut dyn std::io::Write) -> impl Sized {
+pub fn probe_27(w: &mut dyn std::io::Write) -> impl Sized {
     w.write_fmt(format_args!("probe")) // probe: std::io::Write::write_fmt
 }
 
 /// `std::process::Command::output` - all
-pub fn probe_18(c: &mut std::process::Command) -> impl Sized {
+pub fn probe_28(c: &mut std::process::Command) -> impl Sized {
     c.output() // probe: std::process::Command::output
 }
 
 /// `std::process::Command::status` - all
-pub fn probe_19(c: &mut std::process::Command) -> impl Sized {
+pub fn probe_29(c: &mut std::process::Command) -> impl Sized {
     c.status() // probe: std::process::Command::status
 }
 
 /// `std::process::Child::wait` - all
-pub fn probe_20(c: &mut std::process::Child) -> impl Sized {
+pub fn probe_30(c: &mut std::process::Child) -> impl Sized {
     c.wait() // probe: std::process::Child::wait
 }
 
 /// `portable_pty::Child::try_wait` - all
-pub fn probe_21(c: &mut dyn portable_pty::Child) -> impl Sized {
+pub fn probe_31(c: &mut dyn portable_pty::Child) -> impl Sized {
     c.try_wait() // probe: portable_pty::Child::try_wait
 }
 
 /// `pollster::block_on` - all
-pub fn probe_22(f: std::future::Ready<()>) -> impl Sized {
+pub fn probe_32(f: std::future::Ready<()>) -> impl Sized {
     pollster::block_on(f) // probe: pollster::block_on
 }
 
 /// `wgpu::Queue::submit` - all
-pub fn probe_23(q: &wgpu::Queue, b: wgpu::CommandBuffer) -> impl Sized {
+pub fn probe_33(q: &wgpu::Queue, b: wgpu::CommandBuffer) -> impl Sized {
     q.submit([b]) // probe: wgpu::Queue::submit
 }
 
 /// `wgpu::Queue::present` - all
-pub fn probe_24(q: &wgpu::Queue, t: wgpu::SurfaceTexture) -> impl Sized {
+pub fn probe_34(q: &wgpu::Queue, t: wgpu::SurfaceTexture) -> impl Sized {
     q.present(t) // probe: wgpu::Queue::present
 }
 
 /// `bt_render::GpuContext::open` - all
-pub fn probe_25(t: bt_render::WindowTarget) -> impl Sized {
+pub fn probe_35(t: bt_render::WindowTarget) -> impl Sized {
     bt_render::GpuContext::open(t, 1, 1, 1.0) // probe: bt_render::GpuContext::open
 }
 
 /// `bt_pty::PtySession::spawn_shell_in` - all
-pub fn probe_26(
+pub fn probe_36(
     size: bt_pty::PtySize,
     wake: bt_pty::OutputWake,
     p: &bt_pty::PtyRecording,
@@ -146,7 +205,7 @@ pub fn probe_26(
 }
 
 /// `bt_pty::PtySession::spawn_refreshed` - all
-pub fn probe_27(
+pub fn probe_37(
     r: bt_pty::EnvironmentRefresh,
     s: bt_pty::PtySize,
     w: bt_pty::OutputWake,
@@ -156,18 +215,18 @@ pub fn probe_27(
 }
 
 /// `bt_pty::PtySession::resize` - all
-pub fn probe_28(s: &bt_pty::PtySession, size: bt_pty::PtySize) -> impl Sized {
+pub fn probe_38(s: &bt_pty::PtySession, size: bt_pty::PtySize) -> impl Sized {
     s.resize(size) // probe: bt_pty::PtySession::resize
 }
 
 /// `bt_pty::wait_for_retirements` - all
-pub fn probe_29(d: std::time::Duration) -> impl Sized {
+pub fn probe_39(d: std::time::Duration) -> impl Sized {
     bt_pty::wait_for_retirements(d) // probe: bt_pty::wait_for_retirements
 }
 
 /// `bt_platform::keyboard_layout_shift_table` - windows
 #[cfg(windows)]
-pub fn probe_30(
+pub fn probe_40(
     worker: &bt_platform::admission::WorkerCtx,
     layout: &bt_platform::KeyboardLayout,
 ) -> impl Sized {
@@ -176,7 +235,7 @@ pub fn probe_30(
 
 /// `windows::Win32::UI::Shell::ShellExecuteW` - windows
 #[cfg(windows)]
-pub fn probe_31(
+pub fn probe_41(
     o: windows::core::PCWSTR,
     n: windows::Win32::UI::WindowsAndMessaging::SHOW_WINDOW_CMD,
 ) -> impl Sized {
@@ -185,36 +244,76 @@ pub fn probe_31(
 
 /// `windows::Win32::UI::Shell::ShellExecuteExW` - windows
 #[cfg(windows)]
-pub fn probe_32(i: &mut windows::Win32::UI::Shell::SHELLEXECUTEINFOW) -> impl Sized {
+pub fn probe_42(i: &mut windows::Win32::UI::Shell::SHELLEXECUTEINFOW) -> impl Sized {
     unsafe { windows::Win32::UI::Shell::ShellExecuteExW(i) } // probe: windows::Win32::UI::Shell::ShellExecuteExW
+}
+
+/// `windows::Win32::System::Threading::WaitForSingleObject` - windows
+#[cfg(windows)]
+pub fn probe_43(h: windows::Win32::Foundation::HANDLE, d: u32) -> impl Sized {
+    unsafe { windows::Win32::System::Threading::WaitForSingleObject(h, d) } // probe: windows::Win32::System::Threading::WaitForSingleObject
+}
+
+/// `windows::Win32::System::Threading::WaitForSingleObjectEx` - windows
+#[cfg(windows)]
+pub fn probe_44(h: windows::Win32::Foundation::HANDLE, d: u32) -> impl Sized {
+    unsafe { windows::Win32::System::Threading::WaitForSingleObjectEx(h, d, true) } // probe: windows::Win32::System::Threading::WaitForSingleObjectEx
+}
+
+/// `windows::Win32::System::Threading::WaitForMultipleObjects` - windows
+#[cfg(windows)]
+pub fn probe_45(h: &[windows::Win32::Foundation::HANDLE], d: u32) -> impl Sized {
+    unsafe { windows::Win32::System::Threading::WaitForMultipleObjects(h, false, d) } // probe: windows::Win32::System::Threading::WaitForMultipleObjects
+}
+
+/// `windows::Win32::System::Threading::WaitForMultipleObjectsEx` - windows
+#[cfg(windows)]
+pub fn probe_46(h: &[windows::Win32::Foundation::HANDLE], d: u32) -> impl Sized {
+    unsafe { windows::Win32::System::Threading::WaitForMultipleObjectsEx(h, false, d, true) } // probe: windows::Win32::System::Threading::WaitForMultipleObjectsEx
+}
+
+/// `windows::Win32::System::Threading::SignalObjectAndWait` - windows
+#[cfg(windows)]
+pub fn probe_47(
+    s: windows::Win32::Foundation::HANDLE,
+    w: windows::Win32::Foundation::HANDLE,
+    d: u32,
+) -> impl Sized {
+    unsafe { windows::Win32::System::Threading::SignalObjectAndWait(s, w, d, true) } // probe: windows::Win32::System::Threading::SignalObjectAndWait
+}
+
+/// `windows::Win32::System::Threading::SleepEx` - windows
+#[cfg(windows)]
+pub fn probe_48(d: u32) -> impl Sized {
+    unsafe { windows::Win32::System::Threading::SleepEx(d, true) } // probe: windows::Win32::System::Threading::SleepEx
 }
 
 /// `windows::Win32::System::Threading::SetEvent` - windows
 #[cfg(windows)]
-pub fn probe_33(h: windows::Win32::Foundation::HANDLE) -> impl Sized {
+pub fn probe_49(h: windows::Win32::Foundation::HANDLE) -> impl Sized {
     unsafe { windows::Win32::System::Threading::SetEvent(h) } // probe: windows::Win32::System::Threading::SetEvent
 }
 
 /// `windows::Win32::Foundation::CloseHandle` - windows
 #[cfg(windows)]
-pub fn probe_34(h: windows::Win32::Foundation::HANDLE) -> impl Sized {
+pub fn probe_50(h: windows::Win32::Foundation::HANDLE) -> impl Sized {
     unsafe { windows::Win32::Foundation::CloseHandle(h) } // probe: windows::Win32::Foundation::CloseHandle
 }
 
 /// `windows::Win32::Storage::FileSystem::GetDriveTypeW` - windows
 #[cfg(windows)]
-pub fn probe_35(r: windows::core::PCWSTR) -> impl Sized {
+pub fn probe_51(r: windows::core::PCWSTR) -> impl Sized {
     unsafe { windows::Win32::Storage::FileSystem::GetDriveTypeW(r) } // probe: windows::Win32::Storage::FileSystem::GetDriveTypeW
 }
 
 /// `libc::write` - macos
 #[cfg(target_os = "macos")]
-pub fn probe_36(fd: i32, b: &[u8]) -> impl Sized {
+pub fn probe_52(fd: i32, b: &[u8]) -> impl Sized {
     unsafe { libc::write(fd, b.as_ptr().cast(), b.len()) } // probe: libc::write
 }
 
 /// `libc::close` - macos
 #[cfg(target_os = "macos")]
-pub fn probe_37(fd: i32) -> impl Sized {
+pub fn probe_53(fd: i32) -> impl Sized {
     unsafe { libc::close(fd) } // probe: libc::close
 }
