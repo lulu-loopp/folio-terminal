@@ -11636,7 +11636,7 @@ impl<B: Backend> Runtime<'_, B> {
                         .as_mut()
                         .filter(|slot| slot.path == answered)
                     {
-                        slot.answer = pages;
+                        slot.hear(pages);
                         changed |= index == self.window.active_tab;
                     }
                 }
