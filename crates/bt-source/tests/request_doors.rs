@@ -1761,9 +1761,9 @@ fn the_registry_refuses_a_key_on_two_modules_and_a_path_naming_nothing() {
 /// leaves.
 ///
 /// MUTATIONS: in `Judge::walk_on`, do not skip a `beside` edge on the enqueue side — the C1 walk
-/// meets the write; drop the beside walk (`Side::Beside if !beside => continue` as `{}`) — every
-/// edge of the body is met, `gesture_enqueue`'s too; in [`split_beside`], keep only the strict
-/// kinds — the read row leaves.
+/// meets the write; let the beside walk take every edge of the body (drop
+/// `Side::Beside if !beside => continue`) — it meets `gesture_enqueue`'s worker as well, and the
+/// rows differ; in [`split_beside`], keep only the strict kinds — the read row leaves.
 #[test]
 fn a_cut_door_is_walked_from_its_enqueue_and_its_beside_side_keeps_its_breaches() {
     assert_eq!(judge_fixture("gesture"), Vec::<String>::new());
