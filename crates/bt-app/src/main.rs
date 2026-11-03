@@ -8457,6 +8457,21 @@ impl BirthDecision {
         }
         self
     }
+
+    /// **The decision for a resume whose folder the birth found gone, and which started nothing**
+    /// (row 195, review F3): the pane stands where it was put, and a `diagnostics.log` line says
+    /// which folder was gone and that the session was not resumed anywhere else.
+    fn with_resume_not_started(mut self, note: &mut dyn FnMut(&str)) -> Self {
+        if let Some(gone) = self.unless_gone.take() {
+            note(&format!(
+                "{} is not a folder this machine can open now (removed, or on a share that is not \
+                 answering); the agent's session was not resumed anywhere else, and the pane's \
+                 shell is handed back",
+                gone.folder.display()
+            ));
+        }
+        self
+    }
 }
 
 impl PaneBirth {
@@ -14598,9 +14613,7 @@ impl TabState {
             // without a resume brings back.
             profile_id: self.sessions.get(&seat).map_or_else(
                 || self.leaf_profile(seat),
-                |TerminalPane { session: leaf, .. }| {
-                    leaf.agent.saved_profile(&leaf.launch.profile).to_owned()
-                },
+                |TerminalPane { session: leaf, .. }| leaf.own_profile().to_owned(),
             ),
             // The one ladder every shell started in this pane's place reads (T-RESTART-CWD).
             cwd: self
@@ -16308,6 +16321,15 @@ impl ShellSession {
             }
             pane_folder::PaneFolder::Opened(_) | pane_folder::PaneFolder::Unknown(_) => None,
         }
+    }
+
+    /// **The profile this pane is, for every shell started in its likeness** (row 195, review F5):
+    /// the shell it was before its agent was resumed in it, or the profile it was launched as. The
+    /// session save, Restart shell, Duplicate tab and the splits read this one answer, so a pane
+    /// whose typed agent came back is saved, restarted and copied as the shell it was — and never
+    /// becomes a fresh agent's pane.
+    fn own_profile(&self) -> &str {
+        self.agent.saved_profile(&self.launch.profile)
     }
 
     /// [`Self::place_where_the_pane_stands`] with the kind a spawn weighs it by: **named** for a
@@ -22822,6 +22844,9 @@ fn deliver_attention(
                 );
                 break;
             }
+            // **Any hook from the pane says its resumed agent ran** (row 195, review N3) — a
+            // submitted prompt as much as a finished turn — so its end is no failed resume.
+            leaf.agent.spoke();
             // **The session the turn ended in, heard by the pane it ended in** (row 195).
             if let Some(heard) = &message.resume
                 && let Some(vendor) = agent_resume::vendor(&message.family)
@@ -31396,6 +31421,9 @@ fn birth_here(
     programs: &profiles::ProfilePrograms,
 ) -> Result<(LeafSeed, Started), Vec<String>> {
     let (identity, started) = decided_birth(seed, stored_default, programs)?;
+    if let Some(shell) = handed_back_seed(seed, &started) {
+        return birth_here(&shell, stored_default, programs);
+    }
     match resolved_birth_seed(seed, &identity) {
         (resolved, None) => Ok((resolved, started)),
         (_, Some(_)) => Err(vec![identity]),
@@ -32223,7 +32251,7 @@ mod shell_birth_tests {
         let (wake, heard) = waking();
         let spec = pty_door::GoneSpec {
             folder: gone.folder.clone(),
-            arguments: Vec::new(),
+            arguments: Some(Vec::new()),
             working_directory: gone.place.working_directory.clone(),
         };
         let shell = pty_door::request(
@@ -32231,10 +32259,10 @@ mod shell_birth_tests {
                 let resolver = share_that_waits(asked_by, share_answers);
                 let folder_gone = pty_door::gone_place(Some(spec), &resolver).is_some();
                 pty_door::Born {
-                    session: a_quiet_shell(born_size()).map(|(session, hygiene)| {
+                    session: Some(a_quiet_shell(born_size()).map(|(session, hygiene)| {
                         let _ = kept.send(hygiene);
                         session
-                    }),
+                    })),
                     folder_gone,
                 }
             },
@@ -32987,24 +33015,16 @@ fn create_leaf_session(
             environment,
         );
         // **A restored agent is started as its vendor's resume** (row 195).
-        let resume_arguments = compose_resume(&mut command, seed, &started);
-        // The same row composed for the place the pane opens in when its folder is gone: the
-        // birth worker takes this command line and working directory instead, having asked.
-        // A resume whose folder is gone is still the resume: the vendor then finds no session to
-        // come back to, says so and exits, and the pane is handed back its shell with the line.
-        let gone_spec = unless_gone.as_ref().map(|gone| pty_door::GoneSpec {
-            folder: gone.folder.clone(),
-            arguments: resume_arguments.clone().unwrap_or_else(|| {
-                shell_integration::shell_command(
-                    row,
-                    &program_kind,
-                    &gone.place.arguments,
-                    shell_integration::Scripts::installed(),
-                    environment,
-                )
-                .arguments
-            }),
-            working_directory: gone.place.working_directory.clone(),
+        let resuming = compose_resume(&mut command, seed, &started);
+        let gone_spec = birth_unless_gone(unless_gone.as_ref(), resuming, |gone| {
+            shell_integration::shell_command(
+                row,
+                &program_kind,
+                &gone.place.arguments,
+                shell_integration::Scripts::installed(),
+                environment,
+            )
+            .arguments
         });
         // **The PowerShell load is finished on the birth worker**, not here: naming `folio.ps1`
         // means preparing it, which is disk work. The switch is read here, once, and travels with
@@ -33129,14 +33149,16 @@ fn create_leaf_session(
 /// **A restored agent's command line is its vendor's resume** (0.4.9 plan row 195): the profile's
 /// environment stays, its arguments give way to the resume's — a grant is never resurrected, and a
 /// positional word would break `codex resume <id>` — and the configuration folder the session
-/// lives in is the one it was recorded under. Answers the resume's arguments, which a folder that
-/// is gone is started with too; `None`, and `command` untouched, for every other birth.
+/// lives in is the one it was recorded under. Answers whether the birth is a resume; `false`, and
+/// `command` untouched, for every other birth.
 fn compose_resume(
     command: &mut shell_integration::ShellCommand,
     seed: &LeafSeed,
     started: &Started,
-) -> Option<Vec<std::ffi::OsString>> {
-    let (vendor, record) = resuming_vendor(seed, started)?;
+) -> bool {
+    let Some((vendor, record)) = resuming_vendor(seed, started) else {
+        return false;
+    };
     if let Some(home) = &record.home {
         command.environment.push((
             std::ffi::OsString::from(vendor.home_variable),
@@ -33144,7 +33166,26 @@ fn compose_resume(
         ));
     }
     command.arguments = vendor.arguments(&record.resume_id);
-    Some(command.arguments.clone())
+    true
+}
+
+/// **What a birth starts when the folder it carries is gone** (G-SWEEP-048, #29): the same row
+/// composed for the place the pane opens in instead (`compose`), which the birth worker takes,
+/// having asked. **A resume whose folder is gone is started nowhere** (row 195, review F3): run in
+/// the profile's own folder, a vendor that resumes by id would bring the conversation back in a
+/// folder nobody chose — its sandbox and write scope rooted there — so the birth starts nothing,
+/// and the pane is handed its shell with the could-not-resume line
+/// (`agent_resume::AgentAccount::not_started`).
+fn birth_unless_gone(
+    unless_gone: Option<&profiles::GoneFolder>,
+    resuming: bool,
+    compose: impl FnOnce(&profiles::GoneFolder) -> Vec<std::ffi::OsString>,
+) -> Option<pty_door::GoneSpec> {
+    unless_gone.map(|gone| pty_door::GoneSpec {
+        folder: gone.folder.clone(),
+        arguments: (!resuming).then(|| compose(gone)),
+        working_directory: gone.place.working_directory.clone(),
+    })
 }
 
 /// **The vendor and record a seed resumes, when its profile is the one being started** (row 195).
@@ -33305,21 +33346,48 @@ fn await_shell(
 }
 
 /// **The line a pane opens with when its agent's session did not come back** (row 195): a
-/// hand-back's, or a resume whose profile was not the one started.
-fn could_not_resume_line(seed: &LeafSeed, started: &Started) -> Option<String> {
+/// hand-back's, a resume whose profile was not the one started, or one whose program would not
+/// start and was stood in for (`stood_in`, review N2).
+fn could_not_resume_line(seed: &LeafSeed, started: &Started, stood_in: bool) -> Option<String> {
     match (&seed.agent, started) {
         (agent_resume::SeedAgent::CouldNotResume(could), _) => Some(could.text()),
         (agent_resume::SeedAgent::Resume(resume), Started::FellBack(_) | Started::Nothing) => {
-            agent_resume::vendor(&resume.record.vendor).map(|vendor| {
-                agent_resume::CouldNotResume {
-                    title: vendor.title,
-                    id: resume.record.resume_id.clone(),
-                }
-                .text()
-            })
+            could_not_resume(resume).map(|could| could.text())
+        }
+        (agent_resume::SeedAgent::Resume(resume), Started::AsAsked) if stood_in => {
+            could_not_resume(resume).map(|could| could.text())
         }
         _ => None,
     }
+}
+
+/// The could-not-resume line's facts for a resume this build knows the vendor of.
+fn could_not_resume(resume: &agent_resume::Resume) -> Option<agent_resume::CouldNotResume> {
+    agent_resume::vendor(&resume.record.vendor).map(|vendor| agent_resume::CouldNotResume {
+        title: vendor.title,
+        id: resume.record.resume_id.clone(),
+    })
+}
+
+/// **A resume this machine cannot start comes back as the shell the pane hands back** (row 195,
+/// review N2): a pane where `claude` was typed into Git Bash, restored on a machine with no
+/// `claude` on it, is born as its Git Bash — not as the default profile, which would forget the
+/// pane's own shell after one start — saying which session did not come back. `None` for any other
+/// seed, and for a resume whose own profile was the agent's (it falls back as any profile does).
+fn handed_back_seed(seed: &LeafSeed, started: &Started) -> Option<LeafSeed> {
+    let agent_resume::SeedAgent::Resume(resume) = &seed.agent else {
+        return None;
+    };
+    if *started == Started::AsAsked {
+        return None;
+    }
+    let profile = resume.hand_back.clone()?;
+    let could = could_not_resume(resume)?;
+    Some(LeafSeed {
+        profile,
+        agent: agent_resume::SeedAgent::CouldNotResume(could),
+        ..seed.clone()
+    })
 }
 
 /// **The half of a pane's birth that needs its shell** — run at creation for a pane with no shell
@@ -33342,6 +33410,13 @@ fn finish_leaf_birth(
     let mut pty = pty;
     let shell_fallback = pty.as_mut().and_then(PtySession::take_shell_fallback);
     leaf.life.record_spawn_fallback(shell_fallback.clone());
+    // **A stand-in is no resume** (row 195, review N2): when the vendor's program resolved but would
+    // not start, `bt-pty`'s last resort is what runs, and it is no agent this pane can account for
+    // — the record goes, and the pane says which session did not come back.
+    let stood_in = shell_fallback.is_some() && leaf.agent.is_resumed();
+    if stood_in {
+        leaf.agent = agent_resume::AgentAccount::default();
+    }
     // **A pane born on the inbox ConPTY says so, once, and why** (T-KEYBOARD-RECORDS). The
     // process falls back to Windows' own ConPTY when the packaged pair is missing or will not
     // load; that pane gets no win32-input-mode key records (`input::key_records`), so a line in
@@ -33439,7 +33514,9 @@ fn finish_leaf_birth(
     }
     // **And a session that did not come back** (row 195): a shell handed back after its resumed
     // agent exited before a hook spoke, or a resume whose program this machine could not start.
-    if let Some(line) = could_not_resume_line(seed, &decision.started).filter(|_| !in_birth) {
+    if let Some(line) =
+        could_not_resume_line(seed, &decision.started, stood_in).filter(|_| !in_birth)
+    {
         session
             .feed(banner_line(&line).as_bytes())
             .context("write the could-not-resume line into the leaf's first line")?;

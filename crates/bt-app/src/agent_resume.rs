@@ -18,8 +18,9 @@
 //! * **A pane whose own program is the agent** — an agent profile's tab, or a pane this module
 //!   resumed — records every hook of that vendor. Its record ends when the agent ends by itself.
 //! * **A shell pane where somebody typed the agent** records it only while a command the shell
-//!   marked (`OSC 133`) is running, and the record belongs to that command: the shell's next prompt
-//!   ends it ([`AgentAccount::settle_command`]). A shell that marks nothing has no such end to read
+//!   marked (`OSC 133`) is running, and the record belongs to that command and to the first vendor
+//!   heard inside it: the shell's next prompt ends it ([`AgentAccount::settle_command`]), and a mark
+//!   retired while the command runs does not. A shell that marks nothing has no such end to read
 //!   — codex says nothing when it stops — so nothing is recorded there and the pane comes back as
 //!   its shell, as before.
 //! * **`SessionEnd` ends nothing.** It can fire while the system is ending the agent, which would
@@ -34,7 +35,12 @@
 //! and a positional argument would break `codex resume <id>`). When the resumed agent ends by
 //! itself, a pane that was a shell gets its shell back in the same folder ([`Ended::HandBack`]).
 //!
-//! **A resume has failed when the resumed agent exits before any hook has spoken from it** — no
+//! **A resume whose folder is gone is not started** (review F3): no vendor's resume is run in a
+//! folder nobody chose, so the birth starts nothing and the pane is handed its shell with the line
+//! below ([`AgentAccount::not_started`]).
+//!
+//! **A resume has failed when the resumed agent exits before any hook has spoken from it** — any
+//! hook, a submitted prompt's as much as a finished turn's ([`AgentAccount::spoke`]) — no
 //! clock: the vendors' refusals print text and exit (Claude Code: "No conversation found with
 //! session ID: …", exit 1, measured 2026-11-02 in a scratch configuration folder), and a pane
 //! that printed something is not a birth death. The pane's shell is then born in the folder with
@@ -170,9 +176,7 @@ impl Heard {
     /// sends and by the window when it reads, because neither end has cause to trust the other.
     #[must_use]
     pub(crate) fn is_well_formed(&self) -> bool {
-        bt_persist::resume_id_is_well_formed(&self.id)
-            && folder_is_well_formed(&self.cwd)
-            && self.home.as_deref().is_none_or(folder_is_well_formed)
+        session_is_well_formed(&self.id, &self.cwd, self.home.as_deref())
     }
 
     /// The record this becomes on a pane, for `vendor`.
@@ -185,6 +189,16 @@ impl Heard {
             home: self.home.clone(),
         }
     }
+}
+
+/// **The one rule a session's three facts are held to**, wherever they come from (review N5): the
+/// wire's [`Heard`] and the saved record [`revived`] reads alike — a UUID-shaped id
+/// ([`bt_persist::resume_id_is_well_formed`]) and folders [`folder_is_well_formed`] passes.
+#[must_use]
+pub(crate) fn session_is_well_formed(id: &str, cwd: &str, home: Option<&str>) -> bool {
+    bt_persist::resume_id_is_well_formed(id)
+        && folder_is_well_formed(cwd)
+        && home.is_none_or(folder_is_well_formed)
 }
 
 /// An absolute folder of a bounded length with no control, format or separator character in it.
@@ -236,8 +250,12 @@ pub(crate) fn child_of<'a>(program: Option<&Path>, marks: &'a [CommandMark]) -> 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct Resumed {
     /// Whether a hook has spoken from this child — the line between a resume that failed and one
-    /// that ran and ended.
+    /// that ran and ended. Any hook from the pane counts, `UserPromptSubmit` as much as `Stop`
+    /// ([`AgentAccount::spoke`]): something in the pane answered, so the resume ran.
     heard: bool,
+    /// The birth found the recorded folder gone and started nothing in its place: a resume is
+    /// never run in a folder the session was not filed under ([`AgentAccount::not_started`]).
+    not_started: bool,
     /// The shell profile the pane was before its agent was resumed in it, or `None` for a pane
     /// whose own profile is the agent's.
     hand_back: Option<String>,
@@ -306,6 +324,7 @@ impl AgentAccount {
                 command: None,
                 resumed: Some(Resumed {
                     heard: false,
+                    not_started: false,
                     hand_back: resume.hand_back.clone(),
                     title: vendor(&resume.record.vendor).map_or("", |vendor| vendor.title),
                 }),
@@ -332,10 +351,35 @@ impl AgentAccount {
     }
 
     /// Whether this pane's child is a resumed agent.
-    #[cfg(test)]
     #[must_use]
     pub(crate) fn is_resumed(&self) -> bool {
         self.resumed.is_some()
+    }
+
+    /// **The birth found the recorded folder gone and started nothing** (row 195, review F3): the
+    /// pane's shell is owed in its place with the line, at the reaper's next turn
+    /// ([`Self::take_not_started`]).
+    pub(crate) fn not_started(&mut self) {
+        if let Some(resumed) = self.resumed.as_mut() {
+            resumed.not_started = true;
+        }
+    }
+
+    /// **The hand-back a resume that was not started owes**, once: what [`Self::child_ended`]
+    /// answers for a resume that never ran — the pane's shell, the line, the record cleared.
+    pub(crate) fn take_not_started(&mut self) -> Option<Ended> {
+        self.resumed
+            .as_ref()
+            .is_some_and(|resumed| resumed.not_started)
+            .then(|| self.child_ended())
+    }
+
+    /// **A hook spoke from this pane**, whatever it said (review N3): a resumed agent that was
+    /// heard from at all ran, so its end is no failed resume.
+    pub(crate) fn spoke(&mut self) {
+        if let Some(resumed) = self.resumed.as_mut() {
+            resumed.heard = true;
+        }
     }
 
     /// Whether a shell is being born in this pane's place.
@@ -360,6 +404,15 @@ impl AgentAccount {
     /// The pane's own agent is recorded on every turn's end; a shell's only while one of its marked
     /// commands is running, for that command. Any other hook — another vendor's from inside the
     /// pane's agent, a shell that marks nothing — records nothing.
+    ///
+    /// **One run, one vendor, one folder** (review F1, F7). A shell's command is bound to the first
+    /// vendor heard from inside it: a `codex exec` that a typed `claude` starts speaks from the same
+    /// pane, and is refused until the command ends. Within one run only the id may change — a
+    /// `/clear` or `/new` mints a new one, which is the same agent's next session — and the folder
+    /// and configuration folder stay those of the run's first turn, the folder the vendor filed the
+    /// session under, wherever the agent has `cd`'d since. A nested headless run of the same
+    /// vendor (`claude -p` inside Claude Code) is not told apart from a `/clear`: no field names
+    /// it, and it is a named limit in `docs/DESIGN.md`.
     pub(crate) fn hear(&mut self, vendor: &Vendor, heard: &Heard, child: Child<'_>) -> bool {
         if !heard.is_well_formed() {
             return false;
@@ -367,28 +420,50 @@ impl AgentAccount {
         let command = match child {
             Child::Agent(own) if own.family == vendor.family => None,
             Child::Agent(_) => return false,
-            Child::Shell(marks) => match running_command(marks) {
+            Child::Shell(marks) => match self.command_heard_in(marks) {
                 Some(command) => Some(command),
                 None => return false,
             },
         };
-        if let Some(resumed) = self.resumed.as_mut() {
-            resumed.heard = true;
+        let same_run = self.command == command;
+        let kept = self.record.as_ref().filter(|_| same_run);
+        if kept.is_some_and(|kept| kept.vendor != vendor.family) {
+            return false;
         }
-        let record = heard.record(vendor);
+        self.spoke();
+        let record = match kept {
+            Some(kept) => AgentRecordV1 {
+                resume_id: heard.id.clone(),
+                ..kept.clone()
+            },
+            None => heard.record(vendor),
+        };
         let changed = self.record.as_ref() != Some(&record) || self.command != command;
         self.record = Some(record);
         self.command = command;
         changed
     }
 
+    /// The marked command a hook in a shell pane is heard for: the one the shell is running now,
+    /// or the one already recorded while it goes on ([`command_goes_on`]) — a mark that was
+    /// retired under a running command (Clear scrollback, an `ED 3`, eviction, a reflow) does not
+    /// end it.
+    fn command_heard_in(&self, marks: &[CommandMark]) -> Option<CommandMarkId> {
+        running_command(marks).or_else(|| {
+            self.command
+                .filter(|command| command_goes_on(*command, marks))
+        })
+    }
+
     /// **A typed agent's record ends with its command**: cleared once the shell has marked that
-    /// command finished, marked a newer one, or dropped it. Answers whether it was cleared.
+    /// command finished, or marked a newer one (review F2). A mark retired with no newer one after
+    /// it keeps the record: the command it stood for may well be running. Answers whether it was
+    /// cleared.
     pub(crate) fn settle_command(&mut self, marks: &[CommandMark]) -> bool {
         let Some(command) = self.command else {
             return false;
         };
-        if running_command(marks) == Some(command) {
+        if command_goes_on(command, marks) {
             return false;
         }
         self.record = None;
@@ -438,6 +513,19 @@ fn running_command(marks: &[CommandMark]) -> Option<CommandMarkId> {
         .last()
         .filter(|mark| mark.executed.is_some() && mark.finished.is_none())
         .map(|mark| mark.id)
+}
+
+/// **Whether the marked command `command` may still be running**: the shell has marked no newer
+/// command (mark ids are monotonic and never reused), and its own mark, if the session still holds
+/// it, is not finished. A mark the session no longer holds — retired by Clear scrollback, an
+/// `ED 3`, the scrollback quota or a reflow that could not reseat it — says nothing about the
+/// command it stood for.
+fn command_goes_on(command: CommandMarkId, marks: &[CommandMark]) -> bool {
+    !marks.iter().any(|mark| mark.id > command)
+        && marks
+            .iter()
+            .find(|mark| mark.id == command)
+            .is_none_or(|mark| mark.finished.is_none())
 }
 
 /// **A resume a restored pane's seed carries**: the record, and the shell profile to hand back
@@ -506,7 +594,10 @@ pub(crate) fn revived(
 ) -> (String, Option<PathBuf>, SeedAgent) {
     let Some((record, vendor)): Option<(&AgentRecordV1, &'static Vendor)> = record
         .filter(|_| restore.resumes())
-        .filter(|record| record.is_well_formed())
+        .filter(|record| {
+            record.is_well_formed()
+                && session_is_well_formed(&record.resume_id, &record.cwd, record.home.as_deref())
+        })
         .and_then(|record| vendor(&record.vendor).map(|vendor| (record, vendor)))
     else {
         return (profile, folder, SeedAgent::None);

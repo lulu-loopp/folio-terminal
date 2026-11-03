@@ -508,6 +508,9 @@ pub(crate) const TURN_END: &[TurnEnd] = &[
         resume: Resume::Fields {
             id: "session_id",
             cwd: "cwd",
+            // Claude Code's payload names no client: a nested headless `claude -p` is not told
+            // apart from the pane's own agent (a named limit, `docs/DESIGN.md` 2026-11-02).
+            only_client: None,
         },
     },
     // **And this one deliberately cannot**, though its payload names the same file. A turn that
@@ -550,6 +553,9 @@ pub(crate) const TURN_END: &[TurnEnd] = &[
         resume: Resume::Fields {
             id: "thread-id",
             cwd: "cwd",
+            // The same payload says which client ran the turn (`"client":"codex-tui"` in the
+            // recording): a `codex exec` an agent in the pane started is not the pane's session.
+            only_client: Some(("client", "codex-tui")),
         },
     },
     // pi's whole contribution. "Fires only once a run fully settles."
@@ -605,7 +611,15 @@ pub(crate) enum Resume {
     /// The row names no session.
     None,
     /// The payload's top-level `id` field is the vendor's session id and `cwd` its folder.
-    Fields { id: &'static str, cwd: &'static str },
+    /// `only_client`, when declared, is a field naming the client that ran the turn and the value
+    /// the vendor's interactive client gives it: a payload whose field says any other client names
+    /// no session this pane can resume (row 195, review F1). A payload without the field is from a
+    /// version that did not say, and is read as before.
+    Fields {
+        id: &'static str,
+        cwd: &'static str,
+        only_client: Option<(&'static str, &'static str)>,
+    },
 }
 
 impl Resume {

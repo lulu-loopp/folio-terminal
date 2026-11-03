@@ -103,11 +103,7 @@ fn a_saved_agent_pane_with_a_recorded_session_is_born_through_its_vendors_resume
             command.arguments, expected,
             "{saved_as}: the vendor's resume, whole"
         );
-        assert_eq!(
-            resumed,
-            Some(expected),
-            "and the same line for a folder that is gone"
-        );
+        assert!(resumed, "{saved_as}: and the birth knows it is a resume");
         let account = AgentAccount::born(&born.agent, true);
         assert_eq!(account.record(), Some(&claude_record()), "{saved_as}");
         assert!(account.is_resumed());
@@ -381,9 +377,14 @@ fn a_record_is_cleared_by_the_agents_own_exit_and_not_by_session_end() {
     assert_eq!(leaf.agent.record(), None, "the agent's own exit ends it");
 }
 
-/// **A typed agent's record belongs to its command** (row 195): heard while the shell's marked
-/// command runs, and ended by the shell's next prompt — `settle_command`, which the reaper asks
-/// every turn.
+/// RED (row 195, review F2) — **a typed agent's record belongs to its command**: heard while the
+/// shell's marked command runs, kept while that command goes on even when its mark is retired
+/// under it (an `ED 3` from the agent's own redraw, Clear scrollback, eviction), heard again
+/// there, and ended by the shell's next prompt — `settle_command`, which the reaper asks every
+/// turn.
+///
+/// MUTATION: `settle_command` clearing whenever the shell is not running the recorded mark (the
+/// mark retired reads as the command's end): the record is gone after the `ED 3`.
 #[test]
 fn a_typed_agents_record_ends_with_the_command_it_was_typed_as() {
     let mut tabs = [ringing_tab(1, 1)];
@@ -410,6 +411,31 @@ fn a_typed_agents_record_ends_with_the_command_it_was_typed_as() {
         "still running"
     );
     assert_eq!(leaf.agent.record(), Some(&claude_record()));
+    // The agent writes a screenful and more, then clears the scrollback (`ED 3`): the command's
+    // mark, now in the scrollback, is retired while the command runs.
+    leaf.session
+        .feed("agent output\r\n".repeat(200).as_bytes())
+        .expect("the output parses");
+    leaf.session.feed(b"\x1b[3J").expect("the ED 3 parses");
+    assert!(
+        leaf.session.command_marks().is_empty(),
+        "the ED 3 retired the running command's mark"
+    );
+    assert!(
+        !leaf.agent.settle_command(leaf.session.command_marks()),
+        "a retired mark with no newer one is no command's end"
+    );
+    assert_eq!(leaf.agent.record(), Some(&claude_record()));
+    let child =
+        crate::agent_resume::child_of(Some(Path::new("pwsh.exe")), leaf.session.command_marks());
+    let next = Heard {
+        id: "1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f".to_owned(),
+        ..heard.clone()
+    };
+    assert!(
+        leaf.agent.hear(&VENDORS[0], &next, child),
+        "and the same command is heard on"
+    );
     leaf.session
         .feed(b"\x1b]133;D;0\x07\x1b]133;A\x07PS> ")
         .expect("the marks parse");
@@ -438,4 +464,244 @@ fn the_layout_writes_a_panes_record_and_the_shell_it_was() {
     let saved = tabs[0].term_leaf(seat, false);
     assert_eq!(saved.agent, Some(claude_record()));
     assert_eq!(saved.profile_id, "gitbash");
+}
+
+/// RED (row 195, review F1, F7) — **one run, one vendor, one folder**: a shell's command is bound
+/// to the first vendor heard inside it, so the `codex` an agent typed into PowerShell starts is
+/// refused while the command runs; the same vendor's new id (a `/clear`) is taken; and every turn
+/// after the run's first keeps the folder the session was filed under, wherever the agent has
+/// `cd`'d since. The shell's next command is a new run.
+///
+/// MUTATION: drop the refusal of another vendor in `AgentAccount::hear` and the pane records the
+/// `codex exec` that the typed `claude` started — the first assertion after it goes red.
+#[test]
+fn a_typed_agents_record_is_its_first_vendors_and_keeps_its_first_folder() {
+    let mut tabs = [ringing_tab(1, 1)];
+    let seat = tabs[0].seats.terminals()[0];
+    let leaf = &mut tabs[0]
+        .sessions
+        .get_mut(&seat)
+        .expect("the fixture's seat holds a shell")
+        .session;
+    leaf.session
+        .feed(b"\x1b]133;A\x07PS> \x1b]133;B\x07claude\r\n\x1b]133;C\x07")
+        .expect("the marks parse");
+    fn shell(marks: &[bt_term::CommandMark]) -> crate::agent_resume::Child<'_> {
+        crate::agent_resume::child_of(Some(Path::new("pwsh.exe")), marks)
+    }
+    let heard = Heard {
+        id: SESSION.to_owned(),
+        cwd: FOLDER.to_owned(),
+        home: None,
+    };
+    let (claude, codex) = (&VENDORS[0], &VENDORS[1]);
+    assert!(
+        leaf.agent
+            .hear(claude, &heard, shell(leaf.session.command_marks()))
+    );
+    let exec = Heard {
+        id: "2d3e4f5a-6b7c-4d8e-9f0a-1b2c3d4e5f6a".to_owned(),
+        cwd: r"C:\work\resume\scratch".to_owned(),
+        home: None,
+    };
+    assert!(
+        !leaf
+            .agent
+            .hear(codex, &exec, shell(leaf.session.command_marks())),
+        "another vendor's turn inside the command is refused"
+    );
+    assert_eq!(leaf.agent.record(), Some(&claude_record()));
+    let cleared = Heard {
+        id: "3e4f5a6b-7c8d-4e9f-8a1b-2c3d4e5f6a7b".to_owned(),
+        cwd: r"C:\work\resume\crates\bt-app".to_owned(),
+        home: Some(r"C:\work\elsewhere-config".to_owned()),
+    };
+    assert!(
+        leaf.agent
+            .hear(claude, &cleared, shell(leaf.session.command_marks())),
+        "the same vendor's next session is taken"
+    );
+    assert_eq!(
+        leaf.agent.record(),
+        Some(&AgentRecordV1 {
+            resume_id: cleared.id.clone(),
+            ..claude_record()
+        }),
+        "with the run's first folder and configuration folder"
+    );
+    // The command ends; the next one is a run of its own, and may be another vendor's.
+    leaf.session
+        .feed(b"\x1b]133;D;0\x07\x1b]133;A\x07PS> \x1b]133;B\x07codex\r\n\x1b]133;C\x07")
+        .expect("the marks parse");
+    assert!(leaf.agent.settle_command(leaf.session.command_marks()));
+    assert!(
+        leaf.agent
+            .hear(codex, &exec, shell(leaf.session.command_marks()))
+    );
+    assert_eq!(
+        leaf.agent.record().map(|record| record.vendor.as_str()),
+        Some(attention_map::CODEX)
+    );
+    // And a resumed pane keeps the folder its session was filed under at every turn.
+    let mut account = AgentAccount::born(
+        &SeedAgent::Resume(crate::agent_resume::Resume {
+            record: claude_record(),
+            hand_back: None,
+        }),
+        true,
+    );
+    assert!(account.hear(claude, &cleared, crate::agent_resume::Child::Agent(claude)));
+    assert_eq!(
+        account.record().map(|record| record.cwd.as_str()),
+        Some(FOLDER)
+    );
+}
+
+/// RED (row 195, review F3) — **a resume whose folder is gone is started nowhere**: the birth's
+/// alternative for a gone folder starts nothing for a resume (a shell's starts where no folder
+/// would have put it), the landing says so in `diagnostics.log` and leaves the pane where it was
+/// put, and the account then owes the pane's shell, once, with the could-not-resume line and its
+/// record cleared — the hand-back road every failed resume takes.
+///
+/// MUTATION: `birth_unless_gone` composing the alternative for a resume too — the resume would
+/// then run in the profile's own folder — and the first assertion goes red.
+#[test]
+fn a_resume_whose_folder_is_gone_is_started_nowhere_and_hands_back_its_shell() {
+    let gone = profiles::GoneFolder {
+        folder: PathBuf::from(FOLDER),
+        place: profiles::spawn_place(
+            profiles::index_of_id(profiles::fallback_profile_id()),
+            None,
+            &bt_pty::SystemShellEnvironment,
+        )
+        .place,
+    };
+    let composed = || vec![OsString::from("-NoLogo")];
+    assert_eq!(
+        birth_unless_gone(Some(&gone), true, |_| composed()).map(|spec| spec.arguments),
+        Some(None),
+        "a resume starts nothing in the gone folder's stead"
+    );
+    assert_eq!(
+        birth_unless_gone(Some(&gone), false, |_| composed()).map(|spec| spec.arguments),
+        Some(Some(composed())),
+        "a shell starts where no folder would have put it"
+    );
+    let mut notes = Vec::new();
+    let decision = BirthDecision {
+        started: Started::AsAsked,
+        spawn_profile: "claude".to_owned(),
+        spawn_place: Some(PathBuf::from(FOLDER)),
+        at_shell_home: false,
+        named: false,
+        program: None,
+        program_kind: profiles::ShellProgram::Native,
+        unless_gone: Some(Box::new(gone)),
+    }
+    .with_resume_not_started(&mut |line| notes.push(line.to_owned()));
+    assert_eq!(decision.spawn_place, Some(PathBuf::from(FOLDER)));
+    assert!(
+        notes.len() == 1 && notes[0].contains(FOLDER) && notes[0].contains("not resumed"),
+        "{notes:?}"
+    );
+    let mut account = AgentAccount::born(
+        &SeedAgent::Resume(crate::agent_resume::Resume {
+            record: claude_record(),
+            hand_back: Some("gitbash".to_owned()),
+        }),
+        true,
+    );
+    assert_eq!(
+        account.take_not_started(),
+        None,
+        "a resume that started owes nothing"
+    );
+    account.not_started();
+    let Some(Ended::HandBack {
+        profile,
+        cwd,
+        failed,
+    }) = account.take_not_started()
+    else {
+        panic!("a resume that was not started hands back its shell");
+    };
+    assert_eq!(profile.as_deref(), Some("gitbash"));
+    assert_eq!(cwd, PathBuf::from(FOLDER));
+    assert!(
+        failed.is_some_and(|failed| failed.text().contains("Claude Code session 0b9c7e1a")),
+        "with the line"
+    );
+    assert_eq!(account.record(), None, "and the record cleared");
+    assert_eq!(account.take_not_started(), None, "once");
+}
+
+/// **A resume this machine cannot start comes back as the shell the pane hands back** (row 195,
+/// review N2): a Git Bash pane whose typed `claude` was recorded, restored where no row but Git
+/// Bash's is startable, is born as its Git Bash with the could-not-resume line — not as the
+/// default profile.
+#[cfg(windows)]
+#[test]
+fn a_resume_whose_program_is_missing_comes_back_as_the_shell_it_hands_back() {
+    let only_gitbash = profiles::ProfilePrograms::with_only(&[profiles::index_of_id("gitbash")]);
+    let seed = LeafSeed {
+        agent: SeedAgent::Resume(crate::agent_resume::Resume {
+            record: claude_record(),
+            hand_back: Some("gitbash".to_owned()),
+        }),
+        ..restart_seed(
+            "claude",
+            Some(profiles::SeedPlace::Carried(PathBuf::from(FOLDER))),
+        )
+    };
+    let (born, started) = birth_here(&seed, "", &only_gitbash).expect("every row is answered");
+    assert_eq!(born.profile, "gitbash");
+    assert_eq!(started, Started::AsAsked);
+    assert!(
+        could_not_resume_line(&born, &started, false)
+            .is_some_and(|line| line.contains("Claude Code session 0b9c7e1a")),
+        "and says which session did not come back"
+    );
+}
+
+/// RED (row 195, review F5) — **a resumed shell pane's own profile is the shell it hands back**:
+/// a Git Bash pane whose typed `claude` was resumed runs the `claude` profile, and *Restart
+/// shell*, *Duplicate tab* and a split of it start the Git Bash the layout writes it as, read
+/// through the one accessor that answers the hand-back — never a fresh agent.
+///
+/// MUTATION: `ShellSession::own_profile` answering the launch's profile, and the first assertion
+/// goes red.
+#[test]
+fn a_resumed_shell_panes_own_profile_is_the_shell_it_hands_back() {
+    let mut tabs = [ringing_tab(1, 1)];
+    let seat = tabs[0].seats.terminals()[0];
+    let leaf = &mut tabs[0]
+        .sessions
+        .get_mut(&seat)
+        .expect("the fixture's seat holds a shell")
+        .session;
+    leaf.launch.profile = "claude".to_owned();
+    leaf.agent = AgentAccount::born(
+        &SeedAgent::Resume(crate::agent_resume::Resume {
+            record: claude_record(),
+            hand_back: Some("gitbash".to_owned()),
+        }),
+        true,
+    );
+    assert_eq!(
+        leaf.own_profile(),
+        "gitbash",
+        "the pane's own profile is the shell it hands back"
+    );
+    leaf.agent = AgentAccount::default();
+    assert_eq!(
+        leaf.own_profile(),
+        "claude",
+        "and a pane with no resumed agent's is its launch's"
+    );
+    for name in ["restart_shell", "duplicate_tab", "split_seat"] {
+        assert!(
+            crate::test_support::squeezed_body("Runtime", name).contains(".own_profile()"),
+            "{name} reads the pane's own profile"
+        );
+    }
 }

@@ -550,17 +550,31 @@ pub(crate) fn message_for(
 }
 
 /// **The session a row's declared fields name**, or `None` at every step: no payload, a row that
-/// declares none, a field that is missing or is not a string, an id that is not UUID-shaped, a
-/// folder that is not absolute.
+/// declares none, a turn a client other than the vendor's interactive one ran, a field that is
+/// missing or is not a string, an id that is not UUID-shaped, a folder that is not absolute.
 #[must_use]
 fn heard(
     resume: attention_map::Resume,
     payload: Option<&serde_json::Value>,
 ) -> Option<crate::agent_resume::Heard> {
-    let attention_map::Resume::Fields { id, cwd } = resume else {
+    let attention_map::Resume::Fields {
+        id,
+        cwd,
+        only_client,
+    } = resume
+    else {
         return None;
     };
     let payload = payload?;
+    // A turn another client ran — `codex exec`, started by an agent in the pane — is not the
+    // pane's session (review F1).
+    if let Some((field, interactive)) = only_client
+        && payload
+            .get(field)
+            .is_some_and(|client| client.as_str() != Some(interactive))
+    {
+        return None;
+    }
     let heard = crate::agent_resume::Heard {
         id: payload.get(id)?.as_str()?.to_owned(),
         cwd: payload.get(cwd)?.as_str()?.to_owned(),
@@ -1538,8 +1552,8 @@ mod tests {
     /// drops the whole line**, at the window's end; and the verb's own end never sends one. The id
     /// is handed to a vendor's command line, so neither end trusts the other to have checked it.
     ///
-    /// MUTATION: drop `bt_persist::resume_id_is_well_formed(&self.id)` from
-    /// `Heard::is_well_formed` and the first line is accepted.
+    /// MUTATION: drop `bt_persist::resume_id_is_well_formed(id)` from
+    /// `agent_resume::session_is_well_formed` and the first line is accepted.
     #[test]
     fn a_resume_whose_id_is_not_a_uuid_is_refused_with_its_line() {
         let line = |resume: &str| {
@@ -1597,6 +1611,27 @@ mod tests {
                 .map(|heard| heard.cwd),
             Some("/srv/work".to_owned())
         );
+        // **Only the interactive client's turn names the pane's session** (review F1): a turn a
+        // `codex exec` ran — started by an agent in the pane, its notify inherited — names none.
+        for (client, names_one) in [
+            (serde_json::json!("codex-tui"), true),
+            (serde_json::json!("codex-exec"), false),
+            (serde_json::json!(""), false),
+            (serde_json::json!(12), false),
+        ] {
+            let codex = serde_json::json!({
+                "thread-id": SESSION,
+                "cwd": "/srv/work",
+                "client": client,
+            });
+            assert_eq!(
+                message_for("c".to_owned(), CODEX, "agent-turn-complete", Some(&codex))
+                    .resume
+                    .is_some(),
+                names_one,
+                "client {client}"
+            );
+        }
         for (family, event) in [
             (CLAUDE_CODE, "StopFailure"),
             (CLAUDE_CODE, "SessionEnd"),

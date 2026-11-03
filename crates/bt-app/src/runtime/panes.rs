@@ -1696,7 +1696,7 @@ impl<B: Backend> Runtime<'_, B> {
             // profile's default.
             .map(|TerminalPane { session: leaf, .. }| {
                 seed.applied(
-                    &leaf.launch.profile,
+                    leaf.own_profile(),
                     leaf.seed_place_for_a_new_shell().as_ref(),
                 )
             })
@@ -6816,15 +6816,21 @@ pub(crate) fn land_shell_birth(
     };
     // Read off the birth that has left the pane; it is spent only below, in the delivery of what
     // it holds, so nothing a birth carries can be dropped on the way.
-    let decision = if folder_gone {
-        landing.decision.clone().with_folder_gone(&mut note)
-    } else {
-        landing.decision.clone()
+    let decision = match (&answer, folder_gone) {
+        (None, _) => landing.decision.clone().with_resume_not_started(&mut note),
+        (Some(_), true) => landing.decision.clone().with_folder_gone(&mut note),
+        (Some(_), false) => landing.decision.clone(),
     };
     let (born_grid, owed_physical) = (landing.born_grid, landing.owed_physical);
     let (pty, refusal) = match answer {
-        Ok(pty) => (Some(pty), None),
-        Err(error) => (
+        // **A resume whose folder is gone started nothing** (row 195, review F3): the pane is
+        // handed its shell with the could-not-resume line at the reaper's next turn.
+        None => {
+            leaf.session.agent.not_started();
+            (None, None)
+        }
+        Some(Ok(pty)) => (Some(pty), None),
+        Some(Err(error)) => (
             None,
             Some(anyhow::Error::from(error).context(format!(
                 "spawn the {} profile in ConPTY",

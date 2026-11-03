@@ -695,7 +695,7 @@ impl<B: Backend> Runtime<'_, B> {
         // carried into the tab, it is born with again.
         let seed = born_in_tab(
             restart_seed(
-                &leaf.session.launch.profile,
+                leaf.session.own_profile(),
                 leaf.session.seed_place_for_a_new_shell(),
             ),
             self.window.tabs[self.window.active_tab]
