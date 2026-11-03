@@ -325,11 +325,13 @@ pub(crate) trait WindowHost {
         wake: Box<dyn Fn(bt_platform::SystemNews)>,
     ) -> Option<bt_platform::SystemSettingsWatch>;
     /// **The system's question when the session ends, heard by this window** —
-    /// `bt_platform::session_end::SessionEndWatch::install`; `None` where it cannot be.
+    /// `bt_platform::session_end::SessionEndWatch::install`; `None` where it cannot be. `ending`
+    /// is what the answer to `WM_ENDSESSION(TRUE)` waits for (plan row 201).
     fn watch_session_end(
         &self,
         hear: Box<dyn Fn(bt_platform::session_end::SessionEnd)>,
         reason: Box<dyn Fn() -> String>,
+        ending: std::rc::Rc<dyn Fn()>,
     ) -> Option<bt_platform::session_end::SessionEndWatch>;
     /// **A page's place in this window, as the web engine is told it** — the page's visual and
     /// this window's handle, sealed in a [`crate::webhost::SeatAddress`] only the engine reads.
@@ -530,9 +532,10 @@ impl WindowHost for Arc<Window> {
         &self,
         hear: Box<dyn Fn(bt_platform::session_end::SessionEnd)>,
         reason: Box<dyn Fn() -> String>,
+        ending: std::rc::Rc<dyn Fn()>,
     ) -> Option<bt_platform::session_end::SessionEndWatch> {
         let native = crate::native_window_of(self).ok()?;
-        bt_platform::session_end::SessionEndWatch::install(native, hear, reason).ok()
+        bt_platform::session_end::SessionEndWatch::install(native, hear, reason, ending).ok()
     }
     fn page_address(
         &self,
