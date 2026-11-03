@@ -26,6 +26,13 @@
 //! else in a payload stays in the hook process and dies with it. That is not an optimisation: a
 //! channel that carried payloads would be a channel worth attacking.
 //!
+//! **And a third, since 0.4.9 plan row 195**: the session a turn ended in, where a turn-end row
+//! names a [`Resume`](crate::attention_map::Resume) source — the vendor's session id, the folder it
+//! is filed under, and the vendor's configuration folder when the hook's own environment set one.
+//! The same rule holds: named fields only, checked at both ends
+//! ([`crate::agent_resume::Heard::is_well_formed`]); a line whose `resume` is anything else is a
+//! line from something that is not `folio attention`, and is dropped whole.
+//!
 //! The words are the wider of the two doors and are worth stating exactly. What crosses is at most
 //! eighty-one characters of prose with no control character in it, produced by
 //! [`crate::attention_words`] from a source a row declared, and the far end refuses a line whose
@@ -80,10 +87,11 @@ const INBOX_BOUND: usize = 256;
 
 /// One arrival, in the words it crosses the pipe in.
 ///
-/// Five fields and two of them are usually absent. `family` and `event` together name a row of the
-/// mapping table; `capability` names the pane; `id` is present only when that row declared a field
-/// path, which today no row does; `text` is present only when a turn-end row declared where its
-/// words live **and** they were there to be found.
+/// Six fields and three of them are usually absent. `family` and `event` together name a row of
+/// the mapping table; `capability` names the pane; `id` is present only when that row declared a
+/// field path, which today no row does; `text` is present only when a turn-end row declared where
+/// its words live **and** they were there to be found; `resume` only when a turn-end row declared
+/// where its session is named and the payload named a well-formed one.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Message {
     pub capability: String,
@@ -94,6 +102,10 @@ pub(crate) struct Message {
     /// [`crate::attention_words`]. `None` is the ordinary answer and costs the reader only the
     /// wording the toast had before this field existed.
     pub text: Option<String>,
+    /// **The session the turn ended in** (row 195), already checked. `None` for every row that
+    /// declares no [`Resume`](crate::attention_map::Resume) source and for a payload that named
+    /// none this build could resume.
+    pub resume: Option<crate::agent_resume::Heard>,
 }
 
 /// The wire's version, and the reason for it: a `folio.exe` on `PATH` may be a different build from
@@ -116,6 +128,15 @@ impl Message {
         }
         if let Some(text) = &self.text {
             value.insert("text".to_owned(), text.clone().into());
+        }
+        if let Some(resume) = &self.resume {
+            let mut session = serde_json::Map::new();
+            session.insert("id".to_owned(), resume.id.clone().into());
+            session.insert("cwd".to_owned(), resume.cwd.clone().into());
+            if let Some(home) = &resume.home {
+                session.insert("home".to_owned(), home.clone().into());
+            }
+            value.insert("resume".to_owned(), serde_json::Value::Object(session));
         }
         serde_json::Value::Object(value).to_string()
     }
@@ -161,12 +182,40 @@ impl Message {
                 Some(words.to_owned())
             }
         };
+        let resume = match object.get("resume") {
+            None => None,
+            Some(value) => {
+                let session = value.as_object()?;
+                let field = |key: &str| -> Option<Option<String>> {
+                    match session.get(key) {
+                        None => Some(None),
+                        Some(value) => value.as_str().map(|text| Some(text.to_owned())),
+                    }
+                };
+                let heard = crate::agent_resume::Heard {
+                    id: field("id")??,
+                    cwd: field("cwd")??,
+                    home: field("home")?,
+                };
+                // **Checked again here**, for `id`'s reason: this end has no cause to trust that
+                // the far end applied the shape, and the id is handed to a vendor's command line.
+                if !heard.is_well_formed()
+                    || !session
+                        .keys()
+                        .all(|key| matches!(key.as_str(), "id" | "cwd" | "home"))
+                {
+                    return None;
+                }
+                Some(heard)
+            }
+        };
         Some(Self {
             capability: text("cap")?,
             family: text("family")?,
             event: text("event")?,
             id,
             text: words,
+            resume,
         })
     }
 }
@@ -447,7 +496,16 @@ pub(crate) fn run_verb(call: Result<crate::cli::AttentionCall, crate::cli::Atten
     };
     let payload = payload_of(call.payload.as_ref())
         .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok());
-    let message = message_for(capability, family, event, payload.as_ref());
+    let mut message = message_for(capability, family, event, payload.as_ref());
+    // **The vendor's configuration folder, from this process's own environment** — the agent's,
+    // which this hook inherited — and only when it set one (row 195). Read here rather than in
+    // `message_for`, which is pure.
+    if let Some(resume) = message.resume.as_mut()
+        && let Some(vendor) = crate::agent_resume::vendor(family)
+    {
+        resume.home = variable(vendor.home_variable)
+            .filter(|home| crate::agent_resume::folder_is_well_formed(home));
+    }
     match bt_platform::attention_pipe::send_line(&endpoint, &message.encode()) {
         Ok(()) => 0,
         Err(_) => 1,
@@ -476,13 +534,39 @@ pub(crate) fn message_for(
     let text = attention_map::turn_end_row(family, event)
         .and_then(|row| quoted(row.words, payload))
         .filter(|words| words_are_quotable(words));
+    // And the session, if — and only if — a turn-end row declared where it is named, the family
+    // is one this build resumes, and what the payload holds is well-formed (row 195).
+    let resume = attention_map::turn_end_row(family, event)
+        .filter(|_| crate::agent_resume::vendor(family).is_some())
+        .and_then(|row| heard(row.resume, payload));
     Message {
         capability,
         family: family.to_owned(),
         event: event.to_owned(),
         id,
         text,
+        resume,
     }
+}
+
+/// **The session a row's declared fields name**, or `None` at every step: no payload, a row that
+/// declares none, a field that is missing or is not a string, an id that is not UUID-shaped, a
+/// folder that is not absolute.
+#[must_use]
+fn heard(
+    resume: attention_map::Resume,
+    payload: Option<&serde_json::Value>,
+) -> Option<crate::agent_resume::Heard> {
+    let attention_map::Resume::Fields { id, cwd } = resume else {
+        return None;
+    };
+    let payload = payload?;
+    let heard = crate::agent_resume::Heard {
+        id: payload.get(id)?.as_str()?.to_owned(),
+        cwd: payload.get(cwd)?.as_str()?.to_owned(),
+        home: None,
+    };
+    heard.is_well_formed().then_some(heard)
 }
 
 /// The sentence a row's declared source holds, cleaned to what a toast may carry.
@@ -674,6 +758,7 @@ mod tests {
             event: "PermissionRequest".to_owned(),
             id: None,
             text: None,
+            resume: None,
         };
         assert_eq!(Message::decode(&message.encode()), Some(message));
     }
@@ -691,6 +776,7 @@ mod tests {
             event: "Stop".to_owned(),
             id: None,
             text: None,
+            resume: None,
         }
         .encode();
         for coordinate in ["tab", "seat", "window", "pane", "leaf", "index"] {
@@ -742,6 +828,7 @@ mod tests {
             event: "Stop".to_owned(),
             id: None,
             text: Some("收官了。".to_owned()),
+            resume: None,
         };
         assert_eq!(Message::decode(&message.encode()), Some(message));
     }
@@ -862,6 +949,7 @@ mod tests {
             event: "Stop".to_owned(),
             id: None,
             text: None,
+            resume: None,
         };
         let stop = |payload: Option<&serde_json::Value>| {
             message_for("c".to_owned(), CLAUDE_CODE, "Stop", payload)
@@ -921,6 +1009,7 @@ mod tests {
             event: event.to_owned(),
             id: None,
             text: None,
+            resume: None,
         };
         assert_eq!(
             asks_of(&claude, &message("PermissionRequest")),
@@ -942,6 +1031,7 @@ mod tests {
             event: "agent_settled".to_owned(),
             id: None,
             text: None,
+            resume: None,
         };
         assert_eq!(
             asks_of(&installed(PI), &settled),
@@ -960,6 +1050,7 @@ mod tests {
                     event: "Whatever".to_owned(),
                     id: None,
                     text: None,
+                    resume: None,
                 }
             )
             .is_empty()
@@ -1063,6 +1154,7 @@ mod tests {
                 event: event.to_owned(),
                 id: None,
                 text: None,
+                resume: None,
             }
             .encode();
             send_line(endpoint.name(), &line).expect("the endpoint took the line");
@@ -1419,5 +1511,104 @@ mod tests {
             1,
             "the reader got the handle only once the gate had let the holder go on its own"
         );
+    }
+
+    /// A made-up session id of the vendors' shape, for the tests below.
+    const SESSION: &str = "0b9c7e1a-4f3d-4c2b-9a8e-5d6f7a8b9c0d";
+
+    /// **The session a turn ended in crosses the wire, and comes back the same** (row 195).
+    #[test]
+    fn a_turns_session_survives_the_wire() {
+        let message = Message {
+            capability: "0123456789abcdef0123456789abcdef".to_owned(),
+            family: CLAUDE_CODE.to_owned(),
+            event: "Stop".to_owned(),
+            id: None,
+            text: None,
+            resume: Some(crate::agent_resume::Heard {
+                id: SESSION.to_owned(),
+                cwd: r"C:\work\resume".to_owned(),
+                home: Some(r"C:\work\config".to_owned()),
+            }),
+        };
+        assert_eq!(Message::decode(&message.encode()), Some(message));
+    }
+
+    /// RED (row 195) — **a `resume` that is not UUID-shaped, or not only what this build sends,
+    /// drops the whole line**, at the window's end; and the verb's own end never sends one. The id
+    /// is handed to a vendor's command line, so neither end trusts the other to have checked it.
+    ///
+    /// MUTATION: drop `bt_persist::resume_id_is_well_formed(&self.id)` from
+    /// `Heard::is_well_formed` and the first line is accepted.
+    #[test]
+    fn a_resume_whose_id_is_not_a_uuid_is_refused_with_its_line() {
+        let line = |resume: &str| {
+            format!(
+                r#"{{"v":1,"cap":"c","family":"claude-code","event":"Stop","resume":{resume}}}"#
+            )
+        };
+        for bad in [
+            r#"{"id":"--dangerously-skip-permissions","cwd":"C:\\work"}"#,
+            r#"{"id":"0b9c7e1a4f3d4c2b9a8e5d6f7a8b9c0d","cwd":"C:\\work"}"#,
+            r#"{"id":"0b9c7e1a-4f3d-4c2b-9a8e-5d6f7a8b9c0z","cwd":"C:\\work"}"#,
+            r#"{"id":12,"cwd":"C:\\work"}"#,
+            r#"{"cwd":"C:\\work"}"#,
+            r#"{"id":"0b9c7e1a-4f3d-4c2b-9a8e-5d6f7a8b9c0d","cwd":"relative\\folder"}"#,
+            r#"{"id":"0b9c7e1a-4f3d-4c2b-9a8e-5d6f7a8b9c0d","cwd":"C:\\work","grant":"all"}"#,
+            r#""0b9c7e1a-4f3d-4c2b-9a8e-5d6f7a8b9c0d""#,
+        ] {
+            assert_eq!(
+                Message::decode(&line(bad)),
+                None,
+                "the line carrying it was accepted: {bad}"
+            );
+        }
+        // The verb's end: a payload naming something that is not a session sends none.
+        let payload = serde_json::json!({
+            "session_id": "--resume-everything",
+            "cwd": r"C:\work",
+        });
+        assert_eq!(
+            message_for("c".to_owned(), CLAUDE_CODE, "Stop", Some(&payload)).resume,
+            None
+        );
+        // And the well-formed one, for contrast, crosses.
+        assert!(
+            Message::decode(&line(&format!(r#"{{"id":"{SESSION}","cwd":"C:\\work"}}"#))).is_some()
+        );
+    }
+
+    /// **Which rows name a session** (row 195): Claude Code's `Stop` and codex's
+    /// `agent-turn-complete`, from the fields each payload names it by — and no other row, whatever
+    /// its payload holds.
+    #[test]
+    fn only_the_two_declared_turn_ends_carry_a_session() {
+        let claude = serde_json::json!({ "session_id": SESSION, "cwd": r"C:\work" });
+        assert_eq!(
+            message_for("c".to_owned(), CLAUDE_CODE, "Stop", Some(&claude))
+                .resume
+                .map(|heard| heard.id),
+            Some(SESSION.to_owned())
+        );
+        let codex = serde_json::json!({ "thread-id": SESSION, "cwd": "/srv/work" });
+        assert_eq!(
+            message_for("c".to_owned(), CODEX, "agent-turn-complete", Some(&codex))
+                .resume
+                .map(|heard| heard.cwd),
+            Some("/srv/work".to_owned())
+        );
+        for (family, event) in [
+            (CLAUDE_CODE, "StopFailure"),
+            (CLAUDE_CODE, "SessionEnd"),
+            (CLAUDE_CODE, "Notification"),
+            (CODEX, "stop"),
+            (PI, "agent_settled"),
+        ] {
+            assert_eq!(
+                message_for("c".to_owned(), family, event, Some(&claude)).resume,
+                None,
+                "{family}:{event}"
+            );
+        }
     }
 }

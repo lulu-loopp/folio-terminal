@@ -27205,6 +27205,7 @@ mod tests {
                     manual_name: None,
                     card_skip: 0,
                     last_command: String::new(),
+                    agent: None,
                 }))),
             ],
         }));
@@ -27264,6 +27265,7 @@ mod tests {
                             manual_name: None,
                             card_skip: 0,
                             last_command: String::new(),
+                            agent: None,
                         },
                         &|_| FilesLeafState::default(),
                     ),
@@ -27590,6 +27592,7 @@ mod tests {
                     manual_name: None,
                     card_skip: 0,
                     last_command: String::new(),
+                    agent: None,
                 }))),
                 Box::new(LayoutNodeV1::Leaf(LeafNodeV1::Unknown)),
             ],
@@ -35569,6 +35572,7 @@ mod tests {
                     manual_name: None,
                     card_skip: 0,
                     last_command: String::new(),
+                    agent: None,
                 }))),
                 Box::new(LayoutNodeV1::Leaf(LeafNodeV1::Files(
                     bt_persist::FilesLeafV1 {
@@ -35591,6 +35595,7 @@ mod tests {
             manual_name: None,
             card_skip: 0,
             last_command: String::new(),
+            agent: None,
         })))
     }
 
@@ -40985,6 +40990,7 @@ mod tests {
                     manual_name: None,
                     card_skip: 0,
                     last_command: String::new(),
+                    agent: None,
                 }))),
                 Box::new(LayoutNodeV1::Leaf(LeafNodeV1::Unknown)),
             ],
@@ -51089,6 +51095,7 @@ mod tests {
                 manual_name: None,
                 card_skip: 0,
                 last_command: String::new(),
+                agent: None,
             },
             &|seat| FilesLeafState {
                 root: r"D:\repo".to_owned(),
@@ -51207,6 +51214,7 @@ mod tests {
                         manual_name: None,
                         card_skip: 0,
                         last_command: String::new(),
+                        agent: None,
                     },
                 ))),
             ],
@@ -54188,6 +54196,7 @@ mod drop_plan_tests {
             manual_name: None,
             card_skip: 0,
             last_command: String::new(),
+            agent: None,
         };
         let mut revived = Seats::from_persisted(
             &seats.to_persisted(&|_| seed.clone(), &|_| FilesLeafState::default()),

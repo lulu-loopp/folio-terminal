@@ -234,6 +234,12 @@ pub enum Capability {
     /// call site; it is here now so that every row on that page is filtered by
     /// one rule instead of one rule and one exception.
     OptionKey,
+    /// Bringing back, at a restart, the agents that were running in panes (0.4.9 plan row 195).
+    ///
+    /// Windows only **in 0.4.9**, and the boundary is the verification rather than the mechanism:
+    /// the record is written on every platform and read back only where the resume was tried on
+    /// the vendors' own CLIs. The Mac is plan row 197.
+    AgentResume,
 }
 
 impl Capability {
@@ -249,7 +255,10 @@ impl Capability {
     pub const fn on(self, platform: HostPlatform) -> bool {
         match self {
             Self::UpdateCheck => true,
-            Self::ExplorerMenu | Self::AgentDiscovery | Self::WindowBackdrop => {
+            Self::ExplorerMenu
+            | Self::AgentDiscovery
+            | Self::WindowBackdrop
+            | Self::AgentResume => {
                 matches!(platform, HostPlatform::Windows)
             }
             Self::OptionKey => matches!(platform, HostPlatform::MacOs),

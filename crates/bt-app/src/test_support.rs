@@ -330,6 +330,7 @@ pub(crate) fn saved_tab(profile_id: &str, cwd: &str, name: Option<&str>, pinned:
             manual_name: name.map(str::to_owned),
             card_skip: 0,
             last_command: String::new(),
+            agent: None,
         })),
         pinned,
         focused_leaf: "leaf-0".to_owned(),
@@ -393,6 +394,7 @@ fn shells_tab(cwd: &Path, shells: usize) -> TabV1 {
             manual_name: None,
             card_skip: 0,
             last_command: String::new(),
+            agent: None,
         })))
     };
     let root = if shells == 2 {
@@ -509,6 +511,7 @@ pub(crate) fn saved_row_of_two(left: &str, right: &str) -> TabV1 {
             manual_name: None,
             card_skip: 0,
             last_command: String::new(),
+            agent: None,
         })))
     };
     TabV1 {
@@ -540,6 +543,7 @@ pub(crate) fn saved_files_and_terminal(files: bt_persist::FilesLeafV1) -> TabV1 
                     manual_name: None,
                     card_skip: 0,
                     last_command: String::new(),
+                    agent: None,
                 }))),
             ],
         }),
@@ -1434,6 +1438,7 @@ pub(crate) fn solved_lopsided_split(
                 manual_name: None,
                 card_skip: 0,
                 last_command: String::new(),
+                agent: None,
             }),
         ))
     };
@@ -2757,6 +2762,7 @@ pub(crate) fn leaf_saying(text: &str) -> TerminalPane {
             paste_hold: None,
             // A fixture is not a restore, so nothing is owed to its prompt.
             pending_typing: None,
+            agent: crate::agent_resume::AgentAccount::default(),
         },
         view: TermView {
             projection,

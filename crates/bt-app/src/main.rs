@@ -42,6 +42,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+mod agent_resume;
 mod animation;
 mod app_delegate_wire;
 mod arrival;
@@ -6560,6 +6561,7 @@ fn cli_leaf_seed(plan: &cli::CliPlan) -> LeafSeed {
         // `--with-environment` (owner ruling 2026-10-05): the launcher's environment, when the
         // command line asked for it, and the account's otherwise.
         carried_environment: plan.carried_environment.clone(),
+        agent: crate::agent_resume::SeedAgent::None,
     }
 }
 
@@ -7575,6 +7577,10 @@ struct ShellSession {
     /// [`attention::Event::LeafGone`] silently, so only this tells the second walk that the pane
     /// has already ended.
     attention_ended: bool,
+    /// **This pane's agent** (0.4.9 plan row 195): the session its hook last named, which the
+    /// layout writes so a restart can resume it, and — for a pane born as a resume — whether that
+    /// resume ever ran. See [`agent_resume::AgentAccount`].
+    agent: agent_resume::AgentAccount,
     grid: GridSize,
     conpty_grid: GridSize,
     pending_pty_resize: Option<PendingPtyResize>,
@@ -14517,7 +14523,16 @@ impl TabState {
             // at that position *now*: a pane saved after a reorder named whichever
             // profile had slid into its slot, and that wrong id then came back off
             // disk as the pane's shell on the next launch.
-            profile_id: self.leaf_profile(seat),
+            //
+            // **Save for a pane whose agent was resumed in it** (row 195): what it was saved as is
+            // the shell it was before — the profile its hand-back starts and the one a restore
+            // without a resume brings back.
+            profile_id: self.sessions.get(&seat).map_or_else(
+                || self.leaf_profile(seat),
+                |TerminalPane { session: leaf, .. }| {
+                    leaf.agent.saved_profile(&leaf.launch.profile).to_owned()
+                },
+            ),
             // The one ladder every shell started in this pane's place reads (T-RESTART-CWD).
             cwd: self
                 .sessions
@@ -14570,6 +14585,11 @@ impl TabState {
             } else {
                 String::new()
             },
+            // **The session the pane's agent last named** (row 195), held on the pane.
+            agent: self
+                .sessions
+                .get(&seat)
+                .and_then(|TerminalPane { session: leaf, .. }| leaf.agent.record().cloned()),
         }
     }
 
@@ -22684,6 +22704,10 @@ fn attention_delivery(
 // at, what serial to draw a place from, what arrived, what this machine has installed, when now is,
 // and where the lines go. A struct would move the list rather than shorten it, and would put a
 // name in front of `tabs` that no caller reads back.
+///
+/// **Answers whether a pane's agent record changed** (row 195), which the caller owes the layout a
+/// write for: a turn-end message that names its session is heard by the pane it came from
+/// ([`agent_resume::AgentAccount::hear`]).
 #[allow(clippy::too_many_arguments)]
 fn deliver_attention(
     tabs: &mut [TabState],
@@ -22696,7 +22720,8 @@ fn deliver_attention(
     now: Instant,
     trace: Option<&attention_trace::Trace>,
     raised: &mut Vec<AttentionDelivery>,
-) {
+) -> bool {
+    let mut recorded = false;
     for message in messages {
         let asks = attention_wire::asks_of(installed, message);
         if asks.is_empty() {
@@ -22730,6 +22755,16 @@ fn deliver_attention(
                     )],
                 );
                 break;
+            }
+            // **The session the turn ended in, heard by the pane it ended in** (row 195).
+            if let Some(heard) = &message.resume
+                && let Some(vendor) = agent_resume::vendor(&message.family)
+            {
+                let child = agent_resume::child_of(
+                    leaf.launch.program.as_deref(),
+                    leaf.session.command_marks(),
+                );
+                recorded |= leaf.agent.hear(vendor, heard, child);
             }
             if let Some(event) = asks.ledger.clone() {
                 // The clock mirrors the arrival rather than the ledger's answer, and deliberately:
@@ -22773,6 +22808,7 @@ fn deliver_attention(
             break;
         }
     }
+    recorded
 }
 
 /// The claim a tab wears: the loudest of the claims its sessions make.
@@ -29088,8 +29124,27 @@ fn plan_launch(saved: &[TabV1], active: usize, cli_wants_pane: bool) -> LaunchPl
 /// leaf at all, and the fallback to `lone_terminal` then zips one seat against
 /// zero saved leaves and produces no entries — which is right, because there
 /// was nothing saved to pair with.
+///
+/// **No agent is resumed by this door** — [`revive_plan_with`] is the one a launch's pinned tabs
+/// and the restore card's reopened ones come back through (row 195), so this one is the tests'.
+#[cfg(test)]
 fn revive_plan(
     tab: &TabV1,
+) -> (
+    seats::Seats,
+    TabSeed,
+    BTreeMap<SeatId, LeafSeed>,
+    BTreeMap<SeatId, seats::FilesLeafState>,
+    PreviewRestore,
+) {
+    revive_plan_with(tab, agent_resume::Restore::off())
+}
+
+/// `revive_plan`, resuming each pane's recorded agent as `restore` allows
+/// ([`agent_resume::revived`], 0.4.9 plan row 195).
+fn revive_plan_with(
+    tab: &TabV1,
+    restore: agent_resume::Restore,
 ) -> (
     seats::Seats,
     TabSeed,
@@ -29141,14 +29196,25 @@ fn revive_plan(
             // exists, or the unresolved default its birth decides; above it,
             // `unknown_profile_id` carries the name the banner quotes.
             let (profile, unknown_profile_id) = revived_profile(&leaf.profile_id);
+            // **The fifth fact, and the one that may change the first two** (row 195): a pane
+            // whose agent was recorded comes back as that vendor's resume, in the folder the
+            // vendor files the session under — and with nothing typed at it, so no prefill.
+            let (profile, folder, agent) = agent_resume::revived(
+                profile,
+                Some(leaf.cwd.as_str())
+                    .filter(|cwd| !cwd.is_empty())
+                    .map(PathBuf::from),
+                leaf.agent.as_ref(),
+                restore,
+            );
+            let resuming = matches!(agent, agent_resume::SeedAgent::Resume(_));
             (
                 seat,
                 LeafSeed {
                     profile,
-                    unknown_profile_id,
-                    cwd: Some(leaf.cwd.as_str())
-                        .filter(|cwd| !cwd.is_empty())
-                        .map(|cwd| profiles::SeedPlace::Carried(PathBuf::from(cwd))),
+                    // A pane coming back as its agent is not the profile the banner would name.
+                    unknown_profile_id: unknown_profile_id.filter(|_| !resuming),
+                    cwd: folder.map(profiles::SeedPlace::Carried),
                     // The third fact read out of the same saved leaf in the same
                     // pass, for the reason the two above it are: a pane revived
                     // with somebody else's aim is a card pointed at the wrong
@@ -29158,8 +29224,10 @@ fn revive_plan(
                     // three above it's own terms. Empty is `None` rather than an empty command,
                     // so "this shell never reported one" and "this rung does not restore them"
                     // arrive as one case (§7.54e ④).
-                    prefill: Some(leaf.last_command.clone()).filter(|it| !it.is_empty()),
+                    prefill: Some(leaf.last_command.clone())
+                        .filter(|it| !it.is_empty() && !resuming),
                     carried_environment: None,
+                    agent,
                 },
             )
         })
@@ -29440,7 +29508,7 @@ fn collect_term_leaves<'a>(node: &'a LayoutNodeV1, out: &mut Vec<&'a TermLeafV1>
 /// Every Files leaf of a persisted tree, in the order the tree is drawn.
 ///
 /// The exact sibling of [`persisted_term_leaves`], and it has to be the same
-/// walk for the same reason: the pairing in [`revive_plan`] is a `zip` against
+/// walk for the same reason: the pairing in [`revive_plan_with`] is a `zip` against
 /// `Seats::files`, and two walks that agree everywhere except on one shape would
 /// hand a column somebody else's root — which looks like a working files pane
 /// pointed at the wrong folder, not like a bug.
@@ -29634,6 +29702,10 @@ struct LeafSeed {
     /// [`born_in_tab`]; `None` in every other tab. Never saved, so a revived pane takes the
     /// account's environment.
     carried_environment: Option<cli::CarriedEnvironment>,
+    /// **What this pane is born as about an agent** (0.4.9 plan row 195): the vendor's resume a
+    /// restored pane's record asks for ([`agent_resume::revived`]), the failure line a hand-back
+    /// shell opens with, or nothing — which is every seed that is not a restore's.
+    agent: agent_resume::SeedAgent,
 }
 
 /// **The profile a saved pane comes back as, and the id its banner names** — one reading of a
@@ -30919,6 +30991,7 @@ impl SplitSeed {
                 // A split is not a restore; nothing is owed to its prompt.
                 prefill: None,
                 carried_environment: None,
+                agent: crate::agent_resume::SeedAgent::None,
             },
             Self::Profile(profile) => LeafSeed {
                 profile: profile.clone(),
@@ -30934,6 +31007,7 @@ impl SplitSeed {
                 card_skip: 0,
                 prefill: None,
                 carried_environment: None,
+                agent: crate::agent_resume::SeedAgent::None,
             },
             // The chooser answers with a Windows path, because
             // `FOS_FORCEFILESYSTEM` is what makes it answer with a path at all —
@@ -30953,6 +31027,7 @@ impl SplitSeed {
                 card_skip: 0,
                 prefill: None,
                 carried_environment: None,
+                agent: crate::agent_resume::SeedAgent::None,
             },
         }
     }
@@ -31790,6 +31865,7 @@ mod shell_birth_tests {
             card_skip: 0,
             prefill: None,
             carried_environment: None,
+            agent: crate::agent_resume::SeedAgent::None,
         }
     }
 
@@ -32804,18 +32880,24 @@ fn create_leaf_session(
             shell_integration::Scripts::installed(),
             environment,
         );
+        // **A restored agent is started as its vendor's resume** (row 195).
+        let resume_arguments = compose_resume(&mut command, seed, &started);
         // The same row composed for the place the pane opens in when its folder is gone: the
         // birth worker takes this command line and working directory instead, having asked.
+        // A resume whose folder is gone is still the resume: the vendor then finds no session to
+        // come back to, says so and exits, and the pane is handed back its shell with the line.
         let gone_spec = unless_gone.as_ref().map(|gone| pty_door::GoneSpec {
             folder: gone.folder.clone(),
-            arguments: shell_integration::shell_command(
-                row,
-                &program_kind,
-                &gone.place.arguments,
-                shell_integration::Scripts::installed(),
-                environment,
-            )
-            .arguments,
+            arguments: resume_arguments.clone().unwrap_or_else(|| {
+                shell_integration::shell_command(
+                    row,
+                    &program_kind,
+                    &gone.place.arguments,
+                    shell_integration::Scripts::installed(),
+                    environment,
+                )
+                .arguments
+            }),
             working_directory: gone.place.working_directory.clone(),
         });
         // **The PowerShell load is finished on the birth worker**, not here: naming `folio.ps1`
@@ -32903,6 +32985,13 @@ fn create_leaf_session(
         line_wrapping,
         environment,
     );
+    // **What the pane's child is about an agent**: a resume when one was asked for and that program
+    // is the one being started; nothing otherwise — a pane that fell back is the shell it says it
+    // is, and [`finish_leaf_birth`] says the session did not come back.
+    leaf.session.agent = agent_resume::AgentAccount::born(
+        &seed.agent,
+        shell.is_some() && resuming_vendor(seed, &started).is_some(),
+    );
     match shell {
         // **Born later, standing where its shell will stand.** The place is said now, from the
         // decision, so a pane split off or restarted from this one while it is being born is put
@@ -32929,6 +33018,40 @@ fn create_leaf_session(
         }
     }
     Ok(leaf)
+}
+
+/// **A restored agent's command line is its vendor's resume** (0.4.9 plan row 195): the profile's
+/// environment stays, its arguments give way to the resume's — a grant is never resurrected, and a
+/// positional word would break `codex resume <id>` — and the configuration folder the session
+/// lives in is the one it was recorded under. Answers the resume's arguments, which a folder that
+/// is gone is started with too; `None`, and `command` untouched, for every other birth.
+fn compose_resume(
+    command: &mut shell_integration::ShellCommand,
+    seed: &LeafSeed,
+    started: &Started,
+) -> Option<Vec<std::ffi::OsString>> {
+    let (vendor, record) = resuming_vendor(seed, started)?;
+    if let Some(home) = &record.home {
+        command.environment.push((
+            std::ffi::OsString::from(vendor.home_variable),
+            std::ffi::OsString::from(home),
+        ));
+    }
+    command.arguments = vendor.arguments(&record.resume_id);
+    Some(command.arguments.clone())
+}
+
+/// **The vendor and record a seed resumes, when its profile is the one being started** (row 195).
+fn resuming_vendor<'a>(
+    seed: &'a LeafSeed,
+    started: &Started,
+) -> Option<(&'static agent_resume::Vendor, &'a bt_persist::AgentRecordV1)> {
+    match (&seed.agent, started) {
+        (agent_resume::SeedAgent::Resume(resume), Started::AsAsked) => {
+            agent_resume::vendor(&resume.record.vendor).map(|vendor| (vendor, &resume.record))
+        }
+        _ => None,
+    }
 }
 
 /// **A pane, every part but its shell's** — its session made and dressed for its view, standing
@@ -33018,6 +33141,8 @@ fn bare_leaf(
                 capability,
             },
             attention_ended: false,
+            // Told what it is born as by `create_leaf_session`, once the birth is decided.
+            agent: agent_resume::AgentAccount::default(),
             grid,
             conpty_grid: grid,
             pending_pty_resize: None,
@@ -33071,6 +33196,24 @@ fn await_shell(
             owed_physical: None,
         }),
     });
+}
+
+/// **The line a pane opens with when its agent's session did not come back** (row 195): a
+/// hand-back's, or a resume whose profile was not the one started.
+fn could_not_resume_line(seed: &LeafSeed, started: &Started) -> Option<String> {
+    match (&seed.agent, started) {
+        (agent_resume::SeedAgent::CouldNotResume(could), _) => Some(could.text()),
+        (agent_resume::SeedAgent::Resume(resume), Started::FellBack(_) | Started::Nothing) => {
+            agent_resume::vendor(&resume.record.vendor).map(|vendor| {
+                agent_resume::CouldNotResume {
+                    title: vendor.title,
+                    id: resume.record.resume_id.clone(),
+                }
+                .text()
+            })
+        }
+        _ => None,
+    }
 }
 
 /// **The half of a pane's birth that needs its shell** — run at creation for a pane with no shell
@@ -33187,6 +33330,13 @@ fn finish_leaf_birth(
             // just stopped this leaf from claiming to be.
             .feed(fallback_banner(fallback, &seed.profile).as_bytes())
             .context("write the shell fallback banner into the leaf's first line")?;
+    }
+    // **And a session that did not come back** (row 195): a shell handed back after its resumed
+    // agent exited before a hook spoke, or a resume whose program this machine could not start.
+    if let Some(line) = could_not_resume_line(seed, &decision.started).filter(|_| !in_birth) {
+        session
+            .feed(banner_line(&line).as_bytes())
+            .context("write the could-not-resume line into the leaf's first line")?;
     }
     if let Some(bytes) = probe_input.filter(|_| !in_birth) {
         session
@@ -33532,6 +33682,7 @@ fn create_tab_state<G: Glass>(
                     card_skip: 0,
                     prefill: None,
                     carried_environment: None,
+                    agent: crate::agent_resume::SeedAgent::None,
                 }),
                 seed.carried_environment.as_ref(),
             ),
@@ -43491,6 +43642,7 @@ mod multiwindow_session_tests {
                 manual_name: None,
                 card_skip: 0,
                 last_command: String::new(),
+                agent: None,
             })),
             pinned,
             focused_leaf: "leaf-0".to_owned(),
@@ -43598,6 +43750,7 @@ mod multiwindow_session_tests {
                 manual_name: None,
                 card_skip: 0,
                 last_command: command.to_owned(),
+                agent: None,
             })),
             pinned,
             focused_leaf: "leaf-0".to_owned(),
@@ -51998,7 +52151,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                     let place = runtime.window.observed_place;
                     let mut raised: Vec<AttentionDelivery> = Vec::new();
                     let switches = runtime.notification_switches();
-                    deliver_attention(
+                    let recorded = deliver_attention(
                         &mut runtime.window.tabs,
                         runtime.window.active_tab,
                         place,
@@ -52010,6 +52163,10 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                         attention_trace::global(),
                         &mut raised,
                     );
+                    // A pane's agent named a session it had not named: the layout says so.
+                    if recorded {
+                        runtime.mark_session_dirty(now);
+                    }
                     runtime.raise_attention(raised)
                 })
             }
@@ -58197,6 +58354,8 @@ fn main() -> Result<()> {
 //
 // **`main.rs` is still not the same thing as this crate's product text**: it holds fifty-four
 // smaller inline test modules besides. Every pin that reads it says which of the two it means.
+#[cfg(test)]
+mod app_agent_resume_tests;
 #[cfg(test)]
 mod app_attention_tests;
 #[cfg(test)]

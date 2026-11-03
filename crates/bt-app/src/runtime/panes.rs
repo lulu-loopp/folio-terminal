@@ -190,6 +190,9 @@ impl<B: Backend> Runtime<'_, B> {
         match land_successor(leaf, diagnostics::note)? {
             SuccessorLanding::Waiting => Ok(()),
             SuccessorLanding::Refused(refusal) => {
+                // A hand-back's shell that was refused leaves its pane to end as an exited pane
+                // ends (row 195).
+                leaf.session.agent.end_hand_back();
                 exit_diagnostics::say_spawn_failure(
                     seat.0,
                     requested.as_deref(),

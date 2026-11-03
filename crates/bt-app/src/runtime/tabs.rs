@@ -3588,6 +3588,9 @@ impl<B: Backend> Runtime<'_, B> {
         let mut exits = Vec::new();
         let mut active_exited_panes = Vec::new();
         let mut exited = Vec::new();
+        // **Panes whose agent's end hands their shell back** (row 195), and whether a record ended.
+        let mut hand_backs = Vec::new();
+        let mut records_ended = false;
         for (index, tab) in self.window.tabs.iter_mut().enumerate() {
             // A tab has ended when every shell it holds has ended. A tab in
             // probe mode holds no PTY at all and never ends this way.
@@ -3595,6 +3598,9 @@ impl<B: Backend> Runtime<'_, B> {
             let mut any_pty = false;
             let tab_id = tab.id;
             for (seat, leaf) in tab.leaves_mut() {
+                // **A typed agent's record ends with its command** (row 195): the shell marked the
+                // next prompt.
+                records_ended |= leaf.agent.settle_command(leaf.session.command_marks());
                 // A shell still being born is a shell this tab is about to have: the tab has not
                 // ended while one of its panes is in birth.
                 if leaf.life.holds_its_tab() {
@@ -3607,7 +3613,26 @@ impl<B: Backend> Runtime<'_, B> {
                 any_pty = true;
                 match pty.try_wait()? {
                     None => any_live = true,
+                    // **A shell is on its way into this pane's place** (row 195): it holds its tab.
+                    Some(_) if leaf.agent.handing_back() => any_live = true,
                     Some(status) => {
+                        // **The pane's own child ended by itself** (row 195): its record ends, and
+                        // a resumed agent's end hands back the shell the pane was — before any
+                        // birth-death reading, because a resume that is refused prints its reason
+                        // and exits at once, which is that resume's failure and no shell's death.
+                        match leaf.agent.child_ended() {
+                            crate::agent_resume::Ended::Unchanged => {}
+                            crate::agent_resume::Ended::Cleared => records_ended = true,
+                            crate::agent_resume::Ended::HandBack {
+                                profile,
+                                cwd,
+                                failed,
+                            } => {
+                                hand_backs.push((index, *seat, profile, cwd, failed));
+                                any_live = true;
+                                continue;
+                            }
+                        }
                         let elapsed = seen.unwrap_or_else(|| pty.age_at(now));
                         let code = status.signal().is_none().then(|| status.exit_code());
                         let program = leaf.launch.program.clone();
@@ -3715,6 +3740,12 @@ impl<B: Backend> Runtime<'_, B> {
         // Only the ones whose close is nothing to ask: a tab that still holds an
         // unsaved preview waits for the reader, and the question is never put
         // from here (ticket 58).
+        if records_ended {
+            self.mark_session_dirty(now);
+        }
+        for (index, seat, profile, cwd, failed) in hand_backs {
+            self.hand_back_shell(index, seat, profile, cwd, failed)?;
+        }
         let ended = exited.clone();
         let exited = exited_tabs_the_loop_may_close(
             &self.window.dirty_gate,
@@ -5243,6 +5274,7 @@ pub(crate) fn new_tab_leaf_seed(
         card_skip: 0,
         prefill: None,
         carried_environment: None,
+        agent: crate::agent_resume::SeedAgent::None,
     }
 }
 
