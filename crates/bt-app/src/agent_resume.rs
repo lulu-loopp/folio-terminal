@@ -504,7 +504,7 @@ pub(crate) fn revived(
     record: Option<&AgentRecordV1>,
     restore: Restore,
 ) -> (String, Option<PathBuf>, SeedAgent) {
-    let Some((record, vendor)) = record
+    let Some((record, vendor)): Option<(&AgentRecordV1, &'static Vendor)> = record
         .filter(|_| restore.resumes())
         .filter(|record| record.is_well_formed())
         .and_then(|record| vendor(&record.vendor).map(|vendor| (record, vendor)))

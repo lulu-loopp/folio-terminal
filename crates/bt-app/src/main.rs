@@ -29193,7 +29193,7 @@ fn revive_plan_with(
         .terminals()
         .into_iter()
         .zip(saved)
-        .map(|(seat, leaf)| {
+        .map(|(seat, leaf): (SeatId, &TermLeafV1)| {
             // **The saved id, kept as an id** — and swapped for the fallback's here
             // and only here, which is where the reader is owed the sentence about it
             // ([`revived_profile`]). Below this line the seed names a profile that
