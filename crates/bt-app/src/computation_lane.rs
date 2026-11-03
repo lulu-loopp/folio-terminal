@@ -917,7 +917,8 @@ enum Making {
     Beside(std::thread::JoinHandle<Result<MathEngine, String>>),
     /// To be made on the worker by the first formula: the thread door refused `bt-math-fonts`.
     Here(EngineFactory),
-    Made(MathEngine),
+    /// Boxed: the engine is some 400 bytes, and the other states a pointer or two.
+    Made(Box<MathEngine>),
     /// The factory panicked; every formula is refused.
     Refused,
 }
@@ -996,7 +997,7 @@ impl FormulaEngine {
             settled @ (Making::Made(_) | Making::Refused) => settled,
         };
         match &self.making {
-            Making::Made(engine) => Ok(engine),
+            Making::Made(engine) => Ok(engine.as_ref()),
             Making::Beside(_) | Making::Here(_) | Making::Refused => Err(MathRenderError::Aborted),
         }
     }
@@ -1012,7 +1013,7 @@ fn scanned(make: impl FnOnce() -> MathEngine) -> Result<MathEngine, String> {
 /// What a scan's end leaves a [`FormulaEngine`] with; a panic is said here, once.
 fn settled(scan: Result<MathEngine, String>) -> Making {
     match scan {
-        Ok(engine) => Making::Made(engine),
+        Ok(engine) => Making::Made(Box::new(engine)),
         Err(cause) => {
             crate::diagnostics::note(&format!(
                 "computation lane: the formula engine's font scan failed ({cause}); every formula \
