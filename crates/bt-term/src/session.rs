@@ -26175,7 +26175,7 @@ mod tests {
     ///
     /// MUTATION: drop the cap clause from the `HeldElsewhere` arm's guard — the re-ask is pushed
     /// at the cap, the oldest waiting read is dropped and its occurrence filed failed; the
-    /// "printed later" assertion goes red.
+    /// "every read printed later stays queued" assertion goes red.
     #[test]
     fn a_held_pictures_re_ask_never_evicts_a_read_printed_after_it() {
         let (directory, path) = temporary_path_image();
