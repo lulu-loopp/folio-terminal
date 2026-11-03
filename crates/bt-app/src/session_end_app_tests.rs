@@ -238,9 +238,13 @@ fn the_questions_turn(
 /// wake taken, and the question's probe line said into `done`.
 fn the_system_asks_and_the_wake_is_posted(done: &std::cell::RefCell<Vec<AtTheEnd>>) {
     assert_eq!(the_system_asks(), Some(1), "the question is answered TRUE");
-    session_end::posted_with(SessionEnd::Asked, true, &mut |line| {
-        done.borrow_mut().push(AtTheEnd::Said(line.to_owned()));
-    });
+    session_end::posted_with(
+        bt_platform::session_end::SessionEnd::Asked,
+        true,
+        &mut |line| {
+            done.borrow_mut().push(AtTheEnd::Said(line.to_owned()));
+        },
+    );
 }
 
 /// A probe as the end might read it, so that its line is known.
@@ -539,13 +543,17 @@ fn the_probe_counts_folios_callbacks_and_follows_the_questions_wake() {
     let mut said = Vec::new();
     let _callback = session_end::in_a_callback("user_event");
     assert_eq!(the_system_asks(), Some(1));
-    session_end::posted_with(SessionEnd::Asked, true, &mut |line| {
-        said.push(line.to_owned())
-    });
+    session_end::posted_with(
+        bt_platform::session_end::SessionEnd::Asked,
+        true,
+        &mut |line| said.push(line.to_owned()),
+    );
     // The same question, sent to the next window.
-    session_end::posted_with(SessionEnd::Asked, true, &mut |line| {
-        said.push(line.to_owned())
-    });
+    session_end::posted_with(
+        bt_platform::session_end::SessionEnd::Asked,
+        true,
+        &mut |line| said.push(line.to_owned()),
+    );
     assert_eq!(said.len(), 1, "one probe line for the span: {said:?}");
     assert!(
         said[0].starts_with(
@@ -564,9 +572,11 @@ fn the_probe_counts_folios_callbacks_and_follows_the_questions_wake() {
     let _refused = EndSessionHome::new("probe-refused");
     said.clear();
     assert_eq!(the_system_asks(), Some(1));
-    session_end::posted_with(SessionEnd::Asked, false, &mut |line| {
-        said.push(line.to_owned())
-    });
+    session_end::posted_with(
+        bt_platform::session_end::SessionEnd::Asked,
+        false,
+        &mut |line| said.push(line.to_owned()),
+    );
     assert_eq!(session_end::Probe::now().wake, session_end::Wake::Refused);
     assert_eq!(said.len(), 1);
     assert_eq!(
