@@ -11,6 +11,9 @@ const MAX_CONTROLLED_FAILURE_CHARS: usize = 240;
 pub(crate) enum ShellExitDisposition {
     BirthDeathFellBack(&'static str),
     BirthDeathPaneKept,
+    /// The system ended the shell with the session (`SYSTEM_ENDED_EXIT_CODE`, plan row 191): the
+    /// pane is kept with its face and nothing is retired.
+    SystemEndedPaneKept,
     PaneRetired,
     TabKept,
     TabRetired,
@@ -26,6 +29,7 @@ impl ShellExitDisposition {
                 )
             }
             Self::BirthDeathPaneKept => "birth death: pane kept".to_owned(),
+            Self::SystemEndedPaneKept => "ended by the system: pane kept".to_owned(),
             Self::PaneRetired => "retired pane".to_owned(),
             Self::TabKept => "tab kept".to_owned(),
             Self::TabRetired => "tab retired".to_owned(),
