@@ -144,6 +144,67 @@ pub struct TermLeafV1 {
     /// pane without one writes exactly the bytes it used to.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub last_command: String,
+    /// **The agent this pane was running, as the vendor's own resume command needs it** — session
+    /// schema v16 (0.4.9 plan row 195; its `docs/DESIGN.md` entry of 2026-11-02).
+    ///
+    /// Written only when an agent's own hook named its session from inside this pane, and cleared
+    /// when that agent ends by itself; what the restore does with it is the application's (a
+    /// resume through the vendor's command, never a line typed into a shell). No secret is in it:
+    /// a session id is a filing key that opens nothing without the account's own sign-in, which
+    /// stays in the vendor's folder.
+    ///
+    /// Additive and absent when there is none, so every document written before v16 still reads
+    /// and every pane without an agent writes exactly the bytes it used to. A record whose id is
+    /// not UUID-shaped is dropped on the way in ([`LayoutNodeV1::degrade_in_place`]) and the pane
+    /// is kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentRecordV1>,
+}
+
+/// `agent { "vendor": ..., "resume_id": ..., "cwd": ..., "home"?: ... }` — see
+/// [`TermLeafV1::agent`].
+///
+/// The four fields are the vendor's resume command's own inputs and nothing else: which vendor
+/// (the attention family name its hook spoke as), the id that vendor resumes by, the folder the
+/// vendor files the session under, and — only when the hook's environment set one — the vendor's
+/// configuration folder, because a session kept under a second account's folder is not found
+/// under the first. No permission mode, no command line and no grant of any kind is recorded: a
+/// resume starts with the vendor's own defaults.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentRecordV1 {
+    pub vendor: String,
+    pub resume_id: String,
+    pub cwd: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub home: Option<String>,
+}
+
+impl AgentRecordV1 {
+    /// Whether this record is one a build could have written: a UUID-shaped id
+    /// ([`resume_id_is_well_formed`]), a vendor name and a folder.
+    #[must_use]
+    pub fn is_well_formed(&self) -> bool {
+        resume_id_is_well_formed(&self.resume_id)
+            && !self.vendor.is_empty()
+            && !self.cwd.is_empty()
+            && self.home.as_ref().is_none_or(|home| !home.is_empty())
+    }
+}
+
+/// **Whether `id` is shaped like the UUID both resuming vendors file sessions under** —
+/// `8-4-4-4-12` hexadecimal digits, either case.
+///
+/// The one check the record's id passes at every boundary: the hook's process before it sends,
+/// the window's endpoint when it reads the line, and this crate when it reads the file. Claude
+/// Code's `--session-id` says "must be a valid UUID", and `codex resume` takes a "Session id
+/// (UUID)"; an id of any other shape is not one either of them could have handed us.
+#[must_use]
+pub fn resume_id_is_well_formed(id: &str) -> bool {
+    let groups: Vec<&str> = id.split('-').collect();
+    groups.len() == 5
+        && groups.iter().zip([8, 4, 4, 4, 12]).all(|(group, width)| {
+            group.len() == width && group.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
 }
 
 /// `preview { "kind": "preview", "pinned": bool }` — see [`LeafNodeV1::Preview`]
@@ -248,6 +309,16 @@ impl LayoutNodeV1 {
                     leaf.last_command.clear();
                     report.dropped_commands += 1;
                 }
+                // **Dropped and the pane kept** (row 195): a record no build could have written
+                // names no session the vendor could resume, and the pane comes back as its profile.
+                if leaf
+                    .agent
+                    .as_ref()
+                    .is_some_and(|agent| !agent.is_well_formed())
+                {
+                    leaf.agent = None;
+                    report.dropped_agents += 1;
+                }
             }
             LayoutNodeV1::Leaf(_) => {}
         }
@@ -338,6 +409,7 @@ mod tests {
             manual_name: None,
             card_skip: 0,
             last_command: String::new(),
+            agent: None,
         })
     }
 

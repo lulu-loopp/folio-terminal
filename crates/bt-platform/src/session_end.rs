@@ -246,6 +246,31 @@ pub fn ask_to_be_ended_first(level: u32) -> Result<(), String> {
     }
 }
 
+/// **Whether the system says this session is ending, at the instant of asking**
+/// (T-AGENT-OWN-EXIT-AT-SHUTDOWN, plan row 199): `GetSystemMetrics(SM_SHUTTINGDOWN)`, which is
+/// nonzero while the session's sign-out is under way — the one every shutdown and restart begins
+/// with, despite its name. A probe and not yet a rule: `bt-app` writes it on each shell's exit
+/// line, so that a reboot's `diagnostics.log` shows whether it is already set when the system's
+/// end reaches a pane before the question reaches the window. When it is first set, and whether
+/// a cancelled shutdown clears it, are not documented; that is what the probe is for.
+///
+/// A read of the session's state: no message is sent and nothing is waited on. `None` off
+/// Windows, where the system's end is AppKit's quit and no shell is ended before it.
+#[must_use]
+pub fn shutting_down() -> Option<bool> {
+    #[cfg(windows)]
+    {
+        use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_SHUTTINGDOWN};
+        // SAFETY: a read-only query over a system index; no preconditions.
+        let metric = unsafe { GetSystemMetrics(SM_SHUTTINGDOWN) };
+        Some(metric != 0)
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
 /// **Take the registration back** — `UnregisterApplicationRestart`: this process is handing
 /// itself over (an update's applier), and the system's restart is no longer its to ask for.
 ///
@@ -602,8 +627,22 @@ mod tests {
     use super::{
         ENDSESSION_CLOSEAPP, ENDSESSION_CRITICAL, ENDSESSION_LOGOFF, RESTART_FLAGS,
         RESTART_NO_CRASH, RESTART_NO_HANG, RESTART_NO_PATCH, RESTART_NO_REBOOT, SHUTDOWN_LEVEL,
-        SessionEnd, WM_ENDSESSION, WM_QUERYENDSESSION, answer, arrival_line, heard,
+        SessionEnd, WM_ENDSESSION, WM_QUERYENDSESSION, answer, arrival_line, heard, shutting_down,
     };
+
+    /// RED (plan row 199) — **the session-end probe answers on Windows, and only there**: a
+    /// machine running its tests is not signing out, so the read is `Some(false)`; off Windows
+    /// there is no probe at all.
+    ///
+    /// MUTATION: answer `None` on Windows — the exit line would lose its field.
+    #[test]
+    fn the_session_end_probe_answers_on_windows_and_only_there() {
+        if cfg!(windows) {
+            assert_eq!(shutting_down(), Some(false), "a test run is not a sign-out");
+        } else {
+            assert_eq!(shutting_down(), None, "no probe off Windows");
+        }
+    }
 
     /// RED (plan row 191) — **every session-end message is said with its flags, and nothing else
     /// is**: the question, a shutdown taken back, the session really ending — which nothing else
