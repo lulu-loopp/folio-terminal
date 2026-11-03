@@ -1321,6 +1321,7 @@ crates/bt-app/src/palette_index.rs	bt-app crate::palette_index::IndexWorker::req
 crates/bt-app/src/pane_content.rs	bt-app crate::pane_content::DocumentView::fit_viewport_height	Ambiguous	fit_height	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/pane_folder.rs	bt-app crate::pane_folder::ProcessFolderMemo::read_at	Ambiguous	as_ref	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/pane_folder.rs	bt-app crate::pane_folder::ProcessFolderMemo::read_at	Ambiguous	clone	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
+crates/bt-app/src/pdf.rs	bt-app crate::pdf::capped_buffer	Ambiguous	ok	1	std	2026-11-03: Result::ok over the open handle's metadata answer or usize::try_from, moved with read_capped's length guard (T-HELD-FILE-IN-THE-PDF-LANE): no file, no wait
 crates/bt-app/src/pdf.rs	bt-app crate::pdf::raster_page	Ambiguous	collect	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/pdf.rs	bt-app crate::pdf::raster_page	Ambiguous	flat_map	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/pdf.rs	bt-app crate::pdf::raster_page	Ambiguous	get	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
@@ -1332,7 +1333,6 @@ crates/bt-app/src/pdf.rs	bt-app crate::pdf::raster_page	Ambiguous	render_dimensi
 crates/bt-app/src/pdf.rs	bt-app crate::pdf::raster_page	Ambiguous	take_unpremultiplied	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/pdf.rs	bt-app crate::pdf::raster_page	Ambiguous	to_u8_array	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/pdf.rs	bt-app crate::pdf::raster_page	Dynamic	edge	2	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/pdf.rs	bt-app crate::pdf::read_capped	Ambiguous	ok	2	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/pdf.rs	bt-app crate::pdf::read_capped	Ambiguous	read_to_end	1	violation	2026-10-24: (c) the gesture doors answer and draw inline: this site is on the synchronous answer road of Runtime::ask_for_a_paste, Runtime::close_pane, Runtime::hand_off, Runtime::reap_exited_tabs, Runtime::save_clipboard_picture, Runtime::submit_clipboard_write: a file, process or thread call
 crates/bt-app/src/pdf.rs	bt-app crate::pdf::read_capped	Path	take	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/peek_strip.rs	bt-app crate::peek_strip::PeekHost::retain	Dynamic	eligible	2	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
