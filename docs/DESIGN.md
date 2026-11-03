@@ -16341,10 +16341,10 @@ In the suite the same scan sat inside the first wait for a picture's terminal, w
 
 **What is built.**
 - The door is `run_decoration_worker_with(ctx, make_engine)`, and the product's `run_decoration_worker` passes `MathEngine::new`.
-- `made_beside` starts the factory on a thread of its own, `bt-math-fonts`, below normal, when the door is made. The door's engine is a `std::cell::LazyCell` whose first look joins that thread. Only the two formula arms look: `Math`, and a `PreviewMath` whose key is drawable. So no other answer waits for the scan, and a formula asked after it waits for nothing. `FnOnce` makes the engine at most once.
+- `FormulaEngine::beside` starts the factory on a thread of its own, `bt-math-fonts`, below normal, when the door is made. `FormulaEngine::engine` joins that thread at the first formula arm that needs the engine, on the worker: it takes the worker's context, so the join is a `worker-door-body` row of `window_waits.tsv`. Only the two formula arms ask: `Math`, and a `PreviewMath` whose key is drawable. So no other answer waits for the scan, and a formula asked after it waits for nothing. `FnOnce` makes the engine at most once.
 - A plain lazy build on the first formula was rejected, because it would have moved the whole scan onto that formula. With this shape, a formula asked at once waits no longer than it did before.
 - If the thread door refuses the thread, the factory stays with the door, and the first formula makes the engine on the worker.
-- A panic in the factory is the formula's: it reaches the arm's own catch through the join. Every later formula fails the same way, where before the worker would have died at its start.
+- A panic in the factory is a panic of the `bt-math-fonts` thread, outside every `contained_panic::contain`. Under the resident hook it ends the process, as a panic at the worker's start did when the worker made the engine itself. The join carries it on (`expect`), as the joined-panic guard asks.
 
 **Not done.**
 - The lane suite's patience stays as it was. It is a red-only cap on a signal from a real thread, which no counted clock can replace, and CONVENTIONS forbids raising it.
