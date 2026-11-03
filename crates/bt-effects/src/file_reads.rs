@@ -548,6 +548,31 @@ pub fn open(lane: Lane, path: &Path) -> io::Result<Reader<'_, File>> {
     File::open(path).map(|file| Reader::new(file, lane, Some(path)))
 }
 
+/// **Whether a file could not be opened or read because another program holds it at this
+/// moment** (T-DECODE-UNSTARTED-FILED-AS-A-DECODE-FAILURE) — an answer about the moment, not
+/// about the file: the same read may succeed once the holder lets go.
+///
+/// Windows only: a holder that denies read sharing refuses the open with
+/// `ERROR_SHARING_VIOLATION`, and a byte-range lock refuses the read with
+/// `ERROR_LOCK_VIOLATION` ([`held_elsewhere_code`]). An access the file's permissions deny
+/// (`ERROR_ACCESS_DENIED`, which a file pending delete also answers), a file that is not there,
+/// and every other error are not this: each would be answered the same way again. Another
+/// platform's locks are advisory, so an open there is never refused this way.
+pub fn held_elsewhere(error: &io::Error) -> bool {
+    error.raw_os_error().is_some_and(held_elsewhere_code)
+}
+
+/// [`held_elsewhere`] for a Win32 error number — the one place the two numbers are named, read
+/// by `bt_platform`'s video open for the error code Media Foundation hands back. Always `false`
+/// off Windows, where the same numbers are other errors (`EPIPE`, `EDOM`).
+pub const fn held_elsewhere_code(code: i32) -> bool {
+    /// `ERROR_SHARING_VIOLATION`: the file is open in a mode this open may not share.
+    const SHARING_VIOLATION: i32 = 32;
+    /// `ERROR_LOCK_VIOLATION`: a part of the file is locked by another handle.
+    const LOCK_VIOLATION: i32 = 33;
+    cfg!(windows) && matches!(code, SHARING_VIOLATION | LOCK_VIOLATION)
+}
+
 /// Keep std's whole-file read and its allocation strategy unchanged.
 pub fn read(lane: Lane, path: impl AsRef<Path>) -> io::Result<Vec<u8>> {
     let path = path.as_ref();

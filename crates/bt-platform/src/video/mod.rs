@@ -100,7 +100,7 @@
 //!
 //! # What it refuses, and the shape of every refusal
 //!
-//! [`first_frame`] answers one of two words, and they are two because a caller
+//! [`first_frame`] answers one of three words, and they are three because a caller
 //! must treat them differently (T-FIRST-FRAME-RUN-OUT-IS-NOT-A-REFUSAL).
 //! [`NoFrame::Refused`] is a fact about the file: a file that is not a video, a
 //! container Media Foundation has no source for (`.mkv` — Matroska is not among
@@ -110,8 +110,13 @@
 //! [`FIRST_FRAME_BUDGET`] — on a busy machine, a good recording can — and says
 //! nothing about the file. They used to be one `None`, and the one caller filed
 //! a good recording on a loaded machine as "no decoder for this container".
-//! The card and the pane draw the same thing for both: no picture, and the two
-//! lines that are still true; what differs is whether the window asks again.
+//! [`NoFrame::Held`] is a fact about the moment too: the file could not be
+//! opened because another program holds it in a mode the open may not share — a
+//! recording still being written, a copy in progress
+//! (T-DECODE-UNSTARTED-FILED-AS-A-DECODE-FAILURE). It used to be filed as "no
+//! decoder for this container" like every other open that failed.
+//! The card and the pane draw the same thing for all three: no picture, and the
+//! two lines that are still true; what differs is whether the window asks again.
 //!
 //! The clock-free halves ([`decode_first_frame`], [`decode_first_frame_measured`])
 //! cannot run out, and keep `None`.
@@ -138,6 +143,7 @@ use std::time::{Duration, Instant};
 
 use crate::admission::{WaitToken, doors};
 use crate::engine_ledger;
+use windows::Win32::Foundation::WIN32_ERROR;
 use windows::Win32::Media::MediaFoundation::{
     IMF2DBuffer, IMFAttributes, IMFByteStream, IMFMediaBuffer, IMFSourceReader, MF_ACCESSMODE_READ,
     MF_BYTESTREAM_ORIGIN_NAME, MF_FILEFLAGS_NONE, MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_SIZE,
@@ -306,7 +312,9 @@ pub fn first_frame(path: &Path, fit_width: u32, fit_height: u32) -> Result<Video
 ///
 /// A platform that will not start, an apartment that cannot be joined and a
 /// file that will not open are refusals: each is answered at once and would be
-/// answered the same way again.
+/// answered the same way again — except a file another program holds, which is
+/// [`NoFrame::Held`] ([`TheFile::open`]): answered at once, and asked again
+/// when the holder may have let go.
 fn first_frame_through(
     url: &HSTRING,
     budget: Duration,
@@ -314,7 +322,10 @@ fn first_frame_through(
 ) -> Result<VideoFrame, NoFrame> {
     let mut cost = FirstFrameCost::default();
     in_the_process_apartment(&mut cost, |_| {
-        let file = TheFile::open(url)?;
+        let file = match TheFile::open(url) {
+            Ok(file) => file,
+            Err(unopened) => return Some(Err(unopened)),
+        };
         let lent = file.lend();
         let frame = within_budget(budget, move || decode(lent));
         // **Closed before the answer leaves**: whatever the decode thread still
@@ -347,21 +358,34 @@ struct TheFile {
 }
 
 impl TheFile {
-    /// The file at `url`, open for reading, or `None` for a file the platform will
-    /// not open (missing, refused) — the module's one silence.
-    fn open(url: &HSTRING) -> Option<Self> {
+    /// The file at `url`, open for reading — or why not: [`NoFrame::Held`] for a
+    /// file another program holds in a mode this open may not share (the error
+    /// code read by [`crate::file_reads::held_elsewhere_code`], the picture
+    /// decoder's own reading), and [`NoFrame::Refused`] for every other file the
+    /// platform will not open (missing, denied).
+    fn open(url: &HSTRING) -> Result<Self, NoFrame> {
         // SAFETY: a platform entry given a string this function holds for the
         // call, on a thread inside the process apartment (the caller's rule); the
         // stream it hands back is owned here and closed by `Drop`.
-        let stream = crate::file_reads::opaque(crate::file_reads::Lane::Peek, || unsafe {
+        let opened = crate::file_reads::opaque(crate::file_reads::Lane::Peek, || unsafe {
             MFCreateFile(
                 MF_ACCESSMODE_READ,
                 MF_OPENMODE_FAIL_IF_NOT_EXIST,
                 MF_FILEFLAGS_NONE,
                 url,
             )
-        })
-        .ok()?;
+        });
+        let stream = match opened {
+            Ok(stream) => stream,
+            Err(error) => {
+                return Err(match WIN32_ERROR::from_error(&error) {
+                    Some(code) if crate::file_reads::held_elsewhere_code(code.0 as i32) => {
+                        NoFrame::Held
+                    }
+                    _ => NoFrame::Refused,
+                });
+            }
+        };
         // The source resolver chooses a container's handler by the file's name,
         // which a URL used to carry and a byte stream carries as this attribute.
         if let Ok(attributes) = stream.cast::<IMFAttributes>() {
@@ -370,7 +394,7 @@ impl TheFile {
                 let _ = attributes.SetString(&MF_BYTESTREAM_ORIGIN_NAME, url);
             }
         }
-        Some(Self { stream })
+        Ok(Self { stream })
     }
 
     /// A reference to the stream, for the thread that decodes it.
@@ -493,7 +517,7 @@ fn decode_from_url(
     let mut cost = FirstFrameCost::default();
     let frame = in_the_process_apartment(&mut cost, |cost| {
         let opening = Instant::now();
-        let file = TheFile::open(url)?;
+        let file = TheFile::open(url).ok()?;
         let opened = opening.elapsed();
         let frame = read_first_frame(&file.stream, fit_width, fit_height, cost);
         cost.open += opened;
@@ -1954,6 +1978,56 @@ mod tests {
         assert!(
             free,
             "and the file is let go before the silence is answered, though the decode still runs"
+        );
+    }
+
+    /// RED (T-DECODE-UNSTARTED-FILED-AS-A-DECODE-FAILURE; review F7 of row 164) — **a video
+    /// another program is writing is held, not refused**: the open shares no writer, so a
+    /// recording still being written meets a sharing violation, which is an answer about the
+    /// moment ([`NoFrame::Held`]). Once the writer lets go the same file opens; a file that is
+    /// not there stays a refusal.
+    ///
+    /// The writer is this test's own handle, open for writing and sharing reads, as a recorder's
+    /// is. No decode runs on either arm (the open is refused before it, and the let-go arm only
+    /// opens), so nothing here waits on the machine.
+    ///
+    /// MUTATION: have `TheFile::open` answer `Refused` for every error — the held open reads as
+    /// a refusal of the file again; the first assertion goes red.
+    #[test]
+    fn a_video_another_program_is_writing_is_held_and_opens_once_let_go() {
+        use std::os::windows::fs::OpenOptionsExt;
+        /// `FILE_SHARE_READ`: the writer lets readers in, and refuses an open that will not
+        /// share writing with it.
+        const SHARE_READ: u32 = 0x1;
+        let dir = bt_testpath::temp_path("folio-video-held");
+        let copy = a_copy_of_the_fixture(&dir, "录屏 recording.mp4");
+        let url = HSTRING::from(copy.as_os_str());
+        let writer = std::fs::OpenOptions::new()
+            .write(true)
+            .share_mode(SHARE_READ)
+            .open(&copy)
+            .unwrap();
+        let held = first_frame_through(&url, Duration::from_secs(3600), |_| {
+            unreachable!("a file that would not open is never decoded")
+        });
+        drop(writer);
+        let mut cost = FirstFrameCost::default();
+        let opens = in_the_process_apartment(&mut cost, |_| Some(TheFile::open(&url).is_ok()));
+        let missing = HSTRING::from(dir.join("不在 missing.mp4").as_os_str());
+        let gone = first_frame_through(&missing, Duration::from_secs(3600), |_| {
+            unreachable!("a file that is not there is never decoded")
+        });
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            held,
+            Err(NoFrame::Held),
+            "a recording another program is writing is held"
+        );
+        assert_eq!(opens, Some(true), "and opens once the writer lets go");
+        assert_eq!(
+            gone,
+            Err(NoFrame::Refused),
+            "a file that is not there is refused"
         );
     }
 

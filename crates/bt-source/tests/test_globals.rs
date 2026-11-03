@@ -143,6 +143,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use bt_source::call_graph::{Arms, CallGraph, ItemId, Node, Resolver, Target, Unresolved};
 use bt_source::{
@@ -178,21 +179,8 @@ fn workspace_root() -> PathBuf {
 }
 
 /// The whole of a first-party package; `bt-source`'s `tests/fixtures/` are declared out.
-fn universe_for(package: &Package) -> Universe {
-    if package.name() == "bt-source" {
-        let scopes = vec![
-            DiskScope::under(package.directory().join("src")),
-            DiskScope::under(package.directory().join("tests")).excluding(&["fixtures"]),
-        ];
-        return Universe::declare(
-            "the whole of bt-source, fixtures aside",
-            package.targets().to_vec(),
-            scopes,
-            Vendor::Excluded,
-        )
-        .expect("this crate is where it says it is");
-    }
-    universes::whole_package(package, Vendor::Excluded).expect("a package of this workspace")
+pub(crate) fn universe_for(package: &Package) -> Universe {
+    universes::first_party_whole(package, Vendor::Excluded).expect("a package of this workspace")
 }
 
 /// Every span of `search`, sorted.
@@ -519,7 +507,7 @@ fn absolute(module: &str, segments: &[String]) -> String {
 }
 
 impl Globals {
-    fn read(indices: &[(String, Index)], root: &Path) -> Self {
+    fn read(indices: &[(String, Arc<Index>)], root: &Path) -> Self {
         let mut globals = Self {
             packages: indices.iter().map(|(name, _)| name.clone()).collect(),
             ..Self::default()
@@ -1492,7 +1480,7 @@ fn inside(runs: &[(usize, usize)], span: Span) -> bool {
 /// macros whose tokens do not parse as items, and the refusals of items in them that are not
 /// functions and name a global.
 fn item_macros(
-    indices: &[(String, Index)],
+    indices: &[(String, Arc<Index>)],
     globals: &Globals,
     root: &Path,
 ) -> (Vec<MacroBody>, Vec<UnreadMacro>, Vec<String>) {
@@ -1802,10 +1790,10 @@ fn names_test(predicate: &str) -> bool {
 }
 
 /// Scan `indices`: every global each test reaches, by binary.
-fn scan(indices: &[(String, Index)], without_harness: &BTreeSet<String>, root: &Path) -> Scan {
+fn scan(indices: &[(String, Arc<Index>)], without_harness: &BTreeSet<String>, root: &Path) -> Scan {
     let packages: Vec<(&str, &Index)> = indices
         .iter()
-        .map(|(name, index)| (name.as_str(), index))
+        .map(|(name, index)| (name.as_str(), &**index))
         .collect();
     let resolver = Resolver::new(&packages, Arms::filtered(|_| true))
         .unwrap_or_else(|refused| panic!("{refused:?}"));
@@ -2158,8 +2146,13 @@ fn judge(
 
 // ── the workspace ─────────────────────────────────────────────────────────────
 
-/// Every first-party package's index, and the targets that run without the harness.
-fn workspace() -> (Vec<(String, Index)>, BTreeSet<String>) {
+/// Each package's name and its index, as every reading here takes them.
+type Indices = Vec<(String, Arc<Index>)>;
+
+/// Every first-party package's index — the one this process holds for each package's
+/// [`universes::first_party_whole`], shared with every other guard that asks for it — and the
+/// targets that run without the harness.
+pub(crate) fn workspace() -> (Indices, BTreeSet<String>) {
     let workspace = Workspace::read(&workspace_root()).expect("this workspace");
     let mut without_harness = BTreeSet::new();
     let indices = workspace
@@ -2174,7 +2167,7 @@ fn workspace() -> (Vec<(String, Index)>, BTreeSet<String>) {
                     .filter(|target| package.runs_without_harness(&target.id))
                     .map(|target| target.id.to_string()),
             );
-            let index = Index::build(&universe_for(package))
+            let index = Index::shared(&universe_for(package))
                 .unwrap_or_else(|rejections| panic!("{}", report(&rejections)));
             (package.name().to_owned(), index)
         })
@@ -2288,7 +2281,7 @@ fn a_row_needs_a_dated_reason_and_a_known_class() {
 
 /// The `test_globals` fixture: the library `globals`, and its test target `main_probe`, which
 /// runs without the harness.
-fn fixture() -> (Vec<(String, Index)>, BTreeSet<String>, PathBuf) {
+fn fixture() -> (Indices, BTreeSet<String>, PathBuf) {
     let directory = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
         .join("fixtures")
@@ -2322,7 +2315,7 @@ fn fixture() -> (Vec<(String, Index)>, BTreeSet<String>, PathBuf) {
     let index =
         Index::build(&universe).unwrap_or_else(|rejections| panic!("{}", report(&rejections)));
     (
-        vec![("globals".to_owned(), index)],
+        vec![("globals".to_owned(), Arc::new(index))],
         without_harness,
         directory,
     )
@@ -2539,17 +2532,16 @@ fn the_grammar_refuses_each_shape_and_accepts_its_twin() {
 /// functions' writes of process-globals that two tests of one binary reach through resolved
 /// edges, product code included, and the unresolved edges met on the way. A measure, printed as
 /// `TEST_GLOBALS_PRODUCT_REACH` (CI's step "the tests' product reach of process-globals,
-/// measured" runs it with `--nocapture`), for a ticket that would gate product reach; never a
-/// gate, and never compared. It reads the workspace on its own: run beside the gate in one test
-/// binary, the second index costs no wall time (2026-10-24, this machine: 22.6 s for the binary,
-/// 24.0 s for the gate alone, 18.9 s for this alone).
+/// measured, and the line printed" runs it with `--nocapture`), for a ticket that would gate product reach; never a
+/// gate, and never compared. It asks for the same indices as the gate, and the process holds one
+/// of each (`Index::shared`, plan row 166), so beside the gate it costs its own reading only.
 #[test]
 fn the_product_reach_of_the_tests_is_measured() {
     let (indices, without_harness) = workspace();
     let root = normalized(&workspace_root());
     let packages: Vec<(&str, &Index)> = indices
         .iter()
-        .map(|(name, index)| (name.as_str(), index))
+        .map(|(name, index)| (name.as_str(), &**index))
         .collect();
     let resolver = Resolver::new(&packages, Arms::filtered(|_| true))
         .unwrap_or_else(|refused| panic!("{refused:?}"));

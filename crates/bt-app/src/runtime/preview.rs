@@ -9264,7 +9264,7 @@ impl<B: Backend> Runtime<'_, B> {
                     return answer;
                 }
                 // The one door files what it asked: the read under its identity, or —
-                // its thread not started — a failed decode, asked again by new input.
+                // its thread not started — a read not answered, asked again by new input.
                 match self.request_peek_pixels(path) {
                     // The lane was full: nothing is out, and the page's next resolve asks again.
                     PeekAsk::NotNow => return answer,
@@ -11163,10 +11163,16 @@ impl<B: Backend> Runtime<'_, B> {
                     self.hide_preview_picture(surface);
                     return None;
                 }
-                // A first frame that ran out and was asked again: the pane is drawn as a video's
-                // refusal is — its fact lines, no sentence — until a new look asks
-                // (T-FIRST-FRAME-RUN-OUT-IS-NOT-A-REFUSAL).
-                SurfacePixels::Unanswered => {
+                // A read that was not answered and was asked again: a video's pane is drawn as a
+                // video's refusal is — its fact lines, no sentence — and a picture's says why
+                // there is no picture, until a new look asks (T-FIRST-FRAME-RUN-OUT-IS-NOT-A-REFUSAL;
+                // T-DECODE-UNSTARTED-FILED-AS-A-DECODE-FAILURE).
+                SurfacePixels::Unanswered(said) => {
+                    let refusal = unanswered_picture_refusal(&path, Option::as_ref(&said));
+                    if let Some(refusal) = refusal {
+                        self.preview_pane_mut(surface)
+                            .refuse_picture_unless_said(refusal);
+                    }
                     self.hide_preview_picture(surface);
                     return None;
                 }
@@ -11188,12 +11194,12 @@ impl<B: Backend> Runtime<'_, B> {
                     match self.request_peek_pixels(&path) {
                         // Out, or nothing is out and the pane's next resolve asks again.
                         PeekAsk::Asked(_) | PeekAsk::NotNow => {}
+                        // Filed as unanswered and asked again: said here as the record says it
+                        // to every later pane ([`unanswered_picture_refusal`]).
                         PeekAsk::Unstarted => {
-                            self.preview_pane_mut(surface).refuse_picture(Some(
-                                PictureRefusal::this_window_cannot(
-                                    i18n::Text::PreviewFailedImageWorker.text(),
-                                ),
-                            ));
+                            if let Some(refusal) = unanswered_picture_refusal(&path, None) {
+                                self.preview_pane_mut(surface).refuse_picture(Some(refusal));
+                            }
                         }
                         PeekAsk::Refused => {
                             self.preview_pane_mut(surface).refuse_picture(Some(
@@ -13963,7 +13969,12 @@ impl<B: Backend> Runtime<'_, B> {
             facts,
             mtime,
         } = glance;
-        let ran_out = matches!(frame, Err(bt_platform::video::NoFrame::RanOut));
+        // Why no frame came, for the facts' rule, which reads it as the record's filing does
+        // ([`frame_not_answered`]).
+        let no_frame = match &frame {
+            Ok(_) => None,
+            Err(no_frame) => Some(*no_frame),
+        };
         if !file_peek_video_answer(
             &mut self.window.peek_cache,
             &named,
@@ -13976,7 +13987,7 @@ impl<B: Backend> Runtime<'_, B> {
         }
         // Filed with any awaited answer: these outlive the pixels and are the whole of the
         // degraded card — see [`WindowRuntime::video_facts`].
-        let filed = video_facts_to_file(self.window.video_facts.get(&cache_key), facts, ran_out);
+        let filed = video_facts_to_file(self.window.video_facts.get(&cache_key), facts, no_frame);
         self.window.video_facts.insert(cache_key.clone(), filed);
         // Every surface standing on this file, for `complete_peek_image`'s reason: a decode is
         // addressed by path and the answer is the same pixels for a pane, for a window torn off
@@ -15906,6 +15917,11 @@ pub(crate) fn peek_awaits(
 /// [`super::peek::let_go_unnamed_peek_records`] exists to end. Pixels are filed either way: they
 /// are weight, which the budget governs. `true` when the answer was the awaited one — the one case
 /// in which the surfaces standing on the file are told.
+///
+/// **A file another program held is not a failure** (T-DECODE-UNSTARTED-FILED-AS-A-DECODE-FAILURE):
+/// a decode's `HeldElsewhere` is filed as the [`PeekCacheEntry::Unanswered`] it is
+/// ([`unanswered_record`]), with the operating system's words kept for the pane; every other
+/// failure is the decode's `Failed`.
 pub(crate) fn file_peek_answer(
     peek_cache: &mut PeekCache,
     named: &BTreeSet<String>,
@@ -15913,13 +15929,36 @@ pub(crate) fn file_peek_answer(
     asked: computation_lane::ComputationId,
     answer: Result<PeekCacheEntry, bt_term::InlineImageDecodeError>,
 ) -> bool {
-    file_peek_record(
-        peek_cache,
-        named,
-        key,
-        asked,
-        answer.map_err(PeekCacheEntry::Failed),
-    )
+    let answer = answer.map_err(|failure| match failure {
+        held @ bt_term::InlineImageDecodeError::HeldElsewhere(_) => {
+            unanswered_record(peek_cache, &key, Some(held))
+        }
+        failure => PeekCacheEntry::Failed(failure),
+    });
+    file_peek_record(peek_cache, named, key, asked, answer)
+}
+
+/// **The record a read that was not answered is filed as** — [`PeekCacheEntry::Unanswered`],
+/// asked again when the read it answers was already the one more ask (its `Pending`'s
+/// `once_more`, set by the one door), so that a second unanswered read waits for a new look
+/// (T-FIRST-FRAME-RUN-OUT-IS-NOT-A-REFUSAL). One rule for every way in — a first frame that ran
+/// out, a video or a picture another program held (T-DECODE-UNSTARTED-FILED-AS-A-DECODE-FAILURE)
+/// — so the bound is the same bound on every road. `said` is what a picture pane says about it.
+fn unanswered_record(
+    peek_cache: &PeekCache,
+    key: &str,
+    said: Option<bt_term::InlineImageDecodeError>,
+) -> PeekCacheEntry {
+    PeekCacheEntry::Unanswered {
+        asked_again: matches!(
+            peek_cache.peek(key),
+            Some(PeekCacheEntry::Pending {
+                once_more: true,
+                ..
+            })
+        ),
+        said,
+    }
 }
 
 /// [`file_peek_answer`] with the record a no-picture answer is filed as named (`Err`): a decode's
@@ -15961,10 +16000,11 @@ fn file_peek_record(
 ///   them is this; `Decode` is the seam that carries a reason nobody here can translate, which is
 ///   what the pane has always printed for a video that would not decode — and it prints nothing
 ///   at all for one ([`Runtime::complete_peek_video_frame`]);
-/// * **a run-out** — the frame not answered inside the budget — is an `Unanswered`, which says
-///   nothing about the file. It is asked again once with no new input: `asked_again` is whether
-///   the read this answers was already that one more ask ([`PeekCacheEntry::Pending`]'s
-///   `once_more`), so a second run-out waits for a new look.
+/// * **a run-out** — the frame not answered inside the budget — or **a file another program is
+///   writing** (`NoFrame::Held`; T-DECODE-UNSTARTED-FILED-AS-A-DECODE-FAILURE) is an
+///   `Unanswered`, which says nothing about the file. It is asked again once with no new input:
+///   `asked_again` is whether the read this answers was already that one more ask
+///   ([`unanswered_record`]), so a second one waits for a new look.
 ///
 /// Only the cache record is filed here; the facts the same read found are the door's to file
 /// ([`Runtime::complete_peek_video_frame`], by [`video_facts_to_file`]). `mtime` is the file's
@@ -15991,37 +16031,49 @@ pub(crate) fn file_peek_video_answer(
             // [`PreviewImageState::stated_size`].
             native_size: None,
         }),
-        Err(bt_platform::video::NoFrame::Refused) => Err(PeekCacheEntry::Failed(
+        // A run-out and a file another program is writing say nothing about the file
+        // ([`frame_not_answered`]), and a video's pane says nothing about either, as it says
+        // nothing for a refusal.
+        Err(no_frame) if frame_not_answered(no_frame) => {
+            Err(unanswered_record(peek_cache, &key, None))
+        }
+        Err(_refused) => Err(PeekCacheEntry::Failed(
             bt_term::InlineImageDecodeError::Decode("no decoder for this container".to_owned()),
         )),
-        Err(bt_platform::video::NoFrame::RanOut) => Err(PeekCacheEntry::Unanswered {
-            asked_again: matches!(
-                peek_cache.peek(&key),
-                Some(PeekCacheEntry::Pending {
-                    once_more: true,
-                    ..
-                })
-            ),
-        }),
     };
     file_peek_record(peek_cache, named, key, asked, answer)
 }
 
 /// **The facts a video answer files** under its file's key ([`WindowRuntime::video_facts`], whose
 /// one writer is [`Runtime::complete_peek_video_frame`]): the answering read's, since they
-/// outlive the pixels and are the whole of the degraded card — except that a run-out's, which
-/// know only the file's size, never replace facts an earlier answer filed (`earlier`): an answer
-/// that did not come is not news that the recording's length and size are unknown
-/// (T-FIRST-FRAME-RUN-OUT-IS-NOT-A-REFUSAL).
+/// outlive the pixels and are the whole of the degraded card — except that an unanswered read's
+/// (`no_frame`, why no frame came, read by [`frame_not_answered`]: a run-out, or a file another
+/// program is writing), which know only the file's size, never replace facts an earlier answer
+/// filed (`earlier`): an answer that did not come is not news that the recording's length and
+/// size are unknown (T-FIRST-FRAME-RUN-OUT-IS-NOT-A-REFUSAL;
+/// T-DECODE-UNSTARTED-FILED-AS-A-DECODE-FAILURE). A frame's read (`None`) and a refusal's file
+/// what they found.
 pub(crate) fn video_facts_to_file(
     earlier: Option<&preview::VideoFacts>,
     answered: preview::VideoFacts,
-    ran_out: bool,
+    no_frame: Option<bt_platform::video::NoFrame>,
 ) -> preview::VideoFacts {
-    match earlier {
-        Some(earlier) if ran_out => *earlier,
+    match (earlier, no_frame) {
+        (Some(earlier), Some(no_frame)) if frame_not_answered(no_frame) => *earlier,
         _ => answered,
     }
+}
+
+/// **Whether a first frame that did not come was a read not answered** — the budget ran out, or
+/// another program is writing the file — rather than the file's refusal. One reading for the
+/// cache record ([`file_peek_video_answer`]: an `Unanswered`, asked again within row 164's bound)
+/// and for the facts ([`video_facts_to_file`]: an earlier answer's are kept) alike, so that the
+/// two cannot disagree about a held video (T-DECODE-UNSTARTED-FILED-AS-A-DECODE-FAILURE).
+pub(crate) fn frame_not_answered(no_frame: bt_platform::video::NoFrame) -> bool {
+    matches!(
+        no_frame,
+        bt_platform::video::NoFrame::RanOut | bt_platform::video::NoFrame::Held
+    )
 }
 
 /// **The request [`Runtime::open_unverified_reference`] puts on the OS hand-off lane** — the files
@@ -16703,7 +16755,12 @@ pub(crate) fn answer_one_picture(
             height_px,
             ..
         }) => Some((key.clone(), Some(Arc::clone(rgba)), [*width_px, *height_px])),
-        Some(PeekCacheEntry::Failed(_) | PeekCacheEntry::Unanswered { asked_again: true }) => {
+        Some(
+            PeekCacheEntry::Failed(_)
+            | PeekCacheEntry::Unanswered {
+                asked_again: true, ..
+            },
+        ) => {
             return PagePicture::drawn(MarkdownPicture::Failed);
         }
         // **A read is out, or the store has let the pixels go** — and the page's
@@ -16711,10 +16768,13 @@ pub(crate) fn answer_one_picture(
         // keeps drawing what it was drawing rather than going blank, and it goes
         // on down this function either way, because what it is drawing may still
         // be the soft raster the decode is wanted to sharpen.
-        // A first frame that ran out and has not been asked again is asked once more, as a
-        // file never asked about is (T-FIRST-FRAME-RUN-OUT-IS-NOT-A-REFUSAL).
+        // A read not answered (a first frame that ran out, a held file) and not asked again is
+        // asked once more, as a file never asked about is (T-FIRST-FRAME-RUN-OUT-IS-NOT-A-REFUSAL).
         Some(
-            PeekCacheEntry::Pending { .. } | PeekCacheEntry::Unanswered { asked_again: false },
+            PeekCacheEntry::Pending { .. }
+            | PeekCacheEntry::Unanswered {
+                asked_again: false, ..
+            },
         )
         | None => match standing {
             // Answered once, and the cache has since let the pixels go. The
@@ -17278,6 +17338,34 @@ pub(crate) fn image_finger_pan(
     })
 }
 
+/// **What a picture pane says about a read that was not answered and has been asked again**
+/// ([`PeekCacheEntry::Unanswered`]; T-DECODE-UNSTARTED-FILED-AS-A-DECODE-FAILURE) — `None` for a
+/// video, whose pane says nothing about a frame it has not got and states its fact lines, as for
+/// a refusal.
+///
+/// A picture's pane says the reason the record kept (`said`): for a file another program holds,
+/// the operating system's words, with no offer of the default app — the same program would meet
+/// the same holder ([`PictureRefusal::decoded`]). With none kept — a read whose thread could not
+/// be started — it says that this window could not draw the picture, which is true of the window
+/// and not of the file, and the default app is offered. Pure, so the sentence is the one a test
+/// reads.
+pub(crate) fn unanswered_picture_refusal(
+    path: &Path,
+    said: Option<&bt_term::InlineImageDecodeError>,
+) -> Option<PictureRefusal> {
+    if preview::path_names_a_video(path) {
+        return None;
+    }
+    Some(said.map_or_else(
+        || {
+            PictureRefusal::this_window_cannot(i18n::Text::text(
+                i18n::Text::PreviewFailedImageWorker,
+            ))
+        },
+        PictureRefusal::decoded,
+    ))
+}
+
 /// **What this surface has to draw with** — the decode if the store still holds
 /// it, the standing answer if it does not (§7.1.3u ③).
 ///
@@ -17322,7 +17410,10 @@ pub(crate) fn surface_pixels(
             stated: *native_size,
         },
         Some(PeekCacheEntry::Failed(reason)) => SurfacePixels::Failed(reason.clone()),
-        Some(PeekCacheEntry::Unanswered { asked_again: true }) => SurfacePixels::Unanswered,
+        Some(PeekCacheEntry::Unanswered {
+            asked_again: true,
+            said,
+        }) => SurfacePixels::Unanswered(said.clone()),
         // A read is out. What this surface is holding stays on the glass while
         // the answer travels, rather than the picture vanishing and coming back.
         Some(PeekCacheEntry::Pending { .. }) => match held {
@@ -17334,10 +17425,13 @@ pub(crate) fn surface_pixels(
             },
             None => SurfacePixels::Nothing { asked: true },
         },
-        // Nothing filed — or a first frame that ran out and has not been asked again, which this
-        // surface asks once, as it would a file never asked about
+        // Nothing filed — or a read not answered (a first frame that ran out, a held file) and
+        // not asked again, which this surface asks once, as it would a file never asked about
         // (T-FIRST-FRAME-RUN-OUT-IS-NOT-A-REFUSAL).
-        None | Some(PeekCacheEntry::Unanswered { asked_again: false }) => match held {
+        None
+        | Some(PeekCacheEntry::Unanswered {
+            asked_again: false, ..
+        }) => match held {
             Some((content, native)) => SurfacePixels::Standing {
                 content,
                 native,
@@ -17375,7 +17469,7 @@ pub(crate) fn picture_errand(pixels: &SurfacePixels, held_exactly: bool) -> Pict
         }
         | SurfacePixels::Nothing { asked: true }
         | SurfacePixels::Failed(_)
-        | SurfacePixels::Unanswered => PictureErrand::Wait,
+        | SurfacePixels::Unanswered(_) => PictureErrand::Wait,
     }
 }
 

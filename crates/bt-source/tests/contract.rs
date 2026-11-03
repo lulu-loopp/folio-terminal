@@ -21,9 +21,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use bt_source::{
-    DiskScope, Index, MacroKind, MacroShape, ModuleSpec, Needle, Package, Pattern, Provenance,
-    QueryFailure, Scope, Search, Site, Universe, Vendor, View, Why, Workspace, needle, report,
-    universes,
+    Index, MacroKind, MacroShape, ModuleSpec, Needle, Package, Pattern, Provenance, QueryFailure,
+    Scope, Search, Site, Vendor, View, Why, Workspace, needle, report, universes,
 };
 
 fn workspace() -> Workspace {
@@ -45,17 +44,8 @@ fn bt_app() -> Arc<Index> {
 fn bt_source() -> Arc<Index> {
     let workspace = workspace();
     let package: &Package = workspace.package("bt-source").expect("bt-source");
-    let scopes = vec![
-        DiskScope::under(package.directory().join("src")),
-        DiskScope::under(package.directory().join("tests")).excluding(&["fixtures"]),
-    ];
-    let universe = Universe::declare(
-        "the whole of bt-source, fixtures aside",
-        package.targets().to_vec(),
-        scopes,
-        Vendor::Excluded,
-    )
-    .expect("this crate is where it says it is");
+    let universe = universes::first_party_whole(package, Vendor::Excluded)
+        .expect("this crate is where it says it is");
     Index::shared(&universe).unwrap_or_else(|rejections| panic!("{}", report(&rejections)))
 }
 
@@ -638,8 +628,9 @@ fn a_needle_built_inside_the_queried_universe_excludes_its_construction() {
 ///
 /// A union narrows which bytes are read; it does not change what a reader is
 /// allowed to find of itself. This file is one of the universe's own and its
-/// module path is `crate` — one member of the union below — so the needle here
-/// is inside the scope and its own construction is what the exclusion takes.
+/// module path is `crate::contract` (a module of the `real_tree` binary) — one
+/// member of the union below — so the needle here is inside the scope and its
+/// own construction is what the exclusion takes.
 ///
 /// MUTATION: apply the scope after the removals and the first block's
 /// construction stops being excluded and starts being counted; exclude by file
@@ -650,7 +641,7 @@ fn a_needle_built_inside_a_union_of_modules_excludes_its_own_construction() {
     let index = bt_source();
     let union = || {
         Scope::Modules(vec![
-            ModuleSpec::exact("crate"),
+            ModuleSpec::exact("crate::contract"),
             ModuleSpec::tree("crate::query"),
         ])
     };

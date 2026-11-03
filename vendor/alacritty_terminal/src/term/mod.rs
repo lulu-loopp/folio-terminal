@@ -3937,7 +3937,7 @@ mod tests {
 
         processor.advance(
             &mut term,
-            b"Did not find path entry D:\\App\\Base\\anaconda3\\bin\r\n",
+            b"Did not find path entry D:\\Kit\\Base\\anaconda3\\bin\r\n",
         );
         processor.advance(&mut term, prompt.as_bytes());
         assert_eq!(term.grid.cursor.point, Point::new(Line(2), Column(43)));

@@ -1863,9 +1863,6 @@ enum Settled {
 /// What a decode that failed on the worker says, in the decode error's own words.
 const DECODE_FAULT: &str = "the decode stopped on a fault";
 
-/// What a decode whose thread could not be started says, in the decode error's own words.
-const DECODE_UNSTARTED: &str = "the decoder could not be started";
-
 /// **A failed request, settled as its surface's own failure** — pure, so the mapping is the one
 /// the tests read:
 ///
@@ -20057,19 +20054,40 @@ enum PeekCacheEntry {
         /// asked again — the bound on the automatic asking, held here and nowhere else.
         once_more: bool,
     },
-    /// **A video's first frame that was not answered in time** (T-FIRST-FRAME-RUN-OUT-IS-NOT-A-REFUSAL):
-    /// the decode ran out of `bt_platform::video::FIRST_FRAME_BUDGET` — on a busy machine a good
-    /// recording can — or its thread could not be started. It is not a [`Self::Failed`], because
-    /// it says nothing about the file: it used to be filed as "no decoder for this container", and
-    /// a good recording stayed pictureless on every surface that kept standing on it.
+    /// **A read of a file's pixels that was not answered** — an answer about the moment, never
+    /// about the file, so not a [`Self::Failed`]. Three ways in, one record and one bound:
     ///
-    /// Every surface draws it as a video's refusal is drawn — no picture, and the fact lines — and
-    /// it is let go of on every road a `Failed` is. What differs is the asking: while
-    /// `asked_again` is false, the first surface that resolves the file asks once more, through
-    /// the one door, with no new input; the answer to that ask, if it runs out too, is filed with
-    /// `asked_again` true, and then only a new look asks (a hover that settles, a card that
-    /// opens, a surface that names the file anew). At most two reads per look, held in state.
-    Unanswered { asked_again: bool },
+    /// * a video's first frame that ran out of `bt_platform::video::FIRST_FRAME_BUDGET` — on a
+    ///   busy machine a good recording can — or whose decode thread could not be started
+    ///   (T-FIRST-FRAME-RUN-OUT-IS-NOT-A-REFUSAL); it used to be filed as "no decoder for this
+    ///   container", and a good recording stayed pictureless on every surface standing on it;
+    /// * a file another program holds at this moment — a picture's
+    ///   `bt_term::InlineImageDecodeError::HeldElsewhere`, a video's `NoFrame::Held`
+    ///   (T-DECODE-UNSTARTED-FILED-AS-A-DECODE-FAILURE); it used to be a refusal of the disk, or
+    ///   "no decoder" for a video being written;
+    /// * a read the computation lane could not start a thread for
+    ///   ([`PeekAsk::Unstarted`]; the same ticket) — it used to be a `Failed` in the words "the
+    ///   decoder could not be started", which every later surface printed as the file's failure.
+    ///
+    /// `said` is what a picture pane says about it, the reason kept with the file's record as a
+    /// `Failed`'s is (owner's ruling 2026-09-12): the operating system's words for a held picture,
+    /// and `None` for the other two — a picture pane then says this window could not draw it,
+    /// and a video's pane says nothing, as it says nothing for a video's refusal. Every other
+    /// surface draws it as a refusal is drawn — no picture — and it is let go of on every road a
+    /// `Failed` is.
+    ///
+    /// What differs is the asking: while `asked_again` is false, the first surface that resolves
+    /// the file asks once more, through the one door, with no new input; the answer to that ask,
+    /// if it is unanswered too, is filed with `asked_again` true, and then only a new look asks (a
+    /// hover that settles, a card that opens, a surface that names the file anew, the file
+    /// changing). At most two reads per look, held in state. A read whose thread could not be
+    /// started is filed asked again at once: it was refused at the door, inside the asking
+    /// surface's own resolve, so no answer comes back to ask again on, and the lane's rule is that
+    /// the next request — a new look's — starts the thread again.
+    Unanswered {
+        asked_again: bool,
+        said: Option<bt_term::InlineImageDecodeError>,
+    },
     /// **And why it failed** (owner's ruling 2026-09-12). The entry used to be a
     /// bare word, so the only surface that ever heard the reason was one that
     /// happened to be on the glass at the moment the answer landed; a pane that
@@ -20095,7 +20113,7 @@ enum PeekCacheEntry {
 /// A `Ready` weighs its native decode's pixels and is the one thing eviction chooses: the cost of
 /// having let it go is one worker read of a file that is still on the disk, and the surfaces
 /// drawing it keep the answer they were given (§7.1.3u). A `Pending`, an `Unanswered` and a
-/// `Failed` — the unstarted record ([`DECODE_UNSTARTED`]) is a `Failed` — hold no pixels: each counts only the
+/// `Failed` hold no pixels: each counts only the
 /// map's flat overhead per entry (`bt_term::BoundedCache`'s `ENTRY_OVERHEAD_BYTES`, 128 B), and
 /// neither is ever evicted, because each is the record of a question and an evicted record
 /// reads as *never asked*: the pane's, the page's and the flyout's next resolve would ask the
@@ -20127,9 +20145,10 @@ enum PeekAsk {
     /// The lane was full: nothing is out, and the surface's next resolve asks again (the answers
     /// that free the lane are the next hand-out).
     NotNow,
-    /// The lane's thread could not be started: the file is filed as failed
-    /// ([`runtime::peek::unstarted_pixels`]), so it is asked again only by new input to the surface
-    /// — a new hover, the file opened again.
+    /// The lane's thread could not be started: the file is filed as unanswered and asked again
+    /// ([`PeekCacheEntry::Unanswered`], T-DECODE-UNSTARTED-FILED-AS-A-DECODE-FAILURE) — not a
+    /// failure of the file — so it is asked again only by new input to the surface: a new hover,
+    /// the file opened again.
     Unstarted,
     /// It was not asked and will not be: a file this window does not open, or a lane that has
     /// stopped.
@@ -20340,7 +20359,11 @@ impl PictureRefusal {
     fn decoded(error: &bt_term::InlineImageDecodeError) -> Self {
         Self {
             notice: i18n::picture_refused(error),
-            offers_the_default_app: !matches!(error, bt_term::InlineImageDecodeError::Io(_)),
+            offers_the_default_app: !matches!(
+                error,
+                bt_term::InlineImageDecodeError::Io(_)
+                    | bt_term::InlineImageDecodeError::HeldElsewhere(_)
+            ),
         }
     }
 
@@ -21446,10 +21469,12 @@ enum SurfacePixels {
     },
     /// This file will not decode, and the reason the decoder gave.
     Failed(bt_term::InlineImageDecodeError),
-    /// A video's first frame was not answered in time and has been asked again
-    /// once already ([`PeekCacheEntry::Unanswered`]): nothing to draw, and
-    /// nothing to ask until a new look.
-    Unanswered,
+    /// A read that was not answered and has been asked again once already
+    /// ([`PeekCacheEntry::Unanswered`]) — a first frame that ran out, a file
+    /// another program holds, a thread that could not be started: nothing to
+    /// draw, nothing to ask until a new look, and what a picture pane says about
+    /// it (`said`).
+    Unanswered(Option<bt_term::InlineImageDecodeError>),
 }
 
 /// **What one picture surface must do about its pixels this frame** — see
@@ -52891,7 +52916,7 @@ fn executable_banner_name(program: &std::ffi::OsStr) -> String {
 /// executable path and the operating system's account of the failure — and both
 /// were wrong for the top of somebody's screen. The path is not the thing they
 /// picked: they picked a row of the profile menu called *Git Bash*, and
-/// `D:\App\Tool\Git\bin\bash.exe` is an implementation detail of that row that
+/// `D:\Kit\Tool\Git\bin\bash.exe` is an implementation detail of that row that
 /// changes when they reinstall Git. The OS's account arrived wrapped in the
 /// vendored launcher's own debugging — `CreateProcessW \`"…"\` in cwd \`"…"\`
 /// failed: …`, with the command line `Debug`-quoted and still carrying the `NUL`

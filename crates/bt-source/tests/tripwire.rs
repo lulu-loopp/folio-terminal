@@ -470,6 +470,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use bt_source::{
     Certainty, DiskScope, FileRecord, FileScoped, Index, ItemRecord, LiteralValue, MacroKind,
@@ -4079,32 +4080,20 @@ fn is_document(path: &str) -> bool {
 
 /// The whole of a first-party package; `bt-source`'s `tests/fixtures/` are
 /// source *about* compilation and are declared out, as `timing.rs` does.
-fn package_universe(package: &Package) -> Universe {
-    if package.name() == "bt-source" {
-        let scopes = vec![
-            DiskScope::under(package.directory().join("src")),
-            DiskScope::under(package.directory().join("tests")).excluding(&["fixtures"]),
-        ];
-        return Universe::declare(
-            "the whole of bt-source, fixtures aside",
-            package.targets().to_vec(),
-            scopes,
-            Vendor::Excluded,
-        )
-        .expect("this crate is where it says it is");
-    }
-    universes::whole_package(package, Vendor::Excluded).expect("a package of this workspace")
+pub(crate) fn package_universe(package: &Package) -> Universe {
+    universes::first_party_whole(package, Vendor::Excluded).expect("a package of this workspace")
 }
 
-/// Every first-party package's directory and index.
-fn first_party_indices(root: &Path) -> Vec<(PathBuf, Index)> {
+/// Every first-party package's directory and index: the one this process holds for each
+/// package's [`universes::first_party_whole`], shared with every other guard that asks for it.
+pub(crate) fn first_party_indices(root: &Path) -> Vec<(PathBuf, Arc<Index>)> {
     let workspace = Workspace::read(root).expect("this workspace");
     workspace
         .packages()
         .iter()
         .filter(|package| !is_vendored(package.directory()))
         .map(|package| {
-            let index = Index::build(&package_universe(package))
+            let index = Index::shared(&package_universe(package))
                 .unwrap_or_else(|rejections| panic!("{}", report(&rejections)));
             (package.directory().to_path_buf(), index)
         })
@@ -5845,7 +5834,7 @@ type FileId = (usize, usize);
 /// each first-party crate name stands for, and the files read so far for a
 /// constant another file names.
 struct World<'a> {
-    indices: &'a [(PathBuf, Index)],
+    indices: &'a [(PathBuf, Arc<Index>)],
     /// Each module: its file, and the inline `mod`s inside that file that
     /// lead to it.
     /// One module may be written in several files, each under its own `cfg`
@@ -5880,7 +5869,7 @@ enum Walk {
 }
 
 impl<'a> World<'a> {
-    fn of(indices: &'a [(PathBuf, Index)]) -> Self {
+    fn of(indices: &'a [(PathBuf, Arc<Index>)]) -> Self {
         let mut modules = BTreeMap::new();
         let mut placed = BTreeMap::new();
         let mut crates = BTreeMap::new();
@@ -7462,7 +7451,7 @@ fn continued(path: Value, after: &str) -> Value {
 /// one per item, in file and item order, and every rooted read it could not
 /// reduce.
 fn document_readers(
-    indices: &[(PathBuf, Index)],
+    indices: &[(PathBuf, Arc<Index>)],
     root: &Path,
     committed: &BTreeSet<String>,
 ) -> (Vec<DocumentReader>, Vec<UnresolvedRead>) {
@@ -8101,7 +8090,7 @@ fn the_code() -> &'static Code {
 /// Every owner spelling each file's items answer to, and each Rust-source
 /// shape with the item its line is written in.
 fn items_and_shapes(
-    indices: &[(PathBuf, Index)],
+    indices: &[(PathBuf, Arc<Index>)],
     root: &Path,
     committed: &BTreeSet<String>,
     hits: Vec<Hit>,
@@ -8247,7 +8236,7 @@ fn a_row_no_reader_accounts_for_is_refused() {
     let index =
         Index::build(&universe).unwrap_or_else(|rejections| panic!("{}", report(&rejections)));
     let committed = committed_files(&workspace_root());
-    let indices = [(package, index)];
+    let indices = [(package, Arc::new(index))];
     let (readers, unresolved) = document_readers(&indices, &plot, &committed);
     let (spelled, hits) = items_and_shapes(&indices, &plot, &committed, scan(&plot));
 
@@ -8613,7 +8602,7 @@ fn a_planted_document_reader_on_neither_list_makes_the_tripwire_fire() {
         Index::build(&universe).unwrap_or_else(|rejections| panic!("{}", report(&rejections)));
     let committed = committed_files(&workspace_root());
 
-    let indices = [(plot.join("crates").join("planted"), index)];
+    let indices = [(plot.join("crates").join("planted"), Arc::new(index))];
     let (readers, unresolved) = document_readers(&indices, &plot, &committed);
     let found: Vec<(String, Vec<Reading>, Vec<String>)> = readers
         .iter()
@@ -8889,7 +8878,7 @@ fn a_name_two_globs_bring_in_is_the_constant_visible_to_the_reader() {
         .expect("the plant is there");
         let index =
             Index::build(&universe).unwrap_or_else(|rejections| panic!("{}", report(&rejections)));
-        indices.push((package, index));
+        indices.push((package, Arc::new(index)));
     }
     let (readers, unresolved) = document_readers(&indices, &plot, &committed);
     let found: Vec<(String, String, Vec<String>)> = readers
@@ -8989,7 +8978,7 @@ fn a_constant_a_diamond_of_globs_brings_in_is_one_constant() {
     .expect("the plant is there");
     let index =
         Index::build(&universe).unwrap_or_else(|rejections| panic!("{}", report(&rejections)));
-    let (readers, unresolved) = document_readers(&[(package, index)], &plot, &committed);
+    let (readers, unresolved) = document_readers(&[(package, Arc::new(index))], &plot, &committed);
     let found: Vec<(String, String, Vec<String>)> = readers
         .iter()
         .map(|reader| {

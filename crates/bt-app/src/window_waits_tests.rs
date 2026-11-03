@@ -1515,6 +1515,24 @@ impl Src {
             certainty: Certainty::Resolved,
         }
         .in_the_product(self.index)
+            && self.enclosing_items_permit(at)
+    }
+
+    /// Whether every item holding `at` is written for a build of the shipped program, by the
+    /// features that build sets: an item gated on a feature only a dev-dependency names
+    /// (`#[cfg(any(test, feature = "trust-harness"))]`) is not, though
+    /// [`Occurrence::in_the_product`], which reads `test` alone, keeps it (plan row 176: three
+    /// `wait_timeout_while` test helpers of bt-platform read as bare sites).
+    fn enclosing_items_permit(&self, at: usize) -> bool {
+        self.index
+            .items()
+            .iter()
+            .filter(|record| record.whole().holds(at))
+            .all(|record| {
+                record.identities().any(|identity| {
+                    product_build_permits(identity.variant.predicates(), self.features)
+                })
+            })
     }
 
     /// The smallest callable holding `at`.
@@ -9773,6 +9791,138 @@ fn a_site_in_a_function_taking_a_leg_is_a_bare_site() {
     );
 }
 
+/// A planted crate whose functions wait through the verbs the vocabulary took from bt-source's
+/// `BLOCKING` (plan row 176), and a door function waiting the same way (the control).
+const PLANTED_WAIT_WHILE_SITES: &str = "
+pub mod doors { pub struct TraceFlush; }
+pub struct WaitToken<'a, D> { door: &'a D }
+pub fn waits_while(c: &std::sync::Condvar, m: &std::sync::Mutex<bool>) {
+let _ = c.wait_timeout_while(m.lock().unwrap(), std::time::Duration::ZERO, |held| *held);
+let _ = c.wait_while(m.lock().unwrap(), |held| *held);
+}
+pub fn parks() { std::thread::park_timeout(std::time::Duration::ZERO); }
+pub fn sends(s: &std::sync::mpsc::SyncSender<()>) { let _ = s.send(()); }
+pub fn owned(_token: WaitToken<'_, doors::TraceFlush>, c: &std::sync::Condvar, m: &std::sync::Mutex<bool>) {
+let _ = c.wait_timeout_while(m.lock().unwrap(), std::time::Duration::ZERO, |held| *held);
+}
+";
+
+/// RED (T-BARE-SITE-VOCABULARY-WAIT-WHILE-BLIND-SPOT, plan row 176) — **a wait through
+/// `Condvar::wait_timeout_while`, `Condvar::wait_while`, `thread::park_timeout` or
+/// `SyncSender::send` outside a door is a bare site.** Row 145's first form of the WinHTTP close
+/// door waited with `wait_timeout_while`, a name the vocabulary lacked, and its row left the
+/// inventory as "delete it" with no door in sight.
+///
+/// Against the planted crate ([`PLANTED_WAIT_WHILE_SITES`]): `waits_while`, `parks` and `sends`
+/// each hold their sites, counted one each; `owned`, which takes a `WaitToken`, is a door function
+/// whose `wait_timeout_while` is a door effect (the control).
+///
+/// MUTATION: delete the registry's `std::sync::Condvar::wait_timeout_while` line and
+/// `waits_while`'s first site leaves the inventory.
+#[test]
+fn a_wait_through_a_verb_from_blocking_outside_a_door_is_a_bare_site() {
+    let world = planted_world("ww-wait-while", PLANTED_WAIT_WHILE_SITES);
+    let (bare, in_doors, _) = vocabulary_sites_in(&world, &[]);
+    let planted = |item: &str, entry: &str| {
+        (
+            "planted".to_owned(),
+            "-".to_owned(),
+            item.to_owned(),
+            entry.to_owned(),
+        )
+    };
+    let mine: BTreeMap<&BareKey, &usize> = bare
+        .iter()
+        .filter(|((package, _, item, _), _)| {
+            package == "planted"
+                && [
+                    "crate::waits_while",
+                    "crate::parks",
+                    "crate::sends",
+                    "crate::owned",
+                ]
+                .contains(&item.as_str())
+        })
+        .collect();
+    let wanted = [
+        planted("crate::parks", "std::thread::park_timeout"),
+        planted("crate::sends", "std::sync::mpsc::SyncSender::send"),
+        planted(
+            "crate::waits_while",
+            "std::sync::Condvar::wait_timeout_while",
+        ),
+        planted("crate::waits_while", "std::sync::Condvar::wait_while"),
+    ];
+    assert_eq!(
+        mine,
+        wanted
+            .iter()
+            .map(|key| (key, &1))
+            .collect::<BTreeMap<_, _>>(),
+        "the planted waits are not each one bare site"
+    );
+    assert!(
+        in_doors.contains_key(&(
+            "planted".to_owned(),
+            "-".to_owned(),
+            "crate::owned".to_owned()
+        )),
+        "the control: `owned` takes a `WaitToken` and is not a door function; door effects {:?}",
+        in_doors.keys().collect::<Vec<_>>()
+    );
+}
+
+/// A planted crate with a wait in a function gated on a feature no product build sets, the same
+/// wait in one gated on a feature the product build sets, and in an ungated one (the control).
+const PLANTED_TEST_ONLY_FEATURE_SITE: &str = "
+#[cfg(any(test, feature = \"harness\"))]
+pub fn harness_only(c: &std::sync::Condvar, m: &std::sync::Mutex<bool>) {
+let _ = c.wait_timeout_while(m.lock().unwrap(), std::time::Duration::ZERO, |held| *held);
+}
+pub fn shipped(c: &std::sync::Condvar, m: &std::sync::Mutex<bool>) {
+let _ = c.wait_timeout_while(m.lock().unwrap(), std::time::Duration::ZERO, |held| *held);
+}
+#[cfg(feature = \"on\")]
+pub fn gated_on(c: &std::sync::Condvar, m: &std::sync::Mutex<bool>) {
+let _ = c.wait_timeout_while(m.lock().unwrap(), std::time::Duration::ZERO, |held| *held);
+}
+";
+
+/// RED (T-BARE-SITE-VOCABULARY-WAIT-WHILE-BLIND-SPOT, plan row 176) — **a site in an item gated on
+/// a feature the product build does not set is no bare site**: the header of
+/// `window-thread-bare-sites.tsv` says so, and `bt-platform`'s `trust-harness` helpers
+/// (`engine_ledger::outstanding_reaching`, the two `state_reaching`) are written so.
+///
+/// Against the planted crate ([`PLANTED_TEST_ONLY_FEATURE_SITE`]), built with `on` and not
+/// `harness`: `harness_only`'s wait is not in the inventory; `gated_on`'s is, for a feature the
+/// product sets hides nothing; `shipped`'s is (the control).
+///
+/// MUTATIONS: drop [`Src::enclosing_items_permit`] from [`Src::in_product`] and `harness_only`'s
+/// site is a bare site; read every feature as off in [`product_build_cfg`] (`features.contains`
+/// → `false`) and `gated_on`'s site leaves the inventory.
+#[test]
+fn a_site_behind_a_feature_the_product_does_not_set_is_no_bare_site() {
+    let world = planted_world_with_features(
+        "ww-test-only-feature",
+        PLANTED_TEST_ONLY_FEATURE_SITE,
+        &["on"],
+    );
+    let (bare, _, _) = vocabulary_sites_in(&world, &[]);
+    let items: BTreeSet<&str> = bare
+        .keys()
+        .filter(|(package, _, _, entry)| {
+            package == "planted" && entry == "std::sync::Condvar::wait_timeout_while"
+        })
+        .map(|(_, _, item, _)| item.as_str())
+        .collect();
+    assert_eq!(
+        items,
+        BTreeSet::from(["crate::gated_on", "crate::shipped"]),
+        "bare sites {:?}",
+        bare.keys().collect::<Vec<_>>()
+    );
+}
+
 /// RED (T-A2-R1-NONLEG; revision (q)6) — **`# graphs` admits no line**: the live registry's
 /// section is its header alone, and a planted line under it — a well-formed graph line, or one of
 /// the wrong width — is refused for what it is.
@@ -12697,6 +12847,11 @@ impl Drop for PlantedFolder {
 /// `rest`, written to a scratch folder, indexed, and read as the window-waits guard reads the
 /// product's packages ([`World::over`]).
 fn planted_world(tag: &str, rest: &str) -> World {
+    planted_world_with_features(tag, rest, &[])
+}
+
+/// [`planted_world`], its package built with `features` on, as a product build would set them.
+fn planted_world_with_features(tag: &str, rest: &str, features: &[&str]) -> World {
     let index: &'static Index = Box::leak(Box::new(
         planted_index(tag, rest)
             .unwrap_or_else(|rejections| panic!("{}", bt_source::report(&rejections))),
@@ -12705,7 +12860,12 @@ fn planted_world(tag: &str, rest: &str) -> World {
         vec![Src {
             package: "planted",
             index,
-            features: Box::leak(Box::default()),
+            features: Box::leak(Box::new(
+                features
+                    .iter()
+                    .map(|feature| (*feature).to_owned())
+                    .collect(),
+            )),
         }],
         &[BTreeSet::new()],
     )

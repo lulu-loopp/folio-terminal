@@ -28,8 +28,8 @@ if (Test-Path $rendered) { Remove-Item $rendered -Force }
 
 Push-Location $repo
 try {
-    & cargo test -p bt-source --locked --test request_doors -- --exact `
-        every_request_door_returns_at_once | Out-Host
+    & cargo test -p bt-source --locked --test real_tree -- --exact `
+        request_doors::every_request_door_returns_at_once | Out-Host
 } finally {
     Pop-Location
 }
