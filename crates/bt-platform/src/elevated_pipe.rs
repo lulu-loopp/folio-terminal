@@ -305,7 +305,10 @@ fn connect_to_parent_on(
     .map_err(|error| {
         match error.raw_os_error().map(|code| code as u32) {
             Some(code) if code == ERROR_FILE_NOT_FOUND.0 => HandshakeFailure::NoEndpoint,
-            // `open_client` answers without an OS code only when the pipe stayed busy.
+            // A pipe that stayed busy answers with its own code, `ERROR_PIPE_BUSY` (the busy
+            // tests pin it). The answers without an OS code - an endpoint that handed back no
+            // handle, or the end of the retry loop, which its one retry never reaches - are
+            // reported as `ERROR_PIPE_BUSY` too, as they always were (review N8).
             code => HandshakeFailure::Os {
                 call: "CreateFileW",
                 code: code.unwrap_or(ERROR_PIPE_BUSY.0),

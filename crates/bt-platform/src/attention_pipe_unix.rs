@@ -602,7 +602,7 @@ fn listen(
         if waiting[1].revents & libc::POLLIN != 0 {
             match listener.accept() {
                 Ok((stream, _)) => {
-                    if let Some(client) = admit(stream, clock.now()) {
+                    if let Some(client) = admit(stream, clock) {
                         note_accepted(counts);
                         clients.push(client);
                     }
@@ -650,10 +650,11 @@ fn listen(
 ///
 /// `None` closes on it without a byte read and without a count, which is the
 /// module header's rule: a caller a descriptor would have refused on Windows
-/// never attached there, and does not attach here. `now` is the endpoint's
-/// clock's reading as the caller is taken in, which its [`READ_DEADLINE`] is
-/// measured from.
-fn admit(stream: UnixStream, now: Instant) -> Option<Client> {
+/// never attached there, and does not attach here. The caller's
+/// [`READ_DEADLINE`] is measured from the endpoint's clock read once it has
+/// been taken in, after the peer check, as it was read before the clock was
+/// handed in (review N2).
+fn admit(stream: UnixStream, clock: &dyn LaunchClock) -> Option<Client> {
     if stream.set_nonblocking(true).is_err() {
         return None;
     }
@@ -663,7 +664,7 @@ fn admit(stream: UnixStream, now: Instant) -> Option<Client> {
     Some(Client {
         stream,
         buffer: Vec::new(),
-        since: now,
+        since: clock.now(),
     })
 }
 

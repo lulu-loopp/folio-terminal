@@ -1120,7 +1120,7 @@ fn listen(
             }
         }
         if answer == WAIT_TIMEOUT {
-            sweep(&mut pool, counts, clock.now());
+            sweep(&mut pool, counts, clock);
             if pool.is_empty() {
                 return;
             }
@@ -1172,7 +1172,7 @@ fn listen(
                 counts.lock().unwrap_or_else(PoisonError::into_inner).silent += 1;
             }
         }
-        if !relist(&mut pool, index, counts, clock.now()) {
+        if !relist(&mut pool, index, counts, clock) {
             return;
         }
     }
@@ -1199,19 +1199,20 @@ fn note_accepted(counts: &Mutex<PipeCounts>) {
 /// Put one instance back to listening, dropping it if it will not go.
 ///
 /// `false` only when the pool has emptied, which is the one condition that ends the listener.
-/// `now` is the endpoint's clock's reading, which a caller already waiting is timed from.
+/// A caller already waiting is timed from the endpoint's clock read once the instance has been
+/// recycled for it, as `post_read` read it before the clock was handed in (review N2).
 fn relist(
     pool: &mut Vec<Instance>,
     index: usize,
     counts: &Mutex<PipeCounts>,
-    now: Instant,
+    clock: &dyn LaunchClock,
 ) -> bool {
     match pool[index].recycle() {
         Ok(true) => {
             // Somebody was already waiting for this instance. Their read starts now, not on the
             // next turn of the loop.
             note_accepted(counts);
-            let _ = pool[index].post_read(now);
+            let _ = pool[index].post_read(clock.now());
             true
         }
         Ok(false) => true,
@@ -1222,9 +1223,10 @@ fn relist(
     }
 }
 
-/// Take back the instances whose clients attached and then said nothing, by the endpoint's
-/// clock's reading `now`.
-fn sweep(pool: &mut Vec<Instance>, counts: &Mutex<PipeCounts>, now: Instant) {
+/// Take back the instances whose clients attached and then said nothing, by one reading of the
+/// endpoint's clock.
+fn sweep(pool: &mut Vec<Instance>, counts: &Mutex<PipeCounts>, clock: &dyn LaunchClock) {
+    let now = clock.now();
     let mut index = 0;
     while index < pool.len() {
         let expired = pool[index]
@@ -1232,7 +1234,7 @@ fn sweep(pool: &mut Vec<Instance>, counts: &Mutex<PipeCounts>, now: Instant) {
             .is_some_and(|left| left.is_zero());
         if expired {
             counts.lock().unwrap_or_else(PoisonError::into_inner).silent += 1;
-            if !relist(pool, index, counts, now) {
+            if !relist(pool, index, counts, clock) {
                 return;
             }
         }
@@ -1867,6 +1869,10 @@ mod tests {
     /// on its clock, it asked for no wait at all (T-ATTENTION-ENDPOINT-WAITS-ON-A-CLOCK) — a
     /// name with nobody behind it is not a busy endpoint.
     ///
+    /// This reads the waits `send_line_on` asks its clock for, not the real door's elapsed time
+    /// (row 147's conversion, ruling R7): a real wait added outside the clock on the not-found
+    /// road would pass here, as review N4 notes; the busy road's are the busy tests' and plants'.
+    ///
     /// MUTATION: treat `ERROR_FILE_NOT_FOUND` like `ERROR_PIPE_BUSY` in `open_client` and the verb
     /// asks for one busy wait.
     #[test]
@@ -2161,13 +2167,16 @@ mod tests {
         assert_eq!(asking.moved(), CLIENT_BUSY_WAIT);
     }
 
-    /// RED (T-ATTENTION-ENDPOINT-WAITS-ON-A-CLOCK) — **an endpoint freed while the verb waits takes
-    /// its line**, and the wait was the clock's, not a real 100 ms.
+    /// RED (T-ATTENTION-ENDPOINT-WAITS-ON-A-CLOCK) — **an endpoint freed once the verb has been
+    /// answered busy takes its line**, and the wait was the clock's, not a real 100 ms.
     ///
     /// Every instance is taken; the verb's clock awaits a free one within the suite's patience and
-    /// tells the test when it is asked. Only then does the test let the listener go — the answer
-    /// is late by construction — and the verb's one retry is answered: the line is taken, the one
-    /// wait asked was the busy wait's bound, and the clock did not move.
+    /// tells the test when it is asked, which is after the busy answer and before
+    /// `WaitNamedPipeW` is entered. Only then does the test let the listener go — the answer is
+    /// late by construction — and the verb's one retry is answered: the line is taken, the one
+    /// wait asked was the busy wait's bound, and the clock did not move. Whether the kernel wait
+    /// itself returns on the free, or the free came before it was entered, is the kernel's; both
+    /// orders end in the line taken (review N3).
     #[test]
     fn a_busy_endpoint_freed_while_the_verb_waits_takes_the_line() {
         let (pipe, release) = a_busy_endpoint();
