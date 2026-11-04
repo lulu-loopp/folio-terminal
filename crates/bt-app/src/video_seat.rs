@@ -1438,7 +1438,9 @@ impl VideoSeat {
 ///   claim about the format at all;
 /// * a player that did not come up on this machine — an engine not built
 ///   within its open budget twice over, an engine thread that could not be
-///   started, a platform, device or engine factory that refused
+///   started, a platform, device or engine factory that refused, or a
+///   synchronous `SetSource` refusal (the engine's `NoEngine`, which learns
+///   nothing about the bytes)
 ///   ([`EngineError::is_about_the_machine`]) — `Text::VideoPlayerDidNotStart`,
 ///   which says nothing about the file, because nothing was learned about it.
 ///   Until row 189 these said the format could not be played.

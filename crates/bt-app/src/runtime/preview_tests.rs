@@ -2885,8 +2885,10 @@ fn the_volumes_flash_goes_out_on_a_paused_recording() {
 /// and it books its own past instant again (`WebWarmup::already_fired`).
 ///
 /// MUTATION: drop `seat_wait` from `Runtime::strip_animation_work`'s fold — the window books no
-/// wake for the late seat, the turns run out of instants with the loading face still standing,
-/// and the "books a wake" expectation goes red. MUTATION: retire the first late reading in
+/// wake for the late seat, so it is answered only at whatever turn the window's other standing
+/// wakes bring (this fixture has them, about every 550 ms), and the "woke at the engine's first
+/// instant past its open budget" expectation goes red (the "books no wake" panic is reached only
+/// on a window with no other wake). MUTATION: retire the first late reading in
 /// `video_seat::seat_answer` (`plant-189-late-engine-filed-as-a-format.py`) — the sentence is
 /// said at the first run-out, and in the format's words.
 #[test]

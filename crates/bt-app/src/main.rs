@@ -62452,10 +62452,13 @@ mod refused_preview_card_tests {
                 limit: 64_000_000,
             }),
             PictureRefusal::decoded(&Refusal::UnsupportedFormat),
-            // And the three this window raises about itself.
+            // And the five this window raises about itself, the video seat's
+            // three sentences among them (plan row 189).
             PictureRefusal::this_window_cannot(i18n::Text::PreviewFailedImageWorker.text()),
             PictureRefusal::this_window_cannot(i18n::Text::PreviewFailedSeatTooSmall.text()),
             PictureRefusal::this_window_cannot(i18n::Text::VideoFormatCannotPlay.text()),
+            PictureRefusal::this_window_cannot(i18n::Text::VideoDidNotLoad.text()),
+            PictureRefusal::this_window_cannot(i18n::Text::VideoPlayerDidNotStart.text()),
         ]
     }
 

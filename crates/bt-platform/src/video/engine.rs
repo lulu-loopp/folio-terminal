@@ -298,7 +298,11 @@ impl EngineError {
     /// [`OPEN_BUDGET`] or whose thread could not be started
     /// ([`Self::Unresponsive`]), Media Foundation that would not start
     /// ([`Self::NoPlatform`]), no Direct3D device ([`Self::NoDevice`]), or an
-    /// engine factory that refused ([`Self::NoEngine`]). A surface says so in
+    /// engine factory that refused ([`Self::NoEngine`]) — which is also what a
+    /// synchronous `SetSource` refusal answers after the engine was built
+    /// (`SetSource` is asynchronous for a file URL, so a refusal on the call
+    /// itself is an argument or resource failure, nothing learned about the
+    /// bytes). A surface says so in
     /// those words rather than calling the format unplayable. The macOS arm
     /// answers the same question of its own variants.
     #[must_use]
