@@ -339,7 +339,7 @@ const INVENTORY: &[Mark] = &[
         says: Text::CleanupMarkRemoverHome,
         kind: Kind::Data,
         remover: Remover::Staging,
-        writer: "../bt-platform/src/deferred_removal.rs:schedule",
+        writer: "../bt-platform/src/deferred_removal.rs:schedule_by",
     },
 ];
 
@@ -1548,7 +1548,14 @@ fn run_within(worker: &WorkerCtx, door: crate::cli::UninstallDoor) -> i32 {
                                 bt_platform::host_platform(),
                                 installed_members,
                                 &the_processes_to_outlive(asker),
-                                bt_platform::deferred_removal::schedule,
+                                |worker, removal, home| {
+                                    bt_platform::deferred_removal::schedule(
+                                        worker,
+                                        removal,
+                                        home,
+                                        REMOVER_READY_WITHIN,
+                                    )
+                                },
                             )
                         },
                     )
@@ -1576,6 +1583,14 @@ pub(crate) const AFTER_PID_WITHIN: Duration = Duration::from_secs(60);
 
 /// How often the door looks again for the asker's end.
 const AFTER_PID_POLL: Duration = Duration::from_millis(100);
+
+/// **How long the door waits for the remover it started to say it is ready**
+/// (`bt_platform::deferred_removal::schedule`, 0.4.10 plan row 14): a fresh
+/// copy of this executable must start — a new file an antivirus may scan
+/// first — parse the plan it inherits and print its ready line. A remover
+/// that has not by then is stopped, its copy discarded, and the program's row
+/// says why; nothing has been removed.
+const REMOVER_READY_WITHIN: Duration = Duration::from_secs(10);
 
 /// **The language the `--uninstall` door speaks**: the one `settings.json`
 /// names in the data directory Folio would open (`persist::as_it_stands` over

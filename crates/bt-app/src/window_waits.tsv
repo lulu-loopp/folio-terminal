@@ -261,7 +261,8 @@ bt-platform	-	crate::deferred_removal::failure_without_plan	std::io::Write::writ
 bt-platform	-	crate::deferred_removal::finish_with	std::fs::write 2	worker-door-body	WorkerCtx	
 bt-platform	-	crate::deferred_removal::removal_from_environment	std::fs::canonicalize 2	worker-door-body	WorkerCtx	
 bt-platform	-	crate::deferred_removal::run_from_environment	std::io::Write::write_fmt 1	worker-door-body	WorkerCtx	
-bt-platform	-	crate::deferred_removal::schedule	std::fs::create_dir_all 1, std::sync::mpsc::Receiver::recv_timeout 1, std::sync::mpsc::SyncSender::send 1	worker-door-body	WorkerCtx	
+bt-platform	-	crate::deferred_removal::schedule	std::sync::mpsc::Receiver::recv_timeout 1	worker-door-body	WorkerCtx	
+bt-platform	-	crate::deferred_removal::schedule_by	std::fs::create_dir_all 1, std::sync::mpsc::SyncSender::send 1	worker-door-body	WorkerCtx	
 bt-platform	[windows]	crate::elevated_pipe::shell_execute_runas	windows::Win32::UI::Shell::ShellExecuteExW 1	worker-door-body	WorkerCtx	
 bt-platform	-	crate::deferred_removal::stop_child	std::process::Child::wait 1	worker-door-body	WorkerCtx	
 bt-platform	-	crate::exchange::flush_directory	std::fs::File::sync_all 1	worker-door-body	WorkerCtx	
