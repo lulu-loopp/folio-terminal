@@ -736,20 +736,18 @@ impl Judge<'_, '_, '_> {
                             if let Some(id) = callee
                                 && enqueue.is_none()
                                 && !roots.contains(&id)
+                                && !handed_to_one_of(&edge.site, &enqueue_calls)
+                                && !self.is_a_stop(spec, id)
                             {
-                                if !handed_to_one_of(&edge.site, &enqueue_calls)
-                                    && !self.is_a_stop(spec, id)
-                                {
-                                    judged.refused.push(format!(
-                                        "window_waits.tsv:{}: `{}` calls `{}` at {}, which its \
-                                         `# request-door-cuts` row names in neither `enqueue` nor \
-                                         `beside`",
-                                        cut.line,
-                                        spec.key,
-                                        resolver.key(id),
-                                        self.place(edge.from, edge.site.span.start())
-                                    ));
-                                }
+                                judged.refused.push(format!(
+                                    "window_waits.tsv:{}: `{}` calls `{}` at {}, which its \
+                                     `# request-door-cuts` row names in neither `enqueue` nor \
+                                     `beside`",
+                                    cut.line,
+                                    spec.key,
+                                    resolver.key(id),
+                                    self.place(edge.from, edge.site.span.start())
+                                ));
                             }
                         }
                         Side::Beside | Side::Whole => {}
