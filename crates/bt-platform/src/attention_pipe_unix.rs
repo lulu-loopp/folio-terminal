@@ -116,6 +116,7 @@ use std::{
 };
 
 use crate::instance::SOCKET_PATH_LIMIT;
+use crate::launch_conversation::{LaunchClock, RealClock};
 
 /// The longest single frame this endpoint will take, in bytes.
 ///
@@ -145,6 +146,11 @@ pub const MAX_FRAMES_PER_SECOND: u32 = 512;
 /// doorbell apart. `folio attention` writes its line and closes within a
 /// millisecond of connecting; a quarter of a second is three orders of
 /// magnitude of slack.
+///
+/// **Read on the endpoint's clock** (T-ATTENTION-ENDPOINT-WAITS-ON-A-CLOCK), as
+/// on Windows: a caller's start is the clock's reading when it was taken in, and
+/// the listener's one wait for it is a [`LaunchClock::wait`] — the real clock in
+/// the product, a counted one in a test.
 const READ_DEADLINE: Duration = Duration::from_millis(250);
 
 /// How long the verb will spend putting one line on the wire.
@@ -318,7 +324,22 @@ impl AttentionPipe {
     /// The frame's content is deliberately *not* validated here beyond its
     /// length. In particular there is no pane coordinate to check, because
     /// there is none in the format.
+    ///
+    /// Its one wait — each attached caller's [`READ_DEADLINE`] — is read on the
+    /// real clock ([`Self::start_on`]).
     pub fn start(directory: &Path, deliver: impl Fn(String) + Send + 'static) -> io::Result<Self> {
+        Self::start_on(directory, Arc::new(RealClock), deliver)
+    }
+
+    /// [`Self::start`] with its wait on `clock`
+    /// (T-ATTENTION-ENDPOINT-WAITS-ON-A-CLOCK): the deadline of every caller the
+    /// listener serves ([`READ_DEADLINE`]). There is no first word to wait for
+    /// here: the socket is bound and listening before the listener is spawned.
+    pub(crate) fn start_on(
+        directory: &Path,
+        clock: Arc<dyn LaunchClock>,
+        deliver: impl Fn(String) + Send + 'static,
+    ) -> io::Result<Self> {
         let path = crate::instance::attention_socket_path(directory);
         let bytes = path.as_os_str().as_encoded_bytes().len();
         if !crate::instance::fits_a_socket_path(&path) {
@@ -366,7 +387,7 @@ impl AttentionPipe {
                 crate::ThreadPriority::Normal,
                 move |_ctx| {
                     let _alive = alive;
-                    listen(&listener, wake, &counts, &deliver);
+                    listen(&listener, wake, &*clock, &counts, &deliver);
                 },
             )
         };
@@ -493,23 +514,28 @@ enum Frame {
 }
 
 /// Four connections at a time, for as long as the endpoint is open.
+///
+/// **Every reading and the one timed wait are the endpoint's `clock`'s**
+/// (T-ATTENTION-ENDPOINT-WAITS-ON-A-CLOCK): while a caller is in flight, `poll`
+/// is a [`LaunchClock::wait`] of what is left of the nearest deadline, and a
+/// wait the clock ends leaves every descriptor unanswered, so the walk below
+/// reads the deadlines on the same clock; while none is, `poll` waits for a
+/// caller or the stop with no length of time, as it always did.
 fn listen(
     listener: &UnixListener,
     wake: RawFd,
+    clock: &dyn LaunchClock,
     counts: &Mutex<PipeCounts>,
     deliver: &(impl Fn(String) + Send + ?Sized),
 ) {
-    let mut rate = RateLimit::new(Instant::now());
+    let mut rate = RateLimit::new(clock.now());
     let mut clients: Vec<Client> = Vec::new();
     loop {
-        let now = Instant::now();
-        let timeout = clients
+        let now = clock.now();
+        let left = clients
             .iter()
             .map(|client| READ_DEADLINE.saturating_sub(now.duration_since(client.since)))
-            .min()
-            .map_or(-1, |left| {
-                i32::try_from(left.as_millis()).unwrap_or(i32::MAX).max(1)
-            });
+            .min();
         let mut waiting = vec![
             libc::pollfd {
                 fd: wake,
@@ -537,10 +563,24 @@ fn listen(
             revents: 0,
         }));
         let count = libc::nfds_t::try_from(waiting.len()).unwrap_or(0);
-        // SAFETY: every descriptor is open for the whole of this call — the
-        // listener is borrowed, the clients are owned by the vector above, and
-        // the read end is closed only after this loop ends.
-        let ready = unsafe { libc::poll(waiting.as_mut_ptr(), count, timeout) };
+        let ready = match left {
+            // SAFETY: every descriptor is open for the whole of this call — the
+            // listener is borrowed, the clients are owned by the vector above,
+            // and the read end is closed only after this loop ends.
+            None => unsafe { libc::poll(waiting.as_mut_ptr(), count, -1) },
+            // **The nearest read deadline, on the endpoint's clock**: the
+            // clock's wait is this one `poll` of its bound.
+            Some(left) => {
+                let mut ready = 0;
+                clock.wait(left, &mut |bound| {
+                    let milliseconds = i32::try_from(bound.as_millis()).unwrap_or(i32::MAX).max(1);
+                    // SAFETY: as above.
+                    ready = unsafe { libc::poll(waiting.as_mut_ptr(), count, milliseconds) };
+                    ready != 0
+                });
+                ready
+            }
+        };
         if ready < 0 {
             if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
                 continue;
@@ -556,7 +596,7 @@ fn listen(
         if waiting[1].revents & libc::POLLIN != 0 {
             match listener.accept() {
                 Ok((stream, _)) => {
-                    if let Some(client) = admit(stream) {
+                    if let Some(client) = admit(stream, clock.now()) {
                         note_accepted(counts);
                         clients.push(client);
                     }
@@ -582,7 +622,7 @@ fn listen(
                 .is_some_and(|entry| entry.revents != 0);
             let outcome = if readable {
                 collect(&mut clients[index])
-            } else if Instant::now().duration_since(clients[index].since) >= READ_DEADLINE {
+            } else if clock.now().duration_since(clients[index].since) >= READ_DEADLINE {
                 Some(Frame::Silent)
             } else {
                 None
@@ -591,7 +631,7 @@ fn listen(
                 continue;
             };
             clients.remove(index);
-            account(frame, &mut rate, counts, deliver);
+            account(frame, &mut rate, clock.now(), counts, deliver);
         }
     }
     // SAFETY: this thread is the only owner of the read end, and it is ending.
@@ -604,8 +644,10 @@ fn listen(
 ///
 /// `None` closes on it without a byte read and without a count, which is the
 /// module header's rule: a caller a descriptor would have refused on Windows
-/// never attached there, and does not attach here.
-fn admit(stream: UnixStream) -> Option<Client> {
+/// never attached there, and does not attach here. `now` is the endpoint's
+/// clock's reading as the caller is taken in, which its [`READ_DEADLINE`] is
+/// measured from.
+fn admit(stream: UnixStream, now: Instant) -> Option<Client> {
     if stream.set_nonblocking(true).is_err() {
         return None;
     }
@@ -615,7 +657,7 @@ fn admit(stream: UnixStream) -> Option<Client> {
     Some(Client {
         stream,
         buffer: Vec::new(),
-        since: Instant::now(),
+        since: now,
     })
 }
 
@@ -668,17 +710,19 @@ fn finished(client: &mut Client) -> Frame {
 }
 
 /// Charge one finished connection to exactly one counter, and deliver the one
-/// outcome that has somewhere to go.
+/// outcome that has somewhere to go; `now` is the endpoint's clock's reading,
+/// which the rate bound is charged at.
 fn account(
     frame: Frame,
     rate: &mut RateLimit,
+    now: Instant,
     counts: &Mutex<PipeCounts>,
     deliver: &(impl Fn(String) + Send + ?Sized),
 ) {
     match frame {
         Frame::Line(bytes) => {
             let mut counts = counts.lock().unwrap_or_else(PoisonError::into_inner);
-            if rate.admit(Instant::now()) {
+            if rate.admit(now) {
                 counts.delivered += 1;
                 drop(counts);
                 deliver(String::from_utf8_lossy(&bytes).into_owned());
@@ -710,7 +754,7 @@ fn account(
 /// drop: the server reads until the peer's half of the connection goes, so the
 /// shutdown is a statement of the protocol and not a tidying-up.
 ///
-/// There is no busy wait here and no `CLIENT_BUSY_WAIT_MS`, because there is
+/// There is no busy wait here and no `CLIENT_BUSY_WAIT`, because there is
 /// nothing to be busy: a named pipe serves one client per instance and can
 /// answer `ERROR_PIPE_BUSY`, while a listener has a backlog and `connect`
 /// succeeds against a live endpoint whatever it is in the middle of. The
@@ -855,7 +899,28 @@ pub fn unguessable_bits() -> u128 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::launch_conversation::{CountedClock, Turn};
     use std::sync::mpsc;
+
+    /// **An endpoint for `directory` on `clock`**, delivering into the channel
+    /// it hands back — read with the suite's patience
+    /// ([`crate::door_skipped::received`]), never a real bound of its own
+    /// (T-ATTENTION-ENDPOINT-WAITS-ON-A-CLOCK).
+    fn served_on(
+        directory: &Path,
+        clock: &Arc<CountedClock>,
+    ) -> (AttentionPipe, mpsc::Receiver<String>) {
+        let (sender, heard) = mpsc::channel();
+        let endpoint = AttentionPipe::start_on(
+            directory,
+            Arc::clone(clock) as Arc<dyn LaunchClock>,
+            move |line| {
+                let _ = sender.send(line);
+            },
+        )
+        .expect("open the attention endpoint");
+        (endpoint, heard)
+    }
 
     /// A data directory no other test in this process is using, so two of them
     /// can run at once — and one that really exists, because the endpoint's name
@@ -880,21 +945,22 @@ mod tests {
     ///
     /// MUTATION: deliver on the first read rather than on the peer's close and a
     /// line split across two writes arrives in halves.
+    ///
+    /// The endpoint's wait is on a clock that awaits the other end
+    /// (T-ATTENTION-ENDPOINT-WAITS-ON-A-CLOCK), so a caller descheduled between
+    /// its connect and its write is waited for within the suite's patience
+    /// rather than inside a real 250 ms.
     #[test]
     fn a_line_crosses_the_endpoint_and_the_same_value_arrives() {
         let directory = scratch(line!());
-        let (sender, heard) = mpsc::channel();
-        let endpoint = AttentionPipe::start(&directory, move |line| {
-            let _ = sender.send(line);
-        })
-        .expect("open the attention endpoint");
+        let (endpoint, heard) = served_on(&directory, &Arc::new(CountedClock::answering()));
         post(
             endpoint.name(),
             "raise claude-code:PermissionRequest cap=abc",
         );
         assert_eq!(
-            heard.recv_timeout(Duration::from_secs(5)).ok().as_deref(),
-            Some("raise claude-code:PermissionRequest cap=abc")
+            crate::door_skipped::received(&heard, "the endpoint's delivery"),
+            "raise claude-code:PermissionRequest cap=abc"
         );
         assert_eq!(
             endpoint.counts().delivered,
@@ -911,16 +977,18 @@ mod tests {
     /// only that the arithmetic has to come out. A connection that says nothing
     /// and one that says too much are the two refusals a single process can
     /// stand both sides of.
+    ///
+    /// The endpoint's wait is on a clock that awaits the other end
+    /// (T-ATTENTION-ENDPOINT-WAITS-ON-A-CLOCK). The counts are still polled: no
+    /// event says that the two refusals have been counted — one `poll` turn
+    /// serves the newest caller first — so the loop reads them within the
+    /// suite's patience (ruling R5, 2026-11-04).
     #[test]
     fn every_client_that_attaches_is_accounted_for() {
         let directory = scratch(line!());
-        let (sender, heard) = mpsc::channel();
-        let endpoint = AttentionPipe::start(&directory, move |line| {
-            let _ = sender.send(line);
-        })
-        .expect("open the attention endpoint");
+        let (endpoint, heard) = served_on(&directory, &Arc::new(CountedClock::answering()));
         post(endpoint.name(), "one");
-        assert!(heard.recv_timeout(Duration::from_secs(5)).is_ok());
+        crate::door_skipped::received(&heard, "the first caller's line");
 
         // A caller that connects and closes without a word.
         drop(UnixStream::connect(endpoint.name()).expect("connect and say nothing"));
@@ -935,7 +1003,7 @@ mod tests {
             let _ = stream.shutdown(std::net::Shutdown::Write);
         }
 
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + crate::door_skipped::PATIENCE;
         let counts = loop {
             let counts = endpoint.counts();
             if counts.accepted >= 3 && counts.silent >= 1 && counts.oversize >= 1 {
@@ -1150,7 +1218,9 @@ mod tests {
     }
 
     /// An endpoint whose listener stands inside `deliver` until the test lets it
-    /// go, and the flag `deliver` raises on its way out.
+    /// go, and the flag `deliver` raises on its way out. The endpoint's wait is
+    /// on a clock that awaits the other end (T-ATTENTION-ENDPOINT-WAITS-ON-A-CLOCK),
+    /// so the holding line reaches `deliver` whatever its thread's scheduling.
     fn a_held_endpoint(
         directory: &Path,
     ) -> (
@@ -1162,11 +1232,15 @@ mod tests {
         let (release, held) = mpsc::channel::<()>();
         let left = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let leaving = Arc::clone(&left);
-        let endpoint = AttentionPipe::start(directory, move |_line| {
-            let _ = entered.send(());
-            let _ = held.recv();
-            leaving.store(true, std::sync::atomic::Ordering::SeqCst);
-        })
+        let endpoint = AttentionPipe::start_on(
+            directory,
+            Arc::new(CountedClock::answering()),
+            move |_line| {
+                let _ = entered.send(());
+                let _ = held.recv();
+                leaving.store(true, std::sync::atomic::Ordering::SeqCst);
+            },
+        )
         .expect("open the attention endpoint");
         post(endpoint.name(), "hold");
         crate::door_skipped::received(&inside, "the listener inside `deliver`");
@@ -1252,5 +1326,71 @@ mod tests {
             "a listener held in its closure has not left within no time at all"
         );
         drop(release);
+    }
+
+    /// RED (T-ATTENTION-ENDPOINT-WAITS-ON-A-CLOCK) — **a caller that attaches and
+    /// says nothing is let go at its deadline, on the endpoint's clock.**
+    ///
+    /// The Windows test's twin. A client connects and holds its connection
+    /// silent; the endpoint's clock awaits the other end on every wait but the
+    /// first of [`READ_DEADLINE`], which it spends — the deadline runs out on
+    /// the count, not in real time — and tells the test. The next caller's line
+    /// is delivered after that, so the silent one has been swept: one silent,
+    /// one delivered, two attached, and the clock moved by exactly one deadline.
+    /// The silent caller's connection has been closed under it.
+    ///
+    /// MUTATION: read `admit`'s start on `Instant::now()` and the handed-clock
+    /// guard names it; `poll` with `-1` while a caller is in flight and the
+    /// deadline is never asked for, so the test fails at the suite's patience.
+    #[test]
+    fn a_caller_that_attaches_and_says_nothing_is_let_go_at_its_deadline_on_the_count() {
+        let directory = scratch(line!());
+        let (asked_for, deadline_asked) = mpsc::channel();
+        let mut spent = false;
+        let clock = Arc::new(CountedClock::new(move |_, bound| {
+            if bound == READ_DEADLINE && !spent {
+                spent = true;
+                let _ = asked_for.send(());
+                Turn::Spend
+            } else {
+                Turn::Await
+            }
+        }));
+        let (endpoint, heard) = served_on(&directory, &clock);
+        let mut silent = UnixStream::connect(endpoint.name()).expect("attach and say nothing");
+        crate::door_skipped::received(&deadline_asked, "the silent caller's read deadline");
+        post(endpoint.name(), "after");
+        assert_eq!(
+            crate::door_skipped::received(&heard, "the next caller's line"),
+            "after"
+        );
+        let counts = endpoint.counts();
+        assert_eq!(
+            (counts.accepted, counts.delivered, counts.silent),
+            (2, 1, 1),
+            "the silent caller is swept at its deadline and the next one is served: {counts:?}"
+        );
+        assert_eq!(
+            clock.moved(),
+            READ_DEADLINE,
+            "one deadline ran out, on the count"
+        );
+        let asked = clock.asked();
+        assert!(
+            asked.iter().all(|bound| *bound == READ_DEADLINE),
+            "every wait for a caller is its read deadline: {asked:?}"
+        );
+        let mut byte = [0u8; 1];
+        assert_eq!(
+            silent
+                .read(&mut byte)
+                .expect("read what the endpoint left on the silent connection"),
+            0,
+            "the endpoint let go of the silent caller"
+        );
+        assert!(
+            endpoint.retire_within(crate::door_skipped::PATIENCE),
+            "the listener left"
+        );
     }
 }
