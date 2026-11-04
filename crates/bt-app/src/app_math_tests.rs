@@ -971,18 +971,18 @@ fn one_video_texture_is_one_file_at_one_version_at_one_size() {
 /// `bt_compose`'s own typesetting tests).
 ///
 /// A guard: the lane is a worker thread's loop and its arms cannot be told apart by what they
-/// return. In `run_decoration_worker` the terminal formula's arm is the one `typeset` call, and the
-/// engine's own `render` is named once, by the preview formula's arm (a document formula, which
-/// is not this crate's terminal typesetting).
+/// return. In `run_decoration_worker_with` the terminal formula's arm is the one `typeset` call,
+/// and the engine's own `render` is named once, by the preview formula's arm (a document formula,
+/// which is not this crate's terminal typesetting).
 ///
 /// MUTATION: answer the `MathWorkerRequest::Math` arm with `engine.render(..)` instead of
 /// `bt_compose::typeset` — both assertions go red.
 #[test]
 fn the_lane_typesets_a_terminal_formula_through_the_composition_crate() {
     use crate::test_support::{free_fn_body, squeezed};
-    let lane = squeezed(free_fn_body("run_decoration_worker"));
+    let lane = squeezed(free_fn_body("run_decoration_worker_with"));
     assert_eq!(
-        lane.matches("bt_compose::typeset(&engine,&muttask,foreground_rgb)")
+        lane.matches("bt_compose::typeset(engine,&muttask,foreground_rgb)")
             .count(),
         1,
         "the terminal formula's arm typesets through the composition crate:\n{lane}"
