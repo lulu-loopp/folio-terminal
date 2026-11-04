@@ -207,9 +207,16 @@ windows::Win32::System::Threading::WaitForMultipleObjects	windows	waits for kern
 windows::Win32::System::Threading::WaitForMultipleObjectsEx	windows	waits for kernel objects, alertable
 windows::Win32::System::Threading::SignalObjectAndWait	windows	signals one kernel object and waits for another
 windows::Win32::System::Threading::SleepEx	windows	waits for a duration, alertable
+windows::Win32::UI::WindowsAndMessaging::MsgWaitForMultipleObjectsEx	windows	waits for kernel objects or a message to this thread, with no bound when the timeout is INFINITE (the product's site passes 500 ms)
+windows::Win32::System::IO::GetOverlappedResult	windows	waits for an overlapped operation when its wait flag is set; counted at every call, whatever the flag
+windows::Win32::System::IO::GetQueuedCompletionStatus	windows	waits for a completion packet, with no bound when the timeout is INFINITE
+windows::Win32::System::Pipes::WaitNamedPipeW	windows	waits for a pipe instance to come free, with no bound when the timeout is NMPWAIT_WAIT_FOREVER (the product's site passes 100 ms)
 windows::Win32::System::Threading::SetEvent	windows	counted by call site, does not wait
 windows::Win32::Foundation::CloseHandle	windows	counted by call site, does not wait
 windows::Win32::Storage::FileSystem::GetDriveTypeW	windows	counted by call site, does not wait
+libc::poll	macos	waits for a descriptor, with no bound when the timeout is -1
+libc::waitpid	macos	waits for a child process
+libc::waitid	macos	waits for a child process unless WNOHANG is set; counted at every call, whatever the flag
 libc::write	macos	counted by call site, does not wait
 libc::close	macos	counted by call site, does not wait
 

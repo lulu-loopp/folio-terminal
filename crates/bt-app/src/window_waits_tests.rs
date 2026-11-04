@@ -9982,6 +9982,108 @@ fn a_wait_through_a_verb_from_blocking_outside_a_door_is_a_bare_site() {
     );
 }
 
+/// A planted crate with a site of every wait plan row 181 added to the vocabulary:
+/// `GetOverlappedResult` imported and called bare, and called by its whole path, each with its wait
+/// flag `true`, `false` and a variable; `MsgWaitForMultipleObjectsEx`, `GetQueuedCompletionStatus`
+/// and `WaitNamedPipeW` by their whole paths only (the product imports them and calls them bare,
+/// the shape `GetOverlappedResult` stands for here); `libc::poll` and `libc::waitid` by path, and
+/// `waitpid` imported and called bare. `polls_its_own` calls a first-party `poll` bare and a
+/// first-party method `poll` (the control).
+const PLANTED_WAITS_IN_NEITHER_LIST: &str = "
+use windows::Win32::System::IO::GetOverlappedResult;
+use libc::waitpid;
+pub struct Pump;
+impl Pump { pub fn poll(&self) {} }
+pub fn poll() {}
+pub fn overlapped_bare(h: Handle, o: &Overlapped, n: &mut u32, flag: bool) {
+let _ = unsafe { GetOverlappedResult(h, o, n, true) };
+let _ = unsafe { GetOverlappedResult(h, o, n, false) };
+let _ = unsafe { GetOverlappedResult(h, o, n, flag) };
+}
+pub fn overlapped_by_path(h: Handle, o: &Overlapped, n: &mut u32, flag: bool) {
+let _ = unsafe { windows::Win32::System::IO::GetOverlappedResult(h, o, n, true) };
+let _ = unsafe { windows::Win32::System::IO::GetOverlappedResult(h, o, n, false) };
+let _ = unsafe { windows::Win32::System::IO::GetOverlappedResult(h, o, n, flag) };
+}
+pub fn message_wait(d: u32) {
+let _ = unsafe { windows::Win32::UI::WindowsAndMessaging::MsgWaitForMultipleObjectsEx(None, d, Mask, Flags) };
+}
+pub fn port_and_pipe(h: Handle, n: &mut u32, k: &mut usize, o: &mut Packet, name: Name, d: u32) {
+let _ = unsafe { windows::Win32::System::IO::GetQueuedCompletionStatus(h, n, k, o, d) };
+let _ = unsafe { windows::Win32::System::Pipes::WaitNamedPipeW(name, d) };
+}
+pub fn unix_waits(f: &mut [Fd], p: i32, s: &mut i32, i: &mut Info) {
+let _ = unsafe { libc::poll(f.as_mut_ptr(), 1, -1) };
+let _ = unsafe { libc::waitid(0, 0, i, 0) };
+let _ = unsafe { waitpid(p, s, 0) };
+}
+pub fn polls_its_own(pump: &Pump) {
+poll();
+pump.poll();
+}
+";
+
+/// RED (T-WAITS-IN-NEITHER-LIST, plan row 181) — **a wait neither the vocabulary nor
+/// bt-source's `BLOCKING` named before row 181 is a bare site outside a door, imported and bare or
+/// by its whole path, and a flag that makes the call return at once does not take it out**
+/// (ruling R1: `GetOverlappedResult` and `libc::waitid` are counted at every call, whatever their
+/// flag, as the A2e lint will ban every call).
+///
+/// Against the planted crate ([`PLANTED_WAITS_IN_NEITHER_LIST`]): `overlapped_bare` and
+/// `overlapped_by_path` hold three `GetOverlappedResult` sites each (flag `true`, `false`, a
+/// variable); `message_wait`, `port_and_pipe` and `unix_waits` one site of each of their calls,
+/// `waitpid` imported and called bare; `polls_its_own`, which calls only first-party `poll`s,
+/// holds none (the control).
+///
+/// MUTATION: delete the registry's `windows::Win32::System::IO::GetOverlappedResult` line and
+/// `overlapped_bare`'s and `overlapped_by_path`'s sites leave the inventory; delete the
+/// `libc::waitpid` line and `unix_waits`' imported site leaves it.
+#[test]
+fn a_wait_neither_list_named_is_a_bare_site_whatever_its_flag() {
+    let world = planted_world("ww-neither-list", PLANTED_WAITS_IN_NEITHER_LIST);
+    let (bare, _, _) = vocabulary_sites_in(&world, &[]);
+    let mine: BTreeMap<(&str, &str), usize> = bare
+        .iter()
+        .filter(|((package, _, _, _), _)| package == "planted")
+        .map(|((_, _, item, entry), count)| ((item.as_str(), entry.as_str()), *count))
+        .collect();
+    let overlapped = "windows::Win32::System::IO::GetOverlappedResult";
+    let wanted: BTreeMap<(&str, &str), usize> = [
+        (("crate::overlapped_bare", overlapped), 3),
+        (("crate::overlapped_by_path", overlapped), 3),
+        (
+            (
+                "crate::message_wait",
+                "windows::Win32::UI::WindowsAndMessaging::MsgWaitForMultipleObjectsEx",
+            ),
+            1,
+        ),
+        (
+            (
+                "crate::port_and_pipe",
+                "windows::Win32::System::IO::GetQueuedCompletionStatus",
+            ),
+            1,
+        ),
+        (
+            (
+                "crate::port_and_pipe",
+                "windows::Win32::System::Pipes::WaitNamedPipeW",
+            ),
+            1,
+        ),
+        (("crate::unix_waits", "libc::poll"), 1),
+        (("crate::unix_waits", "libc::waitid"), 1),
+        (("crate::unix_waits", "libc::waitpid"), 1),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(
+        mine, wanted,
+        "the planted waits are not the bare sites they are (and `polls_its_own` holds none)"
+    );
+}
+
 /// A planted crate with a wait in a function gated on a feature no product build sets, the same
 /// wait in one gated on a feature the product build sets, and in an ungated one (the control).
 const PLANTED_TEST_ONLY_FEATURE_SITE: &str = "

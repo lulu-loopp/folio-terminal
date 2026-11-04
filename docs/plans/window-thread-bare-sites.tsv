@@ -31,6 +31,24 @@
 ##   bt-platform | [windows] | crate::exit_witness::ExitWitness::ended_within | windows::Win32::System::Threading::WaitForSingleObject
 ##   bt-platform | [windows] | crate::install_flip::imp::creation_of | windows::Win32::System::Threading::WaitForSingleObject
 ##   bt-platform | [windows] | crate::probe_leader_has_exited | windows::Win32::System::Threading::WaitForSingleObject
+## Revealed 2026-11-02 by T-WAITS-IN-NEITHER-LIST (plan row 181): waits that neither the vocabulary nor bt-source's request-door `BLOCKING` list named (`GetOverlappedResult` and `libc::waitid` counted at every call, whatever the flag); sites that were there before them.
+##   bt-platform | [unix] | crate::ProbeChild::suspended | libc::waitid
+##   bt-platform | [unix] | crate::attention_pipe::listen | libc::poll
+##   bt-platform | [unix] | crate::launch_pipe::listen | libc::poll
+##   bt-platform | [unix] | crate::probe_leader_has_exited | libc::waitid
+##   bt-platform | [unix] | crate::reap_probe_leader | libc::waitpid
+##   bt-platform | [windows] | crate::ProbePipeEnd::read_once | windows::Win32::System::IO::GetOverlappedResult
+##   bt-platform | [windows] | crate::attention_pipe::Instance::complete_read | windows::Win32::System::IO::GetOverlappedResult
+##   bt-platform | [windows] | crate::attention_pipe::Instance::settle | windows::Win32::System::IO::GetOverlappedResult
+##   bt-platform | [windows] | crate::attention_pipe::open_client | windows::Win32::System::Pipes::WaitNamedPipeW
+##   bt-platform | [windows] | crate::attention_pipe::write_bounded | windows::Win32::System::IO::GetOverlappedResult
+##   bt-platform | [windows] | crate::elevated_pipe::finish | windows::Win32::System::IO::GetOverlappedResult
+##   bt-platform | [windows] | crate::explorer_command::wait_for_a_message | windows::Win32::UI::WindowsAndMessaging::MsgWaitForMultipleObjectsEx
+##   bt-platform | [windows] | crate::launch_pipe::Instance::read_one | windows::Win32::System::IO::GetOverlappedResult
+##   bt-platform | [windows] | crate::launch_pipe::Instance::settle | windows::Win32::System::IO::GetOverlappedResult
+##   bt-platform | [windows] | crate::launch_pipe::read_reply | windows::Win32::System::IO::GetOverlappedResult
+##   bt-platform | [windows] | crate::windows_impl::set_loop | windows::Win32::System::IO::GetOverlappedResult
+##   bt-platform | [windows] | crate::windows_impl::set_loop | windows::Win32::System::IO::GetQueuedCompletionStatus
 crate	arm	item	entry	count
 bt-app	-	crate::FolioApp::recovered_from_a_lost_device	std::thread::sleep	1
 bt-app	-	crate::animation::AnimationStamp::of	std::fs::metadata	1
@@ -149,11 +167,13 @@ bt-platform	[target_os = "macos"]	crate::http::Exchange::wait	std::sync::Condvar
 bt-platform	[target_os = "macos"]	crate::install_txn::arm::<Os as Surface>::rename	std::fs::rename	1
 bt-platform	[target_os = "macos"]	crate::macos_files::recycle	std::fs::metadata	1
 bt-platform	[target_os = "macos"]	crate::macos_identity::arm::run	std::thread::sleep	1
+bt-platform	[unix]	crate::ProbeChild::suspended	libc::waitid	1
 bt-platform	[unix]	crate::attention_pipe::AttentionPipe::hang_up	libc::close	1
 bt-platform	[unix]	crate::attention_pipe::AttentionPipe::hang_up	libc::write	1
 bt-platform	[unix]	crate::attention_pipe::AttentionPipe::retire_within	std::thread::JoinHandle::join	1
 bt-platform	[unix]	crate::attention_pipe::AttentionPipe::start_on	libc::close	2
 bt-platform	[unix]	crate::attention_pipe::listen	libc::close	1
+bt-platform	[unix]	crate::attention_pipe::listen	libc::poll	1
 bt-platform	[unix]	crate::file_replace::carry_metadata	std::fs::metadata	1
 bt-platform	[unix]	crate::install_evidence::imp::owner_of	std::fs::metadata	1
 bt-platform	[unix]	crate::launch_pipe::LaunchPipe::hang_up	libc::close	1
@@ -161,6 +181,10 @@ bt-platform	[unix]	crate::launch_pipe::LaunchPipe::hang_up	libc::write	1
 bt-platform	[unix]	crate::launch_pipe::LaunchPipe::retire_within	std::thread::JoinHandle::join	1
 bt-platform	[unix]	crate::launch_pipe::LaunchPipe::start_on	libc::close	2
 bt-platform	[unix]	crate::launch_pipe::listen	libc::close	1
+bt-platform	[unix]	crate::launch_pipe::listen	libc::poll	1
+bt-platform	[unix]	crate::probe_leader_has_exited	libc::waitid	1
+bt-platform	[unix]	crate::reap_probe_leader	libc::waitpid	1
+bt-platform	[windows]	crate::ProbePipeEnd::read_once	windows::Win32::System::IO::GetOverlappedResult	1
 bt-platform	[windows]	crate::ProbePipeEnd::read_once	windows::Win32::System::Threading::WaitForMultipleObjects	1
 bt-platform	[windows]	crate::attention_pipe::<Overlapped as Drop>::drop	windows::Win32::Foundation::CloseHandle	1
 bt-platform	[windows]	crate::attention_pipe::<OwnedHandle as Drop>::drop	windows::Win32::Foundation::CloseHandle	1
@@ -170,10 +194,16 @@ bt-platform	[windows]	crate::attention_pipe::AttentionPipe::start_on	std::thread
 bt-platform	[windows]	crate::attention_pipe::AttentionPipe::start_on	windows::Win32::Foundation::CloseHandle	2
 bt-platform	[windows]	crate::attention_pipe::AttentionPipe::start_on	windows::Win32::System::Threading::SetEvent	1
 bt-platform	[windows]	crate::attention_pipe::AttentionPipe::stop_listening	windows::Win32::System::Threading::SetEvent	1
+bt-platform	[windows]	crate::attention_pipe::Instance::complete_read	windows::Win32::System::IO::GetOverlappedResult	1
+bt-platform	[windows]	crate::attention_pipe::Instance::settle	windows::Win32::System::IO::GetOverlappedResult	1
 bt-platform	[windows]	crate::attention_pipe::listen	windows::Win32::System::Threading::WaitForMultipleObjects	1
+bt-platform	[windows]	crate::attention_pipe::open_client	windows::Win32::System::Pipes::WaitNamedPipeW	1
+bt-platform	[windows]	crate::attention_pipe::write_bounded	windows::Win32::System::IO::GetOverlappedResult	1
 bt-platform	[windows]	crate::attention_pipe::write_bounded	windows::Win32::System::Threading::WaitForMultipleObjects	1
+bt-platform	[windows]	crate::elevated_pipe::finish	windows::Win32::System::IO::GetOverlappedResult	1
 bt-platform	[windows]	crate::elevated_pipe::finish	windows::Win32::System::Threading::WaitForMultipleObjects	1
 bt-platform	[windows]	crate::exit_witness::ExitWitness::ended_within	windows::Win32::System::Threading::WaitForSingleObject	1
+bt-platform	[windows]	crate::explorer_command::wait_for_a_message	windows::Win32::UI::WindowsAndMessaging::MsgWaitForMultipleObjectsEx	1
 bt-platform	[windows]	crate::file_replace::carry_metadata	std::fs::metadata	1
 bt-platform	[windows]	crate::file_replace::rename_path	std::fs::rename	1
 bt-platform	[windows]	crate::file_replace::replace_keeping_backup_with	std::fs::metadata	1
@@ -184,6 +214,8 @@ bt-platform	[windows]	crate::install_flip::imp::creation_of	windows::Win32::Syst
 bt-platform	[windows]	crate::instance::<DataDirectoryClaim as Drop>::drop	windows::Win32::Foundation::CloseHandle	1
 bt-platform	[windows]	crate::instance::try_claim_data_directory	windows::Win32::Foundation::CloseHandle	1
 bt-platform	[windows]	crate::launch_pipe::Instance::arm_connect	windows::Win32::System::Threading::SetEvent	1
+bt-platform	[windows]	crate::launch_pipe::Instance::read_one	windows::Win32::System::IO::GetOverlappedResult	1
+bt-platform	[windows]	crate::launch_pipe::Instance::settle	windows::Win32::System::IO::GetOverlappedResult	1
 bt-platform	[windows]	crate::launch_pipe::Instance::wait_for_a_caller	windows::Win32::System::Threading::WaitForMultipleObjects	1
 bt-platform	[windows]	crate::launch_pipe::LaunchPipe::retire_within	std::thread::JoinHandle::join	1
 bt-platform	[windows]	crate::launch_pipe::LaunchPipe::retire_within	windows::Win32::Foundation::CloseHandle	1
@@ -191,6 +223,7 @@ bt-platform	[windows]	crate::launch_pipe::LaunchPipe::start_on	std::thread::Join
 bt-platform	[windows]	crate::launch_pipe::LaunchPipe::start_on	windows::Win32::Foundation::CloseHandle	2
 bt-platform	[windows]	crate::launch_pipe::LaunchPipe::start_on	windows::Win32::System::Threading::SetEvent	1
 bt-platform	[windows]	crate::launch_pipe::LaunchPipe::stop_listening	windows::Win32::System::Threading::SetEvent	1
+bt-platform	[windows]	crate::launch_pipe::read_reply	windows::Win32::System::IO::GetOverlappedResult	1
 bt-platform	[windows]	crate::launch_pipe::signalled_within	windows::Win32::System::Threading::WaitForMultipleObjects	1
 bt-platform	[windows]	crate::probe_leader_has_exited	windows::Win32::System::Threading::WaitForSingleObject	1
 bt-platform	[windows]	crate::process_image_path	windows::Win32::Foundation::CloseHandle	1
@@ -201,6 +234,8 @@ bt-platform	[windows]	crate::video::engine::can_play_types	std::thread::JoinHand
 bt-platform	[windows]	crate::video::within_budget	std::sync::mpsc::Receiver::recv_timeout	1
 bt-platform	[windows]	crate::windows_impl::close	windows::Win32::Foundation::CloseHandle	1
 bt-platform	[windows]	crate::windows_impl::directory_folds_case	windows::Win32::Foundation::CloseHandle	1
+bt-platform	[windows]	crate::windows_impl::set_loop	windows::Win32::System::IO::GetOverlappedResult	1
+bt-platform	[windows]	crate::windows_impl::set_loop	windows::Win32::System::IO::GetQueuedCompletionStatus	2
 bt-platform	[windows]	crate::windows_impl::write_to_console	windows::Win32::Foundation::CloseHandle	1
 bt-platform	[windows] [not(test)]	crate::handoff::windows_handoff::shell_execute_w	windows::Win32::UI::Shell::ShellExecuteW	1
 bt-pty	-	crate::InputRing::take	std::sync::Condvar::wait	1
