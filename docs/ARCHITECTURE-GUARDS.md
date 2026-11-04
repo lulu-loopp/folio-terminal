@@ -1237,6 +1237,25 @@ row 163 judged bt-platform's product kernel waits at `f641b0064` and recorded th
 window-thread bare-site gate, which every product call of those verbs answers to; a new socket or WinHTTP
 timeout in the product is review's.
 
+2026-11-04 (T-ATTENTION-ENDPOINT-WAITS-ON-A-CLOCK, 0.4.10 plan row 13, 0.4.9 row 192): the attention
+endpoint's three waits for the other end are `launch_conversation::LaunchClock`'s, its fifth user: the
+Windows listener's first word (`FIRST_WORD_WITHIN`, through `first_word_on`, which the launch endpoint
+shares), each attached caller's `READ_DEADLINE` on both platforms (the listener's one timed
+`WaitForMultipleObjects` or `poll` is a `LaunchClock::wait` while somebody is reading, and every reading of
+the deadline is the clock's, handed to the helpers as `now`), and the client's one wait past a busy
+endpoint inside `attention_pipe::open_client`. That last one is a kernel wait whose timeout is an argument,
+so the clock's bound goes inside `WaitNamedPipeW` (kept away from `0`, which is the pipe's default wait, and
+from `NMPWAIT_WAIT_FOREVER`) rather than a real 100 ms being counted around it: `LaunchClock::spent`, which
+counted the launch wire's busy waits after `open_client` had really made them (the 2026-11-01 paragraph
+above), is gone, and every caller of `open_client` (the attention verb, the launch handover, the elevated
+pane's host) passes its own clock. `AttentionPipe::start` and `send_line` are the real-clock doors over
+`start_on` and `send_line_on`, so their signatures, which are one on every arm, did not move. What stays on
+the real clock: the two 250 ms write deadlines (Windows `write_bounded`, Unix `WRITE_DEADLINE`), which
+buffering decides, not the endpoint; and bt-app's
+`attention_wire::tests::a_permission_request_crosses_the_endpoint_and_mints_an_episode`, which crosses the
+real endpoint from another crate and cannot be handed the crate-private clock without a product knob. Both
+are noted in TIMING-BOUND.
+
 ## Suite watchdog
 
 The rule: a test that hangs ends its run red within 300 s of its start, and is named, wherever a
