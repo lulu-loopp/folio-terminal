@@ -46,7 +46,9 @@
 //! [`ElevatedEndpoint::accept`] and [`connect_to_parent`], read it on
 //! `launch_conversation::RealClock`; a test hands a counted clock, so "the other end
 //! acted in time" and "the attempt ran out" are facts of the test, never a race
-//! between the real 15 s and a thread or child of the test.
+//! between the real 15 s and a thread or child of the test. The host's open of the
+//! parent's pipe makes its one wait past a busy endpoint on the attempt's clock too
+//! (`attention_pipe::open_client`, T-ATTENTION-ENDPOINT-WAITS-ON-A-CLOCK).
 
 use std::{ffi::OsStr, os::windows::ffi::OsStrExt as _, path::Path, time::Instant};
 
@@ -295,17 +297,21 @@ fn connect_to_parent_on(
     line: &HostLine,
     attempt: Attempt<'_>,
 ) -> Result<HostConnection, HandshakeFailure> {
-    let pipe =
-        open_client(&wide(&line.pipe_name), (GENERIC_READ | GENERIC_WRITE).0).map_err(|error| {
-            match error.raw_os_error().map(|code| code as u32) {
-                Some(code) if code == ERROR_FILE_NOT_FOUND.0 => HandshakeFailure::NoEndpoint,
-                // `open_client` answers without an OS code only when the pipe stayed busy.
-                code => HandshakeFailure::Os {
-                    call: "CreateFileW",
-                    code: code.unwrap_or(ERROR_PIPE_BUSY.0),
-                },
-            }
-        })?;
+    let pipe = open_client(
+        &wide(&line.pipe_name),
+        (GENERIC_READ | GENERIC_WRITE).0,
+        attempt.clock,
+    )
+    .map_err(|error| {
+        match error.raw_os_error().map(|code| code as u32) {
+            Some(code) if code == ERROR_FILE_NOT_FOUND.0 => HandshakeFailure::NoEndpoint,
+            // `open_client` answers without an OS code only when the pipe stayed busy.
+            code => HandshakeFailure::Os {
+                call: "CreateFileW",
+                code: code.unwrap_or(ERROR_PIPE_BUSY.0),
+            },
+        }
+    })?;
     let mode = PIPE_READMODE_MESSAGE;
     // SAFETY: `pipe` is this call's client handle and `mode` a live local.
     unsafe { SetNamedPipeHandleState(pipe.0, Some(&raw const mode), None, None) }.map_err(
@@ -1148,7 +1154,7 @@ mod tests {
         let endpoint = ElevatedEndpoint::create().expect("an endpoint");
         let name = endpoint.host_line().pipe_name.clone();
         let forger = std::thread::spawn(move || {
-            let pipe = open_client(&wide(&name), (GENERIC_READ | GENERIC_WRITE).0)
+            let pipe = open_client(&wide(&name), (GENERIC_READ | GENERIC_WRITE).0, &RealClock)
                 .expect("the forger connects");
             let mode = PIPE_READMODE_MESSAGE;
             // SAFETY: a connected client handle and a live local.
