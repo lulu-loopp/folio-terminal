@@ -446,9 +446,10 @@ fn split_beside(
 
 /// Whether `site` is written in a closure literal handed to one of `calls` (by their sites).
 fn handed_to_one_of(site: &CallSite, calls: &BTreeSet<Span>) -> bool {
-    site.closures
-        .iter()
-        .any(|open| open.handed.is_some_and(|handed| calls.contains(&handed.call)))
+    site.closures.iter().any(|open| {
+        open.handed
+            .is_some_and(|handed| calls.contains(&handed.call))
+    })
 }
 
 /// The first-party item an edge calls: a resolved item, or an `Ambiguous` edge's one candidate.
@@ -1905,10 +1906,7 @@ fn every_shape_a_cut_does_not_read_is_refused() {
         .collect();
     assert_eq!(
         unmet,
-        [
-            "Unmet spawn@0",
-            "Unmet std::sync::Condvar::notify_one",
-        ]
+        ["Unmet spawn@0", "Unmet std::sync::Condvar::notify_one",]
     );
 }
 
@@ -1936,7 +1934,9 @@ fn a_cut_row_is_read_whole_or_refused_by_its_line() {
         )]
     );
     assert_eq!(
-        fixture_refusals(&with("gesture\tgesture_enqueue\tgesture_answer\t2026-11-02: planted")),
+        fixture_refusals(&with(
+            "gesture\tgesture_enqueue\tgesture_answer\t2026-11-02: planted"
+        )),
         [format!(
             "window_waits.tsv:{}: `gesture` is cut on two rows",
             first + 1
@@ -1950,10 +1950,14 @@ fn a_cut_row_is_read_whole_or_refused_by_its_line() {
     );
     assert_eq!(
         fixture_refusals(&with("submit\t—\tLane::offer\t2026-11-02: planted")),
-        [format!("window_waits.tsv:{first}: `submit`'s cut names no enqueue")]
+        [format!(
+            "window_waits.tsv:{first}: `submit`'s cut names no enqueue"
+        )]
     );
     assert_eq!(
-        fixture_refusals(&with("submit\tLane::offer\tLane::offer\t2026-11-02: planted")),
+        fixture_refusals(&with(
+            "submit\tLane::offer\tLane::offer\t2026-11-02: planted"
+        )),
         [format!(
             "window_waits.tsv:{first}: `submit`'s cut names `Lane::offer` in both `enqueue` and \
              `beside`"
@@ -1974,7 +1978,10 @@ fn a_standard_spawn_names_its_closure_argument_from_the_table() {
     let row = "submit_on_a_builder\twindow\tstd::sync::Condvar::notify_one, std::thread::Builder::spawn@0";
     let bare = registry.replacen(row, &row.replacen("spawn@0", "spawn", 1), 1);
     assert_eq!(
-        unread(&fixture_walk(&bare, "submit_on_a_builder"), &fixture_reviewed()),
+        unread(
+            &fixture_walk(&bare, "submit_on_a_builder"),
+            &fixture_reviewed()
+        ),
         ["WorkerBody bt-rd crate::Lane::serve"]
     );
     let line = registry

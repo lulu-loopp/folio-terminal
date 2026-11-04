@@ -10977,10 +10977,9 @@ fn request_door_cut_failures(lines: &[Vec<&str>], cuts: &[Vec<&str>]) -> Vec<Str
         let dated = cells[3].split_once(": ").is_some_and(|(date, why)| {
             let parts: Vec<&str> = date.split('-').collect();
             parts.len() == 3
-                && [4, 2, 2]
-                    .iter()
-                    .zip(&parts)
-                    .all(|(len, part)| part.len() == *len && part.bytes().all(|b| b.is_ascii_digit()))
+                && [4, 2, 2].iter().zip(&parts).all(|(len, part)| {
+                    part.len() == *len && part.bytes().all(|b| b.is_ascii_digit())
+                })
                 && !why.trim().is_empty()
         });
         if !dated {
@@ -11013,7 +11012,12 @@ fn every_request_door_cut_is_a_walked_doors() {
         request_door_cut_failures(&lines, &cuts)
     };
     assert_eq!(
-        planted(vec!["main", "Runtime::hand_off", "—", "2026-11-02: planted"]),
+        planted(vec![
+            "main",
+            "Runtime::hand_off",
+            "—",
+            "2026-11-02: planted"
+        ]),
         ["`main` is cut and is no `# request-doors` line asked on the window"]
     );
     assert_eq!(
@@ -11026,7 +11030,12 @@ fn every_request_door_cut_is_a_walked_doors() {
         ["`Runtime::hand_off` has two `# request-door-cuts` lines"]
     );
     assert_eq!(
-        planted(vec!["Runtime::submit_clipboard_write", "Runtime::ask_the_clipboard", "—", "planted"]),
+        planted(vec![
+            "Runtime::submit_clipboard_write",
+            "Runtime::ask_the_clipboard",
+            "—",
+            "planted"
+        ]),
         ["`Runtime::submit_clipboard_write`'s cut reason is not dated `YYYY-MM-DD: why`"]
     );
 }
