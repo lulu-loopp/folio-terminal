@@ -152,7 +152,7 @@ bt-platform	[target_os = "macos"]	crate::macos_identity::arm::run	std::thread::s
 bt-platform	[unix]	crate::attention_pipe::AttentionPipe::hang_up	libc::close	1
 bt-platform	[unix]	crate::attention_pipe::AttentionPipe::hang_up	libc::write	1
 bt-platform	[unix]	crate::attention_pipe::AttentionPipe::retire_within	std::thread::JoinHandle::join	1
-bt-platform	[unix]	crate::attention_pipe::AttentionPipe::start	libc::close	2
+bt-platform	[unix]	crate::attention_pipe::AttentionPipe::start_on	libc::close	2
 bt-platform	[unix]	crate::attention_pipe::listen	libc::close	1
 bt-platform	[unix]	crate::file_replace::carry_metadata	std::fs::metadata	1
 bt-platform	[unix]	crate::install_evidence::imp::owner_of	std::fs::metadata	1
@@ -166,9 +166,9 @@ bt-platform	[windows]	crate::attention_pipe::<Overlapped as Drop>::drop	windows:
 bt-platform	[windows]	crate::attention_pipe::<OwnedHandle as Drop>::drop	windows::Win32::Foundation::CloseHandle	1
 bt-platform	[windows]	crate::attention_pipe::AttentionPipe::retire_within	std::thread::JoinHandle::join	1
 bt-platform	[windows]	crate::attention_pipe::AttentionPipe::retire_within	windows::Win32::Foundation::CloseHandle	1
-bt-platform	[windows]	crate::attention_pipe::AttentionPipe::start	std::thread::JoinHandle::join	2
-bt-platform	[windows]	crate::attention_pipe::AttentionPipe::start	windows::Win32::Foundation::CloseHandle	2
-bt-platform	[windows]	crate::attention_pipe::AttentionPipe::start	windows::Win32::System::Threading::SetEvent	1
+bt-platform	[windows]	crate::attention_pipe::AttentionPipe::start_on	std::thread::JoinHandle::join	2
+bt-platform	[windows]	crate::attention_pipe::AttentionPipe::start_on	windows::Win32::Foundation::CloseHandle	2
+bt-platform	[windows]	crate::attention_pipe::AttentionPipe::start_on	windows::Win32::System::Threading::SetEvent	1
 bt-platform	[windows]	crate::attention_pipe::AttentionPipe::stop_listening	windows::Win32::System::Threading::SetEvent	1
 bt-platform	[windows]	crate::attention_pipe::listen	windows::Win32::System::Threading::WaitForMultipleObjects	1
 bt-platform	[windows]	crate::attention_pipe::write_bounded	windows::Win32::System::Threading::WaitForMultipleObjects	1
