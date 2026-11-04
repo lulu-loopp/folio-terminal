@@ -4,7 +4,7 @@
 # name) with the number of calls behind it. Held equal to the tree by bt-source's call_graph test;
 # shrink-only against the merge base by scripts/ci/check-unfollowed-edges.ps1 - a key added or grown
 # carries a reason 'YYYY-MM-DD: <why>'. Never edit a key or a count by hand.
-# Ambiguous calls with exactly one candidate, not listed by site above or below (bt_source::call_graph::Unresolved::sole_candidate; a guard naming a callee's callers counts each as a call of its one candidate): 1734. A call whose name is renamed to one only one item declares leaves the list and is counted here.
+# Ambiguous calls with exactly one candidate, not listed by site above or below (bt_source::call_graph::Unresolved::sole_candidate; a guard naming a callee's callers counts each as a call of its one candidate): 1727. A call whose name is renamed to one only one item declares leaves the list and is counted here.
 file	item	kind	name	sites	reason
 crates/bt-app/src/agent_resume.rs	bt-app crate::agent_resume::AgentAccount::saved_profile	Ambiguous	unwrap_or	1	2026-11-03: T-AGENT-RESUME-AFTER-RESTART (plan row 195); the profile the layout writes for an agent pane: the hand-back's shell or the pane's own (Option::unwrap_or on the account's own field); an in-memory read of values the call already holds, no wait
 crates/bt-app/src/agent_resume.rs	bt-app crate::agent_resume::AgentAccount::take_not_started	Ambiguous	then	1	2026-11-03: T-AGENT-RESUME-AFTER-RESTART (plan row 195, review folds); a resume that was started nowhere (its folder gone, review F3) is answered once as the agent's end (bool::then over the account's own flag, into child_ended); an in-memory read of values the call already holds, no wait
@@ -557,6 +557,7 @@ crates/bt-app/src/computation_lane.rs	bt-app crate::computation_lane::FormulaEng
 crates/bt-app/src/computation_lane.rs	bt-app crate::computation_lane::ShareOf::ask	Ambiguous	insert	1	
 crates/bt-app/src/computation_lane.rs	bt-app crate::computation_lane::ShareOf::ended	Ambiguous	collect	1	
 crates/bt-app/src/computation_lane.rs	bt-app crate::computation_lane::ShareOf::ended	Ambiguous	filter_map	1	
+crates/bt-app/src/computation_lane.rs	bt-app crate::computation_lane::ShareOf::ended	Ambiguous	iter_mut	1	2026-11-03: T-LATE-BUILT-VIDEO-RETIRED-AS-UNPLAYABLE (plan row 189); not this site's change: row 189 declares VideoSeats::iter_mut, a second item of that name, so this iter_mut call over the caller's own collection is no longer a sole candidate and is listed by site; an in-memory iterator, no wait
 crates/bt-app/src/computation_lane.rs	bt-app crate::computation_lane::ShareOf::ended	Ambiguous	remove	1	
 crates/bt-app/src/computation_lane.rs	bt-app crate::computation_lane::ShareOf::ended	Ambiguous	take	1	2026-10-31: T-LANE-DRAIN-MARK-GUARD (plan row 110): the share's drain takes each held request under its mark (lane::Request::take) or, past it, through the named door take_superseded_past, where it took through take_if; the request comes from the share's held map behind lane::locked's MutexGuard, a receiver the rules do not type, and three lanes' types declare a take
 crates/bt-app/src/computation_lane.rs	bt-app crate::computation_lane::ShareOf::let_go	Ambiguous	collect	2	
@@ -1190,6 +1191,7 @@ crates/bt-app/src/git_mutation_lane.rs	bt-app crate::git_mutation_lane::GitMutat
 crates/bt-app/src/git_mutation_lane.rs	bt-app crate::git_mutation_lane::GitMutationLane::start_with	Dynamic	wake	1	
 crates/bt-app/src/git_mutation_lane.rs	bt-app crate::git_mutation_lane::OpenPages::file	Dynamic	sink	1	
 crates/bt-app/src/git_mutation_lane.rs	bt-app crate::git_mutation_lane::ReadTicket::begin	Ambiguous	find	1	
+crates/bt-app/src/git_mutation_lane.rs	bt-app crate::git_mutation_lane::ReadTicket::begin	Ambiguous	iter_mut	1	2026-11-03: T-LATE-BUILT-VIDEO-RETIRED-AS-UNPLAYABLE (plan row 189); not this site's change: row 189 declares VideoSeats::iter_mut, a second item of that name, so this iter_mut call over the caller's own collection is no longer a sole candidate and is listed by site; an in-memory iterator, no wait
 crates/bt-app/src/git_mutation_lane.rs	bt-app crate::git_mutation_lane::ReadTicket::begin	Ambiguous	push	1	
 crates/bt-app/src/git_mutation_lane.rs	bt-app crate::git_mutation_lane::ReadTicket::begin	Ambiguous	retain	1	
 crates/bt-app/src/git_mutation_lane.rs	bt-app crate::git_mutation_lane::RepoTurns::ask	Ambiguous	and_then	1	
@@ -1720,6 +1722,7 @@ crates/bt-app/src/lane.rs	bt-app crate::lane::Coalescing::count_arrivals	Ambiguo
 crates/bt-app/src/lane.rs	bt-app crate::lane::Coalescing::count_arrivals	Ambiguous	map_or	1	
 crates/bt-app/src/lane.rs	bt-app crate::lane::Coalescing::ended	Ambiguous	collect	1	
 crates/bt-app/src/lane.rs	bt-app crate::lane::Coalescing::ended	Ambiguous	filter_map	1	
+crates/bt-app/src/lane.rs	bt-app crate::lane::Coalescing::ended	Ambiguous	iter_mut	1	2026-11-03: T-LATE-BUILT-VIDEO-RETIRED-AS-UNPLAYABLE (plan row 189); not this site's change: row 189 declares VideoSeats::iter_mut, a second item of that name, so this iter_mut call over the caller's own collection is no longer a sole candidate and is listed by site; an in-memory iterator, no wait
 crates/bt-app/src/lane.rs	bt-app crate::lane::Coalescing::ended	Ambiguous	remove	1	
 crates/bt-app/src/lane.rs	bt-app crate::lane::Coalescing::ended	Ambiguous	take	1	
 crates/bt-app/src/lane.rs	bt-app crate::lane::Coalescing::ended	Ambiguous	take_while	1	
@@ -2575,6 +2578,7 @@ crates/bt-app/src/preview.rs	bt-app crate::preview::StopKeeps::keep	Ambiguous	co
 crates/bt-app/src/preview.rs	bt-app crate::preview::StopKeeps::keep	Ambiguous	extend	1	2026-10-21: T-QUIT-AND-STOP-SAVES; a standard-library combinator on an Option, an iterator, a slice or a string, which calls no door
 crates/bt-app/src/preview.rs	bt-app crate::preview::StopKeeps::keep	Ambiguous	filter_map	1	2026-10-21: T-QUIT-AND-STOP-SAVES; a standard-library combinator on an Option, an iterator, a slice or a string, which calls no door
 crates/bt-app/src/preview.rs	bt-app crate::preview::StopKeeps::keep	Ambiguous	flat_map	1	2026-10-21: T-QUIT-AND-STOP-SAVES; a standard-library combinator on an Option, an iterator, a slice or a string, which calls no door
+crates/bt-app/src/preview.rs	bt-app crate::preview::StopKeeps::keep	Ambiguous	iter_mut	2	2026-11-03: T-LATE-BUILT-VIDEO-RETIRED-AS-UNPLAYABLE (plan row 189); not this site's change: row 189 declares VideoSeats::iter_mut, a second item of that name, so this iter_mut call over the caller's own collection is no longer a sole candidate and is listed by site; an in-memory iterator, no wait
 crates/bt-app/src/preview.rs	bt-app crate::preview::StopKeeps::keep	Ambiguous	refusal	1	2026-10-21: T-ENDSESSION-SAVES review; `preview::SaveOutcome::refusal`, a match over a save's answer that answers its sentence, which calls no door
 crates/bt-app/src/preview.rs	bt-app crate::preview::claimed_runs	Ambiguous	find	2	
 crates/bt-app/src/preview.rs	bt-app crate::preview::claimed_runs	Ambiguous	map	2	
@@ -4290,7 +4294,6 @@ crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::no
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::note_video_hover	Ambiguous	is_some_and	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::open_crumb_draft	Ambiguous	then	1	2026-10-26: T-SPLIT-2B batch 21; the same site, moved by K2 batch 21 with `open_crumb_draft` from main.rs into runtime/preview.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::open_preview_link	Ambiguous	map	1	
-crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::play_video_file_on	Ambiguous	text	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::pop_out_preview	Ambiguous	then_some	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::present_retained_picture	Ambiguous	find	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::present_retained_picture	Ambiguous	iter	1	
@@ -4738,6 +4741,7 @@ crates/bt-app/src/runtime/web.rs	bt-app crate::runtime::web::Runtime::web_sheet_
 crates/bt-app/src/runtime/web.rs	bt-app crate::runtime::web::page_destination	Ambiguous	ok	1	2026-10-26: T-SPLIT-2B batch 17; the same site, moved by K2 batch 17 with `page_destination` from main.rs into runtime/web.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/web.rs	bt-app crate::runtime::web::revived_page_of	Ambiguous	ok	1	2026-10-25: T-SPLIT-2B batch 2; the same site, moved with `revived_page_of` from main.rs into runtime/web.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::abandon_a_window_nothing_arrived_in	Ambiguous	enumerate	1	
+crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::abandon_a_window_nothing_arrived_in	Ambiguous	iter_mut	1	2026-11-03: T-LATE-BUILT-VIDEO-RETIRED-AS-UNPLAYABLE (plan row 189); not this site's change: row 189 declares VideoSeats::iter_mut, a second item of that name, so this iter_mut call over the caller's own collection is no longer a sole candidate and is listed by site; an in-memory iterator, no wait
 crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::answer_restore	Ambiguous	is_empty	1	
 crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::answer_restore	Ambiguous	saturating_sub	1	
 crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::close_as_it_stands	Ambiguous	map	1	
@@ -6731,7 +6735,6 @@ crates/bt-app/src/video_seat.rs	bt-app crate::video_seat::<VideoSeat as std::fmt
 crates/bt-app/src/video_seat.rs	bt-app crate::video_seat::<VideoSeat as std::fmt::Debug>::fmt	Ambiguous	finish_non_exhaustive	1	
 crates/bt-app/src/video_seat.rs	bt-app crate::video_seat::BarLayout::slot_at	Dynamic	hit	2	
 crates/bt-app/src/video_seat.rs	bt-app crate::video_seat::VideoSeat::bar_deadline	Ambiguous	into_iter	1	
-crates/bt-app/src/video_seat.rs	bt-app crate::video_seat::VideoSeat::open	Ambiguous	play	1	
 crates/bt-app/src/video_seat.rs	bt-app crate::video_seat::VideoSeat::pointer_left	Ambiguous	flatten	1	2026-10-23: T-VIDEO-POINTER-AND-KEYS; a standard-library method (Option, bool, Iterator, Result, str, f32/f64) on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/video_seat.rs	bt-app crate::video_seat::VideoSeat::pointer_moved	Ambiguous	flatten	1	2026-10-23: T-VIDEO-POINTER-AND-KEYS; a standard-library method (Option, bool, Iterator, Result, str, f32/f64) on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/video_seat.rs	bt-app crate::video_seat::VideoSeat::seek_end	Ambiguous	is_finite	1	2026-10-23: T-VIDEO-POINTER-AND-KEYS; a standard-library method (Option, bool, Iterator, Result, str, f32/f64) on a receiver the grammar does not type, which reaches no door
@@ -7089,6 +7092,7 @@ crates/bt-detect/src/lib.rs	bt-detect crate::DetectionContext::required_start	Am
 crates/bt-detect/src/lib.rs	bt-detect crate::append_table_blocks	Ambiguous	any	2	
 crates/bt-detect/src/lib.rs	bt-detect crate::append_table_blocks	Ambiguous	get	2	
 crates/bt-detect/src/lib.rs	bt-detect crate::append_table_blocks	Ambiguous	iter	2	
+crates/bt-detect/src/lib.rs	bt-detect crate::append_table_blocks	Ambiguous	iter_mut	1	2026-11-03: T-LATE-BUILT-VIDEO-RETIRED-AS-UNPLAYABLE (plan row 189); not this site's change: row 189 declares VideoSeats::iter_mut, a second item of that name, so this iter_mut call over the caller's own collection is no longer a sole candidate and is listed by site; an in-memory iterator, no wait
 crates/bt-detect/src/lib.rs	bt-detect crate::append_table_blocks	Ambiguous	skip	1	
 crates/bt-detect/src/lib.rs	bt-detect crate::append_table_blocks	Ambiguous	take	1	
 crates/bt-detect/src/lib.rs	bt-detect crate::append_table_blocks	Ambiguous	unwrap_or	1	
@@ -9418,6 +9422,9 @@ crates/bt-platform/src/macos_player.rs	bt-platform crate::video::macos_player::E
 crates/bt-platform/src/macos_player.rs	bt-platform crate::video::macos_player::Engine::frame	Ambiguous	into_inner	1	
 crates/bt-platform/src/macos_player.rs	bt-platform crate::video::macos_player::Engine::frame	Ambiguous	unwrap_or_else	1	
 crates/bt-platform/src/macos_player.rs	bt-platform crate::video::macos_player::Engine::open	Ambiguous	clone	1	
+crates/bt-platform/src/macos_player.rs	bt-platform crate::video::macos_player::Engine::open_runs_out_at	Ambiguous	into_inner	1	2026-11-03: T-LATE-BUILT-VIDEO-RETIRED-AS-UNPLAYABLE (plan row 189); the first instant the engine's open budget is missed, for the wake the window books: the same reads Engine::state_at makes of the engine's shared state (its Mutex taken with poison recovery, Option::is_some on its error); a field read under the lock, no wait
+crates/bt-platform/src/macos_player.rs	bt-platform crate::video::macos_player::Engine::open_runs_out_at	Ambiguous	is_some	1	2026-11-03: T-LATE-BUILT-VIDEO-RETIRED-AS-UNPLAYABLE (plan row 189); the first instant the engine's open budget is missed, for the wake the window books: the same reads Engine::state_at makes of the engine's shared state (its Mutex taken with poison recovery, Option::is_some on its error); a field read under the lock, no wait
+crates/bt-platform/src/macos_player.rs	bt-platform crate::video::macos_player::Engine::open_runs_out_at	Ambiguous	unwrap_or_else	1	2026-11-03: T-LATE-BUILT-VIDEO-RETIRED-AS-UNPLAYABLE (plan row 189); the first instant the engine's open budget is missed, for the wake the window books: the same reads Engine::state_at makes of the engine's shared state (its Mutex taken with poison recovery, Option::is_some on its error); a field read under the lock, no wait
 crates/bt-platform/src/macos_player.rs	bt-platform crate::video::macos_player::Engine::state_at	Ambiguous	into_inner	1	2026-11-03: T-VIDEO-ENGINE-OPEN-BUDGET-ON-A-CLOCK (plan row 152); re-keyed from Engine::state, the same site: Engine::state's reading moved into the private Engine::state_at
 crates/bt-platform/src/macos_player.rs	bt-platform crate::video::macos_player::Engine::state_at	Ambiguous	is_some	1	2026-11-03: T-VIDEO-ENGINE-OPEN-BUDGET-ON-A-CLOCK (plan row 152); added: is_some in the private Engine::state_at, where Engine::state's reading moved
 crates/bt-platform/src/macos_player.rs	bt-platform crate::video::macos_player::Engine::state_at	Ambiguous	unwrap_or_else	1	2026-11-03: T-VIDEO-ENGINE-OPEN-BUDGET-ON-A-CLOCK (plan row 152); re-keyed from Engine::state, the same site: Engine::state's reading moved into the private Engine::state_at
@@ -9919,6 +9926,11 @@ crates/bt-platform/src/video/engine.rs	bt-platform crate::video::engine::Engine:
 crates/bt-platform/src/video/engine.rs	bt-platform crate::video::engine::Engine::open_on	Ambiguous	clone	1	
 crates/bt-platform/src/video/engine.rs	bt-platform crate::video::engine::Engine::open_on	Ambiguous	collect	1	
 crates/bt-platform/src/video/engine.rs	bt-platform crate::video::engine::Engine::open_on	Ambiguous	encode_wide	1	
+crates/bt-platform/src/video/engine.rs	bt-platform crate::video::engine::Engine::open_runs_out_at	Ambiguous	into_inner	1	2026-11-03: T-LATE-BUILT-VIDEO-RETIRED-AS-UNPLAYABLE (plan row 189); the first instant the engine's open budget is missed, for the wake the window books: the same reads Engine::state_at makes of the engine's shared state (its Mutex taken with poison recovery, Option::is_some on its error, AtomicBool::load on its built flag); a field read under the lock, no wait
+crates/bt-platform/src/video/engine.rs	bt-platform crate::video::engine::Engine::open_runs_out_at	Ambiguous	is_some	1	2026-11-03: T-LATE-BUILT-VIDEO-RETIRED-AS-UNPLAYABLE (plan row 189); the first instant the engine's open budget is missed, for the wake the window books: the same reads Engine::state_at makes of the engine's shared state (its Mutex taken with poison recovery, Option::is_some on its error, AtomicBool::load on its built flag); a field read under the lock, no wait
+crates/bt-platform/src/video/engine.rs	bt-platform crate::video::engine::Engine::open_runs_out_at	Ambiguous	load	1	2026-11-03: T-LATE-BUILT-VIDEO-RETIRED-AS-UNPLAYABLE (plan row 189); the first instant the engine's open budget is missed, for the wake the window books: the same reads Engine::state_at makes of the engine's shared state (its Mutex taken with poison recovery, Option::is_some on its error, AtomicBool::load on its built flag); a field read under the lock, no wait
+crates/bt-platform/src/video/engine.rs	bt-platform crate::video::engine::Engine::open_runs_out_at	Ambiguous	lock	1	2026-11-03: T-LATE-BUILT-VIDEO-RETIRED-AS-UNPLAYABLE (plan row 189); the first instant the engine's open budget is missed, for the wake the window books: the same reads Engine::state_at makes of the engine's shared state (its Mutex taken with poison recovery, Option::is_some on its error, AtomicBool::load on its built flag); a field read under the lock, no wait
+crates/bt-platform/src/video/engine.rs	bt-platform crate::video::engine::Engine::open_runs_out_at	Ambiguous	unwrap_or_else	1	2026-11-03: T-LATE-BUILT-VIDEO-RETIRED-AS-UNPLAYABLE (plan row 189); the first instant the engine's open budget is missed, for the wake the window books: the same reads Engine::state_at makes of the engine's shared state (its Mutex taken with poison recovery, Option::is_some on its error, AtomicBool::load on its built flag); a field read under the lock, no wait
 crates/bt-platform/src/video/engine.rs	bt-platform crate::video::engine::Engine::pause	Ambiguous	send	1	
 crates/bt-platform/src/video/engine.rs	bt-platform crate::video::engine::Engine::play	Ambiguous	send	1	
 crates/bt-platform/src/video/engine.rs	bt-platform crate::video::engine::Engine::seek	Ambiguous	send	1	
@@ -10025,6 +10037,7 @@ crates/bt-platform/src/video/mod.rs	bt-platform crate::video::within_budget	Ambi
 crates/bt-platform/src/video/mod.rs	bt-platform crate::video::within_budget	Dynamic	work	1	
 crates/bt-platform/src/video_load.rs	bt-platform crate::video_load::OpenDeadline::missed	Dynamic	built	1	2026-11-03: T-VIDEO-ENGINE-OPEN-BUDGET-ON-A-CLOCK (plan row 152); added: OpenDeadline::missed asks its lazy `built` closure (an FnOnce parameter) only when due; each arm's Engine::state_at hands it the engine thread's built flag (an atomic load) in the product, a fixed instant or flag in a test
 crates/bt-platform/src/video_load.rs	bt-platform crate::video_load::OpenDeadline::missed	Dynamic	now	1	2026-11-03: T-VIDEO-ENGINE-OPEN-BUDGET-ON-A-CLOCK (plan row 152); added: OpenDeadline::missed asks its lazy `now` closure (an FnOnce parameter) only when due; each arm's Engine::state_at hands it Instant::now in the product, a fixed instant or flag in a test
+crates/bt-platform/src/video_load.rs	bt-platform crate::video_load::OpenDeadline::runs_out_at	Dynamic	built	1	2026-11-03: T-LATE-BUILT-VIDEO-RETIRED-AS-UNPLAYABLE (plan row 189); OpenDeadline::runs_out_at calls the built closure its caller hands it (Engine::open_runs_out_at's atomic load of the engine's built flag); no wait
 crates/bt-platform/src/video_portable.rs	bt-platform crate::video::within_budget	Ambiguous	recv_timeout	1	
 crates/bt-platform/src/video_portable.rs	bt-platform crate::video::within_budget	Ambiguous	send	1	
 crates/bt-platform/src/video_portable.rs	bt-platform crate::video::within_budget	Dynamic	work	1	
@@ -11046,6 +11059,7 @@ crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::resize_lanczos3_
 crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::resize_lanczos3_rgba8_across	Ambiguous	for_each	2	
 crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::resize_lanczos3_rgba8_across	Ambiguous	install	2	
 crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::resize_lanczos3_rgba8_across	Ambiguous	iter	1	
+crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::resize_lanczos3_rgba8_across	Ambiguous	iter_mut	1	2026-11-03: T-LATE-BUILT-VIDEO-RETIRED-AS-UNPLAYABLE (plan row 189); not this site's change: row 189 declares VideoSeats::iter_mut, a second item of that name, so this iter_mut call over the caller's own collection is no longer a sole candidate and is listed by site; an in-memory iterator, no wait
 crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::resize_lanczos3_rgba8_across	Ambiguous	par_chunks_mut	2	
 crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::resize_lanczos3_rgba8_across	Ambiguous	round	1	
 crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::resize_lanczos3_rgba8_across	Ambiguous	with_min_len	2	
