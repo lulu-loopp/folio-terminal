@@ -3989,8 +3989,10 @@ const LANDMARKS: [(&str, &[Landmark]); 4] = [
 /// the recovery door, which rolls a macOS bundle back on a worker since U-29 and recovers a
 /// Windows transaction since U-23. B-ENDSESSION adds the system's end's write step, `exiting`
 /// then `quit_abandoned` around the one admitted wait in `session_end::settle` (the quit's `Write`
-/// on the held document; nothing is torn down).
-const PINS: [Pin; 24] = [
+/// on the held document; nothing is torn down). Plan row 201 adds `exiting` in
+/// `session_end::fence_the_log`, ahead of `diagnostics.log`'s fence at `WM_ENDSESSION(TRUE)` —
+/// after which the system may end the process, so it does not go back.
+const PINS: [Pin; 25] = [
     Pin {
         module: "admission",
         writer: "enter_standalone_main",
@@ -4097,6 +4099,12 @@ const PINS: [Pin; 24] = [
         module: "admission",
         writer: "quit_abandoned",
         owner: "bt-app crate::session_end::settle",
+        after: None,
+    },
+    Pin {
+        module: "admission",
+        writer: "exiting",
+        owner: "bt-app crate::session_end::fence_the_log",
         after: None,
     },
     Pin {
@@ -5418,9 +5426,11 @@ const ADMISSIONS: [&[&str]; 2] = [&["bt_platform", "admission"], &["bt_effects",
 
 /// **The doors whose every call is pinned**, row for row: `diagnostics.log`'s settle (row 30) is
 /// admitted twice in `fn main`, in the build-error arm (after `build`) and at the tail (after
-/// `run_app`); the trace's flush (row 17) is admitted once, inside its one road
-/// `Shutdown::flush_through_its_door`, and `main` takes that road on the same two ways out.
-const DOOR_PINS: [DoorPin; 5] = [
+/// `run_app`), and once in `session_end::fence_the_log`, at `WM_ENDSESSION(TRUE)` — a process the
+/// system ends never reaches `fn main`'s way out (ruled 2026-11-03, plan row 201); the trace's
+/// flush (row 17) is admitted once, inside its one road `Shutdown::flush_through_its_door`, and
+/// `main` takes that road on the same two ways out.
+const DOOR_PINS: [DoorPin; 6] = [
     DoorPin {
         door: "DiagnosticsSettle",
         road: Road::Admitted,
@@ -5432,6 +5442,12 @@ const DOOR_PINS: [DoorPin; 5] = [
         road: Road::Admitted,
         owner: "bt-app crate::main",
         after: Some("run_app"),
+    },
+    DoorPin {
+        door: "DiagnosticsSettle",
+        road: Road::Admitted,
+        owner: "bt-app crate::session_end::fence_the_log",
+        after: None,
     },
     DoorPin {
         door: "TraceFlush",
