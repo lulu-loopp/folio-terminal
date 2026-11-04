@@ -94,7 +94,7 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, Bool, Sel};
 use objc2::{MainThreadMarker, msg_send, sel};
 use objc2_app_kit::{NSApplication, NSApplicationTerminateReply};
-use objc2_foundation::{NSArray, NSURL};
+use objc2_foundation::{NSAppleEventDescriptor, NSAppleEventManager, NSArray, NSURL};
 
 use crate::app_delegate::{
     AE_QUIT_REASON, AppDelegateEvent, AppDelegateEventKind, AppDelegateOrigin, Outbox, QuitReason,
@@ -211,30 +211,19 @@ extern "C-unwind" fn should_terminate(
 ///
 /// `-[NSAppleEventManager currentAppleEvent]`, then `attributeDescriptorForKeyword:`
 /// and `typeCodeValue`, as Apple's own note on telling a log-out from a quit reads
-/// it. Sent by name rather than through `objc2-foundation`'s typed classes: their
-/// `attributeDescriptorForKeyword:` is gated on a framework crate this one does not
-/// carry, and three getters are not worth a new dependency.
+/// it. The manager, the event and the code are `objc2-foundation`'s typed getters;
+/// `attributeDescriptorForKeyword:` alone is sent by name, because its typed binding
+/// is gated on `objc2-core-services`, a package this workspace does not carry and
+/// this one selector does not justify (the registry's `# owners` row for this item).
 fn the_quit_events_reason() -> Option<u32> {
-    let manager_class = AnyClass::get(c"NSAppleEventManager")?;
-    // SAFETY: `+sharedAppleEventManager` takes nothing and answers the process's
-    // manager, an object; a getter, on the main thread, inside the delegate method
-    // AppKit is calling.
-    let manager: Option<Retained<AnyObject>> =
-        unsafe { msg_send![manager_class, sharedAppleEventManager] };
-    let manager = manager?;
-    // SAFETY: `-currentAppleEvent` takes nothing and answers the event being handled,
-    // or nil; a getter on the manager above.
-    let event: Option<Retained<AnyObject>> = unsafe { msg_send![&*manager, currentAppleEvent] };
-    let event = event?;
-    // SAFETY: `-attributeDescriptorForKeyword:` takes an `AEKeyword`, a four-character
-    // code (`u32`), and answers a descriptor or nil; a getter on the event above.
-    let reason: Option<Retained<AnyObject>> =
+    let event = NSAppleEventManager::sharedAppleEventManager().currentAppleEvent()?;
+    // SAFETY: `-[NSAppleEventDescriptor attributeDescriptorForKeyword:]` takes an
+    // `AEKeyword`, a four-character code (`u32`), and answers a descriptor or nil; a
+    // getter on the event AppKit is handling, on the main thread, inside the delegate
+    // method AppKit is calling.
+    let reason: Option<Retained<NSAppleEventDescriptor>> =
         unsafe { msg_send![&*event, attributeDescriptorForKeyword: AE_QUIT_REASON] };
-    let reason = reason?;
-    // SAFETY: `-typeCodeValue` takes nothing and answers an `OSType` (`u32`); a getter
-    // on the descriptor above.
-    let code: u32 = unsafe { msg_send![&*reason, typeCodeValue] };
-    Some(code)
+    Some(reason?.typeCodeValue())
 }
 
 /// `applicationShouldTerminateAfterLastWindowClosed:`

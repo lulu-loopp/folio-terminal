@@ -74,6 +74,9 @@
 ## here is refused, and so is a listed one that is gone; counts taken from the code (A1e).
 ## Windows's undocumented `MessageBoxTimeoutW` has no `windows` 0.62.2 binding, so
 ## `windows_impl::message_box` owns its one narrow declaration and link attribute.
+## 2026-11-04, 0.4.10 plan row 17: `macos_app::the_quit_events_reason` sends the one
+## `attributeDescriptorForKeyword:` by name, because `objc2-foundation` 0.3.2 types it only behind
+## `objc2-core-services`, a package no other item needs; its other three calls are typed.
 ##
 ## `# completions` — the side-effects contract's ledger (design note 2026-10-11, §3.1, revisions
 ## (b)1 and (c)1; ticket S-1): one line per request protocol — the item a request enters by
@@ -318,6 +321,7 @@ msg_send!	bt-platform crate::http::Transport::new	1
 msg_send!	bt-platform crate::macos_app::delegate_answers_the_dock_menu	1
 msg_send!	bt-platform crate::macos_app::delegate_answers_the_edit_menus_clipboard_rows	1
 msg_send!	bt-platform crate::macos_app::delegate_answers_the_four_selectors	1
+msg_send!	bt-platform crate::macos_app::the_quit_events_reason	1
 msg_send!	bt-platform crate::macos_compose	1
 msg_send!	bt-platform crate::macos_compose::Compositor::make_slot	1
 msg_send!	bt-platform crate::macos_dialogs::DeferredFormulaMenu::new	1
