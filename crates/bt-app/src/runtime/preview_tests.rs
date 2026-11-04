@@ -2884,6 +2884,9 @@ fn the_volumes_flash_goes_out_on_a_paused_recording() {
 /// the real clock and a headless turn never starts it, so on this held clock its ask is refused
 /// and it books its own past instant again (`WebWarmup::already_fired`).
 ///
+/// It takes the engine ledger's gate, as its siblings do, because the fixture may build a counted
+/// engine on the way, and a test that reads the process-wide count must not see it.
+///
 /// MUTATION: drop `seat_wait` from `Runtime::strip_animation_work`'s fold — the window books no
 /// wake for the late seat, so it is answered only at whatever turn the window's other standing
 /// wakes bring (this fixture has them, about every 550 ms), and the "woke at the engine's first
@@ -2894,6 +2897,7 @@ fn the_volumes_flash_goes_out_on_a_paused_recording() {
 #[test]
 fn a_player_that_never_comes_up_is_said_at_its_deadlines_by_the_windows_own_wakes() {
     use bt_platform::video::engine::OPEN_BUDGET;
+    let _ledger = crate::test_support::ledger_gate();
     let (mut folio, surface) = a_recording_beside_a_shell("video-player-never-up");
     folio.app.web_warmup.already_fired();
     let t0 = Instant::now();
