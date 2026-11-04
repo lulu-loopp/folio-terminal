@@ -20,7 +20,7 @@ use crate::runtime::web::page_destination;
 use crate::window_seam::prelude::*;
 use crate::{
     ADDRESS_FIELD_WANTS_THE_WHOLE_HEAD, AnimationEntry, AnimationWork, AppEvent, AttentionDelivery,
-    BackgroundDecode, BlockScrollPaint, BuiltMarkdown, CardWords, ClickIntent,
+    BackgroundAnswer, BackgroundAsk, BlockScrollPaint, BuiltMarkdown, CardWords, ClickIntent,
     ClipboardPictureAnswer, ClipboardPictureInbox, ClipboardPictureJob, DOCK_PREVIEW_FADE, DiffRow,
     DocumentMath, DocumentPictures, DragLatch, DrawnAnimation, DropPreview, FOOT_REVEAL_FEEDBACK,
     FileMenuTarget, FilePick, FillSent, FoldedLevel, FootSaying, ForeignPane, FormulaSwitches,
@@ -776,7 +776,13 @@ impl<B: Backend> Runtime<'_, B> {
     /// window without a picture, and says so once in a card: a wallpaper on a
     /// drive that is not plugged in today is the ordinary case, and quietly
     /// erasing the setting would mean plugging the drive back in changed nothing.
-    pub(in crate::runtime) fn reload_background_picture(&mut self) -> Result<()> {
+    ///
+    /// `asked` says which read this is: [`BackgroundAsk::FIRST`] from every caller but one, and the
+    /// one more ask [`crate::BackgroundDecode::answer`] names for a held first read.
+    pub(in crate::runtime) fn reload_background_picture(
+        &mut self,
+        asked: BackgroundAsk,
+    ) -> Result<()> {
         let stored = self.app.settings_store.loaded().background_image.clone();
         // Every call withdraws whatever the last one asked for, `None` included:
         // a clear that raced a slow decode must win, and the generation is how
@@ -809,11 +815,8 @@ impl<B: Backend> Runtime<'_, B> {
                 });
                 *slot
                     .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(BackgroundDecode {
-                    generation,
-                    file,
-                    result,
-                });
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    Some(asked.answered(generation, file, result));
                 // After the answer is in the slot, never before.
                 let _ = proxy.send_event(AppEvent::BackgroundPictureReady);
             },
@@ -857,12 +860,16 @@ impl<B: Backend> Runtime<'_, B> {
         let Some(landed) = self.window.background_decode.take_current() else {
             return Ok(());
         };
-        match landed.result {
-            Ok(image) => {
+        match (landed.answer(), landed.result) {
+            (_, Ok(image)) => {
                 self.window.background_picture = Some(image);
                 self.apply_window_ground()?;
             }
-            Err(refusal) => {
+            // Held by another program, on the first read: the picture on the glass is kept and
+            // nothing is said; the file is read again as the question the answer names, the one
+            // more ask (T-HELD-FILE-IN-THE-OTHER-PICTURE-LANES).
+            (BackgroundAnswer::Ask(next), Err(_)) => self.reload_background_picture(next)?,
+            (_, Err(refusal)) => {
                 self.window.background_picture = None;
                 self.apply_window_ground()?;
                 self.toast(
@@ -886,7 +893,7 @@ impl<B: Backend> Runtime<'_, B> {
         if !self.app.settings_store.store(settings) {
             return Ok(false);
         }
-        self.reload_background_picture()?;
+        self.reload_background_picture(BackgroundAsk::FIRST)?;
         self.apply_window_ground()?;
         Ok(true)
     }
@@ -1146,7 +1153,7 @@ impl<B: Backend> Runtime<'_, B> {
         // thing that says where that is.
         let x = (name_box[0] + edit.caret_px).min(name_box[2] - caret_width);
         self.window.rename_caret_line = Some([x, name_box[1], x + caret_width, name_box[3]]);
-        self.window.rename_drawn = Some(drawn);
+        self.window.drawn_fields.name = Some(drawn);
         (tools, Some(edit))
     }
 
@@ -1243,7 +1250,7 @@ impl<B: Backend> Runtime<'_, B> {
         // ruling moved as far as an IME is concerned.
         let x = (box_[0] + edit.caret_px).min(box_[2] - caret_width);
         self.window.rename_caret_line = Some([x, box_[1], x + caret_width, box_[3]]);
-        self.window.rename_drawn = Some(drawn);
+        self.window.drawn_fields.name = Some(drawn);
         (measure_in, Some(edit), refusal)
     }
 
@@ -1299,7 +1306,7 @@ impl<B: Backend> Runtime<'_, B> {
         // IME's candidate list has to stand under what is being typed.
         let x = (box_[0] + edit.caret_px).min(box_[2] - caret_width);
         self.window.rename_caret_line = Some([x, box_[1], x + caret_width, box_[3]]);
-        self.window.rename_drawn = Some(drawn);
+        self.window.drawn_fields.name = Some(drawn);
         Some(edit)
     }
 
@@ -2297,19 +2304,38 @@ impl<B: Backend> Runtime<'_, B> {
             })
             .map(|(surface, _)| surface)
             .collect();
-        let mut membership_moved = !doomed.is_empty();
+        let membership_moved = !doomed.is_empty();
         for surface in doomed {
             self.window.video.close(surface);
         }
-        // **And an engine that gave up after it had opened** (§7.44 ⑥).
-        //
-        // `EngineError` is sticky — an engine that has errored does not
-        // un-error — and it can arrive at any time: a codec that fails on a
-        // frame a minute in, a file that was replaced under the decoder, a
-        // container that turned out to be truncated, a source that never
-        // finished loading. A seat left standing on one is a rectangle that will
-        // never receive another picture, so it is shut down and the surface is
-        // given the sentence `video_seat::retirement` names for it.
+        membership_moved
+    }
+
+    /// **Shut down every recording whose engine gave up, and give its surface
+    /// the sentence for it** (§7.44 ⑥; plan row 189) — the other half of
+    /// [`Self::sweep_video_seats`], and the half that reads `now`, so it runs on
+    /// the clocked pass ([`Self::service_pictures`]) with the instant that pass
+    /// was handed. Answers whether the set of seats moved.
+    ///
+    /// An engine's refusal is sticky — an engine that has refused does not
+    /// un-refuse — and it can arrive at any time: a codec that fails on a frame
+    /// a minute in, a file that was replaced under the decoder, a container that
+    /// turned out to be truncated, a source that never finished loading. A seat
+    /// left standing on one is a rectangle that will never receive another
+    /// picture, so it is shut down and the surface is given the sentence
+    /// `video_seat::refusal_sentence` names for it.
+    ///
+    /// **An engine that has not come up yet is not one of them** (plan row
+    /// 189). The open budget's run-out is a reading, not a latch: the seat is
+    /// given one more `OPEN_BUDGET` from the first late reading
+    /// (`video_seat::seat_answer`), keeps its loading face and says nothing, and
+    /// is retired — saying the player did not start — only if it is still late
+    /// after that. It used to be retired at the first reading, as "this format
+    /// cannot be played".
+    fn retire_faulted_video_seats(&mut self, now: Instant) -> bool {
+        if self.window.video.is_empty() {
+            return false;
+        }
         let faulted: Vec<(
             PreviewSurface,
             bt_platform::video::engine::EngineError,
@@ -2317,13 +2343,13 @@ impl<B: Backend> Runtime<'_, B> {
         )> = self
             .window
             .video
-            .iter()
+            .iter_mut()
             .filter_map(|(surface, seat)| {
-                let (error, says) = seat.retirement()?;
+                let (error, says) = seat.answer(now)?;
                 Some((surface, error, says))
             })
             .collect();
-        membership_moved |= !faulted.is_empty();
+        let membership_moved = !faulted.is_empty();
         for (surface, error, says) in faulted {
             self.mouse_trace(|| format!("video_seat surface={surface:?} fault={error:?}"));
             self.window.video.close(surface);
@@ -2948,8 +2974,14 @@ impl<B: Backend> Runtime<'_, B> {
             // Filed on the `PreviewImageState`, which is the one place a
             // surface's failures already live and already draw — the same slot a
             // picture that would not decode writes into.
+            //
+            // **In the sentence of the error that came back**, which at the
+            // open is an engine thread that could not be started
+            // (`Unresponsive`) and says the player did not start — not that the
+            // format cannot be played (plan row 189). There is no engine to give
+            // one more budget to, so the next press is the next look.
             self.preview_pane_mut(surface).refuse_picture(Some(
-                PictureRefusal::this_window_cannot(i18n::Text::VideoFormatCannotPlay.text()),
+                PictureRefusal::this_window_cannot(video_seat::refusal_sentence(error).text()),
             ));
         } else {
             // And a play that worked clears whatever the last one said.
@@ -11604,7 +11636,7 @@ impl<B: Backend> Runtime<'_, B> {
                         .as_mut()
                         .filter(|slot| slot.path == answered)
                     {
-                        slot.answer = pages;
+                        slot.hear(pages);
                         changed |= index == self.window.active_tab;
                     }
                 }
@@ -12922,7 +12954,7 @@ impl<B: Backend> Runtime<'_, B> {
         // float being dragged, a window resized — and a picture that stayed
         // where the layout used to be would be the FLIP's own defect with a
         // recording in it.
-        let membership_moved = self.sweep_video_seats();
+        let membership_moved = self.sweep_video_seats() | self.retire_faulted_video_seats(now);
         let frames_arrived = self.window.video.pump(now) | self.advance_animations(now);
         // **And a box that is moving on a clock rather than on an event**
         // (closure review 2, 2026-09-18). Every *event* that moves a picture's
@@ -13706,6 +13738,15 @@ impl<B: Backend> Runtime<'_, B> {
             .then_some(bar_deadline)
             .flatten()
             .map(|deadline| next_tick.map_or(deadline, |tick| deadline.max(tick)));
+        // **And a seat whose engine has not come up** (plan row 189): an
+        // absolute owner clock like the bar's waits, and a wake rather than a
+        // liveness — nothing moves while an engine is late. At the engine's
+        // first instant past its open budget the seat is found late and given
+        // one more; at the end of that one it is retired with its sentence.
+        // Without it the loading face stood until something unrelated woke the
+        // loop. `retire_faulted_video_seats` answers on the turn this wakes,
+        // which runs before this fold, so the instant is never left behind.
+        let seat_wait = self.window.video.answer_deadline();
         AnimationWork {
             deadline: [
                 (strip_moving || rail_waiting || pictures_owe)
@@ -13713,6 +13754,7 @@ impl<B: Backend> Runtime<'_, B> {
                     .flatten(),
                 (bar_moving || pane_moving).then_some(next_tick).flatten(),
                 bar_wait,
+                seat_wait,
             ]
             .into_iter()
             .flatten()

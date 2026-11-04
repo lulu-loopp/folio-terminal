@@ -27,8 +27,10 @@
 //!   which writes it.
 //! * `WM_ENDSESSION(FALSE)` — the line comes down and `hear` is told
 //!   [`SessionEnd::TakenBack`]: the session goes on, and so does the application.
-//! * `WM_ENDSESSION(TRUE)` — nothing: everything owed was handed over at the question, and the
-//!   system ends the process.
+//! * `WM_ENDSESSION(TRUE)` — the last word before the system may end the process (plan row
+//!   201): `ending` is called before the answer, and it says what became of the question's
+//!   save and fences `diagnostics.log`, so that what the log was owed is on the disk when the
+//!   system ends the process. It runs nothing of the loop's.
 //! * `WM_ENDSESSION(TRUE)` with `ENDSESSION_CLOSEAPP` in `lParam` — `hear` is told
 //!   [`SessionEnd::Closed`]. This is the Restart Manager closing the application (an installer
 //!   or the system's servicing needs a file it holds): **the session does not end**, so nobody
@@ -83,6 +85,64 @@ pub const RESTART_NO_REBOOT: u32 = 0x8;
 /// of a write; the next start the person makes reopens the layout anyway.
 pub const RESTART_FLAGS: u32 = RESTART_NO_CRASH | RESTART_NO_HANG;
 
+/// `ENDSESSION_CRITICAL`, the bit of a session-end message's `lParam` that says the session is
+/// ending whatever any application answers.
+pub const ENDSESSION_CRITICAL: isize = 0x4000_0000;
+/// `ENDSESSION_LOGOFF`, the bit of a session-end message's `lParam` that says the person is
+/// signing out (a shutdown and a restart sign out first).
+pub const ENDSESSION_LOGOFF: isize = 0x8000_0000;
+
+/// **The exit code of a process the system ended with the session**: `DBG_TERMINATE_PROCESS`
+/// (0x40010004), which a console process — a pane's shell — is ended with when the session it
+/// runs in ends (T-SHUTDOWN-KILLS-SHELLS-BEFORE-THE-LAYOUT-IS-SAVED, plan row 191).
+///
+/// **It arrives before the question does.** The owner's three shutdowns of 2026-11-02, on 0.4.8:
+/// every pane's shell ended with this code, one turn after another, while Folio's own windows had
+/// not yet been sent `WM_QUERYENDSESSION` — so the hold the question takes (B-ENDSESSION) came
+/// after every shell had gone, and each of those exits had already closed its tab. A shell that
+/// ends with this code did not end itself: it is the system's end of the session reaching the
+/// pane before it reached the window, and `bt-app` keeps the pane rather than retiring it.
+///
+/// Off Windows no process ends with it (an exit status there is eight bits, and the system's end
+/// arrives as `applicationShouldTerminate:` before any shell is ended), so the rule it carries is
+/// inert there.
+pub const SYSTEM_ENDED_EXIT_CODE: u32 = 0x4001_0004;
+
+/// **One line for `diagnostics.log` saying a session-end message arrived** — which one, its
+/// `wParam`, and the bits of its `lParam` named — or `None` for any other message.
+///
+/// Written for every session-end message, `WM_ENDSESSION(TRUE)` included, which nothing else
+/// hears: it is the last thing the system tells this process before it may end it, and a
+/// diagnosis that has to infer whether it came from silence is the diagnosis plan row 191 had to
+/// make. Pure, so its shape is a thing a test can state.
+#[must_use]
+pub fn arrival_line(message: u32, wparam: usize, lparam: isize) -> Option<String> {
+    let name = match message {
+        WM_QUERYENDSESSION => "WM_QUERYENDSESSION",
+        WM_ENDSESSION if wparam == 0 => "WM_ENDSESSION(FALSE)",
+        WM_ENDSESSION => "WM_ENDSESSION(TRUE)",
+        _ => return None,
+    };
+    let named: Vec<&str> = [
+        (ENDSESSION_CLOSEAPP, "CLOSEAPP"),
+        (ENDSESSION_CRITICAL, "CRITICAL"),
+        (ENDSESSION_LOGOFF, "LOGOFF"),
+    ]
+    .into_iter()
+    .filter(|(bit, _)| lparam & bit != 0)
+    .map(|(_, word)| word)
+    .collect();
+    let flags = if named.is_empty() {
+        "none".to_owned()
+    } else {
+        named.join("|")
+    };
+    Some(format!(
+        "BT_SESSION_END the system sent {name}, lParam {:#010x} ({flags})",
+        lparam.cast_unsigned()
+    ))
+}
+
 /// **What the system said about the session ending.**
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SessionEnd {
@@ -105,6 +165,36 @@ pub fn heard(message: u32, wparam: usize, lparam: isize) -> Option<SessionEnd> {
         WM_ENDSESSION if wparam == 0 => Some(SessionEnd::TakenBack),
         WM_ENDSESSION if lparam & ENDSESSION_CLOSEAPP != 0 => Some(SessionEnd::Closed),
         _ => None,
+    }
+}
+
+/// **Whether this is `WM_ENDSESSION(TRUE)` with the session really ending** — not the Restart
+/// Manager's close ([`ENDSESSION_CLOSEAPP`]), after which nobody ends the process. The one
+/// message after which this process may be ended at any moment, and so the one the procedure
+/// holds its answer back for (plan row 201). Pure.
+#[must_use]
+pub fn the_session_really_ends(message: u32, wparam: usize, lparam: isize) -> bool {
+    message == WM_ENDSESSION && wparam != 0 && lparam & ENDSESSION_CLOSEAPP == 0
+}
+
+/// **Whether posted messages wait on this thread's queue** (plan row 201's probe):
+/// `GetQueueStatus(QS_POSTMESSAGE)`'s high word, the kinds of message currently in the queue, read
+/// without a wait and without taking or dispatching anything. The call resets the low word (the
+/// kinds new since the last look), which no wait of this thread reads: winit waits with
+/// `MWMO_INPUTAVAILABLE`, which wakes for anything queued. `None` off Windows, where there is no
+/// such queue.
+#[must_use]
+pub fn posted_messages_waiting() -> Option<bool> {
+    #[cfg(windows)]
+    {
+        use windows::Win32::UI::WindowsAndMessaging::{GetQueueStatus, QS_POSTMESSAGE};
+        // SAFETY: no pointer; the call reads this thread's own queue state.
+        let status = unsafe { GetQueueStatus(QS_POSTMESSAGE) };
+        Some(((status >> 16) & QS_POSTMESSAGE.0) != 0)
+    }
+    #[cfg(not(windows))]
+    {
+        None
     }
 }
 
@@ -156,6 +246,63 @@ pub fn register_restart(flags: u32) -> Result<(), String> {
     }
 }
 
+/// **The shutdown level Folio asks for: the top of the application range** (plan row 191,
+/// adopted on the clean-VM reboot of 2026-11-03). Windows ends a session's processes in
+/// descending level order, and every process starts at the default, `0x280` — Folio and the
+/// console processes it hosts alike. At one level the order between them is the system's, and on
+/// the owner's machine the shells were ended first. At `0x300` Folio is ended before any
+/// process at the default level; on the VM's reboot Folio was ended first, its shells exited
+/// with code 0 after it, and the layout on disk was unchanged. The range above `0x3FF` is the
+/// system's own.
+pub const SHUTDOWN_LEVEL: u32 = 0x300;
+
+/// **Ask Windows to end this process before the processes at the default shutdown level** —
+/// `SetProcessShutdownParameters(level, 0)` ([`SHUTDOWN_LEVEL`] in the product), so that the end
+/// of the session reaches Folio's windows before it reaches the shells in its panes. Once per
+/// process; nothing off Windows, where the system's end is AppKit's.
+///
+/// # Errors
+/// The system refused the level, with its error.
+pub fn ask_to_be_ended_first(level: u32) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use windows::Win32::System::Threading::SetProcessShutdownParameters;
+        // SAFETY: two integers; it sets this process's own place in the shutdown order.
+        unsafe { SetProcessShutdownParameters(level, 0) }
+            .map_err(|error| format!("SetProcessShutdownParameters refused: {error}"))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = level;
+        Ok(())
+    }
+}
+
+/// **Whether the system says this session is ending, at the instant of asking**
+/// (T-AGENT-OWN-EXIT-AT-SHUTDOWN, plan row 199): `GetSystemMetrics(SM_SHUTTINGDOWN)`, which is
+/// nonzero while the session's sign-out is under way — the one every shutdown and restart begins
+/// with, despite its name. A probe and not yet a rule: `bt-app` writes it on each shell's exit
+/// line, so that a reboot's `diagnostics.log` shows whether it is already set when the system's
+/// end reaches a pane before the question reaches the window. When it is first set, and whether
+/// a cancelled shutdown clears it, are not documented; that is what the probe is for.
+///
+/// A read of the session's state: no message is sent and nothing is waited on. `None` off
+/// Windows, where the system's end is AppKit's quit and no shell is ended before it.
+#[must_use]
+pub fn shutting_down() -> Option<bool> {
+    #[cfg(windows)]
+    {
+        use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_SHUTTINGDOWN};
+        // SAFETY: a read-only query over a system index; no preconditions.
+        let metric = unsafe { GetSystemMetrics(SM_SHUTTINGDOWN) };
+        Some(metric != 0)
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
 /// **Take the registration back** — `UnregisterApplicationRestart`: this process is handing
 /// itself over (an update's applier), and the system's restart is no longer its to ask for.
 ///
@@ -179,12 +326,14 @@ pub use windows_session_end::SessionEndWatch;
 
 #[cfg(windows)]
 mod windows_session_end {
+    use std::rc::Rc;
+
     use windows::Win32::Foundation::{GetLastError, HWND, LPARAM, LRESULT, WPARAM};
     use windows::Win32::System::Shutdown::{ShutdownBlockReasonCreate, ShutdownBlockReasonDestroy};
     use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
     use windows::core::HSTRING;
 
-    use super::{SessionEnd, answer, heard};
+    use super::{SessionEnd, answer, arrival_line, heard, the_session_really_ends};
     use crate::NativeWindow;
 
     /// "BTSE". Distinct from every other subclass id in this crate.
@@ -198,17 +347,23 @@ mod windows_session_end {
         hook: Box<SessionEndHook>,
     }
 
-    /// What the subclass calls: who to tell, and the line the shutdown screen shows meanwhile.
+    /// What the subclass calls: who to tell, the line the shutdown screen shows meanwhile, and
+    /// what holds the answer to `WM_ENDSESSION(TRUE)` back (plan row 201).
     pub(super) struct SessionEndHook {
         pub(super) hear: Box<dyn Fn(SessionEnd)>,
         pub(super) reason: Box<dyn Fn() -> String>,
+        /// Says what became of the question's save and fences the log; it runs nothing of the
+        /// loop's. Shared rather than boxed: the procedure calls its own count of it and reads
+        /// nothing of the hook after.
+        pub(super) ending: Rc<dyn Fn()>,
     }
 
     impl SessionEndWatch {
         /// Subclass `window`. `hear` is told what the system said, on the window's own thread
         /// and inside the system's `SendMessage`, so it may only park the news and wake the loop;
         /// `reason` is read when the question arrives, so the line is in the language in force
-        /// then.
+        /// then; `ending` is called at `WM_ENDSESSION(TRUE)` with the session really ending, and
+        /// the answer waits for it (plan row 201).
         ///
         /// # Errors
         /// `SetWindowSubclass` refused, with the system's error number.
@@ -216,9 +371,14 @@ mod windows_session_end {
             window: NativeWindow,
             hear: Box<dyn Fn(SessionEnd)>,
             reason: Box<dyn Fn() -> String>,
+            ending: Rc<dyn Fn()>,
         ) -> Result<Self, String> {
             let hwnd = window.as_hwnd();
-            let hook = Box::new(SessionEndHook { hear, reason });
+            let hook = Box::new(SessionEndHook {
+                hear,
+                reason,
+                ending,
+            });
             let reference_data = (&*hook as *const SessionEndHook) as usize;
             // SAFETY: called on the window's own thread with a live HWND, and the box above
             // outlives the subclass — `Drop` removes it first.
@@ -282,6 +442,18 @@ mod windows_session_end {
         // SAFETY: the owning `SessionEndWatch` holds this box for the whole installed interval
         // and removes the subclass before freeing it, on this same thread.
         let hook = unsafe { &*hook };
+        // Said before anything is done about it, so the line stands where it arrived among the
+        // shells' exit lines (plan row 191): one queue, in order, written by the log's own thread.
+        if let Some(line) = arrival_line(message, wparam.0, lparam.0) {
+            crate::stderr_road::say(line);
+        }
+        // **The last word** (plan row 201): what became of the question's save is said and the
+        // log fenced before the answer. The call is on the procedure's own count of the hook.
+        if the_session_really_ends(message, wparam.0, lparam.0) {
+            let ending = Rc::clone(&hook.ending);
+            ending();
+            return forwarded;
+        }
         match heard(message, wparam.0, lparam.0) {
             // The line goes up before the loop is woken: the write it names is the loop's.
             Some(SessionEnd::Asked) => {
@@ -312,8 +484,9 @@ mod windows_session_end {
         use windows::Win32::UI::WindowsAndMessaging;
 
         use super::super::{
-            ENDSESSION_CLOSEAPP, RESTART_FLAGS, RESTART_NO_CRASH, RESTART_NO_HANG,
-            RESTART_NO_PATCH, RESTART_NO_REBOOT, SessionEnd, WM_ENDSESSION, WM_QUERYENDSESSION,
+            ENDSESSION_CLOSEAPP, ENDSESSION_CRITICAL, ENDSESSION_LOGOFF, RESTART_FLAGS,
+            RESTART_NO_CRASH, RESTART_NO_HANG, RESTART_NO_PATCH, RESTART_NO_REBOOT,
+            SYSTEM_ENDED_EXIT_CODE, SessionEnd, WM_ENDSESSION, WM_QUERYENDSESSION,
             register_restart, withdraw_restart,
         };
         use super::{SESSION_END_SUBCLASS_ID, SessionEndHook, session_end_subclass};
@@ -333,6 +506,21 @@ mod windows_session_end {
             assert_eq!(RESTART_NO_HANG, Recovery::RESTART_NO_HANG.0);
             assert_eq!(RESTART_NO_PATCH, Recovery::RESTART_NO_PATCH.0);
             assert_eq!(RESTART_NO_REBOOT, Recovery::RESTART_NO_REBOOT.0);
+            assert_eq!(
+                ENDSESSION_CRITICAL.cast_unsigned(),
+                WindowsAndMessaging::ENDSESSION_CRITICAL as usize
+            );
+            assert_eq!(
+                ENDSESSION_LOGOFF.cast_unsigned(),
+                WindowsAndMessaging::ENDSESSION_LOGOFF as usize
+            );
+            assert_eq!(
+                SYSTEM_ENDED_EXIT_CODE,
+                windows::Win32::Foundation::DBG_TERMINATE_PROCESS
+                    .0
+                    .cast_unsigned(),
+                "the code a console process is ended with when its session ends"
+            );
         }
 
         /// RED (B-ENDSESSION; T-RESTART-REGISTRATION) — **the window procedure answers the
@@ -345,14 +533,18 @@ mod windows_session_end {
         /// T-RESTART-REGISTRATION the close's `lParam` was never read.
         ///
         /// MUTATION: answer `answer`'s `Asked` arm with 0, or drop the `hear(end)` call; pass
-        /// `0` for `lParam` to `heard` in the subclass — the close is not heard.
+        /// `0` for `lParam` to `heard` in the subclass — the close is not heard. MUTATION (plan
+        /// row 201): drop the `ending()` call — the session really ending holds nothing back.
         #[test]
         fn the_question_is_answered_yes_and_heard() {
             let heard = Rc::new(RefCell::new(Vec::new()));
             let into = Rc::clone(&heard);
+            let ended = Rc::new(std::cell::Cell::new(0_u32));
+            let ends = Rc::clone(&ended);
             let hook = SessionEndHook {
                 hear: Box::new(move |end| into.borrow_mut().push(end)),
                 reason: Box::new(|| "Saving your layout".to_owned()),
+                ending: Rc::new(move || ends.set(ends.get() + 1)),
             };
             let reference = (&hook as *const SessionEndHook) as usize;
             let ask = |message: u32, wparam: usize, lparam: isize| {
@@ -380,11 +572,17 @@ mod windows_session_end {
                 0,
                 "a shutdown taken back is processed"
             );
+            assert_eq!(ended.get(), 0, "nothing before the end holds anything back");
             let _ = ask(WM_ENDSESSION, 1, 0);
             assert_eq!(
                 *heard.borrow(),
                 vec![SessionEnd::Asked, SessionEnd::TakenBack],
                 "the session really ending says nothing new"
+            );
+            assert_eq!(
+                ended.get(),
+                1,
+                "and the end is held for, once, before the answer"
             );
             assert_eq!(
                 ask(WM_ENDSESSION, 1, ENDSESSION_CLOSEAPP),
@@ -395,6 +593,11 @@ mod windows_session_end {
                 heard.borrow().last(),
                 Some(&SessionEnd::Closed),
                 "and heard"
+            );
+            assert_eq!(
+                ended.get(),
+                1,
+                "the close is not the end: nobody ends the process"
             );
         }
 
@@ -477,8 +680,9 @@ impl SessionEndWatch {
         window: crate::NativeWindow,
         hear: Box<dyn Fn(SessionEnd)>,
         reason: Box<dyn Fn() -> String>,
+        ending: std::rc::Rc<dyn Fn()>,
     ) -> Result<Self, String> {
-        let _ = (window, hear, reason);
+        let _ = (window, hear, reason, ending);
         Ok(Self { _nothing: () })
     }
 
@@ -489,13 +693,108 @@ impl SessionEndWatch {
 #[cfg(test)]
 mod tests {
     use super::{
-        ENDSESSION_CLOSEAPP, RESTART_FLAGS, RESTART_NO_CRASH, RESTART_NO_HANG, RESTART_NO_PATCH,
-        RESTART_NO_REBOOT, SessionEnd, WM_ENDSESSION, WM_QUERYENDSESSION, answer, heard,
+        ENDSESSION_CLOSEAPP, ENDSESSION_CRITICAL, ENDSESSION_LOGOFF, RESTART_FLAGS,
+        RESTART_NO_CRASH, RESTART_NO_HANG, RESTART_NO_PATCH, RESTART_NO_REBOOT, SHUTDOWN_LEVEL,
+        SessionEnd, WM_ENDSESSION, WM_QUERYENDSESSION, answer, arrival_line, heard, shutting_down,
+        the_session_really_ends,
     };
+
+    /// RED (plan row 199) — **the session-end probe answers on Windows, and only there**: a
+    /// machine running its tests is not signing out, so the read is `Some(false)`; off Windows
+    /// there is no probe at all.
+    ///
+    /// MUTATION: answer `None` on Windows — the exit line would lose its field.
+    #[test]
+    fn the_session_end_probe_answers_on_windows_and_only_there() {
+        if cfg!(windows) {
+            assert_eq!(shutting_down(), Some(false), "a test run is not a sign-out");
+        } else {
+            assert_eq!(shutting_down(), None, "no probe off Windows");
+        }
+    }
+
+    /// RED (plan row 201, re-review RR-N5) — **the probe's queue read says whether a posted
+    /// message waits, and takes nothing**: on a thread of its own, whose queue the first peek
+    /// creates, the read is `no`; a message posted to the thread makes it `yes`, twice, because the
+    /// read removes nothing; taking the message off makes it `no` again.
+    ///
+    /// MUTATION: read the low word (`status & QS_POSTMESSAGE`, the kinds new since the last look)
+    /// instead of the high word — the second read after the post says `no`.
+    #[cfg(windows)]
+    #[test]
+    fn the_queue_read_says_whether_a_posted_message_waits_and_takes_nothing() {
+        use windows::Win32::Foundation::{LPARAM, WPARAM};
+        use windows::Win32::System::Threading::GetCurrentThreadId;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            MSG, PM_NOREMOVE, PM_REMOVE, PeekMessageW, PostThreadMessageW, WM_APP,
+        };
+
+        use super::posted_messages_waiting;
+
+        let reads = std::thread::spawn(|| {
+            let mut message = MSG::default();
+            let mut reads = Vec::new();
+            // SAFETY: plain Win32 calls on this thread's own queue; the first peek creates the
+            // queue a thread message needs.
+            unsafe {
+                let _ = PeekMessageW(&mut message, None, 0, 0, PM_NOREMOVE);
+                reads.push(posted_messages_waiting());
+                PostThreadMessageW(GetCurrentThreadId(), WM_APP + 21, WPARAM(0), LPARAM(0))
+                    .expect("post to this thread");
+                reads.push(posted_messages_waiting());
+                reads.push(posted_messages_waiting());
+                assert!(
+                    PeekMessageW(&mut message, None, WM_APP + 21, WM_APP + 21, PM_REMOVE).as_bool(),
+                    "the read left the message where it was"
+                );
+                reads.push(posted_messages_waiting());
+            }
+            reads
+        })
+        .join()
+        .expect("the queue's thread");
+        assert_eq!(reads, [Some(false), Some(true), Some(true), Some(false)]);
+    }
+
+    /// RED (plan row 191) — **every session-end message is said with its flags, and nothing else
+    /// is**: the question, a shutdown taken back, the session really ending — which nothing else
+    /// hears — and the Restart Manager's close, each with the bits of its `lParam` named.
+    ///
+    /// MUTATION: answer `None` for `WM_ENDSESSION(TRUE)` — the last message before the system may
+    /// end the process is not said; drop the `LOGOFF` row — a restart's sign-out reads `none`.
+    #[test]
+    fn every_session_end_message_is_said_with_its_flags() {
+        assert_eq!(
+            arrival_line(WM_QUERYENDSESSION, 0, ENDSESSION_LOGOFF).as_deref(),
+            Some("BT_SESSION_END the system sent WM_QUERYENDSESSION, lParam 0x80000000 (LOGOFF)")
+        );
+        assert_eq!(
+            arrival_line(WM_ENDSESSION, 1, ENDSESSION_CRITICAL | ENDSESSION_LOGOFF).as_deref(),
+            Some(
+                "BT_SESSION_END the system sent WM_ENDSESSION(TRUE), lParam 0xc0000000 \
+                 (CRITICAL|LOGOFF)"
+            )
+        );
+        assert_eq!(
+            arrival_line(WM_ENDSESSION, 0, 0).as_deref(),
+            Some("BT_SESSION_END the system sent WM_ENDSESSION(FALSE), lParam 0x00000000 (none)")
+        );
+        assert_eq!(
+            arrival_line(WM_ENDSESSION, 1, ENDSESSION_CLOSEAPP).as_deref(),
+            Some(
+                "BT_SESSION_END the system sent WM_ENDSESSION(TRUE), lParam 0x00000001 (CLOSEAPP)"
+            )
+        );
+        assert_eq!(
+            arrival_line(0x0010, 0, ENDSESSION_CLOSEAPP),
+            None,
+            "WM_CLOSE is not one"
+        );
+    }
 
     /// `ENDSESSION_CRITICAL | ENDSESSION_LOGOFF`, the other two bits a session-end `lParam`
     /// carries.
-    const CRITICAL_AND_LOGOFF: isize = 0xC000_0000;
+    const CRITICAL_AND_LOGOFF: isize = ENDSESSION_CRITICAL | ENDSESSION_LOGOFF;
 
     /// RED (B-ENDSESSION; T-RESTART-REGISTRATION) — **the question, a shutdown taken back and
     /// the Restart Manager's close are heard; the session really ending, and everything else, is
@@ -539,6 +838,32 @@ mod tests {
         assert_eq!(told.get(), 1, "and told");
     }
 
+    /// RED (plan row 201) — **only `WM_ENDSESSION(TRUE)` without the Restart Manager's close is
+    /// the session really ending**: the question, a shutdown taken back and the close are not,
+    /// whatever else their `lParam` carries.
+    ///
+    /// MUTATION: drop the `ENDSESSION_CLOSEAPP` test — the close, after which nobody ends the
+    /// process, would hold its answer for the end.
+    #[test]
+    fn only_the_session_really_ending_is_the_end() {
+        assert!(the_session_really_ends(WM_ENDSESSION, 1, 0));
+        assert!(the_session_really_ends(
+            WM_ENDSESSION,
+            1,
+            CRITICAL_AND_LOGOFF
+        ));
+        assert!(!the_session_really_ends(WM_ENDSESSION, 0, 0), "taken back");
+        assert!(
+            !the_session_really_ends(WM_ENDSESSION, 1, ENDSESSION_CLOSEAPP),
+            "the Restart Manager's close"
+        );
+        assert!(
+            !the_session_really_ends(WM_QUERYENDSESSION, 1, 0),
+            "the question"
+        );
+        assert!(!the_session_really_ends(0x0010, 1, 0), "WM_CLOSE");
+    }
+
     /// RED (T-RESTART-REGISTRATION; the coordinator's interim choice, pending the owner's ruling) — **Windows starts Folio again after
     /// an
     /// update's reboot and the Restart Manager's close, and never after a crash or a hang.**
@@ -561,6 +886,22 @@ mod tests {
             RESTART_FLAGS & (RESTART_NO_REBOOT | RESTART_NO_PATCH),
             0,
             "a restart after the update's reboot and the installer's close"
+        );
+    }
+
+    /// RED (plan row 191) — **the level Folio asks for is above the default and inside the
+    /// application range**: `0x280` is every process's default, so a level at or below it would
+    /// leave the order between Folio and its shells to the system again, and a level above
+    /// `0x3FF` is reserved for the system's own components.
+    ///
+    /// MUTATION: `SHUTDOWN_LEVEL = 0x280` — the default, and the order is the system's again.
+    #[test]
+    fn folio_asks_to_be_ended_before_the_default_level_and_inside_the_application_range() {
+        // Above the default (`0x280`), and no higher than the application range's top (`0x3FF`).
+        const ABOVE_THE_DEFAULT: std::ops::RangeInclusive<u32> = 0x281..=0x3FF;
+        assert!(
+            ABOVE_THE_DEFAULT.contains(&SHUTDOWN_LEVEL),
+            "{SHUTDOWN_LEVEL:#x} is not above the default inside the application range"
         );
     }
 }

@@ -845,6 +845,13 @@ text_entries! {
     /// (T-VIDEO-ENGINE-NO-DURATION). The surface stops showing a player that
     /// will never start and prints this instead.
     VideoDidNotLoad,
+    /// **What a surface says when the video player did not come up on this
+    /// machine** (plan row 189): an engine not built within its open budget
+    /// even after one more, an engine thread that could not be started, or a
+    /// platform, device or engine factory that refused. It says nothing about
+    /// the file, because nothing was learned about it; until row 189 these
+    /// printed [`Self::VideoFormatCannotPlay`].
+    VideoPlayerDidNotStart,
     /// **What a video's bar says in place of its scrubber** when the recording
     /// has loaded and declares no length — a live stream, or a container
     /// written without a duration (T-VIDEO-ENGINE-NO-DURATION). There is
@@ -2149,6 +2156,10 @@ text_entries! {
     /// screen), and **what does not change** — the marks inside the window,
     /// which are not this row's to switch off.
     DescTurnEndNotifications,
+    /// `Agents ▸ Resume agents after restart` — the row (0.4.9 plan row 195).
+    RowResumeAgents,
+    /// Its sentence: what comes back, and when.
+    DescResumeAgents,
     /// The body of a turn-end interruption from a source that wrote no sentence
     /// of its own. States the fact; names nothing to act on.
     ToastTurnFinished,
@@ -3169,6 +3180,9 @@ text_entries! {
     ShellDidNotStart,
     /// The face kept at the bottom of a pane whose shell ended before it became usable.
     ShellBirthDeath,
+    /// The face kept at the bottom of a pane whose shell the system ended with the session
+    /// (plan row 191).
+    ShellEndedBySystem,
     /// About > Version: no newer release is known.
     VersionUpToDate,
     /// About > Version controls and inline links.
@@ -3832,6 +3846,11 @@ impl Text {
                 lang,
                 "This video did not finish loading",
                 "此视频未能加载完成",
+            ),
+            Self::VideoPlayerDidNotStart => pick(
+                lang,
+                "The video player did not start",
+                "The video player did not start", // zh: pending T-LATE-BUILT-VIDEO-RETIRED-AS-UNPLAYABLE
             ),
             Self::VideoNoLength => pick(lang, "No length", "无时长"),
             Self::PreviewFlipToRendered => pick(lang, "View rendered", "查看渲染结果"),
@@ -5200,6 +5219,18 @@ impl Text {
                 "Bounces the Dock icon when an agent finishes a turn in a window out of sight. Minimised windows get a desktop message.",
                 "agent 回合结束而窗口不可见时，跳动程序坞图标。窗口最小化时改为发送桌面通知。",
             ),
+            // zh: pending T-AGENT-RESUME-AFTER-RESTART
+            Self::RowResumeAgents => pick(
+                lang,
+                "Resume agents after restart",
+                "Resume agents after restart",
+            ),
+            // zh: pending T-AGENT-RESUME-AFTER-RESTART
+            Self::DescResumeAgents => pick(
+                lang,
+                "When Folio reopens, panes that were running Claude Code or Codex resume their sessions.",
+                "When Folio reopens, panes that were running Claude Code or Codex resume their sessions.",
+            ),
             Self::ToastTurnFinished => pick(lang, "Turn finished", "回合结束"),
             Self::ToastWaitingForYou => pick(lang, "Waiting for you", "正在等你回答"),
             Self::NotifyRefusedTitle => {
@@ -6373,6 +6404,11 @@ impl Text {
             }
             Self::ShellDidNotStart => pick(lang, "Shell not started", "Shell 未启动"),
             Self::ShellBirthDeath => pick(lang, "exited at birth", "启动即退出"),
+            Self::ShellEndedBySystem => pick(
+                lang,
+                "Ended by the system at shutdown",
+                "Ended by the system at shutdown", // zh: pending T-SHUTDOWN-KILLS-SHELLS-BEFORE-THE-LAYOUT-IS-SAVED
+            ),
         }
     }
 
@@ -6563,7 +6599,21 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[];
+    const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
+        // T-AGENT-RESUME-AFTER-RESTART (0.4.9 plan row 195): the Agents page's resume switch.
+        (Self::RowResumeAgents, HostPlatform::Windows),
+        (Self::RowResumeAgents, HostPlatform::MacOs),
+        (Self::DescResumeAgents, HostPlatform::Windows),
+        (Self::DescResumeAgents, HostPlatform::MacOs),
+        // zh: pending T-SHUTDOWN-KILLS-SHELLS-BEFORE-THE-LAYOUT-IS-SAVED — the note a pane keeps
+        // when the system ended its shell at shutdown (plan row 191).
+        (Self::ShellEndedBySystem, HostPlatform::Windows),
+        (Self::ShellEndedBySystem, HostPlatform::MacOs),
+        // zh: pending T-LATE-BUILT-VIDEO-RETIRED-AS-UNPLAYABLE — what a video's surface says when
+        // the player did not come up on this machine (plan row 189).
+        (Self::VideoPlayerDidNotStart, HostPlatform::Windows),
+        (Self::VideoPlayerDidNotStart, HostPlatform::MacOs),
+    ];
 }
 
 // ── the strings that carry a value ─────────────────────────────────────────
@@ -6571,6 +6621,18 @@ impl Text {
 // A separate family rather than a `Text` variant with holes in it, because these
 // return `String` and every one of the table's entries is `&'static str`. Mixing
 // the two would make the whole table allocate to serve fifteen of its members.
+
+/// **The line a pane opens with when its agent's session did not come back** (0.4.9 plan row
+/// 195): the vendor's title and the first eight characters of the session id, so two panes that
+/// say it can be told apart.
+#[must_use]
+pub fn could_not_resume_text(title: &str, id: &str) -> String {
+    match current() {
+        Lang::English => format!("{title} session {id} could not be resumed."),
+        // zh: pending T-AGENT-RESUME-AFTER-RESTART
+        Lang::Chinese => format!("{title} session {id} could not be resumed."),
+    }
+}
 
 /// The refused address's fact line when its scheme is why it was refused
 /// (§7.7 ④; the card's headline since 2026-10-09 is `Cannot open`). The scheme comes from `webnav::scheme_of` and from nowhere else —
@@ -7814,8 +7876,14 @@ fn refusal_in_lang(lang: Lang, file: &str, error: &bt_term::BackgroundImageError
             format!("{file} is not a picture file this window can open")
         }
         (Lang::Chinese, Refusal::InvalidPath) => format!("{file} 不是这扇窗能打开的图片文件"),
-        (Lang::English, Refusal::Io(reason)) => format!("{file} could not be read: {reason}"),
-        (Lang::Chinese, Refusal::Io(reason)) => format!("{file} 无法读取：{reason}"),
+        // A held file says what an unreadable one says, in the operating system's own words: no
+        // sentence of its own (T-HELD-FILE-IN-THE-OTHER-PICTURE-LANES).
+        (Lang::English, Refusal::Io(reason) | Refusal::HeldElsewhere(reason)) => {
+            format!("{file} could not be read: {reason}")
+        }
+        (Lang::Chinese, Refusal::Io(reason) | Refusal::HeldElsewhere(reason)) => {
+            format!("{file} 无法读取：{reason}")
+        }
         (Lang::English, Refusal::TooLarge { bytes, limit }) => format!(
             "{file} is {} and a background picture may be up to {}",
             bt_term::mebibytes(*bytes),
@@ -10144,6 +10212,7 @@ mod tests {
         for error in [
             Refusal::InvalidPath,
             Refusal::Io("access is denied".to_owned()),
+            Refusal::HeldElsewhere("being used by another process".to_owned()),
             Refusal::TooLarge {
                 bytes: 200 * 1024 * 1024,
                 limit: bt_term::MAX_BACKGROUND_IMAGE_BYTES,

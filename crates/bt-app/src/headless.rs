@@ -103,6 +103,9 @@ pub(crate) enum WindowEffect {
     RestartRegistered { flags: u32 },
     /// That registration taken back (`Backend::withdraw_restart`).
     RestartWithdrawn,
+    /// The system asked to end the program before the processes at the default shutdown level,
+    /// at this level (`Backend::ask_to_be_ended_first`, plan row 191).
+    ShutdownLevelAsked { level: u32 },
     /// A page's place in the window asked for, for the web engine (`WindowHost::page_address`).
     PageAddressed(bt_platform::PageVisual),
     /// A hand-off to the system: a file opened, a path revealed, an address handed over.
@@ -310,6 +313,13 @@ impl Backend for Headless {
 
     fn withdraw_restart(event_loop: &HeadlessLoop) -> Result<(), String> {
         event_loop.ledger.record(WindowEffect::RestartWithdrawn);
+        Ok(())
+    }
+
+    fn ask_to_be_ended_first(event_loop: &HeadlessLoop, level: u32) -> Result<(), String> {
+        event_loop
+            .ledger
+            .record(WindowEffect::ShutdownLevelAsked { level });
         Ok(())
     }
 }
@@ -560,6 +570,7 @@ impl WindowHost for HeadlessWindow {
         &self,
         _hear: Box<dyn Fn(bt_platform::session_end::SessionEnd)>,
         _reason: Box<dyn Fn() -> String>,
+        _ending: std::rc::Rc<dyn Fn()>,
     ) -> Option<bt_platform::session_end::SessionEndWatch> {
         self.ledger.record(WindowEffect::SessionEndWatched);
         None
@@ -1643,6 +1654,7 @@ impl HeadlessApplication {
             ))),
             crate::profiles::settle_registry(),
             crate::explorer_menu::settle_package(),
+            crate::settings::settle_notices(),
         );
         application.app = Some(app);
         application.windows.insert(id, window);
@@ -2117,7 +2129,11 @@ mod tests {
         assert!(window.watch_system_settings(Box::new(|_| {})).is_none());
         assert!(
             window
-                .watch_session_end(Box::new(|_| {}), Box::new(String::new))
+                .watch_session_end(
+                    Box::new(|_| {}),
+                    Box::new(String::new),
+                    std::rc::Rc::new(|| {})
+                )
                 .is_none()
         );
         assert!(

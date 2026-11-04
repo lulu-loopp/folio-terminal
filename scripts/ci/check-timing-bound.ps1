@@ -2,9 +2,10 @@
 #
 # `docs/plans/TIMING-BOUND-TESTS.tsv` names every `#[test]` function whose own
 # body waits on the real clock through a stable std wait (`sleep`, `recv_timeout`,
-# `wait_timeout`, `park_timeout` and their variants; the list is in bt-source's
-# `timing` test, which also refuses a workspace function by one of those names) or
-# measures it (`elapsed`). Existing rows are migration work; a new row is a new
+# `wait_timeout`, `park_timeout` and their variants), a kernel wait (a Win32 object,
+# pipe, port or sleep wait, WinHTTP's or a socket's timeout, a `libc` wait by path;
+# plan row 163) -- the lists are in bt-source's `timing` test, which also refuses a
+# workspace function by one of those names -- or measures it (`elapsed`). Existing rows are migration work; a new row is a new
 # flaky-test liability. This script is the history half: it compares with the
 # merge base, whole rows and multiplicity included, so the list can only
 # shrink. The discovery half is bt-source's `timing` test

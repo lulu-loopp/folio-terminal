@@ -772,6 +772,7 @@ fn saved_window(bounds: WindowBoundsV1, maximized: bool) -> SessionWindowV1 {
                 manual_name: None,
                 card_skip: 0,
                 last_command: String::new(),
+                agent: None,
             })),
             pinned: false,
             focused_leaf: "leaf-0".to_owned(),
@@ -1604,6 +1605,7 @@ fn a_files_only_tab_is_named_on_the_restore_prompt_by_the_folder_it_held() {
                 manual_name: None,
                 card_skip: 0,
                 last_command: String::new(),
+                agent: None,
             }))),
         ],
     });

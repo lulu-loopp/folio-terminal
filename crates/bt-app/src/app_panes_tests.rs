@@ -69,6 +69,7 @@ fn each_saved_pane_comes_back_as_the_shell_it_was_saved_as() {
             manual_name: None,
             card_skip: 0,
             last_command: String::new(),
+            agent: None,
         })))
     };
     // Two different shells this build ships.
@@ -99,6 +100,7 @@ fn each_saved_pane_comes_back_as_the_shell_it_was_saved_as() {
             card_skip: 0,
             prefill: None,
             carried_environment: None,
+            agent: crate::agent_resume::SeedAgent::None,
         }
     );
     assert_eq!(
@@ -110,6 +112,7 @@ fn each_saved_pane_comes_back_as_the_shell_it_was_saved_as() {
             card_skip: 0,
             prefill: None,
             carried_environment: None,
+            agent: crate::agent_resume::SeedAgent::None,
         }
     );
     assert_ne!(
