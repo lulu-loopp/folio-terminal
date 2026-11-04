@@ -476,8 +476,8 @@ watch steward	EarHandle::want	watch-steward	WatchStewardAnswered	a failed start 
 # request-doors
 door	asked on	boundary	handed	mailbox
 pty_door::request_shell	window	pty_door::request@0, bt_platform::spawn_at_priority@2, bt_platform::spawn_at_priority_with_stack@3	—	lane::lock, pty_door::births
-Runtime::reap_exited_tabs	window	pty_door::request@0, bt_platform::spawn_at_priority@2, bt_platform::spawn_at_priority_with_stack@3, bt_pty::retire_within@1, std::thread::Builder::spawn@0	—	lane::lock, pty_door::births, bt_pty::Retirements::begin, bt_pty::Retirements::end
-Runtime::close_pane	window	bt_pty::retire_within@1, std::thread::Builder::spawn@0, trace_sink::Queue::offer	—	lane::lock, bt_pty::Retirements::begin, bt_pty::Retirements::end
+Runtime::reap_exited_tabs	window	std::sync::Condvar::notify_one, std::sync::Condvar::notify_all, pty_door::request@0, bt_platform::spawn_at_priority@2, bt_platform::spawn_at_priority_with_stack@3, lane::Executor::start_worker@2, trace_sink::Queue::offer, bt_pty::retire_within@1, std::thread::Builder::spawn@0	—	lane::lock, lane::Ledger::earliest_owed, lane::Ledger::mint, lane::Ledger::publish, lane::Ledger::say_not_started, lane::Ledger::worker_ended, lane::Queue::ask, pty_door::births, bt_pty::Retirements::begin, bt_pty::Retirements::end
+Runtime::close_pane	window	std::sync::Condvar::notify_one, std::sync::Condvar::notify_all, bt_platform::spawn_at_priority@2, bt_platform::spawn_at_priority_with_stack@3, lane::Executor::start_worker@2, trace_sink::Queue::offer, bt_pty::retire_within@1, std::thread::Builder::spawn@0	—	lane::lock, lane::Ledger::earliest_owed, lane::Ledger::mint, lane::Ledger::publish, lane::Ledger::say_not_started, lane::Ledger::worker_ended, lane::Queue::ask, bt_pty::Retirements::begin, bt_pty::Retirements::end
 spawn_profile_observation	window	bt_platform::spawn_at_priority_with_stack@3, lane::Executor::start_worker@2, shell_integration::profile_runtime::start_profile_observation@4	—	lane::lock, lane::Ledger::earliest_owed, lane::Ledger::worker_ended
 request_page_environment	window	bt_platform::spawn_at_priority@2, bt_platform::spawn_at_priority_with_stack@3	—	lane::lock, shell_integration::page_environment_cell
 attention_copilot::begin_probe	window	bt_platform::spawn_at_priority@2, bt_platform::spawn_at_priority_with_stack@3	attention_copilot::run_probe	lane::lock, attention_copilot::CopilotProbe::lock
@@ -547,7 +547,9 @@ EarHandle::want	window	std::sync::Condvar::notify_one, bt_platform::spawn_at_pri
 ## (an effect, a blocking primitive, a door-level finding) and a row the list has read. Every direct
 ## first-party callee of the door's body is in one cell or is already a stop; an enqueue is called in
 ## the body itself, never only inside a closure literal; a closure handed to a `beside` call is
-## beside's. The reason is dated. Read by bt-source's request-door guard; held to `# request-doors`
+## beside's. The reason is dated. The door's `# request-doors` row is read by both walks, which owe
+## its boundary together (2026-11-04): an entry neither meets is `Unmet`, and a cut whose `enqueue`
+## meets none of it is refused. Read by bt-source's request-door guard; held to `# request-doors`
 ## by `hang_watch::window_waits_tests`.
 
 # request-door-cuts

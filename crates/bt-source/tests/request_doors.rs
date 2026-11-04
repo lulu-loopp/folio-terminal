@@ -73,6 +73,11 @@
 //! walked once more, and what it meets stays on the list when it is a breach whatever is read (an
 //! effect, a blocking primitive, a door-level finding) or a row already read; an `unreviewed`
 //! unresolved edge met only beside a cut is counted and rendered (`beside.tsv`), not listed.
+//! **The boundary, owed by both walks** (ruling 2026-11-04): the two walks read the door's one
+//! `# request-doors` row, and an entry is `Unmet` only when neither meets it — the gesture's own
+//! road beside the enqueue starts lanes and threads of its own, stopped and excused by the same
+//! cells; a cut whose `enqueue` meets none of the boundary is refused, since it has cut the
+//! enqueue away.
 //!
 //! A boundary entry on a foreign callee names no argument (`@N`) — the registry reads no foreign
 //! signature — except the standard library's thread spawns of [`STD_SPAWNS`], whose closure
@@ -486,6 +491,11 @@ struct Judged {
     findings: Vec<Finding>,
     /// `Cutoff` and `Unparsed`: never listable.
     refused: Vec<String>,
+    /// The row's boundary entries this walk met, by their place in the cell.
+    met: BTreeSet<usize>,
+    /// A cut door's beside walk, walked with its C1 side (plan row 52): the two owe the row's
+    /// boundary together ([`Judge::walk`]).
+    beside: Option<Box<Judged>>,
 }
 
 fn kind_of(unresolved: &Unresolved) -> &'static str {
@@ -571,16 +581,60 @@ impl Judge<'_, '_, '_> {
         )
     }
 
-    /// The walk from `spec`'s roots — for a cut door, its C1 side ([`Side::Enqueue`]). A
+    /// The walk from `spec`'s roots, its boundary owed: an entry no walk meets is `Unmet`. A
     /// door-level finding names its owner: the door, or for the implicit walk (`implicit`), the
     /// root the path starts at.
+    ///
+    /// **A cut door** (plan row 52, ruling 2026-11-04) is walked on both sides of its cut: the
+    /// judged walk is its C1 side ([`Side::Enqueue`]), and its beside walk rides along in
+    /// [`Judged::beside`]. The two read the one `# request-doors` row and owe its boundary
+    /// together: an entry is `Unmet` only when neither walk meets it, since a gesture's own road
+    /// beside the enqueue starts lanes and threads of its own. The C1 side must still meet one
+    /// entry, or the row is refused: a cut whose enqueue reaches no boundary has cut away the
+    /// enqueue.
     fn walk(&self, spec: &DoorSpec, implicit: bool) -> Judged {
-        let side = if spec.cut.is_some() {
-            Side::Enqueue
-        } else {
-            Side::Whole
+        let Some(cut) = &spec.cut else {
+            let mut judged = self.walk_on(spec, implicit, Side::Whole);
+            let met = judged.met.clone();
+            self.owe_boundary(spec, &mut judged, &met);
+            return judged;
         };
-        self.walk_on(spec, implicit, side)
+        let mut judged = self.walk_on(spec, implicit, Side::Enqueue);
+        let beside = self.walk_on(spec, implicit, Side::Beside);
+        if !spec.boundary.is_empty() && judged.met.is_empty() {
+            judged.refused.push(format!(
+                "window_waits.tsv:{}: `{}`'s `enqueue` meets none of its boundary: a cut door is \
+                 walked to its boundary from its enqueue",
+                cut.line, spec.key
+            ));
+        }
+        let met: BTreeSet<usize> = judged.met.union(&beside.met).copied().collect();
+        self.owe_boundary(spec, &mut judged, &met);
+        judged.beside = Some(Box::new(beside));
+        judged
+    }
+
+    /// The `Unmet` findings of `spec`'s boundary: one per entry not in `met`.
+    fn owe_boundary(&self, spec: &DoorSpec, judged: &mut Judged, met: &BTreeSet<usize>) {
+        for (at, entry) in spec.boundary.iter().enumerate() {
+            if !met.contains(&at) {
+                judged.findings.push(Finding {
+                    key: (
+                        spec.roots
+                            .first()
+                            .map(|id| self.item_file(*id))
+                            .unwrap_or_default(),
+                        spec.key.clone(),
+                        "Unmet".to_owned(),
+                        entry.spelled.clone(),
+                    ),
+                    site: None,
+                    path: Vec::new(),
+                    root: Node::Item(spec.roots[0]),
+                    under: None,
+                });
+            }
+        }
     }
 
     /// Whether `id` is a stop of `spec`'s walk whatever a cut says: another ledger door, a
@@ -947,31 +1001,9 @@ impl Judge<'_, '_, '_> {
                 }
             }
         }
-        // The beside walk enters no enqueue: its boundary is the C1 walk's to meet.
-        let owed = if side == Side::Beside {
-            &[][..]
-        } else {
-            &spec.boundary[..]
-        };
-        for (at, entry) in owed.iter().enumerate() {
-            if !met.contains(&at) {
-                judged.findings.push(Finding {
-                    key: (
-                        spec.roots
-                            .first()
-                            .map(|id| self.item_file(*id))
-                            .unwrap_or_default(),
-                        spec.key.clone(),
-                        "Unmet".to_owned(),
-                        entry.spelled.clone(),
-                    ),
-                    site: None,
-                    path: Vec::new(),
-                    root: Node::Item(spec.roots[0]),
-                    under: None,
-                });
-            }
-        }
+        // What is owed of the boundary is [`Self::walk`]'s to say: a cut door owes it on both of
+        // its walks together.
+        judged.met = met;
         judged
     }
 }
@@ -1826,12 +1858,13 @@ fn a_closure_handed_to_a_beside_call_is_beside() {
 /// RED (plan row 52) — **every shape a cut does not read is refused, naming the registry's line and
 /// the call's `file:line`** (b–e of the report): a direct callee named in neither cell
 /// (`gesture_strays`' `Lane::peek`); an enqueue called only inside a closure literal
-/// (`gesture_in_a_closure`); a name in either cell the door's body does not call; an enqueue road
-/// that meets no boundary entry (`Unmet`).
+/// (`gesture_in_a_closure`); a name in either cell the door's body does not call; a cut whose
+/// `enqueue` meets none of its boundary (ruling 2026-11-04: refused, even when its beside walk
+/// meets every entry, so that nothing of the row is `Unmet`).
 ///
 /// MUTATIONS: in `Judge::walk_on`, drop the neither-cell refusal; drop the closure-literal refusal
-/// (the enqueue is then walked as beside's closure, unread); drop the stale-name pass; skip the
-/// `Unmet` pass on the enqueue side as on the beside side.
+/// (the enqueue is then walked as beside's closure, unread); drop the stale-name pass; in
+/// `Judge::walk`, drop the refusal of a cut whose C1 side meets nothing.
 #[test]
 fn every_shape_a_cut_does_not_read_is_refused() {
     let registry = fixture_registry();
@@ -1869,15 +1902,24 @@ fn every_shape_a_cut_does_not_read_is_refused() {
             at("let _ = lane.peek(); // gesture_strays")
         )]
     );
+    // Its enqueue, refused inside the closure, is not walked on the C1 side, which then meets none
+    // of the boundary: the cut is refused for that too (ruling 2026-11-04).
     assert_eq!(
         fixture_walk(&registry, "gesture_in_a_closure").refused,
-        [format!(
-            "window_waits.tsv:{}: `gesture_in_a_closure`'s enqueue `bt-rd crate::gesture_enqueue` \
-             is called at {file}:{} inside a closure literal: an enqueue is a call the door's own \
-             body makes",
-            line_of("gesture_in_a_closure"),
-            at("answer_with(job, move || gesture_enqueue(lane, job)); // gesture_in_a_closure")
-        )]
+        [
+            format!(
+                "window_waits.tsv:{}: `gesture_in_a_closure`'s enqueue `bt-rd crate::gesture_enqueue` \
+                 is called at {file}:{} inside a closure literal: an enqueue is a call the door's \
+                 own body makes",
+                line_of("gesture_in_a_closure"),
+                at("answer_with(job, move || gesture_enqueue(lane, job)); // gesture_in_a_closure")
+            ),
+            format!(
+                "window_waits.tsv:{}: `gesture_in_a_closure`'s `enqueue` meets none of its \
+                 boundary: a cut door is walked to its boundary from its enqueue",
+                line_of("gesture_in_a_closure")
+            )
+        ]
     );
     let stale = registry.replacen(
         "gesture\tgesture_enqueue\tgesture_answer, gesture_glances\t",
@@ -1898,15 +1940,50 @@ fn every_shape_a_cut_does_not_read_is_refused() {
         1,
     );
     let judged = fixture_walk(&unmet, "gesture");
-    assert!(judged.refused.is_empty(), "{:?}", judged.refused);
-    let unmet: Vec<String> = unread(&judged, &fixture_reviewed())
-        .into_iter()
-        .filter(|row| row.starts_with("Unmet "))
-        .collect();
     assert_eq!(
-        unmet,
-        ["Unmet spawn@0", "Unmet std::sync::Condvar::notify_one",]
+        judged.refused,
+        [format!(
+            "window_waits.tsv:{}: `gesture`'s `enqueue` meets none of its boundary: a cut door is \
+             walked to its boundary from its enqueue",
+            line_of("gesture")
+        )]
     );
+    assert_eq!(
+        unread(&judged, &fixture_reviewed())
+            .into_iter()
+            .filter(|row| row.starts_with("Unmet "))
+            .collect::<Vec<_>>(),
+        Vec::<String>::new(),
+        "the beside walk meets both entries: the refusal, not an `Unmet`, says what is wrong"
+    );
+}
+
+/// RED (plan row 52, ruling 2026-11-04) — **a boundary entry met only by the beside walk is not
+/// `Unmet`**: `gesture_starts_beside`'s enqueue (`Lane::offer`) meets the notify, and the thread
+/// door is started beside it (`gesture_starts`); the two walks owe the row's boundary together. And
+/// an entry neither walk meets still is: a planted third entry is `Unmet`.
+///
+/// MUTATION: in `Judge::walk`, owe the boundary on the C1 side's `met` alone — `Unmet spawn@0`.
+#[test]
+fn a_boundary_entry_met_only_beside_the_cut_is_not_unmet() {
+    let registry = fixture_registry();
+    let unmet_of = |registry: &str| -> Vec<String> {
+        let judged = fixture_walk(registry, "gesture_starts_beside");
+        assert!(judged.refused.is_empty(), "{:?}", judged.refused);
+        unread(&judged, &fixture_reviewed())
+            .into_iter()
+            .filter(|row| row.starts_with("Unmet "))
+            .collect()
+    };
+    assert_eq!(unmet_of(&registry), Vec::<String>::new());
+    let beside = fixture_beside(&registry, "gesture_starts_beside");
+    assert!(
+        beside.met.len() == 1 && fixture_walk(&registry, "gesture_starts_beside").met.len() == 1,
+        "each walk meets one of the two entries"
+    );
+    let row = "gesture_starts_beside\twindow\tstd::sync::Condvar::notify_one, spawn@0";
+    let planted = registry.replacen(row, &format!("{row}, spawn_with@1"), 1);
+    assert_eq!(unmet_of(&planted), ["Unmet spawn_with@1"]);
 }
 
 /// RED (plan row 52) — **a `# request-door-cuts` row is read whole or refused by its line**: a cut
@@ -3033,8 +3110,13 @@ fn every_request_door_returns_at_once() {
     // Which doors meet each key: the rendering's `paths.tsv` says so, for the reader of a row.
     let mut doors_of: BTreeMap<SiteKey, BTreeSet<String>> = BTreeMap::new();
     let mut never: Vec<String> = Vec::new();
+    // Each cut door's beside walk, walked with its C1 side ([`Judge::walk`]).
+    let mut besides: Vec<(&DoorSpec, Judged)> = Vec::new();
     for spec in &specs {
-        let judged = judge.walk(spec, false);
+        let mut judged = judge.walk(spec, false);
+        if let Some(beside) = judged.beside.take() {
+            besides.push((spec, *beside));
+        }
         let open: BTreeMap<SiteKey, BTreeSet<Site>> = count(&judged.findings);
         let mut by_verdict: BTreeMap<String, usize> = BTreeMap::new();
         for key in open.keys() {
@@ -3069,8 +3151,7 @@ fn every_request_door_returns_at_once() {
     // is a breach whatever is read, or a row already read; an unreviewed edge met there is
     // counted and rendered, not listed.
     let mut beside_left: BTreeMap<SiteKey, BTreeSet<String>> = BTreeMap::new();
-    for spec in specs.iter().filter(|spec| spec.cut.is_some()) {
-        let judged = judge.walk_on(spec, false, Side::Beside);
+    for (spec, judged) in besides {
         never.extend(judged.refused);
         let (kept, left) = split_beside(judged.findings, &reviewed);
         eprintln!(

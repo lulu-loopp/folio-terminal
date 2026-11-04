@@ -499,3 +499,15 @@ pub fn submit_on_a_builder(lane: &'static Lane, job: u32) {
     let builder: std::thread::Builder = std::thread::Builder::new();
     let _ = builder.spawn(move || lane.serve());
 }
+
+/// Plan row 52 (ruling 2026-11-04): a cut door whose enqueue meets one boundary entry (the notify)
+/// and whose beside side meets the other (the thread door, started beside the enqueue).
+pub fn gesture_starts_beside(lane: &'static Lane, job: u32) {
+    lane.offer(job);
+    gesture_starts(lane);
+}
+
+/// Beside `gesture_starts_beside`'s enqueue: the worker handed to the thread door.
+pub fn gesture_starts(lane: &'static Lane) {
+    spawn(move || lane.serve());
+}

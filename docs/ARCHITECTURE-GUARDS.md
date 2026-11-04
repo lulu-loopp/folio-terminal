@@ -737,6 +737,29 @@ row names exactly one item on its arm (`-` for an item on no predicate, else its
 verdict in the list names one item per `cfg` arm; a key that names nothing, or two items on one
 arm, is refused by its row's line (`window_waits.tsv:<line>`, `REQUEST-DOOR-SITES.tsv:<line>`),
 as every other refusal of the registry's cells is.
+Since 2026-11-02 (T-GESTURE-DOORS-ANSWER-OFF-THE-GESTURE, 0.4.9 plan row 52, the owner's ruling)
+a gesture door whose road goes on past its enqueue (it answers, draws, closes a tab) is cut one level
+down by a row of `window_waits.tsv`'s `# request-door-cuts` (`door`, `enqueue`, `beside`, `reason`):
+`Runtime::hand_off`, `Runtime::ask_for_a_paste`, `Runtime::paste_from_clipboard_into`,
+`Runtime::reap_exited_tabs` and `Runtime::close_pane`. Every direct first-party callee of the door's
+body is named in `enqueue` (walked under C1 to the row's boundary) or in `beside` (the gesture's own
+window work, not entered by the C1 walk), or is already a stop; an enqueue is called in the body
+itself, never only inside a closure literal, and a closure handed to a `beside` call is beside's;
+every other shape, a stale name and an undated reason are refused by the registry's line and the
+call's `file:line`. The `beside` side is walked once more, and what it meets stays listed when it
+is a breach whatever is read (an effect, a blocking primitive, a door-level finding) or a row
+already read; an `unreviewed` unresolved edge met only beside a cut is counted in the list's header
+and rendered in `target/request-door-sites/beside.tsv`. A foreign boundary entry may name the
+standard library's thread spawns' closure argument (`std::thread::spawn@0`,
+`std::thread::Builder::spawn@0`, the guard's closed `STD_SPAWNS` table), so the PTY retirement
+thread's body is the thread's, not the door's. `Runtime::submit_clipboard_write` and
+`Runtime::save_clipboard_picture` stay walked whole: their whole road is the enqueue's, and the
+picture save's refusal is answered on the next turn through its own inbox. **Since 2026-11-04**
+(the first real-tree run, coordinator's ruling) the two walks read the door's one
+`# request-doors` row and owe its boundary together: an entry is `Unmet` only when neither walk
+meets it, since the road beside an enqueue starts lanes and threads of its own (close_pane's and
+reap's `close_tab` reaches the computation lane), stopped and excused by the same cells; and a cut
+whose `enqueue` meets none of its boundary is refused, since it has cut the enqueue away.
 
 **The sites, by site.** `docs/plans/REQUEST-DOOR-SITES.tsv` lists every failure keyed by file,
 item, kind and name (no line), with `sites`, a verdict and a reason: `std` or `follows <key>; …`
