@@ -563,24 +563,30 @@ fn listen(
             revents: 0,
         }));
         let count = libc::nfds_t::try_from(waiting.len()).unwrap_or(0);
-        let ready = match left {
+        // **The listener's one `poll`**, of `milliseconds` (`-1` for no
+        // length of time): one site for both lengths below.
+        let mut ready = 0;
+        let mut poll_for = |milliseconds: i32| {
             // SAFETY: every descriptor is open for the whole of this call — the
             // listener is borrowed, the clients are owned by the vector above,
             // and the read end is closed only after this loop ends.
-            None => unsafe { libc::poll(waiting.as_mut_ptr(), count, -1) },
+            ready = unsafe { libc::poll(waiting.as_mut_ptr(), count, milliseconds) };
+            ready != 0
+        };
+        match left {
+            // Nobody is reading: a wait for a caller or the stop, with no
+            // length of time.
+            None => {
+                poll_for(-1);
+            }
             // **The nearest read deadline, on the endpoint's clock**: the
             // clock's wait is this one `poll` of its bound.
             Some(left) => {
-                let mut ready = 0;
                 clock.wait(left, &mut |bound| {
-                    let milliseconds = i32::try_from(bound.as_millis()).unwrap_or(i32::MAX).max(1);
-                    // SAFETY: as above.
-                    ready = unsafe { libc::poll(waiting.as_mut_ptr(), count, milliseconds) };
-                    ready != 0
+                    poll_for(i32::try_from(bound.as_millis()).unwrap_or(i32::MAX).max(1))
                 });
-                ready
             }
-        };
+        }
         if ready < 0 {
             if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
                 continue;

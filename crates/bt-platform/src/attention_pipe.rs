@@ -1098,26 +1098,27 @@ fn listen(
             .map(|instance| instance.event.handle())
             .collect::<Vec<_>>();
         handles.push(stop.0);
-        let answer = match left {
-            // Nobody is reading: a wait for a caller or the stop, with no length of time.
+        // **The listener's one kernel wait**, for a caller, a read or the stop, of `milliseconds`:
+        // one site for both lengths below, so the bare-site inventory still counts one.
+        let mut answer = WAIT_TIMEOUT;
+        let mut wait_for = |milliseconds: u32| {
             // SAFETY: every handle is owned by this thread's pool, or is the stop event, which
             // outlives the listener.
-            None => unsafe { WaitForMultipleObjects(&handles, false, INFINITE) },
+            answer = unsafe { WaitForMultipleObjects(&handles, false, milliseconds) };
+            answer != WAIT_TIMEOUT
+        };
+        match left {
+            // Nobody is reading: a wait for a caller or the stop, with no length of time.
+            None => {
+                wait_for(INFINITE);
+            }
             // **The nearest read deadline, on the endpoint's clock.** The clock's wait is this one
             // kernel wait of its bound; a wait it ends is the deadline's timeout, and the sweep
             // below reads the deadline on the same clock.
             Some(left) => {
-                let mut answer = WAIT_TIMEOUT;
-                clock.wait(left, &mut |bound| {
-                    // SAFETY: as above.
-                    answer = unsafe {
-                        WaitForMultipleObjects(&handles, false, wait_milliseconds(bound))
-                    };
-                    answer != WAIT_TIMEOUT
-                });
-                answer
+                clock.wait(left, &mut |bound| wait_for(wait_milliseconds(bound)));
             }
-        };
+        }
         if answer == WAIT_TIMEOUT {
             sweep(&mut pool, counts, clock.now());
             if pool.is_empty() {
