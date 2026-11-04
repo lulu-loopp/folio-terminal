@@ -1013,6 +1013,7 @@ crates/bt-app/src/main.rs	bt-app crate::AnimationCache::send_fill	Dynamic	send	1
 crates/bt-app/src/main.rs	bt-app crate::ChevronTurn::sample	Ambiguous	as_secs_f32	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::ClipboardPictureJob::take	Ambiguous	map	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::ClipboardPictureJob::take	Ambiguous	ok	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
+crates/bt-app/src/main.rs	bt-app crate::ClipboardPictureMailbox::refuse	Ambiguous	unwrap_or_else	1	std	2026-11-04: a LockResult's, over the picture inbox's own lock, taken on the window to count a save its door refused (plan row 52; the lock is the row's declared mailbox item ClipboardPictureMailbox::refuse): no file, no wait
 crates/bt-app/src/main.rs	bt-app crate::ClipboardPictureMailbox::withdraw	Ambiguous	unwrap_or_else	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::ClipboardPictureMailbox::withdraw	Blocking	std::sync::Mutex::lock	1	violation	2026-10-24: (c) the gesture doors answer and draw inline: this site is on the synchronous answer road of Runtime::save_clipboard_picture
 crates/bt-app/src/main.rs	bt-app crate::ControlClickHint::text	Ambiguous	in_lang	2	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
@@ -4502,6 +4503,7 @@ crates/bt-app/src/window_seam.rs	bt-app crate::window_seam::<Arc as WindowHost>:
 crates/bt-app/src/window_seam.rs	bt-app crate::window_seam::<Arc as WindowHost>::monitor_sizes	Ambiguous	map	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/window_seam.rs	bt-app crate::window_seam::<Arc as WindowHost>::monitor_sizes	Ambiguous	size	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/window_seam.rs	bt-app crate::window_seam::<Arc as WindowHost>::present_facts	Ambiguous	unwrap_or_default	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
+crates/bt-app/src/window_seam.rs	bt-app crate::window_seam::LoopProxy::send_event	Dynamic	(value)	1	std	2026-11-04: the window's wake, LoopProxy's stored send (EventLoopProxy::send_event in the product, a test's ledger in a test), which waits on nothing: the picture save's refused door wakes the window as its saving thread does (plan row 52)
 crates/bt-app/src/window_seam.rs	bt-app crate::window_seam::winit_outer_rect	Ambiguous	saturating_add	2	unreviewed	2026-10-26: T-SPLIT-2B batch 22; the same site, moved by K2 batch 22 with `winit_outer_rect` from main.rs into window_seam.rs: K2 moves the item, not the call
 crates/bt-app/src/wsl.rs	bt-app crate::wsl::facts	Ambiguous	clone	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/wsl.rs	bt-app crate::wsl::facts	Ambiguous	unwrap_or_default	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
