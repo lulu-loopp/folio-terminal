@@ -48866,6 +48866,7 @@ impl<B: Backend> FolioApp<B> {
     /// stopped answering. It cannot arrive from AppKit, and it is one line
     /// against a hang at a boundary this program does not own.
     fn begin_the_systems_quit(&mut self, answer: bt_platform::TerminationAnswer) {
+        session_end::the_systems_quit_asked(answer.reason());
         if self.termination.is_some() {
             if let Err(reason) = answer.answer(bt_platform::TerminationDecision::Cancel) {
                 crate::diagnostics::stderr_line(format!(
@@ -48898,6 +48899,19 @@ impl<B: Backend> FolioApp<B> {
         let Some(answer) = self.termination.take() else {
             return;
         };
+        // **The last word before AppKit may end the process** (0.4.10 plan row 17). `NSTerminateNow`
+        // lets `-[NSApplication terminate:]` go on to `exit()`, and `fn main`'s way out, its fence
+        // among it, is never reached; so what became of the quit's save is said and the log is
+        // fenced here, before the answer, once for the process and within the fence's own bound.
+        if decision == bt_platform::TerminationDecision::Now {
+            session_end::at_the_systems_quit(
+                self.app
+                    .as_ref()
+                    .map_or(persist::ClosedSave::NoSession, |app| {
+                        app.session_store.what_the_close_left()
+                    }),
+            );
+        }
         if let Err(reason) = answer.answer(decision) {
             crate::diagnostics::stderr_line(format!(
                 "{APP_NAME} could not answer the quit the system asked for: {reason}"
@@ -62013,6 +62027,34 @@ mod quit_with_no_window_tests {
         assert!(
             finished < now,
             "AppKit is let go only after the session is on the disk"
+        );
+        // **And the request says why it came, and the answer fences the log before it is given**
+        // (0.4.10 plan row 17): `NSTerminateNow` lets AppKit `exit()` and `fn main`'s fence is
+        // never reached. MUTATION (plant 17-a′): move the `at_the_systems_quit` call below the
+        // `answer.answer(decision)` statement.
+        let said = begin
+            .find("session_end::the_systems_quit_asked(answer.reason());")
+            .expect("the request says why AppKit asked");
+        let parked = begin
+            .find("self.termination = Some(answer);")
+            .expect("and is parked");
+        assert!(said < parked, "{begin}");
+        let answering = method_body("FolioApp", "answer_the_systems_quit");
+        let taken = answering
+            .find("self.termination.take()")
+            .expect("the answer is AppKit's request");
+        let gated = answering
+            .find("decision == bt_platform::TerminationDecision::Now")
+            .expect("the end is NSTerminateNow's");
+        let ended = answering
+            .find("session_end::at_the_systems_quit(")
+            .expect("the quit says its save and fences the log");
+        let replied = answering
+            .find("answer.answer(decision)")
+            .expect("and then answers AppKit");
+        assert!(
+            taken < gated && gated < ended && ended < replied,
+            "the log is fenced before AppKit is answered: {answering}"
         );
     }
 }
