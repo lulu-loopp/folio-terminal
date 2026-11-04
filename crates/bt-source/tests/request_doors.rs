@@ -1948,12 +1948,11 @@ fn every_shape_a_cut_does_not_read_is_refused() {
             line_of("gesture")
         )]
     );
-    assert_eq!(
-        unread(&judged, &fixture_reviewed())
-            .into_iter()
-            .filter(|row| row.starts_with("Unmet "))
-            .collect::<Vec<_>>(),
-        Vec::<String>::new(),
+    assert!(
+        judged
+            .findings
+            .iter()
+            .all(|finding| finding.key.2 != "Unmet"),
         "the beside walk meets both entries: the refusal, not an `Unmet`, says what is wrong"
     );
 }
