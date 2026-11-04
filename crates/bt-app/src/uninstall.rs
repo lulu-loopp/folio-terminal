@@ -1588,8 +1588,9 @@ const AFTER_PID_POLL: Duration = Duration::from_millis(100);
 /// (`bt_platform::deferred_removal::schedule`, 0.4.10 plan row 14): a fresh
 /// copy of this executable must start — a new file an antivirus may scan
 /// first — parse the plan it inherits and print its ready line. A remover
-/// that has not by then is stopped, its copy discarded, and the program's row
-/// says why; nothing has been removed.
+/// that has not by then is stopped and the program's row says why; its copy
+/// is discarded, or, while the stopped image still holds it (Windows), left
+/// for the next purge's "Uninstaller staging" row; nothing has been removed.
 const REMOVER_READY_WITHIN: Duration = Duration::from_secs(10);
 
 /// **The language the `--uninstall` door speaks**: the one `settings.json`

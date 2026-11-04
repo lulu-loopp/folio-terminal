@@ -164,7 +164,9 @@ type ReadyAnswer = io::Result<String>;
 /// **How long the acknowledgement may take is the caller's** (0.4.10 plan row
 /// 14): `ready_within` bounds the one wait, the product's door passes its own
 /// bound and a test chooses its own. A child that has not answered by then is
-/// stopped and its private folder discarded.
+/// stopped; its copy is discarded, or, while the stopped image still holds it
+/// (Windows), left for the next purge's "Uninstaller staging" row. Nothing has
+/// been removed.
 ///
 /// # Errors
 /// The private directory/copy could not be made, the copy differed from the
@@ -1579,8 +1581,8 @@ mod tests {
     /// not ready within the caller's bound is stopped at that bound, and nothing is removed**.
     ///
     /// The real copy is started (the copied test executable, as in
-    /// `a_native_remover_copy_runs_the_plan`), and the wait `schedule` is handed answers that the
-    /// bound ran out without looking at the child, so the child's own speed never enters the
+    /// `a_native_remover_copy_runs_the_plan`), and the wait `schedule_by` is handed answers that
+    /// the bound ran out without looking at the child, so the child's own speed never enters the
     /// verdict and no real time is waited. The one wait is asked for the caller's bound.
     ///
     /// MUTATION: in `schedule_by`, hand `wait` a constant ten seconds instead of `ready_within` —
@@ -1606,6 +1608,8 @@ mod tests {
             },
             Some(install),
         );
+        #[cfg(unix)]
+        let private_after = private_root.clone();
         let (answer, asked) = on_worker(move |worker| {
             let mut asked = None;
             let answer = schedule_by(worker, &plan, &private_root, BOUND, |_, within| {
@@ -1630,10 +1634,16 @@ mod tests {
             b"owned",
             "a stopped remover removed nothing"
         );
-        // Not asserted: that the stopped copy's private folder is gone. `stop_child` discards it
-        // once, right after the kill, and on Windows the killed image is still held at that moment
-        // in nearly every run (19 of 20 on 2026-11-04), so the copy stays for the next purge's
-        // "Uninstaller staging" row, as that row says of a remover that was ended.
+        // Unix removes a running image's name, so the stopped copy's private folder is gone. Not
+        // asserted on Windows: `stop_child` discards it once, right after the kill, and the killed
+        // image is still held at that moment in nearly every run (19 of 20 on 2026-11-04), so the
+        // copy stays for the next purge's "Uninstaller staging" row, as that row says of a remover
+        // that was ended.
+        #[cfg(unix)]
+        assert!(
+            !private_after.exists(),
+            "a stopped remover's private folder is discarded"
+        );
         let _ = fs::remove_dir_all(root);
     }
 }
