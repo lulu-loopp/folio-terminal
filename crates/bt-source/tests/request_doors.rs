@@ -1862,7 +1862,8 @@ fn every_shape_a_cut_does_not_read_is_refused() {
     assert_eq!(
         fixture_walk(&registry, "gesture_strays").refused,
         [format!(
-            "window_waits.tsv:{}: `gesture_strays` calls `crate::Lane::peek` at {file}:{}, which \
+            "window_waits.tsv:{}: `gesture_strays` calls `bt-rd crate::Lane::peek` at {file}:{}, \
+             which \
              its `# request-door-cuts` row names in neither `enqueue` nor `beside`",
             line_of("gesture_strays"),
             at("let _ = lane.peek(); // gesture_strays")
@@ -1871,9 +1872,9 @@ fn every_shape_a_cut_does_not_read_is_refused() {
     assert_eq!(
         fixture_walk(&registry, "gesture_in_a_closure").refused,
         [format!(
-            "window_waits.tsv:{}: `gesture_in_a_closure`'s enqueue `crate::gesture_enqueue` is \
-             called at {file}:{} inside a closure literal: an enqueue is a call the door's own body \
-             makes",
+            "window_waits.tsv:{}: `gesture_in_a_closure`'s enqueue `bt-rd crate::gesture_enqueue` \
+             is called at {file}:{} inside a closure literal: an enqueue is a call the door's own \
+             body makes",
             line_of("gesture_in_a_closure"),
             at("answer_with(job, move || gesture_enqueue(lane, job)); // gesture_in_a_closure")
         )]
