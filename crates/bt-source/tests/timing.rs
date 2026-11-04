@@ -129,6 +129,11 @@
 //!   `recv_timeout` in a helper is not (plan row 208 follows them). A std wait
 //!   ([`REAL_WAITS`]) taken as a value is not seen either; a kernel wait taken
 //!   that way is refused.
+//! * **A wait taken as a value under a name that is also a type**
+//!   ([`KERNEL_WAIT_TYPES`]): `let f = libc::kevent;` or
+//!   `register(libc::kevent)` is neither found nor refused, because a token
+//!   scan cannot tell the function from the struct used as a type; only its
+//!   call is read and only its import is refused. Review owns the value.
 //! * **A kernel wait outside the closed lists** ([`KERNEL_WAITS`],
 //!   [`KERNEL_WAIT_PATHS`]), and a first-party `extern "C"` wait called bare:
 //!   a new wait name in a test body is review's, and joins a list when it is

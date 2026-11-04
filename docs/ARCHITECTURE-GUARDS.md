@@ -1226,7 +1226,9 @@ COM or Winsock wait (`WSAPoll`), WinHTTP's timeouts, a macOS run loop run for a 
 the call of its path (`libc::`, `WinSock::`), because bt-app declares a `poll` and `select`s of its own. A
 path wait named and not called (`libc::kevent`, a struct too, only where it is imported), a group, glob or
 rename of `libc` or `WinSock` (on a file's last line too), a renamed kernel wait and a kernel wait taken as
-a value are refused by file and line, anywhere in a package. The lists are closed: a wait not on them is
+a value are refused by file and line, anywhere in a package. The group and glob refusal is on purpose,
+product imports included: a wait-bearing module (`libc`, `WinSock`) is imported item by item under each
+item's own name, so the scan reads every kernel wait it brings in. The lists are closed: a wait not on them is
 review's, and joins them when it is first written. `GetOverlappedResult`, `waitpid` and `waitid` are not read: they wait for an event or not at all,
 and a test stuck in one is the watchdog's. The product half stays a hand sweep, as rows 125 and 153 ruled:
 row 163 judged bt-platform's product kernel waits at `f641b0064` and recorded them in TIMING-BOUND's
