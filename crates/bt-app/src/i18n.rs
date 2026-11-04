@@ -3847,11 +3847,9 @@ impl Text {
                 "This video did not finish loading",
                 "此视频未能加载完成",
             ),
-            Self::VideoPlayerDidNotStart => pick(
-                lang,
-                "The video player did not start",
-                "The video player did not start", // zh: pending T-LATE-BUILT-VIDEO-RETIRED-AS-UNPLAYABLE
-            ),
+            Self::VideoPlayerDidNotStart => {
+                pick(lang, "The video player did not start", "视频播放器未启动")
+            }
             Self::VideoNoLength => pick(lang, "No length", "无时长"),
             Self::PreviewFlipToRendered => pick(lang, "View rendered", "查看渲染结果"),
             Self::PreviewFlipToPage => pick(lang, "View page", "查看页面"),
@@ -5219,17 +5217,11 @@ impl Text {
                 "Bounces the Dock icon when an agent finishes a turn in a window out of sight. Minimised windows get a desktop message.",
                 "agent 回合结束而窗口不可见时，跳动程序坞图标。窗口最小化时改为发送桌面通知。",
             ),
-            // zh: pending T-AGENT-RESUME-AFTER-RESTART
-            Self::RowResumeAgents => pick(
-                lang,
-                "Resume agents after restart",
-                "Resume agents after restart",
-            ),
-            // zh: pending T-AGENT-RESUME-AFTER-RESTART
+            Self::RowResumeAgents => pick(lang, "Resume agents after restart", "重启后恢复 agent"),
             Self::DescResumeAgents => pick(
                 lang,
                 "When Folio reopens, panes that were running Claude Code or Codex resume their sessions.",
-                "When Folio reopens, panes that were running Claude Code or Codex resume their sessions.",
+                "Folio 重新打开时，运行过 Claude Code 或 Codex 的窗格恢复各自的会话。",
             ),
             Self::ToastTurnFinished => pick(lang, "Turn finished", "回合结束"),
             Self::ToastWaitingForYou => pick(lang, "Waiting for you", "正在等你回答"),
@@ -6404,11 +6396,9 @@ impl Text {
             }
             Self::ShellDidNotStart => pick(lang, "Shell not started", "Shell 未启动"),
             Self::ShellBirthDeath => pick(lang, "exited at birth", "启动即退出"),
-            Self::ShellEndedBySystem => pick(
-                lang,
-                "Ended by the system at shutdown",
-                "Ended by the system at shutdown", // zh: pending T-SHUTDOWN-KILLS-SHELLS-BEFORE-THE-LAYOUT-IS-SAVED
-            ),
+            Self::ShellEndedBySystem => {
+                pick(lang, "Ended by the system at shutdown", "关机时被系统结束")
+            }
         }
     }
 
@@ -6599,21 +6589,7 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
-        // T-AGENT-RESUME-AFTER-RESTART (0.4.9 plan row 195): the Agents page's resume switch.
-        (Self::RowResumeAgents, HostPlatform::Windows),
-        (Self::RowResumeAgents, HostPlatform::MacOs),
-        (Self::DescResumeAgents, HostPlatform::Windows),
-        (Self::DescResumeAgents, HostPlatform::MacOs),
-        // zh: pending T-SHUTDOWN-KILLS-SHELLS-BEFORE-THE-LAYOUT-IS-SAVED — the note a pane keeps
-        // when the system ended its shell at shutdown (plan row 191).
-        (Self::ShellEndedBySystem, HostPlatform::Windows),
-        (Self::ShellEndedBySystem, HostPlatform::MacOs),
-        // zh: pending T-LATE-BUILT-VIDEO-RETIRED-AS-UNPLAYABLE — what a video's surface says when
-        // the player did not come up on this machine (plan row 189).
-        (Self::VideoPlayerDidNotStart, HostPlatform::Windows),
-        (Self::VideoPlayerDidNotStart, HostPlatform::MacOs),
-    ];
+    const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[];
 }
 
 // ── the strings that carry a value ─────────────────────────────────────────
@@ -6629,8 +6605,7 @@ impl Text {
 pub fn could_not_resume_text(title: &str, id: &str) -> String {
     match current() {
         Lang::English => format!("{title} session {id} could not be resumed."),
-        // zh: pending T-AGENT-RESUME-AFTER-RESTART
-        Lang::Chinese => format!("{title} session {id} could not be resumed."),
+        Lang::Chinese => format!("{title} 会话 {id} 无法恢复。"),
     }
 }
 
