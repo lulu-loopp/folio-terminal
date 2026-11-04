@@ -831,6 +831,18 @@ fn read_refused(error: io::Error) -> InlineImageDecodeError {
     }
 }
 
+/// **[`read_refused`] for the window's ground**: [`BackgroundImageError::HeldElsewhere`] when
+/// another program holds the file at this moment, [`BackgroundImageError::Io`] for every other
+/// refusal of the disk (T-HELD-FILE-IN-THE-OTHER-PICTURE-LANES). The same one reading of "held"
+/// ([`bt_effects::file_reads::held_elsewhere`]), into the type the settings row speaks from.
+fn background_read_refused(error: io::Error) -> BackgroundImageError {
+    if bt_effects::file_reads::held_elsewhere(&error) {
+        BackgroundImageError::HeldElsewhere(error.to_string())
+    } else {
+        BackgroundImageError::Io(error.to_string())
+    }
+}
+
 fn decode_image_bytes(bytes: &[u8]) -> Result<DecodedImagePayload, InlineImageDecodeError> {
     decode_image_bytes_within(bytes, MAX_INLINE_IMAGE_RGBA_BYTES)
 }
@@ -1099,6 +1111,13 @@ pub enum BackgroundImageError {
     /// decodes.
     InvalidPath,
     Io(String),
+    /// **Another program holds the file at this moment**
+    /// (T-HELD-FILE-IN-THE-OTHER-PICTURE-LANES): its open or its read was refused because another
+    /// handle does not share it ([`bt_effects::file_reads::held_elsewhere`]), in the operating
+    /// system's own words. An answer about the moment and not about the file, which is why it is
+    /// not [`Self::Io`]: the window asks once more before it says anything (`bt_app`'s
+    /// `background_answer`), and says it in [`Self::Io`]'s words when the second read is held too.
+    HeldElsewhere(String),
     /// The file is bigger than [`MAX_BACKGROUND_IMAGE_BYTES`]. Both numbers are
     /// carried so the sentence can name the limit it applied — an error that
     /// says only "too large" leaves the reader with no way to tell a 70 MB file
@@ -1119,7 +1138,9 @@ impl fmt::Display for BackgroundImageError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidPath => formatter.write_str("not a picture file this window can open"),
-            Self::Io(error) => write!(formatter, "could not be read: {error}"),
+            Self::Io(error) | Self::HeldElsewhere(error) => {
+                write!(formatter, "could not be read: {error}")
+            }
             Self::TooLarge { bytes, limit } => write!(
                 formatter,
                 "is {} and a background picture may be up to {}",
@@ -1217,10 +1238,8 @@ pub fn decode_background_image(
         return Err(BackgroundImageError::InvalidPath);
     }
     let mut file = bt_effects::file_reads::open(bt_effects::file_reads::Lane::InlineImage, path)
-        .map_err(|error| BackgroundImageError::Io(error.to_string()))?;
-    let metadata = file
-        .metadata()
-        .map_err(|error| BackgroundImageError::Io(error.to_string()))?;
+        .map_err(background_read_refused)?;
+    let metadata = file.metadata().map_err(background_read_refused)?;
     if !metadata.is_file() {
         return Err(BackgroundImageError::InvalidPath);
     }
@@ -1234,7 +1253,7 @@ pub fn decode_background_image(
     file.by_ref()
         .take(MAX_BACKGROUND_IMAGE_BYTES + 1)
         .read_to_end(&mut bytes)
-        .map_err(|error| BackgroundImageError::Io(error.to_string()))?;
+        .map_err(background_read_refused)?;
     if bytes.len() as u64 > MAX_BACKGROUND_IMAGE_BYTES {
         return Err(BackgroundImageError::TooLarge {
             bytes: bytes.len() as u64,
@@ -4625,6 +4644,42 @@ mod tests {
         );
     }
 
+    /// RED — **a background picture another program holds is held, not unreadable**
+    /// (T-HELD-FILE-IN-THE-OTHER-PICTURE-LANES): the ground's own open meets the sharing violation
+    /// a program holding the file exclusively gives, and answers `HeldElsewhere`; once the holder
+    /// lets go the same file decodes; a file that is not there stays `Io`.
+    ///
+    /// MUTATION: have `background_read_refused` answer `Io` for every error — the held read is filed
+    /// as the disk's refusal again; the first assertion goes red.
+    #[cfg(windows)]
+    #[test]
+    fn a_background_picture_another_program_holds_is_held_and_decodes_once_it_is_let_go() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let directory = bt_testpath::temp_path("betterterminal-background-held");
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("被占用 ground.png");
+        std::fs::write(&path, png_of(3, 2, [0, 0, 255, 255])).unwrap();
+        let holder = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&path)
+            .unwrap();
+        let held = decode_background_image(&path, (64, 64));
+        drop(holder);
+        let let_go = decode_background_image(&path, (64, 64));
+        let missing = decode_background_image(&directory.join("不在 missing.png"), (64, 64));
+        let _ = std::fs::remove_dir_all(&directory);
+        assert!(
+            matches!(held, Err(BackgroundImageError::HeldElsewhere(_))),
+            "a ground held by another handle is held: {held:?}"
+        );
+        assert!(let_go.is_ok(), "and decodes once let go: {let_go:?}");
+        assert!(
+            matches!(missing, Err(BackgroundImageError::Io(_))),
+            "a file that is not there stays a refusal: {missing:?}"
+        );
+    }
+
     /// PIN — **the resample target is the largest monitor, one scale on both
     /// axes, and never an upscale.**
     #[test]
@@ -4671,6 +4726,7 @@ mod tests {
         for error in [
             BackgroundImageError::InvalidPath,
             BackgroundImageError::Io("access is denied".to_owned()),
+            BackgroundImageError::HeldElsewhere("being used by another process".to_owned()),
             BackgroundImageError::TooLarge {
                 bytes: 200 * 1024 * 1024,
                 limit: MAX_BACKGROUND_IMAGE_BYTES,

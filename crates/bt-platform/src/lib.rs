@@ -29338,8 +29338,8 @@ mod macos_player_signature_tests {
     /// RED — **every verb `bt-app` reaches for has the same signature on every
     /// machine.**
     ///
-    /// The thirteen doors `video_seat.rs` and `main.rs` actually call, plus the
-    /// three the tests do. `Adapter` and `open_on` are deliberately **not** on
+    /// The eighteen doors `video_seat.rs`, `main.rs` and the tests call.
+    /// `Adapter` and `open_on` are deliberately **not** on
     /// this list: the port's backend inventory (§2.5) classes `Adapter` as the
     /// one type that does not survive — it names D3D11 against WARP, which has
     /// no twin on a platform where the frame never touches a Direct3D device —
@@ -29353,6 +29353,9 @@ mod macos_player_signature_tests {
             "open",
             "source",
             "state",
+            "state_at",
+            "open_runs_out_at",
+            "never_built",
             "frame",
             "standing_frame",
             "frame_cost",

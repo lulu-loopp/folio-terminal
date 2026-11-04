@@ -617,6 +617,54 @@ fn the_restart_is_registered_from_the_first_window_alone() {
     );
 }
 
+/// RED (plan row 191; the coordinator's ruling of 2026-11-03 on the clean-VM reboot) — **the
+/// launch asks the system to end Folio before the processes at the default shutdown level, once,
+/// at `SHUTDOWN_LEVEL`**: on the VM's reboot without it the shells' fate was the system's order;
+/// with it Folio was ended first, its shells exited with code 0 after it, and the layout on disk
+/// was unchanged.
+///
+/// MUTATION: ask at `0x280` (the default) — the level is not above every console process's;
+/// ask twice — two records.
+#[test]
+fn the_launch_asks_to_be_ended_before_the_shells_in_its_panes() {
+    let application = restart_application("launch-shutdown-level");
+    application
+        .folio
+        .ask_to_be_ended_before_the_shells(&application.event_loop);
+    let asked: Vec<u32> = application
+        .event_loop
+        .ledger
+        .take()
+        .into_iter()
+        .filter_map(|effect| match effect {
+            crate::headless::WindowEffect::ShutdownLevelAsked { level } => Some(level),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        asked,
+        [bt_platform::session_end::SHUTDOWN_LEVEL],
+        "one ask, at the level above the default"
+    );
+}
+
+/// RED (plan row 191) — **the shutdown level is asked for at the launch's first window and
+/// nowhere else**, in the shape of [`the_restart_is_registered_from_the_first_window_alone`]:
+/// resolved by bt-source's call graph, the one product caller of
+/// `FolioApp::ask_to_be_ended_before_the_shells` is `resumed`, whose first-window block runs once
+/// a process.
+///
+/// MUTATION (plant `plant-191-i-the-level-never-asked.py`): delete the call in `resumed` — no
+/// caller, and a reboot is back to the system's order.
+#[test]
+fn the_shutdown_level_is_asked_from_the_first_window_alone() {
+    assert_eq!(
+        crate::test_support::resolved_callers_of("FolioApp", "ask_to_be_ended_before_the_shells"),
+        std::collections::BTreeSet::from(["crate::FolioApp::resumed".to_owned()]),
+        "the first window asks, and nothing else does"
+    );
+}
+
 /// A headless application over one tab, its ledger emptied, for the restart's tests.
 fn restart_application(tag: &str) -> crate::headless::HeadlessApplication {
     crate::test_support::on_the_window_thread();
