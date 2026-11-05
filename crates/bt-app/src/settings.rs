@@ -3818,7 +3818,7 @@ pub enum SettingsRow {
     TurnEndNotifications,
     /// **Whether a restart brings back the agents that were running in panes**, each through its
     /// own vendor's resume command (0.4.9 plan row 195; `crate::agent_resume`). On by default.
-    /// Windows only in 0.4.9 ([`Capability::AgentResume`]); the Mac is plan row 197.
+    /// On Windows and macOS ([`Capability::AgentResume`]; the Mac since T-AGENT-RESUME-ON-MACOS).
     ResumeAgents,
     /// Whether new PowerShell panes receive Folio's process-scoped integration — and, for a
     /// Windows PowerShell pane, Folio's own PSReadLine with it (T-INTEGRATION-INJECT-2-BUILD:
@@ -27626,7 +27626,8 @@ mod tests {
                 SettingsRow::CopilotHooks,
                 SettingsRow::TurnEndNotifications,
             ];
-            // The resume switch where this build resumes (row 195; the Mac is row 197).
+            // The resume switch where this build resumes (row 195; the Mac since
+            // T-AGENT-RESUME-ON-MACOS).
             if Capability::AgentResume.on(bt_platform::host_platform()) {
                 expected.push(SettingsRow::ResumeAgents);
             }
@@ -28829,15 +28830,17 @@ mod tests {
     fn a_mac_is_not_offered_a_row_about_a_facility_it_has_not_got() {
         use bt_platform::HostPlatform::{MacOs, Windows};
 
-        // `ResumeAgents` since row 195: 0.4.9 resumes agents on Windows only (plan row 197).
-        const NOT_ON_A_MAC: [SettingsRow; 3] = [
-            SettingsRow::ContextMenu,
-            SettingsRow::Acrylic,
-            SettingsRow::ResumeAgents,
-        ];
+        const NOT_ON_A_MAC: [SettingsRow; 2] = [SettingsRow::ContextMenu, SettingsRow::Acrylic];
         for layout in [TabLayoutMode::Horizontal, TabLayoutMode::Vertical] {
             let mac = visible_rows_for(MacOs, layout);
             let windows = visible_rows_for(Windows, layout);
+            // `ResumeAgents` was on the list from row 195 until T-AGENT-RESUME-ON-MACOS: a Mac
+            // resumes agents too, through the pane's own shell.
+            assert!(
+                mac.contains(&SettingsRow::ResumeAgents)
+                    && windows.contains(&SettingsRow::ResumeAgents),
+                "{layout:?}: both platforms resume agents, and both pages hold the switch"
+            );
             for row in NOT_ON_A_MAC {
                 assert!(
                     !mac.contains(&row),

@@ -10542,6 +10542,198 @@ mod tests {
         }
     }
 
+    /// RED (T-AGENT-RESUME-ON-MACOS, ruling R6) — **a resume through the pane's own shell is the
+    /// vendor's own process, found on the `PATH` the person's startup files build; a vendor that
+    /// shell cannot find ends the resume before any hook, which hands the pane its shell with the
+    /// line**.
+    ///
+    /// The real producer end to end, on this Mac: the macOS seed's zsh and bash rows through
+    /// [`shell_command`] and `crate::compose_resume`, spawned over a real pty with the real scripts
+    /// in a `bt_pty::test_shell::Hygiene` sandbox. The vendor is a stand-in: a script named
+    /// `claude` that prints its arguments, its folder, its configuration folder and its pid, then
+    /// exits 7. Its folder reaches `PATH` only through a startup file of the sandbox's home, the one
+    /// each shell reads as the person's own: zsh's `.zshrc`, which only an interactive zsh reads,
+    /// and bash's `.bash_profile`, the login chain `folio.bash` replays (and which shows that bash
+    /// reads its init file although it is handed `-c`). That file sets the whole `PATH` — the
+    /// stand-in's folder and the system's four — rather than adding to the one the test inherited,
+    /// so a machine with a real `claude` installed cannot start it here (ruling R6, review N2). No
+    /// vendor, no account and no file of the account running the test is used.
+    ///
+    /// The stand-in's pid is the pty child's (the shell `exec`ed it), and the child's exit code is
+    /// the stand-in's. With no stand-in, the shell's `exec` says the vendor was not found — zsh
+    /// `command not found: claude`, bash `exec: claude: not found` (review N1) — and the child
+    /// exits 127 before anything could have spoken from it, which is a failed resume
+    /// (`AgentAccount::child_ended`): the pane's shell, in the session's folder, with the line.
+    /// Each wait names its case, so a red first wait of `bash (vendor present)` is the finding that
+    /// bash did not read its init file under `-c`, and nothing else.
+    ///
+    /// MUTATION (plant `plant-15-login-only.py`): the interactive flag dropped, and zsh never reads
+    /// `.zshrc`: the stand-in is not found and the first wait goes red.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_resume_through_the_shell_is_the_vendors_process_and_a_missing_vendor_hands_back_the_shell()
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        struct Mac;
+        impl ShellEnvironment for Mac {
+            fn var_os(&self, key: &str) -> Option<OsString> {
+                (key == "SHELL").then(|| OsString::from("/bin/zsh"))
+            }
+            fn is_file(&self, path: &Path) -> bool {
+                bt_pty::SystemShellEnvironment.is_file(path)
+            }
+        }
+
+        const SESSION: &str = "0b9c7e1a-4f3d-4c2b-9a8e-5d6f7a8b9c0d";
+        let rows = profiles::shipped_for(profiles::SeedPlatform::MacOs, &Mac);
+        for (id, startup_file) in [("zsh", ".zshrc"), ("bash", ".bash_profile")] {
+            for present in [true, false] {
+                let hygiene = bt_pty::test_shell::Hygiene::new().reading_startup_files();
+                let home = hygiene.home();
+                let zdotdir = hygiene.root().join("zdotdir");
+                let vendors = hygiene.root().join("vendors");
+                let folder = hygiene.root().join("work");
+                let configuration = hygiene.root().join("claude-configuration");
+                for directory in [&zdotdir, &vendors, &folder] {
+                    std::fs::create_dir_all(directory).unwrap();
+                }
+                for name in ZDOTDIR_FILES {
+                    std::fs::write(zdotdir.join(name), SCRIPT_ZSH).unwrap();
+                }
+                let script = hygiene.root().join(SCRIPT_FILE);
+                std::fs::write(&script, SCRIPT).unwrap();
+                std::fs::write(
+                    home.join(startup_file),
+                    format!(
+                        "export PATH=\"{}:/usr/bin:/bin:/usr/sbin:/sbin\"\n",
+                        vendors.display()
+                    ),
+                )
+                .unwrap();
+                if present {
+                    let stand_in = vendors.join("claude");
+                    std::fs::write(
+                        &stand_in,
+                        "#!/bin/sh\nprintf 'folio-stand-in argv=[%s] cwd=[%s] home=[%s] \
+                         pid=[%s] end\\n' \"$*\" \"$(pwd -P)\" \"${CLAUDE_CONFIG_DIR-}\" \"$$\"\n\
+                         exit 7\n",
+                    )
+                    .unwrap();
+                    std::fs::set_permissions(&stand_in, std::fs::Permissions::from_mode(0o755))
+                        .unwrap();
+                }
+                let row = rows
+                    .iter()
+                    .find(|row| row.id == id)
+                    .unwrap_or_else(|| panic!("the macOS table ships {id}"));
+                let profiles::ProgramSource::Path(program) = &row.program else {
+                    panic!("{id} names one path");
+                };
+                let seed = crate::LeafSeed {
+                    profile: id.to_owned(),
+                    cwd: Some(profiles::SeedPlace::Carried(folder.clone())),
+                    agent: crate::agent_resume::SeedAgent::Resume(crate::agent_resume::Resume {
+                        record: bt_persist::AgentRecordV1 {
+                            vendor: crate::attention_map::CLAUDE_CODE.to_owned(),
+                            resume_id: SESSION.to_owned(),
+                            cwd: folder.display().to_string(),
+                            home: Some(configuration.display().to_string()),
+                        },
+                        hand_back: Some(id.to_owned()),
+                    }),
+                    ..crate::LeafSeed::default()
+                };
+                let scripts = Scripts {
+                    bash: Some(&script),
+                    zdotdir: Some(&zdotdir),
+                };
+                let mut command = shipped_command(row, &[], scripts, &bare());
+                assert!(
+                    crate::compose_resume(&mut command, &seed, &crate::Started::AsAsked, row),
+                    "{id}: the birth is a resume"
+                );
+                command
+                    .environment
+                    .push((OsString::from("HOME"), home.clone().into_os_string()));
+                let mut session = bt_pty::test_shell::TestShell::spawn_shell_in(
+                    hygiene,
+                    program.clone(),
+                    &command.arguments,
+                    &|| last_resort_arguments(false),
+                    &command.environment,
+                    bt_pty::PtySize::cells(
+                        std::num::NonZeroU16::new(200).unwrap(),
+                        std::num::NonZeroU16::new(24).unwrap(),
+                    ),
+                    Some(folder.clone()),
+                )
+                .unwrap();
+                // The whole phrase each case is judged by, so a reply the pty splits mid-message
+                // (zsh writes `command not found: ` and `claude` apart) is read to its end
+                // (re-review R1).
+                let spoke = |seen: &str| {
+                    if present {
+                        seen.contains(" end")
+                    } else {
+                        seen.contains("not found: claude") || seen.contains("claude: not found")
+                    }
+                };
+                let case = format!(
+                    "{id} (vendor {})",
+                    if present { "present" } else { "absent" }
+                );
+                let mut seen = String::new();
+                crate::lane::wait_until(&format!("{case}: the resume's first words"), || {
+                    seen.push_str(&String::from_utf8_lossy(&session.read_output()));
+                    spoke(&seen)
+                });
+                let mut status = None;
+                crate::lane::wait_until(&format!("{case}: the resume's end"), || {
+                    status = session.try_wait().expect("the child is reaped");
+                    status.is_some()
+                });
+                let code = status.expect("it ended").exit_code();
+                if present {
+                    let folder = std::fs::canonicalize(&folder).unwrap();
+                    let pid = session.child_id().expect("the child has a pid");
+                    for fact in [
+                        format!("argv=[--resume {SESSION}]"),
+                        format!("cwd=[{}]", folder.display()),
+                        format!("home=[{}]", configuration.display()),
+                        format!("pid=[{pid}]"),
+                    ] {
+                        assert!(seen.contains(&fact), "{id}: {fact} in {seen:?}");
+                    }
+                    assert_eq!(code, 7, "{id}: the child's end is the vendor's own");
+                } else {
+                    assert!(
+                        seen.contains("not found: claude") || seen.contains("claude: not found"),
+                        "{case}: the shell names the vendor it did not find: {seen:?}"
+                    );
+                    assert_eq!(code, 127, "{id}: the shell found no vendor");
+                    let mut account = crate::agent_resume::AgentAccount::born(&seed.agent, true);
+                    let crate::agent_resume::Ended::HandBack {
+                        profile,
+                        cwd,
+                        failed: Some(could),
+                    } = account.child_ended()
+                    else {
+                        panic!("{id}: an exit before any hook is a failed resume");
+                    };
+                    assert_eq!(profile.as_deref(), Some(id), "the pane's own shell");
+                    assert_eq!(cwd, folder, "in the session's folder");
+                    assert!(
+                        could.text().contains("Claude Code session 0b9c7e1a"),
+                        "{}",
+                        could.text()
+                    );
+                }
+                session.shutdown().unwrap();
+            }
+        }
+    }
+
     /// PIN — **a Bourne shell is told it has no integration rather than handed
     /// one it will ignore** (review row R3-6).
     ///
