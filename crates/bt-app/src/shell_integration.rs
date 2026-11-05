@@ -10669,7 +10669,16 @@ mod tests {
                     Some(folder.clone()),
                 )
                 .unwrap();
-                let first_line = if present { " end" } else { "not found" };
+                // The whole phrase each case is judged by, so a reply the pty splits mid-message
+                // (zsh writes `command not found: ` and `claude` apart) is read to its end
+                // (re-review R1).
+                let spoke = |seen: &str| {
+                    if present {
+                        seen.contains(" end")
+                    } else {
+                        seen.contains("not found: claude") || seen.contains("claude: not found")
+                    }
+                };
                 let case = format!(
                     "{id} (vendor {})",
                     if present { "present" } else { "absent" }
@@ -10677,7 +10686,7 @@ mod tests {
                 let mut seen = String::new();
                 crate::lane::wait_until(&format!("{case}: the resume's first words"), || {
                     seen.push_str(&String::from_utf8_lossy(&session.read_output()));
-                    seen.contains(first_line)
+                    spoke(&seen)
                 });
                 let mut status = None;
                 crate::lane::wait_until(&format!("{case}: the resume's end"), || {
