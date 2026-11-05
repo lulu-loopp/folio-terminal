@@ -561,7 +561,7 @@ mod tests {
     /// notice per family is published, and a second run writes nothing and owes no notice.
     ///
     /// MUTATIONS: the liveness rule answers "alive" for a missing program
-    /// (`plant-67b-dead-is-alive-r2.py`) and the scan reads another copy's hooks; the repair writes
+    /// (`plant-67b-dead-is-alive-r3.py`) and the scan reads another copy's hooks; the repair writes
     /// nothing (`plant-67b-repair-writes-nothing.py`).
     #[test]
     fn a_dead_owner_is_repaired_at_start_once() {
@@ -817,7 +817,7 @@ mod tests {
     /// shape is left alone**: C1 (whose `Stop` carried no payload, so resume got nothing), C2, C3
     /// with sh quoting, P1 and P2; C4, X1 and P3 are not written.
     ///
-    /// MUTATIONS: the drift check answers "current" (`plant-67b-shape-check-skipped.py`); the
+    /// MUTATIONS: the drift check answers "current" (`plant-67b-shape-check-skipped-r3.py`); the
     /// repair writes nothing (`plant-67b-repair-writes-nothing.py`).
     #[test]
     fn every_historical_shape_of_this_copy_is_brought_to_the_current_one() {
@@ -1155,7 +1155,7 @@ mod tests {
     /// T8 (R4) — **a missing owner on a volume that is not there is not dead**: an unplugged
     /// drive's copy keeps its hooks.
     ///
-    /// MUTATION: the volume is not asked about (`plant-67b-no-volume-check-r2.py`).
+    /// MUTATION: the volume is not asked about (`plant-67b-no-volume-check-r3.py`).
     #[test]
     fn an_owner_on_an_absent_volume_is_not_dead() {
         let root = root("hooks-step-volume");
