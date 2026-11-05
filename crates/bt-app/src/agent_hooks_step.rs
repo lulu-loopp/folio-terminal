@@ -247,6 +247,8 @@ impl AgentHooksStep {
             };
             match (family.apply)(&config, Decision::Install, exe, data) {
                 Outcome::Installed => {
+                    let notice = matches!(found, HooksFound::Dead(_))
+                        .then(|| (family.repaired)(config.named()));
                     let now = (family.scan)(&config.read_afresh(), exe, look);
                     crate::diagnostics::stderr_line(format!(
                         "BT_AGENT_HOOKS {} {} repaired={}{}",
@@ -255,8 +257,6 @@ impl AgentHooksStep {
                         found.diagnostic_word(),
                         gone_programs(&found)
                     ));
-                    let notice = matches!(found, HooksFound::Dead(_))
-                        .then(|| (family.repaired)(config.named()));
                     HooksScan {
                         found: now,
                         repaired_from: Some(found),

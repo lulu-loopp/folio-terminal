@@ -889,7 +889,7 @@ fn mapped<'a>(
             let nodes = rows.value.elements().ok_or_else(unknown)?;
             let values = nodes
                 .iter()
-                .map(|entry| value_at(family, document.text, entry))
+                .map(|entry| value_at(document.text, entry))
                 .collect::<Result<Vec<_>, _>>()?;
             let owners = entry_owners(family, &values);
             let mut entries = Vec::with_capacity(nodes.len());
@@ -907,7 +907,7 @@ fn mapped<'a>(
             let foreign = entries.iter().any(|entry| entry.own.is_none())
                 || (!family.positional && entries.is_empty());
             let matcher = match matcher {
-                Some(matcher) => value_at(family, document.text, &matcher.value)?
+                Some(matcher) => value_at(document.text, &matcher.value)?
                     .as_str()
                     .filter(|matcher| !matcher.is_empty())
                     .map(str::to_owned),
@@ -929,7 +929,7 @@ fn mapped<'a>(
 }
 
 /// The value a span holds, as the classifiers read it.
-fn value_at(family: &Family, text: &str, node: &splice::Node) -> Result<Value, &'static str> {
+fn value_at(text: &str, node: &splice::Node) -> Result<Value, &'static str> {
     serde_json::from_str(&text[node.start..node.end])
         .map_err(|_| crate::i18n::Text::AgentHooksUnreadable.text())
 }

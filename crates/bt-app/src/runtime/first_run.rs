@@ -231,7 +231,7 @@ impl<B: Backend> Runtime<'_, B> {
         };
         if let attention_codex::Outcome::TakeOverRequired(owners) = &outcome {
             self.app.agent_takeovers[1] = attention_ownership::Pending::new(
-                config,
+                config.clone(),
                 owners.clone(),
                 std::time::Instant::now(),
             );
