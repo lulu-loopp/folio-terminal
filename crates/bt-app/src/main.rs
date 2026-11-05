@@ -54290,8 +54290,9 @@ fn app_icons_at(
 }
 
 /// One icon group of this process's own executable, at one side — winit's
-/// `Icon::from_resource`, which is `LoadImageW(GetModuleHandleW(NULL), group, IMAGE_ICON, side,
-/// side)`: the image of the group nearest that side, scaled to it when none is exactly it.
+/// `Icon::from_resource`, which is `LoadImageW` of the module winit is linked into
+/// (`__ImageBase`, which here is the executable), `IMAGE_ICON`, `side` by `side`: the image of
+/// the group nearest that side, scaled to it when none is exactly it.
 #[cfg(windows)]
 fn app_icon_from(group: u16, side: u32) -> Result<winit::window::Icon, winit::window::BadIcon> {
     use winit::platform::windows::IconExtWindows;
@@ -56354,8 +56355,8 @@ mod app_icon_tests {
     }
 
     /// RED (0.4.10 plan row 71) — **this executable carries the program's icon group, and it
-    /// loads at both sides at every scale the icon file was drawn for**; a group the build did
-    /// not file is refused, so the loads are reading this executable's own table.
+    /// loads at both sides at every scale the icon file was drawn for**: the eight loads succeed
+    /// from this module's own table, and a group the build did not file is refused.
     ///
     /// Real `LoadImageW` calls: the build script links `folio.res` into every unit of the bin
     /// target, this unit-test executable included (`build.rs`, `rustc-link-arg-bins`).
