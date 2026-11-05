@@ -54229,8 +54229,10 @@ fn option_as_alt(window: &Window, option_sends_alt: bool) {
 /// displays the image each surface is handed was drawn at its size.
 #[cfg(windows)]
 fn app_icon_sides(scale_factor: f64) -> (u32, u32) {
-    let side = |logical: f64| (logical * scale_factor).round() as u32;
-    (side(16.0), side(32.0))
+    (
+        (16.0 * scale_factor).round() as u32,
+        (32.0 * scale_factor).round() as u32,
+    )
 }
 
 /// [`WindowHost::wear_the_app_icon`] for winit's window (0.4.10 plan row 71).
