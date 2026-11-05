@@ -21079,8 +21079,8 @@ pub use portable_impl::{
 mod app_delegate;
 
 pub use app_delegate::{
-    AppDelegate, AppDelegateEvent, AppDelegateEventKind, AppDelegateOrigin, TerminationAnswer,
-    TerminationDecision, path_from_file_url,
+    AppDelegate, AppDelegateEvent, AppDelegateEventKind, AppDelegateOrigin, QuitReason,
+    TerminationAnswer, TerminationDecision, path_from_file_url,
 };
 
 /// **The selectors added to winit's own application delegate** (M3-1, and the

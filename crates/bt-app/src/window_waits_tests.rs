@@ -5426,8 +5426,9 @@ const ADMISSIONS: [&[&str]; 2] = [&["bt_platform", "admission"], &["bt_effects",
 
 /// **The doors whose every call is pinned**, row for row: `diagnostics.log`'s settle (row 30) is
 /// admitted twice in `fn main`, in the build-error arm (after `build`) and at the tail (after
-/// `run_app`), and once in `session_end::fence_the_log`, at `WM_ENDSESSION(TRUE)` — a process the
-/// system ends never reaches `fn main`'s way out (ruled 2026-11-03, plan row 201); the trace's
+/// `run_app`), and once in `session_end::fence_the_log`, at `WM_ENDSESSION(TRUE)` and, on macOS,
+/// before AppKit's quit is answered `NSTerminateNow` — a process the system ends never reaches
+/// `fn main`'s way out (ruled 2026-11-03, plan row 201; 2026-11-04, 0.4.10 plan row 17); the trace's
 /// flush (row 17) is admitted once, inside its one road `Shutdown::flush_through_its_door`, and
 /// `main` takes that road on the same two ways out.
 const DOOR_PINS: [DoorPin; 6] = [

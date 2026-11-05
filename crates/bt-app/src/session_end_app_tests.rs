@@ -676,3 +676,72 @@ fn the_probe_counts_folios_callbacks_and_follows_the_questions_wake() {
          queued: unknown"
     );
 }
+
+/// RED (0.4.10 plan row 17) — **before AppKit is answered `NSTerminateNow`, the quit says what
+/// became of its save and then fences the log, once for the process; and the request says why
+/// AppKit asked.**
+///
+/// On macOS `-[NSApplication terminate:]` goes on to `exit()` once it is answered, and `fn main`'s
+/// way out, its fence among it, is never reached (X-4 r3 and r5: `WINIT exiting` 7–12 ms after
+/// the answer, then nothing). So the one line on the save and the fence are said and run before
+/// the answer, on every road the close can leave, and a second end in the process fences nothing.
+///
+/// MUTATION (plants 17-a, 17-b): drop the fence from `the_systems_quit_ends_with`, or drop its
+/// road line.
+#[test]
+fn the_systems_quit_says_what_became_of_its_save_and_fences_the_log() {
+    for (save, line) in [
+        (
+            persist::ClosedSave::Landed,
+            "BT_SESSION_END applicationShouldTerminate: answering NSTerminateNow; the quit's save \
+             had landed and session.lock is gone",
+        ),
+        (
+            persist::ClosedSave::NotLanded,
+            "BT_SESSION_END applicationShouldTerminate: answering NSTerminateNow; the quit's save \
+             had not landed within its budget, and session.lock stands",
+        ),
+        (
+            persist::ClosedSave::NoSession,
+            "BT_SESSION_END applicationShouldTerminate: answering NSTerminateNow; this run had no \
+             session to save",
+        ),
+    ] {
+        session_end::forget();
+        let done = std::cell::RefCell::new(Vec::new());
+        let fenced = session_end::the_systems_quit_ends_with(
+            save,
+            &mut |said| done.borrow_mut().push(AtTheEnd::Said(said.to_owned())),
+            &mut || done.borrow_mut().push(AtTheEnd::Fenced),
+        );
+        assert!(fenced, "the first end fences: {save:?}");
+        assert_eq!(
+            done.take(),
+            vec![AtTheEnd::Said(line.to_owned()), AtTheEnd::Fenced],
+            "the line on the save, then the fence: {save:?}"
+        );
+        let again = session_end::the_systems_quit_ends_with(
+            save,
+            &mut |said| done.borrow_mut().push(AtTheEnd::Said(said.to_owned())),
+            &mut || done.borrow_mut().push(AtTheEnd::Fenced),
+        );
+        assert!(!again, "a second end fences nothing: {save:?}");
+        assert_eq!(
+            done.take(),
+            vec![AtTheEnd::Said(
+                "BT_SESSION_END applicationShouldTerminate: an earlier end fenced the log"
+                    .to_owned()
+            )],
+            "and says the log was fenced: {save:?}"
+        );
+    }
+    session_end::forget();
+    assert_eq!(
+        session_end::the_systems_quit_asked_line(bt_platform::QuitReason::LogOut),
+        "BT_SESSION_END applicationShouldTerminate: asked (log out)"
+    );
+    assert_eq!(
+        session_end::the_systems_quit_asked_line(bt_platform::QuitReason::NoneGiven),
+        "BT_SESSION_END applicationShouldTerminate: asked (no reason given)"
+    );
+}
