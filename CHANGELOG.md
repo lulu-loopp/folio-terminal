@@ -17,6 +17,7 @@ All notable changes to Folio are recorded here. The format follows
 - When a picture is zoomed in past its pane, the arrow keys move around it, and Shift with an arrow moves further. <!-- zh: 图片放大到超出窗格时，方向键可在图上移动，按住 Shift 再按方向键移动得更远。 -->
 - Middle-clicking a file in the files column opens it in a new preview pane beside the current one, which keeps what it shows. <!-- zh: 在文件列中用鼠标中键单击文件，会在当前预览窗格旁新开一个窗格显示它，当前窗格的内容保持不变。 -->
 - On Windows, a pane where Claude Code or Codex was running comes back after Folio or Windows restarts with that agent resuming the same conversation in the same folder; when the session cannot be resumed, the pane opens its shell and says so. Settings > Agents > Resume agents after restart turns this off. <!-- zh: 在 Windows 上，Folio 或 Windows 重启后，运行过 Claude Code 或 Codex 的窗格会重新出现，该 agent 在同一文件夹中接着同一段对话；会话无法恢复时，窗格打开它的 shell 并说明这一点。设置 > Agent >「重启后恢复 agent」可将其关闭。 -->
+- On macOS, a pane where Claude Code or Codex was typed into the shell comes back after Folio restarts with that agent resuming the same conversation in the same folder, started by the pane's own shell; when the session cannot be resumed, the pane opens its shell and says so. Settings > Agents > Resume agents after restart turns this off. <!-- zh: pending T-AGENT-RESUME-ON-MACOS -->
 
 ### Fixed
 

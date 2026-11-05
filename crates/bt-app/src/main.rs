@@ -22986,10 +22986,9 @@ fn deliver_attention(
             if let Some(heard) = &message.resume
                 && let Some(vendor) = agent_resume::vendor(&message.family)
             {
-                let child = agent_resume::child_of(
-                    leaf.launch.program.as_deref(),
-                    leaf.session.command_marks(),
-                );
+                let child = leaf
+                    .agent
+                    .child(leaf.launch.program.as_deref(), leaf.session.command_marks());
                 recorded |= leaf.agent.hear(vendor, heard, child);
             }
             if let Some(event) = asks.ledger.clone() {
@@ -31556,7 +31555,9 @@ fn birth_here(
     programs: &profiles::ProfilePrograms,
 ) -> Result<(LeafSeed, Started), Vec<String>> {
     let (identity, started) = decided_birth(seed, stored_default, programs)?;
-    if let Some(shell) = handed_back_seed(seed, &started) {
+    if let Some(shell) = handed_back_seed(seed, &started)
+        .or_else(|| shell_cannot_resume(seed, profiles::row_of(&identity).as_ref(), &started))
+    {
         return birth_here(&shell, stored_default, programs);
     }
     match resolved_birth_seed(seed, &identity) {
@@ -33164,7 +33165,7 @@ fn create_leaf_session(
             environment,
         );
         // **A restored agent is started as its vendor's resume** (row 195).
-        let resuming = compose_resume(&mut command, seed, &started);
+        let resuming = compose_resume(&mut command, seed, &started, row);
         let gone_spec = birth_unless_gone(unless_gone.as_ref(), resuming, |gone| {
             shell_integration::shell_command(
                 row,
@@ -33300,19 +33301,48 @@ fn create_leaf_session(
 /// positional word would break `codex resume <id>` — and the configuration folder the session
 /// lives in is the one it was recorded under. Answers whether the birth is a resume; `false`, and
 /// `command` untouched, for every other birth.
+///
+/// **A shell pane's resume is that shell `exec`ing the vendor** (the Mac's road,
+/// `agent_resume::Road::ThroughTheShell`; T-AGENT-RESUME-ON-MACOS): `row` is the shell's, its own
+/// words stay as its door composed them (zsh's `-l`, bash's `--init-file … -i`), and the shell is
+/// told to be interactive, so it reads the startup files a typed agent's `PATH` came from, and to
+/// run the one command `agent_resume::Vendor::shell_command` spells. A shell whose spelling is not
+/// verified is no resume here: [`birth_here`] has already handed such a seed its shell with the
+/// line ([`shell_cannot_resume`]).
 fn compose_resume(
     command: &mut shell_integration::ShellCommand,
     seed: &LeafSeed,
     started: &Started,
+    row: &profiles::Profile,
 ) -> bool {
     let Some((vendor, record)) = resuming_vendor(seed, started) else {
         return false;
     };
+    let through_the_shell = !vendor.is_started_by(&seed.profile);
+    let shell = profiles::command_flags(&row.program).filter(|_| through_the_shell);
+    if through_the_shell && shell.is_none() {
+        return false;
+    }
     if let Some(home) = &record.home {
         command.environment.push((
             std::ffi::OsString::from(vendor.home_variable),
             std::ffi::OsString::from(home),
         ));
+    }
+    if let Some(flags) = shell {
+        // Once: bash's door already made it interactive (`-i`, or a row's own `--interactive`).
+        if !command
+            .arguments
+            .iter()
+            .any(|word| word == flags.interactive || word == "--interactive")
+        {
+            command.arguments.push(flags.interactive.into());
+        }
+        command.arguments.push(flags.command.into());
+        command
+            .arguments
+            .push(vendor.shell_command(&record.resume_id));
+        return true;
     }
     command.arguments = vendor.arguments(&record.resume_id);
     true
@@ -33534,6 +33564,34 @@ fn handed_back_seed(seed: &LeafSeed, started: &Started) -> Option<LeafSeed> {
     let could = could_not_resume(resume)?;
     Some(LeafSeed {
         profile,
+        agent: agent_resume::SeedAgent::CouldNotResume(could),
+        ..seed.clone()
+    })
+}
+
+/// **A resume the pane's shell cannot be told to start comes back as that shell, saying so**
+/// (T-AGENT-RESUME-ON-MACOS): on the Mac's road the shell `exec`s the vendor, and a shell whose
+/// interactive one-command spelling is not verified (`profiles::CommandFlags`: fish, nu, csh, a
+/// shell of no known family) is handed no command it might read another way. The pane is born as
+/// its own shell, in the session's folder, with the could-not-resume line, and its record goes
+/// the way every failed resume's does. `row` is the row the birth starts (`None`: no row, which a
+/// birth started as asked never is); `None` for any other seed, and for a pane whose own program
+/// is the vendor's.
+fn shell_cannot_resume(
+    seed: &LeafSeed,
+    row: Option<&profiles::Profile>,
+    started: &Started,
+) -> Option<LeafSeed> {
+    let agent_resume::SeedAgent::Resume(resume) = &seed.agent else {
+        return None;
+    };
+    let row = row.filter(|_| *started == Started::AsAsked)?;
+    let vendor = agent_resume::vendor(&resume.record.vendor)?;
+    if vendor.is_started_by(&row.id) || profiles::command_flags(&row.program).is_some() {
+        return None;
+    }
+    let could = could_not_resume(resume)?;
+    Some(LeafSeed {
         agent: agent_resume::SeedAgent::CouldNotResume(could),
         ..seed.clone()
     })
@@ -59270,9 +59328,10 @@ mod platform_gate_tests {
         // Windows-only test fixture: the `pi` row, which only the Windows table ships, reopened
         // from a Recent row, beside its every-platform twin on the host's fallback shell.
         "app_files_tests.rs",
-        // Windows-only test fixture: a saved pane born through its vendor's resume, beside the
-        // shell that is handed back, `pwsh`, which only the Windows table ships (row 195; 0.4.9
-        // resumes on Windows only, plan row 197); the resume's decision itself is portable.
+        // Test fixtures of one platform's table each: a saved pane born through its vendor's
+        // shipped profile beside the `pwsh` it hands back (Windows, row 195), and its macOS twin,
+        // a zsh or bash pane `exec`ing the vendor (T-AGENT-RESUME-ON-MACOS); the road itself is a
+        // value of the platform, tested on both.
         "app_agent_resume_tests.rs",
         // Windows-only test fixtures: a share named by a document (`\\server\share`).
         "app_preview_tests.rs",

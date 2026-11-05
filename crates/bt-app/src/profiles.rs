@@ -940,7 +940,33 @@ pub(crate) struct ShellFamily {
     pub(crate) integration: Integration,
     /// Whether this family launches a shell in WSL's path namespace.
     pub(crate) wsl_launcher: bool,
+    /// How it is told to run one command as the interactive shell a person types into, or `None`
+    /// for a family whose spelling this product has not verified — see [`command_flags`].
+    pub(crate) command_flags: Option<CommandFlags>,
 }
+
+/// **The two words that make a shell run one command as the interactive shell a person types
+/// into, and then leave**: `-i` and `-c` for zsh, bash and the Bourne family (T-AGENT-RESUME-ON-MACOS,
+/// 0.4.10 plan row 15). An agent resumed on macOS is started this way, through the pane's own
+/// shell, so that the shell's own startup files give it the `PATH` it was typed under
+/// (`crate::agent_resume::Road::ThroughTheShell`).
+///
+/// **A family without them is a family whose spelling nobody has checked**, not one that has
+/// none: fish and nu take `-i -c` too, but neither is a shell Folio marks commands in, and csh's
+/// `-l` must be its only argument. Each is added from a verified fact, the way a vendor is.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct CommandFlags {
+    /// The flag that makes the shell interactive although it is handed a command.
+    pub(crate) interactive: &'static str,
+    /// The flag whose next argument is the command.
+    pub(crate) command: &'static str,
+}
+
+/// The interactive one-command spelling zsh, bash and the Bourne family share.
+const POSIX_COMMAND_FLAGS: CommandFlags = CommandFlags {
+    interactive: "-i",
+    command: "-c",
+};
 
 /// Every shell family this product knows by name.
 ///
@@ -965,6 +991,7 @@ pub(crate) const SHELL_FAMILIES: &[ShellFamily] = &[
         grammar: crate::shell_literal::ShellGrammar::PowerShell,
         integration: Integration::PowerShellOptIn,
         wsl_launcher: false,
+        command_flags: None,
     },
     ShellFamily {
         stems: &["cmd"],
@@ -972,6 +999,7 @@ pub(crate) const SHELL_FAMILIES: &[ShellFamily] = &[
         grammar: crate::shell_literal::ShellGrammar::Cmd,
         integration: Integration::CmdPrompt,
         wsl_launcher: false,
+        command_flags: None,
     },
     ShellFamily {
         stems: &["bash"],
@@ -979,6 +1007,7 @@ pub(crate) const SHELL_FAMILIES: &[ShellFamily] = &[
         grammar: crate::shell_literal::ShellGrammar::Posix,
         integration: Integration::BashInitFile,
         wsl_launcher: false,
+        command_flags: Some(POSIX_COMMAND_FLAGS),
     },
     ShellFamily {
         stems: &["wsl"],
@@ -986,6 +1015,7 @@ pub(crate) const SHELL_FAMILIES: &[ShellFamily] = &[
         grammar: crate::shell_literal::ShellGrammar::Posix,
         integration: Integration::BashInitFile,
         wsl_launcher: true,
+        command_flags: None,
     },
     ShellFamily {
         stems: &["zsh"],
@@ -993,6 +1023,7 @@ pub(crate) const SHELL_FAMILIES: &[ShellFamily] = &[
         grammar: crate::shell_literal::ShellGrammar::Posix,
         integration: Integration::ZshDotDir,
         wsl_launcher: false,
+        command_flags: Some(POSIX_COMMAND_FLAGS),
     },
     ShellFamily {
         stems: &["sh", "dash", "ksh", "mksh"],
@@ -1000,6 +1031,7 @@ pub(crate) const SHELL_FAMILIES: &[ShellFamily] = &[
         grammar: crate::shell_literal::ShellGrammar::Posix,
         integration: Integration::None,
         wsl_launcher: false,
+        command_flags: Some(POSIX_COMMAND_FLAGS),
     },
     ShellFamily {
         stems: &["fish"],
@@ -1007,6 +1039,7 @@ pub(crate) const SHELL_FAMILIES: &[ShellFamily] = &[
         grammar: crate::shell_literal::ShellGrammar::Fish,
         integration: Integration::None,
         wsl_launcher: false,
+        command_flags: None,
     },
     ShellFamily {
         stems: &["csh", "tcsh"],
@@ -1014,6 +1047,7 @@ pub(crate) const SHELL_FAMILIES: &[ShellFamily] = &[
         grammar: crate::shell_literal::ShellGrammar::Csh,
         integration: Integration::None,
         wsl_launcher: false,
+        command_flags: None,
     },
     ShellFamily {
         stems: &["nu"],
@@ -1021,8 +1055,16 @@ pub(crate) const SHELL_FAMILIES: &[ShellFamily] = &[
         grammar: crate::shell_literal::ShellGrammar::Nushell,
         integration: Integration::None,
         wsl_launcher: false,
+        command_flags: None,
     },
 ];
+
+/// **The words that make `program` run one command as an interactive shell** ([`CommandFlags`]),
+/// or `None` for a program of no family, or of a family whose spelling is not verified.
+#[must_use]
+pub(crate) fn command_flags(program: &ProgramSource) -> Option<CommandFlags> {
+    shell_family(program)?.command_flags
+}
 
 /// The family `program` belongs to, or `None` for a program no row names.
 fn shell_family(program: &ProgramSource) -> Option<&'static ShellFamily> {
