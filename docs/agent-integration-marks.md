@@ -196,7 +196,8 @@ holds its family's latch, so a repair never writes beside one, and a repair
 reads its file once (`Config::with_one_read`), so a press that wrote after the
 scan makes the repair's write refuse rather than undo it. Each repair
 writes a `BT_AGENT_HOOKS` diagnostics line; a dead owner's also raises one
-notice per family. Copilot is repaired within its version gate: only after the
+notice per family. A drift repair raises none: rewriting this copy's own
+entries into today's form changes nothing the person can see. Copilot is repaired within its version gate: only after the
 version question has been answered (the step asks it, and the answer runs the
 pass again), and never for a copilot too old for the hooks.
 
