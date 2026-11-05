@@ -1871,8 +1871,10 @@ crates/bt-app/src/main.rs	bt-app crate::CardAim::spend	Ambiguous	unwrap_or_else	
 crates/bt-app/src/main.rs	bt-app crate::ChevronTurn::sample	Ambiguous	as_secs_f32	1	
 crates/bt-app/src/main.rs	bt-app crate::ClipboardPictureJob::take	Ambiguous	map	1	
 crates/bt-app/src/main.rs	bt-app crate::ClipboardPictureJob::take	Ambiguous	ok	1	
+crates/bt-app/src/main.rs	bt-app crate::ClipboardPictureMailbox::refuse	Ambiguous	unwrap_or_else	1	2026-11-04: T-GESTURE-DOORS-ANSWER-OFF-THE-GESTURE (0.4.9 plan row 52, 0.4.10 row 5); a picture save refused at its door is counted in the picture's inbox for the next turn: LockResult::unwrap_or_else(PoisonError::into_inner) over the inbox's own lock
 crates/bt-app/src/main.rs	bt-app crate::ClipboardPictureMailbox::take_current	Ambiguous	take	1	
 crates/bt-app/src/main.rs	bt-app crate::ClipboardPictureMailbox::take_current	Ambiguous	unwrap_or_else	1	
+crates/bt-app/src/main.rs	bt-app crate::ClipboardPictureMailbox::take_refusals	Ambiguous	unwrap_or_else	1	2026-11-04: T-GESTURE-DOORS-ANSWER-OFF-THE-GESTURE (0.4.9 plan row 52, 0.4.10 row 5); the refusals counted at the door, taken on the turn the inbox's wake brings: LockResult::unwrap_or_else(PoisonError::into_inner) over the inbox's own lock
 crates/bt-app/src/main.rs	bt-app crate::ClipboardPictureMailbox::withdraw	Ambiguous	unwrap_or_else	1	
 crates/bt-app/src/main.rs	bt-app crate::ControlClickHint::text	Ambiguous	in_lang	2	
 crates/bt-app/src/main.rs	bt-app crate::DocumentMath::insert	Ambiguous	entry	1	
@@ -4209,8 +4211,8 @@ crates/bt-app/src/runtime/pointer/touch.rs	bt-app crate::runtime::pointer::touch
 crates/bt-app/src/runtime/pointer/touch.rs	bt-app crate::runtime::pointer::touch::let_the_system_translate_touch	Ambiguous	send_event	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::adopt_background_picture	Ambiguous	text	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::adopt_background_picture	Ambiguous	to_owned	1	
-crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::adopt_clipboard_picture	Ambiguous	text	1	
-crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::adopt_clipboard_picture	Ambiguous	to_owned	1	
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::adopt_clipboard_picture	Ambiguous	text	2	2026-11-04: T-GESTURE-DOORS-ANSWER-OFF-THE-GESTURE (0.4.9 plan row 52, 0.4.10 row 5); grown 1 -> 2: the notice a refused save's door drew on the paste's own turn is drawn here, on the wake's turn (i18n::Text::PasteClipboardPicture's text().to_owned(), as the door wrote it); the door's two sites left save_clipboard_picture
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::adopt_clipboard_picture	Ambiguous	to_owned	2	2026-11-04: T-GESTURE-DOORS-ANSWER-OFF-THE-GESTURE (0.4.9 plan row 52, 0.4.10 row 5); grown 1 -> 2: the notice a refused save's door drew on the paste's own turn is drawn here, on the wake's turn (i18n::Text::PasteClipboardPicture's text().to_owned(), as the door wrote it); the door's two sites left save_clipboard_picture
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::advance_strip_animation	Ambiguous	status	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::animation_running_on	Ambiguous	and_then	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::animation_running_on	Ambiguous	is_some_and	1	
@@ -4433,8 +4435,6 @@ crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::re
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::reveal_preview_file	Ambiguous	map	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::reveal_preview_file	Ambiguous	or_else	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::save_clipboard_picture	Ambiguous	send_event	1	
-crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::save_clipboard_picture	Ambiguous	text	2	
-crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::save_clipboard_picture	Ambiguous	to_owned	2	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::save_preview_on	Ambiguous	map	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::save_preview_on	Ambiguous	or_else	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::send_owed_markdown_rasters	Ambiguous	collect	1	
@@ -10397,7 +10397,6 @@ crates/bt-pty/src/lib.rs	bt-pty crate::reap_within	Dynamic	reaped	1
 crates/bt-pty/src/lib.rs	bt-pty crate::retire_within	Ambiguous	as_millis	1	
 crates/bt-pty/src/lib.rs	bt-pty crate::retire_within	Ambiguous	elapsed	1	
 crates/bt-pty/src/lib.rs	bt-pty crate::retire_within	Ambiguous	is_err	1	
-crates/bt-pty/src/lib.rs	bt-pty crate::retire_within	Ambiguous	spawn	1	
 crates/bt-pty/src/lib.rs	bt-pty crate::retire_within	Dynamic	teardown	1	
 crates/bt-pty/src/lib.rs	bt-pty crate::say	Dynamic	road	1	2026-10-25: the road fn main installs, diagnostics::stderr_line (a request door of its own row): this crate's stderr lines handed to the writer that owns the run's stderr; the crate cannot name bt-app, so the call is a function value (T-TRACE-SINK-OFF-THE-CALLING-THREAD)
 crates/bt-pty/src/lib.rs	bt-pty crate::spawn_dump_publisher	Ambiguous	is_err	2	
