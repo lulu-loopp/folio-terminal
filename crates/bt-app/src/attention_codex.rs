@@ -1078,33 +1078,100 @@ pub(crate) fn hook_scan_resolved(
 /// Today's form is the one shape there has been (X1): [`program_for`] this copy. The same program
 /// spelled another way — the link a copy was started through, where the scan names the file it
 /// leads to — is this copy's in an older spelling, and drifted.
+///
+/// **A hook of Folio's in the `hooks.json` beside it is an entry in the wrong file** on a codex
+/// below 0.148, which skips it (0.4.10 plan row 69c; the coordinator's ruling on 69c's choice 1): a
+/// press made before the version was known wrote it. Its owners are classified with the line's,
+/// and this copy's hook is drifted, so the start-time repair writes the line and takes the hook out
+/// ([`notify_install_resolved`]) without a second press. In a `hooks.json` Folio reads but will not
+/// edit, a hook the repair would have to take out says that file's reason instead.
 pub(crate) fn notify_scan_resolved(
     config: &crate::attention_hooks::Config,
     exe: &Path,
     look: &dyn Fn(&Path) -> ownership::PathStands,
 ) -> HooksFound {
     let text = match config.standing() {
-        crate::attention_hooks::Standing::Nothing => return HooksFound::Nothing,
-        crate::attention_hooks::Standing::Unreadable => return HooksFound::Unreadable,
-        crate::attention_hooks::Standing::Text(text) => text,
+        Standing::Nothing => String::new(),
+        Standing::Unreadable => return HooksFound::Unreadable,
+        Standing::Text(text) => text,
     };
     let Ok(document) = text.parse::<DocumentMut>() else {
         return HooksFound::Unreadable;
     };
-    if document.get(NOTIFY_KEY).is_none() {
-        return HooksFound::Nothing;
-    }
-    let Some(words) = words_of(&document) else {
-        return HooksFound::Unreadable;
+    let words = match document.get(NOTIFY_KEY) {
+        None => None,
+        Some(_) => match words_of(&document) {
+            Some(words) => Some(words),
+            None => return HooksFound::Unreadable,
+        },
     };
-    let owner = match notify_owner(&document) {
+    let line = match notify_owner(&document) {
         Ok(owner) => owner,
         Err(_) => return HooksFound::Unclassified,
     };
-    let Some(owner) = owner else {
-        return HooksFound::Declined(held_slot(version(), &words));
+    if let (Some(words), None) = (&words, &line) {
+        return HooksFound::Declined(held_slot(version(), words));
+    }
+    let folder = config.named().parent().expect("absolute config");
+    let hooks = match hooks_beside(&folder.join(HOOKS_FILE)) {
+        Ok(hooks) => hooks,
+        Err(reason) => return HooksFound::Declined(reason),
     };
-    ownership::classify_owners(&[owner], exe, look, || words != program_for(exe))
+    let mut owners: Vec<PathBuf> = line.into_iter().collect();
+    owners.extend(hooks.owners.iter().cloned());
+    let found = ownership::classify_owners(&owners, exe, look, || {
+        !hooks.owners.is_empty() || words != Some(program_for(exe))
+    });
+    match (&hooks.config, found) {
+        (Err(reason), found) if found.wants_repair() && !hooks.owners.is_empty() => {
+            HooksFound::Declined(reason)
+        }
+        (_, found) => found,
+    }
+}
+
+/// **`hooks.json` as an operation on `config.toml` reads it** (0.4.10 plan row 69c): its text,
+/// the owners Folio's hooks in it name, and the resolution a write of it needs — or, for a file
+/// this build reads but will not edit, the reason it will not be written.
+struct HooksBeside {
+    text: String,
+    owners: Vec<PathBuf>,
+    config: Result<Config, &'static str>,
+}
+
+/// Read the `hooks.json` at `path`, resolved **once**, for this operation — [`toml_beside`]'s rule
+/// for the other file: a file Folio will not edit is still read, and refused only where a hook of
+/// Folio's in it would have to go. One this build cannot read is
+/// [`Text::AgentHooksUnreadable`](crate::i18n::Text::AgentHooksUnreadable).
+fn hooks_beside(path: &Path) -> Result<HooksBeside, &'static str> {
+    let (text, config) = match Config::resolve(path) {
+        Ok(config) => match config.standing() {
+            Standing::Text(text) => (text, Ok(config)),
+            Standing::Nothing => (String::new(), Ok(config)),
+            Standing::Unreadable => return Err(crate::i18n::Text::AgentHooksUnreadable.text()),
+        },
+        Err(hooks::Unresolved::Refused(reason)) => {
+            match bt_platform::file_reads::read_to_string(
+                bt_platform::file_reads::Lane::Attention,
+                path,
+            ) {
+                Ok(text) => (text, Err(reason)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    (String::new(), Err(reason))
+                }
+                Err(_) => return Err(crate::i18n::Text::AgentHooksUnreadable.text()),
+            }
+        }
+        Err(hooks::Unresolved::Unreadable) => {
+            return Err(crate::i18n::Text::AgentHooksUnreadable.text());
+        }
+    };
+    let owners = hooks::hook_owners(&HOOKS, &text)?;
+    Ok(HooksBeside {
+        text,
+        owners,
+        config,
+    })
 }
 
 /// **The refusal over somebody else's `notify`, on a codex below 0.148** (R12): it names the
@@ -1576,6 +1643,14 @@ pub(crate) fn apply_resolved(
 /// `notify` key, and writing Folio's over theirs deletes a program this build cannot give back.
 /// A `notify` wearing Folio's verb in a shape this build cannot decode is not Folio's (closure
 /// review R4) and is refused the same way.
+///
+/// **A hook of Folio's in the `hooks.json` beside it goes in the same operation**, whichever copy
+/// wrote it — [`ownership::check`] has asked about every other live copy first — so a codex that is
+/// updated past 0.148 later does not mark one turn twice (R18, the other way round; the ruling on
+/// 69c's choice 1). Both edits are made and pass their self-checks, and a `hooks.json` Folio will
+/// not edit holding a hook of Folio's is refused, before either file is written; then the line is
+/// written first: a second write that fails leaves both entries, of which this codex runs the line
+/// alone.
 fn notify_install_resolved(
     config: &Config,
     decision: Decision,
@@ -1603,11 +1678,17 @@ fn notify_install_resolved(
             &words_of(&document).unwrap_or_default(),
         ));
     }
-    let paths = notify_owner(&document)
+    let folder = config.named().parent().expect("absolute config");
+    let hooks = match hooks_beside(&folder.join(HOOKS_FILE)) {
+        Ok(hooks) => hooks,
+        Err(reason) => return Outcome::Refused(reason),
+    };
+    let mut paths = notify_owner(&document)
         .ok()
         .flatten()
         .into_iter()
         .collect::<Vec<_>>();
+    paths.extend(hooks.owners.iter().cloned());
     if let Err(outcome) = ownership::check(&paths, exe, &decision) {
         return outcome;
     }
@@ -1615,18 +1696,37 @@ fn notify_install_resolved(
         Ok(written) => written,
         Err(reason) => return Outcome::Refused(reason),
     };
-    let folder = config.named().parent().expect("absolute config");
+    let cleared = if hooks.owners.is_empty() {
+        None
+    } else {
+        match hooks::hooks_cleared(&HOOKS, &hooks.text, exe) {
+            Ok(cleared) => cleared,
+            Err(reason) => return Outcome::Refused(reason),
+        }
+    };
+    let cleared = match (cleared, &hooks.config) {
+        (Some(text), Ok(hooks_config)) => Some((hooks_config, text)),
+        (Some(_), Err(reason)) => return Outcome::Refused(reason),
+        (None, _) => None,
+    };
     let _record = match ownership::record(data, folder, "codex") {
         Ok(lock) => lock,
         Err(reason) => return Outcome::Refused(reason),
     };
-    let Some(written) = written else {
+    if written.is_none() && cleared.is_none() {
         return Outcome::Unchanged;
-    };
-    match land_codex_file(config, &existing, "toml", &written) {
-        Ok(()) => Outcome::Installed,
-        Err(reason) => Outcome::Refused(reason),
     }
+    if let Some(written) = written
+        && let Err(reason) = land_codex_file(config, &existing, "toml", &written)
+    {
+        return Outcome::Refused(reason);
+    }
+    if let Some((hooks_config, cleared)) = cleared
+        && let Err(reason) = land_codex_file(hooks_config, &hooks.text, "json", &cleared)
+    {
+        return Outcome::Refused(reason);
+    }
+    Outcome::Installed
 }
 
 /// **What a press that wrote nothing, or a removal that wrote (`removed`), says** — in this
@@ -3331,6 +3431,90 @@ mod tests {
         assert_eq!(
             scan_by_version(&dir, codex_at(0, 166, 0)),
             HooksFound::Current
+        );
+    }
+
+    /// RED (the coordinator's ruling on 69c's choice 1) — **a hook a press wrote before the version
+    /// was known heals at the next start, on a codex below 0.148**: the scan of `config.toml` reads
+    /// the hook beside it as drifted (this copy's) or dead (a gone one's), and the install the
+    /// repair makes writes the line and takes the hook out, so a codex updated past 0.148 later
+    /// does not mark a turn twice. Somebody else's program on the key is still said, and nothing is
+    /// written.
+    ///
+    /// RED GATE: `plant-69c-early-hook-unseen.py` drops the hooks beside `config.toml` from the
+    /// scan, and the first assertion reads `Nothing`; `plant-69c-early-hook-left.py` keeps the hook
+    /// through the line's install, and the hook is still there.
+    #[test]
+    fn an_early_hook_on_an_old_codex_is_repaired_into_the_line() {
+        let old = codex_at(0, 147, 0);
+        let dir = scratch("early-hook");
+        assert_eq!(
+            apply_to(&dir.join(HOOKS_FILE), true, &exe()),
+            Outcome::Installed,
+            "the press before the version was known"
+        );
+        assert_eq!(scan_by_version(&dir, old), HooksFound::Drifted);
+        assert_eq!(codex_state_in(&dir, Some(&exe()), false), State::Absent);
+        assert_eq!(press_by_version(&dir, old, true), Outcome::Installed);
+        assert_eq!(
+            std::fs::read_to_string(dir.join(CONFIG_FILE)).expect("written"),
+            format!("notify = {}\n", notify_value(&exe()))
+        );
+        let hooks = std::fs::read_to_string(dir.join(HOOKS_FILE)).expect("there");
+        assert!(!hooks.contains("attention codex:stop"), "{hooks}");
+        assert_eq!(scan_by_version(&dir, old), HooksFound::Current);
+        assert_eq!(codex_state_in(&dir, Some(&exe()), false), State::Installed);
+
+        // A gone copy's hook: dead, and the same repair.
+        let dir = scratch("early-hook-gone");
+        let gone = dir.join("gone").join("folio.exe");
+        let mut hooks = Map::new();
+        let mut stop = Map::new();
+        stop.insert(
+            "hooks".to_owned(),
+            Json::Array(vec![hook_wanted(&gone)[0].hook.clone()]),
+        );
+        hooks.insert(STOP_EVENT.to_owned(), Json::Array(vec![Json::Object(stop)]));
+        let mut file = Map::new();
+        file.insert("hooks".to_owned(), Json::Object(hooks));
+        std::fs::write(
+            dir.join(HOOKS_FILE),
+            serde_json::to_string_pretty(&Json::Object(file)).expect("renders"),
+        )
+        .expect("a gone copy's hook");
+        assert_eq!(
+            scan_by_version(&dir, old),
+            HooksFound::Dead(vec![gone.clone()])
+        );
+        assert_eq!(press_by_version(&dir, old, true), Outcome::Installed);
+        let hooks = std::fs::read_to_string(dir.join(HOOKS_FILE)).expect("there");
+        assert!(!hooks.contains("attention codex:stop"), "{hooks}");
+        assert_eq!(scan_by_version(&dir, old), HooksFound::Current);
+
+        // Somebody else's program on the key: said, and both files as they were.
+        let dir = scratch("early-hook-held");
+        assert_eq!(
+            apply_to(&dir.join(HOOKS_FILE), true, &exe()),
+            Outcome::Installed
+        );
+        let theirs = owners_config("\n", "");
+        std::fs::write(dir.join(CONFIG_FILE), &theirs).expect("their own file");
+        let before = std::fs::read_to_string(dir.join(HOOKS_FILE)).expect("there");
+        assert!(matches!(
+            scan_by_version(&dir, old),
+            HooksFound::Declined(_)
+        ));
+        assert!(matches!(
+            press_by_version(&dir, old, true),
+            Outcome::Refused(_)
+        ));
+        assert_eq!(
+            std::fs::read_to_string(dir.join(CONFIG_FILE)).expect("there"),
+            theirs
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join(HOOKS_FILE)).expect("there"),
+            before
         );
     }
 

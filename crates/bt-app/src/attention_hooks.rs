@@ -971,6 +971,18 @@ fn edited(
     exe: &Path,
     install: bool,
 ) -> Result<Option<String>, &'static str> {
+    edited_as(family, document, exe, install, false)
+}
+
+/// [`edited`], and with `any_copy` a removal that deletes the entries of **every** copy of Folio
+/// ([`hooks_cleared`]).
+fn edited_as(
+    family: &Family,
+    document: &splice::Document,
+    exe: &Path,
+    install: bool,
+    any_copy: bool,
+) -> Result<Option<String>, &'static str> {
     let text = document.text;
     let style = splice::Style::of(document);
     let wanted = if install {
@@ -1043,8 +1055,9 @@ fn edited(
                         .iter()
                         .map(|entry| match &entry.own {
                             None => Fate::Kept,
-                            // Unclaimed until a wanted entry claims it below.
-                            Some(_) if install => Fate::Deleted,
+                            // Unclaimed until a wanted entry claims it below; or, cleared, gone
+                            // whichever copy it names.
+                            Some(_) if install || any_copy => Fate::Deleted,
                             Some(owner) if ownership::other_live(owner, exe) == Ok(false) => {
                                 Fate::Deleted
                             }
@@ -1700,6 +1713,20 @@ pub(crate) fn hooks_edited(
     let document =
         splice::parse(existing).map_err(|_| crate::i18n::Text::AgentHooksUnreadable.text())?;
     edited(family, &document, exe, install)
+}
+
+/// **The text with every entry of Folio's taken out, of whichever copy** — for an operation that has
+/// asked about every other live copy first: codex's `notify` line written in place of its hook, on
+/// a codex below 0.148 (0.4.10 plan row 69c; R18's rule, the other way round). Every byte that is
+/// not Folio's as it was, as [`hooks_edited`]; `Ok(None)` when there is nothing to take out.
+pub(crate) fn hooks_cleared(
+    family: &Family,
+    existing: &str,
+    exe: &Path,
+) -> Result<Option<String>, &'static str> {
+    let document =
+        splice::parse(existing).map_err(|_| crate::i18n::Text::AgentHooksUnreadable.text())?;
+    edited_as(family, &document, exe, false, true)
 }
 
 /// **What is standing at a configuration file's path**, as the answer to "is there one".

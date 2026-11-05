@@ -163,7 +163,9 @@ and escapes.
   install (an own `notify` with other words has its value replaced, a missing one
   gets a line after the last top-level key-value) is the install below Codex
   0.148. There, somebody else's `notify` refuses it, and the row names their
-  program and the version. A removal goes through `hooks.json` on every version
+  program and the version. The same install takes any hook of Folio's out of
+  `hooks.json` (one a press wrote before the version was known), so the
+  start-time scan, which reads it as drifted, heals that press at the next start. A removal goes through `hooks.json` on every version
   and takes out both of Folio's entries. A `notify` line Folio did not write is
   the person's and is never touched.
 - **Copilot**: `hooks/folio.json` is Folio's whole file. One entry that is not
