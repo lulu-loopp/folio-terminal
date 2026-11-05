@@ -92,9 +92,8 @@ use windows::Win32::{
 use windows::core::PCWSTR;
 
 use crate::attention_pipe::{
-    CLIENT_BUSY_WAIT_MS, Overlapped, OwnedHandle, SecurityDescriptor, SendHandle, cancel,
-    logon_sid, open_client, security_descriptor_sddl, session_tag, wide, win32_io_error, win32_of,
-    write_bounded,
+    Overlapped, OwnedHandle, SecurityDescriptor, SendHandle, cancel, logon_sid, open_client,
+    security_descriptor_sddl, session_tag, wide, win32_io_error, win32_of, write_bounded,
 };
 use crate::launch_conversation::{LaunchClock, RealClock};
 
@@ -335,7 +334,7 @@ impl LaunchPipe {
         // handle is closed by whichever of the three arms below is taken, and by `retire_within` on the
         // arm that hands the endpoint back.
         let stop = SendHandle(stop.into_raw());
-        match first_word_on(&*clock, &first_word) {
+        match crate::first_word_on(&*clock, &first_word, FIRST_WORD_WITHIN) {
             Ok(Ok(())) => Ok(Self {
                 name,
                 stop,
@@ -425,20 +424,6 @@ impl Drop for LaunchPipe {
             );
         }
     }
-}
-
-/// **The listener's first word, waited for on `clock`** up to [`FIRST_WORD_WITHIN`] — or
-/// `Timeout` when it did not come inside it.
-fn first_word_on(
-    clock: &dyn LaunchClock,
-    said: &mpsc::Receiver<io::Result<()>>,
-) -> Result<io::Result<()>, RecvTimeoutError> {
-    let mut heard = Err(RecvTimeoutError::Timeout);
-    clock.wait(FIRST_WORD_WITHIN, &mut |bound| {
-        heard = crate::listener_says_within(said, bound);
-        !matches!(heard, Err(RecvTimeoutError::Timeout))
-    });
-    heard
 }
 
 /// One connection at a time, for as long as the endpoint is open.
@@ -803,8 +788,9 @@ pub fn hand_over(
 }
 
 /// [`hand_over`] with its budget on `clock` (T-LAUNCH-HANDOVER-BUDGET-ON-A-CLOCK): the deadline
-/// is set and read on [`LaunchClock::now`], each busy answer's wait inside `open_client` is
-/// [`LaunchClock::spent`], and the wait for the reply is [`LaunchClock::wait`].
+/// is set and read on [`LaunchClock::now`], each busy answer's wait inside `open_client` is a
+/// [`LaunchClock::wait`] on the same clock (T-ATTENTION-ENDPOINT-WAITS-ON-A-CLOCK), and so is the
+/// wait for the reply.
 fn hand_over_on(
     endpoint: &str,
     request: &str,
@@ -820,17 +806,17 @@ fn hand_over_on(
     let deadline = clock.now() + HANDOVER_BUDGET;
     let wide_name = wide(endpoint);
     let handle = loop {
-        match open_client(&wide_name, GENERIC_READ.0 | GENERIC_WRITE.0) {
+        match open_client(&wide_name, GENERIC_READ.0 | GENERIC_WRITE.0, clock) {
             Ok(handle) => break handle,
             // **Busy is not refused, it is waited on.** The endpoint serves one caller at a time,
             // so two launches in the same instant is an ordinary collision rather than an error;
-            // `open_client` has already spent its own hundred milliseconds inside
-            // `WaitNamedPipeW` before answering this, so the loop is a retry and not a spin.
+            // `open_client` has already made its own hundred-millisecond wait past the busy
+            // answer, on this clock (`WaitNamedPipeW`), before answering this, so the loop is a
+            // retry and not a spin.
             Err(error)
                 if matches!(error.kind(), io::ErrorKind::WouldBlock)
                     || error.raw_os_error() == Some(ERROR_PIPE_BUSY.0 as i32) =>
             {
-                clock.spent(Duration::from_millis(u64::from(CLIENT_BUSY_WAIT_MS)));
                 if clock.now() >= deadline {
                     return Err(io::Error::new(
                         io::ErrorKind::TimedOut,
@@ -1315,8 +1301,12 @@ mod tests {
             },
         );
         {
-            let handle = open_client(&wide(pipe.name()), GENERIC_READ.0 | GENERIC_WRITE.0)
-                .expect("connect to the endpoint");
+            let handle = open_client(
+                &wide(pipe.name()),
+                GENERIC_READ.0 | GENERIC_WRITE.0,
+                &RealClock,
+            )
+            .expect("connect to the endpoint");
             write_bounded(handle.0, b"one request").expect("write the request");
             let mut buffer = vec![0u8; MAX_FRAME_BYTES];
             let read = read_reply(
@@ -1389,8 +1379,12 @@ mod tests {
                 let _ = sender.send(admitted);
             },
         );
-        let handle = open_client(&wide(pipe.name()), GENERIC_READ.0 | GENERIC_WRITE.0)
-            .expect("connect to the endpoint");
+        let handle = open_client(
+            &wide(pipe.name()),
+            GENERIC_READ.0 | GENERIC_WRITE.0,
+            &RealClock,
+        )
+        .expect("connect to the endpoint");
         write_bounded(handle.0, b"one request").expect("write the request");
         let mut buffer = vec![0u8; MAX_FRAME_BYTES];
         let asking = CountedClock::answering();
@@ -1512,11 +1506,12 @@ mod tests {
     /// its budget, on the count.**
     ///
     /// The one instance is held by a caller the listener stands inside `decide` for, so every open
-    /// is answered busy; each busy answer is the wait `open_client` made past it, spent on the
-    /// launch's clock, and the launch gives up once those waits add up to the budget.
+    /// is answered busy; each busy answer is the wait `open_client` makes past it, on the
+    /// launch's clock (T-ATTENTION-ENDPOINT-WAITS-ON-A-CLOCK: inside the clock, not counted around
+    /// it), and the launch gives up once those waits add up to the budget.
     ///
-    /// MUTATION: leave the busy answer off the clock in `hand_over_on` and the handover does not
-    /// end within the suite's patience.
+    /// MUTATION: make `open_client`'s `WaitNamedPipeW` outside `clock.wait` and the handover does
+    /// not end within the suite's patience (the clock records no wait and never moves).
     #[test]
     fn an_endpoint_that_stays_busy_costs_the_launch_its_budget_on_the_count() {
         let (pipe, release, _left) = a_held_endpoint(line!());
@@ -1530,7 +1525,7 @@ mod tests {
                 .kind(),
             io::ErrorKind::TimedOut
         );
-        let busy = Duration::from_millis(u64::from(CLIENT_BUSY_WAIT_MS));
+        let busy = crate::attention_pipe::CLIENT_BUSY_WAIT;
         let rounds = usize::try_from(HANDOVER_BUDGET.as_millis() / busy.as_millis()).unwrap();
         assert_eq!(
             asking.asked(),
