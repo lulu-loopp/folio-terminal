@@ -31,6 +31,10 @@ use crate::attention_ownership::{self as ownership, Decision, HooksFound, Outcom
 use crate::i18n::Text;
 use crate::update_trial::Writer;
 
+/// A family's classification of a resolved file, against this copy's program, with the machine's
+/// answer about a path handed in.
+pub(crate) type HooksScanFn = fn(&Config, &Path, &dyn Fn(&Path) -> PathStands) -> HooksFound;
+
 /// **One agent's configuration, as the step reads and repairs it** — the seam a family joins by
 /// (row 69's Codex `hooks.json` replaces the `notify` member here).
 pub(crate) struct HooksFamily {
@@ -42,7 +46,7 @@ pub(crate) struct HooksFamily {
     /// Where its file is on this machine, as the newest program walk read the agent's folders.
     pub(crate) path: fn() -> Option<PathBuf>,
     /// The family's classification of a resolved file ([`HooksFound`]).
-    pub(crate) scan: fn(&Config, &Path, &dyn Fn(&Path) -> PathStands) -> HooksFound,
+    pub(crate) scan: HooksScanFn,
     /// The switch's own writer.
     pub(crate) apply: fn(&Config, Decision, &Path, &Path) -> Outcome,
     /// The notice a repair of a gone copy's hooks raises (R8).
@@ -285,7 +289,7 @@ pub(crate) fn run_agent_hooks_step() {
     }
     let Some(exe) = ownership::this_copy() else {
         crate::diagnostics::stderr_line(
-            "BT_AGENT_HOOKS not scanned: this copy's own program could not be named",
+            "BT_AGENT_HOOKS not scanned: this copy's own program could not be named".to_owned(),
         );
         return;
     };
@@ -314,11 +318,15 @@ fn family_path(family: &HooksFamily) -> Option<PathBuf> {
 /// answer, an Agents-page open or a trial's commit runs the pass, and the pass writes.
 #[cfg(test)]
 fn family_path(family: &HooksFamily) -> Option<PathBuf> {
-    Some(
-        bt_testpath::temp_path("bt-app-test-process-agent-homes")
-            .join(family.tag)
-            .join("config"),
-    )
+    Some(test_process_agent_homes().join(family.tag).join("config"))
+}
+
+/// The scratch folder [`family_path`] keeps a test process's agents in: one per process, named
+/// once.
+#[cfg(test)]
+fn test_process_agent_homes() -> &'static Path {
+    static HOMES: OnceLock<PathBuf> = OnceLock::new();
+    HOMES.get_or_init(|| bt_testpath::temp_path("bt-app-test-process-agent-homes"))
 }
 
 /// **The Agents row's line over what the scan found**, when it has one to say; `None` keeps the
@@ -404,7 +412,8 @@ mod tests {
 
     /// Each family installed by the switch's own writer, for `exe`.
     fn install_all(files: &[PathBuf; 3], exe: &Path, data: &Path) {
-        let applies: [fn(&Path, Decision, &Path, &Path) -> Outcome; 3] = [
+        type ApplyAt = fn(&Path, Decision, &Path, &Path) -> Outcome;
+        let applies: [ApplyAt; 3] = [
             crate::attention_hooks::apply_at,
             crate::attention_codex::apply_at,
             crate::attention_copilot::apply_at,
@@ -1254,9 +1263,10 @@ mod tests {
             (HOOKS_FAMILIES[0].path)(),
             crate::attention_hooks::settings_path()
         );
-        let scratch = bt_testpath::temp_path("bt-app-test-process-agent-homes");
+        let scratch = test_process_agent_homes();
+        assert!(scratch.starts_with(std::env::temp_dir()));
         for family in &HOOKS_FAMILIES {
-            assert!(family_path(family).is_some_and(|path| path.starts_with(&scratch)));
+            assert!(family_path(family).is_some_and(|path| path.starts_with(scratch)));
         }
     }
 }
