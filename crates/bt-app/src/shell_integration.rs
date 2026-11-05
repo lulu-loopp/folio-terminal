@@ -10554,13 +10554,18 @@ mod tests {
     /// exits 7. Its folder reaches `PATH` only through a startup file of the sandbox's home, the one
     /// each shell reads as the person's own: zsh's `.zshrc`, which only an interactive zsh reads,
     /// and bash's `.bash_profile`, the login chain `folio.bash` replays (and which shows that bash
-    /// reads its init file although it is handed `-c`). No vendor, no account and no file of the
-    /// account running the test is used.
+    /// reads its init file although it is handed `-c`). That file sets the whole `PATH` — the
+    /// stand-in's folder and the system's four — rather than adding to the one the test inherited,
+    /// so a machine with a real `claude` installed cannot start it here (ruling R6, review N2). No
+    /// vendor, no account and no file of the account running the test is used.
     ///
     /// The stand-in's pid is the pty child's (the shell `exec`ed it), and the child's exit code is
-    /// the stand-in's. With no stand-in, the shell says `command not found` and the child exits
-    /// 127 before anything could have spoken from it, which is a failed resume
+    /// the stand-in's. With no stand-in, the shell's `exec` says the vendor was not found — zsh
+    /// `command not found: claude`, bash `exec: claude: not found` (review N1) — and the child
+    /// exits 127 before anything could have spoken from it, which is a failed resume
     /// (`AgentAccount::child_ended`): the pane's shell, in the session's folder, with the line.
+    /// Each wait names its case, so a red first wait of `bash (vendor present)` is the finding that
+    /// bash did not read its init file under `-c`, and nothing else.
     ///
     /// MUTATION (plant `plant-15-login-only.py`): the interactive flag dropped, and zsh never reads
     /// `.zshrc`: the stand-in is not found and the first wait goes red.
@@ -10600,7 +10605,10 @@ mod tests {
                 std::fs::write(&script, SCRIPT).unwrap();
                 std::fs::write(
                     home.join(startup_file),
-                    format!("export PATH=\"{}:$PATH\"\n", vendors.display()),
+                    format!(
+                        "export PATH=\"{}:/usr/bin:/bin:/usr/sbin:/sbin\"\n",
+                        vendors.display()
+                    ),
                 )
                 .unwrap();
                 if present {
@@ -10661,14 +10669,18 @@ mod tests {
                     Some(folder.clone()),
                 )
                 .unwrap();
-                let first_line = if present { " end" } else { "command not found" };
+                let first_line = if present { " end" } else { "not found" };
+                let case = format!(
+                    "{id} (vendor {})",
+                    if present { "present" } else { "absent" }
+                );
                 let mut seen = String::new();
-                crate::lane::wait_until(&format!("{id}: the resume's first words"), || {
+                crate::lane::wait_until(&format!("{case}: the resume's first words"), || {
                     seen.push_str(&String::from_utf8_lossy(&session.read_output()));
                     seen.contains(first_line)
                 });
                 let mut status = None;
-                crate::lane::wait_until(&format!("{id}: the resume's end"), || {
+                crate::lane::wait_until(&format!("{case}: the resume's end"), || {
                     status = session.try_wait().expect("the child is reaped");
                     status.is_some()
                 });
@@ -10686,7 +10698,10 @@ mod tests {
                     }
                     assert_eq!(code, 7, "{id}: the child's end is the vendor's own");
                 } else {
-                    assert!(seen.contains("claude"), "{id}: {seen:?}");
+                    assert!(
+                        seen.contains("not found: claude") || seen.contains("claude: not found"),
+                        "{case}: the shell names the vendor it did not find: {seen:?}"
+                    );
                     assert_eq!(code, 127, "{id}: the shell found no vendor");
                     let mut account = crate::agent_resume::AgentAccount::born(&seed.agent, true);
                     let crate::agent_resume::Ended::HandBack {
