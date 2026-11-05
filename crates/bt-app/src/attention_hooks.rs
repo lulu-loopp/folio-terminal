@@ -41,6 +41,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 
+#[cfg(test)]
 use bt_platform::HostPlatform;
 use serde_json::{Map, Value};
 
@@ -274,7 +275,7 @@ pub(crate) fn state() -> State {
     else {
         return State::Unreadable;
     };
-    let Some(value) = serde_json::from_str::<Value>(&text).ok() else {
+    let Some(value) = serde_json::from_str::<Value>(splice::body(&text)).ok() else {
         return State::Unreadable;
     };
     if (owners(&value).unwrap_or_default())
@@ -319,10 +320,12 @@ fn state_at(path: &Path) -> State {
         Standing::Unreadable => return State::Unreadable,
         Standing::Text(text) => text,
     };
+    // A byte-order mark is read past, as the writer reads past it and writes it back.
+    let text = splice::body(&text);
     if text.trim().is_empty() {
         return State::Absent;
     }
-    match serde_json::from_str::<Value>(&text) {
+    match serde_json::from_str::<Value>(text) {
         Ok(settings) if settings.is_object() => {
             if declares_folio(&settings) {
                 State::Installed
@@ -348,7 +351,7 @@ pub(crate) fn installed_rows() -> Vec<MappingRow> {
     else {
         return Vec::new();
     };
-    let Ok(settings) = serde_json::from_str::<Value>(&text) else {
+    let Ok(settings) = serde_json::from_str::<Value>(splice::body(&text)) else {
         return Vec::new();
     };
     rows_declared_by(&settings)
@@ -493,115 +496,605 @@ fn args_for(event: &str) -> Vec<String> {
     args
 }
 
-/// Mutate a validated document after `apply_at` has checked every owner and consent.
-/// User hook entries, including entries sharing a matcher group, survive.
+/// **One entry an install wants in the file**: the event it hangs on, the matcher of its group, and
+/// the entry itself.
+struct Wanted {
+    event: &'static str,
+    matcher: Option<&'static str>,
+    hook: Value,
+}
+
+impl Wanted {
+    /// The group a missing entry is written in: its own, holding nothing else.
+    fn group(&self) -> Value {
+        let mut group = Map::new();
+        if let Some(matcher) = self.matcher {
+            group.insert("matcher".to_owned(), matcher.into());
+        }
+        group.insert("hooks".to_owned(), Value::Array(vec![self.hook.clone()]));
+        Value::Object(group)
+    }
+}
+
+/// Every entry one install writes, in [`rows_to_install`]'s order.
+fn wanted(exe: &Path) -> Vec<Wanted> {
+    rows_to_install()
+        .into_iter()
+        .map(|row| {
+            let (event, matcher) = match row.event.split_once('.') {
+                Some((event, matcher)) => (event, Some(matcher)),
+                None => (row.event, None),
+            };
+            let mut hook = Map::new();
+            hook.insert("type".to_owned(), "command".into());
+            hook.insert("command".to_owned(), exe.to_string_lossy().as_ref().into());
+            hook.insert("args".to_owned(), args_for(row.event).into());
+            // **Every one of these is asynchronous**, and it is not an optimisation (plan
+            // §10.4.3). `PermissionRequest` is a *synchronous decision gate* with a ten-minute
+            // timeout: a signal hook that made it wait would put this program between the user and
+            // every approval Claude Code ever asks for. Asynchronous hooks cannot return a
+            // decision, and this one has none to return — it wants the side effect and nothing
+            // else.
+            hook.insert("async".to_owned(), true.into());
+            Wanted {
+                event,
+                matcher,
+                hook: Value::Object(hook),
+            }
+        })
+        .collect()
+}
+
+/// One hook entry as the file has it, and whether it is provably Folio's.
+struct Entry<'a> {
+    node: &'a splice::Node,
+    value: Value,
+    /// The executable it runs, when [`hook_owner`] reads it as a Folio executable speaking
+    /// `attention`. `None` is every other entry — the person's own, and one that looks like
+    /// Folio's but that this build cannot read as one — and an entry that is `None` is never
+    /// edited, moved or deleted.
+    own: Option<PathBuf>,
+}
+
+/// One matcher group: its object, its `hooks` array and the entries in it.
+struct Group<'a> {
+    node: &'a splice::Node,
+    rows: &'a splice::Node,
+    matcher: Option<String>,
+    entries: Vec<Entry<'a>>,
+}
+
+impl Group<'_> {
+    /// Whether anything in the group is not Folio's: an entry of somebody else's, or no entry at
+    /// all — a group nobody but its writer put there.
+    fn holds_foreign(&self) -> bool {
+        self.entries.is_empty() || self.entries.iter().any(|entry| entry.own.is_none())
+    }
+}
+
+/// One event's member of the `hooks` object, and its groups.
+struct Event<'a> {
+    member: &'a splice::Member,
+    groups: Vec<Group<'a>>,
+}
+
+/// The `hooks` member of the file, read down to its entries.
+struct Hooks<'a> {
+    member: &'a splice::Member,
+    events: Vec<Event<'a>>,
+}
+
+/// What an object on the way to Folio's entries said when it named one key twice.
+///
+/// The agent's own parser decides which of the two it reads, and an edit that guessed could change
+/// the one the agent runs; so nothing is written.
+const DUPLICATE: &str =
+    "the settings file names one key twice where Folio's hooks go, so nothing was written";
+
+/// **What every writer of an agent's file says when the edit it made would have changed a byte
+/// that is not Folio's** — the write-time self-check's refusal (0.4.10 plan row 67a).
+pub(crate) const SPLICE_REFUSED: &str =
+    "Folio could not change only its own lines in this file, so nothing was written";
+
+/// **The file's `hooks`, read down to every entry and whose it is.**
+///
+/// `None` when there is no `hooks` member at all. The shapes [`owners`] refuses are refused here
+/// too, for the same reasons; on top of them, a key named twice anywhere on the way down to an
+/// entry ([`DUPLICATE`]).
+fn mapped<'a>(document: &'a splice::Document) -> Result<Option<Hooks<'a>>, &'static str> {
+    let unknown = || crate::i18n::Text::AgentHooksSchemaUnknown.text();
+    let Some(root) = document.root.as_ref() else {
+        return Ok(None);
+    };
+    if root.members().is_none() {
+        return Err(UNREADABLE);
+    }
+    let Some(member) = root.member("hooks").map_err(|_| DUPLICATE)? else {
+        return Ok(None);
+    };
+    let members = member.value.members().ok_or_else(unknown)?;
+    let mut events = Vec::with_capacity(members.len());
+    for (index, event) in members.iter().enumerate() {
+        if members[..index]
+            .iter()
+            .any(|earlier| earlier.key == event.key)
+        {
+            return Err(DUPLICATE);
+        }
+        let mut groups = Vec::new();
+        for node in event.value.elements().ok_or_else(unknown)? {
+            let rows = node
+                .member("hooks")
+                .map_err(|_| DUPLICATE)?
+                .ok_or_else(unknown)?;
+            let matcher = node.member("matcher").map_err(|_| DUPLICATE)?;
+            let mut entries = Vec::new();
+            for entry in rows.value.elements().ok_or_else(unknown)? {
+                let value = value_at(document.text, entry)?;
+                let own = hook_owner(&value).ok().flatten();
+                entries.push(Entry {
+                    node: entry,
+                    value,
+                    own,
+                });
+            }
+            let matcher = match matcher {
+                Some(matcher) => value_at(document.text, &matcher.value)?
+                    .as_str()
+                    .filter(|matcher| !matcher.is_empty())
+                    .map(str::to_owned),
+                None => None,
+            };
+            groups.push(Group {
+                node,
+                rows: &rows.value,
+                matcher,
+                entries,
+            });
+        }
+        events.push(Event {
+            member: event,
+            groups,
+        });
+    }
+    Ok(Some(Hooks { member, events }))
+}
+
+/// The value a span holds, as the classifiers read it.
+fn value_at(text: &str, node: &splice::Node) -> Result<Value, &'static str> {
+    serde_json::from_str(&text[node.start..node.end]).map_err(|_| UNREADABLE)
+}
+
+/// What becomes of one entry.
+#[derive(Clone)]
+enum Fate {
+    Kept,
+    Replaced(String),
+    Deleted,
+}
+
+/// **The file with Folio's entries put in (`install`) or taken out, every other byte as it was.**
+///
+/// `Ok(None)` when there is nothing to change. The only edits ever made:
+///
+/// - **an own entry replaced, where it stands**, by the entry this build writes — a repair keeps
+///   the entry's place among the person's;
+/// - **an own entry deleted**, with its separator, and the group, event or `hooks` that held
+///   nothing but Folio's going with it;
+/// - **an entry that is missing appended**: a group at the end of its event (after the person's
+///   own), an event at the end of `hooks`, `hooks` at the end of the file's object — laid out like
+///   its neighbours.
+///
+/// An install claims, for each entry it wants, the first own entry under the same event and
+/// matcher, of whichever copy of Folio — `apply_resolved` has asked about every other copy before
+/// this runs — and deletes the own entries left unclaimed. A removal deletes the entries of this
+/// copy and of copies that are gone, and no other. Then [`verified`] reads the result back, and a
+/// result that changed anything else is refused whole.
+fn edited(
+    document: &splice::Document,
+    exe: &Path,
+    install: bool,
+) -> Result<Option<String>, &'static str> {
+    let text = document.text;
+    let style = splice::Style::of(document);
+    let wanted = if install { wanted(exe) } else { Vec::new() };
+    let Some(root) = document.root.as_ref() else {
+        if wanted.is_empty() {
+            return Ok(None);
+        }
+        let mut settings = Map::new();
+        settings.insert(
+            "hooks".to_owned(),
+            Value::Object(events_value(&wanted, &[])),
+        );
+        let fresh = format!(
+            "{}{}{}",
+            &text[..document.body],
+            splice::render(&Value::Object(settings), "", &style, true),
+            style.newline
+        );
+        return verified(document, fresh).map(Some);
+    };
+    let root_members = root.members().ok_or(UNREADABLE)?;
+    // A file of one line gets its new entries on that line; a file with nothing in it yet, over
+    // lines like everything else this build writes.
+    let pretty = root_members.is_empty() || text[root.start..root.end].contains('\n');
+    let root_items = splice::Container::of(text, root).ok_or(UNREADABLE)?;
+    let mut edits = Vec::new();
+    let Some(hooks) = mapped(document)? else {
+        if wanted.is_empty() {
+            return Ok(None);
+        }
+        let layout = root_items.layout(&style, pretty);
+        let member = format!(
+            "{}{}{}",
+            Value::from("hooks"),
+            style.colon,
+            splice::render(
+                &Value::Object(events_value(&wanted, &[])),
+                &layout.indent,
+                &style,
+                layout.pretty
+            )
+        );
+        edits.extend(root_items.edits(
+            &vec![false; root_members.len()],
+            &[member],
+            &style,
+            &layout,
+        ));
+        return splice_checked(document, edits);
+    };
+
+    // Every entry's fate, by event, group and entry.
+    let mut fates: Vec<Vec<Vec<Fate>>> = hooks
+        .events
+        .iter()
+        .map(|event| {
+            event
+                .groups
+                .iter()
+                .map(|group| {
+                    group
+                        .entries
+                        .iter()
+                        .map(|entry| match &entry.own {
+                            None => Fate::Kept,
+                            // Unclaimed until a wanted entry claims it below.
+                            Some(_) if install => Fate::Deleted,
+                            Some(owner) if ownership::other_live(owner, exe) == Ok(false) => {
+                                Fate::Deleted
+                            }
+                            Some(_) => Fate::Kept,
+                        })
+                        .collect()
+                })
+                .collect()
+        })
+        .collect();
+    let mut claimed: Vec<(usize, usize, usize)> = Vec::new();
+    let mut missing: Vec<&Wanted> = Vec::new();
+    for want in &wanted {
+        let mut found = None;
+        'search: for (e, event) in hooks.events.iter().enumerate() {
+            if event.member.key != want.event {
+                continue;
+            }
+            for (g, group) in event.groups.iter().enumerate() {
+                if group.matcher.as_deref() != want.matcher {
+                    continue;
+                }
+                for (h, entry) in group.entries.iter().enumerate() {
+                    if entry.own.is_some() && !claimed.contains(&(e, g, h)) {
+                        found = Some(((e, g, h), entry));
+                        break 'search;
+                    }
+                }
+            }
+        }
+        let Some((at, entry)) = found else {
+            missing.push(want);
+            continue;
+        };
+        claimed.push(at);
+        let (e, g, h) = at;
+        fates[e][g][h] = if entry.value == want.hook {
+            Fate::Kept
+        } else {
+            let old = &text[entry.node.start..entry.node.end];
+            Fate::Replaced(splice::render(
+                &want.hook,
+                splice::line_indent(text, entry.node.start),
+                &style,
+                old.contains('\n'),
+            ))
+        };
+    }
+
+    let mut event_gone = Vec::with_capacity(hooks.events.len());
+    let mut inner = Vec::new();
+    for (e, event) in hooks.events.iter().enumerate() {
+        let appended: Vec<Value> = missing
+            .iter()
+            .filter(|want| want.event == event.member.key)
+            .map(|want| want.group())
+            .collect();
+        let mut group_gone = Vec::with_capacity(event.groups.len());
+        let mut kept = Vec::new();
+        for (g, group) in event.groups.iter().enumerate() {
+            let fates = &fates[e][g];
+            let deleted: Vec<bool> = fates
+                .iter()
+                .map(|fate| matches!(fate, Fate::Deleted))
+                .collect();
+            // A group goes when it held entries and every one of them goes; one the person left
+            // empty stays empty.
+            let gone = !deleted.is_empty() && deleted.iter().all(|gone| *gone);
+            group_gone.push(gone);
+            if gone {
+                continue;
+            }
+            for (entry, fate) in group.entries.iter().zip(fates) {
+                if let Fate::Replaced(written) = fate {
+                    kept.push(splice::Edit {
+                        start: entry.node.start,
+                        end: entry.node.end,
+                        text: written.clone(),
+                    });
+                }
+            }
+            if deleted.iter().any(|gone| *gone) {
+                let rows = splice::Container::of(text, group.rows).ok_or(UNREADABLE)?;
+                let layout = rows.layout(&style, pretty);
+                kept.extend(rows.edits(&deleted, &[], &style, &layout));
+            }
+        }
+        // The same rule one level up: an event whose every group goes, and to which nothing is
+        // appended, goes with them. An event the person left empty stays.
+        let gone =
+            !group_gone.is_empty() && group_gone.iter().all(|gone| *gone) && appended.is_empty();
+        event_gone.push(gone);
+        if gone {
+            continue;
+        }
+        inner.extend(kept);
+        if group_gone.iter().any(|gone| *gone) || !appended.is_empty() {
+            let groups = splice::Container::of(text, &event.member.value).ok_or(UNREADABLE)?;
+            let layout = groups.layout(&style, pretty);
+            let appended: Vec<String> = appended
+                .iter()
+                .map(|group| splice::render(group, &layout.indent, &style, layout.pretty))
+                .collect();
+            inner.extend(groups.edits(&group_gone, &appended, &style, &layout));
+        }
+    }
+    let present: Vec<&str> = hooks
+        .events
+        .iter()
+        .map(|event| event.member.key.as_str())
+        .collect();
+    let added = events_value(missing.iter().copied(), &present);
+    let hooks_gone =
+        !event_gone.is_empty() && event_gone.iter().all(|gone| *gone) && added.is_empty();
+    if hooks_gone {
+        let deleted: Vec<bool> = root_members
+            .iter()
+            .map(|member| member.key_start == hooks.member.key_start)
+            .collect();
+        let layout = root_items.layout(&style, pretty);
+        edits.extend(root_items.edits(&deleted, &[], &style, &layout));
+        return splice_checked(document, edits);
+    }
+    edits.extend(inner);
+    if event_gone.iter().any(|gone| *gone) || !added.is_empty() {
+        let events = splice::Container::of(text, &hooks.member.value).ok_or(UNREADABLE)?;
+        let layout = events.layout(&style, pretty);
+        let appended: Vec<String> = added
+            .iter()
+            .map(|(name, groups)| {
+                format!(
+                    "{}{}{}",
+                    Value::from(name.as_str()),
+                    style.colon,
+                    splice::render(groups, &layout.indent, &style, layout.pretty)
+                )
+            })
+            .collect();
+        edits.extend(events.edits(&event_gone, &appended, &style, &layout));
+    }
+    splice_checked(document, edits)
+}
+
+/// The events the file does not have yet, each with the groups its missing entries are written in.
+fn events_value<'w>(
+    missing: impl IntoIterator<Item = &'w Wanted>,
+    present: &[&str],
+) -> Map<String, Value> {
+    let mut events = Map::new();
+    for want in missing {
+        if present.contains(&want.event) {
+            continue;
+        }
+        if let Value::Array(groups) = events
+            .entry(want.event.to_owned())
+            .or_insert_with(|| Value::Array(Vec::new()))
+        {
+            groups.push(want.group());
+        }
+    }
+    events
+}
+
+/// `edits` made, and the result read back by [`verified`] before anybody may write it.
+fn splice_checked(
+    document: &splice::Document,
+    edits: Vec<splice::Edit>,
+) -> Result<Option<String>, &'static str> {
+    if edits.is_empty() {
+        return Ok(None);
+    }
+    let text = splice::spliced(document.text, edits).ok_or(SPLICE_REFUSED)?;
+    verified(document, text).map(Some)
+}
+
+/// **The write-time self-check** (0.4.10 plan row 67a): the text an edit produced is handed on
+/// only when, read back, it says everything `before` said that was not Folio's, in the same bytes.
+///
+/// Four things are compared, and any difference refuses the write whole ([`SPLICE_REFUSED`]):
+///
+/// 1. the byte-order mark, and the bytes before and after the top-level object;
+/// 2. **every unit of the file that is not Folio's, byte for byte and in order** — each member of
+///    the top-level object other than `hooks`; under `hooks`, the key of every event that holds
+///    something of somebody else's, and in each group that does, its other members and every entry
+///    that is not Folio's ([`foreign_units`]);
+/// 3. the two documents as values, with Folio's entries and the containers left empty by taking
+///    them out stripped from both ([`without_folio`]);
+/// 4. and that the result is a document at all.
+///
+/// The edit plan above is written to pass this; the check is what makes a mistake in it a refusal
+/// rather than somebody's lost hook.
+fn verified(before: &splice::Document, text: String) -> Result<String, &'static str> {
+    if keeps_what_is_not_ours(before, &text) {
+        Ok(text)
+    } else {
+        Err(SPLICE_REFUSED)
+    }
+}
+
+fn keeps_what_is_not_ours(before: &splice::Document, text: &str) -> bool {
+    let Ok(after) = splice::read(text) else {
+        return false;
+    };
+    let Some(root) = after.root.as_ref() else {
+        return false;
+    };
+    if root.members().is_none() || before.text[..before.body] != after.text[..after.body] {
+        return false;
+    }
+    if let Some(old) = before.root.as_ref()
+        && (before.text[before.body..old.start] != after.text[after.body..root.start]
+            || before.text[old.end..] != after.text[root.end..])
+    {
+        return false;
+    }
+    match (foreign_units(before), foreign_units(&after)) {
+        (Some(old), Some(new)) if old == new => {}
+        _ => return false,
+    }
+    match (before.value(), after.value()) {
+        (Ok(old), Ok(new)) => without_folio(old) == without_folio(new),
+        _ => false,
+    }
+}
+
+/// **Every piece of the file that is not Folio's, as the bytes it is, in the order it stands.**
+/// `None` for a document whose `hooks` cannot be read down to its entries.
+fn foreign_units<'a>(document: &'a splice::Document) -> Option<Vec<&'a str>> {
+    let text = document.text;
+    let mut units = Vec::new();
+    let Some(root) = document.root.as_ref() else {
+        return Some(units);
+    };
+    for member in root.members()? {
+        if member.key != "hooks" {
+            units.push(&text[member.key_start..member.value.end]);
+        }
+    }
+    let Some(hooks) = mapped(document).ok()? else {
+        return Some(units);
+    };
+    for event in &hooks.events {
+        if event.groups.iter().any(Group::holds_foreign) {
+            units.push(&text[event.member.key_start..event.member.key_end]);
+        }
+        for group in event.groups.iter().filter(|group| group.holds_foreign()) {
+            for member in group.node.members()? {
+                if member.key != "hooks" {
+                    units.push(&text[member.key_start..member.value.end]);
+                }
+            }
+            if group.entries.is_empty() {
+                units.push(&text[group.rows.start..group.rows.end]);
+            }
+            for entry in group.entries.iter().filter(|entry| entry.own.is_none()) {
+                units.push(&text[entry.node.start..entry.node.end]);
+            }
+        }
+    }
+    Some(units)
+}
+
+/// A settings value with every entry [`hook_owner`] reads as Folio's taken out, and then every
+/// group, event and `hooks` object left empty — the person's own empty ones with them, on both
+/// sides of the comparison alike.
+fn without_folio(mut settings: Value) -> Value {
+    let Some(object) = settings.as_object_mut() else {
+        return settings;
+    };
+    if let Some(hooks) = object.get_mut("hooks").and_then(Value::as_object_mut) {
+        for groups in hooks.values_mut() {
+            let Some(groups) = groups.as_array_mut() else {
+                continue;
+            };
+            for group in groups.iter_mut() {
+                if let Some(rows) = group.get_mut("hooks").and_then(Value::as_array_mut) {
+                    rows.retain(|hook| !matches!(hook_owner(hook), Ok(Some(_))));
+                }
+            }
+            groups.retain(|group| {
+                group
+                    .get("hooks")
+                    .and_then(Value::as_array)
+                    .is_none_or(|rows| !rows.is_empty())
+            });
+        }
+        hooks.retain(|_, groups| groups.as_array().is_none_or(|groups| !groups.is_empty()));
+        if hooks.is_empty() {
+            object.remove("hooks");
+        }
+    }
+    settings
+}
+
+/// [`edited`] over a value, for the tests that ask about the edit and not about a file: the value
+/// is written out the way `serde_json` writes one, edited, and read back.
+#[cfg(test)]
+fn edited_value(settings: &mut Value, exe: &Path, install: bool) -> bool {
+    let text = serde_json::to_string_pretty(settings).expect("a value renders");
+    let Ok(document) = splice::read(&text) else {
+        return false;
+    };
+    match edited(&document, exe, install) {
+        Ok(Some(text)) => {
+            *settings = serde_json::from_str(&text).expect("the splice writes JSON");
+            true
+        }
+        Ok(None) | Err(_) => false,
+    }
+}
+
+/// Put Folio's entries into a value; whether anything changed.
+#[cfg(test)]
 fn install_into(settings: &mut Value, exe: &Path) -> bool {
     install_into_on(settings, exe, bt_platform::host_platform())
 }
 
 /// Direct execution has the same shape on every platform.
+#[cfg(test)]
 fn install_into_on(settings: &mut Value, exe: &Path, _platform: HostPlatform) -> bool {
-    let before = settings.clone();
-    remove_from(settings, exe, true);
-    let object = match settings {
-        Value::Object(object) => object,
-        _ => {
-            *settings = Value::Object(Map::new());
-            let Value::Object(object) = settings else {
-                unreachable!("just assigned an object")
-            };
-            object
-        }
-    };
-    let hooks = object
-        .entry("hooks")
-        .or_insert_with(|| Value::Object(Map::new()));
-    if !hooks.is_object() {
-        *hooks = Value::Object(Map::new());
-    }
-    let Some(hooks) = hooks.as_object_mut() else {
-        return false;
-    };
-    for row in rows_to_install() {
-        let (event, matcher) = match row.event.split_once('.') {
-            Some((event, matcher)) => (event, Some(matcher)),
-            None => (row.event, None),
-        };
-        let mut group = Map::new();
-        if let Some(matcher) = matcher {
-            group.insert("matcher".to_owned(), matcher.into());
-        }
-        let mut hook = Map::new();
-        hook.insert("type".to_owned(), "command".into());
-        hook.insert("command".to_owned(), exe.to_string_lossy().as_ref().into());
-        hook.insert("args".to_owned(), args_for(row.event).into());
-        // **Every one of these is asynchronous**, and it is not an optimisation (plan §10.4.3).
-        // `PermissionRequest` is a *synchronous decision gate* with a ten-minute timeout: a signal
-        // hook that made it wait would put this program between the user and every approval Claude
-        // Code ever asks for. Asynchronous hooks cannot return a decision, and this one has none to
-        // return — it wants the side effect and nothing else.
-        hook.insert("async".to_owned(), true.into());
-        group.insert("hooks".to_owned(), Value::Array(vec![Value::Object(hook)]));
-        hooks
-            .entry(event.to_owned())
-            .or_insert_with(|| Value::Array(Vec::new()));
-        if let Some(array) = hooks.get_mut(event).and_then(Value::as_array_mut) {
-            array.push(Value::Object(group));
-        }
-    }
-    *settings != before
+    edited_value(settings, exe, true)
 }
 
-/// Take Folio's hooks back out, leaving everything else exactly as it was.
-///
-/// Symmetric with [`install_into`] and tested as such: install, remove, and the value is the one
-/// that went in — including a user's own hooks under the same event names, an empty `hooks` object
-/// they had written themselves, and the ordering of everything around it.
-fn remove_from(settings: &mut Value, exe: &Path, takeover: bool) -> bool {
-    let Some(object) = settings.as_object_mut() else {
-        return false;
-    };
-    let Some(hooks) = object.get_mut("hooks").and_then(Value::as_object_mut) else {
-        return false;
-    };
-    let mut changed = false;
-    let events = hooks.keys().cloned().collect::<Vec<_>>();
-    for event in events {
-        let Some(groups) = hooks.get_mut(&event).and_then(Value::as_array_mut) else {
-            continue;
-        };
-        let before = groups.len();
-        groups.retain_mut(|group| {
-            let Some(rows) = group.get_mut("hooks").and_then(Value::as_array_mut) else {
-                return true;
-            };
-            let count = rows.len();
-            rows.retain(|hook| {
-                !hook_owner(hook).ok().flatten().is_some_and(|owner| {
-                    takeover || ownership::other_live(&owner, exe) == Ok(false)
-                })
-            });
-            changed |= rows.len() != count;
-            !rows.is_empty() || count == 0
-        });
-        changed |= groups.len() != before;
-        // An event whose only entries were ours goes with them. An event that was empty before we
-        // arrived stays empty, because we did not put it there.
-        if groups.is_empty() && before != 0 {
-            hooks.remove(&event);
-        }
-    }
-    // The same rule one level up: a `hooks` object that only existed to hold ours goes too.
-    if changed && hooks.is_empty() {
-        object.remove("hooks");
-    }
-    changed
+/// Take this copy's entries, and those of copies that are gone, back out of a value.
+#[cfg(test)]
+fn remove_from(settings: &mut Value, exe: &Path) -> bool {
+    edited_value(settings, exe, false)
 }
 
 /// Put Folio's hooks in, or take them out, on this machine.
 ///
-/// **The file is read, changed and written whole**, and a copy of what was there is kept beside it
-/// the first time each day — `shell_integration`'s rule, for `shell_integration`'s reason: this is
+/// **The file is read and written whole, and only Folio's own entries in it change** ([`edited`]),
+/// and a copy of what was there is kept beside it the first time each day — `shell_integration`'s rule, for `shell_integration`'s reason: this is
 /// somebody's own configuration file, and a build that could damage one had better be able to hand
 /// it back.
 pub(crate) fn apply(decision: Decision, exe: &Path) -> Outcome {
@@ -646,16 +1139,16 @@ pub(crate) fn apply_resolved(
         // Refused rather than replaced, exactly as an unparseable file is.
         Standing::Unreadable => return Outcome::Refused(UNREADABLE),
     };
-    let mut settings = if existing.trim().is_empty() {
-        Value::Object(Map::new())
-    } else {
-        match serde_json::from_str::<Value>(&existing) {
-            Ok(value) if value.is_object() => value,
-            // Refused rather than replaced. A settings file this build cannot read is a settings
-            // file somebody wrote, and overwriting it to add a convenience is not a trade anyone
-            // agreed to.
-            _ => return Outcome::Refused(UNREADABLE),
-        }
+    // Read as spans, for the edit, and as a value, for the classifiers: one text, two views of it.
+    // Refused rather than replaced when either cannot read it. A settings file this build cannot
+    // read is a settings file somebody wrote, and overwriting it to add a convenience is not a
+    // trade anyone agreed to.
+    let Ok(document) = splice::read(&existing) else {
+        return Outcome::Refused(UNREADABLE);
+    };
+    let settings = match document.value() {
+        Ok(value) if value.is_object() => value,
+        _ => return Outcome::Refused(UNREADABLE),
     };
     let paths = match owners(&settings) {
         Ok(paths) => paths,
@@ -665,10 +1158,11 @@ pub(crate) fn apply_resolved(
         Ok(others) => others,
         Err(outcome) => return outcome,
     };
-    let changed = if install {
-        install_into(&mut settings, exe)
-    } else {
-        remove_from(&mut settings, exe, false)
+    // **Only Folio's own entries change, and every other byte of the file stays** (the owner's
+    // rule of 2026-11-04): see [`edited`] and [`verified`].
+    let written = match edited(&document, exe, install) {
+        Ok(written) => written,
+        Err(reason) => return Outcome::Refused(reason),
     };
     let _record = if install {
         match ownership::record(
@@ -682,18 +1176,14 @@ pub(crate) fn apply_resolved(
     } else {
         None
     };
-    if !changed {
+    let Some(text) = written else {
         return if others.is_empty() {
             Outcome::Unchanged
         } else {
             Outcome::LeftOther(others)
         };
-    }
-    let text = match serde_json::to_string_pretty(&settings) {
-        Ok(text) => text,
-        Err(_) => return Outcome::Refused("the settings could not be written back"),
     };
-    match config.land(&existing, "json", format!("{text}\n").as_bytes()) {
+    match config.land(&existing, "json", text.as_bytes()) {
         Landing::Landed => {}
         Landing::NoDirectory => {
             return Outcome::Refused("the user configuration directory could not be created");
@@ -1057,6 +1547,699 @@ pub(crate) fn today() -> String {
     format!("{year:04}{month:02}{day:02}")
 }
 
+/// **Somebody else's JSON, read as the text it is and edited only where Folio's own entries
+/// stand** (0.4.10 plan row 67a; the owner's hard rule of 2026-11-04).
+///
+/// The rule is that Folio touches only what it can prove is its own, and leaves every other byte of
+/// the agent's settings file as it found it: the person's other hooks, every other key, their order,
+/// the indentation, the line endings, a byte-order mark, the trailing newline, the way a number or
+/// an escape is spelled. A value model cannot keep that promise — `serde_json` without
+/// `preserve_order` hands every object back sorted, and re-serialising a document is a rewrite of
+/// all of it — so this module reads the file as **spans**: where every member and every element
+/// starts and ends in the text. Folio's entries are then replaced, deleted or appended by splicing
+/// those spans, and the bytes between them are copied, never regenerated.
+///
+/// The reader is strict JSON (RFC 8259) and nothing more: no comments, no trailing commas, no
+/// single quotes. A document it cannot read is a document Folio does not write (`Malformed`),
+/// which is the same answer `serde_json` gave it before. What it accepts and the value parser does
+/// not (a byte-order mark) is read past and written back.
+///
+/// What is done with the spans is `edited`'s, beside this module, and what is checked before
+/// anything is written is `verified`'s.
+mod splice {
+    use serde_json::Value;
+
+    /// The byte-order mark an editor on Windows may leave at the front of the file.
+    pub(super) const BOM: char = '\u{feff}';
+
+    /// How deep this reader follows nesting before it calls a document unreadable — the value
+    /// parser's own limit, so the two never disagree about which documents exist.
+    const DEPTH: usize = 128;
+
+    /// The document's text after its byte-order mark, if it has one: what a value parser reads.
+    #[must_use]
+    pub(super) fn body(text: &str) -> &str {
+        text.strip_prefix(BOM).unwrap_or(text)
+    }
+
+    /// A document this reader cannot read as strict JSON.
+    #[derive(Debug, Eq, PartialEq)]
+    pub(super) struct Malformed;
+
+    /// An object that names the same key twice, at a place Folio has to look into.
+    #[derive(Debug, Eq, PartialEq)]
+    pub(super) struct Twice;
+
+    /// One value of the document and the bytes it occupies, `start..end`.
+    #[derive(Debug)]
+    pub(super) struct Node {
+        pub(super) start: usize,
+        pub(super) end: usize,
+        pub(super) kind: Kind,
+    }
+
+    /// What a value is, as far as an edit needs to know.
+    #[derive(Debug)]
+    pub(super) enum Kind {
+        Object(Vec<Member>),
+        Array(Vec<Node>),
+        Scalar,
+    }
+
+    /// One member of an object: its key as decoded, the key's own bytes, and its value.
+    #[derive(Debug)]
+    pub(super) struct Member {
+        pub(super) key: String,
+        pub(super) key_start: usize,
+        pub(super) key_end: usize,
+        pub(super) value: Node,
+    }
+
+    impl Member {
+        /// The member's bytes, from its key's opening quote to the end of its value.
+        #[must_use]
+        pub(super) fn span(&self) -> (usize, usize) {
+            (self.key_start, self.value.end)
+        }
+    }
+
+    impl Node {
+        #[must_use]
+        pub(super) fn members(&self) -> Option<&[Member]> {
+            match &self.kind {
+                Kind::Object(members) => Some(members),
+                _ => None,
+            }
+        }
+
+        #[must_use]
+        pub(super) fn elements(&self) -> Option<&[Node]> {
+            match &self.kind {
+                Kind::Array(elements) => Some(elements),
+                _ => None,
+            }
+        }
+
+        /// The one member of this object named `key`, or none; [`Twice`] when it is named twice,
+        /// because then which of the two the agent reads is the agent's parser's business and not
+        /// something an edit may guess at.
+        pub(super) fn member(&self, key: &str) -> Result<Option<&Member>, Twice> {
+            let mut found = None;
+            for member in self.members().unwrap_or_default() {
+                if member.key == key {
+                    if found.is_some() {
+                        return Err(Twice);
+                    }
+                    found = Some(member);
+                }
+            }
+            Ok(found)
+        }
+    }
+
+    /// One file's text and the spans read out of it.
+    pub(super) struct Document<'a> {
+        pub(super) text: &'a str,
+        /// Where the JSON begins: after the byte-order mark when there is one.
+        pub(super) body: usize,
+        /// The top-level value; none when the file holds nothing but whitespace.
+        pub(super) root: Option<Node>,
+    }
+
+    impl Document<'_> {
+        /// The document as a value — the classifiers' view of the same bytes.
+        pub(super) fn value(&self) -> Result<Value, Malformed> {
+            match &self.root {
+                None => Ok(Value::Object(serde_json::Map::new())),
+                Some(_) => serde_json::from_str(&self.text[self.body..]).map_err(|_| Malformed),
+            }
+        }
+    }
+
+    /// Read `text` into spans, or refuse it whole.
+    pub(super) fn read(text: &str) -> Result<Document<'_>, Malformed> {
+        let body = if text.starts_with(BOM) {
+            BOM.len_utf8()
+        } else {
+            0
+        };
+        let mut reader = Reader {
+            text,
+            bytes: text.as_bytes(),
+            at: body,
+        };
+        reader.skip_whitespace();
+        if reader.at == text.len() {
+            return Ok(Document {
+                text,
+                body,
+                root: None,
+            });
+        }
+        let root = reader.value(0)?;
+        reader.skip_whitespace();
+        if reader.at != text.len() {
+            return Err(Malformed);
+        }
+        Ok(Document {
+            text,
+            body,
+            root: Some(root),
+        })
+    }
+
+    struct Reader<'a> {
+        text: &'a str,
+        bytes: &'a [u8],
+        at: usize,
+    }
+
+    impl Reader<'_> {
+        fn peek(&self) -> Option<u8> {
+            self.bytes.get(self.at).copied()
+        }
+
+        fn skip_whitespace(&mut self) {
+            while matches!(self.peek(), Some(b' ' | b'\t' | b'\n' | b'\r')) {
+                self.at += 1;
+            }
+        }
+
+        fn expect(&mut self, byte: u8) -> Result<(), Malformed> {
+            if self.peek() == Some(byte) {
+                self.at += 1;
+                Ok(())
+            } else {
+                Err(Malformed)
+            }
+        }
+
+        fn value(&mut self, depth: usize) -> Result<Node, Malformed> {
+            if depth > DEPTH {
+                return Err(Malformed);
+            }
+            let start = self.at;
+            let kind = match self.peek() {
+                Some(b'{') => self.object(depth)?,
+                Some(b'[') => self.array(depth)?,
+                Some(b'"') => {
+                    self.string()?;
+                    Kind::Scalar
+                }
+                Some(b't') => self.literal("true")?,
+                Some(b'f') => self.literal("false")?,
+                Some(b'n') => self.literal("null")?,
+                Some(b'-' | b'0'..=b'9') => {
+                    self.number()?;
+                    Kind::Scalar
+                }
+                _ => return Err(Malformed),
+            };
+            Ok(Node {
+                start,
+                end: self.at,
+                kind,
+            })
+        }
+
+        fn object(&mut self, depth: usize) -> Result<Kind, Malformed> {
+            self.expect(b'{')?;
+            self.skip_whitespace();
+            let mut members = Vec::new();
+            if self.peek() == Some(b'}') {
+                self.at += 1;
+                return Ok(Kind::Object(members));
+            }
+            loop {
+                let key_start = self.at;
+                if self.peek() != Some(b'"') {
+                    return Err(Malformed);
+                }
+                let key = self.string()?;
+                let key_end = self.at;
+                self.skip_whitespace();
+                self.expect(b':')?;
+                self.skip_whitespace();
+                let value = self.value(depth + 1)?;
+                members.push(Member {
+                    key,
+                    key_start,
+                    key_end,
+                    value,
+                });
+                self.skip_whitespace();
+                match self.peek() {
+                    Some(b',') => {
+                        self.at += 1;
+                        self.skip_whitespace();
+                    }
+                    Some(b'}') => {
+                        self.at += 1;
+                        return Ok(Kind::Object(members));
+                    }
+                    _ => return Err(Malformed),
+                }
+            }
+        }
+
+        fn array(&mut self, depth: usize) -> Result<Kind, Malformed> {
+            self.expect(b'[')?;
+            self.skip_whitespace();
+            let mut elements = Vec::new();
+            if self.peek() == Some(b']') {
+                self.at += 1;
+                return Ok(Kind::Array(elements));
+            }
+            loop {
+                elements.push(self.value(depth + 1)?);
+                self.skip_whitespace();
+                match self.peek() {
+                    Some(b',') => {
+                        self.at += 1;
+                        self.skip_whitespace();
+                    }
+                    Some(b']') => {
+                        self.at += 1;
+                        return Ok(Kind::Array(elements));
+                    }
+                    _ => return Err(Malformed),
+                }
+            }
+        }
+
+        fn literal(&mut self, word: &str) -> Result<Kind, Malformed> {
+            if self.text[self.at..].starts_with(word) {
+                self.at += word.len();
+                Ok(Kind::Scalar)
+            } else {
+                Err(Malformed)
+            }
+        }
+
+        fn digits(&mut self) -> usize {
+            let from = self.at;
+            while matches!(self.peek(), Some(b'0'..=b'9')) {
+                self.at += 1;
+            }
+            self.at - from
+        }
+
+        /// `-? (0 | [1-9][0-9]*) (. [0-9]+)? ([eE] [+-]? [0-9]+)?`
+        fn number(&mut self) -> Result<(), Malformed> {
+            if self.peek() == Some(b'-') {
+                self.at += 1;
+            }
+            match self.peek() {
+                Some(b'0') => self.at += 1,
+                Some(b'1'..=b'9') => {
+                    self.digits();
+                }
+                _ => return Err(Malformed),
+            }
+            if self.peek() == Some(b'.') {
+                self.at += 1;
+                if self.digits() == 0 {
+                    return Err(Malformed);
+                }
+            }
+            if matches!(self.peek(), Some(b'e' | b'E')) {
+                self.at += 1;
+                if matches!(self.peek(), Some(b'+' | b'-')) {
+                    self.at += 1;
+                }
+                if self.digits() == 0 {
+                    return Err(Malformed);
+                }
+            }
+            Ok(())
+        }
+
+        fn hex4(&mut self) -> Result<u32, Malformed> {
+            let digits = self.text.get(self.at..self.at + 4).ok_or(Malformed)?;
+            if !digits.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                return Err(Malformed);
+            }
+            self.at += 4;
+            u32::from_str_radix(digits, 16).map_err(|_| Malformed)
+        }
+
+        /// A string, decoded: the caller compares keys as the agent's parser would read them.
+        fn string(&mut self) -> Result<String, Malformed> {
+            self.expect(b'"')?;
+            let mut decoded = String::new();
+            loop {
+                let character = self.text[self.at..].chars().next().ok_or(Malformed)?;
+                match character {
+                    '"' => {
+                        self.at += 1;
+                        return Ok(decoded);
+                    }
+                    '\\' => {
+                        self.at += 1;
+                        let escape = self.peek().ok_or(Malformed)?;
+                        self.at += 1;
+                        let unescaped = match escape {
+                            b'"' => '"',
+                            b'\\' => '\\',
+                            b'/' => '/',
+                            b'b' => '\u{8}',
+                            b'f' => '\u{c}',
+                            b'n' => '\n',
+                            b'r' => '\r',
+                            b't' => '\t',
+                            b'u' => self.escaped_character()?,
+                            _ => return Err(Malformed),
+                        };
+                        decoded.push(unescaped);
+                    }
+                    control if u32::from(control) < 0x20 => return Err(Malformed),
+                    other => {
+                        decoded.push(other);
+                        self.at += other.len_utf8();
+                    }
+                }
+            }
+        }
+
+        /// The character a `\u` escape names, a surrogate pair read whole. A lone surrogate is
+        /// refused, as the value parser refuses it.
+        fn escaped_character(&mut self) -> Result<char, Malformed> {
+            let unit = self.hex4()?;
+            let code = match unit {
+                0xD800..=0xDBFF => {
+                    self.expect(b'\\')?;
+                    self.expect(b'u')?;
+                    let low = self.hex4()?;
+                    if !(0xDC00..=0xDFFF).contains(&low) {
+                        return Err(Malformed);
+                    }
+                    0x10000 + ((unit - 0xD800) << 10) + (low - 0xDC00)
+                }
+                0xDC00..=0xDFFF => return Err(Malformed),
+                _ => unit,
+            };
+            char::from_u32(code).ok_or(Malformed)
+        }
+    }
+
+    /// One replacement of `start..end` by `text`; an insertion where the two are equal.
+    #[derive(Debug)]
+    pub(super) struct Edit {
+        pub(super) start: usize,
+        pub(super) end: usize,
+        pub(super) text: String,
+    }
+
+    /// `text` with `edits` made and every other byte copied. `None` when two edits overlap — a
+    /// plan this module made wrongly, which writes nothing rather than something.
+    #[must_use]
+    pub(super) fn spliced(text: &str, mut edits: Vec<Edit>) -> Option<String> {
+        edits.sort_by_key(|edit| (edit.start, edit.end));
+        let mut out = String::with_capacity(text.len());
+        let mut at = 0;
+        for edit in edits {
+            if edit.start < at || edit.end < edit.start || edit.end > text.len() {
+                return None;
+            }
+            out.push_str(&text[at..edit.start]);
+            out.push_str(&edit.text);
+            at = edit.end;
+        }
+        out.push_str(&text[at..]);
+        Some(out)
+    }
+
+    /// **How the person's file is laid out**, read off the file, so that what Folio adds to it is
+    /// laid out the same way: the line ending, one level of indentation, and the spelling between a
+    /// key and its value.
+    pub(super) struct Style {
+        pub(super) newline: &'static str,
+        pub(super) unit: String,
+        pub(super) colon: String,
+    }
+
+    impl Style {
+        /// Two spaces, `\n` and `": "` where the file says nothing — a new or empty file.
+        #[must_use]
+        pub(super) fn of(document: &Document) -> Self {
+            let text = document.text;
+            let newline = match text.find('\n') {
+                Some(at) if at > 0 && text.as_bytes()[at - 1] == b'\r' => "\r\n",
+                _ => "\n",
+            };
+            let root = document.root.as_ref();
+            let first = root.and_then(Node::members).and_then(<[Member]>::first);
+            let unit = root
+                .zip(first)
+                .filter(|(root, first)| text[root.start..first.key_start].contains('\n'))
+                .map(|(_, first)| line_indent(text, first.key_start))
+                .filter(|unit| !unit.is_empty())
+                .unwrap_or("  ")
+                .to_owned();
+            let colon = first.map_or_else(
+                || ": ".to_owned(),
+                |first| text[first.key_end..first.value.start].to_owned(),
+            );
+            Self {
+                newline,
+                unit,
+                colon,
+            }
+        }
+    }
+
+    /// The spaces and tabs that begin the line `at` stands on.
+    #[must_use]
+    pub(super) fn line_indent(text: &str, at: usize) -> &str {
+        let start = text[..at].rfind('\n').map_or(0, |newline| newline + 1);
+        let line = &text[start..at];
+        &line[..line.len() - line.trim_start_matches([' ', '\t']).len()]
+    }
+
+    /// `value` as text that begins where it is put and whose later lines stand at `indent` — over
+    /// several lines when `pretty`, on one when not. Only ever used for Folio's own entries.
+    #[must_use]
+    pub(super) fn render(value: &Value, indent: &str, style: &Style, pretty: bool) -> String {
+        let mut out = String::new();
+        if pretty {
+            write_pretty(&mut out, value, indent, style);
+        } else {
+            out.push_str(&value.to_string());
+        }
+        out
+    }
+
+    fn write_pretty(out: &mut String, value: &Value, indent: &str, style: &Style) {
+        let inner = format!("{indent}{}", style.unit);
+        match value {
+            Value::Object(members) if !members.is_empty() => {
+                out.push('{');
+                for (index, (key, item)) in members.iter().enumerate() {
+                    if index > 0 {
+                        out.push(',');
+                    }
+                    out.push_str(style.newline);
+                    out.push_str(&inner);
+                    out.push_str(&Value::from(key.as_str()).to_string());
+                    out.push_str(&style.colon);
+                    write_pretty(out, item, &inner, style);
+                }
+                out.push_str(style.newline);
+                out.push_str(indent);
+                out.push('}');
+            }
+            Value::Array(items) if !items.is_empty() => {
+                out.push('[');
+                for (index, item) in items.iter().enumerate() {
+                    if index > 0 {
+                        out.push(',');
+                    }
+                    out.push_str(style.newline);
+                    out.push_str(&inner);
+                    write_pretty(out, item, &inner, style);
+                }
+                out.push_str(style.newline);
+                out.push_str(indent);
+                out.push(']');
+            }
+            scalar => out.push_str(&scalar.to_string()),
+        }
+    }
+
+    /// Where an item appended to a container goes: the indentation its lines stand at, and whether
+    /// it is laid out over several lines like the items already there.
+    pub(super) struct Layout {
+        pub(super) indent: String,
+        pub(super) pretty: bool,
+    }
+
+    /// **One object's members or one array's elements, as spans**, and the edits that take some of
+    /// them out and put new ones after them.
+    pub(super) struct Container<'a> {
+        text: &'a str,
+        open: usize,
+        close: usize,
+        items: Vec<(usize, usize)>,
+    }
+
+    impl<'a> Container<'a> {
+        /// `None` for a value that holds nothing.
+        #[must_use]
+        pub(super) fn of(text: &'a str, node: &Node) -> Option<Self> {
+            let items = match &node.kind {
+                Kind::Object(members) => members.iter().map(Member::span).collect(),
+                Kind::Array(elements) => {
+                    elements.iter().map(|node| (node.start, node.end)).collect()
+                }
+                Kind::Scalar => return None,
+            };
+            Some(Self {
+                text,
+                open: node.start,
+                close: node.end - 1,
+                items,
+            })
+        }
+
+        /// The whitespace before item `index`: after the bracket for the first, after the comma
+        /// that precedes it for every other.
+        fn gap(&self, index: usize) -> &'a str {
+            let from = match index
+                .checked_sub(1)
+                .and_then(|before| self.items.get(before))
+            {
+                None => self.open + 1,
+                Some(&(_, end)) => self.text[end..self.items[index].0]
+                    .find(',')
+                    .map_or(end, |comma| end + comma + 1),
+            };
+            &self.text[from..self.items[index].0]
+        }
+
+        /// How an appended item is laid out: as the last item there is, or — in an empty
+        /// container — one level in from the line the container opens on.
+        #[must_use]
+        pub(super) fn layout(&self, style: &Style, document_pretty: bool) -> Layout {
+            match self.items.last() {
+                Some(&(start, _)) => Layout {
+                    indent: line_indent(self.text, start).to_owned(),
+                    pretty: self.gap(self.items.len() - 1).contains('\n'),
+                },
+                None => Layout {
+                    indent: format!("{}{}", line_indent(self.text, self.open), style.unit),
+                    pretty: document_pretty,
+                },
+            }
+        }
+
+        /// **The edits that leave every item not `deleted` exactly where and as it is, followed by
+        /// `appended`.**
+        ///
+        /// A run of deleted items takes its own separators with it and nothing else: a run with a
+        /// survivor after it goes up to that survivor's first byte, so the whitespace before the run
+        /// now stands before the survivor; a run at the end goes from the last survivor's last byte,
+        /// so what stood before the closing bracket still does. Appended items go after the last
+        /// item, each behind the comma and the whitespace the last item stood behind. A container
+        /// all of whose items go, with nothing appended, is left empty — `{}` or `[]`.
+        #[must_use]
+        pub(super) fn edits(
+            &self,
+            deleted: &[bool],
+            appended: &[String],
+            style: &Style,
+            layout: &Layout,
+        ) -> Vec<Edit> {
+            let count = self.items.len();
+            let mut edits = Vec::new();
+            let joint = || -> String {
+                match count {
+                    0 if layout.pretty => format!("{}{}", style.newline, layout.indent),
+                    0 => String::new(),
+                    _ => self.gap(count - 1).to_owned(),
+                }
+            };
+            if count > 0 && deleted.iter().all(|gone| *gone) {
+                let edit = if appended.is_empty() {
+                    Edit {
+                        start: self.open + 1,
+                        end: self.close,
+                        text: String::new(),
+                    }
+                } else {
+                    Edit {
+                        start: self.items[0].0,
+                        end: self.items[count - 1].1,
+                        text: appended.join(&format!(",{}", joint())),
+                    }
+                };
+                edits.push(edit);
+                return edits;
+            }
+            let mut index = 0;
+            while index < count {
+                if !deleted[index] {
+                    index += 1;
+                    continue;
+                }
+                let mut last = index;
+                while last + 1 < count && deleted[last + 1] {
+                    last += 1;
+                }
+                let (start, end) = if last + 1 < count {
+                    (self.items[index].0, self.items[last + 1].0)
+                } else {
+                    // A run at the end has a survivor before it: the case where none survives
+                    // returned above.
+                    (self.items[index - 1].1, self.items[last].1)
+                };
+                edits.push(Edit {
+                    start,
+                    end,
+                    text: String::new(),
+                });
+                index = last + 1;
+            }
+            if appended.is_empty() {
+                return edits;
+            }
+            let mut inserted = String::new();
+            if count == 0 {
+                for (position, item) in appended.iter().enumerate() {
+                    if position > 0 {
+                        inserted.push(',');
+                    }
+                    inserted.push_str(&joint());
+                    inserted.push_str(item);
+                }
+                // `{}` gains its closing line; whatever stood between the brackets stays.
+                if layout.pretty && self.close == self.open + 1 {
+                    inserted.push_str(style.newline);
+                    inserted.push_str(line_indent(self.text, self.open));
+                }
+                edits.push(Edit {
+                    start: self.open + 1,
+                    end: self.open + 1,
+                    text: inserted,
+                });
+            } else {
+                let joint = joint();
+                for item in appended {
+                    inserted.push(',');
+                    inserted.push_str(&joint);
+                    inserted.push_str(item);
+                }
+                let at = self.items[count - 1].1;
+                edits.push(Edit {
+                    start: at,
+                    end: at,
+                    text: inserted,
+                });
+            }
+            edits
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1375,7 +2558,7 @@ mod tests {
             stop[1]["hooks"][0]["args"],
             serde_json::json!(["attention", "claude-code:Stop", "--json", "-"])
         );
-        assert!(remove_from(&mut settings, &exe(), false));
+        assert!(remove_from(&mut settings, &exe()));
         assert_eq!(
             settings, original,
             "uninstalling must hand back the file that was there, byte for byte in structure"
@@ -1392,9 +2575,9 @@ mod tests {
             "an install that was already done is not a change"
         );
         assert_eq!(settings, after_first);
-        assert!(remove_from(&mut settings, &exe(), false));
+        assert!(remove_from(&mut settings, &exe()));
         assert!(
-            !remove_from(&mut settings, &exe(), false),
+            !remove_from(&mut settings, &exe()),
             "and neither is a removal of what is not there"
         );
     }
@@ -1429,7 +2612,7 @@ mod tests {
             "a non-object is not an installation; the refusal to write is `apply`'s"
         );
         let mut array: Value = serde_json::from_str("[1,2,3]").expect("array");
-        assert!(!remove_from(&mut array, &exe(), false));
+        assert!(!remove_from(&mut array, &exe()));
     }
 
     /// The command carries the family, so a bare `Stop` is never ambiguous.
@@ -1784,5 +2967,360 @@ mod tests {
             "the copy beside it is the file as it was"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The entry this build writes for `Stop`, on one line, for a copy at `exe`.
+    fn own_stop(exe: &Path) -> String {
+        serde_json::json!({
+            "type": "command",
+            "command": exe,
+            "args": ["attention", "claude-code:Stop", "--json", "-"],
+            "async": true,
+        })
+        .to_string()
+    }
+
+    /// The same entry for a copy that is not there any more.
+    fn gone_stop(dir: &Path) -> String {
+        own_stop(&dir.join("gone").join("folio.exe"))
+    }
+
+    /// **Files somebody wrote, in the shapes people write them**, each with the pieces of it that
+    /// are not Folio's, in the order they stand (0.4.10 plan row 67a, the owner's rule of
+    /// 2026-11-04). None of them holds a Folio entry, so installing and then removing must hand
+    /// back every byte.
+    fn their_files() -> Vec<(&'static str, String, Vec<&'static str>)> {
+        let two_spaces = r#"{
+  "zeta": true,
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "say done" }
+        ]
+      }
+    ],
+    "Notification": [
+      { "matcher": "idle_prompt", "hooks": [ { "type": "command", "command": "beep" } ] }
+    ]
+  },
+  "alpha": 1
+}
+"#;
+        let fragments = vec![
+            r#""zeta": true"#,
+            r#"{ "type": "command", "command": "say done" }"#,
+            r#""matcher": "idle_prompt""#,
+            r#"{ "type": "command", "command": "beep" }"#,
+            r#""alpha": 1"#,
+        ];
+        let tabs = two_spaces.replace("  ", "\t");
+        let four_spaces_crlf = two_spaces.replace("  ", "    ").replace('\n', "\r\n");
+        vec![
+            ("two spaces, LF", two_spaces.to_owned(), fragments.clone()),
+            ("tabs", tabs, fragments.clone()),
+            ("four spaces, CRLF", four_spaces_crlf, fragments),
+            (
+                "a byte-order mark and no newline at the end",
+                "\u{feff}{\"hooks\": {\"Stop\": [{\"hooks\": [{\"type\": \"command\", \
+                 \"command\": \"say done\"}]}]}, \"model\": \"opus\"}"
+                    .to_owned(),
+                vec![
+                    r#"{"type": "command", "command": "say done"}"#,
+                    r#""model": "opus""#,
+                ],
+            ),
+            (
+                "escapes, numbers and a key named twice",
+                r#"{"name": "caf\u00e9 \/ tea", "ratio": 1.50, "big": 1e3, "dup": 1, "dup": 2, "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "\u0073ay"}]}]}}
+"#
+                .to_owned(),
+                vec![
+                    r#""name": "caf\u00e9 \/ tea""#,
+                    r#""ratio": 1.50"#,
+                    r#""big": 1e3"#,
+                    r#""dup": 1"#,
+                    r#""dup": 2"#,
+                    r#"{"type": "command", "command": "\u0073ay"}"#,
+                ],
+            ),
+            (
+                "no hooks at all",
+                "{\n  \"model\": \"opus\"\n}\n".to_owned(),
+                vec![r#""model": "opus""#],
+            ),
+            (
+                "one line",
+                r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"lint"}]}]}}"#
+                    .to_owned(),
+                vec![
+                    r#""matcher":"Bash""#,
+                    r#"{"type":"command","command":"lint"}"#,
+                ],
+            ),
+        ]
+    }
+
+    /// Whether every one of `fragments` stands in `text`, in this order.
+    fn stand_in_order(text: &str, fragments: &[&str]) -> bool {
+        let mut from = 0;
+        fragments.iter().all(|fragment| {
+            text[from..].find(fragment).is_some_and(|at| {
+                from += at + fragment.len();
+                true
+            })
+        })
+    }
+
+    /// RED (0.4.10 plan row 67a; the owner's rule of 2026-11-04) — **the switch changes only
+    /// Folio's own entries, and gives back every byte when it is turned off again.**
+    ///
+    /// Each of [`their_files`]: installing keeps every piece that is not Folio's, byte for byte and
+    /// in order, keeps the byte-order mark and the file's last byte, and the file read back says
+    /// the same thing it said with Folio's entries taken out; removing hands back the file that was
+    /// there, to the byte.
+    ///
+    /// RED GATE: `plant-67a-whole-hooks-reserialised.py` (the `hooks` object written back whole)
+    /// and `plant-67a-claims-nothing.py` turn the first refusal or the first byte comparison red.
+    #[test]
+    fn the_switch_changes_only_folios_own_entries() {
+        for (name, theirs, fragments) in their_files() {
+            let dir = scratch("own-bytes");
+            let path = dir.join(SETTINGS_FILE);
+            std::fs::write(&path, &theirs).expect("their own file");
+
+            assert_eq!(apply_to(&path, true, &exe()), Outcome::Installed, "{name}");
+            let written = std::fs::read_to_string(&path).expect("read back");
+            assert_eq!(state_at(&path), State::Installed, "{name}");
+            assert!(stand_in_order(&written, &fragments), "{name}: {written}");
+            assert_eq!(
+                written.starts_with('\u{feff}'),
+                theirs.starts_with('\u{feff}'),
+                "{name}"
+            );
+            assert_eq!(written.ends_with('\n'), theirs.ends_with('\n'), "{name}");
+            assert_eq!(
+                written.contains("\r\n"),
+                theirs.contains("\r\n"),
+                "{name}: the line endings are the file's"
+            );
+            let value =
+                |text: &str| without_folio(serde_json::from_str(splice::body(text)).expect("JSON"));
+            assert_eq!(value(&written), value(&theirs), "{name}");
+
+            assert_eq!(apply_to(&path, false, &exe()), Outcome::Removed, "{name}");
+            assert_eq!(
+                std::fs::read(&path).expect("read back"),
+                theirs.as_bytes(),
+                "{name}: turning the switch off hands back the file that was there"
+            );
+        }
+    }
+
+    /// RED (0.4.10 plan row 67a) — **an entry of a copy that is gone is replaced where it stands**,
+    /// between the person's own hooks in its group and between their groups in its event.
+    ///
+    /// RED GATE: `plant-67a-claims-nothing.py` (every own entry deleted and appended anew, today's
+    /// writer's behaviour) moves the entry to the end and this goes red.
+    #[test]
+    fn a_gone_copys_entry_is_replaced_where_it_stands() {
+        let dir = scratch("in-place");
+        let path = dir.join(SETTINGS_FILE);
+        let gone = gone_stop(&dir);
+        let new = own_stop(&exe());
+        let before = r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"say before"},"#;
+        let after = r#",{"type":"command","command":"say after"}]},{"hooks":[{"type":"command","command":"say last"}]}]"#;
+        std::fs::write(&path, format!("{before}{gone}{after}}}}}\n")).expect("their own file");
+
+        assert_eq!(apply_to(&path, true, &exe()), Outcome::Installed);
+        let written = std::fs::read_to_string(&path).expect("read back");
+        assert!(
+            written.starts_with(&format!("{before}{new}{after}")),
+            "the entry keeps its place and only it changes: {written}"
+        );
+
+        // And in a group of its own between two of theirs, over lines.
+        let theirs = format!(
+            "{{\n  \"hooks\": {{\n    \"Stop\": [\n      {{ \"hooks\": [ {{ \"type\": \"command\", \
+             \"command\": \"a\" }} ] }},\n      {{ \"hooks\": [ {gone} ] }},\n      {{ \"hooks\": [ \
+             {{ \"type\": \"command\", \"command\": \"b\" }} ] }}\n    ]\n  }}\n}}\n"
+        );
+        std::fs::write(&path, &theirs).expect("their own file");
+        assert_eq!(apply_to(&path, true, &exe()), Outcome::Installed);
+        let written = std::fs::read_to_string(&path).expect("read back");
+        let at = theirs.find(&gone).expect("the old entry");
+        assert!(
+            written.starts_with(&format!(
+                "{}{new}{}",
+                &theirs[..at],
+                &theirs[at + gone.len()..theirs.find("\n    ]").expect("the event's end")]
+            )),
+            "{written}"
+        );
+    }
+
+    /// RED (0.4.10 plan row 67a) — **turning the switch off takes out exactly Folio's entries**:
+    /// the entry between two of the person's in one group, with its comma, and a group of
+    /// Folio's alone, with its comma — and not a byte of theirs, whatever the layout.
+    ///
+    /// RED GATE: `plant-67a-run-eats-a-neighbour.py` (a deletion runs one item too far) drops a
+    /// foreign entry and the bytes differ.
+    #[test]
+    fn turning_it_off_takes_out_exactly_folios_entries() {
+        let dir = scratch("off-exact");
+        let path = dir.join(SETTINGS_FILE);
+        let own = own_stop(&exe());
+        let a = r#"{"type":"command","command":"a"}"#;
+        let b = r#"{"type":"command","command":"b"}"#;
+        let c = r#"{"type":"command","command":"c"}"#;
+        let theirs = format!(
+            r#"{{"hooks":{{"Stop":[{{"hooks":[{a},{own},{b}]}},{{"hooks":[{own}]}},{{"hooks":[{c}]}}]}},"model":"x"}}"#
+        );
+        std::fs::write(&path, &theirs).expect("their own file");
+        assert_eq!(apply_to(&path, false, &exe()), Outcome::Removed);
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read back"),
+            format!(
+                r#"{{"hooks":{{"Stop":[{{"hooks":[{a},{b}]}},{{"hooks":[{c}]}}]}},"model":"x"}}"#
+            )
+        );
+
+        let over_lines = |own: Option<&str>| {
+            let own = own.map_or(String::new(), |own| format!("\r\n          {own},"));
+            format!(
+                "{{\r\n    \"hooks\": {{\r\n        \"Stop\": [\r\n            {{\r\n                \
+                 \"hooks\": [\r\n          {a},{own}\r\n          {b}\r\n                ]\r\n            \
+                 }}\r\n        ]\r\n    }}\r\n}}"
+            )
+        };
+        std::fs::write(&path, over_lines(Some(&own))).expect("their own file");
+        assert_eq!(apply_to(&path, false, &exe()), Outcome::Removed);
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read back"),
+            over_lines(None)
+        );
+    }
+
+    /// **The one place the round trip is not the identity, said** (0.4.10 plan row 67a, §2): an
+    /// empty `"hooks": {}` the person wrote is filled by the install and, once Folio's entries go
+    /// again, goes with them — the file does not say who put an empty object there, and the rule
+    /// that takes away the `hooks` Folio created is the same rule. Every other byte comes back.
+    #[test]
+    fn an_empty_hooks_object_goes_with_folios_entries() {
+        let dir = scratch("empty-hooks");
+        let path = dir.join(SETTINGS_FILE);
+        let theirs = "{\n  \"model\": \"opus\",\n  \"hooks\": {}\n}\n";
+        std::fs::write(&path, theirs).expect("their own file");
+        assert_eq!(apply_to(&path, true, &exe()), Outcome::Installed);
+        let written = std::fs::read_to_string(&path).expect("read back");
+        assert!(
+            written.starts_with("{\n  \"model\": \"opus\",\n  \"hooks\": {\n    \""),
+            "{written}"
+        );
+        assert_eq!(apply_to(&path, false, &exe()), Outcome::Removed);
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read back"),
+            "{\n  \"model\": \"opus\"\n}\n"
+        );
+    }
+
+    /// **A file the splice cannot read, or cannot tell which key the agent reads, is never
+    /// written** — said, and byte for byte as it was, with no copy kept beside it.
+    #[test]
+    fn a_file_the_splice_cannot_be_sure_of_is_never_written() {
+        for (theirs, reason) in [
+            ("{\n  // mine\n  \"model\": \"opus\"\n}\n", UNREADABLE),
+            ("{\"model\": \"opus\",}\n", UNREADABLE),
+            ("{\"hooks\": {}, \"hooks\": {}}\n", DUPLICATE),
+            ("{\"hooks\": {\"Stop\": [], \"Stop\": []}}\n", DUPLICATE),
+            (
+                "{\"hooks\": {\"Stop\": [{\"hooks\": [], \"hooks\": []}]}}\n",
+                DUPLICATE,
+            ),
+        ] {
+            let dir = scratch("unsure");
+            let path = dir.join(SETTINGS_FILE);
+            std::fs::write(&path, theirs).expect("their own file");
+            for install in [true, false] {
+                assert_eq!(
+                    apply_to(&path, install, &exe()),
+                    Outcome::Refused(reason),
+                    "{theirs}"
+                );
+                assert_eq!(std::fs::read_to_string(&path).expect("there"), theirs);
+                assert_eq!(names(&dir), vec![SETTINGS_FILE.to_owned()], "{theirs}");
+            }
+        }
+    }
+
+    /// RED (0.4.10 plan row 67a) — **the write-time self-check refuses an edit that changed
+    /// anything that is not Folio's**: a foreign entry respelled, two of the person's groups in
+    /// the other order, a foreign entry dropped, a key outside `hooks` reformatted. An edit that
+    /// only adds an entry of Folio's passes.
+    ///
+    /// RED GATE: `plant-67a-self-check-skipped.py` makes `verified` hand every text on, and every
+    /// refusal below goes red.
+    #[test]
+    fn the_self_check_refuses_an_edit_that_changed_anything_else() {
+        let own = own_stop(&exe());
+        let theirs = r#"{"model": "opus", "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "a"}]}, {"hooks": [{"type": "command", "command": "b"}]}]}}"#;
+        let document = splice::read(theirs).expect("JSON");
+        for changed in [
+            theirs.replace(r#""command": "a""#, r#""command":"a""#),
+            theirs.replace(r#""command": "a""#, "\"command\": \"\\u0061\""),
+            r#"{"model": "opus", "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "b"}]}, {"hooks": [{"type": "command", "command": "a"}]}]}}"#.to_owned(),
+            r#"{"model": "opus", "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "b"}]}]}}"#.to_owned(),
+            theirs.replace(r#""model": "opus""#, r#""model":"opus""#),
+            format!("{theirs}\n"),
+            format!("\u{feff}{theirs}"),
+            "[]".to_owned(),
+        ] {
+            assert_eq!(
+                verified(&document, changed.clone()),
+                Err(SPLICE_REFUSED),
+                "{changed}"
+            );
+        }
+        let added = theirs.replace(
+            r#"{"type": "command", "command": "b"}]}"#,
+            &format!(r#"{{"type": "command", "command": "b"}}]}}, {{"hooks": [{own}]}}"#),
+        );
+        assert_eq!(verified(&document, added.clone()), Ok(added));
+    }
+
+    /// **The reader is strict JSON and reads what the value parser reads**, so the two views of a
+    /// file never disagree about whether it is one.
+    #[test]
+    fn the_span_reader_reads_what_serde_reads() {
+        for text in [
+            "{}",
+            " { \"a\" : [ 1 , -0.5e+3 , true , false , null , \"\\ud83d\\ude00\" ] } ",
+            "[{\"\\u00e9\": {}}]",
+            "\"\\t\\n\\\\\\/\"",
+        ] {
+            assert!(splice::read(text).is_ok(), "{text}");
+            assert!(serde_json::from_str::<Value>(text).is_ok(), "{text}");
+        }
+        for text in [
+            "{\"a\": 1,}",
+            "{a: 1}",
+            "[01]",
+            "[1.]",
+            "[.5]",
+            "\"\\ud83d\"",
+            "\"\\x\"",
+            "\"tab\there\"",
+            "{} {}",
+            "// c\n{}",
+        ] {
+            assert!(splice::read(text).is_err(), "{text}");
+            assert!(serde_json::from_str::<Value>(text).is_err(), "{text}");
+        }
+        let document = splice::read("\u{feff} {\"é\": [1]}").expect("JSON");
+        assert_eq!(document.body, 3);
+        let root = document.root.as_ref().expect("a value");
+        let member = root.member("é").expect("once").expect("there");
+        assert_eq!(&document.text[member.key_start..member.key_end], "\"é\"");
+        assert_eq!(&document.text[member.value.start..member.value.end], "[1]");
     }
 }
