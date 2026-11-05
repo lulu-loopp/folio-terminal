@@ -62056,6 +62056,23 @@ mod quit_with_no_window_tests {
             taken < gated && gated < ended && ended < replied,
             "the log is fenced before AppKit is answered: {answering}"
         );
+        // **And the end it calls is handed the real log and the real fence** (0.4.10 plan row 17,
+        // review N1): `the_systems_quit_ends_with` is tested with a recorder for both, so the one
+        // product caller is the last connection to `diagnostics::note` and `fence_the_log`.
+        // MUTATION (plant 17-a3): hand `&mut || {}` for the fence in `at_the_systems_quit`.
+        let handed = item_body(
+            &bt_source::ItemQuery::function("at_the_systems_quit").in_module("crate::session_end"),
+        );
+        let end = handed
+            .find("the_systems_quit_ends_with(")
+            .expect("the NSTerminateNow end is the tested one");
+        let sayer = handed
+            .find("&mut crate::diagnostics::note")
+            .expect("the NSTerminateNow end is handed the log and its fence");
+        let fence = handed
+            .find("&mut fence_the_log")
+            .expect("the NSTerminateNow end is handed the log and its fence");
+        assert!(end < sayer && sayer < fence, "{handed}");
     }
 }
 
