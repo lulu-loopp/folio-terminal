@@ -377,9 +377,7 @@ impl Tip {
             Self::ClaudeSettings => {
                 crate::i18n::first_run_tip_claude(&crate::attention_hooks::settings_path_shown())
             }
-            Self::CodexConfig => {
-                crate::i18n::first_run_tip_codex(&crate::attention_codex::config_path_shown())
-            }
+            Self::CodexConfig => crate::attention_codex::first_run_tip(),
             Self::CopilotHooks => {
                 crate::i18n::first_run_tip_copilot(&crate::attention_copilot::hooks_path_shown())
             }

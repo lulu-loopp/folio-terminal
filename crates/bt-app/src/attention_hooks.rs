@@ -640,33 +640,62 @@ pub(crate) fn family_scan(
     exe: &Path,
     look: &dyn Fn(&Path) -> ownership::PathStands,
 ) -> HooksFound {
+    match family_reading(family, config, exe) {
+        Ok(reading) => ownership::classify_owners(&reading.owners, exe, look, || reading.drifted),
+        Err(found) => found,
+    }
+}
+
+/// **One family's file, read for the scan, before the machine is asked about anybody**: the owners
+/// its Folio entries name, and whether this copy's entries are not today's ([`family_drifted`]).
+pub(crate) struct FamilyReading {
+    pub(crate) owners: Vec<PathBuf>,
+    pub(crate) drifted: bool,
+}
+
+/// [`family_scan`]'s reading of the file, or the answer it stops at — a file this build cannot
+/// read, a key named twice, an entry it cannot classify. A file with no hooks at all names no
+/// owner. Split out for [`attention_codex`](crate::attention_codex), whose scan adds the owner of
+/// the `notify` line beside its `hooks.json` (0.4.10 plan row 69c).
+pub(crate) fn family_reading(
+    family: &Family,
+    config: &Config,
+    exe: &Path,
+) -> Result<FamilyReading, HooksFound> {
+    let nothing = || FamilyReading {
+        owners: Vec::new(),
+        drifted: false,
+    };
     let text = match config.standing() {
-        Standing::Nothing => return HooksFound::Nothing,
-        Standing::Unreadable => return HooksFound::Unreadable,
+        Standing::Nothing => return Ok(nothing()),
+        Standing::Unreadable => return Err(HooksFound::Unreadable),
         Standing::Text(text) => text,
     };
     let Ok(document) = splice::parse(&text) else {
-        return HooksFound::Unreadable;
+        return Err(HooksFound::Unreadable);
     };
     let settings = match document.whole_value() {
         Ok(value) if value.is_object() => value,
-        _ => return HooksFound::Unreadable,
+        _ => return Err(HooksFound::Unreadable),
     };
     let hooks = match mapped(family, &document) {
         Ok(Some(hooks)) => hooks,
-        Ok(None) => return HooksFound::Nothing,
+        Ok(None) => return Ok(nothing()),
         Err(reason) if reason == crate::i18n::Text::AgentHooksDuplicateKey.text() => {
-            return HooksFound::Declined(reason);
+            return Err(HooksFound::Declined(reason));
         }
-        Err(_) => return HooksFound::Unreadable,
+        Err(_) => return Err(HooksFound::Unreadable),
     };
-    let Ok(paths) = owners(family, &settings) else {
-        return HooksFound::Unreadable;
+    let Ok(owners) = owners(family, &settings) else {
+        return Err(HooksFound::Unreadable);
     };
     if unclassified_entry(family, &hooks) {
-        return HooksFound::Unclassified;
+        return Err(HooksFound::Unclassified);
     }
-    ownership::classify_owners(&paths, exe, look, || family_drifted(family, &hooks, exe))
+    Ok(FamilyReading {
+        owners,
+        drifted: family_drifted(family, &hooks, exe),
+    })
 }
 
 /// Whether an entry names a copy of Folio in a shape the family's [`Family::owner`] cannot read —

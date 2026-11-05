@@ -31683,6 +31683,19 @@ fn adopt_program_answers(
         .program(attention_copilot::PROFILE_ID)
         .map(std::ffi::OsStr::to_owned)
         != copilot_before;
+    // **codex's version is asked of the program this walk found** (0.4.10 plan row 69c, R17), on
+    // the carry pass's worker: a codex found, moved or gone is a reason to scan again, once the
+    // agents' folders are known — the first answer below runs the pass anyway. A walk that has
+    // answered and has no `codex` row (a Mac's table has none) has found no codex.
+    let walked = attention_hooks::AGENT_HOMES.answered() || answers.facts.is_some();
+    let codex_moved = attention_codex::adopt_walk_program(
+        programs
+            .answer(attention_codex::PROFILE_ID)
+            .or_else(|| walked.then_some(None)),
+    );
+    if codex_moved && attention_hooks::AGENT_HOMES.answered() {
+        carry_pass::begin_carry_pass();
+    }
     if let Some(facts) = answers.facts {
         if wsl::adopt(facts.wsl) {
             profiles::names_changed();

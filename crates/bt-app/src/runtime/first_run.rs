@@ -207,10 +207,11 @@ impl<B: Backend> Runtime<'_, B> {
     /// nobody else can see it.
     ///
     /// The second file it may write is `config.toml` beside it, and only to take out the `notify`
-    /// line an earlier Folio wrote there — see `attention_codex`'s header.
+    /// line an earlier Folio wrote there — see `attention_codex`'s header. On a codex below 0.148
+    /// an install writes that line instead (0.4.10 plan row 69c).
     pub(crate) fn apply_codex_notify(&mut self, install: bool, announce: Announce) -> Result<bool> {
         // The take-over's consent is keyed by the file the press writes Folio's entry in.
-        let config = attention_codex::hooks_path();
+        let config = attention_codex::pressed_path(install);
         let decision = attention_ownership::next_decision(
             &mut self.app.agent_takeovers[1],
             install,
@@ -251,7 +252,9 @@ impl<B: Backend> Runtime<'_, B> {
                     toast::ToastKind::Ok,
                     toast::ToastAnchor::Window,
                     None,
-                    i18n::Text::CodexNotifyAddedToast.text().to_owned(),
+                    attention_codex::added_toast(config.as_deref())
+                        .text()
+                        .to_owned(),
                 )?;
                 Ok(true)
             }
@@ -260,20 +263,26 @@ impl<B: Backend> Runtime<'_, B> {
                     toast::ToastKind::Ok,
                     toast::ToastAnchor::Window,
                     None,
-                    i18n::Text::CodexNotifyRemovedToast.text().to_owned(),
+                    i18n::Text::CodexEntryRemovedToast.text().to_owned(),
                 )?;
                 Ok(true)
             }
             // The file already said what the press asked for.
             attention_codex::Outcome::Unchanged => Ok(true),
-            // The switch is off, and a file beside the one it was pressed on was left as it
-            // was because it could not be read: said, whoever asked.
-            attention_codex::Outcome::LeftUnread { reason, .. } => {
+            // The switch is off, and `config.toml` beside the file it was pressed on was left as
+            // it was — one Folio could not read, or will not edit: said, whoever asked, and
+            // whether a hook of Folio's was there to take out (re-review R4).
+            attention_codex::Outcome::LeftUnread { removed, reason } => {
+                let head = if removed {
+                    i18n::Text::CodexHookRemovedConfigLeft
+                } else {
+                    i18n::Text::CodexNoHookConfigLeft
+                };
                 self.toast(
                     toast::ToastKind::Info,
                     toast::ToastAnchor::Window,
                     None,
-                    i18n::agent_install_refused(i18n::Text::CodexNotifyRemovedToast.text(), reason),
+                    i18n::agent_install_refused(head.text(), reason),
                 )?;
                 Ok(true)
             }
@@ -503,7 +512,7 @@ impl<B: Backend> Runtime<'_, B> {
             claude_found: self.agent_is_on_this_machine("claude"),
             claude_installable: attention_hooks::state() == attention_hooks::State::Absent,
             codex_found: self.agent_is_on_this_machine("codex"),
-            codex_installable: attention_codex::state() == attention_codex::State::Absent,
+            codex_installable: attention_codex::first_run_installable(),
             copilot_found: copilot_on_path,
             copilot_installable: attention_copilot::state() == attention_copilot::State::Absent
                 && attention_copilot::readiness() == attention_copilot::Readiness::Ready,

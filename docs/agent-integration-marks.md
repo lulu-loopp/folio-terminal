@@ -142,7 +142,17 @@ and escapes.
   read refuses an install, and so does one it will not edit when the install has
   to take Folio's line out of it; a removal goes on without it, leaves it as it
   was and says so. Folio never writes Codex's `[hooks.state]`
-  approvals: the person approves the hook once in Codex.
+  approvals: the person approves the hook once in Codex. With hooks switched
+  off in `config.toml` (`[features] hooks = false`, or the older `codex_hooks`)
+  an install is refused, because Codex would not run the hook, and the row is
+  not On for a hook Codex will not run (row 69c).
+- **Which entry, by Codex's version** (row 69c): Codex runs asynchronous hooks
+  from 0.148, so from 0.148 Folio's entry is the hook and below it the `notify`
+  line. The version is what `codex --version` prints for the program the walk
+  found, asked on the start-time scan's worker and asked again only when that
+  file's path, size or modified time changes. A version Folio could not learn
+  (no answer within three seconds, no codex found, or any system but Windows,
+  where it is not asked) counts as current: the hook.
 - **Codex's `notify` line** (`config.toml`): Folio 0.2 to 0.4.9 installed a
   `notify` line, and it stays until Folio writes its hook (row 69 ruling R18).
   It is then removed in the same operation. `toml_edit`'s rendering ended every
@@ -151,9 +161,11 @@ and escapes.
   keeps any comment above it (row 67a ruling R12). The result is read back and
   refused the same way if any other value reads differently. The line writer's
   install (an own `notify` with other words has its value replaced, a missing one
-  gets a line after the last top-level key-value) stays for Codex builds without
-  asynchronous hooks, which plan row 69c chooses it for. A `notify` line Folio
-  did not write is the person's and is never touched.
+  gets a line after the last top-level key-value) is the install below Codex
+  0.148. There, somebody else's `notify` refuses it, and the row names their
+  program and the version. A removal goes through `hooks.json` on every version
+  and takes out both of Folio's entries. A `notify` line Folio did not write is
+  the person's and is never touched.
 - **Copilot**: `hooks/folio.json` is Folio's whole file. One entry that is not
   Folio's refuses the write, so no byte of anyone else's is touched.
 
@@ -243,7 +255,10 @@ scan makes the repair's write refuse rather than undo it. Each repair
 writes a `BT_AGENT_HOOKS` diagnostics line; a dead owner's also raises one
 notice per family. Copilot is repaired within its version gate: only after the
 version question has been answered (the step asks it, and the answer runs the
-pass again), and never for a copilot too old for the hooks.
+pass again), and never for a copilot too old for the hooks. Codex is repaired
+only once its version has been asked, since the version decides which file the
+repair writes (row 69c). On a Codex that runs hooks, a gone copy's `notify` line
+is repaired into the hook, and this copy's working line alone is left as it is.
 
 ## Take-over and the settings row
 

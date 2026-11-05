@@ -107,12 +107,31 @@ const MINIMUM: Version = Version {
     patch: 26,
 };
 
-/// A `major.minor.patch`, and nothing about what it is a version of.
+/// A `major.minor.patch`, and nothing about what it is a version of — copilot's here, and codex's
+/// in [`attention_codex`](crate::attention_codex) (0.4.10 plan row 69c).
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) struct Version {
     major: u32,
     minor: u32,
     patch: u32,
+}
+
+impl Version {
+    /// A version named in the code — a floor a row is gated on.
+    pub(crate) const fn new(major: u32, minor: u32, patch: u32) -> Self {
+        Self {
+            major,
+            minor,
+            patch,
+        }
+    }
+}
+
+/// `major.minor.patch`, as the program printed it: what a row's sentence names.
+impl std::fmt::Display for Version {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}.{}.{}", self.major, self.minor, self.patch)
+    }
 }
 
 /// Read only by the Windows probe ([`run_probe`]) and by this file's tests: off Windows the probe
@@ -137,7 +156,7 @@ impl Version {
     /// each part parse whole, would have read one real machine as a four-part version and the other
     /// as nothing.
     #[must_use]
-    fn parse(text: &str) -> Option<Self> {
+    pub(crate) fn parse(text: &str) -> Option<Self> {
         text.split_whitespace().find_map(|word| {
             let trimmed = word
                 .trim_matches(|character: char| !character.is_ascii_digit() && character != '.');
@@ -1179,16 +1198,7 @@ pub(crate) fn probe_settled() -> bool {
 /// that cannot be read is said, and the inherited environment is used, the pane birth's rule.
 #[cfg(windows)]
 fn run_probe(ctx: &bt_platform::admission::WorkerCtx) -> Option<Version> {
-    let environment = match bt_platform::environment::fresh_logon_environment(ctx) {
-        Ok(block) => block,
-        Err(error) => {
-            crate::diagnostics::note(&format!(
-                "copilot probe: the current environment could not be read ({error}); copilot is \
-                 looked for in the inherited one"
-            ));
-            None
-        }
-    };
+    let environment = logon_environment(ctx, "copilot");
     let variable = |name: &str| match &environment {
         Some(block) => block
             .iter()
@@ -1213,10 +1223,75 @@ fn run_probe(ctx: &bt_platform::admission::WorkerCtx) -> Option<Version> {
         &pathext,
         &|candidate: &Path| candidate.is_file(),
     )?;
+    version_through_cmd(
+        ctx,
+        &copilot,
+        environment.as_ref(),
+        PROBE_DEADLINE,
+        "copilot",
+    )
+}
+
+/// **The current logon block, or `None` when it cannot be read** — said once, as `who`'s probe,
+/// and the inherited environment used: the pane birth's rule.
+#[cfg(windows)]
+fn logon_environment(
+    ctx: &bt_platform::admission::WorkerCtx,
+    who: &str,
+) -> Option<bt_platform::environment::Environment> {
+    match bt_platform::environment::fresh_logon_environment(ctx) {
+        Ok(block) => block,
+        Err(error) => {
+            crate::diagnostics::note(&format!(
+                "{who} probe: the current environment could not be read ({error}); {who} is \
+                 looked for in the inherited one"
+            ));
+            None
+        }
+    }
+}
+
+/// **`<program> --version`, asked of a program another reader has already found** (0.4.10 plan
+/// row 69c, R17: codex's, found by the program walk) — [`run_probe`]'s question, in the same
+/// environment and through the same `cmd.exe`, held to `deadline`. `None` when it would not say.
+#[cfg(windows)]
+pub(crate) fn program_version(
+    ctx: &bt_platform::admission::WorkerCtx,
+    program: &Path,
+    deadline: std::time::Duration,
+    who: &str,
+) -> Option<Version> {
+    let environment = logon_environment(ctx, who);
+    version_through_cmd(ctx, program, environment.as_ref(), deadline, who)
+}
+
+/// Off Windows no program is asked (the module header's probe answers `None` there too), so the
+/// version is unknown.
+#[cfg(not(windows))]
+pub(crate) fn program_version(
+    ctx: &bt_platform::admission::WorkerCtx,
+    program: &Path,
+    deadline: std::time::Duration,
+    who: &str,
+) -> Option<Version> {
+    let _ = (ctx, program, deadline, who);
+    None
+}
+
+/// **`program --version` through `cmd.exe`**, in `environment` when there is one, held to
+/// `deadline`; the first three-part number it prints ([`Version::parse`]).
+#[cfg(windows)]
+fn version_through_cmd(
+    ctx: &bt_platform::admission::WorkerCtx,
+    program: &Path,
+    environment: Option<&bt_platform::environment::Environment>,
+    deadline: std::time::Duration,
+    who: &str,
+) -> Option<Version> {
     // Through the quiet door (§7.40 ①): without `CREATE_NO_WINDOW` a console
     // window opens on screen the first time somebody opens the settings dialog.
     let mut command = bt_platform::quiet_command_named(Path::new("cmd.exe"))?;
-    if let Some(block) = &environment {
+    if let Some(block) = environment {
         for (name, _) in std::env::vars_os() {
             if !block.iter().any(|(held, _)| {
                 held.to_string_lossy()
@@ -1233,8 +1308,8 @@ fn run_probe(ctx: &bt_platform::admission::WorkerCtx) -> Option<Version> {
     let ending = bt_platform::probe_output_with_raw_tail(
         ctx,
         &command,
-        std::ffi::OsStr::new(&probe_command_tail(&copilot)),
-        PROBE_DEADLINE,
+        std::ffi::OsStr::new(&probe_command_tail(program)),
+        deadline,
     )
     .ok()?;
     let output = match ending {
@@ -1243,10 +1318,10 @@ fn run_probe(ctx: &bt_platform::admission::WorkerCtx) -> Option<Version> {
         // trigger asks again.
         bt_platform::ProbeEnding::Overran => {
             crate::diagnostics::note(&format!(
-                "copilot probe: `{} --version` did not answer within {} s and was stopped; the \
+                "{who} probe: `{} --version` did not answer within {} s and was stopped; the \
                  version is unknown until the next probe",
-                copilot.display(),
-                PROBE_DEADLINE.as_secs()
+                program.display(),
+                deadline.as_secs()
             ));
             return None;
         }
@@ -1267,8 +1342,8 @@ const PROBE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
 /// spawn so the shape can be pinned without a machine that has copilot on it.
 #[cfg(windows)]
 #[must_use]
-fn probe_command_tail(copilot: &Path) -> String {
-    format!("/c \"\"{}\" --version\"", copilot.display())
+fn probe_command_tail(program: &Path) -> String {
+    format!("/c \"\"{}\" --version\"", program.display())
 }
 
 #[cfg(not(windows))]

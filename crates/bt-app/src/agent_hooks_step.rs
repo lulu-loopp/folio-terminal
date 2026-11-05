@@ -25,6 +25,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock, PoisonError};
 
+use bt_platform::admission::WorkerCtx;
+
 use crate::attention_copilot::Readiness;
 use crate::attention_hooks::{Config, Unresolved};
 use crate::attention_ownership::{self as ownership, Decision, HooksFound, Outcome, PathStands};
@@ -50,10 +52,14 @@ pub(crate) struct HooksFamily {
     /// The switch's own writer.
     pub(crate) apply: fn(&Config, Decision, &Path, &Path) -> Outcome,
     /// Whether a repair may write the family's hooks now: always, except where the agent's own
-    /// version decides whether they mean what Folio reads them as (Copilot, R9).
+    /// version decides whether they mean what Folio reads them as (Copilot, R9), or which entry is
+    /// Folio's (Codex, 0.4.10 plan row 69c).
     pub(crate) within_its_gate: fn() -> bool,
-    /// The notice a repair of a gone copy's hooks raises (R8).
-    pub(crate) repaired: Text,
+    /// The family's own question about its agent, asked on the pass's worker before its file is
+    /// named: codex's version, which decides the file (row 69c, R17); nothing for the others.
+    pub(crate) settle: fn(&WorkerCtx),
+    /// The notice a repair of a gone copy's hooks raises (R8), by the file the repair wrote.
+    pub(crate) repaired: fn(&Path) -> Text,
 }
 
 /// **The families, in the Agents page's row order** — the order of every per-agent array on the
@@ -66,16 +72,20 @@ pub(crate) static HOOKS_FAMILIES: [HooksFamily; 3] = [
         scan: crate::attention_hooks::scan_resolved,
         apply: crate::attention_hooks::apply_resolved,
         within_its_gate: no_gate,
-        repaired: Text::AgentHooksRepairedClaude,
+        settle: no_question,
+        repaired: claude_repaired,
     },
+    // Its file by its version (row 69c): `hooks.json` from 0.148, `config.toml`'s `notify` line
+    // below; repaired only once the version has been asked and answered.
     HooksFamily {
         family: crate::attention_map::CODEX,
         tag: "codex",
-        path: crate::attention_codex::hooks_path,
+        path: crate::attention_codex::entry_path,
         scan: crate::attention_codex::scan_resolved,
         apply: crate::attention_codex::apply_resolved,
-        within_its_gate: no_gate,
-        repaired: Text::AgentHooksRepairedCodex,
+        within_its_gate: crate::attention_codex::repair_within_the_gate,
+        settle: settle_codex_version,
+        repaired: crate::attention_codex::repaired_notice,
     },
     // Repaired within its version gate (R9): only once the version question has been asked and
     // answered, and never for a copilot too old for the hooks (`repair_within_the_gate`). Never on
@@ -87,13 +97,31 @@ pub(crate) static HOOKS_FAMILIES: [HooksFamily; 3] = [
         scan: crate::attention_copilot::scan_resolved,
         apply: crate::attention_copilot::apply_resolved,
         within_its_gate: crate::attention_copilot::repair_within_the_gate,
-        repaired: Text::AgentHooksRepairedCopilot,
+        settle: no_question,
+        repaired: copilot_repaired,
     },
 ];
 
 /// A family whose hooks mean the same to every version of its agent.
 fn no_gate() -> bool {
     true
+}
+
+/// The notices of the two families with one file each.
+fn claude_repaired(_: &Path) -> Text {
+    Text::AgentHooksRepairedClaude
+}
+
+fn copilot_repaired(_: &Path) -> Text {
+    Text::AgentHooksRepairedCopilot
+}
+
+/// A family with nothing to ask before its file is named.
+fn no_question(_: &WorkerCtx) {}
+
+/// codex's version, settled on the pass's worker (`attention_codex::settle_version`).
+fn settle_codex_version(ctx: &WorkerCtx) {
+    let _ = crate::attention_codex::settle_version(ctx);
 }
 
 /// **One family's answer from one run of the step.**
@@ -103,6 +131,8 @@ pub(crate) struct HooksScan {
     pub(crate) found: HooksFound,
     /// What a repair this run wrote the hooks from.
     pub(crate) repaired_from: Option<HooksFound>,
+    /// The notice that repair owes, when it pointed a gone copy's hooks here (R8).
+    pub(crate) notice: Option<Text>,
 }
 
 impl HooksScan {
@@ -110,6 +140,7 @@ impl HooksScan {
         Self {
             found,
             repaired_from: None,
+            notice: None,
         }
     }
 }
@@ -224,9 +255,12 @@ impl AgentHooksStep {
                         found.diagnostic_word(),
                         gone_programs(&found)
                     ));
+                    let notice = matches!(found, HooksFound::Dead(_))
+                        .then(|| (family.repaired)(config.named()));
                     HooksScan {
                         found: now,
                         repaired_from: Some(found),
+                        notice,
                     }
                 }
                 outcome => {
@@ -248,13 +282,7 @@ impl AgentHooksStep {
             .take()
             .map(|untaken| untaken.notices)
             .unwrap_or_default();
-        notices.extend(
-            scans
-                .iter()
-                .zip(&HOOKS_FAMILIES)
-                .filter(|(scan, _)| matches!(scan.repaired_from, Some(HooksFound::Dead(_))))
-                .map(|(_, family)| family.repaired),
-        );
+        notices.extend(scans.iter().filter_map(|scan| scan.notice));
         *published = Some(HooksSnapshot {
             found: std::array::from_fn(|index| scans[index].found.clone()),
             copilot_readiness,
@@ -303,9 +331,12 @@ pub(crate) fn install_hooks_wake(wake: impl Fn() + Send + Sync + 'static) {
 /// folders are the account's current ones, never the launch's): the walk's first answer runs the
 /// pass, so a run asked earlier — an Agents page opened in the first second — has nothing to read
 /// yet and waits for it.
-pub(crate) fn run_agent_hooks_step() {
+pub(crate) fn run_agent_hooks_step(ctx: &WorkerCtx) {
     if !crate::attention_hooks::AGENT_HOMES.answered() {
         return;
+    }
+    for family in &HOOKS_FAMILIES {
+        (family.settle)(ctx);
     }
     let Some(exe) = ownership::this_copy() else {
         crate::diagnostics::stderr_line(
@@ -548,6 +579,58 @@ mod tests {
         assert!(
             step.take_snapshot().unwrap().notices.is_empty(),
             "a notice was said twice"
+        );
+    }
+
+    /// Row 69c — **on a codex that runs hooks the repair is the hook's**: a gone copy's hook in
+    /// `hooks.json` and the `notify` line it left in `config.toml` are repaired in one write — the
+    /// hook names this copy, the line is out — and the notice says codex asks to trust the new path.
+    ///
+    /// MUTATION: `plant-69c-hook-notice-is-the-lines.py` gives the hook's repair the line's notice.
+    #[test]
+    fn a_gone_copys_codex_hook_and_line_are_repaired_into_the_hook() {
+        let root = root("hooks-step-codex-hook");
+        let gone = copy_at(&root, "A gone");
+        let here = copy_at(&root, "B here");
+        let mut files = files_in(&root.join("config"));
+        let config_toml = files[1].clone();
+        files[1] = config_toml.with_file_name("hooks.json");
+        let gone_data = root.join("gone data");
+        install_all(&files, &gone, &gone_data);
+        assert_eq!(
+            crate::attention_codex::apply_at(&config_toml, Decision::Install, &gone, &gone_data),
+            Outcome::Installed
+        );
+        fs::remove_file(&gone).unwrap();
+        let step = AgentHooksStep::new();
+        let scans = step.scan_and_repair(
+            &some(&files),
+            &here,
+            &root.join("data"),
+            &what_stands,
+            never_held,
+            &every_family,
+        );
+        assert_eq!(
+            scans[1].repaired_from,
+            Some(HooksFound::Dead(vec![gone.clone()]))
+        );
+        assert_eq!(scans[1].found, HooksFound::Current);
+        let hook = fs::read_to_string(&files[1]).unwrap();
+        assert!(
+            hook.contains("B here") && !hook.contains("A gone"),
+            "{hook}"
+        );
+        let line = fs::read_to_string(&config_toml).unwrap();
+        assert!(!line.contains("notify"), "the line is out: {line}");
+        step.publish_scans(&scans, Readiness::Unknown);
+        assert_eq!(
+            step.take_snapshot().unwrap().notices,
+            [
+                Text::AgentHooksRepairedClaude,
+                Text::AgentHooksRepairedCodexHook,
+                Text::AgentHooksRepairedCopilot
+            ]
         );
     }
 

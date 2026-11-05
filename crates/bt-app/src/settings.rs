@@ -4183,7 +4183,7 @@ impl SettingsRow {
             Self::PowerShellProfileLine => Text::RowPowerShellProfileLine.text(),
             Self::LegacyPsReadLine => Text::RowLegacyPsReadLine.text(),
             Self::ClaudeHooks => Text::RowClaudeHooks.text(),
-            Self::CodexNotify => Text::RowCodexNotify.text(),
+            Self::CodexNotify => Text::RowCodexHooks.text(),
             Self::CopilotHooks => Text::RowCopilotHooks.text(),
             Self::GitPanel => Text::RowGitPanel.text(),
             Self::KeyHints => Text::RowKeyHints.text(),
@@ -4383,10 +4383,13 @@ impl SettingsRow {
             // Two facts and no third, the row above's shape: what is written and
             // where, then which of the two things an agent can say this one
             // carries — because a reader who installs it expecting a dot on a
-            // waiting pane has been told something that is not true.
+            // waiting pane has been told something that is not true. **Which
+            // file, by codex's version** (0.4.10 plan row 69c): the hook in
+            // `hooks.json`, or — on a codex below 0.148, which the sentence names —
+            // the `notify` line in `config.toml` (`attention_codex::row_description`).
             Self::CodexNotify => values.agent_config_refusals[1]
                 .or(values.agent_row_lines[1])
-                .unwrap_or(Text::DescCodexNotify.text()),
+                .unwrap_or_else(crate::attention_codex::row_description),
             // **Not a constant, and it is the row above's two facts plus a third
             // that is only sometimes true**: a copilot older than `1.0.26`
             // reported a permission prompt for tool calls nobody was ever asked
@@ -27789,7 +27792,7 @@ mod tests {
         let refused = crate::i18n::Text::AgentConfigLink.text();
         for (index, row, plain) in [
             (0, SettingsRow::ClaudeHooks, Text::DescClaudeHooks.text()),
-            (1, SettingsRow::CodexNotify, Text::DescCodexNotify.text()),
+            (1, SettingsRow::CodexNotify, Text::DescCodexHooks.text()),
             (
                 2,
                 SettingsRow::CopilotHooks,

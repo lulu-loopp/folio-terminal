@@ -58,9 +58,29 @@
 //! Folio 0.2–0.4.9 installed that line, and a machine still carrying it keeps it until Folio has to
 //! write its entry anyway (R18): the switch pressed off or on, or a repair. Then the line goes in the
 //! same operation as the hook is written, by the same byte-keeping rule — so one turn is never
-//! marked twice. A `notify` Folio did not write is the person's and is never touched. The line
-//! writer stays here for the codex builds that have no asynchronous hooks, which plan row 69c
-//! chooses it for.
+//! marked twice. A `notify` Folio did not write is the person's and is never touched.
+//!
+//! # Which of the two, by codex's version (0.4.10 plan row 69c)
+//!
+//! codex runs an asynchronous command hook from 0.148.0; before it, `discovery.rs` skips one
+//! ("async hooks are not supported yet", at `rust-v0.147.0`), so a hook written there would never
+//! run. So the version decides the entry (R12): **the hook on codex 0.148 and later, the `notify`
+//! line below it** — and on a version nobody could learn, the hook (R17). The version is asked of
+//! the program the program walk found for the `codex` row, as `codex --version`, on the start-time
+//! scan's worker and never on the window thread, and the answer is kept against that program's
+//! path, size and modified time, so it is asked again only when codex changed ([`settle_version`]).
+//!
+//! The answer picks the **file** an install is pressed on ([`entry_path`]): `hooks.json` for the
+//! hook, `config.toml` for the line. Everything after that follows the file it was handed — the
+//! scan ([`scan_resolved`]) and the writer ([`apply_resolved`]) — so one operation never reads one
+//! road and writes the other. A removal is the same on every version: it takes Folio's hook out of
+//! `hooks.json` and an earlier Folio's line out of `config.toml` together, because a codex that
+//! is upgraded later would run whatever was left.
+//!
+//! A hook codex will not run is never reported as on (review N6): not below 0.148, not in a
+//! `hooks.json` codex would ignore ([`read_by_codex`]), and not where `config.toml` switches hooks
+//! off ([`hooks_switched_off`]). In each of those the install writes nothing and says why, and so
+//! nothing takes out a working `notify` line in their place either.
 //!
 //! # Where the files are, and why it is asked for rather than composed
 //!
@@ -72,13 +92,16 @@
 
 pub(crate) use crate::attention_ownership::Outcome;
 use crate::attention_ownership::{self as ownership, Decision, HooksFound};
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
+use std::time::{Duration, SystemTime};
 
 use bt_platform::HostPlatform;
 use serde_json::{Map, Value as Json};
 use toml_edit::{Array, DocumentMut, ImDocument, Item, Table, Value};
 
+use crate::attention_copilot::Version;
 use crate::attention_hooks::{self as hooks, Config, Family, Standing, Wanted};
 
 use crate::attention_map::{self, CODEX};
@@ -148,6 +171,191 @@ const TOML_HOOK_EVENTS: [&str; 14] = [
     "Interrupt",
 ];
 
+/// The built-in profile row whose program is codex (`profiles::windows_shipped`): the program the
+/// version is asked of (R17), and the program walk moving it is a reason to ask again.
+pub(crate) const PROFILE_ID: &str = "codex";
+
+/// **The oldest codex that runs an asynchronous command hook** (R12): `discovery.rs` at
+/// `rust-v0.147.0` skips one, and `rust-v0.148.0` runs it. Below it, Folio's entry is the `notify`
+/// line.
+const HOOKS_FLOOR: Version = Version::new(0, 148, 0);
+
+/// **How long `codex --version` may take** before it is stopped and the version is unknown (row
+/// 69's report §1b.6).
+const VERSION_DEADLINE: Duration = Duration::from_secs(3);
+
+/// The key of `config.toml`'s feature switches, and the two names codex reads its hooks switch by:
+/// `hooks`, and the `codex_hooks` it was called before (`features/src/lib.rs` at `rust-v0.166.0`,
+/// `Feature::CodexHooks`).
+const FEATURES_KEY: &str = "features";
+const HOOKS_FEATURE: &str = "hooks";
+const HOOKS_FEATURE_FORMERLY: &str = "codex_hooks";
+
+/// **What is known about this machine's codex version.**
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CodexVersion {
+    /// Nothing has been asked yet: the program walk has not said where codex is, or the program
+    /// it named has not been asked.
+    Unasked,
+    /// No codex where the walk looked, or one that would not say — it failed to start, ran past
+    /// [`VERSION_DEADLINE`], or printed no version.
+    Unknown,
+    /// What `codex --version` printed.
+    Known(Version),
+}
+
+impl CodexVersion {
+    /// **Whether Folio's entry is the hook** (R12): on every answer but a version proved older than
+    /// [`HOOKS_FLOOR`] — one nobody could learn is the current one (R17).
+    #[must_use]
+    pub(crate) fn runs_hooks(self) -> bool {
+        !matches!(self, Self::Known(version) if version < HOOKS_FLOOR)
+    }
+}
+
+/// The program a version was asked of, as it stood when it was asked — the cache's key (R17).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ProgramStamp {
+    path: PathBuf,
+    size: u64,
+    modified: Option<SystemTime>,
+}
+
+/// **The version question's book**: the walk's answer about the `codex` row, and the last program
+/// asked with what it said.
+pub(crate) struct VersionBook {
+    /// `None` until the walk has answered about the row; then its program, `None` for none.
+    walk: Option<Option<PathBuf>>,
+    /// The program asked last, stamped as it stood, and its answer.
+    asked: Option<(ProgramStamp, Option<Version>)>,
+}
+
+impl VersionBook {
+    pub(crate) const fn new() -> Self {
+        Self {
+            walk: None,
+            asked: None,
+        }
+    }
+
+    /// The version as this book has it: the answer held for the walk's program, if that is the
+    /// program it was asked of.
+    fn version(&self) -> CodexVersion {
+        match &self.walk {
+            None => CodexVersion::Unasked,
+            Some(None) => CodexVersion::Unknown,
+            Some(Some(program)) => match &self.asked {
+                Some((stamp, answer)) if &stamp.path == program => {
+                    answer.map_or(CodexVersion::Unknown, CodexVersion::Known)
+                }
+                _ => CodexVersion::Unasked,
+            },
+        }
+    }
+}
+
+/// This process's book.
+static VERSION_BOOK: Mutex<VersionBook> = Mutex::new(VersionBook::new());
+
+fn book(book: &Mutex<VersionBook>) -> std::sync::MutexGuard<'_, VersionBook> {
+    book.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// **The program walk's answer about the `codex` row, adopted** (`ProfilePrograms::answer`'s
+/// shape: `None` while the row has no answer). `true` when it differs from the one held — the
+/// version may be another now, and the start-time scan runs again for it.
+pub(crate) fn adopt_walk_program(answer: Option<Option<&OsStr>>) -> bool {
+    adopt_walk_program_in(&VERSION_BOOK, answer)
+}
+
+/// The same, into a named book.
+pub(crate) fn adopt_walk_program_in(
+    held: &Mutex<VersionBook>,
+    answer: Option<Option<&OsStr>>,
+) -> bool {
+    let walk = answer.map(|program| program.map(PathBuf::from));
+    let mut held = book(held);
+    if held.walk == walk {
+        return false;
+    }
+    held.walk = walk;
+    true
+}
+
+/// **The version, as the newest scan settled it** — what a press, a row and the first-run card
+/// read. Never runs a program: the window thread does not wait on codex.
+#[must_use]
+pub(crate) fn version() -> CodexVersion {
+    book(&VERSION_BOOK).version()
+}
+
+/// **Settle the version, on the start-time scan's worker** (R17): `codex --version` asked of the
+/// walk's program unless the answer held is of the same file — the same path, size and modified
+/// time. Each answer it asks for is one diagnostics line, `BT_AGENT_HOOKS codex version=<it>`, and
+/// `unknown` when there was none to read.
+pub(crate) fn settle_version(ctx: &bt_platform::admission::WorkerCtx) -> CodexVersion {
+    settle_version_in(
+        &VERSION_BOOK,
+        &stamp_of,
+        &|program| {
+            crate::attention_copilot::program_version(ctx, program, VERSION_DEADLINE, "codex")
+        },
+        &crate::diagnostics::stderr_line,
+    )
+}
+
+/// [`settle_version`] with the book, the machine and the voice handed in — the seam the tests
+/// press. The question is asked with the book let go: it may take [`VERSION_DEADLINE`], and a
+/// press reading [`version`] meanwhile is answered from what was held.
+pub(crate) fn settle_version_in(
+    held: &Mutex<VersionBook>,
+    stamp: &dyn Fn(&Path) -> Option<ProgramStamp>,
+    ask: &dyn Fn(&Path) -> Option<Version>,
+    say: &dyn Fn(String),
+) -> CodexVersion {
+    let program = match &book(held).walk {
+        None => return CodexVersion::Unasked,
+        Some(None) => return CodexVersion::Unknown,
+        Some(Some(program)) => program.clone(),
+    };
+    // A program that cannot be looked at cannot be asked either: unknown, and nothing kept.
+    let Some(stamp) = stamp(&program) else {
+        book(held).asked = None;
+        return CodexVersion::Unknown;
+    };
+    if let Some((asked, answer)) = &book(held).asked
+        && asked == &stamp
+    {
+        return answer.map_or(CodexVersion::Unknown, CodexVersion::Known);
+    }
+    let answer = ask(&program);
+    say(format!(
+        "BT_AGENT_HOOKS codex version={}",
+        answer.map_or_else(|| "unknown".to_owned(), |version| version.to_string())
+    ));
+    let mut held = book(held);
+    held.asked = Some((stamp, answer));
+    held.version()
+}
+
+/// The program as it stands on disk, or `None` when it cannot be looked at.
+fn stamp_of(program: &Path) -> Option<ProgramStamp> {
+    let metadata = std::fs::metadata(program).ok()?;
+    Some(ProgramStamp {
+        path: program.to_path_buf(),
+        size: metadata.len(),
+        modified: metadata.modified().ok(),
+    })
+}
+
+/// **Whether the start-time repair may write codex's entry now** (0.4.10 plan row 69c; row 67b's
+/// R9 for Copilot, over this family): only once the version has been asked and answered — a
+/// repair on a version nobody asked yet could write a hook a codex below 0.148 skips, in place of
+/// the `notify` line that works there.
+pub(crate) fn repair_within_the_gate() -> bool {
+    version() != CodexVersion::Unasked
+}
+
 /// **codex's `hooks.json`, as [`attention_hooks`](crate::attention_hooks) reads and writes it.**
 pub(crate) const HOOKS: Family = Family {
     owner: codex_hook_owner,
@@ -209,26 +417,123 @@ pub(crate) fn hooks_path() -> Option<PathBuf> {
     Some(config_dir()?.join(HOOKS_FILE))
 }
 
-/// The same file, spelled for a reader who is being asked to consent to it —
-/// [`crate::attention_hooks::settings_path_shown`]'s rule over `CODEX_HOME`.
+/// The user-level configuration file: where the `notify` line is, on a codex below 0.148.
 #[must_use]
-pub(crate) fn config_path_shown() -> String {
-    config_path_shown_from(
+pub(crate) fn config_path() -> Option<PathBuf> {
+    Some(config_dir()?.join(CONFIG_FILE))
+}
+
+/// **The file Folio's entry goes in on this machine's codex**: `hooks.json`, or `config.toml` on a
+/// version proved below 0.148 (R12, R17) — the file an install is pressed on, and the one the
+/// start-time scan reads.
+#[must_use]
+pub(crate) fn entry_path() -> Option<PathBuf> {
+    if version().runs_hooks() {
+        hooks_path()
+    } else {
+        config_path()
+    }
+}
+
+/// **The file Folio's entry goes in, spelled for a reader who is being asked to consent to it** —
+/// [`crate::attention_hooks::settings_path_shown`]'s rule over `CODEX_HOME`, for the file
+/// [`entry_path`] names.
+#[must_use]
+pub(crate) fn entry_path_shown() -> String {
+    let file = if version().runs_hooks() {
+        HOOKS_FILE
+    } else {
+        CONFIG_FILE
+    };
+    path_shown_from(
+        file,
         crate::attention_hooks::agent_variable(HOME_VARIABLE),
         crate::attention_hooks::agent_variable(bt_platform::home_variable()),
     )
 }
 
-/// The same decision, with the environment handed in.
+/// The same decision, with the file and the environment handed in.
 #[must_use]
-fn config_path_shown_from(named: Option<OsString>, home: Option<OsString>) -> String {
-    let default = || format!("~/{DEFAULT_DIRECTORY}/{CONFIG_FILE}");
+fn path_shown_from(file: &str, named: Option<OsString>, home: Option<OsString>) -> String {
+    let default = || format!("~/{DEFAULT_DIRECTORY}/{file}");
     if named.as_ref().is_none_or(|named| named.is_empty()) {
         return default();
     }
     config_dir_from(named, home)
-        .map(|dir| dir.join(CONFIG_FILE).display().to_string())
+        .map(|dir| dir.join(file).display().to_string())
         .unwrap_or_else(default)
+}
+
+/// **The first-run card's tooltip for the Codex row**: the file this machine will write, and what.
+#[must_use]
+pub(crate) fn first_run_tip() -> String {
+    if version().runs_hooks() {
+        crate::i18n::first_run_tip_codex(&entry_path_shown())
+    } else {
+        crate::i18n::first_run_tip_codex_notify(&entry_path_shown())
+    }
+}
+
+/// **The Agents row's sentence**: the hook's, or — on a codex proved below 0.148 — the one that
+/// names that version and the `notify` line written in its place.
+#[must_use]
+pub(crate) fn row_description() -> &'static str {
+    match version() {
+        CodexVersion::Known(version) if version < HOOKS_FLOOR => {
+            crate::i18n::codex_row_old_version(&version.to_string())
+        }
+        _ => crate::i18n::Text::DescCodexHooks.text(),
+    }
+}
+
+/// **The notice a repair of a gone copy's entry raises**, by the file it wrote: the hook's says
+/// codex asks once to trust the new path; the line's needs no approval.
+#[must_use]
+pub(crate) fn repaired_notice(file: &Path) -> crate::i18n::Text {
+    if file.file_name() == Some(OsStr::new(CONFIG_FILE)) {
+        crate::i18n::Text::AgentHooksRepairedCodex
+    } else {
+        crate::i18n::Text::AgentHooksRepairedCodexHook
+    }
+}
+
+/// **The file a press writes Folio's entry in** — and the key its take-over's consent is kept by:
+/// an install's [`entry_path`], and `hooks.json` for a removal, which takes out both entries.
+#[must_use]
+pub(crate) fn pressed_path(install: bool) -> Option<PathBuf> {
+    if install { entry_path() } else { hooks_path() }
+}
+
+/// **What an install that wrote says**, by the file it wrote: the hook's toast tells the reader
+/// codex asks once to trust it (R13); the line's needs no approval.
+#[must_use]
+pub(crate) fn added_toast(file: Option<&Path>) -> crate::i18n::Text {
+    if file.is_some_and(|file| file.file_name() == Some(OsStr::new(CONFIG_FILE))) {
+        crate::i18n::Text::CodexNotifyAddedToast
+    } else {
+        crate::i18n::Text::CodexHookAddedToast
+    }
+}
+
+/// **Whether the first-run card may offer the Codex row** (row 69's report §1.7, R19): nothing of
+/// Folio's is there yet, and `config.toml` would not refuse the install — below 0.148, codex's one
+/// `notify` key is free; on the hook road, hooks are not switched off there and it declares no
+/// hook events of its own (R15, N6). Nobody's program is in the hook's way.
+#[must_use]
+pub(crate) fn first_run_installable() -> bool {
+    if state() != State::Absent {
+        return false;
+    }
+    let hooks_run = version().runs_hooks();
+    config_path().is_some_and(|path| {
+        toml_beside(&path).is_ok_and(|toml| {
+            if hooks_run {
+                !hooks_switched_off(&toml.document) && !declares_toml_hooks(&toml.document)
+            } else {
+                !declares_somebody_else(&toml.document)
+            }
+        })
+    })
 }
 
 /// What the two files say today.
@@ -237,7 +542,11 @@ pub(crate) fn state() -> State {
     let Some(dir) = config_dir() else {
         return State::Absent;
     };
-    codex_state_in(&dir, ownership::this_copy().as_deref())
+    codex_state_in(
+        &dir,
+        ownership::this_copy().as_deref(),
+        version().runs_hooks(),
+    )
 }
 
 /// **The settings row's two facts, out of one read of the files.**
@@ -258,13 +567,28 @@ pub(crate) fn row_state() -> (bool, Option<&'static str>) {
 /// The same question about a named folder and a named executable, so a test can ask it without a
 /// codex installation on the machine it runs on.
 ///
-/// **Installed when either file names this copy**: the hook, or a `notify` line an earlier Folio
-/// wrote and that stays until Folio writes its entry again (R18). The refusal the row says is
-/// `hooks.json`'s, the one file a press writes Folio's entry in.
+/// **Installed when either file names this copy and codex runs it**: the hook, or a `notify` line
+/// an earlier Folio wrote and that stays until Folio writes its entry again (R18). The hook counts
+/// only where codex will run it (review N6): on a codex that runs hooks (`hooks_run`, 0.148 and
+/// later), in a `hooks.json` codex reads ([`read_by_codex`]), with hooks not switched off in
+/// `config.toml` ([`hooks_switched_off`]). The refusal the row says is `hooks.json`'s, the one
+/// file a press writes Folio's entry in.
 #[must_use]
-fn codex_state_in(dir: &Path, exe: Option<&Path>) -> State {
-    let hook = hooks::state_in(&HOOKS, &dir.join(HOOKS_FILE), exe);
-    let notify = match toml_beside(&dir.join(CONFIG_FILE)) {
+fn codex_state_in(dir: &Path, exe: Option<&Path>, hooks_run: bool) -> State {
+    let toml = toml_beside(&dir.join(CONFIG_FILE));
+    let hook = match hooks::state_in(&HOOKS, &dir.join(HOOKS_FILE), exe) {
+        hooks::State::Installed
+            if !hooks_run
+                || toml
+                    .as_ref()
+                    .is_ok_and(|toml| hooks_switched_off(&toml.document))
+                || !hooks_file_read_by_codex(&dir.join(HOOKS_FILE)) =>
+        {
+            hooks::State::Absent
+        }
+        hook => hook,
+    };
+    let notify = match toml {
         Ok(toml) => {
             let ours = notify_owner(&toml.document).ok().flatten();
             if exe.is_some_and(|exe| {
@@ -417,6 +741,41 @@ fn hook_wanted(exe: &Path) -> Vec<Wanted> {
 /// attribute ([`CodexHooksFile`]), and of the text as written.
 fn read_by_codex(text: &str) -> bool {
     serde_json::from_str::<CodexHooksFile>(text).is_ok()
+}
+
+/// [`read_by_codex`] of the `hooks.json` at `path` as it stands — `false` when it cannot be read.
+fn hooks_file_read_by_codex(path: &Path) -> bool {
+    bt_platform::file_reads::read_to_string(bt_platform::file_reads::Lane::Attention, path)
+        .is_ok_and(|text| read_by_codex(&text))
+}
+
+/// **Whether `config.toml` switches codex's hooks off** (row 69's report §1b.3): `[features]`'s
+/// `hooks`, or the `codex_hooks` it was called before, set to `false`. codex applies the table's
+/// switches in key order, so where both are written `hooks` is the one that stands. A
+/// `[profiles.<name>.features]` table applies only to a session started with that profile, which
+/// Folio cannot know, and is not read (`docs/DESIGN.md`, row 69c's entry).
+fn hooks_switched_off(document: &Table) -> bool {
+    let Some(features) = document.get(FEATURES_KEY).and_then(Item::as_table_like) else {
+        return false;
+    };
+    let switch = |name: &str| features.get(name).and_then(Item::as_bool);
+    switch(HOOKS_FEATURE)
+        .or_else(|| switch(HOOKS_FEATURE_FORMERLY))
+        .is_some_and(|on| !on)
+}
+
+/// **Why codex would not run a hook of Folio's in these files**, when it would not — the refusal an
+/// install gives, and the row's line over them: hooks switched off in `config.toml`, or a
+/// `hooks.json` codex ignores whole ([`read_by_codex`]). Hook events in `config.toml` (R15) are not
+/// one: codex loads both files, with a warning, so a hook already there runs.
+fn hook_kept_from_running(toml: &Table, hooks_text: &str) -> Option<&'static str> {
+    if hooks_switched_off(toml) {
+        Some(crate::i18n::Text::CodexHooksOff.text())
+    } else if !hooks_text.trim().is_empty() && !read_by_codex(hooks_text) {
+        Some(crate::i18n::Text::CodexHooksFileIgnored.text())
+    } else {
+        None
+    }
 }
 
 // ── codex's `HooksFile`, as codex reads it ─────────────────────────────────────
@@ -595,7 +954,7 @@ fn notify_owner(document: &Table) -> Result<Option<PathBuf>, &'static str> {
     if document.get(NOTIFY_KEY).is_none() {
         return Ok(None);
     }
-    let words = words_of(document).ok_or(crate::i18n::Text::AgentHooksUnreadable.text())?;
+    let words = words_of(document).ok_or(crate::i18n::Text::CodexConfigUnreadable.text())?;
     let folio = words.get(1).is_some_and(|word| word == ATTENTION_VERB)
         && words
             .get(2)
@@ -622,14 +981,94 @@ fn declares_somebody_else(document: &Table) -> bool {
     document.get(NOTIFY_KEY).is_some() && !declares_folio(document)
 }
 
-/// **What codex's `hooks.json` holds, as the start-time scan reads it** (0.4.10 plan row 67b over
-/// row 69's file): `attention_hooks::family_scan` over [`HOOKS`]. Nothing is written here.
+/// **What codex's configuration holds, as the start-time scan reads it** (0.4.10 plan row 67b, over
+/// row 69's two files): the file the scan was handed says which entry is Folio's on this codex
+/// ([`entry_path`]) — `config.toml`'s `notify` line ([`notify_scan_resolved`]), or the hook in
+/// `hooks.json` ([`hook_scan_resolved`]). Nothing is written here.
 pub(crate) fn scan_resolved(
     config: &crate::attention_hooks::Config,
     exe: &Path,
     look: &dyn Fn(&Path) -> ownership::PathStands,
 ) -> HooksFound {
-    hooks::family_scan(&HOOKS, config, exe, look)
+    if is_config_file(config) {
+        notify_scan_resolved(config, exe, look)
+    } else {
+        hook_scan_resolved(config, exe, look)
+    }
+}
+
+/// Whether an operation was handed `config.toml` — the `notify` line's road — rather than
+/// `hooks.json`.
+fn is_config_file(config: &Config) -> bool {
+    config.named().file_name() == Some(OsStr::new(CONFIG_FILE))
+}
+
+/// **`hooks.json`, with the `config.toml` beside it, as the scan reads them on a codex that runs
+/// hooks.** The owners are both files' — the hook's, and an earlier Folio's `notify` line's — so a
+/// gone copy's line is repaired with the hook, and this copy's line beside its own hook is an old
+/// shape the repair takes out. **This copy's line alone is current** (R18): it works, and moving it
+/// would trade it for an entry codex asks the person to trust; it is replaced only when Folio writes
+/// its entry anyway.
+///
+/// Where codex would not run a hook of Folio's ([`hook_kept_from_running`]) the reason is the row's
+/// line and nothing is repaired — unless this copy's line is there and works, which is the
+/// integration on such a machine. Where `config.toml` holds hook events of its own (R15) an install
+/// writes nothing, so a file with nothing of Folio's, or one a repair would have to write, says
+/// that instead.
+pub(crate) fn hook_scan_resolved(
+    config: &crate::attention_hooks::Config,
+    exe: &Path,
+    look: &dyn Fn(&Path) -> ownership::PathStands,
+) -> HooksFound {
+    let folder = config.named().parent().expect("absolute hooks file");
+    let toml = match toml_beside(&folder.join(CONFIG_FILE)) {
+        Ok(toml) => toml,
+        Err(reason) => return HooksFound::Declined(reason),
+    };
+    if toml.document.get(NOTIFY_KEY).is_some() && words_of(&toml.document).is_none() {
+        return HooksFound::Declined(crate::i18n::Text::CodexConfigUnreadable.text());
+    }
+    let line = match notify_owner(&toml.document) {
+        Ok(line) => line,
+        Err(_) => return HooksFound::Unclassified,
+    };
+    let reading = match hooks::family_reading(&HOOKS, config, exe) {
+        Ok(reading) => reading,
+        Err(found) => return found,
+    };
+    let hooks_text = match config.standing() {
+        Standing::Text(text) => text,
+        Standing::Nothing | Standing::Unreadable => String::new(),
+    };
+    let line_drifted = || words_of(&toml.document) != Some(program_for(exe));
+    if let Some(reason) = hook_kept_from_running(&toml.document, &hooks_text) {
+        return match line {
+            Some(owner) => match ownership::classify_owners(&[owner], exe, look, line_drifted) {
+                found if found.wants_repair() => HooksFound::Declined(reason),
+                found => found,
+            },
+            None => HooksFound::Declined(reason),
+        };
+    }
+    let found = if reading.owners.is_empty() {
+        match line {
+            Some(owner) => ownership::classify_owners(&[owner], exe, look, line_drifted),
+            None => HooksFound::Nothing,
+        }
+    } else {
+        let mut owners = reading.owners;
+        owners.extend(line.iter().cloned());
+        ownership::classify_owners(&owners, exe, look, || reading.drifted || line.is_some())
+    };
+    match found {
+        found
+            if (found == HooksFound::Nothing || found.wants_repair())
+                && declares_toml_hooks(&toml.document) =>
+        {
+            HooksFound::Declined(crate::i18n::Text::CodexHooksInToml.text())
+        }
+        found => found,
+    }
 }
 
 /// **What codex's configuration holds, as the start-time scan reads it** (0.4.10 plan row 67b):
@@ -663,9 +1102,25 @@ pub(crate) fn notify_scan_resolved(
         Err(_) => return HooksFound::Unclassified,
     };
     let Some(owner) = owner else {
-        return HooksFound::Declined(crate::i18n::Text::AgentCodexNotifyTaken.text());
+        return HooksFound::Declined(held_slot(version(), &words));
     };
     ownership::classify_owners(&[owner], exe, look, || words != program_for(exe))
+}
+
+/// **The refusal over somebody else's `notify`, on a codex below 0.148** (R12): it names the
+/// version and their program, and what a newer codex would let Folio do. Without a version to
+/// name, the plain sentence.
+fn held_slot(version: CodexVersion, words: &[String]) -> &'static str {
+    match (version, words.first()) {
+        (CodexVersion::Known(version), Some(program)) => {
+            let name = Path::new(program).file_name().map_or_else(
+                || program.clone(),
+                |name| name.to_string_lossy().into_owned(),
+            );
+            crate::i18n::codex_notify_held_old_version(&version.to_string(), &name)
+        }
+        _ => crate::i18n::Text::AgentCodexNotifyTaken.text(),
+    }
 }
 
 /// **`existing` with Folio's `notify` line put in (`install`) or taken out, and every other byte as
@@ -696,7 +1151,7 @@ fn edited(
     any_copy: bool,
 ) -> Result<Option<String>, &'static str> {
     let document =
-        ImDocument::parse(existing).map_err(|_| crate::i18n::Text::AgentHooksUnreadable.text())?;
+        ImDocument::parse(existing).map_err(|_| crate::i18n::Text::CodexConfigUnreadable.text())?;
     let table = document.as_table();
     let body = if existing.starts_with('\u{feff}') {
         '\u{feff}'.len_utf8()
@@ -873,8 +1328,9 @@ struct Toml {
     config: Result<Config, &'static str>,
 }
 
-/// Read the `config.toml` at `path`, resolved **once**, for this operation — [`Text::AgentHooksUnreadable`](crate::i18n::Text::AgentHooksUnreadable) when
-/// its bytes are not UTF-8 or its text is not TOML.
+/// Read the `config.toml` at `path`, resolved **once**, for this operation —
+/// [`Text::CodexConfigUnreadable`](crate::i18n::Text::CodexConfigUnreadable) when its bytes are not
+/// UTF-8 or its text is not TOML.
 ///
 /// A file Folio will not edit — a link out of codex's folder, one shared by hard links, a read-only
 /// one — is still read: what it says decides whether a hook may be added beside it (R15), and the
@@ -884,7 +1340,7 @@ fn toml_beside(path: &Path) -> Result<Toml, &'static str> {
         Ok(config) => match config.standing() {
             Standing::Text(text) => (text, Ok(config)),
             Standing::Nothing => (String::new(), Ok(config)),
-            Standing::Unreadable => return Err(crate::i18n::Text::AgentHooksUnreadable.text()),
+            Standing::Unreadable => return Err(crate::i18n::Text::CodexConfigUnreadable.text()),
         },
         Err(hooks::Unresolved::Refused(reason)) => {
             match bt_platform::file_reads::read_to_string(
@@ -895,16 +1351,16 @@ fn toml_beside(path: &Path) -> Result<Toml, &'static str> {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                     (String::new(), Err(reason))
                 }
-                Err(_) => return Err(crate::i18n::Text::AgentHooksUnreadable.text()),
+                Err(_) => return Err(crate::i18n::Text::CodexConfigUnreadable.text()),
             }
         }
         Err(hooks::Unresolved::Unreadable) => {
-            return Err(crate::i18n::Text::AgentHooksUnreadable.text());
+            return Err(crate::i18n::Text::CodexConfigUnreadable.text());
         }
     };
     let document = text
         .parse::<DocumentMut>()
-        .map_err(|_| crate::i18n::Text::AgentHooksUnreadable.text())?;
+        .map_err(|_| crate::i18n::Text::CodexConfigUnreadable.text())?;
     Ok(Toml {
         text,
         document,
@@ -918,8 +1374,11 @@ fn toml_beside(path: &Path) -> Result<Toml, &'static str> {
 /// ([`hooks::hooks_edited`], [`edited`]), and a copy of what was there is kept beside each the first
 /// time each day — `attention_hooks`'s rule, for its reason: these are somebody's own configuration
 /// files, and a build that could damage one had better be able to hand it back.
+///
+/// **An install goes in the file this codex runs Folio's entry from** ([`entry_path`]); a removal is
+/// pressed on `hooks.json` on every version, and takes the line out of `config.toml` with it.
 pub(crate) fn apply(decision: Decision, exe: &Path) -> Outcome {
-    let Some(path) = hooks_path() else {
+    let Some(path) = pressed_path(decision.installs()) else {
         return Outcome::Refused("no codex configuration directory to write into");
     };
     apply_at(&path, decision, exe, &crate::persist::storage_dir())
@@ -964,6 +1423,10 @@ pub(crate) fn apply_at(path: &Path, decision: Decision, exe: &Path, data: &Path)
 /// link out of the folder, a hard link), is the same for a removal (review R2): the hook goes, the
 /// line stays, and the outcome says why. Only an install, which could mark a turn twice, is
 /// refused whole over it.
+///
+/// **Handed `config.toml`, the operation is the `notify` line's** (0.4.10 plan row 69c): an install
+/// writes the line ([`notify_install_resolved`]), and a removal is the one above, pressed on the
+/// `hooks.json` beside it.
 pub(crate) fn apply_resolved(
     config: &Config,
     decision: Decision,
@@ -975,6 +1438,14 @@ pub(crate) fn apply_resolved(
     }
     if !config.named().is_absolute() {
         return Outcome::Refused(crate::i18n::Text::AgentHooksRootUnstable.text());
+    }
+    if is_config_file(config) {
+        return if decision.installs() {
+            notify_install_resolved(config, decision, exe, data)
+        } else {
+            let folder = config.named().parent().expect("absolute config");
+            apply_at(&folder.join(HOOKS_FILE), decision, exe, data)
+        };
     }
     let install = decision.installs();
     // A hook Windows PowerShell 5.1 cannot call would fail on every turn (re-review R1); a removal
@@ -999,7 +1470,7 @@ pub(crate) fn apply_resolved(
     // a file somebody wrote, and whether it carries Folio's line is not something to assume.
     let toml = toml_beside(&folder.join(CONFIG_FILE)).and_then(|toml| {
         if toml.document.get(NOTIFY_KEY).is_some() && words_of(&toml.document).is_none() {
-            Err(crate::i18n::Text::AgentHooksUnreadable.text())
+            Err(crate::i18n::Text::CodexConfigUnreadable.text())
         } else {
             Ok(toml)
         }
@@ -1015,6 +1486,15 @@ pub(crate) fn apply_resolved(
             .is_some_and(|toml| declares_toml_hooks(&toml.document))
     {
         return Outcome::Refused(crate::i18n::Text::CodexHooksInToml.text());
+    }
+    // Hooks switched off in config.toml: the hook would never run, and the `notify` line R18 would
+    // take out in its place is the one entry that works there (review N6).
+    if install
+        && toml
+            .as_ref()
+            .is_some_and(|toml| hooks_switched_off(&toml.document))
+    {
+        return Outcome::Refused(crate::i18n::Text::CodexHooksOff.text());
     }
     let mut paths = match hooks::hook_owners(&HOOKS, &existing) {
         Ok(paths) => paths,
@@ -1086,6 +1566,66 @@ pub(crate) fn apply_resolved(
         Outcome::Installed
     } else {
         removal_outcome(true, others, unread)
+    }
+}
+
+/// **Folio's `notify` line written in `config.toml`, on a codex below 0.148** (0.4.10 plan row 69c,
+/// R12) — the writer every Folio before 0.4.10 used, by 67a's byte-keeping rule ([`edited`]).
+///
+/// Somebody else's program on the key is refused, naming the version ([`held_slot`]): there is one
+/// `notify` key, and writing Folio's over theirs deletes a program this build cannot give back.
+/// A `notify` wearing Folio's verb in a shape this build cannot decode is not Folio's (closure
+/// review R4) and is refused the same way.
+fn notify_install_resolved(
+    config: &Config,
+    decision: Decision,
+    exe: &Path,
+    data: &Path,
+) -> Outcome {
+    let existing = match config.standing() {
+        Standing::Text(text) => text,
+        // Nothing there yet: the install creates the file, and there is nothing to keep beside it.
+        Standing::Nothing => String::new(),
+        // **A file that could not be read is never written over** — release audit 2026-09-16 (C-3).
+        Standing::Unreadable => {
+            return Outcome::Refused(crate::i18n::Text::CodexConfigUnreadable.text());
+        }
+    };
+    let Ok(document) = existing.parse::<DocumentMut>() else {
+        return Outcome::Refused(crate::i18n::Text::CodexConfigUnreadable.text());
+    };
+    if document.get(NOTIFY_KEY).is_some() && words_of(&document).is_none() {
+        return Outcome::Refused(crate::i18n::Text::CodexConfigUnreadable.text());
+    }
+    if declares_somebody_else(&document) {
+        return Outcome::Refused(held_slot(
+            version(),
+            &words_of(&document).unwrap_or_default(),
+        ));
+    }
+    let paths = notify_owner(&document)
+        .ok()
+        .flatten()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if let Err(outcome) = ownership::check(&paths, exe, &decision) {
+        return outcome;
+    }
+    let written = match edited(&existing, exe, true, false) {
+        Ok(written) => written,
+        Err(reason) => return Outcome::Refused(reason),
+    };
+    let folder = config.named().parent().expect("absolute config");
+    let _record = match ownership::record(data, folder, "codex") {
+        Ok(lock) => lock,
+        Err(reason) => return Outcome::Refused(reason),
+    };
+    let Some(written) = written else {
+        return Outcome::Unchanged;
+    };
+    match land_codex_file(config, &existing, "toml", &written) {
+        Ok(()) => Outcome::Installed,
+        Err(reason) => Outcome::Refused(reason),
     }
 }
 
@@ -1192,22 +1732,29 @@ mod tests {
     #[test]
     fn the_tip_names_the_default_spelling_until_the_variable_moves_it() {
         let named = |text: &str| Some(OsString::from(text));
-        assert_eq!(
-            config_path_shown_from(None, named(r"C:\Users\someone")),
-            "~/.codex/config.toml"
-        );
-        assert_eq!(
-            config_path_shown_from(named(""), named(r"C:\Users\someone")),
-            "~/.codex/config.toml"
-        );
-        assert_eq!(config_path_shown_from(None, None), "~/.codex/config.toml");
-        assert_eq!(
-            config_path_shown_from(named(r"D:\scratch\codex-home"), named(r"C:\Users\someone")),
-            PathBuf::from(r"D:\scratch\codex-home")
-                .join(CONFIG_FILE)
-                .display()
-                .to_string()
-        );
+        for file in [HOOKS_FILE, CONFIG_FILE] {
+            let default = format!("~/.codex/{file}");
+            assert_eq!(
+                path_shown_from(file, None, named(r"C:\Users\someone")),
+                default
+            );
+            assert_eq!(
+                path_shown_from(file, named(""), named(r"C:\Users\someone")),
+                default
+            );
+            assert_eq!(path_shown_from(file, None, None), default);
+            assert_eq!(
+                path_shown_from(
+                    file,
+                    named(r"D:\scratch\codex-home"),
+                    named(r"C:\Users\someone")
+                ),
+                PathBuf::from(r"D:\scratch\codex-home")
+                    .join(file)
+                    .display()
+                    .to_string()
+            );
+        }
     }
 
     fn installed(text: &str) -> DocumentMut {
@@ -1442,7 +1989,7 @@ mod tests {
         let installing = apply_to(&dir.join(HOOKS_FILE), true, &exe());
         assert_eq!(
             installing,
-            Outcome::Refused(crate::i18n::Text::AgentHooksUnreadable.text())
+            Outcome::Refused(crate::i18n::Text::CodexConfigUnreadable.text())
         );
         assert_eq!(std::fs::read(&path).expect("still there"), theirs);
         assert_eq!(
@@ -1451,7 +1998,7 @@ mod tests {
             "nothing was written beside it either"
         );
         // And the row drawn from it says so, rather than offering to write over it.
-        assert_eq!(codex_state_in(&dir, Some(&exe())), State::Unreadable);
+        assert_eq!(codex_state_in(&dir, Some(&exe()), true), State::Unreadable);
         // Turning it off has nothing to take out of `hooks.json`, and goes on without the file it
         // cannot read: left as it was, and said (review N5).
         let taking_it_out = apply_to(&dir.join(HOOKS_FILE), false, &exe());
@@ -1459,7 +2006,7 @@ mod tests {
             taking_it_out,
             Outcome::LeftUnread {
                 removed: false,
-                reason: crate::i18n::Text::AgentHooksUnreadable.text()
+                reason: crate::i18n::Text::CodexConfigUnreadable.text()
             }
         );
         assert_eq!(std::fs::read(&path).expect("still there"), theirs);
@@ -1491,14 +2038,14 @@ mod tests {
             std::fs::write(&path, &with_ours).expect("a hook of this copy's");
             assert_eq!(
                 apply_to(&path, true, &exe()),
-                Outcome::Refused(crate::i18n::Text::AgentHooksUnreadable.text()),
+                Outcome::Refused(crate::i18n::Text::CodexConfigUnreadable.text()),
                 "{name}: an install needs both of its answers"
             );
             assert_eq!(
                 apply_to(&path, false, &exe()),
                 Outcome::LeftUnread {
                     removed: true,
-                    reason: crate::i18n::Text::AgentHooksUnreadable.text()
+                    reason: crate::i18n::Text::CodexConfigUnreadable.text()
                 },
                 "{name}"
             );
@@ -1516,10 +2063,10 @@ mod tests {
     fn a_hooks_file_that_is_not_there_is_the_one_that_gets_created() {
         let dir = scratch("absent");
         let path = dir.join(HOOKS_FILE);
-        assert_eq!(codex_state_in(&dir, Some(&exe())), State::Absent);
+        assert_eq!(codex_state_in(&dir, Some(&exe()), true), State::Absent);
 
         assert_eq!(apply_to(&path, true, &exe()), Outcome::Installed);
-        assert_eq!(codex_state_in(&dir, Some(&exe())), State::Installed);
+        assert_eq!(codex_state_in(&dir, Some(&exe()), true), State::Installed);
         assert_eq!(
             names(&dir),
             vec![HOOKS_FILE.to_owned()],
@@ -1915,7 +2462,7 @@ mod tests {
             );
             assert!(written.contains(r#""statusMessage": "\u00e9""#), "{name}");
             assert_eq!(
-                codex_state_in(&dir, Some(&exe())),
+                codex_state_in(&dir, Some(&exe()), true),
                 State::Installed,
                 "{name}"
             );
@@ -2247,7 +2794,7 @@ mod tests {
             assert_eq!(apply_to(&path, true, &exe()), Outcome::Installed, "{name}");
             assert_eq!(std::fs::read_to_string(&config).expect("there"), theirs);
             assert_eq!(
-                codex_state_in(&dir, Some(&exe())),
+                codex_state_in(&dir, Some(&exe()), true),
                 State::Installed,
                 "{name}"
             );
@@ -2259,7 +2806,11 @@ mod tests {
             );
             assert_eq!(apply_to(&path, false, &exe()), Outcome::Removed, "{name}");
             assert_eq!(std::fs::read_to_string(&config).expect("there"), theirs);
-            assert_eq!(codex_state_in(&dir, Some(&exe())), State::Absent, "{name}");
+            assert_eq!(
+                codex_state_in(&dir, Some(&exe()), true),
+                State::Absent,
+                "{name}"
+            );
         }
     }
 
@@ -2284,16 +2835,16 @@ mod tests {
         let without = "# mine\r\nmodel = \"gpt-5\"\r\n[tui]\r\nx = 1\r\n";
         // Kept and read while nothing is pressed: the row is on.
         std::fs::write(&config, line(&exe())).expect("their own file");
-        assert_eq!(codex_state_in(&dir, Some(&exe())), State::Installed);
+        assert_eq!(codex_state_in(&dir, Some(&exe()), true), State::Installed);
         // A press writes the hook and takes the line out.
         assert_eq!(apply_to(&path, true, &exe()), Outcome::Installed);
         assert_eq!(std::fs::read_to_string(&config).expect("there"), without);
-        assert_eq!(codex_state_in(&dir, Some(&exe())), State::Installed);
+        assert_eq!(codex_state_in(&dir, Some(&exe()), true), State::Installed);
         // Both of Folio's entries, by hand or across an upgrade: off takes out both.
         std::fs::write(&config, line(&exe())).expect("their own file");
         assert_eq!(apply_to(&path, false, &exe()), Outcome::Removed);
         assert_eq!(std::fs::read_to_string(&config).expect("there"), without);
-        assert_eq!(codex_state_in(&dir, Some(&exe())), State::Absent);
+        assert_eq!(codex_state_in(&dir, Some(&exe()), true), State::Absent);
 
         // A live other copy's line asks for a take-over, and the consent covers the line.
         let other = dir.join("other").join("folio.exe");
@@ -2600,5 +3151,373 @@ mod tests {
             .in_the_product(crate::test_support::source());
             assert!(found.is_empty(), "`{name}` is codex's to write");
         }
+    }
+
+    // ── 0.4.10 plan row 69c: the entry by codex's version ──────────────────
+
+    fn codex_at(major: u32, minor: u32, patch: u32) -> CodexVersion {
+        CodexVersion::Known(Version::new(major, minor, patch))
+    }
+
+    /// A press on the file a version chooses, with its own marks folder — what [`apply`] does once
+    /// [`pressed_path`] has named the file.
+    fn press_by_version(dir: &Path, version: CodexVersion, install: bool) -> Outcome {
+        let file = if install && !version.runs_hooks() {
+            CONFIG_FILE
+        } else {
+            HOOKS_FILE
+        };
+        apply_to(&dir.join(file), install, &exe())
+    }
+
+    /// One scan of the file a version chooses, the machine's own answer about what stands.
+    fn scan_by_version(dir: &Path, version: CodexVersion) -> HooksFound {
+        let file = if version.runs_hooks() {
+            HOOKS_FILE
+        } else {
+            CONFIG_FILE
+        };
+        let config = Config::resolve(&dir.join(file))
+            .unwrap_or_else(|_| panic!("a fixture resolves"))
+            .with_one_read();
+        scan_resolved(&config, &exe(), &ownership::what_stands)
+    }
+
+    /// RED (0.4.10 plan row 69c; rulings R12, R17) — **one entry per codex version**: from 0.148 the
+    /// hook in `hooks.json`; below it the `notify` line in `config.toml`, as every Folio before
+    /// 0.4.10 wrote it; below it with somebody else's program on the key, the refusal names the
+    /// version; and on a version nobody could learn, the hook. A Folio line beside this copy's hook
+    /// is an old shape the scan wants repaired, and the repair takes the line out.
+    ///
+    /// RED GATE: `plant-69c-version-gate-skipped.py` answers every version as one that runs hooks,
+    /// and the press on 0.147 writes a hook codex skips.
+    #[test]
+    fn one_codex_entry_per_version() {
+        assert!(!codex_at(0, 147, 9).runs_hooks());
+        assert!(!codex_at(0, 114, 0).runs_hooks());
+        assert!(codex_at(0, 148, 0).runs_hooks());
+        assert!(codex_at(0, 166, 0).runs_hooks());
+        assert!(
+            CodexVersion::Unknown.runs_hooks(),
+            "R17: unknown is current"
+        );
+        assert!(CodexVersion::Unasked.runs_hooks());
+
+        // 0.148 and later: the hook, and config.toml untouched.
+        let dir = scratch("version-hook");
+        assert_eq!(
+            press_by_version(&dir, codex_at(0, 148, 0), true),
+            Outcome::Installed
+        );
+        assert_eq!(names(&dir), vec![HOOKS_FILE.to_owned()]);
+        assert_eq!(
+            scan_by_version(&dir, codex_at(0, 148, 0)),
+            HooksFound::Current
+        );
+
+        // Below 0.148, the key free: the line, and no hooks.json.
+        let dir = scratch("version-line");
+        assert_eq!(
+            press_by_version(&dir, codex_at(0, 147, 0), true),
+            Outcome::Installed
+        );
+        assert_eq!(names(&dir), vec![CONFIG_FILE.to_owned()]);
+        assert_eq!(
+            std::fs::read_to_string(dir.join(CONFIG_FILE)).expect("written"),
+            format!("notify = {}\n", notify_value(&exe()))
+        );
+        assert_eq!(
+            scan_by_version(&dir, codex_at(0, 147, 0)),
+            HooksFound::Current
+        );
+        // Turning it off takes the line out on every version.
+        assert_eq!(
+            press_by_version(&dir, codex_at(0, 147, 0), false),
+            Outcome::Removed
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join(CONFIG_FILE)).expect("there"),
+            ""
+        );
+
+        // Below 0.148, the key held: refused, the version and the program named, nothing written.
+        let dir = scratch("version-held");
+        let theirs = owners_config("\n", "");
+        std::fs::write(dir.join(CONFIG_FILE), &theirs).expect("their own file");
+        assert!(matches!(
+            apply_to(&dir.join(CONFIG_FILE), true, &exe()),
+            Outcome::Refused(_)
+        ));
+        let words = words_of(&theirs.parse::<DocumentMut>().expect("TOML")).expect("words");
+        assert_eq!(
+            held_slot(CodexVersion::Unknown, &words),
+            crate::i18n::Text::AgentCodexNotifyTaken.text()
+        );
+        let named = held_slot(codex_at(0, 147, 0), &words);
+        assert!(named.contains("0.147.0"), "{named}");
+        assert!(named.contains("codex-computer-use.exe"), "{named}");
+        assert!(named.contains("0.148"), "{named}");
+        assert_eq!(
+            std::fs::read_to_string(dir.join(CONFIG_FILE)).expect("there"),
+            theirs
+        );
+        assert_eq!(names(&dir), vec![CONFIG_FILE.to_owned()]);
+
+        // Both of Folio's entries, this copy's: drift, and the repair leaves one.
+        let dir = scratch("version-both");
+        assert_eq!(
+            apply_to(&dir.join(HOOKS_FILE), true, &exe()),
+            Outcome::Installed
+        );
+        std::fs::write(
+            dir.join(CONFIG_FILE),
+            format!("notify = {}\n", notify_value(&exe())),
+        )
+        .expect("the line beside it");
+        assert_eq!(
+            scan_by_version(&dir, codex_at(0, 166, 0)),
+            HooksFound::Drifted
+        );
+        assert_eq!(
+            apply_to(&dir.join(HOOKS_FILE), true, &exe()),
+            Outcome::Installed
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join(CONFIG_FILE)).expect("there"),
+            ""
+        );
+        assert_eq!(
+            scan_by_version(&dir, codex_at(0, 166, 0)),
+            HooksFound::Current
+        );
+    }
+
+    /// RED (ruling R18) — **this copy's working `notify` line, alone, is current on a codex that runs
+    /// hooks**: the scan does not move it into an entry codex would ask the person to trust. A gone
+    /// copy's line is dead, and its repair writes the hook and takes the line out.
+    ///
+    /// RED GATE: `plant-69c-line-alone-drifts.py` reads a line beside no hook as an old shape, and
+    /// the first assertion reads `Drifted`.
+    #[test]
+    fn a_working_line_stays_until_folio_writes_its_entry() {
+        let dir = scratch("line-alone");
+        let line = format!("model = \"gpt-5\"\nnotify = {}\n", notify_value(&exe()));
+        std::fs::write(dir.join(CONFIG_FILE), &line).expect("an earlier Folio's line");
+        assert_eq!(
+            scan_by_version(&dir, codex_at(0, 166, 0)),
+            HooksFound::Current
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join(CONFIG_FILE)).expect("there"),
+            line,
+            "a scan writes nothing"
+        );
+
+        let gone = dir.join("gone").join("folio.exe");
+        let theirs = format!("model = \"gpt-5\"\nnotify = {}\n", notify_value(&gone));
+        std::fs::write(dir.join(CONFIG_FILE), &theirs).expect("a gone copy's line");
+        assert_eq!(
+            scan_by_version(&dir, codex_at(0, 166, 0)),
+            HooksFound::Dead(vec![gone.clone()])
+        );
+        assert_eq!(
+            apply_to(&dir.join(HOOKS_FILE), true, &exe()),
+            Outcome::Installed
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join(CONFIG_FILE)).expect("there"),
+            "model = \"gpt-5\"\n"
+        );
+        assert_eq!(
+            scan_by_version(&dir, codex_at(0, 166, 0)),
+            HooksFound::Current
+        );
+    }
+
+    /// RED (review N6) — **a hook codex will not run is never On, and nothing takes a working line
+    /// out for one**: below 0.148, in a `hooks.json` codex ignores, or with hooks switched off in
+    /// `config.toml`, this copy's hook does not make the row Installed; with hooks switched off an
+    /// install is refused and an earlier Folio's line stays where it works.
+    ///
+    /// RED GATE: `plant-69c-hook-on-when-not-run.py` drops the version's condition from
+    /// `codex_state_in`, and the first `Absent` reads `Installed`; `plant-69c-hooks-off-installs.py`
+    /// drops the install's refusal with hooks off, and the hook replaces the line that works.
+    #[test]
+    fn a_hook_codex_will_not_run_is_never_on() {
+        let dir = scratch("not-run");
+        assert_eq!(
+            apply_to(&dir.join(HOOKS_FILE), true, &exe()),
+            Outcome::Installed
+        );
+        assert_eq!(codex_state_in(&dir, Some(&exe()), true), State::Installed);
+        assert_eq!(codex_state_in(&dir, Some(&exe()), false), State::Absent);
+        assert_eq!(
+            scan_by_version(&dir, codex_at(0, 166, 0)),
+            HooksFound::Current
+        );
+
+        std::fs::write(dir.join(CONFIG_FILE), "[features]\nhooks = false\n").expect("off");
+        assert_eq!(codex_state_in(&dir, Some(&exe()), true), State::Absent);
+        assert_eq!(
+            scan_by_version(&dir, codex_at(0, 166, 0)),
+            HooksFound::Declined(crate::i18n::Text::CodexHooksOff.text())
+        );
+
+        let hooks = std::fs::read_to_string(dir.join(HOOKS_FILE)).expect("there");
+        let ignored = hooks.replacen('{', "{\"model\": \"gpt-5\", ", 1);
+        std::fs::write(dir.join(CONFIG_FILE), "").expect("on again");
+        std::fs::write(dir.join(HOOKS_FILE), &ignored).expect("a key codex refuses");
+        assert_eq!(codex_state_in(&dir, Some(&exe()), true), State::Absent);
+        assert_eq!(
+            scan_by_version(&dir, codex_at(0, 166, 0)),
+            HooksFound::Declined(crate::i18n::Text::CodexHooksFileIgnored.text())
+        );
+
+        // Hooks off and an earlier Folio's line: the line is the integration, and it stays.
+        let dir = scratch("not-run-line");
+        let line = format!(
+            "notify = {}\n[features]\ncodex_hooks = false\n",
+            notify_value(&exe())
+        );
+        std::fs::write(dir.join(CONFIG_FILE), &line).expect("off, and the line");
+        assert_eq!(
+            apply_to(&dir.join(HOOKS_FILE), true, &exe()),
+            Outcome::Refused(crate::i18n::Text::CodexHooksOff.text())
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join(CONFIG_FILE)).expect("there"),
+            line
+        );
+        assert_eq!(names(&dir), vec![CONFIG_FILE.to_owned()]);
+        assert_eq!(codex_state_in(&dir, Some(&exe()), true), State::Installed);
+        assert_eq!(
+            scan_by_version(&dir, codex_at(0, 166, 0)),
+            HooksFound::Current
+        );
+    }
+
+    /// PIN (row 69's report §1b.3) — **`[features]`'s hooks switch, by both its names**: `hooks`, and
+    /// the `codex_hooks` it was called before; dotted or under a header alike; `hooks` stands where
+    /// both are written, as codex applies the table in key order. A profile's table is not read.
+    #[test]
+    fn the_hooks_switch_is_read_by_both_its_names() {
+        for (text, off) in [
+            ("", false),
+            ("[features]\nhooks = false\n", true),
+            ("[features]\ncodex_hooks = false\n", true),
+            ("features.hooks = false\n", true),
+            ("features = { codex_hooks = false }\n", true),
+            ("[features]\nhooks = true\n", false),
+            ("[features]\nhooks = true\ncodex_hooks = false\n", false),
+            ("[features]\nhooks = false\ncodex_hooks = true\n", true),
+            ("[features]\nhooks = \"off\"\n", false),
+            ("[profiles.work.features]\nhooks = false\n", false),
+        ] {
+            let document = text.parse::<DocumentMut>().expect("a fixture");
+            assert_eq!(hooks_switched_off(&document), off, "{text:?}");
+        }
+    }
+
+    /// RED (ruling R17) — **the version is asked once per program file**: not before the walk has
+    /// said where codex is, never of a codex that is not there, once for a program, again only when
+    /// its size or modified time moved or the walk named another; an answer that did not come is
+    /// unknown, said once in the log.
+    ///
+    /// RED GATE: `plant-69c-version-asked-every-scan.py` drops the stamp comparison, and the second
+    /// settle asks again.
+    #[test]
+    fn the_version_is_asked_once_per_program_file() {
+        use std::cell::{Cell, RefCell};
+        let held = Mutex::new(VersionBook::new());
+        let asked = Cell::new(0);
+        let answer = Cell::new(Some(Version::new(0, 166, 0)));
+        let size = Cell::new(10_u64);
+        let said = RefCell::new(Vec::new());
+        let stamp = |path: &Path| {
+            Some(ProgramStamp {
+                path: path.to_path_buf(),
+                size: size.get(),
+                modified: None,
+            })
+        };
+        let ask = |_: &Path| {
+            asked.set(asked.get() + 1);
+            answer.get()
+        };
+        let say = |line: String| said.borrow_mut().push(line);
+        let settle = || settle_version_in(&held, &stamp, &ask, &say);
+
+        assert_eq!(settle(), CodexVersion::Unasked, "the walk has not answered");
+        assert!(adopt_walk_program_in(&held, Some(None)));
+        assert_eq!(settle(), CodexVersion::Unknown, "no codex where it looked");
+        assert_eq!(asked.get(), 0);
+
+        let codex = OsStr::new(r"C:\Users\someone\AppData\Roaming\npm\codex.cmd");
+        assert!(adopt_walk_program_in(&held, Some(Some(codex))));
+        assert!(
+            !adopt_walk_program_in(&held, Some(Some(codex))),
+            "the same answer"
+        );
+        assert_eq!(held.lock().unwrap().version(), CodexVersion::Unasked);
+        assert_eq!(settle(), codex_at(0, 166, 0));
+        assert_eq!(settle(), codex_at(0, 166, 0));
+        assert_eq!(asked.get(), 1, "the same file is not asked twice");
+        assert_eq!(*said.borrow(), vec!["BT_AGENT_HOOKS codex version=0.166.0"]);
+
+        size.set(11);
+        answer.set(None);
+        assert_eq!(settle(), CodexVersion::Unknown, "it would not say");
+        assert_eq!(asked.get(), 2, "a changed file is asked again");
+        assert_eq!(
+            said.borrow().last().map(String::as_str),
+            Some("BT_AGENT_HOOKS codex version=unknown")
+        );
+
+        let other = OsStr::new(r"C:\Tools\codex.exe");
+        answer.set(Some(Version::new(0, 147, 0)));
+        assert!(adopt_walk_program_in(&held, Some(Some(other))));
+        assert_eq!(held.lock().unwrap().version(), CodexVersion::Unasked);
+        assert_eq!(settle(), codex_at(0, 147, 0));
+        assert_eq!(asked.get(), 3, "another program is asked");
+    }
+
+    /// PIN — **what codex prints is read as its version**: `codex-cli 0.166.0`, and a prerelease as
+    /// the version it is a prerelease of.
+    #[test]
+    fn the_version_reads_off_what_codex_prints() {
+        assert_eq!(
+            Version::parse("codex-cli 0.166.0\n"),
+            Some(Version::new(0, 166, 0))
+        );
+        assert_eq!(
+            Version::parse("codex-cli 0.147.0-alpha.2\n"),
+            Some(Version::new(0, 147, 0))
+        );
+        assert_eq!(Version::new(0, 148, 0).to_string(), "0.148.0");
+    }
+
+    /// RED (re-review R4) — **a removal that left `config.toml` as it was says so in its own
+    /// sentence**, naming `hooks.json`, and telling a hook taken out from none there; the off-press
+    /// toast picks the one the outcome says.
+    ///
+    /// RED GATE: `plant-69c-left-unread-says-removed.py` gives both cases the removed sentence.
+    #[test]
+    fn a_removal_that_left_config_toml_says_which() {
+        for lang in [crate::i18n::Lang::English, crate::i18n::Lang::Chinese] {
+            let removed = crate::i18n::Text::CodexHookRemovedConfigLeft.in_lang(lang);
+            let none = crate::i18n::Text::CodexNoHookConfigLeft.in_lang(lang);
+            assert_ne!(removed, none);
+            for sentence in [removed, none] {
+                assert!(sentence.contains("hooks.json"), "{sentence}");
+                assert!(sentence.contains("config.toml"), "{sentence}");
+            }
+        }
+        let press = crate::test_support::squeezed_body("Runtime", "apply_codex_notify");
+        assert!(
+            press.contains(
+                "Outcome::LeftUnread{removed,reason}=>{lethead=ifremoved{i18n::Text::CodexHookRemovedConfigLeft}else{i18n::Text::CodexNoHookConfigLeft};"
+            ),
+            "the toast is chosen by the outcome"
+        );
     }
 }

@@ -16,9 +16,13 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use bt_platform::admission::WorkerCtx;
+
 /// **Every member, in the order the pass runs them**: each is one run of a step on the pass's
-/// worker, and asks the trial's gate for its own writer before it writes.
-pub(crate) const CARRY_STEPS: [fn(); 1] = [crate::agent_hooks_step::run_agent_hooks_step];
+/// worker, handed the worker's context — a step may ask a program a question there, as the agent
+/// hooks ask codex its version (0.4.10 plan row 69c) — and asks the trial's gate for its own
+/// writer before it writes.
+pub(crate) const CARRY_STEPS: [fn(&WorkerCtx); 1] = [crate::agent_hooks_step::run_agent_hooks_step];
 
 /// The pass's two facts between its starts: whether a worker is running it, and whether somebody
 /// asked again while one was.
@@ -104,7 +108,7 @@ pub(crate) fn begin_carry_pass_with(
     latch: &'static CarryLatch,
     executor: &crate::lane::Executor,
     say: impl Fn(&str) + Send + Sync + 'static,
-    steps: &'static [fn()],
+    steps: &'static [fn(&WorkerCtx)],
 ) -> bool {
     if !latch.ask_for_round() {
         return true;
@@ -115,10 +119,10 @@ pub(crate) fn begin_carry_pass_with(
             crate::lane::Answered::new("the start-time carry pass", say, move |_end| {
                 latch.carry_ended();
             }),
-            move |_ctx| loop {
+            move |ctx| loop {
                 latch.round_begins();
                 for step in steps {
-                    step();
+                    step(ctx);
                 }
                 if !latch.round_again() {
                     break;
@@ -194,21 +198,21 @@ mod tests {
     fn the_pass_runs_every_step_on_its_worker() {
         static LATCH: CarryLatch = CarryLatch::new();
         static RAN: AtomicUsize = AtomicUsize::new(0);
-        fn first() {
+        fn first(_: &WorkerCtx) {
             assert_eq!(
                 RAN.fetch_add(1, Ordering::AcqRel),
                 0,
                 "the first step runs first"
             );
         }
-        fn second() {
+        fn second(_: &WorkerCtx) {
             assert_eq!(
                 RAN.fetch_add(1, Ordering::AcqRel),
                 1,
                 "the second runs after it"
             );
         }
-        static STEPS: [fn(); 2] = [first, second];
+        static STEPS: [fn(&WorkerCtx); 2] = [first, second];
         let executor = crate::lane::Executor::thread_door(bt_platform::ThreadPriority::BelowNormal);
         // The worker's end is the signal: its voice holds the sender, and the worker lets the
         // voice go when it has ended — after the last round has let the latch go. A voice that is
