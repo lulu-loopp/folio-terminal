@@ -46,6 +46,15 @@
 //! question stays with the debounced save. Whether the question's turn can be run at the question
 //! is plan row 206's, decided on what these probe lines measure.
 //!
+//! **On macOS the system's end is AppKit's quit, and its last word fences the log too** (0.4.10
+//! plan row 17). A log-out, a restart, a shut-down or the Dock's *Quit* asks
+//! `applicationShouldTerminate:`, and Folio's own quit writes the layout before AppKit is
+//! answered. Answering `NSTerminateNow` lets `-[NSApplication terminate:]` go on to `exit()`, so
+//! `fn main`'s way out, its fence among it, is never reached. So the turn that reads the request
+//! says why AppKit asked ([`the_systems_quit_asked`]), and the answer, before it is given, says
+//! what became of the quit's save and fences the log ([`at_the_systems_quit`]): once for the
+//! process, through the same [`FENCED`] cell and the same fence as the end above.
+//!
 //! Window-thread state, so a thread-local: the procedure and the loop are the same thread, and a
 //! test on a thread of its own starts with nothing held.
 
@@ -55,7 +64,7 @@ use std::time::Instant;
 use bt_platform::admission::doors;
 use bt_platform::session_end::SessionEnd;
 
-use crate::persist::{SaveRefusal, SessionStore};
+use crate::persist::{ClosedSave, SaveRefusal, SessionStore};
 
 thread_local! {
     /// Whether the system has asked the session to end and not taken it back.
@@ -79,7 +88,8 @@ thread_local! {
     /// **Whether this span's end has fenced the log** (plan row 201, review F2). The system sends
     /// `WM_ENDSESSION(TRUE)` to every top-level window, and every window is this thread's, so this
     /// thread's cell is the process's. The first window's end fences, and the rest find it fenced,
-    /// say so and return: one second for the process, however many windows there are.
+    /// say so and return: one second for the process, however many windows there are. AppKit's
+    /// quit answered `NSTerminateNow` fences through the same cell (0.4.10 plan row 17).
     static FENCED: Cell<bool> = const { Cell::new(false) };
     /// **How many of `FolioApp`'s winit callbacks are on this thread's stack, and the innermost**
     /// (plan row 201's probe; [`in_a_callback`]).
@@ -450,6 +460,71 @@ fn fence_the_log() {
     bt_platform::admission::exiting();
     let _ =
         bt_platform::admission::admitted::<doors::DiagnosticsSettle, _>(crate::diagnostics::settle);
+}
+
+/// **The line that says AppKit asked the application to terminate, and why** (0.4.10 plan row
+/// 17): the quit Apple event's reason, carried by the request.
+#[must_use]
+pub(crate) fn the_systems_quit_asked_line(reason: bt_platform::QuitReason) -> String {
+    format!(
+        "BT_SESSION_END applicationShouldTerminate: asked ({})",
+        reason.words()
+    )
+}
+
+/// [`the_systems_quit_asked_line`], said to `diagnostics.log` on the turn that reads the request:
+/// the delegate's stack only parks, so this is the first of Folio's code that can say it.
+pub(crate) fn the_systems_quit_asked(reason: bt_platform::QuitReason) {
+    crate::diagnostics::note(&the_systems_quit_asked_line(reason));
+}
+
+/// **The one line `diagnostics.log` is owed about the quit's save when AppKit is answered
+/// `NSTerminateNow`** (0.4.10 plan row 17).
+#[must_use]
+pub(crate) fn the_systems_quit_road_line(save: ClosedSave) -> &'static str {
+    match save {
+        ClosedSave::Landed => {
+            "BT_SESSION_END applicationShouldTerminate: answering NSTerminateNow; the quit's save \
+             had landed and session.lock is gone"
+        }
+        ClosedSave::NotLanded => {
+            "BT_SESSION_END applicationShouldTerminate: answering NSTerminateNow; the quit's save \
+             had not landed within its budget, and session.lock stands"
+        }
+        ClosedSave::NoSession => {
+            "BT_SESSION_END applicationShouldTerminate: answering NSTerminateNow; this run had no \
+             session to save"
+        }
+    }
+}
+
+/// What AppKit's quit says when the log was already fenced for the process (0.4.10 plan row 17).
+pub(crate) const THE_SYSTEMS_QUIT_FENCED_BEFORE: &str =
+    "BT_SESSION_END applicationShouldTerminate: an earlier end fenced the log";
+
+/// **AppKit's quit, before it is answered `NSTerminateNow`** (0.4.10 plan row 17): the line on
+/// the quit's save, then the fence, so that every line said before it is on the disk before the
+/// answer lets AppKit end the process. Once for the process ([`FENCED`]): an end that finds the
+/// log fenced says so and fences nothing. Answers whether it fenced.
+pub(crate) fn the_systems_quit_ends_with(
+    save: ClosedSave,
+    say: &mut dyn FnMut(&str),
+    fence: &mut dyn FnMut(),
+) -> bool {
+    if FENCED.with(Cell::get) {
+        say(THE_SYSTEMS_QUIT_FENCED_BEFORE);
+        return false;
+    }
+    say(the_systems_quit_road_line(save));
+    fence();
+    FENCED.with(|fenced| fenced.set(true));
+    true
+}
+
+/// [`the_systems_quit_ends_with`] with `diagnostics.log` and its fence (`doors::DiagnosticsSettle`,
+/// its own one-second bound, admitted in [`fence_the_log`]).
+pub(crate) fn at_the_systems_quit(save: ClosedSave) {
+    let _ = the_systems_quit_ends_with(save, &mut crate::diagnostics::note, &mut fence_the_log);
 }
 
 /// **Nothing held and nothing parked**, for a test that heard the system: `--test-threads=1` runs
