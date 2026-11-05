@@ -326,6 +326,59 @@ fn hook_command_on(exe: &Path, platform: HostPlatform) -> String {
     format!("{program} {ATTENTION_VERB} {CODEX}:{STOP} {JSON_FLAG} {STDIN_PAYLOAD}")
 }
 
+/// **Whether Windows PowerShell 5.1 can call Folio at this path with `& '<path>'`** (re-review R1).
+/// 5.1, the PowerShell every Windows ships, reads each component of the call's path as a wildcard
+/// pattern before it looks for the file, and throws on one it cannot parse, so the hook would exit 1
+/// on every turn. pwsh 7 does not, and the backtick spelling 5.1 would take is a path pwsh 7 does
+/// not find: no one spelling serves both, so an install from such a path is refused and said.
+///
+/// The pattern, as 5.1 parses it (measured on 2026-11-05 through Windows PowerShell 5.1.26100 and
+/// pwsh 7.6.9 over some seventy folder names, row 69's report): outside a set a backtick makes the
+/// next unit literal, and an unescaped `[` opens a set; the set's first unit is its own, a `]`
+/// too, and the set ends at the next `]`, none being a parse error, and a backtick inside is a
+/// character of the set. In the set, `x-y` is a range, taken left to right, and the range becomes
+/// one of .NET's character classes: a range whose end is below its start, or whose end is `[`,
+/// which .NET reads as the start of a class subtraction, is a parse error too. Units are UTF-16,
+/// which is what both PowerShell and .NET compare.
+#[must_use]
+fn windows_powershell_finds(path: &str) -> bool {
+    path.split(['\\', '/']).all(|component| {
+        let units: Vec<u16> = component.encode_utf16().collect();
+        let mut at = units.iter().copied();
+        let mut escaped = false;
+        while let Some(unit) = at.next() {
+            if unit == u16::from(b'[') && !escaped {
+                let Some(first) = at.next() else {
+                    return false;
+                };
+                let mut set = vec![first];
+                loop {
+                    match at.next() {
+                        None => return false,
+                        Some(unit) if unit == u16::from(b']') => break,
+                        Some(unit) => set.push(unit),
+                    }
+                }
+                let mut index = 0;
+                while index < set.len() {
+                    if index + 2 < set.len() && set[index + 1] == u16::from(b'-') {
+                        if set[index] > set[index + 2] || set[index + 2] == u16::from(b'[') {
+                            return false;
+                        }
+                        index += 3;
+                    } else {
+                        index += 1;
+                    }
+                }
+                escaped = false;
+            } else {
+                escaped = unit == u16::from(b'`');
+            }
+        }
+        true
+    })
+}
+
 /// **Whose one `hooks.json` entry is** — the [`HOOKS`] family's decoder.
 ///
 /// A copy of Folio's when its `command` is Folio's template ([`ownership::legacy_path`]: a quoted
@@ -860,6 +913,10 @@ pub(crate) fn apply_at(path: &Path, decision: Decision, exe: &Path, data: &Path)
 /// and refusing it would leave a hook naming a Folio that is gone — through an uninstall too. So
 /// the removal goes on without that file, leaves it as it was, and says so
 /// ([`Outcome::LeftUnread`]): whether a line of Folio's is in it is exactly what could not be read.
+/// A `config.toml` read and holding Folio's line, but one this build will not edit (read-only, a
+/// link out of the folder, a hard link), is the same for a removal (review R2): the hook goes, the
+/// line stays, and the outcome says why. Only an install, which could mark a turn twice, is
+/// refused whole over it.
 pub(crate) fn apply_resolved(
     config: &Config,
     decision: Decision,
@@ -873,6 +930,14 @@ pub(crate) fn apply_resolved(
         return Outcome::Refused(crate::i18n::Text::AgentHooksRootUnstable.text());
     }
     let install = decision.installs();
+    // A hook Windows PowerShell 5.1 cannot call would fail on every turn (re-review R1); a removal
+    // is never refused for it.
+    if install
+        && bt_platform::host_platform() == HostPlatform::Windows
+        && !windows_powershell_finds(&exe.to_string_lossy())
+    {
+        return Outcome::Refused(crate::i18n::Text::CodexHookPathBrackets.text());
+    }
     let folder = config.named().parent().expect("absolute config");
     let existing = match config.standing() {
         Standing::Text(text) => text,
@@ -933,12 +998,16 @@ pub(crate) fn apply_resolved(
         },
         _ => None,
     };
-    let taken_out = match taken_out {
+    // A `config.toml` Folio reads and will not edit (read-only, a link out of the folder, a hard
+    // link) refuses an install whole, which would otherwise mark one turn twice. A removal marks
+    // nothing: it takes the hook out all the same, leaves the line, and says so (review R2).
+    let (taken_out, unread) = match taken_out {
         Some((toml, text)) => match toml.config.as_ref().map_err(|reason| *reason) {
-            Ok(toml_config) => Some((toml_config, &toml.text, text)),
-            Err(reason) => return Outcome::Refused(reason),
+            Ok(toml_config) => (Some((toml_config, &toml.text, text)), unread),
+            Err(reason) if install => return Outcome::Refused(reason),
+            Err(reason) => (None, Some(reason)),
         },
-        None => None,
+        None => (None, unread),
     };
     let _record = if install {
         match ownership::record(data, folder, "codex") {
@@ -1651,6 +1720,13 @@ mod tests {
                 r"C:\Users\someone\Folio's & 100% $HOME `x`\folio.exe",
                 r"& 'C:\Users\someone\Folio''s & 100% $HOME `x`\folio.exe' attention codex:stop --json -",
             ),
+            // Matched brackets: Windows PowerShell 5.1 reads them as a set and still finds the file
+            // (re-review R1); a path it cannot read is refused before this is written.
+            (
+                HostPlatform::Windows,
+                r"C:\Tools\Folio [portable]\folio.exe",
+                r"& 'C:\Tools\Folio [portable]\folio.exe' attention codex:stop --json -",
+            ),
             (
                 HostPlatform::Windows,
                 "C:\\Users\\someone\\Folio\u{2019}s \u{2018}\u{201a}\u{201b} 文件夹\\folio.exe",
@@ -2267,8 +2343,8 @@ mod tests {
         assert!(toml_lands < hooks_land, "config.toml is written first");
         let judged = body
             .find(
-                "Ok(toml_config)=>Some((toml_config,&toml.text,text)),\
-                 Err(reason)=>returnOutcome::Refused(reason),",
+                "Ok(toml_config)=>(Some((toml_config,&toml.text,text)),unread),\
+                 Err(reason)ifinstall=>returnOutcome::Refused(reason),",
             )
             .expect("a config.toml Folio will not edit is refused here");
         assert!(judged < toml_lands, "and refused before either write");
@@ -2276,6 +2352,186 @@ mod tests {
             .find("ifinstall&&!read_by_codex(written.as_deref().unwrap_or(&existing)){")
             .expect("the text hooks.json will hold is judged by codex's types here");
         assert!(ignored < toml_lands, "before either write too");
+    }
+
+    /// RED (0.4.10 plan row 69, re-review R2) — **a `config.toml` Folio reads and will not edit
+    /// does not keep Folio's hook in `hooks.json` either**: switching off, and so an uninstall,
+    /// takes the hook out, leaves the file holding this copy's `notify` line as it was, and says
+    /// why. A removal cannot mark a turn twice, so the install's whole refusal is not its rule.
+    /// Before, the removal was refused, and an uninstalled Folio left both behind.
+    ///
+    /// MUTATION: `plant-69-removal-refused-unwritable.py` refuses the removal over it again.
+    #[test]
+    fn a_config_toml_folio_will_not_edit_does_not_keep_folios_hook_in() {
+        let dir = scratch("unwritable-toml-off");
+        let config = dir.join(CONFIG_FILE);
+        let path = dir.join(HOOKS_FILE);
+        let with_ours = format!(
+            r#"{{"hooks":{{"Stop":[{{"hooks":[{}]}}]}}}}"#,
+            own_stop(&exe())
+        );
+        std::fs::write(&path, &with_ours).expect("a hook of this copy's");
+        let line = format!("model = \"gpt-5\"\nnotify = {}\n", notify_value(&exe()));
+        std::fs::write(&config, &line).expect("their own file");
+        let writable = std::fs::metadata(&config).expect("there").permissions();
+        let mut readonly = writable.clone();
+        readonly.set_readonly(true);
+        std::fs::set_permissions(&config, readonly).expect("read-only");
+        let outcome = apply_to(&path, false, &exe());
+        let hooks_after = std::fs::read_to_string(&path).expect("there");
+        let config_after = std::fs::read_to_string(&config).expect("there");
+        // Restored before the assertions, not after them: a panic in between would leave the
+        // fixture read-only (attention_ownership's review R14).
+        std::fs::set_permissions(&config, writable).expect("writable again");
+        assert_eq!(
+            outcome,
+            Outcome::LeftUnread {
+                removed: true,
+                reason: crate::i18n::Text::AgentConfigReadOnly.text()
+            }
+        );
+        assert_eq!(hooks_after, "{}", "Folio's hook is out");
+        assert_eq!(config_after, line, "the line stays, as the file was");
+        // Put right, the same press takes the line out too.
+        assert_eq!(apply_to(&path, false, &exe()), Outcome::Removed);
+        assert_eq!(
+            std::fs::read_to_string(&config).expect("there"),
+            "model = \"gpt-5\"\n"
+        );
+    }
+
+    /// RED (0.4.10 plan row 69, re-review R1) — **an install from a path Windows PowerShell 5.1
+    /// cannot call is refused on Windows**, where codex runs the hook through it and the call would
+    /// fail on every turn; a path with matched brackets installs; a removal is never refused for
+    /// it; off Windows the hook is sh's and both install.
+    ///
+    /// MUTATION: `plant-69-brackets-unrefused.py` drops the refusal.
+    #[test]
+    fn a_path_windows_powershell_cannot_call_is_refused_there() {
+        let dir = scratch("brackets");
+        let unmatched = dir.join("a[b").join("folio.exe");
+        let path = dir.join(HOOKS_FILE);
+        let installing = apply_to(&path, true, &unmatched);
+        if bt_platform::host_platform() == HostPlatform::Windows {
+            assert_eq!(
+                installing,
+                Outcome::Refused(crate::i18n::Text::CodexHookPathBrackets.text())
+            );
+            assert!(!path.exists(), "nothing was written");
+        } else {
+            assert_eq!(installing, Outcome::Installed);
+        }
+        let own = own_stop(&unmatched);
+        std::fs::write(
+            &path,
+            format!(r#"{{"hooks":{{"Stop":[{{"hooks":[{own}]}}]}}}}"#),
+        )
+        .expect("a hook of this copy's");
+        assert_eq!(apply_to(&path, false, &unmatched), Outcome::Removed);
+        let matched = dir.join("Folio [portable]").join("folio.exe");
+        assert_eq!(apply_to(&path, true, &matched), Outcome::Installed);
+    }
+
+    /// **The pattern Windows PowerShell 5.1 reads a call's path as** — every folder name of the
+    /// 2026-11-05 measurement (row 69's report, re-review R1), each run as `& '<path>' a` with piped
+    /// stdin through 5.1 and pwsh 7: the first list ran under both, the second failed under 5.1
+    /// alone. A `\` inside a name stands for two folders.
+    #[test]
+    fn windows_powershell_takes_the_paths_it_was_measured_to_take() {
+        let runs = [
+            "plain",
+            "a]b",
+            "x [portable] y",
+            "a[[b]",
+            "a[b]]c",
+            "a`[b",
+            "a`b",
+            "tail`",
+            "a[`]b",
+            "a[b`]c",
+            "]",
+            "a[b[c]d]e",
+            "a[]]b",
+            "a[]b]c",
+            "a``[b",
+            "a`]b",
+            "a`[b]",
+            "a[`]",
+            "[a]",
+            "a [] b ]",
+            "a[b`]",
+            "x[a-c]y",
+            "x[-]y",
+            "x[a-]y",
+            "x[!a]y",
+            "x[^a]y",
+            "tail`[",
+            "x[]-a]y",
+            "x[a-c-e]y",
+            "x[0-9]y",
+            "x[$]y",
+            "x[.]y",
+            "x[(]y",
+            "x[{]y",
+            "x[a b]y",
+            "x[!]y",
+            "x[^]y",
+            "x[a-a]y",
+            "x[文]y",
+            "x[a-文]y",
+            "x[---]y",
+            "x[--a]y",
+            "x[`-a]y",
+            "x[a-c-[d]y",
+            "x[a-b-c]y",
+            "x[-[]y",
+            "x[a-c-]y",
+            "x[a-c--]y",
+            "x[a-c-a]y",
+            "y[Z-a]y",
+            "y[[-a]y",
+            "y[a-b-[c]y",
+            "y[-a-]y",
+            "y[!-#]y",
+            "y[\u{1F600}]y",
+        ];
+        let fails = [
+            "a[b",
+            "a[]b",
+            "a[b]c[d",
+            "a]b[c",
+            "[",
+            "[]",
+            "][",
+            "a[`",
+            "a[b`",
+            "a[`[b",
+            "x[c-a]y",
+            "x[e-c-a]y",
+            "x[a-c][z-a]y",
+            "x[9-0]y",
+            "x[文-a]y",
+            "x[a--]y",
+            r"p[b\c]q",
+            r"p[x\y]q",
+            r"p[a\d]q",
+            r"p[a\]q",
+            "x[A-[]y",
+            "x[A-[b]y",
+            "x[!-[]y",
+            "y[a-Z]y",
+            "y[a-c-[d-a]y",
+            "y[b-[-]y",
+            "y[--[]y",
+        ];
+        for name in runs {
+            let path = format!(r"C:\Users\someone\{name}\folio.exe");
+            assert!(windows_powershell_finds(&path), "{name} ran under 5.1");
+        }
+        for name in fails {
+            let path = format!(r"C:\Users\someone\{name}\folio.exe");
+            assert!(!windows_powershell_finds(&path), "{name} failed under 5.1");
+        }
     }
 
     /// RED (ruling R13) — **Folio never writes codex's record of the person's approval.** Said over

@@ -3282,7 +3282,7 @@ text_entries! {
 
     // ── codex's Stop hook (0.4.10 plan row 69) ─────────────────────────────
     //
-    // One contiguous block at the end, per this table's standing rule. **Two
+    // One contiguous block at the end, per this table's standing rule. **Three
     // refusals**, each the reason half of `CodexNotifyFailedToast`'s sentence,
     // said where `attention_codex::apply_resolved` writes nothing.
     /// `config.toml` already declares hook events, and codex warns on every start
@@ -3293,6 +3293,10 @@ text_entries! {
     /// and `hooks`, a key named twice, a handler or a value of a type codex does not
     /// take — and codex reads none of such a file, so the hook would never run.
     CodexHooksFileIgnored,
+    /// Windows PowerShell 5.1 reads Folio's path as a wildcard pattern and cannot
+    /// parse it (a `[` with no `]` after it, among others), so the hook would
+    /// fail on every turn (re-review R1).
+    CodexHookPathBrackets,
 }
 
 impl Text {
@@ -6423,6 +6427,11 @@ impl Text {
                 "Codex cannot read this hooks.json as it is, so a hook added to it would never run.",
                 "Codex 无法读取当前的 hooks.json，添加的 hook 不会运行。",
             ),
+            Self::CodexHookPathBrackets => pick(
+                lang,
+                "Windows PowerShell cannot run Folio from this path because of the [ or ] in it, so Codex's hook would fail. Move Folio to a folder without [ or ].",
+                "路径中的 [ 或 ] 使 Windows PowerShell 无法运行 Folio，Codex 的 hook 会失败。请将 Folio 移到不含 [ 或 ] 的文件夹。",
+            ),
         }
     }
 
@@ -6610,6 +6619,9 @@ impl Text {
         //   halves, because a card is a surface and not a sentence.
         Self::WebFailRuntimeSay,
         Self::WebFailRuntimeVerb,
+        // — the Codex hook's refusal of a path Windows PowerShell cannot call, which
+        //   `attention_codex::apply_resolved` raises only on Windows (row 69, re-review R1)
+        Self::CodexHookPathBrackets,
     ];
 
     #[cfg(test)]
