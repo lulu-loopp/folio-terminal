@@ -3242,6 +3242,37 @@ mod tests {
                 ],
             ),
             (
+                // Review N6: two lookalikes of Folio's that are not Folio's (an extra key; a
+                // command line that is none of Folio's templates), a hook with arrays and objects
+                // inside it, and a raw non-ASCII byte.
+                "lookalikes, a nested hook and a raw é",
+                r#"{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {"type": "command", "command": "folio.exe", "args": ["attention", "claude-code:Stop", "--json", "-"], "async": true, "timeout": 5},
+          {"type": "command", "command": "folio attention claude-code:Stop"},
+          {"type": "command", "command": "say café"}
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {"matcher": "Bash", "hooks": [{"type": "command", "command": "lint", "args": ["--x", ["y", {"z": [1, {"w": null}]}]], "env": {"A": {"B": [true]}}}]}
+    ]
+  }
+}
+"#
+                .to_owned(),
+                vec![
+                    r#"{"type": "command", "command": "folio.exe", "args": ["attention", "claude-code:Stop", "--json", "-"], "async": true, "timeout": 5}"#,
+                    r#"{"type": "command", "command": "folio attention claude-code:Stop"}"#,
+                    r#"{"type": "command", "command": "say café"}"#,
+                    r#""matcher": "Bash""#,
+                    r#"{"type": "command", "command": "lint", "args": ["--x", ["y", {"z": [1, {"w": null}]}]], "env": {"A": {"B": [true]}}}"#,
+                ],
+            ),
+            (
                 "no hooks at all",
                 "{\n  \"model\": \"opus\"\n}\n".to_owned(),
                 vec![r#""model": "opus""#],
