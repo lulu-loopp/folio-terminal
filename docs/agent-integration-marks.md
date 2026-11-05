@@ -136,10 +136,13 @@ and escapes.
   (judged by a mirror of Codex's own `HooksFile` types: a byte-order mark, a
   top-level key other than `description` and `hooks`, a key named twice, a
   handler or value of a type Codex does not take), or when `config.toml` already
-  declares hook events (Codex warns when both files do). A `config.toml` Folio
-  cannot read refuses an install; a removal goes on without it, leaves it as it
-  was and says so. Folio never writes Codex's `[hooks.state]` approvals: the
-  person approves the hook once in Codex.
+  declares hook events (Codex warns when both files do), or on Windows when
+  Windows PowerShell 5.1 cannot call Folio's path (an unmatched `[`, among
+  others: it reads the path as a wildcard pattern). A `config.toml` Folio cannot
+  read refuses an install, and so does one it will not edit when the install has
+  to take Folio's line out of it; a removal goes on without it, leaves it as it
+  was and says so. Folio never writes Codex's `[hooks.state]`
+  approvals: the person approves the hook once in Codex.
 - **Codex's `notify` line** (`config.toml`): Folio 0.2 to 0.4.9 installed a
   `notify` line, and it stays until Folio writes its hook (row 69 ruling R18).
   It is then removed in the same operation. `toml_edit`'s rendering ended every
