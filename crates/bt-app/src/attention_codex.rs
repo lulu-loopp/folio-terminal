@@ -934,9 +934,9 @@ pub(crate) fn apply_resolved(
         _ => None,
     };
     let taken_out = match taken_out {
-        Some((toml, text)) => match &toml.config {
+        Some((toml, text)) => match toml.config.as_ref().map_err(|reason| *reason) {
             Ok(toml_config) => Some((toml_config, &toml.text, text)),
-            Err(reason) => return Outcome::Refused(*reason),
+            Err(reason) => return Outcome::Refused(reason),
         },
         None => None,
     };
@@ -2268,7 +2268,7 @@ mod tests {
         let judged = body
             .find(
                 "Ok(toml_config)=>Some((toml_config,&toml.text,text)),\
-                 Err(reason)=>returnOutcome::Refused(*reason),",
+                 Err(reason)=>returnOutcome::Refused(reason),",
             )
             .expect("a config.toml Folio will not edit is refused here");
         assert!(judged < toml_lands, "and refused before either write");
