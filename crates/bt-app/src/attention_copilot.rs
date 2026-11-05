@@ -656,9 +656,26 @@ fn hooks_are_switched_off() -> bool {
 ///
 /// Read at the moments it can change rather than on every frame — the caller caches it, for
 /// `attention_hooks`'s reason: this reads a file and may be drawn sixty times a second.
+///
+/// **The settings file is read only when a version came back**: it decides nothing without one
+/// ([`readiness_from`]), so a machine whose probe has not answered reads no file of Copilot's here.
 #[must_use]
 pub(crate) fn readiness() -> Readiness {
-    readiness_from(probe(), hooks_are_switched_off())
+    let found = probe();
+    let switched_off = found.is_some() && hooks_are_switched_off();
+    readiness_from(found, switched_off)
+}
+
+/// **Whether the start-time repair may write Copilot's hooks now** (0.4.10 plan row 67b, R9): only
+/// once the version question has been asked and answered, and never for a copilot too old for
+/// them — an install there would write hooks that misreport. Unasked, it is asked here, and the
+/// answer starts the carry pass again (`AppEvent::CopilotProbed`), which repairs then.
+pub(crate) fn repair_within_the_gate() -> bool {
+    if !probe_settled() {
+        begin_probe();
+        return false;
+    }
+    readiness() != Readiness::TooOld
 }
 
 /// The same decision with both answers handed in.

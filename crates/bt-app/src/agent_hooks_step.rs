@@ -49,6 +49,9 @@ pub(crate) struct HooksFamily {
     pub(crate) scan: HooksScanFn,
     /// The switch's own writer.
     pub(crate) apply: fn(&Config, Decision, &Path, &Path) -> Outcome,
+    /// Whether a repair may write the family's hooks now: always, except where the agent's own
+    /// version decides whether they mean what Folio reads them as (Copilot, R9).
+    pub(crate) within_its_gate: fn() -> bool,
     /// The notice a repair of a gone copy's hooks raises (R8).
     pub(crate) repaired: Text,
 }
@@ -62,6 +65,7 @@ pub(crate) static HOOKS_FAMILIES: [HooksFamily; 3] = [
         path: crate::attention_hooks::settings_path,
         scan: crate::attention_hooks::scan_resolved,
         apply: crate::attention_hooks::apply_resolved,
+        within_its_gate: no_gate,
         repaired: Text::AgentHooksRepairedClaude,
     },
     HooksFamily {
@@ -70,20 +74,27 @@ pub(crate) static HOOKS_FAMILIES: [HooksFamily; 3] = [
         path: crate::attention_codex::config_path,
         scan: crate::attention_codex::scan_resolved,
         apply: crate::attention_codex::apply_resolved,
+        within_its_gate: no_gate,
         repaired: Text::AgentHooksRepairedCodex,
     },
-    // Repaired within its version gate (R9): `apply_resolved` refuses a copilot too old for the
-    // hooks, and the refusal is a diagnostics line here. Never on the resume row's line: this
-    // build resumes no Copilot session.
+    // Repaired within its version gate (R9): only once the version question has been asked and
+    // answered, and never for a copilot too old for the hooks (`repair_within_the_gate`). Never on
+    // the resume row's line: this build resumes no Copilot session.
     HooksFamily {
         family: crate::attention_map::COPILOT,
         tag: "copilot",
         path: crate::attention_copilot::hooks_path,
         scan: crate::attention_copilot::scan_resolved,
         apply: crate::attention_copilot::apply_resolved,
+        within_its_gate: crate::attention_copilot::repair_within_the_gate,
         repaired: Text::AgentHooksRepairedCopilot,
     },
 ];
+
+/// A family whose hooks mean the same to every version of its agent.
+fn no_gate() -> bool {
+    true
+}
 
 /// **One family's answer from one run of the step.**
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -152,7 +163,9 @@ impl AgentHooksStep {
     /// **One run over the families**: each file at `paths` (the families' order) resolved once,
     /// classified against `exe` — this copy's program — with `look` answering what stands at a
     /// path, and repaired where [`HooksFound::wants_repair`] says, into the marks of `data`.
-    /// `defer` is the trial gate's question, asked at most once, and only when a repair is due.
+    /// `defer` is the trial gate's question, asked at most once, and only when a repair is due;
+    /// `within_its_gate` is a family's own ([`HooksFamily::within_its_gate`]), asked only when a
+    /// repair of that family is due.
     pub(crate) fn scan_and_repair(
         &self,
         paths: &[Option<PathBuf>; 3],
@@ -160,6 +173,7 @@ impl AgentHooksStep {
         data: &Path,
         look: &dyn Fn(&Path) -> PathStands,
         mut defer: impl FnMut(Writer) -> bool,
+        within_its_gate: &dyn Fn(&HooksFamily) -> bool,
     ) -> [HooksScan; 3] {
         let mut held = None;
         std::array::from_fn(|index| {
@@ -172,7 +186,9 @@ impl AgentHooksStep {
                 Some(Err(Unresolved::Unreadable)) => {
                     return HooksScan::unrepaired(HooksFound::Unreadable);
                 }
-                Some(Ok(config)) => config,
+                // One read for the run (`Config::with_one_read`): what is classified is what is
+                // edited, and a press that wrote since makes the write refuse rather than undo it.
+                Some(Ok(config)) => config.with_one_read(),
             };
             let found = (family.scan)(&config, exe, look);
             if !found.wants_repair() {
@@ -190,13 +206,17 @@ impl AgentHooksStep {
                 say("held");
                 return HooksScan::unrepaired(found);
             }
+            if !within_its_gate(family) {
+                say("gated");
+                return HooksScan::unrepaired(found);
+            }
             let Some(_latch) = self.take_latch(index) else {
                 say("pressed");
                 return HooksScan::unrepaired(found);
             };
             match (family.apply)(&config, Decision::Install, exe, data) {
                 Outcome::Installed => {
-                    let now = (family.scan)(&config, exe, look);
+                    let now = (family.scan)(&config.read_afresh(), exe, look);
                     crate::diagnostics::stderr_line(format!(
                         "BT_AGENT_HOOKS {} {} repaired={}{}",
                         family.tag,
@@ -300,6 +320,7 @@ pub(crate) fn run_agent_hooks_step() {
         &crate::persist::storage_dir(),
         &ownership::what_stands,
         crate::update_trial::defer,
+        &|family| (family.within_its_gate)(),
     );
     AGENT_HOOKS.publish_scans(&scans, crate::attention_copilot::readiness());
     if let Some(wake) = HOOKS_WAKE.get() {
@@ -307,26 +328,36 @@ pub(crate) fn run_agent_hooks_step() {
     }
 }
 
-/// Where a family's file is: the account's own, in the product.
-#[cfg(not(test))]
-fn family_path(family: &HooksFamily) -> Option<PathBuf> {
-    (family.path)()
-}
-
+/// **Where a family's file is**: the account's own, in the product.
+///
 /// **A test process's agents keep their files in a scratch folder of its own**, never in the
 /// account's (`persist::storage_dir`'s rule for the data folder): a test that drives a walk's
 /// answer, an Agents-page open or a trial's commit runs the pass, and the pass writes.
-#[cfg(test)]
 fn family_path(family: &HooksFamily) -> Option<PathBuf> {
-    Some(test_process_agent_homes().join(family.tag).join("config"))
+    #[cfg(test)]
+    {
+        Some(test_process_agent_homes().join(family.tag).join("config"))
+    }
+    #[cfg(not(test))]
+    {
+        (family.path)()
+    }
 }
 
 /// The scratch folder [`family_path`] keeps a test process's agents in: one per process, named
-/// once.
+/// once, under the build's `target/tb-tests` with the step's own tests' folders.
 #[cfg(test)]
 fn test_process_agent_homes() -> &'static Path {
     static HOMES: OnceLock<PathBuf> = OnceLock::new();
-    HOMES.get_or_init(|| bt_testpath::temp_path("bt-app-test-process-agent-homes"))
+    HOMES.get_or_init(|| {
+        test_scratch_root().join(bt_testpath::unique_name("bt-app-test-process-agent-homes"))
+    })
+}
+
+/// The build's own scratch folder for this module's tests.
+#[cfg(test)]
+fn test_scratch_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/tb-tests")
 }
 
 /// **The Agents row's line over what the scan found**, when it has one to say; `None` keeps the
@@ -377,15 +408,13 @@ mod tests {
     //! the machine's answer about a path is either the real one about those files or one the test
     //! hands in. No test here reads an agent's real configuration or a Folio data folder.
     use super::*;
-    use crate::attention_ownership::{volume_root_of, what_stands};
+    use crate::attention_ownership::{DeadWhen, volume_root_of, what_stands};
     use serde_json::{Value, json};
     use std::fs;
 
     fn root(name: &str) -> crate::test_support::ScratchFolder {
         crate::test_support::ScratchFolder::create(
-            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../../target/tb-tests")
-                .join(bt_testpath::unique_name(name)),
+            test_scratch_root().join(bt_testpath::unique_name(name)),
         )
     }
 
@@ -438,12 +467,16 @@ mod tests {
         false
     }
 
+    fn every_family(_: &HooksFamily) -> bool {
+        true
+    }
+
     /// T1 — **a dead owner is repaired at start, once, for all three families**: the files name
-    /// this copy, the roots are in the marks, one notice per family is published, and a second
-    /// run writes nothing and owes no notice.
+    /// this copy, the roots are in this copy's marks (the gone copy kept its own data folder), one
+    /// notice per family is published, and a second run writes nothing and owes no notice.
     ///
     /// MUTATIONS: the liveness rule answers "alive" for a missing program
-    /// (`plant-67b-dead-is-alive.py`) and the scan reads another copy's hooks; the repair writes
+    /// (`plant-67b-dead-is-alive-r2.py`) and the scan reads another copy's hooks; the repair writes
     /// nothing (`plant-67b-repair-writes-nothing.py`).
     #[test]
     fn a_dead_owner_is_repaired_at_start_once() {
@@ -452,10 +485,17 @@ mod tests {
         let here = copy_at(&root, "B here");
         let files = files_in(&root.join("config"));
         let data = root.join("data");
-        install_all(&files, &gone, &data);
+        install_all(&files, &gone, &root.join("gone data"));
         fs::remove_file(&gone).unwrap();
         let step = AgentHooksStep::new();
-        let scans = step.scan_and_repair(&some(&files), &here, &data, &what_stands, never_held);
+        let scans = step.scan_and_repair(
+            &some(&files),
+            &here,
+            &data,
+            &what_stands,
+            never_held,
+            &every_family,
+        );
         for scan in &scans {
             assert_eq!(
                 scan.repaired_from,
@@ -494,7 +534,14 @@ mod tests {
             ]
         );
         let repaired = bytes(&files);
-        let again = step.scan_and_repair(&some(&files), &here, &data, &what_stands, never_held);
+        let again = step.scan_and_repair(
+            &some(&files),
+            &here,
+            &data,
+            &what_stands,
+            never_held,
+            &every_family,
+        );
         assert!(again.iter().all(|scan| scan.repaired_from.is_none()));
         assert_eq!(bytes(&files), repaired, "a second run wrote");
         step.publish_scans(&again, Readiness::Unknown);
@@ -502,6 +549,82 @@ mod tests {
             step.take_snapshot().unwrap().notices.is_empty(),
             "a notice was said twice"
         );
+    }
+
+    /// **A press between the scan and the write is never undone**: the run classified the file
+    /// and then the file changed (here, the person's press took Folio's hooks out while the trial's
+    /// gate was being asked); the repair's write is of the bytes it classified, so it refuses, the
+    /// file keeps the press's bytes, and the other families are repaired as before.
+    ///
+    /// MUTATION: the run reads the file again for its write (`plant-67b-read-twice.py`): the
+    /// repair puts the hooks back over the press.
+    #[test]
+    fn a_press_between_the_scan_and_the_write_is_never_undone() {
+        let root = root("hooks-step-press-between");
+        let gone = copy_at(&root, "A gone");
+        let here = copy_at(&root, "B here");
+        let files = files_in(&root.join("config"));
+        let data = root.join("data");
+        install_all(&files, &gone, &root.join("gone data"));
+        fs::remove_file(&gone).unwrap();
+        let pressed = "{\n  \"model\": \"mine\"\n}\n";
+        let step = AgentHooksStep::new();
+        let scans = step.scan_and_repair(
+            &some(&files),
+            &here,
+            &data,
+            &what_stands,
+            |_| {
+                fs::write(&files[0], pressed).unwrap();
+                false
+            },
+            &every_family,
+        );
+        assert_eq!(scans[0].repaired_from, None, "the press was written over");
+        assert_eq!(fs::read_to_string(&files[0]).unwrap(), pressed);
+        for scan in &scans[1..] {
+            assert_eq!(
+                scan.repaired_from,
+                Some(HooksFound::Dead(vec![gone.clone()]))
+            );
+        }
+        step.publish_scans(&scans, Readiness::Unknown);
+        assert_eq!(
+            step.take_snapshot().unwrap().notices,
+            [
+                Text::AgentHooksRepairedCodex,
+                Text::AgentHooksRepairedCopilot
+            ],
+            "only what was repaired is said"
+        );
+    }
+
+    /// R9 — **Copilot's hooks are repaired only within its version gate**: a family whose
+    /// gate does not admit the repair is left as it was and said, and the others are repaired.
+    #[test]
+    fn a_family_outside_its_gate_is_left_for_the_answer() {
+        let root = root("hooks-step-gate");
+        let gone = copy_at(&root, "A gone");
+        let here = copy_at(&root, "B here");
+        let files = files_in(&root.join("config"));
+        let data = root.join("data");
+        install_all(&files, &gone, &root.join("gone data"));
+        fs::remove_file(&gone).unwrap();
+        let copilot_before = fs::read(&files[2]).unwrap();
+        let scans = AgentHooksStep::new().scan_and_repair(
+            &some(&files),
+            &here,
+            &data,
+            &what_stands,
+            never_held,
+            &|family: &HooksFamily| family.tag != "copilot",
+        );
+        assert_eq!(
+            scans[2],
+            HooksScan::unrepaired(HooksFound::Dead(vec![gone.clone()]))
+        );
+        assert_eq!(fs::read(&files[2]).unwrap(), copilot_before);
+        assert!(scans[..2].iter().all(|scan| scan.repaired_from.is_some()));
     }
 
     /// T2 — **a living other copy's hooks are left, and said by its path** (R5): nothing is
@@ -522,6 +645,7 @@ mod tests {
             &data,
             &what_stands,
             never_held,
+            &every_family,
         );
         assert_eq!(
             found(&scans),
@@ -643,7 +767,14 @@ mod tests {
             let today = bytes(&files);
             respell(&files);
             let step = AgentHooksStep::new();
-            let scans = step.scan_and_repair(&some(&files), &here, &data, &what_stands, never_held);
+            let scans = step.scan_and_repair(
+                &some(&files),
+                &here,
+                &data,
+                &what_stands,
+                never_held,
+                &every_family,
+            );
             let family = usize::from(shape.starts_with('P')) * 2;
             assert_eq!(
                 scans[family].repaired_from,
@@ -704,7 +835,14 @@ mod tests {
         remove(&|event| event != "Stop");
         let theirs = fs::read(&files[0]).unwrap();
         let step = AgentHooksStep::new();
-        let left = step.scan_and_repair(&some(&files), &here, &data, &what_stands, never_held);
+        let left = step.scan_and_repair(
+            &some(&files),
+            &here,
+            &data,
+            &what_stands,
+            never_held,
+            &every_family,
+        );
         assert_eq!(left[0], HooksScan::unrepaired(HooksFound::Current));
         assert_eq!(
             fs::read(&files[0]).unwrap(),
@@ -712,7 +850,14 @@ mod tests {
             "a person's own removal was undone"
         );
         remove(&|event| event == "Stop");
-        let put_back = step.scan_and_repair(&some(&files), &here, &data, &what_stands, never_held);
+        let put_back = step.scan_and_repair(
+            &some(&files),
+            &here,
+            &data,
+            &what_stands,
+            never_held,
+            &every_family,
+        );
         assert_eq!(put_back[0].repaired_from, Some(HooksFound::Drifted));
         let settings: Value = serde_json::from_slice(&fs::read(&files[0]).unwrap()).unwrap();
         assert!(
@@ -736,6 +881,7 @@ mod tests {
             &root.join("data"),
             &what_stands,
             never_held,
+            &every_family,
         );
         assert_eq!(found(&scans), vec![HooksFound::Nothing; 3]);
         assert!(
@@ -781,6 +927,7 @@ mod tests {
                 &root.join("data"),
                 &what_stands,
                 never_held,
+                &every_family,
             );
             assert_eq!(scans[family].found, HooksFound::Unreadable, "{text}");
             assert_eq!(fs::read_to_string(&files[family]).unwrap(), text);
@@ -850,6 +997,7 @@ mod tests {
             &root.join("data"),
             &what_stands,
             never_held,
+            &every_family,
         );
         assert_eq!(
             scans[0].repaired_from,
@@ -872,6 +1020,13 @@ mod tests {
                 "the person's line {theirs:?} moved or changed:\n{written}"
             );
         }
+        // The line Folio's entry shared: the person's entry, and the group's bytes before it, as
+        // they were.
+        let shared = "            {\"hooks\": [{\"type\": \"command\", \"command\": \"mine\"}";
+        assert!(
+            written.split("\r\n").any(|line| line.starts_with(shared)),
+            "the person's entry beside Folio's moved or changed:\n{written}"
+        );
         let before: Value = serde_json::from_str(&text).unwrap();
         let after: Value = serde_json::from_str(&written).unwrap();
         assert_eq!(without_folio(&after), without_folio(&before));
@@ -895,8 +1050,14 @@ mod tests {
                 what_stands(path)
             }
         };
-        let scans =
-            AgentHooksStep::new().scan_and_repair(&some(&files), &here, &data, &look, never_held);
+        let scans = AgentHooksStep::new().scan_and_repair(
+            &some(&files),
+            &here,
+            &data,
+            &look,
+            never_held,
+            &every_family,
+        );
         assert_eq!(found(&scans), vec![HooksFound::OwnerUnknown; 3]);
         assert_eq!(bytes(&files), before);
         assert_eq!(
@@ -908,7 +1069,7 @@ mod tests {
     /// T8 (R4) — **a missing owner on a volume that is not there is not dead**: an unplugged
     /// drive's copy keeps its hooks.
     ///
-    /// MUTATION: the volume is not asked about (`plant-67b-no-volume-check.py`).
+    /// MUTATION: the volume is not asked about (`plant-67b-no-volume-check-r2.py`).
     #[test]
     fn an_owner_on_an_absent_volume_is_not_dead() {
         let root = root("hooks-step-volume");
@@ -926,26 +1087,107 @@ mod tests {
                 what_stands(path)
             }
         };
-        let scans =
-            AgentHooksStep::new().scan_and_repair(&some(&files), &here, &data, &look, never_held);
+        let scans = AgentHooksStep::new().scan_and_repair(
+            &some(&files),
+            &here,
+            &data,
+            &look,
+            never_held,
+            &every_family,
+        );
         assert_eq!(found(&scans), vec![HooksFound::OwnerUnknown; 3]);
         assert_eq!(bytes(&files), before);
         // The same owner on a volume that answers is dead, by the same rule.
         assert_eq!(
-            ownership::other_live_by(&away, &here, |path: &Path| if path == away {
+            ownership::other_live_by(
+                &away,
+                &here,
+                |path: &Path| if path == away {
+                    PathStands::Missing
+                } else {
+                    what_stands(path)
+                },
+                DeadWhen::MissingOnAVolumeThatIsThere
+            ),
+            Ok(false)
+        );
+    }
+
+    /// **R4 is the scan's rule, not the press's**: a person's press and the uninstall decide on
+    /// the machine as it stands (an owner that is not there is gone, design §6.2), so an unplugged
+    /// drive's copy never keeps a person from turning hooks off or from uninstalling; the scan,
+    /// which writes with nobody asking, calls the same owner unknown. And an operand that names no
+    /// file — a bare `folio.exe` an old build wrote, a placeholder — is gone to a press and cannot
+    /// be asked about by the scan, which leaves it and says so.
+    ///
+    /// MUTATION: the scan's rule calls an operand that names no file dead
+    /// (`plant-67b-unaskable-operand-dead.py`).
+    #[test]
+    fn the_volume_rule_is_the_scans_and_a_press_decides_on_the_machine_as_it_stands() {
+        let root = root("hooks-step-rules");
+        let here = copy_at(&root, "B here");
+        let away = root.join("A away").join("folio.exe");
+        let volume = volume_root_of(&away).expect("a fixture path names its volume");
+        let unplugged = |path: &Path| {
+            if path == away || path == volume {
                 PathStands::Missing
             } else {
                 what_stands(path)
-            }),
-            Ok(false)
+            }
+        };
+        assert_eq!(
+            ownership::other_live_by(&away, &here, unplugged, DeadWhen::Missing),
+            Ok(false),
+            "a press takes an unplugged drive's copy for gone"
         );
+        assert_eq!(
+            ownership::other_live_by(
+                &away,
+                &here,
+                unplugged,
+                DeadWhen::MissingOnAVolumeThatIsThere
+            ),
+            Err(Text::AgentHooksOwnerUnknown.text()),
+            "the scan does not"
+        );
+        for operand in ["folio.exe", "${HOME}/folio.exe"] {
+            let operand = Path::new(operand);
+            assert_eq!(
+                ownership::other_live_by(operand, &here, what_stands, DeadWhen::Missing),
+                Ok(false),
+                "a press removes {}",
+                operand.display()
+            );
+            assert_eq!(
+                ownership::other_live_by(
+                    operand,
+                    &here,
+                    what_stands,
+                    DeadWhen::MissingOnAVolumeThatIsThere
+                ),
+                Err(Text::AgentHooksOwnerUnknown.text()),
+                "the scan leaves {}",
+                operand.display()
+            );
+        }
     }
 
     /// The volume rule's spellings, read off the path alone.
     #[test]
     fn a_volume_is_the_drive_the_share_or_the_mount() {
-        #[cfg(windows)]
-        {
+        // The rooted spellings read the same on every host: a Windows path compares by its
+        // components, so `/Volumes\Stick` is `/Volumes/Stick` there.
+        assert_eq!(
+            volume_root_of(Path::new("/Volumes/Stick/Folio.app/Contents/MacOS/folio")),
+            Some(PathBuf::from("/Volumes/Stick"))
+        );
+        assert_eq!(
+            volume_root_of(Path::new("/Applications/Folio.app/Contents/MacOS/folio")),
+            Some(PathBuf::from("/"))
+        );
+        assert_eq!(volume_root_of(Path::new("Folio/folio")), None);
+        // A drive and a share are prefixes only where the host's paths have them.
+        if bt_platform::host_platform() == bt_platform::HostPlatform::Windows {
             assert_eq!(
                 volume_root_of(Path::new(r"D:\Apps\Folio\folio.exe")),
                 Some(PathBuf::from(r"D:\"))
@@ -954,19 +1196,7 @@ mod tests {
                 volume_root_of(Path::new(r"\\server\share\Folio\folio.exe")),
                 Some(PathBuf::from(r"\\server\share\"))
             );
-            assert_eq!(volume_root_of(Path::new(r"Folio\folio.exe")), None);
-        }
-        #[cfg(not(windows))]
-        {
-            assert_eq!(
-                volume_root_of(Path::new("/Volumes/Stick/Folio.app/Contents/MacOS/folio")),
-                Some(PathBuf::from("/Volumes/Stick"))
-            );
-            assert_eq!(
-                volume_root_of(Path::new("/Applications/Folio.app/Contents/MacOS/folio")),
-                Some(PathBuf::from("/"))
-            );
-            assert_eq!(volume_root_of(Path::new("Folio/folio")), None);
+            assert_eq!(volume_root_of(Path::new(r"D:Folio\folio.exe")), None);
         }
     }
 
@@ -991,10 +1221,17 @@ mod tests {
         let gate = Gate::new();
         let mut asked = 0;
         let step = AgentHooksStep::new();
-        let held = step.scan_and_repair(&some(&files), &here, &data, &what_stands, |writer| {
-            asked += 1;
-            gate.defer(true, writer)
-        });
+        let held = step.scan_and_repair(
+            &some(&files),
+            &here,
+            &data,
+            &what_stands,
+            |writer| {
+                asked += 1;
+                gate.defer(true, writer)
+            },
+            &every_family,
+        );
         assert_eq!(asked, 1, "the gate is asked once per run");
         assert_eq!(gate.pending(), vec![Writer::AgentHooksRepair]);
         assert_eq!(found(&held), vec![HooksFound::Dead(vec![gone.clone()]); 3]);
@@ -1034,9 +1271,14 @@ mod tests {
             &mut crate::update_trial::watchdog_asleep(),
         );
         assert_eq!(gate.take_released(), vec![Writer::AgentHooksRepair]);
-        let released = step.scan_and_repair(&some(&files), &here, &data, &what_stands, |writer| {
-            gate.defer(true, writer)
-        });
+        let released = step.scan_and_repair(
+            &some(&files),
+            &here,
+            &data,
+            &what_stands,
+            |writer| gate.defer(true, writer),
+            &every_family,
+        );
         assert!(
             released
                 .iter()
@@ -1060,7 +1302,14 @@ mod tests {
         let claude = fs::read(&files[0]).unwrap();
         let step = AgentHooksStep::new();
         let press = step.take_latch(0).expect("nobody holds it");
-        let scans = step.scan_and_repair(&some(&files), &here, &data, &what_stands, never_held);
+        let scans = step.scan_and_repair(
+            &some(&files),
+            &here,
+            &data,
+            &what_stands,
+            never_held,
+            &every_family,
+        );
         assert_eq!(
             scans[0],
             HooksScan::unrepaired(HooksFound::Dead(vec![gone.clone()]))
@@ -1076,7 +1325,14 @@ mod tests {
             step.take_latch(1).is_some(),
             "the repair kept Codex's latch"
         );
-        let after = step.scan_and_repair(&some(&files), &here, &data, &what_stands, never_held);
+        let after = step.scan_and_repair(
+            &some(&files),
+            &here,
+            &data,
+            &what_stands,
+            never_held,
+            &every_family,
+        );
         assert!(
             after[0].repaired_from.is_some(),
             "the press let go and the repair still waits"
@@ -1111,6 +1367,7 @@ mod tests {
             &root.join("data"),
             &what_stands,
             never_held,
+            &every_family,
         );
         assert_eq!(found(&scans), vec![HooksFound::Unclassified; 3]);
         for (file, text) in files.iter().zip(&texts) {
@@ -1131,6 +1388,7 @@ mod tests {
             &root.join("data"),
             &what_stands,
             never_held,
+            &every_family,
         );
         assert_eq!(theirs[0].found, HooksFound::Nothing);
     }
@@ -1154,6 +1412,7 @@ mod tests {
             &root.join("data"),
             &what_stands,
             never_held,
+            &every_family,
         );
         assert_eq!(
             found(&scans),
@@ -1171,8 +1430,10 @@ mod tests {
         );
     }
 
-    /// T12 — **the window thread reads no agent's file at start**: `Runtime::create` asks no row
-    /// state and no readiness, and the only window-thread reads left are the presses' (R11).
+    /// T12 — **the window's creation reads no agent's file**: `Runtime::create` asks no row state
+    /// and no readiness, and the adoption reads none. What the window thread still reads is the
+    /// presses' (R11) and the first-run card's three `state()` questions, asked once on a first run
+    /// (report §2.2).
     #[test]
     fn the_window_thread_reads_no_agent_file_at_start() {
         let create = crate::test_support::method_body("Runtime", "create");
@@ -1180,6 +1441,8 @@ mod tests {
             "row_state(",
             "attention_copilot::readiness(",
             "attention_hooks::state(",
+            "attention_codex::state(",
+            "attention_copilot::state(",
         ] {
             assert!(
                 !create.contains(read),
@@ -1205,12 +1468,16 @@ mod tests {
             "apply_copilot_hooks",
         ] {
             let body = method_body("Runtime", press);
-            assert!(body.contains(begins), "{press} does not ask for a scan");
+            assert!(
+                body.contains("crate::agent_row_asked_again(self.app,"),
+                "{press} does not ask for a scan"
+            );
             assert!(
                 body.contains("AGENT_HOOKS.take_latch("),
                 "{press} takes no latch"
             );
         }
+        assert!(free_fn_body("agent_row_asked_again").contains(begins));
         assert!(
             free_fn_body("release_trial_writer")
                 .contains("Writer::AgentHooksRepair => carry_pass::begin_carry_pass()")
@@ -1264,7 +1531,7 @@ mod tests {
             crate::attention_hooks::settings_path()
         );
         let scratch = test_process_agent_homes();
-        assert!(scratch.starts_with(std::env::temp_dir()));
+        assert!(scratch.starts_with(test_scratch_root()));
         for family in &HOOKS_FAMILIES {
             assert!(family_path(family).is_some_and(|path| path.starts_with(scratch)));
         }

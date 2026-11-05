@@ -35,31 +35,45 @@ impl CarryLatch {
         }
     }
 
-    /// `true` when the caller is to start a worker; `false` when one is running and has been told
-    /// to go round once more.
+    /// `true` when the caller is to start a worker; `false` when one is running and will go round
+    /// once more.
+    ///
+    /// **The request is written down before the worker is asked about**: a worker that is letting
+    /// the latch go reads it after it has let go ([`Self::let_the_pass_go`]), so a request is
+    /// either taken by the running worker or finds none running and starts its own — never neither.
+    /// Every operation is sequentially consistent: the two sides each write one flag and then read
+    /// the other, which no weaker order makes see each other.
     fn ask_for_round(&self) -> bool {
-        if self.running.swap(true, Ordering::AcqRel) {
-            self.again.store(true, Ordering::Release);
-            false
-        } else {
-            true
-        }
+        self.again.store(true, Ordering::SeqCst);
+        !self.running.swap(true, Ordering::SeqCst)
     }
 
-    /// The worker's question at the end of a round: go round again, or end. A request that lands
-    /// between the two halves either finds the worker still running (and is taken here) or finds
-    /// it gone and starts its own.
+    /// The worker's first act of each round: what was asked before now, this round answers.
+    fn round_begins(&self) {
+        self.again.store(false, Ordering::SeqCst);
+    }
+
+    /// The worker's question at the end of a round: go round again, or end.
     fn round_again(&self) -> bool {
-        if self.again.swap(false, Ordering::AcqRel) {
-            return true;
-        }
-        self.running.store(false, Ordering::Release);
-        self.again.swap(false, Ordering::AcqRel) && !self.running.swap(true, Ordering::AcqRel)
+        self.asked_since_round_began() || !self.let_the_pass_go()
+    }
+
+    /// Whether a request was written down since this round began.
+    fn asked_since_round_began(&self) -> bool {
+        self.again.load(Ordering::SeqCst)
+    }
+
+    /// The worker lets the latch go: `true` when it has; `false` when a request landed as it let
+    /// go and the worker took the latch back for it (a request that started a worker of its own
+    /// meanwhile leaves this one free to end).
+    fn let_the_pass_go(&self) -> bool {
+        self.running.store(false, Ordering::SeqCst);
+        !self.asked_since_round_began() || self.running.swap(true, Ordering::SeqCst)
     }
 
     /// A worker that never started, or that unwound: the next request starts one.
     fn carry_ended(&self) {
-        self.running.store(false, Ordering::Release);
+        self.running.store(false, Ordering::SeqCst);
     }
 }
 
@@ -102,6 +116,7 @@ pub(crate) fn begin_carry_pass_with(
                 latch.carry_ended();
             }),
             move |_ctx| loop {
+                latch.round_begins();
                 for step in steps {
                     step();
                 }
@@ -124,15 +139,52 @@ mod tests {
     fn a_request_while_the_pass_runs_is_one_more_round() {
         static LATCH: CarryLatch = CarryLatch::new();
         assert!(LATCH.ask_for_round(), "the first request starts the worker");
+        LATCH.round_begins();
         assert!(
             !LATCH.ask_for_round(),
             "a second, while it runs, starts none"
         );
         assert!(LATCH.round_again(), "and is the worker's next round");
+        LATCH.round_begins();
         assert!(!LATCH.round_again(), "after which it ends");
         assert!(
             LATCH.ask_for_round(),
             "and the next request starts a worker again"
+        );
+        LATCH.carry_ended();
+    }
+
+    /// **A request that lands while the worker lets the latch go is not lost**: asked after the
+    /// worker found nothing written down and before it let go, it starts no worker of its own, and
+    /// the worker takes the latch back and goes round for it.
+    ///
+    /// The requester's half — the request written down before the worker is asked about — is
+    /// [`CarryLatch::ask_for_round`]'s order, which this sequence cannot interleave; this pins the
+    /// worker's half, which reads the book again after it lets go.
+    ///
+    /// MUTATION: the worker lets go without reading again (`plant-67b-worker-ends-blind.py`).
+    #[test]
+    fn a_request_as_the_worker_lets_go_is_one_more_round() {
+        static LATCH: CarryLatch = CarryLatch::new();
+        assert!(LATCH.ask_for_round());
+        LATCH.round_begins();
+        assert!(
+            !LATCH.asked_since_round_began(),
+            "the worker finds nothing asked"
+        );
+        assert!(
+            !LATCH.ask_for_round(),
+            "the request finds the worker running"
+        );
+        assert!(
+            !LATCH.let_the_pass_go(),
+            "so the worker keeps the latch for it"
+        );
+        LATCH.round_begins();
+        assert!(!LATCH.round_again(), "and ends after that round");
+        assert!(
+            LATCH.ask_for_round(),
+            "the latch is free for the next request"
         );
         LATCH.carry_ended();
     }
@@ -158,15 +210,22 @@ mod tests {
         }
         static STEPS: [fn(); 2] = [first, second];
         let executor = crate::lane::Executor::thread_door(bt_platform::ThreadPriority::BelowNormal);
-        assert!(begin_carry_pass_with(&LATCH, &executor, |_| {}, &STEPS));
-        let waited = std::time::Instant::now();
-        while LATCH.running.load(Ordering::Acquire) {
-            assert!(
-                waited.elapsed() < std::time::Duration::from_secs(30),
-                "the pass ends"
-            );
-            std::thread::yield_now();
-        }
-        assert_eq!(RAN.load(Ordering::Acquire), 2);
+        // The worker's end is the signal: its voice holds the sender, and the worker lets the
+        // voice go when it has ended — after the last round has let the latch go. A voice that is
+        // used (a refused start, a step that panicked) sends instead.
+        let (said, ended) = std::sync::mpsc::channel::<()>();
+        let voice = move |_: &str| {
+            let _ = said.send(());
+        };
+        assert!(begin_carry_pass_with(&LATCH, &executor, voice, &STEPS));
+        assert!(
+            ended.recv().is_err(),
+            "the pass ended without a word: it started, and no step panicked"
+        );
+        assert_eq!(RAN.load(Ordering::Acquire), 2, "both steps ran");
+        assert!(
+            !LATCH.running.load(Ordering::Acquire),
+            "the pass's end let the latch go"
+        );
     }
 }

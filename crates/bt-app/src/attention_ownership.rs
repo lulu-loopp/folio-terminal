@@ -76,11 +76,12 @@ pub(crate) enum Outcome {
     Refused(&'static str),
 }
 
-/// **This copy, as every writer of an agent's file names it**: the program's real file, every link
-/// on the way followed (`bt_platform::running_image`; 0.4.10 plan row 68, R7, ruled with row 67b).
-/// A copy started through winget's link is named by the file the link leads to, so the press, the
-/// start-time repair and the rows all mean one program, and `None` only when the system would not
-/// say which file this process runs.
+/// **This copy, as every writer of an agent's file names it**: `bt_platform::running_image`'s file
+/// (0.4.10 plan row 68, R7, ruled with row 67b) — on Windows the program's real file, every link on
+/// the way followed, so a copy started through winget's link is named by the file the link leads
+/// to; elsewhere the path it was started by (a macOS bundle is found from its own executable's
+/// path). The press, the start-time repair and the rows all mean one program, and `None` only when
+/// the system would not say which file this process runs.
 #[must_use]
 pub(crate) fn this_copy() -> Option<PathBuf> {
     bt_platform::running_image()
@@ -173,28 +174,47 @@ fn literal_absolute_path(path: &Path) -> Result<&str, &'static str> {
 /// carrying one could neither install nor uninstall for ever — the operand was an error rather
 /// than an answer (closure review R3). The gate that keeps such an operand from being *written*
 /// is [`stable_executable`], and it stays exactly where it is.
+///
+/// The press's and uninstall's rule ([`DeadWhen::Missing`]): a person's press and the uninstall
+/// decide on this machine as it stands, and R4 is the start-time scan's.
 pub(crate) fn other_live(owner: &Path, exe: &Path) -> Result<bool, &'static str> {
-    other_live_by(owner, exe, what_stands)
+    other_live_by(owner, exe, what_stands, DeadWhen::Missing)
 }
 
-/// [`other_live`] with the machine's answer to "what stands at this path" handed in — the seam the
-/// tests press, so a dead owner, an unplugged drive and a path that cannot be asked about are each
-/// a fixture rather than a state of the machine running them.
-///
-/// **Dead is `NotFound` on a volume that is there** (0.4.10 plan row 67, R4). A program that is
-/// missing because the drive or share it lives on is not plugged in, or not reachable, has not
-/// gone: it comes back with the drive, and a repair that took its hooks would take them from a
-/// copy that is only away. So a missing owner is dead only when its volume answers as a folder,
-/// and any other answer about the volume is "unknown", which writes nothing and is said.
+/// **When an owner that is not there is gone**, by who is asking.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DeadWhen {
+    /// A press or the uninstall (design §6.2): a program that is not there is gone, and so is an
+    /// operand that literally names no file — no copy is nobody.
+    Missing,
+    /// **The start-time scan** (0.4.10 plan row 67, R4), which writes with nobody asking: gone only
+    /// when the program's volume is there. A program missing because the drive or share it lives
+    /// on is not plugged in, or not reachable, has not gone: it comes back with the drive, and a
+    /// repair that took its hooks would take them from a copy that is only away. So a missing
+    /// owner is dead only when its volume answers as a folder; any other answer about the volume,
+    /// and an operand that names no file to ask about, is "unknown", which writes nothing and is
+    /// said.
+    MissingOnAVolumeThatIsThere,
+}
+
+/// [`other_live`] with the machine's answer to "what stands at this path" and the rule for a
+/// missing owner handed in — the seam the tests press, so a dead owner, an unplugged drive and a
+/// path that cannot be asked about are each a fixture rather than a state of the machine running
+/// them.
 pub(crate) fn other_live_by(
     owner: &Path,
     exe: &Path,
     look: impl Fn(&Path) -> PathStands,
+    dead_when: DeadWhen,
 ) -> Result<bool, &'static str> {
+    let unknown = || Err(crate::i18n::Text::AgentHooksOwnerUnknown.text());
     // An old translocated operand may be dead and cleanable. Translocation
     // prohibits creating a new mark from there, not removing an obsolete mark.
     if literal_absolute_path(owner).is_err() {
-        return Ok(false);
+        return match dead_when {
+            DeadWhen::Missing => Ok(false),
+            DeadWhen::MissingOnAVolumeThatIsThere => unknown(),
+        };
     }
     if crate::explorer_menu::same_path(owner, exe) {
         return Ok(false);
@@ -202,11 +222,13 @@ pub(crate) fn other_live_by(
     match look(owner) {
         PathStands::File => Ok(true),
         PathStands::Missing
-            if volume_root_of(owner).is_some_and(|volume| look(&volume) == PathStands::Folder) =>
+            if dead_when == DeadWhen::Missing
+                || volume_root_of(owner)
+                    .is_some_and(|volume| look(&volume) == PathStands::Folder) =>
         {
             Ok(false)
         }
-        _ => Err(crate::i18n::Text::AgentHooksOwnerUnknown.text()),
+        _ => unknown(),
     }
 }
 
@@ -258,8 +280,9 @@ pub(crate) fn volume_root_of(path: &Path) -> Option<PathBuf> {
             Some(root)
         }
         Component::RootDir => match (parts.next(), parts.next()) {
+            // macOS's volumes are case-insensitive by default: `/volumes/Stick` is the same mount.
             (Some(Component::Normal(volumes)), Some(Component::Normal(name)))
-                if volumes == "Volumes" =>
+                if volumes.eq_ignore_ascii_case("Volumes") =>
             {
                 Some(Path::new("/").join(volumes).join(name))
             }
@@ -365,7 +388,7 @@ pub(crate) fn classify_owners(
     let mut living = Vec::new();
     let mut dead = Vec::new();
     for owner in owners {
-        match other_live_by(owner, exe, look) {
+        match other_live_by(owner, exe, look, DeadWhen::MissingOnAVolumeThatIsThere) {
             Err(_) => return HooksFound::OwnerUnknown,
             Ok(true) if !living.contains(owner) => living.push(owner.clone()),
             Ok(false) if !crate::explorer_menu::same_path(owner, exe) && !dead.contains(owner) => {

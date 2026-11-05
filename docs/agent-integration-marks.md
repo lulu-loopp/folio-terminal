@@ -175,8 +175,10 @@ worker, never the window thread) classifies each agent's file
 writes in exactly two states:
 
 - **Dead**: every other copy the file names is `NotFound` on a volume that is
-  there (`other_live_by`). A copy on a drive or share that is not plugged in is
-  `OwnerUnknown` and keeps its hooks.
+  there (`other_live_by`, `DeadWhen::MissingOnAVolumeThatIsThere`). A copy on a
+  drive or share that is not plugged in, and an operand that names no file, is
+  `OwnerUnknown` and keeps its hooks. A press and the uninstall keep the older
+  rule (`DeadWhen::Missing`): what is not there is gone.
 - **Drifted**: this copy's own entries in an older form (C1–C3, P1, P2), or no
   Claude Code `Stop`, the event resume needs. Another event the person removed
   by hand stays removed.
@@ -190,9 +192,13 @@ else's `notify` and somebody else's hook file are said on the row. The pass
 runs at the program walk's first answer and when a walk moves an agent's
 folder, at each Agents page open, after a press, and at an update trial's
 commit; during a trial the repair is held (`Writer::AgentHooksRepair`). A press
-holds its family's latch, so a repair never writes beside one. Each repair
+holds its family's latch, so a repair never writes beside one, and a repair
+reads its file once (`Config::with_one_read`), so a press that wrote after the
+scan makes the repair's write refuse rather than undo it. Each repair
 writes a `BT_AGENT_HOOKS` diagnostics line; a dead owner's also raises one
-notice per family. Copilot is repaired within its version gate.
+notice per family. Copilot is repaired within its version gate: only after the
+version question has been answered (the step asks it, and the answer runs the
+pass again), and never for a copilot too old for the hooks.
 
 ## Take-over and the settings row
 

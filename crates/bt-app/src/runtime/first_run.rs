@@ -6,8 +6,8 @@ use crate::shell_integration;
 use crate::window_seam::prelude::*;
 use crate::{
     Announce, Runtime, agent_hooks_step, attention_codex, attention_copilot, attention_hooks,
-    attention_ownership, carry_pass, diagnostics, explorer_menu, first_run, i18n, install_channel,
-    restore, toast, tooltip,
+    attention_ownership, diagnostics, explorer_menu, first_run, i18n, install_channel, restore,
+    toast, tooltip,
 };
 use anyhow::Result;
 use winit::keyboard::{Key, NamedKey};
@@ -136,9 +136,7 @@ impl<B: Backend> Runtime<'_, B> {
             self.app.claude_hooks_installed,
             self.app.agent_config_refusals[0],
         ) = attention_hooks::row_state();
-        // The row's line and the resume row's are the scan's: asked again, off this thread.
-        self.app.agent_hooks_found[0] = None;
-        carry_pass::begin_carry_pass();
+        crate::agent_row_asked_again(self.app, 0);
         match outcome {
             attention_hooks::Outcome::Installed | attention_hooks::Outcome::Removed
                 if announce == Announce::OnlyFailures =>
@@ -229,9 +227,7 @@ impl<B: Backend> Runtime<'_, B> {
             self.app.codex_notify_installed,
             self.app.agent_config_refusals[1],
         ) = attention_codex::row_state();
-        // The row's line and the resume row's are the scan's: asked again, off this thread.
-        self.app.agent_hooks_found[1] = None;
-        carry_pass::begin_carry_pass();
+        crate::agent_row_asked_again(self.app, 1);
         match outcome {
             attention_codex::Outcome::Installed | attention_codex::Outcome::Removed
                 if announce == Announce::OnlyFailures =>
@@ -329,9 +325,7 @@ impl<B: Backend> Runtime<'_, B> {
             self.app.copilot_hooks_installed,
             self.app.agent_config_refusals[2],
         ) = attention_copilot::row_state();
-        // The row's line and the resume row's are the scan's: asked again, off this thread.
-        self.app.agent_hooks_found[2] = None;
-        carry_pass::begin_carry_pass();
+        crate::agent_row_asked_again(self.app, 2);
         self.app.copilot_readiness = attention_copilot::readiness();
         match outcome {
             attention_copilot::Outcome::Installed | attention_copilot::Outcome::Removed

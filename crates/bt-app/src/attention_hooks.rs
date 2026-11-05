@@ -1515,6 +1515,7 @@ pub(crate) fn apply_resolved(
 /// given nothing to copy. Release audit 2026-09-16 (C-3): one non-UTF-8 byte in `config.toml` or
 /// `settings.json` is enough, the file is perfectly writable, and the loss is certain rather than
 /// a race. So the error kind is asked about, and everything that is not "no such file" refuses.
+#[derive(Clone)]
 pub(crate) enum Standing {
     /// There is no file at that path. A write there creates one and destroys nothing.
     Nothing,
@@ -1556,6 +1557,10 @@ pub(crate) struct Config {
     named: PathBuf,
     /// The file that path resolved to, once.
     target: PathBuf,
+    /// **The file as the operation read it, when the operation reads it once**
+    /// ([`Self::with_one_read`]): every read below answers this, so what was classified is what
+    /// is edited, and [`land`] writes only over these bytes.
+    one_read: Option<Standing>,
 }
 
 impl Config {
@@ -1574,7 +1579,29 @@ impl Config {
         Ok(Self {
             named: path.to_path_buf(),
             target: resolve(path)?,
+            one_read: None,
         })
+    }
+
+    /// **This resolution, its file read once for the whole operation** (0.4.10 plan row 67b): the
+    /// start-time repair classifies the file and then writes it, and a press may write between the
+    /// two. Held to one read, the classification and the edit are of the same bytes, and the
+    /// landing's compare refuses the write when the file no longer holds them, so a repair never
+    /// undoes a press it did not see.
+    pub(crate) fn with_one_read(self) -> Self {
+        let read = self.standing();
+        Self {
+            one_read: Some(read),
+            ..self
+        }
+    }
+
+    /// This resolution with its one read let go: what a write left, read as it stands now.
+    pub(crate) fn read_afresh(self) -> Self {
+        Self {
+            one_read: None,
+            ..self
+        }
     }
 
     /// The path the environment named — never resolved again, only reported.
@@ -1589,6 +1616,9 @@ impl Config {
     /// UTF-8, a directory standing under the file's name. None of them is a file that is not
     /// there, and that is the only state in which writing a fresh one loses nothing.
     pub(crate) fn standing(&self) -> Standing {
+        if let Some(read) = &self.one_read {
+            return read.clone();
+        }
         match bt_platform::file_reads::read_to_string(
             bt_platform::file_reads::Lane::Attention,
             &self.target,

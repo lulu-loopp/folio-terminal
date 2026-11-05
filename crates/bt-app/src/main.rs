@@ -741,7 +741,7 @@ enum AppEvent {
     AgentHooksScanned,
     /// **The machine listed its monospaced families** (GitHub issue #3).
     ///
-    /// The tenth of the same family and the newest, and it is owed a wake for
+    /// The tenth of the same family, and it is owed a wake for
     /// [`Self::CopilotProbed`]'s reason with one more on top: the walk was
     /// started by the press that opened the dialog, so the reader is looking at
     /// a picker that is holding one row — the family in force — and waiting for
@@ -31734,6 +31734,15 @@ fn adopt_agent_hooks_snapshot<B: Backend>(
     app.copilot_readiness = snapshot.copilot_readiness;
 }
 
+/// **A press on agent row `family` asks the scan again** (0.4.10 plan row 67b): the row's line and
+/// the resume row's are the scan's, so the row says its own sentence until the pass the press
+/// starts answers, off this thread. With [`adopt_agent_hooks_snapshot`], the one writer of
+/// `App::agent_hooks_found`.
+fn agent_row_asked_again<B: Backend>(app: &mut App<B>, family: usize) {
+    app.agent_hooks_found[family] = None;
+    carry_pass::begin_carry_pass();
+}
+
 /// **The startup trace's two shell lines, held while a launch tab's shell is being born**.
 ///
 /// `BT_CONPTY_SOURCE` and `BT_STARTUP` name the pseudoconsole each launch tab's first shell came
@@ -52651,6 +52660,10 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 if let Some(app) = self.app.as_mut() {
                     app.copilot_readiness = attention_copilot::readiness();
                 }
+                // **The version is the start-time repair's gate for Copilot's hooks** (0.4.10 plan
+                // row 67b, R9): a repair that waited for it runs now, and the scan's snapshot,
+                // which carries readiness too, is read after this answer.
+                carry_pass::begin_carry_pass();
                 self.for_each_window(|runtime| {
                     if runtime.refresh_chrome() {
                         runtime.present_chrome_change()
