@@ -1100,7 +1100,7 @@ fn splice_checked(
 ///    between items, the keys of the person's groups and events, a container the person left
 ///    empty — stands in both, in the same place among the others; and under a
 ///    [`Family::positional`] family, **the place every entry of somebody else's stands at**
-///    ([`places`], row 69a), which a cut cannot see;
+///    ([`foreign_places`], row 69a), which a cut cannot see;
 /// 3. the two documents as values, with Folio's entries and the containers left empty by taking
 ///    them out stripped from both ([`without_folio`]).
 ///
@@ -1150,7 +1150,7 @@ fn keeps_what_is_not_ours(family: &Family, before: &splice::Document, text: &str
         }
     };
     outside_kept
-        && (!family.positional || places(old.as_ref()) == places(new.as_ref()))
+        && (!family.positional || foreign_places(old.as_ref()) == foreign_places(new.as_ref()))
         && match (before.whole_value(), after.whole_value()) {
             (Ok(old), Ok(new)) => without_folio(family, old) == without_folio(family, new),
             _ => false,
@@ -1162,7 +1162,7 @@ fn keeps_what_is_not_ours(family: &Family, before: &splice::Document, text: &str
 /// person's approval of that entry by. [`outside_folios`] compares bytes with Folio's extents cut
 /// out, so a group of Folio's put in front of the person's, or taken out from in front of it, cuts
 /// to the same text: the places are what moved.
-fn places<'a>(hooks: Option<&Hooks<'a>>) -> Vec<(&'a str, usize, usize)> {
+fn foreign_places<'a>(hooks: Option<&Hooks<'a>>) -> Vec<(&'a str, usize, usize)> {
     let mut found = Vec::new();
     for event in hooks.map_or(&[][..], |hooks| hooks.events.as_slice()) {
         for (group_at, group) in event.groups.iter().enumerate() {

@@ -17,7 +17,7 @@
 //!
 //! ```json
 //! { "hooks": { "Stop": [ { "hooks": [
-//!   { "async": true, "command": "\"<folio.exe>\" attention codex:stop --json -",
+//!   { "async": true, "command": "& '<folio.exe>' attention codex:stop --json -",
 //!     "timeout": 10, "type": "command" }
 //! ] } ] } }
 //! ```
@@ -34,10 +34,14 @@
 //! - **`async`**, because a synchronous `Stop` hook holds the turn's end on Folio's verb, and on one
 //!   an exit of 2 with text on stderr is fed back to the model as a continuation (R12). codex runs
 //!   asynchronous command hooks from 0.148.0.
-//! - **One string run through a shell**, codex's only form for a command hook: cmd.exe on Windows,
-//!   where a `%` in Folio's path would be expanded inside the quotes — so an install from such a path
-//!   is refused and said — and `$SHELL -lc` elsewhere, where the single-quoted form keeps `$`,
-//!   backticks and spaces literal ([`hook_command`]).
+//! - **One string run through the session's shell**, codex's only form for a command hook
+//!   (`build_hooks_config` at `rust-v0.166.0`, from `default_user_shell`): PowerShell on Windows —
+//!   `pwsh`, else `powershell.exe` — as `-NoProfile -Command <string>`, so the program is called
+//!   with `&` and its path is one single-quoted literal, inside which `%`, `$`, backticks and `&`
+//!   are plain; the person's login shell elsewhere, as `-c <string>`, with the path in sh's single
+//!   quotes ([`hook_command`]). Codex falls back to `%COMSPEC% /C` and `$SHELL -lc` only for a
+//!   session with no shell of its own; that launcher does not run the PowerShell form, and nor does
+//!   a Unix account whose login shell is PowerShell (`docs/DESIGN.md`, row 69's entry).
 //!
 //! **codex runs a hook only once the person has approved it** in codex, which asks at its next start;
 //! a changed command asks again. That approval is codex's record of the person's decision, keyed by
@@ -138,13 +142,10 @@ const HOOK_TIMEOUT: u64 = 10;
 /// `statusMessage` — is somebody's edit, and it is left as it is.
 const HOOK_KEYS: [&str; 4] = ["type", "command", "async", "timeout"];
 
-/// **The keys codex reads a `hooks.json` with.** Its `HooksFile` refuses any other
-/// (`deny_unknown_fields`), and a file it refuses is a file it ignores whole, with a warning.
-const HOOKS_FILE_KEYS: [&str; 2] = ["description", "hooks"];
-
-/// **The hook events codex reads under config.toml's `[hooks]`** (`HookEventsToml` at
-/// `rust-v0.166.0`). `[hooks.state]`, where codex keeps the person's approvals, is not one of them,
-/// so a table holding only that is not a second representation.
+/// **The hook events codex reads under config.toml's `[hooks]`, and in `hooks.json`**
+/// (`HookEventsToml` at `rust-v0.166.0`, [`CodexHookEvents`]). `[hooks.state]`, where codex keeps
+/// the person's approvals, is not one of them, so a table holding only that is not a second
+/// representation.
 const TOML_HOOK_EVENTS: [&str; 14] = [
     "PreModelRequest",
     "PostModelRequest",
@@ -164,7 +165,7 @@ const TOML_HOOK_EVENTS: [&str; 14] = [
 
 /// **codex's `hooks.json`, as [`attention_hooks`](crate::attention_hooks) reads and writes it.**
 pub(crate) const HOOKS: Family = Family {
-    owner: hook_owner,
+    owner: codex_hook_owner,
     wanted: hook_wanted,
     positional: true,
     unreadable: HOOKS_UNREADABLE,
@@ -252,7 +253,7 @@ pub(crate) fn state() -> State {
     let Some(dir) = config_dir() else {
         return State::Absent;
     };
-    state_in(&dir, std::env::current_exe().ok().as_deref())
+    codex_state_in(&dir, std::env::current_exe().ok().as_deref())
 }
 
 /// **The settings row's two facts, out of one read of the files.**
@@ -277,22 +278,19 @@ pub(crate) fn row_state() -> (bool, Option<&'static str>) {
 /// wrote and that stays until Folio writes its entry again (R18). The refusal the row says is
 /// `hooks.json`'s, the one file a press writes Folio's entry in.
 #[must_use]
-fn state_in(dir: &Path, exe: Option<&Path>) -> State {
+fn codex_state_in(dir: &Path, exe: Option<&Path>) -> State {
     let hook = hooks::state_in(&HOOKS, &dir.join(HOOKS_FILE), exe);
-    let notify = match beside(&dir.join(CONFIG_FILE)) {
-        Ok(toml) => match toml.text.parse::<DocumentMut>() {
-            Ok(document) => {
-                let ours = notify_owner(&document).ok().flatten();
-                if exe.is_some_and(|exe| {
-                    ours.is_some_and(|owner| crate::explorer_menu::same_path(&owner, exe))
-                }) {
-                    State::Installed
-                } else {
-                    State::Absent
-                }
+    let notify = match toml_beside(&dir.join(CONFIG_FILE)) {
+        Ok(toml) => {
+            let ours = notify_owner(&toml.document).ok().flatten();
+            if exe.is_some_and(|exe| {
+                ours.is_some_and(|owner| crate::explorer_menu::same_path(&owner, exe))
+            }) {
+                State::Installed
+            } else {
+                State::Absent
             }
-            Err(_) => State::Unreadable,
-        },
+        }
         Err(_) => State::Unreadable,
     };
     match (hook, notify) {
@@ -311,15 +309,17 @@ pub(crate) fn hook_command(exe: &Path) -> String {
     hook_command_on(exe, bt_platform::host_platform())
 }
 
-/// The same, for a named platform: **cmd.exe's double quotes on Windows**, inside which nothing but
-/// `%` is special and no file name can hold a `"`; **sh's single quotes elsewhere**, inside which
-/// nothing is special and a `'` of the path's own is spelled `'\''`. Both are the spellings
-/// [`ownership::legacy_path`] reads back, which is what makes the entry provably Folio's.
+/// The same, for a named platform: **PowerShell's call operator and single quotes on Windows**
+/// ([`ownership::powershell_quoted`]) — a quoted string followed by a bare word is a parse error
+/// there, so the path is called with `&`, and inside the quotes nothing is special but a quote,
+/// which is doubled; **sh's single quotes elsewhere**, inside which nothing is special and a `'` of
+/// the path's own is spelled `'\''`. Both are the spellings [`ownership::legacy_path`] reads back,
+/// which is what makes the entry provably Folio's.
 #[must_use]
 fn hook_command_on(exe: &Path, platform: HostPlatform) -> String {
     let path = exe.to_string_lossy();
     let program = if platform == HostPlatform::Windows {
-        format!("\"{path}\"")
+        format!("& {}", ownership::powershell_quoted(&path))
     } else {
         format!("'{}'", path.replace('\'', "'\\''"))
     };
@@ -332,7 +332,7 @@ fn hook_command_on(exe: &Path, platform: HostPlatform) -> String {
 /// executable whose own file name is Folio's, speaking `attention codex:<event>`) and it carries no
 /// key Folio does not write ([`HOOK_KEYS`]). Folio's verb in any other shape is an error, which the
 /// splice reads as nobody's: the entry is left where it is, untouched.
-fn hook_owner(hook: &Json) -> Result<Option<PathBuf>, &'static str> {
+fn codex_hook_owner(hook: &Json) -> Result<Option<PathBuf>, &'static str> {
     let Some(command) = hook.get("command").and_then(Json::as_str) else {
         return Ok(None);
     };
@@ -365,28 +365,142 @@ fn hook_wanted(exe: &Path) -> Vec<Wanted> {
     }]
 }
 
-/// **Whether codex would read `hooks.json` with this text in it**, once Folio's hook is added.
+/// **Whether codex would read `hooks.json` with this text in it** — the text the file will hold
+/// once Folio's hook is in it.
 ///
-/// A byte-order mark, a top-level key other than [`HOOKS_FILE_KEYS`], or a `description` that is
-/// not a string makes codex ignore the whole file with a warning — so a hook written into it would
-/// never run, and the press would be a lie. The splice keeps every one of those bytes, so they
-/// would still be there after the write. A text that is not JSON at all is
-/// [`hooks::hook_owners`]'s refusal, said before this is asked.
-fn read_by_codex(existing: &str) -> bool {
-    if existing.starts_with('\u{feff}') {
-        return false;
+/// codex reads the file with `serde_json::from_str::<HooksFile>` (`hooks/src/engine/discovery.rs`
+/// at `rust-v0.166.0`), and any error anywhere in it — a byte-order mark, a top-level key other
+/// than `description` and `hooks`, a key named twice in one object it reads into a struct, a handler of
+/// a type it does not know, a `matcher` that is not a string, a `timeout` that is not a whole
+/// number — is a warning and **the whole file ignored**: a hook written into it would never run,
+/// and the press would be a lie. The splice keeps every one of those bytes, so they would still be
+/// there after the write. So the question is asked of codex's own types, mirrored attribute for
+/// attribute ([`CodexHooksFile`]), and of the text as written.
+fn read_by_codex(text: &str) -> bool {
+    serde_json::from_str::<CodexHooksFile>(text).is_ok()
+}
+
+// ── codex's `HooksFile`, as codex reads it ─────────────────────────────────────
+//
+// `config/src/hook_config.rs` and `protocol/src/hooks.rs` at `rust-v0.166.0`: the same fields,
+// the same types, the same serde attributes — `deny_unknown_fields` on the file and nowhere else,
+// `default` where codex says it, the handler internally tagged by `type`. Only the field names
+// differ, each a `_` before codex's own, since this reads the file to judge it and keeps nothing.
+
+/// codex's `HooksFile`.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CodexHooksFile {
+    #[serde(default, rename = "description")]
+    _description: Option<String>,
+    #[serde(default, rename = "hooks")]
+    _hooks: CodexHookEvents,
+}
+
+/// codex's `HookEventsToml`: its 14 events ([`TOML_HOOK_EVENTS`]), each a list of groups. A key
+/// that is none of them is passed over, as codex passes it over.
+#[derive(Default, serde::Deserialize)]
+struct CodexHookEvents {
+    #[serde(rename = "PreModelRequest", default)]
+    _pre_model_request: Vec<CodexGroup>,
+    #[serde(rename = "PostModelRequest", default)]
+    _post_model_request: Vec<CodexGroup>,
+    #[serde(rename = "PreToolUse", default)]
+    _pre_tool_use: Vec<CodexGroup>,
+    #[serde(rename = "PermissionRequest", default)]
+    _permission_request: Vec<CodexGroup>,
+    #[serde(rename = "PostToolUse", default)]
+    _post_tool_use: Vec<CodexGroup>,
+    #[serde(rename = "PreCompact", default)]
+    _pre_compact: Vec<CodexGroup>,
+    #[serde(rename = "PostCompact", default)]
+    _post_compact: Vec<CodexGroup>,
+    #[serde(rename = "SessionStart", default)]
+    _session_start: Vec<CodexGroup>,
+    #[serde(rename = "SessionEnd", default)]
+    _session_end: Vec<CodexGroup>,
+    #[serde(rename = "UserPromptSubmit", default)]
+    _user_prompt_submit: Vec<CodexGroup>,
+    #[serde(rename = "SubagentStart", default)]
+    _subagent_start: Vec<CodexGroup>,
+    #[serde(rename = "SubagentStop", default)]
+    _subagent_stop: Vec<CodexGroup>,
+    #[serde(rename = "Stop", default)]
+    _stop: Vec<CodexGroup>,
+    #[serde(rename = "Interrupt", default)]
+    _interrupt: Vec<CodexGroup>,
+}
+
+/// codex's `MatcherGroup`.
+#[derive(serde::Deserialize)]
+struct CodexGroup {
+    #[serde(default, rename = "matcher")]
+    _matcher: Option<String>,
+    #[serde(default, rename = "hooks")]
+    _hooks: Vec<CodexHandler>,
+}
+
+/// codex's `HookHandlerConfig`.
+#[derive(serde::Deserialize)]
+#[serde(tag = "type")]
+enum CodexHandler {
+    #[serde(rename = "command")]
+    Command {
+        #[serde(rename = "command")]
+        _command: String,
+        #[serde(default, rename = "commandWindows", alias = "command_windows")]
+        _command_windows: Option<String>,
+        #[serde(default, rename = "timeout")]
+        _timeout_sec: Option<u64>,
+        #[serde(default, rename = "async")]
+        _async: bool,
+        #[serde(default, rename = "statusMessage")]
+        _status_message: Option<String>,
+        #[serde(default, rename = "additionalContextLimit")]
+        _additional_context_limit: Option<usize>,
+    },
+    #[serde(rename = "mcp_tool")]
+    McpTool {
+        #[serde(rename = "server")]
+        _server: String,
+        #[serde(rename = "tool")]
+        _tool: String,
+        #[serde(default, rename = "input", deserialize_with = "toml_representable")]
+        _input: Map<String, Json>,
+        #[serde(default, rename = "timeout")]
+        _timeout_sec: Option<u64>,
+        #[serde(default, rename = "statusMessage")]
+        _status_message: Option<String>,
+    },
+    #[serde(rename = "prompt")]
+    Prompt {},
+    #[serde(rename = "agent")]
+    Agent {},
+}
+
+/// codex's `deserialize_mcp_tool_input`: an `mcp_tool` handler's `input` is an object every value
+/// of which TOML can hold — no `null`, no whole number past `i64` — or the file is refused.
+fn toml_representable<'de, D>(deserializer: D) -> Result<Map<String, Json>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    fn representable(value: &Json) -> bool {
+        match value {
+            Json::Null => false,
+            Json::Number(number) => !number.is_u64() || number.as_i64().is_some(),
+            Json::Array(items) => items.iter().all(representable),
+            Json::Object(items) => items.values().all(representable),
+            Json::Bool(_) | Json::String(_) => true,
+        }
     }
-    if existing.trim().is_empty() {
-        return true;
+    let input = <Map<String, Json> as serde::Deserialize>::deserialize(deserializer)?;
+    if input.values().all(representable) {
+        Ok(input)
+    } else {
+        Err(serde::de::Error::custom(
+            "MCP hook input must be representable as TOML",
+        ))
     }
-    let Ok(Json::Object(file)) = serde_json::from_str::<Json>(existing) else {
-        return true;
-    };
-    file.keys()
-        .all(|key| HOOKS_FILE_KEYS.contains(&key.as_str()))
-        && file
-            .get("description")
-            .is_none_or(|description| description.is_string() || description.is_null())
 }
 
 /// **Whether config.toml carries hook events of its own** (R15): a non-empty list under one of
@@ -656,50 +770,48 @@ fn edited_document(document: &mut DocumentMut, exe: &Path, install: bool) -> boo
     }
 }
 
-/// **`config.toml` as an operation on `hooks.json` reads it**: its text, and the resolution a write
-/// of it needs — or, for a file this build will read but not edit, the reason it will not be
-/// written.
+/// **`config.toml` as an operation on `hooks.json` reads it**: its text, the document it parses
+/// to, and the resolution a write of it needs — or, for a file this build will read but not edit,
+/// the reason it will not be written.
 struct Toml {
     text: String,
+    document: DocumentMut,
     config: Result<Config, &'static str>,
 }
 
-/// Read the `config.toml` at `path`, resolved **once**, for this operation.
+/// Read the `config.toml` at `path`, resolved **once**, for this operation — [`UNREADABLE`] when
+/// its bytes are not UTF-8 or its text is not TOML.
 ///
 /// A file Folio will not edit — a link out of codex's folder, one shared by hard links, a read-only
 /// one — is still read: what it says decides whether a hook may be added beside it (R15), and the
 /// operation is refused only when a line of Folio's in it would have to go.
-fn beside(path: &Path) -> Result<Toml, &'static str> {
-    match Config::resolve(path) {
+fn toml_beside(path: &Path) -> Result<Toml, &'static str> {
+    let (text, config) = match Config::resolve(path) {
         Ok(config) => match config.standing() {
-            Standing::Text(text) => Ok(Toml {
-                text,
-                config: Ok(config),
-            }),
-            Standing::Nothing => Ok(Toml {
-                text: String::new(),
-                config: Ok(config),
-            }),
-            Standing::Unreadable => Err(UNREADABLE),
+            Standing::Text(text) => (text, Ok(config)),
+            Standing::Nothing => (String::new(), Ok(config)),
+            Standing::Unreadable => return Err(UNREADABLE),
         },
         Err(hooks::Unresolved::Refused(reason)) => {
             match bt_platform::file_reads::read_to_string(
                 bt_platform::file_reads::Lane::Attention,
                 path,
             ) {
-                Ok(text) => Ok(Toml {
-                    text,
-                    config: Err(reason),
-                }),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Toml {
-                    text: String::new(),
-                    config: Err(reason),
-                }),
-                Err(_) => Err(UNREADABLE),
+                Ok(text) => (text, Err(reason)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    (String::new(), Err(reason))
+                }
+                Err(_) => return Err(UNREADABLE),
             }
         }
-        Err(hooks::Unresolved::Unreadable) => Err(UNREADABLE),
-    }
+        Err(hooks::Unresolved::Unreadable) => return Err(UNREADABLE),
+    };
+    let document = text.parse::<DocumentMut>().map_err(|_| UNREADABLE)?;
+    Ok(Toml {
+        text,
+        document,
+        config,
+    })
 }
 
 /// Put Folio's hook in, or take it out, on this machine.
@@ -731,15 +843,23 @@ pub(crate) fn apply_at(path: &Path, decision: Decision, exe: &Path, data: &Path)
 /// **Everything below the entry takes this value.** The path was resolved once, at the top; the
 /// read, the dated copy and the replace all name that one answer, and there is no second
 /// resolution on this path for a repointed link to slip through (re-review B1). `config.toml`, the
-/// other file, is resolved once too ([`beside`]).
+/// other file, is resolved once too ([`toml_beside`]).
 ///
 /// One operation over two files, in this order: both are read, **both edits are made and pass
-/// their self-checks** ([`hooks::hooks_edited`], [`edited`]), every copy either names is asked
-/// about, and a `config.toml` this build will not edit is refused — and only then is anything
-/// written, `config.toml` first, then `hooks.json`. So every refusal leaves both files as they
-/// were. The one window left is a second write that fails after the first landed: the `notify`
-/// line is gone and the hook not yet written, a Folio that marks nothing until the next press or
-/// row 67's repair finishes it — never a turn marked twice.
+/// their self-checks** ([`hooks::hooks_edited`], [`edited`], and on an install [`read_by_codex`]
+/// of the text `hooks.json` will hold), every copy either names is asked about, and a
+/// `config.toml` this build will not edit is refused — and only then is anything written,
+/// `config.toml` first, then `hooks.json`. So every refusal leaves both files as they were. The one
+/// window left is a second write that fails after the first landed: the `notify` line is gone and
+/// the hook not yet written, a Folio that marks nothing until the next press or row 67's repair
+/// finishes it — never a turn marked twice.
+///
+/// **A `config.toml` this build cannot read refuses an install and not a removal** (review N5). An
+/// install needs both of its answers: whether it declares hook events (R15) and whether an earlier
+/// Folio's line is in it (R18). A removal needs neither to take Folio's hook out of `hooks.json`,
+/// and refusing it would leave a hook naming a Folio that is gone — through an uninstall too. So
+/// the removal goes on without that file, leaves it as it was, and says so
+/// ([`Outcome::LeftUnread`]): whether a line of Folio's is in it is exactly what could not be read.
 pub(crate) fn apply_resolved(
     config: &Config,
     decision: Decision,
@@ -753,12 +873,6 @@ pub(crate) fn apply_resolved(
         return Outcome::Refused(crate::i18n::Text::AgentHooksRootUnstable.text());
     }
     let install = decision.installs();
-    if install
-        && bt_platform::host_platform() == HostPlatform::Windows
-        && exe.to_string_lossy().contains('%')
-    {
-        return Outcome::Refused(crate::i18n::Text::CodexHookPathPercent.text());
-    }
     let folder = config.named().parent().expect("absolute config");
     let existing = match config.standing() {
         Standing::Text(text) => text,
@@ -767,31 +881,36 @@ pub(crate) fn apply_resolved(
         // **A file that could not be read is never written over** — release audit 2026-09-16 (C-3).
         Standing::Unreadable => return Outcome::Refused(HOOKS_UNREADABLE),
     };
-    let toml = match beside(&folder.join(CONFIG_FILE)) {
-        Ok(toml) => toml,
-        Err(reason) => return Outcome::Refused(reason),
+    // Refused rather than guessed at, on an install: a configuration file this build cannot read is
+    // a file somebody wrote, and whether it carries Folio's line is not something to assume.
+    let toml = toml_beside(&folder.join(CONFIG_FILE)).and_then(|toml| {
+        if toml.document.get(NOTIFY_KEY).is_some() && words_of(&toml.document).is_none() {
+            Err(UNREADABLE)
+        } else {
+            Ok(toml)
+        }
+    });
+    let (toml, unread) = match toml {
+        Ok(toml) => (Some(toml), None),
+        Err(reason) if install => return Outcome::Refused(reason),
+        Err(reason) => (None, Some(reason)),
     };
-    let Ok(document) = toml.text.parse::<DocumentMut>() else {
-        // Refused rather than guessed at. A configuration file this build cannot read is a file
-        // somebody wrote, and whether it carries Folio's line is not something to assume.
-        return Outcome::Refused(UNREADABLE);
-    };
-    if document.get(NOTIFY_KEY).is_some() && words_of(&document).is_none() {
-        return Outcome::Refused(UNREADABLE);
-    }
-    if install && declares_toml_hooks(&document) {
+    if install
+        && toml
+            .as_ref()
+            .is_some_and(|toml| declares_toml_hooks(&toml.document))
+    {
         return Outcome::Refused(crate::i18n::Text::CodexHooksInToml.text());
     }
     let mut paths = match hooks::hook_owners(&HOOKS, &existing) {
         Ok(paths) => paths,
         Err(reason) => return Outcome::Refused(reason),
     };
-    if install && !read_by_codex(&existing) {
-        return Outcome::Refused(crate::i18n::Text::CodexHooksFileIgnored.text());
-    }
     // **Ownership is per entry** (closure review R4): a `notify` wearing Folio's verb in a shape
     // this build cannot decode is not Folio's, and it is left alone.
-    let line = notify_owner(&document).ok().flatten();
+    let line = toml
+        .as_ref()
+        .and_then(|toml| notify_owner(&toml.document).ok().flatten());
     paths.extend(line.iter().cloned());
     let others = match ownership::check(&paths, exe, &decision) {
         Ok(others) => others,
@@ -801,19 +920,25 @@ pub(crate) fn apply_resolved(
         Ok(written) => written,
         Err(reason) => return Outcome::Refused(reason),
     };
+    if install && !read_by_codex(written.as_deref().unwrap_or(&existing)) {
+        return Outcome::Refused(crate::i18n::Text::CodexHooksFileIgnored.text());
+    }
     // **The line an earlier Folio wrote goes in the same operation** (R18): on an install whoever's
     // it is — `check` has asked about every other live copy — so one turn is not marked twice; on a
     // removal this copy's and a gone one's.
-    let taken_out = match line {
-        Some(_) => match edited(&toml.text, exe, false, install) {
-            Ok(taken_out) => taken_out,
+    let taken_out = match (&line, &toml) {
+        (Some(_), Some(toml)) => match edited(&toml.text, exe, false, install) {
+            Ok(taken_out) => taken_out.map(|text| (toml, text)),
             Err(reason) => return Outcome::Refused(reason),
         },
-        None => None,
+        _ => None,
     };
-    let toml_config = match (&taken_out, toml.config.as_ref().map_err(|reason| *reason)) {
-        (Some(_), Err(reason)) => return Outcome::Refused(reason),
-        (_, config) => config.ok(),
+    let taken_out = match taken_out {
+        Some((toml, text)) => match &toml.config {
+            Ok(toml_config) => Some((toml_config, &toml.text, text)),
+            Err(reason) => return Outcome::Refused(*reason),
+        },
+        None => None,
     };
     let _record = if install {
         match ownership::record(data, folder, "codex") {
@@ -824,36 +949,46 @@ pub(crate) fn apply_resolved(
         None
     };
     if written.is_none() && taken_out.is_none() {
-        return if others.is_empty() {
-            Outcome::Unchanged
-        } else {
-            Outcome::LeftOther(others)
-        };
+        return removal_outcome(false, others, unread);
     }
     // The atomic write, mandatory backup, and unsafe-path refusal are all
     // `attention_hooks::land`'s, said once for all three installers. `config.toml` first: see
     // above.
-    if let (Some(taken_out), Some(toml_config)) = (taken_out, toml_config)
-        && let Err(reason) = landed(toml_config, &toml.text, "toml", &taken_out)
+    if let Some((toml_config, toml_text, taken_out)) = taken_out
+        && let Err(reason) = land_codex_file(toml_config, toml_text, "toml", &taken_out)
     {
         return Outcome::Refused(reason);
     }
     if let Some(written) = written
-        && let Err(reason) = landed(config, &existing, "json", &written)
+        && let Err(reason) = land_codex_file(config, &existing, "json", &written)
     {
         return Outcome::Refused(reason);
     }
     if install {
         Outcome::Installed
-    } else if others.is_empty() {
+    } else {
+        removal_outcome(true, others, unread)
+    }
+}
+
+/// **What a press that wrote nothing, or a removal that wrote (`removed`), says** — in this
+/// order: another live copy's entry that stays ([`Outcome::LeftOther`]); a `config.toml` the
+/// removal went on without ([`Outcome::LeftUnread`]), which only a removal can; Folio's entries
+/// taken out, or nothing to do.
+fn removal_outcome(removed: bool, others: Vec<PathBuf>, unread: Option<&'static str>) -> Outcome {
+    if !others.is_empty() {
+        Outcome::LeftOther(others)
+    } else if let Some(reason) = unread {
+        Outcome::LeftUnread { removed, reason }
+    } else if removed {
         Outcome::Removed
     } else {
-        Outcome::LeftOther(others)
+        Outcome::Unchanged
     }
 }
 
 /// One file's write through [`Config::land`], and the sentence for each way it can fail.
-fn landed(
+fn land_codex_file(
     config: &Config,
     existing: &str,
     extension: &str,
@@ -1195,11 +1330,64 @@ mod tests {
             "nothing was written beside it either"
         );
         // And the row drawn from it says so, rather than offering to write over it.
-        assert_eq!(state_in(&dir, Some(&exe())), State::Unreadable);
-        // Taking it back out is refused for the same reason: this build cannot tell whose it is.
+        assert_eq!(codex_state_in(&dir, Some(&exe())), State::Unreadable);
+        // Turning it off has nothing to take out of `hooks.json`, and goes on without the file it
+        // cannot read: left as it was, and said (review N5).
         let taking_it_out = apply_to(&dir.join(HOOKS_FILE), false, &exe());
-        assert_eq!(taking_it_out, Outcome::Refused(UNREADABLE));
+        assert_eq!(
+            taking_it_out,
+            Outcome::LeftUnread {
+                removed: false,
+                reason: UNREADABLE
+            }
+        );
         assert_eq!(std::fs::read(&path).expect("still there"), theirs);
+        assert_eq!(names(&dir), vec![CONFIG_FILE.to_owned()]);
+    }
+
+    /// RED (0.4.10 plan row 69, review N5) — **a `config.toml` this build cannot read does not keep
+    /// Folio's hook in `hooks.json`**: switching off, and so an uninstall, takes the hook out and
+    /// leaves `config.toml` as it was, saying why — for bytes that are not UTF-8, a text that is not
+    /// TOML, and a `notify` that is not a list of words alike. Before, each refused the removal,
+    /// and an uninstalled Folio left a hook naming itself behind.
+    ///
+    /// MUTATION: `plant-69-removal-refused-beside.py` refuses a removal over such a file again.
+    #[test]
+    fn a_config_toml_that_cannot_be_read_does_not_keep_folios_hook_in() {
+        for (name, theirs) in [
+            ("latin-1", &b"# caf\xe9\nmodel = \"gpt-5\"\n"[..]),
+            ("not-toml", &b"model = = \"gpt-5\"\n"[..]),
+            ("notify-not-words", &b"notify = \"ding\"\n"[..]),
+        ] {
+            let dir = scratch(&format!("unread-{name}"));
+            let config = dir.join(CONFIG_FILE);
+            let path = dir.join(HOOKS_FILE);
+            std::fs::write(&config, theirs).expect("their own file");
+            let with_ours = format!(
+                r#"{{"hooks":{{"Stop":[{{"hooks":[{}]}}]}}}}"#,
+                own_stop(&exe())
+            );
+            std::fs::write(&path, &with_ours).expect("a hook of this copy's");
+            assert_eq!(
+                apply_to(&path, true, &exe()),
+                Outcome::Refused(UNREADABLE),
+                "{name}: an install needs both of its answers"
+            );
+            assert_eq!(
+                apply_to(&path, false, &exe()),
+                Outcome::LeftUnread {
+                    removed: true,
+                    reason: UNREADABLE
+                },
+                "{name}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&path).expect("there"),
+                "{}",
+                "{name}: Folio's hook is out"
+            );
+            assert_eq!(std::fs::read(&config).expect("there"), theirs, "{name}");
+        }
     }
 
     /// **A file that is not there is the one state in which writing a fresh one loses nothing.**
@@ -1207,10 +1395,10 @@ mod tests {
     fn a_hooks_file_that_is_not_there_is_the_one_that_gets_created() {
         let dir = scratch("absent");
         let path = dir.join(HOOKS_FILE);
-        assert_eq!(state_in(&dir, Some(&exe())), State::Absent);
+        assert_eq!(codex_state_in(&dir, Some(&exe())), State::Absent);
 
         assert_eq!(apply_to(&path, true, &exe()), Outcome::Installed);
-        assert_eq!(state_in(&dir, Some(&exe())), State::Installed);
+        assert_eq!(codex_state_in(&dir, Some(&exe())), State::Installed);
         assert_eq!(
             names(&dir),
             vec![HOOKS_FILE.to_owned()],
@@ -1448,11 +1636,25 @@ mod tests {
                 "}".to_owned(),
             ])
         );
+        // Windows: PowerShell, as codex runs the hook (`-NoProfile -Command`); `%`, `$`, backticks
+        // and `&` are plain inside the quotes, and every quote PowerShell reads as one is doubled
+        // (review N1). Run through pwsh 7.6 and Windows PowerShell 5.1 on 2026-11-05 with these
+        // paths, each passed its argv and a megabyte of stdin byte for byte (row 69's report).
         for (platform, exe, command) in [
             (
                 HostPlatform::Windows,
                 r"C:\Program Files\Folio\folio.exe",
-                r#""C:\Program Files\Folio\folio.exe" attention codex:stop --json -"#,
+                r"& 'C:\Program Files\Folio\folio.exe' attention codex:stop --json -",
+            ),
+            (
+                HostPlatform::Windows,
+                r"C:\Users\someone\Folio's & 100% $HOME `x`\folio.exe",
+                r"& 'C:\Users\someone\Folio''s & 100% $HOME `x`\folio.exe' attention codex:stop --json -",
+            ),
+            (
+                HostPlatform::Windows,
+                "C:\\Users\\someone\\Folio\u{2019}s \u{2018}\u{201a}\u{201b} 文件夹\\folio.exe",
+                "& 'C:\\Users\\someone\\Folio\u{2019}\u{2019}s \u{2018}\u{2018}\u{201a}\u{201a}\u{201b}\u{201b} 文件夹\\folio.exe' attention codex:stop --json -",
             ),
             (
                 HostPlatform::MacOs,
@@ -1475,6 +1677,16 @@ mod tests {
                 "{platform:?}"
             );
         }
+        // **And a PowerShell literal in any other spelling is not Folio's**: a quote left single
+        // ends the literal there, and PowerShell would run a different command.
+        for spelled in [
+            r"& 'C:\Folio's\folio.exe' attention codex:stop --json -",
+            "& 'C:\\Folio\u{2019}s\\folio.exe' attention codex:stop --json -",
+            r"& 'C:\Folio\folio.exe attention codex:stop --json -",
+            r"& 'C:\Folio\folio.exe'' attention codex:stop --json -",
+        ] {
+            assert!(ownership::legacy_path(spelled, CODEX).is_err(), "{spelled}");
+        }
     }
 
     /// **What codex runs reaches the verb as a `Stop` that reads its payload from stdin**, and the
@@ -1483,8 +1695,8 @@ mod tests {
     fn the_command_codex_runs_is_a_call_the_verb_reads() {
         let command = hook_command_on(Path::new(r"C:\folio\folio.exe"), HostPlatform::Windows);
         let words = command
-            .strip_prefix(r#""C:\folio\folio.exe" "#)
-            .expect("the program, then the verb's words");
+            .strip_prefix(r"& 'C:\folio\folio.exe' ")
+            .expect("the call operator and the program, then the verb's words");
         let call = crate::cli::attention(words.split(' ').map(OsString::from))
             .expect("the verb")
             .expect("a call and not a fault");
@@ -1574,7 +1786,11 @@ mod tests {
                 "{name}: {written}"
             );
             assert!(written.contains(r#""statusMessage": "\u00e9""#), "{name}");
-            assert_eq!(state_in(&dir, Some(&exe())), State::Installed, "{name}");
+            assert_eq!(
+                codex_state_in(&dir, Some(&exe())),
+                State::Installed,
+                "{name}"
+            );
             assert_eq!(apply_to(&path, false, &exe()), Outcome::Removed, "{name}");
             assert_eq!(
                 std::fs::read_to_string(&path).expect("read back"),
@@ -1702,10 +1918,38 @@ mod tests {
     }
 
     /// **A `hooks.json` codex would ignore is never written into**, and one this build cannot read
-    /// is never written at all: a hook added to a file codex refuses whole would never run.
+    /// is never written at all: a hook added to a file codex refuses whole would never run. The
+    /// last five are review N2's: a key named twice where codex reads a struct, a handler type
+    /// codex does not know, a `matcher` that is not a string, a `timeout` that is a string.
+    ///
+    /// MUTATION: `plant-69-hooks-file-loosely-read.py` judges only the file's top-level keys again,
+    /// and those five install.
     #[test]
     fn a_hooks_file_codex_would_ignore_is_never_written() {
         let ignored = crate::i18n::Text::CodexHooksFileIgnored.text();
+        for theirs in [
+            r#"{"description":"a","description":"b"}"#,
+            r#"{"hooks":{"Stop":[{"hooks":[{"type":"http","url":"x"}]}]}}"#,
+            r#"{"hooks":{"PreToolUse":[{"matcher":5,"hooks":[]}]}}"#,
+            r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"a","command":"b"}]}]}}"#,
+            r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"x","timeout":"5"}]}]}}"#,
+        ] {
+            let dir = scratch("ignored-strict");
+            let path = dir.join(HOOKS_FILE);
+            std::fs::write(&path, theirs).expect("their own file");
+            assert_eq!(
+                apply_to(&path, true, &exe()),
+                Outcome::Refused(ignored),
+                "{theirs}"
+            );
+            assert_eq!(
+                apply_to(&path, false, &exe()),
+                Outcome::Unchanged,
+                "{theirs}"
+            );
+            assert_eq!(std::fs::read_to_string(&path).expect("there"), theirs);
+            assert_eq!(names(&dir), vec![HOOKS_FILE.to_owned()], "{theirs}");
+        }
         for (theirs, installing, removing) in [
             (
                 "\u{feff}{\"hooks\": {}}\n",
@@ -1753,6 +1997,50 @@ mod tests {
         std::fs::write(&path, &with_ours).expect("their own file");
         assert_eq!(apply_to(&path, false, &exe()), Outcome::Removed);
         assert_eq!(std::fs::read_to_string(&path).expect("read back"), theirs);
+    }
+
+    /// **The mirror of codex's `HooksFile` reads what codex reads** (review N2): every handler
+    /// codex knows, in every spelling it takes, and an event it does not know passed over; and
+    /// refuses what codex refuses — each of its 14 events ([`TOML_HOOK_EVENTS`], so the mirror
+    /// and the list are one) holding something that is not a list, a key named twice through the
+    /// alias codex accepts, an `mcp_tool` input TOML cannot hold, an `async` that is not a boolean.
+    #[test]
+    fn the_hooks_file_is_judged_by_codexs_own_types() {
+        let own = format!(
+            r#"{{"hooks":{{"Stop":[{{"hooks":[{}]}}]}}}}"#,
+            own_stop(&exe())
+        );
+        for read in [
+            "{}",
+            "{}\n",
+            r#"{"description":null,"hooks":{}}"#,
+            own.as_str(),
+            r#"{"hooks":{"NotAnEvent":5}}"#,
+            r#"{"hooks":{"PreToolUse":[{"matcher":null,"x":1,"hooks":[{"type":"command","command":"a","commandWindows":"b","timeout":5,"async":false,"statusMessage":"s","additionalContextLimit":0,"extra":true}]}]}}"#,
+            r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"a","command_windows":"b"}]}]}}"#,
+            r#"{"hooks":{"Stop":[{"hooks":[{"type":"mcp_tool","server":"s","tool":"t","input":{"a":[1,"x",{"b":true}]}}]}]}}"#,
+            r#"{"hooks":{"Stop":[{"hooks":[{"type":"prompt","prompt":"x"},{"type":"agent"}]}]}}"#,
+        ] {
+            assert!(read_by_codex(read), "{read}");
+        }
+        for event in TOML_HOOK_EVENTS {
+            let refused = format!(r#"{{"hooks":{{"{event}":5}}}}"#);
+            assert!(!read_by_codex(&refused), "{refused}");
+        }
+        for refused in [
+            "",
+            "\u{feff}{}",
+            r#"{"hooks":{"Stop":[],"Stop":[]}}"#,
+            r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"a","commandWindows":"b","command_windows":"c"}]}]}}"#,
+            r#"{"hooks":{"Stop":[{"hooks":[{"type":"command"}]}]}}"#,
+            r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"a","async":null}]}]}}"#,
+            r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"a","timeout":-1}]}]}}"#,
+            r#"{"hooks":{"Stop":[{"hooks":[{"type":"mcp_tool","server":"s","tool":"t","input":{"a":null}}]}]}}"#,
+            r#"{"hooks":{"Stop":[{"hooks":[{"type":"mcp_tool","server":"s","tool":"t","input":{"a":18446744073709551615}}]}]}}"#,
+            r#"{"hooks":{"Stop":[{"hooks":[{"command":"a"}]}]}}"#,
+        ] {
+            assert!(!read_by_codex(refused), "{refused}");
+        }
     }
 
     /// RED (0.4.10 plan row 69a; ruling R15) — **hook events in config.toml keep Folio out of
@@ -1830,7 +2118,11 @@ mod tests {
             let path = dir.join(HOOKS_FILE);
             assert_eq!(apply_to(&path, true, &exe()), Outcome::Installed, "{name}");
             assert_eq!(std::fs::read_to_string(&config).expect("there"), theirs);
-            assert_eq!(state_in(&dir, Some(&exe())), State::Installed, "{name}");
+            assert_eq!(
+                codex_state_in(&dir, Some(&exe())),
+                State::Installed,
+                "{name}"
+            );
             // A take-over press is no licence either: the line is nobody's to take over.
             assert_eq!(
                 apply_with(&path, Decision::TakeOver(Vec::new()), &exe()),
@@ -1839,7 +2131,7 @@ mod tests {
             );
             assert_eq!(apply_to(&path, false, &exe()), Outcome::Removed, "{name}");
             assert_eq!(std::fs::read_to_string(&config).expect("there"), theirs);
-            assert_eq!(state_in(&dir, Some(&exe())), State::Absent, "{name}");
+            assert_eq!(codex_state_in(&dir, Some(&exe())), State::Absent, "{name}");
         }
     }
 
@@ -1864,16 +2156,16 @@ mod tests {
         let without = "# mine\r\nmodel = \"gpt-5\"\r\n[tui]\r\nx = 1\r\n";
         // Kept and read while nothing is pressed: the row is on.
         std::fs::write(&config, line(&exe())).expect("their own file");
-        assert_eq!(state_in(&dir, Some(&exe())), State::Installed);
+        assert_eq!(codex_state_in(&dir, Some(&exe())), State::Installed);
         // A press writes the hook and takes the line out.
         assert_eq!(apply_to(&path, true, &exe()), Outcome::Installed);
         assert_eq!(std::fs::read_to_string(&config).expect("there"), without);
-        assert_eq!(state_in(&dir, Some(&exe())), State::Installed);
+        assert_eq!(codex_state_in(&dir, Some(&exe())), State::Installed);
         // Both of Folio's entries, by hand or across an upgrade: off takes out both.
         std::fs::write(&config, line(&exe())).expect("their own file");
         assert_eq!(apply_to(&path, false, &exe()), Outcome::Removed);
         assert_eq!(std::fs::read_to_string(&config).expect("there"), without);
-        assert_eq!(state_in(&dir, Some(&exe())), State::Absent);
+        assert_eq!(codex_state_in(&dir, Some(&exe())), State::Absent);
 
         // A live other copy's line asks for a take-over, and the consent covers the line.
         let other = dir.join("other").join("folio.exe");
@@ -1967,42 +2259,23 @@ mod tests {
             &bt_source::ItemQuery::function("apply_resolved").in_module("crate::attention_codex"),
         ));
         let toml_lands = body
-            .find("landed(toml_config,&toml.text,\"toml\",&taken_out)")
+            .find("land_codex_file(toml_config,toml_text,\"toml\",&taken_out)")
             .expect("config.toml is landed here");
         let hooks_land = body
-            .find("landed(config,&existing,\"json\",&written)")
+            .find("land_codex_file(config,&existing,\"json\",&written)")
             .expect("hooks.json is landed here");
         assert!(toml_lands < hooks_land, "config.toml is written first");
         let judged = body
-            .find("(Some(_),Err(reason))=>returnOutcome::Refused(reason),")
+            .find(
+                "Ok(toml_config)=>Some((toml_config,&toml.text,text)),\
+                 Err(reason)=>returnOutcome::Refused(*reason),",
+            )
             .expect("a config.toml Folio will not edit is refused here");
         assert!(judged < toml_lands, "and refused before either write");
-    }
-
-    /// **A `%` in Folio's path is refused on Windows**, where cmd.exe would expand it inside the
-    /// quotes codex runs the hook in; a removal is never refused for it.
-    #[test]
-    fn a_percent_in_the_path_is_refused_where_cmd_runs_the_hook() {
-        let dir = scratch("percent");
-        let exe = dir.join("100%").join("folio.exe");
-        let path = dir.join(HOOKS_FILE);
-        let installing = apply_to(&path, true, &exe);
-        if bt_platform::host_platform() == HostPlatform::Windows {
-            assert_eq!(
-                installing,
-                Outcome::Refused(crate::i18n::Text::CodexHookPathPercent.text())
-            );
-            assert!(!path.exists());
-        } else {
-            assert_eq!(installing, Outcome::Installed);
-        }
-        let own = own_stop(&exe);
-        std::fs::write(
-            &path,
-            format!(r#"{{"hooks":{{"Stop":[{{"hooks":[{own}]}}]}}}}"#),
-        )
-        .expect("a hook of this copy's");
-        assert_eq!(apply_to(&path, false, &exe), Outcome::Removed);
+        let ignored = body
+            .find("ifinstall&&!read_by_codex(written.as_deref().unwrap_or(&existing)){")
+            .expect("the text hooks.json will hold is judged by codex's types here");
+        assert!(ignored < toml_lands, "before either write too");
     }
 
     /// RED (ruling R13) — **Folio never writes codex's record of the person's approval.** Said over

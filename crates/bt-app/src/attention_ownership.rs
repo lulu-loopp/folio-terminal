@@ -73,6 +73,14 @@ pub(crate) enum Outcome {
     Unchanged,
     TakeOverRequired(Vec<PathBuf>),
     LeftOther(Vec<PathBuf>),
+    /// **A removal that went on without a second file it reads**, which it left as it was for
+    /// `reason`: Folio's entry is out of the file the press was on (`removed`), or was not in it.
+    /// codex's alone: a `config.toml` that could not be read does not hold a hook in `hooks.json`
+    /// (0.4.10 plan row 69, review N5).
+    LeftUnread {
+        removed: bool,
+        reason: &'static str,
+    },
     Refused(&'static str),
 }
 
@@ -198,6 +206,53 @@ pub(crate) fn check(
     Ok(others)
 }
 
+/// **The characters PowerShell reads as a single quote**: the ASCII one and the four typographic
+/// ones its tokenizer takes in its place (U+2018 to U+201B). Any of them ends a single-quoted
+/// literal, so a path holding one has to double it, whichever it is.
+const POWERSHELL_QUOTES: [char; 5] = ['\'', '\u{2018}', '\u{2019}', '\u{201a}', '\u{201b}'];
+
+/// **`text` as one PowerShell single-quoted literal**: inside one nothing is special — not `$`,
+/// not a backtick, not `%` or `&` — but a quote, and each quote of the text's own, any of the five
+/// ([`POWERSHELL_QUOTES`]), is written twice.
+#[must_use]
+pub(crate) fn powershell_quoted(text: &str) -> String {
+    let mut quoted = String::with_capacity(text.len() + 2);
+    quoted.push('\'');
+    for c in text.chars() {
+        if POWERSHELL_QUOTES.contains(&c) {
+            quoted.push(c);
+        }
+        quoted.push(c);
+    }
+    quoted.push('\'');
+    quoted
+}
+
+/// **What PowerShell reads a single-quoted literal as**, or `None` when `literal` is not one whole
+/// literal: it opens on a quote, a quote followed by a quote is the second one, and the first
+/// quote with none after it closes the literal and has to be its last character.
+fn powershell_literal(literal: &str) -> Option<String> {
+    let mut chars = literal.chars();
+    if !POWERSHELL_QUOTES.contains(&chars.next()?) {
+        return None;
+    }
+    let mut decoded = String::new();
+    while let Some(c) = chars.next() {
+        if !POWERSHELL_QUOTES.contains(&c) {
+            decoded.push(c);
+            continue;
+        }
+        match chars.clone().next() {
+            Some(next) if POWERSHELL_QUOTES.contains(&next) => {
+                decoded.push(next);
+                chars.next();
+            }
+            _ => return chars.next().is_none().then_some(decoded),
+        }
+    }
+    None
+}
+
 /// Strictly decode the literal operand of Folio's old templates, never a shell program.
 pub(crate) fn legacy_path(line: &str, family: &str) -> Result<Option<PathBuf>, &'static str> {
     let marker = format!(" attention {family}:");
@@ -212,15 +267,12 @@ pub(crate) fn legacy_path(line: &str, family: &str) -> Result<Option<PathBuf>, &
     {
         return Err(crate::i18n::Text::AgentHooksSchemaUnknown.text());
     }
-    let path = if let Some(inner) = quoted
-        .strip_prefix("& '")
-        .and_then(|s| s.strip_suffix('\''))
-    {
-        let decoded = inner.replace("''", "'");
-        if format!("& '{}'", decoded.replace('\'', "''")) != quoted {
-            return Err(crate::i18n::Text::AgentHooksSchemaUnknown.text());
+    let path = if let Some(literal) = quoted.strip_prefix("& ") {
+        // Read as PowerShell reads it, and only in the one spelling Folio writes.
+        match powershell_literal(literal) {
+            Some(decoded) if powershell_quoted(&decoded) == literal => decoded,
+            _ => return Err(crate::i18n::Text::AgentHooksSchemaUnknown.text()),
         }
-        decoded
     } else if let Some(inner) = quoted.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')) {
         let decoded = inner.replace("'\\''", "'");
         if format!("'{}'", decoded.replace('\'', "'\\''")) != quoted {

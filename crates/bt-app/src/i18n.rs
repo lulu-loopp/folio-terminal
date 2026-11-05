@@ -3282,18 +3282,16 @@ text_entries! {
 
     // ── codex's Stop hook (0.4.10 plan row 69) ─────────────────────────────
     //
-    // One contiguous block at the end, per this table's standing rule. **Three
+    // One contiguous block at the end, per this table's standing rule. **Two
     // refusals**, each the reason half of `CodexNotifyFailedToast`'s sentence,
     // said where `attention_codex::apply_resolved` writes nothing.
-    /// codex runs a hook through `cmd /C` on Windows, which expands `%` inside
-    /// quotes: a path holding one would be a different command by the time it ran.
-    CodexHookPathPercent,
     /// `config.toml` already declares hook events, and codex warns on every start
     /// when both it and `hooks.json` do (R15).
     CodexHooksInToml,
-    /// `hooks.json` holds a byte-order mark, a top-level key other than
-    /// `description` and `hooks`, or a `description` that is not a string: codex
-    /// reads none of such a file, so a hook added to it would never run.
+    /// `hooks.json`, with Folio's hook in it, is a file codex's own `HooksFile`
+    /// type refuses — a byte-order mark, a top-level key other than `description`
+    /// and `hooks`, a key named twice, a handler or a value of a type codex does not
+    /// take — and codex reads none of such a file, so the hook would never run.
     CodexHooksFileIgnored,
 }
 
@@ -6415,11 +6413,6 @@ impl Text {
             Self::ShellEndedBySystem => {
                 pick(lang, "Ended by the system at shutdown", "关机时被系统结束")
             }
-            Self::CodexHookPathPercent => pick(
-                lang,
-                "Folio's path contains %, which Windows would read as a variable when Codex runs the hook. Move Folio to a folder without %.",
-                "Folio 的路径含有 %，Codex 运行 hook 时 Windows 会将其当作变量。请将 Folio 移到不含 % 的文件夹。",
-            ),
             Self::CodexHooksInToml => pick(
                 lang,
                 "Codex's hooks are in its config.toml. Folio adds its own only to hooks.json, so it changed nothing.",
@@ -6617,10 +6610,6 @@ impl Text {
         //   halves, because a card is a surface and not a sentence.
         Self::WebFailRuntimeSay,
         Self::WebFailRuntimeVerb,
-        // — the refusal of a Codex hook from a path holding `%` (0.4.10 plan row 69): only
-        //   `cmd /C` expands one inside quotes, and `attention_codex::apply_resolved` asks it
-        //   only when `bt_platform::host_platform()` is Windows.
-        Self::CodexHookPathPercent,
     ];
 
     #[cfg(test)]

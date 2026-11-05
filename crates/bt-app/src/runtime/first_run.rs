@@ -156,6 +156,17 @@ impl<B: Backend> Runtime<'_, B> {
             // The file already said what the press asked for. Nothing was written, and a card
             // saying so would be a card about this build's bookkeeping.
             attention_hooks::Outcome::Unchanged => Ok(true),
+            // The switch is off, and a file beside the one it was pressed on was left as it
+            // was because it could not be read: said, whoever asked.
+            attention_hooks::Outcome::LeftUnread { reason, .. } => {
+                self.toast(
+                    toast::ToastKind::Info,
+                    toast::ToastAnchor::Window,
+                    None,
+                    i18n::agent_install_refused(i18n::Text::ClaudeHooksRemovedToast.text(), reason),
+                )?;
+                Ok(true)
+            }
             attention_hooks::Outcome::TakeOverRequired(owners)
             | attention_hooks::Outcome::LeftOther(owners) => {
                 self.toast(
@@ -240,6 +251,17 @@ impl<B: Backend> Runtime<'_, B> {
             }
             // The file already said what the press asked for.
             attention_codex::Outcome::Unchanged => Ok(true),
+            // The switch is off, and a file beside the one it was pressed on was left as it
+            // was because it could not be read: said, whoever asked.
+            attention_codex::Outcome::LeftUnread { reason, .. } => {
+                self.toast(
+                    toast::ToastKind::Info,
+                    toast::ToastAnchor::Window,
+                    None,
+                    i18n::agent_install_refused(i18n::Text::CodexNotifyRemovedToast.text(), reason),
+                )?;
+                Ok(true)
+            }
             attention_codex::Outcome::TakeOverRequired(owners)
             | attention_codex::Outcome::LeftOther(owners) => {
                 self.toast(
@@ -332,6 +354,20 @@ impl<B: Backend> Runtime<'_, B> {
             }
             // The directory already said what the press asked for.
             attention_copilot::Outcome::Unchanged => Ok(true),
+            // The switch is off, and a file beside the one it was pressed on was left as it
+            // was because it could not be read: said, whoever asked.
+            attention_copilot::Outcome::LeftUnread { reason, .. } => {
+                self.toast(
+                    toast::ToastKind::Info,
+                    toast::ToastAnchor::Window,
+                    None,
+                    i18n::agent_install_refused(
+                        i18n::Text::CopilotHooksRemovedToast.text(),
+                        reason,
+                    ),
+                )?;
+                Ok(true)
+            }
             attention_copilot::Outcome::TakeOverRequired(owners)
             | attention_copilot::Outcome::LeftOther(owners) => {
                 self.toast(
