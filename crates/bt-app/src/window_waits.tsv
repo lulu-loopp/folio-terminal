@@ -252,6 +252,7 @@ bt-app	-	crate::packaged_turns::PackagedTurns::birth_turn	std::sync::Condvar::wa
 bt-app	-	crate::packaged_turns::PackagedTurns::check_turn	std::sync::Condvar::wait 1	worker-door-body	WorkerCtx	
 bt-app	-	crate::computation_lane::read_video_glance	std::fs::metadata 1	worker-door-body	WorkerCtx	
 bt-app	-	crate::computation_lane::FormulaEngine::engine	std::thread::JoinHandle::join 1	worker-door-body	WorkerCtx	
+bt-app	-	crate::attention_codex::stamp_of	std::fs::metadata 1	worker-door-body	WorkerCtx	
 bt-app	-	crate::persist::SessionWriter::close	std::thread::sleep 1	owner-door-body	WaitToken	SessionWriterRetire
 bt-app	-	crate::persist::SessionWriter::wait_for	std::sync::mpsc::Receiver::recv_timeout 1	owner-door-body	WaitToken	SessionWriteWait
 bt-app	-	crate::pty_door::bear	bt_pty::PtySession::spawn_refreshed 1, bt_pty::PtySession::spawn_shell_in 1	worker-door-body	WorkerCtx	

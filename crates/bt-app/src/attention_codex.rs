@@ -296,7 +296,7 @@ pub(crate) fn version() -> CodexVersion {
 pub(crate) fn settle_version(ctx: &bt_platform::admission::WorkerCtx) -> CodexVersion {
     settle_version_in(
         &VERSION_BOOK,
-        &stamp_of,
+        &|program| stamp_of(ctx, program),
         &|program| {
             crate::attention_copilot::program_version(ctx, program, VERSION_DEADLINE, "codex")
         },
@@ -338,8 +338,9 @@ pub(crate) fn settle_version_in(
     held.version()
 }
 
-/// The program as it stands on disk, or `None` when it cannot be looked at.
-fn stamp_of(program: &Path) -> Option<ProgramStamp> {
+/// The program as it stands on disk, or `None` when it cannot be looked at: a worker's door, the
+/// one look at the disk the version book takes on the carry worker.
+fn stamp_of(_worker: &bt_platform::admission::WorkerCtx, program: &Path) -> Option<ProgramStamp> {
     let metadata = std::fs::metadata(program).ok()?;
     Some(ProgramStamp {
         path: program.to_path_buf(),

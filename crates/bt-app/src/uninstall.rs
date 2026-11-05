@@ -122,7 +122,7 @@ const INVENTORY: &[Mark] = &[
         writer: "attention_hooks.rs:apply_at",
     },
     Mark {
-        name: "Codex notify",
+        name: "Codex hooks",
         says: Text::CleanupMarkCodex,
         kind: Kind::PerCopy,
         remover: Remover::Agent(1),

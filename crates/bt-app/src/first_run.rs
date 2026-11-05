@@ -3630,7 +3630,7 @@ mod tests {
         // file, and no two rows name the same one.
         for (row, named) in [
             (2_usize, "settings.json"),
-            (3, "config.toml"),
+            (3, "hooks.json"),
             (4, "folio.json"),
         ] {
             assert!(
@@ -4065,7 +4065,7 @@ mod clock_edge_tests {
         for reader in [
             "explorer_menu::package_file()",
             "attention_hooks::state()",
-            "attention_codex::state()",
+            "attention_codex::first_run_installable()",
             "attention_copilot::state()",
         ] {
             assert!(
