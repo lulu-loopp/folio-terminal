@@ -53,7 +53,11 @@ fn a_thread_the_door_started_is_a_worker_by_its_name() {
 /// the video threads, which changed in the same way; this one is asked because it runs on every
 /// platform that has an endpoint.
 ///
-/// MUTATION: start the listener in `AttentionPipe::start` with
+/// The endpoint's waits are on a clock that awaits the other end, and the line is heard within
+/// the suite's patience (T-ATTENTION-ENDPOINT-WAITS-ON-A-CLOCK): `start_on` spawns the listener
+/// exactly as the product's `start` does, which is the one thing asked here.
+///
+/// MUTATION: start the listener in `AttentionPipe::start_on` with
 /// `std::thread::Builder::new().name("folio-attention-endpoint".to_owned()).spawn(move || …)`
 /// again and the role delivered is `Unset`.
 #[cfg(any(windows, unix))]
@@ -62,17 +66,21 @@ fn the_attention_endpoint_delivers_on_a_worker_the_door_started() {
     let directory = bt_testpath::temp_path("bt-platform-attention-role");
     std::fs::create_dir_all(&directory).expect("make the data directory");
     let (sender, heard) = std::sync::mpsc::channel();
-    let endpoint = crate::attention_pipe::AttentionPipe::start(&directory, move |line| {
-        let _ = sender.send((line, role()));
-    })
+    let endpoint = crate::attention_pipe::AttentionPipe::start_on(
+        &directory,
+        std::sync::Arc::new(crate::launch_conversation::CountedClock::answering()),
+        move |line| {
+            let _ = sender.send((line, role()));
+        },
+    )
     .expect("open the attention endpoint");
     crate::attention_pipe::send_line(endpoint.name(), "raise probe:Role cap=abc")
         .expect("the endpoint took the line");
     assert_eq!(
-        heard.recv_timeout(std::time::Duration::from_secs(5)).ok(),
-        Some((
+        crate::door_skipped::received(&heard, "the endpoint's delivery"),
+        (
             "raise probe:Role cap=abc".to_owned(),
             Role::Worker("folio-attention-endpoint")
-        ))
+        )
     );
 }

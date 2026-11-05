@@ -109,14 +109,17 @@ and escapes.
   laid out like its neighbours. An own entry is one `hook_owner` reads as a
   Folio executable speaking `attention`. Nothing else is edited, moved or
   deleted. Before anything is written, `verified` reads the result back. It
-  compares the byte-order mark and the bytes around the top-level object, every
-  piece that is not Folio's (byte for byte and in order), and the two documents
-  as values with Folio's entries stripped from both. Any difference refuses the
-  write whole: "Folio could not change only its own lines in this file, so
-  nothing was written". A file that is not strict JSON (comments, trailing
-  commas) is never written, as before. A key named twice on the way down to
-  Folio's entries is refused too, because the agent's parser decides which of
-  the two it reads. The switch, the take-over and uninstall all go through this
+  cuts Folio's entries, and the groups, events and `hooks` that hold nothing
+  else, out of the file before and after, each with one separator, and
+  requires what is left to be the same bytes: the byte-order mark, every piece
+  of the person's, and the whitespace, commas and brackets between them. It
+  also compares the two documents as values with Folio's entries stripped from
+  both. Any difference refuses the write whole: "Folio could not change only
+  its own lines in this file, so nothing was written". A file that is not
+  strict JSON (comments, trailing commas) is never written, as before. A key
+  named twice on the way down to Folio's entries, or inside an entry that reads
+  as Folio's, is refused too, because the agent's parser decides which of the
+  two it reads. The switch, the take-over and uninstall all go through this
   writer.
 - **Codex** (`attention_codex`, 0.4.10 plan row 69): Folio's entry is a `Stop`
   hook in `hooks.json` beside `config.toml`, written by the same splice as
@@ -151,7 +154,9 @@ and escapes.
 One round trip is not the identity. The file cannot say who wrote an empty
 `"hooks": {}` or an empty event array. Folio fills it on install, and on
 removal it goes with Folio's entries, by the same rule that removes a `hooks`
-Folio created. Every other byte comes back. This is ruled, not owed (2026-11-04,
+Folio created. The same holds one level up: an object Folio's entries were the
+only members of is written back as `{}`, so a file that was `{ }`, or `{` and
+`}` on two lines, comes back as `{}`. Every other byte comes back. This is ruled, not owed (2026-11-04,
 plan row 67a D1): an empty container holds no hook or setting of the person's,
 and the rule protects their hooks and settings, so no record outside the file
 is kept to tell who wrote one. Row 69's ruling R16 amends D1 for Codex's

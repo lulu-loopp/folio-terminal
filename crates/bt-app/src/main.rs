@@ -1487,6 +1487,9 @@ struct ClipboardPictureInbox {
     /// The generation the window is waiting for. Bumped by every new paste.
     wanted: u64,
     landed: Option<ClipboardPictureAnswer>,
+    /// The saves refused at the door since the window last looked (plan row 52): each is said on
+    /// the turn the inbox's wake brings, in the notice the door used to draw itself.
+    refused: usize,
 }
 
 impl ClipboardPictureMailbox {
@@ -1509,6 +1512,26 @@ impl ClipboardPictureMailbox {
     /// The inbox itself, for the worker to leave its answer in.
     fn inbox(&self) -> Arc<std::sync::Mutex<ClipboardPictureInbox>> {
         Arc::clone(&self.inbox)
+    }
+
+    /// One save refused at its door, counted for the next look (plan row 52): the generation is
+    /// left alone, so the paste a running save answers is still the one waited for.
+    fn refuse(&self) {
+        self.inbox
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .refused += 1;
+    }
+
+    /// How many saves were refused at the door since the last look, and none from now on.
+    fn take_refusals(&mut self) -> usize {
+        std::mem::take(
+            &mut self
+                .inbox
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .refused,
+        )
     }
 
     /// Take whatever landed, and answer with it only if it is still an answer to
@@ -48866,6 +48889,7 @@ impl<B: Backend> FolioApp<B> {
     /// stopped answering. It cannot arrive from AppKit, and it is one line
     /// against a hang at a boundary this program does not own.
     fn begin_the_systems_quit(&mut self, answer: bt_platform::TerminationAnswer) {
+        session_end::the_systems_quit_asked(answer.reason());
         if self.termination.is_some() {
             if let Err(reason) = answer.answer(bt_platform::TerminationDecision::Cancel) {
                 crate::diagnostics::stderr_line(format!(
@@ -48898,6 +48922,19 @@ impl<B: Backend> FolioApp<B> {
         let Some(answer) = self.termination.take() else {
             return;
         };
+        // **The last word before AppKit may end the process** (0.4.10 plan row 17). `NSTerminateNow`
+        // lets `-[NSApplication terminate:]` go on to `exit()`, and `fn main`'s way out, its fence
+        // among it, is never reached; so what became of the quit's save is said and the log is
+        // fenced here, before the answer, once for the process and within the fence's own bound.
+        if decision == bt_platform::TerminationDecision::Now {
+            session_end::at_the_systems_quit(
+                self.app
+                    .as_ref()
+                    .map_or(persist::ClosedSave::NoSession, |app| {
+                        app.session_store.what_the_close_left()
+                    }),
+            );
+        }
         if let Err(reason) = answer.answer(decision) {
             crate::diagnostics::stderr_line(format!(
                 "{APP_NAME} could not answer the quit the system asked for: {reason}"
@@ -62014,6 +62051,51 @@ mod quit_with_no_window_tests {
             finished < now,
             "AppKit is let go only after the session is on the disk"
         );
+        // **And the request says why it came, and the answer fences the log before it is given**
+        // (0.4.10 plan row 17): `NSTerminateNow` lets AppKit `exit()` and `fn main`'s fence is
+        // never reached. MUTATION (plant 17-a′): move the `at_the_systems_quit` call below the
+        // `answer.answer(decision)` statement.
+        let said = begin
+            .find("session_end::the_systems_quit_asked(answer.reason());")
+            .expect("the request says why AppKit asked");
+        let parked = begin
+            .find("self.termination = Some(answer);")
+            .expect("and is parked");
+        assert!(said < parked, "{begin}");
+        let answering = method_body("FolioApp", "answer_the_systems_quit");
+        let taken = answering
+            .find("self.termination.take()")
+            .expect("the answer is AppKit's request");
+        let gated = answering
+            .find("decision == bt_platform::TerminationDecision::Now")
+            .expect("the end is NSTerminateNow's");
+        let ended = answering
+            .find("session_end::at_the_systems_quit(")
+            .expect("the quit says its save and fences the log");
+        let replied = answering
+            .find("answer.answer(decision)")
+            .expect("and then answers AppKit");
+        assert!(
+            taken < gated && gated < ended && ended < replied,
+            "the log is fenced before AppKit is answered: {answering}"
+        );
+        // **And the end it calls is handed the real log and the real fence** (0.4.10 plan row 17,
+        // review N1): `the_systems_quit_ends_with` is tested with a recorder for both, so the one
+        // product caller is the last connection to `diagnostics::note` and `fence_the_log`.
+        // MUTATION (plant 17-a3): hand `&mut || {}` for the fence in `at_the_systems_quit`.
+        let handed = item_body(
+            &bt_source::ItemQuery::function("at_the_systems_quit").in_module("crate::session_end"),
+        );
+        let end = handed
+            .find("the_systems_quit_ends_with(")
+            .expect("the NSTerminateNow end is the tested one");
+        let sayer = handed
+            .find("&mut crate::diagnostics::note")
+            .expect("the NSTerminateNow end is handed the log and its fence");
+        let fence = handed
+            .find("&mut fence_the_log")
+            .expect("the NSTerminateNow end is handed the log and its fence");
+        assert!(end < sayer && sayer < fence, "{handed}");
     }
 }
 

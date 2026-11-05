@@ -14192,12 +14192,7 @@ impl<B: Backend> Runtime<'_, B> {
             crate::diagnostics::stderr_line(
                 "clipboard picture workers are all busy; paste ignored".to_owned(),
             );
-            return self.toast(
-                toast::ToastKind::Error,
-                toast::ToastAnchor::Window,
-                None,
-                i18n::Text::PasteClipboardPicture.text().to_owned(),
-            );
+            return self.refuse_clipboard_picture_on_the_next_turn();
         };
         let generation = self.window.clipboard_picture.withdraw();
         let inbox = self.window.clipboard_picture.inbox();
@@ -14233,13 +14228,25 @@ impl<B: Backend> Runtime<'_, B> {
             crate::diagnostics::stderr_line(
                 "clipboard picture worker could not be started; paste ignored".to_owned(),
             );
-            return self.toast(
-                toast::ToastKind::Error,
-                toast::ToastAnchor::Window,
-                None,
-                i18n::Text::PasteClipboardPicture.text().to_owned(),
-            );
+            return self.refuse_clipboard_picture_on_the_next_turn();
         }
+        Ok(())
+    }
+
+    /// **A save refused at its door, answered on the next turn** (plan row 52, ruling R5): the
+    /// refusal is counted in the picture's own inbox, under the lock the worker's answer is left
+    /// under, and the window is woken as the worker wakes it ([`AppEvent::ClipboardPictureReady`]);
+    /// [`Self::adopt_clipboard_picture`] draws the notice this door used to draw on the gesture's
+    /// own turn. The door's line is said where it always was, in the same words.
+    ///
+    /// **Under no generation**: a refusal answers no question of its own and supersedes none, so a
+    /// save still running for an earlier paste lands as it would have.
+    fn refuse_clipboard_picture_on_the_next_turn(&mut self) -> Result<()> {
+        self.window.clipboard_picture.refuse();
+        let _ = self
+            .app
+            .event_proxy
+            .send_event(AppEvent::ClipboardPictureReady);
         Ok(())
     }
 
@@ -14271,6 +14278,17 @@ impl<B: Backend> Runtime<'_, B> {
     /// answers a gesture that has been superseded, and the file it wrote is
     /// swept by the cap the next paste applies.
     pub(crate) fn adopt_clipboard_picture(&mut self) -> Result<()> {
+        // A save its door refused ([`Self::refuse_clipboard_picture_on_the_next_turn`]) is said
+        // first, once per refusal, in the notice the door drew before plan row 52: it was asked
+        // before any answer still to land.
+        for _ in 0..self.window.clipboard_picture.take_refusals() {
+            self.toast(
+                toast::ToastKind::Error,
+                toast::ToastAnchor::Window,
+                None,
+                i18n::Text::PasteClipboardPicture.text().to_owned(),
+            )?;
+        }
         let Some(landed) = self.window.clipboard_picture.take_current() else {
             return Ok(());
         };

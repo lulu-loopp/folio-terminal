@@ -625,19 +625,20 @@ struct Entry<'a> {
     own: Option<PathBuf>,
 }
 
-/// One matcher group: its object, its `hooks` array and the entries in it.
+/// One matcher group: its `hooks` array and the entries in it.
 struct Group<'a> {
-    node: &'a splice::Node,
     rows: &'a splice::Node,
     matcher: Option<String>,
     entries: Vec<Entry<'a>>,
+    /// Whether anything in the group is not Folio's: an entry of somebody else's, or — outside a
+    /// [`Family::positional`] family — no entry at all, a group nobody but its writer put there.
+    foreign: bool,
 }
 
 impl Group<'_> {
-    /// Whether anything in the group is not Folio's: an entry of somebody else's, or no entry at
-    /// all — a group nobody but its writer put there.
+    /// See [`Group::foreign`].
     fn holds_foreign(&self) -> bool {
-        self.entries.is_empty() || self.entries.iter().any(|entry| entry.own.is_none())
+        self.foreign
     }
 }
 
@@ -647,10 +648,50 @@ struct Event<'a> {
     groups: Vec<Group<'a>>,
 }
 
+impl Event<'_> {
+    fn groups_share(&self) -> FolioShare {
+        folio_share_of(self.groups.iter().map(|group| !group.holds_foreign()))
+    }
+}
+
 /// The `hooks` member of the file, read down to its entries.
 struct Hooks<'a> {
     member: &'a splice::Property,
     events: Vec<Event<'a>>,
+}
+
+impl Hooks<'_> {
+    fn events_share(&self) -> FolioShare {
+        folio_share_of(
+            self.events
+                .iter()
+                .map(|event| event.groups_share() == FolioShare::OnlyFolios),
+        )
+    }
+}
+
+/// **What a container on the way to Folio's entries holds**, as the self-check reads it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FolioShare {
+    /// Nothing at all: `{}` or `[]`, whatever whitespace stands between the brackets.
+    Nothing,
+    /// Folio's and nothing else.
+    OnlyFolios,
+    /// Something of somebody else's — and a container the person left empty inside it counts as
+    /// theirs.
+    Theirs,
+}
+
+/// The share of a container whose items are each Folio's alone (`true`) or not.
+fn folio_share_of(items: impl IntoIterator<Item = bool>) -> FolioShare {
+    let mut share = FolioShare::Nothing;
+    for folios in items {
+        if !folios {
+            return FolioShare::Theirs;
+        }
+        share = FolioShare::OnlyFolios;
+    }
+    share
 }
 
 /// What an object on the way to Folio's entries said when it named one key twice.
@@ -669,7 +710,7 @@ pub(crate) const SPLICE_REFUSED: &str =
 ///
 /// `None` when there is no `hooks` member at all. The shapes [`owners`] refuses are refused here
 /// too, for the same reasons; on top of them, a key named twice anywhere on the way down to an
-/// entry ([`Family::duplicate`]).
+/// entry, or inside an entry that reads as Folio's ([`Family::duplicate`]).
 fn mapped<'a>(
     family: &Family,
     document: &'a splice::Document,
@@ -706,12 +747,20 @@ fn mapped<'a>(
                 .map(|entry| value_at(family, document.text, entry))
                 .collect::<Result<Vec<_>, _>>()?;
             let owners = entry_owners(family, &values);
-            let entries = nodes
-                .iter()
-                .zip(values)
-                .zip(owners)
-                .map(|((node, value), own)| Entry { node, value, own })
-                .collect();
+            let mut entries = Vec::with_capacity(nodes.len());
+            for ((node, value), own) in nodes.iter().zip(values).zip(owners) {
+                // An entry that reads as Folio's only because the value parser kept the last of two
+                // keys of one name: which one the agent runs is its parser's business, and an edit
+                // of the entry would take the other one's bytes with it.
+                if own.is_some() && node.names_a_key_twice() {
+                    return Err(family.duplicate);
+                }
+                entries.push(Entry { node, value, own });
+            }
+            // Under a positional family a group with no entry of anybody else's is nobody's, empty
+            // or not: the group Folio's removal leaves empty where it stood (ruling R16) is one.
+            let foreign = entries.iter().any(|entry| entry.own.is_none())
+                || (!family.positional && entries.is_empty());
             let matcher = match matcher {
                 Some(matcher) => value_at(family, document.text, &matcher.value)?
                     .as_str()
@@ -720,10 +769,10 @@ fn mapped<'a>(
                 None => None,
             };
             groups.push(Group {
-                node,
                 rows: &rows.value,
                 matcher,
                 entries,
+                foreign,
             });
         }
         events.push(Event {
@@ -1043,20 +1092,24 @@ fn splice_checked(
 /// **The write-time self-check** (0.4.10 plan row 67a): the text an edit produced is handed on
 /// only when, read back, it says everything `before` said that was not Folio's, in the same bytes.
 ///
-/// Four things are compared, and any difference refuses the write whole ([`SPLICE_REFUSED`]):
+/// Three things are compared, and any difference refuses the write whole ([`SPLICE_REFUSED`]):
 ///
-/// 1. the byte-order mark, and the bytes before and after the top-level object;
-/// 2. **every unit of the file that is not Folio's, byte for byte and in order** — each member of
-///    the top-level object other than `hooks`; under `hooks`, the key of every event that holds
-///    something of somebody else's, and in each group that does, its other members and every entry
-///    that is not Folio's ([`foreign_units`]); under a [`Family::positional`] family, also the
-///    place every one of those entries stands at (row 69a);
+/// 1. that the result is a document, and its top level an object;
+/// 2. **the whole file with Folio's extents cut out, byte for byte** ([`outside_folios`]): every
+///    byte that is not Folio's — the byte-order mark, the whitespace, the commas and brackets
+///    between items, the keys of the person's groups and events, a container the person left
+///    empty — stands in both, in the same place among the others; and under a
+///    [`Family::positional`] family, **the place every entry of somebody else's stands at**
+///    ([`places`], row 69a), which a cut cannot see;
 /// 3. the two documents as values, with Folio's entries and the containers left empty by taking
-///    them out stripped from both ([`without_folio`]);
-/// 4. and that the result is a document at all.
+///    them out stripped from both ([`without_folio`]).
+///
+/// A file that held nothing but whitespace (D4) has only its byte-order mark compared, and what
+/// replaces it must be Folio's alone.
 ///
 /// The edit plan above is written to pass this; the check is what makes a mistake in it a refusal
-/// rather than somebody's lost hook.
+/// rather than somebody's lost hook. Its cuts are worked out here, apart from the plan's, so that a
+/// mistake in the plan's separators is not made twice.
 fn verified(
     family: &Family,
     before: &splice::Document,
@@ -1073,104 +1126,222 @@ fn keeps_what_is_not_ours(family: &Family, before: &splice::Document, text: &str
     let Ok(after) = splice::parse(text) else {
         return false;
     };
-    let Some(root) = after.root.as_ref() else {
+    let (Some(root), Ok(old), Ok(new)) = (
+        after.root.as_ref(),
+        mapped(family, before),
+        mapped(family, &after),
+    ) else {
         return false;
     };
-    if root.members().is_none() || before.text[..before.body] != after.text[..after.body] {
+    if root.members().is_none() {
         return false;
     }
-    if let Some(old) = before.root.as_ref()
-        && (before.text[before.body..old.start] != after.text[after.body..root.start]
-            || before.text[old.end..] != after.text[root.end..])
-    {
-        return false;
+    let outside_kept = if before.root.is_none() {
+        before.text[..before.body] == after.text[..after.body]
+            && root_folio_share(&after, new.as_ref()) == FolioShare::OnlyFolios
+    } else {
+        let filled = FilledByFolio::by_edit(before, old.as_ref(), &after, new.as_ref());
+        match (
+            outside_folios(before, old.as_ref(), &filled),
+            outside_folios(&after, new.as_ref(), &filled),
+        ) {
+            (Some(old), Some(new)) => old == new,
+            _ => false,
+        }
+    };
+    outside_kept
+        && (!family.positional || places(old.as_ref()) == places(new.as_ref()))
+        && match (before.whole_value(), after.whole_value()) {
+            (Ok(old), Ok(new)) => without_folio(family, old) == without_folio(family, new),
+            _ => false,
+        }
+}
+
+/// **Where every entry of somebody else's stands** — its event, its group's index in that event
+/// and its own in the group — which is what a [`Family::positional`] family's agent keys the
+/// person's approval of that entry by. [`outside_folios`] compares bytes with Folio's extents cut
+/// out, so a group of Folio's put in front of the person's, or taken out from in front of it, cuts
+/// to the same text: the places are what moved.
+fn places<'a>(hooks: Option<&Hooks<'a>>) -> Vec<(&'a str, usize, usize)> {
+    let mut found = Vec::new();
+    for event in hooks.map_or(&[][..], |hooks| hooks.events.as_slice()) {
+        for (group_at, group) in event.groups.iter().enumerate() {
+            for (entry_at, entry) in group.entries.iter().enumerate() {
+                if entry.own.is_none() {
+                    found.push((event.member.key.as_str(), group_at, entry_at));
+                }
+            }
+        }
     }
-    match (foreign_units(family, before), foreign_units(family, &after)) {
-        (Some(old), Some(new)) if old == new => {}
-        _ => return false,
-    }
-    match (before.whole_value(), after.whole_value()) {
-        (Ok(old), Ok(new)) => without_folio(family, old) == without_folio(family, new),
-        _ => false,
+    found
+}
+
+/// The share of the file's own object: Folio's alone when its one member is a `hooks` that is.
+fn root_folio_share(document: &splice::Document, hooks: Option<&Hooks>) -> FolioShare {
+    let hooks_folios = hooks.is_some_and(|hooks| hooks.events_share() == FolioShare::OnlyFolios);
+    folio_share_of(
+        document
+            .root
+            .as_ref()
+            .and_then(splice::Node::members)
+            .unwrap_or_default()
+            .iter()
+            .map(|member| member.key == "hooks" && hooks_folios),
+    )
+}
+
+/// **The containers the person left empty that the edit filled with Folio's alone** (rulings D1
+/// and N2): the file's own object, `hooks`, and events by name. Such a container stands on both
+/// sides of the comparison as its key and brackets, with what stands between them cut — the
+/// whitespace the person left inside on one side, Folio's entries on the other. Every other
+/// container the person left empty is compared whole, so an edit that took one away, or put
+/// anything but Folio's into it, is refused.
+struct FilledByFolio {
+    root: bool,
+    hooks: bool,
+    events: Vec<String>,
+}
+
+impl FilledByFolio {
+    fn by_edit(
+        before: &splice::Document,
+        old: Option<&Hooks>,
+        after: &splice::Document,
+        new: Option<&Hooks>,
+    ) -> Self {
+        let filled = |was: FolioShare, is: FolioShare| {
+            was == FolioShare::Nothing && is == FolioShare::OnlyFolios
+        };
+        let events = match (old, new) {
+            (Some(old), Some(new)) => old
+                .events
+                .iter()
+                .filter(|event| {
+                    new.events.iter().any(|now| {
+                        now.member.key == event.member.key
+                            && filled(event.groups_share(), now.groups_share())
+                    })
+                })
+                .map(|event| event.member.key.clone())
+                .collect(),
+            _ => Vec::new(),
+        };
+        Self {
+            root: filled(root_folio_share(before, old), root_folio_share(after, new)),
+            hooks: old
+                .zip(new)
+                .is_some_and(|(old, new)| filled(old.events_share(), new.events_share())),
+            events,
+        }
     }
 }
 
-/// One piece of the file that is not Folio's, as [`foreign_units`] lists them.
-#[derive(Debug, Eq, PartialEq)]
-enum Unit<'a> {
-    /// The bytes it is.
-    Bytes(&'a str),
-    /// **Where an entry of somebody else's stands** — its event, its group's index in that event
-    /// and its own in the group — under a [`Family::positional`] family, whose agent keys the
-    /// person's approval of that entry by exactly these three.
-    Place {
-        event: &'a str,
-        group: usize,
-        entry: usize,
-    },
-}
-
-/// **Every piece of the file that is not Folio's, as the bytes it is, in the order it stands.**
-/// `None` for a document whose `hooks` cannot be read down to its entries.
+/// **The file with every extent of Folio's cut out**: Folio's entries, a group of nothing but
+/// Folio's entries, an event of nothing but such groups, and a `hooks` of nothing but such
+/// events, each with one separator next to it; a container all of whose items are Folio's with
+/// everything between its brackets. What is left is every byte that is not Folio's, in its place.
 ///
-/// Under a [`Family::positional`] family a group with no entry of anybody else's is nobody's to
-/// list, empty or not — the group Folio's removal leaves empty where it stood (ruling R16) is one —
-/// and every foreign entry's [`Unit::Place`] is listed beside its bytes.
-fn foreign_units<'a>(family: &Family, document: &'a splice::Document) -> Option<Vec<Unit<'a>>> {
+/// `None` for a document whose top level is not an object.
+fn outside_folios(
+    document: &splice::Document,
+    hooks: Option<&Hooks>,
+    filled: &FilledByFolio,
+) -> Option<String> {
     let text = document.text;
-    let mut units = Vec::new();
-    let Some(root) = document.root.as_ref() else {
-        return Some(units);
-    };
-    for member in root.members()? {
-        if member.key != "hooks" {
-            units.push(Unit::Bytes(&text[member.key_start..member.value.end]));
+    let root = document.root.as_ref()?;
+    let mut cuts = Vec::new();
+    if filled.root {
+        cuts.push((root.start + 1, root.end - 1));
+    } else {
+        let hooks_go = !filled.hooks
+            && hooks.is_some_and(|hooks| hooks.events_share() == FolioShare::OnlyFolios);
+        let members: Vec<bool> = root
+            .members()?
+            .iter()
+            .map(|member| member.key == "hooks" && hooks_go)
+            .collect();
+        cut_folio_items(root, &members, &mut cuts);
+        match hooks {
+            Some(hooks) if filled.hooks => {
+                let value = &hooks.member.value;
+                cuts.push((value.start + 1, value.end - 1));
+            }
+            Some(hooks) if !hooks_go && hooks.events_share() == FolioShare::Theirs => {
+                let events: Vec<bool> = hooks
+                    .events
+                    .iter()
+                    .map(|event| {
+                        event.groups_share() == FolioShare::OnlyFolios
+                            && !filled.events.contains(&event.member.key)
+                    })
+                    .collect();
+                cut_folio_items(&hooks.member.value, &events, &mut cuts);
+                for event in &hooks.events {
+                    let value = &event.member.value;
+                    if filled.events.contains(&event.member.key) {
+                        cuts.push((value.start + 1, value.end - 1));
+                    } else if event.groups_share() == FolioShare::Theirs {
+                        let groups: Vec<bool> = event
+                            .groups
+                            .iter()
+                            .map(|group| !group.holds_foreign())
+                            .collect();
+                        cut_folio_items(value, &groups, &mut cuts);
+                        for group in event.groups.iter().filter(|group| group.holds_foreign()) {
+                            let entries: Vec<bool> = group
+                                .entries
+                                .iter()
+                                .map(|entry| entry.own.is_some())
+                                .collect();
+                            cut_folio_items(group.rows, &entries, &mut cuts);
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
     }
-    let Some(hooks) = mapped(family, document).ok()? else {
-        return Some(units);
+    cuts.sort_unstable();
+    let mut rest = String::with_capacity(text.len());
+    let mut at = 0;
+    for (start, end) in cuts {
+        rest.push_str(&text[at..start]);
+        at = end;
+    }
+    rest.push_str(&text[at..]);
+    Some(rest)
+}
+
+/// The cuts that take a container's Folio items (`folios`) out, each run of them with one
+/// separator: up to the next item's first byte when one follows, from the last other item's end
+/// when none does; and everything between the brackets when every item is Folio's.
+fn cut_folio_items(node: &splice::Node, folios: &[bool], cuts: &mut Vec<(usize, usize)>) {
+    let items: Vec<(usize, usize)> = match (node.members(), node.elements()) {
+        (Some(members), _) => members.iter().map(splice::Property::span).collect(),
+        (_, Some(elements)) => elements.iter().map(|item| (item.start, item.end)).collect(),
+        _ => return,
     };
-    let foreign = |group: &Group| {
-        if family.positional {
-            group.entries.iter().any(|entry| entry.own.is_none())
+    if !items.is_empty() && folios.iter().all(|folio| *folio) {
+        cuts.push((node.start + 1, node.end - 1));
+        return;
+    }
+    let mut index = 0;
+    while index < items.len() {
+        if !folios[index] {
+            index += 1;
+            continue;
+        }
+        let mut last = index;
+        while last + 1 < items.len() && folios[last + 1] {
+            last += 1;
+        }
+        cuts.push(if last + 1 < items.len() {
+            (items[index].0, items[last + 1].0)
         } else {
-            group.holds_foreign()
-        }
-    };
-    for event in &hooks.events {
-        if event.groups.iter().any(foreign) {
-            units.push(Unit::Bytes(
-                &text[event.member.key_start..event.member.key_end],
-            ));
-        }
-        for (index, group) in event.groups.iter().enumerate() {
-            if !foreign(group) {
-                continue;
-            }
-            for member in group.node.members()? {
-                if member.key != "hooks" {
-                    units.push(Unit::Bytes(&text[member.key_start..member.value.end]));
-                }
-            }
-            if group.entries.is_empty() {
-                units.push(Unit::Bytes(&text[group.rows.start..group.rows.end]));
-            }
-            for (at, entry) in group.entries.iter().enumerate() {
-                if entry.own.is_some() {
-                    continue;
-                }
-                units.push(Unit::Bytes(&text[entry.node.start..entry.node.end]));
-                if family.positional {
-                    units.push(Unit::Place {
-                        event: event.member.key.as_str(),
-                        group: index,
-                        entry: at,
-                    });
-                }
-            }
-        }
+            (items[index - 1].1, items[last].1)
+        });
+        index = last + 1;
     }
-    Some(units)
 }
 
 /// A settings value with every entry [`entry_owners`] reads as Folio's taken out, and then every
@@ -1739,8 +1910,11 @@ mod splice {
     /// The byte-order mark an editor on Windows may leave at the front of the file.
     pub(super) const BOM: char = '\u{feff}';
 
-    /// How deep this reader follows nesting before it calls a document unreadable — the value
-    /// parser's own limit, so the two never disagree about which documents exist.
+    /// How deep this reader follows nesting before it calls a document unreadable: at least as
+    /// deep as the value parser does (`serde_json` stops at its 128th nested container, this
+    /// reader past element depth 128). A document only this reader accepts is refused by
+    /// `Document::whole_value` and called unreadable, so nothing is ever written from a reading
+    /// only one of the two made.
     const DEPTH: usize = 128;
 
     /// The document's text after its byte-order mark, if it has one: what a value parser reads.
@@ -1821,6 +1995,17 @@ mod splice {
                 }
             }
             Ok(found)
+        }
+
+        /// Whether this object names any key twice.
+        #[must_use]
+        pub(super) fn names_a_key_twice(&self) -> bool {
+            let members = self.members().unwrap_or_default();
+            members.iter().enumerate().any(|(index, member)| {
+                members[..index]
+                    .iter()
+                    .any(|earlier| earlier.key == member.key)
+            })
         }
     }
 
@@ -3212,6 +3397,37 @@ mod tests {
                 ],
             ),
             (
+                // Review N6: two lookalikes of Folio's that are not Folio's (an extra key; a
+                // command line that is none of Folio's templates), a hook with arrays and objects
+                // inside it, and a raw non-ASCII byte.
+                "lookalikes, a nested hook and a raw é",
+                r#"{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {"type": "command", "command": "folio.exe", "args": ["attention", "claude-code:Stop", "--json", "-"], "async": true, "timeout": 5},
+          {"type": "command", "command": "folio attention claude-code:Stop"},
+          {"type": "command", "command": "say café"}
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {"matcher": "Bash", "hooks": [{"type": "command", "command": "lint", "args": ["--x", ["y", {"z": [1, {"w": null}]}]], "env": {"A": {"B": [true]}}}]}
+    ]
+  }
+}
+"#
+                .to_owned(),
+                vec![
+                    r#"{"type": "command", "command": "folio.exe", "args": ["attention", "claude-code:Stop", "--json", "-"], "async": true, "timeout": 5}"#,
+                    r#"{"type": "command", "command": "folio attention claude-code:Stop"}"#,
+                    r#"{"type": "command", "command": "say café"}"#,
+                    r#""matcher": "Bash""#,
+                    r#"{"type": "command", "command": "lint", "args": ["--x", ["y", {"z": [1, {"w": null}]}]], "env": {"A": {"B": [true]}}}"#,
+                ],
+            ),
+            (
                 "no hooks at all",
                 "{\n  \"model\": \"opus\"\n}\n".to_owned(),
                 vec![r#""model": "opus""#],
@@ -3425,25 +3641,72 @@ mod tests {
             std::fs::read_to_string(&path).expect("read back"),
             "{\n  \"model\": \"opus\"\n}\n"
         );
+
+        // Review N2, the same class one level up: an object that holds nothing but whitespace
+        // comes back as `{}` once Folio's entries — its only members — go again.
+        for (theirs, back) in [
+            ("{ }\n", "{}\n"),
+            ("{\n}\n", "{}\n"),
+            ("{\r\n}\r\n", "{}\r\n"),
+        ] {
+            std::fs::write(&path, theirs).expect("their own file");
+            assert_eq!(
+                apply_to(&path, true, &exe()),
+                Outcome::Installed,
+                "{theirs:?}"
+            );
+            assert_eq!(
+                apply_to(&path, false, &exe()),
+                Outcome::Removed,
+                "{theirs:?}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&path).expect("read back"),
+                back,
+                "{theirs:?}"
+            );
+        }
     }
 
     /// **A file the splice cannot read, or cannot tell which key the agent reads, is never
     /// written** — said, and byte for byte as it was, with no copy kept beside it.
+    ///
+    /// Review N3: an entry that reads as Folio's only because the value parser keeps the last of
+    /// two `command`s — the person's first, Folio's second — is one of them. Replacing or deleting
+    /// it would take the person's `command` with it.
     #[test]
     fn a_file_the_splice_cannot_be_sure_of_is_never_written() {
+        let twice = own_stop(&exe()).replacen("{", r#"{"command":"notify-me","#, 1);
+        assert!(
+            matches!(
+                hook_owner(&serde_json::from_str(&twice).expect("JSON")),
+                Ok(Some(_))
+            ),
+            "the value parser reads the entry as Folio's: {twice}"
+        );
         for (theirs, reason) in [
-            ("{\n  // mine\n  \"model\": \"opus\"\n}\n", UNREADABLE),
-            ("{\"model\": \"opus\",}\n", UNREADABLE),
-            ("{\"hooks\": {}, \"hooks\": {}}\n", DUPLICATE),
-            ("{\"hooks\": {\"Stop\": [], \"Stop\": []}}\n", DUPLICATE),
             (
-                "{\"hooks\": {\"Stop\": [{\"hooks\": [], \"hooks\": []}]}}\n",
+                "{\n  // mine\n  \"model\": \"opus\"\n}\n".to_owned(),
+                UNREADABLE,
+            ),
+            ("{\"model\": \"opus\",}\n".to_owned(), UNREADABLE),
+            ("{\"hooks\": {}, \"hooks\": {}}\n".to_owned(), DUPLICATE),
+            (
+                "{\"hooks\": {\"Stop\": [], \"Stop\": []}}\n".to_owned(),
+                DUPLICATE,
+            ),
+            (
+                "{\"hooks\": {\"Stop\": [{\"hooks\": [], \"hooks\": []}]}}\n".to_owned(),
+                DUPLICATE,
+            ),
+            (
+                format!("{{\"hooks\": {{\"Stop\": [{{\"hooks\": [{twice}]}}]}}}}\n"),
                 DUPLICATE,
             ),
         ] {
             let dir = scratch("unsure");
             let path = dir.join(SETTINGS_FILE);
-            std::fs::write(&path, theirs).expect("their own file");
+            std::fs::write(&path, &theirs).expect("their own file");
             for install in [true, false] {
                 assert_eq!(
                     apply_to(&path, install, &exe()),
@@ -3456,27 +3719,42 @@ mod tests {
         }
     }
 
-    /// RED (0.4.10 plan row 67a) — **the write-time self-check refuses an edit that changed
-    /// anything that is not Folio's**: a foreign entry respelled, two of the person's groups in
-    /// the other order, a foreign entry dropped, a key outside `hooks` reformatted. An edit that
-    /// only adds an entry of Folio's passes.
+    /// RED (0.4.10 plan row 67a; review N1) — **the write-time self-check refuses an edit that
+    /// changed anything that is not Folio's**: a foreign entry respelled, two of the person's
+    /// groups in the other order, a foreign entry dropped, a key outside `hooks` reformatted — and
+    /// the bytes between the person's pieces: the whitespace between two of their groups, a
+    /// group's `"hooks"` key respelled, an empty event of theirs taken away or its inside changed.
+    /// An edit that only adds Folio's passes, into an empty event of theirs too (D1).
     ///
     /// RED GATE: `plant-67a-self-check-skipped.py` makes `verified` hand every text on, and every
-    /// refusal below goes red.
+    /// refusal below goes red; `plant-67a-outside-folios-skipped.py` skips the comparison of the
+    /// file with Folio's extents cut out, and the first case — whitespace inside a foreign entry,
+    /// which the value comparison cannot see — goes red, as do the whitespace and empty-event
+    /// cases after it.
     #[test]
     fn the_self_check_refuses_an_edit_that_changed_anything_else() {
         let own = own_stop(&exe());
-        let theirs = r#"{"model": "opus", "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "a"}]}, {"hooks": [{"type": "command", "command": "b"}]}]}}"#;
+        let theirs = r#"{"model": "opus", "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "a"}]}, {"hooks": [{"type": "command", "command": "b"}]}], "Notification": [ ]}}"#;
         let document = splice::parse(theirs).expect("JSON");
         for changed in [
             theirs.replace(r#""command": "a""#, r#""command":"a""#),
             theirs.replace(r#""command": "a""#, "\"command\": \"\\u0061\""),
-            r#"{"model": "opus", "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "b"}]}, {"hooks": [{"type": "command", "command": "a"}]}]}}"#.to_owned(),
-            r#"{"model": "opus", "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "b"}]}]}}"#.to_owned(),
+            theirs.replace(
+                r#"{"hooks": [{"type": "command", "command": "a"}]}, {"hooks": [{"type": "command", "command": "b"}]}"#,
+                r#"{"hooks": [{"type": "command", "command": "b"}]}, {"hooks": [{"type": "command", "command": "a"}]}"#,
+            ),
+            theirs.replace(
+                r#"{"hooks": [{"type": "command", "command": "a"}]}, "#,
+                "",
+            ),
             theirs.replace(r#""model": "opus""#, r#""model":"opus""#),
             format!("{theirs}\n"),
             format!("\u{feff}{theirs}"),
             "[]".to_owned(),
+            theirs.replace("]}, {\"hooks\"", "]},{\"hooks\""),
+            theirs.replace("[{\"hooks\": [{\"type\": \"command\", \"command\": \"a\"", "[{\"hooks\" : [{\"type\": \"command\", \"command\": \"a\""),
+            theirs.replace(r#", "Notification": [ ]"#, ""),
+            theirs.replace(r#""Notification": [ ]"#, r#""Notification": []"#),
         ] {
             assert_eq!(
                 verified(&CLAUDE, &document, changed.clone()),
@@ -3489,6 +3767,11 @@ mod tests {
             &format!(r#"{{"type": "command", "command": "b"}}]}}, {{"hooks": [{own}]}}"#),
         );
         assert_eq!(verified(&CLAUDE, &document, added.clone()), Ok(added));
+        let filled = theirs.replace(
+            r#""Notification": [ ]"#,
+            &format!(r#""Notification": [{{"hooks": [{own}]}}]"#),
+        );
+        assert_eq!(verified(&CLAUDE, &document, filled.clone()), Ok(filled));
     }
 
     /// **The reader is strict JSON and reads what the value parser reads**, so the two views of a
