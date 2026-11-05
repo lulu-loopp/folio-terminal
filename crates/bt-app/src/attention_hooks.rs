@@ -1578,8 +1578,11 @@ mod splice {
     /// The byte-order mark an editor on Windows may leave at the front of the file.
     pub(super) const BOM: char = '\u{feff}';
 
-    /// How deep this reader follows nesting before it calls a document unreadable — the value
-    /// parser's own limit, so the two never disagree about which documents exist.
+    /// How deep this reader follows nesting before it calls a document unreadable: at least as
+    /// deep as the value parser does (`serde_json` stops at its 128th nested container, this
+    /// reader past element depth 128). A document only this reader accepts is refused by
+    /// `Document::whole_value` and called unreadable, so nothing is ever written from a reading
+    /// only one of the two made.
     const DEPTH: usize = 128;
 
     /// The document's text after its byte-order mark, if it has one: what a value parser reads.
