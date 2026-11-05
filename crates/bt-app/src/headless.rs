@@ -69,6 +69,9 @@ pub(crate) enum WindowEffect {
     OptionAsAlt(bool),
     /// The program's own icon worn at a scale (`WindowHost::wear_the_app_icon`).
     AppIcon(f64),
+    /// The system's box said over the window (`WindowHost::say_in_a_box`), with its text — kept
+    /// here, and raised nowhere.
+    SaidInABox(String),
     /// The window's input-method facts read (`WindowHost::ime_facts`).
     ImeFactsRead,
     /// A line the window's runtime said in `diagnostics.log` (`WindowHost::note`), as it would
@@ -599,6 +602,11 @@ impl WindowHost for HeadlessWindow {
     }
     fn wear_the_app_icon(&self, scale_factor: f64) {
         self.ledger.record(WindowEffect::AppIcon(scale_factor));
+    }
+    fn say_in_a_box(&self, seen: bt_platform::SeenBox, text: &str) {
+        let _ = seen;
+        self.ledger
+            .record(WindowEffect::SaidInABox(text.to_owned()));
     }
     fn clipboard(
         &self,

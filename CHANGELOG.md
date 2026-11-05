@@ -51,6 +51,7 @@ All notable changes to Folio are recorded here. The format follows
 - On macOS, when you log out, restart or shut down, or quit Folio from the Dock, Folio's log now says whether the layout it saved had reached the disk, and the log's lines up to that point are written out before macOS ends Folio, waiting at most one second for them. <!-- zh: pending T-MAC-DIAGNOSTICS-FLUSH-AFTER-TERMINATE -->
 - Turning Claude Code or Codex hooks on or off in Settings > Agents, and uninstalling Folio, now change only Folio's own entries in that agent's settings file. Everything else in the file stays exactly as it was, including your other hooks, the order, the formatting and the line endings. <!-- zh: pending -->
 - On Windows, Folio's windows now show Folio's icon in the snap layouts and Snap Assist, in Alt+Tab and Task View, and above the taskbar's window previews, and the icon stays sharp when a window moves to a display with a different scale. <!-- zh: pending -->
+- On Windows, the message boxes Folio shows now carry Folio's icon in Alt+Tab and on the taskbar, and a box Folio shows while one of its windows is open belongs to that window instead of appearing as a separate program on the taskbar. <!-- zh: pending -->
 
 ## 0.4.8-preview — 2026-10-23
 
