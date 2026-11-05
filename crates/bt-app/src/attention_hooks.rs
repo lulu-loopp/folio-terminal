@@ -578,7 +578,7 @@ struct Event<'a> {
 }
 
 impl Event<'_> {
-    fn folio_share(&self) -> FolioShare {
+    fn groups_share(&self) -> FolioShare {
         folio_share_of(self.groups.iter().map(|group| !group.holds_foreign()))
     }
 }
@@ -590,11 +590,11 @@ struct Hooks<'a> {
 }
 
 impl Hooks<'_> {
-    fn folio_share(&self) -> FolioShare {
+    fn events_share(&self) -> FolioShare {
         folio_share_of(
             self.events
                 .iter()
-                .map(|event| event.folio_share() == FolioShare::OnlyFolios),
+                .map(|event| event.groups_share() == FolioShare::OnlyFolios),
         )
     }
 }
@@ -1023,7 +1023,7 @@ fn keeps_what_is_not_ours(before: &splice::Document, text: &str) -> bool {
         before.text[..before.body] == after.text[..after.body]
             && root_folio_share(&after, new.as_ref()) == FolioShare::OnlyFolios
     } else {
-        let filled = FilledByFolio::between(before, old.as_ref(), &after, new.as_ref());
+        let filled = FilledByFolio::by_edit(before, old.as_ref(), &after, new.as_ref());
         match (
             outside_folios(before, old.as_ref(), &filled),
             outside_folios(&after, new.as_ref(), &filled),
@@ -1041,7 +1041,7 @@ fn keeps_what_is_not_ours(before: &splice::Document, text: &str) -> bool {
 
 /// The share of the file's own object: Folio's alone when its one member is a `hooks` that is.
 fn root_folio_share(document: &splice::Document, hooks: Option<&Hooks>) -> FolioShare {
-    let hooks_folios = hooks.is_some_and(|hooks| hooks.folio_share() == FolioShare::OnlyFolios);
+    let hooks_folios = hooks.is_some_and(|hooks| hooks.events_share() == FolioShare::OnlyFolios);
     folio_share_of(
         document
             .root
@@ -1066,7 +1066,7 @@ struct FilledByFolio {
 }
 
 impl FilledByFolio {
-    fn between(
+    fn by_edit(
         before: &splice::Document,
         old: Option<&Hooks>,
         after: &splice::Document,
@@ -1082,7 +1082,7 @@ impl FilledByFolio {
                 .filter(|event| {
                     new.events.iter().any(|now| {
                         now.member.key == event.member.key
-                            && filled(event.folio_share(), now.folio_share())
+                            && filled(event.groups_share(), now.groups_share())
                     })
                 })
                 .map(|event| event.member.key.clone())
@@ -1093,7 +1093,7 @@ impl FilledByFolio {
             root: filled(root_folio_share(before, old), root_folio_share(after, new)),
             hooks: old
                 .zip(new)
-                .is_some_and(|(old, new)| filled(old.folio_share(), new.folio_share())),
+                .is_some_and(|(old, new)| filled(old.events_share(), new.events_share())),
             events,
         }
     }
@@ -1117,7 +1117,7 @@ fn outside_folios(
         cuts.push((root.start + 1, root.end - 1));
     } else {
         let hooks_go = !filled.hooks
-            && hooks.is_some_and(|hooks| hooks.folio_share() == FolioShare::OnlyFolios);
+            && hooks.is_some_and(|hooks| hooks.events_share() == FolioShare::OnlyFolios);
         let members: Vec<bool> = root
             .members()?
             .iter()
@@ -1129,12 +1129,12 @@ fn outside_folios(
                 let value = &hooks.member.value;
                 cuts.push((value.start + 1, value.end - 1));
             }
-            Some(hooks) if !hooks_go && hooks.folio_share() == FolioShare::Theirs => {
+            Some(hooks) if !hooks_go && hooks.events_share() == FolioShare::Theirs => {
                 let events: Vec<bool> = hooks
                     .events
                     .iter()
                     .map(|event| {
-                        event.folio_share() == FolioShare::OnlyFolios
+                        event.groups_share() == FolioShare::OnlyFolios
                             && !filled.events.contains(&event.member.key)
                     })
                     .collect();
@@ -1143,7 +1143,7 @@ fn outside_folios(
                     let value = &event.member.value;
                     if filled.events.contains(&event.member.key) {
                         cuts.push((value.start + 1, value.end - 1));
-                    } else if event.folio_share() == FolioShare::Theirs {
+                    } else if event.groups_share() == FolioShare::Theirs {
                         let groups: Vec<bool> = event
                             .groups
                             .iter()
