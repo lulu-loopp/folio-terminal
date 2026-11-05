@@ -278,6 +278,9 @@ impl Runtime<'_, Native> {
         stand_the_window_at(native, stood_at, "state the new window's outer rectangle");
         let physical = window.inner_size();
         let scale_factor = dpi_snapshot(&window)?.authoritative_scale;
+        // The program's icon at the scale this window's renderer is born at — the first window's
+        // sentence, said by every window this process opens (0.4.10 plan row 71).
+        window.wear_the_app_icon(scale_factor);
         // The visual tree first, because the swapchain hangs off it — §2.3's
         // shape, once per window, because a `Compositor` is parameterised by the
         // HWND it composes above. An owner-thread door (`doors::CompositorBirth`): a refusal is

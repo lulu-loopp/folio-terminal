@@ -76,6 +76,14 @@ pub mod pinned;
 
 use std::fmt;
 
+/// **The id the application's icon group is filed under**, read at both of its ends.
+///
+/// `bt-app`'s build script files `folio.ico` under it ([`ResourceFile::add_icon`] says why it is
+/// `1`), and the program loads the same group back out of its own executable to put on its
+/// windows (`bt-app`'s `wear_app_icon`, 0.4.10 plan row 71). One constant, so the group the
+/// program asks for is the group the build filed.
+pub const APP_ICON_GROUP: u16 = 1;
+
 /// `RT_ICON` — one image out of an `.ico`.
 const RT_ICON: u16 = 3;
 /// `RT_GROUP_ICON` — the directory that says which images belong to one icon.

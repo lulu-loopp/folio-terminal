@@ -35798,6 +35798,11 @@ impl Runtime<'_, Native> {
                     let startup_dpi = dpi_snapshot(&window)?;
                     let physical = window.inner_size();
                     let startup_scale_factor = startup_dpi.authoritative_scale;
+                    // **The program's icon, at the scale the renderer is about to be born at**
+                    // (0.4.10 plan row 71): the window is still hidden, and the snap layouts,
+                    // Alt+Tab and Task View read the window's own icon, which nothing else
+                    // gives it. A later scale change wears it again (`apply_scale_factor`).
+                    window.wear_the_app_icon(startup_scale_factor);
                     let phase_started = Instant::now();
                     // The visual tree first, because the swapchain hangs off it. Its
                     // `topmost = true` target composes above this window's own painting, so
@@ -54382,6 +54387,86 @@ fn option_as_alt(window: &Window, option_sends_alt: bool) {
     }
 }
 
+/// **The sides of the shell's two icons at `scale_factor`**, in physical pixels: the small one
+/// (`SM_CXSMICON`, 16 at 96 DPI) and the big one (`SM_CXICON`, 32), scaled as Windows scales them
+/// for a display (0.4.10 plan row 71).
+///
+/// Both are asked for by size. Left to `LR_DEFAULTSIZE` they would both be the big size, and the
+/// small icon would be the big one shrunk by whoever draws it. `folio.ico` holds 16, 20, 24 and
+/// 32, and 32, 40, 48 and 64, which are these sides at 100, 125, 150 and 200 %, so on those
+/// displays the image each surface is handed was drawn at its size.
+#[cfg(windows)]
+fn app_icon_sides(scale_factor: f64) -> (u32, u32) {
+    (
+        (16.0 * scale_factor).round() as u32,
+        (32.0 * scale_factor).round() as u32,
+    )
+}
+
+/// [`WindowHost::wear_the_app_icon`] for winit's window (0.4.10 plan row 71).
+///
+/// **What it is for.** Windows draws a window's own icon (`WM_GETICON`, and then the window
+/// class's) in the snap layouts, in Snap Assist, in Alt+Tab, in Task View and over a taskbar
+/// button's thumbnails. winit registers its window class with no icon, and a window nobody gave
+/// one is an empty slot in each of them. The executable's icon is not that icon: Explorer and the
+/// taskbar button draw it from the file, and no window carries it.
+///
+/// **So the window is given the executable's own group** ([`bt_winres::APP_ICON_GROUP`], the
+/// group the build script filed `folio.ico` under), at the two sides `app_icon_sides` gives for
+/// the scale its renderer is drawn at: the small one as `ICON_SMALL` (winit's `set_window_icon`)
+/// and the big one as `ICON_BIG` (`set_taskbar_icon`). `ICON_SMALL2` answers the small one by
+/// itself. winit keeps each `Icon` with its window and destroys the handle it replaces, so a
+/// window that wears its icon again after a scale change leaves nothing behind.
+///
+/// A refusal is one diagnostics line and a window without an icon, as every window was before:
+/// the group is linked into every build that opens a window, so the refusal left is the
+/// system's own (`LoadImageW` out of handles).
+///
+/// Off Windows this is nothing: a macOS application's icon is its bundle's (`CFBundleIconFile`),
+/// and winit's `set_window_icon` does nothing there.
+fn wear_app_icon(window: &Window, scale_factor: f64) {
+    #[cfg(windows)]
+    {
+        use winit::platform::windows::WindowExtWindows;
+        match app_icons_at(scale_factor) {
+            Ok((small, big)) => {
+                window.set_window_icon(Some(small));
+                window.set_taskbar_icon(Some(big));
+            }
+            Err(error) => crate::diagnostics::stderr_line(format!(
+                "recoverable window icon load failure at scale {scale_factor}: {error}"
+            )),
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (window, scale_factor);
+    }
+}
+
+/// **The executable's icon group, loaded at the small and the big side for `scale_factor`** —
+/// `LoadImageW` of this process's own module (`app_icon_from`).
+#[cfg(windows)]
+fn app_icons_at(
+    scale_factor: f64,
+) -> Result<(winit::window::Icon, winit::window::Icon), winit::window::BadIcon> {
+    let (small, big) = app_icon_sides(scale_factor);
+    Ok((
+        app_icon_from(bt_winres::APP_ICON_GROUP, small)?,
+        app_icon_from(bt_winres::APP_ICON_GROUP, big)?,
+    ))
+}
+
+/// One icon group of this process's own executable, at one side — winit's
+/// `Icon::from_resource`, which is `LoadImageW` of the module winit is linked into
+/// (`__ImageBase`, which here is the executable), `IMAGE_ICON`, `side` by `side`: the image of
+/// the group nearest that side, scaled to it when none is exactly it.
+#[cfg(windows)]
+fn app_icon_from(group: u16, side: u32) -> Result<winit::window::Icon, winit::window::BadIcon> {
+    use winit::platform::windows::IconExtWindows;
+    winit::window::Icon::from_resource(group, Some(PhysicalSize::new(side, side)))
+}
+
 /// **The window's ground is told the new size before anything else is**
 /// (§7.1.6c-4b re-judged; user ruling 2026-08-24).
 ///
@@ -56335,6 +56420,127 @@ mod opening_window_tests {
         assert_eq!(
             attributes.inner_size,
             Some(LogicalSize::new(INITIAL_WIDTH, INITIAL_HEIGHT).into())
+        );
+    }
+}
+
+/// **The program's icon on its own windows** (0.4.10 plan row 71): every window is born wearing
+/// it, and this executable holds it at every side the shell asks for. The scale change's half is
+/// `app_dpi_tests::a_scale_change_wears_the_programs_icon_at_the_new_scale`, on the headless
+/// window.
+#[cfg(test)]
+mod app_icon_tests {
+    use crate::test_support::method_body;
+
+    /// RED (0.4.10 plan row 71) — **every window this process opens is born wearing the
+    /// program's icon, at the scale its renderer is born at, before the renderer exists.**
+    ///
+    /// **The two constructors are the only roads to a window**, and that is asked first: every
+    /// product call of winit's `create_window` stands in `Runtime::create` or
+    /// `Runtime::open_window`, one each (review N3). A third road, a window made again after a
+    /// device loss for instance, would be born with no icon of its own while every pin below
+    /// stayed green; it is named here instead, and joins the list below with its door. Both take
+    /// winit's own window, so no headless window is born on either: the order is held against
+    /// the source. After the scale is read, because the icon is worn at the renderer's scale and
+    /// a later change wears it again only when that scale moves; before the renderer, because the
+    /// window is still hidden there and the first frame shows it.
+    ///
+    /// MUTATIONS: drop the door from `Runtime::create`
+    /// (`plant-71-a-first-window-born-without-the-icon.py`) or from `Runtime::open_window`
+    /// (`plant-71-b-second-window-born-without-the-icon.py`), and the panic names that
+    /// constructor; open a third road to a window (`plant-71-e-a-third-road-to-a-window.py`),
+    /// and the first assertion names it.
+    #[test]
+    fn every_window_is_born_wearing_the_programs_icon() {
+        let index = crate::test_support::source();
+        let calls = crate::test_support::found(
+            bt_source::needle!(bt_source::Pattern::identifier("create_window")),
+            bt_source::View::Identifiers,
+        )
+        .in_the_product(index);
+        let roads: std::collections::BTreeSet<String> = calls
+            .owners(index)
+            .into_keys()
+            .map(|identity| match identity.type_owner {
+                Some(owner) => format!("{owner}::{}", identity.name),
+                None => identity.name,
+            })
+            .collect();
+        assert_eq!(
+            (
+                calls.len(),
+                roads.iter().map(String::as_str).collect::<Vec<_>>()
+            ),
+            (2, vec!["Runtime::create", "Runtime::open_window"]),
+            "the product makes a window in exactly these two constructors, once each; a new road \
+             to a window wears the program's icon too, and joins this list"
+        );
+        for (owner, scale, renderer) in [
+            (
+                "create",
+                "startup_scale_factor",
+                "gpu_door::open_first_window(",
+            ),
+            ("open_window", "scale_factor", "WindowRenderer::new("),
+        ] {
+            let body = method_body("Runtime", owner);
+            let made = body
+                .find(".create_window(attributes)")
+                .unwrap_or_else(|| panic!("`Runtime::{owner}` constructs a window"));
+            let scaled = made
+                + body[made..]
+                    .find(&format!("let {scale} ="))
+                    .unwrap_or_else(|| panic!("`Runtime::{owner}` reads the renderer's scale"));
+            let worn = body
+                .find(&format!("window.wear_the_app_icon({scale});"))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "`Runtime::{owner}` puts the program's icon on the window it makes, at \
+                         the renderer's scale"
+                    )
+                });
+            let born = body
+                .find(renderer)
+                .unwrap_or_else(|| panic!("`Runtime::{owner}` gives its window a renderer"));
+            assert!(
+                made < scaled && scaled < worn && worn < born,
+                "`Runtime::{owner}`: the window is made, its scale read, the icon worn at that \
+                 scale and only then is the renderer born"
+            );
+        }
+    }
+
+    /// PIN (0.4.10 plan row 71) — **the shell's two sides at the four scales `folio.ico` was
+    /// drawn for are the system's own** (`SM_CXSMICON` and `SM_CXICON` at 96, 120, 144 and 192
+    /// DPI), each an image the file holds.
+    #[cfg(windows)]
+    #[test]
+    fn the_two_sides_are_the_systems_at_every_scale_the_icon_file_was_drawn_for() {
+        assert_eq!(
+            [1.0, 1.25, 1.5, 2.0].map(super::app_icon_sides),
+            [(16, 32), (20, 40), (24, 48), (32, 64)]
+        );
+    }
+
+    /// RED (0.4.10 plan row 71) — **this executable carries the program's icon group, and it
+    /// loads at both sides at every scale the icon file was drawn for**: the eight loads succeed
+    /// from this module's own table, and a group the build did not file is refused.
+    ///
+    /// Real `LoadImageW` calls: the build script links `folio.res` into every unit of the bin
+    /// target, this unit-test executable included (`build.rs`, `rustc-link-arg-bins`).
+    ///
+    /// MUTATION (`plant-71-d-the-wrong-group.py`): ask for group 2 and every load is refused.
+    #[cfg(windows)]
+    #[test]
+    fn this_executable_carries_the_programs_icon_at_every_side_the_shell_asks_for() {
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            if let Err(error) = super::app_icons_at(scale) {
+                panic!("the program's icon does not load at scale {scale}: {error}");
+            }
+        }
+        assert!(
+            super::app_icon_from(bt_winres::APP_ICON_GROUP + 1, 32).is_err(),
+            "a group the build did not file is refused"
         );
     }
 }
@@ -59253,7 +59459,8 @@ mod platform_gate_tests {
         // attributes taken off by `xattr`; the channel's derivation is portable.
         "install_channel.rs",
         // The startup path: the native-window door's two arms, and the five
-        // platform calls M1-1 made non-fatal.
+        // platform calls M1-1 made non-fatal; and winit's own window extensions
+        // (macOS's Option key, the Windows window's icon).
         "main.rs",
         // Windows-only test fixtures: the Store PowerShell's app execution alias and package (an
         // MSIX fact), and the never-settling check's program, Windows PowerShell beside its Unix
