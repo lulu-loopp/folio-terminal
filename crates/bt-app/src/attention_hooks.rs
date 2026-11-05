@@ -600,7 +600,7 @@ pub(crate) const SPLICE_REFUSED: &str =
 ///
 /// `None` when there is no `hooks` member at all. The shapes [`owners`] refuses are refused here
 /// too, for the same reasons; on top of them, a key named twice anywhere on the way down to an
-/// entry ([`DUPLICATE`]).
+/// entry, or inside an entry that reads as Folio's ([`DUPLICATE`]).
 fn mapped<'a>(document: &'a splice::Document) -> Result<Option<Hooks<'a>>, &'static str> {
     let unknown = || crate::i18n::Text::AgentHooksSchemaUnknown.text();
     let Some(root) = document.root.as_ref() else {
@@ -632,6 +632,12 @@ fn mapped<'a>(document: &'a splice::Document) -> Result<Option<Hooks<'a>>, &'sta
             for entry in rows.value.elements().ok_or_else(unknown)? {
                 let value = value_at(document.text, entry)?;
                 let own = hook_owner(&value).ok().flatten();
+                // An entry that reads as Folio's only because the value parser kept the last of two
+                // keys of one name: which one the agent runs is its parser's business, and an edit
+                // of the entry would take the other one's bytes with it.
+                if own.is_some() && entry.names_a_key_twice() {
+                    return Err(DUPLICATE);
+                }
                 entries.push(Entry {
                     node: entry,
                     value,
@@ -1654,6 +1660,17 @@ mod splice {
                 }
             }
             Ok(found)
+        }
+
+        /// Whether this object names any key twice.
+        #[must_use]
+        pub(super) fn names_a_key_twice(&self) -> bool {
+            let members = self.members().unwrap_or_default();
+            members.iter().enumerate().any(|(index, member)| {
+                members[..index]
+                    .iter()
+                    .any(|earlier| earlier.key == member.key)
+            })
         }
     }
 
@@ -3258,21 +3275,43 @@ mod tests {
 
     /// **A file the splice cannot read, or cannot tell which key the agent reads, is never
     /// written** — said, and byte for byte as it was, with no copy kept beside it.
+    ///
+    /// Review N3: an entry that reads as Folio's only because the value parser keeps the last of
+    /// two `command`s — the person's first, Folio's second — is one of them. Replacing or deleting
+    /// it would take the person's `command` with it.
     #[test]
     fn a_file_the_splice_cannot_be_sure_of_is_never_written() {
+        let twice = own_stop(&exe()).replacen("{", r#"{"command":"notify-me","#, 1);
+        assert!(
+            matches!(
+                hook_owner(&serde_json::from_str(&twice).expect("JSON")),
+                Ok(Some(_))
+            ),
+            "the value parser reads the entry as Folio's: {twice}"
+        );
         for (theirs, reason) in [
-            ("{\n  // mine\n  \"model\": \"opus\"\n}\n", UNREADABLE),
-            ("{\"model\": \"opus\",}\n", UNREADABLE),
-            ("{\"hooks\": {}, \"hooks\": {}}\n", DUPLICATE),
-            ("{\"hooks\": {\"Stop\": [], \"Stop\": []}}\n", DUPLICATE),
             (
-                "{\"hooks\": {\"Stop\": [{\"hooks\": [], \"hooks\": []}]}}\n",
+                "{\n  // mine\n  \"model\": \"opus\"\n}\n".to_owned(),
+                UNREADABLE,
+            ),
+            ("{\"model\": \"opus\",}\n".to_owned(), UNREADABLE),
+            ("{\"hooks\": {}, \"hooks\": {}}\n".to_owned(), DUPLICATE),
+            (
+                "{\"hooks\": {\"Stop\": [], \"Stop\": []}}\n".to_owned(),
+                DUPLICATE,
+            ),
+            (
+                "{\"hooks\": {\"Stop\": [{\"hooks\": [], \"hooks\": []}]}}\n".to_owned(),
+                DUPLICATE,
+            ),
+            (
+                format!("{{\"hooks\": {{\"Stop\": [{{\"hooks\": [{twice}]}}]}}}}\n"),
                 DUPLICATE,
             ),
         ] {
             let dir = scratch("unsure");
             let path = dir.join(SETTINGS_FILE);
-            std::fs::write(&path, theirs).expect("their own file");
+            std::fs::write(&path, &theirs).expect("their own file");
             for install in [true, false] {
                 assert_eq!(
                     apply_to(&path, install, &exe()),
