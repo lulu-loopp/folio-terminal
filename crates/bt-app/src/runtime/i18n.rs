@@ -49,7 +49,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// that has changed. What *has* changed is the window's own words, and those
     /// are re-derived from the table on the frame that draws them.
     ///
-    /// So there are three steps and each answers for one of the three things
+    /// So there are four steps and each answers for one of the four things
     /// that outlive a repaint:
     ///
     /// 1. `i18n::install` — the answer itself, and the revision behind it. A
@@ -62,6 +62,10 @@ impl<B: Backend> Runtime<'_, B> {
     /// 3. [`Self::refresh_chrome`] and a publish — the strip, the tooltip
     ///    anchors, the files feet, `preview_button_width` and the whole overlay
     ///    stack, all rebuilt from the words that are in force now.
+    /// 4. The start-time carry pass, asked again: an Agents row over a repair its
+    ///    writer refused says the writer's sentence (0.4.10 plan row 67b, review
+    ///    N4), which was put into words when the scan ran, so the scan says it
+    ///    again in the language in force.
     ///
     /// The PSReadLine row's cached line needs no step of its own: it keeps one
     /// slot per language rather than one slot, so step 3 asks it in the new
@@ -81,6 +85,7 @@ impl<B: Backend> Runtime<'_, B> {
         });
         self.sync_math_layout_key();
         self.refresh_chrome();
+        crate::carry_pass::begin_carry_pass();
         self.publish_frame(FrameTrigger {
             occurred_at: Instant::now(),
             source: FrameSource::Expose,

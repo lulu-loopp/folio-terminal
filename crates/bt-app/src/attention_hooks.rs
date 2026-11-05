@@ -501,6 +501,10 @@ fn args_for(event: &str) -> Vec<String> {
 struct Wanted {
     event: &'static str,
     matcher: Option<&'static str>,
+    /// The request the entry speaks for — its `claude-code:<row>` word, which every shape of
+    /// Folio's entry has carried since the first (report §1.3), so an entry is known by what it
+    /// says and never by where it stands (ruling N1).
+    request: String,
     hook: Value,
     /// Whether its turn-end row carries resume — `Stop` — so that a file missing it is one whose
     /// resume cannot work, and an old shape to the start-time scan (0.4.10 plan row 67, R3).
@@ -542,6 +546,7 @@ fn wanted(exe: &Path) -> Vec<Wanted> {
             Wanted {
                 event,
                 matcher,
+                request: format!("{CLAUDE_CODE}:{}", row.event),
                 hook: Value::Object(hook),
                 carries_resume: attention_map::turn_end_row(CLAUDE_CODE, row.event)
                     .is_some_and(|row| row.resume.is_declared()),
@@ -576,8 +581,10 @@ pub(crate) fn scan_resolved(
     let hooks = match mapped(&document) {
         Ok(Some(hooks)) => hooks,
         Ok(None) => return HooksFound::Nothing,
-        Err(reason) if reason == crate::i18n::Text::AgentHooksDuplicateKey.text() => {
-            return HooksFound::Declined(reason);
+        // The row says it in its own register; a press's toast keeps the writer's sentence
+        // (review N7).
+        Err(crate::i18n::Text::AgentHooksDuplicateKey) => {
+            return HooksFound::Declined(crate::i18n::Text::AgentHooksDuplicateKeyRow);
         }
         Err(_) => return HooksFound::Unreadable,
     };
@@ -587,7 +594,7 @@ pub(crate) fn scan_resolved(
     if unclassified_entry(&hooks) {
         return HooksFound::Unclassified;
     }
-    ownership::classify_owners(&paths, exe, look, || claude_drifted(&hooks, exe))
+    ownership::classify_owners(&paths, exe, look, || claude_form(&hooks, exe))
 }
 
 /// Whether an entry names a copy of Folio in a shape [`hook_owner`] cannot read — one with a key
@@ -609,52 +616,126 @@ fn unclassified_entry(hooks: &Hooks<'_>) -> bool {
         })
 }
 
-/// **Whether this copy's entries are not today's** (R3): an entry an install would replace, an own
-/// entry no install wants, or no entry at all for an event that carries resume. An event the person
-/// took out by hand that carries no resume is theirs to leave out.
+/// **The form of this copy's entries** (R3 and ruling N1, 2026-11-05; [`ownership::Form`]).
 ///
-/// The entries are claimed the way [`edited`] claims them — for each wanted entry the first own
-/// entry under the same event and matcher — so "drifted" is exactly "an install would change one of
-/// this copy's entries, or add `Stop`".
-fn claude_drifted(hooks: &Hooks<'_>, exe: &Path) -> bool {
-    let mut claimed: Vec<(usize, usize, usize)> = Vec::new();
-    for want in wanted(exe) {
-        let found = hooks
+/// Old only in the ruled shapes: an entry an install claims ([`claims`]) that is not in today's
+/// form ([`in_todays_form`]: a string form C1–C3, another spelling of the program, other
+/// arguments), or no entry at all for an event that carries resume (`Stop`). Nothing else about an
+/// own entry is drift — an `async` the person set is theirs, and so is the group they moved it
+/// into — so the scan never names, and the repair never rewrites, a person's edit. An event the
+/// person took out by hand that carries no resume is theirs to leave out. This copy's entries no
+/// install claims are the person's placing, and named.
+fn claude_form(hooks: &Hooks<'_>, exe: &Path) -> ownership::Form {
+    let wanted = wanted(exe);
+    let claimed = claims(hooks, &wanted, exe);
+    for (want, at) in wanted.iter().zip(&claimed) {
+        match at {
+            Some((e, g, h)) => {
+                if !in_todays_form(&hooks.events[*e].groups[*g].entries[*h].value, want) {
+                    return ownership::Form::Old;
+                }
+            }
+            None if want.carries_resume => return ownership::Form::Old,
+            None => {}
+        }
+    }
+    let mut placed: Vec<String> = Vec::new();
+    for (e, event) in hooks.events.iter().enumerate() {
+        for (g, group) in event.groups.iter().enumerate() {
+            for (h, entry) in group.entries.iter().enumerate() {
+                if entry.own.is_some()
+                    && !claimed.contains(&Some((e, g, h)))
+                    && !placed.contains(&event.member.key)
+                {
+                    placed.push(event.member.key.clone());
+                }
+            }
+        }
+    }
+    if placed.is_empty() {
+        ownership::Form::Today
+    } else {
+        ownership::Form::Placed(placed)
+    }
+}
+
+/// **The request an entry of Folio's speaks for**: `claude-code:<row>`, from its `args` or, in the
+/// string forms, from the line after ` attention ` (a payload's ` --json -` is not part of it).
+fn request_of(value: &Value) -> Option<String> {
+    if let Some(args) = value.get("args") {
+        return args.get(1).and_then(Value::as_str).map(str::to_owned);
+    }
+    let line = value.get("command").and_then(Value::as_str)?;
+    let marker = format!(" attention {CLAUDE_CODE}:");
+    let (_, tail) = line.rsplit_once(&marker)?;
+    Some(format!(
+        "{CLAUDE_CODE}:{}",
+        tail.strip_suffix(" --json -").unwrap_or(tail)
+    ))
+}
+
+/// **The own entry each wanted entry claims** (ruling N1, 2026-11-05), in `wanted`'s order: under
+/// the wanted event, one that speaks for the same request ([`request_of`]) — **wherever in that
+/// event it stands**, in a group of Folio's own or in one of the person's, whatever its matcher —
+/// this copy's first, then any copy's. Ownership is by content and never by position: an entry
+/// the person moved is still the entry it was. [`claude_form`] and [`edited`] both ask this.
+fn claims(hooks: &Hooks<'_>, wanted: &[Wanted], exe: &Path) -> Vec<Option<(usize, usize, usize)>> {
+    let mut claimed: Vec<Option<(usize, usize, usize)>> = Vec::with_capacity(wanted.len());
+    for want in wanted {
+        let candidates: Vec<((usize, usize, usize), &Entry<'_>)> = hooks
             .events
             .iter()
             .enumerate()
             .filter(|(_, event)| event.member.key == want.event)
             .flat_map(|(e, event)| {
-                event
-                    .groups
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, group)| group.matcher.as_deref() == want.matcher)
-                    .flat_map(move |(g, group)| {
-                        group
-                            .entries
-                            .iter()
-                            .enumerate()
-                            .map(move |(h, entry)| ((e, g, h), entry))
-                    })
+                event.groups.iter().enumerate().flat_map(move |(g, group)| {
+                    group
+                        .entries
+                        .iter()
+                        .enumerate()
+                        .map(move |(h, entry)| ((e, g, h), entry))
+                })
             })
-            .find(|(at, entry)| entry.own.is_some() && !claimed.contains(at));
-        match found {
-            Some((_, entry)) if entry.value != want.hook => return true,
-            Some((at, _)) => claimed.push(at),
-            None if want.carries_resume => return true,
-            None => {}
-        }
+            .filter(|(at, entry)| {
+                entry.own.is_some()
+                    && !claimed.contains(&Some(*at))
+                    && request_of(&entry.value).as_deref() == Some(want.request.as_str())
+            })
+            .collect();
+        let this_copys = candidates.iter().find(|(_, entry)| {
+            entry
+                .own
+                .as_deref()
+                .is_some_and(|owner| crate::explorer_menu::same_path(owner, exe))
+        });
+        claimed.push(this_copys.or(candidates.first()).map(|(at, _)| *at));
     }
-    hooks.events.iter().enumerate().any(|(e, event)| {
-        event.groups.iter().enumerate().any(|(g, group)| {
-            group
-                .entries
-                .iter()
-                .enumerate()
-                .any(|(h, entry)| entry.own.is_some() && !claimed.contains(&(e, g, h)))
-        })
-    })
+    claimed
+}
+
+/// **Whether a claimed entry is in today's form**: the direct form, naming this copy's program as
+/// this build spells it, with the wanted entry's arguments. Every other key of it is the person's
+/// to set — `async` among them.
+fn in_todays_form(value: &Value, want: &Wanted) -> bool {
+    value
+        .get("args")
+        .is_some_and(|args| args == &want.hook["args"])
+        && value.get("command") == want.hook.get("command")
+}
+
+/// **A claimed entry brought into today's form**: an old string form is replaced by the entry this
+/// build writes; an entry in the direct form gets this copy's program and the wanted arguments, and
+/// keeps every other key it has, as the person left them.
+fn repaired_entry(value: &Value, want: &Wanted) -> Value {
+    match (value.get("args"), value.as_object()) {
+        (Some(_), Some(entry)) => {
+            let mut entry = entry.clone();
+            entry.insert("command".to_owned(), want.hook["command"].clone());
+            entry.insert("args".to_owned(), want.hook["args"].clone());
+            Value::Object(entry)
+        }
+        _ => want.hook.clone(),
+    }
 }
 
 /// One hook entry as the file has it, and whether it is provably Folio's.
@@ -671,7 +752,6 @@ struct Entry<'a> {
 /// One matcher group: its `hooks` array and the entries in it.
 struct Group<'a> {
     rows: &'a splice::Node,
-    matcher: Option<String>,
     entries: Vec<Entry<'a>>,
 }
 
@@ -740,17 +820,17 @@ fn folio_share_of(items: impl IntoIterator<Item = bool>) -> FolioShare {
 /// `None` when there is no `hooks` member at all. The shapes [`owners`] refuses are refused here
 /// too, for the same reasons; on top of them, a key named twice anywhere on the way down to an
 /// entry, or inside an entry that reads as Folio's ([`Text::AgentHooksDuplicateKey`](crate::i18n::Text::AgentHooksDuplicateKey)).
-fn mapped<'a>(document: &'a splice::Document) -> Result<Option<Hooks<'a>>, &'static str> {
-    let unknown = || crate::i18n::Text::AgentHooksSchemaUnknown.text();
+fn mapped<'a>(document: &'a splice::Document) -> Result<Option<Hooks<'a>>, crate::i18n::Text> {
+    let unknown = || crate::i18n::Text::AgentHooksSchemaUnknown;
     let Some(root) = document.root.as_ref() else {
         return Ok(None);
     };
     if root.members().is_none() {
-        return Err(crate::i18n::Text::AgentHooksUnreadable.text());
+        return Err(crate::i18n::Text::AgentHooksUnreadable);
     }
     let Some(member) = root
         .member("hooks")
-        .map_err(|_| crate::i18n::Text::AgentHooksDuplicateKey.text())?
+        .map_err(|_| crate::i18n::Text::AgentHooksDuplicateKey)?
     else {
         return Ok(None);
     };
@@ -761,17 +841,18 @@ fn mapped<'a>(document: &'a splice::Document) -> Result<Option<Hooks<'a>>, &'sta
             .iter()
             .any(|earlier| earlier.key == event.key)
         {
-            return Err(crate::i18n::Text::AgentHooksDuplicateKey.text());
+            return Err(crate::i18n::Text::AgentHooksDuplicateKey);
         }
         let mut groups = Vec::new();
         for node in event.value.elements().ok_or_else(unknown)? {
             let rows = node
                 .member("hooks")
-                .map_err(|_| crate::i18n::Text::AgentHooksDuplicateKey.text())?
+                .map_err(|_| crate::i18n::Text::AgentHooksDuplicateKey)?
                 .ok_or_else(unknown)?;
-            let matcher = node
-                .member("matcher")
-                .map_err(|_| crate::i18n::Text::AgentHooksDuplicateKey.text())?;
+            // A matcher named twice is a key named twice. Which group an entry stands in says
+            // nothing of whose it is (ruling N1), so the matcher is not kept beside the group.
+            node.member("matcher")
+                .map_err(|_| crate::i18n::Text::AgentHooksDuplicateKey)?;
             let mut entries = Vec::new();
             for entry in rows.value.elements().ok_or_else(unknown)? {
                 let value = value_at(document.text, entry)?;
@@ -780,7 +861,7 @@ fn mapped<'a>(document: &'a splice::Document) -> Result<Option<Hooks<'a>>, &'sta
                 // keys of one name: which one the agent runs is its parser's business, and an edit
                 // of the entry would take the other one's bytes with it.
                 if own.is_some() && entry.names_a_key_twice() {
-                    return Err(crate::i18n::Text::AgentHooksDuplicateKey.text());
+                    return Err(crate::i18n::Text::AgentHooksDuplicateKey);
                 }
                 entries.push(Entry {
                     node: entry,
@@ -788,16 +869,8 @@ fn mapped<'a>(document: &'a splice::Document) -> Result<Option<Hooks<'a>>, &'sta
                     own,
                 });
             }
-            let matcher = match matcher {
-                Some(matcher) => value_at(document.text, &matcher.value)?
-                    .as_str()
-                    .filter(|matcher| !matcher.is_empty())
-                    .map(str::to_owned),
-                None => None,
-            };
             groups.push(Group {
                 rows: &rows.value,
-                matcher,
                 entries,
             });
         }
@@ -810,9 +883,9 @@ fn mapped<'a>(document: &'a splice::Document) -> Result<Option<Hooks<'a>>, &'sta
 }
 
 /// The value a span holds, as the classifiers read it.
-fn value_at(text: &str, node: &splice::Node) -> Result<Value, &'static str> {
+fn value_at(text: &str, node: &splice::Node) -> Result<Value, crate::i18n::Text> {
     serde_json::from_str(&text[node.start..node.end])
-        .map_err(|_| crate::i18n::Text::AgentHooksUnreadable.text())
+        .map_err(|_| crate::i18n::Text::AgentHooksUnreadable)
 }
 
 /// What becomes of one entry.
@@ -827,18 +900,21 @@ enum Fate {
 ///
 /// `Ok(None)` when there is nothing to change. The only edits ever made:
 ///
-/// - **an own entry replaced, where it stands**, by the entry this build writes — a repair keeps
-///   the entry's place among the person's;
+/// - **an own entry brought into today's form, where it stands** ([`repaired_entry`]) — a repair
+///   keeps the entry's place among the person's, and every key of it that is not the program or
+///   its arguments;
 /// - **an own entry deleted**, with its separator, and the group, event or `hooks` that held
 ///   nothing but Folio's going with it;
 /// - **an entry that is missing appended**: a group at the end of its event (after the person's
 ///   own), an event at the end of `hooks`, `hooks` at the end of the file's object — laid out like
 ///   its neighbours.
 ///
-/// An install claims, for each entry it wants, the first own entry under the same event and
-/// matcher, of whichever copy of Folio — `apply_resolved` has asked about every other copy before
-/// this runs — and deletes the own entries left unclaimed. A removal deletes the entries of this
-/// copy and of copies that are gone, and no other. Then [`verified`] reads the result back, and a
+/// An install claims, for each entry it wants, an own entry under the same event that speaks for
+/// the same request, wherever in the event it stands ([`claims`]), of whichever copy of Folio —
+/// `apply_resolved` has asked about every other copy before this runs — rewrites a claimed entry
+/// only when it is not in today's form, deletes the other copies' entries left unclaimed and keeps
+/// this copy's (ruling N1, 2026-11-05). A removal deletes the entries of this copy and of copies
+/// that are gone, and no other. Then [`verified`] reads the result back, and a
 /// result that changed anything else is refused whole.
 fn edited(
     document: &splice::Document,
@@ -874,7 +950,7 @@ fn edited(
     let root_items =
         splice::Container::of(text, root).ok_or(crate::i18n::Text::AgentHooksUnreadable.text())?;
     let mut edits = Vec::new();
-    let Some(hooks) = mapped(document)? else {
+    let Some(hooks) = mapped(document).map_err(crate::i18n::Text::text)? else {
         if wanted.is_empty() {
             return Ok(None);
         }
@@ -913,8 +989,19 @@ fn edited(
                         .iter()
                         .map(|entry| match &entry.own {
                             None => Fate::Kept,
-                            // Unclaimed until a wanted entry claims it below.
-                            Some(_) if install => Fate::Deleted,
+                            // **This copy's own entry no install claims is the person's placing**
+                            // (ruling N1, 2026-11-05) — a copy of one of Folio's entries they put
+                            // under another event, or a second one — and an install leaves it
+                            // where it stands; a removal takes it out with this copy's others.
+                            Some(owner) if install => {
+                                if crate::explorer_menu::same_path(owner, exe) {
+                                    Fate::Kept
+                                } else {
+                                    // Another copy's, unclaimed until a wanted entry claims it
+                                    // below: `apply_resolved` has asked about every other copy.
+                                    Fate::Deleted
+                                }
+                            }
                             Some(owner) if ownership::other_live(owner, exe) == Ok(false) => {
                                 Fate::Deleted
                             }
@@ -925,38 +1012,21 @@ fn edited(
                 .collect()
         })
         .collect();
-    let mut claimed: Vec<(usize, usize, usize)> = Vec::new();
     let mut missing: Vec<&Wanted> = Vec::new();
-    for want in &wanted {
-        let mut found = None;
-        'search: for (e, event) in hooks.events.iter().enumerate() {
-            if event.member.key != want.event {
-                continue;
-            }
-            for (g, group) in event.groups.iter().enumerate() {
-                if group.matcher.as_deref() != want.matcher {
-                    continue;
-                }
-                for (h, entry) in group.entries.iter().enumerate() {
-                    if entry.own.is_some() && !claimed.contains(&(e, g, h)) {
-                        found = Some(((e, g, h), entry));
-                        break 'search;
-                    }
-                }
-            }
-        }
-        let Some((at, entry)) = found else {
+    for (want, at) in wanted.iter().zip(claims(&hooks, &wanted, exe)) {
+        let Some((e, g, h)) = at else {
             missing.push(want);
             continue;
         };
-        claimed.push(at);
-        let (e, g, h) = at;
-        fates[e][g][h] = if entry.value == want.hook {
+        let entry = &hooks.events[e].groups[g].entries[h];
+        // Claimed where it stands. Only an old shape is rewritten, and only what makes it old: a
+        // person's edit of Folio's own entry is theirs (ruling N1).
+        fates[e][g][h] = if in_todays_form(&entry.value, want) {
             Fate::Kept
         } else {
             let old = &text[entry.node.start..entry.node.end];
             Fate::Replaced(splice::render(
-                &want.hook,
+                &repaired_entry(&entry.value, want),
                 splice::line_indent(text, entry.node.start),
                 &style,
                 old.contains('\n'),

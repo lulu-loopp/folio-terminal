@@ -331,9 +331,15 @@ pub(crate) fn scan_resolved(
         Err(_) => return HooksFound::Unclassified,
     };
     let Some(owner) = owner else {
-        return HooksFound::Declined(crate::i18n::Text::AgentCodexNotifyTaken.text());
+        return HooksFound::Declined(crate::i18n::Text::AgentCodexNotifyTaken);
     };
-    ownership::classify_owners(&[owner], exe, look, || words != program_for(exe))
+    ownership::classify_owners(&[owner], exe, look, || {
+        if words == program_for(exe) {
+            ownership::Form::Today
+        } else {
+            ownership::Form::Old
+        }
+    })
 }
 
 /// **`existing` with Folio's `notify` line put in (`install`) or taken out, and every other byte as

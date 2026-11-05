@@ -46,6 +46,11 @@
 //! No payload is interpolated. `timeoutSec: 5` remains unchanged. Legacy shell
 //! entries are decoded only for ownership and migrated on an explicit install.
 //!
+//! **The file is Folio's, and the person's edits of it are theirs** (0.4.10 plan row 67b, ruling
+//! N1): an install brings each of Folio's entries into today's form where it stands
+//! ([`installed_document`]) and changes nothing else of it — a `timeoutSec` or a `matcher` the
+//! person set, and a copy of an entry they put under another event, stay.
+//!
 //! # The version gate
 //!
 //! `permission_prompt` did not always mean what this build reads it as. Upstream's changelog, at
@@ -457,25 +462,27 @@ fn entry_owner(entry: &Value) -> Result<Option<PathBuf>, &'static str> {
     Ok(owner)
 }
 
-fn owners(document: &Value) -> Result<Vec<PathBuf>, &'static str> {
+/// The programs the file's entries name. Refused, by the sentence's key (review N7): a file of a
+/// shape this build does not know, and one with an entry that is not Folio's.
+fn owners(document: &Value) -> Result<Vec<PathBuf>, crate::i18n::Text> {
     if document.get("version").and_then(Value::as_u64) != Some(SCHEMA_VERSION)
         || document.as_object().is_none_or(|o| {
             o.keys()
                 .any(|k| !["version", "hooks"].contains(&k.as_str()))
         })
     {
-        return Err(crate::i18n::Text::AgentHooksSchemaUnknown.text());
+        return Err(crate::i18n::Text::AgentHooksSchemaUnknown);
     }
     let mut paths = Vec::new();
     for entries in document
         .get("hooks")
         .and_then(Value::as_object)
-        .ok_or(crate::i18n::Text::AgentHooksSchemaUnknown.text())?
+        .ok_or(crate::i18n::Text::AgentHooksSchemaUnknown)?
         .values()
     {
         for entry in entries
             .as_array()
-            .ok_or(crate::i18n::Text::AgentHooksSchemaUnknown.text())?
+            .ok_or(crate::i18n::Text::AgentHooksSchemaUnknown)?
         {
             // **Ownership is per entry** (closure review R4): an entry this build cannot decode is
             // not Folio's, which is the same fact about this file as an entry that is plainly
@@ -485,7 +492,7 @@ fn owners(document: &Value) -> Result<Vec<PathBuf>, &'static str> {
                 entry_owner(entry)
                     .ok()
                     .flatten()
-                    .ok_or(crate::i18n::Text::AgentCopilotFileTaken.text())?,
+                    .ok_or(crate::i18n::Text::AgentCopilotFileTaken)?,
             );
         }
     }
@@ -523,16 +530,16 @@ pub(crate) fn scan_resolved(
     let paths = match owners(&document) {
         Ok(paths) => paths,
         // The file's shape was read, and an entry in it is not one of Folio's.
-        Err(reason) if reason == crate::i18n::Text::AgentCopilotFileTaken.text() => {
+        Err(crate::i18n::Text::AgentCopilotFileTaken) => {
             return if unclassified_entry(&document) {
                 HooksFound::Unclassified
             } else {
-                HooksFound::Declined(reason)
+                HooksFound::Declined(crate::i18n::Text::AgentCopilotFileTaken)
             };
         }
         Err(_) => return HooksFound::Unreadable,
     };
-    ownership::classify_owners(&paths, exe, look, || copilot_drifted(&document, exe))
+    ownership::classify_owners(&paths, exe, look, || copilot_form(&document, exe))
 }
 
 /// Whether an entry [`entry_owner`] cannot read names a copy of Folio in one of its program columns.
@@ -557,25 +564,200 @@ fn unclassified_entry(document: &Value) -> bool {
         })
 }
 
-/// **Whether any entry of this copy's is not today's** (R3): one [`document_for`] does not write
-/// under its event — the `powershell` and `bash` columns of the old templates (P1, P2), another
-/// timeout, another spelling of the program. An event missing from the file is not drift: none of
-/// this family's carries resume, and the person may have taken it out.
-fn copilot_drifted(document: &Value, exe: &Path) -> bool {
-    let today = document_for(exe);
+/// **The form of this copy's entries** (R3 and ruling N1, 2026-11-05; [`ownership::Form`]).
+///
+/// Old only in the ruled shapes: an entry an install claims ([`claims`]) in the `powershell` or
+/// `bash` column of the old templates (P1, P2), naming the program in another spelling, or with
+/// other arguments. A `timeoutSec` or a `matcher` the person set on Folio's entry is theirs, and is
+/// not drift. An event missing from the file is not drift either: none of this family's carries
+/// resume, and the person may have taken it out. This copy's entries no install claims are the
+/// person's placing, and named.
+fn copilot_form(document: &Value, exe: &Path) -> ownership::Form {
+    let wanted = wanted(exe);
+    let claimed = claims(document, &wanted, exe);
+    if wanted
+        .iter()
+        .zip(&claimed)
+        .any(|(want, at)| at.is_some_and(|at| !in_todays_form(entry_at(document, at), want)))
+    {
+        return ownership::Form::Old;
+    }
+    let mut placed: Vec<String> = Vec::new();
+    for (event, entries) in hooks_of(document) {
+        for (index, _) in entries.iter().enumerate() {
+            let at = (event.as_str(), index);
+            if !claimed.contains(&Some(at)) && !placed.iter().any(|placed| placed == event) {
+                placed.push(event.clone());
+            }
+        }
+    }
+    if placed.is_empty() {
+        ownership::Form::Today
+    } else {
+        ownership::Form::Placed(placed)
+    }
+}
+
+/// **One entry an install wants**: its event, the request it speaks for (`copilot:<row>`), and
+/// the entry [`document_for`] writes.
+struct Wanted {
+    event: String,
+    request: String,
+    entry: Value,
+}
+
+/// Every entry one install writes, in [`document_for`]'s order.
+fn wanted(exe: &Path) -> Vec<Wanted> {
+    hooks_of(&document_for(exe))
+        .flat_map(|(event, entries)| {
+            entries.iter().map(move |entry| Wanted {
+                event: event.clone(),
+                request: request_of(entry).unwrap_or_default(),
+                entry: entry.clone(),
+            })
+        })
+        .collect()
+}
+
+/// A document's events and their entries, in the file's order. The shape is [`owners`]'s to
+/// refuse; what is not an array of entries holds none here.
+fn hooks_of(document: &Value) -> impl Iterator<Item = (&String, &Vec<Value>)> {
     document
         .get("hooks")
         .and_then(Value::as_object)
-        .is_some_and(|hooks| {
-            hooks.iter().any(|(event, entries)| {
-                let wanted = today["hooks"].get(event).and_then(Value::as_array);
-                entries.as_array().is_some_and(|entries| {
-                    entries
-                        .iter()
-                        .any(|entry| wanted.is_none_or(|wanted| !wanted.contains(entry)))
-                })
+        .into_iter()
+        .flatten()
+        .filter_map(|(event, entries)| Some((event, entries.as_array()?)))
+}
+
+/// The entry at an event and an index of it.
+fn entry_at<'d>(document: &'d Value, (event, index): (&str, usize)) -> &'d Value {
+    &document["hooks"][event][index]
+}
+
+/// **The request an entry of Folio's speaks for**: `copilot:<row>`, from its `args` or, in the old
+/// shell columns, from the line after ` attention `.
+fn request_of(entry: &Value) -> Option<String> {
+    if entry.get("exec").is_some() {
+        return entry
+            .get("args")?
+            .get(1)
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+    }
+    let line = ["bash", "powershell", "command"]
+        .iter()
+        .find_map(|column| entry.get(*column).and_then(Value::as_str))?;
+    let (_, tail) = line.rsplit_once(&format!(" attention {COPILOT}:"))?;
+    Some(format!("{COPILOT}:{tail}"))
+}
+
+/// **The entry each wanted entry claims** (ruling N1, 2026-11-05), in `wanted`'s order: under the
+/// wanted event, one of Folio's that speaks for the same request, this copy's first, then any
+/// copy's. Ownership is by content: the entry's place in its event's list, and the `matcher` and
+/// `timeoutSec` the person may have set on it, say nothing of which entry it is.
+fn claims<'d>(document: &'d Value, wanted: &[Wanted], exe: &Path) -> Vec<Option<(&'d str, usize)>> {
+    let mut claimed: Vec<Option<(&'d str, usize)>> = Vec::with_capacity(wanted.len());
+    for want in wanted {
+        let candidates: Vec<((&'d str, usize), PathBuf)> = hooks_of(document)
+            .filter(|(event, _)| **event == want.event)
+            .flat_map(|(event, entries)| {
+                entries
+                    .iter()
+                    .enumerate()
+                    .map(move |(index, entry)| ((event.as_str(), index), entry))
             })
-        })
+            .filter(|(at, entry)| {
+                !claimed.contains(&Some(*at))
+                    && request_of(entry).as_deref() == Some(want.request.as_str())
+            })
+            .filter_map(|(at, entry)| Some((at, entry_owner(entry).ok().flatten()?)))
+            .collect();
+        let this_copys = candidates
+            .iter()
+            .find(|(_, owner)| crate::explorer_menu::same_path(owner, exe));
+        claimed.push(this_copys.or(candidates.first()).map(|(at, _)| *at));
+    }
+    claimed
+}
+
+/// **Whether a claimed entry is in today's form**: the `exec` column, naming this copy's program as
+/// this build spells it, with the wanted entry's arguments. Every other key of it is the person's
+/// to set — `timeoutSec` and `matcher` among them.
+fn in_todays_form(entry: &Value, want: &Wanted) -> bool {
+    entry.get("exec").is_some()
+        && entry.get("exec") == want.entry.get("exec")
+        && entry.get("args") == want.entry.get("args")
+}
+
+/// **A claimed entry brought into today's form**: an old shell column is replaced by the entry
+/// this build writes; an entry in the `exec` column gets this copy's program and the wanted
+/// arguments, and keeps every other key it has, as the person left them.
+fn repaired_entry(entry: &Value, want: &Wanted) -> Value {
+    match (entry.get("exec"), entry.as_object()) {
+        (Some(_), Some(entry)) => {
+            let mut entry = entry.clone();
+            entry.insert("exec".to_owned(), want.entry["exec"].clone());
+            entry.insert("args".to_owned(), want.entry["args"].clone());
+            Value::Object(entry)
+        }
+        _ => want.entry.clone(),
+    }
+}
+
+/// **The document an install writes** over the one standing (ruling N1, 2026-11-05): every wanted
+/// entry claimed where it stands and brought into today's form only when it is not in it, every
+/// wanted entry nobody's entry speaks for appended to its event, the other copies' entries left
+/// over taken out — `apply_resolved` has asked about every other copy before this runs — and this
+/// copy's left over kept where they stand. An event left with nothing goes. Over no file,
+/// [`document_for`].
+fn installed_document(standing: Option<&Value>, exe: &Path) -> Value {
+    let Some(standing) = standing else {
+        return document_for(exe);
+    };
+    let wanted = wanted(exe);
+    let claimed = claims(standing, &wanted, exe);
+    let mut events = Map::new();
+    for (event, entries) in hooks_of(standing) {
+        let kept: Vec<Value> = entries
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| {
+                let at = (event.as_str(), index);
+                if let Some(want) = wanted
+                    .iter()
+                    .zip(&claimed)
+                    .find_map(|(want, claim)| (*claim == Some(at)).then_some(want))
+                {
+                    return Some(if in_todays_form(entry, want) {
+                        entry.clone()
+                    } else {
+                        repaired_entry(entry, want)
+                    });
+                }
+                entry_owner(entry)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|owner| crate::explorer_menu::same_path(&owner, exe))
+                    .then(|| entry.clone())
+            })
+            .collect();
+        if !kept.is_empty() || entries.is_empty() {
+            events.insert(event.clone(), Value::Array(kept));
+        }
+    }
+    for (want, claim) in wanted.iter().zip(&claimed) {
+        if claim.is_none()
+            && let Value::Array(entries) = events
+                .entry(want.event.clone())
+                .or_insert_with(|| Value::Array(Vec::new()))
+        {
+            entries.push(want.entry.clone());
+        }
+    }
+    let mut document = standing.clone();
+    document["hooks"] = Value::Object(events);
+    document
 }
 
 /// **The rows one install writes**: every copilot row. None of them is tiered — this family
@@ -586,7 +768,8 @@ pub(crate) fn rows_to_install() -> Vec<MappingRow> {
     attention_map::installed_rows(attention_map::ROWS, COPILOT, |_| true)
 }
 
-/// **The whole document one install writes**, given where this build lives.
+/// **The whole document one install writes where there is none**, given where this build lives —
+/// and today's form of every entry an install over a standing one claims ([`installed_document`]).
 #[must_use]
 pub(crate) fn document_for(exe: &Path) -> Value {
     document_for_on(exe, bt_platform::host_platform())
@@ -774,7 +957,7 @@ pub(crate) fn apply_resolved(
     };
     let paths = match standing.as_ref().map(owners).transpose() {
         Ok(paths) => paths.unwrap_or_default(),
-        Err(reason) => return Outcome::Refused(reason),
+        Err(reason) => return Outcome::Refused(reason.text()),
     };
     let others = match ownership::check(&paths, exe, &decision) {
         Ok(others) => others,
@@ -817,7 +1000,7 @@ pub(crate) fn apply_resolved(
             Ok(lock) => lock,
             Err(reason) => return Outcome::Refused(reason),
         };
-        let written = document_for(exe);
+        let written = installed_document(standing.as_ref(), exe);
         if standing.as_ref() == Some(&written) {
             return Outcome::Unchanged;
         }

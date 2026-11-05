@@ -20333,7 +20333,7 @@ mod tests {
     /// string read off this machine, so its length is a fact about the machine
     /// rather than about the copy. What is held here instead is the entry it
     /// falls back to when there is no version to name.
-    const OTHERWISE: [(SettingsRow, Text, bt_platform::HostPlatform); 30] = {
+    const OTHERWISE: [(SettingsRow, Text, bt_platform::HostPlatform); 31] = {
         use bt_platform::HostPlatform::{MacOs, Windows};
         [
             // The other end of a value the fixture had to pick one end of.
@@ -20438,9 +20438,9 @@ mod tests {
                 Windows,
             ),
             // What an agent's row says over what the start-time scan found (0.4.10 plan row
-            // 67b), one entry per fixed sentence; the line naming another copy carries that
-            // copy's path, read off the machine, and is outside the list for the version
-            // line's reason above.
+            // 67b), one entry per fixed sentence; the lines naming another copy, the events an
+            // entry of Folio's was put under and a writer's refusal carry what was read off the
+            // machine, and are outside the list for the version line's reason above.
             (
                 SettingsRow::ClaudeHooks,
                 Text::AgentHooksUnreadable,
@@ -20453,7 +20453,12 @@ mod tests {
             ),
             (
                 SettingsRow::ClaudeHooks,
-                Text::AgentHooksDuplicateKey,
+                Text::AgentHooksDuplicateKeyRow,
+                Windows,
+            ),
+            (
+                SettingsRow::ClaudeHooks,
+                Text::AgentHooksRepairHeld,
                 Windows,
             ),
             (

@@ -1,4 +1,5 @@
 //! Shared policy for per-copy agent marks. Adapters alone decode their schemas.
+use crate::i18n::Text;
 use crate::shell_integration::profile_marks::{self, Marks};
 use std::path::{Path, PathBuf};
 
@@ -191,9 +192,10 @@ pub(crate) enum DeadWhen {
     /// when the program's volume is there. A program missing because the drive or share it lives
     /// on is not plugged in, or not reachable, has not gone: it comes back with the drive, and a
     /// repair that took its hooks would take them from a copy that is only away. So a missing
-    /// owner is dead only when its volume answers as a folder; any other answer about the volume,
-    /// and an operand that names no file to ask about, is "unknown", which writes nothing and is
-    /// said.
+    /// owner is dead only when the volume its path leads to answers as a folder — the volume of
+    /// where the path goes once every link and junction on it is followed (review N5), not of how
+    /// it is spelled; a path whose way cannot be followed, any other answer about the volume, and
+    /// an operand that names no file to ask about, is "unknown", which writes nothing and is said.
     MissingOnAVolumeThatIsThere,
 }
 
@@ -221,19 +223,16 @@ pub(crate) fn other_live_by(
     }
     match look(owner) {
         PathStands::File => Ok(true),
-        PathStands::Missing
-            if dead_when == DeadWhen::Missing
-                || volume_root_of(owner)
-                    .is_some_and(|volume| look(&volume) == PathStands::Folder) =>
-        {
-            Ok(false)
-        }
+        PathStands::Missing { .. } if dead_when == DeadWhen::Missing => Ok(false),
+        PathStands::Missing {
+            volume: Some(volume),
+        } if look(&volume) == PathStands::Folder => Ok(false),
         _ => unknown(),
     }
 }
 
 /// **What stands at a path**, as the liveness rule asks it ([`other_live_by`]).
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum PathStands {
     /// A file: for an owner, a living copy.
     File,
@@ -241,8 +240,9 @@ pub(crate) enum PathStands {
     Folder,
     /// Something that is neither.
     Other,
-    /// Nothing, by the system's own `NotFound`.
-    Missing,
+    /// Nothing, by the system's own `NotFound` — with the root of the volume the path leads to
+    /// ([`volume_of_a_missing_path`]): `None` when its way cannot be followed.
+    Missing { volume: Option<PathBuf> },
     /// The system would not say: a permission, a device that is not ready, a share that does not
     /// answer. **Not evidence of anything.**
     Unknown,
@@ -255,9 +255,40 @@ pub(crate) fn what_stands(path: &Path) -> PathStands {
         Ok(meta) if meta.is_file() => PathStands::File,
         Ok(meta) if meta.is_dir() => PathStands::Folder,
         Ok(_) => PathStands::Other,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => PathStands::Missing,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => PathStands::Missing {
+            volume: volume_of_a_missing_path(path),
+        },
         Err(_) => PathStands::Unknown,
     }
+}
+
+/// **The root of the volume a path that is not there leads to** (0.4.10 plan row 67b, review N5),
+/// every link and junction on its way followed — `None` when the way cannot be followed.
+///
+/// A path's spelling does not say which volume it is on: `C:\Tools\Folio\folio.exe`, where
+/// `C:\Tools` is a junction to `E:\Tools`, lives on `E:`, and with `E:` unplugged the program is
+/// away, not gone. So the deepest part of the path that is there — the link itself, where the link
+/// is what stands — is resolved to its final target (`fs::canonicalize`), the parts that are not
+/// there are put back after it, and the volume is read off that ([`volume_root_of`]). A part the
+/// system will not say about, a link whose target is not there, and a path with no part that is
+/// there are all a way that cannot be followed.
+#[must_use]
+pub(crate) fn volume_of_a_missing_path(path: &Path) -> Option<PathBuf> {
+    let mut missing = Vec::new();
+    let mut there = path;
+    loop {
+        match std::fs::symlink_metadata(there) {
+            Ok(_) => break,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                missing.push(there.file_name()?);
+                there = there.parent()?;
+            }
+            Err(_) => return None,
+        }
+    }
+    let mut leads_to = std::fs::canonicalize(there).ok()?;
+    leads_to.extend(missing.iter().rev());
+    volume_root_of(&leads_to)
 }
 
 /// **The root of the volume a path lives on**: the drive's root or the UNC share's on Windows
@@ -315,6 +346,11 @@ pub(crate) enum HooksFound {
     Nothing,
     /// This copy's, in today's form.
     Current,
+    /// This copy's, in today's form, with entries of this copy's that no install put where they
+    /// stand — under the events carried (ruling N1, 2026-11-05): a copy of one of Folio's entries
+    /// the person put under another event, or a second one. Ownership is by content and never by
+    /// position, so they are left where they are, and said.
+    Placed(Vec<String>),
     /// This copy's, in an older form — or missing the event resume is carried on (R3).
     Drifted,
     /// Folio's entries whose programs are gone, on volumes that are there (R4); this copy's own
@@ -334,8 +370,9 @@ pub(crate) enum HooksFound {
     Refused(&'static str),
     /// A file whose Folio part this build will not write, for the sentence carried — somebody
     /// else's program on Codex's one `notify` key, a hook file of somebody else's under Folio's
-    /// name, a key named twice. The switch stays pressable; its press says the same.
-    Declined(&'static str),
+    /// name, a key named twice. The switch stays pressable, and its press says why. Carried as the
+    /// sentence's key, so the row says it in the language in force (review N7).
+    Declined(Text),
 }
 
 impl HooksFound {
@@ -345,10 +382,14 @@ impl HooksFound {
         matches!(self, Self::Dead(_) | Self::Drifted)
     }
 
-    /// Whether the hooks there are this copy's — what the switch shows.
+    /// Whether the hooks there are this copy's in today's form — what the switch shows, and what
+    /// the resume row counts. **An old shape is not** (review N4): `Drifted` is published only
+    /// when its repair did not happen, and hooks in an old shape are hooks resume cannot count on
+    /// (C1's `Stop` carries no payload), so the switch reads Off, the row says why the repair did
+    /// not happen, and a press writes today's.
     #[must_use]
     pub(crate) fn is_this_copys(&self) -> bool {
-        matches!(self, Self::Current | Self::Drifted)
+        matches!(self, Self::Current | Self::Placed(_))
     }
 
     /// The word the diagnostics line names the state by.
@@ -357,6 +398,7 @@ impl HooksFound {
         match self {
             Self::Nothing => "none",
             Self::Current => "current",
+            Self::Placed(_) => "current-placed",
             Self::Drifted => "drift",
             Self::Dead(_) => "dead",
             Self::OtherCopy(_) => "other-copy",
@@ -374,13 +416,13 @@ impl HooksFound {
 ///
 /// No owner is [`HooksFound::Nothing`]; any owner the machine will not say about is unknown, and
 /// any living other copy is that copy's, before anything is called dead; owners that are all gone
-/// (this copy's own beside them or not) are dead; this copy's alone are `drifted` — the family's
-/// own answer to "is every entry in today's form", asked only then.
+/// (this copy's own beside them or not) are dead; this copy's alone are in the family's `form` —
+/// its own answer to "is every entry in today's form", asked only then.
 pub(crate) fn classify_owners(
     owners: &[PathBuf],
     exe: &Path,
     look: &dyn Fn(&Path) -> PathStands,
-    drifted: impl FnOnce() -> bool,
+    form: impl FnOnce() -> Form,
 ) -> HooksFound {
     if owners.is_empty() {
         return HooksFound::Nothing;
@@ -401,11 +443,30 @@ pub(crate) fn classify_owners(
         HooksFound::OtherCopy(living)
     } else if !dead.is_empty() {
         HooksFound::Dead(dead)
-    } else if drifted() {
-        HooksFound::Drifted
     } else {
-        HooksFound::Current
+        match form() {
+            Form::Today => HooksFound::Current,
+            Form::Placed(events) => HooksFound::Placed(events),
+            Form::Old => HooksFound::Drifted,
+        }
     }
+}
+
+/// **This copy's entries, as the family reads their form** (R3 and ruling N1, 2026-11-05).
+///
+/// Drift is only the ruled shapes — an old string or shell form, wrong arguments, a spelling of
+/// the program that is not this copy's, a missing `Stop` — because a repair rewrites what drift
+/// names, and a person's edit of Folio's own entry is theirs: an `async` they set, a `timeoutSec`
+/// or `matcher` on Copilot's entry, an entry they moved into a group of their own (ownership is by
+/// content, never by position), a copy of one under another event.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum Form {
+    /// Every entry an install claims is in today's form, and none is left over.
+    Today,
+    /// As `Today`, with entries of this copy's no install claims: the events they stand under.
+    Placed(Vec<String>),
+    /// An entry an install claims is in a ruled old shape, or resume's event has no entry.
+    Old,
 }
 
 pub(crate) fn check(
