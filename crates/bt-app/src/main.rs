@@ -56266,18 +56266,46 @@ mod app_icon_tests {
     /// RED (0.4.10 plan row 71) — **every window this process opens is born wearing the
     /// program's icon, at the scale its renderer is born at, before the renderer exists.**
     ///
-    /// The two constructors are the only roads to a window (`ime_report_tests` walks the same
-    /// two), and both take winit's own window, so no headless window is born on either: the
-    /// order is held against the source. After the scale is read, because the icon is worn at the
-    /// renderer's scale and a later change wears it again only when that scale moves; before the
-    /// renderer, because the window is still hidden there and the first frame shows it.
+    /// **The two constructors are the only roads to a window**, and that is asked first: every
+    /// product call of winit's `create_window` stands in `Runtime::create` or
+    /// `Runtime::open_window`, one each (review N3). A third road, a window made again after a
+    /// device loss for instance, would be born with no icon of its own while every pin below
+    /// stayed green; it is named here instead, and joins the list below with its door. Both take
+    /// winit's own window, so no headless window is born on either: the order is held against
+    /// the source. After the scale is read, because the icon is worn at the renderer's scale and
+    /// a later change wears it again only when that scale moves; before the renderer, because the
+    /// window is still hidden there and the first frame shows it.
     ///
     /// MUTATIONS: drop the door from `Runtime::create`
     /// (`plant-71-a-first-window-born-without-the-icon.py`) or from `Runtime::open_window`
     /// (`plant-71-b-second-window-born-without-the-icon.py`), and the panic names that
-    /// constructor.
+    /// constructor; open a third road to a window (`plant-71-e-a-third-road-to-a-window.py`),
+    /// and the first assertion names it.
     #[test]
     fn every_window_is_born_wearing_the_programs_icon() {
+        let index = crate::test_support::source();
+        let calls = crate::test_support::found(
+            bt_source::needle!(bt_source::Pattern::identifier("create_window")),
+            bt_source::View::Identifiers,
+        )
+        .in_the_product(index);
+        let roads: std::collections::BTreeSet<String> = calls
+            .owners(index)
+            .into_keys()
+            .map(|identity| match identity.type_owner {
+                Some(owner) => format!("{owner}::{}", identity.name),
+                None => identity.name,
+            })
+            .collect();
+        assert_eq!(
+            (
+                calls.len(),
+                roads.iter().map(String::as_str).collect::<Vec<_>>()
+            ),
+            (2, vec!["Runtime::create", "Runtime::open_window"]),
+            "the product makes a window in exactly these two constructors, once each; a new road \
+             to a window wears the program's icon too, and joins this list"
+        );
         for (owner, scale, renderer) in [
             (
                 "create",
