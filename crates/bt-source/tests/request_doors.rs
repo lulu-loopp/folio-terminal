@@ -90,7 +90,8 @@
 //! Every failure is a row of `docs/plans/REQUEST-DOOR-SITES.tsv`, keyed by site (`file`, `item`,
 //! `kind`, `name`; no line), with its count, its verdict and its reason: `std` and `follows` (read,
 //! nothing behind it), `unreviewed` (counted, the list shrinks) or `violation` (a C1 breach, its
-//! finding named). The guard holds the list equal to the tree; `scripts/ci/check-request-door-sites.ps1`
+//! finding named). The guard holds the list equal to the tree, its comment lines with its rows (the
+//! count of unread keys met only beside a cut is in them); `scripts/ci/check-request-door-sites.ps1`
 //! holds it to the merge base.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -3360,7 +3361,24 @@ fn every_request_door_returns_at_once() {
         ));
     }
     std::fs::write(out.join("implicit-under.tsv"), &behind).expect("the implicit rows' kinds");
-    let failures = list_failures(&tree, &list, &doors_of, &under);
+    let mut failures = list_failures(&tree, &list, &doors_of, &under);
+    // The comment lines above the columns are the tree's too (review N1, 2026-11-04): they carry
+    // the count of unread keys met only beside a cut, which no row holds, so a landing that moves
+    // a beside key regenerates the header rather than leaving a stale count on the list.
+    let comments = |text: &str| -> Vec<String> {
+        text.lines()
+            .take_while(|line| *line != LIST_HEADER)
+            .map(str::to_owned)
+            .collect()
+    };
+    let (committed_comments, rendered_comments) = (comments(&committed), comments(&rendering));
+    if committed_comments != rendered_comments {
+        failures.push(format!(
+            "the list's comment lines are not the tree's: committed `{}`, the tree `{}`",
+            committed_comments.join(" "),
+            rendered_comments.join(" ")
+        ));
+    }
     assert!(
         failures.is_empty(),
         "docs/plans/REQUEST-DOOR-SITES.tsv and the tree disagree ({} differences; the rendering is in \

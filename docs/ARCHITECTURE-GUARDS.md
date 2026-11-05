@@ -759,7 +759,9 @@ picture save's refusal is answered on the next turn through its own inbox. **Sin
 `# request-doors` row and owe its boundary together: an entry is `Unmet` only when neither walk
 meets it, since the road beside an enqueue starts lanes and threads of its own (close_pane's and
 reap's `close_tab` reaches the computation lane), stopped and excused by the same cells; and a cut
-whose `enqueue` meets none of its boundary is refused, since it has cut the enqueue away.
+whose `enqueue` meets none of its boundary is refused, since it has cut the enqueue away. The
+list's comment lines, which carry that header count, are held equal to the tree with its rows
+(2026-11-04, review N1), so a landing that moves a beside key regenerates the count.
 
 **The sites, by site.** `docs/plans/REQUEST-DOOR-SITES.tsv` lists every failure keyed by file,
 item, kind and name (no line), with `sites`, a verdict and a reason: `std` or `follows <key>; …`
