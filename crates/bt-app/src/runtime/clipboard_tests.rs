@@ -1190,6 +1190,12 @@ fn a_copy_while_the_clipboard_is_held_never_holds_the_window() {
 /// as it would have: the refusal mints no generation, so the earlier answer is still the one
 /// waited for, and its path reaches the shell.
 ///
+/// It takes every place of the process-global `CLIPBOARD_PICTURE_JOBS_RUNNING` for its whole length,
+/// so it must stay the binary's only test that takes a place (review N5, 2026-11-04): a second test
+/// that saves a picture would find the places gone, or leave this one short of four. The test-globals
+/// guard does not see the global, which is written in the product's `ClipboardPictureJob::take`
+/// through `fetch_update`, so `docs/plans/TEST-GLOBALS.tsv` holds no row for it (its note says why).
+///
 /// MUTATIONS: draw the notice in `Runtime::save_clipboard_picture` as before plan row 52 — a notice
 /// on the paste's own turn; withdraw a generation on a refusal — the earlier save's path is dropped.
 #[test]
