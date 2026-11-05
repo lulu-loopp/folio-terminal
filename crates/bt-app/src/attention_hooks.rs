@@ -3141,19 +3141,29 @@ mod tests {
 
         // And in a group of its own between two of theirs, over lines.
         let theirs = format!(
-            "{{\n  \"hooks\": {{\n    \"Stop\": [\n      {{ \"hooks\": [ {{ \"type\": \"command\", \
-             \"command\": \"a\" }} ] }},\n      {{ \"hooks\": [ {gone} ] }},\n      {{ \"hooks\": [ \
-             {{ \"type\": \"command\", \"command\": \"b\" }} ] }}\n    ]\n  }}\n}}\n"
+            r#"{{
+  "hooks": {{
+    "Stop": [
+      {{ "hooks": [ {{ "type": "command", "command": "a" }} ] }},
+      {{ "hooks": [ {gone} ] }},
+      {{ "hooks": [ {{ "type": "command", "command": "b" }} ] }}
+    ]
+  }}
+}}
+"#
         );
         std::fs::write(&path, &theirs).expect("their own file");
         assert_eq!(apply_to(&path, true, &exe()), Outcome::Installed);
         let written = std::fs::read_to_string(&path).expect("read back");
         let at = theirs.find(&gone).expect("the old entry");
+        // Up to the line that closes the event's list, the file's last `]`.
+        let closing = theirs.rfind(']').expect("the event's end");
+        let end = theirs[..closing].rfind('\n').expect("its line");
         assert!(
             written.starts_with(&format!(
                 "{}{new}{}",
                 &theirs[..at],
-                &theirs[at + gone.len()..theirs.find("\n    ]").expect("the event's end")]
+                &theirs[at + gone.len()..end]
             )),
             "{written}"
         );
@@ -3185,13 +3195,30 @@ mod tests {
             )
         );
 
+        // Over CRLF lines whose indentation is not the file's unit: written with `\n` here and
+        // turned into the file's endings once, at the end.
         let over_lines = |own: Option<&str>| {
-            let own = own.map_or(String::new(), |own| format!("\r\n          {own},"));
+            let own = own.map_or(String::new(), |own| {
+                format!(
+                    r#"
+          {own},"#
+                )
+            });
             format!(
-                "{{\r\n    \"hooks\": {{\r\n        \"Stop\": [\r\n            {{\r\n                \
-                 \"hooks\": [\r\n          {a},{own}\r\n          {b}\r\n                ]\r\n            \
-                 }}\r\n        ]\r\n    }}\r\n}}"
+                r#"{{
+    "hooks": {{
+        "Stop": [
+            {{
+                "hooks": [
+          {a},{own}
+          {b}
+                ]
+            }}
+        ]
+    }}
+}}"#
             )
+            .replace('\n', "\r\n")
         };
         std::fs::write(&path, over_lines(Some(&own))).expect("their own file");
         assert_eq!(apply_to(&path, false, &exe()), Outcome::Removed);
@@ -3214,7 +3241,12 @@ mod tests {
         assert_eq!(apply_to(&path, true, &exe()), Outcome::Installed);
         let written = std::fs::read_to_string(&path).expect("read back");
         assert!(
-            written.starts_with("{\n  \"model\": \"opus\",\n  \"hooks\": {\n    \""),
+            written.starts_with(
+                r#"{
+  "model": "opus",
+  "hooks": {
+    ""#
+            ),
             "{written}"
         );
         assert_eq!(apply_to(&path, false, &exe()), Outcome::Removed);
