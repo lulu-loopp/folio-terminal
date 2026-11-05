@@ -1,8 +1,8 @@
 # Agent integration marks (T-B)
 
 The adapters decode ownership at `attention_hooks::hook_owner`,
-`attention_codex::hook_owner` (and `notify_owner` for the line an earlier Folio
-wrote), and `attention_copilot::entry_owner`.
+`attention_codex::codex_hook_owner` (and `notify_owner` for the line an earlier
+Folio wrote), and `attention_copilot::entry_owner`.
 The verb/family identifies a Folio entry; its executable operand identifies the
 copy. `attention_ownership::other_live` uses `explorer_menu::same_path` and
 filesystem metadata. Only `NotFound` means a dead owner; access errors refuse.
@@ -126,17 +126,20 @@ and escapes.
   Claude Code's through the `HOOKS` family (`attention_hooks::Family`). Codex
   keeps the person's approval of each hook under the hook's place in the file
   (event, group index, handler index), so the family is positional. An own entry
-  is a group whose only handler `attention_codex::hook_owner` reads as a Folio
-  executable speaking `attention codex:` with no key but `type`, `command`,
-  `async` and `timeout`. A Folio-looking handler that shares a group with the
+  is a group whose only handler `attention_codex::codex_hook_owner` reads as a
+  Folio executable speaking `attention codex:` with no key but `type`,
+  `command`, `async` and `timeout`. A Folio-looking handler that shares a group with the
   person's, or carries another key, is theirs and is left where it is. An install
   appends Folio's group at the end of `Stop`, so no group of the person's moves.
   The self-check also compares the place of every entry that is not Folio's.
-  Nothing is written when Codex would ignore the file (a byte-order mark, a
-  top-level key other than `description` and `hooks`), when `config.toml`
-  already declares hook events (Codex warns when both files do), or on Windows
-  when Folio's path holds a `%`, which `cmd /C` would expand. Folio never writes
-  Codex's `[hooks.state]` approvals: the person approves the hook once in Codex.
+  Nothing is written when Codex would ignore the file with Folio's hook in it
+  (judged by a mirror of Codex's own `HooksFile` types: a byte-order mark, a
+  top-level key other than `description` and `hooks`, a key named twice, a
+  handler or value of a type Codex does not take), or when `config.toml` already
+  declares hook events (Codex warns when both files do). A `config.toml` Folio
+  cannot read refuses an install; a removal goes on without it, leaves it as it
+  was and says so. Folio never writes Codex's `[hooks.state]` approvals: the
+  person approves the hook once in Codex.
 - **Codex's `notify` line** (`config.toml`): Folio 0.2 to 0.4.9 installed a
   `notify` line, and it stays until Folio writes its hook (row 69 ruling R18).
   It is then removed in the same operation. `toml_edit`'s rendering ended every
@@ -186,13 +189,19 @@ index the person's approval is keyed by.
   hook failure, rather than a user-facing blocking decision.
 - Codex lifecycle hooks, checked at
   [`rust-v0.166.0`](https://github.com/openai/codex/tree/rust-v0.166.0) on
-  2026-11-04 (`codex-rs/hooks/src/engine/discovery.rs`, `command_runner.rs`,
-  `events/stop.rs`): `hooks.json` has a `description` and `hooks`, and nothing
-  else (`deny_unknown_fields`). A command handler is `type: "command"`, one
-  `command` string run through `cmd /C` on Windows and `$SHELL -lc` elsewhere,
-  `async` and `timeout` in seconds. Folio writes `async: true` and
-  `timeout: 10`. The `Stop` request carries `session_id`, `cwd` and
-  `last_assistant_message` on stdin. A hook runs only after the person trusts it
+  2026-11-04 and 2026-11-05 (`codex-rs/hooks/src/engine/discovery.rs`,
+  `command_runner.rs`, `events/stop.rs`, `core/src/session/mod.rs`
+  `build_hooks_config`, `shell-command/src/shell_detect.rs`): `hooks.json` has a
+  `description` and `hooks`, and nothing else (`deny_unknown_fields`); any error
+  reading it ignores the whole file. A command handler is `type: "command"`, one
+  `command` string run through the session's shell: PowerShell on Windows (`pwsh`,
+  else `powershell.exe`, as `-NoProfile -Command`), the account's login shell
+  with `-c` elsewhere; `%COMSPEC% /C` and `$SHELL -lc` only for a session with no
+  shell of its own. Folio's Windows command is `& '<folio.exe>' attention
+  codex:stop --json -`, with every PowerShell quote in the path doubled; the Unix
+  one puts the path in sh's single quotes. `async` and `timeout` in seconds.
+  Folio writes `async: true` and `timeout: 10`. The `Stop` request carries
+  `session_id`, `cwd` and `last_assistant_message` on stdin. A hook runs only after the person trusts it
   in Codex, and a changed command asks again.
 
 No shell, guard process, launcher, or startup migration is added. Exact legacy
