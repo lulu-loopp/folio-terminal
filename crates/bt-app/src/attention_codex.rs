@@ -218,13 +218,6 @@ fn config_dir_from(named: Option<OsString>, home: Option<OsString>) -> Option<Pa
     Some(PathBuf::from(home.filter(|home| !home.is_empty())?).join(DEFAULT_DIRECTORY))
 }
 
-/// The user-level configuration file — read, and written only to take out the `notify` line an
-/// earlier Folio wrote.
-#[must_use]
-pub(crate) fn config_path() -> Option<PathBuf> {
-    Some(config_dir()?.join(CONFIG_FILE))
-}
-
 /// The user-level hooks file. **The file this module writes Folio's hook in.**
 #[must_use]
 pub(crate) fn hooks_path() -> Option<PathBuf> {
@@ -818,9 +811,9 @@ pub(crate) fn apply_resolved(
         },
         None => None,
     };
-    let toml_config = match (&taken_out, &toml.config) {
-        (Some(_), Err(reason)) => return Outcome::Refused(*reason),
-        (_, config) => config.as_ref().ok(),
+    let toml_config = match (&taken_out, toml.config.as_ref().map_err(|reason| *reason)) {
+        (Some(_), Err(reason)) => return Outcome::Refused(reason),
+        (_, config) => config.ok(),
     };
     let _record = if install {
         match ownership::record(data, folder, "codex") {
@@ -993,7 +986,6 @@ mod tests {
         );
         assert_eq!(config_dir_from(None, None), None);
         assert_eq!(config_dir_from(None, named("")), None);
-        assert!(config_path().is_none_or(|path| path.ends_with(CONFIG_FILE)));
         assert!(hooks_path().is_none_or(|path| path.ends_with(HOOKS_FILE)));
         // **Nothing in this module can be steered by where the process happens to be standing**,
         // asserted over the source itself because that is the only form the rule has. The names are
@@ -1982,7 +1974,7 @@ mod tests {
             .expect("hooks.json is landed here");
         assert!(toml_lands < hooks_land, "config.toml is written first");
         let judged = body
-            .find("(Some(_),Err(reason))=>returnOutcome::Refused(*reason),")
+            .find("(Some(_),Err(reason))=>returnOutcome::Refused(reason),")
             .expect("a config.toml Folio will not edit is refused here");
         assert!(judged < toml_lands, "and refused before either write");
     }
