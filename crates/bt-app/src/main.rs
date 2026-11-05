@@ -56230,6 +56230,99 @@ mod opening_window_tests {
     }
 }
 
+/// **The program's icon on its own windows** (0.4.10 plan row 71): every window is born wearing
+/// it, and this executable holds it at every side the shell asks for. The scale change's half is
+/// `app_dpi_tests::a_scale_change_wears_the_programs_icon_at_the_new_scale`, on the headless
+/// window.
+#[cfg(test)]
+mod app_icon_tests {
+    use crate::test_support::method_body;
+
+    /// RED (0.4.10 plan row 71) — **every window this process opens is born wearing the
+    /// program's icon, at the scale its renderer is born at, before the renderer exists.**
+    ///
+    /// The two constructors are the only roads to a window (`ime_report_tests` walks the same
+    /// two), and both take winit's own window, so no headless window is born on either: the
+    /// order is held against the source. After the scale is read, because the icon is worn at the
+    /// renderer's scale and a later change wears it again only when that scale moves; before the
+    /// renderer, because the window is still hidden there and the first frame shows it.
+    ///
+    /// MUTATIONS: drop the door from `Runtime::create`
+    /// (`plant-71-a-first-window-born-without-the-icon.py`) or from `Runtime::open_window`
+    /// (`plant-71-b-second-window-born-without-the-icon.py`), and the panic names that
+    /// constructor.
+    #[test]
+    fn every_window_is_born_wearing_the_programs_icon() {
+        for (owner, scale, renderer) in [
+            (
+                "create",
+                "startup_scale_factor",
+                "gpu_door::open_first_window(",
+            ),
+            ("open_window", "scale_factor", "WindowRenderer::new("),
+        ] {
+            let body = method_body("Runtime", owner);
+            let made = body
+                .find(".create_window(attributes)")
+                .unwrap_or_else(|| panic!("`Runtime::{owner}` constructs a window"));
+            let scaled = made
+                + body[made..]
+                    .find(&format!("let {scale} ="))
+                    .unwrap_or_else(|| panic!("`Runtime::{owner}` reads the renderer's scale"));
+            let worn = body
+                .find(&format!("window.wear_the_app_icon({scale});"))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "`Runtime::{owner}` puts the program's icon on the window it makes, at \
+                         the renderer's scale"
+                    )
+                });
+            let born = body
+                .find(renderer)
+                .unwrap_or_else(|| panic!("`Runtime::{owner}` gives its window a renderer"));
+            assert!(
+                made < scaled && scaled < worn && worn < born,
+                "`Runtime::{owner}`: the window is made, its scale read, the icon worn at that \
+                 scale and only then is the renderer born"
+            );
+        }
+    }
+
+    /// PIN (0.4.10 plan row 71) — **the shell's two sides at the four scales `folio.ico` was
+    /// drawn for are the system's own** (`SM_CXSMICON` and `SM_CXICON` at 96, 120, 144 and 192
+    /// DPI), each an image the file holds.
+    #[cfg(windows)]
+    #[test]
+    fn the_two_sides_are_the_systems_at_every_scale_the_icon_file_was_drawn_for() {
+        assert_eq!(
+            [1.0, 1.25, 1.5, 2.0].map(super::app_icon_sides),
+            [(16, 32), (20, 40), (24, 48), (32, 64)]
+        );
+    }
+
+    /// RED (0.4.10 plan row 71) — **this executable carries the program's icon group, and it
+    /// loads at both sides at every scale the icon file was drawn for**; a group the build did
+    /// not file is refused, so the loads are reading this executable's own table.
+    ///
+    /// Real `LoadImageW` calls: the build script links `folio.res` into every unit of the bin
+    /// target, this unit-test executable included (`build.rs`, `rustc-link-arg-bins`).
+    ///
+    /// MUTATION (`plant-71-d-the-wrong-group.py`): ask for group 2 and every load is refused.
+    #[cfg(windows)]
+    #[test]
+    fn this_executable_carries_the_programs_icon_at_every_side_the_shell_asks_for() {
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            if let Err(error) = super::app_icons_at(scale) {
+                panic!("the program's icon does not load at scale {scale}: {error}");
+            }
+        }
+        assert!(
+            super::app_icon_from(bt_winres::APP_ICON_GROUP + 1, 32).is_err(),
+            "a group the build did not file is refused"
+        );
+    }
+}
+
 /// Review X-1 and X-3: the two races a delayed picture paste can lose.
 #[cfg(test)]
 mod clipboard_picture_race_tests {
