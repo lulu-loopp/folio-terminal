@@ -55,9 +55,6 @@ pub(crate) struct HooksFamily {
     /// version decides whether they mean what Folio reads them as (Copilot, R9), or which entry is
     /// Folio's (Codex, 0.4.10 plan row 69c).
     pub(crate) within_its_gate: fn() -> bool,
-    /// The family's own question about its agent, asked on the pass's worker before its file is
-    /// named: codex's version, which decides the file (row 69c, R17); nothing for the others.
-    pub(crate) settle: fn(&WorkerCtx),
     /// The notice a repair of a gone copy's hooks raises (R8), by the file the repair wrote.
     pub(crate) repaired: fn(&Path) -> Text,
 }
@@ -72,7 +69,6 @@ pub(crate) static HOOKS_FAMILIES: [HooksFamily; 3] = [
         scan: crate::attention_hooks::scan_resolved,
         apply: crate::attention_hooks::apply_resolved,
         within_its_gate: no_gate,
-        settle: no_question,
         repaired: claude_repaired,
     },
     // Its file by its version (row 69c): `hooks.json` from 0.148, `config.toml`'s `notify` line
@@ -84,7 +80,6 @@ pub(crate) static HOOKS_FAMILIES: [HooksFamily; 3] = [
         scan: crate::attention_codex::scan_resolved,
         apply: crate::attention_codex::apply_resolved,
         within_its_gate: crate::attention_codex::repair_within_the_gate,
-        settle: settle_codex_version,
         repaired: crate::attention_codex::repaired_notice,
     },
     // Repaired within its version gate (R9): only once the version question has been asked and
@@ -97,7 +92,6 @@ pub(crate) static HOOKS_FAMILIES: [HooksFamily; 3] = [
         scan: crate::attention_copilot::scan_resolved,
         apply: crate::attention_copilot::apply_resolved,
         within_its_gate: crate::attention_copilot::repair_within_the_gate,
-        settle: no_question,
         repaired: copilot_repaired,
     },
 ];
@@ -114,14 +108,6 @@ fn claude_repaired(_: &Path) -> Text {
 
 fn copilot_repaired(_: &Path) -> Text {
     Text::AgentHooksRepairedCopilot
-}
-
-/// A family with nothing to ask before its file is named.
-fn no_question(_: &WorkerCtx) {}
-
-/// codex's version, settled on the pass's worker (`attention_codex::settle_version`).
-fn settle_codex_version(ctx: &WorkerCtx) {
-    let _ = crate::attention_codex::settle_version(ctx);
 }
 
 /// **One family's answer from one run of the step.**
@@ -325,7 +311,7 @@ pub(crate) fn install_hooks_wake(wake: impl Fn() + Send + Sync + 'static) {
     let _ = HOOKS_WAKE.set(Box::new(wake));
 }
 
-/// **The step, on this machine**: the carry pass's member ([`crate::carry_pass::CARRY_STEPS`]).
+/// **The step, on this machine**: the carry pass's member ([`crate::carry_pass::run_carry_steps`]).
 ///
 /// **Not before the program walk has answered** (the pane-environment ruling of 2026-10-05: the
 /// folders are the account's current ones, never the launch's): the walk's first answer runs the
@@ -335,9 +321,10 @@ pub(crate) fn run_agent_hooks_step(ctx: &WorkerCtx) {
     if !crate::attention_hooks::AGENT_HOMES.answered() {
         return;
     }
-    for family in &HOOKS_FAMILIES {
-        (family.settle)(ctx);
-    }
+    // The one family whose file is named by a question of its agent: codex's version decides
+    // whether Folio's entry is the hook or the `notify` line (row 69c, R17), so it is settled here,
+    // on the pass's worker, before any family's file is named.
+    let _ = crate::attention_codex::settle_version(ctx);
     let Some(exe) = ownership::this_copy() else {
         crate::diagnostics::stderr_line(
             "BT_AGENT_HOOKS not scanned: this copy's own program could not be named".to_owned(),
