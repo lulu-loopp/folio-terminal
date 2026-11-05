@@ -35,6 +35,12 @@
 //! and a positional argument would break `codex resume <id>`). When the resumed agent ends by
 //! itself, a pane that was a shell gets its shell back in the same folder ([`Ended::HandBack`]).
 //!
+//! **Which program starts it is the platform's road** ([`Road`], T-AGENT-RESUME-ON-MACOS): on
+//! Windows the vendor's own shipped profile, whose program a fresh logon environment finds; on a
+//! Mac the pane's own shell, told to `exec` the vendor's resume, because a child of a Folio started
+//! from Finder inherits launchd's `PATH` and only the person's shell builds theirs. Either way the
+//! agent is the pane's process and nothing is typed.
+//!
 //! **A resume whose folder is gone is not started** (review F3): no vendor's resume is run in a
 //! folder nobody chose, so the birth starts nothing and the pane is handed its shell with the line
 //! below ([`AgentAccount::not_started`]).
@@ -79,10 +85,12 @@ pub(crate) enum ResumeForm {
 pub(crate) struct Vendor {
     /// The attention family its hook speaks as ([`attention_map::CLAUDE_CODE`]).
     pub(crate) family: &'static str,
-    /// The shipped agent profile that starts it (`profiles::windows_shipped`).
+    /// The shipped agent profile that starts it on Windows (`profiles::windows_shipped`; a Mac
+    /// ships none, and resumes through the pane's shell instead: [`Road`]).
     pub(crate) profile: &'static str,
     /// The file stem its program has, whatever the install route (`claude.cmd`, `claude.exe`): how
-    /// a profile somebody made for it is told apart from a shell.
+    /// a profile somebody made for it is told apart from a shell, and the name a shell is told to
+    /// `exec` on the Mac's road ([`Vendor::shell_command`]).
     pub(crate) program_stem: &'static str,
     /// Its product name, as the failure line says it. Not localised, like every product name in
     /// the profile table.
@@ -130,6 +138,22 @@ impl Vendor {
             ResumeForm::Subcommand(subcommand) => subcommand,
         };
         vec![OsString::from(word), OsString::from(id)]
+    }
+
+    /// **The one command a shell is handed to become this vendor's resume** (the Mac's road,
+    /// [`Road::ThroughTheShell`]): `exec`, the program's name, the resume's arguments. No word
+    /// needs quoting in any shell: the name and the flag are this table's constants, and the id is
+    /// one [`session_is_well_formed`] passed, hex digits and hyphens. `exec` makes the agent the
+    /// pane's own process (the child the reaper waits on) and skips the shell's aliases and
+    /// functions, so an alias that adds a flag resurrects no grant.
+    #[must_use]
+    pub(crate) fn shell_command(&self, id: &str) -> OsString {
+        let mut command = OsString::from("exec");
+        for word in std::iter::once(OsString::from(self.program_stem)).chain(self.arguments(id)) {
+            command.push(" ");
+            command.push(word);
+        }
+        command
     }
 
     /// Whether `program` is this vendor's CLI, by its file stem (either case).
@@ -238,7 +262,8 @@ pub(crate) enum Child<'a> {
 }
 
 /// **The child a pane's program makes it** for [`AgentAccount::hear`]: the vendor whose CLI it
-/// runs, or a shell with the commands it marked.
+/// runs, or a shell with the commands it marked. A pane whose child is a resume is asked through
+/// [`AgentAccount::child`], which knows its vendor whatever its program is called.
 #[must_use]
 pub(crate) fn child_of<'a>(program: Option<&Path>, marks: &'a [CommandMark]) -> Child<'a> {
     program
@@ -354,6 +379,19 @@ impl AgentAccount {
     #[must_use]
     pub(crate) fn is_resumed(&self) -> bool {
         self.resumed.is_some()
+    }
+
+    /// **The child this pane is, for the question "whose hook is this"** (T-AGENT-RESUME-ON-MACOS):
+    /// a resume is its vendor's agent by its record, whatever its program is called. On a Mac the
+    /// program is the shell that `exec`ed it; on Windows it is the vendor's own, so the answer
+    /// there is the one [`child_of`] gives. Any other pane is what [`child_of`] says.
+    #[must_use]
+    pub(crate) fn child<'a>(&self, program: Option<&Path>, marks: &'a [CommandMark]) -> Child<'a> {
+        self.resumed
+            .as_ref()
+            .and(self.record.as_ref())
+            .and_then(|record| vendor(&record.vendor))
+            .map_or_else(|| child_of(program, marks), Child::Agent)
     }
 
     /// **The birth found the recorded folder gone and started nothing** (row 195, review F3): the
@@ -548,8 +586,9 @@ pub(crate) enum SeedAgent {
     CouldNotResume(CouldNotResume),
 }
 
-/// **Whether this run resumes agents at all**: the Agents page's switch, on a platform this build
-/// resumes on (Windows only in 0.4.9; the Mac writes the record and ignores it, plan row 197).
+/// **Whether this run resumes agents at all, and by which road**: the Agents page's switch, on a
+/// platform this build resumes on (Windows since 0.4.9, macOS since T-AGENT-RESUME-ON-MACOS), and
+/// that platform's [`Road`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct Restore {
     pub(crate) switch: bool,
@@ -582,10 +621,41 @@ impl Restore {
     }
 }
 
+/// **Which program a resume is started as** (T-AGENT-RESUME-ON-MACOS, 0.4.10 plan row 15): a
+/// value of the platform, so a test on either machine asks what the other does.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Road {
+    /// The vendor's own program, through its shipped profile ([`Vendor::profile`]), with the
+    /// resume's arguments in place of the profile's. A child on Windows is given the account's
+    /// fresh logon environment, so the `PATH` it is found on and runs with is the person's.
+    VendorProgram,
+    /// The pane's own shell, as its profile starts it, told to run [`Vendor::shell_command`] as
+    /// an interactive shell ([`crate::profiles::CommandFlags`]). Off Windows a child inherits
+    /// Folio's own environment (launchd's bare system `PATH` for an app opened from Finder), and
+    /// the `PATH` an agent was typed under is the one the person's login and rc files build, so
+    /// the shell that reads them is what starts it.
+    ThroughTheShell,
+}
+
+impl Road {
+    /// The road `platform` resumes by.
+    #[must_use]
+    pub(crate) const fn on(platform: HostPlatform) -> Self {
+        match platform {
+            HostPlatform::Windows => Self::VendorProgram,
+            HostPlatform::MacOs | HostPlatform::OtherUnix => Self::ThroughTheShell,
+        }
+    }
+}
+
 /// **A saved pane's profile, folder and agent, as its seed is to carry them**: `(profile, folder,
 /// agent)`. A well-formed record of a vendor this build resumes, while `restore` resumes, makes
-/// the pane the vendor's program in the recorded folder, handing back `profile` when that was a
+/// the pane its vendor's resume in the recorded folder, handing back `profile` when that was a
 /// shell; anything else leaves the pane as it was saved.
+///
+/// **The vendor is the record's, and the program is the road's** ([`Road::on`]): a pane whose own
+/// profile starts the vendor keeps it on either road; a shell pane is born as the vendor's profile
+/// on Windows, and as that same shell on a Mac, which `exec`s the vendor's resume.
 #[must_use]
 pub(crate) fn revived(
     profile: String,
@@ -606,7 +676,10 @@ pub(crate) fn revived(
     let (started, hand_back) = if vendor.is_started_by(&profile) {
         (profile, None)
     } else {
-        (vendor.profile.to_owned(), Some(profile))
+        match Road::on(restore.platform) {
+            Road::VendorProgram => (vendor.profile.to_owned(), Some(profile)),
+            Road::ThroughTheShell => (profile.clone(), Some(profile)),
+        }
     };
     (
         started,

@@ -236,9 +236,10 @@ pub enum Capability {
     OptionKey,
     /// Bringing back, at a restart, the agents that were running in panes (0.4.9 plan row 195).
     ///
-    /// Windows only **in 0.4.9**, and the boundary is the verification rather than the mechanism:
-    /// the record is written on every platform and read back only where the resume was tried on
-    /// the vendors' own CLIs. The Mac is plan row 197.
+    /// **Windows and macOS** (macOS since T-AGENT-RESUME-ON-MACOS, 0.4.10 plan row 15), each by its
+    /// own road (`crate::agent_resume::Road`): on Windows the vendor's program is started, on a
+    /// Mac the pane's own shell starts it. Another Unix has no build, and so no road anybody has
+    /// tried.
     AgentResume,
 }
 
@@ -255,12 +256,10 @@ impl Capability {
     pub const fn on(self, platform: HostPlatform) -> bool {
         match self {
             Self::UpdateCheck => true,
-            Self::ExplorerMenu
-            | Self::AgentDiscovery
-            | Self::WindowBackdrop
-            | Self::AgentResume => {
+            Self::ExplorerMenu | Self::AgentDiscovery | Self::WindowBackdrop => {
                 matches!(platform, HostPlatform::Windows)
             }
+            Self::AgentResume => matches!(platform, HostPlatform::Windows | HostPlatform::MacOs),
             Self::OptionKey => matches!(platform, HostPlatform::MacOs),
         }
     }

@@ -97,7 +97,7 @@ fn a_saved_agent_pane_with_a_recorded_session_is_born_through_its_vendors_resume
             shell_integration::Scripts::installed(),
             &bt_pty::SystemShellEnvironment,
         );
-        let resumed = compose_resume(&mut command, &born, &started);
+        let resumed = compose_resume(&mut command, &born, &started, &row);
         let expected = vec![OsString::from("--resume"), OsString::from(SESSION)];
         assert_eq!(
             command.arguments, expected,
@@ -132,7 +132,7 @@ fn a_saved_agent_pane_with_a_recorded_session_is_born_through_its_vendors_resume
         shell_integration::Scripts::installed(),
         &bt_pty::SystemShellEnvironment,
     );
-    compose_resume(&mut command, &born, &started);
+    compose_resume(&mut command, &born, &started, &row);
     assert!(command.environment.contains(&(
         OsString::from("CLAUDE_CONFIG_DIR"),
         OsString::from(r"C:\work\second-config")
@@ -140,8 +140,9 @@ fn a_saved_agent_pane_with_a_recorded_session_is_born_through_its_vendors_resume
 }
 
 /// RED (row 195) — **the switch off, a pane comes back as its shell**, exactly as before this
-/// row: its own profile, its own folder, and its last typed line owed to its prompt. And on a
-/// platform this build does not resume on (R11; the Mac is plan row 197), the same.
+/// row: its own profile, its own folder, and its last typed line owed to its prompt, on Windows
+/// and on a Mac alike (T-AGENT-RESUME-ON-MACOS). And on a platform this build does not resume on
+/// (another Unix, which has no build), the same with the switch on.
 ///
 /// MUTATION: drop `self.switch &&` from `Restore::resumes` and the switched-off pane is born as
 /// the vendor's program.
@@ -153,8 +154,12 @@ fn with_the_switch_off_a_recorded_pane_comes_back_as_its_shell() {
             platform: HostPlatform::Windows,
         },
         Restore {
-            switch: true,
+            switch: false,
             platform: HostPlatform::MacOs,
+        },
+        Restore {
+            switch: true,
+            platform: HostPlatform::OtherUnix,
         },
         Restore::off(),
     ] {
@@ -699,4 +704,509 @@ fn a_resumed_shell_panes_own_profile_is_the_shell_it_hands_back() {
         "claude",
         "and a pane with no resumed agent's is its launch's"
     );
+}
+
+/// A Codex record of [`SESSION`] in [`FOLDER`].
+fn codex_record() -> AgentRecordV1 {
+    AgentRecordV1 {
+        vendor: attention_map::CODEX.to_owned(),
+        ..claude_record()
+    }
+}
+
+/// The shell environment a Mac whose account shell is `/bin/zsh` answers with: what
+/// `profiles::shipped_for(SeedPlatform::MacOs, …)` reads to build that table on any machine.
+struct ZshAccount;
+
+impl bt_pty::ShellEnvironment for ZshAccount {
+    fn var_os(&self, key: &str) -> Option<OsString> {
+        (key == "SHELL").then(|| OsString::from("/bin/zsh"))
+    }
+
+    fn is_file(&self, _path: &Path) -> bool {
+        true
+    }
+}
+
+/// The macOS table's row `id`, built as a value on whichever machine runs the test (H1 rule 1).
+fn mac_row(id: &str) -> profiles::Profile {
+    profiles::shipped_for(profiles::SeedPlatform::MacOs, &ZshAccount)
+        .into_iter()
+        .find(|row| row.id == id)
+        .unwrap_or_else(|| panic!("the macOS table ships {id}"))
+}
+
+/// A seed that resumes `record` in a pane of `profile`, handing that profile back.
+fn resume_seed(profile: &str, record: AgentRecordV1) -> LeafSeed {
+    LeafSeed {
+        profile: profile.to_owned(),
+        cwd: Some(profiles::SeedPlace::Carried(PathBuf::from(FOLDER))),
+        agent: SeedAgent::Resume(crate::agent_resume::Resume {
+            record,
+            hand_back: Some(profile.to_owned()),
+        }),
+        ..LeafSeed::default()
+    }
+}
+
+/// The scripts a shell's door names, as names only: nothing here asks the disk.
+fn named_scripts() -> shell_integration::Scripts<'static> {
+    shell_integration::Scripts {
+        bash: Some(Path::new("/folio/folio.bash")),
+        zdotdir: Some(Path::new("/folio/zdotdir")),
+    }
+}
+
+/// RED (T-AGENT-RESUME-ON-MACOS) — **the road a resume takes is the platform's, and the vendor is
+/// the record's**: on Windows a shell pane is born as the vendor's own profile, on a Mac as that
+/// same shell (which `exec`s the vendor), and a pane whose own profile is the vendor's keeps it on
+/// both. Asked of the platform as a value, so either machine checks the other (CONVENTIONS H1).
+/// Another Unix has no build and resumes nothing.
+///
+/// MUTATION (plant `plant-15-mac-not-resumed.py`): `Capability::AgentResume` on Windows only, and
+/// the Mac's shell pane comes back with no resume.
+#[test]
+fn the_resume_road_is_the_platforms() {
+    use crate::agent_resume::{Resume, Road, revived};
+    assert_eq!(Road::on(HostPlatform::Windows), Road::VendorProgram);
+    assert_eq!(Road::on(HostPlatform::MacOs), Road::ThroughTheShell);
+    for (platform, shell_pane_born_as) in [
+        (HostPlatform::Windows, "claude"),
+        (HostPlatform::MacOs, "zsh"),
+    ] {
+        let restore = Restore {
+            switch: true,
+            platform,
+        };
+        let (profile, folder, agent) = revived(
+            "zsh".to_owned(),
+            Some(PathBuf::from("/work/elsewhere")),
+            Some(&claude_record()),
+            restore,
+        );
+        assert_eq!(profile, shell_pane_born_as, "{platform:?}: a shell pane");
+        assert_eq!(
+            folder.as_deref(),
+            Some(Path::new(FOLDER)),
+            "{platform:?}: in the folder the session is filed under"
+        );
+        assert_eq!(
+            agent,
+            SeedAgent::Resume(Resume {
+                record: claude_record(),
+                hand_back: Some("zsh".to_owned()),
+            }),
+            "{platform:?}: resumed, handing the shell back"
+        );
+        let (profile, _, agent) =
+            revived("claude".to_owned(), None, Some(&claude_record()), restore);
+        assert_eq!(profile, "claude", "{platform:?}: the vendor's own pane");
+        assert_eq!(
+            agent,
+            SeedAgent::Resume(Resume {
+                record: claude_record(),
+                hand_back: None,
+            }),
+            "{platform:?}: which hands nothing back"
+        );
+    }
+    let (profile, _, agent) = revived(
+        "zsh".to_owned(),
+        None,
+        Some(&claude_record()),
+        Restore {
+            switch: true,
+            platform: HostPlatform::OtherUnix,
+        },
+    );
+    assert_eq!((profile.as_str(), agent), ("zsh", SeedAgent::None));
+}
+
+/// RED (T-AGENT-RESUME-ON-MACOS) — **a shell pane's resume is its own shell, interactive,
+/// `exec`ing the vendor's resume**: the shell's words stay as its door composed them (zsh's and
+/// sh's `-l`, bash's `--init-file … -i`), `-i` is added once, and `-c` carries the one command,
+/// `exec claude --resume <id>` / `exec codex resume <id>`. The configuration folder the session
+/// was recorded under is set. The rows are the macOS table's, built as values, so this runs on
+/// both machines.
+///
+/// MUTATIONS (plants `plant-15-shell-argv-replaced.py`, `plant-15-no-exec.py`,
+/// `plant-15-login-only.py`): the shell's words replaced by the vendor's, the command without
+/// `exec`, or the interactive flag dropped, and the argv assertion goes red.
+#[test]
+fn a_shell_panes_resume_keeps_its_shells_words_and_execs_the_vendor() {
+    let exec =
+        |vendor: &str, words: &str| OsString::from(format!("exec {vendor} {words} {SESSION}"));
+    let cases = [
+        (
+            "zsh",
+            claude_record(),
+            vec![
+                OsString::from("-l"),
+                OsString::from("-i"),
+                OsString::from("-c"),
+                exec("claude", "--resume"),
+            ],
+        ),
+        (
+            "bash",
+            codex_record(),
+            vec![
+                OsString::from("--init-file"),
+                OsString::from("/folio/folio.bash"),
+                OsString::from("-i"),
+                OsString::from("-c"),
+                exec("codex", "resume"),
+            ],
+        ),
+        (
+            "sh",
+            claude_record(),
+            vec![
+                OsString::from("-l"),
+                OsString::from("-i"),
+                OsString::from("-c"),
+                exec("claude", "--resume"),
+            ],
+        ),
+    ];
+    for (id, record, expected) in cases {
+        let row = mac_row(id);
+        let seed = resume_seed(id, record);
+        let mut command = shell_integration::shell_command(
+            &row,
+            &profiles::shipped_kind(&row),
+            &[],
+            named_scripts(),
+            &ZshAccount,
+        );
+        assert!(
+            compose_resume(&mut command, &seed, &Started::AsAsked, &row),
+            "{id}: the birth is a resume"
+        );
+        assert_eq!(command.arguments, expected, "{id}: the shell, told to exec");
+    }
+    let row = mac_row("zsh");
+    let seed = resume_seed(
+        "zsh",
+        AgentRecordV1 {
+            home: Some("/work/second-config".to_owned()),
+            ..claude_record()
+        },
+    );
+    let mut command = shell_integration::shell_command(
+        &row,
+        &profiles::shipped_kind(&row),
+        &[],
+        named_scripts(),
+        &ZshAccount,
+    );
+    compose_resume(&mut command, &seed, &Started::AsAsked, &row);
+    assert!(
+        command.environment.contains(&(
+            OsString::from("CLAUDE_CONFIG_DIR"),
+            OsString::from("/work/second-config")
+        )),
+        "the session's configuration folder"
+    );
+}
+
+/// RED (T-AGENT-RESUME-ON-MACOS) — **a shell whose spelling is not verified comes back as that
+/// shell, saying which session did not come back**: a fish pane is handed no command, its seed
+/// carries the could-not-resume line in the session's folder, and the account it is born with
+/// holds no record, so the next start does not try again. zsh, bash and sh are not refused, and
+/// neither is a pane whose own profile is the vendor's.
+///
+/// MUTATION (plant `plant-15-unknown-family-composed.py`): `shell_cannot_resume` refusing nothing,
+/// and the fish pane is answered with no seed.
+#[test]
+fn a_shell_without_a_known_spelling_comes_back_with_the_line() {
+    let mut fish = mac_row("zsh");
+    fish.id = profiles::USER_SHELL_ID.to_owned();
+    fish.program = profiles::ProgramSource::Path(PathBuf::from("/opt/homebrew/bin/fish"));
+    let seed = resume_seed(&fish.id, claude_record());
+    let shell = shell_cannot_resume(&seed, Some(&fish), &Started::AsAsked)
+        .expect("a fish pane is handed no command");
+    assert_eq!(shell.profile, fish.id, "its own shell");
+    assert_eq!(shell.cwd, seed.cwd, "in the session's folder");
+    let SeedAgent::CouldNotResume(could) = &shell.agent else {
+        panic!("with the line: {:?}", shell.agent);
+    };
+    assert!(
+        could.text().contains("Claude Code session 0b9c7e1a"),
+        "{}",
+        could.text()
+    );
+    assert_eq!(
+        AgentAccount::born(&shell.agent, true).record(),
+        None,
+        "and no record"
+    );
+    let mut command = shell_integration::shell_command(
+        &fish,
+        &profiles::shipped_kind(&fish),
+        &[],
+        named_scripts(),
+        &ZshAccount,
+    );
+    let before = command.arguments.clone();
+    assert!(
+        !compose_resume(&mut command, &seed, &Started::AsAsked, &fish),
+        "and no resume is composed for it"
+    );
+    assert_eq!(command.arguments, before);
+    for id in ["zsh", "bash", "sh"] {
+        let row = mac_row(id);
+        assert!(
+            shell_cannot_resume(
+                &resume_seed(id, claude_record()),
+                Some(&row),
+                &Started::AsAsked
+            )
+            .is_none(),
+            "{id} is told the command"
+        );
+    }
+    let mut claude = mac_row("zsh");
+    claude.id = "claude".to_owned();
+    claude.program = profiles::ProgramSource::Path(PathBuf::from("/usr/local/bin/claude"));
+    assert!(
+        shell_cannot_resume(
+            &resume_seed("claude", claude_record()),
+            Some(&claude),
+            &Started::AsAsked
+        )
+        .is_none(),
+        "the vendor's own pane is no shell"
+    );
+}
+
+/// RED (T-AGENT-RESUME-ON-MACOS, ruling R4) — **a resumed pane is its vendor's agent whatever its
+/// program is called**: on a Mac the pane's program is the shell that `exec`ed the vendor, and a
+/// `/clear` there (a new id from the same vendor) is still recorded, while another vendor's turn
+/// from inside it is refused (row 195's F1). A pane that is no resume is what its program says.
+///
+/// MUTATION (plant `plant-15-resumed-pane-heard-as-a-shell.py`): `AgentAccount::child` answering
+/// what the program's name says, and the `/clear` is refused.
+#[test]
+fn a_resumed_pane_is_its_vendors_agent_whatever_its_program() {
+    let claude = &VENDORS[0];
+    let codex = &VENDORS[1];
+    let zsh = Some(Path::new("/bin/zsh"));
+    let mut account = AgentAccount::born(
+        &SeedAgent::Resume(crate::agent_resume::Resume {
+            record: claude_record(),
+            hand_back: Some("zsh".to_owned()),
+        }),
+        true,
+    );
+    let cleared = Heard {
+        id: "1c9c7e1a-4f3d-4c2b-9a8e-5d6f7a8b9c0d".to_owned(),
+        cwd: FOLDER.to_owned(),
+        home: None,
+    };
+    let child = account.child(zsh, &[]);
+    assert!(
+        matches!(child, crate::agent_resume::Child::Agent(vendor) if vendor.family == claude.family),
+        "the resumed pane is Claude Code's: {child:?}"
+    );
+    assert!(
+        account.hear(claude, &cleared, child),
+        "a /clear in the resumed pane is recorded"
+    );
+    assert_eq!(
+        account.record().map(|record| record.resume_id.as_str()),
+        Some(cleared.id.as_str())
+    );
+    let child = account.child(zsh, &[]);
+    assert!(
+        !account.hear(codex, &cleared, child),
+        "another vendor's turn from inside it is refused"
+    );
+    assert!(
+        matches!(
+            AgentAccount::default().child(zsh, &[]),
+            crate::agent_resume::Child::Shell(_)
+        ),
+        "a pane that is no resume is its program's"
+    );
+}
+
+/// RED (T-AGENT-RESUME-ON-MACOS, ruling R4, review N3) — **the attention road asks the pane's
+/// account which agent it is**: a resumed pane whose program is the shell that `exec`ed the vendor
+/// (`/bin/zsh`, the Mac's road) hears its vendor's `Stop` with a new id (a `/clear`) through
+/// `deliver_attention`, and the record moves to the new session, owed to the layout. Asked by the
+/// program's name alone, the pane is a shell that marked no command, and the `/clear` is lost:
+/// the next restart would resume the session the person left.
+///
+/// MUTATION (plant `plant-15-attention-asks-the-program.py`): `deliver_attention` asking
+/// `agent_resume::child_of` again, and the first assertion goes red.
+#[test]
+fn a_resumed_shell_panes_clear_is_heard_through_the_attention_road() {
+    let mut tabs = vec![ringing_tab(1, 1)];
+    let seat = tabs[0].seats.terminals()[0];
+    let capability = attention_wire::mint_capability();
+    let leaf = &mut tabs[0]
+        .sessions
+        .get_mut(&seat)
+        .expect("the fixture's seat holds a shell")
+        .session;
+    leaf.attention.capability.clone_from(&capability);
+    leaf.launch.program = Some(PathBuf::from("/bin/zsh"));
+    leaf.agent = AgentAccount::born(&resume_seed("zsh", claude_record()).agent, true);
+    let installed =
+        attention_map::installed_rows(attention_map::ROWS, attention_map::CLAUDE_CODE, |_| true);
+    let cleared = Heard {
+        id: "1c9c7e1a-4f3d-4c2b-9a8e-5d6f7a8b9c0d".to_owned(),
+        cwd: FOLDER.to_owned(),
+        home: None,
+    };
+    let mut places = attention::Places::default();
+    let owed = deliver_attention(
+        &mut tabs,
+        1,
+        on_a_screen(false),
+        BOTH_NOTIFICATION_ROWS_ON,
+        &mut places,
+        &[attention_wire::Message {
+            capability,
+            family: attention_map::CLAUDE_CODE.to_owned(),
+            event: "Stop".to_owned(),
+            id: None,
+            text: None,
+            resume: Some(cleared.clone()),
+        }],
+        &installed,
+        Instant::now(),
+        None,
+        &mut Vec::new(),
+    );
+    assert!(owed, "the resumed pane's /clear is owed to the layout");
+    assert_eq!(
+        tabs[0].sessions[&seat]
+            .session
+            .agent
+            .record()
+            .map(|record| record.resume_id.as_str()),
+        Some(cleared.id.as_str()),
+        "and the record is the session the person is in now"
+    );
+}
+
+/// RED (T-AGENT-RESUME-ON-MACOS, ruling R3, review N4) — **`birth_here` hands a resume on a shell
+/// of no verified spelling its shell, with the line**: the call, not only the function. A resume
+/// seed on the pane's own `pwsh` (a family with no `profiles::CommandFlags`) is born, through this
+/// machine's table, as `pwsh` started as asked, in the session's folder, saying which session did
+/// not come back. Windows-only by its fixture: the Mac's table ships only zsh, bash and sh, which
+/// all have the spelling, so there it has no row to refuse; `shell_cannot_resume` itself is pinned
+/// on both by `a_shell_without_a_known_spelling_comes_back_with_the_line`.
+///
+/// MUTATION (plant `plant-15-birth-skips-the-refusal.py`): the `.or_else(shell_cannot_resume…)`
+/// dropped from `birth_here`, and the pane is born still holding the resume, saying nothing.
+#[cfg(windows)]
+#[test]
+fn a_resume_on_a_shell_of_no_verified_spelling_is_born_as_that_shell_with_the_line() {
+    let every_row =
+        profiles::ProfilePrograms::with_only(&(0..profiles::count()).collect::<Vec<_>>());
+    let row = profiles::row_of("pwsh").expect("the Windows table ships pwsh");
+    assert_eq!(
+        profiles::command_flags(&row.program),
+        None,
+        "pwsh's one-command spelling is not verified"
+    );
+    let (born, started) = birth_here(&resume_seed("pwsh", claude_record()), "", &every_row)
+        .expect("every row is answered");
+    assert_eq!(started, Started::AsAsked);
+    assert_eq!(born.profile, "pwsh", "its own shell");
+    assert_eq!(
+        born.cwd.as_ref().map(profiles::SeedPlace::path),
+        Some(Path::new(FOLDER)),
+        "in the session's folder"
+    );
+    let SeedAgent::CouldNotResume(could) = &born.agent else {
+        panic!("with the line: {:?}", born.agent);
+    };
+    assert!(
+        could.text().contains("Claude Code session 0b9c7e1a"),
+        "{}",
+        could.text()
+    );
+}
+
+/// RED (T-AGENT-RESUME-ON-MACOS) — **the macOS twin of
+/// `a_saved_agent_pane_with_a_recorded_session_is_born_through_its_vendors_resume`**: a saved zsh
+/// pane with a Claude Code record and a saved bash pane with a Codex record, through this Mac's own
+/// table — `revive_plan_with` → `birth_here` → `shell_command` → `compose_resume` →
+/// `AgentAccount::born` — are born as their own shells in the session's folder, owing nothing to
+/// a prompt, told to `exec` the vendor's resume, and remember the shell they hand back.
+///
+/// MUTATION (plants `plant-15-mac-not-resumed.py`, `plant-15-shell-argv-replaced.py`): the Mac
+/// not resumed, and the pane comes back as its shell with its prefill; the shell's words replaced,
+/// and the argv assertion goes red.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_saved_shell_pane_with_a_recorded_session_is_born_as_its_shell_execing_the_vendors_resume() {
+    const ON_THIS_MAC: Restore = Restore {
+        switch: true,
+        platform: HostPlatform::MacOs,
+    };
+    let every_row =
+        profiles::ProfilePrograms::with_only(&(0..profiles::count()).collect::<Vec<_>>());
+    for (saved_as, record, command_word) in [
+        (
+            "zsh",
+            claude_record(),
+            format!("exec claude --resume {SESSION}"),
+        ),
+        (
+            "bash",
+            codex_record(),
+            format!("exec codex resume {SESSION}"),
+        ),
+    ] {
+        let tab = saved_agent_tab(saved_as, "claude", Some(record.clone()));
+        let seed = revived_seed(&tab, ON_THIS_MAC);
+        assert_eq!(seed.profile, saved_as, "{saved_as}: born as its own shell");
+        assert_eq!(
+            seed.cwd.as_ref().map(profiles::SeedPlace::path),
+            Some(Path::new(FOLDER)),
+            "{saved_as}: in the folder the session is filed under"
+        );
+        assert_eq!(
+            seed.prefill, None,
+            "{saved_as}: nothing is typed at a resume"
+        );
+        let (born, started) = birth_here(&seed, "", &every_row).expect("every row is answered");
+        assert_eq!(started, Started::AsAsked);
+        assert_eq!(born.profile, saved_as);
+        let row = profiles::row_of(&born.profile).expect("this Mac ships the row");
+        let mut command = shell_integration::shell_command(
+            &row,
+            &profiles::shipped_kind(&row),
+            &[],
+            named_scripts(),
+            &bt_pty::SystemShellEnvironment,
+        );
+        let mut expected = command.arguments.clone();
+        if !expected.iter().any(|word| word == "-i") {
+            expected.push(OsString::from("-i"));
+        }
+        expected.push(OsString::from("-c"));
+        expected.push(OsString::from(command_word));
+        assert!(
+            compose_resume(&mut command, &born, &started, &row),
+            "{saved_as}: the birth is a resume"
+        );
+        assert_eq!(
+            command.arguments, expected,
+            "{saved_as}: the shell's own words, then the vendor's resume"
+        );
+        let account = AgentAccount::born(&born.agent, true);
+        assert_eq!(account.record(), Some(&record), "{saved_as}");
+        assert!(account.is_resumed());
+        assert_eq!(
+            account.saved_profile(saved_as),
+            saved_as,
+            "{saved_as}: the layout goes on writing the pane as its shell"
+        );
+    }
 }
