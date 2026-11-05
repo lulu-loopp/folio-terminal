@@ -67,6 +67,8 @@ pub(crate) enum WindowEffect {
     ImeArea([i32; 4]),
     /// macOS's Option key told to send Alt, or not.
     OptionAsAlt(bool),
+    /// The program's own icon worn at a scale (`WindowHost::wear_the_app_icon`).
+    AppIcon(f64),
     /// The window's input-method facts read (`WindowHost::ime_facts`).
     ImeFactsRead,
     /// A line the window's runtime said in `diagnostics.log` (`WindowHost::note`), as it would
@@ -594,6 +596,9 @@ impl WindowHost for HeadlessWindow {
     fn set_option_as_alt(&self, option_sends_alt: bool) {
         self.ledger
             .record(WindowEffect::OptionAsAlt(option_sends_alt));
+    }
+    fn wear_the_app_icon(&self, scale_factor: f64) {
+        self.ledger.record(WindowEffect::AppIcon(scale_factor));
     }
     fn clipboard(
         &self,
@@ -2092,6 +2097,7 @@ mod tests {
             PhysicalSize::new(3, 18).into(),
         );
         window.set_option_as_alt(true);
+        window.wear_the_app_icon(1.25);
         window.note("诊断 a line, said as it is written");
         // The window's questions to the system answer the documented stand-ins, and record
         // nothing; its instructions record what they were told.
@@ -2281,6 +2287,7 @@ mod tests {
                 WindowEffect::Cursor(Cursor::Icon(CursorIcon::Text)),
                 WindowEffect::ImeArea([10, 20, 3, 18]),
                 WindowEffect::OptionAsAlt(true),
+                WindowEffect::AppIcon(1.25),
                 WindowEffect::Noted("诊断 a line, said as it is written".to_owned()),
                 WindowEffect::StoodAt(bt_platform::WindowRect {
                     left: 10,
