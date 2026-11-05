@@ -4,7 +4,7 @@
 # name) with the number of calls behind it. Held equal to the tree by bt-source's call_graph test;
 # shrink-only against the merge base by scripts/ci/check-unfollowed-edges.ps1 - a key added or grown
 # carries a reason 'YYYY-MM-DD: <why>'. Never edit a key or a count by hand.
-# Ambiguous calls with exactly one candidate, not listed by site above or below (bt_source::call_graph::Unresolved::sole_candidate; a guard naming a callee's callers counts each as a call of its one candidate): 1727. A call whose name is renamed to one only one item declares leaves the list and is counted here.
+# Ambiguous calls with exactly one candidate, not listed by site above or below (bt_source::call_graph::Unresolved::sole_candidate; a guard naming a callee's callers counts each as a call of its one candidate): 1726. A call whose name is renamed to one only one item declares leaves the list and is counted here.
 file	item	kind	name	sites	reason
 crates/bt-app/src/agent_resume.rs	bt-app crate::agent_resume::AgentAccount::saved_profile	Ambiguous	unwrap_or	1	2026-11-03: T-AGENT-RESUME-AFTER-RESTART (plan row 195); the profile the layout writes for an agent pane: the hand-back's shell or the pane's own (Option::unwrap_or on the account's own field); an in-memory read of values the call already holds, no wait
 crates/bt-app/src/agent_resume.rs	bt-app crate::agent_resume::AgentAccount::take_not_started	Ambiguous	then	1	2026-11-03: T-AGENT-RESUME-AFTER-RESTART (plan row 195, review folds); a resume that was started nowhere (its folder gone, review F3) is answered once as the agent's end (bool::then over the account's own flag, into child_ended); an in-memory read of values the call already holds, no wait
@@ -1871,8 +1871,10 @@ crates/bt-app/src/main.rs	bt-app crate::CardAim::spend	Ambiguous	unwrap_or_else	
 crates/bt-app/src/main.rs	bt-app crate::ChevronTurn::sample	Ambiguous	as_secs_f32	1	
 crates/bt-app/src/main.rs	bt-app crate::ClipboardPictureJob::take	Ambiguous	map	1	
 crates/bt-app/src/main.rs	bt-app crate::ClipboardPictureJob::take	Ambiguous	ok	1	
+crates/bt-app/src/main.rs	bt-app crate::ClipboardPictureMailbox::refuse	Ambiguous	unwrap_or_else	1	2026-11-04: T-GESTURE-DOORS-ANSWER-OFF-THE-GESTURE (0.4.9 plan row 52, 0.4.10 row 5); a picture save refused at its door is counted in the picture's inbox for the next turn: LockResult::unwrap_or_else(PoisonError::into_inner) over the inbox's own lock
 crates/bt-app/src/main.rs	bt-app crate::ClipboardPictureMailbox::take_current	Ambiguous	take	1	
 crates/bt-app/src/main.rs	bt-app crate::ClipboardPictureMailbox::take_current	Ambiguous	unwrap_or_else	1	
+crates/bt-app/src/main.rs	bt-app crate::ClipboardPictureMailbox::take_refusals	Ambiguous	unwrap_or_else	1	2026-11-04: T-GESTURE-DOORS-ANSWER-OFF-THE-GESTURE (0.4.9 plan row 52, 0.4.10 row 5); the refusals counted at the door, taken on the turn the inbox's wake brings: LockResult::unwrap_or_else(PoisonError::into_inner) over the inbox's own lock
 crates/bt-app/src/main.rs	bt-app crate::ClipboardPictureMailbox::withdraw	Ambiguous	unwrap_or_else	1	
 crates/bt-app/src/main.rs	bt-app crate::ControlClickHint::text	Ambiguous	in_lang	2	
 crates/bt-app/src/main.rs	bt-app crate::DocumentMath::insert	Ambiguous	entry	1	
@@ -4209,8 +4211,8 @@ crates/bt-app/src/runtime/pointer/touch.rs	bt-app crate::runtime::pointer::touch
 crates/bt-app/src/runtime/pointer/touch.rs	bt-app crate::runtime::pointer::touch::let_the_system_translate_touch	Ambiguous	send_event	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::adopt_background_picture	Ambiguous	text	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::adopt_background_picture	Ambiguous	to_owned	1	
-crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::adopt_clipboard_picture	Ambiguous	text	1	
-crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::adopt_clipboard_picture	Ambiguous	to_owned	1	
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::adopt_clipboard_picture	Ambiguous	text	2	2026-11-04: T-GESTURE-DOORS-ANSWER-OFF-THE-GESTURE (0.4.9 plan row 52, 0.4.10 row 5); grown 1 -> 2: the notice a refused save's door drew on the paste's own turn is drawn here, on the wake's turn (i18n::Text::PasteClipboardPicture's text().to_owned(), as the door wrote it); the door's two sites left save_clipboard_picture
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::adopt_clipboard_picture	Ambiguous	to_owned	2	2026-11-04: T-GESTURE-DOORS-ANSWER-OFF-THE-GESTURE (0.4.9 plan row 52, 0.4.10 row 5); grown 1 -> 2: the notice a refused save's door drew on the paste's own turn is drawn here, on the wake's turn (i18n::Text::PasteClipboardPicture's text().to_owned(), as the door wrote it); the door's two sites left save_clipboard_picture
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::advance_strip_animation	Ambiguous	status	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::animation_running_on	Ambiguous	and_then	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::animation_running_on	Ambiguous	is_some_and	1	
@@ -4433,8 +4435,6 @@ crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::re
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::reveal_preview_file	Ambiguous	map	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::reveal_preview_file	Ambiguous	or_else	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::save_clipboard_picture	Ambiguous	send_event	1	
-crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::save_clipboard_picture	Ambiguous	text	2	
-crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::save_clipboard_picture	Ambiguous	to_owned	2	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::save_preview_on	Ambiguous	map	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::save_preview_on	Ambiguous	or_else	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::send_owed_markdown_rasters	Ambiguous	collect	1	
@@ -7646,19 +7646,18 @@ crates/bt-platform/src/app_delegate.rs	bt-platform crate::app_delegate::path_fro
 crates/bt-platform/src/app_delegate.rs	bt-platform crate::app_delegate::path_from_file_url	Ambiguous	len	1	
 crates/bt-platform/src/app_delegate.rs	bt-platform crate::app_delegate::path_from_file_url	Ambiguous	map_err	1	
 crates/bt-platform/src/app_delegate.rs	bt-platform crate::app_delegate::path_from_file_url	Ambiguous	map_or	1	
-crates/bt-platform/src/attention_pipe.rs	bt-platform crate::attention_pipe::AttentionPipe::start	Ambiguous	map_err	1	
+crates/bt-platform/src/attention_pipe.rs	bt-platform crate::attention_pipe::AttentionPipe::start_on	Ambiguous	map_err	1	2026-11-04: T-ATTENTION-ENDPOINT-WAITS-ON-A-CLOCK (0.4.10 plan row 13); not this site's change: AttentionPipe::start became the real-clock door over start_on, which holds the old body unchanged, so its sites moved with it (the stop event's creation error made an io::Error, Result::map_err)
 crates/bt-platform/src/attention_pipe.rs	bt-platform crate::attention_pipe::Instance::arm_connect	Dynamic	code	3	
 crates/bt-platform/src/attention_pipe.rs	bt-platform crate::attention_pipe::Instance::open	Ambiguous	unwrap_or	1	
 crates/bt-platform/src/attention_pipe.rs	bt-platform crate::attention_pipe::Overlapped::new	Ambiguous	map_err	1	
 crates/bt-platform/src/attention_pipe.rs	bt-platform crate::attention_pipe::SecurityDescriptor::attributes	Ambiguous	unwrap_or	1	
 crates/bt-platform/src/attention_pipe.rs	bt-platform crate::attention_pipe::SecurityDescriptor::from_sddl	Ambiguous	map_err	1	
-crates/bt-platform/src/attention_pipe.rs	bt-platform crate::attention_pipe::listen	Ambiguous	as_millis	1	
 crates/bt-platform/src/attention_pipe.rs	bt-platform crate::attention_pipe::listen	Ambiguous	checked_sub	1	
 crates/bt-platform/src/attention_pipe.rs	bt-platform crate::attention_pipe::listen	Ambiguous	into_owned	1	
 crates/bt-platform/src/attention_pipe.rs	bt-platform crate::attention_pipe::listen	Ambiguous	push	1	
-crates/bt-platform/src/attention_pipe.rs	bt-platform crate::attention_pipe::listen	Ambiguous	unwrap_or	1	
 crates/bt-platform/src/attention_pipe.rs	bt-platform crate::attention_pipe::listen	Ambiguous	unwrap_or_else	3	
 crates/bt-platform/src/attention_pipe.rs	bt-platform crate::attention_pipe::listen	Dynamic	deliver	1	
+crates/bt-platform/src/attention_pipe.rs	bt-platform crate::attention_pipe::listen	Dynamic	wait_for	2	2026-11-04: T-ATTENTION-ENDPOINT-WAITS-ON-A-CLOCK (0.4.10 plan row 13); the listener's one kernel wait is a local closure (wait_for) called with INFINITE when nobody is reading and inside LaunchClock::wait with the clock's bound when somebody is: both calls are that closure, one WaitForMultipleObjects site
 crates/bt-platform/src/attention_pipe.rs	bt-platform crate::attention_pipe::logon_sid	Ambiguous	as_mut_ptr	1	
 crates/bt-platform/src/attention_pipe.rs	bt-platform crate::attention_pipe::logon_sid	Ambiguous	as_ptr	1	
 crates/bt-platform/src/attention_pipe.rs	bt-platform crate::attention_pipe::logon_sid	Ambiguous	cast	3	
@@ -7671,6 +7670,7 @@ crates/bt-platform/src/attention_pipe.rs	bt-platform crate::attention_pipe::name
 crates/bt-platform/src/attention_pipe.rs	bt-platform crate::attention_pipe::names_an_endpoint	Ambiguous	is_ascii_hexdigit	1	
 crates/bt-platform/src/attention_pipe.rs	bt-platform crate::attention_pipe::names_an_endpoint	Ambiguous	is_empty	1	
 crates/bt-platform/src/attention_pipe.rs	bt-platform crate::attention_pipe::note_accepted	Ambiguous	unwrap_or_else	1	
+crates/bt-platform/src/attention_pipe.rs	bt-platform crate::attention_pipe::open_client	Ambiguous	as_bool	1	2026-11-04: T-ATTENTION-ENDPOINT-WAITS-ON-A-CLOCK (0.4.10 plan row 13); the busy wait inside LaunchClock::wait answers whether WaitNamedPipeW saw a free instance (windows BOOL::as_bool)
 crates/bt-platform/src/attention_pipe.rs	bt-platform crate::attention_pipe::open_client	Ambiguous	is_invalid	1	
 crates/bt-platform/src/attention_pipe.rs	bt-platform crate::attention_pipe::sid_to_string	Ambiguous	cast	1	
 crates/bt-platform/src/attention_pipe.rs	bt-platform crate::attention_pipe::sid_to_string	Ambiguous	is_null	1	
@@ -7679,12 +7679,14 @@ crates/bt-platform/src/attention_pipe.rs	bt-platform crate::attention_pipe::sid_
 crates/bt-platform/src/attention_pipe.rs	bt-platform crate::attention_pipe::sweep	Ambiguous	unwrap_or_else	1	
 crates/bt-platform/src/attention_pipe.rs	bt-platform crate::attention_pipe::unguessable_bits	Ambiguous	finish	1	
 crates/bt-platform/src/attention_pipe.rs	bt-platform crate::attention_pipe::unguessable_bits	Dynamic	half	2	
+crates/bt-platform/src/attention_pipe.rs	bt-platform crate::attention_pipe::wait_milliseconds	Ambiguous	clamp	1	2026-11-04: T-ATTENTION-ENDPOINT-WAITS-ON-A-CLOCK (0.4.10 plan row 13); a clock's bound in kernel milliseconds, kept away from 0 (the pipe's default wait) and from INFINITE / NMPWAIT_WAIT_FOREVER (u32::clamp)
+crates/bt-platform/src/attention_pipe.rs	bt-platform crate::attention_pipe::wait_milliseconds	Ambiguous	unwrap_or	1	2026-11-04: T-ATTENTION-ENDPOINT-WAITS-ON-A-CLOCK (0.4.10 plan row 13); a clock's bound past u32 milliseconds read as the largest (u32::try_from, Result::unwrap_or)
 crates/bt-platform/src/attention_pipe.rs	bt-platform crate::attention_pipe::wide	Ambiguous	collect	1	
 crates/bt-platform/src/attention_pipe.rs	bt-platform crate::attention_pipe::write_bounded	Ambiguous	map_err	1	
 crates/bt-platform/src/attention_pipe_portable.rs	bt-platform crate::attention_pipe::unguessable_bits	Ambiguous	finish	2	
-crates/bt-platform/src/attention_pipe_unix.rs	bt-platform crate::attention_pipe::AttentionPipe::start	Ambiguous	as_encoded_bytes	1	
-crates/bt-platform/src/attention_pipe_unix.rs	bt-platform crate::attention_pipe::AttentionPipe::start	Ambiguous	len	1	
-crates/bt-platform/src/attention_pipe_unix.rs	bt-platform crate::attention_pipe::AttentionPipe::start	Ambiguous	map	1	
+crates/bt-platform/src/attention_pipe_unix.rs	bt-platform crate::attention_pipe::AttentionPipe::start_on	Ambiguous	as_encoded_bytes	1	2026-11-04: T-ATTENTION-ENDPOINT-WAITS-ON-A-CLOCK (0.4.10 plan row 13); not this site's change: AttentionPipe::start became the real-clock door over start_on, which holds the old body unchanged, so its sites moved with it (the socket path's length checked on its bytes, OsStr::as_encoded_bytes)
+crates/bt-platform/src/attention_pipe_unix.rs	bt-platform crate::attention_pipe::AttentionPipe::start_on	Ambiguous	len	1	2026-11-04: T-ATTENTION-ENDPOINT-WAITS-ON-A-CLOCK (0.4.10 plan row 13); not this site's change: AttentionPipe::start became the real-clock door over start_on, which holds the old body unchanged, so its sites moved with it (the socket path's length checked on its bytes, slice len)
+crates/bt-platform/src/attention_pipe_unix.rs	bt-platform crate::attention_pipe::AttentionPipe::start_on	Ambiguous	map	1	2026-11-04: T-ATTENTION-ENDPOINT-WAITS-ON-A-CLOCK (0.4.10 plan row 13); not this site's change: AttentionPipe::start became the real-clock door over start_on, which holds the old body unchanged, so its sites moved with it (the socket path as the endpoint's name, Option::map)
 crates/bt-platform/src/attention_pipe_unix.rs	bt-platform crate::attention_pipe::account	Ambiguous	into_owned	1	
 crates/bt-platform/src/attention_pipe_unix.rs	bt-platform crate::attention_pipe::account	Ambiguous	unwrap_or_else	3	
 crates/bt-platform/src/attention_pipe_unix.rs	bt-platform crate::attention_pipe::account	Dynamic	deliver	1	
@@ -7692,13 +7694,13 @@ crates/bt-platform/src/attention_pipe_unix.rs	bt-platform crate::attention_pipe:
 crates/bt-platform/src/attention_pipe_unix.rs	bt-platform crate::attention_pipe::collect	Ambiguous	kind	2	
 crates/bt-platform/src/attention_pipe_unix.rs	bt-platform crate::attention_pipe::listen	Ambiguous	as_millis	1	
 crates/bt-platform/src/attention_pipe_unix.rs	bt-platform crate::attention_pipe::listen	Ambiguous	as_mut_ptr	1	
-crates/bt-platform/src/attention_pipe_unix.rs	bt-platform crate::attention_pipe::listen	Ambiguous	duration_since	2	
 crates/bt-platform/src/attention_pipe_unix.rs	bt-platform crate::attention_pipe::listen	Ambiguous	extend	1	
 crates/bt-platform/src/attention_pipe_unix.rs	bt-platform crate::attention_pipe::listen	Ambiguous	get	1	
 crates/bt-platform/src/attention_pipe_unix.rs	bt-platform crate::attention_pipe::listen	Ambiguous	is_some_and	1	
 crates/bt-platform/src/attention_pipe_unix.rs	bt-platform crate::attention_pipe::listen	Ambiguous	kind	2	
 crates/bt-platform/src/attention_pipe_unix.rs	bt-platform crate::attention_pipe::listen	Ambiguous	len	1	
 crates/bt-platform/src/attention_pipe_unix.rs	bt-platform crate::attention_pipe::listen	Ambiguous	unwrap_or	2	
+crates/bt-platform/src/attention_pipe_unix.rs	bt-platform crate::attention_pipe::listen	Dynamic	poll_for	2	2026-11-04: T-ATTENTION-ENDPOINT-WAITS-ON-A-CLOCK (0.4.10 plan row 13); the listener's one poll is a local closure (poll_for) called with -1 when nobody is reading and inside LaunchClock::wait with the clock's bound when somebody is: both calls are that closure, one libc::poll site
 crates/bt-platform/src/attention_pipe_unix.rs	bt-platform crate::attention_pipe::names_an_endpoint	Ambiguous	all	1	
 crates/bt-platform/src/attention_pipe_unix.rs	bt-platform crate::attention_pipe::names_an_endpoint	Ambiguous	and_then	1	
 crates/bt-platform/src/attention_pipe_unix.rs	bt-platform crate::attention_pipe::names_an_endpoint	Ambiguous	bytes	1	
@@ -10395,7 +10397,6 @@ crates/bt-pty/src/lib.rs	bt-pty crate::reap_within	Dynamic	reaped	1
 crates/bt-pty/src/lib.rs	bt-pty crate::retire_within	Ambiguous	as_millis	1	
 crates/bt-pty/src/lib.rs	bt-pty crate::retire_within	Ambiguous	elapsed	1	
 crates/bt-pty/src/lib.rs	bt-pty crate::retire_within	Ambiguous	is_err	1	
-crates/bt-pty/src/lib.rs	bt-pty crate::retire_within	Ambiguous	spawn	1	
 crates/bt-pty/src/lib.rs	bt-pty crate::retire_within	Dynamic	teardown	1	
 crates/bt-pty/src/lib.rs	bt-pty crate::say	Dynamic	road	1	2026-10-25: the road fn main installs, diagnostics::stderr_line (a request door of its own row): this crate's stderr lines handed to the writer that owns the run's stderr; the crate cannot name bt-app, so the call is a function value (T-TRACE-SINK-OFF-THE-CALLING-THREAD)
 crates/bt-pty/src/lib.rs	bt-pty crate::spawn_dump_publisher	Ambiguous	is_err	2	

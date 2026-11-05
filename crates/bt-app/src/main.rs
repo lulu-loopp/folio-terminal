@@ -1487,6 +1487,9 @@ struct ClipboardPictureInbox {
     /// The generation the window is waiting for. Bumped by every new paste.
     wanted: u64,
     landed: Option<ClipboardPictureAnswer>,
+    /// The saves refused at the door since the window last looked (plan row 52): each is said on
+    /// the turn the inbox's wake brings, in the notice the door used to draw itself.
+    refused: usize,
 }
 
 impl ClipboardPictureMailbox {
@@ -1509,6 +1512,26 @@ impl ClipboardPictureMailbox {
     /// The inbox itself, for the worker to leave its answer in.
     fn inbox(&self) -> Arc<std::sync::Mutex<ClipboardPictureInbox>> {
         Arc::clone(&self.inbox)
+    }
+
+    /// One save refused at its door, counted for the next look (plan row 52): the generation is
+    /// left alone, so the paste a running save answers is still the one waited for.
+    fn refuse(&self) {
+        self.inbox
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .refused += 1;
+    }
+
+    /// How many saves were refused at the door since the last look, and none from now on.
+    fn take_refusals(&mut self) -> usize {
+        std::mem::take(
+            &mut self
+                .inbox
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .refused,
+        )
     }
 
     /// Take whatever landed, and answer with it only if it is still an answer to
