@@ -458,7 +458,9 @@ pub(crate) fn known_events() -> Vec<String> {
 ///
 /// **Exit codes**, and they are for a person reading a hook log rather than for a program:
 /// `0` said; `1` there was nowhere to say it (not in a Folio pane, or the window has gone);
-/// `2` the call itself was wrong. None of them is ever a reason to block.
+/// `2` the call itself was wrong. None of them is ever a reason to block. A row whose program runs
+/// its hooks in every session, Folio's or not, exits `0` where there was nowhere to say it
+/// ([`nowhere_exit`]).
 pub(crate) fn run_verb(call: Result<crate::cli::AttentionCall, crate::cli::AttentionFault>) -> i32 {
     let call = match call {
         Ok(call) => call,
@@ -492,7 +494,7 @@ pub(crate) fn run_verb(call: Result<crate::cli::AttentionCall, crate::cli::Atten
         // Not a failure worth a sentence on a console nobody is looking at: it means the caller is
         // not running inside a Folio pane, which is the ordinary state of every other terminal on
         // the machine. The code says so and nothing is printed.
-        return 1;
+        return nowhere_exit(family, event);
     };
     let payload = payload_of(call.payload.as_ref())
         .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok());
@@ -508,7 +510,17 @@ pub(crate) fn run_verb(call: Result<crate::cli::AttentionCall, crate::cli::Atten
     }
     match bt_platform::attention_pipe::send_line(&endpoint, &message.encode()) {
         Ok(()) => 0,
-        Err(_) => 1,
+        Err(_) => nowhere_exit(family, event),
+    }
+}
+
+/// **The exit when there was nowhere to say it**: `1`, unless the turn-end row says its program
+/// would read that as a failed hook ([`attention_map::Nowhere::Quiet`], codex's `Stop`).
+#[must_use]
+fn nowhere_exit(family: &str, event: &str) -> i32 {
+    match attention_map::turn_end_row(family, event).map(|row| row.nowhere) {
+        Some(attention_map::Nowhere::Quiet) => 0,
+        Some(attention_map::Nowhere::Says) | None => 1,
     }
 }
 
@@ -918,8 +930,9 @@ mod tests {
             Some("Done.".to_owned()),
             "the marks around the words are not the words"
         );
-        // A family with no declared source quotes nothing, whatever is in its payload — the pin on
-        // "declared, never inferred". `stop` is codex's other turn-end row and it is one of these.
+        // A row quotes only from the field it declares — the pin on "declared, never inferred".
+        // `stop` is codex's other turn-end row, and its hook request spells the field
+        // `last_assistant_message`: the notify payload's `last-assistant-message` is not it.
         assert_eq!(
             message_for("c".to_owned(), CODEX, "stop", Some(&codex)).text,
             None
@@ -1590,11 +1603,11 @@ mod tests {
         );
     }
 
-    /// **Which rows name a session** (row 195): Claude Code's `Stop` and codex's
-    /// `agent-turn-complete`, from the fields each payload names it by — and no other row, whatever
-    /// its payload holds.
+    /// **Which rows name a session** (row 195): Claude Code's `Stop`, codex's
+    /// `agent-turn-complete` and, since 0.4.10 (plan row 69), codex's `Stop` hook, from the fields
+    /// each payload names it by — and no other row, whatever its payload holds.
     #[test]
-    fn only_the_two_declared_turn_ends_carry_a_session() {
+    fn only_the_three_declared_turn_ends_carry_a_session() {
         let claude = serde_json::json!({ "session_id": SESSION, "cwd": r"C:\work" });
         assert_eq!(
             message_for("c".to_owned(), CLAUDE_CODE, "Stop", Some(&claude))
@@ -1645,7 +1658,6 @@ mod tests {
             (CLAUDE_CODE, "StopFailure"),
             (CLAUDE_CODE, "SessionEnd"),
             (CLAUDE_CODE, "Notification"),
-            (CODEX, "stop"),
             (PI, "agent_settled"),
         ] {
             assert_eq!(
@@ -1654,5 +1666,93 @@ mod tests {
                 "{family}:{event}"
             );
         }
+    }
+
+    /// **codex's `Stop` hook request reaches the wire with its words and its session** (plan row
+    /// 69), on the fields `stop.command.input.schema.json` names at `rust-v0.166.0`. The request
+    /// names no client, so no client is asked for (R14); without a `session_id` it names no
+    /// session and the turn's end is still sent.
+    #[test]
+    fn the_stop_payload_reaches_the_wire_with_its_session() {
+        let request = serde_json::json!({
+            "session_id": SESSION,
+            "turn_id": "turn-1",
+            "transcript_path": null,
+            "cwd": "/srv/work",
+            "hook_event_name": "Stop",
+            "model": "gpt-5.5",
+            "permission_mode": "default",
+            "stop_hook_active": false,
+            "last_assistant_message": "**Done.** The rest is detail.",
+        });
+        let message = message_for("c".to_owned(), CODEX, "stop", Some(&request));
+        assert_eq!(message.text, Some("Done.".to_owned()));
+        assert_eq!(
+            message.resume.map(|heard| (heard.id, heard.cwd)),
+            Some((SESSION.to_owned(), "/srv/work".to_owned()))
+        );
+        // A continued turn (`stop_hook_active`) ends again later, and each end is a turn's end.
+        let mut continued = request.clone();
+        continued["stop_hook_active"] = serde_json::json!(true);
+        assert!(
+            message_for("c".to_owned(), CODEX, "stop", Some(&continued))
+                .resume
+                .is_some()
+        );
+        let mut unnamed = request.clone();
+        unnamed
+            .as_object_mut()
+            .expect("an object")
+            .remove("session_id");
+        let message = message_for("c".to_owned(), CODEX, "stop", Some(&unnamed));
+        assert_eq!(message.resume, None);
+        assert_eq!(message.text, Some("Done.".to_owned()));
+        // The notify payload's spellings are not this row's.
+        let notify = serde_json::json!({
+            "thread-id": SESSION,
+            "cwd": "/srv/work",
+            "client": "codex-tui",
+            "last-assistant-message": "Done.",
+        });
+        let message = message_for("c".to_owned(), CODEX, "stop", Some(&notify));
+        assert_eq!((message.text, message.resume), (None, None));
+    }
+
+    /// **A codex hook outside a Folio pane exits 0** (plan row 69): codex runs its hooks in every
+    /// session and shows a non-zero exit as a failed hook, so its `Stop` row is the one that keeps
+    /// quiet where there is nowhere to say it. Every other row still says so with a 1.
+    ///
+    /// RED GATE: `plant-69-exit-one-outside.py` has the verb exit a bare 1 when no pane is named,
+    /// and the reading of `run_verb` below finds it.
+    #[test]
+    fn a_codex_hook_outside_a_folio_pane_exits_zero() {
+        assert_eq!(nowhere_exit(CODEX, "stop"), 0);
+        for (family, event) in [
+            (CLAUDE_CODE, "Stop"),
+            (CLAUDE_CODE, "StopFailure"),
+            (CLAUDE_CODE, "PermissionRequest"),
+            (CODEX, "agent-turn-complete"),
+            (CODEX, "permission-request"),
+            (PI, "agent_settled"),
+        ] {
+            assert_eq!(nowhere_exit(family, event), 1, "{family}:{event}");
+        }
+        assert_eq!(
+            attention_map::TURN_END
+                .iter()
+                .filter(|row| row.nowhere == attention_map::Nowhere::Quiet)
+                .map(|row| (row.family, row.event))
+                .collect::<Vec<_>>(),
+            [(CODEX, "stop")],
+            "a second quiet row is a decision, not a refactor"
+        );
+        // And the verb asks it at both of its "nowhere" exits — no pane, no window — and says a
+        // bare 1 at neither: `run_verb` reads this process's environment, so it is read here.
+        let verb = crate::test_support::squeezed(crate::test_support::item_body(
+            &bt_source::ItemQuery::function("run_verb").in_module("crate::attention_wire"),
+        ));
+        assert!(verb.contains("else{returnnowhere_exit(family,event);};"));
+        assert!(verb.contains("Err(_)=>nowhere_exit(family,event),"));
+        assert!(!verb.contains("return1;") && !verb.contains("=>1,"));
     }
 }
