@@ -178,19 +178,20 @@ impl<B: Backend> Runtime<'_, B> {
         }
     }
 
-    /// Write Folio's `notify` program into the user's own codex configuration, or take it back out.
+    /// Write Folio's `Stop` hook into the user's own codex `hooks.json`, or take it back out
+    /// (0.4.10 plan row 69).
     ///
-    /// [`Self::apply_claude_hooks`]'s verb over a second upstream and a second file format, and
-    /// every clause of that one's note holds here: the row is redrawn from the file either way, so
-    /// a refusal leaves the switch standing where the machine actually is; nothing is written
-    /// anywhere but the one user-level file; and a refusal carries a sentence, because on the
-    /// machine where it fires nobody else can see it.
+    /// [`Self::apply_claude_hooks`]'s verb over a second upstream, and every clause of that one's
+    /// note holds here: the row is redrawn from the files either way, so a refusal leaves the
+    /// switch standing where the machine actually is; nothing is written anywhere but the user's
+    /// own codex folder; and a refusal carries a sentence, because on the machine where it fires
+    /// nobody else can see it.
     ///
-    /// The refusal this one has that the other does not is **somebody else's `notify`**. There is
-    /// one such key in that file, so installing over it would delete a program this build cannot
-    /// give back — see `attention_codex`'s header.
+    /// The second file it may write is `config.toml` beside it, and only to take out the `notify`
+    /// line an earlier Folio wrote there — see `attention_codex`'s header.
     pub(crate) fn apply_codex_notify(&mut self, install: bool, announce: Announce) -> Result<bool> {
-        let config = attention_codex::config_path();
+        // The take-over's consent is keyed by the file the press writes Folio's entry in.
+        let config = attention_codex::hooks_path();
         let decision = attention_ownership::next_decision(
             &mut self.app.agent_takeovers[1],
             install,

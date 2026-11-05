@@ -773,10 +773,13 @@ fn push_unique(paths: &mut Vec<PathBuf>, path: PathBuf) {
         paths.push(path);
     }
 }
+/// The file each family's removal is pressed on. codex's is `hooks.json`, the file its hook is in;
+/// the operation also reads the `config.toml` beside it, and takes out the `notify` line an
+/// earlier Folio wrote there (0.4.10 plan row 69a).
 fn agent_path(index: usize, root: &Path) -> PathBuf {
     root.join(match index {
         0 => "settings.json",
-        1 => "config.toml",
+        1 => "hooks.json",
         _ => "hooks/folio.json",
     })
 }

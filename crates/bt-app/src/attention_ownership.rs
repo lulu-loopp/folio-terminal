@@ -311,7 +311,7 @@ mod tests {
     fn adapters() -> [(&'static str, &'static str, Apply); 3] {
         [
             ("claude", "settings.json", crate::attention_hooks::apply_at),
-            ("codex", "config.toml", crate::attention_codex::apply_at),
+            ("codex", "hooks.json", crate::attention_codex::apply_at),
             (
                 "copilot",
                 "hooks/folio.json",
@@ -422,13 +422,7 @@ mod tests {
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             let data = root.join("data");
             fs::create_dir_all(&data).unwrap();
-            let original = if family == "codex" {
-                "# user's config\n"
-            } else if family == "copilot" {
-                ""
-            } else {
-                "{}\n"
-            };
+            let original = if family == "copilot" { "" } else { "{}\n" };
             fs::write(&path, original).unwrap();
             let placeholder = root.join("${CLAUDE_PROJECT_DIR}/folio.exe");
             for bad in [
@@ -462,8 +456,7 @@ mod tests {
             let data = root.join("data");
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             let future = match family {
-                "claude" => "{\"hooks\":{\"Stop\":{\"future\":true}}}",
-                "codex" => "notify = { future = true }",
+                "claude" | "codex" => "{\"hooks\":{\"Stop\":{\"future\":true}}}",
                 _ => "{\"version\":999,\"hooks\":{}}",
             };
             for text in ["{broken", future] {
@@ -640,23 +633,31 @@ mod tests {
         }
     }
 
+    /// **A `notify` program of the person's own is never Folio's to take over**, and since 0.4.10
+    /// (plan row 69) it no longer keeps Folio out either: the hook goes into `hooks.json` beside it,
+    /// and the line is the bytes it was, under a take-over press as under any other.
     #[test]
     fn attention_codex_takeover_never_replaces_a_user_notifier() {
         let root = root("user-notifier");
         let exe = root.join("folio.exe");
-        let path = root.join("config.toml");
+        let config = root.join("config.toml");
         let original = "# keep this\nnotify = ['my-notifier', '--user-option']\n";
-        fs::write(&path, original).unwrap();
+        fs::write(&config, original).unwrap();
         assert_eq!(
             crate::attention_codex::apply_at(
-                &path,
+                &root.join("hooks.json"),
                 Decision::TakeOver(vec![]),
                 &exe,
                 &root.join("data")
             ),
-            Outcome::Refused("codex already runs a notify program of your own")
+            Outcome::Installed
         );
-        assert_eq!(fs::read_to_string(path).unwrap(), original);
+        assert_eq!(fs::read_to_string(config).unwrap(), original);
+        assert!(
+            fs::read_to_string(root.join("hooks.json"))
+                .unwrap()
+                .contains("attention codex:stop")
+        );
     }
 
     #[test]
@@ -715,9 +716,10 @@ mod tests {
                 {"type":"command","command":format!("\"{program}\" attention claude-code:Stop --json -"),"async":true}
             ]}]}}))
             .unwrap(),
-            "codex" => format!(
-                "notify = [\"{program}\", \"attention\", \"codex:agent-turn-complete\", \"--json\"]\n"
-            ),
+            "codex" => serde_json::to_string(&serde_json::json!({"hooks":{"Stop":[{"hooks":[
+                {"type":"command","command":format!("\"{program}\" attention codex:stop --json -"),"async":true,"timeout":10}
+            ]}]}}))
+            .unwrap(),
             _ => serde_json::to_string(&serde_json::json!({"version":1,"hooks":{"agentStop":[
                 {"type":"command","exec":program,"args":["attention","copilot:agentStop"],"timeoutSec":5}
             ]}}))
@@ -753,7 +755,7 @@ mod tests {
             let data = root.join("data");
             let (extension, theirs) = match family {
                 "claude" => ("json", "{\"model\":\"theirs\"}\n"),
-                "codex" => ("toml", "# theirs\n"),
+                "codex" => ("json", "{\"description\":\"theirs\"}\n"),
                 _ => ("json", "{\"version\":1,\"hooks\":{}}\n"),
             };
             let named = root.join("named").join(file);
@@ -890,10 +892,10 @@ mod tests {
                     after.contains("mytool"),
                     "{family} {decision:?}: {outcome:?} took somebody else's program out"
                 );
-                // Only Claude Code's file has room for both. The other two families' files are one
-                // program and one document, so a stranger there refuses the press outright and the
-                // bytes are the ones that were written by hand.
-                if family == "claude" {
+                // Claude Code's and codex's hook files have room for both. Copilot's is one program
+                // and one document, so a stranger there refuses the press outright and the bytes
+                // are the ones that were written by hand.
+                if family != "copilot" {
                     continue;
                 }
                 assert!(
@@ -939,8 +941,14 @@ mod tests {
             // And the entry that named nobody is gone rather than kept beside ours.
             let after = fs::read_to_string(root.join("install").join(file)).unwrap();
             // The bare operand is gone; what stands there now is an absolute path that happens to
-            // end in the same name, which no quote can precede.
-            assert!(!after.contains("\"folio.exe\""), "{family}: {after}");
+            // end in the same name, which no quote can precede. codex's operand is inside a JSON
+            // string, where the quote around it is escaped.
+            let bare = if family == "codex" {
+                "\\\"folio.exe\\\""
+            } else {
+                "\"folio.exe\""
+            };
+            assert!(!after.contains(bare), "{family}: {after}");
         }
     }
 
@@ -1025,6 +1033,7 @@ mod tests {
         let unreadable = [
             "the settings file is not one this build can read",
             "the codex configuration file is not one this build can read",
+            "the codex hooks file is not one this build can read",
             "the copilot hook file is not one this build can read",
         ];
         for (family, file, apply) in adapters() {

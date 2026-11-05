@@ -3279,6 +3279,22 @@ text_entries! {
     UpdateFailedUndone,
     /// Its detail; `{version}` is the version whose changes were not kept (0.4.8 E5).
     UpdateCardUndone,
+
+    // ── codex's Stop hook (0.4.10 plan row 69) ─────────────────────────────
+    //
+    // One contiguous block at the end, per this table's standing rule. **Three
+    // refusals**, each the reason half of `CodexNotifyFailedToast`'s sentence,
+    // said where `attention_codex::apply_resolved` writes nothing.
+    /// codex runs a hook through `cmd /C` on Windows, which expands `%` inside
+    /// quotes: a path holding one would be a different command by the time it ran.
+    CodexHookPathPercent,
+    /// `config.toml` already declares hook events, and codex warns on every start
+    /// when both it and `hooks.json` do (R15).
+    CodexHooksInToml,
+    /// `hooks.json` holds a byte-order mark, a top-level key other than
+    /// `description` and `hooks`, or a `description` that is not a string: codex
+    /// reads none of such a file, so a hook added to it would never run.
+    CodexHooksFileIgnored,
 }
 
 impl Text {
@@ -6399,6 +6415,21 @@ impl Text {
             Self::ShellEndedBySystem => {
                 pick(lang, "Ended by the system at shutdown", "关机时被系统结束")
             }
+            Self::CodexHookPathPercent => pick(
+                lang,
+                "Folio's path contains %, which Windows would read as a variable when Codex runs the hook. Move Folio to a folder without %.",
+                "Folio 的路径含有 %，Codex 运行 hook 时 Windows 会将其当作变量。请将 Folio 移到不含 % 的文件夹。",
+            ),
+            Self::CodexHooksInToml => pick(
+                lang,
+                "Codex's hooks are in its config.toml. Folio adds its own only to hooks.json, so it changed nothing.",
+                "Codex 的 hook 写在 config.toml 中。Folio 只在 hooks.json 中添加自己的 hook，因此未做修改。",
+            ),
+            Self::CodexHooksFileIgnored => pick(
+                lang,
+                "Codex cannot read this hooks.json as it is, so a hook added to it would never run.",
+                "Codex 无法读取当前的 hooks.json，添加的 hook 不会运行。",
+            ),
         }
     }
 
