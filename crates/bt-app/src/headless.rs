@@ -360,6 +360,8 @@ pub(crate) struct HeadlessWindow {
 /// driven too; a test that wants the refusal scripts it.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct PlatformAnswers {
+    /// `WindowHost::is_visible`, winit's own reading: `Some(true)`.
+    pub(crate) visible: Option<bool>,
     /// `WindowHost::is_minimized`, winit's own reading: `Some(false)`.
     pub(crate) minimized: Option<bool>,
     /// `WindowHost::is_iconic`: `false`.
@@ -392,6 +394,7 @@ pub(crate) struct PlatformAnswers {
 impl Default for PlatformAnswers {
     fn default() -> Self {
         Self {
+            visible: Some(true),
             minimized: Some(false),
             iconic: false,
             cloaked: false,
@@ -438,7 +441,7 @@ impl WindowHost for HeadlessWindow {
         self.scale
     }
     fn is_visible(&self) -> Option<bool> {
-        Some(true)
+        self.answers.get().visible
     }
     fn is_maximized(&self) -> bool {
         false

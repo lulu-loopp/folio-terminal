@@ -15353,8 +15353,8 @@ struct SystemBox;
 /// 0.4.10 plan row 72): on a stop the windows are being taken down and the renderer may be what
 /// failed, so, as before the first window, there is no window to put a card on — but a window
 /// still stands to own the box, so the box has no taskbar button or Alt+Tab entry of its own and
-/// is centred on it. The window is [`the_box_owner`]'s; with none standing the box is
-/// ownerless, and wears the program's icon itself.
+/// is centred on it. The window is [`the_box_owner`]'s; with none standing on the screen the box
+/// is ownerless, and wears the program's icon itself.
 struct BoxOver<'window, W: WindowHost>(Option<&'window W>);
 
 impl<W: WindowHost> NativeSay for BoxOver<'_, W> {
@@ -15363,14 +15363,23 @@ impl<W: WindowHost> NativeSay for BoxOver<'_, W> {
     }
 }
 
-/// **The window a stop's box is owned by** (0.4.10 plan row 72): of the windows not on their
-/// way out, the one the keyboard is on, else the first in the opening order; `None` when none
-/// stands. Read off the windows as [`FolioApp::frontmost_window`] reads them, and from the
-/// windows alone, so a stop can lend the box its owner while it holds the application.
+/// **The window a stop's box is owned by** (0.4.10 plan row 72): of the windows on the screen
+/// and not on their way out, the one the keyboard is on, else the first in the opening order;
+/// `None` when none is. A window is off the screen when it has never been shown, is hidden
+/// (a quake window put away), is minimised, or is iconic or cloaked as last sampled (on another
+/// virtual desktop): an owned box has no taskbar button of its own and keeps to its owner's
+/// desktop, so a box owned by such a window could be on no taskbar the reader sees (review N2).
+/// With none on the screen the box is ownerless, and has its own button and the program's icon.
+/// Read off the windows as [`FolioApp::frontmost_window`] reads them, and from the windows
+/// alone, so a stop can lend the box its owner while it holds the application.
 fn the_box_owner<B: Backend>(windows: &Windows<WindowId, WindowRuntime<B>>) -> Option<&B::Window> {
     let mut first_standing = None;
     for (_, runtime) in windows.in_order() {
-        if runtime.leaving.is_some() {
+        let off_the_screen = !runtime.window_shown
+            || runtime.window_hidden
+            || runtime.window.is_visible() == Some(false)
+            || runtime.window.is_minimized() == Some(true);
+        if runtime.leaving.is_some() || off_the_screen {
             continue;
         }
         if runtime.window_focused {

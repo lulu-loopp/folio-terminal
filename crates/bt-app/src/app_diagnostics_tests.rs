@@ -1092,24 +1092,55 @@ fn a_forced_stop_during_the_documents_phase_disposes_of_the_held_release() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// RED (0.4.10 plan row 72, T-MESSAGE-BOX-WEARS-THE-ICON) — **a stop's box is owned by the
-/// window the keyboard is on, else by the first window still standing, and by none when no
-/// window stands**: a window on its way out owns nothing, focused or not.
+/// RED (0.4.10 plan row 72, T-MESSAGE-BOX-WEARS-THE-ICON; review N2) — **a stop's box is owned
+/// by the window the keyboard is on, else by the first window still standing on the screen, and
+/// by none when no window stands there**: a window on its way out owns nothing, focused or not,
+/// and neither does a window the reader cannot see — hidden (iconic or cloaked as sampled), never
+/// shown, put away, or minimised.
 ///
 /// MUTATION (`plant-72-b-the-first-window-owns-every-box.py`): ask the first standing window
 /// before the focused one, and the focused second window is passed over.
+/// MUTATION (`plant-72-f-a-window-off-the-screen-owns-the-box.py`): stop passing over the windows
+/// off the screen, and the hidden first window owns the box.
 #[test]
 fn a_stops_box_is_owned_by_the_focused_window_else_the_first_standing() {
-    /// One window's focus and leave, as a stop finds them.
+    /// One window as a stop finds it.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum Found {
+        Standing,
+        Focused,
+        Leaving,
+        FocusedLeaving,
+        /// Iconic or cloaked, as last sampled.
+        Hidden,
+        NeverShown,
+        /// Not visible: a quake window put away.
+        PutAway,
+        Minimised,
+    }
+    use Found::{
+        Focused, FocusedLeaving, Hidden, Leaving, Minimised, NeverShown, PutAway, Standing,
+    };
+    /// The window `id` set as `found`, every other reading as a standing window's.
     fn stand(
         windows: &mut Windows<WindowId, WindowRuntime<crate::headless::Headless>>,
         id: WindowId,
-        focused: bool,
-        leaving: bool,
+        found: Found,
     ) {
         let runtime = windows.get_mut(id).expect("an open window");
-        runtime.window_focused = focused;
-        runtime.leaving = leaving.then(Instant::now);
+        runtime.window_focused = matches!(found, Found::Focused | Found::FocusedLeaving);
+        runtime.leaving =
+            matches!(found, Found::Leaving | Found::FocusedLeaving).then(Instant::now);
+        runtime.window_hidden = matches!(found, Found::Hidden);
+        runtime.window_shown = !matches!(found, Found::NeverShown);
+        runtime
+            .window
+            .answers
+            .set(crate::headless::PlatformAnswers {
+                visible: Some(!matches!(found, Found::PutAway)),
+                minimized: Some(matches!(found, Found::Minimised)),
+                ..crate::headless::PlatformAnswers::default()
+            });
     }
     let window = |tag: &str| {
         crate::headless::HeadlessFolio::with_tabs(
@@ -1133,28 +1164,31 @@ fn a_stops_box_is_owned_by_the_focused_window_else_the_first_standing() {
             .find(|(_, runtime)| std::ptr::eq(&runtime.window, owner))
             .map(|(id, _)| id)
     };
-    stand(&mut windows, one, false, false);
-    stand(&mut windows, two, true, false);
-    let focused_second = owner(&windows);
-    stand(&mut windows, two, false, false);
-    let none_focused = owner(&windows);
-    stand(&mut windows, one, false, true);
-    let first_leaving = owner(&windows);
-    stand(&mut windows, one, false, false);
-    stand(&mut windows, two, true, true);
-    let focused_leaving = owner(&windows);
-    stand(&mut windows, one, true, true);
-    let all_leaving = owner(&windows);
+    let cases = [
+        ((Standing, Focused), Some(two)),
+        ((Standing, Standing), Some(one)),
+        ((Leaving, Standing), Some(two)),
+        ((Standing, FocusedLeaving), Some(one)),
+        ((FocusedLeaving, FocusedLeaving), None),
+        ((Hidden, Standing), Some(two)),
+        ((NeverShown, Standing), Some(two)),
+        ((PutAway, Standing), Some(two)),
+        ((Minimised, Standing), Some(two)),
+        ((Hidden, Minimised), None),
+        ((NeverShown, PutAway), None),
+    ];
+    let found: Vec<_> = cases
+        .iter()
+        .map(|&((first, second), _)| {
+            stand(&mut windows, one, first);
+            stand(&mut windows, two, second);
+            ((first, second), owner(&windows))
+        })
+        .collect();
     assert_eq!(
-        [
-            focused_second,
-            none_focused,
-            first_leaving,
-            focused_leaving,
-            all_leaving
-        ],
-        [Some(two), Some(one), Some(two), Some(one), None],
-        "the focused standing window, else the first standing one, else none"
+        found,
+        cases.to_vec(),
+        "the focused window on the screen, else the first one on the screen, else none"
     );
 }
 
