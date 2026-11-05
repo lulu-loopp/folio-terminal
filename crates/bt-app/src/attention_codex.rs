@@ -740,10 +740,13 @@ pub(crate) fn apply_at(path: &Path, decision: Decision, exe: &Path, data: &Path)
 /// resolution on this path for a repointed link to slip through (re-review B1). `config.toml`, the
 /// other file, is resolved once too ([`beside`]).
 ///
-/// One operation over two files, in this order: both are read and judged, every copy either names
-/// is asked about, and only then is anything written — `hooks.json` first, then `config.toml`, so
-/// that a second write that fails leaves both of Folio's entries rather than neither, and the next
-/// press, or row 67's repair, finishes it.
+/// One operation over two files, in this order: both are read, **both edits are made and pass
+/// their self-checks** ([`hooks::hooks_edited`], [`edited`]), every copy either names is asked
+/// about, and a `config.toml` this build will not edit is refused — and only then is anything
+/// written, `config.toml` first, then `hooks.json`. So every refusal leaves both files as they
+/// were. The one window left is a second write that fails after the first landed: the `notify`
+/// line is gone and the hook not yet written, a Folio that marks nothing until the next press or
+/// row 67's repair finishes it — never a turn marked twice.
 pub(crate) fn apply_resolved(
     config: &Config,
     decision: Decision,
@@ -835,14 +838,15 @@ pub(crate) fn apply_resolved(
         };
     }
     // The atomic write, mandatory backup, and unsafe-path refusal are all
-    // `attention_hooks::land`'s, said once for all three installers.
-    if let Some(written) = written
-        && let Err(reason) = landed(config, &existing, "json", &written)
+    // `attention_hooks::land`'s, said once for all three installers. `config.toml` first: see
+    // above.
+    if let (Some(taken_out), Some(toml_config)) = (taken_out, toml_config)
+        && let Err(reason) = landed(toml_config, &toml.text, "toml", &taken_out)
     {
         return Outcome::Refused(reason);
     }
-    if let (Some(taken_out), Some(toml_config)) = (taken_out, toml_config)
-        && let Err(reason) = landed(toml_config, &toml.text, "toml", &taken_out)
+    if let Some(written) = written
+        && let Err(reason) = landed(config, &existing, "json", &written)
     {
         return Outcome::Refused(reason);
     }
@@ -1913,6 +1917,74 @@ mod tests {
         std::fs::write(&config, line(&gone)).expect("their own file");
         assert_eq!(apply_to(&path, true, &exe()), Outcome::Installed);
         assert_eq!(std::fs::read_to_string(&config).expect("there"), without);
+    }
+
+    /// RED (0.4.10 plan row 69; the coordinator, 2026-11-04) — **a `config.toml` the operation must
+    /// refuse leaves `hooks.json` as it was**: both edits are made and judged, and every refusal
+    /// said, before either file is written; then `config.toml` is written first. No refusal is
+    /// half done, and the one window left — a second write that fails — loses the `notify` line
+    /// before the hook is written, so a turn is never marked twice.
+    ///
+    /// RED GATE: `plant-69-hook-before-refusal.py` writes `hooks.json` before the `config.toml`
+    /// judgement, and the hooks file comes back with Folio's group in it;
+    /// `plant-69-hooks-landed-first.py` writes the two files the other way round, and the reading of
+    /// `apply_resolved` below finds it.
+    #[test]
+    fn a_config_toml_the_writer_refuses_leaves_hooks_json_untouched() {
+        let dir = scratch("refused-toml");
+        let config = dir.join(CONFIG_FILE);
+        let path = dir.join(HOOKS_FILE);
+        let theirs = their_hooks("\n", "  ");
+        std::fs::write(&path, &theirs).expect("their own file");
+        // This copy's `notify` line, in a file Folio reads and will not edit: the install has to
+        // take the line out, so the press is refused.
+        let line = format!("model = \"gpt-5\"\nnotify = {}\n", notify_value(&exe()));
+        std::fs::write(&config, &line).expect("their own file");
+        let writable = std::fs::metadata(&config).expect("there").permissions();
+        let mut readonly = writable.clone();
+        readonly.set_readonly(true);
+        std::fs::set_permissions(&config, readonly).expect("read-only");
+        let outcome = apply_to(&path, true, &exe());
+        let hooks_after = std::fs::read_to_string(&path).expect("there");
+        let config_after = std::fs::read_to_string(&config).expect("there");
+        let after = names(&dir);
+        // Restored before the assertions, not after them: a panic in between would leave the
+        // fixture read-only (attention_ownership's review R14).
+        std::fs::set_permissions(&config, writable).expect("writable again");
+        assert_eq!(
+            outcome,
+            Outcome::Refused(crate::i18n::Text::AgentConfigReadOnly.text())
+        );
+        assert_eq!(hooks_after, theirs, "the hook was not written");
+        assert_eq!(config_after, line, "the line was not taken out");
+        assert_eq!(
+            after,
+            vec![CONFIG_FILE.to_owned(), HOOKS_FILE.to_owned()],
+            "no copy was kept of either: nothing was about to be written"
+        );
+        // Put right, the same press writes both.
+        assert_eq!(apply_to(&path, true, &exe()), Outcome::Installed);
+        assert_eq!(
+            std::fs::read_to_string(&config).expect("there"),
+            "model = \"gpt-5\"\n"
+        );
+
+        // **`config.toml` lands first**: the order is the property, and no fixture can make the
+        // second of two atomic replaces fail, so it is read off the operation itself.
+        let body = crate::test_support::squeezed(crate::test_support::item_body(
+            &bt_source::ItemQuery::function("apply_resolved").in_module("crate::attention_codex"),
+        ));
+        let toml_lands = body
+            .find("landed(toml_config,&toml.text,\"toml\",&taken_out)")
+            .expect("config.toml is landed here");
+        let hooks_land = body
+            .find("landed(config,&existing,\"json\",&written)")
+            .expect("hooks.json is landed here");
+        assert!(toml_lands < hooks_land, "config.toml is written first");
+        let judged = body
+            .find("(Some(_),Err(reason))=>returnOutcome::Refused(*reason),")
+            .expect("a config.toml Folio will not edit is refused here");
+        assert!(judged < toml_lands, "and refused before either write");
     }
 
     /// **A `%` in Folio's path is refused on Windows**, where cmd.exe would expand it inside the
