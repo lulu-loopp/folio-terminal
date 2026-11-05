@@ -4,26 +4,38 @@
 //! `MessageBoxTimeoutW` makes a window of the dialog class `#32770`, which has no class icon,
 //! and sends it no `WM_SETICON`: the shell then draws the box's Alt+Tab entry with no icon and
 //! its taskbar button with a generic window glyph (the owner looked on 0.4.9, 2026-11-05). A box
-//! that has a Folio window to be owned by is owned by it and has no entry of its own; every other
-//! box — a launch about to exit, a road process's failure window, the panic hook's alert — is the
-//! process's only window, and wears the program's icon itself.
+//! that has a Folio window on the screen to be owned by is owned by it and has no entry of its
+//! own; every other box — a launch about to exit, a road process's failure window, the panic
+//! hook's alert — is the process's only window, and wears the program's icon itself.
 //!
 //! **How it gets it.** The box is the system's; its window exists only inside the call. So for
-//! exactly as long as the call is up this thread holds a `WH_CBT` hook ([`DressedBox`]), and
-//! the first activation of a `#32770` window on this thread is the box's: the hook loads the
-//! executable's icon group at that window's display's scale ([`ProgramIcons`]) and sends both
-//! sides as the window's own icons. The box keeps its layout, its text, its OK in the reader's
-//! language and its fifteen-minute bound. The icons are destroyed after the call has returned,
-//! when the window they were given to is gone.
+//! exactly as long as the call is up this thread holds a `WH_CBT` hook ([`DressedBox`]). The
+//! first `#32770` window *made* on this thread while the hook is held is the box this call
+//! raises (`HCBT_CREATEWND`); a dialog that stood before the call is not it. When that window is
+//! activated (`HCBT_ACTIVATE`) the hook loads the executable's icon group at the scale of the
+//! display the box is on ([`ProgramIcons`]) and sends both sides as the window's own icons. The
+//! box keeps its layout, its text, its OK in the reader's language and its fifteen-minute bound.
+//! The icons are destroyed after the call has returned, when the window they were given to is
+//! gone.
+//!
+//! **The display's own scale, in every process.** A box raised before any window of Folio's —
+//! the front door, the uninstall door, the update's appliers and the recovery build, the
+//! remover, a panic before the first window — is raised by a process that is not yet DPI aware
+//! (the executable has no manifest; winit's event loop makes the process aware), where
+//! `GetDpiForWindow` answers 96 on every display. The display's DPI is therefore read with this
+//! thread switched to per-monitor awareness for the one read and switched back
+//! ([`display_dpi_of`]); in an aware process it is the answer `GetDpiForWindow` gives.
 //!
 //! **Loaded from this module, not from the file**: the image the process is running, so the
 //! icon is the right one after an update has replaced the file on disk, and in the uninstall
 //! remover, which is a copy of the executable. A load the module refuses leaves the box as it
-//! was; a last-resort box has nowhere it could say so.
+//! was; a last-resort box has nowhere it could say so. So does a thread whose storage is being
+//! torn down: the dresser is reached with `LocalKey::try_with`, and a box raised from a
+//! thread-local's destructor is raised undressed rather than turned into an abort.
 //!
 //! **Every call here is one the call graph follows** (`bt-source`'s native-labels guard walks
 //! what `message_box` reaches): a method of the standard library is called by its path
-//! (`Result::ok(…)`, `LocalKey::with(&…)`), because a bare `.ok()` or `.with(…)` is ambiguous
+//! (`Result::ok(…)`, `LocalKey::try_with(&…)`), because a bare `.ok()` or `.with(…)` is ambiguous
 //! with the package's own methods of those names, and the walk would follow every one of them.
 
 use std::cell::RefCell;
@@ -31,13 +43,17 @@ use std::ffi::c_void;
 use std::thread::LocalKey;
 
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Graphics::Gdi::{MONITOR_DEFAULTTONEAREST, MonitorFromWindow};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::GetCurrentThreadId;
-use windows::Win32::UI::HiDpi::GetDpiForWindow;
+use windows::Win32::UI::HiDpi::{
+    DPI_AWARENESS_CONTEXT, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForMonitor,
+    MDT_EFFECTIVE_DPI, SetThreadDpiAwarenessContext,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DestroyIcon, GetClassNameW, HCBT_ACTIVATE, HHOOK, HICON, ICON_BIG, ICON_SMALL,
-    IMAGE_ICON, LR_DEFAULTCOLOR, LoadImageW, SendMessageW, SetWindowsHookExW, UnhookWindowsHookEx,
-    WH_CBT, WM_SETICON,
+    CallNextHookEx, DestroyIcon, GetClassNameW, HCBT_ACTIVATE, HCBT_CREATEWND, HHOOK, HICON,
+    ICON_BIG, ICON_SMALL, IMAGE_ICON, LR_DEFAULTCOLOR, LoadImageW, SendMessageW, SetWindowsHookExW,
+    UnhookWindowsHookEx, WH_CBT, WM_SETICON,
 };
 use windows::core::PCWSTR;
 
@@ -100,26 +116,64 @@ fn icon_of_this_module(side: u32) -> Option<HICON> {
     Some(HICON(image.0))
 }
 
-/// **The dressing of one box**: nothing until the box is seen, then the icons it wears.
+/// **The effective DPI of the display `window` is on**, read with this thread per-monitor aware
+/// for the one read and then put back as it was: what an aware process's `GetDpiForWindow`
+/// answers, and the display's own scale in a process that is not aware yet. 96 when the system
+/// will not say (a Windows without per-thread awareness reads 96 in an unaware process too).
+fn display_dpi_of(window: HWND) -> u32 {
+    let mut dpi_x = 0_u32;
+    let mut dpi_y = 0_u32;
+    // SAFETY: the awareness context is this thread's, set for the two reads below and put back
+    // before the block ends (a refused switch answers an invalid context, and nothing is put
+    // back); `MonitorFromWindow` with `MONITOR_DEFAULTTONEAREST` always answers a monitor; both
+    // out-parameters are exclusively borrowed for the call.
+    let read = unsafe {
+        let before = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        let monitor = MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST);
+        let read = GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y);
+        if !DPI_AWARENESS_CONTEXT::is_invalid(&before) {
+            let _ = SetThreadDpiAwarenessContext(before);
+        }
+        read
+    };
+    match read {
+        Ok(()) if dpi_x > 0 => dpi_x,
+        _ => 96,
+    }
+}
+
+/// **The dressing of one box**: the box once it is made, then the icons it wears.
 struct BoxDresser {
+    the_box: Option<HWND>,
     worn: Option<ProgramIcons>,
 }
 
 impl BoxDresser {
     /// A dresser waiting for its box.
     const fn waiting() -> Self {
-        Self { worn: None }
+        Self {
+            the_box: None,
+            worn: None,
+        }
     }
 
-    /// **The DPI the box is to be dressed at, when `window` is it**: the first `#32770` window
-    /// activated on this thread while the dresser waits. Every other window, and the box once
-    /// it is dressed, answers `None`.
+    /// **A window is being made on this thread**: the first `#32770` window made while the
+    /// dresser waits is the box this call raises. Every later window, and any dialog that stood
+    /// before the call, is not.
+    fn note_a_new_window(&mut self, window: HWND) {
+        if Option::is_none(&self.the_box) && is_a_dialog_box(window) {
+            self.the_box = Some(window);
+        }
+    }
+
+    /// **The DPI the box is to be dressed at, when `window` is it**: the box this call made,
+    /// activated before it wears the icon. Every other window, and the box once it is dressed,
+    /// answers `None`.
     fn the_box_at(&self, window: HWND) -> Option<u32> {
-        if Option::is_some(&self.worn) || !is_a_dialog_box(window) {
+        if Option::is_some(&self.worn) || self.the_box != Some(window) {
             return None;
         }
-        // SAFETY: a read of a live window's DPI; 0 (an invalid window) is read as 96.
-        Some(u32::max(unsafe { GetDpiForWindow(window) }, 96))
+        Some(display_dpi_of(window))
     }
 
     /// **The box puts the program's icon on**: both sides sent as its window's own icons, and
@@ -174,11 +228,17 @@ pub(crate) struct DressedBox {
 
 impl DressedBox {
     /// The hook for the box about to be raised on this thread, dressing it in the program's icon
-    /// ([`ProgramIcons::at_dpi`]). A hook Windows refuses leaves the box undressed.
+    /// ([`ProgramIcons::at_dpi`]). A hook Windows refuses, or a thread whose storage is being torn
+    /// down, leaves the box undressed.
     pub(crate) fn around() -> Self {
-        let put_aside = LocalKey::with(&DRESSER, |slot| {
+        let Ok(put_aside) = LocalKey::try_with(&DRESSER, |slot| {
             RefCell::replace(slot, Some(BoxDresser::waiting()))
-        });
+        }) else {
+            return Self {
+                hook: None,
+                put_aside: None,
+            };
+        };
         // SAFETY: a read with no arguments.
         let thread = unsafe { GetCurrentThreadId() };
         // SAFETY: `box_hook` is an `extern "system"` function with the `HOOKPROC` signature that
@@ -195,26 +255,40 @@ impl Drop for DressedBox {
             let _ = unsafe { UnhookWindowsHookEx(hook) };
         }
         let put_aside = Option::take(&mut self.put_aside);
-        let this_box = LocalKey::with(&DRESSER, |slot| RefCell::replace(slot, put_aside));
+        let this_box = LocalKey::try_with(&DRESSER, |slot| RefCell::replace(slot, put_aside));
         drop(this_box);
     }
 }
 
-/// `WH_CBT`: something is about to happen to a window of this thread. An activation of the box
-/// the dresser waits for dresses it in the program's icon at the box's display's scale; every
-/// code is passed on, as every hook procedure must.
+/// `WH_CBT`: something is about to happen to a window of this thread. A window being made is
+/// shown to the box's dresser, which keeps the first dialog as the box; that box's activation
+/// dresses it in the program's icon at its display's scale. Every code is passed on, as every
+/// hook procedure must, and nothing here can panic across the system's frame.
 unsafe extern "system" fn box_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if u32::try_from(code) == Ok(HCBT_ACTIVATE) {
-        let window = HWND(wparam.0 as *mut c_void);
-        LocalKey::with(&DRESSER, |slot| {
-            if let Ok(mut dresser) = RefCell::try_borrow_mut(slot)
-                && let Some(dresser) = Option::as_mut(&mut *dresser)
-                && let Some(dpi) = dresser.the_box_at(window)
-                && let Some(icons) = ProgramIcons::at_dpi(dpi)
-            {
-                dresser.put_on(window, icons);
-            }
-        });
+    match u32::try_from(code) {
+        Ok(HCBT_CREATEWND) => {
+            let window = HWND(wparam.0 as *mut c_void);
+            let _ = LocalKey::try_with(&DRESSER, |slot| {
+                if let Ok(mut dresser) = RefCell::try_borrow_mut(slot)
+                    && let Some(dresser) = Option::as_mut(&mut *dresser)
+                {
+                    dresser.note_a_new_window(window);
+                }
+            });
+        }
+        Ok(HCBT_ACTIVATE) => {
+            let window = HWND(wparam.0 as *mut c_void);
+            let _ = LocalKey::try_with(&DRESSER, |slot| {
+                if let Ok(mut dresser) = RefCell::try_borrow_mut(slot)
+                    && let Some(dresser) = Option::as_mut(&mut *dresser)
+                    && let Some(dpi) = dresser.the_box_at(window)
+                    && let Some(icons) = ProgramIcons::at_dpi(dpi)
+                {
+                    dresser.put_on(window, icons);
+                }
+            });
+        }
+        _ => {}
     }
     // SAFETY: the arguments are the ones this procedure was called with.
     unsafe { CallNextHookEx(None, code, wparam, lparam) }
@@ -222,6 +296,7 @@ unsafe extern "system" fn box_hook(code: i32, wparam: WPARAM, lparam: LPARAM) ->
 
 #[cfg(test)]
 mod tests {
+    use windows::Win32::UI::HiDpi::{AreDpiAwarenessContextsEqual, GetThreadDpiAwarenessContext};
     use windows::Win32::UI::WindowsAndMessaging::{
         CreateIcon, CreateWindowExW, DestroyWindow, WINDOW_EX_STYLE, WM_GETICON, WS_POPUP,
     };
@@ -281,6 +356,22 @@ mod tests {
         }
     }
 
+    /// What this thread's dresser slot holds: the box it noted and the two icons it wears, by
+    /// handle; `None` when no box is being raised.
+    fn the_slot() -> Option<(Option<HWND>, Option<(isize, isize)>)> {
+        DRESSER.with(|slot| {
+            slot.borrow().as_ref().map(|dresser| {
+                (
+                    dresser.the_box,
+                    dresser
+                        .worn
+                        .as_ref()
+                        .map(|icons| (icons.small.0 as isize, icons.big.0 as isize)),
+                )
+            })
+        })
+    }
+
     /// PIN (0.4.10 plan row 71, moved here with the rule by row 72) — **the shell's two sides at
     /// the four scales `folio.ico` was drawn for are the system's own** (`SM_CXSMICON` and
     /// `SM_CXICON` at 96, 120, 144 and 192 DPI), each an image the file holds.
@@ -292,33 +383,39 @@ mod tests {
         );
     }
 
-    /// RED (0.4.10 plan row 72) — **the box wears the program's icon, at its display's scale,
-    /// and nothing else does**: the first `#32770` window activated is the box, to be dressed at
-    /// that window's DPI, and is given both sides; a window of another class activated before
-    /// it, and a second `#32770` after it, are no box and keep no icon. No window is shown: the
+    /// RED (0.4.10 plan row 72, review N4) — **the box wears the program's icon, at its display's
+    /// scale, and nothing else does**: the first `#32770` window made while the dresser waits is
+    /// the box, dressed when it is activated at the DPI of the display it is on, with both sides.
+    /// A dialog that stood before the call, a window of another class, and a second `#32770` made
+    /// after the box are no box and keep no icon. No window is shown: the creations and the
     /// activations are handed to the dresser as the hook hands them.
     ///
     /// MUTATION (`plant-72-c-the-box-gets-no-big-icon.py`): drop the `ICON_BIG` send, and the
     /// box's big icon is empty.
     #[test]
     fn the_box_wears_the_programs_icon_and_nothing_else_does() {
-        let other = hidden(w!("STATIC"));
-        let the_box = hidden(w!("#32770"));
-        let another_box = hidden(w!("#32770"));
+        let older = hidden(w!("#32770"));
         let mut dresser = BoxDresser::waiting();
+        let other = hidden(w!("STATIC"));
+        dresser.note_a_new_window(other);
+        let the_box = hidden(w!("#32770"));
+        dresser.note_a_new_window(the_box);
+        let another_box = hidden(w!("#32770"));
+        dresser.note_a_new_window(another_box);
 
+        assert_eq!(
+            dresser.the_box_at(older),
+            None,
+            "a dialog that stood before the call is not the box"
+        );
         assert_eq!(
             dresser.the_box_at(other),
             None,
             "a window that is no box is not dressed"
         );
-        assert_eq!(icons_of(other), (0, 0), "and keeps no icon");
-
-        // SAFETY: a read of a live window's DPI.
-        let dpi = unsafe { GetDpiForWindow(the_box) }.max(96);
         assert_eq!(
             dresser.the_box_at(the_box),
-            Some(dpi),
+            Some(display_dpi_of(the_box)),
             "the box is dressed at its display's scale"
         );
         dresser.put_on(the_box, two_drawn_icons());
@@ -328,29 +425,90 @@ mod tests {
             (worn.small.0 as isize, worn.big.0 as isize),
             "the box wears both sides as its own icons"
         );
-
         assert_eq!(
             dresser.the_box_at(another_box),
             None,
-            "one box is dressed per call, the first"
+            "one box is dressed per call, the first made"
         );
-        assert_eq!(
-            icons_of(another_box),
-            (0, 0),
-            "and the second keeps no icon"
-        );
+        assert_eq!(dresser.the_box_at(the_box), None, "and dressed once");
+        for window in [older, other, another_box] {
+            assert_eq!(icons_of(window), (0, 0), "every other window keeps no icon");
+        }
 
-        for window in [other, the_box, another_box] {
+        for window in [older, other, the_box, another_box] {
             // SAFETY: windows this test made.
             let _ = unsafe { DestroyWindow(window) };
         }
     }
 
+    /// RED (0.4.10 plan row 72, review N3) — **the display's scale is read aware, and the thread
+    /// is left as it was**: the read switches this thread to per-monitor awareness for itself
+    /// alone, so the thread's awareness context after it is the one before it, and the answer is
+    /// a display's DPI. This test executable has no manifest: before the switch, its thread is
+    /// the unaware one a box before Folio's first window is raised from.
+    #[test]
+    fn the_displays_scale_is_read_aware_and_the_thread_is_left_as_it_was() {
+        let window = hidden(w!("#32770"));
+        // SAFETY: reads of this thread's own context.
+        let before = unsafe { GetThreadDpiAwarenessContext() };
+        let dpi = display_dpi_of(window);
+        // SAFETY: as above.
+        let after = unsafe { GetThreadDpiAwarenessContext() };
+        // SAFETY: two contexts this thread was answered.
+        let same = unsafe { AreDpiAwarenessContextsEqual(before, after) };
+        assert!(same.as_bool(), "the thread's awareness is put back");
+        assert!(dpi >= 96, "a display's DPI: {dpi}");
+        // SAFETY: a window this test made.
+        let _ = unsafe { DestroyWindow(window) };
+    }
+
+    /// RED (0.4.10 plan row 72, review N4) — **a box raised inside another puts the first one's
+    /// dressing aside and gives it back**: the nested box's hook gets a waiting dresser of its
+    /// own, the first box's icons are kept while it is up and are back in the slot when it ends,
+    /// and the slot is empty once the first box has ended too. No window is needed.
+    #[test]
+    fn a_box_inside_a_box_puts_the_first_ones_dressing_aside_and_gives_it_back() {
+        assert_eq!(the_slot(), None, "no box is being raised");
+        let first = DressedBox::around();
+        assert_eq!(
+            the_slot(),
+            Some((None, None)),
+            "the first box's dresser waits"
+        );
+        let icons = two_drawn_icons();
+        let worn = (icons.small.0 as isize, icons.big.0 as isize);
+        DRESSER.with(|slot| {
+            slot.borrow_mut()
+                .as_mut()
+                .expect("the first box's dresser")
+                .worn = Some(icons);
+        });
+        let second = DressedBox::around();
+        assert_eq!(
+            the_slot(),
+            Some((None, None)),
+            "the nested box gets a dresser of its own"
+        );
+        drop(second);
+        assert_eq!(
+            the_slot(),
+            Some((None, Some(worn))),
+            "and gives the first one back, still wearing its icons"
+        );
+        drop(first);
+        assert_eq!(
+            the_slot(),
+            None,
+            "and the slot is empty after the first box"
+        );
+    }
+
     /// RED (0.4.10 plan row 72) — **the hook is held for exactly as long as the box is up, and
-    /// dresses the box it sees**: `windows_impl::message_box` takes it before
-    /// `MessageBoxTimeoutW` and lets it go after the call has returned, so the box's first
-    /// activation is seen and no window of this thread's is dressed after it; and the hook
-    /// procedure loads the program's icon at the DPI the dresser answers and puts it on.
+    /// dresses the box it made**: `windows_impl::message_box` takes it before
+    /// `MessageBoxTimeoutW` and lets it go after the call has returned, so the box's creation and
+    /// first activation are seen and no window of this thread's is dressed after it; and the hook
+    /// procedure notes the windows made, and loads the program's icon at the DPI the dresser
+    /// answers and puts it on.
     ///
     /// MUTATION (`plant-72-d-the-hook-after-the-box.py`): take the hook after the call, and the
     /// order is refused.
@@ -374,13 +532,16 @@ mod tests {
         );
         let hook = source_test::body(&ItemQuery::function("box_hook").in_module("crate::box_icon"));
         for step in [
+            "Ok(HCBT_CREATEWND) => {",
+            "dresser.note_a_new_window(window);",
+            "Ok(HCBT_ACTIVATE) => {",
             "&& let Some(dpi) = dresser.the_box_at(window)",
             "&& let Some(icons) = ProgramIcons::at_dpi(dpi)",
             "dresser.put_on(window, icons);",
         ] {
             assert!(
                 hook.contains(step),
-                "the hook procedure dresses the box it sees (`{step}`):\n{hook}"
+                "the hook procedure dresses the box it made (`{step}`):\n{hook}"
             );
         }
     }
