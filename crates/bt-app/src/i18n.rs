@@ -6617,6 +6617,10 @@ impl Text {
         //   halves, because a card is a surface and not a sentence.
         Self::WebFailRuntimeSay,
         Self::WebFailRuntimeVerb,
+        // — the refusal of a Codex hook from a path holding `%` (0.4.10 plan row 69): only
+        //   `cmd /C` expands one inside quotes, and `attention_codex::apply_resolved` asks it
+        //   only when `bt_platform::host_platform()` is Windows.
+        Self::CodexHookPathPercent,
     ];
 
     #[cfg(test)]
