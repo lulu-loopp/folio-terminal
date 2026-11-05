@@ -574,13 +574,13 @@ impl Group<'_> {
 
 /// One event's member of the `hooks` object, and its groups.
 struct Event<'a> {
-    member: &'a splice::Member,
+    member: &'a splice::Property,
     groups: Vec<Group<'a>>,
 }
 
 /// The `hooks` member of the file, read down to its entries.
 struct Hooks<'a> {
-    member: &'a splice::Member,
+    member: &'a splice::Property,
     events: Vec<Event<'a>>,
 }
 
@@ -1601,21 +1601,21 @@ mod splice {
     /// What a value is, as far as an edit needs to know.
     #[derive(Debug)]
     pub(super) enum Kind {
-        Object(Vec<Member>),
+        Object(Vec<Property>),
         Array(Vec<Node>),
         Scalar,
     }
 
     /// One member of an object: its key as decoded, the key's own bytes, and its value.
     #[derive(Debug)]
-    pub(super) struct Member {
+    pub(super) struct Property {
         pub(super) key: String,
         pub(super) key_start: usize,
         pub(super) key_end: usize,
         pub(super) value: Node,
     }
 
-    impl Member {
+    impl Property {
         /// The member's bytes, from its key's opening quote to the end of its value.
         #[must_use]
         pub(super) fn span(&self) -> (usize, usize) {
@@ -1625,7 +1625,7 @@ mod splice {
 
     impl Node {
         #[must_use]
-        pub(super) fn members(&self) -> Option<&[Member]> {
+        pub(super) fn members(&self) -> Option<&[Property]> {
             match &self.kind {
                 Kind::Object(members) => Some(members),
                 _ => None,
@@ -1643,7 +1643,7 @@ mod splice {
         /// The one member of this object named `key`, or none; [`Twice`] when it is named twice,
         /// because then which of the two the agent reads is the agent's parser's business and not
         /// something an edit may guess at.
-        pub(super) fn member(&self, key: &str) -> Result<Option<&Member>, Twice> {
+        pub(super) fn member(&self, key: &str) -> Result<Option<&Property>, Twice> {
             let mut found = None;
             for member in self.members().unwrap_or_default() {
                 if member.key == key {
@@ -1781,7 +1781,7 @@ mod splice {
                 self.expect(b':')?;
                 self.skip_whitespace();
                 let value = self.value(depth + 1)?;
-                members.push(Member {
+                members.push(Property {
                     key,
                     key_start,
                     key_end,
@@ -1988,7 +1988,7 @@ mod splice {
                 _ => "\n",
             };
             let root = document.root.as_ref();
-            let first = root.and_then(Node::members).and_then(<[Member]>::first);
+            let first = root.and_then(Node::members).and_then(<[Property]>::first);
             let unit = root
                 .zip(first)
                 .filter(|(root, first)| text[root.start..first.key_start].contains('\n'))
@@ -2087,7 +2087,7 @@ mod splice {
         #[must_use]
         pub(super) fn of(text: &'a str, node: &Node) -> Option<Self> {
             let items = match &node.kind {
-                Kind::Object(members) => members.iter().map(Member::span).collect(),
+                Kind::Object(members) => members.iter().map(Property::span).collect(),
                 Kind::Array(elements) => {
                     elements.iter().map(|node| (node.start, node.end)).collect()
                 }
