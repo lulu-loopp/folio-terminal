@@ -20052,30 +20052,26 @@ mod windows_impl {
     /// [`a_box_would_be_seen`] (T-STOP-NOTICE-BOX-QUERY-MACOS), which here is
     /// always yes.
     ///
-    /// `HWND::default()` is the ownerless box: the process has no window to be
-    /// modal to, which is the whole situation. `MB_SETFOREGROUND` because the
-    /// caller is a shell or Explorer that has just taken the focus back — a box
-    /// nobody sees is the same as no box, and this one carries the only
-    /// explanation of a launch that is about to exit.
+    /// `None` is the ownerless box: the process has no window to be modal to,
+    /// which is the whole situation. `MB_SETFOREGROUND` because the caller is a
+    /// shell or Explorer that has just taken the focus back — a box nobody sees
+    /// is the same as no box, and this one carries the only explanation of a
+    /// launch that is about to exit. The crate's own `message_box` is this box
+    /// over no window, as every platform's door is.
+    ///
+    /// **Owned by `over` when a Folio window stands** (0.4.10 plan row 72), through
+    /// [`SeenBox::say`]. An owned box has no taskbar button or Alt+Tab entry of its own (its
+    /// owner's stands for it), is centred on its owner, and disables its owner while it is up — on the two roads
+    /// that pass one (a stop saying what it lost, and a frame-shape stop's alert) the window
+    /// thread is inside this call's own modal loop either way, and the windows close right
+    /// after it.
     ///
     /// **It wears the program's icon** (0.4.10 plan row 72): a box with no owner is the
     /// process's only window, and its Alt+Tab entry and taskbar button are drawn from its own
-    /// icon, which the system's dialog class does not give it ([`raise_the_box`]).
-    pub fn message_box(title: &str, text: &str) {
-        raise_the_box(None, title, text);
-    }
-
-    /// **The system's box, owned by `over` when a Folio window stands, and in the program's
-    /// icon** (0.4.10 plan row 72) — [`message_box`]'s one body, and [`SeenBox::say`]'s.
-    ///
-    /// An owned box has no taskbar button or Alt+Tab entry of its own (its owner's stands for
-    /// it), is centred on its owner, and disables its owner while it is up — on the two roads
-    /// that pass one (a stop saying what it lost, and a frame-shape stop's alert) the window
-    /// thread is inside this call's own modal loop either way, and the windows close right
-    /// after it. Every box, owned or not, is dressed in the executable's icon group by this
-    /// thread's `WH_CBT` hook, held for exactly the length of the call
-    /// ([`crate::box_icon::DressedBox`]).
-    fn raise_the_box(over: Option<crate::NativeWindow>, title: &str, text: &str) {
+    /// icon, which the system's dialog class does not give it. Every box, owned or not, is
+    /// dressed in the executable's icon group by this thread's `WH_CBT` hook, held for exactly
+    /// the length of the call ([`crate::box_icon::DressedBox`]).
+    pub(crate) fn message_box(over: Option<crate::NativeWindow>, title: &str, text: &str) {
         const ALERT_WITHIN_MS: u32 = 15 * 60 * 1000;
         #[link(name = "user32")]
         unsafe extern "system" {
@@ -20116,7 +20112,7 @@ mod windows_impl {
     /// ownerless, fifteen-minute-bounded box above is that box. The macOS arm
     /// is the one that differs (`macos_dialogs::standalone_alert`).
     pub fn standalone_alert(title: &str, text: &str) {
-        message_box(title, text);
+        message_box(None, title, text);
     }
 
     /// **The box a reader would see** (T-STOP-NOTICE-BOX-QUERY-MACOS) — on this platform
@@ -20125,11 +20121,11 @@ mod windows_impl {
     pub struct SeenBox(());
 
     impl SeenBox {
-        /// Raise the box, owned by `over` when a Folio window stands ([`raise_the_box`]), which
+        /// Raise the box, owned by `over` when a Folio window stands ([`message_box`]), which
         /// has no fallback on this platform. `over` is a window of the calling thread's: the box
         /// runs its modal loop on that thread, and an owner on another would have to answer it.
         pub fn say(self, over: Option<crate::NativeWindow>, title: &str, text: &str) {
-            raise_the_box(over, title, text);
+            message_box(over, title, text);
         }
     }
 
@@ -20388,19 +20384,27 @@ pub use windows_impl::{
     get_dpi_for_window, get_window_rect, get_work_area, hide_every_window_of_this_process,
     install_console_ctrl_handler, install_context_menu, install_window_class_background,
     is_window_cloaked, is_window_minimized, keyboard_layout_shift_table, keyboard_layouts,
-    leave_process, let_the_system_translate_touch, message_box, monitor_id_at,
-    monospace_family_named, monospace_font_families, mouse_button_down, os_ui_language,
-    pointer_position, pointer_position_in_window, read_context_menu, recycle,
-    redirect_std_streams_to_file, register_clipboard_owner, remove_context_menu,
-    request_window_close, set_clipboard_text, set_current_thread_priority, set_system_backdrop,
-    set_window_dark_mode, set_window_outer_rect, set_window_topmost, silence_std_streams,
-    stand_window_at, standalone_alert, std_error_is_console, stop_flashing_window,
-    system_backdrop_available, system_high_contrast, system_uses_light_apps, take_keyboard_focus,
-    taskbar_auto_hidden_from_state, taskbar_is_auto_hidden, thread_mouse_capture,
-    top_level_window_at, virtual_key_for_character, virtual_key_is_dead, virtual_key_of_scan_code,
-    virtual_screen_rect, wheel_scroll_amount, window_is_exposed, work_area_at, write_std_error,
-    write_to_console,
+    leave_process, let_the_system_translate_touch, monitor_id_at, monospace_family_named,
+    monospace_font_families, mouse_button_down, os_ui_language, pointer_position,
+    pointer_position_in_window, read_context_menu, recycle, redirect_std_streams_to_file,
+    register_clipboard_owner, remove_context_menu, request_window_close, set_clipboard_text,
+    set_current_thread_priority, set_system_backdrop, set_window_dark_mode, set_window_outer_rect,
+    set_window_topmost, silence_std_streams, stand_window_at, standalone_alert,
+    std_error_is_console, stop_flashing_window, system_backdrop_available, system_high_contrast,
+    system_uses_light_apps, take_keyboard_focus, taskbar_auto_hidden_from_state,
+    taskbar_is_auto_hidden, thread_mouse_capture, top_level_window_at, virtual_key_for_character,
+    virtual_key_is_dead, virtual_key_of_scan_code, virtual_screen_rect, wheel_scroll_amount,
+    window_is_exposed, work_area_at, write_std_error, write_to_console,
 };
+
+/// **Say one thing in the system's box, over no window** — the ownerless door every platform
+/// keeps: a launch about to exit, a road process's failure, the panic hook's alert. On Windows
+/// it is the system's box over no window (`windows_impl::message_box`), which also serves the
+/// owned box a stop raises through [`SeenBox::say`] (0.4.10 plan row 72).
+#[cfg(windows)]
+pub fn message_box(title: &str, text: &str) {
+    windows_impl::message_box(None, title, text);
+}
 
 /// **The same doors, on a machine with no Win32** (M1-1).
 ///
