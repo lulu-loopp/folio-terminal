@@ -192,6 +192,12 @@ pub(crate) enum Writer {
     /// a trial asks for it only once it is committed, and so the person's Folio; the release
     /// asks for it then (`register_restart_now`).
     RestartRegistration,
+    /// **The start-time carry pass's repair of agent hooks** (`carry_pass`, its first member
+    /// `agent_hooks_step`; the gate is asked on the pass's worker, 0.4.10 plan row 67b): the
+    /// Claude Code, Codex and Copilot entries of a copy that is gone, or of this copy in an older
+    /// shape, rewritten to this one. Held back, the scan still runs and its classification is
+    /// shown; the release runs the pass again, which then writes.
+    AgentHooksRepair,
 }
 
 impl Writer {
@@ -215,13 +221,14 @@ impl Writer {
             | Writer::ExplorerRepair
             | Writer::ToastIdentity
             | Writer::RecoveredAnnouncement
-            | Writer::RestartRegistration => false,
+            | Writer::RestartRegistration
+            | Writer::AgentHooksRepair => false,
         }
     }
 
     /// Every writer, in release order.
     #[cfg(test)]
-    pub(crate) const ALL: [Writer; 18] = [
+    pub(crate) const ALL: [Writer; 19] = [
         Writer::DataFolderMove,
         Writer::DataFolder,
         Writer::RefusedCopies,
@@ -240,6 +247,7 @@ impl Writer {
         Writer::ToastIdentity,
         Writer::RecoveredAnnouncement,
         Writer::RestartRegistration,
+        Writer::AgentHooksRepair,
     ];
 }
 

@@ -42,6 +42,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+mod agent_hooks_step;
 mod agent_resume;
 mod animation;
 mod app_delegate_wire;
@@ -56,6 +57,7 @@ mod attention_wire;
 mod attention_words;
 mod card_trace;
 mod cardhint;
+mod carry_pass;
 mod cli;
 mod clipboard_lane;
 mod clipboard_picture;
@@ -731,9 +733,15 @@ enum AppEvent {
     /// `explorer_menu::state()` and `explorer_menu::take_outcome()` by the time
     /// this is sent, and this says only that something did.
     ExplorerPackageChanged,
+    /// **The carry pass's agent-hooks step published what it found** (0.4.10 plan row 67b): the
+    /// answer is in `agent_hooks_step::AGENT_HOOKS`, and the handler sets the Agents rows from it
+    /// and raises the notice of each repair of a gone copy's hooks. Owed a wake for
+    /// [`Self::ExplorerPackageChanged`]'s reason: the scan lands seconds into a launch, or behind a
+    /// modal, on a window that may have nothing else coming.
+    AgentHooksScanned,
     /// **The machine listed its monospaced families** (GitHub issue #3).
     ///
-    /// The tenth of the same family and the newest, and it is owed a wake for
+    /// The tenth of the same family, and it is owed a wake for
     /// [`Self::CopilotProbed`]'s reason with one more on top: the walk was
     /// started by the press that opened the dialog, so the reader is looking at
     /// a picker that is holding one row — the family in force — and waiting for
@@ -1058,6 +1066,7 @@ impl AppEvent {
             | Self::CopilotProbed
             | Self::UpdateChecked
             | Self::ExplorerPackageChanged
+            | Self::AgentHooksScanned
             | Self::FontsScanned
             | Self::TaskbarAnswered
             | Self::ProgramsAnswered
@@ -9278,13 +9287,24 @@ struct App<B: Backend = Native> {
     /// a second to draw one tick would be reading it sixty times a second. So it is cached at the
     /// two moments it can change — the launch, and a press on the row.
     ///
-    /// **Not repaired at launch, unlike the verb above.** A menu entry pointing at a `folio.exe`
-    /// that has moved opens nothing and the user cannot tell why; a hook command pointing at one
-    /// fails, is retried by nobody, and leaves an agent as silent as it was before anyone installed
-    /// anything. The second is a feature that has stopped working, not a broken thing on somebody's
-    /// desktop — and rewriting a file belonging to another program at every launch, without being
-    /// asked, is not something this build does.
+    /// **Repaired at start since 0.4.10, for two states only** (plan row 67b, reversing the
+    /// 2026-08-25 stance that hooks are not repaired at launch): hooks naming a copy that is gone,
+    /// and this copy's own in an older shape, are pointed here by the carry pass's worker
+    /// (`agent_hooks_step`). The stance's premise was that a dead hook is a feature that has
+    /// stopped working; row 195 made the hooks how a restart brings sessions back, so a dead one is
+    /// resume quietly doing nothing. Every other state is said, never written.
+    ///
+    /// **Not read at launch.** The launch reads no agent's file on this thread: until the scan's
+    /// first answer ([`Self::agent_rows_known`]) the switch reads Off, and the answer sets it.
     claude_hooks_installed: bool,
+    /// **What the newest start-time scan found in each agent's configuration**
+    /// (`agent_hooks_step::HooksSnapshot`), in the `agent_takeovers` order — what the Agents rows'
+    /// lines are said from. `None` for a family a press has written since, until the scan the
+    /// press asked for answers.
+    agent_hooks_found: [Option<attention_ownership::HooksFound>; 3],
+    /// **Whether a scan has answered at all** in this process: before it, nothing about the agents'
+    /// files is known on this thread, and the resume row says nothing about their hooks.
+    agent_rows_known: bool,
     /// **Why each agent's configuration file will not be edited, when it will not be** — the
     /// `agent_takeovers` order, Claude Code then codex then copilot.
     ///
@@ -9831,6 +9851,8 @@ impl<B: Backend> App<B> {
             explorer_package_asked_place: explorer_menu::ExplorerPlace::default(),
             explorer_package_announce: Announce::Everything,
             agent_takeovers: Default::default(),
+            agent_hooks_found: Default::default(),
+            agent_rows_known: false,
             profiles_file_broken: false,
             pins_file_broken: false,
             settings_file_broken: false,
@@ -15189,6 +15211,8 @@ fn release_trial_writer(writer: update_trial::Writer, stores: &mut TrialStores<'
         Writer::RecoveredAnnouncement => recovered::ask(&persist::storage_dir()),
         // The trial is committed: it is the person's Folio, and the system may start it again.
         Writer::RestartRegistration => (stores.restart)(),
+        // The pass again, on its worker: what it held back, it now writes.
+        Writer::AgentHooksRepair => carry_pass::begin_carry_pass(),
     }
 }
 
@@ -31695,20 +31719,58 @@ fn adopt_program_answers(
             news.names = true;
         }
         news.git = git::GIT_LOCATION.adopt(facts.git);
-        news.agent_homes = attention_hooks::AGENT_HOMES.adopt(facts.generation, facts.agent_homes);
+        // **The first answer is news too** (0.4.10 plan row 67b): before it no agent's file has
+        // been read in this process, whether or not the walk's folders differ from the launch's.
+        let first = !attention_hooks::AGENT_HOMES.answered();
+        news.agent_homes =
+            attention_hooks::AGENT_HOMES.adopt(facts.generation, facts.agent_homes) || first;
+        if news.agent_homes {
+            // Where the agents keep their files is the account's own now: the carry pass reads
+            // them there, on its worker, wherever this answer was adopted — the launch adopts the
+            // walk before it has a window to take news to.
+            carry_pass::begin_carry_pass();
+        }
     }
     news
 }
 
-/// **The three agent rows, read off their files again** — `Runtime::refresh_agent_rows`'s body,
-/// and the program walk's adopter's when the folders the files live in moved (T-FRESH-FACTS). The
-/// copilot readiness is read again with them: whether its hooks are switched off is a file in the
-/// same folder.
-fn read_the_agent_rows_again<B: Backend>(app: &mut App<B>) {
-    (app.claude_hooks_installed, app.agent_config_refusals[0]) = attention_hooks::row_state();
-    (app.codex_notify_installed, app.agent_config_refusals[1]) = attention_codex::row_state();
-    (app.copilot_hooks_installed, app.agent_config_refusals[2]) = attention_copilot::row_state();
-    app.copilot_readiness = attention_copilot::readiness();
+/// **The three agent rows, set from the start-time scan's answer** (0.4.10 plan row 67b) — what
+/// the window does with `agent_hooks_step::HooksSnapshot`, and all it does: the files were read on
+/// the carry pass's worker. Whether the switch is On (this copy's hooks, in today's form or an
+/// older one), the reason a file will not be edited at all, what each row says, and Copilot's
+/// readiness, which reads a file in the same folder.
+fn adopt_agent_hooks_snapshot<B: Backend>(
+    app: &mut App<B>,
+    snapshot: &agent_hooks_step::HooksSnapshot,
+) {
+    let installed = [
+        &mut app.claude_hooks_installed,
+        &mut app.codex_notify_installed,
+        &mut app.copilot_hooks_installed,
+    ];
+    for ((installed, refusal), found) in installed
+        .into_iter()
+        .zip(&mut app.agent_config_refusals)
+        .zip(&snapshot.found)
+    {
+        *installed = found.is_this_copys();
+        *refusal = match found {
+            attention_ownership::HooksFound::Refused(reason) => Some(*reason),
+            _ => None,
+        };
+    }
+    app.agent_hooks_found = snapshot.found.clone().map(Some);
+    app.agent_rows_known = true;
+    app.copilot_readiness = snapshot.copilot_readiness;
+}
+
+/// **A press on agent row `family` asks the scan again** (0.4.10 plan row 67b): the row's line and
+/// the resume row's are the scan's, so the row says its own sentence until the pass the press
+/// starts answers, off this thread. With [`adopt_agent_hooks_snapshot`], the one writer of
+/// `App::agent_hooks_found`.
+fn agent_row_asked_again<B: Backend>(app: &mut App<B>, family: usize) {
+    app.agent_hooks_found[family] = None;
+    carry_pass::begin_carry_pass();
 }
 
 /// **The startup trace's two shell lines, held while a launch tab's shell is being born**.
@@ -35336,6 +35398,15 @@ impl Runtime<'_, Native> {
                 let _ = proxy.send_event(AppEvent::ExplorerPackageChanged);
             });
         }
+        // **And the carry pass's** (0.4.10 plan row 67b): it can write too — an agent's hooks that
+        // name a copy that is gone — and lands after the program walk, which is after the first
+        // frame on most launches. Installed before the walk can answer, so before the pass runs.
+        {
+            let proxy = proxy.clone();
+            agent_hooks_step::install_hooks_wake(move || {
+                let _ = proxy.send_event(AppEvent::AgentHooksScanned);
+            });
+        }
         // **And the sixth's** (GitHub issue #3), which is the only one of them
         // that is started by a *press* rather than by startup or by a pane: the
         // gear asks the machine for its monospaced families, and the picker is
@@ -36209,12 +36280,6 @@ impl Runtime<'_, Native> {
                 }
             });
         let git_worker = git::GitWorker::spawn(proxy.clone(), Arc::clone(git_mutations.turns()))?;
-        // **One read per family, and both of the row's facts come out of it**: whether this copy's
-        // marks are in that file, and — when the file is one this build will not edit — the reason
-        // the row has to say instead of `Off` (closure review R1).
-        let claude_row = attention_hooks::row_state();
-        let codex_row = attention_codex::row_state();
-        let copilot_row = attention_copilot::row_state();
         let mut app = App::assemble(AppParts {
             gpu,
             tab_ids,
@@ -36242,16 +36307,17 @@ impl Runtime<'_, Native> {
             // Reads the registry once and, on a machine whose `folio.exe`
             // has moved since, writes the verb again — see the field.
             context_menu_installed: context_menu::reassert(),
-            claude_hooks_installed: claude_row.0,
-            // The same, over codex's own file — see the field above's note, which holds word for
-            // word for this one.
-            codex_notify_installed: codex_row.0,
-            // And again over copilot's own hooks directory. The readiness beside it starts at
-            // `Unknown` on every machine, because the probe that could better it has not been
-            // started — nothing has shown the page it is printed on yet.
-            copilot_hooks_installed: copilot_row.0,
-            agent_config_refusals: [claude_row.1, codex_row.1, copilot_row.1],
-            copilot_readiness: attention_copilot::readiness(),
+            // **Nothing about the agents' files is read on this thread at launch** (0.4.10 plan
+            // row 67b): the carry pass reads them on its worker once the program walk has said
+            // where they are, and its answer sets these. Until then each switch reads Off and no
+            // row says anything of its own.
+            claude_hooks_installed: false,
+            codex_notify_installed: false,
+            // The readiness starts at `Unknown` on every machine, because the probe that could
+            // better it has not been started — nothing has shown the page it is printed on yet.
+            copilot_hooks_installed: false,
+            agent_config_refusals: [None; 3],
+            copilot_readiness: attention_copilot::Readiness::Unknown,
             // Nobody has been asked yet, which is the only thing a launch can
             // truthfully say about it — see the field.
             notifications: NotificationDesk::new(proxy.clone()),
@@ -46876,11 +46942,6 @@ impl<B: Backend> FolioApp<B> {
             // The parser questions about the PowerShell rows, as after a table change.
             shell_integration::begin_powershell_preparation_for(&app.profile_programs);
         }
-        if news.agent_homes {
-            // Where an agent keeps its configuration moved: its row reads the file there now,
-            // once for the process (the rows are the application's).
-            read_the_agent_rows_again(app);
-        }
         if news.copilot {
             attention_copilot::reask_probe(attention_copilot::ProbeTrigger::ProgramMoved);
         }
@@ -49485,6 +49546,47 @@ impl<B: Backend> FolioApp<B> {
             }
         }
         Ok(())
+    }
+
+    /// **Set the Agents rows from the scan, and say each repair of a gone copy's hooks once**
+    /// (0.4.10 plan row 67b, R8): one notice per family, on the window the keyboard is on, else the
+    /// oldest standing one; every window's chrome redrawn, because the rows are facts about the
+    /// machine and any window may be showing the page.
+    fn adopt_agent_hooks_scan(&mut self) -> Result<()> {
+        let Some(snapshot) = agent_hooks_step::AGENT_HOOKS.take_snapshot() else {
+            return Ok(());
+        };
+        let Some(app) = self.app.as_mut() else {
+            return Ok(());
+        };
+        adopt_agent_hooks_snapshot(app, &snapshot);
+        let oldest_standing = |app: &mut Self| {
+            (0..app.windows.len()).find_map(|index| {
+                let id = app.windows.key_at(index)?;
+                app.windows
+                    .get_mut(id)
+                    .is_some_and(|window| window.leaving.is_none())
+                    .then_some(id)
+            })
+        };
+        let told = self.frontmost_window().or_else(|| oldest_standing(self));
+        self.for_each_window(|runtime| {
+            if Some(runtime.window_id()) == told {
+                for notice in &snapshot.notices {
+                    runtime.toast(
+                        toast::ToastKind::Ok,
+                        toast::ToastAnchor::Window,
+                        None,
+                        notice.text().to_owned(),
+                    )?;
+                }
+            }
+            if runtime.refresh_chrome() {
+                runtime.present_chrome_change()
+            } else {
+                Ok(())
+            }
+        })
     }
 
     fn announce_recovered_edits(&mut self) -> Result<()> {
@@ -52542,6 +52644,9 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                     }
                 })
             }
+            // **The carry pass's answer about the agents' hooks**: the rows set from it, its
+            // notices raised once on the focused window, every window redrawn.
+            AppEvent::AgentHooksScanned => self.adopt_agent_hooks_scan(),
             // **The one place the family list moves onto the screen.** The walk
             // finished on a worker and left its answer in `settings`' mailbox;
             // this is between two frames, which is the whole reason the worker
@@ -52589,6 +52694,10 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 if let Some(app) = self.app.as_mut() {
                     app.copilot_readiness = attention_copilot::readiness();
                 }
+                // **The version is the start-time repair's gate for Copilot's hooks** (0.4.10 plan
+                // row 67b, R9): a repair that waited for it runs now, and the scan's snapshot,
+                // which carries readiness too, is read after this answer.
+                carry_pass::begin_carry_pass();
                 self.for_each_window(|runtime| {
                     if runtime.refresh_chrome() {
                         runtime.present_chrome_change()

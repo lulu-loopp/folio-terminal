@@ -36,7 +36,7 @@
 //! have", so a user who edits it by hand gets a Folio that agrees with them.
 
 pub(crate) use crate::attention_ownership::Outcome;
-use crate::attention_ownership::{self as ownership, Decision};
+use crate::attention_ownership::{self as ownership, Decision, HooksFound};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
@@ -267,7 +267,7 @@ pub(crate) fn state() -> State {
     if state != State::Installed {
         return state;
     }
-    let Some(exe) = std::env::current_exe().ok() else {
+    let Some(exe) = ownership::this_copy() else {
         return State::Unreadable;
     };
     let Ok(text) =
@@ -502,6 +502,9 @@ struct Wanted {
     event: &'static str,
     matcher: Option<&'static str>,
     hook: Value,
+    /// Whether its turn-end row carries resume — `Stop` — so that a file missing it is one whose
+    /// resume cannot work, and an old shape to the start-time scan (0.4.10 plan row 67, R3).
+    carries_resume: bool,
 }
 
 impl Wanted {
@@ -540,9 +543,118 @@ fn wanted(exe: &Path) -> Vec<Wanted> {
                 event,
                 matcher,
                 hook: Value::Object(hook),
+                carries_resume: attention_map::turn_end_row(CLAUDE_CODE, row.event)
+                    .is_some_and(|row| row.resume.is_declared()),
             }
         })
         .collect()
+}
+
+/// **What Claude Code's settings file holds, as the start-time scan reads it** (0.4.10 plan row
+/// 67b). Nothing is written here: the step repairs a [`HooksFound::wants_repair`] answer through
+/// [`apply_resolved`], the switch's own writer, which asks every question again before it writes.
+///
+/// `look` is the machine's answer to "what stands at this path" ([`ownership::what_stands`] in the
+/// product), so a test decides which owners are alive, gone or on a volume that is not there.
+pub(crate) fn scan_resolved(
+    config: &Config,
+    exe: &Path,
+    look: &dyn Fn(&Path) -> ownership::PathStands,
+) -> HooksFound {
+    let text = match config.standing() {
+        Standing::Nothing => return HooksFound::Nothing,
+        Standing::Unreadable => return HooksFound::Unreadable,
+        Standing::Text(text) => text,
+    };
+    let Ok(document) = splice::parse(&text) else {
+        return HooksFound::Unreadable;
+    };
+    let settings = match document.whole_value() {
+        Ok(value) if value.is_object() => value,
+        _ => return HooksFound::Unreadable,
+    };
+    let hooks = match mapped(&document) {
+        Ok(Some(hooks)) => hooks,
+        Ok(None) => return HooksFound::Nothing,
+        Err(reason) if reason == crate::i18n::Text::AgentHooksDuplicateKey.text() => {
+            return HooksFound::Declined(reason);
+        }
+        Err(_) => return HooksFound::Unreadable,
+    };
+    let Ok(paths) = owners(&settings) else {
+        return HooksFound::Unreadable;
+    };
+    if unclassified_entry(&hooks) {
+        return HooksFound::Unclassified;
+    }
+    ownership::classify_owners(&paths, exe, look, || claude_drifted(&hooks, exe))
+}
+
+/// Whether an entry names a copy of Folio in a shape [`hook_owner`] cannot read — one with a key
+/// this build does not write, an argument list of another shape, a template it never produced.
+fn unclassified_entry(hooks: &Hooks<'_>) -> bool {
+    hooks
+        .events
+        .iter()
+        .flat_map(|event| &event.groups)
+        .flat_map(|group| &group.entries)
+        .any(|entry| {
+            entry.own.is_none()
+                && hook_owner(&entry.value).is_err()
+                && entry
+                    .value
+                    .get("command")
+                    .and_then(Value::as_str)
+                    .is_some_and(|command| ownership::folio_like_command(command, CLAUDE_CODE))
+        })
+}
+
+/// **Whether this copy's entries are not today's** (R3): an entry an install would replace, an own
+/// entry no install wants, or no entry at all for an event that carries resume. An event the person
+/// took out by hand that carries no resume is theirs to leave out.
+///
+/// The entries are claimed the way [`edited`] claims them — for each wanted entry the first own
+/// entry under the same event and matcher — so "drifted" is exactly "an install would change one of
+/// this copy's entries, or add `Stop`".
+fn claude_drifted(hooks: &Hooks<'_>, exe: &Path) -> bool {
+    let mut claimed: Vec<(usize, usize, usize)> = Vec::new();
+    for want in wanted(exe) {
+        let found = hooks
+            .events
+            .iter()
+            .enumerate()
+            .filter(|(_, event)| event.member.key == want.event)
+            .flat_map(|(e, event)| {
+                event
+                    .groups
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, group)| group.matcher.as_deref() == want.matcher)
+                    .flat_map(move |(g, group)| {
+                        group
+                            .entries
+                            .iter()
+                            .enumerate()
+                            .map(move |(h, entry)| ((e, g, h), entry))
+                    })
+            })
+            .find(|(at, entry)| entry.own.is_some() && !claimed.contains(at));
+        match found {
+            Some((_, entry)) if entry.value != want.hook => return true,
+            Some((at, _)) => claimed.push(at),
+            None if want.carries_resume => return true,
+            None => {}
+        }
+    }
+    hooks.events.iter().enumerate().any(|(e, event)| {
+        event.groups.iter().enumerate().any(|(g, group)| {
+            group
+                .entries
+                .iter()
+                .enumerate()
+                .any(|(h, entry)| entry.own.is_some() && !claimed.contains(&(e, g, h)))
+        })
+    })
 }
 
 /// One hook entry as the file has it, and whether it is provably Folio's.
@@ -623,32 +735,23 @@ fn folio_share_of(items: impl IntoIterator<Item = bool>) -> FolioShare {
     share
 }
 
-/// What an object on the way to Folio's entries said when it named one key twice.
-///
-/// The agent's own parser decides which of the two it reads, and an edit that guessed could change
-/// the one the agent runs; so nothing is written.
-const DUPLICATE: &str =
-    "the settings file names one key twice where Folio's hooks go, so nothing was written";
-
-/// **What every writer of an agent's file says when the edit it made would have changed a byte
-/// that is not Folio's** — the write-time self-check's refusal (0.4.10 plan row 67a).
-pub(crate) const SPLICE_REFUSED: &str =
-    "Folio could not change only its own lines in this file, so nothing was written";
-
 /// **The file's `hooks`, read down to every entry and whose it is.**
 ///
 /// `None` when there is no `hooks` member at all. The shapes [`owners`] refuses are refused here
 /// too, for the same reasons; on top of them, a key named twice anywhere on the way down to an
-/// entry, or inside an entry that reads as Folio's ([`DUPLICATE`]).
+/// entry, or inside an entry that reads as Folio's ([`Text::AgentHooksDuplicateKey`](crate::i18n::Text::AgentHooksDuplicateKey)).
 fn mapped<'a>(document: &'a splice::Document) -> Result<Option<Hooks<'a>>, &'static str> {
     let unknown = || crate::i18n::Text::AgentHooksSchemaUnknown.text();
     let Some(root) = document.root.as_ref() else {
         return Ok(None);
     };
     if root.members().is_none() {
-        return Err(UNREADABLE);
+        return Err(crate::i18n::Text::AgentHooksUnreadable.text());
     }
-    let Some(member) = root.member("hooks").map_err(|_| DUPLICATE)? else {
+    let Some(member) = root
+        .member("hooks")
+        .map_err(|_| crate::i18n::Text::AgentHooksDuplicateKey.text())?
+    else {
         return Ok(None);
     };
     let members = member.value.members().ok_or_else(unknown)?;
@@ -658,15 +761,17 @@ fn mapped<'a>(document: &'a splice::Document) -> Result<Option<Hooks<'a>>, &'sta
             .iter()
             .any(|earlier| earlier.key == event.key)
         {
-            return Err(DUPLICATE);
+            return Err(crate::i18n::Text::AgentHooksDuplicateKey.text());
         }
         let mut groups = Vec::new();
         for node in event.value.elements().ok_or_else(unknown)? {
             let rows = node
                 .member("hooks")
-                .map_err(|_| DUPLICATE)?
+                .map_err(|_| crate::i18n::Text::AgentHooksDuplicateKey.text())?
                 .ok_or_else(unknown)?;
-            let matcher = node.member("matcher").map_err(|_| DUPLICATE)?;
+            let matcher = node
+                .member("matcher")
+                .map_err(|_| crate::i18n::Text::AgentHooksDuplicateKey.text())?;
             let mut entries = Vec::new();
             for entry in rows.value.elements().ok_or_else(unknown)? {
                 let value = value_at(document.text, entry)?;
@@ -675,7 +780,7 @@ fn mapped<'a>(document: &'a splice::Document) -> Result<Option<Hooks<'a>>, &'sta
                 // keys of one name: which one the agent runs is its parser's business, and an edit
                 // of the entry would take the other one's bytes with it.
                 if own.is_some() && entry.names_a_key_twice() {
-                    return Err(DUPLICATE);
+                    return Err(crate::i18n::Text::AgentHooksDuplicateKey.text());
                 }
                 entries.push(Entry {
                     node: entry,
@@ -706,7 +811,8 @@ fn mapped<'a>(document: &'a splice::Document) -> Result<Option<Hooks<'a>>, &'sta
 
 /// The value a span holds, as the classifiers read it.
 fn value_at(text: &str, node: &splice::Node) -> Result<Value, &'static str> {
-    serde_json::from_str(&text[node.start..node.end]).map_err(|_| UNREADABLE)
+    serde_json::from_str(&text[node.start..node.end])
+        .map_err(|_| crate::i18n::Text::AgentHooksUnreadable.text())
 }
 
 /// What becomes of one entry.
@@ -759,11 +865,14 @@ fn edited(
         );
         return verified(document, fresh).map(Some);
     };
-    let root_members = root.members().ok_or(UNREADABLE)?;
+    let root_members = root
+        .members()
+        .ok_or(crate::i18n::Text::AgentHooksUnreadable.text())?;
     // A file of one line gets its new entries on that line; a file with nothing in it yet, over
     // lines like everything else this build writes.
     let pretty = root_members.is_empty() || text[root.start..root.end].contains('\n');
-    let root_items = splice::Container::of(text, root).ok_or(UNREADABLE)?;
+    let root_items =
+        splice::Container::of(text, root).ok_or(crate::i18n::Text::AgentHooksUnreadable.text())?;
     let mut edits = Vec::new();
     let Some(hooks) = mapped(document)? else {
         if wanted.is_empty() {
@@ -888,7 +997,8 @@ fn edited(
                 }
             }
             if deleted.iter().any(|gone| *gone) {
-                let rows = splice::Container::of(text, group.rows).ok_or(UNREADABLE)?;
+                let rows = splice::Container::of(text, group.rows)
+                    .ok_or(crate::i18n::Text::AgentHooksUnreadable.text())?;
                 let layout = rows.layout(&style, pretty);
                 kept.extend(rows.edits(&deleted, &[], &style, &layout));
             }
@@ -903,7 +1013,8 @@ fn edited(
         }
         inner.extend(kept);
         if group_gone.iter().any(|gone| *gone) || !appended.is_empty() {
-            let groups = splice::Container::of(text, &event.member.value).ok_or(UNREADABLE)?;
+            let groups = splice::Container::of(text, &event.member.value)
+                .ok_or(crate::i18n::Text::AgentHooksUnreadable.text())?;
             let layout = groups.layout(&style, pretty);
             let appended: Vec<String> = appended
                 .iter()
@@ -931,7 +1042,8 @@ fn edited(
     }
     edits.extend(inner);
     if event_gone.iter().any(|gone| *gone) || !added.is_empty() {
-        let events = splice::Container::of(text, &hooks.member.value).ok_or(UNREADABLE)?;
+        let events = splice::Container::of(text, &hooks.member.value)
+            .ok_or(crate::i18n::Text::AgentHooksUnreadable.text())?;
         let layout = events.layout(&style, pretty);
         let appended: Vec<String> = added
             .iter()
@@ -977,14 +1089,16 @@ fn splice_checked(
     if edits.is_empty() {
         return Ok(None);
     }
-    let text = splice::spliced(document.text, edits).ok_or(SPLICE_REFUSED)?;
+    let text = splice::spliced(document.text, edits)
+        .ok_or(crate::i18n::Text::AgentHooksSpliceRefused.text())?;
     verified(document, text).map(Some)
 }
 
 /// **The write-time self-check** (0.4.10 plan row 67a): the text an edit produced is handed on
 /// only when, read back, it says everything `before` said that was not Folio's, in the same bytes.
 ///
-/// Three things are compared, and any difference refuses the write whole ([`SPLICE_REFUSED`]):
+/// Three things are compared, and any difference refuses the write whole
+/// ([`Text::AgentHooksSpliceRefused`](crate::i18n::Text::AgentHooksSpliceRefused)):
 ///
 /// 1. that the result is a document, and its top level an object;
 /// 2. **the whole file with Folio's extents cut out, byte for byte** ([`outside_folios`]): every
@@ -1004,7 +1118,7 @@ fn verified(before: &splice::Document, text: String) -> Result<String, &'static 
     if keeps_what_is_not_ours(before, &text) {
         Ok(text)
     } else {
-        Err(SPLICE_REFUSED)
+        Err(crate::i18n::Text::AgentHooksSpliceRefused.text())
     }
 }
 
@@ -1293,7 +1407,9 @@ pub(crate) fn apply_at(path: &Path, decision: Decision, exe: &Path, data: &Path)
     match Config::resolve(path) {
         Ok(config) => apply_resolved(&config, decision, exe, data),
         Err(Unresolved::Refused(reason)) => Outcome::Refused(reason),
-        Err(Unresolved::Unreadable) => Outcome::Refused(UNREADABLE),
+        Err(Unresolved::Unreadable) => {
+            Outcome::Refused(crate::i18n::Text::AgentHooksUnreadable.text())
+        }
     }
 }
 
@@ -1320,18 +1436,20 @@ pub(crate) fn apply_resolved(
         // Nothing there yet: the install creates the file, and there is nothing to keep beside it.
         Standing::Nothing => String::new(),
         // Refused rather than replaced, exactly as an unparseable file is.
-        Standing::Unreadable => return Outcome::Refused(UNREADABLE),
+        Standing::Unreadable => {
+            return Outcome::Refused(crate::i18n::Text::AgentHooksUnreadable.text());
+        }
     };
     // Read as spans, for the edit, and as a value, for the classifiers: one text, two views of it.
     // Refused rather than replaced when either cannot read it. A settings file this build cannot
     // read is a settings file somebody wrote, and overwriting it to add a convenience is not a
     // trade anyone agreed to.
     let Ok(document) = splice::parse(&existing) else {
-        return Outcome::Refused(UNREADABLE);
+        return Outcome::Refused(crate::i18n::Text::AgentHooksUnreadable.text());
     };
     let settings = match document.whole_value() {
         Ok(value) if value.is_object() => value,
-        _ => return Outcome::Refused(UNREADABLE),
+        _ => return Outcome::Refused(crate::i18n::Text::AgentHooksUnreadable.text()),
     };
     let paths = match owners(&settings) {
         Ok(paths) => paths,
@@ -1372,7 +1490,7 @@ pub(crate) fn apply_resolved(
             return Outcome::Refused("the user configuration directory could not be created");
         }
         Landing::NoBackup => {
-            return Outcome::Refused(NO_BACKUP);
+            return Outcome::Refused(crate::i18n::Text::AgentConfigNoBackup.text());
         }
         Landing::Changed => {
             return Outcome::Refused(crate::i18n::Text::AgentConfigChanged.text());
@@ -1388,19 +1506,6 @@ pub(crate) fn apply_resolved(
     }
 }
 
-/// The sentence all three installers say when the copy of the user's own file could not be kept.
-///
-/// One string because it is one ruling: **the copy is a precondition of the write, not a courtesy
-/// beside it.** See [`land`].
-pub(crate) const NO_BACKUP: &str =
-    "a copy of your own file could not be kept, so nothing was written";
-
-/// What this module says about a settings file it could not read, whichever half could not read it.
-///
-/// One sentence for the byte that is not UTF-8 and for the document that is not JSON, because to
-/// the reader they are one fact: there is a file there, and this build is not going to guess at it.
-const UNREADABLE: &str = "the settings file is not one this build can read";
-
 /// **What is standing at a configuration file's path**, as the answer to "is there one".
 ///
 /// The distinction between these three is the whole of the read side of [`land`]'s contract.
@@ -1410,6 +1515,7 @@ const UNREADABLE: &str = "the settings file is not one this build can read";
 /// given nothing to copy. Release audit 2026-09-16 (C-3): one non-UTF-8 byte in `config.toml` or
 /// `settings.json` is enough, the file is perfectly writable, and the loss is certain rather than
 /// a race. So the error kind is asked about, and everything that is not "no such file" refuses.
+#[derive(Clone)]
 pub(crate) enum Standing {
     /// There is no file at that path. A write there creates one and destroys nothing.
     Nothing,
@@ -1451,6 +1557,10 @@ pub(crate) struct Config {
     named: PathBuf,
     /// The file that path resolved to, once.
     target: PathBuf,
+    /// **The file as the operation read it, when the operation reads it once**
+    /// ([`Self::with_one_read`]): every read below answers this, so what was classified is what
+    /// is edited, and [`land`] writes only over these bytes.
+    one_read: Option<Standing>,
 }
 
 impl Config {
@@ -1469,7 +1579,29 @@ impl Config {
         Ok(Self {
             named: path.to_path_buf(),
             target: resolve(path)?,
+            one_read: None,
         })
+    }
+
+    /// **This resolution, its file read once for the whole operation** (0.4.10 plan row 67b): the
+    /// start-time repair classifies the file and then writes it, and a press may write between the
+    /// two. Held to one read, the classification and the edit are of the same bytes, and the
+    /// landing's compare refuses the write when the file no longer holds them, so a repair never
+    /// undoes a press it did not see.
+    pub(crate) fn with_one_read(self) -> Self {
+        let read = self.standing();
+        Self {
+            one_read: Some(read),
+            ..self
+        }
+    }
+
+    /// This resolution with its one read let go: what a write left, read as it stands now.
+    pub(crate) fn read_afresh(self) -> Self {
+        Self {
+            one_read: None,
+            ..self
+        }
     }
 
     /// The path the environment named — never resolved again, only reported.
@@ -1484,6 +1616,9 @@ impl Config {
     /// UTF-8, a directory standing under the file's name. None of them is a file that is not
     /// there, and that is the only state in which writing a fresh one loses nothing.
     pub(crate) fn standing(&self) -> Standing {
+        if let Some(read) = &self.one_read {
+            return read.clone();
+        }
         match bt_platform::file_reads::read_to_string(
             bt_platform::file_reads::Lane::Attention,
             &self.target,
@@ -3111,7 +3246,10 @@ mod tests {
         std::fs::write(&path, theirs).expect("the user's own file");
 
         let installing = apply_to(&path, true, &exe());
-        assert_eq!(installing, Outcome::Refused(UNREADABLE));
+        assert_eq!(
+            installing,
+            Outcome::Refused(crate::i18n::Text::AgentHooksUnreadable.text())
+        );
         assert_eq!(std::fs::read(&path).expect("still there"), theirs);
         assert_eq!(
             names(&dir),
@@ -3122,7 +3260,10 @@ mod tests {
         assert_eq!(state_at(&path), State::Unreadable);
         // Taking it back out is refused for the same reason: this build cannot tell whose it is.
         let taking_it_out = apply_to(&path, false, &exe());
-        assert_eq!(taking_it_out, Outcome::Refused(UNREADABLE));
+        assert_eq!(
+            taking_it_out,
+            Outcome::Refused(crate::i18n::Text::AgentHooksUnreadable.text())
+        );
         assert_eq!(std::fs::read(&path).expect("still there"), theirs);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -3528,21 +3669,27 @@ mod tests {
         for (theirs, reason) in [
             (
                 "{\n  // mine\n  \"model\": \"opus\"\n}\n".to_owned(),
-                UNREADABLE,
+                crate::i18n::Text::AgentHooksUnreadable.text(),
             ),
-            ("{\"model\": \"opus\",}\n".to_owned(), UNREADABLE),
-            ("{\"hooks\": {}, \"hooks\": {}}\n".to_owned(), DUPLICATE),
+            (
+                "{\"model\": \"opus\",}\n".to_owned(),
+                crate::i18n::Text::AgentHooksUnreadable.text(),
+            ),
+            (
+                "{\"hooks\": {}, \"hooks\": {}}\n".to_owned(),
+                crate::i18n::Text::AgentHooksDuplicateKey.text(),
+            ),
             (
                 "{\"hooks\": {\"Stop\": [], \"Stop\": []}}\n".to_owned(),
-                DUPLICATE,
+                crate::i18n::Text::AgentHooksDuplicateKey.text(),
             ),
             (
                 "{\"hooks\": {\"Stop\": [{\"hooks\": [], \"hooks\": []}]}}\n".to_owned(),
-                DUPLICATE,
+                crate::i18n::Text::AgentHooksDuplicateKey.text(),
             ),
             (
                 format!("{{\"hooks\": {{\"Stop\": [{{\"hooks\": [{twice}]}}]}}}}\n"),
-                DUPLICATE,
+                crate::i18n::Text::AgentHooksDuplicateKey.text(),
             ),
         ] {
             let dir = scratch("unsure");
@@ -3599,7 +3746,7 @@ mod tests {
         ] {
             assert_eq!(
                 verified(&document, changed.clone()),
-                Err(SPLICE_REFUSED),
+                Err(crate::i18n::Text::AgentHooksSpliceRefused.text()),
                 "{changed}"
             );
         }

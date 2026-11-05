@@ -60,7 +60,7 @@
 //! proved too old, never the absence of proof.
 
 pub(crate) use crate::attention_ownership::Outcome;
-use crate::attention_ownership::{self as ownership, Decision};
+use crate::attention_ownership::{self as ownership, Decision, HooksFound};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex, OnceLock};
@@ -92,12 +92,6 @@ const SETTINGS_FILE: &str = "settings.json";
 
 /// The user setting that turns every hook file off at once, ours included.
 const DISABLE_ALL_HOOKS: &str = "disableAllHooks";
-
-/// What this module says about a hook file it could not read, whichever half could not read it.
-///
-/// One sentence for the byte that is not UTF-8 and for the document that is not JSON, because to
-/// the reader they are one fact: there is a file there, and this build is not going to guess at it.
-const UNREADABLE: &str = "the copilot hook file is not one this build can read";
 
 /// The schema version upstream's own example carries: `"version": 1`.
 const SCHEMA_VERSION: u64 = 1;
@@ -279,7 +273,7 @@ pub(crate) fn state() -> State {
     if state != State::Installed {
         return state;
     }
-    let Some(exe) = std::env::current_exe().ok() else {
+    let Some(exe) = ownership::this_copy() else {
         return State::Unreadable;
     };
     let Ok(text) =
@@ -491,7 +485,7 @@ fn owners(document: &Value) -> Result<Vec<PathBuf>, &'static str> {
                 entry_owner(entry)
                     .ok()
                     .flatten()
-                    .ok_or("a hook file of your own already stands under that name")?,
+                    .ok_or(crate::i18n::Text::AgentCopilotFileTaken.text())?,
             );
         }
     }
@@ -500,6 +494,88 @@ fn owners(document: &Value) -> Result<Vec<PathBuf>, &'static str> {
 
 fn declares_folio(document: &Value) -> bool {
     !declared_events(document).is_empty()
+}
+
+/// **What Copilot's hook file holds, as the start-time scan reads it** (0.4.10 plan row 67b):
+/// `attention_hooks::scan_resolved`'s answer over a file that is Folio's whole or nobody's. Nothing
+/// is written here.
+///
+/// The file's own shape is read first — a version this build does not know is a file it cannot
+/// read — and then its entries: one of somebody else's makes the file theirs, one that names a copy
+/// of Folio in a shape this build cannot read is said as that.
+pub(crate) fn scan_resolved(
+    config: &crate::attention_hooks::Config,
+    exe: &Path,
+    look: &dyn Fn(&Path) -> ownership::PathStands,
+) -> HooksFound {
+    let text = match config.standing() {
+        crate::attention_hooks::Standing::Nothing => return HooksFound::Nothing,
+        crate::attention_hooks::Standing::Unreadable => return HooksFound::Unreadable,
+        crate::attention_hooks::Standing::Text(text) => text,
+    };
+    if text.trim().is_empty() {
+        return HooksFound::Nothing;
+    }
+    let document = match serde_json::from_str::<Value>(&text) {
+        Ok(document) if document.is_object() => document,
+        _ => return HooksFound::Unreadable,
+    };
+    let paths = match owners(&document) {
+        Ok(paths) => paths,
+        // The file's shape was read, and an entry in it is not one of Folio's.
+        Err(reason) if reason == crate::i18n::Text::AgentCopilotFileTaken.text() => {
+            return if unclassified_entry(&document) {
+                HooksFound::Unclassified
+            } else {
+                HooksFound::Declined(reason)
+            };
+        }
+        Err(_) => return HooksFound::Unreadable,
+    };
+    ownership::classify_owners(&paths, exe, look, || copilot_drifted(&document, exe))
+}
+
+/// Whether an entry [`entry_owner`] cannot read names a copy of Folio in one of its program columns.
+fn unclassified_entry(document: &Value) -> bool {
+    document
+        .get("hooks")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flat_map(|hooks| hooks.values())
+        .filter_map(Value::as_array)
+        .flatten()
+        .filter(|entry| entry_owner(entry).is_err())
+        .any(|entry| {
+            ["exec", "bash", "powershell", "command"]
+                .iter()
+                .any(|column| {
+                    entry
+                        .get(*column)
+                        .and_then(Value::as_str)
+                        .is_some_and(|program| ownership::folio_like_command(program, COPILOT))
+                })
+        })
+}
+
+/// **Whether any entry of this copy's is not today's** (R3): one [`document_for`] does not write
+/// under its event — the `powershell` and `bash` columns of the old templates (P1, P2), another
+/// timeout, another spelling of the program. An event missing from the file is not drift: none of
+/// this family's carries resume, and the person may have taken it out.
+fn copilot_drifted(document: &Value, exe: &Path) -> bool {
+    let today = document_for(exe);
+    document
+        .get("hooks")
+        .and_then(Value::as_object)
+        .is_some_and(|hooks| {
+            hooks.iter().any(|(event, entries)| {
+                let wanted = today["hooks"].get(event).and_then(Value::as_array);
+                entries.as_array().is_some_and(|entries| {
+                    entries
+                        .iter()
+                        .any(|entry| wanted.is_none_or(|wanted| !wanted.contains(entry)))
+                })
+            })
+        })
 }
 
 /// **The rows one install writes**: every copilot row. None of them is tiered — this family
@@ -580,9 +656,26 @@ fn hooks_are_switched_off() -> bool {
 ///
 /// Read at the moments it can change rather than on every frame — the caller caches it, for
 /// `attention_hooks`'s reason: this reads a file and may be drawn sixty times a second.
+///
+/// **The settings file is read only when a version came back**: it decides nothing without one
+/// ([`readiness_from`]), so a machine whose probe has not answered reads no file of Copilot's here.
 #[must_use]
 pub(crate) fn readiness() -> Readiness {
-    readiness_from(probe(), hooks_are_switched_off())
+    let found = probe();
+    let switched_off = found.is_some() && hooks_are_switched_off();
+    readiness_from(found, switched_off)
+}
+
+/// **Whether the start-time repair may write Copilot's hooks now** (0.4.10 plan row 67b, R9): only
+/// once the version question has been asked and answered, and never for a copilot too old for
+/// them — an install there would write hooks that misreport. Unasked, it is asked here, and the
+/// answer starts the carry pass again (`AppEvent::CopilotProbed`), which repairs then.
+pub(crate) fn repair_within_the_gate() -> bool {
+    if !probe_settled() {
+        begin_probe();
+        return false;
+    }
+    readiness() != Readiness::TooOld
 }
 
 /// The same decision with both answers handed in.
@@ -634,7 +727,9 @@ pub(crate) fn apply_at(path: &Path, decision: Decision, exe: &Path, data: &Path)
     match crate::attention_hooks::Config::resolve(path) {
         Ok(config) => apply_resolved(&config, decision, exe, data),
         Err(crate::attention_hooks::Unresolved::Refused(reason)) => Outcome::Refused(reason),
-        Err(crate::attention_hooks::Unresolved::Unreadable) => Outcome::Refused(UNREADABLE),
+        Err(crate::attention_hooks::Unresolved::Unreadable) => {
+            Outcome::Refused(crate::i18n::Text::AgentHooksUnreadable.text())
+        }
     }
 }
 
@@ -663,7 +758,9 @@ pub(crate) fn apply_resolved(
         // **A file that could not be read is never written over, and never removed either** — this
         // build cannot tell whose it is. Release audit 2026-09-16 (C-3), the same conflation the
         // other two installers held.
-        crate::attention_hooks::Standing::Unreadable => return Outcome::Refused(UNREADABLE),
+        crate::attention_hooks::Standing::Unreadable => {
+            return Outcome::Refused(crate::i18n::Text::AgentHooksUnreadable.text());
+        }
     };
     let standing = if existing.trim().is_empty() {
         None
@@ -672,7 +769,7 @@ pub(crate) fn apply_resolved(
             Ok(document) if document.is_object() => Some(document),
             // Refused rather than replaced, for `attention_hooks`'s reason: a file this build
             // cannot read is a file somebody wrote.
-            _ => return Outcome::Refused(UNREADABLE),
+            _ => return Outcome::Refused(crate::i18n::Text::AgentHooksUnreadable.text()),
         }
     };
     let paths = match standing.as_ref().map(owners).transpose() {
@@ -741,7 +838,7 @@ pub(crate) fn apply_resolved(
                 return Outcome::Refused("the copilot hooks directory could not be created");
             }
             crate::attention_hooks::Landing::NoBackup => {
-                return Outcome::Refused(crate::attention_hooks::NO_BACKUP);
+                return Outcome::Refused(crate::i18n::Text::AgentConfigNoBackup.text());
             }
             crate::attention_hooks::Landing::Changed => {
                 return Outcome::Refused(crate::i18n::Text::AgentConfigChanged.text());
@@ -1754,7 +1851,10 @@ mod tests {
         std::fs::write(&path, theirs).expect("the user's own file");
 
         let installing = apply_to(&path, true, &exe());
-        assert_eq!(installing, Outcome::Refused(UNREADABLE));
+        assert_eq!(
+            installing,
+            Outcome::Refused(crate::i18n::Text::AgentHooksUnreadable.text())
+        );
         assert_eq!(std::fs::read(&path).expect("still there"), theirs);
         assert_eq!(
             std::fs::read_dir(&hooks).expect("the directory").count(),
@@ -1765,7 +1865,10 @@ mod tests {
         assert_eq!(state_at(&path), State::Unreadable);
         // Nor is it removed: uninstalling a file this build never read deletes somebody's own.
         let taking_it_out = apply_to(&path, false, &exe());
-        assert_eq!(taking_it_out, Outcome::Refused(UNREADABLE));
+        assert_eq!(
+            taking_it_out,
+            Outcome::Refused(crate::i18n::Text::AgentHooksUnreadable.text())
+        );
         assert!(path.is_file(), "it is still there");
         let _ = std::fs::remove_dir_all(&home);
     }
@@ -1790,7 +1893,7 @@ mod tests {
         for install in [true, false] {
             assert_eq!(
                 apply_to(&path, install, &exe()),
-                Outcome::Refused("a hook file of your own already stands under that name")
+                Outcome::Refused(crate::i18n::Text::AgentCopilotFileTaken.text())
             );
             assert_eq!(std::fs::read(&path).expect("still there"), bytes);
         }

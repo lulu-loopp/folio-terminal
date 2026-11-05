@@ -76,6 +76,19 @@ pub(crate) enum Outcome {
     Refused(&'static str),
 }
 
+/// **This copy, as every writer of an agent's file names it**: `bt_platform::running_image`'s file
+/// (0.4.10 plan row 68, R7, ruled with row 67b) — on Windows the program's real file, every link on
+/// the way followed, so a copy started through winget's link is named by the file the link leads
+/// to; elsewhere the path it was started by (a macOS bundle is found from its own executable's
+/// path). The press, the start-time repair and the rows all mean one program, and `None` only when
+/// the system would not say which file this process runs.
+#[must_use]
+pub(crate) fn this_copy() -> Option<PathBuf> {
+    bt_platform::running_image()
+        .ok()
+        .map(|image| image.path.clone())
+}
+
 /// The single gate for writing per-copy marks; no PATH-relative fallback.
 pub(crate) fn stable_executable(exe: Option<&Path>) -> Result<&Path, &'static str> {
     let exe = exe.ok_or(crate::i18n::Text::AgentHooksExeUnknown.text())?;
@@ -161,19 +174,237 @@ fn literal_absolute_path(path: &Path) -> Result<&str, &'static str> {
 /// carrying one could neither install nor uninstall for ever — the operand was an error rather
 /// than an answer (closure review R3). The gate that keeps such an operand from being *written*
 /// is [`stable_executable`], and it stays exactly where it is.
+///
+/// The press's and uninstall's rule ([`DeadWhen::Missing`]): a person's press and the uninstall
+/// decide on this machine as it stands, and R4 is the start-time scan's.
 pub(crate) fn other_live(owner: &Path, exe: &Path) -> Result<bool, &'static str> {
+    other_live_by(owner, exe, what_stands, DeadWhen::Missing)
+}
+
+/// **When an owner that is not there is gone**, by who is asking.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DeadWhen {
+    /// A press or the uninstall (design §6.2): a program that is not there is gone, and so is an
+    /// operand that literally names no file — no copy is nobody.
+    Missing,
+    /// **The start-time scan** (0.4.10 plan row 67, R4), which writes with nobody asking: gone only
+    /// when the program's volume is there. A program missing because the drive or share it lives
+    /// on is not plugged in, or not reachable, has not gone: it comes back with the drive, and a
+    /// repair that took its hooks would take them from a copy that is only away. So a missing
+    /// owner is dead only when its volume answers as a folder; any other answer about the volume,
+    /// and an operand that names no file to ask about, is "unknown", which writes nothing and is
+    /// said.
+    MissingOnAVolumeThatIsThere,
+}
+
+/// [`other_live`] with the machine's answer to "what stands at this path" and the rule for a
+/// missing owner handed in — the seam the tests press, so a dead owner, an unplugged drive and a
+/// path that cannot be asked about are each a fixture rather than a state of the machine running
+/// them.
+pub(crate) fn other_live_by(
+    owner: &Path,
+    exe: &Path,
+    look: impl Fn(&Path) -> PathStands,
+    dead_when: DeadWhen,
+) -> Result<bool, &'static str> {
+    let unknown = || Err(crate::i18n::Text::AgentHooksOwnerUnknown.text());
     // An old translocated operand may be dead and cleanable. Translocation
     // prohibits creating a new mark from there, not removing an obsolete mark.
     if literal_absolute_path(owner).is_err() {
-        return Ok(false);
+        return match dead_when {
+            DeadWhen::Missing => Ok(false),
+            DeadWhen::MissingOnAVolumeThatIsThere => unknown(),
+        };
     }
     if crate::explorer_menu::same_path(owner, exe) {
         return Ok(false);
     }
-    match std::fs::metadata(owner) {
-        Ok(meta) if meta.is_file() => Ok(true),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        _ => Err(crate::i18n::Text::AgentHooksOwnerUnknown.text()),
+    match look(owner) {
+        PathStands::File => Ok(true),
+        PathStands::Missing
+            if dead_when == DeadWhen::Missing
+                || volume_root_of(owner)
+                    .is_some_and(|volume| look(&volume) == PathStands::Folder) =>
+        {
+            Ok(false)
+        }
+        _ => unknown(),
+    }
+}
+
+/// **What stands at a path**, as the liveness rule asks it ([`other_live_by`]).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PathStands {
+    /// A file: for an owner, a living copy.
+    File,
+    /// A folder: for a volume's root, a volume that is there.
+    Folder,
+    /// Something that is neither.
+    Other,
+    /// Nothing, by the system's own `NotFound`.
+    Missing,
+    /// The system would not say: a permission, a device that is not ready, a share that does not
+    /// answer. **Not evidence of anything.**
+    Unknown,
+}
+
+/// [`PathStands`] on this machine.
+#[must_use]
+pub(crate) fn what_stands(path: &Path) -> PathStands {
+    match std::fs::metadata(path) {
+        Ok(meta) if meta.is_file() => PathStands::File,
+        Ok(meta) if meta.is_dir() => PathStands::Folder,
+        Ok(_) => PathStands::Other,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => PathStands::Missing,
+        Err(_) => PathStands::Unknown,
+    }
+}
+
+/// **The root of the volume a path lives on**: the drive's root or the UNC share's on Windows
+/// (`D:\`, `\\server\share\`), `/Volumes/<name>` for a volume macOS mounts there, and `/`
+/// for anything else under the root. `None` for a path that names no root at all.
+///
+/// Read off the path's own components and never off the machine, so the rule is the same whether
+/// the volume is there or not — which is the question [`other_live_by`] then asks of it.
+#[must_use]
+pub(crate) fn volume_root_of(path: &Path) -> Option<PathBuf> {
+    use std::path::Component;
+    let mut parts = path.components();
+    match parts.next()? {
+        Component::Prefix(prefix) => {
+            let mut root = PathBuf::from(prefix.as_os_str());
+            if parts.next() != Some(Component::RootDir) {
+                return None;
+            }
+            root.push(Component::RootDir);
+            Some(root)
+        }
+        Component::RootDir => match (parts.next(), parts.next()) {
+            // macOS's volumes are case-insensitive by default: `/volumes/Stick` is the same mount.
+            (Some(Component::Normal(volumes)), Some(Component::Normal(name)))
+                if volumes.eq_ignore_ascii_case("Volumes") =>
+            {
+                Some(Path::new("/").join(volumes).join(name))
+            }
+            _ => Some(PathBuf::from("/")),
+        },
+        _ => None,
+    }
+}
+
+/// **Whether an entry this build could not decode names a copy of Folio** — the line between "an
+/// entry that looks like Folio's" (said, and left exactly where it is) and somebody else's.
+///
+/// `command` is the entry's program, or for the old string form the whole line, whose program is
+/// what stands before ` attention <family>:`. Only the program's own file name votes, as it does
+/// for an entry that decodes ([`folio_operand`]): a person's `mytool attention claude-code:Stop`
+/// is theirs, not an unreadable one of ours.
+#[must_use]
+pub(crate) fn folio_like_command(command: &str, family: &str) -> bool {
+    let program = command
+        .rsplit_once(&format!(" attention {family}:"))
+        .map_or(command, |(program, _)| program);
+    folio_operand(program.trim_matches(|c| matches!(c, '"' | '\'' | '&' | ' '))).is_some()
+}
+
+/// **What one family's configuration holds, as the start-time scan classifies it** (0.4.10 plan
+/// row 67b). Read without writing; the step repairs exactly two of these ([`Self::wants_repair`]).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum HooksFound {
+    /// No Folio entry at all, or no file.
+    Nothing,
+    /// This copy's, in today's form.
+    Current,
+    /// This copy's, in an older form — or missing the event resume is carried on (R3).
+    Drifted,
+    /// Folio's entries whose programs are gone, on volumes that are there (R4); this copy's own
+    /// may stand beside them. The gone programs.
+    Dead(Vec<PathBuf>),
+    /// A living other copy's (R5): its programs.
+    OtherCopy(Vec<PathBuf>),
+    /// An owner this machine would not say about, or one on a volume that is not there.
+    OwnerUnknown,
+    /// A file this build cannot read as the agent's own format. **Never written.**
+    Unreadable,
+    /// An entry that names a copy of Folio in a shape this build cannot classify. Left exactly
+    /// where it is, and no repair writes beside it.
+    Unclassified,
+    /// A file this build will not edit at all — a link out of the agent's folder, one with hard
+    /// links, a read-only one: the switch beside it is inert, and the row says this sentence.
+    Refused(&'static str),
+    /// A file whose Folio part this build will not write, for the sentence carried — somebody
+    /// else's program on Codex's one `notify` key, a hook file of somebody else's under Folio's
+    /// name, a key named twice. The switch stays pressable; its press says the same.
+    Declined(&'static str),
+}
+
+impl HooksFound {
+    /// The two states an unattended repair writes (R1): a dead owner, and this copy's own old shape.
+    #[must_use]
+    pub(crate) fn wants_repair(&self) -> bool {
+        matches!(self, Self::Dead(_) | Self::Drifted)
+    }
+
+    /// Whether the hooks there are this copy's — what the switch shows.
+    #[must_use]
+    pub(crate) fn is_this_copys(&self) -> bool {
+        matches!(self, Self::Current | Self::Drifted)
+    }
+
+    /// The word the diagnostics line names the state by.
+    #[must_use]
+    pub(crate) fn diagnostic_word(&self) -> &'static str {
+        match self {
+            Self::Nothing => "none",
+            Self::Current => "current",
+            Self::Drifted => "drift",
+            Self::Dead(_) => "dead",
+            Self::OtherCopy(_) => "other-copy",
+            Self::OwnerUnknown => "owner-unknown",
+            Self::Unreadable => "unreadable",
+            Self::Unclassified => "unclassified",
+            Self::Refused(_) => "refused",
+            Self::Declined(_) => "declined",
+        }
+    }
+}
+
+/// **The ownership half of a scan**, shared by the three families: the owners one file's Folio
+/// entries name, read against this copy and the machine.
+///
+/// No owner is [`HooksFound::Nothing`]; any owner the machine will not say about is unknown, and
+/// any living other copy is that copy's, before anything is called dead; owners that are all gone
+/// (this copy's own beside them or not) are dead; this copy's alone are `drifted` — the family's
+/// own answer to "is every entry in today's form", asked only then.
+pub(crate) fn classify_owners(
+    owners: &[PathBuf],
+    exe: &Path,
+    look: &dyn Fn(&Path) -> PathStands,
+    drifted: impl FnOnce() -> bool,
+) -> HooksFound {
+    if owners.is_empty() {
+        return HooksFound::Nothing;
+    }
+    let mut living = Vec::new();
+    let mut dead = Vec::new();
+    for owner in owners {
+        match other_live_by(owner, exe, look, DeadWhen::MissingOnAVolumeThatIsThere) {
+            Err(_) => return HooksFound::OwnerUnknown,
+            Ok(true) if !living.contains(owner) => living.push(owner.clone()),
+            Ok(false) if !crate::explorer_menu::same_path(owner, exe) && !dead.contains(owner) => {
+                dead.push(owner.clone());
+            }
+            Ok(_) => {}
+        }
+    }
+    if !living.is_empty() {
+        HooksFound::OtherCopy(living)
+    } else if !dead.is_empty() {
+        HooksFound::Dead(dead)
+    } else if drifted() {
+        HooksFound::Drifted
+    } else {
+        HooksFound::Current
     }
 }
 
@@ -654,7 +885,7 @@ mod tests {
                 &exe,
                 &root.join("data")
             ),
-            Outcome::Refused("codex already runs a notify program of your own")
+            Outcome::Refused(crate::i18n::Text::AgentCodexNotifyTaken.text())
         );
         assert_eq!(fs::read_to_string(path).unwrap(), original);
     }
@@ -1022,11 +1253,8 @@ mod tests {
     /// sentence here becomes "not one this build can read".
     #[test]
     fn attention_a_protected_config_names_its_own_reason() {
-        let unreadable = [
-            "the settings file is not one this build can read",
-            "the codex configuration file is not one this build can read",
-            "the copilot hook file is not one this build can read",
-        ];
+        // One sentence for all three writers since 0.4.10 (plan row 67b, D3).
+        let unreadable = [crate::i18n::Text::AgentHooksUnreadable.text()];
         for (family, file, apply) in adapters() {
             let root = root(&format!("protected-{family}"));
             let exe = root.join("folio.exe");
