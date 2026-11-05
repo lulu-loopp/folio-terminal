@@ -5111,6 +5111,10 @@ crates/bt-app/src/session_end.rs	bt-app crate::session_end::take	Ambiguous	set	1
 crates/bt-app/src/session_end.rs	bt-app crate::session_end::take	Ambiguous	with	2	2026-11-03: T-SHUTDOWN-SAVE-LANDS-BEFORE-THE-END (plan row 201, re-ruling (A)+(C)); take reads and moves the question's wake: a `thread_local!` `LocalKey::with` or `Cell::set` on the window thread's own end-of-session state, which calls no door
 crates/bt-app/src/session_end.rs	bt-app crate::session_end::take	Ambiguous	with_borrow_mut	1	
 crates/bt-app/src/session_end.rs	bt-app crate::session_end::the_road	Ambiguous	with	1	2026-11-03: T-SHUTDOWN-SAVE-LANDS-BEFORE-THE-END (plan row 201, re-ruling (A)+(C)); the_road reads the ANSWER cell: a `thread_local!` `LocalKey::with` or `Cell::set` on the window thread's own end-of-session state, which calls no door
+crates/bt-app/src/session_end.rs	bt-app crate::session_end::the_systems_quit_ends_with	Ambiguous	set	1	2026-11-04: T-MAC-DIAGNOSTICS-FLUSH-AFTER-TERMINATE (0.4.10 plan row 17); the NSTerminateNow answer marks FENCED once it has fenced the log: a `thread_local!` `LocalKey::with` or `Cell::set` on the window thread's own end-of-session state, which calls no door
+crates/bt-app/src/session_end.rs	bt-app crate::session_end::the_systems_quit_ends_with	Ambiguous	with	2	2026-11-04: T-MAC-DIAGNOSTICS-FLUSH-AFTER-TERMINATE (0.4.10 plan row 17); the NSTerminateNow answer reads FENCED (an earlier end fenced the log) and sets it: a `thread_local!` `LocalKey::with` or `Cell::set` on the window thread's own end-of-session state, which calls no door
+crates/bt-app/src/session_end.rs	bt-app crate::session_end::the_systems_quit_ends_with	Dynamic	fence	1	2026-11-04: T-MAC-DIAGNOSTICS-FLUSH-AFTER-TERMINATE (0.4.10 plan row 17); the fence the NSTerminateNow answer is handed: at_the_systems_quit hands fence_the_log, whose DiagnosticsSettle door is admitted in the Exiting phase and bounded by SETTLE_WITHIN (1 s, row 201 ruling R2); the tests hand a recorder
+crates/bt-app/src/session_end.rs	bt-app crate::session_end::the_systems_quit_ends_with	Dynamic	say	2	2026-11-04: T-MAC-DIAGNOSTICS-FLUSH-AFTER-TERMINATE (0.4.10 plan row 17); the line sayer the NSTerminateNow answer is handed (the line on the quit's save, or that an earlier end fenced the log): at_the_systems_quit hands diagnostics::note, a push onto the log writer queue, no wait; the tests hand a recorder
 crates/bt-app/src/settings.rs	bt-app crate::settings::AdvancedOpen::keys	Ambiguous	collect	1	
 crates/bt-app/src/settings.rs	bt-app crate::settings::AdvancedOpen::keys	Ambiguous	into_iter	1	
 crates/bt-app/src/settings.rs	bt-app crate::settings::AdvancedOpen::keys	Ambiguous	key	1	
@@ -7641,6 +7645,7 @@ crates/bt-platform/src/app_delegate.rs	bt-platform crate::app_delegate::Outbox::
 crates/bt-platform/src/app_delegate.rs	bt-platform crate::app_delegate::Outbox::drain	Ambiguous	unwrap_or_else	1	
 crates/bt-platform/src/app_delegate.rs	bt-platform crate::app_delegate::Outbox::drain	Dynamic	(value)	1	
 crates/bt-platform/src/app_delegate.rs	bt-platform crate::app_delegate::Outbox::release	Ambiguous	unwrap_or_else	1	
+crates/bt-platform/src/app_delegate.rs	bt-platform crate::app_delegate::QuitReason::words	Ambiguous	escape_debug	1	2026-11-04: T-MAC-DIAGNOSTICS-FLUSH-AFTER-TERMINATE (0.4.10 plan row 17); the words of a quit reason AppKit gave that Folio does not name: str::escape_debug over the four-character code read lossily (String::from_utf8_lossy), pure formatting, no door
 crates/bt-platform/src/app_delegate.rs	bt-platform crate::app_delegate::path_from_bytes	Ambiguous	map	1	
 crates/bt-platform/src/app_delegate.rs	bt-platform crate::app_delegate::path_from_bytes	Ambiguous	map_err	1	
 crates/bt-platform/src/app_delegate.rs	bt-platform crate::app_delegate::path_from_file_url	Ambiguous	eq_ignore_ascii_case	1	
@@ -9128,6 +9133,7 @@ crates/bt-platform/src/macos_app.rs	bt-platform crate::macos_app::post	Ambiguous
 crates/bt-platform/src/macos_app.rs	bt-platform crate::macos_app::recompute_the_delegate_mask	Ambiguous	delegate	1	
 crates/bt-platform/src/macos_app.rs	bt-platform crate::macos_app::recompute_the_delegate_mask	Ambiguous	setDelegate	2	
 crates/bt-platform/src/macos_app.rs	bt-platform crate::macos_app::reply_to_should_terminate	Ambiguous	replyToApplicationShouldTerminate	1	
+crates/bt-platform/src/macos_app.rs	bt-platform crate::macos_app::the_quit_events_reason	Ambiguous	currentAppleEvent	1	2026-11-04: T-MAC-DIAGNOSTICS-FLUSH-AFTER-TERMINATE (0.4.10 plan row 17, ruling R3); the quit's reason is read from the Apple event AppKit is handling: objc2-foundation's typed -[NSAppleEventManager currentAppleEvent] on the shared manager, a getter on the main thread inside applicationShouldTerminate:, which calls no door
 crates/bt-platform/src/macos_clipboard_payload.rs	bt-platform crate::macos_clipboard_payload::<MacClipboard as ClipboardPort>::survey	Ambiguous	as_str	1	
 crates/bt-platform/src/macos_clipboard_payload.rs	bt-platform crate::macos_clipboard_payload::<MacClipboard as ClipboardPort>::survey	Ambiguous	iter	1	
 crates/bt-platform/src/macos_clipboard_payload.rs	bt-platform crate::macos_clipboard_payload::<MacClipboard as ClipboardPort>::survey	Ambiguous	to_string	1	

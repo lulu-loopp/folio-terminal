@@ -403,8 +403,13 @@ mod mac {
                     self.tally.paths.push(paths);
                 }
                 AppDelegateEventKind::TerminationRequested(answer) => {
-                    self.report
-                        .say(&format!("EVENT {}", event.origin.selector()));
+                    // The quit event's reason rides with the request (0.4.10 plan row 17):
+                    // this harness's own `osascript` quit carries none.
+                    self.report.say(&format!(
+                        "EVENT {} ({})",
+                        event.origin.selector(),
+                        answer.reason().words()
+                    ));
                     self.tally.terminations += 1;
                     self.termination = Some(answer);
                 }
