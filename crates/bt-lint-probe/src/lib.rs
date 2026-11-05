@@ -288,32 +288,88 @@ pub fn probe_48(d: u32) -> impl Sized {
     unsafe { windows::Win32::System::Threading::SleepEx(d, true) } // probe: windows::Win32::System::Threading::SleepEx
 }
 
+/// `windows::Win32::UI::WindowsAndMessaging::MsgWaitForMultipleObjectsEx` - windows
+#[cfg(windows)]
+pub fn probe_49(
+    d: u32,
+    m: windows::Win32::UI::WindowsAndMessaging::QUEUE_STATUS_FLAGS,
+    f: windows::Win32::UI::WindowsAndMessaging::MSG_WAIT_FOR_MULTIPLE_OBJECTS_EX_FLAGS,
+) -> impl Sized {
+    unsafe { windows::Win32::UI::WindowsAndMessaging::MsgWaitForMultipleObjectsEx(None, d, m, f) } // probe: windows::Win32::UI::WindowsAndMessaging::MsgWaitForMultipleObjectsEx
+}
+
+/// `windows::Win32::System::IO::GetOverlappedResult` - windows
+#[cfg(windows)]
+pub fn probe_50(
+    h: windows::Win32::Foundation::HANDLE,
+    o: &windows::Win32::System::IO::OVERLAPPED,
+    n: &mut u32,
+) -> impl Sized {
+    unsafe { windows::Win32::System::IO::GetOverlappedResult(h, o, n, true) } // probe: windows::Win32::System::IO::GetOverlappedResult
+}
+
+/// `windows::Win32::System::IO::GetQueuedCompletionStatus` - windows
+#[cfg(windows)]
+pub fn probe_51(
+    h: windows::Win32::Foundation::HANDLE,
+    n: &mut u32,
+    k: &mut usize,
+    o: &mut *mut windows::Win32::System::IO::OVERLAPPED,
+    d: u32,
+) -> impl Sized {
+    unsafe { windows::Win32::System::IO::GetQueuedCompletionStatus(h, n, k, o, d) } // probe: windows::Win32::System::IO::GetQueuedCompletionStatus
+}
+
+/// `windows::Win32::System::Pipes::WaitNamedPipeW` - windows
+#[cfg(windows)]
+pub fn probe_52(n: windows::core::PCWSTR, d: u32) -> impl Sized {
+    unsafe { windows::Win32::System::Pipes::WaitNamedPipeW(n, d) } // probe: windows::Win32::System::Pipes::WaitNamedPipeW
+}
+
 /// `windows::Win32::System::Threading::SetEvent` - windows
 #[cfg(windows)]
-pub fn probe_49(h: windows::Win32::Foundation::HANDLE) -> impl Sized {
+pub fn probe_53(h: windows::Win32::Foundation::HANDLE) -> impl Sized {
     unsafe { windows::Win32::System::Threading::SetEvent(h) } // probe: windows::Win32::System::Threading::SetEvent
 }
 
 /// `windows::Win32::Foundation::CloseHandle` - windows
 #[cfg(windows)]
-pub fn probe_50(h: windows::Win32::Foundation::HANDLE) -> impl Sized {
+pub fn probe_54(h: windows::Win32::Foundation::HANDLE) -> impl Sized {
     unsafe { windows::Win32::Foundation::CloseHandle(h) } // probe: windows::Win32::Foundation::CloseHandle
 }
 
 /// `windows::Win32::Storage::FileSystem::GetDriveTypeW` - windows
 #[cfg(windows)]
-pub fn probe_51(r: windows::core::PCWSTR) -> impl Sized {
+pub fn probe_55(r: windows::core::PCWSTR) -> impl Sized {
     unsafe { windows::Win32::Storage::FileSystem::GetDriveTypeW(r) } // probe: windows::Win32::Storage::FileSystem::GetDriveTypeW
+}
+
+/// `libc::poll` - macos
+#[cfg(target_os = "macos")]
+pub fn probe_56(f: &mut [libc::pollfd], d: i32) -> impl Sized {
+    unsafe { libc::poll(f.as_mut_ptr(), f.len() as libc::nfds_t, d) } // probe: libc::poll
+}
+
+/// `libc::waitpid` - macos
+#[cfg(target_os = "macos")]
+pub fn probe_57(p: libc::pid_t, s: &mut i32) -> impl Sized {
+    unsafe { libc::waitpid(p, s, 0) } // probe: libc::waitpid
+}
+
+/// `libc::waitid` - macos
+#[cfg(target_os = "macos")]
+pub fn probe_58(p: libc::id_t, i: &mut libc::siginfo_t) -> impl Sized {
+    unsafe { libc::waitid(libc::P_PID, p, i, libc::WEXITED) } // probe: libc::waitid
 }
 
 /// `libc::write` - macos
 #[cfg(target_os = "macos")]
-pub fn probe_52(fd: i32, b: &[u8]) -> impl Sized {
+pub fn probe_59(fd: i32, b: &[u8]) -> impl Sized {
     unsafe { libc::write(fd, b.as_ptr().cast(), b.len()) } // probe: libc::write
 }
 
 /// `libc::close` - macos
 #[cfg(target_os = "macos")]
-pub fn probe_53(fd: i32) -> impl Sized {
+pub fn probe_60(fd: i32) -> impl Sized {
     unsafe { libc::close(fd) } // probe: libc::close
 }

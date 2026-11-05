@@ -133,6 +133,13 @@ const BLOCKING: &[&str] = &[
     "windows::Win32::System::Threading::WaitForMultipleObjectsEx",
     "windows::Win32::System::Threading::SignalObjectAndWait",
     "windows::Win32::System::Threading::SleepEx",
+    "windows::Win32::UI::WindowsAndMessaging::MsgWaitForMultipleObjectsEx",
+    "windows::Win32::System::IO::GetOverlappedResult",
+    "windows::Win32::System::IO::GetQueuedCompletionStatus",
+    "windows::Win32::System::Pipes::WaitNamedPipeW",
+    "libc::poll",
+    "libc::waitpid",
+    "libc::waitid",
 ];
 
 /// The [`BLOCKING`] primitives that are not window-thread waits, each with why: every other
