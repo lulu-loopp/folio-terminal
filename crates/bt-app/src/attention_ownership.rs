@@ -612,12 +612,16 @@ mod tests {
                     serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
                 let entry = if family == "claude" {
                     assert_eq!(written["model"], "user-choice");
+                    // **The old entry is replaced where it stood** (0.4.10 plan row 67a): still
+                    // first in its group, the person's own hook still beside it, and no second
+                    // group appended for it.
+                    assert_eq!(written["hooks"]["Stop"].as_array().map(Vec::len), Some(1));
                     assert_eq!(
-                        written["hooks"]["Stop"][0]["hooks"][0]["command"],
+                        written["hooks"]["Stop"][0]["hooks"][1]["command"],
                         "echo user-hook"
                     );
-                    assert_eq!(written["hooks"]["Stop"][1]["hooks"][0]["async"], true);
-                    &written["hooks"]["Stop"][1]["hooks"][0]
+                    assert_eq!(written["hooks"]["Stop"][0]["hooks"][0]["async"], true);
+                    &written["hooks"]["Stop"][0]["hooks"][0]
                 } else {
                     &written["hooks"]["agentStop"][0]
                 };

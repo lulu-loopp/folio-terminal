@@ -90,11 +90,56 @@ about a `$PROFILE` (`AgentConfigLink`, `AgentConfigHardLink`,
 while it stands there — `SettingsRow::option_enabled`, the rule every greyed
 picker in the dialog keeps.
 
-**Editing reformats.** Claude Code's and Copilot's files are re-serialised
-whole, so an entry Folio leaves alone comes back value-identical rather than
-byte-identical: key order and whitespace are the serialiser's. The release note
-already says it (“Updating agent hooks may reformat their JSON settings; a dated
-backup is kept”). Codex keeps `toml_edit`'s preservation.
+**Editing touches only Folio's own entries** (owner's rule, 2026-11-04; 0.4.10
+plan row 67a; this replaces "Editing reformats", which described the writer
+before it). Folio changes only what it can prove is its own, and every other
+byte of an agent's file stays as it was: the person's hooks before and after
+Folio's on the same events, every other key, their order, the indentation, the
+line endings, a byte-order mark, the trailing newline, the spelling of numbers
+and escapes.
+
+- **Claude Code** (`attention_hooks`): the file is read as spans by a strict
+  JSON reader (`splice`), and `edited` makes only three kinds of edit. It
+  replaces an own entry where it stands, which is how a gone copy's entry is
+  repaired among the person's own. It deletes an own entry with its comma, and
+  the group, event or `hooks` that held nothing but Folio's goes with it. It
+  appends a missing entry: a group at the end of its event, after the person's,
+  an event at the end of `hooks`, or `hooks` at the end of the file's object,
+  laid out like its neighbours. An own entry is one `hook_owner` reads as a
+  Folio executable speaking `attention`. Nothing else is edited, moved or
+  deleted. Before anything is written, `verified` reads the result back. It
+  cuts Folio's entries, and the groups, events and `hooks` that hold nothing
+  else, out of the file before and after, each with one separator, and
+  requires what is left to be the same bytes: the byte-order mark, every piece
+  of the person's, and the whitespace, commas and brackets between them. It
+  also compares the two documents as values with Folio's entries stripped from
+  both. Any difference refuses the write whole: "Folio could not change only
+  its own lines in this file, so nothing was written". A file that is not
+  strict JSON (comments, trailing commas) is never written, as before. A key
+  named twice on the way down to Folio's entries, or inside an entry that reads
+  as Folio's, is refused too, because the agent's parser decides which of the
+  two it reads. The switch, the take-over and uninstall all go through this
+  writer.
+- **Codex** (`attention_codex`): the same rule on `config.toml`. `toml_edit`'s
+  rendering ended every line in `\n` and dropped a byte-order mark, so the edit
+  is now one line of text, placed by `ImDocument`'s spans. An own `notify` with
+  other words has its value replaced, keeping a comment at the end of the line.
+  A missing `notify` gets a line after the last top-level key-value, or at the
+  top of a file of tables only. Removing takes the line and its line ending and
+  keeps any comment above it (ruling R12). The result is read back and refused
+  the same way if any other value reads differently.
+- **Copilot**: `hooks/folio.json` is Folio's whole file. One entry that is not
+  Folio's refuses the write, so no byte of anyone else's is touched.
+
+One round trip is not the identity. The file cannot say who wrote an empty
+`"hooks": {}` or an empty event array. Folio fills it on install, and on
+removal it goes with Folio's entries, by the same rule that removes a `hooks`
+Folio created. The same holds one level up: an object Folio's entries were the
+only members of is written back as `{}`, so a file that was `{ }`, or `{` and
+`}` on two lines, comes back as `{}`. Every other byte comes back. This is ruled, not owed (2026-11-04,
+plan row 67a D1): an empty container holds no hook or setting of the person's,
+and the rule protects their hooks and settings, so no record outside the file
+is kept to tell who wrote one.
 
 ## Current upstream schemas, checked 2026-09-20
 
@@ -158,9 +203,10 @@ history in place. An unreadable or unsupported record refuses installation; a mi
 
 Existing dated backup names and first-backup-of-day behavior stay unchanged.
 Copilot's wholly removable file is still deleted; partial removal uses the shared
-atomic writer. Claude/Copilot JSON reserialization can reorder keys and change
-formatting. Codex keeps `toml_edit` preservation. T-C1 release-note wording:
-“Updating agent hooks may reformat their JSON settings; a dated backup is kept.”
+atomic writer. Claude Code's and Codex's files keep every byte outside Folio's
+own entries (see "Editing touches only Folio's own entries" above). The 0.4.3
+release note's "Updating agent hooks may reformat their JSON settings" no longer
+holds as of 0.4.10.
 Config read/modify/write is not a transaction with arbitrary external editors;
 the existing narrow race with simultaneous external replacement remains.
 

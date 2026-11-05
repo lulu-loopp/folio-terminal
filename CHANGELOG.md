@@ -49,6 +49,7 @@ All notable changes to Folio are recorded here. The format follows
 - When Folio is started through the `folio` link an older winget (before 1.9) makes, Settings > About > Licences now opens the notices file that came with the copy instead of the web page. <!-- zh: 通过旧版 winget（1.9 之前）创建的 `folio` 链接启动 Folio 时，设置 > 关于 > 许可证现在会打开这份副本自带的许可声明文件，而不是网页。 -->
 - The first picture, glance or page Folio shows after it starts no longer waits while Folio reads the fonts installed on the computer, which only formulas need; Folio now reads them alongside. <!-- zh: Folio 启动后显示的第一张图片、悬停卡片或页面，不再等待 Folio 读取电脑上安装的字体（只有公式需要这些字体）；Folio 现在一边显示一边读取字体。 -->
 - On macOS, when you log out, restart or shut down, or quit Folio from the Dock, Folio's log now says whether the layout it saved had reached the disk, and the log's lines up to that point are written out before macOS ends Folio, waiting at most one second for them. <!-- zh: pending T-MAC-DIAGNOSTICS-FLUSH-AFTER-TERMINATE -->
+- Turning Claude Code or Codex hooks on or off in Settings > Agents, and uninstalling Folio, now change only Folio's own entries in that agent's settings file. Everything else in the file stays exactly as it was, including your other hooks, the order, the formatting and the line endings. <!-- zh: pending -->
 - On Windows, Folio's windows now show Folio's icon in the snap layouts and Snap Assist, in Alt+Tab and Task View, and above the taskbar's window previews, and the icon stays sharp when a window moves to a display with a different scale. <!-- zh: pending -->
 
 ## 0.4.8-preview — 2026-10-23
