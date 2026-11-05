@@ -59,7 +59,9 @@ use crate::attention_ownership::{self as ownership, Decision};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-use toml_edit::{Array, DocumentMut, Item, Value};
+use toml_edit::{Array, DocumentMut, ImDocument, Item, Table, Value};
+
+use crate::attention_hooks::SPLICE_REFUSED;
 
 use crate::attention_map::CODEX;
 use crate::cli::ATTENTION_VERB;
@@ -259,7 +261,7 @@ pub(crate) fn program_for(exe: &Path) -> Vec<String> {
 }
 
 /// The words of a `notify` value, or nothing when the key is absent or is not an array of strings.
-fn words_of(document: &DocumentMut) -> Option<Vec<String>> {
+fn words_of(document: &Table) -> Option<Vec<String>> {
     document
         .get(NOTIFY_KEY)?
         .as_array()?
@@ -270,12 +272,12 @@ fn words_of(document: &DocumentMut) -> Option<Vec<String>> {
 
 /// Whether the exact Folio argv shape is present. `notify_owner` is the
 /// ownership decoder; all mutations additionally check its executable path.
-fn declares_folio(document: &DocumentMut) -> bool {
+fn declares_folio(document: &Table) -> bool {
     notify_owner(document).is_ok_and(|owner| owner.is_some())
 }
 
 /// The sole Codex attribution site: argv[0], with the exact Folio verb/event shape.
-fn notify_owner(document: &DocumentMut) -> Result<Option<PathBuf>, &'static str> {
+fn notify_owner(document: &Table) -> Result<Option<PathBuf>, &'static str> {
     if document.get(NOTIFY_KEY).is_none() {
         return Ok(None);
     }
@@ -303,51 +305,194 @@ fn notify_owner(document: &DocumentMut) -> Result<Option<PathBuf>, &'static str>
 ///
 /// The one state this module refuses to act on. See the module header: there is one `notify` key,
 /// so writing ours over theirs deletes a program this build cannot give back.
-fn declares_somebody_else(document: &DocumentMut) -> bool {
+fn declares_somebody_else(document: &Table) -> bool {
     document.get(NOTIFY_KEY).is_some() && !declares_folio(document)
 }
 
-/// Write Folio's program onto the key, replacing one of ours it had before.
+/// **`existing` with Folio's `notify` line put in (`install`) or taken out, and every other byte as
+/// it was** (the owner's rule of 2026-11-04; 0.4.10 plan row 67a). `Ok(None)` when there is nothing
+/// to change.
 ///
-/// Returns whether anything changed, so that a press on an already-installed machine costs no write
-/// at all — `attention_hooks`'s rule, for `shell_integration`'s reason.
-fn install_into(document: &mut DocumentMut, exe: &Path) -> bool {
-    if declares_somebody_else(document) {
-        return false;
+/// `toml_edit` keeps comments and key order through a round trip, but not every byte: it drops a
+/// byte-order mark and ends every line it writes in `\n`, so a file saved with Windows line endings
+/// came back with Unix ones. So the document is read for its **spans** (`ImDocument` keeps them) and
+/// the edit is made on the text, one line, and nothing else:
+///
+/// - **an own `notify` with other words** has its value replaced where it stands — a comment at the
+///   end of the line stays with it;
+/// - **no `notify`** gets one line after the last key-value at the top level (where codex reads
+///   it, never under a table header), or at the top of a file that has none;
+/// - **removing** takes the `notify` line out, its line ending with it, and nothing above it: a
+///   comment the person wrote over the key stays where they wrote it.
+///
+/// The result is read back before anybody may write it ([`kept`]).
+fn edited(existing: &str, exe: &Path, install: bool) -> Result<Option<String>, &'static str> {
+    let document = ImDocument::parse(existing).map_err(|_| UNREADABLE)?;
+    let table = document.as_table();
+    let body = if existing.starts_with('\u{feff}') {
+        '\u{feff}'.len_utf8()
+    } else {
+        0
+    };
+    let newline = match existing.find('\n') {
+        Some(at) if at > 0 && existing.as_bytes()[at - 1] == b'\r' => "\r\n",
+        _ => "\n",
+    };
+    let edit = if install {
+        if declares_somebody_else(table) || words_of(table) == Some(program_for(exe)) {
+            return Ok(None);
+        }
+        let mut array = Array::new();
+        for word in program_for(exe) {
+            array.push(word);
+        }
+        let value = Value::Array(array).to_string();
+        match table.get(NOTIFY_KEY) {
+            Some(item) => {
+                let span = item.span().ok_or(SPLICE_REFUSED)?;
+                (span.start, span.end, value)
+            }
+            None => {
+                let line = format!("{NOTIFY_KEY} = {value}");
+                let last = table
+                    .get_values()
+                    .iter()
+                    .filter_map(|(_, value)| value.span())
+                    .map(|span| span.end)
+                    .max();
+                match last.map(|end| (end, existing[end..].find('\n'))) {
+                    Some((end, Some(ending))) => {
+                        let at = end + ending + 1;
+                        (at, at, format!("{line}{newline}"))
+                    }
+                    Some((_, None)) => (existing.len(), existing.len(), format!("{newline}{line}")),
+                    None => (body, body, format!("{line}{newline}")),
+                }
+            }
+        }
+    } else {
+        if notify_owner(table)
+            .ok()
+            .flatten()
+            .is_none_or(|owner| ownership::other_live(&owner, exe) != Ok(false))
+        {
+            return Ok(None);
+        }
+        let (key, item) = table.get_key_value(NOTIFY_KEY).ok_or(SPLICE_REFUSED)?;
+        let key = key.span().ok_or(SPLICE_REFUSED)?;
+        let value = item.span().ok_or(SPLICE_REFUSED)?;
+        let start = existing[..key.start]
+            .rfind('\n')
+            .map_or(body, |ending| ending + 1)
+            .max(body);
+        // Nothing but indentation before the key on its line: the line is the key's.
+        if !existing[start..key.start]
+            .trim_matches([' ', '\t'])
+            .is_empty()
+        {
+            return Err(SPLICE_REFUSED);
+        }
+        match existing[value.end..].find('\n') {
+            Some(ending) => (start, value.end + ending + 1, String::new()),
+            // The last line, with no line ending of its own: the one before it goes instead, so a
+            // file that ended without one still does.
+            None => {
+                let before = if existing[..start].ends_with("\r\n") {
+                    2
+                } else {
+                    usize::from(existing[..start].ends_with('\n'))
+                };
+                (start - before, existing.len(), String::new())
+            }
+        }
+    };
+    let (start, end, text) = edit;
+    let written = format!("{}{text}{}", &existing[..start], &existing[end..]);
+    if kept(existing, &written, exe, install) {
+        Ok(Some(written))
+    } else {
+        Err(SPLICE_REFUSED)
     }
-    let mut array = Array::new();
-    for word in program_for(exe) {
-        array.push(word);
-    }
-    let written = Item::Value(Value::Array(array));
-    // Compare argv, not TOML decoration/quoting, so a disk round trip is a no-op.
-    if words_of(document).as_ref() == Some(&program_for(exe)) {
-        return false;
-    }
-    document[NOTIFY_KEY] = written;
-    true
 }
 
-/// Take Folio's program back off the key, leaving everything else exactly as it was.
-///
-/// Symmetric with [`install_into`] and tested as such, byte for byte, on a document with the user's
-/// own comments and tables in it.
-fn remove_from(document: &mut DocumentMut, exe: &Path) -> bool {
-    if notify_owner(document)
-        .ok()
-        .flatten()
-        .is_none_or(|owner| ownership::other_live(&owner, exe) != Ok(false))
-    {
+/// **The write-time self-check**: the edited text is a configuration codex can read, its `notify`
+/// is what the edit meant it to be, and every other value of the file — by its key path, in its
+/// order — reads exactly as it did.
+fn kept(existing: &str, written: &str, exe: &Path, install: bool) -> bool {
+    let Ok(after) = written.parse::<DocumentMut>() else {
         return false;
+    };
+    let notify = if install {
+        words_of(&after) == Some(program_for(exe))
+    } else {
+        after.get(NOTIFY_KEY).is_none()
+    };
+    let before = values_but_notify(existing);
+    notify && before.is_some() && before == values_but_notify(written)
+}
+
+/// Every value of a document but its top-level `notify`, by key path and in order, and every table
+/// — what codex reads out of the file, whatever the comments and blank lines around it say.
+fn values_but_notify(text: &str) -> Option<Vec<(String, String)>> {
+    let mut document = text.parse::<DocumentMut>().ok()?;
+    document.remove(NOTIFY_KEY);
+    let mut found = Vec::new();
+    flattened(document.as_table(), "", &mut found);
+    Some(found)
+}
+
+fn flattened(table: &toml_edit::Table, path: &str, found: &mut Vec<(String, String)>) {
+    for (key, item) in table.iter() {
+        let at = format!("{path}{key:?}.");
+        match item {
+            Item::Value(value) => {
+                found.push((at, value.clone().decorated("", "").to_string()));
+            }
+            Item::Table(table) => {
+                found.push((at.clone(), "table".to_owned()));
+                flattened(table, &at, found);
+            }
+            Item::ArrayOfTables(tables) => {
+                for (index, table) in tables.iter().enumerate() {
+                    let at = format!("{at}{index}.");
+                    found.push((at.clone(), "table".to_owned()));
+                    flattened(table, &at, found);
+                }
+            }
+            Item::None => {}
+        }
     }
-    document.remove(NOTIFY_KEY).is_some()
+}
+
+/// [`edited`] over a document, for the tests that ask about the edit rather than about a file.
+#[cfg(test)]
+fn install_into(document: &mut DocumentMut, exe: &Path) -> bool {
+    edited_document(document, exe, true)
+}
+
+/// See [`install_into`].
+#[cfg(test)]
+fn remove_from(document: &mut DocumentMut, exe: &Path) -> bool {
+    edited_document(document, exe, false)
+}
+
+#[cfg(test)]
+fn edited_document(document: &mut DocumentMut, exe: &Path, install: bool) -> bool {
+    match edited(&document.to_string(), exe, install) {
+        Ok(Some(text)) => {
+            *document = text.parse().expect("the edit writes TOML");
+            true
+        }
+        Ok(None) | Err(_) => false,
+    }
 }
 
 /// Put Folio's `notify` in, or take it out, on this machine.
 ///
-/// **The file is read, changed and written whole**, and a copy of what was there is kept beside it
-/// the first time each day — `attention_hooks`'s rule, for its reason: this is somebody's own
-/// configuration file, and a build that could damage one had better be able to hand it back.
+/// **The file is read and written whole, and only Folio's own line in it changes** ([`edited`]),
+/// and a copy of what was there is kept beside it the first time each day — `attention_hooks`'s
+/// rule, for its reason: this is somebody's own configuration file, and a build that could damage
+/// one had better be able to hand it back.
 pub(crate) fn apply(decision: Decision, exe: &Path) -> Outcome {
     let Some(path) = config_path() else {
         return Outcome::Refused("no codex configuration directory to write into");
@@ -392,7 +537,7 @@ pub(crate) fn apply_resolved(
         // went ahead over somebody's own configuration — release audit 2026-09-16 (C-3).
         crate::attention_hooks::Standing::Unreadable => return Outcome::Refused(UNREADABLE),
     };
-    let mut document = match existing.parse::<DocumentMut>() {
+    let document = match existing.parse::<DocumentMut>() {
         Ok(document) => document,
         // Refused rather than replaced. A configuration file this build cannot read is a file
         // somebody wrote, and overwriting it to add a convenience is not a trade anyone agreed to.
@@ -403,8 +548,8 @@ pub(crate) fn apply_resolved(
     }
     // **Ownership is per entry** (closure review R4), and this family's entry is the whole key: a
     // `notify` wearing Folio's verb in a shape this build cannot decode is not Folio's, which is
-    // the answer [`declares_folio`] and [`remove_from`] have always given about it. An install
-    // over it is refused below as somebody else's program; a removal leaves it alone.
+    // the answer [`declares_folio`] and [`edited`] have always given about it. An install over it
+    // is refused below as somebody else's program; a removal leaves it alone.
     let paths = notify_owner(&document)
         .ok()
         .flatten()
@@ -417,10 +562,11 @@ pub(crate) fn apply_resolved(
         Ok(others) => others,
         Err(outcome) => return outcome,
     };
-    let changed = if install {
-        install_into(&mut document, exe)
-    } else {
-        remove_from(&mut document, exe)
+    // **Only Folio's own line changes, and every other byte of the file stays** (the owner's rule
+    // of 2026-11-04): see [`edited`].
+    let written = match edited(&existing, exe, install) {
+        Ok(written) => written,
+        Err(reason) => return Outcome::Refused(reason),
     };
     let _record = if install {
         match ownership::record(
@@ -434,16 +580,16 @@ pub(crate) fn apply_resolved(
     } else {
         None
     };
-    if !changed {
+    let Some(written) = written else {
         return if others.is_empty() {
             Outcome::Unchanged
         } else {
             Outcome::LeftOther(others)
         };
-    }
+    };
     // The atomic write, mandatory backup, and unsafe-path refusal are all
     // `attention_hooks::land`'s, said once for all three installers.
-    match config.land(&existing, "toml", rendered(&document, &existing).as_bytes()) {
+    match config.land(&existing, "toml", written.as_bytes()) {
         crate::attention_hooks::Landing::Landed => {}
         crate::attention_hooks::Landing::NoDirectory => {
             return Outcome::Refused("the codex configuration directory could not be created");
@@ -465,26 +611,6 @@ pub(crate) fn apply_resolved(
     } else {
         Outcome::LeftOther(others)
     }
-}
-
-/// The bytes to write, given what was read.
-///
-/// **A file that ended without a newline still ends without one** (found on a real machine,
-/// 2026-08-25: install-then-uninstall handed back the file and one extra byte). `toml_edit` renders
-/// a document with a line ending after its last item, which is the right default for a document it
-/// is creating and a change to a document it was handed. One byte is exactly the difference between
-/// "uninstalling gives the file back" and "uninstalling gives the file back and a newline", and the
-/// promise this module makes is the first one.
-///
-/// Exactly one, and only when the reader's own file had none: a file that ended in two blank lines
-/// still ends in two, because that is what `existing.ends_with` already answers.
-#[must_use]
-fn rendered(document: &DocumentMut, existing: &str) -> String {
-    let mut text = document.to_string();
-    if !existing.is_empty() && !existing.ends_with('\n') && text.ends_with('\n') {
-        text.pop();
-    }
-    text
 }
 
 #[cfg(test)]
@@ -718,18 +844,18 @@ mod tests {
             "model = \"gpt-5\"\n",
             "model = \"gpt-5\"\n\n",
         ] {
-            let mut document = original.parse::<DocumentMut>().expect("fixture");
-            assert!(install_into(&mut document, &exe()));
-            let installed = rendered(&document, original);
+            let installed = edited(original, &exe(), true)
+                .expect("an edit")
+                .expect("a change");
             assert!(
                 installed.contains(NOTIFY_KEY),
                 "the line is in what gets written"
             );
-            let mut back = installed.parse::<DocumentMut>().expect("what we wrote");
-            assert!(remove_from(&mut back, &exe()));
+            let back = edited(&installed, &exe(), false)
+                .expect("an edit")
+                .expect("a change");
             assert_eq!(
-                rendered(&back, &installed),
-                original,
+                back, original,
                 "install then uninstall is the identity on the bytes, not only on the document"
             );
         }
@@ -887,5 +1013,121 @@ mod tests {
         } else {
             State::Absent
         }
+    }
+
+    /// The value of the `notify` this build writes for a copy at `exe`, as it is spelled in the file.
+    fn notify_value(exe: &Path) -> String {
+        let mut array = Array::new();
+        for word in program_for(exe) {
+            array.push(word);
+        }
+        Value::Array(array).to_string()
+    }
+
+    /// RED (0.4.10 plan row 67a; ruling R12) — **a comment the person wrote over Folio's `notify`
+    /// stays when the switch is turned off**, and the one at the end of Folio's own line stays with
+    /// the line when a copy that is gone is replaced.
+    ///
+    /// `toml_edit`'s `remove` takes the comment lines above a key with the key; the edit on the text
+    /// takes the one line and nothing above it.
+    #[test]
+    fn a_comment_over_the_line_stays_when_the_line_goes() {
+        let ours = notify_value(&exe());
+        let theirs = format!("# the bell, from Folio\nnotify = {ours}\nmodel = \"gpt-5\"\n");
+        assert_eq!(
+            edited(&theirs, &exe(), false),
+            Ok(Some(
+                "# the bell, from Folio\nmodel = \"gpt-5\"\n".to_owned()
+            ))
+        );
+        let gone = exe().parent().unwrap().join("gone").join("folio.exe");
+        let theirs = format!(
+            "model = \"gpt-5\"\nnotify = {} # Folio's\n",
+            notify_value(&gone)
+        );
+        assert_eq!(
+            edited(&theirs, &exe(), true),
+            Ok(Some(format!(
+                "model = \"gpt-5\"\nnotify = {ours} # Folio's\n"
+            )))
+        );
+    }
+
+    /// RED (0.4.10 plan row 67a; the owner's rule of 2026-11-04) — **the file's line endings and its
+    /// byte-order mark are the file's**: a file saved with Windows line endings gets its line in
+    /// them, keeps its mark, and comes back to the byte when the line goes again. `toml_edit`'s
+    /// rendering ended every line it wrote in `\n` and dropped the mark.
+    #[test]
+    fn the_line_endings_and_the_byte_order_mark_are_the_files() {
+        let theirs =
+            "\u{feff}# mine\r\nmodel = \"gpt-5\"\r\n\r\n[tui]\r\nnotification_method = \"bel\"\r\n";
+        let installed = edited(theirs, &exe(), true)
+            .expect("an edit")
+            .expect("a change");
+        assert_eq!(
+            installed,
+            theirs.replacen(
+                "model = \"gpt-5\"\r\n",
+                &format!("model = \"gpt-5\"\r\nnotify = {}\r\n", notify_value(&exe())),
+                1
+            )
+        );
+        assert_eq!(
+            edited(&installed, &exe(), false),
+            Ok(Some(theirs.to_owned()))
+        );
+    }
+
+    /// **A file of tables only gets the line at its top**, where codex reads a top-level key — a
+    /// `notify` written after a header would be that table's — and after a byte-order mark.
+    #[test]
+    fn a_file_of_tables_only_gets_the_line_at_its_top() {
+        for mark in ["", "\u{feff}"] {
+            let theirs = format!("{mark}[tui]\nnotification_method = \"bel\"\n");
+            let installed = edited(&theirs, &exe(), true)
+                .expect("an edit")
+                .expect("a change");
+            assert_eq!(
+                installed,
+                format!(
+                    "{mark}notify = {}\n[tui]\nnotification_method = \"bel\"\n",
+                    notify_value(&exe())
+                )
+            );
+            let read = installed.parse::<DocumentMut>().expect("TOML");
+            assert!(declares_folio(&read));
+            assert_eq!(read["tui"]["notification_method"].as_str(), Some("bel"));
+            assert_eq!(edited(&installed, &exe(), false), Ok(Some(theirs)));
+        }
+    }
+
+    /// RED (0.4.10 plan row 67a) — **the write-time self-check refuses an edit that changed
+    /// anything but Folio's line**: another value, a value dropped, Folio's line under a table
+    /// header (a `tui.notify` codex would never run), a table's value changed.
+    #[test]
+    fn the_self_check_refuses_an_edit_that_changed_anything_else() {
+        let ours = format!("notify = {}", notify_value(&exe()));
+        let theirs = "model = \"gpt-5\"\n[tui]\nx = 1\n";
+        assert!(kept(
+            theirs,
+            &format!("model = \"gpt-5\"\n{ours}\n[tui]\nx = 1\n"),
+            &exe(),
+            true
+        ));
+        for changed in [
+            format!("model = \"gpt-6\"\n{ours}\n[tui]\nx = 1\n"),
+            format!("{ours}\n[tui]\nx = 1\n"),
+            format!("model = \"gpt-5\"\n[tui]\n{ours}\nx = 1\n"),
+            format!("model = \"gpt-5\"\n{ours}\n[tui]\nx = 2\n"),
+            format!("model = \"gpt-5\"\n{ours}\n"),
+        ] {
+            assert!(!kept(theirs, &changed, &exe(), true), "{changed}");
+        }
+        assert!(kept(
+            &format!("model = \"gpt-5\"\n{ours}\n[tui]\nx = 1\n"),
+            theirs,
+            &exe(),
+            false
+        ));
     }
 }
