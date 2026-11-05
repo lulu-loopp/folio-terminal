@@ -71,7 +71,7 @@
 //! is read here, and only otherwise the documented default beside the user's profile.
 
 pub(crate) use crate::attention_ownership::Outcome;
-use crate::attention_ownership::{self as ownership, Decision};
+use crate::attention_ownership::{self as ownership, Decision, HooksFound};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
@@ -79,9 +79,9 @@ use bt_platform::HostPlatform;
 use serde_json::{Map, Value as Json};
 use toml_edit::{Array, DocumentMut, ImDocument, Item, Table, Value};
 
-use crate::attention_hooks::{self as hooks, Config, Family, SPLICE_REFUSED, Standing, Wanted};
+use crate::attention_hooks::{self as hooks, Config, Family, Standing, Wanted};
 
-use crate::attention_map::CODEX;
+use crate::attention_map::{self, CODEX};
 use crate::cli::{ATTENTION_VERB, STDIN_PAYLOAD};
 
 /// The variable codex reads for its configuration directory.
@@ -99,21 +99,6 @@ const DEFAULT_DIRECTORY: &str = ".codex";
 
 /// The key codex spawns a program from at the end of a turn.
 const NOTIFY_KEY: &str = "notify";
-
-/// What this module says about a configuration file it could not read, whichever half could not
-/// read it.
-///
-/// One sentence for the byte that is not UTF-8 and for the document that is not TOML, because to
-/// the reader they are one fact: there is a file there, and this build is not going to guess at it.
-const UNREADABLE: &str = "the codex configuration file is not one this build can read";
-
-/// The same sentence about `hooks.json`.
-const HOOKS_UNREADABLE: &str = "the codex hooks file is not one this build can read";
-
-/// What an object on the way to Folio's hook said when it named one key twice — the reason
-/// [`attention_hooks`](crate::attention_hooks) gives about Claude Code's file, about this one.
-const HOOKS_DUPLICATE: &str =
-    "the codex hooks file names one key twice where Folio's hook goes, so nothing was written";
 
 /// The event a `notify` program is told about, in the wire's `<family>:<event>` spelling.
 ///
@@ -168,8 +153,7 @@ pub(crate) const HOOKS: Family = Family {
     owner: codex_hook_owner,
     wanted: hook_wanted,
     positional: true,
-    unreadable: HOOKS_UNREADABLE,
-    duplicate: HOOKS_DUPLICATE,
+    agent: CODEX,
 };
 
 /// Whether this machine's user configuration already calls Folio.
@@ -253,7 +237,7 @@ pub(crate) fn state() -> State {
     let Some(dir) = config_dir() else {
         return State::Absent;
     };
-    codex_state_in(&dir, std::env::current_exe().ok().as_deref())
+    codex_state_in(&dir, ownership::this_copy().as_deref())
 }
 
 /// **The settings row's two facts, out of one read of the files.**
@@ -415,6 +399,8 @@ fn hook_wanted(exe: &Path) -> Vec<Wanted> {
         event: STOP_EVENT,
         matcher: None,
         hook: Json::Object(hook),
+        carries_resume: attention_map::turn_end_row(CODEX, STOP)
+            .is_some_and(|row| row.resume.is_declared()),
     }]
 }
 
@@ -609,7 +595,7 @@ fn notify_owner(document: &Table) -> Result<Option<PathBuf>, &'static str> {
     if document.get(NOTIFY_KEY).is_none() {
         return Ok(None);
     }
-    let words = words_of(document).ok_or(UNREADABLE)?;
+    let words = words_of(document).ok_or(crate::i18n::Text::AgentHooksUnreadable.text())?;
     let folio = words.get(1).is_some_and(|word| word == ATTENTION_VERB)
         && words
             .get(2)
@@ -634,6 +620,52 @@ fn notify_owner(document: &Table) -> Result<Option<PathBuf>, &'static str> {
 /// over theirs deletes a program this build cannot give back.
 fn declares_somebody_else(document: &Table) -> bool {
     document.get(NOTIFY_KEY).is_some() && !declares_folio(document)
+}
+
+/// **What codex's `hooks.json` holds, as the start-time scan reads it** (0.4.10 plan row 67b over
+/// row 69's file): `attention_hooks::family_scan` over [`HOOKS`]. Nothing is written here.
+pub(crate) fn scan_resolved(
+    config: &crate::attention_hooks::Config,
+    exe: &Path,
+    look: &dyn Fn(&Path) -> ownership::PathStands,
+) -> HooksFound {
+    hooks::family_scan(&HOOKS, config, exe, look)
+}
+
+/// **What codex's configuration holds, as the start-time scan reads it** (0.4.10 plan row 67b):
+/// `attention_hooks::scan_resolved`'s answer over this family's one entry, the `notify` key.
+/// Nothing is written here.
+///
+/// Today's form is the one shape there has been (X1): [`program_for`] this copy. The same program
+/// spelled another way — the link a copy was started through, where the scan names the file it
+/// leads to — is this copy's in an older spelling, and drifted.
+pub(crate) fn notify_scan_resolved(
+    config: &crate::attention_hooks::Config,
+    exe: &Path,
+    look: &dyn Fn(&Path) -> ownership::PathStands,
+) -> HooksFound {
+    let text = match config.standing() {
+        crate::attention_hooks::Standing::Nothing => return HooksFound::Nothing,
+        crate::attention_hooks::Standing::Unreadable => return HooksFound::Unreadable,
+        crate::attention_hooks::Standing::Text(text) => text,
+    };
+    let Ok(document) = text.parse::<DocumentMut>() else {
+        return HooksFound::Unreadable;
+    };
+    if document.get(NOTIFY_KEY).is_none() {
+        return HooksFound::Nothing;
+    }
+    let Some(words) = words_of(&document) else {
+        return HooksFound::Unreadable;
+    };
+    let owner = match notify_owner(&document) {
+        Ok(owner) => owner,
+        Err(_) => return HooksFound::Unclassified,
+    };
+    let Some(owner) = owner else {
+        return HooksFound::Declined(crate::i18n::Text::AgentCodexNotifyTaken.text());
+    };
+    ownership::classify_owners(&[owner], exe, look, || words != program_for(exe))
 }
 
 /// **`existing` with Folio's `notify` line put in (`install`) or taken out, and every other byte as
@@ -663,7 +695,8 @@ fn edited(
     install: bool,
     any_copy: bool,
 ) -> Result<Option<String>, &'static str> {
-    let document = ImDocument::parse(existing).map_err(|_| UNREADABLE)?;
+    let document =
+        ImDocument::parse(existing).map_err(|_| crate::i18n::Text::AgentHooksUnreadable.text())?;
     let table = document.as_table();
     let body = if existing.starts_with('\u{feff}') {
         '\u{feff}'.len_utf8()
@@ -685,7 +718,9 @@ fn edited(
         let value = Value::Array(array).to_string();
         match table.get(NOTIFY_KEY) {
             Some(item) => {
-                let span = item.span().ok_or(SPLICE_REFUSED)?;
+                let span = item
+                    .span()
+                    .ok_or(crate::i18n::Text::AgentHooksSpliceRefused.text())?;
                 (span.start, span.end, value)
             }
             None => {
@@ -714,9 +749,15 @@ fn edited(
         {
             return Ok(None);
         }
-        let (key, item) = table.get_key_value(NOTIFY_KEY).ok_or(SPLICE_REFUSED)?;
-        let key = key.span().ok_or(SPLICE_REFUSED)?;
-        let value = item.span().ok_or(SPLICE_REFUSED)?;
+        let (key, item) = table
+            .get_key_value(NOTIFY_KEY)
+            .ok_or(crate::i18n::Text::AgentHooksSpliceRefused.text())?;
+        let key = key
+            .span()
+            .ok_or(crate::i18n::Text::AgentHooksSpliceRefused.text())?;
+        let value = item
+            .span()
+            .ok_or(crate::i18n::Text::AgentHooksSpliceRefused.text())?;
         let start = existing[..key.start]
             .rfind('\n')
             .map_or(body, |ending| ending + 1)
@@ -726,7 +767,7 @@ fn edited(
             .trim_matches([' ', '\t'])
             .is_empty()
         {
-            return Err(SPLICE_REFUSED);
+            return Err(crate::i18n::Text::AgentHooksSpliceRefused.text());
         }
         match existing[value.end..].find('\n') {
             Some(ending) => (start, value.end + ending + 1, String::new()),
@@ -747,7 +788,7 @@ fn edited(
     if kept(existing, &written, exe, install) {
         Ok(Some(written))
     } else {
-        Err(SPLICE_REFUSED)
+        Err(crate::i18n::Text::AgentHooksSpliceRefused.text())
     }
 }
 
@@ -832,7 +873,7 @@ struct Toml {
     config: Result<Config, &'static str>,
 }
 
-/// Read the `config.toml` at `path`, resolved **once**, for this operation — [`UNREADABLE`] when
+/// Read the `config.toml` at `path`, resolved **once**, for this operation — [`Text::AgentHooksUnreadable`](crate::i18n::Text::AgentHooksUnreadable) when
 /// its bytes are not UTF-8 or its text is not TOML.
 ///
 /// A file Folio will not edit — a link out of codex's folder, one shared by hard links, a read-only
@@ -843,7 +884,7 @@ fn toml_beside(path: &Path) -> Result<Toml, &'static str> {
         Ok(config) => match config.standing() {
             Standing::Text(text) => (text, Ok(config)),
             Standing::Nothing => (String::new(), Ok(config)),
-            Standing::Unreadable => return Err(UNREADABLE),
+            Standing::Unreadable => return Err(crate::i18n::Text::AgentHooksUnreadable.text()),
         },
         Err(hooks::Unresolved::Refused(reason)) => {
             match bt_platform::file_reads::read_to_string(
@@ -854,12 +895,16 @@ fn toml_beside(path: &Path) -> Result<Toml, &'static str> {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                     (String::new(), Err(reason))
                 }
-                Err(_) => return Err(UNREADABLE),
+                Err(_) => return Err(crate::i18n::Text::AgentHooksUnreadable.text()),
             }
         }
-        Err(hooks::Unresolved::Unreadable) => return Err(UNREADABLE),
+        Err(hooks::Unresolved::Unreadable) => {
+            return Err(crate::i18n::Text::AgentHooksUnreadable.text());
+        }
     };
-    let document = text.parse::<DocumentMut>().map_err(|_| UNREADABLE)?;
+    let document = text
+        .parse::<DocumentMut>()
+        .map_err(|_| crate::i18n::Text::AgentHooksUnreadable.text())?;
     Ok(Toml {
         text,
         document,
@@ -887,7 +932,9 @@ pub(crate) fn apply_at(path: &Path, decision: Decision, exe: &Path, data: &Path)
     match Config::resolve(path) {
         Ok(config) => apply_resolved(&config, decision, exe, data),
         Err(hooks::Unresolved::Refused(reason)) => Outcome::Refused(reason),
-        Err(hooks::Unresolved::Unreadable) => Outcome::Refused(HOOKS_UNREADABLE),
+        Err(hooks::Unresolved::Unreadable) => {
+            Outcome::Refused(crate::i18n::Text::AgentHooksUnreadable.text())
+        }
     }
 }
 
@@ -944,13 +991,15 @@ pub(crate) fn apply_resolved(
         // Nothing there yet: the install creates the file, and there is nothing to keep beside it.
         Standing::Nothing => String::new(),
         // **A file that could not be read is never written over** — release audit 2026-09-16 (C-3).
-        Standing::Unreadable => return Outcome::Refused(HOOKS_UNREADABLE),
+        Standing::Unreadable => {
+            return Outcome::Refused(crate::i18n::Text::AgentHooksUnreadable.text());
+        }
     };
     // Refused rather than guessed at, on an install: a configuration file this build cannot read is
     // a file somebody wrote, and whether it carries Folio's line is not something to assume.
     let toml = toml_beside(&folder.join(CONFIG_FILE)).and_then(|toml| {
         if toml.document.get(NOTIFY_KEY).is_some() && words_of(&toml.document).is_none() {
-            Err(UNREADABLE)
+            Err(crate::i18n::Text::AgentHooksUnreadable.text())
         } else {
             Ok(toml)
         }
@@ -1068,7 +1117,7 @@ fn land_codex_file(
         hooks::Landing::NoDirectory => {
             Err("the codex configuration directory could not be created")
         }
-        hooks::Landing::NoBackup => Err(hooks::NO_BACKUP),
+        hooks::Landing::NoBackup => Err(crate::i18n::Text::AgentConfigNoBackup.text()),
         hooks::Landing::Changed => Err(crate::i18n::Text::AgentConfigChanged.text()),
         hooks::Landing::NotWritten => Err("the codex configuration file could not be written"),
     }
@@ -1391,7 +1440,10 @@ mod tests {
         std::fs::write(&path, theirs).expect("the user's own file");
 
         let installing = apply_to(&dir.join(HOOKS_FILE), true, &exe());
-        assert_eq!(installing, Outcome::Refused(UNREADABLE));
+        assert_eq!(
+            installing,
+            Outcome::Refused(crate::i18n::Text::AgentHooksUnreadable.text())
+        );
         assert_eq!(std::fs::read(&path).expect("still there"), theirs);
         assert_eq!(
             names(&dir),
@@ -1407,7 +1459,7 @@ mod tests {
             taking_it_out,
             Outcome::LeftUnread {
                 removed: false,
-                reason: UNREADABLE
+                reason: crate::i18n::Text::AgentHooksUnreadable.text()
             }
         );
         assert_eq!(std::fs::read(&path).expect("still there"), theirs);
@@ -1439,14 +1491,14 @@ mod tests {
             std::fs::write(&path, &with_ours).expect("a hook of this copy's");
             assert_eq!(
                 apply_to(&path, true, &exe()),
-                Outcome::Refused(UNREADABLE),
+                Outcome::Refused(crate::i18n::Text::AgentHooksUnreadable.text()),
                 "{name}: an install needs both of its answers"
             );
             assert_eq!(
                 apply_to(&path, false, &exe()),
                 Outcome::LeftUnread {
                     removed: true,
-                    reason: UNREADABLE
+                    reason: crate::i18n::Text::AgentHooksUnreadable.text()
                 },
                 "{name}"
             );
@@ -2044,13 +2096,13 @@ mod tests {
             ),
             (
                 "{\n  // mine\n  \"hooks\": {}\n}\n",
-                Outcome::Refused(HOOKS_UNREADABLE),
-                Outcome::Refused(HOOKS_UNREADABLE),
+                Outcome::Refused(crate::i18n::Text::AgentHooksUnreadable.text()),
+                Outcome::Refused(crate::i18n::Text::AgentHooksUnreadable.text()),
             ),
             (
                 "{\"hooks\": {\"Stop\": [], \"Stop\": []}}\n",
-                Outcome::Refused(HOOKS_DUPLICATE),
-                Outcome::Refused(HOOKS_DUPLICATE),
+                Outcome::Refused(crate::i18n::Text::AgentHooksDuplicateKey.text()),
+                Outcome::Refused(crate::i18n::Text::AgentHooksDuplicateKey.text()),
             ),
         ] {
             let dir = scratch("ignored");

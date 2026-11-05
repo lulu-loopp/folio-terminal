@@ -3279,6 +3279,33 @@ text_entries! {
     UpdateFailedUndone,
     /// Its detail; `{version}` is the version whose changes were not kept (0.4.8 E5).
     UpdateCardUndone,
+    // ── agent hooks said and repaired at start (0.4.10 plan row 67b) ─────────
+    //
+    // D3: the refusals of the three agent writers, in the register of a settings row's line,
+    // because each is now also what the row says.
+    /// A key named twice where Folio's hooks go (`attention_hooks::mapped`).
+    AgentHooksDuplicateKey,
+    /// The write-time self-check's refusal, every writer's (0.4.10 plan row 67a).
+    AgentHooksSpliceRefused,
+    /// A file none of the three writers can read; also the row's line over one.
+    AgentHooksUnreadable,
+    /// The dated copy of the person's own file could not be kept (`Landing::NoBackup`).
+    AgentConfigNoBackup,
+    /// Codex's one `notify` key runs somebody else's program.
+    AgentCodexNotifyTaken,
+    /// A hook file of somebody else's stands under Folio's name in Copilot's folder.
+    AgentCopilotFileTaken,
+    /// The row's line over hooks a living other copy runs (R5); `{path}` is that copy's program.
+    AgentHooksOtherCopy,
+    /// The row's line over an entry that names a copy of Folio in a shape this build cannot read.
+    AgentHooksUnclassified,
+    /// The notice after the start-time scan pointed hooks of a gone copy at this one (R8).
+    AgentHooksRepairedClaude,
+    AgentHooksRepairedCodex,
+    AgentHooksRepairedCopilot,
+    /// The resume row's line while resume is on and an agent's hooks are not this copy's;
+    /// `{agents}` is the list.
+    DescResumeAgentsNeedsHooks,
 
     // ── codex's Stop hook (0.4.10 plan row 69) ─────────────────────────────
     //
@@ -6409,6 +6436,66 @@ impl Text {
                 "Changes made in Folio {version} were not kept.",
                 "在 Folio {version} 中所做的更改没有保留。",
             ),
+            Self::AgentHooksDuplicateKey => pick(
+                lang,
+                "This file names one key twice where Folio’s hooks go, so nothing was written.",
+                "此文件在 Folio 的 hook 所在位置重复使用了同一个键，因此未写入。",
+            ),
+            Self::AgentHooksSpliceRefused => pick(
+                lang,
+                "Folio could not change only its own lines in this file, so nothing was written.",
+                "Folio 无法只改动此文件中属于自己的行，因此未写入。",
+            ),
+            Self::AgentHooksUnreadable => pick(
+                lang,
+                "This file is in a form Folio cannot read. Folio does not change the file.",
+                "此文件的格式 Folio 无法读取。Folio 不改动此文件。",
+            ),
+            Self::AgentConfigNoBackup => pick(
+                lang,
+                "A copy of your own file could not be kept, so nothing was written.",
+                "无法为你的文件保留副本，因此未写入。",
+            ),
+            Self::AgentCodexNotifyTaken => pick(
+                lang,
+                "Codex already runs a notify program of your own.",
+                "Codex 已在运行你自己的 notify 程序。",
+            ),
+            Self::AgentCopilotFileTaken => pick(
+                lang,
+                "A hook file of your own already has this name.",
+                "已有一个同名的 hook 文件，属于你自己。",
+            ),
+            Self::AgentHooksOtherCopy => pick(
+                lang,
+                "These hooks run another Folio: {path}. On points the hooks at this Folio.",
+                "这些 hook 运行的是另一个 Folio：{path}。开启后 hook 改为指向这个 Folio。",
+            ),
+            Self::AgentHooksUnclassified => pick(
+                lang,
+                "An entry here looks like Folio’s, in a form Folio never wrote. Folio does not change the entry.",
+                "此处有一项看似属于 Folio，但格式不是 Folio 写过的。Folio 不改动这一项。",
+            ),
+            Self::AgentHooksRepairedClaude => pick(
+                lang,
+                "Claude Code hooks now point at this Folio.",
+                "Claude Code 的 hook 已改为指向这个 Folio。",
+            ),
+            Self::AgentHooksRepairedCodex => pick(
+                lang,
+                "Codex now notifies this Folio.",
+                "Codex 已改为通知这个 Folio。",
+            ),
+            Self::AgentHooksRepairedCopilot => pick(
+                lang,
+                "Copilot hooks now point at this Folio.",
+                "Copilot 的 hook 已改为指向这个 Folio。",
+            ),
+            Self::DescResumeAgentsNeedsHooks => pick(
+                lang,
+                "Resume needs this Folio’s hooks for: {agents}.",
+                "恢复会话需要此 Folio 的 hook：{agents}。",
+            ),
             Self::UpdateCardRestartMissed => {
                 pick(lang, "The restart did not happen.", "未能重启。")
             }
@@ -7132,6 +7219,35 @@ pub(crate) fn agent_owner_notice(install: bool, owners: &[std::path::PathBuf]) -
             .map(|p| p.display().to_string())
             .collect::<Vec<_>>()
             .join("\n")
+    )
+}
+
+/// **The Agents row's line over hooks a living other copy runs** (0.4.10 plan row 67b, R5): that
+/// copy's program, named, because "another Folio" without a path is a sentence nobody can act on.
+///
+/// Interned ([`intern`]): one entry per language per distinct set of other copies this process is
+/// told about, which is the number of copies on the machine.
+pub(crate) fn agent_hooks_other_copy_line(owners: &[std::path::PathBuf]) -> &'static str {
+    let paths = owners
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    intern(Text::AgentHooksOtherCopy.text().replace("{path}", &paths))
+}
+
+/// **The resume row's line while resume is on and some agents' hooks are not this copy's** (0.4.10
+/// plan row 67b): `agents` are their product names, in the row order. At most three distinct
+/// lists per language, so the pool stays small.
+pub(crate) fn resume_needs_hooks_line(agents: &[&str]) -> &'static str {
+    let separator = match current() {
+        Lang::English => ", ",
+        Lang::Chinese => "、",
+    };
+    intern(
+        Text::DescResumeAgentsNeedsHooks
+            .text()
+            .replace("{agents}", &agents.join(separator)),
     )
 }
 

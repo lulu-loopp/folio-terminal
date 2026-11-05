@@ -352,6 +352,10 @@ pub(crate) trait WindowHost {
     fn note(&self, line: &str);
     /// macOS's Option key as Alt, or as the composing key the keyboard prints with.
     fn set_option_as_alt(&self, option_sends_alt: bool);
+    /// **The program's own icon, worn by this window at `scale_factor`** (0.4.10 plan row 71) —
+    /// [`crate::wear_app_icon`]: the executable's icon group, at the shell's small and big sizes
+    /// for that scale, as the window's own icon on Windows; nothing anywhere else.
+    fn wear_the_app_icon(&self, scale_factor: f64);
     /// The window's scale and rectangle as the platform reports them, beside winit's.
     fn dpi_snapshot(&self) -> anyhow::Result<crate::DpiSnapshot>;
     /// **One clipboard request, put on the clipboard lane for this window** — served through this
@@ -553,6 +557,9 @@ impl WindowHost for Arc<Window> {
     }
     fn set_option_as_alt(&self, option_sends_alt: bool) {
         crate::option_as_alt(self, option_sends_alt);
+    }
+    fn wear_the_app_icon(&self, scale_factor: f64) {
+        crate::wear_app_icon(self, scale_factor);
     }
     fn dpi_snapshot(&self) -> anyhow::Result<crate::DpiSnapshot> {
         native_dpi_snapshot(self)

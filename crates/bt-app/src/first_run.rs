@@ -340,6 +340,10 @@ pub struct Machine {
     /// one turn of waiting ran out before it landed. Decides whether the
     /// Explorer row arrives on ([`explorer_arrives_on`]).
     pub install_channel: Channel,
+    /// Whether "Resume agents after restart" is on — the one stored answer the card reads, because
+    /// it decides whether the two agents resume brings back arrive on
+    /// ([`agent_arrives_on`]).
+    pub resume_agents: bool,
 }
 
 /// What the pointer resting on a row earns.
@@ -495,11 +499,29 @@ pub fn rows_for(platform: HostPlatform, machine: &Machine) -> Vec<Row> {
             group_break_above: !opened,
             line,
             tip,
-            on: false,
+            on: agent_arrives_on(kind, machine.resume_agents),
         });
         opened = true;
     }
     rows
+}
+
+/// **Whether Claude Code's and Codex's rows arrive switched on while resume is** (the owner's
+/// ruling of 2026-11-04 on 0.4.10 plan row 67, R6): resume, on by default, brings those two
+/// agents' sessions back only through their hooks, so a card that offered them switched off was
+/// offering a resume that could not work. The card's rule that every other row arrives off is
+/// amended for these two rows alone, and the person can still switch either off. One constant, so
+/// the ruling is one line.
+pub const RESUMED_AGENT_ROWS_ARRIVE_ON: bool = true;
+
+/// Whether an agent row arrives on: Claude Code's and Codex's, while resume is on and
+/// [`RESUMED_AGENT_ROWS_ARRIVE_ON`] says so; Copilot's never (this build resumes no Copilot
+/// session).
+#[must_use]
+pub fn agent_arrives_on(kind: RowKind, resume_agents: bool) -> bool {
+    RESUMED_AGENT_ROWS_ARRIVE_ON
+        && resume_agents
+        && matches!(kind, RowKind::Claude | RowKind::Codex)
 }
 
 /// **Whether the Explorer row arrives switched on** (U-3; owner ruling
@@ -2021,6 +2043,10 @@ mod tests {
             copilot_found: true,
             copilot_installable: true,
             install_channel: Channel::Ours,
+            // Off, so the pins below state the card's own rule; the two rows resume turns on are
+            // the ruling of 2026-11-04's, pinned on their own
+            // (`with_resume_on_the_claude_code_and_codex_rows_arrive_on`).
+            resume_agents: false,
         }
     }
 
@@ -2363,6 +2389,9 @@ mod tests {
     /// the Explorer row arrive on where a package manager will take the verb
     /// away again, so the pin now states that exception and nothing wider —
     /// on a copy unpacked by hand every row after the first still arrives off.
+    /// The owner's ruling of 2026-11-04 (0.4.10 plan row 67, R6) adds the two agent rows resume
+    /// needs while resume is on; this pin's machine has it off, and
+    /// `with_resume_on_the_claude_code_and_codex_rows_arrive_on` pins that exception.
     ///
     /// MUTATION: ship any other row on and a machine gets a registry key or
     /// somebody's `~/.claude/settings.json` edited by a reader who pressed the
@@ -2395,6 +2424,47 @@ mod tests {
             [RowKind::Explorer],
             "with an uninstall hook the Explorer row, and nothing else, joins the update check"
         );
+    }
+
+    /// PIN (the owner's ruling of 2026-11-04 on 0.4.10 plan row 67, R6) — **while resume is on,
+    /// Claude Code's and Codex's rows arrive on, and an untouched card's `Done` installs their
+    /// hooks; Copilot's never does, and with resume off neither does.**
+    ///
+    /// MUTATION: `RESUMED_AGENT_ROWS_ARRIVE_ON = false` and a first run with resume on, the default,
+    /// brings no session back after a restart until somebody finds the hooks rows.
+    #[test]
+    fn with_resume_on_the_claude_code_and_codex_rows_arrive_on() {
+        let resumed = rows(&Machine {
+            resume_agents: true,
+            ..every_row()
+        });
+        let on: Vec<RowKind> = resumed
+            .iter()
+            .filter(|row| row.on)
+            .map(|row| row.kind)
+            .collect();
+        assert_eq!(on, [RowKind::Update, RowKind::Claude, RowKind::Codex]);
+        assert_eq!(
+            applications(&resumed, ExplorerShape::FirstPageAndClassic),
+            [
+                Application::UpdateCheck(true),
+                Application::ClaudeHooks,
+                Application::CodexNotify
+            ],
+            "an untouched card with resume on did not bring the hooks resume needs"
+        );
+        let resting = rows(&every_row());
+        assert!(
+            resting
+                .iter()
+                .filter(|row| matches!(
+                    row.kind,
+                    RowKind::Claude | RowKind::Codex | RowKind::Copilot
+                ))
+                .all(|row| !row.on),
+            "with resume off an agent row arrived on"
+        );
+        assert!(!agent_arrives_on(RowKind::Copilot, true));
     }
 
     /// A temporary folder standing in for the folder `folio.exe` was installed

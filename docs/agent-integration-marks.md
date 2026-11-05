@@ -207,10 +207,43 @@ index the person's approval is keyed by.
   `session_id`, `cwd` and `last_assistant_message` on stdin. A hook runs only after the person trusts it
   in Codex, and a changed command asks again.
 
-No shell, guard process, launcher, or startup migration is added. Exact legacy
-Folio shell templates are decoded for ownership; an explicit hook install or
-refresh upgrades eligible entries. Unrecognized Folio-shaped templates refuse.
-Claude entries sharing a group with user hooks are edited individually.
+No shell, guard process or launcher is added. Exact legacy Folio shell
+templates are decoded for ownership; an install or refresh upgrades eligible
+entries. Unrecognized Folio-shaped templates refuse. Claude entries sharing a
+group with user hooks are edited individually.
+
+## The start-time scan (0.4.10 plan row 67b)
+
+Since 0.4.10 the start-time carry pass (`carry_pass`, on its own below-normal
+worker, never the window thread) classifies each agent's file
+(`agent_hooks_step`; each family's `scan_resolved` returns a `HooksFound`) and
+writes in exactly two states:
+
+- **Dead**: every other copy the file names is `NotFound` on a volume that is
+  there (`other_live_by`, `DeadWhen::MissingOnAVolumeThatIsThere`). A copy on a
+  drive or share that is not plugged in, and an operand that names no file, is
+  `OwnerUnknown` and keeps its hooks. A press and the uninstall keep the older
+  rule (`DeadWhen::Missing`): what is not there is gone.
+- **Drifted**: this copy's own entries in an older form (C1–C3, P1, P2), or no
+  Claude Code `Stop`, the event resume needs. Another event the person removed
+  by hand stays removed.
+
+Both go through the switch's writer (`apply_resolved`, `Decision::Install`),
+which asks every question again, records the root in `agent_config_roots` and
+changes only Folio's own entries. Nothing else is written: a living other copy
+keeps its hooks and the row names it (its take-over stays the press's), and an
+unknown owner, an unreadable file, an unclassified Folio-like entry, somebody
+else's `notify` and somebody else's hook file are said on the row. The pass
+runs at the program walk's first answer and when a walk moves an agent's
+folder, at each Agents page open, after a press, and at an update trial's
+commit; during a trial the repair is held (`Writer::AgentHooksRepair`). A press
+holds its family's latch, so a repair never writes beside one, and a repair
+reads its file once (`Config::with_one_read`), so a press that wrote after the
+scan makes the repair's write refuse rather than undo it. Each repair
+writes a `BT_AGENT_HOOKS` diagnostics line; a dead owner's also raises one
+notice per family. Copilot is repaired within its version gate: only after the
+version question has been answered (the step asks it, and the answer runs the
+pass again), and never for a copilot too old for the hooks.
 
 ## Take-over and the settings row
 

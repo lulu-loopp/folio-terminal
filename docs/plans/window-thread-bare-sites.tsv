@@ -56,7 +56,7 @@ bt-app	-	crate::append_panic_report	std::io::Write::write_fmt	1
 bt-app	-	crate::attention_hooks::Config::land	std::fs::create_dir_all	1
 bt-app	-	crate::attention_hooks::Config::land	std::fs::write	1
 bt-app	-	crate::attention_hooks::editable_target	std::fs::canonicalize	2
-bt-app	-	crate::attention_ownership::other_live	std::fs::metadata	1
+bt-app	-	crate::attention_ownership::what_stands	std::fs::metadata	1
 bt-app	-	crate::attention_wire::payload_on_stdin	std::sync::mpsc::Receiver::recv_timeout	1
 bt-app	-	crate::clipboard_picture::names_in	std::fs::read_dir	1
 bt-app	-	crate::clipboard_picture::save	std::fs::create_dir_all	1
