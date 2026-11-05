@@ -5,8 +5,9 @@ use crate::profiles;
 use crate::shell_integration;
 use crate::window_seam::prelude::*;
 use crate::{
-    Announce, Runtime, attention_codex, attention_copilot, attention_hooks, attention_ownership,
-    diagnostics, explorer_menu, first_run, i18n, install_channel, restore, toast, tooltip,
+    Announce, Runtime, agent_hooks_step, attention_codex, attention_copilot, attention_hooks,
+    attention_ownership, carry_pass, diagnostics, explorer_menu, first_run, i18n, install_channel,
+    restore, toast, tooltip,
 };
 use anyhow::Result;
 use winit::keyboard::{Key, NamedKey};
@@ -113,10 +114,16 @@ impl<B: Backend> Runtime<'_, B> {
             config.as_deref(),
             std::time::Instant::now(),
         );
-        let exe = std::env::current_exe().ok();
-        let outcome = match attention_ownership::stable_executable(exe.as_deref()) {
-            Ok(exe) => attention_hooks::apply(decision, exe),
-            Err(reason) => attention_hooks::Outcome::Refused(reason),
+        let exe = attention_ownership::this_copy();
+        let outcome = {
+            // **No start-time repair of this family writes while a press does** (0.4.10 plan row
+            // 67b): the press holds the family's latch across its write, and a repair that finds
+            // it taken writes nothing.
+            let _press = agent_hooks_step::AGENT_HOOKS.take_latch(0);
+            match attention_ownership::stable_executable(exe.as_deref()) {
+                Ok(exe) => attention_hooks::apply(decision, exe),
+                Err(reason) => attention_hooks::Outcome::Refused(reason),
+            }
         };
         if let attention_hooks::Outcome::TakeOverRequired(owners) = &outcome {
             self.app.agent_takeovers[0] = attention_ownership::Pending::new(
@@ -129,6 +136,9 @@ impl<B: Backend> Runtime<'_, B> {
             self.app.claude_hooks_installed,
             self.app.agent_config_refusals[0],
         ) = attention_hooks::row_state();
+        // The row's line and the resume row's are the scan's: asked again, off this thread.
+        self.app.agent_hooks_found[0] = None;
+        carry_pass::begin_carry_pass();
         match outcome {
             attention_hooks::Outcome::Installed | attention_hooks::Outcome::Removed
                 if announce == Announce::OnlyFailures =>
@@ -197,10 +207,16 @@ impl<B: Backend> Runtime<'_, B> {
             config.as_deref(),
             std::time::Instant::now(),
         );
-        let exe = std::env::current_exe().ok();
-        let outcome = match attention_ownership::stable_executable(exe.as_deref()) {
-            Ok(exe) => attention_codex::apply(decision, exe),
-            Err(reason) => attention_codex::Outcome::Refused(reason),
+        let exe = attention_ownership::this_copy();
+        let outcome = {
+            // **No start-time repair of this family writes while a press does** (0.4.10 plan row
+            // 67b): the press holds the family's latch across its write, and a repair that finds
+            // it taken writes nothing.
+            let _press = agent_hooks_step::AGENT_HOOKS.take_latch(1);
+            match attention_ownership::stable_executable(exe.as_deref()) {
+                Ok(exe) => attention_codex::apply(decision, exe),
+                Err(reason) => attention_codex::Outcome::Refused(reason),
+            }
         };
         if let attention_codex::Outcome::TakeOverRequired(owners) = &outcome {
             self.app.agent_takeovers[1] = attention_ownership::Pending::new(
@@ -213,6 +229,9 @@ impl<B: Backend> Runtime<'_, B> {
             self.app.codex_notify_installed,
             self.app.agent_config_refusals[1],
         ) = attention_codex::row_state();
+        // The row's line and the resume row's are the scan's: asked again, off this thread.
+        self.app.agent_hooks_found[1] = None;
+        carry_pass::begin_carry_pass();
         match outcome {
             attention_codex::Outcome::Installed | attention_codex::Outcome::Removed
                 if announce == Announce::OnlyFailures =>
@@ -288,10 +307,16 @@ impl<B: Backend> Runtime<'_, B> {
             config.as_deref(),
             std::time::Instant::now(),
         );
-        let exe = std::env::current_exe().ok();
-        let outcome = match attention_ownership::stable_executable(exe.as_deref()) {
-            Ok(exe) => attention_copilot::apply(decision, exe),
-            Err(reason) => attention_copilot::Outcome::Refused(reason),
+        let exe = attention_ownership::this_copy();
+        let outcome = {
+            // **No start-time repair of this family writes while a press does** (0.4.10 plan row
+            // 67b): the press holds the family's latch across its write, and a repair that finds
+            // it taken writes nothing.
+            let _press = agent_hooks_step::AGENT_HOOKS.take_latch(2);
+            match attention_ownership::stable_executable(exe.as_deref()) {
+                Ok(exe) => attention_copilot::apply(decision, exe),
+                Err(reason) => attention_copilot::Outcome::Refused(reason),
+            }
         };
         if let attention_copilot::Outcome::TakeOverRequired(owners) = &outcome {
             self.app.agent_takeovers[2] = attention_ownership::Pending::new(
@@ -304,6 +329,9 @@ impl<B: Backend> Runtime<'_, B> {
             self.app.copilot_hooks_installed,
             self.app.agent_config_refusals[2],
         ) = attention_copilot::row_state();
+        // The row's line and the resume row's are the scan's: asked again, off this thread.
+        self.app.agent_hooks_found[2] = None;
+        carry_pass::begin_carry_pass();
         self.app.copilot_readiness = attention_copilot::readiness();
         match outcome {
             attention_copilot::Outcome::Installed | attention_copilot::Outcome::Removed
@@ -450,6 +478,7 @@ impl<B: Backend> Runtime<'_, B> {
                 && attention_copilot::readiness() == attention_copilot::Readiness::Ready,
             install_channel: install_channel::channel()
                 .unwrap_or(install_channel::Channel::Unknown),
+            resume_agents: self.app.settings_store.loaded().resume_agents,
         };
         let rows = first_run::rows(&machine);
         let shape = first_run::explorer_shape(&machine);
