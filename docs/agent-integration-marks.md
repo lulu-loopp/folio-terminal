@@ -134,7 +134,9 @@ and escapes.
 One round trip is not the identity. The file cannot say who wrote an empty
 `"hooks": {}` or an empty event array. Folio fills it on install, and on
 removal it goes with Folio's entries, by the same rule that removes a `hooks`
-Folio created. Every other byte comes back. This is ruled, not owed (2026-11-04,
+Folio created. The same holds one level up: an object Folio's entries were the
+only members of is written back as `{}`, so a file that was `{ }`, or `{` and
+`}` on two lines, comes back as `{}`. Every other byte comes back. This is ruled, not owed (2026-11-04,
 plan row 67a D1): an empty container holds no hook or setting of the person's,
 and the rule protects their hooks and settings, so no record outside the file
 is kept to tell who wrote one.

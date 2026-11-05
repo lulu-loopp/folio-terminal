@@ -3451,6 +3451,31 @@ mod tests {
             std::fs::read_to_string(&path).expect("read back"),
             "{\n  \"model\": \"opus\"\n}\n"
         );
+
+        // Review N2, the same class one level up: an object that holds nothing but whitespace
+        // comes back as `{}` once Folio's entries — its only members — go again.
+        for (theirs, back) in [
+            ("{ }\n", "{}\n"),
+            ("{\n}\n", "{}\n"),
+            ("{\r\n}\r\n", "{}\r\n"),
+        ] {
+            std::fs::write(&path, theirs).expect("their own file");
+            assert_eq!(
+                apply_to(&path, true, &exe()),
+                Outcome::Installed,
+                "{theirs:?}"
+            );
+            assert_eq!(
+                apply_to(&path, false, &exe()),
+                Outcome::Removed,
+                "{theirs:?}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&path).expect("read back"),
+                back,
+                "{theirs:?}"
+            );
+        }
     }
 
     /// **A file the splice cannot read, or cannot tell which key the agent reads, is never
