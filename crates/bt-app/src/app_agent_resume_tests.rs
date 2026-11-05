@@ -1031,6 +1031,107 @@ fn a_resumed_pane_is_its_vendors_agent_whatever_its_program() {
     );
 }
 
+/// RED (T-AGENT-RESUME-ON-MACOS, ruling R4, review N3) — **the attention road asks the pane's
+/// account which agent it is**: a resumed pane whose program is the shell that `exec`ed the vendor
+/// (`/bin/zsh`, the Mac's road) hears its vendor's `Stop` with a new id (a `/clear`) through
+/// `deliver_attention`, and the record moves to the new session, owed to the layout. Asked by the
+/// program's name alone, the pane is a shell that marked no command, and the `/clear` is lost:
+/// the next restart would resume the session the person left.
+///
+/// MUTATION (plant `plant-15-attention-asks-the-program.py`): `deliver_attention` asking
+/// `agent_resume::child_of` again, and the first assertion goes red.
+#[test]
+fn a_resumed_shell_panes_clear_is_heard_through_the_attention_road() {
+    let mut tabs = vec![ringing_tab(1, 1)];
+    let seat = tabs[0].seats.terminals()[0];
+    let capability = attention_wire::mint_capability();
+    let leaf = &mut tabs[0]
+        .sessions
+        .get_mut(&seat)
+        .expect("the fixture's seat holds a shell")
+        .session;
+    leaf.attention.capability.clone_from(&capability);
+    leaf.launch.program = Some(PathBuf::from("/bin/zsh"));
+    leaf.agent = AgentAccount::born(&resume_seed("zsh", claude_record()).agent, true);
+    let installed =
+        attention_map::installed_rows(attention_map::ROWS, attention_map::CLAUDE_CODE, |_| true);
+    let cleared = Heard {
+        id: "1c9c7e1a-4f3d-4c2b-9a8e-5d6f7a8b9c0d".to_owned(),
+        cwd: FOLDER.to_owned(),
+        home: None,
+    };
+    let mut places = attention::Places::default();
+    let owed = deliver_attention(
+        &mut tabs,
+        1,
+        on_a_screen(false),
+        BOTH_NOTIFICATION_ROWS_ON,
+        &mut places,
+        &[attention_wire::Message {
+            capability,
+            family: attention_map::CLAUDE_CODE.to_owned(),
+            event: "Stop".to_owned(),
+            id: None,
+            text: None,
+            resume: Some(cleared.clone()),
+        }],
+        &installed,
+        Instant::now(),
+        None,
+        &mut Vec::new(),
+    );
+    assert!(owed, "the resumed pane's /clear is owed to the layout");
+    assert_eq!(
+        tabs[0].sessions[&seat]
+            .session
+            .agent
+            .record()
+            .map(|record| record.resume_id.as_str()),
+        Some(cleared.id.as_str()),
+        "and the record is the session the person is in now"
+    );
+}
+
+/// RED (T-AGENT-RESUME-ON-MACOS, ruling R3, review N4) — **`birth_here` hands a resume on a shell
+/// of no verified spelling its shell, with the line**: the call, not only the function. A resume
+/// seed on the pane's own `pwsh` (a family with no `profiles::CommandFlags`) is born, through this
+/// machine's table, as `pwsh` started as asked, in the session's folder, saying which session did
+/// not come back. Windows-only by its fixture: the Mac's table ships only zsh, bash and sh, which
+/// all have the spelling, so there it has no row to refuse; `shell_cannot_resume` itself is pinned
+/// on both by `a_shell_without_a_known_spelling_comes_back_with_the_line`.
+///
+/// MUTATION (plant `plant-15-birth-skips-the-refusal.py`): the `.or_else(shell_cannot_resume…)`
+/// dropped from `birth_here`, and the pane is born still holding the resume, saying nothing.
+#[cfg(windows)]
+#[test]
+fn a_resume_on_a_shell_of_no_verified_spelling_is_born_as_that_shell_with_the_line() {
+    let every_row =
+        profiles::ProfilePrograms::with_only(&(0..profiles::count()).collect::<Vec<_>>());
+    let row = profiles::row_of("pwsh").expect("the Windows table ships pwsh");
+    assert_eq!(
+        profiles::command_flags(&row.program),
+        None,
+        "pwsh's one-command spelling is not verified"
+    );
+    let (born, started) = birth_here(&resume_seed("pwsh", claude_record()), "", &every_row)
+        .expect("every row is answered");
+    assert_eq!(started, Started::AsAsked);
+    assert_eq!(born.profile, "pwsh", "its own shell");
+    assert_eq!(
+        born.cwd.as_ref().map(profiles::SeedPlace::path),
+        Some(Path::new(FOLDER)),
+        "in the session's folder"
+    );
+    let SeedAgent::CouldNotResume(could) = &born.agent else {
+        panic!("with the line: {:?}", born.agent);
+    };
+    assert!(
+        could.text().contains("Claude Code session 0b9c7e1a"),
+        "{}",
+        could.text()
+    );
+}
+
 /// RED (T-AGENT-RESUME-ON-MACOS) — **the macOS twin of
 /// `a_saved_agent_pane_with_a_recorded_session_is_born_through_its_vendors_resume`**: a saved zsh
 /// pane with a Claude Code record and a saved bash pane with a Codex record, through this Mac's own
