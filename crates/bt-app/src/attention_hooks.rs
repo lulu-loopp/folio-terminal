@@ -962,7 +962,7 @@ fn verified(before: &splice::Document, text: String) -> Result<String, &'static 
 }
 
 fn keeps_what_is_not_ours(before: &splice::Document, text: &str) -> bool {
-    let Ok(after) = splice::read(text) else {
+    let Ok(after) = splice::parse(text) else {
         return false;
     };
     let Some(root) = after.root.as_ref() else {
@@ -1061,7 +1061,7 @@ fn without_folio(mut settings: Value) -> Value {
 #[cfg(test)]
 fn edited_value(settings: &mut Value, exe: &Path, install: bool) -> bool {
     let text = serde_json::to_string_pretty(settings).expect("a value renders");
-    let Ok(document) = splice::read(&text) else {
+    let Ok(document) = splice::parse(&text) else {
         return false;
     };
     match edited(&document, exe, install) {
@@ -1143,7 +1143,7 @@ pub(crate) fn apply_resolved(
     // Refused rather than replaced when either cannot read it. A settings file this build cannot
     // read is a settings file somebody wrote, and overwriting it to add a convenience is not a
     // trade anyone agreed to.
-    let Ok(document) = splice::read(&existing) else {
+    let Ok(document) = splice::parse(&existing) else {
         return Outcome::Refused(UNREADABLE);
     };
     let settings = match document.value() {
@@ -1676,8 +1676,8 @@ mod splice {
         }
     }
 
-    /// Read `text` into spans, or refuse it whole.
-    pub(super) fn read(text: &str) -> Result<Document<'_>, Malformed> {
+    /// Parse `text` into spans, or refuse it whole.
+    pub(super) fn parse(text: &str) -> Result<Document<'_>, Malformed> {
         let body = if text.starts_with(BOM) {
             BOM.len_utf8()
         } else {
@@ -3264,7 +3264,7 @@ mod tests {
     fn the_self_check_refuses_an_edit_that_changed_anything_else() {
         let own = own_stop(&exe());
         let theirs = r#"{"model": "opus", "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "a"}]}, {"hooks": [{"type": "command", "command": "b"}]}]}}"#;
-        let document = splice::read(theirs).expect("JSON");
+        let document = splice::parse(theirs).expect("JSON");
         for changed in [
             theirs.replace(r#""command": "a""#, r#""command":"a""#),
             theirs.replace(r#""command": "a""#, "\"command\": \"\\u0061\""),
@@ -3298,7 +3298,7 @@ mod tests {
             "[{\"\\u00e9\": {}}]",
             "\"\\t\\n\\\\\\/\"",
         ] {
-            assert!(splice::read(text).is_ok(), "{text}");
+            assert!(splice::parse(text).is_ok(), "{text}");
             assert!(serde_json::from_str::<Value>(text).is_ok(), "{text}");
         }
         for text in [
@@ -3313,10 +3313,10 @@ mod tests {
             "{} {}",
             "// c\n{}",
         ] {
-            assert!(splice::read(text).is_err(), "{text}");
+            assert!(splice::parse(text).is_err(), "{text}");
             assert!(serde_json::from_str::<Value>(text).is_err(), "{text}");
         }
-        let document = splice::read("\u{feff} {\"é\": [1]}").expect("JSON");
+        let document = splice::parse("\u{feff} {\"é\": [1]}").expect("JSON");
         assert_eq!(document.body, 3);
         let root = document.root.as_ref().expect("a value");
         let member = root.member("é").expect("once").expect("there");
