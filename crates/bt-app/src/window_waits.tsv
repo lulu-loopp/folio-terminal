@@ -503,7 +503,7 @@ install_channel::begin	window	bt_platform::spawn_at_priority@2, bt_platform::spa
 recovered::ask	window	bt_platform::spawn_at_priority@2, bt_platform::spawn_at_priority_with_stack@3	—	lane::lock
 explorer_menu::begin_probe	window	bt_platform::spawn_at_priority_with_stack@3, lane::Executor::start_worker@2, explorer_menu::start_probe_with@2	—	lane::lock, explorer_menu::remember, explorer_menu::state, lane::Ledger::earliest_owed, lane::Ledger::worker_ended
 explorer_menu::request	window	bt_platform::spawn_at_priority_with_stack@3, lane::Executor::start_worker@2	—	lane::lock, explorer_menu::state, lane::Ledger::earliest_owed, lane::Ledger::worker_ended
-carry_pass::begin_carry_pass	window	bt_platform::spawn_at_priority_with_stack@3, lane::Executor::start_worker@2	—	lane::lock, lane::Ledger::earliest_owed, lane::Ledger::worker_ended
+carry_pass::begin_carry_pass	window	bt_platform::spawn_at_priority_with_stack@3, lane::Executor::start_worker@2	carry_pass::run_carry_steps	lane::lock, lane::Ledger::earliest_owed, lane::Ledger::worker_ended
 LayoutTables::shifted_character	window	std::sync::mpsc::SyncSender::try_send	—	lane::lock
 FilesWorker::request	window	std::sync::mpsc::Sender::send	—	lane::lock
 PreviewWorker::request	window	std::sync::mpsc::Sender::send	—	lane::lock

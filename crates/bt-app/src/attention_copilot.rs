@@ -1187,121 +1187,65 @@ pub(crate) fn probe_settled() -> bool {
 /// whatever folder the shell that started Folio was standing in. A `copilot.cmd` dropped into a
 /// cloned repository therefore ran the moment somebody opened Settings ▸ Agents — a page about
 /// agents, running a program nobody named, with no press on anything. So the search is this
-/// window's own ([`bt_platform::program_in_directories`], which never looks at a working
-/// directory) and what `cmd` receives is the answer, quoted, with nothing left to resolve.
+/// window's own ([`ProbeEnvironment::program`](crate::shell_integration::ProbeEnvironment::program):
+/// [`bt_platform::program_in_directories`] over the block's `PATH`, or `program_on_path` over the
+/// inherited one, neither of which looks at a working directory) and what `cmd` receives is the
+/// answer, quoted, with nothing left to resolve.
 ///
 /// **In the environment a pane is born with** (T-FRESH-FACTS): the current logon block
 /// (`bt_platform::environment::fresh_logon_environment`, the door T-ENV-REFRESH's births and the
-/// program walk use), not this process's launch environment. Both the search (its `PATH` and
+/// program walk use, read as the PowerShell probes read it: `shell_integration::ProbeEnvironment`),
+/// not this process's launch environment. Both the search (its `PATH` and
 /// `PATHEXT`) and the child (`copilot.cmd` starts `node` off its `PATH`) read it, so a copilot
 /// or a `node` installed while Folio runs is found and runs the way a pane would run it. A block
 /// that cannot be read is said, and the inherited environment is used, the pane birth's rule.
 #[cfg(windows)]
 fn run_probe(ctx: &bt_platform::admission::WorkerCtx) -> Option<Version> {
-    let environment = logon_environment(ctx, "copilot");
-    let variable = |name: &str| match &environment {
-        Some(block) => block
-            .iter()
-            .find(|(held, _)| held.to_string_lossy().eq_ignore_ascii_case(name))
-            .map(|(_, value)| value.clone()),
-        None => std::env::var_os(name),
-    };
-    let directories: Vec<PathBuf> = variable("PATH")
-        .map(|path| {
-            std::env::split_paths(&path)
-                // Absolute entries only: an empty entry, and a relative one, both mean the
-                // working directory to Windows.
-                .filter(|entry| entry.is_absolute())
-                .collect()
-        })
-        .unwrap_or_default();
-    let pathext =
-        variable("PATHEXT").map_or_else(String::new, |value| value.to_string_lossy().into_owned());
-    let copilot = bt_platform::program_in_directories(
-        Path::new("copilot"),
-        &directories,
-        &pathext,
-        &|candidate: &Path| candidate.is_file(),
-    )?;
-    version_through_cmd(
-        ctx,
-        &copilot,
-        environment.as_ref(),
-        PROBE_DEADLINE,
-        "copilot",
-    )
-}
-
-/// **The current logon block, or `None` when it cannot be read** — said once, as `who`'s probe,
-/// and the inherited environment used: the pane birth's rule.
-#[cfg(windows)]
-fn logon_environment(
-    ctx: &bt_platform::admission::WorkerCtx,
-    who: &str,
-) -> Option<bt_platform::environment::Environment> {
-    match bt_platform::environment::fresh_logon_environment(ctx) {
-        Ok(block) => block,
-        Err(error) => {
-            crate::diagnostics::note(&format!(
-                "{who} probe: the current environment could not be read ({error}); {who} is \
-                 looked for in the inherited one"
-            ));
-            None
-        }
-    }
+    let environment = crate::shell_integration::ProbeEnvironment::current(ctx, "copilot probe");
+    let copilot = environment.program(Path::new("copilot"))?;
+    version_through_cmd(ctx, &copilot, &environment, PROBE_DEADLINE, "copilot")
 }
 
 /// **`<program> --version`, asked of a program another reader has already found** (0.4.10 plan
 /// row 69c, R17: codex's, found by the program walk) — [`run_probe`]'s question, in the same
-/// environment and through the same `cmd.exe`, held to `deadline`. `None` when it would not say.
-#[cfg(windows)]
-pub(crate) fn program_version(
-    ctx: &bt_platform::admission::WorkerCtx,
-    program: &Path,
-    deadline: std::time::Duration,
-    who: &str,
-) -> Option<Version> {
-    let environment = logon_environment(ctx, who);
-    version_through_cmd(ctx, program, environment.as_ref(), deadline, who)
-}
-
-/// Off Windows no program is asked (the module header's probe answers `None` there too), so the
+/// environment and through the same `cmd.exe`, held to `deadline`. `None` when it would not say;
+/// off Windows no program is asked (the module header's probe answers `None` there too), so the
 /// version is unknown.
-#[cfg(not(windows))]
 pub(crate) fn program_version(
     ctx: &bt_platform::admission::WorkerCtx,
     program: &Path,
     deadline: std::time::Duration,
     who: &str,
 ) -> Option<Version> {
-    let _ = (ctx, program, deadline, who);
-    None
+    #[cfg(windows)]
+    {
+        let environment =
+            crate::shell_integration::ProbeEnvironment::current(ctx, &format!("{who} probe"));
+        version_through_cmd(ctx, program, &environment, deadline, who)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (ctx, program, deadline, who);
+        None
+    }
 }
 
-/// **`program --version` through `cmd.exe`**, in `environment` when there is one, held to
-/// `deadline`; the first three-part number it prints ([`Version::parse`]).
+/// **`program --version` through `cmd.exe`**, in `environment` (laid over the child by
+/// [`ProbeEnvironment::apply`](crate::shell_integration::ProbeEnvironment::apply), so the child
+/// sees the block a pane is born with and nothing of Folio's own), held to `deadline`; the first
+/// three-part number it prints ([`Version::parse`]).
 #[cfg(windows)]
 fn version_through_cmd(
     ctx: &bt_platform::admission::WorkerCtx,
     program: &Path,
-    environment: Option<&bt_platform::environment::Environment>,
+    environment: &crate::shell_integration::ProbeEnvironment,
     deadline: std::time::Duration,
     who: &str,
 ) -> Option<Version> {
     // Through the quiet door (§7.40 ①): without `CREATE_NO_WINDOW` a console
     // window opens on screen the first time somebody opens the settings dialog.
     let mut command = bt_platform::quiet_command_named(Path::new("cmd.exe"))?;
-    if let Some(block) = environment {
-        for (name, _) in std::env::vars_os() {
-            if !block.iter().any(|(held, _)| {
-                held.to_string_lossy()
-                    .eq_ignore_ascii_case(&name.to_string_lossy())
-            }) {
-                command.env_remove(name);
-            }
-        }
-        command.envs(block.iter().map(|(name, value)| (name, value)));
-    }
+    environment.apply(&mut command);
     // A raw tail and not `args`, because what is being built is a string `cmd`
     // parses for itself: the outer quotes are the pair it strips, and the inner
     // ones are what keep a program path holding a space one token.
