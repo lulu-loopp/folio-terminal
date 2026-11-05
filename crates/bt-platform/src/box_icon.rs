@@ -345,7 +345,10 @@ mod tests {
         let taken = body
             .find("let dressed = crate::box_icon::DressedBox::around();")
             .expect("the box's hook is taken");
-        let raised = body.find("MessageBoxTimeoutW(").expect("the box is raised");
+        // The last mention is the call; the first is the function's `extern` declaration.
+        let raised = body
+            .rfind("MessageBoxTimeoutW(")
+            .expect("the box is raised");
         let let_go = body
             .find("drop(dressed);")
             .expect("the box's hook is let go");
