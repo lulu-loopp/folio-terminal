@@ -48,6 +48,7 @@ All notable changes to Folio are recorded here. The format follows
 - When Folio is started through the `folio` link an older winget (before 1.9) makes, Settings > About > Licences now opens the notices file that came with the copy instead of the web page. <!-- zh: 通过旧版 winget（1.9 之前）创建的 `folio` 链接启动 Folio 时，设置 > 关于 > 许可证现在会打开这份副本自带的许可声明文件，而不是网页。 -->
 - The first picture, glance or page Folio shows after it starts no longer waits while Folio reads the fonts installed on the computer, which only formulas need; Folio now reads them alongside. <!-- zh: Folio 启动后显示的第一张图片、悬停卡片或页面，不再等待 Folio 读取电脑上安装的字体（只有公式需要这些字体）；Folio 现在一边显示一边读取字体。 -->
 - Turning Claude Code or Codex hooks on or off in Settings > Agents, and uninstalling Folio, now change only Folio's own entries in that agent's settings file. Everything else in the file stays exactly as it was, including your other hooks, the order, the formatting and the line endings. <!-- zh: pending -->
+- Codex 0.148 and later reach Folio through a Codex hook instead of its notify line, so Folio works beside another program that uses that line, such as Codex's computer use. Codex asks once to trust the hook. <!-- zh: pending -->
 
 ## 0.4.8-preview — 2026-10-23
 
