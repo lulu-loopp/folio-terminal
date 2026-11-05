@@ -1167,7 +1167,7 @@ fn a_stops_box_is_owned_by_the_focused_window_else_the_first_standing() {
 /// here (`SystemBox`).
 ///
 /// MUTATION (`plant-72-a-a-stop-box-owned-by-nobody.py`): build the stop's notice over no window
-/// (`BoxOver(over.and(None))`), and its site is refused.
+/// (`BoxOver(over.filter(|_| false))`), and its site is refused.
 #[test]
 fn every_box_a_stop_raises_while_a_window_stands_is_owned_by_one() {
     let index = crate::test_support::source();
