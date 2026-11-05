@@ -506,7 +506,7 @@ struct Wanted {
 
 impl Wanted {
     /// The group a missing entry is written in: its own, holding nothing else.
-    fn group(&self) -> Value {
+    fn hooks_group(&self) -> Value {
         let mut group = Map::new();
         if let Some(matcher) = self.matcher {
             group.insert("matcher".to_owned(), matcher.into());
@@ -817,7 +817,7 @@ fn edited(
         let appended: Vec<Value> = missing
             .iter()
             .filter(|want| want.event == event.member.key)
-            .map(|want| want.group())
+            .map(|want| want.hooks_group())
             .collect();
         let mut group_gone = Vec::with_capacity(event.groups.len());
         let mut kept = Vec::new();
@@ -919,7 +919,7 @@ fn events_value<'w>(
             .entry(want.event.to_owned())
             .or_insert_with(|| Value::Array(Vec::new()))
         {
-            groups.push(want.group());
+            groups.push(want.hooks_group());
         }
     }
     events
@@ -981,7 +981,7 @@ fn keeps_what_is_not_ours(before: &splice::Document, text: &str) -> bool {
         (Some(old), Some(new)) if old == new => {}
         _ => return false,
     }
-    match (before.value(), after.value()) {
+    match (before.whole_value(), after.whole_value()) {
         (Ok(old), Ok(new)) => without_folio(old) == without_folio(new),
         _ => false,
     }
@@ -1146,7 +1146,7 @@ pub(crate) fn apply_resolved(
     let Ok(document) = splice::parse(&existing) else {
         return Outcome::Refused(UNREADABLE);
     };
-    let settings = match document.value() {
+    let settings = match document.whole_value() {
         Ok(value) if value.is_object() => value,
         _ => return Outcome::Refused(UNREADABLE),
     };
@@ -1668,7 +1668,7 @@ mod splice {
 
     impl Document<'_> {
         /// The document as a value — the classifiers' view of the same bytes.
-        pub(super) fn value(&self) -> Result<Value, Malformed> {
+        pub(super) fn whole_value(&self) -> Result<Value, Malformed> {
             match &self.root {
                 None => Ok(Value::Object(serde_json::Map::new())),
                 Some(_) => serde_json::from_str(&self.text[self.body..]).map_err(|_| Malformed),
@@ -1696,7 +1696,7 @@ mod splice {
                 root: None,
             });
         }
-        let root = reader.value(0)?;
+        let root = reader.json_element(0)?;
         reader.skip_whitespace();
         if reader.at != text.len() {
             return Err(Malformed);
@@ -1725,7 +1725,7 @@ mod splice {
             }
         }
 
-        fn expect(&mut self, byte: u8) -> Result<(), Malformed> {
+        fn require_byte(&mut self, byte: u8) -> Result<(), Malformed> {
             if self.peek() == Some(byte) {
                 self.at += 1;
                 Ok(())
@@ -1734,7 +1734,7 @@ mod splice {
             }
         }
 
-        fn value(&mut self, depth: usize) -> Result<Node, Malformed> {
+        fn json_element(&mut self, depth: usize) -> Result<Node, Malformed> {
             if depth > DEPTH {
                 return Err(Malformed);
             }
@@ -1763,7 +1763,7 @@ mod splice {
         }
 
         fn object(&mut self, depth: usize) -> Result<Kind, Malformed> {
-            self.expect(b'{')?;
+            self.require_byte(b'{')?;
             self.skip_whitespace();
             let mut members = Vec::new();
             if self.peek() == Some(b'}') {
@@ -1778,9 +1778,9 @@ mod splice {
                 let key = self.string()?;
                 let key_end = self.at;
                 self.skip_whitespace();
-                self.expect(b':')?;
+                self.require_byte(b':')?;
                 self.skip_whitespace();
-                let value = self.value(depth + 1)?;
+                let value = self.json_element(depth + 1)?;
                 members.push(Property {
                     key,
                     key_start,
@@ -1803,7 +1803,7 @@ mod splice {
         }
 
         fn array(&mut self, depth: usize) -> Result<Kind, Malformed> {
-            self.expect(b'[')?;
+            self.require_byte(b'[')?;
             self.skip_whitespace();
             let mut elements = Vec::new();
             if self.peek() == Some(b']') {
@@ -1811,7 +1811,7 @@ mod splice {
                 return Ok(Kind::Array(elements));
             }
             loop {
-                elements.push(self.value(depth + 1)?);
+                elements.push(self.json_element(depth + 1)?);
                 self.skip_whitespace();
                 match self.peek() {
                     Some(b',') => {
@@ -1885,7 +1885,7 @@ mod splice {
 
         /// A string, decoded: the caller compares keys as the agent's parser would read them.
         fn string(&mut self) -> Result<String, Malformed> {
-            self.expect(b'"')?;
+            self.require_byte(b'"')?;
             let mut decoded = String::new();
             loop {
                 let character = self.text[self.at..].chars().next().ok_or(Malformed)?;
@@ -1927,8 +1927,8 @@ mod splice {
             let unit = self.hex4()?;
             let code = match unit {
                 0xD800..=0xDBFF => {
-                    self.expect(b'\\')?;
-                    self.expect(b'u')?;
+                    self.require_byte(b'\\')?;
+                    self.require_byte(b'u')?;
                     let low = self.hex4()?;
                     if !(0xDC00..=0xDFFF).contains(&low) {
                         return Err(Malformed);
