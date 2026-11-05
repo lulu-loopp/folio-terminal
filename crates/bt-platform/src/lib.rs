@@ -9603,6 +9603,26 @@ pub(crate) fn listener_says_within<T>(
     said.recv_timeout(bound)
 }
 
+/// **A Windows listener's first word, waited for on `clock`** up to `bound` — or `Timeout` when it
+/// did not come inside it: the one wait both Windows endpoints' `start` makes before it hands an
+/// endpoint back (T-LAUNCH-HANDOVER-BUDGET-ON-A-CLOCK for the launch endpoint,
+/// T-ATTENTION-ENDPOINT-WAITS-ON-A-CLOCK for the attention endpoint, which share it here). The
+/// product's clock makes the one [`listener_says_within`] of `bound`; a test's counted clock
+/// awaits the word within its patience, or spends the bound without listening.
+#[cfg(windows)]
+pub(crate) fn first_word_on<T>(
+    clock: &dyn launch_conversation::LaunchClock,
+    said: &std::sync::mpsc::Receiver<T>,
+    bound: std::time::Duration,
+) -> Result<T, std::sync::mpsc::RecvTimeoutError> {
+    let mut heard = Err(std::sync::mpsc::RecvTimeoutError::Timeout);
+    clock.wait(bound, &mut |within| {
+        heard = listener_says_within(said, within);
+        !matches!(heard, Err(std::sync::mpsc::RecvTimeoutError::Timeout))
+    });
+    heard
+}
+
 /// **How long a directory watch's retirement waits for its watcher thread to leave**
 /// (`DirWatch::retire_within`, T-DROP-DOORS D-40), on the worker that holds the watch. The
 /// thread's ending is a stop it is already waiting on — microseconds on every ordinary
