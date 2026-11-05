@@ -15368,16 +15368,19 @@ impl<W: WindowHost> NativeSay for BoxOver<'_, W> {
 /// stands. Read off the windows as [`FolioApp::frontmost_window`] reads them, and from the
 /// windows alone, so a stop can lend the box its owner while it holds the application.
 fn the_box_owner<B: Backend>(windows: &Windows<WindowId, WindowRuntime<B>>) -> Option<&B::Window> {
-    let standing = || {
-        windows
-            .in_order()
-            .map(|(_, runtime)| runtime)
-            .filter(|runtime| runtime.leaving.is_none())
-    };
-    standing()
-        .find(|runtime| runtime.window_focused)
-        .or_else(|| standing().next())
-        .map(|runtime| &runtime.window)
+    let mut first_standing = None;
+    for (_, runtime) in windows.in_order() {
+        if runtime.leaving.is_some() {
+            continue;
+        }
+        if runtime.window_focused {
+            return Some(&runtime.window);
+        }
+        if first_standing.is_none() {
+            first_standing = Some(&runtime.window);
+        }
+    }
+    first_standing
 }
 
 /// **What a stop's notice asks of the system's box** (T-STOP-NOTICE-BOX-QUERY-MACOS, 0.4.9 plan
