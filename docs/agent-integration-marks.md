@@ -177,8 +177,9 @@ writes in exactly two states:
 - **Dead**: every other copy the file names is `NotFound` on a volume that is
   there (`other_live_by`, `DeadWhen::MissingOnAVolumeThatIsThere`). The volume
   is the one the path leads to once its links and junctions are followed
-  (`volume_of_a_missing_path` resolves the deepest part that is there); a path
-  whose way cannot be followed is an owner that cannot be asked about. A copy
+  (`volume_of_a_missing_path` resolves the deepest part that is there), asked
+  only under this rule, never by a press or the uninstall; a path whose way
+  cannot be followed is an owner that cannot be asked about. A copy
   on a drive or share that is not plugged in, and an operand that names no
   file, is `OwnerUnknown` and keeps its hooks. A press and the uninstall keep
   the older rule (`DeadWhen::Missing`): what is not there is gone.
@@ -193,10 +194,12 @@ they set stays, and so do a `timeoutSec` or `matcher` on Copilot's entry.
 Ownership is by content, never by position: each wanted entry claims an own
 entry under its event that speaks for the same request (`claude-code:<row>`,
 `copilot:<row>`), wherever it stands, so an entry moved into the person's own
-group stays there. This copy's entries no install claims, such as one under an
-event Folio does not use, are left alone, kept by every install and said on
-the row ("An entry of Folio's under <event> is one Folio did not put there").
-A switch turned Off still takes every entry of this copy's out.
+group stays there. Entries of Folio's no install claims, such as one under an
+event Folio does not use, are the person's placing: kept by every install and
+said on the row ("An entry of Folio's under <event> is one Folio did not put
+there"). This copy's stay as they are; another copy's, moved or gone, are
+pointed at this copy where they stand and keep the person's other keys. A
+switch turned Off still takes every entry of this copy's out.
 
 Both go through the switch's writer (`apply_resolved`, `Decision::Install`),
 which asks every question again, records the root in `agent_config_roots` and

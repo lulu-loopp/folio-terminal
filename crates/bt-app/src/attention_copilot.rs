@@ -513,7 +513,7 @@ fn declares_folio(document: &Value) -> bool {
 pub(crate) fn scan_resolved(
     config: &crate::attention_hooks::Config,
     exe: &Path,
-    look: &dyn Fn(&Path) -> ownership::PathStands,
+    look: &dyn ownership::Look,
 ) -> HooksFound {
     let text = match config.standing() {
         crate::attention_hooks::Standing::Nothing => return HooksFound::Nothing,
@@ -598,25 +598,47 @@ fn copilot_form(document: &Value, exe: &Path) -> ownership::Form {
     }
 }
 
-/// **One entry an install wants**: its event, the request it speaks for (`copilot:<row>`), and
-/// the entry [`document_for`] writes.
+/// **One entry an install wants**: its event, the row it speaks for (the `<row>` of
+/// `copilot:<row>`), and the entry [`document_for`] writes for it.
 struct Wanted {
     event: String,
-    request: String,
+    row: &'static str,
     entry: Value,
 }
 
-/// Every entry one install writes, in [`document_for`]'s order.
+/// Every entry one install writes, in [`rows_to_install`]'s order.
 fn wanted(exe: &Path) -> Vec<Wanted> {
-    hooks_of(&document_for(exe))
-        .flat_map(|(event, entries)| {
-            entries.iter().map(move |entry| Wanted {
-                event: event.clone(),
-                request: request_of(entry).unwrap_or_default(),
-                entry: entry.clone(),
-            })
+    rows_to_install()
+        .into_iter()
+        .map(|row| Wanted {
+            event: event_of(row.event).to_owned(),
+            row: row.event,
+            entry: todays_entry(row.event, exe),
         })
         .collect()
+}
+
+/// The event a row's entry hangs on: the row before its matcher.
+fn event_of(row: &str) -> &str {
+    row.split_once('.').map_or(row, |(event, _)| event)
+}
+
+/// **The entry this build writes for one row**, naming this copy's program.
+fn todays_entry(row: &str, exe: &Path) -> Value {
+    let mut entry = Map::new();
+    if let Some((_, matcher)) = row.split_once('.') {
+        entry.insert("matcher".to_owned(), matcher.into());
+    }
+    entry.insert("exec".to_owned(), exe.to_string_lossy().as_ref().into());
+    entry.insert(
+        "args".to_owned(),
+        serde_json::json!(["attention", format!("{COPILOT}:{row}")]),
+    );
+    entry.insert("timeoutSec".to_owned(), TIMEOUT_SECONDS.into());
+    // Upstream defaults this to `"command"` when it is omitted. Written anyway, because a default
+    // is a thing that can change and this file has to keep meaning one thing.
+    entry.insert("type".to_owned(), "command".into());
+    Value::Object(entry)
 }
 
 /// A document's events and their entries, in the file's order. The shape is [`owners`]'s to
@@ -635,25 +657,28 @@ fn entry_at<'d>(document: &'d Value, (event, index): (&str, usize)) -> &'d Value
     &document["hooks"][event][index]
 }
 
-/// **The request an entry of Folio's speaks for**: `copilot:<row>`, from its `args` or, in the old
-/// shell columns, from the line after ` attention `.
-fn request_of(entry: &Value) -> Option<String> {
+/// **The row an entry of Folio's speaks for**: the `<row>` of its `copilot:<row>` word, from its
+/// `args` or, in the old shell columns, from the line after ` attention `. [`entry_owner`] reads
+/// an owner only off an entry that names one.
+fn row_of(entry: &Value) -> Option<String> {
+    let family = format!("{COPILOT}:");
     if entry.get("exec").is_some() {
         return entry
             .get("args")?
             .get(1)
             .and_then(Value::as_str)
+            .and_then(|word| word.strip_prefix(&family))
             .map(str::to_owned);
     }
     let line = ["bash", "powershell", "command"]
         .iter()
         .find_map(|column| entry.get(*column).and_then(Value::as_str))?;
-    let (_, tail) = line.rsplit_once(&format!(" attention {COPILOT}:"))?;
-    Some(format!("{COPILOT}:{tail}"))
+    let (_, tail) = line.rsplit_once(&format!(" attention {family}"))?;
+    Some(tail.to_owned())
 }
 
 /// **The entry each wanted entry claims** (ruling N1, 2026-11-05), in `wanted`'s order: under the
-/// wanted event, one of Folio's that speaks for the same request, this copy's first, then any
+/// wanted event, one of Folio's that speaks for the same row, this copy's first, then any
 /// copy's. Ownership is by content: the entry's place in its event's list, and the `matcher` and
 /// `timeoutSec` the person may have set on it, say nothing of which entry it is.
 fn claims<'d>(document: &'d Value, wanted: &[Wanted], exe: &Path) -> Vec<Option<(&'d str, usize)>> {
@@ -668,8 +693,7 @@ fn claims<'d>(document: &'d Value, wanted: &[Wanted], exe: &Path) -> Vec<Option<
                     .map(move |(index, entry)| ((event.as_str(), index), entry))
             })
             .filter(|(at, entry)| {
-                !claimed.contains(&Some(*at))
-                    && request_of(entry).as_deref() == Some(want.request.as_str())
+                !claimed.contains(&Some(*at)) && row_of(entry).as_deref() == Some(want.row)
             })
             .filter_map(|(at, entry)| Some((at, entry_owner(entry).ok().flatten()?)))
             .collect();
@@ -690,26 +714,28 @@ fn in_todays_form(entry: &Value, want: &Wanted) -> bool {
         && entry.get("args") == want.entry.get("args")
 }
 
-/// **A claimed entry brought into today's form**: an old shell column is replaced by the entry
-/// this build writes; an entry in the `exec` column gets this copy's program and the wanted
-/// arguments, and keeps every other key it has, as the person left them.
-fn repaired_entry(entry: &Value, want: &Wanted) -> Value {
+/// **An entry of Folio's brought into today's form** (`todays`, [`todays_entry`] for its row): an
+/// old shell column is replaced by the entry this build writes; an entry in the `exec` column gets
+/// this copy's program and the row's arguments, and keeps every other key it has, as the person
+/// left them.
+fn repaired_entry(entry: &Value, todays: &Value) -> Value {
     match (entry.get("exec"), entry.as_object()) {
         (Some(_), Some(entry)) => {
             let mut entry = entry.clone();
-            entry.insert("exec".to_owned(), want.entry["exec"].clone());
-            entry.insert("args".to_owned(), want.entry["args"].clone());
+            entry.insert("exec".to_owned(), todays["exec"].clone());
+            entry.insert("args".to_owned(), todays["args"].clone());
             Value::Object(entry)
         }
-        _ => want.entry.clone(),
+        _ => todays.clone(),
     }
 }
 
 /// **The document an install writes** over the one standing (ruling N1, 2026-11-05): every wanted
 /// entry claimed where it stands and brought into today's form only when it is not in it, every
-/// wanted entry nobody's entry speaks for appended to its event, the other copies' entries left
-/// over taken out — `apply_resolved` has asked about every other copy before this runs — and this
-/// copy's left over kept where they stand. An event left with nothing goes. Over no file,
+/// wanted entry nobody's entry speaks for appended to its event, and every entry of Folio's left
+/// over kept where it stands as the person's placing — this copy's as it is, another copy's
+/// pointed at this copy with every other key it has (re-review R1; `apply_resolved` has asked
+/// about every other copy before this runs). An event left with nothing goes. Over no file,
 /// [`document_for`].
 fn installed_document(standing: Option<&Value>, exe: &Path) -> Value {
     let Some(standing) = standing else {
@@ -732,14 +758,14 @@ fn installed_document(standing: Option<&Value>, exe: &Path) -> Value {
                     return Some(if in_todays_form(entry, want) {
                         entry.clone()
                     } else {
-                        repaired_entry(entry, want)
+                        repaired_entry(entry, &want.entry)
                     });
                 }
-                entry_owner(entry)
-                    .ok()
-                    .flatten()
-                    .is_some_and(|owner| crate::explorer_menu::same_path(&owner, exe))
-                    .then(|| entry.clone())
+                let owner = entry_owner(entry).ok().flatten()?;
+                if crate::explorer_menu::same_path(&owner, exe) {
+                    return Some(entry.clone());
+                }
+                Some(repaired_entry(entry, &todays_entry(&row_of(entry)?, exe)))
             })
             .collect();
         if !kept.is_empty() || entries.is_empty() {
@@ -780,28 +806,11 @@ pub(crate) fn document_for(exe: &Path) -> Value {
 pub(crate) fn document_for_on(exe: &Path, _platform: HostPlatform) -> Value {
     let mut hooks = Map::new();
     for row in rows_to_install() {
-        let (event, matcher) = match row.event.split_once('.') {
-            Some((event, matcher)) => (event, Some(matcher)),
-            None => (row.event, None),
-        };
-        let mut entry = Map::new();
-        if let Some(matcher) = matcher {
-            entry.insert("matcher".to_owned(), matcher.into());
-        }
-        entry.insert("exec".to_owned(), exe.to_string_lossy().as_ref().into());
-        entry.insert(
-            "args".to_owned(),
-            serde_json::json!(["attention", format!("{COPILOT}:{}", row.event)]),
-        );
-        entry.insert("timeoutSec".to_owned(), TIMEOUT_SECONDS.into());
-        // Upstream defaults this to `"command"` when it is omitted. Written anyway, because a
-        // default is a thing that can change and this file has to keep meaning one thing.
-        entry.insert("type".to_owned(), "command".into());
         let list = hooks
-            .entry(event.to_owned())
+            .entry(event_of(row.event).to_owned())
             .or_insert_with(|| Value::Array(Vec::new()));
         if let Some(array) = list.as_array_mut() {
-            array.push(Value::Object(entry));
+            array.push(todays_entry(row.event, exe));
         }
     }
     let mut document = Map::new();

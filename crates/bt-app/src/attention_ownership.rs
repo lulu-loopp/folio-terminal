@@ -179,7 +179,7 @@ fn literal_absolute_path(path: &Path) -> Result<&str, &'static str> {
 /// The press's and uninstall's rule ([`DeadWhen::Missing`]): a person's press and the uninstall
 /// decide on this machine as it stands, and R4 is the start-time scan's.
 pub(crate) fn other_live(owner: &Path, exe: &Path) -> Result<bool, &'static str> {
-    other_live_by(owner, exe, what_stands, DeadWhen::Missing)
+    other_live_by(owner, exe, &what_stands, DeadWhen::Missing)
 }
 
 /// **When an owner that is not there is gone**, by who is asking.
@@ -199,14 +199,16 @@ pub(crate) enum DeadWhen {
     MissingOnAVolumeThatIsThere,
 }
 
-/// [`other_live`] with the machine's answer to "what stands at this path" and the rule for a
-/// missing owner handed in — the seam the tests press, so a dead owner, an unplugged drive and a
-/// path that cannot be asked about are each a fixture rather than a state of the machine running
-/// them.
+/// [`other_live`] with the machine ([`Look`]) and the rule for a missing owner handed in — the
+/// seam the tests press, so a dead owner, an unplugged drive and a path that cannot be asked about
+/// are each a fixture rather than a state of the machine running them.
+///
+/// The volume a missing owner's path leads to is asked for only under the scan's rule: a press and
+/// the uninstall, which decide on the machine as it stands, never walk it (re-review R2).
 pub(crate) fn other_live_by(
     owner: &Path,
     exe: &Path,
-    look: impl Fn(&Path) -> PathStands,
+    look: &(impl Look + ?Sized),
     dead_when: DeadWhen,
 ) -> Result<bool, &'static str> {
     let unknown = || Err(crate::i18n::Text::AgentHooksOwnerUnknown.text());
@@ -221,18 +223,46 @@ pub(crate) fn other_live_by(
     if crate::explorer_menu::same_path(owner, exe) {
         return Ok(false);
     }
-    match look(owner) {
+    match look.stands(owner) {
         PathStands::File => Ok(true),
-        PathStands::Missing { .. } if dead_when == DeadWhen::Missing => Ok(false),
-        PathStands::Missing {
-            volume: Some(volume),
-        } if look(&volume) == PathStands::Folder => Ok(false),
+        PathStands::Missing => match dead_when {
+            DeadWhen::Missing => Ok(false),
+            DeadWhen::MissingOnAVolumeThatIsThere => match look.volume_of(owner) {
+                Some(volume) if look.stands(&volume) == PathStands::Folder => Ok(false),
+                _ => unknown(),
+            },
+        },
         _ => unknown(),
     }
 }
 
+/// **The machine, as the liveness rule asks it** ([`other_live_by`]): what stands at a path, and
+/// the root of the volume a path that is not there leads to — the second asked only under the
+/// start-time scan's rule (re-review R2, 2026-11-05).
+///
+/// Every `Fn(&Path) -> PathStands` is one, with this machine's own volume walk
+/// ([`volume_of_a_missing_path`]): [`what_stands`] is the product's, and a test's closure decides
+/// what stands while the walk stays the machine's. A test that decides the volume as well writes a
+/// type of its own.
+pub(crate) trait Look {
+    /// What stands at `path`.
+    fn stands(&self, path: &Path) -> PathStands;
+
+    /// The root of the volume `missing`, a path that is not there, leads to; `None` when its way
+    /// cannot be followed.
+    fn volume_of(&self, missing: &Path) -> Option<PathBuf> {
+        volume_of_a_missing_path(missing)
+    }
+}
+
+impl<F: Fn(&Path) -> PathStands + ?Sized> Look for F {
+    fn stands(&self, path: &Path) -> PathStands {
+        self(path)
+    }
+}
+
 /// **What stands at a path**, as the liveness rule asks it ([`other_live_by`]).
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PathStands {
     /// A file: for an owner, a living copy.
     File,
@@ -240,9 +270,9 @@ pub(crate) enum PathStands {
     Folder,
     /// Something that is neither.
     Other,
-    /// Nothing, by the system's own `NotFound` — with the root of the volume the path leads to
-    /// ([`volume_of_a_missing_path`]): `None` when its way cannot be followed.
-    Missing { volume: Option<PathBuf> },
+    /// Nothing, by the system's own `NotFound`. Where the path leads is [`Look::volume_of`]'s, and
+    /// asked only by the scan's rule.
+    Missing,
     /// The system would not say: a permission, a device that is not ready, a share that does not
     /// answer. **Not evidence of anything.**
     Unknown,
@@ -255,9 +285,7 @@ pub(crate) fn what_stands(path: &Path) -> PathStands {
         Ok(meta) if meta.is_file() => PathStands::File,
         Ok(meta) if meta.is_dir() => PathStands::Folder,
         Ok(_) => PathStands::Other,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => PathStands::Missing {
-            volume: volume_of_a_missing_path(path),
-        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => PathStands::Missing,
         Err(_) => PathStands::Unknown,
     }
 }
@@ -425,7 +453,7 @@ impl HooksFound {
 pub(crate) fn classify_owners(
     owners: &[PathBuf],
     exe: &Path,
-    look: &dyn Fn(&Path) -> PathStands,
+    look: &dyn Look,
     form: impl FnOnce() -> Form,
 ) -> HooksFound {
     if owners.is_empty() {

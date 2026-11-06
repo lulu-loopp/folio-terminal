@@ -27,13 +27,13 @@ use std::sync::{Mutex, OnceLock, PoisonError};
 
 use crate::attention_copilot::Readiness;
 use crate::attention_hooks::{Config, Unresolved};
-use crate::attention_ownership::{self as ownership, Decision, HooksFound, Outcome, PathStands};
+use crate::attention_ownership::{self as ownership, Decision, HooksFound, Outcome};
 use crate::i18n::Text;
 use crate::update_trial::Writer;
 
 /// A family's classification of a resolved file, against this copy's program, with the machine's
 /// answer about a path handed in.
-pub(crate) type HooksScanFn = fn(&Config, &Path, &dyn Fn(&Path) -> PathStands) -> HooksFound;
+pub(crate) type HooksScanFn = fn(&Config, &Path, &dyn ownership::Look) -> HooksFound;
 
 /// **One agent's configuration, as the step reads and repairs it** — the seam a family joins by
 /// (row 69's Codex `hooks.json` replaces the `notify` member here).
@@ -193,7 +193,7 @@ impl AgentHooksStep {
         paths: &[Option<PathBuf>; 3],
         exe: &Path,
         data: &Path,
-        look: &dyn Fn(&Path) -> PathStands,
+        look: &dyn ownership::Look,
         mut defer: impl FnMut(Writer) -> bool,
         within_its_gate: &dyn Fn(&HooksFamily) -> bool,
     ) -> [HooksScan; 3] {
@@ -450,12 +450,7 @@ pub(crate) fn held_by_another(index: usize) -> bool {
 }
 
 /// [`held_by_another`] over a named file, with the machine's answer about a path handed in.
-fn held_at(
-    family: &HooksFamily,
-    path: &Path,
-    exe: &Path,
-    look: &dyn Fn(&Path) -> PathStands,
-) -> bool {
+fn held_at(family: &HooksFamily, path: &Path, exe: &Path, look: &dyn ownership::Look) -> bool {
     Config::resolve(path).is_ok_and(|config| {
         matches!(
             (family.scan)(&config, exe, look),
@@ -493,7 +488,7 @@ mod tests {
     //! the machine's answer about a path is either the real one about those files or one the test
     //! hands in. No test here reads an agent's real configuration or a Folio data folder.
     use super::*;
-    use crate::attention_ownership::{DeadWhen, volume_root_of, what_stands};
+    use crate::attention_ownership::{DeadWhen, PathStands, volume_root_of, what_stands};
     use serde_json::{Value, json};
     use std::fs;
 
@@ -552,6 +547,36 @@ mod tests {
         false
     }
 
+    /// **A machine a test writes** ([`ownership::Look`]): what stands, by `stands`, and the volume
+    /// every missing path leads to — with the number of times that was asked for, which only the
+    /// scan's rule does (re-review R2).
+    struct MachineAsWritten<F> {
+        stands: F,
+        volume: Option<PathBuf>,
+        volume_asked: std::cell::Cell<usize>,
+    }
+
+    impl<F> MachineAsWritten<F> {
+        fn new(stands: F, volume: Option<PathBuf>) -> Self {
+            Self {
+                stands,
+                volume,
+                volume_asked: std::cell::Cell::new(0),
+            }
+        }
+    }
+
+    impl<F: Fn(&Path) -> PathStands> ownership::Look for MachineAsWritten<F> {
+        fn stands(&self, path: &Path) -> PathStands {
+            (self.stands)(path)
+        }
+
+        fn volume_of(&self, _missing: &Path) -> Option<PathBuf> {
+            self.volume_asked.set(self.volume_asked.get() + 1);
+            self.volume.clone()
+        }
+    }
+
     fn every_family(_: &HooksFamily) -> bool {
         true
     }
@@ -561,7 +586,7 @@ mod tests {
     /// notice per family is published, and a second run writes nothing and owes no notice.
     ///
     /// MUTATIONS: the liveness rule answers "alive" for a missing program
-    /// (`plant-67b-dead-is-alive-r3.py`) and the scan reads another copy's hooks; the repair writes
+    /// (`plant-67b-dead-is-alive-r4.py`) and the scan reads another copy's hooks; the repair writes
     /// nothing (`plant-67b-repair-writes-nothing.py`).
     #[test]
     fn a_dead_owner_is_repaired_at_start_once() {
@@ -1155,7 +1180,7 @@ mod tests {
     /// T8 (R4) — **a missing owner on a volume that is not there is not dead**: an unplugged
     /// drive's copy keeps its hooks.
     ///
-    /// MUTATION: the volume is not asked about (`plant-67b-no-volume-check-r3.py`).
+    /// MUTATION: the volume is not asked about (`plant-67b-no-volume-check-r4.py`).
     #[test]
     fn an_owner_on_an_absent_volume_is_not_dead() {
         let root = root("hooks-step-volume");
@@ -1166,17 +1191,16 @@ mod tests {
         install_all(&files, &away, &data);
         let before = bytes(&files);
         let volume = volume_root_of(&away).expect("a fixture path names its volume");
-        let look = |path: &Path| {
-            if path == away {
-                PathStands::Missing {
-                    volume: Some(volume.clone()),
+        let look = MachineAsWritten::new(
+            |path: &Path| {
+                if path == away || path == volume {
+                    PathStands::Missing
+                } else {
+                    what_stands(path)
                 }
-            } else if path == volume {
-                PathStands::Missing { volume: None }
-            } else {
-                what_stands(path)
-            }
-        };
+            },
+            Some(volume.clone()),
+        );
         let scans = AgentHooksStep::new().scan_and_repair(
             &some(&files),
             &here,
@@ -1188,17 +1212,21 @@ mod tests {
         assert_eq!(found(&scans), vec![HooksFound::OwnerUnknown; 3]);
         assert_eq!(bytes(&files), before);
         // The same owner on a volume that answers is dead, by the same rule.
+        let answers = MachineAsWritten::new(
+            |path: &Path| {
+                if path == away {
+                    PathStands::Missing
+                } else {
+                    what_stands(path)
+                }
+            },
+            Some(volume),
+        );
         assert_eq!(
             ownership::other_live_by(
                 &away,
                 &here,
-                |path: &Path| if path == away {
-                    PathStands::Missing {
-                        volume: volume_root_of(&away),
-                    }
-                } else {
-                    what_stands(path)
-                },
+                &answers,
                 DeadWhen::MissingOnAVolumeThatIsThere
             ),
             Ok(false)
@@ -1210,46 +1238,54 @@ mod tests {
     /// drive's copy never keeps a person from turning hooks off or from uninstalling; the scan,
     /// which writes with nobody asking, calls the same owner unknown. And an operand that names no
     /// file — a bare `folio.exe` an old build wrote, a placeholder — is gone to a press and cannot
-    /// be asked about by the scan, which leaves it and says so.
+    /// be asked about by the scan, which leaves it and says so. A press never walks the way to a
+    /// missing owner's volume: only the scan's rule asks for it (re-review R2).
     ///
-    /// MUTATION: the scan's rule calls an operand that names no file dead
-    /// (`plant-67b-unaskable-operand-dead.py`).
+    /// MUTATIONS: the scan's rule calls an operand that names no file dead
+    /// (`plant-67b-unaskable-operand-dead.py`); the volume is walked whoever asks
+    /// (`plant-67b-volume-walked-eagerly.py`).
     #[test]
     fn the_volume_rule_is_the_scans_and_a_press_decides_on_the_machine_as_it_stands() {
         let root = root("hooks-step-rules");
         let here = copy_at(&root, "B here");
         let away = root.join("A away").join("folio.exe");
         let volume = volume_root_of(&away).expect("a fixture path names its volume");
-        let unplugged = |path: &Path| {
-            if path == away {
-                PathStands::Missing {
-                    volume: Some(volume.clone()),
+        let unplugged = MachineAsWritten::new(
+            |path: &Path| {
+                if path == away || path == volume {
+                    PathStands::Missing
+                } else {
+                    what_stands(path)
                 }
-            } else if path == volume {
-                PathStands::Missing { volume: None }
-            } else {
-                what_stands(path)
-            }
-        };
+            },
+            Some(volume.clone()),
+        );
         assert_eq!(
-            ownership::other_live_by(&away, &here, unplugged, DeadWhen::Missing),
+            ownership::other_live_by(&away, &here, &unplugged, DeadWhen::Missing),
             Ok(false),
             "a press takes an unplugged drive's copy for gone"
+        );
+        // Re-review R2: a press never walks the way to the volume; only the scan's rule asks.
+        assert_eq!(
+            unplugged.volume_asked.get(),
+            0,
+            "a press asked for the volume"
         );
         assert_eq!(
             ownership::other_live_by(
                 &away,
                 &here,
-                unplugged,
+                &unplugged,
                 DeadWhen::MissingOnAVolumeThatIsThere
             ),
             Err(Text::AgentHooksOwnerUnknown.text()),
             "the scan does not"
         );
+        assert_eq!(unplugged.volume_asked.get(), 1);
         for operand in ["folio.exe", "${HOME}/folio.exe"] {
             let operand = Path::new(operand);
             assert_eq!(
-                ownership::other_live_by(operand, &here, what_stands, DeadWhen::Missing),
+                ownership::other_live_by(operand, &here, &what_stands, DeadWhen::Missing),
                 Ok(false),
                 "a press removes {}",
                 operand.display()
@@ -1258,7 +1294,7 @@ mod tests {
                 ownership::other_live_by(
                     operand,
                     &here,
-                    what_stands,
+                    &what_stands,
                     DeadWhen::MissingOnAVolumeThatIsThere
                 ),
                 Err(Text::AgentHooksOwnerUnknown.text()),
@@ -1795,6 +1831,96 @@ mod tests {
         );
     }
 
+    /// Re-review R1 (2026-11-05) — **a gone copy's entry the person placed is pointed at this copy
+    /// where it stands**: copy A's `Stop` entry copied under `SubagentStop` with `async` set false,
+    /// and A's Copilot `agentStop` entry copied under `subagentStop` with its own `timeoutSec`. A is
+    /// gone, and the start-time repair claims the wanted entries; the two placed ones are not
+    /// deleted but name this copy, keep the person's keys, and the rows say they are the person's.
+    /// Whether a person's placing survives does not hang on whether Folio moved.
+    ///
+    /// MUTATIONS: an install deletes another copy's unclaimed entry again, Claude Code's
+    /// (`plant-67b-placed-deleted.py`) or Copilot's (`plant-67b-placed-deleted-copilot.py`).
+    #[test]
+    fn a_gone_copys_placed_entry_is_pointed_here_where_it_stands() {
+        let root = root("hooks-step-gone-placed");
+        let gone = copy_at(&root, "A gone");
+        let here = copy_at(&root, "B here");
+        let files = files_in(&root.join("config"));
+        let data = root.join("data");
+        install_all(&files, &gone, &root.join("gone data"));
+        edit_json(&files[0], |settings| {
+            let mut copy = settings["hooks"]["Stop"][0]["hooks"][0].clone();
+            copy["async"] = json!(false);
+            settings["hooks"]["SubagentStop"] = json!([{ "hooks": [copy] }]);
+        });
+        edit_json(&files[2], |document| {
+            let mut copy = document["hooks"]["agentStop"][0].clone();
+            copy["timeoutSec"] = json!(45);
+            document["hooks"]["subagentStop"] = json!([copy]);
+        });
+        fs::remove_file(&gone).unwrap();
+        let scans = AgentHooksStep::new().scan_and_repair(
+            &some(&files),
+            &here,
+            &data,
+            &what_stands,
+            never_held,
+            &every_family,
+        );
+        let dead = Some(HooksFound::Dead(vec![gone.clone()]));
+        assert_eq!(scans[0].repaired_from, dead);
+        assert_eq!(
+            scans[0].found,
+            HooksFound::Placed(vec!["SubagentStop".to_owned()])
+        );
+        assert_eq!(scans[2].repaired_from, dead);
+        assert_eq!(
+            scans[2].found,
+            HooksFound::Placed(vec!["subagentStop".to_owned()])
+        );
+        let program = json!(here.to_string_lossy());
+        let settings: Value = serde_json::from_slice(&fs::read(&files[0]).unwrap()).unwrap();
+        let placed = &settings["hooks"]["SubagentStop"][0]["hooks"][0];
+        assert_eq!(
+            placed["command"], program,
+            "the placed entry was not pointed here"
+        );
+        assert_eq!(
+            placed["args"],
+            settings["hooks"]["Stop"][0]["hooks"][0]["args"]
+        );
+        assert_eq!(
+            placed["async"],
+            json!(false),
+            "the person's async was taken back"
+        );
+        let document: Value = serde_json::from_slice(&fs::read(&files[2]).unwrap()).unwrap();
+        let placed = &document["hooks"]["subagentStop"][0];
+        assert_eq!(
+            placed["exec"], program,
+            "the placed entry was not pointed here"
+        );
+        assert_eq!(
+            placed["timeoutSec"],
+            json!(45),
+            "the person's timeout was taken back"
+        );
+        for file in &files {
+            let text = fs::read_to_string(file).unwrap();
+            assert!(
+                !text.contains("A gone"),
+                "{} names the gone copy",
+                file.display()
+            );
+        }
+        assert_eq!(
+            hooks_row_line(&scans[0].found, scans[0].unrepaired),
+            Some(crate::i18n::agent_hooks_placed_line(&[
+                "SubagentStop".to_owned()
+            ]))
+        );
+    }
+
     /// N4 — **a due repair that did not happen is said on the row, and resume counts the hooks as
     /// missing**: this copy's C1 hooks (whose `Stop` carries no payload) in a folder where the
     /// dated copy cannot be kept are not written, the row says the writer's reason, the switch
@@ -1892,7 +2018,7 @@ mod tests {
     /// the path is spelled on answers. A press decides on the machine as it stands.
     ///
     /// MUTATION: the volume is read off the path's spelling again
-    /// (`plant-67b-volume-by-spelling.py`).
+    /// (`plant-67b-volume-by-spelling-r2.py`).
     #[test]
     fn a_missing_owner_behind_a_link_is_judged_where_the_link_leads() {
         let root = root("hooks-step-link");
@@ -1904,7 +2030,7 @@ mod tests {
         let owner = link.join("Folio").join("folio.exe");
         let scan = DeadWhen::MissingOnAVolumeThatIsThere;
         assert_eq!(
-            ownership::other_live_by(&owner, &here, what_stands, scan),
+            ownership::other_live_by(&owner, &here, &what_stands, scan),
             Ok(false),
             "a copy gone from where the link leads is gone"
         );
@@ -1914,17 +2040,19 @@ mod tests {
             PathStands::Folder,
             "the volume the path is spelled on is there"
         );
-        assert!(matches!(
-            what_stands(&owner),
-            PathStands::Missing { volume: None }
-        ));
+        assert_eq!(what_stands(&owner), PathStands::Missing);
         assert_eq!(
-            ownership::other_live_by(&owner, &here, what_stands, scan),
+            ownership::volume_of_a_missing_path(&owner),
+            None,
+            "the way through the link was followed by its spelling"
+        );
+        assert_eq!(
+            ownership::other_live_by(&owner, &here, &what_stands, scan),
             Err(Text::AgentHooksOwnerUnknown.text()),
             "a copy behind a link to a volume that is away was called gone"
         );
         assert_eq!(
-            ownership::other_live_by(&owner, &here, what_stands, DeadWhen::Missing),
+            ownership::other_live_by(&owner, &here, &what_stands, DeadWhen::Missing),
             Ok(false)
         );
     }

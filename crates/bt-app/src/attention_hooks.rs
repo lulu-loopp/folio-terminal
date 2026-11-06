@@ -501,10 +501,10 @@ fn args_for(event: &str) -> Vec<String> {
 struct Wanted {
     event: &'static str,
     matcher: Option<&'static str>,
-    /// The request the entry speaks for — its `claude-code:<row>` word, which every shape of
-    /// Folio's entry has carried since the first (report §1.3), so an entry is known by what it
-    /// says and never by where it stands (ruling N1).
-    request: String,
+    /// The row the entry speaks for — the `<row>` of its `claude-code:<row>` word, which every
+    /// shape of Folio's entry has carried since the first (report §1.3), so an entry is known by
+    /// what it says and never by where it stands (ruling N1).
+    row: &'static str,
     hook: Value,
     /// Whether its turn-end row carries resume — `Stop` — so that a file missing it is one whose
     /// resume cannot work, and an old shape to the start-time scan (0.4.10 plan row 67, R3).
@@ -523,6 +523,21 @@ impl Wanted {
     }
 }
 
+/// **The entry this build writes for one row**, naming this copy's program.
+fn todays_hook(row: &str, exe: &Path) -> Value {
+    let mut hook = Map::new();
+    hook.insert("type".to_owned(), "command".into());
+    hook.insert("command".to_owned(), exe.to_string_lossy().as_ref().into());
+    hook.insert("args".to_owned(), args_for(row).into());
+    // **Every one of these is asynchronous**, and it is not an optimisation (plan §10.4.3).
+    // `PermissionRequest` is a *synchronous decision gate* with a ten-minute timeout: a signal hook
+    // that made it wait would put this program between the user and every approval Claude Code ever
+    // asks for. Asynchronous hooks cannot return a decision, and this one has none to return — it
+    // wants the side effect and nothing else.
+    hook.insert("async".to_owned(), true.into());
+    Value::Object(hook)
+}
+
 /// Every entry one install writes, in [`rows_to_install`]'s order.
 fn wanted(exe: &Path) -> Vec<Wanted> {
     rows_to_install()
@@ -532,22 +547,11 @@ fn wanted(exe: &Path) -> Vec<Wanted> {
                 Some((event, matcher)) => (event, Some(matcher)),
                 None => (row.event, None),
             };
-            let mut hook = Map::new();
-            hook.insert("type".to_owned(), "command".into());
-            hook.insert("command".to_owned(), exe.to_string_lossy().as_ref().into());
-            hook.insert("args".to_owned(), args_for(row.event).into());
-            // **Every one of these is asynchronous**, and it is not an optimisation (plan
-            // §10.4.3). `PermissionRequest` is a *synchronous decision gate* with a ten-minute
-            // timeout: a signal hook that made it wait would put this program between the user and
-            // every approval Claude Code ever asks for. Asynchronous hooks cannot return a
-            // decision, and this one has none to return — it wants the side effect and nothing
-            // else.
-            hook.insert("async".to_owned(), true.into());
             Wanted {
                 event,
                 matcher,
-                request: format!("{CLAUDE_CODE}:{}", row.event),
-                hook: Value::Object(hook),
+                row: row.event,
+                hook: todays_hook(row.event, exe),
                 carries_resume: attention_map::turn_end_row(CLAUDE_CODE, row.event)
                     .is_some_and(|row| row.resume.is_declared()),
             }
@@ -561,11 +565,7 @@ fn wanted(exe: &Path) -> Vec<Wanted> {
 ///
 /// `look` is the machine's answer to "what stands at this path" ([`ownership::what_stands`] in the
 /// product), so a test decides which owners are alive, gone or on a volume that is not there.
-pub(crate) fn scan_resolved(
-    config: &Config,
-    exe: &Path,
-    look: &dyn Fn(&Path) -> ownership::PathStands,
-) -> HooksFound {
+pub(crate) fn scan_resolved(config: &Config, exe: &Path, look: &dyn ownership::Look) -> HooksFound {
     let text = match config.standing() {
         Standing::Nothing => return HooksFound::Nothing,
         Standing::Unreadable => return HooksFound::Unreadable,
@@ -659,23 +659,25 @@ fn claude_form(hooks: &Hooks<'_>, exe: &Path) -> ownership::Form {
     }
 }
 
-/// **The request an entry of Folio's speaks for**: `claude-code:<row>`, from its `args` or, in the
-/// string forms, from the line after ` attention ` (a payload's ` --json -` is not part of it).
-fn request_of(value: &Value) -> Option<String> {
+/// **The row an entry of Folio's speaks for**: the `<row>` of its `claude-code:<row>` word, from its
+/// `args` or, in the string forms, from the line after ` attention ` (a payload's ` --json -` is
+/// not part of it). [`hook_owner`] reads an owner only off an entry that names one.
+fn row_of(value: &Value) -> Option<String> {
+    let family = format!("{CLAUDE_CODE}:");
     if let Some(args) = value.get("args") {
-        return args.get(1).and_then(Value::as_str).map(str::to_owned);
+        return args
+            .get(1)
+            .and_then(Value::as_str)
+            .and_then(|word| word.strip_prefix(&family))
+            .map(str::to_owned);
     }
     let line = value.get("command").and_then(Value::as_str)?;
-    let marker = format!(" attention {CLAUDE_CODE}:");
-    let (_, tail) = line.rsplit_once(&marker)?;
-    Some(format!(
-        "{CLAUDE_CODE}:{}",
-        tail.strip_suffix(" --json -").unwrap_or(tail)
-    ))
+    let (_, tail) = line.rsplit_once(&format!(" attention {family}"))?;
+    Some(tail.strip_suffix(" --json -").unwrap_or(tail).to_owned())
 }
 
 /// **The own entry each wanted entry claims** (ruling N1, 2026-11-05), in `wanted`'s order: under
-/// the wanted event, one that speaks for the same request ([`request_of`]) — **wherever in that
+/// the wanted event, one that speaks for the same row ([`Own::row`]) — **wherever in that
 /// event it stands**, in a group of Folio's own or in one of the person's, whatever its matcher —
 /// this copy's first, then any copy's. Ownership is by content and never by position: an entry
 /// the person moved is still the entry it was. [`claude_form`] and [`edited`] both ask this.
@@ -697,16 +699,15 @@ fn claims(hooks: &Hooks<'_>, wanted: &[Wanted], exe: &Path) -> Vec<Option<(usize
                 })
             })
             .filter(|(at, entry)| {
-                entry.own.is_some()
-                    && !claimed.contains(&Some(*at))
-                    && request_of(&entry.value).as_deref() == Some(want.request.as_str())
+                !claimed.contains(&Some(*at))
+                    && entry.own.as_ref().is_some_and(|own| own.row == want.row)
             })
             .collect();
         let this_copys = candidates.iter().find(|(_, entry)| {
             entry
                 .own
-                .as_deref()
-                .is_some_and(|owner| crate::explorer_menu::same_path(owner, exe))
+                .as_ref()
+                .is_some_and(|own| crate::explorer_menu::same_path(&own.owner, exe))
         });
         claimed.push(this_copys.or(candidates.first()).map(|(at, _)| *at));
     }
@@ -723,18 +724,19 @@ fn in_todays_form(value: &Value, want: &Wanted) -> bool {
         && value.get("command") == want.hook.get("command")
 }
 
-/// **A claimed entry brought into today's form**: an old string form is replaced by the entry this
-/// build writes; an entry in the direct form gets this copy's program and the wanted arguments, and
-/// keeps every other key it has, as the person left them.
-fn repaired_entry(value: &Value, want: &Wanted) -> Value {
+/// **An entry of Folio's brought into today's form** (`todays`, [`todays_hook`] for its row): an old
+/// string form is replaced by the entry this build writes; an entry in the direct form gets this
+/// copy's program and the row's arguments, and keeps every other key it has, as the person left
+/// them.
+fn repaired_entry(value: &Value, todays: &Value) -> Value {
     match (value.get("args"), value.as_object()) {
         (Some(_), Some(entry)) => {
             let mut entry = entry.clone();
-            entry.insert("command".to_owned(), want.hook["command"].clone());
-            entry.insert("args".to_owned(), want.hook["args"].clone());
+            entry.insert("command".to_owned(), todays["command"].clone());
+            entry.insert("args".to_owned(), todays["args"].clone());
             Value::Object(entry)
         }
-        _ => want.hook.clone(),
+        _ => todays.clone(),
     }
 }
 
@@ -742,11 +744,17 @@ fn repaired_entry(value: &Value, want: &Wanted) -> Value {
 struct Entry<'a> {
     node: &'a splice::Node,
     value: Value,
-    /// The executable it runs, when [`hook_owner`] reads it as a Folio executable speaking
-    /// `attention`. `None` is every other entry — the person's own, and one that looks like
-    /// Folio's but that this build cannot read as one — and an entry that is `None` is never
+    /// Whose it is and what it speaks for, when [`hook_owner`] reads it as a Folio executable
+    /// speaking `attention`. `None` is every other entry — the person's own, and one that looks
+    /// like Folio's but that this build cannot read as one — and an entry that is `None` is never
     /// edited, moved or deleted.
-    own: Option<PathBuf>,
+    own: Option<Own>,
+}
+
+/// An entry of Folio's: the executable it runs, and the row it speaks for ([`row_of`]).
+struct Own {
+    owner: PathBuf,
+    row: String,
 }
 
 /// One matcher group: its `hooks` array and the entries in it.
@@ -856,7 +864,12 @@ fn mapped<'a>(document: &'a splice::Document) -> Result<Option<Hooks<'a>>, crate
             let mut entries = Vec::new();
             for entry in rows.value.elements().ok_or_else(unknown)? {
                 let value = value_at(document.text, entry)?;
-                let own = hook_owner(&value).ok().flatten();
+                let own = hook_owner(&value).ok().flatten().and_then(|owner| {
+                    Some(Own {
+                        row: row_of(&value)?,
+                        owner,
+                    })
+                });
                 // An entry that reads as Folio's only because the value parser kept the last of two
                 // keys of one name: which one the agent runs is its parser's business, and an edit
                 // of the entry would take the other one's bytes with it.
@@ -975,6 +988,16 @@ fn edited(
         return splice_checked(document, edits);
     };
 
+    // An entry written over where it stands, on as many lines as it stood on.
+    let rewritten = |entry: &Entry<'_>, value: &Value| {
+        let old = &text[entry.node.start..entry.node.end];
+        Fate::Replaced(splice::render(
+            value,
+            splice::line_indent(text, entry.node.start),
+            &style,
+            old.contains('\n'),
+        ))
+    };
     // Every entry's fate, by event, group and entry.
     let mut fates: Vec<Vec<Vec<Fate>>> = hooks
         .events
@@ -989,20 +1012,26 @@ fn edited(
                         .iter()
                         .map(|entry| match &entry.own {
                             None => Fate::Kept,
-                            // **This copy's own entry no install claims is the person's placing**
-                            // (ruling N1, 2026-11-05) — a copy of one of Folio's entries they put
-                            // under another event, or a second one — and an install leaves it
-                            // where it stands; a removal takes it out with this copy's others.
-                            Some(owner) if install => {
-                                if crate::explorer_menu::same_path(owner, exe) {
+                            // **An own entry no install claims is the person's placing** (ruling
+                            // N1, 2026-11-05) — a copy of one of Folio's entries they put under
+                            // another event, or a second one — and an install leaves it where it
+                            // stands; a removal takes it out with this copy's others.
+                            Some(own) if install => {
+                                if crate::explorer_menu::same_path(&own.owner, exe) {
                                     Fate::Kept
                                 } else {
-                                    // Another copy's, unclaimed until a wanted entry claims it
-                                    // below: `apply_resolved` has asked about every other copy.
-                                    Fate::Deleted
+                                    // Another copy's — moved, gone, or taken over by the press's
+                                    // consent: `apply_resolved` has asked about every other copy —
+                                    // is pointed at this copy where it stands, with every other
+                                    // key the person left on it (re-review R1). A wanted entry
+                                    // that claims it below decides its fate again.
+                                    rewritten(
+                                        entry,
+                                        &repaired_entry(&entry.value, &todays_hook(&own.row, exe)),
+                                    )
                                 }
                             }
-                            Some(owner) if ownership::other_live(owner, exe) == Ok(false) => {
+                            Some(own) if ownership::other_live(&own.owner, exe) == Ok(false) => {
                                 Fate::Deleted
                             }
                             Some(_) => Fate::Kept,
@@ -1024,13 +1053,7 @@ fn edited(
         fates[e][g][h] = if in_todays_form(&entry.value, want) {
             Fate::Kept
         } else {
-            let old = &text[entry.node.start..entry.node.end];
-            Fate::Replaced(splice::render(
-                &repaired_entry(&entry.value, want),
-                splice::line_indent(text, entry.node.start),
-                &style,
-                old.contains('\n'),
-            ))
+            rewritten(entry, &repaired_entry(&entry.value, &want.hook))
         };
     }
 

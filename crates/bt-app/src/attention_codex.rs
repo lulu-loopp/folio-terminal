@@ -310,7 +310,7 @@ fn declares_somebody_else(document: &Table) -> bool {
 pub(crate) fn scan_resolved(
     config: &crate::attention_hooks::Config,
     exe: &Path,
-    look: &dyn Fn(&Path) -> ownership::PathStands,
+    look: &dyn ownership::Look,
 ) -> HooksFound {
     let text = match config.standing() {
         crate::attention_hooks::Standing::Nothing => return HooksFound::Nothing,
