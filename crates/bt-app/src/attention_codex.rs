@@ -176,13 +176,15 @@ const TOML_HOOK_EVENTS: [&str; 14] = [
 pub(crate) const PROFILE_ID: &str = "codex";
 
 /// **The oldest codex that runs an asynchronous command hook** (R12): `discovery.rs` at
-/// `rust-v0.147.0` skips one, and `rust-v0.148.0` runs it. Below it, Folio's entry is the `notify`
-/// line.
+/// `rust-v0.147.0` skips one, and `rust-v0.148.0` runs it. Below it — a prerelease of it too, which
+/// semver orders before it ([`CodexRelease::runs_hooks`]) — Folio's entry is the `notify` line.
 const HOOKS_FLOOR: Version = Version::new(0, 148, 0);
 
-/// **How long `codex --version` may take** before it is stopped and the version is unknown (row
-/// 69's report §1b.6).
-const VERSION_DEADLINE: Duration = Duration::from_secs(3);
+/// **How long `codex --version` may take** before it is stopped and the version is unknown for
+/// this round (row 69's report §1b.6): copilot's [`PROBE_DEADLINE`](crate::attention_copilot)
+/// (the 69c review's C2), because both are a start of a program under whatever load the machine
+/// has, and an answer stopped early is asked again ([`Asked::Overran`]).
+const VERSION_DEADLINE: Duration = Duration::from_secs(10);
 
 /// The key of `config.toml`'s feature switches, and the two names codex reads its hooks switch by:
 /// `hooks`, and the `codex_hooks` it was called before (`features/src/lib.rs` at `rust-v0.166.0`,
@@ -192,24 +194,173 @@ const HOOKS_FEATURE: &str = "hooks";
 const HOOKS_FEATURE_FORMERLY: &str = "codex_hooks";
 
 /// **What is known about this machine's codex version.**
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum CodexVersion {
     /// Nothing has been asked yet: the program walk has not said where codex is, or the program
     /// it named has not been asked.
     Unasked,
     /// No codex where the walk looked, or one that would not say — it failed to start, ran past
-    /// [`VERSION_DEADLINE`], or printed no version.
+    /// [`VERSION_DEADLINE`], exited with a failure, or printed no version line
+    /// ([`CodexRelease::parse`]).
     Unknown,
     /// What `codex --version` printed.
-    Known(Version),
+    Known(CodexRelease),
 }
 
 impl CodexVersion {
-    /// **Whether Folio's entry is the hook** (R12): on every answer but a version proved older than
+    /// **Whether Folio's entry is the hook** (R12): on every answer but a release proved older than
     /// [`HOOKS_FLOOR`] — one nobody could learn is the current one (R17).
     #[must_use]
-    pub(crate) fn runs_hooks(self) -> bool {
-        !matches!(self, Self::Known(version) if version < HOOKS_FLOOR)
+    pub(crate) fn runs_hooks(&self) -> bool {
+        match self {
+            Self::Known(release) => release.runs_hooks(),
+            Self::Unasked | Self::Unknown => true,
+        }
+    }
+}
+
+/// **A codex release, as `codex --version` names it** (the 69c review's C1): its version, and the
+/// prerelease identifiers after a `-`, which semver orders before the release they lead up to —
+/// `0.148.0-alpha.5` is older than `0.148.0` (semver 2.0.0 §11). Build metadata after a `+` orders
+/// nothing and is not kept.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CodexRelease {
+    version: Version,
+    prerelease: Option<String>,
+}
+
+impl CodexRelease {
+    /// **Whether this release runs Folio's hook**: one at or past [`HOOKS_FLOOR`] by semver's
+    /// order — a prerelease of 0.148.0 comes before 0.148.0 and is held to the `notify` line, and
+    /// a prerelease of a later version (`0.149.0-alpha.1`) is past it.
+    #[must_use]
+    fn runs_hooks(&self) -> bool {
+        self.version > HOOKS_FLOOR || (self.version == HOOKS_FLOOR && self.prerelease.is_none())
+    }
+
+    /// Whether this release is older than [`HOOKS_FLOOR`] — what the row's sentence names.
+    #[must_use]
+    fn below_floor(&self) -> bool {
+        !self.runs_hooks()
+    }
+
+    /// **The version line codex prints, and nothing else** (the 69c review's C5): the first line of
+    /// the answer that is not blank must be `codex-cli <semver>` whole — two words, the second a
+    /// version by [`semver`](Self::semver). A launcher or wrapper that prints its own version
+    /// first, or a sentence with a number in it, is not believed: the version is then unknown,
+    /// which runs the hook (R17), rather than a stranger's number read as codex's.
+    #[must_use]
+    fn parse(stdout: &str) -> Option<Self> {
+        let line = stdout.lines().find(|line| !line.trim().is_empty())?;
+        let mut words = line.split_whitespace();
+        match (words.next(), words.next(), words.next()) {
+            (Some("codex-cli"), Some(release), None) => Self::semver(release),
+            _ => None,
+        }
+    }
+
+    /// `major.minor.patch`, then an optional `-prerelease` and `+build` (semver 2.0.0 §2, §9, §10):
+    /// numbers without leading zeros, identifiers of ASCII letters, digits and hyphens, none empty,
+    /// and no numeric prerelease identifier with a leading zero.
+    #[must_use]
+    fn semver(text: &str) -> Option<Self> {
+        let (rest, build) = match text.split_once('+') {
+            Some((rest, build)) => (rest, Some(build)),
+            None => (text, None),
+        };
+        let (core, prerelease) = match rest.split_once('-') {
+            Some((core, prerelease)) => (core, Some(prerelease)),
+            None => (rest, None),
+        };
+        if build.is_some_and(|build| !Self::identifiers(build, false))
+            || prerelease.is_some_and(|prerelease| !Self::identifiers(prerelease, true))
+        {
+            return None;
+        }
+        let mut parts = core.split('.').map(Self::number);
+        let version = Version::new(parts.next()??, parts.next()??, parts.next()??);
+        if parts.next().is_some() {
+            return None;
+        }
+        Some(Self {
+            version,
+            prerelease: prerelease.map(str::to_owned),
+        })
+    }
+
+    /// One of semver's numbers: digits only, and no leading zero unless it is `0`.
+    #[must_use]
+    fn number(part: &str) -> Option<u32> {
+        let digits = !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit());
+        if !digits || (part.len() > 1 && part.starts_with('0')) {
+            return None;
+        }
+        part.parse().ok()
+    }
+
+    /// Dot-separated identifiers, none empty, of ASCII letters, digits and hyphens — and, in a
+    /// prerelease (`numbers_bare`), a numeric one without a leading zero.
+    #[must_use]
+    fn identifiers(text: &str, numbers_bare: bool) -> bool {
+        text.split('.').all(|identifier| {
+            let allowed = !identifier.is_empty()
+                && identifier
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-');
+            let numeric = identifier.bytes().all(|byte| byte.is_ascii_digit());
+            allowed
+                && !(numbers_bare && numeric && identifier.len() > 1 && identifier.starts_with('0'))
+        })
+    }
+}
+
+/// `major.minor.patch`, and `-<prerelease>` when there is one: what the row's sentence and the
+/// diagnostics line name. No spaces, so the diagnostics line stays one field.
+impl std::fmt::Display for CodexRelease {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.prerelease {
+            Some(prerelease) => write!(formatter, "{}-{prerelease}", self.version),
+            None => write!(formatter, "{}", self.version),
+        }
+    }
+}
+
+/// **The answer a version question came back with** (the 69c review's C2): one codex gave —
+/// a release, or none — or a question stopped at [`VERSION_DEADLINE`], which says nothing about
+/// the program and is not kept, so the next round asks again.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum Asked {
+    /// It ran to its end: the release it named, or `None` for a failure or no version line.
+    Answered(Option<CodexRelease>),
+    /// It was stopped at the deadline.
+    Overran,
+}
+
+impl Asked {
+    /// **How `codex --version` ended, read by codex's rule** (C2, C5): a run that finished with
+    /// success, and only then its version line ([`CodexRelease::parse`]); a failed exit is no
+    /// version whatever it printed. Not asked at all (off Windows, a `cmd.exe` that would not
+    /// start) is an answer of none.
+    #[must_use]
+    fn of(ending: Option<bt_platform::ProbeEnding>) -> Self {
+        match ending {
+            Some(bt_platform::ProbeEnding::Finished(output)) => Self::Answered(Self::release_from(
+                output.status.success(),
+                &String::from_utf8_lossy(&output.stdout),
+            )),
+            Some(bt_platform::ProbeEnding::Overran) => Self::Overran,
+            None => Self::Answered(None),
+        }
+    }
+
+    /// The release a finished run names: its version line, on a successful exit only.
+    #[must_use]
+    fn release_from(succeeded: bool, stdout: &str) -> Option<CodexRelease> {
+        if succeeded {
+            CodexRelease::parse(stdout)
+        } else {
+            None
+        }
     }
 }
 
@@ -227,7 +378,7 @@ pub(crate) struct VersionBook {
     /// `None` until the walk has answered about the row; then its program, `None` for none.
     walk: Option<Option<PathBuf>>,
     /// The program asked last, stamped as it stood, and its answer.
-    asked: Option<(ProgramStamp, Option<Version>)>,
+    asked: Option<(ProgramStamp, Asked)>,
 }
 
 impl VersionBook {
@@ -239,17 +390,25 @@ impl VersionBook {
     }
 
     /// The version as this book has it: the answer held for the walk's program, if that is the
-    /// program it was asked of.
+    /// program it was asked of — unknown for a question that overran, until it is asked again.
     fn version(&self) -> CodexVersion {
         match &self.walk {
             None => CodexVersion::Unasked,
             Some(None) => CodexVersion::Unknown,
             Some(Some(program)) => match &self.asked {
-                Some((stamp, answer)) if &stamp.path == program => {
-                    answer.map_or(CodexVersion::Unknown, CodexVersion::Known)
-                }
+                Some((stamp, asked)) if &stamp.path == program => asked.version(),
                 _ => CodexVersion::Unasked,
             },
+        }
+    }
+}
+
+impl Asked {
+    /// The version this answer gives.
+    fn version(&self) -> CodexVersion {
+        match self {
+            Self::Answered(Some(release)) => CodexVersion::Known(release.clone()),
+            Self::Answered(None) | Self::Overran => CodexVersion::Unknown,
         }
     }
 }
@@ -291,14 +450,20 @@ pub(crate) fn version() -> CodexVersion {
 
 /// **Settle the version, on the start-time scan's worker** (R17): `codex --version` asked of the
 /// walk's program unless the answer held is of the same file — the same path, size and modified
-/// time. Each answer it asks for is one diagnostics line, `BT_AGENT_HOOKS codex version=<it>`, and
-/// `unknown` when there was none to read.
+/// time — and an answer that overran its deadline is never the one held, so the next round asks
+/// again (the 69c review's C2). Each answer it asks for is one diagnostics line,
+/// `BT_AGENT_HOOKS codex version=<it>`, and `unknown` when there was none to read.
 pub(crate) fn settle_version(ctx: &bt_platform::admission::WorkerCtx) -> CodexVersion {
     settle_version_in(
         &VERSION_BOOK,
         &|program| stamp_of(ctx, program),
         &|program| {
-            crate::attention_copilot::program_version(ctx, program, VERSION_DEADLINE, "codex")
+            Asked::of(crate::attention_copilot::program_version(
+                ctx,
+                program,
+                VERSION_DEADLINE,
+                "codex",
+            ))
         },
         &crate::diagnostics::stderr_line,
     )
@@ -310,7 +475,7 @@ pub(crate) fn settle_version(ctx: &bt_platform::admission::WorkerCtx) -> CodexVe
 pub(crate) fn settle_version_in(
     held: &Mutex<VersionBook>,
     stamp: &dyn Fn(&Path) -> Option<ProgramStamp>,
-    ask: &dyn Fn(&Path) -> Option<Version>,
+    ask: &dyn Fn(&Path) -> Asked,
     say: &dyn Fn(String),
 ) -> CodexVersion {
     let program = match &book(held).walk {
@@ -323,15 +488,19 @@ pub(crate) fn settle_version_in(
         book(held).asked = None;
         return CodexVersion::Unknown;
     };
-    if let Some((asked, answer)) = &book(held).asked
+    // An answer of the same file is kept; a question stopped at the deadline is not an answer.
+    if let Some((asked, answer @ Asked::Answered(_))) = &book(held).asked
         && asked == &stamp
     {
-        return answer.map_or(CodexVersion::Unknown, CodexVersion::Known);
+        return answer.version();
     }
     let answer = ask(&program);
     say(format!(
         "BT_AGENT_HOOKS codex version={}",
-        answer.map_or_else(|| "unknown".to_owned(), |version| version.to_string())
+        match &answer {
+            Asked::Answered(Some(release)) => release.to_string(),
+            Asked::Answered(None) | Asked::Overran => "unknown".to_owned(),
+        }
     ));
     let mut held = book(held);
     held.asked = Some((stamp, answer));
@@ -354,7 +523,12 @@ fn stamp_of(_worker: &bt_platform::admission::WorkerCtx, program: &Path) -> Opti
 /// repair on a version nobody asked yet could write a hook a codex below 0.148 skips, in place of
 /// the `notify` line that works there.
 pub(crate) fn repair_within_the_gate() -> bool {
-    version() != CodexVersion::Unasked
+    repair_within_the_gate_in(&VERSION_BOOK)
+}
+
+/// The same question of a named book — the seam the step's test presses (the 69c review's C4).
+pub(crate) fn repair_within_the_gate_in(held: &Mutex<VersionBook>) -> bool {
+    book(held).version() != CodexVersion::Unasked
 }
 
 /// **codex's `hooks.json`, as [`attention_hooks`](crate::attention_hooks) reads and writes it.**
@@ -480,8 +654,8 @@ pub(crate) fn first_run_tip() -> String {
 #[must_use]
 pub(crate) fn row_description() -> &'static str {
     match version() {
-        CodexVersion::Known(version) if version < HOOKS_FLOOR => {
-            crate::i18n::codex_row_old_version(&version.to_string())
+        CodexVersion::Known(release) if release.below_floor() => {
+            crate::i18n::codex_row_old_version(&release.to_string())
         }
         _ => crate::i18n::Text::DescCodexHooks.text(),
     }
@@ -517,24 +691,16 @@ pub(crate) fn added_toast(file: Option<&Path>) -> crate::i18n::Text {
 }
 
 /// **Whether the first-run card may offer the Codex row** (row 69's report §1.7, R19): nothing of
-/// Folio's is there yet, and `config.toml` would not refuse the install — below 0.148, codex's one
-/// `notify` key is free; on the hook road, hooks are not switched off there and it declares no
-/// hook events of its own (R15, N6). Nobody's program is in the hook's way.
+/// Folio's is there yet, and an install of this copy's entry in the file this codex runs it from
+/// ([`entry_path`]) would not be refused — [`install_refusal_at`], the install's own refusals
+/// asked of the same files (the 69c review's C3), so the card offers nothing a press would then
+/// refuse. Another live copy's entry is not a refusal: the press asks about it.
 #[must_use]
 pub(crate) fn first_run_installable() -> bool {
-    if state() != State::Absent {
-        return false;
-    }
-    let hooks_run = version().runs_hooks();
-    config_path().is_some_and(|path| {
-        toml_beside(&path).is_ok_and(|toml| {
-            if hooks_run {
-                !hooks_switched_off(&toml.document) && !declares_toml_hooks(&toml.document)
-            } else {
-                !declares_somebody_else(&toml.document)
-            }
-        })
-    })
+    state() == State::Absent
+        && entry_path()
+            .zip(ownership::this_copy())
+            .is_some_and(|(path, exe)| install_refusal_at(&path, &exe, &version()).is_none())
 }
 
 /// What the two files say today.
@@ -750,6 +916,12 @@ fn hooks_file_read_by_codex(path: &Path) -> bool {
         .is_ok_and(|text| read_by_codex(&text))
 }
 
+/// **The refusal over hooks switched off**, naming the `config.toml` that says so (the 69c
+/// review's C6): the file this operation read, which is under `CODEX_HOME` when that is set.
+fn hooks_off(toml_path: &Path) -> &'static str {
+    crate::i18n::codex_hooks_off(&toml_path.display().to_string())
+}
+
 /// **Whether `config.toml` switches codex's hooks off** (row 69's report §1b.3): `[features]`'s
 /// `hooks`, or the `codex_hooks` it was called before, set to `false`. codex applies the table's
 /// switches in key order, so where both are written `hooks` is the one that stands. A
@@ -769,9 +941,13 @@ fn hooks_switched_off(document: &Table) -> bool {
 /// install gives, and the row's line over them: hooks switched off in `config.toml`, or a
 /// `hooks.json` codex ignores whole ([`read_by_codex`]). Hook events in `config.toml` (R15) are not
 /// one: codex loads both files, with a warning, so a hook already there runs.
-fn hook_kept_from_running(toml: &Table, hooks_text: &str) -> Option<&'static str> {
+fn hook_kept_from_running(
+    toml_path: &Path,
+    toml: &Table,
+    hooks_text: &str,
+) -> Option<&'static str> {
     if hooks_switched_off(toml) {
-        Some(crate::i18n::Text::CodexHooksOff.text())
+        Some(hooks_off(toml_path))
     } else if !hooks_text.trim().is_empty() && !read_by_codex(hooks_text) {
         Some(crate::i18n::Text::CodexHooksFileIgnored.text())
     } else {
@@ -1042,7 +1218,7 @@ pub(crate) fn hook_scan_resolved(
         Standing::Nothing | Standing::Unreadable => String::new(),
     };
     let line_drifted = || words_of(&toml.document) != Some(program_for(exe));
-    if let Some(reason) = hook_kept_from_running(&toml.document, &hooks_text) {
+    if let Some(reason) = hook_kept_from_running(&toml.path, &toml.document, &hooks_text) {
         return match line {
             Some(owner) => match ownership::classify_owners(&[owner], exe, look, line_drifted) {
                 found if found.wants_repair() => HooksFound::Declined(reason),
@@ -1111,7 +1287,7 @@ pub(crate) fn notify_scan_resolved(
         Err(_) => return HooksFound::Unclassified,
     };
     if let (Some(words), None) = (&words, &line) {
-        return HooksFound::Declined(held_slot(version(), words));
+        return HooksFound::Declined(held_slot(&version(), words));
     }
     let folder = config.named().parent().expect("absolute config");
     let hooks = match hooks_beside(&folder.join(HOOKS_FILE)) {
@@ -1178,14 +1354,14 @@ fn hooks_beside(path: &Path) -> Result<HooksBeside, &'static str> {
 /// **The refusal over somebody else's `notify`, on a codex below 0.148** (R12): it names the
 /// version and their program, and what a newer codex would let Folio do. Without a version to
 /// name, the plain sentence.
-fn held_slot(version: CodexVersion, words: &[String]) -> &'static str {
+fn held_slot(version: &CodexVersion, words: &[String]) -> &'static str {
     match (version, words.first()) {
-        (CodexVersion::Known(version), Some(program)) => {
+        (CodexVersion::Known(release), Some(program)) => {
             let name = Path::new(program).file_name().map_or_else(
                 || program.clone(),
                 |name| name.to_string_lossy().into_owned(),
             );
-            crate::i18n::codex_notify_held_old_version(&version.to_string(), &name)
+            crate::i18n::codex_notify_held_old_version(&release.to_string(), &name)
         }
         _ => crate::i18n::Text::AgentCodexNotifyTaken.text(),
     }
@@ -1387,10 +1563,11 @@ fn edited_document(document: &mut DocumentMut, exe: &Path, install: bool) -> boo
     }
 }
 
-/// **`config.toml` as an operation on `hooks.json` reads it**: its text, the document it parses
-/// to, and the resolution a write of it needs — or, for a file this build will read but not edit,
-/// the reason it will not be written.
+/// **`config.toml` as an operation on `hooks.json` reads it**: the path it was read at, its text,
+/// the document it parses to, and the resolution a write of it needs — or, for a file this build
+/// will read but not edit, the reason it will not be written.
 struct Toml {
+    path: PathBuf,
     text: String,
     document: DocumentMut,
     config: Result<Config, &'static str>,
@@ -1430,10 +1607,175 @@ fn toml_beside(path: &Path) -> Result<Toml, &'static str> {
         .parse::<DocumentMut>()
         .map_err(|_| crate::i18n::Text::CodexConfigUnreadable.text())?;
     Ok(Toml {
+        path: path.to_path_buf(),
         text,
         document,
         config,
     })
+}
+
+/// [`toml_beside`], for the hook road: a `notify` this build cannot decode is a file it cannot read
+/// — whether it carries Folio's line is not something to assume.
+fn toml_for_hooks(path: &Path) -> Result<Toml, &'static str> {
+    toml_beside(path).and_then(|toml| {
+        if toml.document.get(NOTIFY_KEY).is_some() && words_of(&toml.document).is_none() {
+            Err(crate::i18n::Text::CodexConfigUnreadable.text())
+        } else {
+            Ok(toml)
+        }
+    })
+}
+
+/// **The two files an install reads, as it has read them** — the file it writes Folio's entry in,
+/// and the one beside it whose entry it may take out.
+#[derive(Clone, Copy)]
+enum InstallRoad<'a> {
+    /// `hooks.json`'s text, and `config.toml` beside it ([`toml_for_hooks`]).
+    Hook {
+        existing: &'a str,
+        toml: Result<&'a Toml, &'static str>,
+    },
+    /// `config.toml`'s text, and `hooks.json` beside it ([`hooks_beside`]).
+    Notify {
+        existing: &'a str,
+        hooks: Result<&'a HooksBeside, &'static str>,
+    },
+}
+
+/// **Why an install of `exe`'s entry would be refused, over files already read** — the one list
+/// both install roads and the first-run card ask (the 69c review's C3), so the card never offers a
+/// row the press then refuses. Everything here is decided from the texts and the version; asking
+/// about another live copy's entry ([`ownership::check`]) is a question, not a refusal, and is the
+/// press's alone.
+///
+/// - **The hook** is refused for a path Windows PowerShell 5.1 cannot call (re-review R1), a
+///   `config.toml` this build cannot read (R15 and R18 both need it), hook events declared in
+///   `config.toml` (R15), hooks switched off there (N6), a `hooks.json` whose edit fails its
+///   self-check or that codex would ignore whole once written ([`read_by_codex`]), and an earlier
+///   Folio's `notify` line that would have to come out of a `config.toml` this build will not
+///   edit (read-only, a link out of the folder, a hard link).
+/// - **The `notify` line** is refused for a `config.toml` this build cannot read, somebody else's
+///   program on the key ([`held_slot`], naming `version`), a `hooks.json` it cannot read, an edit
+///   that fails its self-check, and a hook of Folio's that would have to come out of a `hooks.json`
+///   this build will not edit.
+fn install_refusal(
+    road: InstallRoad<'_>,
+    exe: &Path,
+    version: &CodexVersion,
+) -> Option<&'static str> {
+    match road {
+        InstallRoad::Hook { existing, toml } => {
+            if bt_platform::host_platform() == HostPlatform::Windows
+                && !windows_powershell_finds(&exe.to_string_lossy())
+            {
+                return Some(crate::i18n::Text::CodexHookPathBrackets.text());
+            }
+            let toml = match toml {
+                Ok(toml) => toml,
+                Err(reason) => return Some(reason),
+            };
+            if declares_toml_hooks(&toml.document) {
+                return Some(crate::i18n::Text::CodexHooksInToml.text());
+            }
+            if hooks_switched_off(&toml.document) {
+                return Some(hooks_off(&toml.path));
+            }
+            if let Err(reason) = hooks::hook_owners(&HOOKS, existing) {
+                return Some(reason);
+            }
+            let written = match hooks::hooks_edited(&HOOKS, existing, exe, true) {
+                Ok(written) => written,
+                Err(reason) => return Some(reason),
+            };
+            if !read_by_codex(written.as_deref().unwrap_or(existing)) {
+                return Some(crate::i18n::Text::CodexHooksFileIgnored.text());
+            }
+            if notify_owner(&toml.document).ok().flatten().is_some() {
+                match edited(&toml.text, exe, false, true) {
+                    Err(reason) => return Some(reason),
+                    Ok(Some(_)) => return toml.config.as_ref().err().copied(),
+                    Ok(None) => {}
+                }
+            }
+            None
+        }
+        InstallRoad::Notify { existing, hooks } => {
+            let Ok(document) = existing.parse::<DocumentMut>() else {
+                return Some(crate::i18n::Text::CodexConfigUnreadable.text());
+            };
+            if document.get(NOTIFY_KEY).is_some() && words_of(&document).is_none() {
+                return Some(crate::i18n::Text::CodexConfigUnreadable.text());
+            }
+            if declares_somebody_else(&document) {
+                return Some(held_slot(version, &words_of(&document).unwrap_or_default()));
+            }
+            let hooks = match hooks {
+                Ok(hooks) => hooks,
+                Err(reason) => return Some(reason),
+            };
+            if let Err(reason) = edited(existing, exe, true, false) {
+                return Some(reason);
+            }
+            if !hooks.owners.is_empty() {
+                match hooks::hooks_cleared(&HOOKS, &hooks.text, exe) {
+                    Err(reason) => return Some(reason),
+                    Ok(Some(_)) => return hooks.config.as_ref().err().copied(),
+                    Ok(None) => {}
+                }
+            }
+            None
+        }
+    }
+}
+
+/// **[`install_refusal`] of the files at `path` and beside it, read now** — what the first-run card
+/// asks: the press's checks before the files, too (an executable that can be named stably, a file
+/// this build will resolve and read, an absolute path), then the files' own.
+fn install_refusal_at(path: &Path, exe: &Path, version: &CodexVersion) -> Option<&'static str> {
+    if let Err(reason) = ownership::stable_executable(Some(exe)) {
+        return Some(reason);
+    }
+    let config = match Config::resolve(path) {
+        Ok(config) => config,
+        Err(hooks::Unresolved::Refused(reason)) => return Some(reason),
+        Err(hooks::Unresolved::Unreadable) => {
+            return Some(crate::i18n::Text::AgentHooksUnreadable.text());
+        }
+    };
+    if !config.named().is_absolute() {
+        return Some(crate::i18n::Text::AgentHooksRootUnstable.text());
+    }
+    let folder = config.named().parent().expect("absolute config");
+    let notify = is_config_file(&config);
+    let existing = match config.standing() {
+        Standing::Text(text) => text,
+        Standing::Nothing => String::new(),
+        Standing::Unreadable if notify => {
+            return Some(crate::i18n::Text::CodexConfigUnreadable.text());
+        }
+        Standing::Unreadable => return Some(crate::i18n::Text::AgentHooksUnreadable.text()),
+    };
+    if notify {
+        let hooks = hooks_beside(&folder.join(HOOKS_FILE));
+        install_refusal(
+            InstallRoad::Notify {
+                existing: &existing,
+                hooks: hooks.as_ref().map_err(|reason| *reason),
+            },
+            exe,
+            version,
+        )
+    } else {
+        let toml = toml_for_hooks(&folder.join(CONFIG_FILE));
+        install_refusal(
+            InstallRoad::Hook {
+                existing: &existing,
+                toml: toml.as_ref().map_err(|reason| *reason),
+            },
+            exe,
+            version,
+        )
+    }
 }
 
 /// Put Folio's hook in, or take it out, on this machine.
@@ -1472,10 +1814,11 @@ pub(crate) fn apply_at(path: &Path, decision: Decision, exe: &Path, data: &Path)
 /// resolution on this path for a repointed link to slip through (re-review B1). `config.toml`, the
 /// other file, is resolved once too ([`toml_beside`]).
 ///
-/// One operation over two files, in this order: both are read, **both edits are made and pass
-/// their self-checks** ([`hooks::hooks_edited`], [`edited`], and on an install [`read_by_codex`]
-/// of the text `hooks.json` will hold), every copy either names is asked about, and a
-/// `config.toml` this build will not edit is refused — and only then is anything written,
+/// One operation over two files, in this order: both are read; an install's refusals are asked
+/// ([`install_refusal`], the first-run card's list too — among them a `config.toml` this build will
+/// not edit holding the line that must go); every copy either names is asked about; **both edits
+/// are made and pass their self-checks** ([`hooks::hooks_edited`], [`edited`], and on an install
+/// [`read_by_codex`] of the text `hooks.json` will hold) — and only then is anything written,
 /// `config.toml` first, then `hooks.json`. So every refusal leaves both files as they were. The one
 /// window left is a second write that fails after the first landed: the `notify` line is gone and
 /// the hook not yet written, a Folio that marks nothing until the next press or row 67's repair
@@ -1516,14 +1859,6 @@ pub(crate) fn apply_resolved(
         };
     }
     let install = decision.installs();
-    // A hook Windows PowerShell 5.1 cannot call would fail on every turn (re-review R1); a removal
-    // is never refused for it.
-    if install
-        && bt_platform::host_platform() == HostPlatform::Windows
-        && !windows_powershell_finds(&exe.to_string_lossy())
-    {
-        return Outcome::Refused(crate::i18n::Text::CodexHookPathBrackets.text());
-    }
     let folder = config.named().parent().expect("absolute config");
     let existing = match config.standing() {
         Standing::Text(text) => text,
@@ -1534,36 +1869,27 @@ pub(crate) fn apply_resolved(
             return Outcome::Refused(crate::i18n::Text::AgentHooksUnreadable.text());
         }
     };
-    // Refused rather than guessed at, on an install: a configuration file this build cannot read is
-    // a file somebody wrote, and whether it carries Folio's line is not something to assume.
-    let toml = toml_beside(&folder.join(CONFIG_FILE)).and_then(|toml| {
-        if toml.document.get(NOTIFY_KEY).is_some() && words_of(&toml.document).is_none() {
-            Err(crate::i18n::Text::CodexConfigUnreadable.text())
-        } else {
-            Ok(toml)
-        }
-    });
+    let toml = toml_for_hooks(&folder.join(CONFIG_FILE));
+    // **An install's refusals are [`install_refusal`]'s**, the list the first-run card asks too, and
+    // all of them before anybody is asked about another copy's entry. A removal is never refused for
+    // what only an install needs (a path PowerShell can call, hook events or hooks switched off in
+    // `config.toml`, a file codex reads), and goes on without a `config.toml` it cannot read.
+    if install
+        && let Some(reason) = install_refusal(
+            InstallRoad::Hook {
+                existing: &existing,
+                toml: toml.as_ref().map_err(|reason| *reason),
+            },
+            exe,
+            &version(),
+        )
+    {
+        return Outcome::Refused(reason);
+    }
     let (toml, unread) = match toml {
         Ok(toml) => (Some(toml), None),
-        Err(reason) if install => return Outcome::Refused(reason),
         Err(reason) => (None, Some(reason)),
     };
-    if install
-        && toml
-            .as_ref()
-            .is_some_and(|toml| declares_toml_hooks(&toml.document))
-    {
-        return Outcome::Refused(crate::i18n::Text::CodexHooksInToml.text());
-    }
-    // Hooks switched off in config.toml: the hook would never run, and the `notify` line R18 would
-    // take out in its place is the one entry that works there (review N6).
-    if install
-        && toml
-            .as_ref()
-            .is_some_and(|toml| hooks_switched_off(&toml.document))
-    {
-        return Outcome::Refused(crate::i18n::Text::CodexHooksOff.text());
-    }
     let mut paths = match hooks::hook_owners(&HOOKS, &existing) {
         Ok(paths) => paths,
         Err(reason) => return Outcome::Refused(reason),
@@ -1582,9 +1908,6 @@ pub(crate) fn apply_resolved(
         Ok(written) => written,
         Err(reason) => return Outcome::Refused(reason),
     };
-    if install && !read_by_codex(written.as_deref().unwrap_or(&existing)) {
-        return Outcome::Refused(crate::i18n::Text::CodexHooksFileIgnored.text());
-    }
     // **The line an earlier Folio wrote goes in the same operation** (R18): on an install whoever's
     // it is — `check` has asked about every other live copy — so one turn is not marked twice; on a
     // removal this copy's and a gone one's.
@@ -1596,12 +1919,12 @@ pub(crate) fn apply_resolved(
         _ => None,
     };
     // A `config.toml` Folio reads and will not edit (read-only, a link out of the folder, a hard
-    // link) refuses an install whole, which would otherwise mark one turn twice. A removal marks
-    // nothing: it takes the hook out all the same, leaves the line, and says so (review R2).
+    // link) refuses an install whole, which would otherwise mark one turn twice
+    // ([`install_refusal`]). A removal marks nothing: it takes the hook out all the same, leaves
+    // the line, and says so (review R2).
     let (taken_out, unread) = match taken_out {
         Some((toml, text)) => match toml.config.as_ref().map_err(|reason| *reason) {
             Ok(toml_config) => (Some((toml_config, &toml.text, text)), unread),
-            Err(reason) if install => return Outcome::Refused(reason),
             Err(reason) => (None, Some(reason)),
         },
         None => (None, unread),
@@ -1652,6 +1975,9 @@ pub(crate) fn apply_resolved(
 /// not edit holding a hook of Folio's is refused, before either file is written; then the line is
 /// written first: a second write that fails leaves both entries, of which this codex runs the line
 /// alone.
+///
+/// Every refusal is [`install_refusal`]'s, asked before anybody is asked about another copy's
+/// entry; the reads below it take what it has already let through.
 fn notify_install_resolved(
     config: &Config,
     decision: Decision,
@@ -1667,20 +1993,22 @@ fn notify_install_resolved(
             return Outcome::Refused(crate::i18n::Text::CodexConfigUnreadable.text());
         }
     };
+    let folder = config.named().parent().expect("absolute config");
+    let hooks = hooks_beside(&folder.join(HOOKS_FILE));
+    if let Some(reason) = install_refusal(
+        InstallRoad::Notify {
+            existing: &existing,
+            hooks: hooks.as_ref().map_err(|reason| *reason),
+        },
+        exe,
+        &version(),
+    ) {
+        return Outcome::Refused(reason);
+    }
     let Ok(document) = existing.parse::<DocumentMut>() else {
         return Outcome::Refused(crate::i18n::Text::CodexConfigUnreadable.text());
     };
-    if document.get(NOTIFY_KEY).is_some() && words_of(&document).is_none() {
-        return Outcome::Refused(crate::i18n::Text::CodexConfigUnreadable.text());
-    }
-    if declares_somebody_else(&document) {
-        return Outcome::Refused(held_slot(
-            version(),
-            &words_of(&document).unwrap_or_default(),
-        ));
-    }
-    let folder = config.named().parent().expect("absolute config");
-    let hooks = match hooks_beside(&folder.join(HOOKS_FILE)) {
+    let hooks = match hooks {
         Ok(hooks) => hooks,
         Err(reason) => return Outcome::Refused(reason),
     };
@@ -3045,17 +3373,24 @@ mod tests {
             .find("land_codex_file(config,&existing,\"json\",&written)")
             .expect("hooks.json is landed here");
         assert!(toml_lands < hooks_land, "config.toml is written first");
+        // An install's refusals are `install_refusal`'s (the 69c review's C3), asked before either
+        // write — among them a config.toml Folio will not edit, and the text hooks.json will hold
+        // judged by codex's types.
         let judged = body
-            .find(
-                "Ok(toml_config)=>(Some((toml_config,&toml.text,text)),unread),\
-                 Err(reason)ifinstall=>returnOutcome::Refused(reason),",
-            )
-            .expect("a config.toml Folio will not edit is refused here");
+            .find("ifinstall&&letSome(reason)=install_refusal(InstallRoad::Hook{")
+            .expect("an install's refusals are asked here");
         assert!(judged < toml_lands, "and refused before either write");
-        let ignored = body
-            .find("ifinstall&&!read_by_codex(written.as_deref().unwrap_or(&existing)){")
-            .expect("the text hooks.json will hold is judged by codex's types here");
-        assert!(ignored < toml_lands, "before either write too");
+        let refusals = crate::test_support::squeezed(crate::test_support::item_body(
+            &bt_source::ItemQuery::function("install_refusal").in_module("crate::attention_codex"),
+        ));
+        assert!(
+            refusals.contains("Ok(Some(_))=>returntoml.config.as_ref().err().copied(),"),
+            "a config.toml Folio will not edit, holding the line, is refused: {refusals}"
+        );
+        assert!(
+            refusals.contains("if!read_by_codex(written.as_deref().unwrap_or(existing)){"),
+            "the text hooks.json will hold is judged by codex's types: {refusals}"
+        );
     }
 
     /// RED (0.4.10 plan row 69, re-review R2) — **a `config.toml` Folio reads and will not edit
@@ -3257,12 +3592,24 @@ mod tests {
     // ── 0.4.10 plan row 69c: the entry by codex's version ──────────────────
 
     fn codex_at(major: u32, minor: u32, patch: u32) -> CodexVersion {
-        CodexVersion::Known(Version::new(major, minor, patch))
+        CodexVersion::Known(release_at(major, minor, patch, None))
+    }
+
+    fn release_at(major: u32, minor: u32, patch: u32, prerelease: Option<&str>) -> CodexRelease {
+        CodexRelease {
+            version: Version::new(major, minor, patch),
+            prerelease: prerelease.map(str::to_owned),
+        }
+    }
+
+    /// A prerelease of `major.minor.patch`.
+    fn codex_pre(major: u32, minor: u32, patch: u32, prerelease: &str) -> CodexVersion {
+        CodexVersion::Known(release_at(major, minor, patch, Some(prerelease)))
     }
 
     /// A press on the file a version chooses, with its own marks folder — what [`apply`] does once
     /// [`pressed_path`] has named the file.
-    fn press_by_version(dir: &Path, version: CodexVersion, install: bool) -> Outcome {
+    fn press_by_version(dir: &Path, version: &CodexVersion, install: bool) -> Outcome {
         let file = if install && !version.runs_hooks() {
             CONFIG_FILE
         } else {
@@ -3272,7 +3619,7 @@ mod tests {
     }
 
     /// One scan of the file a version chooses, the machine's own answer about what stands.
-    fn scan_by_version(dir: &Path, version: CodexVersion) -> HooksFound {
+    fn scan_by_version(dir: &Path, version: &CodexVersion) -> HooksFound {
         let file = if version.runs_hooks() {
             HOOKS_FILE
         } else {
@@ -3291,7 +3638,8 @@ mod tests {
     /// is an old shape the scan wants repaired, and the repair takes the line out.
     ///
     /// RED GATE: `plant-69c-version-gate-skipped.py` answers every version as one that runs hooks,
-    /// and the press on 0.147 writes a hook codex skips.
+    /// and the press on 0.147 writes a hook codex skips; `plant-69c-prerelease-runs-hooks.py` reads
+    /// a prerelease of 0.148.0 as 0.148.0 (the 69c review's C1).
     #[test]
     fn one_codex_entry_per_version() {
         assert!(!codex_at(0, 147, 9).runs_hooks());
@@ -3303,23 +3651,38 @@ mod tests {
             "R17: unknown is current"
         );
         assert!(CodexVersion::Unasked.runs_hooks());
+        // The 69c review's C1: semver orders a prerelease before the release it leads up to.
+        assert!(
+            !codex_pre(0, 148, 0, "alpha.5").runs_hooks(),
+            "0.148.0-alpha.5 is older than 0.148.0"
+        );
+        assert!(
+            codex_pre(0, 149, 0, "alpha.1").runs_hooks(),
+            "a prerelease of a later version is past 0.148.0"
+        );
+        assert!(!codex_pre(0, 147, 0, "alpha.2").runs_hooks());
+        assert_eq!(
+            release_at(0, 148, 0, Some("alpha.5")).to_string(),
+            "0.148.0-alpha.5",
+            "the row and the diagnostics line name the prerelease"
+        );
 
         // 0.148 and later: the hook, and config.toml untouched.
         let dir = scratch("version-hook");
         assert_eq!(
-            press_by_version(&dir, codex_at(0, 148, 0), true),
+            press_by_version(&dir, &codex_at(0, 148, 0), true),
             Outcome::Installed
         );
         assert_eq!(names(&dir), vec![HOOKS_FILE.to_owned()]);
         assert_eq!(
-            scan_by_version(&dir, codex_at(0, 148, 0)),
+            scan_by_version(&dir, &codex_at(0, 148, 0)),
             HooksFound::Current
         );
 
         // Below 0.148, the key free: the line, and no hooks.json.
         let dir = scratch("version-line");
         assert_eq!(
-            press_by_version(&dir, codex_at(0, 147, 0), true),
+            press_by_version(&dir, &codex_at(0, 147, 0), true),
             Outcome::Installed
         );
         assert_eq!(names(&dir), vec![CONFIG_FILE.to_owned()]);
@@ -3328,12 +3691,12 @@ mod tests {
             format!("notify = {}\n", notify_value(&exe()))
         );
         assert_eq!(
-            scan_by_version(&dir, codex_at(0, 147, 0)),
+            scan_by_version(&dir, &codex_at(0, 147, 0)),
             HooksFound::Current
         );
         // Turning it off takes the line out on every version.
         assert_eq!(
-            press_by_version(&dir, codex_at(0, 147, 0), false),
+            press_by_version(&dir, &codex_at(0, 147, 0), false),
             Outcome::Removed
         );
         assert_eq!(
@@ -3351,10 +3714,10 @@ mod tests {
         ));
         let words = words_of(&theirs.parse::<DocumentMut>().expect("TOML")).expect("words");
         assert_eq!(
-            held_slot(CodexVersion::Unknown, &words),
+            held_slot(&CodexVersion::Unknown, &words),
             crate::i18n::Text::AgentCodexNotifyTaken.text()
         );
-        let named = held_slot(codex_at(0, 147, 0), &words);
+        let named = held_slot(&codex_at(0, 147, 0), &words);
         assert!(named.contains("0.147.0"), "{named}");
         assert!(named.contains("codex-computer-use.exe"), "{named}");
         assert!(named.contains("0.148"), "{named}");
@@ -3376,7 +3739,7 @@ mod tests {
         )
         .expect("the line beside it");
         assert_eq!(
-            scan_by_version(&dir, codex_at(0, 166, 0)),
+            scan_by_version(&dir, &codex_at(0, 166, 0)),
             HooksFound::Drifted
         );
         assert_eq!(
@@ -3388,7 +3751,7 @@ mod tests {
             ""
         );
         assert_eq!(
-            scan_by_version(&dir, codex_at(0, 166, 0)),
+            scan_by_version(&dir, &codex_at(0, 166, 0)),
             HooksFound::Current
         );
     }
@@ -3405,7 +3768,7 @@ mod tests {
         let line = format!("model = \"gpt-5\"\nnotify = {}\n", notify_value(&exe()));
         std::fs::write(dir.join(CONFIG_FILE), &line).expect("an earlier Folio's line");
         assert_eq!(
-            scan_by_version(&dir, codex_at(0, 166, 0)),
+            scan_by_version(&dir, &codex_at(0, 166, 0)),
             HooksFound::Current
         );
         assert_eq!(
@@ -3418,7 +3781,7 @@ mod tests {
         let theirs = format!("model = \"gpt-5\"\nnotify = {}\n", notify_value(&gone));
         std::fs::write(dir.join(CONFIG_FILE), &theirs).expect("a gone copy's line");
         assert_eq!(
-            scan_by_version(&dir, codex_at(0, 166, 0)),
+            scan_by_version(&dir, &codex_at(0, 166, 0)),
             HooksFound::Dead(vec![gone.clone()])
         );
         assert_eq!(
@@ -3430,7 +3793,7 @@ mod tests {
             "model = \"gpt-5\"\n"
         );
         assert_eq!(
-            scan_by_version(&dir, codex_at(0, 166, 0)),
+            scan_by_version(&dir, &codex_at(0, 166, 0)),
             HooksFound::Current
         );
     }
@@ -3454,16 +3817,16 @@ mod tests {
             Outcome::Installed,
             "the press before the version was known"
         );
-        assert_eq!(scan_by_version(&dir, old), HooksFound::Drifted);
+        assert_eq!(scan_by_version(&dir, &old), HooksFound::Drifted);
         assert_eq!(codex_state_in(&dir, Some(&exe()), false), State::Absent);
-        assert_eq!(press_by_version(&dir, old, true), Outcome::Installed);
+        assert_eq!(press_by_version(&dir, &old, true), Outcome::Installed);
         assert_eq!(
             std::fs::read_to_string(dir.join(CONFIG_FILE)).expect("written"),
             format!("notify = {}\n", notify_value(&exe()))
         );
         let hooks = std::fs::read_to_string(dir.join(HOOKS_FILE)).expect("there");
         assert!(!hooks.contains("attention codex:stop"), "{hooks}");
-        assert_eq!(scan_by_version(&dir, old), HooksFound::Current);
+        assert_eq!(scan_by_version(&dir, &old), HooksFound::Current);
         assert_eq!(codex_state_in(&dir, Some(&exe()), false), State::Installed);
 
         // A gone copy's hook: dead, and the same repair.
@@ -3484,13 +3847,13 @@ mod tests {
         )
         .expect("a gone copy's hook");
         assert_eq!(
-            scan_by_version(&dir, old),
+            scan_by_version(&dir, &old),
             HooksFound::Dead(vec![gone.clone()])
         );
-        assert_eq!(press_by_version(&dir, old, true), Outcome::Installed);
+        assert_eq!(press_by_version(&dir, &old, true), Outcome::Installed);
         let hooks = std::fs::read_to_string(dir.join(HOOKS_FILE)).expect("there");
         assert!(!hooks.contains("attention codex:stop"), "{hooks}");
-        assert_eq!(scan_by_version(&dir, old), HooksFound::Current);
+        assert_eq!(scan_by_version(&dir, &old), HooksFound::Current);
 
         // Somebody else's program on the key: said, and both files as they were.
         let dir = scratch("early-hook-held");
@@ -3502,11 +3865,11 @@ mod tests {
         std::fs::write(dir.join(CONFIG_FILE), &theirs).expect("their own file");
         let before = std::fs::read_to_string(dir.join(HOOKS_FILE)).expect("there");
         assert!(matches!(
-            scan_by_version(&dir, old),
+            scan_by_version(&dir, &old),
             HooksFound::Declined(_)
         ));
         assert!(matches!(
-            press_by_version(&dir, old, true),
+            press_by_version(&dir, &old, true),
             Outcome::Refused(_)
         ));
         assert_eq!(
@@ -3526,7 +3889,9 @@ mod tests {
     ///
     /// RED GATE: `plant-69c-hook-on-when-not-run.py` drops the version's condition from
     /// `codex_state_in`, and the first `Absent` reads `Installed`; `plant-69c-hooks-off-installs.py`
-    /// drops the install's refusal with hooks off, and the hook replaces the line that works.
+    /// drops the install's refusal with hooks off, and the hook replaces the line that works;
+    /// `plant-69c-hooks-off-names-home.py` names `~/.codex/config.toml` whatever was read (the 69c
+    /// review's C6), and the sentence does not name the fixture's file.
     #[test]
     fn a_hook_codex_will_not_run_is_never_on() {
         let dir = scratch("not-run");
@@ -3537,16 +3902,25 @@ mod tests {
         assert_eq!(codex_state_in(&dir, Some(&exe()), true), State::Installed);
         assert_eq!(codex_state_in(&dir, Some(&exe()), false), State::Absent);
         assert_eq!(
-            scan_by_version(&dir, codex_at(0, 166, 0)),
+            scan_by_version(&dir, &codex_at(0, 166, 0)),
             HooksFound::Current
         );
 
         std::fs::write(dir.join(CONFIG_FILE), "[features]\nhooks = false\n").expect("off");
         assert_eq!(codex_state_in(&dir, Some(&exe()), true), State::Absent);
         assert_eq!(
-            scan_by_version(&dir, codex_at(0, 166, 0)),
-            HooksFound::Declined(crate::i18n::Text::CodexHooksOff.text())
+            scan_by_version(&dir, &codex_at(0, 166, 0)),
+            HooksFound::Declined(hooks_off(&dir.join(CONFIG_FILE)))
         );
+        // The 69c review's C6: the sentence names the file read, wherever CODEX_HOME put it.
+        let shown = dir.join(CONFIG_FILE).display().to_string();
+        let refusal = hooks_off(&dir.join(CONFIG_FILE));
+        assert!(refusal.contains(&shown), "{refusal}");
+        for lang in [crate::i18n::Lang::English, crate::i18n::Lang::Chinese] {
+            let sentence = crate::i18n::codex_hooks_off_in_lang(lang, &shown);
+            assert!(sentence.contains(&shown), "{sentence}");
+            assert!(!sentence.contains("~/.codex"), "{sentence}");
+        }
 
         let hooks = std::fs::read_to_string(dir.join(HOOKS_FILE)).expect("there");
         let ignored = hooks.replacen('{', "{\"model\": \"gpt-5\", ", 1);
@@ -3554,7 +3928,7 @@ mod tests {
         std::fs::write(dir.join(HOOKS_FILE), &ignored).expect("a key codex refuses");
         assert_eq!(codex_state_in(&dir, Some(&exe()), true), State::Absent);
         assert_eq!(
-            scan_by_version(&dir, codex_at(0, 166, 0)),
+            scan_by_version(&dir, &codex_at(0, 166, 0)),
             HooksFound::Declined(crate::i18n::Text::CodexHooksFileIgnored.text())
         );
 
@@ -3567,7 +3941,7 @@ mod tests {
         std::fs::write(dir.join(CONFIG_FILE), &line).expect("off, and the line");
         assert_eq!(
             apply_to(&dir.join(HOOKS_FILE), true, &exe()),
-            Outcome::Refused(crate::i18n::Text::CodexHooksOff.text())
+            Outcome::Refused(hooks_off(&dir.join(CONFIG_FILE)))
         );
         assert_eq!(
             std::fs::read_to_string(dir.join(CONFIG_FILE)).expect("there"),
@@ -3576,7 +3950,7 @@ mod tests {
         assert_eq!(names(&dir), vec![CONFIG_FILE.to_owned()]);
         assert_eq!(codex_state_in(&dir, Some(&exe()), true), State::Installed);
         assert_eq!(
-            scan_by_version(&dir, codex_at(0, 166, 0)),
+            scan_by_version(&dir, &codex_at(0, 166, 0)),
             HooksFound::Current
         );
     }
@@ -3615,7 +3989,7 @@ mod tests {
         use std::cell::{Cell, RefCell};
         let held = Mutex::new(VersionBook::new());
         let asked = Cell::new(0);
-        let answer = Cell::new(Some(Version::new(0, 166, 0)));
+        let answer = RefCell::new(Asked::Answered(Some(release_at(0, 166, 0, None))));
         let size = Cell::new(10_u64);
         let said = RefCell::new(Vec::new());
         let stamp = |path: &Path| {
@@ -3627,7 +4001,7 @@ mod tests {
         };
         let ask = |_: &Path| {
             asked.set(asked.get() + 1);
-            answer.get()
+            answer.borrow().clone()
         };
         let say = |line: String| said.borrow_mut().push(line);
         let settle = || settle_version_in(&held, &stamp, &ask, &say);
@@ -3650,7 +4024,7 @@ mod tests {
         assert_eq!(*said.borrow(), vec!["BT_AGENT_HOOKS codex version=0.166.0"]);
 
         size.set(11);
-        answer.set(None);
+        *answer.borrow_mut() = Asked::Answered(None);
         assert_eq!(settle(), CodexVersion::Unknown, "it would not say");
         assert_eq!(asked.get(), 2, "a changed file is asked again");
         assert_eq!(
@@ -3659,26 +4033,245 @@ mod tests {
         );
 
         let other = OsStr::new(r"C:\Tools\codex.exe");
-        answer.set(Some(Version::new(0, 147, 0)));
+        *answer.borrow_mut() = Asked::Answered(Some(release_at(0, 147, 0, None)));
         assert!(adopt_walk_program_in(&held, Some(Some(other))));
         assert_eq!(held.lock().unwrap().version(), CodexVersion::Unasked);
         assert_eq!(settle(), codex_at(0, 147, 0));
         assert_eq!(asked.get(), 3, "another program is asked");
     }
 
-    /// PIN — **what codex prints is read as its version**: `codex-cli 0.166.0`, and a prerelease as
-    /// the version it is a prerelease of.
+    /// RED (the 69c review's C2) — **a question stopped at its deadline is not an answer**: the
+    /// version is unknown for that round and the log says so, but nothing is kept, so the next
+    /// round asks the same file again; the answer that then comes is the one held.
+    ///
+    /// RED GATE: `plant-69c-overrun-kept.py` keeps an overrun like an answer, and the second settle
+    /// asks nothing.
+    #[test]
+    fn an_overrun_version_question_is_asked_again() {
+        use std::cell::{Cell, RefCell};
+        let held = Mutex::new(VersionBook::new());
+        let asked = Cell::new(0);
+        let answer = RefCell::new(Asked::Overran);
+        let said = RefCell::new(Vec::new());
+        let stamp = |path: &Path| {
+            Some(ProgramStamp {
+                path: path.to_path_buf(),
+                size: 10,
+                modified: None,
+            })
+        };
+        let ask = |_: &Path| {
+            asked.set(asked.get() + 1);
+            answer.borrow().clone()
+        };
+        let say = |line: String| said.borrow_mut().push(line);
+        let settle = || settle_version_in(&held, &stamp, &ask, &say);
+        assert!(adopt_walk_program_in(
+            &held,
+            Some(Some(OsStr::new(r"C:\Tools\codex.exe")))
+        ));
+
+        assert_eq!(settle(), CodexVersion::Unknown, "an overrun is unknown");
+        assert_eq!(*said.borrow(), vec!["BT_AGENT_HOOKS codex version=unknown"]);
+        assert_eq!(held.lock().unwrap().version(), CodexVersion::Unknown);
+        assert!(
+            repair_within_the_gate_in(&held),
+            "asked, and unknown: R17's current version, the repair's gate open"
+        );
+        assert_eq!(settle(), CodexVersion::Unknown);
+        assert_eq!(
+            asked.get(),
+            2,
+            "the same file, asked again after an overrun"
+        );
+
+        *answer.borrow_mut() = Asked::Answered(Some(release_at(0, 147, 0, None)));
+        assert_eq!(settle(), codex_at(0, 147, 0));
+        assert_eq!(settle(), codex_at(0, 147, 0));
+        assert_eq!(asked.get(), 3, "the answer that came is held");
+        assert_eq!(
+            VERSION_DEADLINE,
+            Duration::from_secs(10),
+            "copilot's deadline"
+        );
+    }
+
+    /// PIN (the 69c review's C5) — **codex's version is its version line, on a successful exit**:
+    /// the first line that is not blank must be `codex-cli <semver>` whole. A wrapper that prints
+    /// its own version first, a sentence with a number in it, a failed exit, or no line at all is
+    /// no version — unknown, which runs the hook (R17).
+    ///
+    /// RED GATE: `plant-69c-version-any-line.py` reads the first version anywhere in the answer,
+    /// and the wrapper's line is believed; `plant-69c-failed-exit-believed.py` reads a failed run's
+    /// line all the same.
     #[test]
     fn the_version_reads_off_what_codex_prints() {
+        let read = |stdout: &str| Asked::release_from(true, stdout);
         assert_eq!(
-            Version::parse("codex-cli 0.166.0\n"),
-            Some(Version::new(0, 166, 0))
+            read("codex-cli 0.166.0\n"),
+            Some(release_at(0, 166, 0, None))
         );
         assert_eq!(
-            Version::parse("codex-cli 0.147.0-alpha.2\n"),
-            Some(Version::new(0, 147, 0))
+            read("codex-cli 0.166.0\r\n"),
+            Some(release_at(0, 166, 0, None))
         );
-        assert_eq!(Version::new(0, 148, 0).to_string(), "0.148.0");
+        assert_eq!(
+            read("\ncodex-cli 0.148.0-alpha.5\n"),
+            Some(release_at(0, 148, 0, Some("alpha.5")))
+        );
+        assert_eq!(
+            read("codex-cli 0.148.0+build.7\n"),
+            Some(release_at(0, 148, 0, None)),
+            "build metadata orders nothing"
+        );
+        assert_eq!(
+            read("codex-cli 0.147.0-alpha.2\n"),
+            Some(release_at(0, 147, 0, Some("alpha.2"))),
+            "a prerelease is kept as one, below 0.148 either way"
+        );
+        for stranger in [
+            "",
+            "\n\n",
+            "wrapper 2.1.0\ncodex-cli 0.166.0\n",
+            "codex-shim 0.166.0\n",
+            "codex-cli 0.166.0 (npm)\n",
+            "codex-cli version 0.166.0\n",
+            "codex-cli v0.166.0\n",
+            "codex-cli 0.166\n",
+            "codex-cli 0.166.0.1\n",
+            "codex-cli 00.166.0\n",
+            "codex-cli 0.166.0-\n",
+            "codex-cli 0.166.0-alpha..1\n",
+            "codex-cli 0.166.0-01\n",
+            "'codex' is not recognized as an internal or external command",
+        ] {
+            assert_eq!(read(stranger), None, "{stranger:?}");
+        }
+        assert_eq!(
+            Asked::release_from(false, "codex-cli 0.166.0\n"),
+            None,
+            "a failed exit is no version, whatever it printed"
+        );
+        assert_eq!(Asked::of(None), Asked::Answered(None), "not asked: none");
+        assert_eq!(
+            Asked::of(Some(bt_platform::ProbeEnding::Overran)),
+            Asked::Overran
+        );
+    }
+
+    /// RED (the 69c review's C3) — **the first-run card offers only what the press would write**:
+    /// each install refusal the press gives, [`install_refusal_at`] — the card's question — gives
+    /// for the same files, and the press leaves them byte for byte. A `hooks.json` codex would
+    /// ignore once written; a path Windows PowerShell 5.1 cannot call; a `notify` this build cannot
+    /// decode, on either road; and, below 0.148, a read-only `config.toml` the line would go in.
+    /// Empty folders are offered on both roads, and the press installs there.
+    ///
+    /// RED GATE: `plant-69c-card-reads-one-file.py` has the card read `config.toml` alone on the
+    /// hook's road, and the ignored `hooks.json` is offered.
+    #[test]
+    fn an_install_is_refused_alike_by_the_press_and_the_card() {
+        let current = codex_at(0, 166, 0);
+        let old = codex_at(0, 147, 0);
+        let alike = |path: &Path, version: &CodexVersion, exe: &Path, reason: &'static str| {
+            let dir = path.parent().expect("a folder");
+            let before = names(dir)
+                .into_iter()
+                .map(|name| {
+                    let bytes = std::fs::read(dir.join(&name)).expect("there");
+                    (name, bytes)
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                install_refusal_at(path, exe, version),
+                Some(reason),
+                "the card, {}",
+                path.display()
+            );
+            assert_eq!(
+                apply_to(path, true, exe),
+                Outcome::Refused(reason),
+                "the press, {}",
+                path.display()
+            );
+            let after = names(dir)
+                .into_iter()
+                .map(|name| {
+                    let bytes = std::fs::read(dir.join(&name)).expect("there");
+                    (name, bytes)
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(after, before, "nothing written, {}", path.display());
+        };
+
+        // A hooks.json codex would ignore whole once written.
+        let dir = scratch("card-ignored");
+        std::fs::write(dir.join(HOOKS_FILE), r#"{"model": "gpt-5", "hooks": {}}"#)
+            .expect("their own file");
+        alike(
+            &dir.join(HOOKS_FILE),
+            &current,
+            &exe(),
+            crate::i18n::Text::CodexHooksFileIgnored.text(),
+        );
+
+        // A path Windows PowerShell 5.1 cannot call: on Windows only, where codex runs the hook
+        // through it.
+        let dir = scratch("card-brackets");
+        let unmatched = dir.join("a[b").join("folio.exe");
+        if bt_platform::host_platform() == HostPlatform::Windows {
+            alike(
+                &dir.join(HOOKS_FILE),
+                &current,
+                &unmatched,
+                crate::i18n::Text::CodexHookPathBrackets.text(),
+            );
+        } else {
+            assert_eq!(
+                install_refusal_at(&dir.join(HOOKS_FILE), &unmatched, &current),
+                None
+            );
+        }
+
+        // A notify this build cannot decode, on both roads.
+        let dir = scratch("card-notify-undecodable");
+        std::fs::write(dir.join(CONFIG_FILE), "notify = \"x\"\n").expect("their own file");
+        let unreadable = crate::i18n::Text::CodexConfigUnreadable.text();
+        alike(&dir.join(HOOKS_FILE), &current, &exe(), unreadable);
+        alike(&dir.join(CONFIG_FILE), &old, &exe(), unreadable);
+
+        // Below 0.148, a config.toml the line would go in and that Folio will not edit.
+        let dir = scratch("card-readonly");
+        let config = dir.join(CONFIG_FILE);
+        std::fs::write(&config, "model = \"gpt-5\"\n").expect("their own file");
+        let writable = std::fs::metadata(&config).expect("there").permissions();
+        let mut readonly = writable.clone();
+        readonly.set_readonly(true);
+        std::fs::set_permissions(&config, readonly).expect("read-only");
+        let card = install_refusal_at(&config, &exe(), &old);
+        let press = apply_to(&config, true, &exe());
+        let after = std::fs::read_to_string(&config).expect("there");
+        // Restored before the assertions, not after them: a panic in between would leave the
+        // fixture read-only (attention_ownership's review R14).
+        std::fs::set_permissions(&config, writable).expect("writable again");
+        let read_only = crate::i18n::Text::AgentConfigReadOnly.text();
+        assert_eq!(card, Some(read_only), "the card");
+        assert_eq!(press, Outcome::Refused(read_only), "the press");
+        assert_eq!(after, "model = \"gpt-5\"\n");
+
+        // Nothing in the way: offered on both roads, and the press installs.
+        for (file, version) in [(HOOKS_FILE, &current), (CONFIG_FILE, &old)] {
+            let dir = scratch("card-free");
+            assert_eq!(
+                install_refusal_at(&dir.join(file), &exe(), version),
+                None,
+                "{file}"
+            );
+            assert_eq!(
+                apply_to(&dir.join(file), true, &exe()),
+                Outcome::Installed,
+                "{file}"
+            );
+        }
     }
 
     /// RED (re-review R4) — **a removal that left `config.toml` as it was says so in its own

@@ -697,6 +697,60 @@ mod tests {
         assert!(scans[..2].iter().all(|scan| scan.repaired_from.is_some()));
     }
 
+    /// Row 69c (the 69c review's C4) — **codex's repair waits for its version**: before the version
+    /// has been asked, a gone copy's `notify` line is said and left, and neither `config.toml` nor
+    /// a `hooks.json` beside it is written — a repair then could write a hook a codex below 0.148
+    /// skips, in place of the line that works there. Once the version is answered (here: no codex
+    /// where the walk looked, unknown, which is current), the same scan repairs it.
+    ///
+    /// MUTATION: `plant-69c-repair-gate-open.py` opens codex's gate before the version is asked,
+    /// and the line is repaired at once.
+    #[test]
+    fn a_codex_repair_waits_for_the_version() {
+        let root = root("hooks-step-codex-gate");
+        let gone = copy_at(&root, "A gone");
+        let here = copy_at(&root, "B here");
+        let files = files_in(&root.join("config"));
+        let data = root.join("data");
+        install_all(&files, &gone, &root.join("gone data"));
+        fs::remove_file(&gone).unwrap();
+        let hooks_json = files[1].with_file_name("hooks.json");
+        let before = (fs::read(&files[1]).unwrap(), fs::read(&hooks_json).ok());
+        let book = std::sync::Mutex::new(crate::attention_codex::VersionBook::new());
+        let gate = |family: &HooksFamily| {
+            family.tag != "codex" || crate::attention_codex::repair_within_the_gate_in(&book)
+        };
+        let step = AgentHooksStep::new();
+        let scans =
+            step.scan_and_repair(&some(&files), &here, &data, &what_stands, never_held, &gate);
+        assert_eq!(
+            scans[1],
+            HooksScan::unrepaired(HooksFound::Dead(vec![gone.clone()]))
+        );
+        assert_eq!(
+            (fs::read(&files[1]).unwrap(), fs::read(&hooks_json).ok()),
+            before,
+            "both of codex's files byte for byte"
+        );
+        assert!(scans[0].repaired_from.is_some() && scans[2].repaired_from.is_some());
+
+        assert!(crate::attention_codex::adopt_walk_program_in(
+            &book,
+            Some(None)
+        ));
+        let again =
+            step.scan_and_repair(&some(&files), &here, &data, &what_stands, never_held, &gate);
+        assert_eq!(
+            again[1].repaired_from,
+            Some(HooksFound::Dead(vec![gone.clone()]))
+        );
+        let line = fs::read_to_string(&files[1]).unwrap();
+        assert!(
+            line.contains("B here") && !line.contains("A gone"),
+            "{line}"
+        );
+    }
+
     /// T2 — **a living other copy's hooks are left, and said by its path** (R5): nothing is
     /// written, the row names the other program, and the resume row counts both resumed agents as
     /// missing.

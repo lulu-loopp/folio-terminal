@@ -1203,20 +1203,31 @@ pub(crate) fn probe_settled() -> bool {
 fn run_probe(ctx: &bt_platform::admission::WorkerCtx) -> Option<Version> {
     let environment = crate::shell_integration::ProbeEnvironment::current(ctx, "copilot probe");
     let copilot = environment.program(Path::new("copilot"))?;
-    version_through_cmd(ctx, &copilot, &environment, PROBE_DEADLINE, "copilot")
+    match version_through_cmd(ctx, &copilot, &environment, PROBE_DEADLINE, "copilot")? {
+        // Copilot's rule, kept: whatever it printed, whatever its exit status, read for a
+        // version (a copilot that says its version and then fails to look for updates is the
+        // version it said).
+        bt_platform::ProbeEnding::Finished(output) => {
+            Version::parse(&String::from_utf8_lossy(&output.stdout))
+        }
+        bt_platform::ProbeEnding::Overran => None,
+    }
 }
 
 /// **`<program> --version`, asked of a program another reader has already found** (0.4.10 plan
 /// row 69c, R17: codex's, found by the program walk) — [`run_probe`]'s question, in the same
-/// environment and through the same `cmd.exe`, held to `deadline`. `None` when it would not say;
-/// off Windows no program is asked (the module header's probe answers `None` there too), so the
-/// version is unknown.
+/// environment and through the same `cmd.exe`, held to `deadline`. How it ended, for the asker to
+/// read by its own rule: [`ProbeEnding::Finished`](bt_platform::ProbeEnding::Finished) with its
+/// exit status and what it printed, or
+/// [`ProbeEnding::Overran`](bt_platform::ProbeEnding::Overran) — an answer that may come next
+/// time (the 69c review's C2). `None` when it could not be asked; off Windows no program is asked
+/// (the module header's probe answers `None` there too), so the version is unknown.
 pub(crate) fn program_version(
     ctx: &bt_platform::admission::WorkerCtx,
     program: &Path,
     deadline: std::time::Duration,
     who: &str,
-) -> Option<Version> {
+) -> Option<bt_platform::ProbeEnding> {
     #[cfg(windows)]
     {
         let environment =
@@ -1232,8 +1243,8 @@ pub(crate) fn program_version(
 
 /// **`program --version` through `cmd.exe`**, in `environment` (laid over the child by
 /// [`ProbeEnvironment::apply`](crate::shell_integration::ProbeEnvironment::apply), so the child
-/// sees the block a pane is born with and nothing of Folio's own), held to `deadline`; the first
-/// three-part number it prints ([`Version::parse`]).
+/// sees the block a pane is born with and nothing of Folio's own), held to `deadline`: how it
+/// ended, or `None` when it could not be started.
 #[cfg(windows)]
 fn version_through_cmd(
     ctx: &bt_platform::admission::WorkerCtx,
@@ -1241,7 +1252,7 @@ fn version_through_cmd(
     environment: &crate::shell_integration::ProbeEnvironment,
     deadline: std::time::Duration,
     who: &str,
-) -> Option<Version> {
+) -> Option<bt_platform::ProbeEnding> {
     // Through the quiet door (§7.40 ①): without `CREATE_NO_WINDOW` a console
     // window opens on screen the first time somebody opens the settings dialog.
     let mut command = bt_platform::quiet_command_named(Path::new("cmd.exe"))?;
@@ -1256,8 +1267,10 @@ fn version_through_cmd(
         deadline,
     )
     .ok()?;
-    let output = match ending {
-        bt_platform::ProbeEnding::Finished(output) => output,
+    match &ending {
+        bt_platform::ProbeEnding::Finished(output) => {
+            bt_platform::file_reads::pipe_output(bt_platform::file_reads::Lane::Attention, output);
+        }
         // Stopped at the deadline: the version is unknown (not "no copilot"), and the next
         // trigger asks again.
         bt_platform::ProbeEnding::Overran => {
@@ -1267,11 +1280,9 @@ fn version_through_cmd(
                 program.display(),
                 deadline.as_secs()
             ));
-            return None;
         }
-    };
-    bt_platform::file_reads::pipe_output(bt_platform::file_reads::Lane::Attention, &output);
-    Version::parse(&String::from_utf8_lossy(&output.stdout))
+    }
+    Some(ending)
 }
 
 /// **How long `copilot --version` may take** before the probe stops it and answers "unknown" —

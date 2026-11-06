@@ -3334,9 +3334,6 @@ text_entries! {
     /// `config.toml` cannot be read — not UTF-8, not TOML, or a `notify` that is
     /// not a list of words. Named, because this row has two files.
     CodexConfigUnreadable,
-    /// `[features] hooks = false` (or `codex_hooks`) in `config.toml`: codex runs
-    /// no hook, so Folio writes none, and says it as the row's line.
-    CodexHooksOff,
     /// The hook written: codex asks once to trust it (R13).
     CodexHookAddedToast,
     /// A removal that took Folio's hook out of `hooks.json` and left `config.toml`
@@ -6548,11 +6545,6 @@ impl Text {
                 "Codex's config.toml is in a form Folio cannot read. Folio does not change the file.",
                 "Codex 的 config.toml 格式 Folio 无法读取。Folio 不改动此文件。",
             ),
-            Self::CodexHooksOff => pick(
-                lang,
-                "Hooks are switched off in your ~/.codex/config.toml, so a hook added here would not run.",
-                "~/.codex/config.toml 中已关闭 hook，此处添加的 hook 不会运行。",
-            ),
             Self::CodexHookAddedToast => pick(
                 lang,
                 "Hook added. Codex asks once to trust it, the next time it starts.",
@@ -7272,6 +7264,25 @@ pub(crate) fn codex_row_old_version(version: &str) -> &'static str {
             "Codex 回合结束时标记标签页。Codex {version} 低于 0.148，因此在 ~/.codex/config.toml 或 CODEX_HOME 中添加 notify 程序。"
         ),
     })
+}
+
+/// **`[features] hooks = false` (or `codex_hooks`) in codex's `config.toml`** (row 69's review N6):
+/// codex runs no hook, so Folio writes none, and says it as the row's line — naming the file that
+/// says so, which is under `CODEX_HOME` when that is set (the 69c review's C6). Interned
+/// ([`intern`]): one per path per language. The Chinese is a draft for the Chinese pass.
+pub(crate) fn codex_hooks_off(path: &str) -> &'static str {
+    intern(codex_hooks_off_in_lang(current(), path))
+}
+
+/// [`codex_hooks_off`] with the language named — [`Text::in_lang`]'s split, so a test reads both
+/// columns without switching the process's one language under every other test.
+pub(crate) fn codex_hooks_off_in_lang(lang: Lang, path: &str) -> String {
+    match lang {
+        Lang::English => {
+            format!("Hooks are switched off in {path}, so a hook added here would not run.")
+        }
+        Lang::Chinese => format!("{path} 中已关闭 hook，此处添加的 hook 不会运行。"),
+    }
 }
 
 /// **Somebody else's program on codex's one `notify` key, on a codex below 0.148** (row 69's
