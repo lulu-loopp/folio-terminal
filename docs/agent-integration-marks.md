@@ -234,13 +234,31 @@ worker, never the window thread) classifies each agent's file
 writes in exactly two states:
 
 - **Dead**: every other copy the file names is `NotFound` on a volume that is
-  there (`other_live_by`, `DeadWhen::MissingOnAVolumeThatIsThere`). A copy on a
-  drive or share that is not plugged in, and an operand that names no file, is
-  `OwnerUnknown` and keeps its hooks. A press and the uninstall keep the older
-  rule (`DeadWhen::Missing`): what is not there is gone.
-- **Drifted**: this copy's own entries in an older form (C1–C3, P1, P2), or no
-  Claude Code `Stop`, the event resume needs. Another event the person removed
-  by hand stays removed.
+  there (`other_live_by`, `DeadWhen::MissingOnAVolumeThatIsThere`). The volume
+  is the one the path leads to once its links and junctions are followed
+  (`volume_of_a_missing_path` resolves the deepest part that is there), asked
+  only under this rule, never by a press or the uninstall; a path whose way
+  cannot be followed is an owner that cannot be asked about. A copy
+  on a drive or share that is not plugged in, and an operand that names no
+  file, is `OwnerUnknown` and keeps its hooks. A press and the uninstall keep
+  the older rule (`DeadWhen::Missing`): what is not there is gone.
+- **Drifted**: only the ruled shapes. This copy's own entries in an older form
+  (C1–C3, P1, P2), with arguments that are not today's, or with a spelling of
+  the program that is not this copy's; or no Claude Code `Stop`, the event
+  resume needs. Another event the person removed by hand stays removed unless
+  a drift repair runs, which writes the full current set.
+
+A person's edit of Folio's own entry is theirs, not drift: an `async: false`
+they set stays, and so do a `timeoutSec` or `matcher` on Copilot's entry.
+Ownership is by content, never by position: each wanted entry claims an own
+entry under its event that speaks for the same request (`claude-code:<row>`,
+`copilot:<row>`), wherever it stands, so an entry moved into the person's own
+group stays there. Entries of Folio's no install claims, such as one under an
+event Folio does not use, are the person's placing: kept by every install and
+said on the row ("An entry of Folio's under <event> is one Folio did not put
+there"). This copy's stay as they are; another copy's, moved or gone, are
+pointed at this copy where they stand and keep the person's other keys. A
+switch turned Off still takes every entry of this copy's out.
 
 Both go through the switch's writer (`apply_resolved`, `Decision::Install`),
 which asks every question again, records the root in `agent_config_roots` and
@@ -250,12 +268,21 @@ unknown owner, an unreadable file, an unclassified Folio-like entry, somebody
 else's `notify` and somebody else's hook file are said on the row. The pass
 runs at the program walk's first answer and when a walk moves an agent's
 folder, at each Agents page open, after a press, and at an update trial's
-commit; during a trial the repair is held (`Writer::AgentHooksRepair`). A press
-holds its family's latch, so a repair never writes beside one, and a repair
+commit, and when the window's language changes (a refused repair's reason is
+said again in the new language); during a trial the repair is held
+(`Writer::AgentHooksRepair`). A press holds its family's latch, so a repair
+never writes beside one; a press that finds the repair holding the latch
+writes nothing and says "Folio is updating this file. Try again." A repair
 reads its file once (`Config::with_one_read`), so a press that wrote after the
-scan makes the repair's write refuse rather than undo it. Each repair
-writes a `BT_AGENT_HOOKS` diagnostics line; a dead owner's also raises one
-notice per family. Copilot is repaired within its version gate: only after the
+scan makes the repair's write refuse rather than undo it. A due repair that
+was held or refused is said on the row with its reason, and the resume row
+counts those hooks as missing; hooks in an old shape are never counted as this
+copy's. Each repair writes a `BT_AGENT_HOOKS` diagnostics line; a dead owner's
+also raises one notice per family, and only when the rescan finds the hooks
+this copy's (otherwise the line says `repaired=lost`). A drift repair raises
+none: it rewrites only what makes an entry old (an old form is replaced, a
+direct entry gets this copy's program and the wanted arguments and keeps its
+other keys), so the person's own edits stay. Copilot is repaired within its version gate: only after the
 version question has been answered (the step asks it, and the answer runs the
 pass again), and never for a copilot too old for the hooks. Codex is repaired
 only once its version has been asked, since the version decides which file the

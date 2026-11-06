@@ -331,10 +331,16 @@ pub struct Machine {
     pub claude_found: bool,
     /// …and its hook is not in `~/.claude/settings.json` yet.
     pub claude_installable: bool,
+    /// …but the file holds hooks of a living other copy of Folio, or of one the machine will not
+    /// say about: the row is offered and arrives Off, because a take-over is never a first-run
+    /// act (0.4.10 plan row 67b, ruling N3).
+    pub claude_over_another: bool,
     pub codex_found: bool,
     pub codex_installable: bool,
+    pub codex_over_another: bool,
     pub copilot_found: bool,
     pub copilot_installable: bool,
+    pub copilot_over_another: bool,
     /// **How this copy was installed** — `install_channel`'s fact, read through
     /// `install_channel::channel()`, and [`Channel::Unknown`] when the card's
     /// one turn of waiting ran out before it landed. Decides whether the
@@ -471,24 +477,27 @@ pub fn rows_for(platform: HostPlatform, machine: &Machine) -> Vec<Row> {
         (
             RowKind::Claude,
             machine.claude_found && machine.claude_installable,
+            machine.claude_over_another,
             Text::FirstRunRowClaude,
             Tip::ClaudeSettings,
         ),
         (
             RowKind::Codex,
             machine.codex_found && machine.codex_installable,
+            machine.codex_over_another,
             Text::FirstRunRowCodex,
             Tip::CodexConfig,
         ),
         (
             RowKind::Copilot,
             machine.copilot_found && machine.copilot_installable,
+            machine.copilot_over_another,
             Text::FirstRunRowCopilot,
             Tip::CopilotHooks,
         ),
     ];
     let mut opened = false;
-    for (kind, found, line, tip) in agents {
+    for (kind, found, over_another, line, tip) in agents {
         if !offered(kind) || !found {
             continue;
         }
@@ -497,7 +506,9 @@ pub fn rows_for(platform: HostPlatform, machine: &Machine) -> Vec<Row> {
             group_break_above: !opened,
             line,
             tip,
-            on: agent_arrives_on(kind, machine.resume_agents),
+            // Over another copy's hooks the row is the person's to switch on: its press is the
+            // take-over the toast then asks them to confirm (ruling N3).
+            on: !over_another && agent_arrives_on(kind, machine.resume_agents),
         });
         opened = true;
     }
@@ -2036,10 +2047,13 @@ mod tests {
             explorer_first_page_available: true,
             claude_found: true,
             claude_installable: true,
+            claude_over_another: false,
             codex_found: true,
             codex_installable: true,
+            codex_over_another: false,
             copilot_found: true,
             copilot_installable: true,
+            copilot_over_another: false,
             install_channel: Channel::Ours,
             // Off, so the pins below state the card's own rule; the two rows resume turns on are
             // the ruling of 2026-11-04's, pinned on their own
@@ -2463,6 +2477,35 @@ mod tests {
             "with resume off an agent row arrived on"
         );
         assert!(!agent_arrives_on(RowKind::Copilot, true));
+    }
+
+    /// RED (0.4.10 plan row 67b, ruling N3) — **a row over a living other copy's hooks is offered
+    /// and arrives Off, resume on or not**: a take-over is never a first-run act, so an untouched
+    /// card's `Done` asks nothing of that file; the row beside it arrives as it would.
+    ///
+    /// MUTATION: the row's arrival ignores the other copy (`plant-67b-first-run-takes-over.py`):
+    /// Claude Code's row arrives on over copy A's hooks, and `Done` asks for the take-over.
+    #[test]
+    fn a_row_over_a_living_other_copys_hooks_arrives_off() {
+        let over = rows(&Machine {
+            resume_agents: true,
+            claude_over_another: true,
+            ..every_row()
+        });
+        let claude = over
+            .iter()
+            .find(|row| row.kind == RowKind::Claude)
+            .expect("the row is offered, for the person to switch on");
+        assert!(!claude.on, "a first run took another copy's hooks");
+        assert!(
+            over.iter().any(|row| row.kind == RowKind::Codex && row.on),
+            "the row beside it lost its own arrival"
+        );
+        assert!(
+            !applications(&over, ExplorerShape::FirstPageAndClassic)
+                .contains(&Application::ClaudeHooks),
+            "an untouched Done asked for a take-over"
+        );
     }
 
     /// A temporary folder standing in for the folder `folio.exe` was installed

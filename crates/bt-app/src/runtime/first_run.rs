@@ -107,6 +107,15 @@ impl<B: Backend> Runtime<'_, B> {
     /// The one that matters is a settings file this build cannot read: it is left exactly as it is,
     /// because it belongs to somebody who wrote it.
     pub(crate) fn apply_claude_hooks(&mut self, install: bool, announce: Announce) -> Result<bool> {
+        // **A press and the start-time repair of this family never write together, and neither
+        // waits for the other** (0.4.10 plan row 67b, review N2): the press holds the family's
+        // latch across its write, a repair that finds it taken writes nothing, and a press that
+        // finds the repair holding it writes nothing either — it says so and asks for the pass,
+        // whose answer redraws the row. Taken before the decision, so a take-over's consent is
+        // not spent on a press that wrote nothing.
+        let Some(press) = agent_hooks_step::AGENT_HOOKS.take_latch(0) else {
+            return self.press_beside_a_repair(0, i18n::Text::ClaudeHooksFailedToast);
+        };
         let config = attention_hooks::settings_path();
         let decision = attention_ownership::next_decision(
             &mut self.app.agent_takeovers[0],
@@ -115,16 +124,11 @@ impl<B: Backend> Runtime<'_, B> {
             std::time::Instant::now(),
         );
         let exe = attention_ownership::this_copy();
-        let outcome = {
-            // **No start-time repair of this family writes while a press does** (0.4.10 plan row
-            // 67b): the press holds the family's latch across its write, and a repair that finds
-            // it taken writes nothing.
-            let _press = agent_hooks_step::AGENT_HOOKS.take_latch(0);
-            match attention_ownership::stable_executable(exe.as_deref()) {
-                Ok(exe) => attention_hooks::apply(decision, exe),
-                Err(reason) => attention_hooks::Outcome::Refused(reason),
-            }
+        let outcome = match attention_ownership::stable_executable(exe.as_deref()) {
+            Ok(exe) => attention_hooks::apply(decision, exe),
+            Err(reason) => attention_hooks::Outcome::Refused(reason),
         };
+        drop(press);
         if let attention_hooks::Outcome::TakeOverRequired(owners) = &outcome {
             self.app.agent_takeovers[0] = attention_ownership::Pending::new(
                 config,
@@ -210,6 +214,15 @@ impl<B: Backend> Runtime<'_, B> {
     /// line an earlier Folio wrote there — see `attention_codex`'s header. On a codex below 0.148
     /// an install writes that line instead (0.4.10 plan row 69c).
     pub(crate) fn apply_codex_notify(&mut self, install: bool, announce: Announce) -> Result<bool> {
+        // **A press and the start-time repair of this family never write together, and neither
+        // waits for the other** (0.4.10 plan row 67b, review N2): the press holds the family's
+        // latch across its write, a repair that finds it taken writes nothing, and a press that
+        // finds the repair holding it writes nothing either — it says so and asks for the pass,
+        // whose answer redraws the row. Taken before the decision, so a take-over's consent is
+        // not spent on a press that wrote nothing.
+        let Some(press) = agent_hooks_step::AGENT_HOOKS.take_latch(1) else {
+            return self.press_beside_a_repair(1, i18n::Text::CodexNotifyFailedToast);
+        };
         // The take-over's consent is keyed by the file the press writes Folio's entry in.
         let config = attention_codex::pressed_path(install);
         let decision = attention_ownership::next_decision(
@@ -219,16 +232,11 @@ impl<B: Backend> Runtime<'_, B> {
             std::time::Instant::now(),
         );
         let exe = attention_ownership::this_copy();
-        let outcome = {
-            // **No start-time repair of this family writes while a press does** (0.4.10 plan row
-            // 67b): the press holds the family's latch across its write, and a repair that finds
-            // it taken writes nothing.
-            let _press = agent_hooks_step::AGENT_HOOKS.take_latch(1);
-            match attention_ownership::stable_executable(exe.as_deref()) {
-                Ok(exe) => attention_codex::apply(decision, exe),
-                Err(reason) => attention_codex::Outcome::Refused(reason),
-            }
+        let outcome = match attention_ownership::stable_executable(exe.as_deref()) {
+            Ok(exe) => attention_codex::apply(decision, exe),
+            Err(reason) => attention_codex::Outcome::Refused(reason),
         };
+        drop(press);
         if let attention_codex::Outcome::TakeOverRequired(owners) = &outcome {
             self.app.agent_takeovers[1] = attention_ownership::Pending::new(
                 config.clone(),
@@ -328,6 +336,15 @@ impl<B: Backend> Runtime<'_, B> {
         install: bool,
         announce: Announce,
     ) -> Result<bool> {
+        // **A press and the start-time repair of this family never write together, and neither
+        // waits for the other** (0.4.10 plan row 67b, review N2): the press holds the family's
+        // latch across its write, a repair that finds it taken writes nothing, and a press that
+        // finds the repair holding it writes nothing either — it says so and asks for the pass,
+        // whose answer redraws the row. Taken before the decision, so a take-over's consent is
+        // not spent on a press that wrote nothing.
+        let Some(press) = agent_hooks_step::AGENT_HOOKS.take_latch(2) else {
+            return self.press_beside_a_repair(2, i18n::Text::CopilotHooksFailedToast);
+        };
         let config = attention_copilot::hooks_path();
         let decision = attention_ownership::next_decision(
             &mut self.app.agent_takeovers[2],
@@ -336,16 +353,11 @@ impl<B: Backend> Runtime<'_, B> {
             std::time::Instant::now(),
         );
         let exe = attention_ownership::this_copy();
-        let outcome = {
-            // **No start-time repair of this family writes while a press does** (0.4.10 plan row
-            // 67b): the press holds the family's latch across its write, and a repair that finds
-            // it taken writes nothing.
-            let _press = agent_hooks_step::AGENT_HOOKS.take_latch(2);
-            match attention_ownership::stable_executable(exe.as_deref()) {
-                Ok(exe) => attention_copilot::apply(decision, exe),
-                Err(reason) => attention_copilot::Outcome::Refused(reason),
-            }
+        let outcome = match attention_ownership::stable_executable(exe.as_deref()) {
+            Ok(exe) => attention_copilot::apply(decision, exe),
+            Err(reason) => attention_copilot::Outcome::Refused(reason),
         };
+        drop(press);
         if let attention_copilot::Outcome::TakeOverRequired(owners) = &outcome {
             self.app.agent_takeovers[2] = attention_ownership::Pending::new(
                 config,
@@ -419,6 +431,21 @@ impl<B: Backend> Runtime<'_, B> {
                 Ok(false)
             }
         }
+    }
+
+    /// **A press on agent row `family` while the start-time repair is writing the same file**
+    /// (0.4.10 plan row 67b, review N2): nothing is written, the press says why under the row's
+    /// own failure (`failed`), and the pass is asked again so the row is said from what the
+    /// repair left.
+    fn press_beside_a_repair(&mut self, family: usize, failed: i18n::Text) -> Result<bool> {
+        crate::agent_row_asked_again(self.app, family);
+        self.toast(
+            toast::ToastKind::Error,
+            toast::ToastAnchor::Window,
+            None,
+            i18n::agent_install_refused(failed.text(), i18n::Text::AgentHooksBeingRepaired.text()),
+        )?;
+        Ok(false)
     }
 
     /// Put the first-run card up, once, on a machine that has never run Folio
@@ -511,11 +538,16 @@ impl<B: Backend> Runtime<'_, B> {
             ),
             claude_found: self.agent_is_on_this_machine("claude"),
             claude_installable: attention_hooks::state() == attention_hooks::State::Absent,
+            // A take-over is never a first-run act (0.4.10 plan row 67b, ruling N3): `Absent` is
+            // also a file another living copy's hooks are in, and the row over it arrives Off.
+            claude_over_another: agent_hooks_step::held_by_another(0),
             codex_found: self.agent_is_on_this_machine("codex"),
             codex_installable: attention_codex::first_run_installable(),
+            codex_over_another: agent_hooks_step::held_by_another(1),
             copilot_found: copilot_on_path,
             copilot_installable: attention_copilot::state() == attention_copilot::State::Absent
                 && attention_copilot::readiness() == attention_copilot::Readiness::Ready,
+            copilot_over_another: agent_hooks_step::held_by_another(2),
             install_channel: install_channel::channel()
                 .unwrap_or(install_channel::Channel::Unknown),
             resume_agents: self.app.settings_store.loaded().resume_agents,

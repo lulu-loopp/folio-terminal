@@ -3345,6 +3345,19 @@ text_entries! {
     /// The repair notice when the hook was pointed here (R8): codex asks again,
     /// because the command changed.
     AgentHooksRepairedCodexHook,
+    /// The row's line over a key named twice where Folio's hooks go: the scan wrote nothing, so it
+    /// says what the file is, not what a write did (review N7; the press keeps
+    /// `AgentHooksDuplicateKey`).
+    AgentHooksDuplicateKeyRow,
+    /// The row's line over entries of this copy's that no install put where they stand (ruling
+    /// N1); `{events}` is the list of their events.
+    AgentHooksPlaced,
+    /// The row's line over a due repair held while an update is on trial (review N4).
+    AgentHooksRepairHeld,
+    /// The row's line over a due repair the writer refused (review N4); `{reason}` is its sentence.
+    AgentHooksRepairRefused,
+    /// A press's refusal while the start-time repair of the same file is writing (review N2).
+    AgentHooksBeingRepaired,
 }
 
 impl Text {
@@ -6517,6 +6530,31 @@ impl Text {
                 "Resume needs this Folio’s hooks for: {agents}.",
                 "恢复会话需要此 Folio 的 hook：{agents}。",
             ),
+            Self::AgentHooksDuplicateKeyRow => pick(
+                lang,
+                "This file names one key twice where Folio’s hooks go. Folio does not change the file.",
+                "此文件在 Folio 的 hook 所在位置重复使用了同一个键。Folio 不改动此文件。",
+            ),
+            Self::AgentHooksPlaced => pick(
+                lang,
+                "An entry of Folio’s under {events} is one Folio did not put there. Folio does not change it.",
+                "{events} 下有一项 Folio 的条目不是 Folio 放的。Folio 不改动这一项。",
+            ),
+            Self::AgentHooksRepairHeld => pick(
+                lang,
+                "Folio repairs these hooks once the update is confirmed.",
+                "更新确认后，Folio 会修复这些 hook。",
+            ),
+            Self::AgentHooksRepairRefused => pick(
+                lang,
+                "Folio could not repair these hooks: {reason}",
+                "Folio 未能修复这些 hook：{reason}",
+            ),
+            Self::AgentHooksBeingRepaired => pick(
+                lang,
+                "Folio is updating this file. Try again.",
+                "Folio 正在更新此文件，请重试。",
+            ),
             Self::UpdateCardRestartMissed => {
                 pick(lang, "The restart did not happen.", "未能重启。")
             }
@@ -7338,6 +7376,31 @@ pub(crate) fn agent_hooks_other_copy_line(owners: &[std::path::PathBuf]) -> &'st
         .collect::<Vec<_>>()
         .join(", ");
     intern(Text::AgentHooksOtherCopy.text().replace("{path}", &paths))
+}
+
+/// **The row's line over entries of this copy's that no install put where they stand** (0.4.10
+/// plan row 67b, ruling N1): `events` are the events they stand under, in the file's order. Read
+/// off the person's file, so the pool holds one line per distinct list said.
+pub(crate) fn agent_hooks_placed_line(events: &[String]) -> &'static str {
+    let separator = match current() {
+        Lang::English => ", ",
+        Lang::Chinese => "、",
+    };
+    intern(
+        Text::AgentHooksPlaced
+            .text()
+            .replace("{events}", &events.join(separator)),
+    )
+}
+
+/// **The row's line over a due repair its writer refused** (0.4.10 plan row 67b, review N4):
+/// `reason` is the writer's sentence.
+pub(crate) fn agent_hooks_repair_refused_line(reason: &str) -> &'static str {
+    intern(
+        Text::AgentHooksRepairRefused
+            .text()
+            .replace("{reason}", reason),
+    )
 }
 
 /// **The resume row's line while resume is on and some agents' hooks are not this copy's** (0.4.10

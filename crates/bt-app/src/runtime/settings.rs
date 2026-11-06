@@ -2676,11 +2676,11 @@ impl<B: Backend> Runtime<'_, B> {
             // What each row says of what the start-time scan found (0.4.10 plan row 67b), and
             // what the resume row says of the hooks resume needs — both said from the scan's
             // answer, here and in the language in force, never read off the disk.
-            agent_row_lines: self
-                .app
-                .agent_hooks_found
-                .each_ref()
-                .map(|found| found.as_ref().and_then(agent_hooks_step::hooks_row_line)),
+            agent_row_lines: self.app.agent_hooks_found.each_ref().map(|found| {
+                found.as_ref().and_then(|(found, unrepaired)| {
+                    agent_hooks_step::hooks_row_line(found, *unrepaired)
+                })
+            }),
             resume_agents_line: agent_hooks_step::resume_row_line(
                 self.app.settings_store.loaded().resume_agents,
                 self.app.agent_rows_known,

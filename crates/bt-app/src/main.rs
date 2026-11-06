@@ -9299,9 +9299,12 @@ struct App<B: Backend = Native> {
     claude_hooks_installed: bool,
     /// **What the newest start-time scan found in each agent's configuration**
     /// (`agent_hooks_step::HooksSnapshot`), in the `agent_takeovers` order — what the Agents rows'
-    /// lines are said from. `None` for a family a press has written since, until the scan the
-    /// press asked for answers.
-    agent_hooks_found: [Option<attention_ownership::HooksFound>; 3],
+    /// lines are said from, with why a due repair was not written. `None` for a family a press has
+    /// written since, until the scan the press asked for answers.
+    agent_hooks_found: [Option<(
+        attention_ownership::HooksFound,
+        Option<agent_hooks_step::Unrepaired>,
+    )>; 3],
     /// **Whether a scan has answered at all** in this process: before it, nothing about the agents'
     /// files is known on this thread, and the resume row says nothing about their hooks.
     agent_rows_known: bool,
@@ -31742,7 +31745,9 @@ fn adopt_agent_hooks_snapshot<B: Backend>(
             _ => None,
         };
     }
-    app.agent_hooks_found = snapshot.found.clone().map(Some);
+    app.agent_hooks_found = std::array::from_fn(|index| {
+        Some((snapshot.found[index].clone(), snapshot.unrepaired[index]))
+    });
     app.agent_rows_known = true;
     app.copilot_readiness = snapshot.copilot_readiness;
 }

@@ -91,7 +91,7 @@
 //! is read here, and only otherwise the documented default beside the user's profile.
 
 pub(crate) use crate::attention_ownership::Outcome;
-use crate::attention_ownership::{self as ownership, Decision, HooksFound};
+use crate::attention_ownership::{self as ownership, Decision, Form, HooksFound, RowSentence};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
@@ -535,6 +535,10 @@ pub(crate) fn repair_within_the_gate_in(held: &Mutex<VersionBook>) -> bool {
 pub(crate) const HOOKS: Family = Family {
     owner: codex_hook_owner,
     wanted: hook_wanted,
+    todays: hook_entry,
+    // The program and its arguments are one line here; `async` and `timeout` are the person's to
+    // set (ruling N1).
+    program_keys: &["command"],
     positional: true,
     agent: CODEX,
 };
@@ -784,6 +788,11 @@ pub(crate) fn hook_command(exe: &Path) -> String {
     hook_command_on(exe, bt_platform::host_platform())
 }
 
+/// [`hook_command`] for any row of this family: the line that names it as `codex:<row>`.
+fn row_command(exe: &Path, row: &str) -> String {
+    row_command_on(exe, row, bt_platform::host_platform())
+}
+
 /// The same, for a named platform: **PowerShell's call operator and single quotes on Windows**
 /// ([`ownership::powershell_quoted`]) — a quoted string followed by a bare word is a parse error
 /// there, so the path is called with `&`, and inside the quotes nothing is special but a quote,
@@ -792,13 +801,18 @@ pub(crate) fn hook_command(exe: &Path) -> String {
 /// which is what makes the entry provably Folio's.
 #[must_use]
 fn hook_command_on(exe: &Path, platform: HostPlatform) -> String {
+    row_command_on(exe, STOP, platform)
+}
+
+/// [`hook_command_on`] for any row of this family.
+fn row_command_on(exe: &Path, row: &str, platform: HostPlatform) -> String {
     let path = exe.to_string_lossy();
     let program = if platform == HostPlatform::Windows {
         format!("& {}", ownership::powershell_quoted(&path))
     } else {
         format!("'{}'", path.replace('\'', "'\\''"))
     };
-    format!("{program} {ATTENTION_VERB} {CODEX}:{STOP} {JSON_FLAG} {STDIN_PAYLOAD}")
+    format!("{program} {ATTENTION_VERB} {CODEX}:{row} {JSON_FLAG} {STDIN_PAYLOAD}")
 }
 
 /// **Whether Windows PowerShell 5.1 can call Folio at this path with `& '<path>'`** (re-review R1).
@@ -881,18 +895,26 @@ fn codex_hook_owner(hook: &Json) -> Result<Option<PathBuf>, &'static str> {
 /// **The one entry an install writes**, in a group of its own under `Stop`. `Stop` reads no
 /// matcher, so the group carries none.
 fn hook_wanted(exe: &Path) -> Vec<Wanted> {
-    let mut hook = Map::new();
-    hook.insert("type".to_owned(), "command".into());
-    hook.insert("command".to_owned(), hook_command(exe).into());
-    hook.insert("async".to_owned(), true.into());
-    hook.insert("timeout".to_owned(), HOOK_TIMEOUT.into());
     vec![Wanted {
         event: STOP_EVENT,
         matcher: None,
-        hook: Json::Object(hook),
+        row: STOP,
+        hook: hook_entry(STOP, exe),
         carries_resume: attention_map::turn_end_row(CODEX, STOP)
             .is_some_and(|row| row.resume.is_declared()),
     }]
+}
+
+/// **The entry this build writes for one row** — [`HOOKS`]'s
+/// [`Family::todays`](crate::attention_hooks::Family::todays): what an install points another
+/// copy's entry at, where it stands (ruling N1).
+fn hook_entry(row: &str, exe: &Path) -> Json {
+    let mut hook = Map::new();
+    hook.insert("type".to_owned(), "command".into());
+    hook.insert("command".to_owned(), row_command(exe, row).into());
+    hook.insert("async".to_owned(), true.into());
+    hook.insert("timeout".to_owned(), HOOK_TIMEOUT.into());
+    Json::Object(hook)
 }
 
 /// **Whether codex would read `hooks.json` with this text in it** — the text the file will hold
@@ -941,15 +963,11 @@ fn hooks_switched_off(document: &Table) -> bool {
 /// install gives, and the row's line over them: hooks switched off in `config.toml`, or a
 /// `hooks.json` codex ignores whole ([`read_by_codex`]). Hook events in `config.toml` (R15) are not
 /// one: codex loads both files, with a warning, so a hook already there runs.
-fn hook_kept_from_running(
-    toml_path: &Path,
-    toml: &Table,
-    hooks_text: &str,
-) -> Option<&'static str> {
+fn hook_kept_from_running(toml_path: &Path, toml: &Table, hooks_text: &str) -> Option<RowSentence> {
     if hooks_switched_off(toml) {
-        Some(hooks_off(toml_path))
+        Some(RowSentence::CodexHooksOff(toml_path.to_path_buf()))
     } else if !hooks_text.trim().is_empty() && !read_by_codex(hooks_text) {
-        Some(crate::i18n::Text::CodexHooksFileIgnored.text())
+        Some(crate::i18n::Text::CodexHooksFileIgnored.into())
     } else {
         None
     }
@@ -1165,7 +1183,7 @@ fn declares_somebody_else(document: &Table) -> bool {
 pub(crate) fn scan_resolved(
     config: &crate::attention_hooks::Config,
     exe: &Path,
-    look: &dyn Fn(&Path) -> ownership::PathStands,
+    look: &dyn ownership::Look,
 ) -> HooksFound {
     if is_config_file(config) {
         notify_scan_resolved(config, exe, look)
@@ -1195,15 +1213,15 @@ fn is_config_file(config: &Config) -> bool {
 pub(crate) fn hook_scan_resolved(
     config: &crate::attention_hooks::Config,
     exe: &Path,
-    look: &dyn Fn(&Path) -> ownership::PathStands,
+    look: &dyn ownership::Look,
 ) -> HooksFound {
     let folder = config.named().parent().expect("absolute hooks file");
     let toml = match toml_beside(&folder.join(CONFIG_FILE)) {
         Ok(toml) => toml,
-        Err(reason) => return HooksFound::Declined(reason),
+        Err(reason) => return HooksFound::Declined(reason.into()),
     };
     if toml.document.get(NOTIFY_KEY).is_some() && words_of(&toml.document).is_none() {
-        return HooksFound::Declined(crate::i18n::Text::CodexConfigUnreadable.text());
+        return HooksFound::Declined(crate::i18n::Text::CodexConfigUnreadable.into());
     }
     let line = match notify_owner(&toml.document) {
         Ok(line) => line,
@@ -1217,10 +1235,16 @@ pub(crate) fn hook_scan_resolved(
         Standing::Text(text) => text,
         Standing::Nothing | Standing::Unreadable => String::new(),
     };
-    let line_drifted = || words_of(&toml.document) != Some(program_for(exe));
+    let line_form = || {
+        if words_of(&toml.document) == Some(program_for(exe)) {
+            Form::Today
+        } else {
+            Form::Old
+        }
+    };
     if let Some(reason) = hook_kept_from_running(&toml.path, &toml.document, &hooks_text) {
         return match line {
-            Some(owner) => match ownership::classify_owners(&[owner], exe, look, line_drifted) {
+            Some(owner) => match ownership::classify_owners(&[owner], exe, look, line_form) {
                 found if found.wants_repair() => HooksFound::Declined(reason),
                 found => found,
             },
@@ -1229,20 +1253,26 @@ pub(crate) fn hook_scan_resolved(
     }
     let found = if reading.owners.is_empty() {
         match line {
-            Some(owner) => ownership::classify_owners(&[owner], exe, look, line_drifted),
+            Some(owner) => ownership::classify_owners(&[owner], exe, look, line_form),
             None => HooksFound::Nothing,
         }
     } else {
         let mut owners = reading.owners;
         owners.extend(line.iter().cloned());
-        ownership::classify_owners(&owners, exe, look, || reading.drifted || line.is_some())
+        // This copy's line beside its own hook is an old shape the repair takes out.
+        let form = if line.is_some() {
+            Form::Old
+        } else {
+            reading.form
+        };
+        ownership::classify_owners(&owners, exe, look, || form)
     };
     match found {
         found
             if (found == HooksFound::Nothing || found.wants_repair())
                 && declares_toml_hooks(&toml.document) =>
         {
-            HooksFound::Declined(crate::i18n::Text::CodexHooksInToml.text())
+            HooksFound::Declined(crate::i18n::Text::CodexHooksInToml.into())
         }
         found => found,
     }
@@ -1265,7 +1295,7 @@ pub(crate) fn hook_scan_resolved(
 pub(crate) fn notify_scan_resolved(
     config: &crate::attention_hooks::Config,
     exe: &Path,
-    look: &dyn Fn(&Path) -> ownership::PathStands,
+    look: &dyn ownership::Look,
 ) -> HooksFound {
     let text = match config.standing() {
         Standing::Nothing => String::new(),
@@ -1292,16 +1322,20 @@ pub(crate) fn notify_scan_resolved(
     let folder = config.named().parent().expect("absolute config");
     let hooks = match hooks_beside(&folder.join(HOOKS_FILE)) {
         Ok(hooks) => hooks,
-        Err(reason) => return HooksFound::Declined(reason),
+        Err(reason) => return HooksFound::Declined(reason.into()),
     };
     let mut owners: Vec<PathBuf> = line.into_iter().collect();
     owners.extend(hooks.owners.iter().cloned());
     let found = ownership::classify_owners(&owners, exe, look, || {
-        !hooks.owners.is_empty() || words != Some(program_for(exe))
+        if hooks.owners.is_empty() && words == Some(program_for(exe)) {
+            Form::Today
+        } else {
+            Form::Old
+        }
     });
     match (&hooks.config, found) {
         (Err(reason), found) if found.wants_repair() && !hooks.owners.is_empty() => {
-            HooksFound::Declined(reason)
+            HooksFound::Declined(RowSentence::Said(*reason))
         }
         (_, found) => found,
     }
@@ -1320,12 +1354,12 @@ struct HooksBeside {
 /// for the other file: a file Folio will not edit is still read, and refused only where a hook of
 /// Folio's in it would have to go. One this build cannot read is
 /// [`Text::AgentHooksUnreadable`](crate::i18n::Text::AgentHooksUnreadable).
-fn hooks_beside(path: &Path) -> Result<HooksBeside, &'static str> {
+fn hooks_beside(path: &Path) -> Result<HooksBeside, crate::i18n::Text> {
     let (text, config) = match Config::resolve(path) {
         Ok(config) => match config.standing() {
             Standing::Text(text) => (text, Ok(config)),
             Standing::Nothing => (String::new(), Ok(config)),
-            Standing::Unreadable => return Err(crate::i18n::Text::AgentHooksUnreadable.text()),
+            Standing::Unreadable => return Err(crate::i18n::Text::AgentHooksUnreadable),
         },
         Err(hooks::Unresolved::Refused(reason)) => {
             match bt_platform::file_reads::read_to_string(
@@ -1336,11 +1370,11 @@ fn hooks_beside(path: &Path) -> Result<HooksBeside, &'static str> {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                     (String::new(), Err(reason))
                 }
-                Err(_) => return Err(crate::i18n::Text::AgentHooksUnreadable.text()),
+                Err(_) => return Err(crate::i18n::Text::AgentHooksUnreadable),
             }
         }
         Err(hooks::Unresolved::Unreadable) => {
-            return Err(crate::i18n::Text::AgentHooksUnreadable.text());
+            return Err(crate::i18n::Text::AgentHooksUnreadable);
         }
     };
     let owners = hooks::hook_owners(&HOOKS, &text)?;
@@ -1354,16 +1388,16 @@ fn hooks_beside(path: &Path) -> Result<HooksBeside, &'static str> {
 /// **The refusal over somebody else's `notify`, on a codex below 0.148** (R12): it names the
 /// version and their program, and what a newer codex would let Folio do. Without a version to
 /// name, the plain sentence.
-fn held_slot(version: &CodexVersion, words: &[String]) -> &'static str {
+fn held_slot(version: &CodexVersion, words: &[String]) -> RowSentence {
     match (version, words.first()) {
-        (CodexVersion::Known(release), Some(program)) => {
-            let name = Path::new(program).file_name().map_or_else(
+        (CodexVersion::Known(release), Some(program)) => RowSentence::CodexNotifyHeld {
+            version: release.to_string(),
+            program: Path::new(program).file_name().map_or_else(
                 || program.clone(),
                 |name| name.to_string_lossy().into_owned(),
-            );
-            crate::i18n::codex_notify_held_old_version(&release.to_string(), &name)
-        }
-        _ => crate::i18n::Text::AgentCodexNotifyTaken.text(),
+            ),
+        },
+        _ => crate::i18n::Text::AgentCodexNotifyTaken.into(),
     }
 }
 
@@ -1580,12 +1614,12 @@ struct Toml {
 /// A file Folio will not edit — a link out of codex's folder, one shared by hard links, a read-only
 /// one — is still read: what it says decides whether a hook may be added beside it (R15), and the
 /// operation is refused only when a line of Folio's in it would have to go.
-fn toml_beside(path: &Path) -> Result<Toml, &'static str> {
+fn toml_beside(path: &Path) -> Result<Toml, crate::i18n::Text> {
     let (text, config) = match Config::resolve(path) {
         Ok(config) => match config.standing() {
             Standing::Text(text) => (text, Ok(config)),
             Standing::Nothing => (String::new(), Ok(config)),
-            Standing::Unreadable => return Err(crate::i18n::Text::CodexConfigUnreadable.text()),
+            Standing::Unreadable => return Err(crate::i18n::Text::CodexConfigUnreadable),
         },
         Err(hooks::Unresolved::Refused(reason)) => {
             match bt_platform::file_reads::read_to_string(
@@ -1596,16 +1630,16 @@ fn toml_beside(path: &Path) -> Result<Toml, &'static str> {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                     (String::new(), Err(reason))
                 }
-                Err(_) => return Err(crate::i18n::Text::CodexConfigUnreadable.text()),
+                Err(_) => return Err(crate::i18n::Text::CodexConfigUnreadable),
             }
         }
         Err(hooks::Unresolved::Unreadable) => {
-            return Err(crate::i18n::Text::CodexConfigUnreadable.text());
+            return Err(crate::i18n::Text::CodexConfigUnreadable);
         }
     };
     let document = text
         .parse::<DocumentMut>()
-        .map_err(|_| crate::i18n::Text::CodexConfigUnreadable.text())?;
+        .map_err(|_| crate::i18n::Text::CodexConfigUnreadable)?;
     Ok(Toml {
         path: path.to_path_buf(),
         text,
@@ -1617,13 +1651,15 @@ fn toml_beside(path: &Path) -> Result<Toml, &'static str> {
 /// [`toml_beside`], for the hook road: a `notify` this build cannot decode is a file it cannot read
 /// — whether it carries Folio's line is not something to assume.
 fn toml_for_hooks(path: &Path) -> Result<Toml, &'static str> {
-    toml_beside(path).and_then(|toml| {
-        if toml.document.get(NOTIFY_KEY).is_some() && words_of(&toml.document).is_none() {
-            Err(crate::i18n::Text::CodexConfigUnreadable.text())
-        } else {
-            Ok(toml)
-        }
-    })
+    toml_beside(path)
+        .map_err(crate::i18n::Text::text)
+        .and_then(|toml| {
+            if toml.document.get(NOTIFY_KEY).is_some() && words_of(&toml.document).is_none() {
+                Err(crate::i18n::Text::CodexConfigUnreadable.text())
+            } else {
+                Ok(toml)
+            }
+        })
 }
 
 /// **The two files an install reads, as it has read them** — the file it writes Folio's entry in,
@@ -1681,7 +1717,7 @@ fn install_refusal(
                 return Some(hooks_off(&toml.path));
             }
             if let Err(reason) = hooks::hook_owners(&HOOKS, existing) {
-                return Some(reason);
+                return Some(reason.text());
             }
             let written = match hooks::hooks_edited(&HOOKS, existing, exe, true) {
                 Ok(written) => written,
@@ -1707,7 +1743,7 @@ fn install_refusal(
                 return Some(crate::i18n::Text::CodexConfigUnreadable.text());
             }
             if declares_somebody_else(&document) {
-                return Some(held_slot(version, &words_of(&document).unwrap_or_default()));
+                return Some(held_slot(version, &words_of(&document).unwrap_or_default()).text());
             }
             let hooks = match hooks {
                 Ok(hooks) => hooks,
@@ -1760,7 +1796,7 @@ fn install_refusal_at(path: &Path, exe: &Path, version: &CodexVersion) -> Option
         install_refusal(
             InstallRoad::Notify {
                 existing: &existing,
-                hooks: hooks.as_ref().map_err(|reason| *reason),
+                hooks: hooks.as_ref().map_err(|reason| reason.text()),
             },
             exe,
             version,
@@ -1892,7 +1928,7 @@ pub(crate) fn apply_resolved(
     };
     let mut paths = match hooks::hook_owners(&HOOKS, &existing) {
         Ok(paths) => paths,
-        Err(reason) => return Outcome::Refused(reason),
+        Err(reason) => return Outcome::Refused(reason.text()),
     };
     // **Ownership is per entry** (closure review R4): a `notify` wearing Folio's verb in a shape
     // this build cannot decode is not Folio's, and it is left alone.
@@ -1998,7 +2034,7 @@ fn notify_install_resolved(
     if let Some(reason) = install_refusal(
         InstallRoad::Notify {
             existing: &existing,
-            hooks: hooks.as_ref().map_err(|reason| *reason),
+            hooks: hooks.as_ref().map_err(|reason| reason.text()),
         },
         exe,
         &version(),
@@ -2010,7 +2046,7 @@ fn notify_install_resolved(
     };
     let hooks = match hooks {
         Ok(hooks) => hooks,
-        Err(reason) => return Outcome::Refused(reason),
+        Err(reason) => return Outcome::Refused(reason.text()),
     };
     let mut paths = notify_owner(&document)
         .ok()
@@ -3715,9 +3751,9 @@ mod tests {
         let words = words_of(&theirs.parse::<DocumentMut>().expect("TOML")).expect("words");
         assert_eq!(
             held_slot(&CodexVersion::Unknown, &words),
-            crate::i18n::Text::AgentCodexNotifyTaken.text()
+            crate::i18n::Text::AgentCodexNotifyTaken.into()
         );
-        let named = held_slot(&codex_at(0, 147, 0), &words);
+        let named = held_slot(&codex_at(0, 147, 0), &words).text();
         assert!(named.contains("0.147.0"), "{named}");
         assert!(named.contains("codex-computer-use.exe"), "{named}");
         assert!(named.contains("0.148"), "{named}");
@@ -3910,7 +3946,7 @@ mod tests {
         assert_eq!(codex_state_in(&dir, Some(&exe()), true), State::Absent);
         assert_eq!(
             scan_by_version(&dir, &codex_at(0, 166, 0)),
-            HooksFound::Declined(hooks_off(&dir.join(CONFIG_FILE)))
+            HooksFound::Declined(RowSentence::CodexHooksOff(dir.join(CONFIG_FILE)))
         );
         // The 69c review's C6: the sentence names the file read, wherever CODEX_HOME put it.
         let shown = dir.join(CONFIG_FILE).display().to_string();
@@ -3929,7 +3965,7 @@ mod tests {
         assert_eq!(codex_state_in(&dir, Some(&exe()), true), State::Absent);
         assert_eq!(
             scan_by_version(&dir, &codex_at(0, 166, 0)),
-            HooksFound::Declined(crate::i18n::Text::CodexHooksFileIgnored.text())
+            HooksFound::Declined(crate::i18n::Text::CodexHooksFileIgnored.into())
         );
 
         // Hooks off and an earlier Folio's line: the line is the integration, and it stays.
