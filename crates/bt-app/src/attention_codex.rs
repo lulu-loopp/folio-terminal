@@ -782,15 +782,11 @@ fn codex_state_in(dir: &Path, exe: Option<&Path>, hooks_run: bool) -> State {
     }
 }
 
-/// **The command Folio's hook runs**, for the shell codex runs it through on this machine.
+/// **The command Folio's hook runs** for one row of this family (`codex:<row>`), for the shell
+/// codex runs it through on this machine.
 #[must_use]
-pub(crate) fn hook_command(exe: &Path) -> String {
-    hook_command_on(exe, bt_platform::host_platform())
-}
-
-/// [`hook_command`] for any row of this family: the line that names it as `codex:<row>`.
-fn row_command(exe: &Path, row: &str) -> String {
-    row_command_on(exe, row, bt_platform::host_platform())
+fn hook_command(exe: &Path, row: &str) -> String {
+    hook_command_on(exe, row, bt_platform::host_platform())
 }
 
 /// The same, for a named platform: **PowerShell's call operator and single quotes on Windows**
@@ -800,12 +796,7 @@ fn row_command(exe: &Path, row: &str) -> String {
 /// the path's own is spelled `'\''`. Both are the spellings [`ownership::legacy_path`] reads back,
 /// which is what makes the entry provably Folio's.
 #[must_use]
-fn hook_command_on(exe: &Path, platform: HostPlatform) -> String {
-    row_command_on(exe, STOP, platform)
-}
-
-/// [`hook_command_on`] for any row of this family.
-fn row_command_on(exe: &Path, row: &str, platform: HostPlatform) -> String {
+fn hook_command_on(exe: &Path, row: &str, platform: HostPlatform) -> String {
     let path = exe.to_string_lossy();
     let program = if platform == HostPlatform::Windows {
         format!("& {}", ownership::powershell_quoted(&path))
@@ -911,7 +902,7 @@ fn hook_wanted(exe: &Path) -> Vec<Wanted> {
 fn hook_entry(row: &str, exe: &Path) -> Json {
     let mut hook = Map::new();
     hook.insert("type".to_owned(), "command".into());
-    hook.insert("command".to_owned(), row_command(exe, row).into());
+    hook.insert("command".to_owned(), hook_command(exe, row).into());
     hook.insert("async".to_owned(), true.into());
     hook.insert("timeout".to_owned(), HOOK_TIMEOUT.into());
     Json::Object(hook)
@@ -1335,7 +1326,7 @@ pub(crate) fn notify_scan_resolved(
     });
     match (&hooks.config, found) {
         (Err(reason), found) if found.wants_repair() && !hooks.owners.is_empty() => {
-            HooksFound::Declined(RowSentence::Said(*reason))
+            HooksFound::Declined(RowSentence::Said(reason))
         }
         (_, found) => found,
     }
@@ -2758,7 +2749,10 @@ mod tests {
                 "@@@@\"hooks\": [".to_owned(),
                 "@@@@@{".to_owned(),
                 "@@@@@@\"async\": true,".to_owned(),
-                format!("@@@@@@\"command\": {},", Json::from(hook_command(&exe()))),
+                format!(
+                    "@@@@@@\"command\": {},",
+                    Json::from(hook_command(&exe(), STOP))
+                ),
                 "@@@@@@\"timeout\": 10,".to_owned(),
                 "@@@@@@\"type\": \"command\"".to_owned(),
                 "@@@@@}".to_owned(),
@@ -2807,7 +2801,7 @@ mod tests {
                 r"'/home/someone/o'\''neil $HOME `x`/folio' attention codex:stop --json -",
             ),
         ] {
-            let written = hook_command_on(Path::new(exe), platform);
+            let written = hook_command_on(Path::new(exe), STOP, platform);
             assert_eq!(written, command, "{platform:?}");
             // **And it reads back as this copy's**: the decoder that decides what Folio may edit
             // is the one that decodes what it wrote.
@@ -2833,7 +2827,11 @@ mod tests {
     /// event is one this build maps (plan row 69b): its words and its session are declared.
     #[test]
     fn the_command_codex_runs_is_a_call_the_verb_reads() {
-        let command = hook_command_on(Path::new(r"C:\folio\folio.exe"), HostPlatform::Windows);
+        let command = hook_command_on(
+            Path::new(r"C:\folio\folio.exe"),
+            STOP,
+            HostPlatform::Windows,
+        );
         let words = command
             .strip_prefix(r"& 'C:\folio\folio.exe' ")
             .expect("the call operator and the program, then the verb's words");
@@ -2916,7 +2914,7 @@ mod tests {
             assert_eq!(after["hooks"]["Stop"].as_array().map(Vec::len), Some(3));
             assert_eq!(
                 after["hooks"]["Stop"][2]["hooks"][0]["command"],
-                Json::from(hook_command(&exe())),
+                Json::from(hook_command(&exe(), STOP)),
                 "{name}: Folio's is the last group"
             );
             // Laid out as their file is: its line endings, its indentation.
@@ -3021,7 +3019,7 @@ mod tests {
         assert_eq!(apply_to(&path, true, &exe()), Outcome::Installed);
         assert_eq!(
             hooks_of(&path)["hooks"]["Stop"][3]["hooks"][0]["command"],
-            Json::from(hook_command(&exe()))
+            Json::from(hook_command(&exe(), STOP))
         );
         assert_eq!(apply_to(&path, false, &exe()), Outcome::Removed);
         assert_eq!(std::fs::read_to_string(&path).expect("read back"), emptied);
@@ -3055,6 +3053,65 @@ mod tests {
             serde_json::from_str::<Json>(&theirs).expect("JSON")["hooks"]["Stop"][0]
         );
         assert_eq!(after["hooks"]["Stop"].as_array().map(Vec::len), Some(2));
+    }
+
+    /// **Row 67b's ruling N1 holds for codex's hook** (merged 2026-11-06): a `timeout` or `async`
+    /// the person set on this copy's entry is theirs, not drift; a copy of the entry they put under
+    /// another event is their placing, kept and said; and a gone copy's entry is pointed at this
+    /// copy where it stands, with the person's keys on it and the person's group after it at the
+    /// index it had, so no approval is detached.
+    #[test]
+    fn a_persons_edit_of_folios_codex_entry_is_theirs() {
+        let dir = scratch("n1-edit");
+        let path = dir.join(HOOKS_FILE);
+        let edited = |exe: &Path| {
+            let mut entry = hook_entry(STOP, exe);
+            entry["timeout"] = 30.into();
+            entry["async"] = false.into();
+            entry.to_string()
+        };
+        let mine = edited(&exe());
+        let file = format!(r#"{{"hooks":{{"Stop":[{{"hooks":[{mine}]}}]}}}}"#);
+        std::fs::write(&path, &file).expect("this copy's entry, edited");
+        assert_eq!(
+            scan_by_version(&dir, &codex_at(0, 166, 0)),
+            HooksFound::Current
+        );
+        assert_eq!(apply_to(&path, true, &exe()), Outcome::Unchanged);
+        assert_eq!(std::fs::read_to_string(&path).expect("there"), file);
+
+        let group = format!(r#"[{{"hooks":[{mine}]}}]"#);
+        let placed = format!(r#"{{"hooks":{{"Stop":{group},"SessionStart":{group}}}}}"#);
+        std::fs::write(&path, &placed).expect("a copy under another event");
+        assert_eq!(
+            scan_by_version(&dir, &codex_at(0, 166, 0)),
+            HooksFound::Placed(vec!["SessionStart".to_owned()])
+        );
+        assert_eq!(apply_to(&path, true, &exe()), Outcome::Unchanged);
+        assert_eq!(std::fs::read_to_string(&path).expect("there"), placed);
+
+        let gone = dir.join("gone").join("folio.exe");
+        let theirs = edited(&gone);
+        let person = r#"{"hooks":[{"type":"command","command":"p0"}]}"#;
+        let file = format!(r#"{{"hooks":{{"Stop":[{{"hooks":[{theirs}]}},{person}]}}}}"#);
+        std::fs::write(&path, &file).expect("a gone copy's entry, edited");
+        assert_eq!(
+            scan_by_version(&dir, &codex_at(0, 166, 0)),
+            HooksFound::Dead(vec![gone.clone()])
+        );
+        assert_eq!(apply_to(&path, true, &exe()), Outcome::Installed);
+        let after = hooks_of(&path);
+        let stop = after["hooks"]["Stop"].as_array().expect("Stop");
+        assert_eq!(stop.len(), 2, "{after}");
+        assert_eq!(
+            stop[0]["hooks"][0],
+            serde_json::from_str::<Json>(&mine).expect("JSON")
+        );
+        assert_eq!(stop[1]["hooks"][0]["command"], "p0");
+        assert_eq!(
+            scan_by_version(&dir, &codex_at(0, 166, 0)),
+            HooksFound::Current
+        );
     }
 
     /// **A `hooks.json` codex would ignore is never written into**, and one this build cannot read
