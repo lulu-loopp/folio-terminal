@@ -268,10 +268,14 @@ pub(crate) fn what_stands(path: &Path) -> PathStands {
 /// A path's spelling does not say which volume it is on: `C:\Tools\Folio\folio.exe`, where
 /// `C:\Tools` is a junction to `E:\Tools`, lives on `E:`, and with `E:` unplugged the program is
 /// away, not gone. So the deepest part of the path that is there — the link itself, where the link
-/// is what stands — is resolved to its final target (`fs::canonicalize`), the parts that are not
-/// there are put back after it, and the volume is read off that ([`volume_root_of`]). A part the
-/// system will not say about, a link whose target is not there, and a path with no part that is
-/// there are all a way that cannot be followed.
+/// is what stands — is resolved to its final target, the parts that are not there are put back
+/// after it, and the volume is read off that ([`volume_root_of`]). A part the system will not say
+/// about, a link whose target is not there, and a path with no part that is there are all a way
+/// that cannot be followed.
+///
+/// The resolving is the hand-off doors' own ([`bt_platform::handoff::resolved_for_a_door`]:
+/// `fs::canonicalize`, `None` where it fails, without the verbatim prefix it writes on Windows),
+/// so a drive's or a share's root is read as the path names it.
 #[must_use]
 pub(crate) fn volume_of_a_missing_path(path: &Path) -> Option<PathBuf> {
     let mut missing = Vec::new();
@@ -286,7 +290,7 @@ pub(crate) fn volume_of_a_missing_path(path: &Path) -> Option<PathBuf> {
             Err(_) => return None,
         }
     }
-    let mut leads_to = std::fs::canonicalize(there).ok()?;
+    let mut leads_to = bt_platform::handoff::resolved_for_a_door(there)?;
     leads_to.extend(missing.iter().rev());
     volume_root_of(&leads_to)
 }
