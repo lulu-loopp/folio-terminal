@@ -401,6 +401,22 @@ impl VersionBook {
             },
         }
     }
+
+    /// **Whether the version question has an answer** (the final review of row 69, F1): the walk
+    /// has answered about the row, and either it found no codex or the program it named was asked
+    /// and the question ran to its end. A question stopped at [`VERSION_DEADLINE`] is not an
+    /// answer — [`Self::version`] reads it as unknown for presses and rows (R17), but nothing
+    /// unattended is written on it.
+    fn answered(&self) -> bool {
+        match &self.walk {
+            None => false,
+            Some(None) => true,
+            Some(Some(program)) => matches!(
+                &self.asked,
+                Some((stamp, Asked::Answered(_))) if &stamp.path == program
+            ),
+        }
+    }
 }
 
 impl Asked {
@@ -521,14 +537,15 @@ fn stamp_of(_worker: &bt_platform::admission::WorkerCtx, program: &Path) -> Opti
 /// **Whether the start-time repair may write codex's entry now** (0.4.10 plan row 69c; row 67b's
 /// R9 for Copilot, over this family): only once the version has been asked and answered — a
 /// repair on a version nobody asked yet could write a hook a codex below 0.148 skips, in place of
-/// the `notify` line that works there.
+/// the `notify` line that works there. A question that overran is not an answer (the final review
+/// of row 69, F1): the gate stays closed until a later round's question runs to its end.
 pub(crate) fn repair_within_the_gate() -> bool {
     repair_within_the_gate_in(&VERSION_BOOK)
 }
 
 /// The same question of a named book — the seam the step's test presses (the 69c review's C4).
 pub(crate) fn repair_within_the_gate_in(held: &Mutex<VersionBook>) -> bool {
-    book(held).version() != CodexVersion::Unasked
+    book(held).answered()
 }
 
 /// **codex's `hooks.json`, as [`attention_hooks`](crate::attention_hooks) reads and writes it.**
@@ -4135,10 +4152,12 @@ mod tests {
 
     /// RED (the 69c review's C2) — **a question stopped at its deadline is not an answer**: the
     /// version is unknown for that round and the log says so, but nothing is kept, so the next
-    /// round asks the same file again; the answer that then comes is the one held.
+    /// round asks the same file again; the answer that then comes is the one held. Until it comes,
+    /// the start-time repair's gate stays closed (the final review of row 69, F1).
     ///
     /// RED GATE: `plant-69c-overrun-kept.py` keeps an overrun like an answer, and the second settle
-    /// asks nothing.
+    /// asks nothing; `plant-69c-overrun-opens-gate.py` opens the start-time repair's gate on an
+    /// overrun (the final review of row 69, F1), and the gate is open after the first settle.
     #[test]
     fn an_overrun_version_question_is_asked_again() {
         use std::cell::{Cell, RefCell};
@@ -4168,8 +4187,9 @@ mod tests {
         assert_eq!(*said.borrow(), vec!["BT_AGENT_HOOKS codex version=unknown"]);
         assert_eq!(held.lock().unwrap().version(), CodexVersion::Unknown);
         assert!(
-            repair_within_the_gate_in(&held),
-            "asked, and unknown: R17's current version, the repair's gate open"
+            !repair_within_the_gate_in(&held),
+            "unknown for presses and rows (R17), but an overrun is no answer: the repair's gate \
+             stays closed (the final review of row 69, F1)"
         );
         assert_eq!(settle(), CodexVersion::Unknown);
         assert_eq!(
@@ -4177,9 +4197,14 @@ mod tests {
             2,
             "the same file, asked again after an overrun"
         );
+        assert!(!repair_within_the_gate_in(&held), "overran again: closed");
 
         *answer.borrow_mut() = Asked::Answered(Some(release_at(0, 147, 0, None)));
         assert_eq!(settle(), codex_at(0, 147, 0));
+        assert!(
+            repair_within_the_gate_in(&held),
+            "the next answered settle opens the gate"
+        );
         assert_eq!(settle(), codex_at(0, 147, 0));
         assert_eq!(asked.get(), 3, "the answer that came is held");
         assert_eq!(
