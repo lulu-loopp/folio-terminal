@@ -1948,6 +1948,7 @@ mod tests {
                 home: None,
                 launch: None,
             }),
+            another_client: false,
         }
     }
 

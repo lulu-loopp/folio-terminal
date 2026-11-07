@@ -1799,6 +1799,7 @@ fn a_headless_run_names_no_session() {
             home: None,
             launch: None,
         }),
+        another_client: false,
     };
     let sent = attention_wire::with_launch(message.clone(), claude, || {
         Some(agent_argv(&["claude", "-p", "summarise"]))
