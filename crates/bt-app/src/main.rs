@@ -33397,9 +33397,7 @@ fn create_leaf_session(
     );
     // **A resume's turns are its agent's from birth** (row 75): its record was written by that
     // agent's own `Stop`, so what it draws while it reloads is no finished turn.
-    if leaf.session.agent.is_resumed() {
-        leaf.session.turns = agent_turns::TurnAccount::of_a_resumed_agent();
-    }
+    leaf.session.turns = agent_turns::TurnAccount::born_beside(&leaf.session.agent);
     match shell {
         // **Born later, standing where its shell will stand.** The place is said now, from the
         // decision, so a pane split off or restarted from this one while it is being born is put

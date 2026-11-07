@@ -79,13 +79,14 @@ pub(crate) struct AgentTurn {
 }
 
 impl TurnAccount {
-    /// **A pane born as its agent's resume**, bound from birth: its record was written by that
-    /// agent's own `Stop`, so its hooks are known to speak, and the bytes a resume prints while
-    /// it reloads its conversation are not a turn that ended.
+    /// **The account a pane is born with, beside the agent account it was born with.** A pane
+    /// born as its agent's resume is bound from birth: its record was written by that agent's own
+    /// `Stop`, so its hooks are known to speak, and the bytes a resume prints while it reloads its
+    /// conversation are not a turn that ended. Every other pane is born unbound.
     #[must_use]
-    pub(crate) fn of_a_resumed_agent() -> Self {
+    pub(crate) fn born_beside(agent: &agent_resume::AgentAccount) -> Self {
         Self {
-            bound: Some(Binding::Child),
+            bound: agent.is_resumed().then_some(Binding::Child),
             ..Self::default()
         }
     }
@@ -144,7 +145,7 @@ impl TurnAccount {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent_resume::VENDORS;
+    use crate::agent_resume::{AgentAccount, Resume, SeedAgent, VENDORS};
 
     fn shell(marks: &[CommandMark]) -> Child<'_> {
         Child::Shell(marks)
@@ -216,16 +217,37 @@ mod tests {
         );
     }
 
-    /// **A resume is bound from birth, before its agent has said anything** (row 75): what it
-    /// prints while it reloads its conversation is not a turn that ended.
+    /// RED (row 75) — **a resume is bound from birth, before its agent has said anything**: what
+    /// it prints while it reloads its conversation is not a turn that ended. Any other birth is
+    /// unbound, and read by the shell's rule until its agent's first turn arrival (ruling R4).
+    ///
+    /// MUTATION: `bound: None` in `born_beside` and the first assertion goes red.
     #[test]
     fn a_resume_is_bound_from_birth_with_nothing_finished() {
+        let seed = SeedAgent::Resume(Resume {
+            record: bt_persist::AgentRecordV1 {
+                vendor: crate::attention_map::CLAUDE_CODE.to_owned(),
+                resume_id: "0b9c7e1a-4f3d-4c2b-9a8e-5d6f7a8b9c0d".to_owned(),
+                cwd: r"C:\work\resume".to_owned(),
+                home: None,
+            },
+            hand_back: None,
+        });
         assert_eq!(
-            TurnAccount::of_a_resumed_agent().agent_turn(),
+            TurnAccount::born_beside(&AgentAccount::born(&seed, true)).agent_turn(),
             Some(AgentTurn {
                 ended_at: None,
                 running: false
             })
+        );
+        assert_eq!(
+            TurnAccount::born_beside(&AgentAccount::born(&seed, false)).agent_turn(),
+            None,
+            "a birth that is not a resume"
+        );
+        assert_eq!(
+            TurnAccount::born_beside(&AgentAccount::default()).agent_turn(),
+            None
         );
     }
 }

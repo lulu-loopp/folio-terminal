@@ -428,12 +428,25 @@ fn background_dot(tabs: &[TabState]) -> StatusClaim {
 #[test]
 fn a_resumed_agents_pane_is_unread_by_its_turns_and_not_by_its_bytes() {
     let (mut tabs, seat, capability) = an_agent_pane("claude.exe");
-    tabs[0]
+    let resumed = crate::agent_resume::AgentAccount::born(
+        &crate::agent_resume::SeedAgent::Resume(crate::agent_resume::Resume {
+            record: bt_persist::AgentRecordV1 {
+                vendor: attention_map::CLAUDE_CODE.to_owned(),
+                resume_id: "0b9c7e1a-4f3d-4c2b-9a8e-5d6f7a8b9c0d".to_owned(),
+                cwd: r"C:\work\resume".to_owned(),
+                home: None,
+            },
+            hand_back: None,
+        }),
+        true,
+    );
+    let leaf = &mut tabs[0]
         .sessions
         .get_mut(&seat)
         .expect("the fixture's pane")
-        .session
-        .turns = agent_turns::TurnAccount::of_a_resumed_agent();
+        .session;
+    leaf.turns = agent_turns::TurnAccount::born_beside(&resumed);
+    leaf.agent = resumed;
     draws(&mut tabs, seat, 40);
     assert_eq!(
         background_dot(&tabs),
