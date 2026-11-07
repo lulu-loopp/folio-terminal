@@ -152,8 +152,10 @@ pub struct TermLeafV1 {
     /// resume through the vendor's command, never a line typed into a shell). A session id is a
     /// filing key that opens nothing without the account's own sign-in, which stays in the
     /// vendor's folder; since v17 the record also carries the agent's launch words
-    /// ([`AgentRecordV1::launch`]), the person's own command line, never a value that may hold a
-    /// secret.
+    /// ([`AgentRecordV1::launch`]), the person's own command line, of which the flags whose values
+    /// hold credentials are dropped and only named: inline `--settings`, `--mcp-config` or
+    /// `--agents` JSON, and a Codex `-c` whose key is not on its stated list of keys that hold none
+    /// (`bt-app`'s `agent_resume::CarriedValues`, row 74's R5 and review N2).
     ///
     /// Additive and absent when there is none, so every document written before v16 still reads
     /// and every pane without an agent writes exactly the bytes it used to. A record whose id is

@@ -292,9 +292,50 @@ fn launch_of_value(value: &serde_json::Value) -> Option<bt_persist::AgentLaunchV
     crate::agent_resume::launch_is_well_formed(&launch).then_some(launch)
 }
 
-/// **The line with its agent's launch** (row 74): what `parent_line` — the hook's parent's command
-/// line, asked only for a line that names a session — says about how the agent was started, by
-/// `vendor`'s table ([`crate::agent_resume::Vendor::launch_of`]).
+/// A process this one descends from, by its pid and start instant.
+type AncestorProcess = bt_platform::install_flip::Running;
+
+/// **The command line of the agent that ran this hook** (row 74; review N1): this process's
+/// parent's, which is the agent for Claude Code's exec-form hook and for codex's `notify` program
+/// — or, when that parent is the shell codex runs Folio's own `Stop` entry through
+/// ([`crate::attention_codex::hook_shell_runs`], on `platform`) and the entry names this very
+/// program, that shell's parent: **one generation up, and no further**, because on Windows no
+/// shell `exec`s what it runs. Any other parent is answered as it is, and the vendor's table reads
+/// a shell, a wrapper or anybody else's program as a launch not read. `None` when the parent was
+/// not read, or the shell's parent was not.
+///
+/// Pure but for its doors, so a test hands it any line: `parent` is this process's parent as the
+/// door read it, `is_this_program` says whether a path names the running program, and
+/// `parent_line_of` reads the parent of a process this one descends from
+/// ([`bt_platform::process_folder::arguments_of_parent_of`], whose pid and start checks hold the
+/// shell and its parent alike).
+#[must_use]
+pub(crate) fn agent_line(
+    family: &str,
+    parent: Option<bt_platform::process_folder::AncestorLine>,
+    platform: bt_platform::HostPlatform,
+    is_this_program: impl FnOnce(&std::path::Path) -> bool,
+    parent_line_of: impl FnOnce(AncestorProcess) -> Option<Vec<std::ffi::OsString>>,
+) -> Option<Vec<std::ffi::OsString>> {
+    let parent = parent?;
+    let through_our_hook = family == attention_map::CODEX
+        && parent
+            .words
+            .iter()
+            .map(|word| word.to_str().map(str::to_owned))
+            .collect::<Option<Vec<String>>>()
+            .and_then(|words| crate::attention_codex::hook_shell_runs(&words, platform))
+            .is_some_and(|path| is_this_program(path.as_path()));
+    if through_our_hook {
+        parent_line_of(parent.process)
+    } else {
+        Some(parent.words)
+    }
+}
+
+/// **The line with its agent's launch** (row 74): what `parent_line` — the agent's command line
+/// ([`agent_line`]), asked only for a line that names a session — says about how the agent was
+/// started, by `vendor`'s table ([`crate::agent_resume::Vendor::launch_of`]).
 ///
 /// Pure but for `parent_line`, so a test hands it any command line, or none. A run that answers and
 /// exits (`claude -p`) names no session, so its line goes without its `resume`. A command line that
@@ -620,11 +661,25 @@ pub(crate) fn run_verb(call: Result<crate::cli::AttentionCall, crate::cli::Atten
         resume.home = variable(vendor.home_variable)
             .filter(|home| crate::agent_resume::folder_is_well_formed(home));
     }
-    // **And how the agent was started, from this process's parent** — the agent, which ran this
-    // hook as its own child (row 74). Read here, and only for a line that names a session.
+    // **And how the agent was started, from the agent's own command line** — this process's
+    // parent, or, through codex's hook shell, that shell's parent (row 74, review N1). Read here,
+    // and only for a line that names a session.
     if let Some(vendor) = crate::agent_resume::vendor(family) {
         message = with_launch(message, vendor, || {
-            bt_platform::process_folder::parent_arguments().ok()
+            agent_line(
+                family,
+                bt_platform::process_folder::parent_arguments().ok(),
+                bt_platform::host_platform(),
+                |path| {
+                    std::env::current_exe()
+                        .is_ok_and(|exe| crate::explorer_menu::same_path(path, &exe))
+                },
+                |shell| {
+                    bt_platform::process_folder::arguments_of_parent_of(shell)
+                        .ok()
+                        .map(|line| line.words)
+                },
+            )
         });
     }
     match bt_platform::attention_pipe::send_line(&endpoint, &message.encode()) {
@@ -1841,6 +1896,112 @@ mod tests {
             .resume
             .as_ref()
             .and_then(|heard| heard.launch.clone())
+    }
+
+    /// RED (row 74, review N1) — **through codex's hook shell the agent is read one generation
+    /// up, and through no other parent**: on Windows codex runs Folio's `Stop` entry as
+    /// `pwsh -NoProfile -Command "& '<folio.exe>' attention codex:stop --json -"`, so the hook's
+    /// parent is that shell; when its line is exactly that and names this program, the shell's
+    /// parent — the agent — is asked for, and its words are the launch. Claude Code's parent, a
+    /// codex parent, a person's own PowerShell, and the hook line of another program are answered
+    /// as they are, the shell's parent never asked; and a shell whose parent cannot be read is no
+    /// line at all.
+    ///
+    /// MUTATION (plant `plant-74-hook-shell-not-crossed.py`): `agent_line` answers the parent
+    /// always — the hook shell's own words come back, and the Codex launch through it is unread.
+    #[test]
+    fn through_codexs_hook_shell_the_agent_is_read_one_generation_up() {
+        use bt_platform::HostPlatform;
+        use bt_platform::install_flip::Running;
+        use bt_platform::process_folder::AncestorLine;
+        let folio = r"C:\Program Files\Folio\folio.exe";
+        let shell = Running {
+            pid: 40,
+            started: 2,
+        };
+        let command = format!("& '{folio}' attention codex:stop --json -");
+        let hook = AncestorLine {
+            process: shell,
+            words: hook_parent_line(&[
+                r"C:\Program Files\PowerShell\7\pwsh.exe",
+                "-NoProfile",
+                "-Command",
+                command.as_str(),
+            ]),
+        };
+        let agent = hook_parent_line(&["codex", "--yolo", "-m", "o3"]);
+        let through = agent_line(
+            CODEX,
+            Some(hook.clone()),
+            HostPlatform::Windows,
+            |path| path == std::path::Path::new(folio),
+            |asked| {
+                assert_eq!(asked, shell, "the shell's own parent is asked for");
+                Some(agent.clone())
+            },
+        );
+        assert_eq!(through.as_ref(), Some(&agent));
+        let codex = &crate::agent_resume::VENDORS[1];
+        let message = with_launch(
+            Message {
+                family: CODEX.to_owned(),
+                ..session_line()
+            },
+            codex,
+            || through,
+        );
+        assert_eq!(
+            launch_sent(&message),
+            Some(bt_persist::AgentLaunchV1 {
+                args: ["--yolo", "-m", "o3"].map(str::to_owned).to_vec(),
+                dropped: Vec::new(),
+                unread: false,
+            }),
+            "the agent's launch, read through its hook shell"
+        );
+        // Every other parent is answered as it is, and its own parent is never asked for.
+        let never = |_: Running| -> Option<Vec<std::ffi::OsString>> {
+            panic!("only codex's hook shell is stepped through")
+        };
+        let own_powershell = AncestorLine {
+            process: shell,
+            words: hook_parent_line(&[r"C:\Program Files\PowerShell\7\pwsh.exe", "-NoLogo"]),
+        };
+        for (family, parent, ours) in [
+            (CLAUDE_CODE, hook.clone(), true),
+            (CODEX, own_powershell, true),
+            (CODEX, hook.clone(), false),
+            (
+                CODEX,
+                AncestorLine {
+                    process: shell,
+                    words: agent,
+                },
+                true,
+            ),
+        ] {
+            assert_eq!(
+                agent_line(
+                    family,
+                    Some(parent.clone()),
+                    HostPlatform::Windows,
+                    |_| ours,
+                    never
+                ),
+                Some(parent.words.clone()),
+                "{family}: {parent:?}"
+            );
+        }
+        assert_eq!(
+            agent_line(CODEX, None, HostPlatform::Windows, |_| true, never),
+            None,
+            "no parent read, no line"
+        );
+        assert_eq!(
+            agent_line(CODEX, Some(hook), HostPlatform::Windows, |_| true, |_| None),
+            None,
+            "a hook shell whose parent was not read is no line, never the shell's own"
+        );
     }
 
     /// **A session's launch crosses the wire and comes back the same** (row 74): the words, the

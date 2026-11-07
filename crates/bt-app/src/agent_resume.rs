@@ -36,16 +36,21 @@
 //!
 //! **And so do the words the agent was started with** (0.4.10 plan row 74; at the owner's wish,
 //! the 2026-11-06 entry in `docs/DESIGN.md` reverses row 195's "a resume never resurrects a
-//! grant"). The hook reads its parent's command line — the agent's own, exactly as the operating
-//! system started it, past any alias or wrapper the person typed — and the vendor's table
+//! grant"). The hook reads its agent's command line, exactly as the operating system started it,
+//! past any alias or wrapper the person typed — its parent's, or, when its parent is the shell
+//! Codex runs Folio's own `Stop` entry through, that shell's parent, one step and no further
+//! (review N1, [`crate::attention_wire::agent_line`]) — and the vendor's table
 //! ([`LaunchTable`]) keeps the flags a resume is handed again: a session started with
 //! `--dangerously-skip-permissions` or `--model opus` comes back with them, after the resume's own
 //! words. A prompt and the flags the resume itself replaces (`--resume`, `--continue`) are dropped
-//! without a word; a one-time flag (`--worktree`), a flag the table does not know and a value that
-//! may hold a secret (inline `--settings` JSON) are dropped and named, and the pane opens with one
-//! line saying what it came back without ([`ResumedWithout`]). A launch the hook could not read
-//! carries nothing, and the line says so. The words replayed are the launch's, so a `/model` or a
-//! mode changed mid-session comes back as it was at the launch.
+//! without a word; a one-time flag (`--worktree`) and a value that may hold a secret (inline
+//! `--settings` or `--agents` JSON, a Codex `-c` whose key is not on the table's list) are dropped
+//! and named, and the pane opens with one line saying what it came back without
+//! ([`ResumedWithout`]). A flag the table does not know ends the read: what it takes is not known,
+//! so neither is which word after it is a value and which a subcommand, and the launch is not read
+//! (review N4). A launch the hook could not read carries nothing, and the line says so. The words
+//! replayed are the launch's, so a `/model` or a mode changed mid-session comes back as it was at
+//! the launch.
 //!
 //! **Which program starts it is the platform's road** ([`Road`], T-AGENT-RESUME-ON-MACOS): on
 //! Windows the vendor's own shipped profile, whose program a fresh logon environment finds; on a
@@ -190,7 +195,8 @@ impl Vendor {
     }
 
     /// **What this vendor's own command line, as the operating system holds it, says about how it
-    /// was started** — the hook's parent's words ([`bt_platform::process_folder::parent_arguments`]).
+    /// was started** — the agent's words as the hook read them
+    /// ([`crate::attention_wire::agent_line`]).
     ///
     /// The words are read only off a shape the table names
     /// ([`LaunchTable::launch_words_after_program`]); any other shape, and a word that is not text,
@@ -264,6 +270,38 @@ pub(crate) enum FlagFate {
     Headless,
 }
 
+/// **Which values of a carried flag are carried.** The launch words are written to
+/// `session.json` in the clear (row 74's R5), so a value that can hold a key or a token is not one
+/// of them: it is dropped and its flag named, its value never stored.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CarriedValues {
+    /// Every value: a name, a mode, a folder, a file.
+    Any,
+    /// Every value but JSON written inline (its first character past any space is `{`): a
+    /// settings, server or agents object can hold a key or a token. A value naming a file is
+    /// carried.
+    NotInlineJson,
+    /// Only a `key=value` whose key — the text before the first `=`, trimmed, as Codex's own
+    /// `CliConfigOverrides::parse_overrides` reads it — is one of these exactly: a stated list of
+    /// keys that hold no credential (review N2, ruling (a)). A dotted key (`mcp_servers.x.env.…`),
+    /// any other key and a value with no `=` are not carried.
+    KeyIn(&'static [&'static str]),
+}
+
+impl CarriedValues {
+    /// Whether `value` is carried under this rule.
+    #[must_use]
+    fn carries(self, value: &str) -> bool {
+        match self {
+            Self::Any => true,
+            Self::NotInlineJson => !value.trim_start().starts_with('{'),
+            Self::KeyIn(keys) => value
+                .split_once('=')
+                .is_some_and(|(key, _)| keys.contains(&key.trim())),
+        }
+    }
+}
+
 /// **One flag of a vendor's command line**: its spellings, what it takes, and its fate.
 #[derive(Debug)]
 pub(crate) struct LaunchFlag {
@@ -271,20 +309,31 @@ pub(crate) struct LaunchFlag {
     pub(crate) names: &'static [&'static str],
     pub(crate) arity: LaunchArity,
     pub(crate) fate: FlagFate,
-    /// A value that is JSON written inline (its first character past any space is `{`) is dropped
-    /// and the flag named, even where the flag is carried: a settings or server object can hold a
-    /// key or a token, and the launch words are written to `session.json` in the clear (row 74's
-    /// R5). A value naming a file is carried.
-    pub(crate) inline_json_dropped: bool,
+    /// Which of its values a carried flag carries ([`CarriedValues`]).
+    pub(crate) values: CarriedValues,
 }
 
-/// One flag of a table, spelled out.
+/// One flag of a table, spelled out, every value of it carried if it is.
 const fn flag(names: &'static [&'static str], arity: LaunchArity, fate: FlagFate) -> LaunchFlag {
     LaunchFlag {
         names,
         arity,
         fate,
-        inline_json_dropped: false,
+        values: CarriedValues::Any,
+    }
+}
+
+/// One carried flag of a table, only the values `values` allows carried.
+const fn carried_flag(
+    names: &'static [&'static str],
+    arity: LaunchArity,
+    values: CarriedValues,
+) -> LaunchFlag {
+    LaunchFlag {
+        names,
+        arity,
+        fate: FlagFate::Carried,
+        values,
     }
 }
 
@@ -295,13 +344,20 @@ pub(crate) struct LaunchTable {
     /// The file stems the vendor's own program has (`claude.exe`, `codex`): its words are
     /// everything after the first.
     pub(crate) programs: &'static [&'static str],
-    /// The vendor's entry script when the program is `node` (npm's `claude.cmd` runs
-    /// `node …\claude-code\cli.js`; a Mac's shebang runs `node …/bin/claude`), by the end of its
-    /// path with `/` for every separator: its words are everything after the script.
+    /// The vendor's entry script when the program is `node`, by the end of its path with `/` for
+    /// every separator, matched from a separator on: its words are everything after the script.
+    /// npm's `claude.cmd` runs `node …\node_modules\@anthropic-ai\claude-code\cli.js`, the
+    /// package's own path whole; a Mac's shebang runs `node …/bin/claude`, the name of npm's link
+    /// to that file, and that tail is wider (review N6): it takes any node script at a path ending
+    /// `/bin/claude`, which on a Mac is where npm and Homebrew put the link, and on Windows is no
+    /// path npm writes.
     pub(crate) scripts: &'static [&'static str],
-    /// Every flag the vendor's `--help` lists. A flag not here is dropped and named.
+    /// Every flag the vendor's `--help` lists. A flag not here ends the read: what it takes is not
+    /// known, so neither is which word after it is its value, and the launch is not read.
     pub(crate) flags: &'static [LaunchFlag],
-    /// The first positional words that make the run one that answers and exits (`codex exec`).
+    /// The first positional words that make the run anything but the session a resume starts
+    /// again: every subcommand of the vendor's but its resume's own (`codex exec`,
+    /// `codex app-server`). The run's turn is recorded as no session.
     pub(crate) headless_subcommands: &'static [&'static str],
     /// Whether a short flag's attached value may be written after `=` (`-m=o3`, clap's rule);
     /// commander takes everything after the letter as the value.
@@ -316,7 +372,7 @@ pub(crate) const CLAUDE_LAUNCH: LaunchTable = {
     use LaunchArity::{Many, Nothing, One, OptionalOne};
     LaunchTable {
         programs: &["claude"],
-        scripts: &["claude-code/cli.js", "bin/claude"],
+        scripts: &["@anthropic-ai/claude-code/cli.js", "bin/claude"],
         flags: &[
             // What the session is allowed, and what it runs on.
             flag(&["--dangerously-skip-permissions"], Nothing, Carried),
@@ -325,15 +381,9 @@ pub(crate) const CLAUDE_LAUNCH: LaunchTable = {
             flag(&["--model"], One, Carried),
             flag(&["--effort"], One, Carried),
             flag(&["--fallback-model"], One, Carried),
-            LaunchFlag {
-                inline_json_dropped: true,
-                ..flag(&["--settings"], One, Carried)
-            },
+            carried_flag(&["--settings"], One, CarriedValues::NotInlineJson),
             flag(&["--setting-sources"], One, Carried),
-            LaunchFlag {
-                inline_json_dropped: true,
-                ..flag(&["--mcp-config"], Many, Carried)
-            },
+            carried_flag(&["--mcp-config"], Many, CarriedValues::NotInlineJson),
             flag(&["--strict-mcp-config"], Nothing, Carried),
             flag(&["--plugin-dir"], One, Carried),
             flag(&["--plugin-url"], One, Carried),
@@ -342,7 +392,7 @@ pub(crate) const CLAUDE_LAUNCH: LaunchTable = {
             flag(&["--disallowedTools", "--disallowed-tools"], Many, Carried),
             flag(&["--tools"], Many, Carried),
             flag(&["--agent"], One, Carried),
-            flag(&["--agents"], One, Carried),
+            carried_flag(&["--agents"], One, CarriedValues::NotInlineJson),
             flag(&["--system-prompt"], One, Carried),
             flag(&["--system-prompt-file"], One, Carried),
             flag(&["--append-system-prompt"], One, Carried),
@@ -407,10 +457,52 @@ pub(crate) const CLAUDE_LAUNCH: LaunchTable = {
     }
 };
 
+/// **The `-c`/`--config` keys a Codex launch carries** (review N2, ruling (a)): top-level keys of
+/// codex's `ConfigToml` at `rust-v0.166.0` (`codex-rs/config/src/config_toml.rs`) whose value is
+/// a name (of a model, of a provider in `model_providers`, of a profile in `profiles`), a switch,
+/// a number, or one of a fixed set of words, so none holds a credential. Codex types each value
+/// against its key and refuses a launch whose value is not of that type, and a refused launch ran
+/// no hook. Credentials live under other keys (`mcp_servers.<x>.env`, `model_providers.<x>`'s
+/// tokens and headers), and every key not here is dropped and named.
+const CODEX_CARRIED_CONFIG_KEYS: &[&str] = &[
+    // Named by the ruling: `model` (a model's name), `model_reasoning_effort` (`ReasoningEffort`),
+    // `model_provider` (a key of `model_providers`), `sandbox_mode` (`SandboxMode`),
+    // `approval_policy` (`AskForApproval`, whose granular form is five booleans) and `profile` (a
+    // key of `profiles`).
+    "model",
+    "model_reasoning_effort",
+    "model_provider",
+    "sandbox_mode",
+    "approval_policy",
+    "profile",
+    // Read off the same struct: `review_model` (the `/review` model's name), two `i64`s, five
+    // enums (`ReasoningEffort`, `ReasoningSummary`, `Verbosity`, `ApprovalsReviewer`,
+    // `WebSearchMode`) and two `bool`s.
+    "review_model",
+    "model_context_window",
+    "model_auto_compact_token_limit",
+    "plan_mode_reasoning_effort",
+    "model_reasoning_summary",
+    "model_verbosity",
+    "approvals_reviewer",
+    "web_search",
+    "hide_agent_reasoning",
+    "show_raw_agent_reasoning",
+];
+
 /// **Codex's command line** — `codex --help` and `codex resume --help`, version 0.166.0, read
-/// 2026-11-06 in a scratch `CODEX_HOME`; `--yolo` is the bypass flag's alias in codex's source.
-/// The npm package's `codex.js` starts the native program with its own words, so the hook's
-/// parent is the native `codex` (older packages named it by target).
+/// 2026-11-06 in a scratch `CODEX_HOME`, and each carried row checked on 2026-11-07 against the
+/// source at `rust-v0.166.0` (review N3): **every carried flag is one `codex resume` takes**,
+/// since the resume hands them after its own `resume <id>` and a flag `resume` refused would end
+/// the resume before any hook (row 74's R9 then clears the record). `codex resume` is
+/// `ResumeCommand` in `codex-rs/cli/src/main.rs`: its own `--last`, `--all` and
+/// `--include-non-interactive`, `InteractiveRemoteOptions` (`--remote`, `--remote-auth-token-env`)
+/// and the whole interactive CLI (`SessionTuiCli`, `codex-rs/tui/src/cli.rs`'s `Cli`, which holds
+/// `SharedCliOptions` from `codex-rs/utils/cli/src/shared_options.rs`); `-c` and the feature
+/// toggles are the root's `global = true` arguments, which clap accepts after any subcommand. No
+/// row of the root's is missing from `resume`'s, so none is dropped for it. `--yolo` and
+/// `--not-so-yolo` are hidden aliases in that source. The npm package's `codex.js` starts the
+/// native program with its own words (older packages named it by target).
 pub(crate) const CODEX_LAUNCH: LaunchTable = {
     use FlagFate::{Carried, Dropped, Superseded};
     use LaunchArity::{Many, Nothing, One};
@@ -426,31 +518,39 @@ pub(crate) const CODEX_LAUNCH: LaunchTable = {
         ],
         scripts: &[],
         flags: &[
-            // What the session is allowed, and what it runs on.
-            flag(&["-a", "--ask-for-approval"], One, Carried),
+            // `SharedCliOptions` (`codex resume` takes it through `SessionTuiCli`).
+            flag(&["-m", "--model"], One, Carried),
+            flag(&["--oss"], Nothing, Carried),
+            flag(&["--local-provider"], One, Carried),
+            flag(&["-p", "--profile"], One, Carried),
             flag(&["-s", "--sandbox"], One, Carried),
+            flag(&["--approve-for-me", "--not-so-yolo"], Nothing, Carried),
             flag(
                 &["--dangerously-bypass-approvals-and-sandbox", "--yolo"],
                 Nothing,
                 Carried,
             ),
             flag(&["--dangerously-bypass-hook-trust"], Nothing, Carried),
-            flag(&["--approve-for-me"], Nothing, Carried),
-            flag(&["-m", "--model"], One, Carried),
-            flag(&["-p", "--profile"], One, Carried),
-            flag(&["-c", "--config"], One, Carried),
-            flag(&["--enable"], One, Carried),
-            flag(&["--disable"], One, Carried),
-            flag(&["--strict-config"], Nothing, Carried),
-            flag(&["--oss"], Nothing, Carried),
-            flag(&["--local-provider"], One, Carried),
-            flag(&["--remote"], One, Carried),
-            flag(&["--remote-auth-token-env"], One, Carried),
             flag(&["-C", "--cd"], One, Carried),
             flag(&["--add-dir"], One, Carried),
+            // The interactive CLI's own (`codex-rs/tui/src/cli.rs`).
+            flag(&["--strict-config"], Nothing, Carried),
+            flag(&["-a", "--ask-for-approval"], One, Carried),
             flag(&["--search"], Nothing, Carried),
             flag(&["--no-alt-screen"], Nothing, Carried),
             flag(&["--no-daemon"], Nothing, Carried),
+            // `InteractiveRemoteOptions`: an address, and the name of the variable that holds the
+            // token — never the token.
+            flag(&["--remote"], One, Carried),
+            flag(&["--remote-auth-token-env"], One, Carried),
+            // The root's global arguments (`CliConfigOverrides`, `FeatureToggles`).
+            carried_flag(
+                &["-c", "--config"],
+                One,
+                CarriedValues::KeyIn(CODEX_CARRIED_CONFIG_KEYS),
+            ),
+            flag(&["--enable"], One, Carried),
+            flag(&["--disable"], One, Carried),
             // What the resume is instead (`resume`'s and `fork`'s own pickers).
             flag(&["--last"], Nothing, Superseded),
             flag(&["--all"], Nothing, Superseded),
@@ -461,7 +561,48 @@ pub(crate) const CODEX_LAUNCH: LaunchTable = {
             flag(&["-h", "--help"], Nothing, Dropped),
             flag(&["-V", "--version"], Nothing, Dropped),
         ],
-        headless_subcommands: &["exec", "e", "review"],
+        // Every subcommand `codex --help` 0.166.0 lists, its aliases and the hidden ones of
+        // `Subcommand` in `codex-rs/cli/src/main.rs` included, and clap's own `help`; but
+        // `resume` and `fork`, whose session is the one a resume starts again. `mcp-server` is
+        // the subcommand codex 0.120–0.147 had (`rust-v0.147.0`), whose turns still reach Folio
+        // through the `notify` line below 0.148. `app` is a subcommand on Windows and macOS, the
+        // platforms Folio runs on.
+        headless_subcommands: &[
+            "agents",
+            "tcp-tunnel",
+            "exec",
+            "e",
+            "review",
+            "login",
+            "logout",
+            "mcp",
+            "mcp-server",
+            "plugin",
+            "app-server",
+            "remote-control",
+            "app",
+            "completion",
+            "update",
+            "doctor",
+            "sandbox",
+            "debug",
+            "execpolicy",
+            "apply",
+            "a",
+            "queue",
+            "archive",
+            "delete",
+            "migrate-rollouts",
+            "migrate-nfs-db",
+            "unarchive",
+            "cloud",
+            "cloud-tasks",
+            "responses-api-proxy",
+            "stdio-to-uds",
+            "exec-server",
+            "features",
+            "help",
+        ],
         short_value_after_equals: true,
     }
 };
@@ -484,7 +625,7 @@ fn path_tail(word: &str) -> &str {
 }
 
 /// The file stem of a program word: its last part, without a Windows `.exe`.
-fn program_word_stem(word: &str) -> &str {
+pub(crate) fn program_word_stem(word: &str) -> &str {
     let name = path_tail(word);
     match name.len().checked_sub(4) {
         Some(at) if name.is_char_boundary(at) && name[at..].eq_ignore_ascii_case(".exe") => {
@@ -530,12 +671,15 @@ impl LaunchTable {
         self.flags.iter().find(|flag| flag.names.contains(&name))
     }
 
-    /// **Each of a launch's words, decided** (row 74's §2): a carried flag goes with its values, in
-    /// its order; a superseded one and every positional word (a prompt, a subcommand's id) go
-    /// without a word; any other flag — a dropped one, one this table does not know — is named, its
-    /// values never. `--` ends the flags, and what follows it is positional. A short flag's letters
-    /// may be run together (`-cp`), and the first that takes a value takes the rest of the word as
-    /// it (`-mo3`). An attached long value (`--debug=hooks`) stays one word.
+    /// **Each of a launch's words, decided** (row 74's §2): a carried flag goes with the values it
+    /// carries ([`CarriedValues`]), in its order; a superseded one and every positional word (a
+    /// prompt, a subcommand's id) go without a word; a dropped one is named, its values never. A
+    /// flag's values are taken by the table's arity and no other rule, and **a flag this table
+    /// does not know ends the read as unread** (review N4): what it takes is not known, so neither
+    /// is whether the word after it is its value or the subcommand that makes the run headless.
+    /// `--` ends the flags, and what follows it is positional. A short flag's letters may be run
+    /// together (`-cp`), and the first that takes a value takes the rest of the word as it
+    /// (`-mo3`). An attached long value (`--debug=hooks`) stays one word.
     #[must_use]
     pub(crate) fn carried_launch(&self, words: &[String]) -> LaunchRead {
         let mut launch = AgentLaunchV1::default();
@@ -552,8 +696,7 @@ impl LaunchTable {
                     None => (word.clone(), None),
                 };
                 let Some(flag) = self.launch_flag_named(&name) else {
-                    name_dropped(&mut launch, &name);
-                    continue;
+                    return LaunchRead::Unread;
                 };
                 let values = match attached {
                     Some(value) => vec![value.to_owned()],
@@ -568,10 +711,7 @@ impl LaunchTable {
                 for (at, letter) in letters.char_indices() {
                     let name = format!("-{letter}");
                     let Some(flag) = self.launch_flag_named(&name) else {
-                        // A letter the table does not know: what follows it in the word is not
-                        // knowable either, so the rest of the word goes with it.
-                        name_dropped(&mut launch, &name);
-                        break;
+                        return LaunchRead::Unread;
                     };
                     if flag.arity == LaunchArity::Nothing {
                         if flag_decided(flag, &name, None, Vec::new(), &mut launch) {
@@ -620,15 +760,13 @@ fn flag_decided(
         FlagFate::Superseded => {}
         FlagFate::Dropped => name_dropped(launch, name),
         FlagFate::Carried => {
-            let inline =
-                |value: &String| flag.inline_json_dropped && value.trim_start().starts_with('{');
+            let carried = |value: &String| flag.values.carries(value);
             match written {
-                Some(_) if values.iter().any(inline) => name_dropped(launch, name),
+                Some(_) if !values.iter().all(carried) => name_dropped(launch, name),
                 Some(word) => launch.args.push(word),
                 None => {
                     let took = values.len();
-                    let kept: Vec<String> =
-                        values.into_iter().filter(|value| !inline(value)).collect();
+                    let kept: Vec<String> = values.into_iter().filter(carried).collect();
                     if kept.len() < took {
                         name_dropped(launch, name);
                     }
@@ -794,7 +932,7 @@ pub(crate) struct Heard {
     pub(crate) cwd: String,
     /// The vendor's configuration folder, when the hook's own environment set one.
     pub(crate) home: Option<String>,
-    /// How the agent was started, as the hook read its parent's command line (row 74): `None`
+    /// How the agent was started, as the hook read the agent's command line (row 74): `None`
     /// from a hook that did not read it (a `folio.exe` older than this build).
     pub(crate) launch: Option<AgentLaunchV1>,
 }

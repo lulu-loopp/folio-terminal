@@ -1382,12 +1382,16 @@ fn a_shell_resume_quotes_each_launch_word() {
 /// and drops a prompt and the resume's own words without a word**: `-w feat` makes a worktree
 /// (named), `--fork-session` is the resume's (silent), `"fix the bug"` is the first prompt
 /// (silent), `--model opus` comes back. A variadic flag takes every word up to the next flag, `--`
-/// ends the flags, an attached long value stays one word, and a flag the table does not know is
-/// named while the word after it is taken for a prompt.
+/// ends the flags, an attached long value stays one word, and inline JSON — `--settings`,
+/// `--mcp-config`, `--agents` (review N2) — is dropped and named while a file is carried. **A flag
+/// the table does not know ends the read** (review N4): what it takes is not known, so neither is
+/// which word after it is a value, and the launch is not read.
 ///
 /// MUTATIONS: `-w` carried (plant `plant-74-one-shot-carried.py`) — the first case's `args` and
 /// `dropped` go red; `name_dropped` writing nothing (plant `plant-74-drop-unsaid.py`) — every
-/// `dropped` goes red, and so does the line.
+/// `dropped` goes red, and so does the line; `--agents` carried whatever its value (plant
+/// `plant-74-secret-carried.py`) — the inline-JSON case goes red; an unknown flag named and
+/// skipped (plant `plant-74-unknown-flag-skipped.py`) — the unknown-flag cases go red.
 #[test]
 fn the_carry_table_drops_one_shot_words_and_names_the_flags() {
     let claude = &VENDORS[0];
@@ -1424,21 +1428,22 @@ fn the_carry_table_drops_one_shot_words_and_names_the_flags() {
         "a variadic flag stops at the next flag, and `--` ends the flags"
     );
     assert_eq!(
-        launch_read(
-            claude,
-            &[
-                "claude",
-                "--frobnicate",
-                "loud",
-                "--bg",
-                "--verbose",
-                "-n",
-                "mine"
-            ]
-        ),
-        read_launch(&["--verbose"], &["--frobnicate", "--bg", "-n"]),
-        "an unknown flag and the one-time ones are named, never their values"
+        launch_read(claude, &["claude", "--bg", "--verbose", "-n", "mine"]),
+        read_launch(&["--verbose"], &["--bg", "-n"]),
+        "the one-time ones are named, never their values"
     );
+    for line in [
+        &["claude", "--frobnicate", "loud", "--verbose"][..],
+        &["claude", "--verbose", "--frobnicate=loud"],
+        &["claude", "-Z", "--verbose"],
+        &["claude", "-vZ"],
+    ] {
+        assert_eq!(
+            launch_read(claude, line),
+            crate::agent_resume::LaunchRead::Unread,
+            "a flag the table does not know ends the read: {line:?}"
+        );
+    }
     assert_eq!(
         launch_read(
             claude,
@@ -1449,12 +1454,20 @@ fn the_carry_table_drops_one_shot_words_and_names_the_flags() {
                 "--mcp-config",
                 "servers.json",
                 " {\"x\": 1}",
-                "--settings=./team.json"
+                "--settings=./team.json",
+                "--agents",
+                r#"{"reviewer": {"prompt": "token sk-1"}}"#,
+                "--agents=./agents.json"
             ]
         ),
         read_launch(
-            &["--mcp-config", "servers.json", "--settings=./team.json"],
-            &["--settings", "--mcp-config"]
+            &[
+                "--mcp-config",
+                "servers.json",
+                "--settings=./team.json",
+                "--agents=./agents.json"
+            ],
+            &["--settings", "--mcp-config", "--agents"]
         ),
         "inline JSON is dropped and named; a file is carried"
     );
@@ -1549,6 +1562,128 @@ fn a_codex_launch_is_replayed_after_its_subcommand() {
     );
 }
 
+/// RED (row 74, review N2) — **a Codex `-c` is carried only for a key that holds no credential**:
+/// `model`, `model_reasoning_effort`, `sandbox_mode` and the rest of the stated list come back in
+/// every spelling clap takes (`-c v`, `-cv`, `-c=v`, `--config v`, `--config=v`), a key with spaces
+/// around it as Codex trims it; an MCP server's environment, a provider's token, a header, any
+/// other key, a dotted key under a listed one and a value with no `=` are dropped and named, their
+/// value never written.
+///
+/// MUTATION (plant `plant-74-secret-carried.py`): `-c` carried whatever its key — the
+/// `GITHUB_TOKEN` case goes red.
+#[test]
+fn a_codex_config_override_is_carried_only_for_a_key_with_no_secret() {
+    let codex = &VENDORS[1];
+    assert_eq!(
+        launch_read(
+            codex,
+            &[
+                "codex",
+                "-c",
+                r#"model="o3""#,
+                "-cmodel_reasoning_effort=high",
+                "-c=sandbox_mode=workspace-write",
+                "--config",
+                " approval_policy = \"never\"",
+                "--config=profile=work",
+                "-c",
+                "web_search=live"
+            ]
+        ),
+        read_launch(
+            &[
+                "-c",
+                r#"model="o3""#,
+                "-cmodel_reasoning_effort=high",
+                "-c=sandbox_mode=workspace-write",
+                "--config",
+                " approval_policy = \"never\"",
+                "--config=profile=work",
+                "-c",
+                "web_search=live"
+            ],
+            &[]
+        )
+    );
+    for (spelled, value) in [
+        ("-c", r#"mcp_servers.github.env.GITHUB_TOKEN="ghp_secret""#),
+        (
+            "-c",
+            r#"model_providers.x.experimental_bearer_token="sk-secret""#,
+        ),
+        (
+            "-c",
+            r#"model_providers.x.http_headers.Authorization="Bearer t""#,
+        ),
+        ("--config", r#"shell_environment_policy.set.API_KEY="k""#),
+        ("-c", r#"model.extra="x""#),
+        ("-c", "model"),
+        ("-c", r#"chatgpt_base_url="https://u:p@host""#),
+    ] {
+        assert_eq!(
+            launch_read(codex, &["codex", "--yolo", spelled, value, "-m", "o3"]),
+            read_launch(&["--yolo", "-m", "o3"], &[spelled]),
+            "{spelled} {value}"
+        );
+        let attached = format!("{spelled}={value}");
+        assert_eq!(
+            launch_read(codex, &["codex", attached.as_str()]),
+            read_launch(&[], &[spelled]),
+            "{attached}"
+        );
+    }
+}
+
+/// RED (row 74, review N3) — **every flag a Codex launch carries is one `codex resume` takes**,
+/// because the resume hands them after its own `resume <id>`, and a flag `resume` refused would end
+/// the resume itself. The set is read off `codex resume`'s parser at `rust-v0.166.0`
+/// (`ResumeCommand` in `codex-rs/cli/src/main.rs`, with `SessionTuiCli`, `SharedCliOptions` and
+/// the root's global `-c`, `--enable` and `--disable`); a row added to the table and carried has
+/// to be added here from that source, and one `resume` does not list is `Dropped`.
+#[test]
+fn every_carried_codex_flag_is_one_codex_resume_takes() {
+    let resume_takes = [
+        "-m",
+        "--model",
+        "--oss",
+        "--local-provider",
+        "-p",
+        "--profile",
+        "-s",
+        "--sandbox",
+        "--approve-for-me",
+        "--not-so-yolo",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--yolo",
+        "--dangerously-bypass-hook-trust",
+        "-C",
+        "--cd",
+        "--add-dir",
+        "--strict-config",
+        "-a",
+        "--ask-for-approval",
+        "--search",
+        "--no-alt-screen",
+        "--no-daemon",
+        "--remote",
+        "--remote-auth-token-env",
+        "-c",
+        "--config",
+        "--enable",
+        "--disable",
+    ];
+    let mut carried: Vec<&str> = crate::agent_resume::CODEX_LAUNCH
+        .flags
+        .iter()
+        .filter(|flag| flag.fate == crate::agent_resume::FlagFate::Carried)
+        .flat_map(|flag| flag.names.iter().copied())
+        .collect();
+    carried.sort_unstable();
+    let mut expected = resume_takes.to_vec();
+    expected.sort_unstable();
+    assert_eq!(carried, expected, "the carried set is `codex resume`'s");
+}
+
 /// RED (row 74, T6) — **a run that answers and exits names no session**: a Claude Code whose
 /// command line holds `-p` (a nested `claude -p` inside the pane's own agent, row 195's named
 /// limit) and a `codex exec` read as headless, and the hook's line goes without its `resume` — the
@@ -1570,10 +1705,33 @@ fn a_headless_run_names_no_session() {
             "{line:?}"
         );
     }
+    for line in [
+        &["codex", "exec", "--json", "go"][..],
+        &["codex", "e", "go"],
+        &["codex", "--yolo", "mcp-server"],
+        &["codex", "-m", "o3", "app-server"],
+        &["codex", "review"],
+        &["codex", "cloud-tasks"],
+        &["codex", "help"],
+    ] {
+        assert_eq!(
+            launch_read(codex, line),
+            crate::agent_resume::LaunchRead::Headless,
+            "{line:?}"
+        );
+    }
+    // A flag the table does not know may take the next word as its value or not: the read ends
+    // there, and the subcommand after it is never taken for a prompt (review N4).
     assert_eq!(
-        launch_read(codex, &["codex", "exec", "--json", "go"]),
-        crate::agent_resume::LaunchRead::Headless
+        launch_read(codex, &["codex", "--newflag", "v", "exec", "go"]),
+        crate::agent_resume::LaunchRead::Unread
     );
+    // A session's own subcommands are no headless run.
+    assert_eq!(
+        launch_read(codex, &["codex", "fork", SESSION, "--search"]),
+        read_launch(&["--search"], &[])
+    );
+
     let message = attention_wire::Message {
         capability: "cap".to_owned(),
         family: attention_map::CLAUDE_CODE.to_owned(),
@@ -1723,6 +1881,7 @@ fn a_launch_is_read_only_off_a_shape_the_table_names() {
         ][..],
         &["npx", "@anthropic-ai/claude-code", "--verbose"],
         &["node", "/usr/local/lib/not-claude-code/cli.js"],
+        &["node", "/usr/local/lib/claude-code/cli.js", "--verbose"],
         &["bash", "-c", "claude --verbose"],
         &[],
     ] {

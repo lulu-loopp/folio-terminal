@@ -29,13 +29,21 @@
 //! that started this one — asked by `folio attention`, whose parent is the agent that ran its hook,
 //! so that a resumed session can be handed the flags the agent was started with. Read only, and
 //! answered only while that very parent runs: the parent is taken by its pid **and** its start
-//! instant ([`crate::install_flip::parent_of_this_process`]), and the start is asked again after
-//! the read, so a parent that ended — and a pid reused since — is never answered for.
+//! instant ([`crate::install_flip::parent_of`]), and the start is asked again after the read, so a
+//! parent that ended — and a pid reused since — is never answered for. And
+//! [`arguments_of_parent_of`] the same, one generation up (row 74's review N1): the parent of a
+//! process this one descends from, for a hook an agent runs through a shell, with the child it was
+//! asked about held to the same rule — it must still run as recorded after the read too. Which
+//! step to take, and whether to take it, is the caller's.
 //!
 //! * **Windows**: the same one `OpenProcess` as the folder's, and the same PEB walk, to
 //!   `RTL_USER_PROCESS_PARAMETERS.CommandLine` (the `UNICODE_STRING` `winternl.h` names beside
-//!   `ImagePathName`), whose characters are split into words by `CommandLineToArgvW`, the rule a
-//!   program's own C runtime splits them by. A 32-bit parent is read from its own PEB.
+//!   `ImagePathName`), whose characters are split into words by `CommandLineToArgvW`. That is the
+//!   rule of the Windows shell, and nearly the MSVC C runtime's, which Rust's standard library
+//!   follows too: the two part only on a doubled quote inside a quoted run (`"a""b"`), which the
+//!   runtime since 2008 reads as one literal quote and `CommandLineToArgvW` as the run's end and a
+//!   new one, so a word holding `""` may be recorded otherwise than the agent read it (review N5,
+//!   a named limit). A 32-bit parent is read from its own PEB.
 //! * **macOS**: `sysctl(KERN_PROCARGS2)`, through [`crate::install_flip::arguments_of`].
 //!
 //! Bounded as the folder's read is: a `UNICODE_STRING` holds at most 32,767 characters, and
@@ -85,13 +93,35 @@ pub enum ArgumentsRefusal {
     Unsupported,
 }
 
-/// **The command line this process's parent was started with**, its program's own word first —
-/// see the module header.
+/// **A process this one descends from, and the words it was started with.**
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AncestorLine {
+    /// The process, by its pid and start instant.
+    pub process: crate::install_flip::Running,
+    /// Its command line, its program's own word first.
+    pub words: Vec<OsString>,
+}
+
+/// **The command line this process's parent was started with** — see the module header.
 ///
 /// # Errors
 /// An [`ArgumentsRefusal`] naming the reason.
-pub fn parent_arguments() -> Result<Vec<OsString>, ArgumentsRefusal> {
+pub fn parent_arguments() -> Result<AncestorLine, ArgumentsRefusal> {
     imp::parent_arguments()
+}
+
+/// **The command line `child`'s parent was started with** — `child` a process this one descends
+/// from, by its pid and start instant: the parent taken as [`parent_arguments`] takes it, started
+/// before `child`, and both still running as recorded before the open and after the read (row
+/// 74's review N1).
+///
+/// # Errors
+/// An [`ArgumentsRefusal`] naming the reason; `Exited` when `child` or its parent does not run as
+/// recorded.
+pub fn arguments_of_parent_of(
+    child: crate::install_flip::Running,
+) -> Result<AncestorLine, ArgumentsRefusal> {
+    imp::arguments_of_parent_of(child)
 }
 
 /// A bridge to another machine, by its image name as the foreground-program door spells it.
@@ -265,7 +295,8 @@ fn refusal_of_errno(errno: i32, no_such_process: i32, not_permitted: i32) -> Fol
 
 #[cfg(windows)]
 mod imp {
-    use super::{ArgumentsRefusal, FolderRefusal, PebLayout, ProcessMemory};
+    use super::{AncestorLine, ArgumentsRefusal, FolderRefusal, PebLayout, ProcessMemory};
+    use crate::install_flip::Running;
     use std::{
         ffi::OsString,
         os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
@@ -472,13 +503,21 @@ mod imp {
         }
     }
 
-    /// The parent's command line (module header): asked only while the parent recorded by pid and
-    /// start runs, before the open and again after the read — the handle held between keeps the
-    /// process it opened, and a start that still matches after the read is that same process.
-    pub(super) fn parent_arguments() -> Result<Vec<OsString>, ArgumentsRefusal> {
-        use crate::install_flip::{parent_of_this_process, still_running};
-        let parent = parent_of_this_process().ok_or(ArgumentsRefusal::Exited)?;
-        if !still_running(parent) {
+    /// This process's parent's command line (module header).
+    pub(super) fn parent_arguments() -> Result<AncestorLine, ArgumentsRefusal> {
+        let this = crate::install_flip::this_running_process().ok_or(ArgumentsRefusal::Exited)?;
+        arguments_of_parent_of(this)
+    }
+
+    /// `child`'s parent's command line (module header): asked only while the parent recorded by
+    /// pid and start runs, and `child` too, before the open and again after the read — the handle
+    /// held between keeps the process it opened, and a start that still matches after the read is
+    /// that same process.
+    pub(super) fn arguments_of_parent_of(child: Running) -> Result<AncestorLine, ArgumentsRefusal> {
+        use crate::install_flip::{parent_of, still_running};
+        let parent = parent_of(child).ok_or(ArgumentsRefusal::Exited)?;
+        let both_run = || still_running(parent) && still_running(child);
+        if !both_run() {
             return Err(ArgumentsRefusal::Exited);
         }
         let process = opened_for_reading(parent.pid).map_err(|unopened| match unopened {
@@ -487,18 +526,22 @@ mod imp {
             Unopened::Unreadable => ArgumentsRefusal::Unreadable,
         })?;
         let read = process.parameters_string(super::command_line_units);
-        if !still_running(parent) {
+        if !both_run() {
             return Err(ArgumentsRefusal::Exited);
         }
         match read.and_then(|units| words_of_command_line(&units)) {
-            Some(words) => Ok(words),
+            Some(words) => Ok(AncestorLine {
+                process: parent,
+                words,
+            }),
             None if process.has_exited() => Err(ArgumentsRefusal::Exited),
             None => Err(ArgumentsRefusal::Unreadable),
         }
     }
 
-    /// **A command line's words, split by `CommandLineToArgvW`** — the rule a program's own C
-    /// runtime splits its command line by, the first word's included. `None` when it refuses.
+    /// **A command line's words, split by `CommandLineToArgvW`**, the first word's included —
+    /// the Windows shell's rule, which parts from the C runtime's only on a doubled quote inside a
+    /// quoted run (module header, review N5). `None` when it refuses.
     fn words_of_command_line(units: &[u16]) -> Option<Vec<OsString>> {
         use std::os::windows::ffi::OsStringExt;
         let line: Vec<u16> = units.iter().copied().chain(std::iter::once(0)).collect();
@@ -575,17 +618,34 @@ mod imp {
         super::path_of_c_bytes(bytes).ok_or(FolderRefusal::Unreadable)
     }
 
-    /// The parent's command line (module header), through `install_flip`'s read by pid and start:
-    /// a parent that does not run as recorded, before or after the read, is an exit; a refused
-    /// permission is no access; any other failure is a read that did not answer.
-    pub(super) fn parent_arguments() -> Result<Vec<std::ffi::OsString>, super::ArgumentsRefusal> {
+    /// This process's parent's command line (module header).
+    pub(super) fn parent_arguments() -> Result<super::AncestorLine, super::ArgumentsRefusal> {
+        let this =
+            crate::install_flip::this_running_process().ok_or(super::ArgumentsRefusal::Exited)?;
+        arguments_of_parent_of(this)
+    }
+
+    /// `child`'s parent's command line (module header), through `install_flip`'s read by pid and
+    /// start: a parent that does not run as recorded, before or after the read, is an exit, and so
+    /// is a `child` that no longer runs after it; a refused permission is no access; any other
+    /// failure is a read that did not answer.
+    pub(super) fn arguments_of_parent_of(
+        child: crate::install_flip::Running,
+    ) -> Result<super::AncestorLine, super::ArgumentsRefusal> {
         use super::ArgumentsRefusal;
-        let parent =
-            crate::install_flip::parent_of_this_process().ok_or(ArgumentsRefusal::Exited)?;
-        crate::install_flip::arguments_of(parent).map_err(|error| match error.kind() {
-            std::io::ErrorKind::NotFound => ArgumentsRefusal::Exited,
-            std::io::ErrorKind::PermissionDenied => ArgumentsRefusal::NoAccess,
-            _ => ArgumentsRefusal::Unreadable,
+        let parent = crate::install_flip::parent_of(child).ok_or(ArgumentsRefusal::Exited)?;
+        let words =
+            crate::install_flip::arguments_of(parent).map_err(|error| match error.kind() {
+                std::io::ErrorKind::NotFound => ArgumentsRefusal::Exited,
+                std::io::ErrorKind::PermissionDenied => ArgumentsRefusal::NoAccess,
+                _ => ArgumentsRefusal::Unreadable,
+            })?;
+        if !crate::install_flip::still_running(child) {
+            return Err(ArgumentsRefusal::Exited);
+        }
+        Ok(super::AncestorLine {
+            process: parent,
+            words,
         })
     }
 }
@@ -601,7 +661,14 @@ mod imp {
     }
 
     /// The named unsupported-platform refusal.
-    pub(super) fn parent_arguments() -> Result<Vec<std::ffi::OsString>, super::ArgumentsRefusal> {
+    pub(super) fn parent_arguments() -> Result<super::AncestorLine, super::ArgumentsRefusal> {
+        Err(super::ArgumentsRefusal::Unsupported)
+    }
+
+    /// The named unsupported-platform refusal.
+    pub(super) fn arguments_of_parent_of(
+        _child: crate::install_flip::Running,
+    ) -> Result<super::AncestorLine, super::ArgumentsRefusal> {
         Err(super::ArgumentsRefusal::Unsupported)
     }
 }
@@ -1060,51 +1127,86 @@ mod tests {
     #[cfg(any(windows, target_os = "macos"))]
     const PARENT_MARKER: &str = "工作 \"quoted\" word";
 
+    /// The word the stand-in shell carries on its command line, between the stand-in agent and the
+    /// reading child (review N1's T10 variant).
+    #[cfg(any(windows, target_os = "macos"))]
+    const SHELL_MARKER: &str = "stand-in shell";
+
     /// **The stand-in parent and the child that reads it** (row 74, T10), run only when the test
     /// that starts it asks. `parent-waits` and `parent-leaves` start this executable again as
     /// `reads-parent`, with their own standard input and output, and either wait for it or end at
     /// once; `reads-parent` waits for a line (or the end) on its standard input, then reads its
     /// parent's command line and prints it — each word hex-encoded, so no word's own characters
-    /// can move the line about.
+    /// can move the line about. **And one generation more** (review N1): `agent-waits` and
+    /// `agent-leaves` start a stand-in shell, `shell-hop`, carrying [`SHELL_MARKER`], and wait for
+    /// it or end at once; the shell starts `reads-agent` and waits for it, which reads its parent
+    /// (the shell) and then that parent's parent (the agent), and prints both.
     #[cfg(any(windows, target_os = "macos"))]
     #[test]
     fn helper_parents() {
         use std::io::{BufRead as _, Write as _};
+        let say = |label: &str, answer: Result<AncestorLine, ArgumentsRefusal>| {
+            let line = match answer {
+                Ok(line) => {
+                    let mut said = format!("{label} ok");
+                    for word in line.words {
+                        said.push(' ');
+                        for byte in word.to_string_lossy().as_bytes() {
+                            said.push_str(&format!("{byte:02x}"));
+                        }
+                    }
+                    said
+                }
+                Err(refusal) => format!("{label} err {refusal:?}"),
+            };
+            writeln!(std::io::stdout(), "{line}").expect("say what was read");
+            std::io::stdout().flush().expect("flush what was read");
+        };
         match std::env::var(HELPER_MODE).as_deref() {
-            Ok(mode @ ("parent-waits" | "parent-leaves")) => {
+            Ok(mode @ ("parent-waits" | "parent-leaves" | "agent-waits" | "agent-leaves")) => {
+                let (args, next): (&[&str], _) = if mode.starts_with("parent") {
+                    (&[], "reads-parent")
+                } else {
+                    (&[SHELL_MARKER], "shell-hop")
+                };
                 #[expect(
                     clippy::zombie_processes,
-                    reason = "`parent-leaves` ends before its reading child on purpose: that child \
-                              is the test of a parent that has ended, and an orphan \
-                              is the system's to reap"
+                    reason = "`parent-leaves` and `agent-leaves` end before their child on \
+                              purpose: that child is the test of a parent that has ended, and an \
+                              orphan is the system's to reap"
                 )]
                 let mut child = crate::quiet_command(std::env::current_exe().unwrap())
                     .args(["--exact", PARENT_HELPER, "--nocapture"])
-                    .env(HELPER_MODE, "reads-parent")
+                    .args(args)
+                    .env(HELPER_MODE, next)
                     .spawn()
-                    .expect("start the reading child");
-                if mode == "parent-waits" {
-                    child.wait().expect("the reading child ends");
+                    .expect("start the next generation");
+                if mode.ends_with("-waits") {
+                    child.wait().expect("the child ends");
                 }
             }
-            Ok("reads-parent") => {
+            Ok("shell-hop") => {
+                crate::quiet_command(std::env::current_exe().unwrap())
+                    .args(["--exact", PARENT_HELPER, "--nocapture"])
+                    .env(HELPER_MODE, "reads-agent")
+                    .spawn()
+                    .expect("start the reading child")
+                    .wait()
+                    .expect("the reading child ends");
+            }
+            Ok(mode @ ("reads-parent" | "reads-agent")) => {
                 let mut release = String::new();
                 let _ = std::io::BufReader::new(std::io::stdin()).read_line(&mut release);
-                let line = match parent_arguments() {
-                    Ok(words) => {
-                        let mut line = String::from("PARENT ok");
-                        for word in words {
-                            line.push(' ');
-                            for byte in word.to_string_lossy().as_bytes() {
-                                line.push_str(&format!("{byte:02x}"));
-                            }
-                        }
-                        line
-                    }
-                    Err(refusal) => format!("PARENT err {refusal:?}"),
-                };
-                writeln!(std::io::stdout(), "{line}").expect("say what was read");
-                std::io::stdout().flush().expect("flush what was read");
+                let parent = parent_arguments();
+                if mode == "reads-agent" {
+                    let agent = parent
+                        .clone()
+                        .and_then(|shell| arguments_of_parent_of(shell.process));
+                    say("SHELL", parent);
+                    say("PARENT", agent);
+                } else {
+                    say("PARENT", parent);
+                }
             }
             _ => {}
         }
@@ -1113,6 +1215,16 @@ mod tests {
     /// What the reading child said: its parent's words, or the refusal by name.
     #[cfg(any(windows, target_os = "macos"))]
     fn parent_read_back(output: &mut dyn std::io::BufRead) -> Result<Vec<String>, String> {
+        line_read_back(output, "PARENT")
+    }
+
+    /// What the reading child said under `label`: the words it read, or the refusal by name.
+    #[cfg(any(windows, target_os = "macos"))]
+    fn line_read_back(
+        output: &mut dyn std::io::BufRead,
+        label: &str,
+    ) -> Result<Vec<String>, String> {
+        let (failed, read) = (format!("{label} err "), format!("{label} ok"));
         loop {
             let mut line = String::new();
             assert_ne!(
@@ -1123,10 +1235,10 @@ mod tests {
                 "the reading child ended without an answer"
             );
             let line = line.trim_end();
-            if let Some(refusal) = line.strip_prefix("PARENT err ") {
+            if let Some(refusal) = line.strip_prefix(failed.as_str()) {
                 return Err(refusal.to_owned());
             }
-            if let Some(words) = line.strip_prefix("PARENT ok") {
+            if let Some(words) = line.strip_prefix(read.as_str()) {
                 return Ok(words
                     .split_whitespace()
                     .map(|hex| {
@@ -1226,6 +1338,82 @@ mod tests {
             assert!(
                 !matches!(&read, Ok(words) if words.iter().any(|word| word == PARENT_MARKER)),
                 "an ended parent's words are never answered: {read:?}"
+            );
+        }
+    }
+
+    /// RED (real process, row 74 T10, review N1) — **through a shell between, the agent is read
+    /// one generation up**: the stand-in agent starts a stand-in shell, which starts the reading
+    /// child; the child reads the shell's words (its parent), then the agent's
+    /// ([`arguments_of_parent_of`] the shell), each word for word. Which shell line earns that step
+    /// is `bt-app`'s (`attention_codex::hook_shell_runs`); this is the door it steps through.
+    ///
+    /// MUTATIONS: `arguments_of_parent_of` reading `child` itself rather than its parent — the
+    /// shell's words come back twice, with no agent marker; `install_flip::parent_of` answering
+    /// this process's parent whatever it is asked — the same.
+    #[cfg(any(windows, target_os = "macos"))]
+    #[test]
+    fn through_a_shell_between_the_agent_is_read_one_generation_up() {
+        use std::io::Write as _;
+        let mut agent = stand_in_parent("agent-waits");
+        let mut output = std::io::BufReader::new(agent.stdout.take().expect("stdout was piped"));
+        let mut input = agent.stdin.take().expect("stdin was piped");
+        let agent = Started(agent);
+        input.write_all(b"go\n").expect("release the reading child");
+        input.flush().expect("flush the release");
+        let shell = line_read_back(&mut output, "SHELL");
+        let read = line_read_back(&mut output, "PARENT");
+        drop(input);
+        drop(agent);
+        let shell = shell.expect("a running shell's command line is readable");
+        assert_eq!(
+            shell.last().map(String::as_str),
+            Some(SHELL_MARKER),
+            "the shell's words: {shell:?}"
+        );
+        let read = read.expect("a running agent's command line is readable through its shell");
+        assert_eq!(
+            read.last().map(String::as_str),
+            Some(PARENT_MARKER),
+            "the agent's words, one generation up: {read:?}"
+        );
+    }
+
+    /// RED (real process, row 74 T10, review N1) — **an agent that has ended is not read through
+    /// its shell**: the stand-in agent starts the stand-in shell and ends at once, and the reading
+    /// child, released only after, does not answer the agent's words. On Windows the answer is
+    /// `Exited` (the snapshot still names the agent's pid, which no longer runs as recorded); on
+    /// macOS the orphaned shell's parent is `launchd`, whose command line holds no marker either
+    /// way.
+    ///
+    /// MUTATION (of the setup, which is what makes this a test of an ended agent): let
+    /// `reads-agent` read before its release line — the agent is still running then, and its
+    /// words come back.
+    #[cfg(any(windows, target_os = "macos"))]
+    #[test]
+    fn an_agent_that_has_ended_is_not_read_through_its_shell() {
+        use std::io::Write as _;
+        let mut agent = stand_in_parent("agent-leaves");
+        let mut output = std::io::BufReader::new(agent.stdout.take().expect("stdout was piped"));
+        let mut input = agent.stdin.take().expect("stdin was piped");
+        let mut agent = Started(agent);
+        agent.0.wait().expect("the stand-in agent ends");
+        input.write_all(b"go\n").expect("release the reading child");
+        input.flush().expect("flush the release");
+        let shell = line_read_back(&mut output, "SHELL");
+        let read = line_read_back(&mut output, "PARENT");
+        drop(input);
+        drop(agent);
+        assert!(
+            matches!(&shell, Ok(words) if words.last().map(String::as_str) == Some(SHELL_MARKER)),
+            "the shell still runs and is read: {shell:?}"
+        );
+        if cfg!(windows) {
+            assert_eq!(read, Err("Exited".to_owned()));
+        } else {
+            assert!(
+                !matches!(&read, Ok(words) if words.iter().any(|word| word == PARENT_MARKER)),
+                "an ended agent's words are never answered: {read:?}"
             );
         }
     }

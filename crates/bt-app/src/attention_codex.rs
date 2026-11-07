@@ -823,6 +823,43 @@ fn hook_command_on(exe: &Path, row: &str, platform: HostPlatform) -> String {
     format!("{program} {ATTENTION_VERB} {CODEX}:{row} {JSON_FLAG} {STDIN_PAYLOAD}")
 }
 
+/// **The Folio a shell's command line runs, when the line is codex running Folio's own `Stop`
+/// entry** (row 74's review N1), and `None` for every other line.
+///
+/// Codex runs a command hook through the session's shell, and on Windows a shell never `exec`s
+/// what it runs, so the verb's parent is that shell and the agent is one generation up. So the
+/// line must be that spawn exactly, by `build_command` in `codex-rs/hooks/src/engine/
+/// command_runner.rs` at `rust-v0.166.0`: on Windows `pwsh` or `powershell` (by the program's
+/// stem, either case) with `-NoProfile -Command` and the entry's command; elsewhere a shell with
+/// `-c`, or with `-lc` (codex's launcher for a session with no shell of its own), and the entry's
+/// command. And the command must be **byte for byte the one Folio writes** for the path it names
+/// ([`hook_command_on`], decoded by the reader that decides what Folio may edit,
+/// [`ownership::legacy_path`]) — so a person's own shell, a wrapper, a nested agent or anybody
+/// else's line never reads as it. Whether that path is the running program is the caller's
+/// question.
+#[must_use]
+pub(crate) fn hook_shell_runs(words: &[String], platform: HostPlatform) -> Option<PathBuf> {
+    let command = if platform == HostPlatform::Windows {
+        let [shell, no_profile, run, command] = words else {
+            return None;
+        };
+        let stem = crate::agent_resume::program_word_stem(shell);
+        (["pwsh", "powershell"]
+            .iter()
+            .any(|ours| stem.eq_ignore_ascii_case(ours))
+            && no_profile == "-NoProfile"
+            && run == "-Command")
+            .then_some(command)?
+    } else {
+        let [_shell, run, command] = words else {
+            return None;
+        };
+        matches!(run.as_str(), "-c" | "-lc").then_some(command)?
+    };
+    let path = ownership::legacy_path(command, CODEX).ok().flatten()?;
+    (hook_command_on(&path, STOP, platform) == *command).then_some(path)
+}
+
 /// **Whether Windows PowerShell 5.1 can call Folio at this path with `& '<path>'`** (re-review R1).
 /// 5.1, the PowerShell every Windows ships, reads each component of the call's path as a wildcard
 /// pattern before it looks for the file, and throws on one it cannot parse, so the hook would exit 1
@@ -2838,6 +2875,99 @@ mod tests {
         ] {
             assert!(ownership::legacy_path(spelled, CODEX).is_err(), "{spelled}");
         }
+    }
+
+    /// RED (row 74, review N1) — **the shell line of codex running Folio's own `Stop` entry is
+    /// known for it, and no other line is**: on Windows `pwsh`/`powershell` with `-NoProfile
+    /// -Command` and the entry's command byte for byte, elsewhere a shell with `-c` or `-lc` and
+    /// the sh spelling; the path it names comes back. Another flag, an extra word, another event,
+    /// another quoting, the other platform's spelling and a program not named Folio are not it.
+    ///
+    /// MUTATION: compare the command by `legacy_path`'s decoding alone, without the byte-exact
+    /// re-spelling — the `"…"`-quoted line reads as the hook.
+    #[test]
+    fn only_codexs_spawn_of_folios_own_entry_is_its_hook_shell() {
+        let windows_exe = r"C:\Program Files\Folio\folio.exe";
+        let ours = hook_command_on(Path::new(windows_exe), STOP, HostPlatform::Windows);
+        let ours = ours.as_str();
+        let words =
+            |line: &[&str]| -> Vec<String> { line.iter().map(|word| (*word).to_owned()).collect() };
+        for shell in [
+            r"C:\Program Files\PowerShell\7\pwsh.exe",
+            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+            "PWSH",
+        ] {
+            assert_eq!(
+                hook_shell_runs(
+                    &words(&[shell, "-NoProfile", "-Command", ours]),
+                    HostPlatform::Windows
+                ),
+                Some(PathBuf::from(windows_exe)),
+                "{shell}"
+            );
+        }
+        let pwsh = r"C:\Program Files\PowerShell\7\pwsh.exe";
+        let other_event = ours.replace(":stop ", ":agent-turn-complete ");
+        let double_quoted = format!(r#""{windows_exe}" attention codex:stop --json -"#);
+        let not_folio = hook_command_on(
+            Path::new(r"C:\Tools\mytool.exe"),
+            STOP,
+            HostPlatform::Windows,
+        );
+        for line in [
+            vec![pwsh],
+            vec![pwsh, "-NoLogo"],
+            vec![pwsh, "-NoProfile", "-NonInteractive", "-Command", ours],
+            vec![pwsh, "-NoProfile", "-Command", ours, "extra"],
+            vec![pwsh, "-noprofile", "-Command", ours],
+            vec![pwsh, "-NoProfile", "-Command", other_event.as_str()],
+            vec![pwsh, "-NoProfile", "-Command", double_quoted.as_str()],
+            vec![pwsh, "-NoProfile", "-Command", not_folio.as_str()],
+            vec![
+                r"C:\Windows\System32\cmd.exe",
+                "-NoProfile",
+                "-Command",
+                ours,
+            ],
+            vec![r"C:\Windows\System32\cmd.exe", "/C", ours],
+            vec!["codex", "-NoProfile", "-Command", ours],
+        ] {
+            assert_eq!(
+                hook_shell_runs(&words(&line), HostPlatform::Windows),
+                None,
+                "{line:?}"
+            );
+        }
+        let mac_exe = "/Applications/Folio.app/Contents/MacOS/folio";
+        let sh = hook_command_on(Path::new(mac_exe), STOP, HostPlatform::MacOs);
+        let sh = sh.as_str();
+        for run in ["-c", "-lc"] {
+            assert_eq!(
+                hook_shell_runs(&words(&["/bin/zsh", run, sh]), HostPlatform::MacOs),
+                Some(PathBuf::from(mac_exe)),
+                "{run}"
+            );
+        }
+        for line in [
+            vec!["/bin/zsh", "-i", sh],
+            vec!["/bin/zsh", "-c", sh, "extra"],
+            vec!["/bin/zsh", "-NoProfile", "-Command", sh],
+            vec!["/bin/zsh", "-c", ours],
+        ] {
+            assert_eq!(
+                hook_shell_runs(&words(&line), HostPlatform::MacOs),
+                None,
+                "{line:?}"
+            );
+        }
+        assert_eq!(
+            hook_shell_runs(
+                &words(&[pwsh, "-NoProfile", "-Command", sh]),
+                HostPlatform::Windows
+            ),
+            None,
+            "the sh spelling is not the Windows entry"
+        );
     }
 
     /// **What codex runs reaches the verb as a `Stop` that reads its payload from stdin**, and the

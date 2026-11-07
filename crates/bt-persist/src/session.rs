@@ -55,8 +55,10 @@ use crate::layout::LayoutNodeV1;
 /// row 74): the flags the agent was started with that its vendor's resume does not bring back by
 /// itself, so a session started with `--dangerously-skip-permissions` or `--model opus` comes back
 /// the way it was started. **They are written in the clear**, as the plaintext clause above writes
-/// a URL: they are the person's own command line, and a value that may hold a secret (inline
-/// `--settings` JSON) is never among them.
+/// a URL: they are the person's own command line, and the values that hold credentials are never
+/// among them — inline `--settings`, `--mcp-config` or `--agents` JSON, and a Codex `-c` whose key
+/// is not on its stated list of keys that hold none, are dropped and only their flag named (row
+/// 74's R5 and review N2).
 pub const SESSION_SCHEMA_VERSION: u32 = 17;
 
 /// **What a preview row's string names** — schema v11.
