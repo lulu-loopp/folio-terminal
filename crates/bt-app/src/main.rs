@@ -23076,8 +23076,12 @@ fn deliver_attention(
             // **And the turn itself, which is what an agent pane's blue dot is read from**
             // (row 75): ended, begun, or reported in from inside one.
             if let Some(step) = asks.turn {
-                leaf.turn_account
-                    .hear_turn_step(step, child, leaf.output_revision);
+                leaf.turn_account.hear_turn_step(
+                    step,
+                    &message.family,
+                    child,
+                    leaf.output_revision,
+                );
             }
             if let Some(event) = asks.ledger.clone() {
                 // The clock mirrors the arrival rather than the ledger's answer, and deliberately:

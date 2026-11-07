@@ -319,6 +319,7 @@ fn a_record_is_cleared_by_the_agents_own_exit_and_not_by_session_end() {
         id: None,
         text: None,
         resume,
+        another_client: false,
     };
     let heard = Heard {
         id: SESSION.to_owned(),
@@ -1074,6 +1075,7 @@ fn a_resumed_shell_panes_clear_is_heard_through_the_attention_road() {
             id: None,
             text: None,
             resume: Some(cleared.clone()),
+            another_client: false,
         }],
         &installed,
         Instant::now(),

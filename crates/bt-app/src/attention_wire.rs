@@ -87,11 +87,12 @@ const INBOX_BOUND: usize = 256;
 
 /// One arrival, in the words it crosses the pipe in.
 ///
-/// Six fields and three of them are usually absent. `family` and `event` together name a row of
+/// Seven fields and four of them are usually absent. `family` and `event` together name a row of
 /// the mapping table; `capability` names the pane; `id` is present only when that row declared a
 /// field path, which today no row does; `text` is present only when a turn-end row declared where
 /// its words live **and** they were there to be found; `resume` only when a turn-end row declared
-/// where its session is named and the payload named a well-formed one.
+/// where its session is named and the payload named a well-formed one; `another_client` only when
+/// a turn-end row declared the interactive client and the payload named another.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Message {
     pub capability: String,
@@ -106,6 +107,13 @@ pub(crate) struct Message {
     /// declares no [`Resume`](crate::attention_map::Resume) source and for a payload that named
     /// none this build could resume.
     pub resume: Option<crate::agent_resume::Heard>,
+    /// **The turn was another client's** (0.4.10 plan row 75, review N1): a turn-end row declares
+    /// the vendor's interactive client (`only_client`) and the payload names another, or none —
+    /// codex's `notify` from a `codex exec` an agent in the pane started. Decided in the verb, the
+    /// only process that holds the payload, by the check [`heard`] makes for the session
+    /// ([`ran_in_the_interactive_client`]), and crossing as `"another_client": true`. Such a turn
+    /// end is no step of the pane's agent's turns ([`asks_of`]).
+    pub another_client: bool,
 }
 
 /// The wire's version, and the reason for it: a `folio.exe` on `PATH` may be a different build from
@@ -137,6 +145,9 @@ impl Message {
                 session.insert("home".to_owned(), home.clone().into());
             }
             value.insert("resume".to_owned(), serde_json::Value::Object(session));
+        }
+        if self.another_client {
+            value.insert("another_client".to_owned(), true.into());
         }
         serde_json::Value::Object(value).to_string()
     }
@@ -209,6 +220,12 @@ impl Message {
                 Some(heard)
             }
         };
+        // Absent from every line but a turn end another client ran, and from a verb of a build
+        // before row 75's review, which is read as it always was.
+        let another_client = match object.get("another_client") {
+            None => false,
+            Some(value) => value.as_bool()?,
+        };
         Some(Self {
             capability: text("cap")?,
             family: text("family")?,
@@ -216,6 +233,7 @@ impl Message {
             id,
             text: words,
             resume,
+            another_client,
         })
     }
 }
@@ -323,7 +341,12 @@ pub(crate) fn asks_of(installed: &[crate::attention::MappingRow], message: &Mess
         ledger: attention_map::row(attention_map::ROWS, &message.family, &message.event)
             .map(|row| attention_map::event_for(installed, row, message.id.as_deref())),
         turn_end: attention_map::turn_end(&message.family, &message.event),
-        turn: attention_map::turn_step(&message.family, &message.event),
+        // A turn end another client ran is no step of the pane's agent (review N1).
+        turn: if message.another_client {
+            None
+        } else {
+            attention_map::turn_step(&message.family, &message.event)
+        },
     }
 }
 
@@ -573,6 +596,15 @@ pub(crate) fn message_for(
     let resume = attention_map::turn_end_row(family, event)
         .filter(|_| crate::agent_resume::vendor(family).is_some())
         .and_then(|row| heard(row.resume, payload));
+    // And whether the turn was another client's (row 75, review N1): by the same check the
+    // session's is, so the two can never come to disagree about which turns are the pane's.
+    let another_client =
+        attention_map::turn_end_row(family, event).is_some_and(|row| match row.resume {
+            attention_map::Resume::Fields { only_client, .. } => {
+                !ran_in_the_interactive_client(only_client, payload)
+            }
+            attention_map::Resume::None => false,
+        });
     Message {
         capability,
         family: family.to_owned(),
@@ -580,6 +612,7 @@ pub(crate) fn message_for(
         id,
         text,
         resume,
+        another_client,
     }
 }
 
@@ -602,9 +635,7 @@ fn heard(
     let payload = payload?;
     // A turn another client ran — `codex exec`, started by an agent in the pane — is not the
     // pane's session (review F1), and neither is one whose payload does not say (re-review RN1).
-    if let Some((field, interactive)) = only_client
-        && payload.get(field).and_then(serde_json::Value::as_str) != Some(interactive)
-    {
+    if !ran_in_the_interactive_client(only_client, Some(payload)) {
         return None;
     }
     let heard = crate::agent_resume::Heard {
@@ -613,6 +644,25 @@ fn heard(
         home: None,
     };
     heard.is_well_formed().then_some(heard)
+}
+
+/// **Whether a turn was run by the vendor's interactive client**, by a row's declared
+/// `only_client` (`attention_map::Resume::Fields`): always, for a row that declares none; for one
+/// that does, only when the payload's field says the interactive client — a payload that says
+/// another, or does not say, ran elsewhere (review F1, re-review RN1). The one check behind both
+/// what the session is ([`heard`]) and whether the turn is the pane's at all
+/// ([`Message::another_client`], row 75's review N1).
+#[must_use]
+fn ran_in_the_interactive_client(
+    only_client: Option<(&'static str, &'static str)>,
+    payload: Option<&serde_json::Value>,
+) -> bool {
+    only_client.is_none_or(|(field, interactive)| {
+        payload
+            .and_then(|payload| payload.get(field))
+            .and_then(serde_json::Value::as_str)
+            == Some(interactive)
+    })
 }
 
 /// The sentence a row's declared source holds, cleaned to what a toast may carry.
@@ -813,6 +863,7 @@ mod tests {
             id: None,
             text: None,
             resume: None,
+            another_client: false,
         };
         assert_eq!(Message::decode(&message.encode()), Some(message));
     }
@@ -831,6 +882,7 @@ mod tests {
             id: None,
             text: None,
             resume: None,
+            another_client: false,
         }
         .encode();
         for coordinate in ["tab", "seat", "window", "pane", "leaf", "index"] {
@@ -883,6 +935,7 @@ mod tests {
             id: None,
             text: Some("收官了。".to_owned()),
             resume: None,
+            another_client: false,
         };
         assert_eq!(Message::decode(&message.encode()), Some(message));
     }
@@ -1005,6 +1058,7 @@ mod tests {
             id: None,
             text: None,
             resume: None,
+            another_client: false,
         };
         let stop = |payload: Option<&serde_json::Value>| {
             message_for("c".to_owned(), CLAUDE_CODE, "Stop", payload)
@@ -1065,6 +1119,7 @@ mod tests {
             id: None,
             text: None,
             resume: None,
+            another_client: false,
         };
         assert_eq!(
             asks_of(&claude, &message("PermissionRequest")),
@@ -1088,6 +1143,7 @@ mod tests {
             id: None,
             text: None,
             resume: None,
+            another_client: false,
         };
         assert_eq!(
             asks_of(&installed(PI), &settled),
@@ -1108,6 +1164,7 @@ mod tests {
                     id: None,
                     text: None,
                     resume: None,
+                    another_client: false,
                 }
             )
             .is_empty()
@@ -1212,6 +1269,7 @@ mod tests {
                 id: None,
                 text: None,
                 resume: None,
+                another_client: false,
             }
             .encode();
             send_line(endpoint.name(), &line).expect("the endpoint took the line");
@@ -1587,6 +1645,7 @@ mod tests {
                 cwd: r"C:\work\resume".to_owned(),
                 home: Some(r"C:\work\config".to_owned()),
             }),
+            another_client: false,
         };
         assert_eq!(Message::decode(&message.encode()), Some(message));
     }
@@ -1698,6 +1757,67 @@ mod tests {
                 "{family}:{event}"
             );
         }
+    }
+
+    /// RED (row 75, review N1) — **a turn end another client ran is no step of the pane's
+    /// agent**: codex's `notify` from a `codex exec` an agent in the pane started says so across
+    /// the wire, by the one check that refuses its session, and the window reads no turn from it;
+    /// the interactive client's crosses as a turn's end. A row that declares no client never says
+    /// another ran.
+    ///
+    /// MUTATION: read `turn_step` in `asks_of` whatever `another_client` says, and the
+    /// `codex-exec` client's turn is a step: the second assertion goes red.
+    #[test]
+    fn a_turn_end_another_client_ran_crosses_as_no_step() {
+        let ran_by = |client: Option<&str>| {
+            let mut payload = serde_json::json!({ "thread-id": SESSION, "cwd": "/srv/work" });
+            if let Some(client) = client {
+                payload["client"] = serde_json::json!(client);
+            }
+            message_for("c".to_owned(), CODEX, "agent-turn-complete", Some(&payload))
+        };
+        let exec = ran_by(Some("codex-exec"));
+        assert!(exec.another_client, "the payload names another client");
+        assert_eq!(
+            asks_of(&[], &exec).turn,
+            None,
+            "no step of the pane's agent"
+        );
+        assert_eq!(
+            Message::decode(&exec.encode()),
+            Some(exec.clone()),
+            "and it crosses as it was sent"
+        );
+        assert!(
+            ran_by(None).another_client,
+            "nor a payload that names no client"
+        );
+        let interactive = ran_by(Some("codex-tui"));
+        assert!(!interactive.another_client);
+        assert_eq!(
+            asks_of(&[], &interactive).turn,
+            Some(attention_map::TurnStep::Ended)
+        );
+        for (family, event) in [
+            (CLAUDE_CODE, "Stop"),
+            (CODEX, "stop"),
+            (PI, "agent_settled"),
+        ] {
+            let message = message_for("c".to_owned(), family, event, Some(&serde_json::json!({})));
+            assert!(!message.another_client, "{family}:{event}");
+            assert_eq!(
+                asks_of(&[], &message).turn,
+                Some(attention_map::TurnStep::Ended),
+                "{family}:{event}"
+            );
+        }
+        assert_eq!(
+            Message::decode(
+                r#"{"v":1,"cap":"c","family":"codex","event":"stop","another_client":"yes"}"#
+            ),
+            None,
+            "a flag that is not a boolean drops the line"
+        );
     }
 
     /// **codex's `Stop` hook request reaches the wire with its words and its session** (plan row

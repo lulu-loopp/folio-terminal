@@ -748,8 +748,11 @@ pub(crate) fn turn_end_row(family: &str, event: &str) -> Option<&'static TurnEnd
 /// **What is not here.** `SessionEnd` / `sessionEnd` (a session ending is not a turn running),
 /// `Notification.agent_completed` (a background session finished, not this pane's turn) and
 /// `Notification.quota_auto_resume_disabled` (the agent stays stopped). codex and pi contribute
-/// nothing: neither has an installed row that is heard inside a turn, so their panes are read by
-/// their turns' ends alone, which is all their dot needs — neither starts turns by itself.
+/// nothing: neither has an installed row that is heard inside a turn or says one began, so their
+/// panes are read by their turns' ends alone — codex's `Stop` hook (`stop`) or `notify`'s
+/// `agent-turn-complete`, pi's `agent_settled` — and a dot one of them earned while the user was
+/// away stays through its next turn, until that turn ends or the pane is looked at (a named limit,
+/// `docs/DESIGN.md` 2026-11-06).
 pub(crate) const TURN_WITHIN: &[TurnWithin] = &[
     // "Runs immediately after a tool completes successfully."
     TurnWithin {
@@ -1745,6 +1748,7 @@ mod tests {
             (CLAUDE_CODE, "Notification.agent_needs_input", None),
             (CLAUDE_CODE, "Notification.agent_completed", None),
             (CLAUDE_CODE, "SessionEnd", None),
+            (CODEX, "stop", Some(TurnStep::Ended)),
             (CODEX, "agent-turn-complete", Some(TurnStep::Ended)),
             (CODEX, "user-prompt-submit", Some(TurnStep::Began)),
             (COPILOT, "agentStop", Some(TurnStep::Ended)),

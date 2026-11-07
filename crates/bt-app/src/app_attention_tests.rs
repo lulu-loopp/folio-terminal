@@ -91,6 +91,7 @@ fn a_waits_ten_minutes_are_armed_on_arrival_forgotten_on_its_clear_and_spent_whe
         id: None,
         text: None,
         resume: None,
+        another_client: false,
     };
     let mut places = attention::Places::default();
     let start = Instant::now();
@@ -378,6 +379,7 @@ fn hook(tabs: &mut [TabState], capability: &str, family: &str, event: &str, acti
             id: None,
             text: None,
             resume: None,
+            another_client: false,
         }],
         &every_familys_rows(),
         Instant::now(),
@@ -388,7 +390,7 @@ fn hook(tabs: &mut [TabState], capability: &str, family: &str, event: &str, acti
 
 /// The program in the pane writes `chunks` reads' worth — a spinner frame, a status line, a
 /// repaint — counted the way the drain counts them.
-fn draws(tabs: &mut [TabState], seat: SeatId, chunks: u64) {
+fn the_agent_draws(tabs: &mut [TabState], seat: SeatId, chunks: u64) {
     let leaf = &mut tabs[0]
         .sessions
         .get_mut(&seat)
@@ -401,7 +403,7 @@ fn draws(tabs: &mut [TabState], seat: SeatId, chunks: u64) {
 }
 
 /// The pane's cells go to the glass: the user is looking at it.
-fn painted(tabs: &mut [TabState], seat: SeatId) {
+fn the_pane_is_painted(tabs: &mut [TabState], seat: SeatId) {
     mark_leaf_painted(
         &mut tabs[0]
             .sessions
@@ -447,7 +449,7 @@ fn a_resumed_agents_pane_is_unread_by_its_turns_and_not_by_its_bytes() {
         .session;
     leaf.turn_account = agent_turns::TurnAccount::born_beside(&resumed);
     leaf.agent = resumed;
-    draws(&mut tabs, seat, 40);
+    the_agent_draws(&mut tabs, seat, 40);
     assert_eq!(
         background_dot(&tabs),
         StatusClaim::Silent,
@@ -455,8 +457,8 @@ fn a_resumed_agents_pane_is_unread_by_its_turns_and_not_by_its_bytes() {
     );
     let claude = attention_map::CLAUDE_CODE;
     hook(&mut tabs, &capability, claude, "UserPromptSubmit", 0);
-    painted(&mut tabs, seat);
-    draws(&mut tabs, seat, 12);
+    the_pane_is_painted(&mut tabs, seat);
+    the_agent_draws(&mut tabs, seat, 12);
     assert_eq!(
         background_dot(&tabs),
         StatusClaim::Silent,
@@ -468,8 +470,8 @@ fn a_resumed_agents_pane_is_unread_by_its_turns_and_not_by_its_bytes() {
         StatusClaim::Unread,
         "a turn that went on writing after the user left, and ended"
     );
-    painted(&mut tabs, seat);
-    draws(&mut tabs, seat, 3);
+    the_pane_is_painted(&mut tabs, seat);
+    the_agent_draws(&mut tabs, seat, 3);
     assert_eq!(
         background_dot(&tabs),
         StatusClaim::Silent,
@@ -490,12 +492,12 @@ fn a_turn_the_agent_starts_itself_is_work_in_flight_until_it_ends() {
     let (mut tabs, seat, capability) = an_agent_pane("claude.exe");
     let claude = attention_map::CLAUDE_CODE;
     hook(&mut tabs, &capability, claude, "UserPromptSubmit", 0);
-    painted(&mut tabs, seat);
-    draws(&mut tabs, seat, 5);
+    the_pane_is_painted(&mut tabs, seat);
+    the_agent_draws(&mut tabs, seat, 5);
     hook(&mut tabs, &capability, claude, "Stop", 1);
     assert_eq!(background_dot(&tabs), StatusClaim::Unread);
     hook(&mut tabs, &capability, claude, "UserPromptSubmit", 1);
-    draws(&mut tabs, seat, 5);
+    the_agent_draws(&mut tabs, seat, 5);
     assert_eq!(
         background_dot(&tabs),
         StatusClaim::Silent,
@@ -524,11 +526,11 @@ fn a_turn_that_ended_in_view_owes_nothing_after_the_user_leaves() {
     let (mut tabs, seat, capability) = an_agent_pane("claude.exe");
     let claude = attention_map::CLAUDE_CODE;
     hook(&mut tabs, &capability, claude, "UserPromptSubmit", 0);
-    draws(&mut tabs, seat, 8);
-    painted(&mut tabs, seat);
+    the_agent_draws(&mut tabs, seat, 8);
+    the_pane_is_painted(&mut tabs, seat);
     hook(&mut tabs, &capability, claude, "Stop", 0);
-    painted(&mut tabs, seat);
-    draws(&mut tabs, seat, 2);
+    the_pane_is_painted(&mut tabs, seat);
+    the_agent_draws(&mut tabs, seat, 2);
     assert_eq!(background_dot(&tabs), StatusClaim::Silent);
 }
 
@@ -541,7 +543,7 @@ fn a_turn_that_ended_in_view_owes_nothing_after_the_user_leaves() {
 #[test]
 fn a_fresh_agent_pane_keeps_the_byte_rule_until_its_first_hook() {
     let (mut tabs, seat, capability) = an_agent_pane("claude.exe");
-    draws(&mut tabs, seat, 3);
+    the_agent_draws(&mut tabs, seat, 3);
     assert_eq!(
         background_dot(&tabs),
         StatusClaim::Unread,
@@ -581,11 +583,11 @@ fn an_agent_typed_into_a_shell_wears_its_dot_at_its_turns_ends() {
         .expect("the marks parse");
     let claude = attention_map::CLAUDE_CODE;
     hook(&mut tabs, &capability, claude, "UserPromptSubmit", 0);
-    painted(&mut tabs, seat);
-    draws(&mut tabs, seat, 6);
+    the_pane_is_painted(&mut tabs, seat);
+    the_agent_draws(&mut tabs, seat, 6);
     hook(&mut tabs, &capability, claude, "Stop", 1);
     assert_eq!(background_dot(&tabs), StatusClaim::Unread);
-    painted(&mut tabs, seat);
+    the_pane_is_painted(&mut tabs, seat);
     let leaf = &mut tabs[0]
         .sessions
         .get_mut(&seat)
@@ -597,7 +599,7 @@ fn an_agent_typed_into_a_shell_wears_its_dot_at_its_turns_ends() {
     leaf.turn_account
         .settle_turn_command(leaf.session.command_marks());
     assert_eq!(leaf.turn_account.agent_turn(), None, "the shell's again");
-    draws(&mut tabs, seat, 1);
+    the_agent_draws(&mut tabs, seat, 1);
     assert_eq!(
         background_dot(&tabs),
         StatusClaim::Unread,
@@ -616,8 +618,8 @@ fn codex_and_copilot_panes_are_read_by_their_own_turn_rows() {
     let (mut tabs, seat, capability) = an_agent_pane("codex.exe");
     let codex = attention_map::CODEX;
     hook(&mut tabs, &capability, codex, "agent-turn-complete", 0);
-    painted(&mut tabs, seat);
-    draws(&mut tabs, seat, 30);
+    the_pane_is_painted(&mut tabs, seat);
+    the_agent_draws(&mut tabs, seat, 30);
     assert_eq!(
         background_dot(&tabs),
         StatusClaim::Silent,
@@ -637,8 +639,8 @@ fn codex_and_copilot_panes_are_read_by_their_own_turn_rows() {
         .expect("the marks parse");
     let copilot = attention_map::COPILOT;
     hook(&mut tabs, &capability, copilot, "userPromptSubmitted", 0);
-    painted(&mut tabs, seat);
-    draws(&mut tabs, seat, 4);
+    the_pane_is_painted(&mut tabs, seat);
+    the_agent_draws(&mut tabs, seat, 4);
     assert_eq!(background_dot(&tabs), StatusClaim::Silent);
     hook(&mut tabs, &capability, copilot, "agentStop", 1);
     assert_eq!(background_dot(&tabs), StatusClaim::Unread);
@@ -732,6 +734,7 @@ fn every_hook_that_reaches_a_pane_writes_a_hear_line() {
                 id: None,
                 text: None,
                 resume: None,
+                another_client: false,
             }],
             &every_familys_rows(),
             Instant::now(),
@@ -753,5 +756,74 @@ fn every_hook_that_reaches_a_pane_writes_a_hear_line() {
         heard,
         ["UserPromptSubmit", "PostToolUse", "Stop", "Stop"]
             .map(|event| format!("hear tab=0 seat={seat:?} episode=- event=claude-code:{event}"))
+    );
+}
+
+/// What reaches the pane when an agent in it runs `codex exec`: the nested codex's `notify`, its
+/// payload naming the client that ran it, made by the verb exactly as the hook makes it.
+fn a_codex_exec_ends_its_turn(tabs: &mut [TabState], capability: &str, active: usize) {
+    let payload = serde_json::json!({
+        "type": "agent-turn-complete",
+        "thread-id": "0b9c7e1a-4f3d-4c2b-9a8e-5d6f7a8b9c0d",
+        "cwd": "/srv/work",
+        "client": "codex-exec",
+    });
+    deliver_attention(
+        tabs,
+        active,
+        on_a_screen(true),
+        BOTH_NOTIFICATION_ROWS_ON,
+        &mut attention::Places::default(),
+        &[attention_wire::message_for(
+            capability.to_owned(),
+            attention_map::CODEX,
+            "agent-turn-complete",
+            Some(&payload),
+        )],
+        &every_familys_rows(),
+        Instant::now(),
+        None,
+        &mut Vec::new(),
+    );
+}
+
+/// RED (row 75, review N1) — **a `codex exec` an agent runs ends no turn of the pane's**: Claude
+/// Code's Bash tool runs it, and its hooks name the pane, because they inherit its capability.
+/// Through codex's `Stop` hook or its `notify`, the nested run's end is another vendor's, and the
+/// Claude pane's turn under way stays under way; Claude's own `Stop` is the end. In a codex pane,
+/// the nested run's `notify` says another client ran it, and lights nothing.
+///
+/// MUTATION: drop the `own.family != family` refusal in `TurnAccount::hear_turn_step` and the
+/// first assertion goes red (plant `plant-75-any-family-is-the-panes.py`).
+#[test]
+fn a_codex_exec_inside_an_agent_pane_ends_no_turn_of_its() {
+    let (mut tabs, seat, capability) = an_agent_pane("claude.exe");
+    let claude = attention_map::CLAUDE_CODE;
+    hook(&mut tabs, &capability, claude, "UserPromptSubmit", 0);
+    the_pane_is_painted(&mut tabs, seat);
+    the_agent_draws(&mut tabs, seat, 7);
+    hook(&mut tabs, &capability, attention_map::CODEX, "stop", 1);
+    a_codex_exec_ends_its_turn(&mut tabs, &capability, 1);
+    assert_eq!(
+        background_dot(&tabs),
+        StatusClaim::Silent,
+        "Claude's turn is still under way"
+    );
+    hook(&mut tabs, &capability, claude, "Stop", 1);
+    assert_eq!(
+        background_dot(&tabs),
+        StatusClaim::Unread,
+        "and this is its end"
+    );
+
+    let (mut tabs, seat, capability) = an_agent_pane("codex.exe");
+    hook(&mut tabs, &capability, attention_map::CODEX, "stop", 0);
+    the_pane_is_painted(&mut tabs, seat);
+    the_agent_draws(&mut tabs, seat, 4);
+    a_codex_exec_ends_its_turn(&mut tabs, &capability, 1);
+    assert_eq!(
+        background_dot(&tabs),
+        StatusClaim::Silent,
+        "a turn another client ran is not the codex pane's"
     );
 }
