@@ -292,25 +292,25 @@ fn launch_of_value(value: &serde_json::Value) -> Option<bt_persist::AgentLaunchV
     crate::agent_resume::launch_is_well_formed(&launch).then_some(launch)
 }
 
-/// **The line with its agent's launch** (row 74): what `read` — the hook's parent's command line,
-/// asked only for a line that names a session — says about how the agent was started, by
+/// **The line with its agent's launch** (row 74): what `parent_line` — the hook's parent's command
+/// line, asked only for a line that names a session — says about how the agent was started, by
 /// `vendor`'s table ([`crate::agent_resume::Vendor::launch_of`]).
 ///
-/// Pure but for `read`, so a test hands it any command line, or none. A run that answers and exits
-/// (`claude -p`) names no session, so its line goes without its `resume`. A command line that was
-/// not there, or not in a shape the table names, is an unread launch; so is one whose line would
+/// Pure but for `parent_line`, so a test hands it any command line, or none. A run that answers and
+/// exits (`claude -p`) names no session, so its line goes without its `resume`. A command line that
+/// was not there, or not in a shape the table names, is an unread launch; so is one whose line would
 /// not fit the endpoint's frame ([`bt_platform::attention_pipe::MAX_MESSAGE_BYTES`]) — the
 /// session still crosses, and the resumed pane says it came back without its launch arguments.
 #[must_use]
 pub(crate) fn with_launch(
     mut message: Message,
     vendor: &crate::agent_resume::Vendor,
-    read: impl FnOnce() -> Option<Vec<std::ffi::OsString>>,
+    parent_line: impl FnOnce() -> Option<Vec<std::ffi::OsString>>,
 ) -> Message {
     let Some(resume) = message.resume.as_mut() else {
         return message;
     };
-    let launch = match read().map(|argv| vendor.launch_of(&argv)) {
+    let launch = match parent_line().map(|argv| vendor.launch_of(&argv)) {
         Some(crate::agent_resume::LaunchRead::Headless) => {
             message.resume = None;
             return message;
