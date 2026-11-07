@@ -176,7 +176,7 @@ impl TurnAccount {
     /// What the claim reads, or `None` while the pane is read by the shell's rule.
     #[must_use]
     pub(crate) fn agent_turn(&self) -> Option<AgentTurn> {
-        self.bound.map(|_| AgentTurn {
+        self.bound.as_ref().map(|_| AgentTurn {
             ended_at: self.ended_at,
             running: self.running,
         })
