@@ -44,6 +44,7 @@ use std::{
 
 mod agent_hooks_step;
 mod agent_resume;
+mod agent_turns;
 mod animation;
 mod app_delegate_wire;
 mod arrival;
@@ -7683,6 +7684,10 @@ struct ShellSession {
     /// layout writes so a restart can resume it, and — for a pane born as a resume — whether that
     /// resume ever ran. See [`agent_resume::AgentAccount`].
     agent: agent_resume::AgentAccount,
+    /// **This pane's agent's turns, as its blue dot reads them** (0.4.10 plan row 75): for a pane
+    /// whose agent's hooks are heard, "finished" is a turn's end and not the bytes it draws. See
+    /// [`agent_turns::TurnAccount`].
+    turn_account: agent_turns::TurnAccount,
     grid: GridSize,
     conpty_grid: GridSize,
     pending_pty_resize: Option<PendingPtyResize>,
@@ -16580,6 +16585,7 @@ impl ShellSession {
             last_seen_revision: self.last_seen_revision,
             tab_is_active,
             awaiting: self.attention.ledger.ticket().is_some(),
+            turn: self.turn_account.agent_turn(),
         }
     }
 }
@@ -22728,6 +22734,11 @@ struct SessionFacts {
     /// is the user's, and no snapshot of a `SessionStatus` can answer the
     /// second.
     awaiting: bool,
+    /// **This pane's agent's turns, when its hooks are heard** (0.4.10 plan row 75) —
+    /// [`agent_turns::TurnAccount::agent_turn`]. `Some` replaces the shell's reading of
+    /// "finished": the agent's turn end instead of its bytes, the agent's turn instead of the
+    /// shell's `working`. `None` is every other pane, read as before.
+    turn: Option<agent_turns::AgentTurn>,
 }
 
 impl SessionFacts {
@@ -22739,6 +22750,21 @@ impl SessionFacts {
     /// wears a dot telling you to look at it.
     fn has_unseen_output(self) -> bool {
         !self.tab_is_active && self.output_revision > self.last_seen_revision
+    }
+
+    /// **Whether an agent's turn ended where the user has not seen it** (0.4.10 plan row 75) —
+    /// [`Self::has_unseen_output`]'s sentence for a pane read by its agent's turns.
+    ///
+    /// The end is held at the output revision the pane had reached when it was heard, and seeing
+    /// is painting, as it is for every pane: a turn whose last words were painted before the user
+    /// left is not news, and a turn that went on writing after they left is. What the agent draws
+    /// between turns — a status line, a repaint for a focus report — moves the output revision and
+    /// nothing else, so it lights nothing.
+    fn has_unseen_turn_end(self, turn: agent_turns::AgentTurn) -> bool {
+        !self.tab_is_active
+            && turn
+                .ended_at
+                .is_some_and(|ended| ended > self.last_seen_revision)
     }
 
     /// What this session is claiming right now.
@@ -22761,16 +22787,33 @@ impl SessionFacts {
     /// The bell is the exception to both: it is latched by the session and
     /// survives whatever else is happening, because a bell is a thing that
     /// *rang*, not a state the session is in.
+    ///
+    /// **For a pane read by its agent's turns** (0.4.10 plan row 75) the two readings of
+    /// "finished" are the agent's and not the shell's: work in flight is a turn under way, unread
+    /// is a turn's end the user has not seen, and the shell's exit code says nothing about the
+    /// agent's turn — a typed agent stands on the shell's previous command, whose failure is not
+    /// the agent's (the owner's ruling R5, 2026-11-06: a failed turn is a plain blue end).
     fn claim(self) -> StatusClaim {
-        let work_in_flight = self.status.working || self.status.progress.is_some();
-        let unread = !work_in_flight && self.has_unseen_output();
+        let (work_in_flight, unseen, exit_speaks) = match self.turn {
+            Some(turn) => (
+                turn.running || self.status.progress.is_some(),
+                self.has_unseen_turn_end(turn),
+                false,
+            ),
+            None => (
+                self.status.working || self.status.progress.is_some(),
+                self.has_unseen_output(),
+                true,
+            ),
+        };
+        let unread = !work_in_flight && unseen;
         if self.awaiting {
             // Above every suppression below it, and deliberately: a queue place
             // is not a claim *about output*, so neither "work in flight" nor
             // "you have already looked" has anything to say about it. §7.1.5b:
             // 看一眼阻塞的 agent 不解除阻塞.
             StatusClaim::Awaiting
-        } else if unread && self.status.failure_exit_code.is_some() {
+        } else if unread && exit_speaks && self.status.failure_exit_code.is_some() {
             StatusClaim::Failed
         } else if self.status.bell_latched() {
             StatusClaim::Bell
@@ -23006,17 +23049,39 @@ fn deliver_attention(
                 );
                 break;
             }
+            // **Which hook reached which pane, every time** (0.4.10 plan row 75): the arrival
+            // itself, which the decisions below record only when one is taken — so the gap between
+            // a turn's end and whatever comes next can be read off the trace.
+            emit_attention_lines(
+                trace,
+                vec![attention_trace::hear_line(
+                    at,
+                    &message.family,
+                    &message.event,
+                )],
+            );
             // **Any hook from the pane says its resumed agent ran** (row 195, review N3) — a
             // submitted prompt as much as a finished turn — so its end is no failed resume.
             leaf.agent.spoke();
+            // What the pane's program makes it, asked once for the two accounts below.
+            let child = leaf
+                .agent
+                .child(leaf.launch.program.as_deref(), leaf.session.command_marks());
             // **The session the turn ended in, heard by the pane it ended in** (row 195).
             if let Some(heard) = &message.resume
                 && let Some(vendor) = agent_resume::vendor(&message.family)
             {
-                let child = leaf
-                    .agent
-                    .child(leaf.launch.program.as_deref(), leaf.session.command_marks());
                 recorded |= leaf.agent.hear(vendor, heard, child);
+            }
+            // **And the turn itself, which is what an agent pane's blue dot is read from**
+            // (row 75): ended, begun, or reported in from inside one.
+            if let Some(step) = asks.turn {
+                leaf.turn_account.hear_turn_step(
+                    step,
+                    &message.family,
+                    child,
+                    leaf.output_revision,
+                );
             }
             if let Some(event) = asks.ledger.clone() {
                 // The clock mirrors the arrival rather than the ledger's answer, and deliberately:
@@ -33348,6 +33413,9 @@ fn create_leaf_session(
         &seed.agent,
         shell.is_some() && resuming_vendor(seed, &started).is_some(),
     );
+    // **A resume's turns are its agent's from birth** (row 75): its record was written by that
+    // agent's own `Stop`, so what it draws while it reloads is no finished turn.
+    leaf.session.turn_account = agent_turns::TurnAccount::born_beside(&leaf.session.agent);
     match shell {
         // **Born later, standing where its shell will stand.** The place is said now, from the
         // decision, so a pane split off or restarted from this one while it is being born is put
@@ -33557,6 +33625,8 @@ fn bare_leaf(
             attention_ended: false,
             // Told what it is born as by `create_leaf_session`, once the birth is decided.
             agent: agent_resume::AgentAccount::default(),
+            // Likewise: a resume is bound from birth, any other pane at its agent's first turn.
+            turn_account: agent_turns::TurnAccount::default(),
             grid,
             conpty_grid: grid,
             pending_pty_resize: None,
@@ -33733,6 +33803,8 @@ fn finish_leaf_birth(
     let stood_in = shell_fallback.is_some() && leaf.agent.is_resumed();
     if stood_in {
         leaf.agent = agent_resume::AgentAccount::default();
+        // Nor are its turns an agent's (row 75): the stand-in is read by the shell's rule.
+        leaf.turn_account = agent_turns::TurnAccount::default();
     }
     // **A pane born on the inbox ConPTY says so, once, and why** (T-KEYBOARD-RECORDS). The
     // process falls back to Windows' own ConPTY when the packaged pair is missing or will not
