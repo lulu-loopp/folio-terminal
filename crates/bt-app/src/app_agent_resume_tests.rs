@@ -1634,6 +1634,59 @@ fn a_codex_config_override_is_carried_only_for_a_key_with_no_secret() {
     }
 }
 
+/// RED (row 74, the coordinator's ruling of 2026-11-07) — **a Codex `--remote` is carried only
+/// when its address has no userinfo**: `ws://host:port`, `wss://host:port/`, `unix://` and
+/// `unix://PATH` come back, split or attached; `wss://user:pass@host`, `ws://token@host` and a
+/// form Codex does not document are dropped and named `--remote`, the address never written. An
+/// `@` past the authority, or in a socket's path, is no userinfo.
+///
+/// MUTATION (plant `plant-74-secret-carried.py`, its third site): `--remote` carried whatever its
+/// address — the userinfo cases go red.
+#[test]
+fn a_codex_remote_is_carried_only_without_userinfo() {
+    let codex = &VENDORS[1];
+    for address in [
+        "ws://127.0.0.1:4500",
+        "wss://example.com:443/",
+        "wss://example.com/a@b",
+        "unix://",
+        "unix://codex.sock",
+        "unix:///run/user/501/codex@daemon",
+    ] {
+        assert_eq!(
+            launch_read(codex, &["codex", "--remote", address]),
+            read_launch(&["--remote", address], &[]),
+            "{address}"
+        );
+        let attached = format!("--remote={address}");
+        assert_eq!(
+            launch_read(codex, &["codex", attached.as_str()]),
+            read_launch(&[attached.as_str()], &[]),
+            "{attached}"
+        );
+    }
+    for address in [
+        "wss://user:pass@example.com:443/",
+        "ws://token@127.0.0.1:4500",
+        "wss://@example.com",
+        "WSS://example.com",
+        "example.com:443",
+        "http://example.com",
+    ] {
+        assert_eq!(
+            launch_read(codex, &["codex", "--remote", address, "--search"]),
+            read_launch(&["--search"], &["--remote"]),
+            "{address}"
+        );
+        let attached = format!("--remote={address}");
+        assert_eq!(
+            launch_read(codex, &["codex", attached.as_str()]),
+            read_launch(&[], &["--remote"]),
+            "{attached}"
+        );
+    }
+}
+
 /// RED (row 74, review N3) — **every flag a Codex launch carries is one `codex resume` takes**,
 /// because the resume hands them after its own `resume <id>`, and a flag `resume` refused would end
 /// the resume itself. The set is read off `codex resume`'s parser at `rust-v0.166.0`

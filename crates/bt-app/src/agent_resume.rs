@@ -286,6 +286,12 @@ pub(crate) enum CarriedValues {
     /// keys that hold no credential (review N2, ruling (a)). A dotted key (`mcp_servers.x.env.…`),
     /// any other key and a value with no `=` are not carried.
     KeyIn(&'static [&'static str]),
+    /// Only an address in a form the vendor documents and with no userinfo (the coordinator's
+    /// ruling of 2026-11-07, for Codex's `--remote`): `ws://` or `wss://` whose authority — the
+    /// text after `://` up to the first `/`, `?` or `#` — holds no `@`, or `unix://` and a socket
+    /// path, which names no host and so no user. `wss://user:pass@host` is not carried, and nor is
+    /// any other form.
+    AddressWithoutUserinfo,
 }
 
 impl CarriedValues {
@@ -298,6 +304,19 @@ impl CarriedValues {
             Self::KeyIn(keys) => value
                 .split_once('=')
                 .is_some_and(|(key, _)| keys.contains(&key.trim())),
+            Self::AddressWithoutUserinfo => {
+                value.starts_with("unix://")
+                    || ["ws://", "wss://"]
+                        .iter()
+                        .find_map(|scheme| value.strip_prefix(scheme))
+                        .is_some_and(|rest| {
+                            !rest
+                                .split(['/', '?', '#'])
+                                .next()
+                                .unwrap_or_default()
+                                .contains('@')
+                        })
+            }
         }
     }
 }
@@ -539,9 +558,9 @@ pub(crate) const CODEX_LAUNCH: LaunchTable = {
             flag(&["--search"], Nothing, Carried),
             flag(&["--no-alt-screen"], Nothing, Carried),
             flag(&["--no-daemon"], Nothing, Carried),
-            // `InteractiveRemoteOptions`: an address, and the name of the variable that holds the
-            // token — never the token.
-            flag(&["--remote"], One, Carried),
+            // `InteractiveRemoteOptions`: an address with no userinfo (the coordinator's ruling of
+            // 2026-11-07), and the name of the variable that holds the token — never the token.
+            carried_flag(&["--remote"], One, CarriedValues::AddressWithoutUserinfo),
             flag(&["--remote-auth-token-env"], One, Carried),
             // The root's global arguments (`CliConfigOverrides`, `FeatureToggles`).
             carried_flag(
