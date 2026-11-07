@@ -46,6 +46,11 @@
 //! No payload is interpolated. `timeoutSec: 5` remains unchanged. Legacy shell
 //! entries are decoded only for ownership and migrated on an explicit install.
 //!
+//! **The file is Folio's, and the person's edits of it are theirs** (0.4.10 plan row 67b, ruling
+//! N1): an install brings each of Folio's entries into today's form where it stands
+//! ([`installed_document`]) and changes nothing else of it — a `timeoutSec` or a `matcher` the
+//! person set, and a copy of an entry they put under another event, stay.
+//!
 //! # The version gate
 //!
 //! `permission_prompt` did not always mean what this build reads it as. Upstream's changelog, at
@@ -107,12 +112,31 @@ const MINIMUM: Version = Version {
     patch: 26,
 };
 
-/// A `major.minor.patch`, and nothing about what it is a version of.
+/// A `major.minor.patch`, and nothing about what it is a version of — copilot's here, and codex's
+/// in [`attention_codex`](crate::attention_codex) (0.4.10 plan row 69c).
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) struct Version {
     major: u32,
     minor: u32,
     patch: u32,
+}
+
+impl Version {
+    /// A version named in the code — a floor a row is gated on.
+    pub(crate) const fn new(major: u32, minor: u32, patch: u32) -> Self {
+        Self {
+            major,
+            minor,
+            patch,
+        }
+    }
+}
+
+/// `major.minor.patch`, as the program printed it: what a row's sentence names.
+impl std::fmt::Display for Version {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}.{}.{}", self.major, self.minor, self.patch)
+    }
 }
 
 /// Read only by the Windows probe ([`run_probe`]) and by this file's tests: off Windows the probe
@@ -137,7 +161,7 @@ impl Version {
     /// each part parse whole, would have read one real machine as a four-part version and the other
     /// as nothing.
     #[must_use]
-    fn parse(text: &str) -> Option<Self> {
+    pub(crate) fn parse(text: &str) -> Option<Self> {
         text.split_whitespace().find_map(|word| {
             let trimmed = word
                 .trim_matches(|character: char| !character.is_ascii_digit() && character != '.');
@@ -457,25 +481,27 @@ fn entry_owner(entry: &Value) -> Result<Option<PathBuf>, &'static str> {
     Ok(owner)
 }
 
-fn owners(document: &Value) -> Result<Vec<PathBuf>, &'static str> {
+/// The programs the file's entries name. Refused, by the sentence's key (review N7): a file of a
+/// shape this build does not know, and one with an entry that is not Folio's.
+fn owners(document: &Value) -> Result<Vec<PathBuf>, crate::i18n::Text> {
     if document.get("version").and_then(Value::as_u64) != Some(SCHEMA_VERSION)
         || document.as_object().is_none_or(|o| {
             o.keys()
                 .any(|k| !["version", "hooks"].contains(&k.as_str()))
         })
     {
-        return Err(crate::i18n::Text::AgentHooksSchemaUnknown.text());
+        return Err(crate::i18n::Text::AgentHooksSchemaUnknown);
     }
     let mut paths = Vec::new();
     for entries in document
         .get("hooks")
         .and_then(Value::as_object)
-        .ok_or(crate::i18n::Text::AgentHooksSchemaUnknown.text())?
+        .ok_or(crate::i18n::Text::AgentHooksSchemaUnknown)?
         .values()
     {
         for entry in entries
             .as_array()
-            .ok_or(crate::i18n::Text::AgentHooksSchemaUnknown.text())?
+            .ok_or(crate::i18n::Text::AgentHooksSchemaUnknown)?
         {
             // **Ownership is per entry** (closure review R4): an entry this build cannot decode is
             // not Folio's, which is the same fact about this file as an entry that is plainly
@@ -485,7 +511,7 @@ fn owners(document: &Value) -> Result<Vec<PathBuf>, &'static str> {
                 entry_owner(entry)
                     .ok()
                     .flatten()
-                    .ok_or(crate::i18n::Text::AgentCopilotFileTaken.text())?,
+                    .ok_or(crate::i18n::Text::AgentCopilotFileTaken)?,
             );
         }
     }
@@ -506,7 +532,7 @@ fn declares_folio(document: &Value) -> bool {
 pub(crate) fn scan_resolved(
     config: &crate::attention_hooks::Config,
     exe: &Path,
-    look: &dyn Fn(&Path) -> ownership::PathStands,
+    look: &dyn ownership::Look,
 ) -> HooksFound {
     let text = match config.standing() {
         crate::attention_hooks::Standing::Nothing => return HooksFound::Nothing,
@@ -523,16 +549,16 @@ pub(crate) fn scan_resolved(
     let paths = match owners(&document) {
         Ok(paths) => paths,
         // The file's shape was read, and an entry in it is not one of Folio's.
-        Err(reason) if reason == crate::i18n::Text::AgentCopilotFileTaken.text() => {
+        Err(crate::i18n::Text::AgentCopilotFileTaken) => {
             return if unclassified_entry(&document) {
                 HooksFound::Unclassified
             } else {
-                HooksFound::Declined(reason)
+                HooksFound::Declined(crate::i18n::Text::AgentCopilotFileTaken.into())
             };
         }
         Err(_) => return HooksFound::Unreadable,
     };
-    ownership::classify_owners(&paths, exe, look, || copilot_drifted(&document, exe))
+    ownership::classify_owners(&paths, exe, look, || copilot_form(&document, exe))
 }
 
 /// Whether an entry [`entry_owner`] cannot read names a copy of Folio in one of its program columns.
@@ -557,25 +583,226 @@ fn unclassified_entry(document: &Value) -> bool {
         })
 }
 
-/// **Whether any entry of this copy's is not today's** (R3): one [`document_for`] does not write
-/// under its event — the `powershell` and `bash` columns of the old templates (P1, P2), another
-/// timeout, another spelling of the program. An event missing from the file is not drift: none of
-/// this family's carries resume, and the person may have taken it out.
-fn copilot_drifted(document: &Value, exe: &Path) -> bool {
-    let today = document_for(exe);
+/// **The form of this copy's entries** (R3 and ruling N1, 2026-11-05; [`ownership::Form`]).
+///
+/// Old only in the ruled shapes: an entry an install claims ([`claims`]) in the `powershell` or
+/// `bash` column of the old templates (P1, P2), naming the program in another spelling, or with
+/// other arguments. A `timeoutSec` or a `matcher` the person set on Folio's entry is theirs, and is
+/// not drift. An event missing from the file is not drift either: none of this family's carries
+/// resume, and the person may have taken it out. This copy's entries no install claims are the
+/// person's placing, and named.
+fn copilot_form(document: &Value, exe: &Path) -> ownership::Form {
+    let wanted = wanted(exe);
+    let claimed = claims(document, &wanted, exe);
+    if wanted
+        .iter()
+        .zip(&claimed)
+        .any(|(want, at)| at.is_some_and(|at| !in_todays_form(entry_at(document, at), want)))
+    {
+        return ownership::Form::Old;
+    }
+    let mut placed: Vec<String> = Vec::new();
+    for (event, entries) in hooks_of(document) {
+        for (index, _) in entries.iter().enumerate() {
+            let at = (event.as_str(), index);
+            if !claimed.contains(&Some(at)) && !placed.iter().any(|placed| placed == event) {
+                placed.push(event.clone());
+            }
+        }
+    }
+    if placed.is_empty() {
+        ownership::Form::Today
+    } else {
+        ownership::Form::Placed(placed)
+    }
+}
+
+/// **One entry an install wants**: its event, the row it speaks for (the `<row>` of
+/// `copilot:<row>`), and the entry [`document_for`] writes for it.
+struct Wanted {
+    event: String,
+    row: &'static str,
+    entry: Value,
+}
+
+/// Every entry one install writes, in [`rows_to_install`]'s order.
+fn wanted(exe: &Path) -> Vec<Wanted> {
+    rows_to_install()
+        .into_iter()
+        .map(|row| Wanted {
+            event: event_of(row.event).to_owned(),
+            row: row.event,
+            entry: todays_entry(row.event, exe),
+        })
+        .collect()
+}
+
+/// The event a row's entry hangs on: the row before its matcher.
+fn event_of(row: &str) -> &str {
+    row.split_once('.').map_or(row, |(event, _)| event)
+}
+
+/// **The entry this build writes for one row**, naming this copy's program.
+fn todays_entry(row: &str, exe: &Path) -> Value {
+    let mut entry = Map::new();
+    if let Some((_, matcher)) = row.split_once('.') {
+        entry.insert("matcher".to_owned(), matcher.into());
+    }
+    entry.insert("exec".to_owned(), exe.to_string_lossy().as_ref().into());
+    entry.insert(
+        "args".to_owned(),
+        serde_json::json!(["attention", format!("{COPILOT}:{row}")]),
+    );
+    entry.insert("timeoutSec".to_owned(), TIMEOUT_SECONDS.into());
+    // Upstream defaults this to `"command"` when it is omitted. Written anyway, because a default
+    // is a thing that can change and this file has to keep meaning one thing.
+    entry.insert("type".to_owned(), "command".into());
+    Value::Object(entry)
+}
+
+/// A document's events and their entries, in the file's order. The shape is [`owners`]'s to
+/// refuse; what is not an array of entries holds none here.
+fn hooks_of(document: &Value) -> impl Iterator<Item = (&String, &Vec<Value>)> {
     document
         .get("hooks")
         .and_then(Value::as_object)
-        .is_some_and(|hooks| {
-            hooks.iter().any(|(event, entries)| {
-                let wanted = today["hooks"].get(event).and_then(Value::as_array);
-                entries.as_array().is_some_and(|entries| {
-                    entries
-                        .iter()
-                        .any(|entry| wanted.is_none_or(|wanted| !wanted.contains(entry)))
-                })
+        .into_iter()
+        .flatten()
+        .filter_map(|(event, entries)| Some((event, entries.as_array()?)))
+}
+
+/// The entry at an event and an index of it.
+fn entry_at<'d>(document: &'d Value, (event, index): (&str, usize)) -> &'d Value {
+    &document["hooks"][event][index]
+}
+
+/// **The row an entry of Folio's speaks for**: the `<row>` of its `copilot:<row>` word, from its
+/// `args` or, in the old shell columns, from the line after ` attention `. [`entry_owner`] reads
+/// an owner only off an entry that names one.
+fn row_of(entry: &Value) -> Option<String> {
+    let family = format!("{COPILOT}:");
+    if entry.get("exec").is_some() {
+        return entry
+            .get("args")?
+            .get(1)
+            .and_then(Value::as_str)
+            .and_then(|word| word.strip_prefix(&family))
+            .map(str::to_owned);
+    }
+    let line = ["bash", "powershell", "command"]
+        .iter()
+        .find_map(|column| entry.get(*column).and_then(Value::as_str))?;
+    let (_, tail) = line.rsplit_once(&format!(" attention {family}"))?;
+    Some(tail.to_owned())
+}
+
+/// **The entry each wanted entry claims** (ruling N1, 2026-11-05), in `wanted`'s order: under the
+/// wanted event, one of Folio's that speaks for the same row, this copy's first, then any
+/// copy's. Ownership is by content: the entry's place in its event's list, and the `matcher` and
+/// `timeoutSec` the person may have set on it, say nothing of which entry it is.
+fn claims<'d>(document: &'d Value, wanted: &[Wanted], exe: &Path) -> Vec<Option<(&'d str, usize)>> {
+    let mut claimed: Vec<Option<(&'d str, usize)>> = Vec::with_capacity(wanted.len());
+    for want in wanted {
+        let candidates: Vec<((&'d str, usize), PathBuf)> = hooks_of(document)
+            .filter(|(event, _)| **event == want.event)
+            .flat_map(|(event, entries)| {
+                entries
+                    .iter()
+                    .enumerate()
+                    .map(move |(index, entry)| ((event.as_str(), index), entry))
             })
-        })
+            .filter(|(at, entry)| {
+                !claimed.contains(&Some(*at)) && row_of(entry).as_deref() == Some(want.row)
+            })
+            .filter_map(|(at, entry)| Some((at, entry_owner(entry).ok().flatten()?)))
+            .collect();
+        let this_copys = candidates
+            .iter()
+            .find(|(_, owner)| crate::explorer_menu::same_path(owner, exe));
+        claimed.push(this_copys.or(candidates.first()).map(|(at, _)| *at));
+    }
+    claimed
+}
+
+/// **Whether a claimed entry is in today's form**: the `exec` column, naming this copy's program as
+/// this build spells it, with the wanted entry's arguments. Every other key of it is the person's
+/// to set — `timeoutSec` and `matcher` among them.
+fn in_todays_form(entry: &Value, want: &Wanted) -> bool {
+    entry.get("exec").is_some()
+        && entry.get("exec") == want.entry.get("exec")
+        && entry.get("args") == want.entry.get("args")
+}
+
+/// **An entry of Folio's brought into today's form** (`todays`, [`todays_entry`] for its row): an
+/// old shell column is replaced by the entry this build writes; an entry in the `exec` column gets
+/// this copy's program and the row's arguments, and keeps every other key it has, as the person
+/// left them.
+fn repaired_entry(entry: &Value, todays: &Value) -> Value {
+    match (entry.get("exec"), entry.as_object()) {
+        (Some(_), Some(entry)) => {
+            let mut entry = entry.clone();
+            entry.insert("exec".to_owned(), todays["exec"].clone());
+            entry.insert("args".to_owned(), todays["args"].clone());
+            Value::Object(entry)
+        }
+        _ => todays.clone(),
+    }
+}
+
+/// **The document an install writes** over the one standing (ruling N1, 2026-11-05): every wanted
+/// entry claimed where it stands and brought into today's form only when it is not in it, every
+/// wanted entry nobody's entry speaks for appended to its event, and every entry of Folio's left
+/// over kept where it stands as the person's placing — this copy's as it is, another copy's
+/// pointed at this copy with every other key it has (re-review R1; `apply_resolved` has asked
+/// about every other copy before this runs). An event left with nothing goes. Over no file,
+/// [`document_for`].
+fn installed_document(standing: Option<&Value>, exe: &Path) -> Value {
+    let Some(standing) = standing else {
+        return document_for(exe);
+    };
+    let wanted = wanted(exe);
+    let claimed = claims(standing, &wanted, exe);
+    let mut events = Map::new();
+    for (event, entries) in hooks_of(standing) {
+        let kept: Vec<Value> = entries
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| {
+                let at = (event.as_str(), index);
+                if let Some(want) = wanted
+                    .iter()
+                    .zip(&claimed)
+                    .find_map(|(want, claim)| (*claim == Some(at)).then_some(want))
+                {
+                    return Some(if in_todays_form(entry, want) {
+                        entry.clone()
+                    } else {
+                        repaired_entry(entry, &want.entry)
+                    });
+                }
+                let owner = entry_owner(entry).ok().flatten()?;
+                if crate::explorer_menu::same_path(&owner, exe) {
+                    return Some(entry.clone());
+                }
+                Some(repaired_entry(entry, &todays_entry(&row_of(entry)?, exe)))
+            })
+            .collect();
+        if !kept.is_empty() || entries.is_empty() {
+            events.insert(event.clone(), Value::Array(kept));
+        }
+    }
+    for (want, claim) in wanted.iter().zip(&claimed) {
+        if claim.is_none()
+            && let Value::Array(entries) = events
+                .entry(want.event.clone())
+                .or_insert_with(|| Value::Array(Vec::new()))
+        {
+            entries.push(want.entry.clone());
+        }
+    }
+    let mut document = standing.clone();
+    document["hooks"] = Value::Object(events);
+    document
 }
 
 /// **The rows one install writes**: every copilot row. None of them is tiered — this family
@@ -586,7 +813,8 @@ pub(crate) fn rows_to_install() -> Vec<MappingRow> {
     attention_map::installed_rows(attention_map::ROWS, COPILOT, |_| true)
 }
 
-/// **The whole document one install writes**, given where this build lives.
+/// **The whole document one install writes where there is none**, given where this build lives —
+/// and today's form of every entry an install over a standing one claims ([`installed_document`]).
 #[must_use]
 pub(crate) fn document_for(exe: &Path) -> Value {
     document_for_on(exe, bt_platform::host_platform())
@@ -597,28 +825,11 @@ pub(crate) fn document_for(exe: &Path) -> Value {
 pub(crate) fn document_for_on(exe: &Path, _platform: HostPlatform) -> Value {
     let mut hooks = Map::new();
     for row in rows_to_install() {
-        let (event, matcher) = match row.event.split_once('.') {
-            Some((event, matcher)) => (event, Some(matcher)),
-            None => (row.event, None),
-        };
-        let mut entry = Map::new();
-        if let Some(matcher) = matcher {
-            entry.insert("matcher".to_owned(), matcher.into());
-        }
-        entry.insert("exec".to_owned(), exe.to_string_lossy().as_ref().into());
-        entry.insert(
-            "args".to_owned(),
-            serde_json::json!(["attention", format!("{COPILOT}:{}", row.event)]),
-        );
-        entry.insert("timeoutSec".to_owned(), TIMEOUT_SECONDS.into());
-        // Upstream defaults this to `"command"` when it is omitted. Written anyway, because a
-        // default is a thing that can change and this file has to keep meaning one thing.
-        entry.insert("type".to_owned(), "command".into());
         let list = hooks
-            .entry(event.to_owned())
+            .entry(event_of(row.event).to_owned())
             .or_insert_with(|| Value::Array(Vec::new()));
         if let Some(array) = list.as_array_mut() {
-            array.push(Value::Object(entry));
+            array.push(todays_entry(row.event, exe));
         }
     }
     let mut document = Map::new();
@@ -774,7 +985,7 @@ pub(crate) fn apply_resolved(
     };
     let paths = match standing.as_ref().map(owners).transpose() {
         Ok(paths) => paths.unwrap_or_default(),
-        Err(reason) => return Outcome::Refused(reason),
+        Err(reason) => return Outcome::Refused(reason.text()),
     };
     let others = match ownership::check(&paths, exe, &decision) {
         Ok(others) => others,
@@ -817,7 +1028,7 @@ pub(crate) fn apply_resolved(
             Ok(lock) => lock,
             Err(reason) => return Outcome::Refused(reason),
         };
-        let written = document_for(exe);
+        let written = installed_document(standing.as_ref(), exe);
         if standing.as_ref() == Some(&written) {
             return Outcome::Unchanged;
         }
@@ -1168,91 +1379,102 @@ pub(crate) fn probe_settled() -> bool {
 /// whatever folder the shell that started Folio was standing in. A `copilot.cmd` dropped into a
 /// cloned repository therefore ran the moment somebody opened Settings ▸ Agents — a page about
 /// agents, running a program nobody named, with no press on anything. So the search is this
-/// window's own ([`bt_platform::program_in_directories`], which never looks at a working
-/// directory) and what `cmd` receives is the answer, quoted, with nothing left to resolve.
+/// window's own ([`ProbeEnvironment::program`](crate::shell_integration::ProbeEnvironment::program):
+/// [`bt_platform::program_in_directories`] over the block's `PATH`, or `program_on_path` over the
+/// inherited one, neither of which looks at a working directory) and what `cmd` receives is the
+/// answer, quoted, with nothing left to resolve.
 ///
 /// **In the environment a pane is born with** (T-FRESH-FACTS): the current logon block
 /// (`bt_platform::environment::fresh_logon_environment`, the door T-ENV-REFRESH's births and the
-/// program walk use), not this process's launch environment. Both the search (its `PATH` and
+/// program walk use, read as the PowerShell probes read it: `shell_integration::ProbeEnvironment`),
+/// not this process's launch environment. Both the search (its `PATH` and
 /// `PATHEXT`) and the child (`copilot.cmd` starts `node` off its `PATH`) read it, so a copilot
 /// or a `node` installed while Folio runs is found and runs the way a pane would run it. A block
 /// that cannot be read is said, and the inherited environment is used, the pane birth's rule.
 #[cfg(windows)]
 fn run_probe(ctx: &bt_platform::admission::WorkerCtx) -> Option<Version> {
-    let environment = match bt_platform::environment::fresh_logon_environment(ctx) {
-        Ok(block) => block,
-        Err(error) => {
-            crate::diagnostics::note(&format!(
-                "copilot probe: the current environment could not be read ({error}); copilot is \
-                 looked for in the inherited one"
-            ));
-            None
+    let environment = crate::shell_integration::ProbeEnvironment::current(ctx, "copilot probe");
+    let copilot = environment.program(Path::new("copilot"))?;
+    match version_through_cmd(ctx, &copilot, &environment, PROBE_DEADLINE, "copilot")? {
+        // Copilot's rule, kept: whatever it printed, whatever its exit status, read for a
+        // version (a copilot that says its version and then fails to look for updates is the
+        // version it said).
+        bt_platform::ProbeEnding::Finished(output) => {
+            Version::parse(&String::from_utf8_lossy(&output.stdout))
         }
-    };
-    let variable = |name: &str| match &environment {
-        Some(block) => block
-            .iter()
-            .find(|(held, _)| held.to_string_lossy().eq_ignore_ascii_case(name))
-            .map(|(_, value)| value.clone()),
-        None => std::env::var_os(name),
-    };
-    let directories: Vec<PathBuf> = variable("PATH")
-        .map(|path| {
-            std::env::split_paths(&path)
-                // Absolute entries only: an empty entry, and a relative one, both mean the
-                // working directory to Windows.
-                .filter(|entry| entry.is_absolute())
-                .collect()
-        })
-        .unwrap_or_default();
-    let pathext =
-        variable("PATHEXT").map_or_else(String::new, |value| value.to_string_lossy().into_owned());
-    let copilot = bt_platform::program_in_directories(
-        Path::new("copilot"),
-        &directories,
-        &pathext,
-        &|candidate: &Path| candidate.is_file(),
-    )?;
+        bt_platform::ProbeEnding::Overran => None,
+    }
+}
+
+/// **`<program> --version`, asked of a program another reader has already found** (0.4.10 plan
+/// row 69c, R17: codex's, found by the program walk) — [`run_probe`]'s question, in the same
+/// environment and through the same `cmd.exe`, held to `deadline`. How it ended, for the asker to
+/// read by its own rule: [`ProbeEnding::Finished`](bt_platform::ProbeEnding::Finished) with its
+/// exit status and what it printed, or
+/// [`ProbeEnding::Overran`](bt_platform::ProbeEnding::Overran) — an answer that may come next
+/// time (the 69c review's C2). `None` when it could not be asked; off Windows no program is asked
+/// (the module header's probe answers `None` there too), so the version is unknown.
+pub(crate) fn program_version(
+    ctx: &bt_platform::admission::WorkerCtx,
+    program: &Path,
+    deadline: std::time::Duration,
+    who: &str,
+) -> Option<bt_platform::ProbeEnding> {
+    #[cfg(windows)]
+    {
+        let environment =
+            crate::shell_integration::ProbeEnvironment::current(ctx, &format!("{who} probe"));
+        version_through_cmd(ctx, program, &environment, deadline, who)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (ctx, program, deadline, who);
+        None
+    }
+}
+
+/// **`program --version` through `cmd.exe`**, in `environment` (laid over the child by
+/// [`ProbeEnvironment::apply`](crate::shell_integration::ProbeEnvironment::apply), so the child
+/// sees the block a pane is born with and nothing of Folio's own), held to `deadline`: how it
+/// ended, or `None` when it could not be started.
+#[cfg(windows)]
+fn version_through_cmd(
+    ctx: &bt_platform::admission::WorkerCtx,
+    program: &Path,
+    environment: &crate::shell_integration::ProbeEnvironment,
+    deadline: std::time::Duration,
+    who: &str,
+) -> Option<bt_platform::ProbeEnding> {
     // Through the quiet door (§7.40 ①): without `CREATE_NO_WINDOW` a console
     // window opens on screen the first time somebody opens the settings dialog.
     let mut command = bt_platform::quiet_command_named(Path::new("cmd.exe"))?;
-    if let Some(block) = &environment {
-        for (name, _) in std::env::vars_os() {
-            if !block.iter().any(|(held, _)| {
-                held.to_string_lossy()
-                    .eq_ignore_ascii_case(&name.to_string_lossy())
-            }) {
-                command.env_remove(name);
-            }
-        }
-        command.envs(block.iter().map(|(name, value)| (name, value)));
-    }
+    environment.apply(&mut command);
     // A raw tail and not `args`, because what is being built is a string `cmd`
     // parses for itself: the outer quotes are the pair it strips, and the inner
     // ones are what keep a program path holding a space one token.
     let ending = bt_platform::probe_output_with_raw_tail(
         ctx,
         &command,
-        std::ffi::OsStr::new(&probe_command_tail(&copilot)),
-        PROBE_DEADLINE,
+        std::ffi::OsStr::new(&probe_command_tail(program)),
+        deadline,
     )
     .ok()?;
-    let output = match ending {
-        bt_platform::ProbeEnding::Finished(output) => output,
+    match &ending {
+        bt_platform::ProbeEnding::Finished(output) => {
+            bt_platform::file_reads::pipe_output(bt_platform::file_reads::Lane::Attention, output);
+        }
         // Stopped at the deadline: the version is unknown (not "no copilot"), and the next
         // trigger asks again.
         bt_platform::ProbeEnding::Overran => {
             crate::diagnostics::note(&format!(
-                "copilot probe: `{} --version` did not answer within {} s and was stopped; the \
+                "{who} probe: `{} --version` did not answer within {} s and was stopped; the \
                  version is unknown until the next probe",
-                copilot.display(),
-                PROBE_DEADLINE.as_secs()
+                program.display(),
+                deadline.as_secs()
             ));
-            return None;
         }
-    };
-    bt_platform::file_reads::pipe_output(bt_platform::file_reads::Lane::Attention, &output);
-    Version::parse(&String::from_utf8_lossy(&output.stdout))
+    }
+    Some(ending)
 }
 
 /// **How long `copilot --version` may take** before the probe stops it and answers "unknown" —
@@ -1267,8 +1489,8 @@ const PROBE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
 /// spawn so the shape can be pinned without a machine that has copilot on it.
 #[cfg(windows)]
 #[must_use]
-fn probe_command_tail(copilot: &Path) -> String {
-    format!("/c \"\"{}\" --version\"", copilot.display())
+fn probe_command_tail(program: &Path) -> String {
+    format!("/c \"\"{}\" --version\"", program.display())
 }
 
 #[cfg(not(windows))]

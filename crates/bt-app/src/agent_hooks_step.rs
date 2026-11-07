@@ -25,15 +25,17 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock, PoisonError};
 
+use bt_platform::admission::WorkerCtx;
+
 use crate::attention_copilot::Readiness;
 use crate::attention_hooks::{Config, Unresolved};
-use crate::attention_ownership::{self as ownership, Decision, HooksFound, Outcome, PathStands};
+use crate::attention_ownership::{self as ownership, Decision, HooksFound, Outcome};
 use crate::i18n::Text;
 use crate::update_trial::Writer;
 
 /// A family's classification of a resolved file, against this copy's program, with the machine's
 /// answer about a path handed in.
-pub(crate) type HooksScanFn = fn(&Config, &Path, &dyn Fn(&Path) -> PathStands) -> HooksFound;
+pub(crate) type HooksScanFn = fn(&Config, &Path, &dyn ownership::Look) -> HooksFound;
 
 /// **One agent's configuration, as the step reads and repairs it** — the seam a family joins by
 /// (row 69's Codex `hooks.json` replaces the `notify` member here).
@@ -50,10 +52,11 @@ pub(crate) struct HooksFamily {
     /// The switch's own writer.
     pub(crate) apply: fn(&Config, Decision, &Path, &Path) -> Outcome,
     /// Whether a repair may write the family's hooks now: always, except where the agent's own
-    /// version decides whether they mean what Folio reads them as (Copilot, R9).
+    /// version decides whether they mean what Folio reads them as (Copilot, R9), or which entry is
+    /// Folio's (Codex, 0.4.10 plan row 69c).
     pub(crate) within_its_gate: fn() -> bool,
-    /// The notice a repair of a gone copy's hooks raises (R8).
-    pub(crate) repaired: Text,
+    /// The notice a repair of a gone copy's hooks raises (R8), by the file the repair wrote.
+    pub(crate) repaired: fn(&Path) -> Text,
 }
 
 /// **The families, in the Agents page's row order** — the order of every per-agent array on the
@@ -66,16 +69,18 @@ pub(crate) static HOOKS_FAMILIES: [HooksFamily; 3] = [
         scan: crate::attention_hooks::scan_resolved,
         apply: crate::attention_hooks::apply_resolved,
         within_its_gate: no_gate,
-        repaired: Text::AgentHooksRepairedClaude,
+        repaired: claude_repaired,
     },
+    // Its file by its version (row 69c): `hooks.json` from 0.148, `config.toml`'s `notify` line
+    // below; repaired only once the version has been asked and answered.
     HooksFamily {
         family: crate::attention_map::CODEX,
         tag: "codex",
-        path: crate::attention_codex::config_path,
+        path: crate::attention_codex::entry_path,
         scan: crate::attention_codex::scan_resolved,
         apply: crate::attention_codex::apply_resolved,
-        within_its_gate: no_gate,
-        repaired: Text::AgentHooksRepairedCodex,
+        within_its_gate: crate::attention_codex::repair_within_the_gate,
+        repaired: crate::attention_codex::repaired_notice,
     },
     // Repaired within its version gate (R9): only once the version question has been asked and
     // answered, and never for a copilot too old for the hooks (`repair_within_the_gate`). Never on
@@ -87,13 +92,22 @@ pub(crate) static HOOKS_FAMILIES: [HooksFamily; 3] = [
         scan: crate::attention_copilot::scan_resolved,
         apply: crate::attention_copilot::apply_resolved,
         within_its_gate: crate::attention_copilot::repair_within_the_gate,
-        repaired: Text::AgentHooksRepairedCopilot,
+        repaired: copilot_repaired,
     },
 ];
 
 /// A family whose hooks mean the same to every version of its agent.
 fn no_gate() -> bool {
     true
+}
+
+/// The notices of the two families with one file each.
+fn claude_repaired(_: &Path) -> Text {
+    Text::AgentHooksRepairedClaude
+}
+
+fn copilot_repaired(_: &Path) -> Text {
+    Text::AgentHooksRepairedCopilot
 }
 
 /// **One family's answer from one run of the step.**
@@ -103,6 +117,11 @@ pub(crate) struct HooksScan {
     pub(crate) found: HooksFound,
     /// What a repair this run wrote the hooks from.
     pub(crate) repaired_from: Option<HooksFound>,
+    /// The notice that repair owes, when it pointed a gone copy's hooks here (R8) and the rescan
+    /// confirmed it (review N6) — by the file it wrote, for codex's two (row 69c).
+    pub(crate) notice: Option<Text>,
+    /// Why a repair that was due did not happen, when the row has that to say (review N4).
+    pub(crate) unrepaired: Option<Unrepaired>,
 }
 
 impl HooksScan {
@@ -110,15 +129,36 @@ impl HooksScan {
         Self {
             found,
             repaired_from: None,
+            notice: None,
+            unrepaired: None,
+        }
+    }
+
+    fn left(found: HooksFound, why: Unrepaired) -> Self {
+        Self {
+            unrepaired: Some(why),
+            ..Self::unrepaired(found)
         }
     }
 }
 
-/// **What the window adopts**: the three answers, Copilot's readiness read beside them, and the
-/// notices the runs since the last adoption owe.
+/// **Why a due repair was not written, as the Agents row says it** (0.4.10 plan row 67b, review
+/// N4). A repair outside its family's gate, or beside a press, has nothing to say: the version's
+/// answer and the press each run the pass again.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Unrepaired {
+    /// Held while an update is on trial; the commit runs the pass again.
+    Held,
+    /// The writer refused, for its sentence.
+    Refused(&'static str),
+}
+
+/// **What the window adopts**: the three answers, why a due repair was not written, Copilot's
+/// readiness read beside them, and the notices the runs since the last adoption owe.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct HooksSnapshot {
     pub(crate) found: [HooksFound; 3],
+    pub(crate) unrepaired: [Option<Unrepaired>; 3],
     pub(crate) copilot_readiness: Readiness,
     pub(crate) notices: Vec<Text>,
 }
@@ -171,7 +211,7 @@ impl AgentHooksStep {
         paths: &[Option<PathBuf>; 3],
         exe: &Path,
         data: &Path,
-        look: &dyn Fn(&Path) -> PathStands,
+        look: &dyn ownership::Look,
         mut defer: impl FnMut(Writer) -> bool,
         within_its_gate: &dyn Fn(&HooksFamily) -> bool,
     ) -> [HooksScan; 3] {
@@ -204,7 +244,7 @@ impl AgentHooksStep {
             };
             if *held.get_or_insert_with(|| defer(Writer::AgentHooksRepair)) {
                 say("held");
-                return HooksScan::unrepaired(found);
+                return HooksScan::left(found, Unrepaired::Held);
             }
             if !within_its_gate(family) {
                 say("gated");
@@ -216,18 +256,34 @@ impl AgentHooksStep {
             };
             match (family.apply)(&config, Decision::Install, exe, data) {
                 Outcome::Installed => {
-                    let now = (family.scan)(&config.read_afresh(), exe, look);
+                    let config = config.read_afresh();
+                    let now = (family.scan)(&config, exe, look);
+                    // **A repair is said only where the rescan confirms it** (review N6): two copies
+                    // starting together can both land, and the one whose write came first finds
+                    // the other's hooks there now — its own write lost, nothing to announce.
+                    let confirmed = now.is_this_copys();
+                    let notice = (confirmed && matches!(found, HooksFound::Dead(_)))
+                        .then(|| (family.repaired)(config.named()));
                     crate::diagnostics::stderr_line(format!(
                         "BT_AGENT_HOOKS {} {} repaired={}{}",
                         family.tag,
                         now.diagnostic_word(),
-                        found.diagnostic_word(),
+                        if confirmed {
+                            found.diagnostic_word().to_owned()
+                        } else {
+                            format!("lost ({})", now.diagnostic_word())
+                        },
                         gone_programs(&found)
                     ));
                     HooksScan {
-                        found: now,
-                        repaired_from: Some(found),
+                        repaired_from: confirmed.then_some(found),
+                        notice,
+                        ..HooksScan::unrepaired(now)
                     }
+                }
+                Outcome::Refused(reason) => {
+                    say(&format!("refused ({reason})"));
+                    HooksScan::left(found, Unrepaired::Refused(reason))
                 }
                 outcome => {
                     say(&format!("refused ({outcome:?})"));
@@ -248,15 +304,10 @@ impl AgentHooksStep {
             .take()
             .map(|untaken| untaken.notices)
             .unwrap_or_default();
-        notices.extend(
-            scans
-                .iter()
-                .zip(&HOOKS_FAMILIES)
-                .filter(|(scan, _)| matches!(scan.repaired_from, Some(HooksFound::Dead(_))))
-                .map(|(_, family)| family.repaired),
-        );
+        notices.extend(scans.iter().filter_map(|scan| scan.notice));
         *published = Some(HooksSnapshot {
             found: std::array::from_fn(|index| scans[index].found.clone()),
+            unrepaired: std::array::from_fn(|index| scans[index].unrepaired),
             copilot_readiness,
             notices,
         });
@@ -297,16 +348,20 @@ pub(crate) fn install_hooks_wake(wake: impl Fn() + Send + Sync + 'static) {
     let _ = HOOKS_WAKE.set(Box::new(wake));
 }
 
-/// **The step, on this machine**: the carry pass's member ([`crate::carry_pass::CARRY_STEPS`]).
+/// **The step, on this machine**: the carry pass's member ([`crate::carry_pass::run_carry_steps`]).
 ///
 /// **Not before the program walk has answered** (the pane-environment ruling of 2026-10-05: the
 /// folders are the account's current ones, never the launch's): the walk's first answer runs the
 /// pass, so a run asked earlier — an Agents page opened in the first second — has nothing to read
 /// yet and waits for it.
-pub(crate) fn run_agent_hooks_step() {
+pub(crate) fn run_agent_hooks_step(ctx: &WorkerCtx) {
     if !crate::attention_hooks::AGENT_HOMES.answered() {
         return;
     }
+    // The one family whose file is named by a question of its agent: codex's version decides
+    // whether Folio's entry is the hook or the `notify` line (row 69c, R17), so it is settled here,
+    // on the pass's worker, before any family's file is named.
+    let _ = crate::attention_codex::settle_version(ctx);
     let Some(exe) = ownership::this_copy() else {
         crate::diagnostics::stderr_line(
             "BT_AGENT_HOOKS not scanned: this copy's own program could not be named".to_owned(),
@@ -362,21 +417,66 @@ fn test_scratch_root() -> PathBuf {
 
 /// **The Agents row's line over what the scan found**, when it has one to say; `None` keeps the
 /// row's own sentence. A refused file says its reason through `agent_config_refusals`, which also
-/// makes its switch inert, so it has no line here.
+/// makes its switch inert, so it has no line here. A due repair that was held or refused says why
+/// (review N4); this copy's entries no install put where they stand are named by their events
+/// (ruling N1). Said in the language in force.
 #[must_use]
-pub(crate) fn hooks_row_line(found: &HooksFound) -> Option<&'static str> {
-    match found {
-        HooksFound::OtherCopy(programs) => Some(crate::i18n::agent_hooks_other_copy_line(programs)),
-        HooksFound::OwnerUnknown => Some(Text::AgentHooksOwnerUnknown.text()),
-        HooksFound::Unreadable => Some(Text::AgentHooksUnreadable.text()),
-        HooksFound::Unclassified => Some(Text::AgentHooksUnclassified.text()),
-        HooksFound::Declined(reason) => Some(reason),
-        HooksFound::Nothing
-        | HooksFound::Current
-        | HooksFound::Drifted
-        | HooksFound::Dead(_)
-        | HooksFound::Refused(_) => None,
+pub(crate) fn hooks_row_line(
+    found: &HooksFound,
+    unrepaired: Option<Unrepaired>,
+) -> Option<&'static str> {
+    match (found, unrepaired) {
+        (HooksFound::OtherCopy(programs), _) => {
+            Some(crate::i18n::agent_hooks_other_copy_line(programs))
+        }
+        (HooksFound::OwnerUnknown, _) => Some(Text::AgentHooksOwnerUnknown.text()),
+        (HooksFound::Unreadable, _) => Some(Text::AgentHooksUnreadable.text()),
+        (HooksFound::Unclassified, _) => Some(Text::AgentHooksUnclassified.text()),
+        (HooksFound::Declined(reason), _) => Some(reason.text()),
+        (HooksFound::Placed(events), _) => Some(crate::i18n::agent_hooks_placed_line(events)),
+        (HooksFound::Dead(_) | HooksFound::Drifted, Some(Unrepaired::Held)) => {
+            Some(Text::AgentHooksRepairHeld.text())
+        }
+        (HooksFound::Dead(_) | HooksFound::Drifted, Some(Unrepaired::Refused(reason))) => {
+            Some(crate::i18n::agent_hooks_repair_refused_line(reason))
+        }
+        (
+            HooksFound::Nothing
+            | HooksFound::Current
+            | HooksFound::Drifted
+            | HooksFound::Dead(_)
+            | HooksFound::Refused(_),
+            _,
+        ) => None,
     }
+}
+
+/// **Whether family `index`'s file holds hooks of a living other copy, or of one the machine will
+/// not say about** — the first-run card's question (0.4.10 plan row 67b, ruling N3): a row over
+/// either arrives Off, because a take-over is never a first-run act. Read on the caller's thread,
+/// beside the card's three `state()` reads, by the start-time scan's own classification.
+#[must_use]
+pub(crate) fn held_by_another(index: usize) -> bool {
+    let family = &HOOKS_FAMILIES[index];
+    let Some(path) = family_path(family) else {
+        return false;
+    };
+    // This copy's program cannot be named, so the row's press would be refused
+    // (`stable_executable`): the row arrives Off rather than switched on for a refusal.
+    let Some(exe) = ownership::this_copy() else {
+        return true;
+    };
+    held_at(family, &path, &exe, &ownership::what_stands)
+}
+
+/// [`held_by_another`] over a named file, with the machine's answer about a path handed in.
+fn held_at(family: &HooksFamily, path: &Path, exe: &Path, look: &dyn ownership::Look) -> bool {
+    Config::resolve(path).is_ok_and(|config| {
+        matches!(
+            (family.scan)(&config, exe, look),
+            HooksFound::OtherCopy(_) | HooksFound::OwnerUnknown
+        )
+    })
 }
 
 /// **The resume row's line** (R5): while resume is on, the agents this build resumes whose hooks
@@ -408,7 +508,7 @@ mod tests {
     //! the machine's answer about a path is either the real one about those files or one the test
     //! hands in. No test here reads an agent's real configuration or a Folio data folder.
     use super::*;
-    use crate::attention_ownership::{DeadWhen, volume_root_of, what_stands};
+    use crate::attention_ownership::{DeadWhen, PathStands, volume_root_of, what_stands};
     use serde_json::{Value, json};
     use std::fs;
 
@@ -467,6 +567,36 @@ mod tests {
         false
     }
 
+    /// **A machine a test writes** ([`ownership::Look`]): what stands, by `stands`, and the volume
+    /// every missing path leads to — with the number of times that was asked for, which only the
+    /// scan's rule does (re-review R2).
+    struct MachineAsWritten<F> {
+        stands: F,
+        volume: Option<PathBuf>,
+        volume_asked: std::cell::Cell<usize>,
+    }
+
+    impl<F> MachineAsWritten<F> {
+        fn new(stands: F, volume: Option<PathBuf>) -> Self {
+            Self {
+                stands,
+                volume,
+                volume_asked: std::cell::Cell::new(0),
+            }
+        }
+    }
+
+    impl<F: Fn(&Path) -> PathStands> ownership::Look for MachineAsWritten<F> {
+        fn stands(&self, path: &Path) -> PathStands {
+            (self.stands)(path)
+        }
+
+        fn volume_of(&self, _missing: &Path) -> Option<PathBuf> {
+            self.volume_asked.set(self.volume_asked.get() + 1);
+            self.volume.clone()
+        }
+    }
+
     fn every_family(_: &HooksFamily) -> bool {
         true
     }
@@ -476,7 +606,7 @@ mod tests {
     /// notice per family is published, and a second run writes nothing and owes no notice.
     ///
     /// MUTATIONS: the liveness rule answers "alive" for a missing program
-    /// (`plant-67b-dead-is-alive-r2.py`) and the scan reads another copy's hooks; the repair writes
+    /// (`plant-67b-dead-is-alive-r4.py`) and the scan reads another copy's hooks; the repair writes
     /// nothing (`plant-67b-repair-writes-nothing.py`).
     #[test]
     fn a_dead_owner_is_repaired_at_start_once() {
@@ -548,6 +678,58 @@ mod tests {
         assert!(
             step.take_snapshot().unwrap().notices.is_empty(),
             "a notice was said twice"
+        );
+    }
+
+    /// Row 69c — **on a codex that runs hooks the repair is the hook's**: a gone copy's hook in
+    /// `hooks.json` and the `notify` line it left in `config.toml` are repaired in one write — the
+    /// hook names this copy, the line is out — and the notice says codex asks to trust the new path.
+    ///
+    /// MUTATION: `plant-69c-hook-notice-is-the-lines.py` gives the hook's repair the line's notice.
+    #[test]
+    fn a_gone_copys_codex_hook_and_line_are_repaired_into_the_hook() {
+        let root = root("hooks-step-codex-hook");
+        let gone = copy_at(&root, "A gone");
+        let here = copy_at(&root, "B here");
+        let mut files = files_in(&root.join("config"));
+        let config_toml = files[1].clone();
+        files[1] = config_toml.with_file_name("hooks.json");
+        let gone_data = root.join("gone data");
+        install_all(&files, &gone, &gone_data);
+        assert_eq!(
+            crate::attention_codex::apply_at(&config_toml, Decision::Install, &gone, &gone_data),
+            Outcome::Installed
+        );
+        fs::remove_file(&gone).unwrap();
+        let step = AgentHooksStep::new();
+        let scans = step.scan_and_repair(
+            &some(&files),
+            &here,
+            &root.join("data"),
+            &what_stands,
+            never_held,
+            &every_family,
+        );
+        assert_eq!(
+            scans[1].repaired_from,
+            Some(HooksFound::Dead(vec![gone.clone()]))
+        );
+        assert_eq!(scans[1].found, HooksFound::Current);
+        let hook = fs::read_to_string(&files[1]).unwrap();
+        assert!(
+            hook.contains("B here") && !hook.contains("A gone"),
+            "{hook}"
+        );
+        let line = fs::read_to_string(&config_toml).unwrap();
+        assert!(!line.contains("notify"), "the line is out: {line}");
+        step.publish_scans(&scans, Readiness::Unknown);
+        assert_eq!(
+            step.take_snapshot().unwrap().notices,
+            [
+                Text::AgentHooksRepairedClaude,
+                Text::AgentHooksRepairedCodexHook,
+                Text::AgentHooksRepairedCopilot
+            ]
         );
     }
 
@@ -627,6 +809,60 @@ mod tests {
         assert!(scans[..2].iter().all(|scan| scan.repaired_from.is_some()));
     }
 
+    /// Row 69c (the 69c review's C4) — **codex's repair waits for its version**: before the version
+    /// has been asked, a gone copy's `notify` line is said and left, and neither `config.toml` nor
+    /// a `hooks.json` beside it is written — a repair then could write a hook a codex below 0.148
+    /// skips, in place of the line that works there. Once the version is answered (here: no codex
+    /// where the walk looked, unknown, which is current), the same scan repairs it.
+    ///
+    /// MUTATION: `plant-69c-repair-gate-open.py` opens codex's gate before the version is asked,
+    /// and the line is repaired at once.
+    #[test]
+    fn a_codex_repair_waits_for_the_version() {
+        let root = root("hooks-step-codex-gate");
+        let gone = copy_at(&root, "A gone");
+        let here = copy_at(&root, "B here");
+        let files = files_in(&root.join("config"));
+        let data = root.join("data");
+        install_all(&files, &gone, &root.join("gone data"));
+        fs::remove_file(&gone).unwrap();
+        let hooks_json = files[1].with_file_name("hooks.json");
+        let before = (fs::read(&files[1]).unwrap(), fs::read(&hooks_json).ok());
+        let book = std::sync::Mutex::new(crate::attention_codex::VersionBook::new());
+        let gate = |family: &HooksFamily| {
+            family.tag != "codex" || crate::attention_codex::repair_within_the_gate_in(&book)
+        };
+        let step = AgentHooksStep::new();
+        let scans =
+            step.scan_and_repair(&some(&files), &here, &data, &what_stands, never_held, &gate);
+        assert_eq!(
+            scans[1],
+            HooksScan::unrepaired(HooksFound::Dead(vec![gone.clone()]))
+        );
+        assert_eq!(
+            (fs::read(&files[1]).unwrap(), fs::read(&hooks_json).ok()),
+            before,
+            "both of codex's files byte for byte"
+        );
+        assert!(scans[0].repaired_from.is_some() && scans[2].repaired_from.is_some());
+
+        assert!(crate::attention_codex::adopt_walk_program_in(
+            &book,
+            Some(None)
+        ));
+        let again =
+            step.scan_and_repair(&some(&files), &here, &data, &what_stands, never_held, &gate);
+        assert_eq!(
+            again[1].repaired_from,
+            Some(HooksFound::Dead(vec![gone.clone()]))
+        );
+        let line = fs::read_to_string(&files[1]).unwrap();
+        assert!(
+            line.contains("B here") && !line.contains("A gone"),
+            "{line}"
+        );
+    }
+
     /// T2 — **a living other copy's hooks are left, and said by its path** (R5): nothing is
     /// written, the row names the other program, and the resume row counts both resumed agents as
     /// missing.
@@ -652,7 +888,8 @@ mod tests {
             vec![HooksFound::OtherCopy(vec![other.clone()]); 3]
         );
         assert_eq!(bytes(&files), before);
-        let line = hooks_row_line(&scans[0].found).expect("the row says whose hooks these are");
+        let line = hooks_row_line(&scans[0].found, scans[0].unrepaired)
+            .expect("the row says whose hooks these are");
         assert!(line.contains(&other.display().to_string()), "{line}");
         let resume = resume_row_line(
             true,
@@ -731,7 +968,7 @@ mod tests {
     /// shape is left alone**: C1 (whose `Stop` carried no payload, so resume got nothing), C2, C3
     /// with sh quoting, P1 and P2; C4, X1 and P3 are not written.
     ///
-    /// MUTATIONS: the drift check answers "current" (`plant-67b-shape-check-skipped.py`); the
+    /// MUTATIONS: the drift check answers "current" (`plant-67b-shape-check-skipped-r3.py`); the
     /// repair writes nothing (`plant-67b-repair-writes-nothing.py`).
     #[test]
     fn every_historical_shape_of_this_copy_is_brought_to_the_current_one() {
@@ -932,7 +1169,7 @@ mod tests {
             assert_eq!(scans[family].found, HooksFound::Unreadable, "{text}");
             assert_eq!(fs::read_to_string(&files[family]).unwrap(), text);
             assert_eq!(
-                hooks_row_line(&scans[family].found),
+                hooks_row_line(&scans[family].found, scans[family].unrepaired),
                 Some(Text::AgentHooksUnreadable.text())
             );
             step.publish_scans(&scans, Readiness::Unknown);
@@ -1061,7 +1298,7 @@ mod tests {
         assert_eq!(found(&scans), vec![HooksFound::OwnerUnknown; 3]);
         assert_eq!(bytes(&files), before);
         assert_eq!(
-            hooks_row_line(&scans[0].found),
+            hooks_row_line(&scans[0].found, scans[0].unrepaired),
             Some(Text::AgentHooksOwnerUnknown.text())
         );
     }
@@ -1069,7 +1306,7 @@ mod tests {
     /// T8 (R4) — **a missing owner on a volume that is not there is not dead**: an unplugged
     /// drive's copy keeps its hooks.
     ///
-    /// MUTATION: the volume is not asked about (`plant-67b-no-volume-check-r2.py`).
+    /// MUTATION: the volume is not asked about (`plant-67b-no-volume-check-r4.py`).
     #[test]
     fn an_owner_on_an_absent_volume_is_not_dead() {
         let root = root("hooks-step-volume");
@@ -1080,13 +1317,16 @@ mod tests {
         install_all(&files, &away, &data);
         let before = bytes(&files);
         let volume = volume_root_of(&away).expect("a fixture path names its volume");
-        let look = |path: &Path| {
-            if path == away || path == volume {
-                PathStands::Missing
-            } else {
-                what_stands(path)
-            }
-        };
+        let look = MachineAsWritten::new(
+            |path: &Path| {
+                if path == away || path == volume {
+                    PathStands::Missing
+                } else {
+                    what_stands(path)
+                }
+            },
+            Some(volume.clone()),
+        );
         let scans = AgentHooksStep::new().scan_and_repair(
             &some(&files),
             &here,
@@ -1098,15 +1338,21 @@ mod tests {
         assert_eq!(found(&scans), vec![HooksFound::OwnerUnknown; 3]);
         assert_eq!(bytes(&files), before);
         // The same owner on a volume that answers is dead, by the same rule.
+        let answers = MachineAsWritten::new(
+            |path: &Path| {
+                if path == away {
+                    PathStands::Missing
+                } else {
+                    what_stands(path)
+                }
+            },
+            Some(volume),
+        );
         assert_eq!(
             ownership::other_live_by(
                 &away,
                 &here,
-                |path: &Path| if path == away {
-                    PathStands::Missing
-                } else {
-                    what_stands(path)
-                },
+                &answers,
                 DeadWhen::MissingOnAVolumeThatIsThere
             ),
             Ok(false)
@@ -1118,42 +1364,54 @@ mod tests {
     /// drive's copy never keeps a person from turning hooks off or from uninstalling; the scan,
     /// which writes with nobody asking, calls the same owner unknown. And an operand that names no
     /// file — a bare `folio.exe` an old build wrote, a placeholder — is gone to a press and cannot
-    /// be asked about by the scan, which leaves it and says so.
+    /// be asked about by the scan, which leaves it and says so. A press never walks the way to a
+    /// missing owner's volume: only the scan's rule asks for it (re-review R2).
     ///
-    /// MUTATION: the scan's rule calls an operand that names no file dead
-    /// (`plant-67b-unaskable-operand-dead.py`).
+    /// MUTATIONS: the scan's rule calls an operand that names no file dead
+    /// (`plant-67b-unaskable-operand-dead.py`); the volume is walked whoever asks
+    /// (`plant-67b-volume-walked-eagerly.py`).
     #[test]
     fn the_volume_rule_is_the_scans_and_a_press_decides_on_the_machine_as_it_stands() {
         let root = root("hooks-step-rules");
         let here = copy_at(&root, "B here");
         let away = root.join("A away").join("folio.exe");
         let volume = volume_root_of(&away).expect("a fixture path names its volume");
-        let unplugged = |path: &Path| {
-            if path == away || path == volume {
-                PathStands::Missing
-            } else {
-                what_stands(path)
-            }
-        };
+        let unplugged = MachineAsWritten::new(
+            |path: &Path| {
+                if path == away || path == volume {
+                    PathStands::Missing
+                } else {
+                    what_stands(path)
+                }
+            },
+            Some(volume.clone()),
+        );
         assert_eq!(
-            ownership::other_live_by(&away, &here, unplugged, DeadWhen::Missing),
+            ownership::other_live_by(&away, &here, &unplugged, DeadWhen::Missing),
             Ok(false),
             "a press takes an unplugged drive's copy for gone"
+        );
+        // Re-review R2: a press never walks the way to the volume; only the scan's rule asks.
+        assert_eq!(
+            unplugged.volume_asked.get(),
+            0,
+            "a press asked for the volume"
         );
         assert_eq!(
             ownership::other_live_by(
                 &away,
                 &here,
-                unplugged,
+                &unplugged,
                 DeadWhen::MissingOnAVolumeThatIsThere
             ),
             Err(Text::AgentHooksOwnerUnknown.text()),
             "the scan does not"
         );
+        assert_eq!(unplugged.volume_asked.get(), 1);
         for operand in ["folio.exe", "${HOME}/folio.exe"] {
             let operand = Path::new(operand);
             assert_eq!(
-                ownership::other_live_by(operand, &here, what_stands, DeadWhen::Missing),
+                ownership::other_live_by(operand, &here, &what_stands, DeadWhen::Missing),
                 Ok(false),
                 "a press removes {}",
                 operand.display()
@@ -1162,7 +1420,7 @@ mod tests {
                 ownership::other_live_by(
                     operand,
                     &here,
-                    what_stands,
+                    &what_stands,
                     DeadWhen::MissingOnAVolumeThatIsThere
                 ),
                 Err(Text::AgentHooksOwnerUnknown.text()),
@@ -1374,7 +1632,7 @@ mod tests {
             assert_eq!(&fs::read_to_string(file).unwrap(), text);
         }
         assert_eq!(
-            hooks_row_line(&scans[0].found),
+            hooks_row_line(&scans[0].found, scans[0].unrepaired),
             Some(Text::AgentHooksUnclassified.text())
         );
         fs::write(
@@ -1418,22 +1676,22 @@ mod tests {
             found(&scans),
             [
                 HooksFound::Nothing,
-                HooksFound::Declined(Text::AgentCodexNotifyTaken.text()),
-                HooksFound::Declined(Text::AgentCopilotFileTaken.text())
+                HooksFound::Declined(Text::AgentCodexNotifyTaken.into()),
+                HooksFound::Declined(Text::AgentCopilotFileTaken.into())
             ]
         );
         assert_eq!(fs::read_to_string(&files[1]).unwrap(), codex);
         assert_eq!(fs::read_to_string(&files[2]).unwrap(), copilot);
         assert_eq!(
-            hooks_row_line(&scans[1].found),
+            hooks_row_line(&scans[1].found, scans[1].unrepaired),
             Some(Text::AgentCodexNotifyTaken.text())
         );
     }
 
     /// T12 — **the window's creation reads no agent's file**: `Runtime::create` asks no row state
     /// and no readiness, and the adoption reads none. What the window thread still reads is the
-    /// presses' (R11) and the first-run card's three `state()` questions, asked once on a first run
-    /// (report §2.2).
+    /// presses' (R11) and the first-run card's three `state()` questions and three
+    /// `held_by_another` ones (ruling N3), asked once on a first run (report §2.2).
     #[test]
     fn the_window_thread_reads_no_agent_file_at_start() {
         let create = crate::test_support::method_body("Runtime", "create");
@@ -1454,7 +1712,10 @@ mod tests {
     }
 
     /// **The pass runs at the moments the rulings name** (R7): the walk's answer (its first
-    /// included), the Agents page's open edge, a press, and the trial's commit.
+    /// included), the Agents page's open edge, a press, the trial's commit, and a new language.
+    /// And a press never writes beside the repair (review N2).
+    ///
+    /// MUTATION: the press ignores the latch's answer (`plant-67b-press-beside-repair.py`).
     #[test]
     fn the_pass_runs_at_the_moments_the_rulings_name() {
         use crate::test_support::{free_fn_body, method_body};
@@ -1472,12 +1733,23 @@ mod tests {
                 body.contains("crate::agent_row_asked_again(self.app,"),
                 "{press} does not ask for a scan"
             );
+            // Review N2: a press that finds the repair holding the latch writes nothing.
             assert!(
-                body.contains("AGENT_HOOKS.take_latch("),
-                "{press} takes no latch"
+                body.contains("let Some(press) = agent_hooks_step::AGENT_HOOKS.take_latch(")
+                    && body.contains("return self.press_beside_a_repair(")
+                    && body.contains("drop(press);"),
+                "{press} writes beside a repair"
             );
         }
+        let beside = method_body("Runtime", "press_beside_a_repair");
+        assert!(
+            beside.contains("crate::agent_row_asked_again(self.app, family)")
+                && beside.contains("Text::AgentHooksBeingRepaired"),
+            "a press beside a repair does not say so"
+        );
         assert!(free_fn_body("agent_row_asked_again").contains(begins));
+        // A row's refused repair carries the writer's sentence: a new language says it again.
+        assert!(method_body("Runtime", "adopt_new_language").contains(begins));
         assert!(
             free_fn_body("release_trial_writer")
                 .contains("Writer::AgentHooksRepair => carry_pass::begin_carry_pass()")
@@ -1534,6 +1806,418 @@ mod tests {
         assert!(scratch.starts_with(test_scratch_root()));
         for family in &HOOKS_FAMILIES {
             assert!(family_path(family).is_some_and(|path| path.starts_with(scratch)));
+        }
+    }
+
+    /// The settings file as a value, and written back.
+    fn edit_json(file: &Path, edit: impl FnOnce(&mut Value)) {
+        let mut value: Value = serde_json::from_slice(&fs::read(file).unwrap()).unwrap();
+        edit(&mut value);
+        fs::write(file, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+    }
+
+    /// Folio's `Notification.agent_needs_input` entry, read out of the group it was written in.
+    fn needs_input(settings: &Value) -> Option<(usize, Value)> {
+        settings["hooks"]["Notification"]
+            .as_array()?
+            .iter()
+            .enumerate()
+            .find(|(_, group)| group["matcher"] == "agent_needs_input")
+            .map(|(at, group)| (at, group["hooks"][0].clone()))
+    }
+
+    /// N1 (ruling 2026-11-05) — **a person's edit of this copy's own entries is theirs**: `async`
+    /// set false on `Stop`, a copy of `Stop` put under `SubagentStop`, Folio's
+    /// `Notification.agent_needs_input` entry moved into the person's own `Notification` group,
+    /// and Copilot's `timeoutSec` changed on one entry. The scan calls none of them drift, writes
+    /// nothing, and the row names the event Folio did not put its entry under. When a real old
+    /// shape is repaired beside them (`Stop` without its payload; one Copilot entry in the old
+    /// `powershell` column), only that is rewritten, and every edit of the person's stays.
+    ///
+    /// MUTATION: the drift check compares the whole entry again (`plant-67b-whole-entry-drift.py`).
+    #[test]
+    fn a_persons_edit_of_this_copys_own_entry_is_left() {
+        let root = root("hooks-step-persons-edit");
+        let here = copy_at(&root, "here");
+        let files = files_in(&root.join("config"));
+        let data = root.join("data");
+        install_all(&files, &here, &data);
+        edit_json(&files[0], |settings| {
+            let stop = &mut settings["hooks"]["Stop"][0]["hooks"][0];
+            stop["async"] = json!(false);
+            let copy = stop.clone();
+            settings["hooks"]["SubagentStop"] = json!([{ "hooks": [copy] }]);
+            let (at, entry) = needs_input(settings).expect("the entry an install writes");
+            let groups = settings["hooks"]["Notification"].as_array_mut().unwrap();
+            groups.remove(at);
+            groups.push(json!({ "hooks": [{ "type": "command", "command": "say mine" }, entry] }));
+        });
+        edit_json(&files[2], |document| {
+            let events = document["hooks"].as_object_mut().unwrap();
+            let first = events.values_mut().next().unwrap();
+            first[0]["timeoutSec"] = json!(30);
+        });
+        let edited = bytes(&files);
+        let step = AgentHooksStep::new();
+        let scans = step.scan_and_repair(
+            &some(&files),
+            &here,
+            &data,
+            &what_stands,
+            never_held,
+            &every_family,
+        );
+        let placed = HooksFound::Placed(vec!["SubagentStop".to_owned()]);
+        assert_eq!(scans[0], HooksScan::unrepaired(placed.clone()));
+        assert_eq!(scans[2], HooksScan::unrepaired(HooksFound::Current));
+        assert_eq!(bytes(&files), edited, "a person's edit was written over");
+        let line = hooks_row_line(&scans[0].found, scans[0].unrepaired).expect("said");
+        assert_eq!(
+            line,
+            crate::i18n::agent_hooks_placed_line(&["SubagentStop".to_owned()])
+        );
+        assert!(scans.iter().all(|scan| scan.found.is_this_copys()));
+
+        // A real old shape beside the edits: only it is rewritten.
+        edit_json(&files[0], |settings| {
+            settings["hooks"]["Stop"][0]["hooks"][0]["args"] =
+                json!(["attention", "claude-code:Stop"]);
+        });
+        edit_json(&files[2], |document| {
+            let events = document["hooks"].as_object_mut().unwrap();
+            let last = events.values_mut().last().unwrap();
+            let entry = last[0].as_object_mut().unwrap();
+            let program = entry.remove("exec").unwrap();
+            let request = entry.remove("args").unwrap()[1].clone();
+            entry.insert(
+                "powershell".to_owned(),
+                json!(format!(
+                    "& '{}' attention {}",
+                    program.as_str().unwrap(),
+                    request.as_str().unwrap()
+                )),
+            );
+        });
+        let repaired = step.scan_and_repair(
+            &some(&files),
+            &here,
+            &data,
+            &what_stands,
+            never_held,
+            &every_family,
+        );
+        assert_eq!(repaired[0].repaired_from, Some(HooksFound::Drifted));
+        assert_eq!(repaired[0].found, placed);
+        assert_eq!(repaired[2].repaired_from, Some(HooksFound::Drifted));
+        assert_eq!(repaired[2].found, HooksFound::Current);
+        let settings: Value = serde_json::from_slice(&fs::read(&files[0]).unwrap()).unwrap();
+        let stop = &settings["hooks"]["Stop"][0]["hooks"][0];
+        assert_eq!(
+            stop["args"],
+            json!(["attention", "claude-code:Stop", "--json", "-"])
+        );
+        assert_eq!(
+            stop["async"],
+            json!(false),
+            "the person's async was taken back"
+        );
+        assert!(
+            settings["hooks"]["SubagentStop"].is_array(),
+            "the person's copy under another event was taken out"
+        );
+        assert!(
+            needs_input(&settings).is_none(),
+            "the moved entry was put back in a group of Folio's"
+        );
+        assert!(
+            settings["hooks"]["Notification"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|group| group.get("matcher").is_none()
+                    && group["hooks"].as_array().unwrap().len() == 2),
+            "the moved entry left the person's group"
+        );
+        let document: Value = serde_json::from_slice(&fs::read(&files[2]).unwrap()).unwrap();
+        let first = document["hooks"]
+            .as_object()
+            .unwrap()
+            .values()
+            .next()
+            .unwrap();
+        assert_eq!(
+            first[0]["timeoutSec"],
+            json!(30),
+            "the person's timeout was taken back"
+        );
+        assert!(
+            !fs::read_to_string(&files[2])
+                .unwrap()
+                .contains("powershell")
+        );
+    }
+
+    /// Re-review R1 (2026-11-05) — **a gone copy's entry the person placed is pointed at this copy
+    /// where it stands**: copy A's `Stop` entry copied under `SubagentStop` with `async` set false,
+    /// and A's Copilot `agentStop` entry copied under `subagentStop` with its own `timeoutSec`. A is
+    /// gone, and the start-time repair claims the wanted entries; the two placed ones are not
+    /// deleted but name this copy, keep the person's keys, and the rows say they are the person's.
+    /// Whether a person's placing survives does not hang on whether Folio moved.
+    ///
+    /// MUTATIONS: an install deletes another copy's unclaimed entry again, Claude Code's
+    /// (`plant-67b-placed-deleted.py`) or Copilot's (`plant-67b-placed-deleted-copilot.py`).
+    #[test]
+    fn a_gone_copys_placed_entry_is_pointed_here_where_it_stands() {
+        let root = root("hooks-step-gone-placed");
+        let gone = copy_at(&root, "A gone");
+        let here = copy_at(&root, "B here");
+        let files = files_in(&root.join("config"));
+        let data = root.join("data");
+        install_all(&files, &gone, &root.join("gone data"));
+        edit_json(&files[0], |settings| {
+            let mut copy = settings["hooks"]["Stop"][0]["hooks"][0].clone();
+            copy["async"] = json!(false);
+            settings["hooks"]["SubagentStop"] = json!([{ "hooks": [copy] }]);
+        });
+        edit_json(&files[2], |document| {
+            let mut copy = document["hooks"]["agentStop"][0].clone();
+            copy["timeoutSec"] = json!(45);
+            document["hooks"]["subagentStop"] = json!([copy]);
+        });
+        fs::remove_file(&gone).unwrap();
+        let scans = AgentHooksStep::new().scan_and_repair(
+            &some(&files),
+            &here,
+            &data,
+            &what_stands,
+            never_held,
+            &every_family,
+        );
+        let dead = Some(HooksFound::Dead(vec![gone.clone()]));
+        assert_eq!(scans[0].repaired_from, dead);
+        assert_eq!(
+            scans[0].found,
+            HooksFound::Placed(vec!["SubagentStop".to_owned()])
+        );
+        assert_eq!(scans[2].repaired_from, dead);
+        assert_eq!(
+            scans[2].found,
+            HooksFound::Placed(vec!["subagentStop".to_owned()])
+        );
+        let program = json!(here.to_string_lossy());
+        let settings: Value = serde_json::from_slice(&fs::read(&files[0]).unwrap()).unwrap();
+        let placed = &settings["hooks"]["SubagentStop"][0]["hooks"][0];
+        assert_eq!(
+            placed["command"], program,
+            "the placed entry was not pointed here"
+        );
+        assert_eq!(
+            placed["args"],
+            settings["hooks"]["Stop"][0]["hooks"][0]["args"]
+        );
+        assert_eq!(
+            placed["async"],
+            json!(false),
+            "the person's async was taken back"
+        );
+        let document: Value = serde_json::from_slice(&fs::read(&files[2]).unwrap()).unwrap();
+        let placed = &document["hooks"]["subagentStop"][0];
+        assert_eq!(
+            placed["exec"], program,
+            "the placed entry was not pointed here"
+        );
+        assert_eq!(
+            placed["timeoutSec"],
+            json!(45),
+            "the person's timeout was taken back"
+        );
+        for file in &files {
+            let text = fs::read_to_string(file).unwrap();
+            assert!(
+                !text.contains("A gone"),
+                "{} names the gone copy",
+                file.display()
+            );
+        }
+        assert_eq!(
+            hooks_row_line(&scans[0].found, scans[0].unrepaired),
+            Some(crate::i18n::agent_hooks_placed_line(&[
+                "SubagentStop".to_owned()
+            ]))
+        );
+    }
+
+    /// N4 — **a due repair that did not happen is said on the row, and resume counts the hooks as
+    /// missing**: this copy's C1 hooks (whose `Stop` carries no payload) in a folder where the
+    /// dated copy cannot be kept are not written, the row says the writer's reason, the switch
+    /// reads Off, and the resume row names Claude Code; held during an update's trial, the row
+    /// says the repair waits for the update to be confirmed.
+    ///
+    /// MUTATION: a refused repair is published as nothing to say (`plant-67b-refusal-unsaid.py`).
+    #[test]
+    fn a_due_repair_that_did_not_happen_is_said_and_counts_as_missing() {
+        let root = root("hooks-step-refused");
+        let here = copy_at(&root, "here");
+        let files = files_in(&root.join("config"));
+        let data = root.join("data");
+        install_all(&files, &here, &data);
+        claude_in_old_shape(&files[0], double_quoted, false);
+        let old = fs::read(&files[0]).unwrap();
+        let held = AgentHooksStep::new().scan_and_repair(
+            &some(&files),
+            &here,
+            &data,
+            &what_stands,
+            |_| true,
+            &every_family,
+        );
+        assert_eq!(
+            held[0],
+            HooksScan::left(HooksFound::Drifted, Unrepaired::Held)
+        );
+        assert_eq!(
+            hooks_row_line(&held[0].found, held[0].unrepaired),
+            Some(Text::AgentHooksRepairHeld.text())
+        );
+        // A folder standing where today's copy of the person's file goes.
+        let backup =
+            files[0].with_extension(format!("json.bak-{}", crate::attention_hooks::today()));
+        fs::create_dir_all(&backup).unwrap();
+        let scans = AgentHooksStep::new().scan_and_repair(
+            &some(&files),
+            &here,
+            &data,
+            &what_stands,
+            never_held,
+            &every_family,
+        );
+        let refusal = Text::AgentConfigNoBackup.text();
+        assert_eq!(
+            scans[0],
+            HooksScan::left(HooksFound::Drifted, Unrepaired::Refused(refusal))
+        );
+        assert_eq!(fs::read(&files[0]).unwrap(), old);
+        assert_eq!(
+            hooks_row_line(&scans[0].found, scans[0].unrepaired),
+            Some(crate::i18n::agent_hooks_repair_refused_line(refusal))
+        );
+        let hooked = scans.each_ref().map(|scan| scan.found.is_this_copys());
+        assert_eq!(
+            hooked,
+            [false, true, true],
+            "an old shape counted as this copy's"
+        );
+        assert_eq!(
+            resume_row_line(true, true, hooked),
+            Some(crate::i18n::resume_needs_hooks_line(&["Claude Code"]))
+        );
+    }
+
+    /// Makes `link` lead to `target`: a directory junction on Windows (no privilege needed), a
+    /// symbolic link elsewhere.
+    fn link_to(link: &Path, target: &Path) {
+        let hygiene = bt_pty::test_shell::Hygiene::new();
+        let mut command = if bt_platform::host_platform() == bt_platform::HostPlatform::Windows {
+            let cmd = PathBuf::from(std::env::var_os("SystemRoot").expect("Windows names it"))
+                .join("System32")
+                .join("cmd.exe");
+            let mut command = hygiene.command(cmd, bt_platform::quiet_command);
+            command.args(["/C", "mklink", "/J"]).arg(link).arg(target);
+            command
+        } else {
+            let mut command = hygiene.command("/bin/ln", bt_platform::quiet_command);
+            command.arg("-s").arg(target).arg(link);
+            command
+        };
+        let made = command.output().expect("the link command runs");
+        assert!(
+            made.status.success(),
+            "the link was not made: {}",
+            String::from_utf8_lossy(&made.stderr)
+        );
+    }
+
+    /// N5 — **a missing owner behind a link is judged by the volume the link leads to**: the
+    /// owner is spelled under a junction (a symbolic link off Windows) whose own volume is there.
+    /// With the link's target there, the copy is gone; with the target gone — the drive it was on
+    /// unplugged — the scan cannot follow the way and calls the owner unknown, though the volume
+    /// the path is spelled on answers. A press decides on the machine as it stands.
+    ///
+    /// MUTATION: the volume is read off the path's spelling again
+    /// (`plant-67b-volume-by-spelling-r2.py`).
+    #[test]
+    fn a_missing_owner_behind_a_link_is_judged_where_the_link_leads() {
+        let root = root("hooks-step-link");
+        let here = copy_at(&root, "B here");
+        let target = root.join("elsewhere");
+        fs::create_dir_all(&target).unwrap();
+        let link = root.join("linked");
+        link_to(&link, &target);
+        let owner = link.join("Folio").join("folio.exe");
+        let scan = DeadWhen::MissingOnAVolumeThatIsThere;
+        assert_eq!(
+            ownership::other_live_by(&owner, &here, &what_stands, scan),
+            Ok(false),
+            "a copy gone from where the link leads is gone"
+        );
+        fs::remove_dir_all(&target).unwrap();
+        assert_eq!(
+            what_stands(&volume_root_of(&owner).expect("a volume")),
+            PathStands::Folder,
+            "the volume the path is spelled on is there"
+        );
+        assert_eq!(what_stands(&owner), PathStands::Missing);
+        assert_eq!(
+            ownership::volume_of_a_missing_path(&owner),
+            None,
+            "the way through the link was followed by its spelling"
+        );
+        assert_eq!(
+            ownership::other_live_by(&owner, &here, &what_stands, scan),
+            Err(Text::AgentHooksOwnerUnknown.text()),
+            "a copy behind a link to a volume that is away was called gone"
+        );
+        assert_eq!(
+            ownership::other_live_by(&owner, &here, &what_stands, DeadWhen::Missing),
+            Ok(false)
+        );
+    }
+
+    /// N3 — **the first-run card's question**: a file a living other copy's hooks are in, and one
+    /// whose owner the machine will not say about, is held by another; one with no Folio entry, or
+    /// only a gone copy's, is not.
+    #[test]
+    fn a_file_another_living_copy_holds_is_said_to_the_first_run_card() {
+        let root = root("hooks-step-first-run");
+        let other = copy_at(&root, "A living");
+        let here = copy_at(&root, "B here");
+        let files = files_in(&root.join("config"));
+        let data = root.join("data");
+        for (family, file) in HOOKS_FAMILIES.iter().zip(&files) {
+            assert!(
+                !held_at(family, file, &here, &what_stands),
+                "no file is held"
+            );
+        }
+        install_all(&files, &other, &data);
+        for (family, file) in HOOKS_FAMILIES.iter().zip(&files) {
+            assert!(held_at(family, file, &here, &what_stands), "{}", family.tag);
+            let unknown = |path: &Path| {
+                if path == other {
+                    PathStands::Unknown
+                } else {
+                    what_stands(path)
+                }
+            };
+            assert!(held_at(family, file, &here, &unknown), "{}", family.tag);
+        }
+        fs::remove_file(&other).unwrap();
+        for (family, file) in HOOKS_FAMILIES.iter().zip(&files) {
+            assert!(
+                !held_at(family, file, &here, &what_stands),
+                "{}",
+                family.tag
+            );
         }
     }
 }

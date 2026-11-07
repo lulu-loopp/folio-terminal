@@ -9,16 +9,27 @@
 //! only adopts.
 //!
 //! **Its first member is the agent hooks** ([`crate::agent_hooks_step`], row 67b); row 68a adds the
-//! carry rule's other owner-checked things to [`CARRY_STEPS`] rather than a second worker.
+//! carry rule's other owner-checked things to [`run_carry_steps`] rather than a second worker.
 //!
 //! A request while the pass runs is not lost and not doubled: it is written down, and the worker
 //! runs every step once more before it ends ([`begin_carry_pass_with`]).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// **Every member, in the order the pass runs them**: each is one run of a step on the pass's
-/// worker, and asks the trial's gate for its own writer before it writes.
-pub(crate) const CARRY_STEPS: [fn(); 1] = [crate::agent_hooks_step::run_agent_hooks_step];
+use bt_platform::admission::WorkerCtx;
+
+/// **One round of the pass: every member, in the order the pass runs them**. Each is one run of a
+/// step on the pass's worker, handed the worker's context — a step may ask a program a question
+/// there, as the agent hooks ask codex its version (0.4.10 plan row 69c) — and asks the trial's
+/// gate for its own writer before it writes.
+///
+/// Each member is called by name, never through a list of function pointers: the worker's context
+/// is followed from the thread door to every function it is handed along calls the source guards
+/// resolve (`window_waits_tests::every_worker_door_body_is_reached_from_a_completions_door`), and a
+/// call through a pointer is one they do not follow.
+pub(crate) fn run_carry_steps(ctx: &WorkerCtx) {
+    crate::agent_hooks_step::run_agent_hooks_step(ctx);
+}
 
 /// The pass's two facts between its starts: whether a worker is running it, and whether somebody
 /// asked again while one was.
@@ -89,12 +100,12 @@ pub(crate) fn begin_carry_pass() {
         &CARRY_LATCH,
         &crate::lane::Executor::thread_door(bt_platform::ThreadPriority::BelowNormal),
         crate::diagnostics::note,
-        &CARRY_STEPS,
+        run_carry_steps,
     );
 }
 
-/// [`begin_carry_pass`] with the latch, the executor, the voice and the steps handed in — the
-/// seam the tests press. `true` when a worker was started, or one running was told to go round
+/// [`begin_carry_pass`] with the latch, the executor, the voice and the round's steps handed in —
+/// the seam the tests press. `true` when a worker was started, or one running was told to go round
 /// again.
 ///
 /// **A start the door refuses is said once** and the latch let go, so the next request starts
@@ -104,7 +115,7 @@ pub(crate) fn begin_carry_pass_with(
     latch: &'static CarryLatch,
     executor: &crate::lane::Executor,
     say: impl Fn(&str) + Send + Sync + 'static,
-    steps: &'static [fn()],
+    steps: fn(&WorkerCtx),
 ) -> bool {
     if !latch.ask_for_round() {
         return true;
@@ -115,11 +126,9 @@ pub(crate) fn begin_carry_pass_with(
             crate::lane::Answered::new("the start-time carry pass", say, move |_end| {
                 latch.carry_ended();
             }),
-            move |_ctx| loop {
+            move |ctx| loop {
                 latch.round_begins();
-                for step in steps {
-                    step();
-                }
+                steps(ctx);
                 if !latch.round_again() {
                     break;
                 }
@@ -194,21 +203,24 @@ mod tests {
     fn the_pass_runs_every_step_on_its_worker() {
         static LATCH: CarryLatch = CarryLatch::new();
         static RAN: AtomicUsize = AtomicUsize::new(0);
-        fn first() {
+        fn first(_: &WorkerCtx) {
             assert_eq!(
                 RAN.fetch_add(1, Ordering::AcqRel),
                 0,
                 "the first step runs first"
             );
         }
-        fn second() {
+        fn second(_: &WorkerCtx) {
             assert_eq!(
                 RAN.fetch_add(1, Ordering::AcqRel),
                 1,
                 "the second runs after it"
             );
         }
-        static STEPS: [fn(); 2] = [first, second];
+        fn round(ctx: &WorkerCtx) {
+            first(ctx);
+            second(ctx);
+        }
         let executor = crate::lane::Executor::thread_door(bt_platform::ThreadPriority::BelowNormal);
         // The worker's end is the signal: its voice holds the sender, and the worker lets the
         // voice go when it has ended — after the last round has let the latch go. A voice that is
@@ -217,7 +229,7 @@ mod tests {
         let voice = move |_: &str| {
             let _ = said.send(());
         };
-        assert!(begin_carry_pass_with(&LATCH, &executor, voice, &STEPS));
+        assert!(begin_carry_pass_with(&LATCH, &executor, voice, round));
         assert!(
             ended.recv().is_err(),
             "the pass ended without a word: it started, and no step panicked"

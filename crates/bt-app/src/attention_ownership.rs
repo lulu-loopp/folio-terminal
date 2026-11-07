@@ -1,4 +1,5 @@
 //! Shared policy for per-copy agent marks. Adapters alone decode their schemas.
+use crate::i18n::Text;
 use crate::shell_integration::profile_marks::{self, Marks};
 use std::path::{Path, PathBuf};
 
@@ -73,6 +74,14 @@ pub(crate) enum Outcome {
     Unchanged,
     TakeOverRequired(Vec<PathBuf>),
     LeftOther(Vec<PathBuf>),
+    /// **A removal that went on without a second file it reads**, which it left as it was for
+    /// `reason`: Folio's entry is out of the file the press was on (`removed`), or was not in it.
+    /// codex's alone: a `config.toml` that could not be read does not hold a hook in `hooks.json`
+    /// (0.4.10 plan row 69, review N5).
+    LeftUnread {
+        removed: bool,
+        reason: &'static str,
+    },
     Refused(&'static str),
 }
 
@@ -178,7 +187,7 @@ fn literal_absolute_path(path: &Path) -> Result<&str, &'static str> {
 /// The press's and uninstall's rule ([`DeadWhen::Missing`]): a person's press and the uninstall
 /// decide on this machine as it stands, and R4 is the start-time scan's.
 pub(crate) fn other_live(owner: &Path, exe: &Path) -> Result<bool, &'static str> {
-    other_live_by(owner, exe, what_stands, DeadWhen::Missing)
+    other_live_by(owner, exe, &what_stands, DeadWhen::Missing)
 }
 
 /// **When an owner that is not there is gone**, by who is asking.
@@ -191,20 +200,23 @@ pub(crate) enum DeadWhen {
     /// when the program's volume is there. A program missing because the drive or share it lives
     /// on is not plugged in, or not reachable, has not gone: it comes back with the drive, and a
     /// repair that took its hooks would take them from a copy that is only away. So a missing
-    /// owner is dead only when its volume answers as a folder; any other answer about the volume,
-    /// and an operand that names no file to ask about, is "unknown", which writes nothing and is
-    /// said.
+    /// owner is dead only when the volume its path leads to answers as a folder — the volume of
+    /// where the path goes once every link and junction on it is followed (review N5), not of how
+    /// it is spelled; a path whose way cannot be followed, any other answer about the volume, and
+    /// an operand that names no file to ask about, is "unknown", which writes nothing and is said.
     MissingOnAVolumeThatIsThere,
 }
 
-/// [`other_live`] with the machine's answer to "what stands at this path" and the rule for a
-/// missing owner handed in — the seam the tests press, so a dead owner, an unplugged drive and a
-/// path that cannot be asked about are each a fixture rather than a state of the machine running
-/// them.
+/// [`other_live`] with the machine ([`Look`]) and the rule for a missing owner handed in — the
+/// seam the tests press, so a dead owner, an unplugged drive and a path that cannot be asked about
+/// are each a fixture rather than a state of the machine running them.
+///
+/// The volume a missing owner's path leads to is asked for only under the scan's rule: a press and
+/// the uninstall, which decide on the machine as it stands, never walk it (re-review R2).
 pub(crate) fn other_live_by(
     owner: &Path,
     exe: &Path,
-    look: impl Fn(&Path) -> PathStands,
+    look: &(impl Look + ?Sized),
     dead_when: DeadWhen,
 ) -> Result<bool, &'static str> {
     let unknown = || Err(crate::i18n::Text::AgentHooksOwnerUnknown.text());
@@ -219,16 +231,41 @@ pub(crate) fn other_live_by(
     if crate::explorer_menu::same_path(owner, exe) {
         return Ok(false);
     }
-    match look(owner) {
+    match look.stands(owner) {
         PathStands::File => Ok(true),
-        PathStands::Missing
-            if dead_when == DeadWhen::Missing
-                || volume_root_of(owner)
-                    .is_some_and(|volume| look(&volume) == PathStands::Folder) =>
-        {
-            Ok(false)
-        }
+        PathStands::Missing => match dead_when {
+            DeadWhen::Missing => Ok(false),
+            DeadWhen::MissingOnAVolumeThatIsThere => match look.volume_of(owner) {
+                Some(volume) if look.stands(&volume) == PathStands::Folder => Ok(false),
+                _ => unknown(),
+            },
+        },
         _ => unknown(),
+    }
+}
+
+/// **The machine, as the liveness rule asks it** ([`other_live_by`]): what stands at a path, and
+/// the root of the volume a path that is not there leads to — the second asked only under the
+/// start-time scan's rule (re-review R2, 2026-11-05).
+///
+/// Every `Fn(&Path) -> PathStands` is one, with this machine's own volume walk
+/// ([`volume_of_a_missing_path`]): [`what_stands`] is the product's, and a test's closure decides
+/// what stands while the walk stays the machine's. A test that decides the volume as well writes a
+/// type of its own.
+pub(crate) trait Look {
+    /// What stands at `path`.
+    fn stands(&self, path: &Path) -> PathStands;
+
+    /// The root of the volume `missing`, a path that is not there, leads to; `None` when its way
+    /// cannot be followed.
+    fn volume_of(&self, missing: &Path) -> Option<PathBuf> {
+        volume_of_a_missing_path(missing)
+    }
+}
+
+impl<F: Fn(&Path) -> PathStands + ?Sized> Look for F {
+    fn stands(&self, path: &Path) -> PathStands {
+        self(path)
     }
 }
 
@@ -241,7 +278,8 @@ pub(crate) enum PathStands {
     Folder,
     /// Something that is neither.
     Other,
-    /// Nothing, by the system's own `NotFound`.
+    /// Nothing, by the system's own `NotFound`. Where the path leads is [`Look::volume_of`]'s, and
+    /// asked only by the scan's rule.
     Missing,
     /// The system would not say: a permission, a device that is not ready, a share that does not
     /// answer. **Not evidence of anything.**
@@ -258,6 +296,39 @@ pub(crate) fn what_stands(path: &Path) -> PathStands {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => PathStands::Missing,
         Err(_) => PathStands::Unknown,
     }
+}
+
+/// **The root of the volume a path that is not there leads to** (0.4.10 plan row 67b, review N5),
+/// every link and junction on its way followed — `None` when the way cannot be followed.
+///
+/// A path's spelling does not say which volume it is on: `C:\Tools\Folio\folio.exe`, where
+/// `C:\Tools` is a junction to `E:\Tools`, lives on `E:`, and with `E:` unplugged the program is
+/// away, not gone. So the deepest part of the path that is there — the link itself, where the link
+/// is what stands — is resolved to its final target, the parts that are not there are put back
+/// after it, and the volume is read off that ([`volume_root_of`]). A part the system will not say
+/// about, a link whose target is not there, and a path with no part that is there are all a way
+/// that cannot be followed.
+///
+/// The resolving is the hand-off doors' own ([`bt_platform::handoff::resolved_for_a_door`]:
+/// `fs::canonicalize`, `None` where it fails, without the verbatim prefix it writes on Windows),
+/// so a drive's or a share's root is read as the path names it.
+#[must_use]
+pub(crate) fn volume_of_a_missing_path(path: &Path) -> Option<PathBuf> {
+    let mut missing = Vec::new();
+    let mut there = path;
+    loop {
+        match std::fs::symlink_metadata(there) {
+            Ok(_) => break,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                missing.push(there.file_name()?);
+                there = there.parent()?;
+            }
+            Err(_) => return None,
+        }
+    }
+    let mut leads_to = bt_platform::handoff::resolved_for_a_door(there)?;
+    leads_to.extend(missing.iter().rev());
+    volume_root_of(&leads_to)
 }
 
 /// **The root of the volume a path lives on**: the drive's root or the UNC share's on Windows
@@ -315,6 +386,11 @@ pub(crate) enum HooksFound {
     Nothing,
     /// This copy's, in today's form.
     Current,
+    /// This copy's, in today's form, with entries of this copy's that no install put where they
+    /// stand — under the events carried (ruling N1, 2026-11-05): a copy of one of Folio's entries
+    /// the person put under another event, or a second one. Ownership is by content and never by
+    /// position, so they are left where they are, and said.
+    Placed(Vec<String>),
     /// This copy's, in an older form — or missing the event resume is carried on (R3).
     Drifted,
     /// Folio's entries whose programs are gone, on volumes that are there (R4); this copy's own
@@ -334,8 +410,47 @@ pub(crate) enum HooksFound {
     Refused(&'static str),
     /// A file whose Folio part this build will not write, for the sentence carried — somebody
     /// else's program on Codex's one `notify` key, a hook file of somebody else's under Folio's
-    /// name, a key named twice. The switch stays pressable; its press says the same.
-    Declined(&'static str),
+    /// name, a key named twice. The switch stays pressable, and its press says why. Carried as what
+    /// the sentence is made of, so the row says it in the language in force (review N7).
+    Declined(RowSentence),
+}
+
+/// **The sentence a declined row says** ([`HooksFound::Declined`]), kept as what it is made of and
+/// put into words when the row is drawn, in the language in force (review N7) — codex's two that
+/// name a version, a program or a file among them (0.4.10 plan row 69c).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum RowSentence {
+    /// A sentence of the table.
+    Fixed(Text),
+    /// The writer's refusal of a file it will not edit (a link out of the agent's folder, one with
+    /// hard links, a read-only one) — already a sentence, as [`HooksFound::Refused`] carries one.
+    Said(&'static str),
+    /// Somebody else's program on codex's one `notify` key, on a codex below 0.148 (R12): the
+    /// version, and the program's own file name.
+    CodexNotifyHeld { version: String, program: String },
+    /// Codex's hooks switched off in the `config.toml` at this path (the 69c review's C6).
+    CodexHooksOff(PathBuf),
+}
+
+impl RowSentence {
+    /// The sentence, in the language in force.
+    #[must_use]
+    pub(crate) fn text(&self) -> &'static str {
+        match self {
+            Self::Fixed(text) => text.text(),
+            Self::Said(sentence) => sentence,
+            Self::CodexNotifyHeld { version, program } => {
+                crate::i18n::codex_notify_held_old_version(version, program)
+            }
+            Self::CodexHooksOff(path) => crate::i18n::codex_hooks_off(&path.display().to_string()),
+        }
+    }
+}
+
+impl From<Text> for RowSentence {
+    fn from(text: Text) -> Self {
+        Self::Fixed(text)
+    }
 }
 
 impl HooksFound {
@@ -345,10 +460,14 @@ impl HooksFound {
         matches!(self, Self::Dead(_) | Self::Drifted)
     }
 
-    /// Whether the hooks there are this copy's — what the switch shows.
+    /// Whether the hooks there are this copy's in today's form — what the switch shows, and what
+    /// the resume row counts. **An old shape is not** (review N4): `Drifted` is published only
+    /// when its repair did not happen, and hooks in an old shape are hooks resume cannot count on
+    /// (C1's `Stop` carries no payload), so the switch reads Off, the row says why the repair did
+    /// not happen, and a press writes today's.
     #[must_use]
     pub(crate) fn is_this_copys(&self) -> bool {
-        matches!(self, Self::Current | Self::Drifted)
+        matches!(self, Self::Current | Self::Placed(_))
     }
 
     /// The word the diagnostics line names the state by.
@@ -357,6 +476,7 @@ impl HooksFound {
         match self {
             Self::Nothing => "none",
             Self::Current => "current",
+            Self::Placed(_) => "current-placed",
             Self::Drifted => "drift",
             Self::Dead(_) => "dead",
             Self::OtherCopy(_) => "other-copy",
@@ -374,13 +494,13 @@ impl HooksFound {
 ///
 /// No owner is [`HooksFound::Nothing`]; any owner the machine will not say about is unknown, and
 /// any living other copy is that copy's, before anything is called dead; owners that are all gone
-/// (this copy's own beside them or not) are dead; this copy's alone are `drifted` — the family's
-/// own answer to "is every entry in today's form", asked only then.
+/// (this copy's own beside them or not) are dead; this copy's alone are in the family's `form` —
+/// its own answer to "is every entry in today's form", asked only then.
 pub(crate) fn classify_owners(
     owners: &[PathBuf],
     exe: &Path,
-    look: &dyn Fn(&Path) -> PathStands,
-    drifted: impl FnOnce() -> bool,
+    look: &dyn Look,
+    form: impl FnOnce() -> Form,
 ) -> HooksFound {
     if owners.is_empty() {
         return HooksFound::Nothing;
@@ -401,11 +521,30 @@ pub(crate) fn classify_owners(
         HooksFound::OtherCopy(living)
     } else if !dead.is_empty() {
         HooksFound::Dead(dead)
-    } else if drifted() {
-        HooksFound::Drifted
     } else {
-        HooksFound::Current
+        match form() {
+            Form::Today => HooksFound::Current,
+            Form::Placed(events) => HooksFound::Placed(events),
+            Form::Old => HooksFound::Drifted,
+        }
     }
+}
+
+/// **This copy's entries, as the family reads their form** (R3 and ruling N1, 2026-11-05).
+///
+/// Drift is only the ruled shapes — an old string or shell form, wrong arguments, a spelling of
+/// the program that is not this copy's, a missing `Stop` — because a repair rewrites what drift
+/// names, and a person's edit of Folio's own entry is theirs: an `async` they set, a `timeoutSec`
+/// or `matcher` on Copilot's entry, an entry they moved into a group of their own (ownership is by
+/// content, never by position), a copy of one under another event.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum Form {
+    /// Every entry an install claims is in today's form, and none is left over.
+    Today,
+    /// As `Today`, with entries of this copy's no install claims: the events they stand under.
+    Placed(Vec<String>),
+    /// An entry an install claims is in a ruled old shape, or resume's event has no entry.
+    Old,
 }
 
 pub(crate) fn check(
@@ -429,6 +568,53 @@ pub(crate) fn check(
     Ok(others)
 }
 
+/// **The characters PowerShell reads as a single quote**: the ASCII one and the four typographic
+/// ones its tokenizer takes in its place (U+2018 to U+201B). Any of them ends a single-quoted
+/// literal, so a path holding one has to double it, whichever it is.
+const POWERSHELL_QUOTES: [char; 5] = ['\'', '\u{2018}', '\u{2019}', '\u{201a}', '\u{201b}'];
+
+/// **`text` as one PowerShell single-quoted literal**: inside one nothing is special — not `$`,
+/// not a backtick, not `%` or `&` — but a quote, and each quote of the text's own, any of the five
+/// ([`POWERSHELL_QUOTES`]), is written twice.
+#[must_use]
+pub(crate) fn powershell_quoted(text: &str) -> String {
+    let mut quoted = String::with_capacity(text.len() + 2);
+    quoted.push('\'');
+    for c in text.chars() {
+        if POWERSHELL_QUOTES.contains(&c) {
+            quoted.push(c);
+        }
+        quoted.push(c);
+    }
+    quoted.push('\'');
+    quoted
+}
+
+/// **What PowerShell reads a single-quoted literal as**, or `None` when `literal` is not one whole
+/// literal: it opens on a quote, a quote followed by a quote is the second one, and the first
+/// quote with none after it closes the literal and has to be its last character.
+fn powershell_literal(literal: &str) -> Option<String> {
+    let mut chars = literal.chars();
+    if !POWERSHELL_QUOTES.contains(&chars.next()?) {
+        return None;
+    }
+    let mut decoded = String::new();
+    while let Some(c) = chars.next() {
+        if !POWERSHELL_QUOTES.contains(&c) {
+            decoded.push(c);
+            continue;
+        }
+        match chars.clone().next() {
+            Some(next) if POWERSHELL_QUOTES.contains(&next) => {
+                decoded.push(next);
+                chars.next();
+            }
+            _ => return chars.next().is_none().then_some(decoded),
+        }
+    }
+    None
+}
+
 /// Strictly decode the literal operand of Folio's old templates, never a shell program.
 pub(crate) fn legacy_path(line: &str, family: &str) -> Result<Option<PathBuf>, &'static str> {
     let marker = format!(" attention {family}:");
@@ -443,15 +629,12 @@ pub(crate) fn legacy_path(line: &str, family: &str) -> Result<Option<PathBuf>, &
     {
         return Err(crate::i18n::Text::AgentHooksSchemaUnknown.text());
     }
-    let path = if let Some(inner) = quoted
-        .strip_prefix("& '")
-        .and_then(|s| s.strip_suffix('\''))
-    {
-        let decoded = inner.replace("''", "'");
-        if format!("& '{}'", decoded.replace('\'', "''")) != quoted {
-            return Err(crate::i18n::Text::AgentHooksSchemaUnknown.text());
+    let path = if let Some(literal) = quoted.strip_prefix("& ") {
+        // Read as PowerShell reads it, and only in the one spelling Folio writes.
+        match powershell_literal(literal) {
+            Some(decoded) if powershell_quoted(&decoded) == literal => decoded,
+            _ => return Err(crate::i18n::Text::AgentHooksSchemaUnknown.text()),
         }
-        decoded
     } else if let Some(inner) = quoted.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')) {
         let decoded = inner.replace("'\\''", "'");
         if format!("'{}'", decoded.replace('\'', "'\\''")) != quoted {
@@ -542,7 +725,7 @@ mod tests {
     fn adapters() -> [(&'static str, &'static str, Apply); 3] {
         [
             ("claude", "settings.json", crate::attention_hooks::apply_at),
-            ("codex", "config.toml", crate::attention_codex::apply_at),
+            ("codex", "hooks.json", crate::attention_codex::apply_at),
             (
                 "copilot",
                 "hooks/folio.json",
@@ -653,13 +836,7 @@ mod tests {
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             let data = root.join("data");
             fs::create_dir_all(&data).unwrap();
-            let original = if family == "codex" {
-                "# user's config\n"
-            } else if family == "copilot" {
-                ""
-            } else {
-                "{}\n"
-            };
+            let original = if family == "copilot" { "" } else { "{}\n" };
             fs::write(&path, original).unwrap();
             let placeholder = root.join("${CLAUDE_PROJECT_DIR}/folio.exe");
             for bad in [
@@ -693,8 +870,7 @@ mod tests {
             let data = root.join("data");
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             let future = match family {
-                "claude" => "{\"hooks\":{\"Stop\":{\"future\":true}}}",
-                "codex" => "notify = { future = true }",
+                "claude" | "codex" => "{\"hooks\":{\"Stop\":{\"future\":true}}}",
                 _ => "{\"version\":999,\"hooks\":{}}",
             };
             for text in ["{broken", future] {
@@ -871,23 +1047,31 @@ mod tests {
         }
     }
 
+    /// **A `notify` program of the person's own is never Folio's to take over**, and since 0.4.10
+    /// (plan row 69) it no longer keeps Folio out either: the hook goes into `hooks.json` beside it,
+    /// and the line is the bytes it was, under a take-over press as under any other.
     #[test]
     fn attention_codex_takeover_never_replaces_a_user_notifier() {
         let root = root("user-notifier");
         let exe = root.join("folio.exe");
-        let path = root.join("config.toml");
+        let config = root.join("config.toml");
         let original = "# keep this\nnotify = ['my-notifier', '--user-option']\n";
-        fs::write(&path, original).unwrap();
+        fs::write(&config, original).unwrap();
         assert_eq!(
             crate::attention_codex::apply_at(
-                &path,
+                &root.join("hooks.json"),
                 Decision::TakeOver(vec![]),
                 &exe,
                 &root.join("data")
             ),
-            Outcome::Refused(crate::i18n::Text::AgentCodexNotifyTaken.text())
+            Outcome::Installed
         );
-        assert_eq!(fs::read_to_string(path).unwrap(), original);
+        assert_eq!(fs::read_to_string(config).unwrap(), original);
+        assert!(
+            fs::read_to_string(root.join("hooks.json"))
+                .unwrap()
+                .contains("attention codex:stop")
+        );
     }
 
     #[test]
@@ -946,9 +1130,10 @@ mod tests {
                 {"type":"command","command":format!("\"{program}\" attention claude-code:Stop --json -"),"async":true}
             ]}]}}))
             .unwrap(),
-            "codex" => format!(
-                "notify = [\"{program}\", \"attention\", \"codex:agent-turn-complete\", \"--json\"]\n"
-            ),
+            "codex" => serde_json::to_string(&serde_json::json!({"hooks":{"Stop":[{"hooks":[
+                {"type":"command","command":format!("\"{program}\" attention codex:stop --json -"),"async":true,"timeout":10}
+            ]}]}}))
+            .unwrap(),
             _ => serde_json::to_string(&serde_json::json!({"version":1,"hooks":{"agentStop":[
                 {"type":"command","exec":program,"args":["attention","copilot:agentStop"],"timeoutSec":5}
             ]}}))
@@ -984,7 +1169,7 @@ mod tests {
             let data = root.join("data");
             let (extension, theirs) = match family {
                 "claude" => ("json", "{\"model\":\"theirs\"}\n"),
-                "codex" => ("toml", "# theirs\n"),
+                "codex" => ("json", "{\"description\":\"theirs\"}\n"),
                 _ => ("json", "{\"version\":1,\"hooks\":{}}\n"),
             };
             let named = root.join("named").join(file);
@@ -1121,10 +1306,10 @@ mod tests {
                     after.contains("mytool"),
                     "{family} {decision:?}: {outcome:?} took somebody else's program out"
                 );
-                // Only Claude Code's file has room for both. The other two families' files are one
-                // program and one document, so a stranger there refuses the press outright and the
-                // bytes are the ones that were written by hand.
-                if family == "claude" {
+                // Claude Code's and codex's hook files have room for both. Copilot's is one program
+                // and one document, so a stranger there refuses the press outright and the bytes
+                // are the ones that were written by hand.
+                if family != "copilot" {
                     continue;
                 }
                 assert!(
@@ -1170,8 +1355,14 @@ mod tests {
             // And the entry that named nobody is gone rather than kept beside ours.
             let after = fs::read_to_string(root.join("install").join(file)).unwrap();
             // The bare operand is gone; what stands there now is an absolute path that happens to
-            // end in the same name, which no quote can precede.
-            assert!(!after.contains("\"folio.exe\""), "{family}: {after}");
+            // end in the same name, which no quote can precede. codex's operand is inside a JSON
+            // string, where the quote around it is escaped.
+            let bare = if family == "codex" {
+                "\\\"folio.exe\\\""
+            } else {
+                "\"folio.exe\""
+            };
+            assert!(!after.contains(bare), "{family}: {after}");
         }
     }
 
