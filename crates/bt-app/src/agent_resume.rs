@@ -46,9 +46,11 @@
 //! without a word; a one-time flag (`--worktree`) and a value that may hold a secret (inline
 //! `--settings` or `--agents` JSON, a Codex `-c` whose key is not on the table's list) are dropped
 //! and named, and the pane opens with one line saying what it came back without
-//! ([`ResumedWithout`]). A flag the table does not know ends the read: what it takes is not known,
-//! so neither is which word after it is a value and which a subcommand, and the launch is not read
-//! (review N4). A launch the hook could not read carries nothing, and the line says so. The words
+//! ([`ResumedWithout`]). What a flag the table does not know takes is not known
+//! ([`UnknownFlags`]): in a Codex launch it ends the read, since the word after it may be the
+//! subcommand that makes the run headless (review N4); in a Claude Code launch it is dropped and
+//! named with the word after it, unless that word is a flag, and the rest is read (re-review F2).
+//! A launch the hook could not read carries nothing, and the line says so. The words
 //! replayed are the launch's, so a `/model` or a mode changed mid-session comes back as it was at
 //! the launch.
 //!
@@ -287,10 +289,12 @@ pub(crate) enum CarriedValues {
     /// any other key and a value with no `=` are not carried.
     KeyIn(&'static [&'static str]),
     /// Only an address in a form the vendor documents and with no userinfo (the coordinator's
-    /// ruling of 2026-11-07, for Codex's `--remote`): `ws://` or `wss://` whose authority — the
-    /// text after `://` up to the first `/`, `?` or `#` — holds no `@`, or `unix://` and a socket
-    /// path, which names no host and so no user. `wss://user:pass@host` is not carried, and nor is
-    /// any other form.
+    /// rulings of 2026-11-07, for Codex's `--remote`): `ws://host[:port]` or `wss://host[:port]`,
+    /// a path after it allowed, whose authority — the text after `://` up to the first `/` —
+    /// holds no `@`, or `unix://` and an optional socket path, which names no host and so no user.
+    /// An address with a `?` or a `#` anywhere is not carried (re-review F1): a query or a fragment
+    /// is no form Codex documents, and either can hold a token. `wss://user:pass@host` is not
+    /// carried, and nor is any other form.
     AddressWithoutUserinfo,
 }
 
@@ -305,17 +309,14 @@ impl CarriedValues {
                 .split_once('=')
                 .is_some_and(|(key, _)| keys.contains(&key.trim())),
             Self::AddressWithoutUserinfo => {
-                value.starts_with("unix://")
-                    || ["ws://", "wss://"]
-                        .iter()
-                        .find_map(|scheme| value.strip_prefix(scheme))
-                        .is_some_and(|rest| {
-                            !rest
-                                .split(['/', '?', '#'])
-                                .next()
-                                .unwrap_or_default()
-                                .contains('@')
-                        })
+                !value.contains(['?', '#'])
+                    && (value.starts_with("unix://")
+                        || ["ws://", "wss://"]
+                            .iter()
+                            .find_map(|scheme| value.strip_prefix(scheme))
+                            .is_some_and(|rest| {
+                                !rest.split('/').next().unwrap_or_default().contains('@')
+                            }))
             }
         }
     }
@@ -356,6 +357,28 @@ const fn carried_flag(
     }
 }
 
+/// **What a flag a vendor's table does not name does to the read** (re-review F2, ruled (a)). A
+/// table is read off one version's `--help`, so the vendor's next release brings flags it does
+/// not name; what such a flag takes is not known.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum UnknownFlags {
+    /// **The read ends as unread** (Codex, review N4): neither is it known whether the word after
+    /// the flag is its value or the first positional, and Codex's first positional may be the
+    /// subcommand that makes the run headless (`codex --new v exec …`).
+    EndTheRead,
+    /// **The flag is dropped and named, and the read goes on** (Claude Code): it is taken as a
+    /// dropped flag of [`LaunchArity::OptionalOne`] — the next word goes with it unless that word
+    /// starts with `-`, and an attached value (`--new=v`) is its own. A word taken so that was not
+    /// its value is a positional, which this table drops anyway: Claude Code's only positional is
+    /// the first prompt, it has no subcommand a session runs under, and its one headless switch,
+    /// `-p`, is a flag. **A short letter with letters after it in its word still ends the read**:
+    /// those may be its value or more flags, `-p` among them, and no table says which.
+    DroppedWithTheNextWord,
+}
+
+/// The row a flag [`UnknownFlags::DroppedWithTheNextWord`] does not name is read by.
+const UNKNOWN_FLAG: LaunchFlag = flag(&[], LaunchArity::OptionalOne, FlagFate::Dropped);
+
 /// **How one vendor's command line is read** — data, one per vendor, read off the vendor's own
 /// `--help` at a stated version (§ "M3" of row 74's report).
 #[derive(Debug)]
@@ -371,9 +394,10 @@ pub(crate) struct LaunchTable {
     /// `/bin/claude`, which on a Mac is where npm and Homebrew put the link, and on Windows is no
     /// path npm writes.
     pub(crate) scripts: &'static [&'static str],
-    /// Every flag the vendor's `--help` lists. A flag not here ends the read: what it takes is not
-    /// known, so neither is which word after it is its value, and the launch is not read.
+    /// Every flag the vendor's `--help` lists. What a flag not here does is [`Self::unknown_flags`].
     pub(crate) flags: &'static [LaunchFlag],
+    /// What a flag [`Self::flags`] does not name does to the read (re-review F2).
+    pub(crate) unknown_flags: UnknownFlags,
     /// The first positional words that make the run anything but the session a resume starts
     /// again: every subcommand of the vendor's but its resume's own (`codex exec`,
     /// `codex app-server`). The run's turn is recorded as no session.
@@ -472,6 +496,7 @@ pub(crate) const CLAUDE_LAUNCH: LaunchTable = {
             flag(&["-v", "--version"], Nothing, Dropped),
         ],
         headless_subcommands: &[],
+        unknown_flags: UnknownFlags::DroppedWithTheNextWord,
         short_value_after_equals: false,
     }
 };
@@ -622,6 +647,7 @@ pub(crate) const CODEX_LAUNCH: LaunchTable = {
             "features",
             "help",
         ],
+        unknown_flags: UnknownFlags::EndTheRead,
         short_value_after_equals: true,
     }
 };
@@ -693,9 +719,9 @@ impl LaunchTable {
     /// **Each of a launch's words, decided** (row 74's §2): a carried flag goes with the values it
     /// carries ([`CarriedValues`]), in its order; a superseded one and every positional word (a
     /// prompt, a subcommand's id) go without a word; a dropped one is named, its values never. A
-    /// flag's values are taken by the table's arity and no other rule, and **a flag this table
-    /// does not know ends the read as unread** (review N4): what it takes is not known, so neither
-    /// is whether the word after it is its value or the subcommand that makes the run headless.
+    /// flag's values are taken by the table's arity and no other rule; **a flag this table does
+    /// not know is read by the table's [`UnknownFlags`]** — Codex's ends the read as unread
+    /// (review N4), Claude Code's drops and names it with the word after it (re-review F2).
     /// `--` ends the flags, and what follows it is positional. A short flag's letters may be run
     /// together (`-cp`), and the first that takes a value takes the rest of the word as it
     /// (`-mo3`). An attached long value (`--debug=hooks`) stays one word.
@@ -714,8 +740,12 @@ impl LaunchTable {
                     Some((name, value)) => (format!("--{name}"), Some(value)),
                     None => (word.clone(), None),
                 };
-                let Some(flag) = self.launch_flag_named(&name) else {
-                    return LaunchRead::Unread;
+                let flag = match self.launch_flag_named(&name) {
+                    Some(flag) => flag,
+                    None if self.unknown_flags == UnknownFlags::DroppedWithTheNextWord => {
+                        &UNKNOWN_FLAG
+                    }
+                    None => return LaunchRead::Unread,
                 };
                 let values = match attached {
                     Some(value) => vec![value.to_owned()],
@@ -729,8 +759,15 @@ impl LaunchTable {
                 let letters = &word[1..];
                 for (at, letter) in letters.char_indices() {
                     let name = format!("-{letter}");
-                    let Some(flag) = self.launch_flag_named(&name) else {
-                        return LaunchRead::Unread;
+                    let last = at + letter.len_utf8() == letters.len();
+                    let flag = match self.launch_flag_named(&name) {
+                        Some(flag) => flag,
+                        None if last
+                            && self.unknown_flags == UnknownFlags::DroppedWithTheNextWord =>
+                        {
+                            &UNKNOWN_FLAG
+                        }
+                        None => return LaunchRead::Unread,
                     };
                     if flag.arity == LaunchArity::Nothing {
                         if flag_decided(flag, &name, None, Vec::new(), &mut launch) {

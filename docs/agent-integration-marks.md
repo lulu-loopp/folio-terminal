@@ -308,8 +308,10 @@ needs no step. The read is bounded and waits on nothing (Windows: the
 process's PEB, asked to be running before and after; macOS:
 `KERN_PROCARGS2`). Each vendor's table keeps the session flags, drops the
 first start's own flags and any value that can hold a credential by name,
-and every prompt silently; a flag the table does not know leaves the launch
-not read. The line carries the result as a top-level `launch` key beside
+and every prompt silently. A flag the table does not know leaves a Codex
+launch not read, and is dropped and named, with the word after it unless
+that word is a flag, in a Claude Code one. The line carries the result as a
+top-level `launch` key beside
 `resume` (wire version 1). Nothing changes in the installed entries: the
 same `args` arrays, the same command string, the same events. A hook entry
 that runs through any other shell line (an old shell template, a person's

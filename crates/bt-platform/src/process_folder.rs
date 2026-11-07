@@ -40,10 +40,10 @@
 //!   `RTL_USER_PROCESS_PARAMETERS.CommandLine` (the `UNICODE_STRING` `winternl.h` names beside
 //!   `ImagePathName`), whose characters are split into words by `CommandLineToArgvW`. That is the
 //!   rule of the Windows shell, and nearly the MSVC C runtime's, which Rust's standard library
-//!   follows too: the two part only on a doubled quote inside a quoted run (`"a""b"`), which the
-//!   runtime since 2008 reads as one literal quote and `CommandLineToArgvW` as the run's end and a
-//!   new one, so a word holding `""` may be recorded otherwise than the agent read it (review N5,
-//!   a named limit). A 32-bit parent is read from its own PEB.
+//!   follows too: the two part only on a doubled quote inside a quoted run (`"a""b c"`), which
+//!   `CommandLineToArgvW` reads as a literal quote that also ends the quoted run, where the runtime
+//!   since 2008 stays inside it, so a word holding `""` may be recorded otherwise than the agent
+//!   read it (review N5, a named limit; re-review F3). A 32-bit parent is read from its own PEB.
 //! * **macOS**: `sysctl(KERN_PROCARGS2)`, through [`crate::install_flip::arguments_of`].
 //!
 //! Bounded as the folder's read is: a `UNICODE_STRING` holds at most 32,767 characters, and
@@ -541,7 +541,8 @@ mod imp {
 
     /// **A command line's words, split by `CommandLineToArgvW`**, the first word's included —
     /// the Windows shell's rule, which parts from the C runtime's only on a doubled quote inside a
-    /// quoted run (module header, review N5). `None` when it refuses.
+    /// quoted run: a literal quote that also ends the run here, where the runtime since 2008 stays
+    /// inside it (module header, review N5). `None` when it refuses.
     fn words_of_command_line(units: &[u16]) -> Option<Vec<OsString>> {
         use std::os::windows::ffi::OsStringExt;
         let line: Vec<u16> = units.iter().copied().chain(std::iter::once(0)).collect();

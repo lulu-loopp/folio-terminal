@@ -1385,15 +1385,14 @@ fn a_shell_resume_quotes_each_launch_word() {
 /// (named), `--fork-session` is the resume's (silent), `"fix the bug"` is the first prompt
 /// (silent), `--model opus` comes back. A variadic flag takes every word up to the next flag, `--`
 /// ends the flags, an attached long value stays one word, and inline JSON — `--settings`,
-/// `--mcp-config`, `--agents` (review N2) — is dropped and named while a file is carried. **A flag
-/// the table does not know ends the read** (review N4): what it takes is not known, so neither is
-/// which word after it is a value, and the launch is not read.
+/// `--mcp-config`, `--agents` (review N2) — is dropped and named while a file is carried. A flag
+/// the table does not know is
+/// [`a_flag_newer_than_claudes_table_is_dropped_and_named_and_the_rest_read`]'s.
 ///
 /// MUTATIONS: `-w` carried (plant `plant-74-one-shot-carried.py`) — the first case's `args` and
 /// `dropped` go red; `name_dropped` writing nothing (plant `plant-74-drop-unsaid.py`) — every
 /// `dropped` goes red, and so does the line; `--agents` carried whatever its value (plant
-/// `plant-74-secret-carried.py`) — the inline-JSON case goes red; an unknown flag named and
-/// skipped (plant `plant-74-unknown-flag-skipped.py`) — the unknown-flag cases go red.
+/// `plant-74-secret-carried.py`) — the inline-JSON case goes red.
 #[test]
 fn the_carry_table_drops_one_shot_words_and_names_the_flags() {
     let claude = &VENDORS[0];
@@ -1434,18 +1433,6 @@ fn the_carry_table_drops_one_shot_words_and_names_the_flags() {
         read_launch(&["--verbose"], &["--bg", "-n"]),
         "the one-time ones are named, never their values"
     );
-    for line in [
-        &["claude", "--frobnicate", "loud", "--verbose"][..],
-        &["claude", "--verbose", "--frobnicate=loud"],
-        &["claude", "-Z", "--verbose"],
-        &["claude", "-vZ"],
-    ] {
-        assert_eq!(
-            launch_read(claude, line),
-            crate::agent_resume::LaunchRead::Unread,
-            "a flag the table does not know ends the read: {line:?}"
-        );
-    }
     assert_eq!(
         launch_read(
             claude,
@@ -1636,11 +1623,13 @@ fn a_codex_config_override_is_carried_only_for_a_key_with_no_secret() {
     }
 }
 
-/// RED (row 74, the coordinator's ruling of 2026-11-07) — **a Codex `--remote` is carried only
-/// when its address has no userinfo**: `ws://host:port`, `wss://host:port/`, `unix://` and
-/// `unix://PATH` come back, split or attached; `wss://user:pass@host`, `ws://token@host` and a
-/// form Codex does not document are dropped and named `--remote`, the address never written. An
-/// `@` past the authority, or in a socket's path, is no userinfo.
+/// RED (row 74, the coordinator's rulings of 2026-11-07) — **a Codex `--remote` is carried only
+/// when its address has no userinfo, no query and no fragment**: `ws://host:port`,
+/// `wss://host:port/`, a path after the authority, `unix://` and `unix://PATH` come back, split or
+/// attached; `wss://user:pass@host`, `ws://token@host`, an address with a `?` or a `#` anywhere
+/// (re-review F1: `wss://host/?token=…` names no user and still holds a secret) and a form Codex
+/// does not document are dropped and named `--remote`, the address never written. An `@` past
+/// the authority, or in a socket's path, is no userinfo.
 ///
 /// MUTATION (plant `plant-74-secret-carried.py`, its third site): `--remote` carried whatever its
 /// address — the userinfo cases go red.
@@ -1671,6 +1660,10 @@ fn a_codex_remote_is_carried_only_without_userinfo() {
         "wss://user:pass@example.com:443/",
         "ws://token@127.0.0.1:4500",
         "wss://@example.com",
+        "wss://example.com:443/?token=abc",
+        "ws://127.0.0.1:4500#session",
+        "wss://example.com/path?x",
+        "unix:///run/user/501/codex.sock?token=x",
         "WSS://example.com",
         "example.com:443",
         "http://example.com",
@@ -1739,13 +1732,91 @@ fn every_carried_codex_flag_is_one_codex_resume_takes() {
     assert_eq!(carried, expected, "the carried set is `codex resume`'s");
 }
 
+/// RED (row 74, re-review F2, ruled (a)) — **a flag newer than Claude Code's table is dropped and
+/// named, and the rest of the launch is read**: the owner's case, a bypass and a model beside a
+/// flag 2.1.319's `--help` does not list, comes back with the bypass and the model, and the pane's
+/// line names the new flag. Its arity is not known, so the word after it goes with it unless that
+/// word is a flag — a value is never written, and a word that was the first prompt is dropped
+/// anyway; `-p` after it is still seen. An unknown short letter with letters after it (`-Zp`)
+/// still ends the read: those may be its value or more flags, `-p` among them. Codex keeps
+/// "unknown ends the read" ([`a_headless_run_names_no_session`]).
+///
+/// MUTATIONS: Claude Code's table ending the read at an unknown flag (plant
+/// `plant-74-claude-unknown-ends-read.py`) — the read cases go red; the bundle guard gone (plant
+/// `plant-74-short-bundle-guessed.py`) — the `-Zp` and `-Zv` cases go red.
+#[test]
+fn a_flag_newer_than_claudes_table_is_dropped_and_named_and_the_rest_read() {
+    let claude = &VENDORS[0];
+    let read_as = |line: &[&str], args: &[&str], dropped: &[&str]| {
+        assert_eq!(
+            launch_read(claude, line),
+            read_launch(args, dropped),
+            "{line:?}"
+        );
+    };
+    read_as(
+        &[
+            "claude",
+            "--dangerously-skip-permissions",
+            "--some-new-flag",
+            "value",
+            "--model",
+            "opus",
+        ],
+        &["--dangerously-skip-permissions", "--model", "opus"],
+        &["--some-new-flag"],
+    );
+    read_as(
+        &["claude", "--some-new-flag", "--model", "opus"],
+        &["--model", "opus"],
+        &["--some-new-flag"],
+    );
+    read_as(
+        &["claude", "--verbose", "--frobnicate=loud"],
+        &["--verbose"],
+        &["--frobnicate"],
+    );
+    read_as(
+        &["claude", "--frobnicate", "loud", "--verbose", "fix the bug"],
+        &["--verbose"],
+        &["--frobnicate"],
+    );
+    read_as(&["claude", "-Z", "--verbose"], &["--verbose"], &["-Z"]);
+    read_as(&["claude", "-Z", "fix the bug"], &[], &["-Z"]);
+    for line in [
+        &["claude", "--frobnicate", "loud", "-p", "summarise"][..],
+        &["claude", "-Z", "-p"],
+    ] {
+        assert_eq!(
+            launch_read(claude, line),
+            crate::agent_resume::LaunchRead::Headless,
+            "{line:?}"
+        );
+    }
+    for line in [
+        &["claude", "-Zp", "summarise"][..],
+        &["claude", "-Zv", "--verbose"],
+    ] {
+        assert_eq!(
+            launch_read(claude, line),
+            crate::agent_resume::LaunchRead::Unread,
+            "a bundled unknown letter ends the read: {line:?}"
+        );
+    }
+}
+
 /// RED (row 74, T6) — **a run that answers and exits names no session**: a Claude Code whose
 /// command line holds `-p` (a nested `claude -p` inside the pane's own agent, row 195's named
 /// limit) and a `codex exec` read as headless, and the hook's line goes without its `resume` — the
 /// pane keeps the session it had.
 ///
-/// MUTATION (plant `plant-74-headless-recorded.py`): `--print` carried like any switch, and the
-/// headless run's turn is sent with its session.
+/// A flag Codex's table does not know ends the read (review N4; kept by re-review F2's ruling):
+/// the word after it may be its value or the subcommand, so `--newflag v exec` is not read.
+///
+/// MUTATIONS (plant `plant-74-headless-recorded.py`): `--print` carried like any switch, and the
+/// headless run's turn is sent with its session; (plant `plant-74-unknown-flag-skipped.py`)
+/// Codex's table reading an unknown flag as Claude Code's does, and the unknown-flag cases go
+/// red.
 #[test]
 fn a_headless_run_names_no_session() {
     let (claude, codex) = (&VENDORS[0], &VENDORS[1]);
@@ -1777,10 +1848,17 @@ fn a_headless_run_names_no_session() {
     }
     // A flag the table does not know may take the next word as its value or not: the read ends
     // there, and the subcommand after it is never taken for a prompt (review N4).
-    assert_eq!(
-        launch_read(codex, &["codex", "--newflag", "v", "exec", "go"]),
-        crate::agent_resume::LaunchRead::Unread
-    );
+    for line in [
+        &["codex", "--newflag", "v", "exec", "go"][..],
+        &["codex", "--newflag", "--search"],
+        &["codex", "-Z", "--search"],
+    ] {
+        assert_eq!(
+            launch_read(codex, line),
+            crate::agent_resume::LaunchRead::Unread,
+            "{line:?}"
+        );
+    }
     // A session's own subcommands are no headless run.
     assert_eq!(
         launch_read(codex, &["codex", "fork", SESSION, "--search"]),
