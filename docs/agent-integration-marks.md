@@ -227,6 +227,22 @@ other keys), so the person's own edits stay. Copilot is repaired within its vers
 version question has been answered (the step asks it, and the answer runs the
 pass again), and never for a copilot too old for the hooks.
 
+## The hook reads how its agent was started (0.4.10 plan row 74)
+
+A turn end that names a session (Claude Code's `Stop`, Codex's
+`agent-turn-complete`) also says how the agent was started: `folio attention`
+reads its own parent process's command line, which is the agent's, because
+Claude Code runs an `args` hook directly and Codex spawns `notify` from its
+own process. The read is bounded and waits on nothing (Windows: the parent's
+PEB, asked to be running before and after; macOS: `KERN_PROCARGS2`). Each
+vendor's table keeps the session flags, drops the first start's own flags by
+name and every prompt silently, and the line carries the result as a
+top-level `launch` key beside `resume` (wire version 1). Nothing changes in
+the installed entries: the same `args` arrays, the same events. A hook entry
+that runs through a shell (an old shell template) has the shell as its parent,
+whose command line is not a shape the table names: that launch is not read,
+and the resumed pane says it came back without its launch arguments.
+
 ## Take-over and the settings row
 
 The existing settings switch reports its result through a toast. A foreign live

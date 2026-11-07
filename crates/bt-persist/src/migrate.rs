@@ -971,6 +971,7 @@ pub const SESSION_MIGRATIONS: &[(u32, MigrationStep)] = &[
     (13, migrate_session_v13_to_v14),
     (14, migrate_session_v14_to_v15),
     (15, migrate_session_v15_to_v16),
+    (16, migrate_session_v16_to_v17),
 ];
 
 fn migrate_session_v1_to_v2(mut value: Value) -> Value {
@@ -1314,6 +1315,20 @@ fn migrate_session_v14_to_v15(mut value: Value) -> Value {
 fn migrate_session_v15_to_v16(mut value: Value) -> Value {
     if let Some(object) = value.as_object_mut() {
         object.insert("schema_version".to_owned(), Value::from(16));
+    }
+    value
+}
+
+/// **v17 takes the number and nothing else** (rule 3): a v16 agent record keeps no launch, and
+/// "not read" is not "read, and empty".
+///
+/// [`crate::AgentRecordV1::launch`] is what the agent's own hook read of how the agent was started,
+/// and no build before this one read it. A record migrated from v16 has no `launch` key, and its
+/// pane resumes exactly as the build that wrote it resumed it — with the vendor's own defaults, and
+/// no line about arguments it never knew of.
+fn migrate_session_v16_to_v17(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("schema_version".to_owned(), Value::from(17));
     }
     value
 }
@@ -3218,6 +3233,40 @@ mod tests {
         let mut expected = before;
         expected["schema_version"] = json!(16);
         assert_eq!(migrated, expected);
+    }
+
+    /// RED (row 74, T4) — **the v16 -> v17 session step takes the number and invents no launch**: a
+    /// v16 pane's agent record comes through with exactly its keys, and no `launch` key — the key
+    /// whose absence makes the resume what v16's was.
+    ///
+    /// MUTATION (plant `plant-74-old-record-invents.py`): the step writes `launch: {}` into each
+    /// record — the record grows a key and the comparison goes red.
+    #[test]
+    fn migrate_session_v16_to_v17_takes_the_number_and_invents_no_launch() {
+        let before = json!({
+            "schema_version": 16,
+            "windows": [{
+                "tabs": [{
+                    "root": {
+                        "kind": "term",
+                        "profile": "claude",
+                        "agent": {
+                            "vendor": "claude-code",
+                            "resume_id": "0f8b6a2e-3c1d-4e5f-9a7b-1c2d3e4f5a6b",
+                            "cwd": "C:\\work"
+                        }
+                    }
+                }]
+            }],
+            "recent": [],
+            "recent_folders": []
+        });
+        let migrated = migrate_value(before.clone(), 16, 17, SESSION_MIGRATIONS).unwrap();
+        let mut expected = before;
+        expected["schema_version"] = json!(17);
+        assert_eq!(migrated, expected);
+        let agent = &migrated["windows"][0]["tabs"][0]["root"]["agent"];
+        assert!(agent.get("launch").is_none(), "no launch key: {agent}");
     }
 
     /// RED (60) — **the v38 -> v39 step adds the web-pages receipt as `Never`, and leaves every

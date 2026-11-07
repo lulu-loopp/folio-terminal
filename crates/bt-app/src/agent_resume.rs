@@ -31,9 +31,21 @@
 //! A restored pane whose record names a vendor this build can resume is born **as that vendor's
 //! program with that vendor's resume arguments, in the recorded folder** ([`revived`],
 //! [`Vendor::arguments`]). Folio starts the agent and never types anything into a shell. The
-//! profile's environment comes along; its arguments do not (a resume never resurrects a grant,
-//! and a positional argument would break `codex resume <id>`). When the resumed agent ends by
-//! itself, a pane that was a shell gets its shell back in the same folder ([`Ended::HandBack`]).
+//! profile's environment comes along. When the resumed agent ends by itself, a pane that was a
+//! shell gets its shell back in the same folder ([`Ended::HandBack`]).
+//!
+//! **And so do the words the agent was started with** (0.4.10 plan row 74; at the owner's wish,
+//! the 2026-11-06 entry in `docs/DESIGN.md` reverses row 195's "a resume never resurrects a
+//! grant"). The hook reads its parent's command line — the agent's own, exactly as the operating
+//! system started it, past any alias or wrapper the person typed — and the vendor's table
+//! ([`LaunchTable`]) keeps the flags a resume is handed again: a session started with
+//! `--dangerously-skip-permissions` or `--model opus` comes back with them, after the resume's own
+//! words. A prompt and the flags the resume itself replaces (`--resume`, `--continue`) are dropped
+//! without a word; a one-time flag (`--worktree`), a flag the table does not know and a value that
+//! may hold a secret (inline `--settings` JSON) are dropped and named, and the pane opens with one
+//! line saying what it came back without ([`ResumedWithout`]). A launch the hook could not read
+//! carries nothing, and the line says so. The words replayed are the launch's, so a `/model` or a
+//! mode changed mid-session comes back as it was at the launch.
 //!
 //! **Which program starts it is the platform's road** ([`Road`], T-AGENT-RESUME-ON-MACOS): on
 //! Windows the vendor's own shipped profile, whose program a fresh logon environment finds; on a
@@ -57,12 +69,13 @@
 //! The record is C1's *vendor conversation / resume id* and nothing else; the leaf's place in the
 //! saved tree stands in for C1's session id until C1 mints one; a resume is a new
 //! [`crate::ShellSession`] incarnation; one record is one `agent_epoch`'s resume face, written at
-//! its first turn's end and cleared at its end. No grant is recorded, so none is resurrected.
+//! its first turn's end and cleared at its end. Its launch is that epoch's launch words, read from
+//! the agent's own command line at its first turn's end.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-use bt_persist::AgentRecordV1;
+use bt_persist::{AgentLaunchV1, AgentRecordV1};
 use bt_platform::HostPlatform;
 use bt_term::{CommandMark, CommandMarkId};
 
@@ -98,6 +111,8 @@ pub(crate) struct Vendor {
     /// The variable it reads its configuration folder from — the folder its sessions are filed in.
     pub(crate) home_variable: &'static str,
     pub(crate) form: ResumeForm,
+    /// How its own command line is read, and which of its words a resume is handed again.
+    pub(crate) launch: &'static LaunchTable,
 }
 
 /// **The vendors this build resumes**, in the order their adapters arrived. Copilot CLI, Kimi Code
@@ -111,6 +126,7 @@ pub(crate) const VENDORS: &[Vendor] = &[
         title: "Claude Code",
         home_variable: "CLAUDE_CONFIG_DIR",
         form: ResumeForm::Flag("--resume"),
+        launch: &CLAUDE_LAUNCH,
     },
     Vendor {
         family: attention_map::CODEX,
@@ -119,6 +135,7 @@ pub(crate) const VENDORS: &[Vendor] = &[
         title: "Codex",
         home_variable: "CODEX_HOME",
         form: ResumeForm::Subcommand("resume"),
+        launch: &CODEX_LAUNCH,
     },
 ];
 
@@ -129,31 +146,68 @@ pub(crate) fn vendor(family: &str) -> Option<&'static Vendor> {
 }
 
 impl Vendor {
-    /// **The resume command's arguments**, and nothing else: no profile argument, no flag of
-    /// Folio's choosing.
+    /// **The resume command's arguments**: the vendor's resume words, then `launch` — the words
+    /// the agent was started with that its table carries ([`replayed_launch`]), in their order. No
+    /// profile argument and no flag of Folio's choosing. The launch comes after the id on both
+    /// vendors: Claude Code's flags take any order, and `codex resume` reads the same interactive
+    /// flags as `codex` after its id, its own taking precedence (no positional is ever carried, so
+    /// none is read as a prompt).
     #[must_use]
-    pub(crate) fn arguments(&self, id: &str) -> Vec<OsString> {
+    pub(crate) fn arguments(&self, id: &str, launch: &[String]) -> Vec<OsString> {
         let word = match self.form {
             ResumeForm::Flag(flag) => flag,
             ResumeForm::Subcommand(subcommand) => subcommand,
         };
-        vec![OsString::from(word), OsString::from(id)]
+        [OsString::from(word), OsString::from(id)]
+            .into_iter()
+            .chain(launch.iter().map(OsString::from))
+            .collect()
     }
 
     /// **The one command a shell is handed to become this vendor's resume** (the Mac's road,
-    /// [`Road::ThroughTheShell`]): `exec`, the program's name, the resume's arguments. No word
-    /// needs quoting in any shell: the name and the flag are this table's constants, and the id is
-    /// one [`session_is_well_formed`] passed, hex digits and hyphens. `exec` makes the agent the
-    /// pane's own process (the child the reaper waits on) and skips the shell's aliases and
-    /// functions, so an alias that adds a flag resurrects no grant.
+    /// [`Road::ThroughTheShell`]): `exec`, the program's name, the resume's words, and each launch
+    /// word in POSIX single quotes. The name and the resume's words need none — they are this
+    /// table's constants and an id [`session_is_well_formed`] passed, hex digits and hyphens — but
+    /// a launch word is the person's own (a folder with a space in it, a `;`), and quoted it is one
+    /// word, never syntax. Every shell this road starts quotes that way
+    /// ([`crate::profiles::CommandFlags`] are POSIX shells'). `exec` makes the agent the pane's own
+    /// process (the child the reaper waits on) and skips the shell's aliases and functions, so what
+    /// the agent is handed is its launch and nothing an alias adds.
     #[must_use]
-    pub(crate) fn shell_command(&self, id: &str) -> OsString {
+    pub(crate) fn shell_command(&self, id: &str, launch: &[String]) -> OsString {
         let mut command = OsString::from("exec");
-        for word in std::iter::once(OsString::from(self.program_stem)).chain(self.arguments(id)) {
+        for word in
+            std::iter::once(OsString::from(self.program_stem)).chain(self.arguments(id, &[]))
+        {
             command.push(" ");
             command.push(word);
         }
+        for word in launch {
+            command.push(" ");
+            command.push(crate::shell_literal::posix_literal(word));
+        }
         command
+    }
+
+    /// **What this vendor's own command line, as the operating system holds it, says about how it
+    /// was started** — the hook's parent's words ([`bt_platform::process_folder::parent_arguments`]).
+    ///
+    /// The words are read only off a shape the table names
+    /// ([`LaunchTable::launch_words_after_program`]); any other shape, and a word that is not text,
+    /// is a launch not read. Then the table decides each word ([`LaunchTable::carried_launch`]).
+    #[must_use]
+    pub(crate) fn launch_of(&self, argv: &[OsString]) -> LaunchRead {
+        let Some(argv) = argv
+            .iter()
+            .map(|word| word.to_str().map(str::to_owned))
+            .collect::<Option<Vec<String>>>()
+        else {
+            return LaunchRead::Unread;
+        };
+        match self.launch.launch_words_after_program(&argv) {
+            Some(words) => self.launch.carried_launch(words),
+            None => LaunchRead::Unread,
+        }
     }
 
     /// Whether `program` is this vendor's CLI, by its file stem (either case).
@@ -177,6 +231,555 @@ impl Vendor {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The launch: how each vendor's command line is read, and which words come back
+// ---------------------------------------------------------------------------
+
+/// **How many words a flag takes after it**, by the vendor's own parser (Claude Code's is
+/// commander's, codex's is clap's).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum LaunchArity {
+    /// A switch: `--verbose`.
+    Nothing,
+    /// One value, the next word whatever it looks like: `--model opus`.
+    One,
+    /// One value if the next word does not start with `-`: `--resume [value]`, `--debug [filter]`.
+    OptionalOne,
+    /// Every next word until one that starts with `-`: `--add-dir <directories...>`.
+    Many,
+}
+
+/// **What becomes of a flag the agent was started with**, when it is resumed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FlagFate {
+    /// Handed to the resume again, with its values, in its place.
+    Carried,
+    /// What the resume does instead (`--resume`, `--continue`, `--session-id`): dropped, and
+    /// nothing said, because the resume is that flag.
+    Superseded,
+    /// A one-time thing, or one the resume must not repeat (`--worktree`, `--background`):
+    /// dropped, and named in the pane's line.
+    Dropped,
+    /// The run answers and exits (`--print`): its turn names no session at all.
+    Headless,
+}
+
+/// **One flag of a vendor's command line**: its spellings, what it takes, and its fate.
+#[derive(Debug)]
+pub(crate) struct LaunchFlag {
+    /// Every spelling, a dash included: `["-r", "--resume"]`.
+    pub(crate) names: &'static [&'static str],
+    pub(crate) arity: LaunchArity,
+    pub(crate) fate: FlagFate,
+    /// A value that is JSON written inline (its first character past any space is `{`) is dropped
+    /// and the flag named, even where the flag is carried: a settings or server object can hold a
+    /// key or a token, and the launch words are written to `session.json` in the clear (row 74's
+    /// R5). A value naming a file is carried.
+    pub(crate) inline_json_dropped: bool,
+}
+
+/// One flag of a table, spelled out.
+const fn flag(names: &'static [&'static str], arity: LaunchArity, fate: FlagFate) -> LaunchFlag {
+    LaunchFlag {
+        names,
+        arity,
+        fate,
+        inline_json_dropped: false,
+    }
+}
+
+/// **How one vendor's command line is read** — data, one per vendor, read off the vendor's own
+/// `--help` at a stated version (§ "M3" of row 74's report).
+#[derive(Debug)]
+pub(crate) struct LaunchTable {
+    /// The file stems the vendor's own program has (`claude.exe`, `codex`): its words are
+    /// everything after the first.
+    pub(crate) programs: &'static [&'static str],
+    /// The vendor's entry script when the program is `node` (npm's `claude.cmd` runs
+    /// `node …\claude-code\cli.js`; a Mac's shebang runs `node …/bin/claude`), by the end of its
+    /// path with `/` for every separator: its words are everything after the script.
+    pub(crate) scripts: &'static [&'static str],
+    /// Every flag the vendor's `--help` lists. A flag not here is dropped and named.
+    pub(crate) flags: &'static [LaunchFlag],
+    /// The first positional words that make the run one that answers and exits (`codex exec`).
+    pub(crate) headless_subcommands: &'static [&'static str],
+    /// Whether a short flag's attached value may be written after `=` (`-m=o3`, clap's rule);
+    /// commander takes everything after the letter as the value.
+    pub(crate) short_value_after_equals: bool,
+}
+
+/// **Claude Code's command line** — `claude --help`, version 2.1.319, read 2026-11-06 in a
+/// scratch configuration folder; the `-file` system-prompt spellings are the CLI reference's (the
+/// help names them in `--bare`'s text).
+pub(crate) const CLAUDE_LAUNCH: LaunchTable = {
+    use FlagFate::{Carried, Dropped, Headless, Superseded};
+    use LaunchArity::{Many, Nothing, One, OptionalOne};
+    LaunchTable {
+        programs: &["claude"],
+        scripts: &["claude-code/cli.js", "bin/claude"],
+        flags: &[
+            // What the session is allowed, and what it runs on.
+            flag(&["--dangerously-skip-permissions"], Nothing, Carried),
+            flag(&["--allow-dangerously-skip-permissions"], Nothing, Carried),
+            flag(&["--permission-mode"], One, Carried),
+            flag(&["--model"], One, Carried),
+            flag(&["--effort"], One, Carried),
+            flag(&["--fallback-model"], One, Carried),
+            LaunchFlag {
+                inline_json_dropped: true,
+                ..flag(&["--settings"], One, Carried)
+            },
+            flag(&["--setting-sources"], One, Carried),
+            LaunchFlag {
+                inline_json_dropped: true,
+                ..flag(&["--mcp-config"], Many, Carried)
+            },
+            flag(&["--strict-mcp-config"], Nothing, Carried),
+            flag(&["--plugin-dir"], One, Carried),
+            flag(&["--plugin-url"], One, Carried),
+            flag(&["--add-dir"], Many, Carried),
+            flag(&["--allowedTools", "--allowed-tools"], Many, Carried),
+            flag(&["--disallowedTools", "--disallowed-tools"], Many, Carried),
+            flag(&["--tools"], Many, Carried),
+            flag(&["--agent"], One, Carried),
+            flag(&["--agents"], One, Carried),
+            flag(&["--system-prompt"], One, Carried),
+            flag(&["--system-prompt-file"], One, Carried),
+            flag(&["--append-system-prompt"], One, Carried),
+            flag(&["--append-system-prompt-file"], One, Carried),
+            flag(&["--system-prompt-snapshot"], One, Carried),
+            flag(
+                &["--exclude-dynamic-system-prompt-sections"],
+                Nothing,
+                Carried,
+            ),
+            flag(&["--autocompact"], One, Carried),
+            flag(&["--betas"], Many, Carried),
+            flag(&["--brief"], Nothing, Carried),
+            flag(&["--chrome"], Nothing, Carried),
+            flag(&["--no-chrome"], Nothing, Carried),
+            flag(&["--ide"], Nothing, Carried),
+            flag(&["--verbose"], Nothing, Carried),
+            flag(&["-d", "--debug"], OptionalOne, Carried),
+            flag(&["--debug-file"], One, Carried),
+            flag(&["--safe-mode"], Nothing, Carried),
+            flag(&["--bare"], Nothing, Carried),
+            flag(&["--restricted"], Nothing, Carried),
+            flag(&["--disable-slash-commands"], Nothing, Carried),
+            flag(&["--ax-screen-reader"], Nothing, Carried),
+            flag(&["--prompt-suggestions"], OptionalOne, Carried),
+            // What the resume is instead.
+            flag(&["-r", "--resume"], OptionalOne, Superseded),
+            flag(&["-c", "--continue"], Nothing, Superseded),
+            flag(&["--session-id"], One, Superseded),
+            flag(&["--fork-session"], Nothing, Superseded),
+            // A run that answers and exits.
+            flag(&["-p", "--print"], Nothing, Headless),
+            // One-time things, a session's own name, and what only a printed run reads.
+            flag(&["-w", "--worktree"], OptionalOne, Dropped),
+            flag(&["--tmux"], Nothing, Dropped),
+            flag(&["--bg", "--background"], Nothing, Dropped),
+            flag(&["--cloud"], OptionalOne, Dropped),
+            flag(&["--environment"], One, Dropped),
+            flag(&["--desktop"], Nothing, Dropped),
+            flag(&["--from-pr"], OptionalOne, Dropped),
+            flag(&["--teleport"], OptionalOne, Dropped),
+            flag(&["--file"], Many, Dropped),
+            flag(&["-n", "--name"], One, Dropped),
+            flag(&["--remote-control"], OptionalOne, Dropped),
+            flag(&["--remote-control-session-name-prefix"], One, Dropped),
+            flag(&["--output-format"], One, Dropped),
+            flag(&["--input-format"], One, Dropped),
+            flag(&["--json-schema"], One, Dropped),
+            flag(&["--max-budget-usd"], One, Dropped),
+            flag(&["--no-session-persistence"], Nothing, Dropped),
+            flag(&["--include-partial-messages"], Nothing, Dropped),
+            flag(&["--include-hook-events"], Nothing, Dropped),
+            flag(&["--replay-user-messages"], Nothing, Dropped),
+            flag(&["--forward-subagent-text"], Nothing, Dropped),
+            flag(&["--permission-prompts"], One, Dropped),
+            flag(&["--permission-prompt-tool"], One, Dropped),
+            flag(&["-h", "--help"], Nothing, Dropped),
+            flag(&["-v", "--version"], Nothing, Dropped),
+        ],
+        headless_subcommands: &[],
+        short_value_after_equals: false,
+    }
+};
+
+/// **Codex's command line** — `codex --help` and `codex resume --help`, version 0.166.0, read
+/// 2026-11-06 in a scratch `CODEX_HOME`; `--yolo` is the bypass flag's alias in codex's source.
+/// The npm package's `codex.js` starts the native program with its own words, so the hook's
+/// parent is the native `codex` (older packages named it by target).
+pub(crate) const CODEX_LAUNCH: LaunchTable = {
+    use FlagFate::{Carried, Dropped, Superseded};
+    use LaunchArity::{Many, Nothing, One};
+    LaunchTable {
+        programs: &[
+            "codex",
+            "codex-x86_64-pc-windows-msvc",
+            "codex-aarch64-pc-windows-msvc",
+            "codex-x86_64-apple-darwin",
+            "codex-aarch64-apple-darwin",
+            "codex-x86_64-unknown-linux-musl",
+            "codex-aarch64-unknown-linux-musl",
+        ],
+        scripts: &[],
+        flags: &[
+            // What the session is allowed, and what it runs on.
+            flag(&["-a", "--ask-for-approval"], One, Carried),
+            flag(&["-s", "--sandbox"], One, Carried),
+            flag(
+                &["--dangerously-bypass-approvals-and-sandbox", "--yolo"],
+                Nothing,
+                Carried,
+            ),
+            flag(&["--dangerously-bypass-hook-trust"], Nothing, Carried),
+            flag(&["--approve-for-me"], Nothing, Carried),
+            flag(&["-m", "--model"], One, Carried),
+            flag(&["-p", "--profile"], One, Carried),
+            flag(&["-c", "--config"], One, Carried),
+            flag(&["--enable"], One, Carried),
+            flag(&["--disable"], One, Carried),
+            flag(&["--strict-config"], Nothing, Carried),
+            flag(&["--oss"], Nothing, Carried),
+            flag(&["--local-provider"], One, Carried),
+            flag(&["--remote"], One, Carried),
+            flag(&["--remote-auth-token-env"], One, Carried),
+            flag(&["-C", "--cd"], One, Carried),
+            flag(&["--add-dir"], One, Carried),
+            flag(&["--search"], Nothing, Carried),
+            flag(&["--no-alt-screen"], Nothing, Carried),
+            flag(&["--no-daemon"], Nothing, Carried),
+            // What the resume is instead (`resume`'s and `fork`'s own pickers).
+            flag(&["--last"], Nothing, Superseded),
+            flag(&["--all"], Nothing, Superseded),
+            flag(&["--include-non-interactive"], Nothing, Superseded),
+            // One-time things.
+            flag(&["-i", "--image"], Many, Dropped),
+            flag(&["--worktree"], Nothing, Dropped),
+            flag(&["-h", "--help"], Nothing, Dropped),
+            flag(&["-V", "--version"], Nothing, Dropped),
+        ],
+        headless_subcommands: &["exec", "e", "review"],
+        short_value_after_equals: true,
+    }
+};
+
+/// **What the hook read of how its agent was started.**
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum LaunchRead {
+    /// The run answers and exits (`claude -p`): its turn names no session, and none is recorded
+    /// (row 74's R6, closing row 195's named limit of a nested headless run).
+    Headless,
+    /// The command line was not there to read, or not in a shape the table names.
+    Unread,
+    /// The words carried and the flags dropped.
+    Read(AgentLaunchV1),
+}
+
+/// The last part of a path, by either platform's separator.
+fn path_tail(word: &str) -> &str {
+    word.rsplit(['/', '\\']).next().unwrap_or(word)
+}
+
+/// The file stem of a program word: its last part, without a Windows `.exe`.
+fn program_word_stem(word: &str) -> &str {
+    let name = path_tail(word);
+    match name.len().checked_sub(4) {
+        Some(at) if name.is_char_boundary(at) && name[at..].eq_ignore_ascii_case(".exe") => {
+            &name[..at]
+        }
+        _ => name,
+    }
+}
+
+impl LaunchTable {
+    /// **The words after the program's own**, when `argv` is a shape this table names: the
+    /// vendor's program and everything after it, or `node`, the vendor's entry script and
+    /// everything after that. `None` for every other shape — a wrapper, a runtime flag before the
+    /// script, a program of another name — which is not guessed at.
+    #[must_use]
+    pub(crate) fn launch_words_after_program<'a>(
+        &self,
+        argv: &'a [String],
+    ) -> Option<&'a [String]> {
+        let program = program_word_stem(argv.first()?);
+        if self
+            .programs
+            .iter()
+            .any(|stem| program.eq_ignore_ascii_case(stem))
+        {
+            return argv.get(1..);
+        }
+        let script = argv.get(1)?.replace('\\', "/");
+        (program.eq_ignore_ascii_case("node")
+            && self.scripts.iter().any(|tail| {
+                script.len() >= tail.len()
+                    && script.is_char_boundary(script.len() - tail.len())
+                    && script[script.len() - tail.len()..].eq_ignore_ascii_case(tail)
+                    && (script.len() == tail.len()
+                        || script[..script.len() - tail.len()].ends_with('/'))
+            }))
+        .then(|| argv.get(2..))
+        .flatten()
+    }
+
+    /// The flag one spelling names.
+    fn launch_flag_named(&self, name: &str) -> Option<&LaunchFlag> {
+        self.flags.iter().find(|flag| flag.names.contains(&name))
+    }
+
+    /// **Each of a launch's words, decided** (row 74's §2): a carried flag goes with its values, in
+    /// its order; a superseded one and every positional word (a prompt, a subcommand's id) go
+    /// without a word; any other flag — a dropped one, one this table does not know — is named, its
+    /// values never. `--` ends the flags, and what follows it is positional. A short flag's letters
+    /// may be run together (`-cp`), and the first that takes a value takes the rest of the word as
+    /// it (`-mo3`). An attached long value (`--debug=hooks`) stays one word.
+    #[must_use]
+    pub(crate) fn carried_launch(&self, words: &[String]) -> LaunchRead {
+        let mut launch = AgentLaunchV1::default();
+        let mut positional = true;
+        let mut index = 0;
+        while let Some(word) = words.get(index) {
+            index += 1;
+            if word == "--" {
+                break;
+            }
+            if let Some(long) = word.strip_prefix("--") {
+                let (name, attached) = match long.split_once('=') {
+                    Some((name, value)) => (format!("--{name}"), Some(value)),
+                    None => (word.clone(), None),
+                };
+                let Some(flag) = self.launch_flag_named(&name) else {
+                    name_dropped(&mut launch, &name);
+                    continue;
+                };
+                let values = match attached {
+                    Some(value) => vec![value.to_owned()],
+                    None => values_after(flag.arity, words, &mut index),
+                };
+                let written = attached.is_some().then(|| word.clone());
+                if flag_decided(flag, &name, written, values, &mut launch) {
+                    return LaunchRead::Headless;
+                }
+            } else if word.len() > 1 && word.starts_with('-') {
+                let letters = &word[1..];
+                for (at, letter) in letters.char_indices() {
+                    let name = format!("-{letter}");
+                    let Some(flag) = self.launch_flag_named(&name) else {
+                        // A letter the table does not know: what follows it in the word is not
+                        // knowable either, so the rest of the word goes with it.
+                        name_dropped(&mut launch, &name);
+                        break;
+                    };
+                    if flag.arity == LaunchArity::Nothing {
+                        if flag_decided(flag, &name, None, Vec::new(), &mut launch) {
+                            return LaunchRead::Headless;
+                        }
+                        continue;
+                    }
+                    let rest = &letters[at + letter.len_utf8()..];
+                    let value = if self.short_value_after_equals {
+                        rest.strip_prefix('=').unwrap_or(rest)
+                    } else {
+                        rest
+                    };
+                    let (written, values) = if value.is_empty() {
+                        (None, values_after(flag.arity, words, &mut index))
+                    } else {
+                        (Some(format!("{name}{rest}")), vec![value.to_owned()])
+                    };
+                    if flag_decided(flag, &name, written, values, &mut launch) {
+                        return LaunchRead::Headless;
+                    }
+                    break;
+                }
+            } else if std::mem::take(&mut positional)
+                && self.headless_subcommands.contains(&word.as_str())
+            {
+                return LaunchRead::Headless;
+            }
+        }
+        LaunchRead::Read(launch)
+    }
+}
+
+/// One flag occurrence's fate, written into `launch`: `written` is the one word it was written
+/// as when its value was attached, `values` its value words otherwise. Answers whether the run
+/// is headless.
+fn flag_decided(
+    flag: &LaunchFlag,
+    name: &str,
+    written: Option<String>,
+    values: Vec<String>,
+    launch: &mut AgentLaunchV1,
+) -> bool {
+    match flag.fate {
+        FlagFate::Headless => return true,
+        FlagFate::Superseded => {}
+        FlagFate::Dropped => name_dropped(launch, name),
+        FlagFate::Carried => {
+            let inline =
+                |value: &String| flag.inline_json_dropped && value.trim_start().starts_with('{');
+            match written {
+                Some(_) if values.iter().any(inline) => name_dropped(launch, name),
+                Some(word) => launch.args.push(word),
+                None => {
+                    let took = values.len();
+                    let kept: Vec<String> =
+                        values.into_iter().filter(|value| !inline(value)).collect();
+                    if kept.len() < took {
+                        name_dropped(launch, name);
+                    }
+                    if took == 0 || !kept.is_empty() {
+                        launch.args.push(name.to_owned());
+                        launch.args.extend(kept);
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+/// The values a flag of `arity` takes from the words at `index`, which moves past them.
+fn values_after(arity: LaunchArity, words: &[String], index: &mut usize) -> Vec<String> {
+    let taken = match arity {
+        LaunchArity::Nothing => 0,
+        LaunchArity::One => usize::from(*index < words.len()),
+        LaunchArity::OptionalOne => {
+            usize::from(words.get(*index).is_some_and(|word| !word.starts_with('-')))
+        }
+        LaunchArity::Many => words[*index..]
+            .iter()
+            .take_while(|word| !word.starts_with('-'))
+            .count(),
+    };
+    let values = words[*index..*index + taken].to_vec();
+    *index += taken;
+    values
+}
+
+/// A flag's name, said once among the dropped.
+fn name_dropped(launch: &mut AgentLaunchV1, name: &str) {
+    if !launch.dropped.iter().any(|dropped| dropped == name) {
+        launch.dropped.push(name.to_owned());
+    }
+}
+
+/// The most bytes a launch's words may hold together: no more than the attention line they
+/// crossed in ([`bt_platform::attention_pipe::MAX_MESSAGE_BYTES`]) could carry.
+pub(crate) const MAX_LAUNCH_BYTES: usize = bt_platform::attention_pipe::MAX_MESSAGE_BYTES;
+
+/// **Whether one launch word is one this build could have sent**: nothing in it that moves text
+/// about rather than being text — a control, format or bidirectional character, or a line or
+/// paragraph separator — by [`folder_is_well_formed`]'s rule. An empty word is a word
+/// (`--tools ""`).
+#[must_use]
+pub(crate) fn launch_word_is_well_formed(word: &str) -> bool {
+    !word.chars().any(|character| {
+        character.is_control()
+            || crate::is_format_or_bidi_control(character)
+            || matches!(character, '\u{2028}' | '\u{2029}')
+    })
+}
+
+/// **Whether a launch is one this build could have written**: its own shape
+/// ([`AgentLaunchV1::is_well_formed`]), every word and name [`launch_word_is_well_formed`], every
+/// name a flag's (it starts with `-`), and no more bytes together than a line could carry.
+#[must_use]
+pub(crate) fn launch_is_well_formed(launch: &AgentLaunchV1) -> bool {
+    launch.is_well_formed()
+        && launch.dropped.iter().all(|name| name.starts_with('-'))
+        && launch
+            .args
+            .iter()
+            .chain(&launch.dropped)
+            .all(|word| launch_word_is_well_formed(word))
+        && launch
+            .args
+            .iter()
+            .chain(&launch.dropped)
+            .map(String::len)
+            .sum::<usize>()
+            <= MAX_LAUNCH_BYTES
+}
+
+/// **What a resume hands the vendor of its launch, and what the pane says of the rest.**
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ReplayedLaunch {
+    /// The words after the resume's own ([`Vendor::arguments`], [`Vendor::shell_command`]).
+    pub(crate) words: Vec<String>,
+    /// The pane's line, when something was not carried.
+    pub(crate) said: Option<ResumedWithout>,
+}
+
+/// **The launch `record` is resumed with, by `program`** — the program the pane's birth starts.
+///
+/// * A record with no launch (written before v17) resumes with none, and nothing is said.
+/// * A launch that was not read, or that no build could have written, resumes with none, and the
+///   pane says it came back without its launch arguments.
+/// * **A batch file is no road for these words** (row 74's R7): `cmd.exe` runs it
+///   ([`bt_pty::is_interpreted_script`]), expanding `%…%` even inside the quotes each token is
+///   given, and the shim's own `%*` splits the words again. A launch with a `"`, a `%` or a `!` in
+///   any word is not carried through one, and the line says so.
+/// * Any other launch resumes with its words, and the line names the flags it dropped, if any.
+#[must_use]
+pub(crate) fn replayed_launch(
+    vendor: &Vendor,
+    record: &AgentRecordV1,
+    program: &Path,
+) -> ReplayedLaunch {
+    let unread = || ReplayedLaunch {
+        words: Vec::new(),
+        said: Some(ResumedWithout {
+            title: vendor.title,
+            flags: Vec::new(),
+        }),
+    };
+    let Some(launch) = &record.launch else {
+        return ReplayedLaunch {
+            words: Vec::new(),
+            said: None,
+        };
+    };
+    if launch.unread || !launch_is_well_formed(launch) {
+        return unread();
+    }
+    if bt_pty::is_interpreted_script(program.as_os_str())
+        && launch
+            .args
+            .iter()
+            .any(|word| word.contains(['"', '%', '!']))
+    {
+        return unread();
+    }
+    ReplayedLaunch {
+        words: launch.args.clone(),
+        said: (!launch.dropped.is_empty()).then(|| ResumedWithout {
+            title: vendor.title,
+            flags: launch.dropped.clone(),
+        }),
+    }
+}
+
+/// **The one line a resumed pane says when its launch did not all come back**: the flags it came
+/// back without, by name — or, with none named, that it came back without its launch arguments.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ResumedWithout {
+    pub(crate) title: &'static str,
+    pub(crate) flags: Vec<String>,
+}
+
+impl ResumedWithout {
+    /// The line's text in the window's language (`zh pending`).
+    #[must_use]
+    pub(crate) fn text(&self) -> String {
+        crate::i18n::resumed_without_text(self.title, &self.flags)
+    }
+}
+
 /// The most characters a folder may cross the wire as. A path a vendor reports is the folder it
 /// was started in, and one longer than this is not a folder anybody works in.
 pub(crate) const MAX_FOLDER_CHARS: usize = 1024;
@@ -191,16 +794,21 @@ pub(crate) struct Heard {
     pub(crate) cwd: String,
     /// The vendor's configuration folder, when the hook's own environment set one.
     pub(crate) home: Option<String>,
+    /// How the agent was started, as the hook read its parent's command line (row 74): `None`
+    /// from a hook that did not read it (a `folio.exe` older than this build).
+    pub(crate) launch: Option<AgentLaunchV1>,
 }
 
 impl Heard {
     /// **Whether every part is one this build could have sent**: a UUID-shaped id
-    /// ([`bt_persist::resume_id_is_well_formed`]), and folders that are absolute, bounded and free
-    /// of anything that moves text about rather than being text. Checked by the hook before it
-    /// sends and by the window when it reads, because neither end has cause to trust the other.
+    /// ([`bt_persist::resume_id_is_well_formed`]), folders that are absolute, bounded and free
+    /// of anything that moves text about rather than being text, and a launch
+    /// [`launch_is_well_formed`] passes. Checked by the hook before it sends and by the window
+    /// when it reads, because neither end has cause to trust the other.
     #[must_use]
     pub(crate) fn is_well_formed(&self) -> bool {
         session_is_well_formed(&self.id, &self.cwd, self.home.as_deref())
+            && self.launch.as_ref().is_none_or(launch_is_well_formed)
     }
 
     /// The record this becomes on a pane, for `vendor`.
@@ -211,6 +819,7 @@ impl Heard {
             resume_id: self.id.clone(),
             cwd: self.cwd.clone(),
             home: self.home.clone(),
+            launch: self.launch.clone(),
         }
     }
 }
@@ -381,6 +990,15 @@ impl AgentAccount {
         self.resumed.is_some()
     }
 
+    /// Whether this pane's child is a resumed agent its birth started — not one whose folder the
+    /// birth found gone ([`Self::not_started`]).
+    #[must_use]
+    pub(crate) fn resume_runs(&self) -> bool {
+        self.resumed
+            .as_ref()
+            .is_some_and(|resumed| !resumed.not_started)
+    }
+
     /// **The child this pane is, for the question "whose hook is this"** (T-AGENT-RESUME-ON-MACOS):
     /// a resume is its vendor's agent by its record, whatever its program is called. On a Mac the
     /// program is the shell that `exec`ed it; on Windows it is the vendor's own, so the answer
@@ -448,9 +1066,10 @@ impl AgentAccount {
     /// pane, and is refused until the command ends. Within one run only the id may change — a
     /// `/clear` or `/new` mints a new one, which is the same agent's next session — and the folder
     /// and configuration folder stay those of the run's first turn, the folder the vendor filed the
-    /// session under, wherever the agent has `cd`'d since. A nested headless run of the same
-    /// vendor (`claude -p` inside Claude Code) is not told apart from a `/clear`: no field names
-    /// it, and it is a named limit in `docs/DESIGN.md`.
+    /// session under, wherever the agent has `cd`'d since; so does its launch, one process's
+    /// command line. A nested headless run of the same vendor (`claude -p` inside Claude Code)
+    /// names no session at all since row 74: its hook reads `-p` on its parent's command line
+    /// ([`LaunchRead::Headless`]) and sends none.
     pub(crate) fn hear(&mut self, vendor: &Vendor, heard: &Heard, child: Child<'_>) -> bool {
         if !heard.is_well_formed() {
             return false;
