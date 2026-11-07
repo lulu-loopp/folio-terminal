@@ -1,7 +1,8 @@
 # Agent integration marks (T-B)
 
 The adapters decode ownership at `attention_hooks::hook_owner`,
-`attention_codex::notify_owner`, and `attention_copilot::entry_owner`.
+`attention_codex::codex_hook_owner` (and `notify_owner` for the line an earlier
+Folio wrote), and `attention_copilot::entry_owner`.
 The verb/family identifies a Folio entry; its executable operand identifies the
 copy. `attention_ownership::other_live` uses `explorer_menu::same_path` and
 filesystem metadata. Only `NotFound` means a dead owner; access errors refuse.
@@ -120,14 +121,53 @@ and escapes.
   as Folio's, is refused too, because the agent's parser decides which of the
   two it reads. The switch, the take-over and uninstall all go through this
   writer.
-- **Codex** (`attention_codex`): the same rule on `config.toml`. `toml_edit`'s
-  rendering ended every line in `\n` and dropped a byte-order mark, so the edit
-  is now one line of text, placed by `ImDocument`'s spans. An own `notify` with
-  other words has its value replaced, keeping a comment at the end of the line.
-  A missing `notify` gets a line after the last top-level key-value, or at the
-  top of a file of tables only. Removing takes the line and its line ending and
-  keeps any comment above it (ruling R12). The result is read back and refused
-  the same way if any other value reads differently.
+- **Codex** (`attention_codex`, 0.4.10 plan row 69): Folio's entry is a `Stop`
+  hook in `hooks.json` beside `config.toml`, written by the same splice as
+  Claude Code's through the `HOOKS` family (`attention_hooks::Family`). Codex
+  keeps the person's approval of each hook under the hook's place in the file
+  (event, group index, handler index), so the family is positional. An own entry
+  is a group whose only handler `attention_codex::codex_hook_owner` reads as a
+  Folio executable speaking `attention codex:` with no key but `type`,
+  `command`, `async` and `timeout`. A Folio-looking handler that shares a group with the
+  person's, or carries another key, is theirs and is left where it is. An install
+  appends Folio's group at the end of `Stop`, so no group of the person's moves.
+  The self-check also compares the place of every entry that is not Folio's.
+  Nothing is written when Codex would ignore the file with Folio's hook in it
+  (judged by a mirror of Codex's own `HooksFile` types: a byte-order mark, a
+  top-level key other than `description` and `hooks`, a key named twice, a
+  handler or value of a type Codex does not take), or when `config.toml` already
+  declares hook events (Codex warns when both files do), or on Windows when
+  Windows PowerShell 5.1 cannot call Folio's path (an unmatched `[`, among
+  others: it reads the path as a wildcard pattern). A `config.toml` Folio cannot
+  read refuses an install, and so does one it will not edit when the install has
+  to take Folio's line out of it; a removal goes on without it, leaves it as it
+  was and says so. Folio never writes Codex's `[hooks.state]`
+  approvals: the person approves the hook once in Codex. With hooks switched
+  off in `config.toml` (`[features] hooks = false`, or the older `codex_hooks`)
+  an install is refused, because Codex would not run the hook, and the row is
+  not On for a hook Codex will not run (row 69c).
+- **Which entry, by Codex's version** (row 69c): Codex runs asynchronous hooks
+  from 0.148, so from 0.148 Folio's entry is the hook and below it the `notify`
+  line. The version is what `codex --version` prints for the program the walk
+  found, asked on the start-time scan's worker and asked again only when that
+  file's path, size or modified time changes. A version Folio could not learn
+  (no answer within three seconds, no codex found, or any system but Windows,
+  where it is not asked) counts as current: the hook.
+- **Codex's `notify` line** (`config.toml`): Folio 0.2 to 0.4.9 installed a
+  `notify` line, and it stays until Folio writes its hook (row 69 ruling R18).
+  It is then removed in the same operation. `toml_edit`'s rendering ended every
+  line in `\n` and dropped a byte-order mark, so the edit is one line of text,
+  placed by `ImDocument`'s spans. Removing takes the line and its line ending and
+  keeps any comment above it (row 67a ruling R12). The result is read back and
+  refused the same way if any other value reads differently. The line writer's
+  install (an own `notify` with other words has its value replaced, a missing one
+  gets a line after the last top-level key-value) is the install below Codex
+  0.148. There, somebody else's `notify` refuses it, and the row names their
+  program and the version. The same install takes any hook of Folio's out of
+  `hooks.json` (one a press wrote before the version was known), so the
+  start-time scan, which reads it as drifted, heals that press at the next start. A removal goes through `hooks.json` on every version
+  and takes out both of Folio's entries. A `notify` line Folio did not write is
+  the person's and is never touched.
 - **Copilot**: `hooks/folio.json` is Folio's whole file. One entry that is not
   Folio's refuses the write, so no byte of anyone else's is touched.
 
@@ -139,7 +179,10 @@ only members of is written back as `{}`, so a file that was `{ }`, or `{` and
 `}` on two lines, comes back as `{}`. Every other byte comes back. This is ruled, not owed (2026-11-04,
 plan row 67a D1): an empty container holds no hook or setting of the person's,
 and the rule protects their hooks and settings, so no record outside the file
-is kept to tell who wrote one.
+is kept to tell who wrote one. Row 69's ruling R16 amends D1 for Codex's
+`hooks.json` `Stop` event alone: a Folio group with a group after it is emptied
+to `"hooks": []` where it stands, not taken out, so the later group keeps the
+index the person's approval is keyed by.
 
 ## Current upstream schemas, checked 2026-09-20
 
@@ -161,6 +204,22 @@ is kept to tell who wrote one.
   "codex:agent-turn-complete", "--json"]`. Codex appends the JSON payload,
   discards standard streams, and spawns without waiting. Failure is a continued
   hook failure, rather than a user-facing blocking decision.
+- Codex lifecycle hooks, checked at
+  [`rust-v0.166.0`](https://github.com/openai/codex/tree/rust-v0.166.0) on
+  2026-11-04 and 2026-11-05 (`codex-rs/hooks/src/engine/discovery.rs`,
+  `command_runner.rs`, `events/stop.rs`, `core/src/session/mod.rs`
+  `build_hooks_config`, `shell-command/src/shell_detect.rs`): `hooks.json` has a
+  `description` and `hooks`, and nothing else (`deny_unknown_fields`); any error
+  reading it ignores the whole file. A command handler is `type: "command"`, one
+  `command` string run through the session's shell: PowerShell on Windows (`pwsh`,
+  else `powershell.exe`, as `-NoProfile -Command`), the account's login shell
+  with `-c` elsewhere; `%COMSPEC% /C` and `$SHELL -lc` only for a session with no
+  shell of its own. Folio's Windows command is `& '<folio.exe>' attention
+  codex:stop --json -`, with every PowerShell quote in the path doubled; the Unix
+  one puts the path in sh's single quotes. `async` and `timeout` in seconds.
+  Folio writes `async: true` and `timeout: 10`. The `Stop` request carries
+  `session_id`, `cwd` and `last_assistant_message` on stdin. A hook runs only after the person trusts it
+  in Codex, and a changed command asks again.
 
 No shell, guard process or launcher is added. Exact legacy Folio shell
 templates are decoded for ownership; an install or refresh upgrades eligible
@@ -225,7 +284,10 @@ none: it rewrites only what makes an entry old (an old form is replaced, a
 direct entry gets this copy's program and the wanted arguments and keeps its
 other keys), so the person's own edits stay. Copilot is repaired within its version gate: only after the
 version question has been answered (the step asks it, and the answer runs the
-pass again), and never for a copilot too old for the hooks.
+pass again), and never for a copilot too old for the hooks. Codex is repaired
+only once its version has been asked, since the version decides which file the
+repair writes (row 69c). On a Codex that runs hooks, a gone copy's `notify` line
+is repaired into the hook, and this copy's working line alone is left as it is.
 
 ## The hook reads how its agent was started (0.4.10 plan row 74)
 
@@ -255,8 +317,9 @@ including removal, and expires. There is no automatic takeover.
 
 Removal returns `LeftOther(paths)` when another live copy remains. Other owned
 or dead entries can still be removed; the result states which owners were kept.
-Codex's user-authored notifier continues to refuse replacement even with
-`TakeOver`. No saved notifier is overwritten or chained.
+A Codex `notify` program of the person's own is never replaced, even with
+`TakeOver`, and since row 69 it does not keep Folio out: the hook goes into
+`hooks.json` beside it. No saved notifier is overwritten or chained.
 
 ## T-C1 contract
 
@@ -265,7 +328,8 @@ supplies the trusted current executable, actual config file and Folio data root.
 The ordinary settings entry point `apply` obtains today's agent config path.
 T-C1 should enumerate historical `agent_config_roots` plus today's environment
 and default candidates, deduplicate paths, then call `apply_at` with `Remove`.
-Root-relative files are `settings.json`, `config.toml`, and `hooks/folio.json`.
+Root-relative files are `settings.json`, `hooks.json` (with `config.toml`
+beside it, for an earlier Folio's `notify` line), and `hooks/folio.json`.
 Attach the config path to each outcome. `Refused` is an attempted refusal;
 `LeftOther` is a deliberate retention, not evidence of removal. Running-instance,
 exit-code, purge and CLI policies belong to T-C1.

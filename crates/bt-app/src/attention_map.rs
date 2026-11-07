@@ -512,6 +512,7 @@ pub(crate) const TURN_END: &[TurnEnd] = &[
             // apart from the pane's own agent (a named limit, `docs/DESIGN.md` 2026-11-02).
             only_client: None,
         },
+        nowhere: Nowhere::Says,
     },
     // **And this one deliberately cannot**, though its payload names the same file. A turn that
     // ended in failure did not end on the sentence the transcript ends with: that sentence is from
@@ -525,15 +526,30 @@ pub(crate) const TURN_END: &[TurnEnd] = &[
         // Its hook is spawned without the payload (`args_for`): a turn that failed is followed by
         // the next `Stop`, which names the same session.
         resume: Resume::None,
+        nowhere: Nowhere::Says,
     },
+    // **codex's `Stop` hook**, which since 0.4.10 (plan row 69) is the entry Folio installs for
+    // codex 0.148 and later. Its request is quoted from upstream at `rust-v0.166.0`
+    // (`codex-rs/hooks/src/events/stop.rs`, `stop.command.input.schema.json`): `session_id`,
+    // `turn_id`, `transcript_path`, `cwd`, `hook_event_name`, `model`, `permission_mode`,
+    // `stop_hook_active` and `last_assistant_message`, the last being the sentence itself.
     TurnEnd {
         family: CODEX,
         event: "stop",
         via: Via::Stop,
-        words: Words::None,
-        // codex's hooks are not installed by this build; its session reaches a pane through
-        // `notify` below.
-        resume: Resume::None,
+        words: Words::Field("last_assistant_message"),
+        // `codex resume <session_id>` in `cwd` brings the session back.
+        resume: Resume::Fields {
+            id: "session_id",
+            cwd: "cwd",
+            // The hook's request names no client, unlike `notify`'s: a nested `codex exec` the
+            // pane's codex started is not told apart from the pane's own session, the limit
+            // Claude Code's `claude -p` already has (`docs/DESIGN.md` 2026-11-04).
+            only_client: None,
+        },
+        // codex runs its hooks in every session, in a Folio pane or not, and shows a hook that
+        // exited non-zero as failed: a turn that ended where nobody is watching is not a failure.
+        nowhere: Nowhere::Quiet,
     },
     // codex's `notify` program, whose only observed `type` is `agent-turn-complete` — and which the
     // survey found **silent** while a real approval box was on screen. It says "I have finished
@@ -557,6 +573,7 @@ pub(crate) const TURN_END: &[TurnEnd] = &[
             // recording): a `codex exec` an agent in the pane started is not the pane's session.
             only_client: Some(("client", "codex-tui")),
         },
+        nowhere: Nowhere::Says,
     },
     // pi's whole contribution. "Fires only once a run fully settles."
     TurnEnd {
@@ -565,6 +582,7 @@ pub(crate) const TURN_END: &[TurnEnd] = &[
         via: Via::AgentSettled,
         words: Words::None,
         resume: Resume::None,
+        nowhere: Nowhere::Says,
     },
     // copilot's, and the only one of its thirteen hook events that says a turn is over: "The main
     // agent finishes a turn." Its payload's `stopReason` is quoted as the single value `"end_turn"`.
@@ -583,6 +601,7 @@ pub(crate) const TURN_END: &[TurnEnd] = &[
         // copilot has a resume command (`copilot --resume <id>`) and its payload a `sessionId`; it
         // lands vendor by vendor, from its own verified facts, as a row in `agent_resume::VENDORS`.
         resume: Resume::None,
+        nowhere: Nowhere::Says,
     },
 ];
 
@@ -598,6 +617,23 @@ pub(crate) struct TurnEnd {
     /// Where the session this turn ended in is named, when the family names one this build can
     /// resume (0.4.9 plan row 195).
     pub(crate) resume: Resume,
+    /// What the verb's exit says when there is nowhere to say it: no Folio pane, or no window
+    /// behind it any more.
+    pub(crate) nowhere: Nowhere,
+}
+
+/// **The verb's exit when a turn ended where no Folio window can hear it** (0.4.10 plan row 69).
+///
+/// The verb exits 1 there, and for a hook only Folio installs, run only from Folio's panes, that is
+/// a fact worth a status line. A program that runs its hooks in every session it ever starts, in a
+/// pane or not, and shows a non-zero exit as a failed hook, reads the same 1 as something gone
+/// wrong in every session started outside Folio — which nothing did.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Nowhere {
+    /// Exit 1: the hook says it reached nobody.
+    Says,
+    /// Exit 0: a turn that ended where nobody is watching is not a failure.
+    Quiet,
 }
 
 /// **Where a turn-end payload names its session and its folder** — the third declared field the
@@ -1060,9 +1096,10 @@ mod tests {
 
     /// **Where a sentence may be quoted from is a column, and it is closed.**
     ///
-    /// Two families declare a source today and the other four declare none, and this walks the
-    /// whole table rather than the two — because the failure this is about is not a row that says
-    /// the wrong thing, it is a row that ends up saying *something* when nobody decided it should.
+    /// Three rows of two families declare a source today and the other three declare none, and
+    /// this walks the whole table rather than the three — because the failure this is about is not
+    /// a row that says the wrong thing, it is a row that ends up saying *something* when nobody
+    /// decided it should.
     /// A `Words` inherited by a family whose payload was never read would put a tool name, a file
     /// path or a prompt on somebody's desktop.
     #[test]
@@ -1078,10 +1115,14 @@ mod tests {
             Some(Words::Field("last-assistant-message")),
             "the field codex's `notify` payload has carried since the survey recorded it"
         );
+        assert_eq!(
+            words(CODEX, "stop"),
+            Some(Words::Field("last_assistant_message")),
+            "the field codex's `Stop` hook request names the sentence with, at rust-v0.166.0"
+        );
         // Everything else, named one by one so that adding a source is a line typed on purpose.
         for silent in [
             (CLAUDE_CODE, "StopFailure"),
-            (CODEX, "stop"),
             (PI, "agent_settled"),
             (COPILOT, "agentStop"),
         ] {
@@ -1098,8 +1139,8 @@ mod tests {
                 .iter()
                 .filter(|row| row.words.are_somewhere())
                 .count(),
-            2,
-            "two rows can quote; a third is a decision, not a refactor"
+            3,
+            "three rows can quote; a fourth is a decision, not a refactor"
         );
         // **A row that only ever raises a wait has nowhere to declare a source**, because this is
         // the announcement lane's table and it is not on it. That is red line 14 read from the

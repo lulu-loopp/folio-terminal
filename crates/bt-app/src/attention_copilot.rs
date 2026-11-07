@@ -112,12 +112,31 @@ const MINIMUM: Version = Version {
     patch: 26,
 };
 
-/// A `major.minor.patch`, and nothing about what it is a version of.
+/// A `major.minor.patch`, and nothing about what it is a version of — copilot's here, and codex's
+/// in [`attention_codex`](crate::attention_codex) (0.4.10 plan row 69c).
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) struct Version {
     major: u32,
     minor: u32,
     patch: u32,
+}
+
+impl Version {
+    /// A version named in the code — a floor a row is gated on.
+    pub(crate) const fn new(major: u32, minor: u32, patch: u32) -> Self {
+        Self {
+            major,
+            minor,
+            patch,
+        }
+    }
+}
+
+/// `major.minor.patch`, as the program printed it: what a row's sentence names.
+impl std::fmt::Display for Version {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}.{}.{}", self.major, self.minor, self.patch)
+    }
 }
 
 /// Read only by the Windows probe ([`run_probe`]) and by this file's tests: off Windows the probe
@@ -142,7 +161,7 @@ impl Version {
     /// each part parse whole, would have read one real machine as a four-part version and the other
     /// as nothing.
     #[must_use]
-    fn parse(text: &str) -> Option<Self> {
+    pub(crate) fn parse(text: &str) -> Option<Self> {
         text.split_whitespace().find_map(|word| {
             let trimmed = word
                 .trim_matches(|character: char| !character.is_ascii_digit() && character != '.');
@@ -534,7 +553,7 @@ pub(crate) fn scan_resolved(
             return if unclassified_entry(&document) {
                 HooksFound::Unclassified
             } else {
-                HooksFound::Declined(crate::i18n::Text::AgentCopilotFileTaken)
+                HooksFound::Declined(crate::i18n::Text::AgentCopilotFileTaken.into())
             };
         }
         Err(_) => return HooksFound::Unreadable,
@@ -1360,91 +1379,102 @@ pub(crate) fn probe_settled() -> bool {
 /// whatever folder the shell that started Folio was standing in. A `copilot.cmd` dropped into a
 /// cloned repository therefore ran the moment somebody opened Settings ▸ Agents — a page about
 /// agents, running a program nobody named, with no press on anything. So the search is this
-/// window's own ([`bt_platform::program_in_directories`], which never looks at a working
-/// directory) and what `cmd` receives is the answer, quoted, with nothing left to resolve.
+/// window's own ([`ProbeEnvironment::program`](crate::shell_integration::ProbeEnvironment::program):
+/// [`bt_platform::program_in_directories`] over the block's `PATH`, or `program_on_path` over the
+/// inherited one, neither of which looks at a working directory) and what `cmd` receives is the
+/// answer, quoted, with nothing left to resolve.
 ///
 /// **In the environment a pane is born with** (T-FRESH-FACTS): the current logon block
 /// (`bt_platform::environment::fresh_logon_environment`, the door T-ENV-REFRESH's births and the
-/// program walk use), not this process's launch environment. Both the search (its `PATH` and
+/// program walk use, read as the PowerShell probes read it: `shell_integration::ProbeEnvironment`),
+/// not this process's launch environment. Both the search (its `PATH` and
 /// `PATHEXT`) and the child (`copilot.cmd` starts `node` off its `PATH`) read it, so a copilot
 /// or a `node` installed while Folio runs is found and runs the way a pane would run it. A block
 /// that cannot be read is said, and the inherited environment is used, the pane birth's rule.
 #[cfg(windows)]
 fn run_probe(ctx: &bt_platform::admission::WorkerCtx) -> Option<Version> {
-    let environment = match bt_platform::environment::fresh_logon_environment(ctx) {
-        Ok(block) => block,
-        Err(error) => {
-            crate::diagnostics::note(&format!(
-                "copilot probe: the current environment could not be read ({error}); copilot is \
-                 looked for in the inherited one"
-            ));
-            None
+    let environment = crate::shell_integration::ProbeEnvironment::current(ctx, "copilot probe");
+    let copilot = environment.program(Path::new("copilot"))?;
+    match version_through_cmd(ctx, &copilot, &environment, PROBE_DEADLINE, "copilot")? {
+        // Copilot's rule, kept: whatever it printed, whatever its exit status, read for a
+        // version (a copilot that says its version and then fails to look for updates is the
+        // version it said).
+        bt_platform::ProbeEnding::Finished(output) => {
+            Version::parse(&String::from_utf8_lossy(&output.stdout))
         }
-    };
-    let variable = |name: &str| match &environment {
-        Some(block) => block
-            .iter()
-            .find(|(held, _)| held.to_string_lossy().eq_ignore_ascii_case(name))
-            .map(|(_, value)| value.clone()),
-        None => std::env::var_os(name),
-    };
-    let directories: Vec<PathBuf> = variable("PATH")
-        .map(|path| {
-            std::env::split_paths(&path)
-                // Absolute entries only: an empty entry, and a relative one, both mean the
-                // working directory to Windows.
-                .filter(|entry| entry.is_absolute())
-                .collect()
-        })
-        .unwrap_or_default();
-    let pathext =
-        variable("PATHEXT").map_or_else(String::new, |value| value.to_string_lossy().into_owned());
-    let copilot = bt_platform::program_in_directories(
-        Path::new("copilot"),
-        &directories,
-        &pathext,
-        &|candidate: &Path| candidate.is_file(),
-    )?;
+        bt_platform::ProbeEnding::Overran => None,
+    }
+}
+
+/// **`<program> --version`, asked of a program another reader has already found** (0.4.10 plan
+/// row 69c, R17: codex's, found by the program walk) — [`run_probe`]'s question, in the same
+/// environment and through the same `cmd.exe`, held to `deadline`. How it ended, for the asker to
+/// read by its own rule: [`ProbeEnding::Finished`](bt_platform::ProbeEnding::Finished) with its
+/// exit status and what it printed, or
+/// [`ProbeEnding::Overran`](bt_platform::ProbeEnding::Overran) — an answer that may come next
+/// time (the 69c review's C2). `None` when it could not be asked; off Windows no program is asked
+/// (the module header's probe answers `None` there too), so the version is unknown.
+pub(crate) fn program_version(
+    ctx: &bt_platform::admission::WorkerCtx,
+    program: &Path,
+    deadline: std::time::Duration,
+    who: &str,
+) -> Option<bt_platform::ProbeEnding> {
+    #[cfg(windows)]
+    {
+        let environment =
+            crate::shell_integration::ProbeEnvironment::current(ctx, &format!("{who} probe"));
+        version_through_cmd(ctx, program, &environment, deadline, who)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (ctx, program, deadline, who);
+        None
+    }
+}
+
+/// **`program --version` through `cmd.exe`**, in `environment` (laid over the child by
+/// [`ProbeEnvironment::apply`](crate::shell_integration::ProbeEnvironment::apply), so the child
+/// sees the block a pane is born with and nothing of Folio's own), held to `deadline`: how it
+/// ended, or `None` when it could not be started.
+#[cfg(windows)]
+fn version_through_cmd(
+    ctx: &bt_platform::admission::WorkerCtx,
+    program: &Path,
+    environment: &crate::shell_integration::ProbeEnvironment,
+    deadline: std::time::Duration,
+    who: &str,
+) -> Option<bt_platform::ProbeEnding> {
     // Through the quiet door (§7.40 ①): without `CREATE_NO_WINDOW` a console
     // window opens on screen the first time somebody opens the settings dialog.
     let mut command = bt_platform::quiet_command_named(Path::new("cmd.exe"))?;
-    if let Some(block) = &environment {
-        for (name, _) in std::env::vars_os() {
-            if !block.iter().any(|(held, _)| {
-                held.to_string_lossy()
-                    .eq_ignore_ascii_case(&name.to_string_lossy())
-            }) {
-                command.env_remove(name);
-            }
-        }
-        command.envs(block.iter().map(|(name, value)| (name, value)));
-    }
+    environment.apply(&mut command);
     // A raw tail and not `args`, because what is being built is a string `cmd`
     // parses for itself: the outer quotes are the pair it strips, and the inner
     // ones are what keep a program path holding a space one token.
     let ending = bt_platform::probe_output_with_raw_tail(
         ctx,
         &command,
-        std::ffi::OsStr::new(&probe_command_tail(&copilot)),
-        PROBE_DEADLINE,
+        std::ffi::OsStr::new(&probe_command_tail(program)),
+        deadline,
     )
     .ok()?;
-    let output = match ending {
-        bt_platform::ProbeEnding::Finished(output) => output,
+    match &ending {
+        bt_platform::ProbeEnding::Finished(output) => {
+            bt_platform::file_reads::pipe_output(bt_platform::file_reads::Lane::Attention, output);
+        }
         // Stopped at the deadline: the version is unknown (not "no copilot"), and the next
         // trigger asks again.
         bt_platform::ProbeEnding::Overran => {
             crate::diagnostics::note(&format!(
-                "copilot probe: `{} --version` did not answer within {} s and was stopped; the \
+                "{who} probe: `{} --version` did not answer within {} s and was stopped; the \
                  version is unknown until the next probe",
-                copilot.display(),
-                PROBE_DEADLINE.as_secs()
+                program.display(),
+                deadline.as_secs()
             ));
-            return None;
         }
-    };
-    bt_platform::file_reads::pipe_output(bt_platform::file_reads::Lane::Attention, &output);
-    Version::parse(&String::from_utf8_lossy(&output.stdout))
+    }
+    Some(ending)
 }
 
 /// **How long `copilot --version` may take** before the probe stops it and answers "unknown" —
@@ -1459,8 +1489,8 @@ const PROBE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
 /// spawn so the shape can be pinned without a machine that has copilot on it.
 #[cfg(windows)]
 #[must_use]
-fn probe_command_tail(copilot: &Path) -> String {
-    format!("/c \"\"{}\" --version\"", copilot.display())
+fn probe_command_tail(program: &Path) -> String {
+    format!("/c \"\"{}\" --version\"", program.display())
 }
 
 #[cfg(not(windows))]

@@ -383,9 +383,7 @@ impl Tip {
             Self::ClaudeSettings => {
                 crate::i18n::first_run_tip_claude(&crate::attention_hooks::settings_path_shown())
             }
-            Self::CodexConfig => {
-                crate::i18n::first_run_tip_codex(&crate::attention_codex::config_path_shown())
-            }
+            Self::CodexConfig => crate::attention_codex::first_run_tip(),
             Self::CopilotHooks => {
                 crate::i18n::first_run_tip_copilot(&crate::attention_copilot::hooks_path_shown())
             }
@@ -3675,7 +3673,7 @@ mod tests {
         // file, and no two rows name the same one.
         for (row, named) in [
             (2_usize, "settings.json"),
-            (3, "config.toml"),
+            (3, "hooks.json"),
             (4, "folio.json"),
         ] {
             assert!(
@@ -4110,7 +4108,7 @@ mod clock_edge_tests {
         for reader in [
             "explorer_menu::package_file()",
             "attention_hooks::state()",
-            "attention_codex::state()",
+            "attention_codex::first_run_installable()",
             "attention_copilot::state()",
         ] {
             assert!(

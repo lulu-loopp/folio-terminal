@@ -25,6 +25,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock, PoisonError};
 
+use bt_platform::admission::WorkerCtx;
+
 use crate::attention_copilot::Readiness;
 use crate::attention_hooks::{Config, Unresolved};
 use crate::attention_ownership::{self as ownership, Decision, HooksFound, Outcome};
@@ -50,10 +52,11 @@ pub(crate) struct HooksFamily {
     /// The switch's own writer.
     pub(crate) apply: fn(&Config, Decision, &Path, &Path) -> Outcome,
     /// Whether a repair may write the family's hooks now: always, except where the agent's own
-    /// version decides whether they mean what Folio reads them as (Copilot, R9).
+    /// version decides whether they mean what Folio reads them as (Copilot, R9), or which entry is
+    /// Folio's (Codex, 0.4.10 plan row 69c).
     pub(crate) within_its_gate: fn() -> bool,
-    /// The notice a repair of a gone copy's hooks raises (R8).
-    pub(crate) repaired: Text,
+    /// The notice a repair of a gone copy's hooks raises (R8), by the file the repair wrote.
+    pub(crate) repaired: fn(&Path) -> Text,
 }
 
 /// **The families, in the Agents page's row order** — the order of every per-agent array on the
@@ -66,16 +69,18 @@ pub(crate) static HOOKS_FAMILIES: [HooksFamily; 3] = [
         scan: crate::attention_hooks::scan_resolved,
         apply: crate::attention_hooks::apply_resolved,
         within_its_gate: no_gate,
-        repaired: Text::AgentHooksRepairedClaude,
+        repaired: claude_repaired,
     },
+    // Its file by its version (row 69c): `hooks.json` from 0.148, `config.toml`'s `notify` line
+    // below; repaired only once the version has been asked and answered.
     HooksFamily {
         family: crate::attention_map::CODEX,
         tag: "codex",
-        path: crate::attention_codex::config_path,
+        path: crate::attention_codex::entry_path,
         scan: crate::attention_codex::scan_resolved,
         apply: crate::attention_codex::apply_resolved,
-        within_its_gate: no_gate,
-        repaired: Text::AgentHooksRepairedCodex,
+        within_its_gate: crate::attention_codex::repair_within_the_gate,
+        repaired: crate::attention_codex::repaired_notice,
     },
     // Repaired within its version gate (R9): only once the version question has been asked and
     // answered, and never for a copilot too old for the hooks (`repair_within_the_gate`). Never on
@@ -87,13 +92,22 @@ pub(crate) static HOOKS_FAMILIES: [HooksFamily; 3] = [
         scan: crate::attention_copilot::scan_resolved,
         apply: crate::attention_copilot::apply_resolved,
         within_its_gate: crate::attention_copilot::repair_within_the_gate,
-        repaired: Text::AgentHooksRepairedCopilot,
+        repaired: copilot_repaired,
     },
 ];
 
 /// A family whose hooks mean the same to every version of its agent.
 fn no_gate() -> bool {
     true
+}
+
+/// The notices of the two families with one file each.
+fn claude_repaired(_: &Path) -> Text {
+    Text::AgentHooksRepairedClaude
+}
+
+fn copilot_repaired(_: &Path) -> Text {
+    Text::AgentHooksRepairedCopilot
 }
 
 /// **One family's answer from one run of the step.**
@@ -103,6 +117,9 @@ pub(crate) struct HooksScan {
     pub(crate) found: HooksFound,
     /// What a repair this run wrote the hooks from.
     pub(crate) repaired_from: Option<HooksFound>,
+    /// The notice that repair owes, when it pointed a gone copy's hooks here (R8) and the rescan
+    /// confirmed it (review N6) — by the file it wrote, for codex's two (row 69c).
+    pub(crate) notice: Option<Text>,
     /// Why a repair that was due did not happen, when the row has that to say (review N4).
     pub(crate) unrepaired: Option<Unrepaired>,
 }
@@ -112,6 +129,7 @@ impl HooksScan {
         Self {
             found,
             repaired_from: None,
+            notice: None,
             unrepaired: None,
         }
     }
@@ -238,11 +256,14 @@ impl AgentHooksStep {
             };
             match (family.apply)(&config, Decision::Install, exe, data) {
                 Outcome::Installed => {
-                    let now = (family.scan)(&config.read_afresh(), exe, look);
+                    let config = config.read_afresh();
+                    let now = (family.scan)(&config, exe, look);
                     // **A repair is said only where the rescan confirms it** (review N6): two copies
                     // starting together can both land, and the one whose write came first finds
                     // the other's hooks there now — its own write lost, nothing to announce.
                     let confirmed = now.is_this_copys();
+                    let notice = (confirmed && matches!(found, HooksFound::Dead(_)))
+                        .then(|| (family.repaired)(config.named()));
                     crate::diagnostics::stderr_line(format!(
                         "BT_AGENT_HOOKS {} {} repaired={}{}",
                         family.tag,
@@ -256,6 +277,7 @@ impl AgentHooksStep {
                     ));
                     HooksScan {
                         repaired_from: confirmed.then_some(found),
+                        notice,
                         ..HooksScan::unrepaired(now)
                     }
                 }
@@ -282,13 +304,7 @@ impl AgentHooksStep {
             .take()
             .map(|untaken| untaken.notices)
             .unwrap_or_default();
-        notices.extend(
-            scans
-                .iter()
-                .zip(&HOOKS_FAMILIES)
-                .filter(|(scan, _)| matches!(scan.repaired_from, Some(HooksFound::Dead(_))))
-                .map(|(_, family)| family.repaired),
-        );
+        notices.extend(scans.iter().filter_map(|scan| scan.notice));
         *published = Some(HooksSnapshot {
             found: std::array::from_fn(|index| scans[index].found.clone()),
             unrepaired: std::array::from_fn(|index| scans[index].unrepaired),
@@ -332,16 +348,20 @@ pub(crate) fn install_hooks_wake(wake: impl Fn() + Send + Sync + 'static) {
     let _ = HOOKS_WAKE.set(Box::new(wake));
 }
 
-/// **The step, on this machine**: the carry pass's member ([`crate::carry_pass::CARRY_STEPS`]).
+/// **The step, on this machine**: the carry pass's member ([`crate::carry_pass::run_carry_steps`]).
 ///
 /// **Not before the program walk has answered** (the pane-environment ruling of 2026-10-05: the
 /// folders are the account's current ones, never the launch's): the walk's first answer runs the
 /// pass, so a run asked earlier — an Agents page opened in the first second — has nothing to read
 /// yet and waits for it.
-pub(crate) fn run_agent_hooks_step() {
+pub(crate) fn run_agent_hooks_step(ctx: &WorkerCtx) {
     if !crate::attention_hooks::AGENT_HOMES.answered() {
         return;
     }
+    // The one family whose file is named by a question of its agent: codex's version decides
+    // whether Folio's entry is the hook or the `notify` line (row 69c, R17), so it is settled here,
+    // on the pass's worker, before any family's file is named.
+    let _ = crate::attention_codex::settle_version(ctx);
     let Some(exe) = ownership::this_copy() else {
         crate::diagnostics::stderr_line(
             "BT_AGENT_HOOKS not scanned: this copy's own program could not be named".to_owned(),
@@ -661,6 +681,58 @@ mod tests {
         );
     }
 
+    /// Row 69c — **on a codex that runs hooks the repair is the hook's**: a gone copy's hook in
+    /// `hooks.json` and the `notify` line it left in `config.toml` are repaired in one write — the
+    /// hook names this copy, the line is out — and the notice says codex asks to trust the new path.
+    ///
+    /// MUTATION: `plant-69c-hook-notice-is-the-lines.py` gives the hook's repair the line's notice.
+    #[test]
+    fn a_gone_copys_codex_hook_and_line_are_repaired_into_the_hook() {
+        let root = root("hooks-step-codex-hook");
+        let gone = copy_at(&root, "A gone");
+        let here = copy_at(&root, "B here");
+        let mut files = files_in(&root.join("config"));
+        let config_toml = files[1].clone();
+        files[1] = config_toml.with_file_name("hooks.json");
+        let gone_data = root.join("gone data");
+        install_all(&files, &gone, &gone_data);
+        assert_eq!(
+            crate::attention_codex::apply_at(&config_toml, Decision::Install, &gone, &gone_data),
+            Outcome::Installed
+        );
+        fs::remove_file(&gone).unwrap();
+        let step = AgentHooksStep::new();
+        let scans = step.scan_and_repair(
+            &some(&files),
+            &here,
+            &root.join("data"),
+            &what_stands,
+            never_held,
+            &every_family,
+        );
+        assert_eq!(
+            scans[1].repaired_from,
+            Some(HooksFound::Dead(vec![gone.clone()]))
+        );
+        assert_eq!(scans[1].found, HooksFound::Current);
+        let hook = fs::read_to_string(&files[1]).unwrap();
+        assert!(
+            hook.contains("B here") && !hook.contains("A gone"),
+            "{hook}"
+        );
+        let line = fs::read_to_string(&config_toml).unwrap();
+        assert!(!line.contains("notify"), "the line is out: {line}");
+        step.publish_scans(&scans, Readiness::Unknown);
+        assert_eq!(
+            step.take_snapshot().unwrap().notices,
+            [
+                Text::AgentHooksRepairedClaude,
+                Text::AgentHooksRepairedCodexHook,
+                Text::AgentHooksRepairedCopilot
+            ]
+        );
+    }
+
     /// **A press between the scan and the write is never undone**: the run classified the file
     /// and then the file changed (here, the person's press took Folio's hooks out while the trial's
     /// gate was being asked); the repair's write is of the bytes it classified, so it refuses, the
@@ -735,6 +807,60 @@ mod tests {
         );
         assert_eq!(fs::read(&files[2]).unwrap(), copilot_before);
         assert!(scans[..2].iter().all(|scan| scan.repaired_from.is_some()));
+    }
+
+    /// Row 69c (the 69c review's C4) — **codex's repair waits for its version**: before the version
+    /// has been asked, a gone copy's `notify` line is said and left, and neither `config.toml` nor
+    /// a `hooks.json` beside it is written — a repair then could write a hook a codex below 0.148
+    /// skips, in place of the line that works there. Once the version is answered (here: no codex
+    /// where the walk looked, unknown, which is current), the same scan repairs it.
+    ///
+    /// MUTATION: `plant-69c-repair-gate-open.py` opens codex's gate before the version is asked,
+    /// and the line is repaired at once.
+    #[test]
+    fn a_codex_repair_waits_for_the_version() {
+        let root = root("hooks-step-codex-gate");
+        let gone = copy_at(&root, "A gone");
+        let here = copy_at(&root, "B here");
+        let files = files_in(&root.join("config"));
+        let data = root.join("data");
+        install_all(&files, &gone, &root.join("gone data"));
+        fs::remove_file(&gone).unwrap();
+        let hooks_json = files[1].with_file_name("hooks.json");
+        let before = (fs::read(&files[1]).unwrap(), fs::read(&hooks_json).ok());
+        let book = std::sync::Mutex::new(crate::attention_codex::VersionBook::new());
+        let gate = |family: &HooksFamily| {
+            family.tag != "codex" || crate::attention_codex::repair_within_the_gate_in(&book)
+        };
+        let step = AgentHooksStep::new();
+        let scans =
+            step.scan_and_repair(&some(&files), &here, &data, &what_stands, never_held, &gate);
+        assert_eq!(
+            scans[1],
+            HooksScan::unrepaired(HooksFound::Dead(vec![gone.clone()]))
+        );
+        assert_eq!(
+            (fs::read(&files[1]).unwrap(), fs::read(&hooks_json).ok()),
+            before,
+            "both of codex's files byte for byte"
+        );
+        assert!(scans[0].repaired_from.is_some() && scans[2].repaired_from.is_some());
+
+        assert!(crate::attention_codex::adopt_walk_program_in(
+            &book,
+            Some(None)
+        ));
+        let again =
+            step.scan_and_repair(&some(&files), &here, &data, &what_stands, never_held, &gate);
+        assert_eq!(
+            again[1].repaired_from,
+            Some(HooksFound::Dead(vec![gone.clone()]))
+        );
+        let line = fs::read_to_string(&files[1]).unwrap();
+        assert!(
+            line.contains("B here") && !line.contains("A gone"),
+            "{line}"
+        );
     }
 
     /// T2 — **a living other copy's hooks are left, and said by its path** (R5): nothing is
@@ -1550,8 +1676,8 @@ mod tests {
             found(&scans),
             [
                 HooksFound::Nothing,
-                HooksFound::Declined(Text::AgentCodexNotifyTaken),
-                HooksFound::Declined(Text::AgentCopilotFileTaken)
+                HooksFound::Declined(Text::AgentCodexNotifyTaken.into()),
+                HooksFound::Declined(Text::AgentCopilotFileTaken.into())
             ]
         );
         assert_eq!(fs::read_to_string(&files[1]).unwrap(), codex);
