@@ -2821,7 +2821,7 @@ pub(crate) fn leaf_saying(text: &str) -> TerminalPane {
             agent: crate::agent_resume::AgentAccount::default(),
             // Nor are its turns any agent's: a fixture is read by the shell's rule until a test
             // delivers it a hook.
-            turns: crate::agent_turns::TurnAccount::default(),
+            turn_account: crate::agent_turns::TurnAccount::default(),
         },
         view: TermView {
             projection,

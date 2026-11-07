@@ -445,7 +445,7 @@ fn a_resumed_agents_pane_is_unread_by_its_turns_and_not_by_its_bytes() {
         .get_mut(&seat)
         .expect("the fixture's pane")
         .session;
-    leaf.turns = agent_turns::TurnAccount::born_beside(&resumed);
+    leaf.turn_account = agent_turns::TurnAccount::born_beside(&resumed);
     leaf.agent = resumed;
     draws(&mut tabs, seat, 40);
     assert_eq!(
@@ -594,8 +594,9 @@ fn an_agent_typed_into_a_shell_wears_its_dot_at_its_turns_ends() {
     leaf.session
         .feed(b"\x1b]133;D;0\x07\x1b]133;A\x07PS> ")
         .expect("the marks parse");
-    leaf.turns.settle_turn_command(leaf.session.command_marks());
-    assert_eq!(leaf.turns.agent_turn(), None, "the shell's again");
+    leaf.turn_account
+        .settle_turn_command(leaf.session.command_marks());
+    assert_eq!(leaf.turn_account.agent_turn(), None, "the shell's again");
     draws(&mut tabs, seat, 1);
     assert_eq!(
         background_dot(&tabs),

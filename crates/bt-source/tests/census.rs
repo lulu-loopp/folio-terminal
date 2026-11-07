@@ -1669,8 +1669,9 @@ fn a_session_ends_without_reading_its_view() {
 /// The fields of the session record: the 22 fields `LeafSession` had at O-4b's head, each
 /// `ShellSession`'s by the contract's M8 rename (O-5a, 2026-10-27), less the two O-5b moved to
 /// the pane (2026-10-28, rulings E2 and E5): `view` and `successor`, and with `agent`, the account
-/// of the agent the pane runs and the session it named (0.4.9 plan row 195). Twenty-one.
-const SHELL_SESSION_FIELDS: [&str; 21] = [
+/// of the agent the pane runs and the session it named (0.4.9 plan row 195), and `turn_account`,
+/// the account of that agent's turns its blue dot reads (0.4.10 plan row 75). Twenty-two.
+const SHELL_SESSION_FIELDS: [&str; 22] = [
     "agent",
     "attention",
     "attention_ended",
@@ -1691,6 +1692,7 @@ const SHELL_SESSION_FIELDS: [&str; 21] = [
     "pending_typing",
     "process_folder",
     "session",
+    "turn_account",
     "wake",
 ];
 

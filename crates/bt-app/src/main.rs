@@ -7687,7 +7687,7 @@ struct ShellSession {
     /// **This pane's agent's turns, as its blue dot reads them** (0.4.10 plan row 75): for a pane
     /// whose agent's hooks are heard, "finished" is a turn's end and not the bytes it draws. See
     /// [`agent_turns::TurnAccount`].
-    turns: agent_turns::TurnAccount,
+    turn_account: agent_turns::TurnAccount,
     grid: GridSize,
     conpty_grid: GridSize,
     pending_pty_resize: Option<PendingPtyResize>,
@@ -16585,7 +16585,7 @@ impl ShellSession {
             last_seen_revision: self.last_seen_revision,
             tab_is_active,
             awaiting: self.attention.ledger.ticket().is_some(),
-            turn: self.turns.agent_turn(),
+            turn: self.turn_account.agent_turn(),
         }
     }
 }
@@ -23076,7 +23076,8 @@ fn deliver_attention(
             // **And the turn itself, which is what an agent pane's blue dot is read from**
             // (row 75): ended, begun, or reported in from inside one.
             if let Some(step) = asks.turn {
-                leaf.turns.hear_turn_step(step, child, leaf.output_revision);
+                leaf.turn_account
+                    .hear_turn_step(step, child, leaf.output_revision);
             }
             if let Some(event) = asks.ledger.clone() {
                 // The clock mirrors the arrival rather than the ledger's answer, and deliberately:
@@ -33410,7 +33411,7 @@ fn create_leaf_session(
     );
     // **A resume's turns are its agent's from birth** (row 75): its record was written by that
     // agent's own `Stop`, so what it draws while it reloads is no finished turn.
-    leaf.session.turns = agent_turns::TurnAccount::born_beside(&leaf.session.agent);
+    leaf.session.turn_account = agent_turns::TurnAccount::born_beside(&leaf.session.agent);
     match shell {
         // **Born later, standing where its shell will stand.** The place is said now, from the
         // decision, so a pane split off or restarted from this one while it is being born is put
@@ -33613,7 +33614,7 @@ fn bare_leaf(
             // Told what it is born as by `create_leaf_session`, once the birth is decided.
             agent: agent_resume::AgentAccount::default(),
             // Likewise: a resume is bound from birth, any other pane at its agent's first turn.
-            turns: agent_turns::TurnAccount::default(),
+            turn_account: agent_turns::TurnAccount::default(),
             grid,
             conpty_grid: grid,
             pending_pty_resize: None,
@@ -33769,7 +33770,7 @@ fn finish_leaf_birth(
     if stood_in {
         leaf.agent = agent_resume::AgentAccount::default();
         // Nor are its turns an agent's (row 75): the stand-in is read by the shell's rule.
-        leaf.turns = agent_turns::TurnAccount::default();
+        leaf.turn_account = agent_turns::TurnAccount::default();
     }
     // **A pane born on the inbox ConPTY says so, once, and why** (T-KEYBOARD-RECORDS). The
     // process falls back to Windows' own ConPTY when the packaged pair is missing or will not
