@@ -263,11 +263,19 @@ pub(crate) fn state() -> State {
     let Some(path) = settings_path() else {
         return State::Absent;
     };
-    let state = state_at(&path);
+    state_in(&CLAUDE, &path, ownership::this_copy().as_deref())
+}
+
+/// **Whether one family's hook file at `path` holds this copy's entries** (`exe`, the running
+/// executable; `None` when it could not be asked), and the states in which the question has no
+/// answer — the reading [`state`] gives of Claude Code's file, for any [`Family`].
+#[must_use]
+pub(crate) fn state_in(family: &Family, path: &Path, exe: Option<&Path>) -> State {
+    let state = state_at(family, path);
     if state != State::Installed {
         return state;
     }
-    let Some(exe) = ownership::this_copy() else {
+    let Some(exe) = exe else {
         return State::Unreadable;
     };
     let Ok(text) =
@@ -278,9 +286,9 @@ pub(crate) fn state() -> State {
     let Some(value) = serde_json::from_str::<Value>(splice::body(&text)).ok() else {
         return State::Unreadable;
     };
-    if (owners(&value).unwrap_or_default())
+    if (owners(family, &value).unwrap_or_default())
         .iter()
-        .any(|owner| crate::explorer_menu::same_path(owner, &exe))
+        .any(|owner| crate::explorer_menu::same_path(owner, exe))
     {
         State::Installed
     } else {
@@ -305,7 +313,7 @@ pub(crate) fn row_state() -> (bool, Option<&'static str>) {
 /// The same question about a named file, so a test can ask it without a settings file on the
 /// machine it runs on.
 #[must_use]
-fn state_at(path: &Path) -> State {
+fn state_at(family: &Family, path: &Path) -> State {
     let config = match Config::resolve(path) {
         Ok(config) => config,
         // Read, and not ours to change. The row says which file it is looking at.
@@ -327,7 +335,7 @@ fn state_at(path: &Path) -> State {
     }
     match serde_json::from_str::<Value>(text) {
         Ok(settings) if settings.is_object() => {
-            if declares_folio(&settings) {
+            if declares_folio(family, &settings) {
                 State::Installed
             } else {
                 State::Absent
@@ -395,11 +403,73 @@ fn group_is_ours(group: &Value) -> bool {
     group
         .get("hooks")
         .and_then(Value::as_array)
-        .is_some_and(|hooks| {
-            hooks
-                .iter()
-                .any(|hook| hook_owner(hook).is_ok_and(|owner| owner.is_some()))
+        .is_some_and(|hooks| entry_owners(&CLAUDE, hooks).iter().any(Option::is_some))
+}
+
+/// **One agent's hook file, as the splice reads and writes it** (0.4.10 plan row 69a).
+///
+/// Claude Code's `settings.json` and Codex's `hooks.json` nest the same way — the file's object,
+/// its `hooks`, an event's array of groups, a group's `hooks` array of entries — so the reader, the
+/// three edits ([`edited`]) and the write-time self-check ([`verified`]) are one, and what the two
+/// files differ in is said here and nowhere else.
+pub(crate) struct Family {
+    /// **Whose one entry is**: the executable it runs when it is a copy of Folio speaking this
+    /// family's verb, `Ok(None)` for anybody else's, and an error for an entry wearing Folio's verb
+    /// in a shape this build cannot claim — which is then nobody's to edit.
+    pub(crate) owner: fn(&Value) -> Result<Option<PathBuf>, &'static str>,
+    /// The entries one install of a copy at this executable writes.
+    pub(crate) wanted: fn(&Path) -> Vec<Wanted>,
+    /// **The entry this build writes for one row** ([`Wanted::row`]), naming the copy at this
+    /// executable — what an install points another copy's entry at, where it stands (ruling N1,
+    /// re-review R1).
+    pub(crate) todays: fn(&str, &Path) -> Value,
+    /// **The keys that say which program an entry runs, and how** — what today's form is judged on
+    /// ([`in_todays_form`]) and the only keys a repair rewrites ([`repaired_entry`]); every other
+    /// key of an entry of Folio's is the person's to set. An entry without every one of them is in
+    /// an older shape.
+    pub(crate) program_keys: &'static [&'static str],
+    /// **Whether the agent keys something of the person's by an entry's place in the file.**
+    ///
+    /// Codex records the person's approval of a hook under `<file>:<event>:<group>:<entry>`, so
+    /// taking a group out from in front of theirs would detach every approval after it (ruling
+    /// R16). Under such a family an entry is Folio's only when it is its group's one entry, a group
+    /// of Folio's with a group after it is emptied where it stands rather than taken out, and the
+    /// self-check compares every foreign entry's place as well as its bytes.
+    pub(crate) positional: bool,
+    /// The family's name in the wire's `<family>:<event>` spelling, which a Folio-looking entry
+    /// this build cannot claim speaks (the start-time scan's "unclassified", 0.4.10 plan row 67b).
+    pub(crate) agent: &'static str,
+}
+
+/// Claude Code's `settings.json`.
+pub(crate) const CLAUDE: Family = Family {
+    owner: hook_owner,
+    wanted,
+    todays: todays_hook,
+    program_keys: &["command", "args"],
+    positional: false,
+    agent: CLAUDE_CODE,
+};
+
+/// **Whose each entry of one group is** — [`Family::owner`], read per entry, and the one place that
+/// reading is made: the planner, the owners an operation checks, the state a row reads and the
+/// self-check's stripped value all take it from here, so no two of them can disagree about an
+/// entry.
+///
+/// Under a [`Family::positional`] family an entry that shares its group is nobody's: Folio writes
+/// its entry alone in a group of its own, and one standing beside the person's could only be taken
+/// out by moving theirs.
+fn entry_owners(family: &Family, rows: &[Value]) -> Vec<Option<PathBuf>> {
+    let alone = !family.positional || rows.len() == 1;
+    rows.iter()
+        .map(|hook| {
+            if alone {
+                (family.owner)(hook).ok().flatten()
+            } else {
+                None
+            }
         })
+        .collect()
 }
 
 /// The only decoder of Claude hook ownership, for both legacy and direct form.
@@ -425,43 +495,40 @@ fn hook_owner(hook: &Value) -> Result<Option<PathBuf>, &'static str> {
     Ok(owner)
 }
 
-fn owners(settings: &Value) -> Result<Vec<PathBuf>, &'static str> {
+fn owners(family: &Family, settings: &Value) -> Result<Vec<PathBuf>, crate::i18n::Text> {
     let mut found = Vec::new();
     let Some(hooks) = settings.get("hooks") else {
         return Ok(found);
     };
     for groups in hooks
         .as_object()
-        .ok_or(crate::i18n::Text::AgentHooksSchemaUnknown.text())?
+        .ok_or(crate::i18n::Text::AgentHooksSchemaUnknown)?
         .values()
     {
         for group in groups
             .as_array()
-            .ok_or(crate::i18n::Text::AgentHooksSchemaUnknown.text())?
+            .ok_or(crate::i18n::Text::AgentHooksSchemaUnknown)?
         {
             let rows = group
                 .get("hooks")
                 .and_then(Value::as_array)
-                .ok_or(crate::i18n::Text::AgentHooksSchemaUnknown.text())?;
-            for hook in rows {
-                if !hook.is_object() {
-                    return Err(crate::i18n::Text::AgentHooksSchemaUnknown.text());
-                }
-                // **Ownership is per entry.** An entry this build cannot decode is not Folio's: it
-                // is left exactly where it is, and it has no say over the entries beside it. One
-                // hand-written `"mytool attention claude-code:Stop"` used to refuse every edit to
-                // the whole file, install and remove alike — a second state nobody could get out
-                // of (closure review R4). The document's own shape, above and below, is still a
-                // refusal: that is a file this build cannot read, not an entry it cannot claim.
-                let Ok(Some(owner)) = hook_owner(hook) else {
-                    continue;
-                };
+                .ok_or(crate::i18n::Text::AgentHooksSchemaUnknown)?;
+            if rows.iter().any(|hook| !hook.is_object()) {
+                return Err(crate::i18n::Text::AgentHooksSchemaUnknown);
+            }
+            // **Ownership is per entry.** An entry this build cannot decode is not Folio's: it
+            // is left exactly where it is, and it has no say over the entries beside it. One
+            // hand-written `"mytool attention claude-code:Stop"` used to refuse every edit to
+            // the whole file, install and remove alike — a second state nobody could get out
+            // of (closure review R4). The document's own shape, above and below, is still a
+            // refusal: that is a file this build cannot read, not an entry it cannot claim.
+            for owner in entry_owners(family, rows).into_iter().flatten() {
                 if group.as_object().is_none_or(|o| {
                     o.keys()
                         .any(|k| !["matcher", "hooks"].contains(&k.as_str()))
                 }) || group.get("matcher").is_some_and(|v| !v.is_string())
                 {
-                    return Err(crate::i18n::Text::AgentHooksSchemaUnknown.text());
+                    return Err(crate::i18n::Text::AgentHooksSchemaUnknown);
                 }
                 found.push(owner);
             }
@@ -470,8 +537,19 @@ fn owners(settings: &Value) -> Result<Vec<PathBuf>, &'static str> {
     Ok(found)
 }
 
-fn declares_folio(settings: &Value) -> bool {
-    !declared_events(settings).is_empty()
+/// Whether any group of the file holds an entry of Folio's, of whichever copy.
+fn declares_folio(family: &Family, settings: &Value) -> bool {
+    settings
+        .get("hooks")
+        .and_then(Value::as_object)
+        .is_some_and(|hooks| {
+            hooks
+                .values()
+                .filter_map(Value::as_array)
+                .flatten()
+                .filter_map(|group| group.get("hooks").and_then(Value::as_array))
+                .any(|rows| entry_owners(family, rows).iter().any(Option::is_some))
+        })
 }
 
 /// **The rows one install writes**: every Claude Code row whose wait is primary, plus every clear.
@@ -498,17 +576,17 @@ fn args_for(event: &str) -> Vec<String> {
 
 /// **One entry an install wants in the file**: the event it hangs on, the matcher of its group, and
 /// the entry itself.
-struct Wanted {
-    event: &'static str,
-    matcher: Option<&'static str>,
-    /// The row the entry speaks for — the `<row>` of its `claude-code:<row>` word, which every
-    /// shape of Folio's entry has carried since the first (report §1.3), so an entry is known by
-    /// what it says and never by where it stands (ruling N1).
-    row: &'static str,
-    hook: Value,
+pub(crate) struct Wanted {
+    pub(crate) event: &'static str,
+    pub(crate) matcher: Option<&'static str>,
+    /// The row the entry speaks for — the `<row>` of its `<family>:<row>` word, which every shape
+    /// of Folio's entry has carried since the first (report §1.3), so an entry is known by what it
+    /// says and never by where it stands (ruling N1; [`row_of`]).
+    pub(crate) row: &'static str,
+    pub(crate) hook: Value,
     /// Whether its turn-end row carries resume — `Stop` — so that a file missing it is one whose
     /// resume cannot work, and an old shape to the start-time scan (0.4.10 plan row 67, R3).
-    carries_resume: bool,
+    pub(crate) carries_resume: bool,
 }
 
 impl Wanted {
@@ -566,40 +644,84 @@ fn wanted(exe: &Path) -> Vec<Wanted> {
 /// `look` is the machine's answer to "what stands at this path" ([`ownership::what_stands`] in the
 /// product), so a test decides which owners are alive, gone or on a volume that is not there.
 pub(crate) fn scan_resolved(config: &Config, exe: &Path, look: &dyn ownership::Look) -> HooksFound {
+    family_scan(&CLAUDE, config, exe, look)
+}
+
+/// **What one family's hook file holds, as the start-time scan reads it** — [`scan_resolved`]'s
+/// reading, for any [`Family`]: Claude Code's `settings.json`, and codex's `hooks.json` on a codex
+/// that runs it (0.4.10 plan row 69c).
+pub(crate) fn family_scan(
+    family: &Family,
+    config: &Config,
+    exe: &Path,
+    look: &dyn ownership::Look,
+) -> HooksFound {
+    match family_reading(family, config, exe) {
+        Ok(reading) => ownership::classify_owners(&reading.owners, exe, look, || reading.form),
+        Err(found) => found,
+    }
+}
+
+/// **One family's file, read for the scan, before the machine is asked about anybody**: the owners
+/// its Folio entries name, and the form of this copy's entries ([`family_form`]).
+pub(crate) struct FamilyReading {
+    pub(crate) owners: Vec<PathBuf>,
+    pub(crate) form: ownership::Form,
+}
+
+/// [`family_scan`]'s reading of the file, or the answer it stops at — a file this build cannot
+/// read, a key named twice, an entry it cannot classify. A file with no hooks at all names no
+/// owner. Split out for [`attention_codex`](crate::attention_codex), whose scan adds the owner of
+/// the `notify` line beside its `hooks.json` (0.4.10 plan row 69c).
+pub(crate) fn family_reading(
+    family: &Family,
+    config: &Config,
+    exe: &Path,
+) -> Result<FamilyReading, HooksFound> {
+    let nothing = || FamilyReading {
+        owners: Vec::new(),
+        form: ownership::Form::Today,
+    };
     let text = match config.standing() {
-        Standing::Nothing => return HooksFound::Nothing,
-        Standing::Unreadable => return HooksFound::Unreadable,
+        Standing::Nothing => return Ok(nothing()),
+        Standing::Unreadable => return Err(HooksFound::Unreadable),
         Standing::Text(text) => text,
     };
     let Ok(document) = splice::parse(&text) else {
-        return HooksFound::Unreadable;
+        return Err(HooksFound::Unreadable);
     };
     let settings = match document.whole_value() {
         Ok(value) if value.is_object() => value,
-        _ => return HooksFound::Unreadable,
+        _ => return Err(HooksFound::Unreadable),
     };
-    let hooks = match mapped(&document) {
+    let hooks = match mapped(family, &document) {
         Ok(Some(hooks)) => hooks,
-        Ok(None) => return HooksFound::Nothing,
+        Ok(None) => return Ok(nothing()),
         // The row says it in its own register; a press's toast keeps the writer's sentence
         // (review N7).
         Err(crate::i18n::Text::AgentHooksDuplicateKey) => {
-            return HooksFound::Declined(crate::i18n::Text::AgentHooksDuplicateKeyRow);
+            return Err(HooksFound::Declined(
+                crate::i18n::Text::AgentHooksDuplicateKeyRow.into(),
+            ));
         }
-        Err(_) => return HooksFound::Unreadable,
+        Err(_) => return Err(HooksFound::Unreadable),
     };
-    let Ok(paths) = owners(&settings) else {
-        return HooksFound::Unreadable;
+    let Ok(owners) = owners(family, &settings) else {
+        return Err(HooksFound::Unreadable);
     };
-    if unclassified_entry(&hooks) {
-        return HooksFound::Unclassified;
+    if unclassified_entry(family, &hooks) {
+        return Err(HooksFound::Unclassified);
     }
-    ownership::classify_owners(&paths, exe, look, || claude_form(&hooks, exe))
+    Ok(FamilyReading {
+        owners,
+        form: family_form(family, &hooks, exe),
+    })
 }
 
-/// Whether an entry names a copy of Folio in a shape [`hook_owner`] cannot read — one with a key
-/// this build does not write, an argument list of another shape, a template it never produced.
-fn unclassified_entry(hooks: &Hooks<'_>) -> bool {
+/// Whether an entry names a copy of Folio in a shape the family's [`Family::owner`] cannot read —
+/// one with a key this build does not write, an argument list of another shape, a template it
+/// never produced.
+fn unclassified_entry(family: &Family, hooks: &Hooks<'_>) -> bool {
     hooks
         .events
         .iter()
@@ -607,12 +729,12 @@ fn unclassified_entry(hooks: &Hooks<'_>) -> bool {
         .flat_map(|group| &group.entries)
         .any(|entry| {
             entry.own.is_none()
-                && hook_owner(&entry.value).is_err()
+                && (family.owner)(&entry.value).is_err()
                 && entry
                     .value
                     .get("command")
                     .and_then(Value::as_str)
-                    .is_some_and(|command| ownership::folio_like_command(command, CLAUDE_CODE))
+                    .is_some_and(|command| ownership::folio_like_command(command, family.agent))
         })
 }
 
@@ -625,13 +747,14 @@ fn unclassified_entry(hooks: &Hooks<'_>) -> bool {
 /// into — so the scan never names, and the repair never rewrites, a person's edit. An event the
 /// person took out by hand that carries no resume is theirs to leave out. This copy's entries no
 /// install claims are the person's placing, and named.
-fn claude_form(hooks: &Hooks<'_>, exe: &Path) -> ownership::Form {
-    let wanted = wanted(exe);
+fn family_form(family: &Family, hooks: &Hooks<'_>, exe: &Path) -> ownership::Form {
+    let wanted = (family.wanted)(exe);
     let claimed = claims(hooks, &wanted, exe);
     for (want, at) in wanted.iter().zip(&claimed) {
         match at {
             Some((e, g, h)) => {
-                if !in_todays_form(&hooks.events[*e].groups[*g].entries[*h].value, want) {
+                let value = &hooks.events[*e].groups[*g].entries[*h].value;
+                if !in_todays_form(family, value, want) {
                     return ownership::Form::Old;
                 }
             }
@@ -659,11 +782,12 @@ fn claude_form(hooks: &Hooks<'_>, exe: &Path) -> ownership::Form {
     }
 }
 
-/// **The row an entry of Folio's speaks for**: the `<row>` of its `claude-code:<row>` word, from its
-/// `args` or, in the string forms, from the line after ` attention ` (a payload's ` --json -` is
-/// not part of it). [`hook_owner`] reads an owner only off an entry that names one.
-fn row_of(value: &Value) -> Option<String> {
-    let family = format!("{CLAUDE_CODE}:");
+/// **The row an entry of Folio's speaks for**: the `<row>` of its `<family>:<row>` word
+/// ([`Family::agent`]), from its `args` or, in the string forms, from the line after ` attention `
+/// (a payload's ` --json -` is not part of it). [`Family::owner`] reads an owner only off an entry
+/// that names one.
+fn row_of(agent: &str, value: &Value) -> Option<String> {
+    let family = format!("{agent}:");
     if let Some(args) = value.get("args") {
         return args
             .get(1)
@@ -680,7 +804,7 @@ fn row_of(value: &Value) -> Option<String> {
 /// the wanted event, one that speaks for the same row ([`Own::row`]) — **wherever in that
 /// event it stands**, in a group of Folio's own or in one of the person's, whatever its matcher —
 /// this copy's first, then any copy's. Ownership is by content and never by position: an entry
-/// the person moved is still the entry it was. [`claude_form`] and [`edited`] both ask this.
+/// the person moved is still the entry it was. [`family_form`] and [`edited`] both ask this.
 fn claims(hooks: &Hooks<'_>, wanted: &[Wanted], exe: &Path) -> Vec<Option<(usize, usize, usize)>> {
     let mut claimed: Vec<Option<(usize, usize, usize)>> = Vec::with_capacity(wanted.len());
     for want in wanted {
@@ -714,26 +838,35 @@ fn claims(hooks: &Hooks<'_>, wanted: &[Wanted], exe: &Path) -> Vec<Option<(usize
     claimed
 }
 
-/// **Whether a claimed entry is in today's form**: the direct form, naming this copy's program as
-/// this build spells it, with the wanted entry's arguments. Every other key of it is the person's
-/// to set — `async` among them.
-fn in_todays_form(value: &Value, want: &Wanted) -> bool {
-    value
-        .get("args")
-        .is_some_and(|args| args == &want.hook["args"])
-        && value.get("command") == want.hook.get("command")
+/// **Whether a claimed entry is in today's form**: today's shape ([`Family::program_keys`] all
+/// there), naming this copy's program as this build spells it, with the wanted entry's arguments —
+/// every program key as the wanted entry has it. Every other key of it is the person's to set —
+/// `async` among them, and codex's `timeout`.
+fn in_todays_form(family: &Family, value: &Value, want: &Wanted) -> bool {
+    family.program_keys.iter().all(|key| {
+        value
+            .get(*key)
+            .is_some_and(|held| Some(held) == want.hook.get(*key))
+    })
 }
 
-/// **An entry of Folio's brought into today's form** (`todays`, [`todays_hook`] for its row): an old
-/// string form is replaced by the entry this build writes; an entry in the direct form gets this
-/// copy's program and the row's arguments, and keeps every other key it has, as the person left
-/// them.
-fn repaired_entry(value: &Value, todays: &Value) -> Value {
-    match (value.get("args"), value.as_object()) {
-        (Some(_), Some(entry)) => {
+/// **An entry of Folio's brought into today's form** (`todays`, [`Family::todays`] for its row): an
+/// entry in an older shape — one without every one of the family's [`Family::program_keys`], such
+/// as Claude Code's string forms — is replaced by the entry this build writes; an entry in today's
+/// shape gets this copy's program and the row's arguments, and keeps every other key it has, as
+/// the person left them.
+fn repaired_entry(family: &Family, value: &Value, todays: &Value) -> Value {
+    match value.as_object() {
+        Some(entry)
+            if family
+                .program_keys
+                .iter()
+                .all(|key| entry.contains_key(*key)) =>
+        {
             let mut entry = entry.clone();
-            entry.insert("command".to_owned(), todays["command"].clone());
-            entry.insert("args".to_owned(), todays["args"].clone());
+            for key in family.program_keys {
+                entry.insert((*key).to_owned(), todays[*key].clone());
+            }
             Value::Object(entry)
         }
         _ => todays.clone(),
@@ -744,7 +877,7 @@ fn repaired_entry(value: &Value, todays: &Value) -> Value {
 struct Entry<'a> {
     node: &'a splice::Node,
     value: Value,
-    /// Whose it is and what it speaks for, when [`hook_owner`] reads it as a Folio executable
+    /// Whose it is and what it speaks for, when [`entry_owners`] reads it as a Folio executable
     /// speaking `attention`. `None` is every other entry — the person's own, and one that looks
     /// like Folio's but that this build cannot read as one — and an entry that is `None` is never
     /// edited, moved or deleted.
@@ -761,13 +894,15 @@ struct Own {
 struct Group<'a> {
     rows: &'a splice::Node,
     entries: Vec<Entry<'a>>,
+    /// Whether anything in the group is not Folio's: an entry of somebody else's, or — outside a
+    /// [`Family::positional`] family — no entry at all, a group nobody but its writer put there.
+    foreign: bool,
 }
 
 impl Group<'_> {
-    /// Whether anything in the group is not Folio's: an entry of somebody else's, or no entry at
-    /// all — a group nobody but its writer put there.
+    /// See [`Group::foreign`].
     fn holds_foreign(&self) -> bool {
-        self.entries.is_empty() || self.entries.iter().any(|entry| entry.own.is_none())
+        self.foreign
     }
 }
 
@@ -828,7 +963,10 @@ fn folio_share_of(items: impl IntoIterator<Item = bool>) -> FolioShare {
 /// `None` when there is no `hooks` member at all. The shapes [`owners`] refuses are refused here
 /// too, for the same reasons; on top of them, a key named twice anywhere on the way down to an
 /// entry, or inside an entry that reads as Folio's ([`Text::AgentHooksDuplicateKey`](crate::i18n::Text::AgentHooksDuplicateKey)).
-fn mapped<'a>(document: &'a splice::Document) -> Result<Option<Hooks<'a>>, crate::i18n::Text> {
+fn mapped<'a>(
+    family: &Family,
+    document: &'a splice::Document,
+) -> Result<Option<Hooks<'a>>, crate::i18n::Text> {
     let unknown = || crate::i18n::Text::AgentHooksSchemaUnknown;
     let Some(root) = document.root.as_ref() else {
         return Ok(None);
@@ -861,30 +999,36 @@ fn mapped<'a>(document: &'a splice::Document) -> Result<Option<Hooks<'a>>, crate
             // nothing of whose it is (ruling N1), so the matcher is not kept beside the group.
             node.member("matcher")
                 .map_err(|_| crate::i18n::Text::AgentHooksDuplicateKey)?;
-            let mut entries = Vec::new();
-            for entry in rows.value.elements().ok_or_else(unknown)? {
-                let value = value_at(document.text, entry)?;
-                let own = hook_owner(&value).ok().flatten().and_then(|owner| {
+            let nodes = rows.value.elements().ok_or_else(unknown)?;
+            let values = nodes
+                .iter()
+                .map(|entry| value_at(document.text, entry))
+                .collect::<Result<Vec<_>, _>>()?;
+            let owners = entry_owners(family, &values);
+            let mut entries = Vec::with_capacity(nodes.len());
+            for ((node, value), owner) in nodes.iter().zip(values).zip(owners) {
+                let own = owner.and_then(|owner| {
                     Some(Own {
-                        row: row_of(&value)?,
+                        row: row_of(family.agent, &value)?,
                         owner,
                     })
                 });
                 // An entry that reads as Folio's only because the value parser kept the last of two
                 // keys of one name: which one the agent runs is its parser's business, and an edit
                 // of the entry would take the other one's bytes with it.
-                if own.is_some() && entry.names_a_key_twice() {
+                if own.is_some() && node.names_a_key_twice() {
                     return Err(crate::i18n::Text::AgentHooksDuplicateKey);
                 }
-                entries.push(Entry {
-                    node: entry,
-                    value,
-                    own,
-                });
+                entries.push(Entry { node, value, own });
             }
+            // Under a positional family a group with no entry of anybody else's is nobody's, empty
+            // or not: the group Folio's removal leaves empty where it stood (ruling R16) is one.
+            let foreign = entries.iter().any(|entry| entry.own.is_none())
+                || (!family.positional && entries.is_empty());
             groups.push(Group {
                 rows: &rows.value,
                 entries,
+                foreign,
             });
         }
         events.push(Event {
@@ -929,14 +1073,37 @@ enum Fate {
 /// this copy's (ruling N1, 2026-11-05). A removal deletes the entries of this copy and of copies
 /// that are gone, and no other. Then [`verified`] reads the result back, and a
 /// result that changed anything else is refused whole.
+///
+/// **Under a [`Family::positional`] family a group of Folio's with any group after it is emptied
+/// where it stands** — its entry deleted, the group left as `"hooks": []` — rather than taken out
+/// (ruling R16, which amends the D1 rule above for Codex's `hooks.json` alone): every group after
+/// it keeps its index, so every approval the person gave one of theirs stays attached to it. An
+/// empty group is one Codex loads without a word.
 fn edited(
+    family: &Family,
     document: &splice::Document,
     exe: &Path,
     install: bool,
 ) -> Result<Option<String>, &'static str> {
+    edited_as(family, document, exe, install, false)
+}
+
+/// [`edited`], and with `any_copy` a removal that deletes the entries of **every** copy of Folio
+/// ([`hooks_cleared`]).
+fn edited_as(
+    family: &Family,
+    document: &splice::Document,
+    exe: &Path,
+    install: bool,
+    any_copy: bool,
+) -> Result<Option<String>, &'static str> {
     let text = document.text;
     let style = splice::Style::of(document);
-    let wanted = if install { wanted(exe) } else { Vec::new() };
+    let wanted = if install {
+        (family.wanted)(exe)
+    } else {
+        Vec::new()
+    };
     let Some(root) = document.root.as_ref() else {
         if wanted.is_empty() {
             return Ok(None);
@@ -952,7 +1119,7 @@ fn edited(
             splice::render(&Value::Object(settings), "", &style, true),
             style.newline
         );
-        return verified(document, fresh).map(Some);
+        return verified(family, document, fresh).map(Some);
     };
     let root_members = root
         .members()
@@ -963,7 +1130,7 @@ fn edited(
     let root_items =
         splice::Container::of(text, root).ok_or(crate::i18n::Text::AgentHooksUnreadable.text())?;
     let mut edits = Vec::new();
-    let Some(hooks) = mapped(document).map_err(crate::i18n::Text::text)? else {
+    let Some(hooks) = mapped(family, document).map_err(crate::i18n::Text::text)? else {
         if wanted.is_empty() {
             return Ok(None);
         }
@@ -985,7 +1152,7 @@ fn edited(
             &style,
             &layout,
         ));
-        return splice_checked(document, edits);
+        return splice_checked(family, document, edits);
     };
 
     // An entry written over where it stands, on as many lines as it stood on.
@@ -1012,6 +1179,8 @@ fn edited(
                         .iter()
                         .map(|entry| match &entry.own {
                             None => Fate::Kept,
+                            // Cleared: gone, whichever copy it names.
+                            Some(_) if any_copy => Fate::Deleted,
                             // **An own entry no install claims is the person's placing** (ruling
                             // N1, 2026-11-05) — a copy of one of Folio's entries they put under
                             // another event, or a second one — and an install leaves it where it
@@ -1025,10 +1194,8 @@ fn edited(
                                     // is pointed at this copy where it stands, with every other
                                     // key the person left on it (re-review R1). A wanted entry
                                     // that claims it below decides its fate again.
-                                    rewritten(
-                                        entry,
-                                        &repaired_entry(&entry.value, &todays_hook(&own.row, exe)),
-                                    )
+                                    let todays = (family.todays)(&own.row, exe);
+                                    rewritten(entry, &repaired_entry(family, &entry.value, &todays))
                                 }
                             }
                             Some(own) if ownership::other_live(&own.owner, exe) == Ok(false) => {
@@ -1050,10 +1217,10 @@ fn edited(
         let entry = &hooks.events[e].groups[g].entries[h];
         // Claimed where it stands. Only an old shape is rewritten, and only what makes it old: a
         // person's edit of Folio's own entry is theirs (ruling N1).
-        fates[e][g][h] = if in_todays_form(&entry.value, want) {
+        fates[e][g][h] = if in_todays_form(family, &entry.value, want) {
             Fate::Kept
         } else {
-            rewritten(entry, &repaired_entry(&entry.value, &want.hook))
+            rewritten(entry, &repaired_entry(family, &entry.value, &want.hook))
         };
     }
 
@@ -1065,22 +1232,38 @@ fn edited(
             .filter(|want| want.event == event.member.key)
             .map(|want| want.hooks_group())
             .collect();
-        let mut group_gone = Vec::with_capacity(event.groups.len());
+        let deleted: Vec<Vec<bool>> = fates[e]
+            .iter()
+            .map(|fates| {
+                fates
+                    .iter()
+                    .map(|fate| matches!(fate, Fate::Deleted))
+                    .collect()
+            })
+            .collect();
+        // A group goes when it held entries and every one of them goes; one the person left
+        // empty stays empty.
+        let mut group_gone: Vec<bool> = deleted
+            .iter()
+            .map(|deleted| !deleted.is_empty() && deleted.iter().all(|gone| *gone))
+            .collect();
+        if family.positional {
+            // From the end: a group that would go, with a group after it that stays, stays
+            // itself — emptied — and is then a group that stays for the ones before it.
+            let mut stays_after = false;
+            for gone in group_gone.iter_mut().rev() {
+                if *gone && stays_after {
+                    *gone = false;
+                }
+                stays_after |= !*gone;
+            }
+        }
         let mut kept = Vec::new();
         for (g, group) in event.groups.iter().enumerate() {
-            let fates = &fates[e][g];
-            let deleted: Vec<bool> = fates
-                .iter()
-                .map(|fate| matches!(fate, Fate::Deleted))
-                .collect();
-            // A group goes when it held entries and every one of them goes; one the person left
-            // empty stays empty.
-            let gone = !deleted.is_empty() && deleted.iter().all(|gone| *gone);
-            group_gone.push(gone);
-            if gone {
+            if group_gone[g] {
                 continue;
             }
-            for (entry, fate) in group.entries.iter().zip(fates) {
+            for (entry, fate) in group.entries.iter().zip(&fates[e][g]) {
                 if let Fate::Replaced(written) = fate {
                     kept.push(splice::Edit {
                         start: entry.node.start,
@@ -1089,11 +1272,11 @@ fn edited(
                     });
                 }
             }
-            if deleted.iter().any(|gone| *gone) {
+            if deleted[g].iter().any(|gone| *gone) {
                 let rows = splice::Container::of(text, group.rows)
                     .ok_or(crate::i18n::Text::AgentHooksUnreadable.text())?;
                 let layout = rows.layout(&style, pretty);
-                kept.extend(rows.edits(&deleted, &[], &style, &layout));
+                kept.extend(rows.edits(&deleted[g], &[], &style, &layout));
             }
         }
         // The same rule one level up: an event whose every group goes, and to which nothing is
@@ -1131,7 +1314,7 @@ fn edited(
             .collect();
         let layout = root_items.layout(&style, pretty);
         edits.extend(root_items.edits(&deleted, &[], &style, &layout));
-        return splice_checked(document, edits);
+        return splice_checked(family, document, edits);
     }
     edits.extend(inner);
     if event_gone.iter().any(|gone| *gone) || !added.is_empty() {
@@ -1151,7 +1334,7 @@ fn edited(
             .collect();
         edits.extend(events.edits(&event_gone, &appended, &style, &layout));
     }
-    splice_checked(document, edits)
+    splice_checked(family, document, edits)
 }
 
 /// The events the file does not have yet, each with the groups its missing entries are written in.
@@ -1176,6 +1359,7 @@ fn events_value<'w>(
 
 /// `edits` made, and the result read back by [`verified`] before anybody may write it.
 fn splice_checked(
+    family: &Family,
     document: &splice::Document,
     edits: Vec<splice::Edit>,
 ) -> Result<Option<String>, &'static str> {
@@ -1184,7 +1368,7 @@ fn splice_checked(
     }
     let text = splice::spliced(document.text, edits)
         .ok_or(crate::i18n::Text::AgentHooksSpliceRefused.text())?;
-    verified(document, text).map(Some)
+    verified(family, document, text).map(Some)
 }
 
 /// **The write-time self-check** (0.4.10 plan row 67a): the text an edit produced is handed on
@@ -1197,7 +1381,9 @@ fn splice_checked(
 /// 2. **the whole file with Folio's extents cut out, byte for byte** ([`outside_folios`]): every
 ///    byte that is not Folio's — the byte-order mark, the whitespace, the commas and brackets
 ///    between items, the keys of the person's groups and events, a container the person left
-///    empty — stands in both, in the same place among the others;
+///    empty — stands in both, in the same place among the others; and under a
+///    [`Family::positional`] family, **the place every entry of somebody else's stands at**
+///    ([`foreign_places`], row 69a), which a cut cannot see;
 /// 3. the two documents as values, with Folio's entries and the containers left empty by taking
 ///    them out stripped from both ([`without_folio`]).
 ///
@@ -1207,20 +1393,27 @@ fn splice_checked(
 /// The edit plan above is written to pass this; the check is what makes a mistake in it a refusal
 /// rather than somebody's lost hook. Its cuts are worked out here, apart from the plan's, so that a
 /// mistake in the plan's separators is not made twice.
-fn verified(before: &splice::Document, text: String) -> Result<String, &'static str> {
-    if keeps_what_is_not_ours(before, &text) {
+fn verified(
+    family: &Family,
+    before: &splice::Document,
+    text: String,
+) -> Result<String, &'static str> {
+    if keeps_what_is_not_ours(family, before, &text) {
         Ok(text)
     } else {
         Err(crate::i18n::Text::AgentHooksSpliceRefused.text())
     }
 }
 
-fn keeps_what_is_not_ours(before: &splice::Document, text: &str) -> bool {
+fn keeps_what_is_not_ours(family: &Family, before: &splice::Document, text: &str) -> bool {
     let Ok(after) = splice::parse(text) else {
         return false;
     };
-    let (Some(root), Ok(old), Ok(new)) = (after.root.as_ref(), mapped(before), mapped(&after))
-    else {
+    let (Some(root), Ok(old), Ok(new)) = (
+        after.root.as_ref(),
+        mapped(family, before),
+        mapped(family, &after),
+    ) else {
         return false;
     };
     if root.members().is_none() {
@@ -1240,10 +1433,30 @@ fn keeps_what_is_not_ours(before: &splice::Document, text: &str) -> bool {
         }
     };
     outside_kept
+        && (!family.positional || foreign_places(old.as_ref()) == foreign_places(new.as_ref()))
         && match (before.whole_value(), after.whole_value()) {
-            (Ok(old), Ok(new)) => without_folio(old) == without_folio(new),
+            (Ok(old), Ok(new)) => without_folio(family, old) == without_folio(family, new),
             _ => false,
         }
+}
+
+/// **Where every entry of somebody else's stands** — its event, its group's index in that event
+/// and its own in the group — which is what a [`Family::positional`] family's agent keys the
+/// person's approval of that entry by. [`outside_folios`] compares bytes with Folio's extents cut
+/// out, so a group of Folio's put in front of the person's, or taken out from in front of it, cuts
+/// to the same text: the places are what moved.
+fn foreign_places<'a>(hooks: Option<&Hooks<'a>>) -> Vec<(&'a str, usize, usize)> {
+    let mut found = Vec::new();
+    for event in hooks.map_or(&[][..], |hooks| hooks.events.as_slice()) {
+        for (group_at, group) in event.groups.iter().enumerate() {
+            for (entry_at, entry) in group.entries.iter().enumerate() {
+                if entry.own.is_none() {
+                    found.push((event.member.key.as_str(), group_at, entry_at));
+                }
+            }
+        }
+    }
+    found
 }
 
 /// The share of the file's own object: Folio's alone when its one member is a `hooks` that is.
@@ -1414,10 +1627,10 @@ fn cut_folio_items(node: &splice::Node, folios: &[bool], cuts: &mut Vec<(usize, 
     }
 }
 
-/// A settings value with every entry [`hook_owner`] reads as Folio's taken out, and then every
+/// A settings value with every entry [`entry_owners`] reads as Folio's taken out, and then every
 /// group, event and `hooks` object left empty — the person's own empty ones with them, on both
 /// sides of the comparison alike.
-fn without_folio(mut settings: Value) -> Value {
+fn without_folio(family: &Family, mut settings: Value) -> Value {
     let Some(object) = settings.as_object_mut() else {
         return settings;
     };
@@ -1428,7 +1641,10 @@ fn without_folio(mut settings: Value) -> Value {
             };
             for group in groups.iter_mut() {
                 if let Some(rows) = group.get_mut("hooks").and_then(Value::as_array_mut) {
-                    rows.retain(|hook| !matches!(hook_owner(hook), Ok(Some(_))));
+                    // `retain` visits every entry once and in order, so the owners read in that
+                    // order are the entries' own.
+                    let mut owners = entry_owners(family, rows).into_iter();
+                    rows.retain(|_| owners.next().flatten().is_none());
                 }
             }
             groups.retain(|group| {
@@ -1454,7 +1670,7 @@ fn edited_value(settings: &mut Value, exe: &Path, install: bool) -> bool {
     let Ok(document) = splice::parse(&text) else {
         return false;
     };
-    match edited(&document, exe, install) {
+    match edited(&CLAUDE, &document, exe, install) {
         Ok(Some(text)) => {
             *settings = serde_json::from_str(&text).expect("the splice writes JSON");
             true
@@ -1533,28 +1749,15 @@ pub(crate) fn apply_resolved(
             return Outcome::Refused(crate::i18n::Text::AgentHooksUnreadable.text());
         }
     };
-    // Read as spans, for the edit, and as a value, for the classifiers: one text, two views of it.
-    // Refused rather than replaced when either cannot read it. A settings file this build cannot
-    // read is a settings file somebody wrote, and overwriting it to add a convenience is not a
-    // trade anyone agreed to.
-    let Ok(document) = splice::parse(&existing) else {
-        return Outcome::Refused(crate::i18n::Text::AgentHooksUnreadable.text());
-    };
-    let settings = match document.whole_value() {
-        Ok(value) if value.is_object() => value,
-        _ => return Outcome::Refused(crate::i18n::Text::AgentHooksUnreadable.text()),
-    };
-    let paths = match owners(&settings) {
+    let paths = match hook_owners(&CLAUDE, &existing) {
         Ok(paths) => paths,
-        Err(reason) => return Outcome::Refused(reason),
+        Err(reason) => return Outcome::Refused(reason.text()),
     };
     let others = match ownership::check(&paths, exe, &decision) {
         Ok(others) => others,
         Err(outcome) => return outcome,
     };
-    // **Only Folio's own entries change, and every other byte of the file stays** (the owner's
-    // rule of 2026-11-04): see [`edited`] and [`verified`].
-    let written = match edited(&document, exe, install) {
+    let written = match hooks_edited(&CLAUDE, &existing, exe, install) {
         Ok(written) => written,
         Err(reason) => return Outcome::Refused(reason),
     };
@@ -1597,6 +1800,52 @@ pub(crate) fn apply_resolved(
     } else {
         Outcome::LeftOther(others)
     }
+}
+
+/// **Every copy of Folio a family's hook file names**, of whichever copy, read off the text the
+/// operation read — or the refusal of a file this build cannot read.
+///
+/// Read as spans, for the edit, and as a value, for the classifiers: one text, two views of it.
+/// Refused rather than replaced when either cannot read it. A settings file this build cannot read
+/// is a settings file somebody wrote, and overwriting it to add a convenience is not a trade anyone
+/// agreed to.
+pub(crate) fn hook_owners(
+    family: &Family,
+    existing: &str,
+) -> Result<Vec<PathBuf>, crate::i18n::Text> {
+    let document = splice::parse(existing).map_err(|_| crate::i18n::Text::AgentHooksUnreadable)?;
+    match document.whole_value() {
+        Ok(value) if value.is_object() => owners(family, &value),
+        _ => Err(crate::i18n::Text::AgentHooksUnreadable),
+    }
+}
+
+/// **The text with this copy's entries put in (`install`) or taken out**, every byte that is not
+/// Folio's as it was (the owner's rule of 2026-11-04): see [`edited`] and [`verified`]. `Ok(None)`
+/// when there is nothing to change.
+pub(crate) fn hooks_edited(
+    family: &Family,
+    existing: &str,
+    exe: &Path,
+    install: bool,
+) -> Result<Option<String>, &'static str> {
+    let document =
+        splice::parse(existing).map_err(|_| crate::i18n::Text::AgentHooksUnreadable.text())?;
+    edited(family, &document, exe, install)
+}
+
+/// **The text with every entry of Folio's taken out, of whichever copy** — for an operation that has
+/// asked about every other live copy first: codex's `notify` line written in place of its hook, on
+/// a codex below 0.148 (0.4.10 plan row 69c; R18's rule, the other way round). Every byte that is
+/// not Folio's as it was, as [`hooks_edited`]; `Ok(None)` when there is nothing to take out.
+pub(crate) fn hooks_cleared(
+    family: &Family,
+    existing: &str,
+    exe: &Path,
+) -> Result<Option<String>, &'static str> {
+    let document =
+        splice::parse(existing).map_err(|_| crate::i18n::Text::AgentHooksUnreadable.text())?;
+    edited_as(family, &document, exe, false, true)
 }
 
 /// **What is standing at a configuration file's path**, as the answer to "is there one".
@@ -3148,7 +3397,7 @@ mod tests {
     }
 
     fn state_of(settings: &Value) -> State {
-        if declares_folio(settings) {
+        if declares_folio(&CLAUDE, settings) {
             State::Installed
         } else {
             State::Absent
@@ -3350,7 +3599,7 @@ mod tests {
             "nothing was written beside it either"
         );
         // And the row drawn from it says so, rather than offering to write over it.
-        assert_eq!(state_at(&path), State::Unreadable);
+        assert_eq!(state_at(&CLAUDE, &path), State::Unreadable);
         // Taking it back out is refused for the same reason: this build cannot tell whose it is.
         let taking_it_out = apply_to(&path, false, &exe());
         assert_eq!(
@@ -3366,10 +3615,10 @@ mod tests {
     fn a_settings_file_that_is_not_there_is_the_one_that_gets_created() {
         let dir = scratch("absent");
         let path = dir.join(SETTINGS_FILE);
-        assert_eq!(state_at(&path), State::Absent);
+        assert_eq!(state_at(&CLAUDE, &path), State::Absent);
 
         assert_eq!(apply_to(&path, true, &exe()), Outcome::Installed);
-        assert_eq!(state_at(&path), State::Installed);
+        assert_eq!(state_at(&CLAUDE, &path), State::Installed);
         assert_eq!(
             names(&dir),
             vec![SETTINGS_FILE.to_owned()],
@@ -3553,7 +3802,7 @@ mod tests {
 
             assert_eq!(apply_to(&path, true, &exe()), Outcome::Installed, "{name}");
             let written = std::fs::read_to_string(&path).expect("read back");
-            assert_eq!(state_at(&path), State::Installed, "{name}");
+            assert_eq!(state_at(&CLAUDE, &path), State::Installed, "{name}");
             assert!(stand_in_order(&written, &fragments), "{name}: {written}");
             assert_eq!(
                 written.starts_with('\u{feff}'),
@@ -3566,8 +3815,12 @@ mod tests {
                 theirs.contains("\r\n"),
                 "{name}: the line endings are the file's"
             );
-            let value =
-                |text: &str| without_folio(serde_json::from_str(splice::body(text)).expect("JSON"));
+            let value = |text: &str| {
+                without_folio(
+                    &CLAUDE,
+                    serde_json::from_str(splice::body(text)).expect("JSON"),
+                )
+            };
             assert_eq!(value(&written), value(&theirs), "{name}");
 
             assert_eq!(apply_to(&path, false, &exe()), Outcome::Removed, "{name}");
@@ -3838,7 +4091,7 @@ mod tests {
             theirs.replace(r#""Notification": [ ]"#, r#""Notification": []"#),
         ] {
             assert_eq!(
-                verified(&document, changed.clone()),
+                verified(&CLAUDE, &document, changed.clone()),
                 Err(crate::i18n::Text::AgentHooksSpliceRefused.text()),
                 "{changed}"
             );
@@ -3847,12 +4100,12 @@ mod tests {
             r#"{"type": "command", "command": "b"}]}"#,
             &format!(r#"{{"type": "command", "command": "b"}}]}}, {{"hooks": [{own}]}}"#),
         );
-        assert_eq!(verified(&document, added.clone()), Ok(added));
+        assert_eq!(verified(&CLAUDE, &document, added.clone()), Ok(added));
         let filled = theirs.replace(
             r#""Notification": [ ]"#,
             &format!(r#""Notification": [{{"hooks": [{own}]}}]"#),
         );
-        assert_eq!(verified(&document, filled.clone()), Ok(filled));
+        assert_eq!(verified(&CLAUDE, &document, filled.clone()), Ok(filled));
     }
 
     /// **The reader is strict JSON and reads what the value parser reads**, so the two views of a

@@ -74,6 +74,14 @@ pub(crate) enum Outcome {
     Unchanged,
     TakeOverRequired(Vec<PathBuf>),
     LeftOther(Vec<PathBuf>),
+    /// **A removal that went on without a second file it reads**, which it left as it was for
+    /// `reason`: Folio's entry is out of the file the press was on (`removed`), or was not in it.
+    /// codex's alone: a `config.toml` that could not be read does not hold a hook in `hooks.json`
+    /// (0.4.10 plan row 69, review N5).
+    LeftUnread {
+        removed: bool,
+        reason: &'static str,
+    },
     Refused(&'static str),
 }
 
@@ -402,9 +410,47 @@ pub(crate) enum HooksFound {
     Refused(&'static str),
     /// A file whose Folio part this build will not write, for the sentence carried — somebody
     /// else's program on Codex's one `notify` key, a hook file of somebody else's under Folio's
-    /// name, a key named twice. The switch stays pressable, and its press says why. Carried as the
-    /// sentence's key, so the row says it in the language in force (review N7).
-    Declined(Text),
+    /// name, a key named twice. The switch stays pressable, and its press says why. Carried as what
+    /// the sentence is made of, so the row says it in the language in force (review N7).
+    Declined(RowSentence),
+}
+
+/// **The sentence a declined row says** ([`HooksFound::Declined`]), kept as what it is made of and
+/// put into words when the row is drawn, in the language in force (review N7) — codex's two that
+/// name a version, a program or a file among them (0.4.10 plan row 69c).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum RowSentence {
+    /// A sentence of the table.
+    Fixed(Text),
+    /// The writer's refusal of a file it will not edit (a link out of the agent's folder, one with
+    /// hard links, a read-only one) — already a sentence, as [`HooksFound::Refused`] carries one.
+    Said(&'static str),
+    /// Somebody else's program on codex's one `notify` key, on a codex below 0.148 (R12): the
+    /// version, and the program's own file name.
+    CodexNotifyHeld { version: String, program: String },
+    /// Codex's hooks switched off in the `config.toml` at this path (the 69c review's C6).
+    CodexHooksOff(PathBuf),
+}
+
+impl RowSentence {
+    /// The sentence, in the language in force.
+    #[must_use]
+    pub(crate) fn text(&self) -> &'static str {
+        match self {
+            Self::Fixed(text) => text.text(),
+            Self::Said(sentence) => sentence,
+            Self::CodexNotifyHeld { version, program } => {
+                crate::i18n::codex_notify_held_old_version(version, program)
+            }
+            Self::CodexHooksOff(path) => crate::i18n::codex_hooks_off(&path.display().to_string()),
+        }
+    }
+}
+
+impl From<Text> for RowSentence {
+    fn from(text: Text) -> Self {
+        Self::Fixed(text)
+    }
 }
 
 impl HooksFound {
@@ -522,6 +568,53 @@ pub(crate) fn check(
     Ok(others)
 }
 
+/// **The characters PowerShell reads as a single quote**: the ASCII one and the four typographic
+/// ones its tokenizer takes in its place (U+2018 to U+201B). Any of them ends a single-quoted
+/// literal, so a path holding one has to double it, whichever it is.
+const POWERSHELL_QUOTES: [char; 5] = ['\'', '\u{2018}', '\u{2019}', '\u{201a}', '\u{201b}'];
+
+/// **`text` as one PowerShell single-quoted literal**: inside one nothing is special — not `$`,
+/// not a backtick, not `%` or `&` — but a quote, and each quote of the text's own, any of the five
+/// ([`POWERSHELL_QUOTES`]), is written twice.
+#[must_use]
+pub(crate) fn powershell_quoted(text: &str) -> String {
+    let mut quoted = String::with_capacity(text.len() + 2);
+    quoted.push('\'');
+    for c in text.chars() {
+        if POWERSHELL_QUOTES.contains(&c) {
+            quoted.push(c);
+        }
+        quoted.push(c);
+    }
+    quoted.push('\'');
+    quoted
+}
+
+/// **What PowerShell reads a single-quoted literal as**, or `None` when `literal` is not one whole
+/// literal: it opens on a quote, a quote followed by a quote is the second one, and the first
+/// quote with none after it closes the literal and has to be its last character.
+fn powershell_literal(literal: &str) -> Option<String> {
+    let mut chars = literal.chars();
+    if !POWERSHELL_QUOTES.contains(&chars.next()?) {
+        return None;
+    }
+    let mut decoded = String::new();
+    while let Some(c) = chars.next() {
+        if !POWERSHELL_QUOTES.contains(&c) {
+            decoded.push(c);
+            continue;
+        }
+        match chars.clone().next() {
+            Some(next) if POWERSHELL_QUOTES.contains(&next) => {
+                decoded.push(next);
+                chars.next();
+            }
+            _ => return chars.next().is_none().then_some(decoded),
+        }
+    }
+    None
+}
+
 /// Strictly decode the literal operand of Folio's old templates, never a shell program.
 pub(crate) fn legacy_path(line: &str, family: &str) -> Result<Option<PathBuf>, &'static str> {
     let marker = format!(" attention {family}:");
@@ -536,15 +629,12 @@ pub(crate) fn legacy_path(line: &str, family: &str) -> Result<Option<PathBuf>, &
     {
         return Err(crate::i18n::Text::AgentHooksSchemaUnknown.text());
     }
-    let path = if let Some(inner) = quoted
-        .strip_prefix("& '")
-        .and_then(|s| s.strip_suffix('\''))
-    {
-        let decoded = inner.replace("''", "'");
-        if format!("& '{}'", decoded.replace('\'', "''")) != quoted {
-            return Err(crate::i18n::Text::AgentHooksSchemaUnknown.text());
+    let path = if let Some(literal) = quoted.strip_prefix("& ") {
+        // Read as PowerShell reads it, and only in the one spelling Folio writes.
+        match powershell_literal(literal) {
+            Some(decoded) if powershell_quoted(&decoded) == literal => decoded,
+            _ => return Err(crate::i18n::Text::AgentHooksSchemaUnknown.text()),
         }
-        decoded
     } else if let Some(inner) = quoted.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')) {
         let decoded = inner.replace("'\\''", "'");
         if format!("'{}'", decoded.replace('\'', "'\\''")) != quoted {
@@ -635,7 +725,7 @@ mod tests {
     fn adapters() -> [(&'static str, &'static str, Apply); 3] {
         [
             ("claude", "settings.json", crate::attention_hooks::apply_at),
-            ("codex", "config.toml", crate::attention_codex::apply_at),
+            ("codex", "hooks.json", crate::attention_codex::apply_at),
             (
                 "copilot",
                 "hooks/folio.json",
@@ -746,13 +836,7 @@ mod tests {
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             let data = root.join("data");
             fs::create_dir_all(&data).unwrap();
-            let original = if family == "codex" {
-                "# user's config\n"
-            } else if family == "copilot" {
-                ""
-            } else {
-                "{}\n"
-            };
+            let original = if family == "copilot" { "" } else { "{}\n" };
             fs::write(&path, original).unwrap();
             let placeholder = root.join("${CLAUDE_PROJECT_DIR}/folio.exe");
             for bad in [
@@ -786,8 +870,7 @@ mod tests {
             let data = root.join("data");
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             let future = match family {
-                "claude" => "{\"hooks\":{\"Stop\":{\"future\":true}}}",
-                "codex" => "notify = { future = true }",
+                "claude" | "codex" => "{\"hooks\":{\"Stop\":{\"future\":true}}}",
                 _ => "{\"version\":999,\"hooks\":{}}",
             };
             for text in ["{broken", future] {
@@ -964,23 +1047,31 @@ mod tests {
         }
     }
 
+    /// **A `notify` program of the person's own is never Folio's to take over**, and since 0.4.10
+    /// (plan row 69) it no longer keeps Folio out either: the hook goes into `hooks.json` beside it,
+    /// and the line is the bytes it was, under a take-over press as under any other.
     #[test]
     fn attention_codex_takeover_never_replaces_a_user_notifier() {
         let root = root("user-notifier");
         let exe = root.join("folio.exe");
-        let path = root.join("config.toml");
+        let config = root.join("config.toml");
         let original = "# keep this\nnotify = ['my-notifier', '--user-option']\n";
-        fs::write(&path, original).unwrap();
+        fs::write(&config, original).unwrap();
         assert_eq!(
             crate::attention_codex::apply_at(
-                &path,
+                &root.join("hooks.json"),
                 Decision::TakeOver(vec![]),
                 &exe,
                 &root.join("data")
             ),
-            Outcome::Refused(crate::i18n::Text::AgentCodexNotifyTaken.text())
+            Outcome::Installed
         );
-        assert_eq!(fs::read_to_string(path).unwrap(), original);
+        assert_eq!(fs::read_to_string(config).unwrap(), original);
+        assert!(
+            fs::read_to_string(root.join("hooks.json"))
+                .unwrap()
+                .contains("attention codex:stop")
+        );
     }
 
     #[test]
@@ -1039,9 +1130,10 @@ mod tests {
                 {"type":"command","command":format!("\"{program}\" attention claude-code:Stop --json -"),"async":true}
             ]}]}}))
             .unwrap(),
-            "codex" => format!(
-                "notify = [\"{program}\", \"attention\", \"codex:agent-turn-complete\", \"--json\"]\n"
-            ),
+            "codex" => serde_json::to_string(&serde_json::json!({"hooks":{"Stop":[{"hooks":[
+                {"type":"command","command":format!("\"{program}\" attention codex:stop --json -"),"async":true,"timeout":10}
+            ]}]}}))
+            .unwrap(),
             _ => serde_json::to_string(&serde_json::json!({"version":1,"hooks":{"agentStop":[
                 {"type":"command","exec":program,"args":["attention","copilot:agentStop"],"timeoutSec":5}
             ]}}))
@@ -1077,7 +1169,7 @@ mod tests {
             let data = root.join("data");
             let (extension, theirs) = match family {
                 "claude" => ("json", "{\"model\":\"theirs\"}\n"),
-                "codex" => ("toml", "# theirs\n"),
+                "codex" => ("json", "{\"description\":\"theirs\"}\n"),
                 _ => ("json", "{\"version\":1,\"hooks\":{}}\n"),
             };
             let named = root.join("named").join(file);
@@ -1214,10 +1306,10 @@ mod tests {
                     after.contains("mytool"),
                     "{family} {decision:?}: {outcome:?} took somebody else's program out"
                 );
-                // Only Claude Code's file has room for both. The other two families' files are one
-                // program and one document, so a stranger there refuses the press outright and the
-                // bytes are the ones that were written by hand.
-                if family == "claude" {
+                // Claude Code's and codex's hook files have room for both. Copilot's is one program
+                // and one document, so a stranger there refuses the press outright and the bytes
+                // are the ones that were written by hand.
+                if family != "copilot" {
                     continue;
                 }
                 assert!(
@@ -1263,8 +1355,14 @@ mod tests {
             // And the entry that named nobody is gone rather than kept beside ours.
             let after = fs::read_to_string(root.join("install").join(file)).unwrap();
             // The bare operand is gone; what stands there now is an absolute path that happens to
-            // end in the same name, which no quote can precede.
-            assert!(!after.contains("\"folio.exe\""), "{family}: {after}");
+            // end in the same name, which no quote can precede. codex's operand is inside a JSON
+            // string, where the quote around it is escaped.
+            let bare = if family == "codex" {
+                "\\\"folio.exe\\\""
+            } else {
+                "\"folio.exe\""
+            };
+            assert!(!after.contains(bare), "{family}: {after}");
         }
     }
 

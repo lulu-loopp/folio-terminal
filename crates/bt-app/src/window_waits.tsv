@@ -252,6 +252,7 @@ bt-app	-	crate::packaged_turns::PackagedTurns::birth_turn	std::sync::Condvar::wa
 bt-app	-	crate::packaged_turns::PackagedTurns::check_turn	std::sync::Condvar::wait 1	worker-door-body	WorkerCtx	
 bt-app	-	crate::computation_lane::read_video_glance	std::fs::metadata 1	worker-door-body	WorkerCtx	
 bt-app	-	crate::computation_lane::FormulaEngine::engine	std::thread::JoinHandle::join 1	worker-door-body	WorkerCtx	
+bt-app	-	crate::attention_codex::stamp_of	std::fs::metadata 1	worker-door-body	WorkerCtx	
 bt-app	-	crate::persist::SessionWriter::close	std::thread::sleep 1	owner-door-body	WaitToken	SessionWriterRetire
 bt-app	-	crate::persist::SessionWriter::wait_for	std::sync::mpsc::Receiver::recv_timeout 1	owner-door-body	WaitToken	SessionWriteWait
 bt-app	-	crate::pty_door::bear	bt_pty::PtySession::spawn_refreshed 1, bt_pty::PtySession::spawn_shell_in 1	worker-door-body	WorkerCtx	
@@ -502,7 +503,7 @@ install_channel::begin	window	bt_platform::spawn_at_priority@2, bt_platform::spa
 recovered::ask	window	bt_platform::spawn_at_priority@2, bt_platform::spawn_at_priority_with_stack@3	—	lane::lock
 explorer_menu::begin_probe	window	bt_platform::spawn_at_priority_with_stack@3, lane::Executor::start_worker@2, explorer_menu::start_probe_with@2	—	lane::lock, explorer_menu::remember, explorer_menu::state, lane::Ledger::earliest_owed, lane::Ledger::worker_ended
 explorer_menu::request	window	bt_platform::spawn_at_priority_with_stack@3, lane::Executor::start_worker@2	—	lane::lock, explorer_menu::state, lane::Ledger::earliest_owed, lane::Ledger::worker_ended
-carry_pass::begin_carry_pass	window	bt_platform::spawn_at_priority_with_stack@3, lane::Executor::start_worker@2	—	lane::lock, lane::Ledger::earliest_owed, lane::Ledger::worker_ended
+carry_pass::begin_carry_pass	window	bt_platform::spawn_at_priority_with_stack@3, lane::Executor::start_worker@2	carry_pass::run_carry_steps	lane::lock, lane::Ledger::earliest_owed, lane::Ledger::worker_ended
 LayoutTables::shifted_character	window	std::sync::mpsc::SyncSender::try_send	—	lane::lock
 FilesWorker::request	window	std::sync::mpsc::Sender::send	—	lane::lock
 PreviewWorker::request	window	std::sync::mpsc::Sender::send	—	lane::lock

@@ -2696,17 +2696,20 @@ text_entries! {
     CategoryAgents,
     /// `Agents` — the word in the rail.
     NavAgents,
-    /// `Agents ▸ Codex notify` — the row.
-    RowCodexNotify,
+    /// `Agents ▸ Codex hooks` — the row (its entry is a hook from codex 0.148, the
+    /// `notify` line below; 0.4.10 plan row 69c).
+    RowCodexHooks,
     /// Its sentence. Two facts and a boundary, on `DescClaudeHooks`'s shape: what
     /// is written and where, and then **which** of the two things an agent can
     /// say this one carries. The third clause earns its place — the row beside it
     /// arranges for a pane to say *it is waiting for you*, and a reader who
     /// assumed this did the same would install it, watch an approval box sit
     /// there with nothing on the tab, and conclude the switch was broken.
-    DescCodexNotify,
+    DescCodexHooks,
+    /// The `notify` line written, on a codex below 0.148.
     CodexNotifyAddedToast,
-    CodexNotifyRemovedToast,
+    /// Folio's entry taken out — the hook, an earlier Folio's `notify` line, or both.
+    CodexEntryRemovedToast,
     /// The refusal's own half of the sentence; the reason follows it, in the
     /// installer's words.
     CodexNotifyFailedToast,
@@ -3306,6 +3309,42 @@ text_entries! {
     /// The resume row's line while resume is on and an agent's hooks are not this copy's;
     /// `{agents}` is the list.
     DescResumeAgentsNeedsHooks,
+
+    // ── codex's Stop hook (0.4.10 plan row 69) ─────────────────────────────
+    //
+    // One contiguous block at the end, per this table's standing rule. **Three
+    // refusals**, each the reason half of `CodexNotifyFailedToast`'s sentence,
+    // said where `attention_codex::apply_resolved` writes nothing.
+    /// `config.toml` already declares hook events, and codex warns on every start
+    /// when both it and `hooks.json` do (R15).
+    CodexHooksInToml,
+    /// `hooks.json`, with Folio's hook in it, is a file codex's own `HooksFile`
+    /// type refuses — a byte-order mark, a top-level key other than `description`
+    /// and `hooks`, a key named twice, a handler or a value of a type codex does not
+    /// take — and codex reads none of such a file, so the hook would never run.
+    CodexHooksFileIgnored,
+    /// Windows PowerShell 5.1 reads Folio's path as a wildcard pattern and cannot
+    /// parse it (a `[` with no `]` after it, among others), so the hook would
+    /// fail on every turn (re-review R1).
+    CodexHookPathBrackets,
+
+    // ── codex's entry by its version, and its rows (0.4.10 plan row 69c) ──
+    //
+    // The Chinese column is a draft for the Chinese pass (R11).
+    /// `config.toml` cannot be read — not UTF-8, not TOML, or a `notify` that is
+    /// not a list of words. Named, because this row has two files.
+    CodexConfigUnreadable,
+    /// The hook written: codex asks once to trust it (R13).
+    CodexHookAddedToast,
+    /// A removal that took Folio's hook out of `hooks.json` and left `config.toml`
+    /// as it was — a file it could not read or will not edit (`LeftUnread`,
+    /// re-review R4); the reason follows it.
+    CodexHookRemovedConfigLeft,
+    /// The same, when `hooks.json` held no hook of Folio's.
+    CodexNoHookConfigLeft,
+    /// The repair notice when the hook was pointed here (R8): codex asks again,
+    /// because the command changed.
+    AgentHooksRepairedCodexHook,
     /// The row's line over a key named twice where Folio's hooks go: the scan wrote nothing, so it
     /// says what the file is, not what a write did (review N7; the press keeps
     /// `AgentHooksDuplicateKey`).
@@ -5434,7 +5473,7 @@ impl Text {
             Self::CleanupMarkProfiles => pick(lang, "PowerShell profiles", "PowerShell 配置文件"),
             Self::CleanupMarkPsReadLine => pick(lang, "PSReadLine module", "PSReadLine 模块"),
             Self::CleanupMarkClaude => pick(lang, "Claude Code hooks", "Claude Code 钩子"),
-            Self::CleanupMarkCodex => pick(lang, "Codex notify", "Codex 通知"),
+            Self::CleanupMarkCodex => pick(lang, "Codex hooks", "Codex 通知"),
             Self::CleanupMarkCopilot => pick(lang, "Copilot hooks", "Copilot 钩子"),
             Self::CleanupMarkExplorer => pick(lang, "Explorer registrations", "资源管理器注册"),
             Self::CleanupMarkExplorerPackage => {
@@ -5823,21 +5862,21 @@ impl Text {
             // 「通知」, the same word as its two neighbours: what the reader is
             // switching on is a notification, and `notify` is the name of the
             // key it writes rather than a second kind of thing.
-            Self::RowCodexNotify => pick(lang, "Codex notify", "Codex 通知"),
-            Self::DescCodexNotify => pick(
+            Self::RowCodexHooks => pick(lang, "Codex hooks", "Codex 通知"),
+            Self::DescCodexHooks => pick(
                 lang,
-                "Marks the tab when Codex finishes a turn. Adds a notify program to your ~/.codex/config.toml, or CODEX_HOME.",
-                "Codex 回合结束时标记标签页。在 ~/.codex/config.toml 或 CODEX_HOME 中添加 notify 程序。",
+                "Marks the tab when Codex finishes a turn. Adds a hook to your ~/.codex/hooks.json, or CODEX_HOME.",
+                "Codex 回合结束时标记标签页。在 ~/.codex/hooks.json 或 CODEX_HOME 中添加 hook。",
             ),
             Self::CodexNotifyAddedToast => pick(
                 lang,
                 "Notify program added. Takes effect in a new Codex session.",
                 "已写入 ~/.codex/config.toml。新的 codex 会话开始生效。",
             ),
-            Self::CodexNotifyRemovedToast => pick(
+            Self::CodexEntryRemovedToast => pick(
                 lang,
-                "Codex notify program removed",
-                "已从 ~/.codex/config.toml 移除",
+                "Folio removed from Codex's configuration",
+                "已从 Codex 的配置中移除 Folio",
             ),
             Self::CodexNotifyFailedToast => pick(
                 lang,
@@ -6524,6 +6563,46 @@ impl Text {
             Self::ShellEndedBySystem => {
                 pick(lang, "Ended by the system at shutdown", "关机时被系统结束")
             }
+            Self::CodexHooksInToml => pick(
+                lang,
+                "Codex's hooks are in its config.toml. Folio adds its own only to hooks.json, so it changed nothing.",
+                "Codex 的 hook 写在 config.toml 中。Folio 只在 hooks.json 中添加自己的 hook，因此未做修改。",
+            ),
+            Self::CodexHooksFileIgnored => pick(
+                lang,
+                "Codex cannot read this hooks.json as it is, so a hook added to it would never run.",
+                "Codex 无法读取当前的 hooks.json，添加的 hook 不会运行。",
+            ),
+            Self::CodexHookPathBrackets => pick(
+                lang,
+                "Windows PowerShell cannot run Folio from this path because of the [ or ] in it, so Codex's hook would fail. Move Folio to a folder without [ or ].",
+                "路径中的 [ 或 ] 使 Windows PowerShell 无法运行 Folio，Codex 的 hook 会失败。请将 Folio 移到不含 [ 或 ] 的文件夹。",
+            ),
+            Self::CodexConfigUnreadable => pick(
+                lang,
+                "Codex's config.toml is in a form Folio cannot read. Folio does not change the file.",
+                "Codex 的 config.toml 格式 Folio 无法读取。Folio 不改动此文件。",
+            ),
+            Self::CodexHookAddedToast => pick(
+                lang,
+                "Hook added. Codex asks once to trust it, the next time it starts.",
+                "已添加 hook。Codex 下次启动时会请你确认一次是否信任它。",
+            ),
+            Self::CodexHookRemovedConfigLeft => pick(
+                lang,
+                "Folio's hook was removed from hooks.json, and config.toml was left as it was",
+                "已从 hooks.json 移除 Folio 的 hook，config.toml 保持原样",
+            ),
+            Self::CodexNoHookConfigLeft => pick(
+                lang,
+                "hooks.json held no hook of Folio's, and config.toml was left as it was",
+                "hooks.json 中没有 Folio 的 hook，config.toml 保持原样",
+            ),
+            Self::AgentHooksRepairedCodexHook => pick(
+                lang,
+                "Codex's hook now points at this Folio. Codex asks once to trust the new path.",
+                "Codex 的 hook 已改为指向这个 Folio。Codex 会请你确认一次是否信任新路径。",
+            ),
         }
     }
 
@@ -6711,6 +6790,9 @@ impl Text {
         //   halves, because a card is a surface and not a sentence.
         Self::WebFailRuntimeSay,
         Self::WebFailRuntimeVerb,
+        // — the Codex hook's refusal of a path Windows PowerShell cannot call, which
+        //   `attention_codex::apply_resolved` raises only on Windows (row 69, re-review R1)
+        Self::CodexHookPathBrackets,
     ];
 
     #[cfg(test)]
@@ -7188,13 +7270,71 @@ pub fn first_run_tip_claude(path: &str) -> String {
     }
 }
 
-/// The Codex row's tooltip, naming the file this machine will write.
+/// The Codex row's tooltip, naming the file this machine will write: `hooks.json`, where the hook
+/// goes from codex 0.148 (0.4.10 plan row 69c).
 #[must_use]
 pub fn first_run_tip_codex(path: &str) -> String {
+    match current() {
+        Lang::English => format!("Takes a dated copy of {path}, then writes the hook."),
+        Lang::Chinese => format!("先做带日期的副本，再写入 {path}"),
+    }
+}
+
+/// The same, on a codex below 0.148, whose file is `config.toml` and whose entry is the `notify`
+/// line.
+#[must_use]
+pub fn first_run_tip_codex_notify(path: &str) -> String {
     match current() {
         Lang::English => format!("Takes a dated copy of {path}, then writes the notify program."),
         Lang::Chinese => format!("先做带日期的副本，再写入 {path}"),
     }
+}
+
+/// **The Codex row's sentence on a codex below 0.148** (0.4.10 plan row 69c): it names the version,
+/// and the `notify` line written there in place of a hook. Interned ([`intern`]): one per version
+/// per language. The Chinese is a draft for the Chinese pass.
+pub(crate) fn codex_row_old_version(version: &str) -> &'static str {
+    intern(match current() {
+        Lang::English => format!(
+            "Marks the tab when Codex finishes a turn. Codex {version} is older than 0.148, so this adds a notify program to your ~/.codex/config.toml, or CODEX_HOME."
+        ),
+        Lang::Chinese => format!(
+            "Codex 回合结束时标记标签页。Codex {version} 低于 0.148，因此在 ~/.codex/config.toml 或 CODEX_HOME 中添加 notify 程序。"
+        ),
+    })
+}
+
+/// **`[features] hooks = false` (or `codex_hooks`) in codex's `config.toml`** (row 69's review N6):
+/// codex runs no hook, so Folio writes none, and says it as the row's line — naming the file that
+/// says so, which is under `CODEX_HOME` when that is set (the 69c review's C6). Interned
+/// ([`intern`]): one per path per language. The Chinese is a draft for the Chinese pass.
+pub(crate) fn codex_hooks_off(path: &str) -> &'static str {
+    intern(codex_hooks_off_in_lang(current(), path))
+}
+
+/// [`codex_hooks_off`] with the language named — [`Text::in_lang`]'s split, so a test reads both
+/// columns without switching the process's one language under every other test.
+pub(crate) fn codex_hooks_off_in_lang(lang: Lang, path: &str) -> String {
+    match lang {
+        Lang::English => {
+            format!("Hooks are switched off in {path}, so a hook added here would not run.")
+        }
+        Lang::Chinese => format!("{path} 中已关闭 hook，此处添加的 hook 不会运行。"),
+    }
+}
+
+/// **Somebody else's program on codex's one `notify` key, on a codex below 0.148** (row 69's
+/// report §1b.6, R12): the refusal names the version and their program, and what a newer codex
+/// lets Folio do instead. Interned ([`intern`]). The Chinese is a draft for the Chinese pass.
+pub(crate) fn codex_notify_held_old_version(version: &str, program: &str) -> &'static str {
+    intern(match current() {
+        Lang::English => format!(
+            "Codex {version} runs {program} when a turn ends, and its notify line takes one program. Codex 0.148 or later lets Folio add a hook of its own instead."
+        ),
+        Lang::Chinese => format!(
+            "Codex {version} 在回合结束时运行 {program}，而它的 notify 只能设一个程序。Codex 0.148 或更高版本允许 Folio 另加自己的 hook。"
+        ),
+    })
 }
 
 /// The Copilot CLI row's tooltip, naming the file this machine will write.
@@ -9471,7 +9611,8 @@ mod tests {
                 first_run_tip_claude as fn(&str) -> String,
                 "~/.claude/settings.json",
             ),
-            (first_run_tip_codex, "~/.codex/config.toml"),
+            (first_run_tip_codex, "~/.codex/hooks.json"),
+            (first_run_tip_codex_notify, "~/.codex/config.toml"),
             (first_run_tip_copilot, "~/.copilot/hooks/folio.json"),
         ] {
             assert!(built(default).contains(default));
