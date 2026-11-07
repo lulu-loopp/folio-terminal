@@ -694,6 +694,25 @@ pub(crate) fn facts_with(
         // ledger, and a place in the queue outranks every one of its rules.
         // The tests that are about the queue say so ([`waiting`]).
         awaiting: false,
+        // A shell's rule: no agent's turns are heard here. The tests about an agent pane's turns
+        // say so ([`agent_turn_facts`]).
+        turn: None,
+    }
+}
+
+/// **An agent pane read by its turns** (0.4.10 plan row 75): `ended_at` is the output revision
+/// its latest turn ended at, `running` whether a turn is under way, and `output` / `seen` the
+/// bytes it drew and how much of them was painted.
+pub(crate) fn agent_turn_facts(
+    ended_at: Option<u64>,
+    running: bool,
+    output_revision: u64,
+    last_seen_revision: u64,
+    tab_is_active: bool,
+) -> SessionFacts {
+    SessionFacts {
+        turn: Some(crate::agent_turns::AgentTurn { ended_at, running }),
+        ..facts_with(quiet(), output_revision, last_seen_revision, tab_is_active)
     }
 }
 
@@ -2800,6 +2819,9 @@ pub(crate) fn leaf_saying(text: &str) -> TerminalPane {
             // A fixture is not a restore, so nothing is owed to its prompt.
             pending_typing: None,
             agent: crate::agent_resume::AgentAccount::default(),
+            // Nor are its turns any agent's: a fixture is read by the shell's rule until a test
+            // delivers it a hook.
+            turns: crate::agent_turns::TurnAccount::default(),
         },
         view: TermView {
             projection,

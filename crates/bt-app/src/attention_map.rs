@@ -690,6 +690,97 @@ pub(crate) fn turn_end_row(family: &str, event: &str) -> Option<&'static TurnEnd
         .find(|row| row.family == family && row.event == event)
 }
 
+/// **The third table: events that only happen while a turn is running** (0.4.10 plan row 75).
+///
+/// The tab's blue dot says *finished, and you have not looked* (DESIGN §7.1.5b). For a pane whose
+/// program is an agent, "finished" is the end of a turn ([`TURN_END`]), and a turn that has started
+/// again since is work in flight, which outranks a finished claim (D35). The start of a turn is
+/// already declared — a clear whose `begins_turn` is true. What is declared here is the rest of the
+/// evidence that a turn is under way: an arrival that cannot happen between turns, because it is
+/// the agent's own work reporting in. Claude Code's hooks reference says `UserPromptSubmit` also
+/// fires on turns Claude Code starts on its own (a `/loop` iteration, a background subagent
+/// reporting back) and is silent about others; these rows are what is heard of a turn whose start
+/// no hook announced.
+///
+/// **A separate table, for [`TURN_END`]'s reason.** These rows are clears on the queue lane as
+/// well, and what they mean there — a receipt, a kind's own boundary — is a different sentence
+/// from "the agent is working". A column on [`ROWS`] would ask every row the question, including
+/// the waits, and a wait is not evidence of a running turn: `Notification.agent_needs_input` is a
+/// *background* session asking, and a quota wait is an agent standing still. Every row here names
+/// an event [`ROWS`] carries, so it is installed wherever the clears are — pinned below.
+///
+/// **What is not here.** `SessionEnd` / `sessionEnd` (a session ending is not a turn running),
+/// `Notification.agent_completed` (a background session finished, not this pane's turn) and
+/// `Notification.quota_auto_resume_disabled` (the agent stays stopped). codex and pi contribute
+/// nothing: neither has an installed row that is heard inside a turn, so their panes are read by
+/// their turns' ends alone, which is all their dot needs — neither starts turns by itself.
+pub(crate) const TURN_WITHIN: &[TurnWithin] = &[
+    // "Runs immediately after a tool completes successfully."
+    TurnWithin {
+        family: CLAUDE_CODE,
+        event: "PostToolUse",
+    },
+    // "Runs after a user responds to an MCP elicitation."
+    TurnWithin {
+        family: CLAUDE_CODE,
+        event: "ElicitationResult",
+    },
+    TurnWithin {
+        family: CLAUDE_CODE,
+        event: "Notification.elicitation_complete",
+    },
+    TurnWithin {
+        family: CLAUDE_CODE,
+        event: "Notification.elicitation_response",
+    },
+    // The quota reset and the agent carried on by itself: a turn is running.
+    TurnWithin {
+        family: CLAUDE_CODE,
+        event: "Notification.quota_auto_resume_fired",
+    },
+];
+
+/// One row of [`TURN_WITHIN`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct TurnWithin {
+    pub(crate) family: &'static str,
+    pub(crate) event: &'static str,
+}
+
+/// **What one arrival says about the pane's turn** — read off the three tables and nothing else
+/// (0.4.10 plan row 75). [`crate::agent_turns`] is what the pane does with it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TurnStep {
+    /// A turn ended ([`TURN_END`]).
+    Ended,
+    /// A turn began: a clear that declares `begins_turn`.
+    Began,
+    /// The agent's own work reported in from inside a turn ([`TURN_WITHIN`]).
+    Within,
+}
+
+/// The [`TurnStep`] a `<family>:<event>` is, if it is one.
+///
+/// The end is asked first, and the order is the declaration rather than a preference: `Stop` is a
+/// clear in [`ROWS`] and a turn's end in [`TURN_END`], and of those two sentences only the second is
+/// about the turn.
+#[must_use]
+pub(crate) fn turn_step(family: &str, event: &str) -> Option<TurnStep> {
+    if turn_end_row(family, event).is_some() {
+        return Some(TurnStep::Ended);
+    }
+    if let Some(MappedAction::Clear {
+        begins_turn: true, ..
+    }) = row(ROWS, family, event).map(|row| row.action)
+    {
+        return Some(TurnStep::Began);
+    }
+    TURN_WITHIN
+        .iter()
+        .any(|row| row.family == family && row.event == event)
+        .then_some(TurnStep::Within)
+}
+
 /// **R2, made a function**: the rows one machine actually has installed.
 ///
 /// A kind that has a primary row keeps only its primary; a kind that has none keeps its fallbacks.
@@ -1566,6 +1657,62 @@ mod tests {
                 row.family,
                 row.event
             );
+        }
+    }
+
+    /// **Every row of [`TURN_WITHIN`] is a clear [`ROWS`] carries, and none is a turn's end**
+    /// (0.4.10 plan row 75): a row here is only heard if the installer installs its event, which
+    /// it does for every row of [`ROWS`] — and a row that were also in [`TURN_END`] would be read
+    /// as the end, so writing it here would be a sentence nobody can hear.
+    #[test]
+    fn every_turn_within_row_is_an_installed_clear_and_not_an_end() {
+        for within in TURN_WITHIN {
+            let clear = row(ROWS, within.family, within.event).unwrap_or_else(|| {
+                panic!("{}:{} has no row to install", within.family, within.event)
+            });
+            assert!(
+                matches!(
+                    clear.action,
+                    MappedAction::Clear {
+                        begins_turn: false,
+                        ..
+                    }
+                ),
+                "{}:{} is a clear that begins no turn",
+                within.family,
+                within.event
+            );
+            assert_eq!(turn_end(within.family, within.event), None);
+            assert_eq!(
+                turn_step(within.family, within.event),
+                Some(TurnStep::Within)
+            );
+        }
+    }
+
+    /// **What each family's arrivals say about a turn, from the tables alone** (row 75). A turn's
+    /// end wins over the clear the same event also is; a clear that begins a turn says so; a wait,
+    /// a session's end and a background session's news say nothing about this pane's turn.
+    #[test]
+    fn each_familys_turn_steps_come_from_its_rows() {
+        for (family, event, step) in [
+            (CLAUDE_CODE, "Stop", Some(TurnStep::Ended)),
+            (CLAUDE_CODE, "StopFailure", Some(TurnStep::Ended)),
+            (CLAUDE_CODE, "UserPromptSubmit", Some(TurnStep::Began)),
+            (CLAUDE_CODE, "PostToolUse", Some(TurnStep::Within)),
+            (CLAUDE_CODE, "PermissionRequest", None),
+            (CLAUDE_CODE, "Notification.agent_needs_input", None),
+            (CLAUDE_CODE, "Notification.agent_completed", None),
+            (CLAUDE_CODE, "SessionEnd", None),
+            (CODEX, "agent-turn-complete", Some(TurnStep::Ended)),
+            (CODEX, "user-prompt-submit", Some(TurnStep::Began)),
+            (COPILOT, "agentStop", Some(TurnStep::Ended)),
+            (COPILOT, "userPromptSubmitted", Some(TurnStep::Began)),
+            (COPILOT, "notification.permission_prompt", None),
+            (COPILOT, "sessionEnd", None),
+            (PI, "agent_settled", Some(TurnStep::Ended)),
+        ] {
+            assert_eq!(turn_step(family, event), step, "{family}:{event}");
         }
     }
 }

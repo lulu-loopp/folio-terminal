@@ -547,7 +547,7 @@ impl AgentAccount {
 }
 
 /// The marked command the shell is running now: its last mark, executed and not finished.
-fn running_command(marks: &[CommandMark]) -> Option<CommandMarkId> {
+pub(crate) fn running_command(marks: &[CommandMark]) -> Option<CommandMarkId> {
     marks
         .last()
         .filter(|mark| mark.executed.is_some() && mark.finished.is_none())
@@ -559,7 +559,7 @@ fn running_command(marks: &[CommandMark]) -> Option<CommandMarkId> {
 /// it, is not finished. A mark the session no longer holds — retired by Clear scrollback, an
 /// `ED 3`, the scrollback quota or a reflow that could not reseat it — says nothing about the
 /// command it stood for.
-fn command_goes_on(command: CommandMarkId, marks: &[CommandMark]) -> bool {
+pub(crate) fn command_goes_on(command: CommandMarkId, marks: &[CommandMark]) -> bool {
     !marks.iter().any(|mark| mark.id > command)
         && marks
             .iter()

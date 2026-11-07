@@ -3641,6 +3641,8 @@ impl<B: Backend> Runtime<'_, B> {
                 // **A typed agent's record ends with its command** (row 195): the shell marked the
                 // next prompt.
                 records_ended |= leaf.agent.settle_command(leaf.session.command_marks());
+                // **And its turns with it** (0.4.10 plan row 75): the pane is the shell's again.
+                leaf.turns.settle_turn_command(leaf.session.command_marks());
                 // **A resume whose folder was gone started nothing** (row 195, review F3): the
                 // pane's shell is owed in its place now, with the could-not-resume line.
                 match leaf.agent.take_not_started() {

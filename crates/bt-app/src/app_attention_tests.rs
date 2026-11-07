@@ -326,3 +326,418 @@ fn every_road_that_ends_a_pane_emits_leaf_gone_once() {
     drop(tabs);
     drop(hygiene);
 }
+
+// ── 0.4.10 plan row 75: an agent pane's blue dot is read from its turns ──
+//
+// T-UNREAD-DOT-ON-EVERY-BACKGROUND-TAB. The sequences below are the shapes the hooks reference
+// documents and the owner's machine runs — a pane whose program is the agent (every pane 0.4.9's
+// resume brings back), a turn the agent starts by itself, an agent typed into an integrated shell —
+// with invented capabilities and no folder at all: nothing here asks the disk.
+
+/// One pane in a background tab (the window's active tab is 1, and there is only tab 0), running
+/// `program`, holding a capability its hooks can name.
+fn an_agent_pane(program: &str) -> (Vec<TabState>, SeatId, String) {
+    let mut tabs = vec![ringing_tab(1, 1)];
+    let seat = tabs[0].seats.terminals()[0];
+    let capability = attention_wire::mint_capability();
+    let leaf = &mut tabs[0]
+        .sessions
+        .get_mut(&seat)
+        .expect("the fixture's seat holds a shell")
+        .session;
+    leaf.attention.capability.clone_from(&capability);
+    leaf.launch.program = Some(PathBuf::from(program));
+    (tabs, seat, capability)
+}
+
+/// Every family's installed rows, as a machine that installed all three would hold them.
+fn every_familys_rows() -> Vec<attention::MappingRow> {
+    [
+        attention_map::CLAUDE_CODE,
+        attention_map::CODEX,
+        attention_map::COPILOT,
+    ]
+    .into_iter()
+    .flat_map(|family| attention_map::installed_rows(attention_map::ROWS, family, |_| true))
+    .collect()
+}
+
+/// `family:event` from the pane holding `capability`, delivered with the window's active tab
+/// `active` — 1 for "the user is elsewhere", 0 for "the user is on this tab".
+fn hook(tabs: &mut [TabState], capability: &str, family: &str, event: &str, active: usize) {
+    deliver_attention(
+        tabs,
+        active,
+        on_a_screen(true),
+        BOTH_NOTIFICATION_ROWS_ON,
+        &mut attention::Places::default(),
+        &[attention_wire::Message {
+            capability: capability.to_owned(),
+            family: family.to_owned(),
+            event: event.to_owned(),
+            id: None,
+            text: None,
+            resume: None,
+        }],
+        &every_familys_rows(),
+        Instant::now(),
+        None,
+        &mut Vec::new(),
+    );
+}
+
+/// The program in the pane writes `chunks` reads' worth — a spinner frame, a status line, a
+/// repaint — counted the way the drain counts them.
+fn draws(tabs: &mut [TabState], seat: SeatId, chunks: u64) {
+    let leaf = &mut tabs[0]
+        .sessions
+        .get_mut(&seat)
+        .expect("the fixture's pane")
+        .session;
+    for _ in 0..chunks {
+        leaf.output_revision =
+            runtime::terminal::output_revision(leaf.output_revision, true, false);
+    }
+}
+
+/// The pane's cells go to the glass: the user is looking at it.
+fn painted(tabs: &mut [TabState], seat: SeatId) {
+    mark_leaf_painted(
+        &mut tabs[0]
+            .sessions
+            .get_mut(&seat)
+            .expect("the fixture's pane")
+            .session,
+    );
+}
+
+/// The dot tab 0 wears while it is not the tab on screen.
+fn background_dot(tabs: &[TabState]) -> StatusClaim {
+    tabs[0].fleet_claim_for(false)
+}
+
+/// RED (row 75) — **a resumed agent's pane wears no dot for what it draws, and wears one for a
+/// turn that ended while the user was away** — the owner's every background tab of 2026-11-06,
+/// and the fix. Born as its agent's resume, the pane is read by its turns from birth: the bytes
+/// its agent draws while it reloads, and between turns, are not "finished". A turn that ended out
+/// of view is, until it is painted; and what it draws after that — a status line, a repaint for
+/// the focus report leaving the tab sends — brings nothing back.
+///
+/// MUTATION: in `SessionFacts::claim`, read `self.has_unseen_output()` in the `Some(turn)` arm
+/// (the byte rule kept for agent panes) and the first assertion goes red.
+#[test]
+fn a_resumed_agents_pane_is_unread_by_its_turns_and_not_by_its_bytes() {
+    let (mut tabs, seat, capability) = an_agent_pane("claude.exe");
+    tabs[0]
+        .sessions
+        .get_mut(&seat)
+        .expect("the fixture's pane")
+        .session
+        .turns = agent_turns::TurnAccount::of_a_resumed_agent();
+    draws(&mut tabs, seat, 40);
+    assert_eq!(
+        background_dot(&tabs),
+        StatusClaim::Silent,
+        "what a resumed agent draws is no finished turn"
+    );
+    let claude = attention_map::CLAUDE_CODE;
+    hook(&mut tabs, &capability, claude, "UserPromptSubmit", 0);
+    painted(&mut tabs, seat);
+    draws(&mut tabs, seat, 12);
+    assert_eq!(
+        background_dot(&tabs),
+        StatusClaim::Silent,
+        "a turn under way, whatever it draws"
+    );
+    hook(&mut tabs, &capability, claude, "Stop", 1);
+    assert_eq!(
+        background_dot(&tabs),
+        StatusClaim::Unread,
+        "a turn that went on writing after the user left, and ended"
+    );
+    painted(&mut tabs, seat);
+    draws(&mut tabs, seat, 3);
+    assert_eq!(
+        background_dot(&tabs),
+        StatusClaim::Silent,
+        "looked at; what it draws afterwards is not news"
+    );
+}
+
+/// RED (row 75) — **a turn the agent starts by itself hides the end before it, and its own end
+/// lights the dot**: `Stop`, then the `UserPromptSubmit` Claude Code's reference says fires on
+/// turns it starts on its own, a tool reporting in, and the next `Stop` — work in flight outranks
+/// a finished claim (D35) in an agent's pane exactly as in a shell's. And a turn whose start no
+/// hook announced is heard from inside it: the `PostToolUse` alone puts the earlier end away.
+///
+/// MUTATION: `TurnStep::Began | TurnStep::Within => {}` in `TurnAccount::hear_turn_step` and the
+/// second assertion goes red.
+#[test]
+fn a_turn_the_agent_starts_itself_is_work_in_flight_until_it_ends() {
+    let (mut tabs, seat, capability) = an_agent_pane("claude.exe");
+    let claude = attention_map::CLAUDE_CODE;
+    hook(&mut tabs, &capability, claude, "UserPromptSubmit", 0);
+    painted(&mut tabs, seat);
+    draws(&mut tabs, seat, 5);
+    hook(&mut tabs, &capability, claude, "Stop", 1);
+    assert_eq!(background_dot(&tabs), StatusClaim::Unread);
+    hook(&mut tabs, &capability, claude, "UserPromptSubmit", 1);
+    draws(&mut tabs, seat, 5);
+    assert_eq!(
+        background_dot(&tabs),
+        StatusClaim::Silent,
+        "a self-started turn is under way"
+    );
+    hook(&mut tabs, &capability, claude, "PostToolUse", 1);
+    hook(&mut tabs, &capability, claude, "Stop", 1);
+    assert_eq!(background_dot(&tabs), StatusClaim::Unread, "and it ended");
+    // No announced start this time: the tool's receipt is the turn running.
+    hook(&mut tabs, &capability, claude, "PostToolUse", 1);
+    assert_eq!(
+        background_dot(&tabs),
+        StatusClaim::Silent,
+        "a turn heard from inside it"
+    );
+}
+
+/// RED (row 75) — **a turn that ended on the tab the user is looking at is seen, so leaving the
+/// tab owes nothing**, whatever the agent draws after the user has gone. Seeing is painting, and
+/// the end is held at the revision it was heard at.
+///
+/// MUTATION: hold the end at `u64::MAX` in `TurnAccount::hear_turn_step` instead of at
+/// `output_revision`, and the pane is unread for a turn the user watched end.
+#[test]
+fn a_turn_that_ended_in_view_owes_nothing_after_the_user_leaves() {
+    let (mut tabs, seat, capability) = an_agent_pane("claude.exe");
+    let claude = attention_map::CLAUDE_CODE;
+    hook(&mut tabs, &capability, claude, "UserPromptSubmit", 0);
+    draws(&mut tabs, seat, 8);
+    painted(&mut tabs, seat);
+    hook(&mut tabs, &capability, claude, "Stop", 0);
+    painted(&mut tabs, seat);
+    draws(&mut tabs, seat, 2);
+    assert_eq!(background_dot(&tabs), StatusClaim::Silent);
+}
+
+/// RED (row 75, the owner's ruling R4) — **a fresh agent pane before its first hook keeps the
+/// shell's rule**: what it draws reads as unread exactly as before this row, and its first turn
+/// arrival binds it to its turns.
+///
+/// MUTATION: in `ShellSession::session_facts`, read every pane by its turns (`Some` of an unbound
+/// account as an `AgentTurn` with nothing ended) and the first assertion goes red.
+#[test]
+fn a_fresh_agent_pane_keeps_the_byte_rule_until_its_first_hook() {
+    let (mut tabs, seat, capability) = an_agent_pane("claude.exe");
+    draws(&mut tabs, seat, 3);
+    assert_eq!(
+        background_dot(&tabs),
+        StatusClaim::Unread,
+        "no hook heard: the shell's rule"
+    );
+    hook(
+        &mut tabs,
+        &capability,
+        attention_map::CLAUDE_CODE,
+        "UserPromptSubmit",
+        1,
+    );
+    assert_eq!(
+        background_dot(&tabs),
+        StatusClaim::Silent,
+        "bound, and a turn under way"
+    );
+}
+
+/// RED (row 75, D4's first branch) — **an agent typed into an integrated shell gets its dot at
+/// its turns' ends**, although the shell's `C` says "working" for the agent's whole life; and the
+/// shell's next prompt hands the pane back to the shell's rule, where its command boundary is
+/// read again.
+///
+/// MUTATION: keep `self.status.working` in the `Some(turn)` arm of `SessionFacts::claim` and the
+/// first `Unread` assertion goes red (the pane wears nothing, as before this row).
+#[test]
+fn an_agent_typed_into_a_shell_wears_its_dot_at_its_turns_ends() {
+    let (mut tabs, seat, capability) = an_agent_pane("pwsh.exe");
+    tabs[0]
+        .sessions
+        .get_mut(&seat)
+        .expect("the fixture's pane")
+        .session
+        .session
+        .feed(b"\x1b]133;A\x07PS> \x1b]133;B\x07claude\r\n\x1b]133;C\x07")
+        .expect("the marks parse");
+    let claude = attention_map::CLAUDE_CODE;
+    hook(&mut tabs, &capability, claude, "UserPromptSubmit", 0);
+    painted(&mut tabs, seat);
+    draws(&mut tabs, seat, 6);
+    hook(&mut tabs, &capability, claude, "Stop", 1);
+    assert_eq!(background_dot(&tabs), StatusClaim::Unread);
+    painted(&mut tabs, seat);
+    let leaf = &mut tabs[0]
+        .sessions
+        .get_mut(&seat)
+        .expect("the fixture's pane")
+        .session;
+    leaf.session
+        .feed(b"\x1b]133;D;0\x07\x1b]133;A\x07PS> ")
+        .expect("the marks parse");
+    leaf.turns.settle_turn_command(leaf.session.command_marks());
+    assert_eq!(leaf.turns.agent_turn(), None, "the shell's again");
+    draws(&mut tabs, seat, 1);
+    assert_eq!(
+        background_dot(&tabs),
+        StatusClaim::Unread,
+        "and its own command boundary is read as it always was"
+    );
+}
+
+/// RED (row 75) — **codex and copilot by their own rows, and nothing else**: codex's `notify`
+/// turn end alone (no hook of its says a turn began), copilot's `userPromptSubmitted` and
+/// `agentStop`. The same account, the same claim, no family named in the code.
+///
+/// MUTATION: answer `turn: None` in `asks_of` (no arrival says anything about a turn) and the
+/// codex pane stays on the byte rule: its first assertion goes red.
+#[test]
+fn codex_and_copilot_panes_are_read_by_their_own_turn_rows() {
+    let (mut tabs, seat, capability) = an_agent_pane("codex.exe");
+    let codex = attention_map::CODEX;
+    hook(&mut tabs, &capability, codex, "agent-turn-complete", 0);
+    painted(&mut tabs, seat);
+    draws(&mut tabs, seat, 30);
+    assert_eq!(
+        background_dot(&tabs),
+        StatusClaim::Silent,
+        "codex streaming its next answer is not finished"
+    );
+    hook(&mut tabs, &capability, codex, "agent-turn-complete", 1);
+    assert_eq!(background_dot(&tabs), StatusClaim::Unread);
+
+    let (mut tabs, seat, capability) = an_agent_pane("pwsh.exe");
+    tabs[0]
+        .sessions
+        .get_mut(&seat)
+        .expect("the fixture's pane")
+        .session
+        .session
+        .feed(b"\x1b]133;A\x07PS> \x1b]133;B\x07copilot\r\n\x1b]133;C\x07")
+        .expect("the marks parse");
+    let copilot = attention_map::COPILOT;
+    hook(&mut tabs, &capability, copilot, "userPromptSubmitted", 0);
+    painted(&mut tabs, seat);
+    draws(&mut tabs, seat, 4);
+    assert_eq!(background_dot(&tabs), StatusClaim::Silent);
+    hook(&mut tabs, &capability, copilot, "agentStop", 1);
+    assert_eq!(background_dot(&tabs), StatusClaim::Unread);
+}
+
+/// PIN (row 75) — **the claim ladder over an agent's turns**: a standing request outranks
+/// everything, as before; an unseen turn end is blue and never red — the shell's exit code is not
+/// the agent's turn (the owner's ruling R5); a turn under way, or an end already painted, is
+/// silent whatever the bytes say.
+#[test]
+fn an_agent_turns_claim_ladder() {
+    use crate::test_support::{agent_turn_facts, quiet};
+    assert_eq!(
+        agent_turn_facts(Some(5), false, 9, 4, false).claim(),
+        StatusClaim::Unread
+    );
+    assert_eq!(
+        agent_turn_facts(Some(5), false, 9, 4, true).claim(),
+        StatusClaim::Silent,
+        "the tab on screen is never unread"
+    );
+    assert_eq!(
+        agent_turn_facts(Some(5), true, 9, 4, false).claim(),
+        StatusClaim::Silent,
+        "a turn under way"
+    );
+    assert_eq!(
+        agent_turn_facts(Some(5), false, 9, 5, false).claim(),
+        StatusClaim::Silent,
+        "the end was painted; the bytes after it are not news"
+    );
+    assert_eq!(
+        agent_turn_facts(None, false, 9, 0, false).claim(),
+        StatusClaim::Silent,
+        "no turn has ended"
+    );
+    let failed_shell = SessionFacts {
+        status: SessionStatus {
+            failure_exit_code: Some(1),
+            ..quiet()
+        },
+        ..agent_turn_facts(Some(5), false, 9, 4, false)
+    };
+    assert_eq!(
+        failed_shell.claim(),
+        StatusClaim::Unread,
+        "the shell's last exit code is not the agent's turn"
+    );
+    let asking = SessionFacts {
+        awaiting: true,
+        ..agent_turn_facts(Some(5), true, 9, 4, false)
+    };
+    assert_eq!(asking.claim(), StatusClaim::Awaiting);
+}
+
+/// RED (row 75) — **every hook that reaches a pane writes a `hear` line**, the decisions or not:
+/// a `PostToolUse` that clears nothing and a second `Stop` whose turn's end was already announced
+/// decide nothing, and are in the file all the same, so the gap between a turn's end and the next
+/// arrival can be read off it. A hook naming no pane writes nothing.
+///
+/// MUTATION: drop the `hear_line` emission from `deliver_attention` and the assertion goes red.
+#[test]
+fn every_hook_that_reaches_a_pane_writes_a_hear_line() {
+    let path = std::env::temp_dir().join(format!(
+        "{}.log",
+        bt_testpath::unique_name("bt-attention-trace-hear")
+    ));
+    let _ = std::fs::remove_file(&path);
+    let capture = crate::trace_sink::Capture::new();
+    let trace = crate::trace::Trace::create(&path, "# pin", capture.queue());
+    let (mut tabs, seat, capability) = an_agent_pane("claude.exe");
+    let claude = attention_map::CLAUDE_CODE;
+    let mut places = attention::Places::default();
+    for (named, event) in [
+        (capability.as_str(), "UserPromptSubmit"),
+        (capability.as_str(), "PostToolUse"),
+        (capability.as_str(), "Stop"),
+        (capability.as_str(), "Stop"),
+        ("a capability no pane holds", "Stop"),
+    ] {
+        deliver_attention(
+            &mut tabs,
+            1,
+            on_a_screen(true),
+            BOTH_NOTIFICATION_ROWS_ON,
+            &mut places,
+            &[attention_wire::Message {
+                capability: named.to_owned(),
+                family: claude.to_owned(),
+                event: event.to_owned(),
+                id: None,
+                text: None,
+                resume: None,
+            }],
+            &every_familys_rows(),
+            Instant::now(),
+            Some(&trace),
+            &mut Vec::new(),
+        );
+    }
+    capture.write_out();
+    let heard: Vec<String> = std::fs::read_to_string(&path)
+        .unwrap_or_default()
+        .lines()
+        .skip(1)
+        .filter_map(|line| line.trim_start().split_once(' ').map(|(_, rest)| rest))
+        .filter(|line| line.starts_with("hear "))
+        .map(str::to_owned)
+        .collect();
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(
+        heard,
+        ["UserPromptSubmit", "PostToolUse", "Stop", "Stop"]
+            .map(|event| format!("hear tab=0 seat={seat:?} episode=- event=claude-code:{event}"))
+    );
+}

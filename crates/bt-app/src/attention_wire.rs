@@ -290,12 +290,16 @@ pub(crate) struct Asks {
     pub ledger: Option<Event>,
     /// The event lane: a turn ended, and this is who said so.
     pub turn_end: Option<crate::attention::Via>,
+    /// **What the arrival says about the pane's turn** (0.4.10 plan row 75): ended, begun, or
+    /// heard from inside one — [`attention_map::turn_step`], read off the same tables as the two
+    /// lanes above. It is what an agent pane's blue dot is read from ([`crate::agent_turns`]).
+    pub turn: Option<attention_map::TurnStep>,
 }
 
 impl Asks {
     #[must_use]
     pub(crate) fn is_empty(&self) -> bool {
-        self.ledger.is_none() && self.turn_end.is_none()
+        self.ledger.is_none() && self.turn_end.is_none() && self.turn.is_none()
     }
 }
 
@@ -319,6 +323,7 @@ pub(crate) fn asks_of(installed: &[crate::attention::MappingRow], message: &Mess
         ledger: attention_map::row(attention_map::ROWS, &message.family, &message.event)
             .map(|row| attention_map::event_for(installed, row, message.id.as_deref())),
         turn_end: attention_map::turn_end(&message.family, &message.event),
+        turn: attention_map::turn_step(&message.family, &message.event),
     }
 }
 
@@ -1028,6 +1033,7 @@ mod tests {
             Asks {
                 ledger: Some(Event::StrongWait(WaitSlot::Level(WaitKind::Permission))),
                 turn_end: None,
+                turn: None,
             }
         );
         // **`Stop` reaches both lanes, and this is the assertion that keeps it doing so.** A lookup
@@ -1050,6 +1056,7 @@ mod tests {
             Asks {
                 ledger: None,
                 turn_end: Some(Via::AgentSettled),
+                turn: Some(attention_map::TurnStep::Ended),
             }
         );
         // And a name from nowhere asks nothing at all.
