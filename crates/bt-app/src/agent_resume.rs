@@ -819,7 +819,7 @@ impl Heard {
             resume_id: self.id.clone(),
             cwd: self.cwd.clone(),
             home: self.home.clone(),
-            launch: self.launch.clone(),
+            launch: self.launch.clone().map(Box::new),
         }
     }
 }

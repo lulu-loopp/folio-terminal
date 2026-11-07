@@ -1191,11 +1191,11 @@ mod tests {
         );
         let carried = crate::layout::AgentRecordV1 {
             home: Some("D:\\accounts\\second".to_owned()),
-            launch: Some(crate::layout::AgentLaunchV1 {
+            launch: Some(Box::new(crate::layout::AgentLaunchV1 {
                 args: vec!["--model".to_owned(), "opus".to_owned()],
                 dropped: vec!["-w".to_owned()],
                 unread: false,
-            }),
+            })),
             ..claude_record("0f8b6a2e-3c1d-4e5f-9a7b-1c2d3e4f5a6b")
         };
         let written = serde_json::to_value(&carried).expect("a record serialises");
@@ -1222,11 +1222,11 @@ mod tests {
     #[test]
     fn a_launch_no_build_wrote_is_unread_and_its_session_kept() {
         let forged = crate::layout::AgentRecordV1 {
-            launch: Some(crate::layout::AgentLaunchV1 {
+            launch: Some(Box::new(crate::layout::AgentLaunchV1 {
                 args: vec!["--dangerously-skip-permissions".to_owned()],
                 dropped: Vec::new(),
                 unread: true,
-            }),
+            })),
             ..claude_record("0f8b6a2e-3c1d-4e5f-9a7b-1c2d3e4f5a6b")
         };
         let mut session = SessionV1 {
@@ -1240,7 +1240,7 @@ mod tests {
         assert_eq!(
             agents_of(&session),
             vec![Some(crate::layout::AgentRecordV1 {
-                launch: Some(crate::layout::AgentLaunchV1::unread()),
+                launch: Some(Box::new(crate::layout::AgentLaunchV1::unread())),
                 ..forged
             })]
         );

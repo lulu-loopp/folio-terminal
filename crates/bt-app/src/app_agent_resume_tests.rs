@@ -1282,11 +1282,11 @@ fn read_launch(args: &[&str], dropped: &[&str]) -> crate::agent_resume::LaunchRe
 /// A Claude Code record of [`SESSION`] whose agent was started with `args`, dropping `dropped`.
 fn launched_claude(args: &[&str], dropped: &[&str]) -> AgentRecordV1 {
     AgentRecordV1 {
-        launch: Some(bt_persist::AgentLaunchV1 {
+        launch: Some(Box::new(bt_persist::AgentLaunchV1 {
             args: launch_words(args),
             dropped: launch_words(dropped),
             unread: false,
-        }),
+        })),
         ..claude_record()
     }
 }
@@ -1660,7 +1660,7 @@ fn a_resumed_pane_says_what_its_launch_came_back_without() {
     assert_eq!(
         line(
             AgentRecordV1 {
-                launch: Some(bt_persist::AgentLaunchV1::unread()),
+                launch: Some(Box::new(bt_persist::AgentLaunchV1::unread())),
                 ..claude_record()
             },
             true

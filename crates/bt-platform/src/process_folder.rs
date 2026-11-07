@@ -433,29 +433,22 @@ mod imp {
     impl Process {
         /// **One string of the process parameters, read from the PEB this process keeps them
         /// in**: a WOW64 process's own 32-bit PEB (which `ProcessWow64Information` locates), any
-        /// other's native one. `field` picks the string in the layout the PEB is read in.
-        fn parameters_string(&self, field: fn(PebLayout) -> u64) -> Option<Vec<u16>> {
+        /// other's native one. `walk` is the string's own walk
+        /// ([`super::current_directory_units`], [`super::command_line_units`]), handed the PEB
+        /// and the layout it is read in.
+        fn parameters_string(
+            &self,
+            walk: fn(&dyn ProcessMemory, u64, PebLayout) -> Option<Vec<u16>>,
+        ) -> Option<Vec<u16>> {
             match self.query::<usize>(ProcessWow64Information) {
                 // A WOW64 process: the answer is its 32-bit PEB's address.
-                Some(peb32) if peb32 != 0 => u64::try_from(peb32).ok().and_then(|peb32| {
-                    super::parameters_string_units(
-                        self,
-                        peb32,
-                        PebLayout::WOW64,
-                        field(PebLayout::WOW64),
-                    )
-                }),
+                Some(peb32) if peb32 != 0 => u64::try_from(peb32)
+                    .ok()
+                    .and_then(|peb32| walk(self, peb32, PebLayout::WOW64)),
                 Some(_) => self
                     .query::<PROCESS_BASIC_INFORMATION>(ProcessBasicInformation)
                     .and_then(|basic| u64::try_from(basic.PebBaseAddress.addr()).ok())
-                    .and_then(|peb| {
-                        super::parameters_string_units(
-                            self,
-                            peb,
-                            PebLayout::NATIVE_64,
-                            field(PebLayout::NATIVE_64),
-                        )
-                    }),
+                    .and_then(|peb| walk(self, peb, PebLayout::NATIVE_64)),
                 None => None,
             }
         }
@@ -472,7 +465,7 @@ mod imp {
         {
             return Err(FolderRefusal::FarSide);
         }
-        match process.parameters_string(|layout| layout.current_directory_at) {
+        match process.parameters_string(super::current_directory_units) {
             Some(units) => Ok(super::folder_of_dos_path(&units)),
             None if process.has_exited() => Err(FolderRefusal::Exited),
             None => Err(FolderRefusal::Unreadable),
@@ -493,7 +486,7 @@ mod imp {
             Unopened::Exited => ArgumentsRefusal::Exited,
             Unopened::Unreadable => ArgumentsRefusal::Unreadable,
         })?;
-        let read = process.parameters_string(|layout| layout.command_line_at);
+        let read = process.parameters_string(super::command_line_units);
         if !still_running(parent) {
             return Err(ArgumentsRefusal::Exited);
         }
@@ -1079,7 +1072,13 @@ mod tests {
         use std::io::{BufRead as _, Write as _};
         match std::env::var(HELPER_MODE).as_deref() {
             Ok(mode @ ("parent-waits" | "parent-leaves")) => {
-                let mut child = crate::quiet_command(&std::env::current_exe().unwrap())
+                #[expect(
+                    clippy::zombie_processes,
+                    reason = "`parent-leaves` ends before its reading child on purpose: that child \
+                              is the test of a parent that has ended, and an orphan \
+                              is the system's to reap"
+                )]
+                let mut child = crate::quiet_command(std::env::current_exe().unwrap())
                     .args(["--exact", PARENT_HELPER, "--nocapture"])
                     .env(HELPER_MODE, "reads-parent")
                     .spawn()
@@ -1145,7 +1144,7 @@ mod tests {
     /// The stand-in parent in `mode`, its standard input and output piped to this test.
     #[cfg(any(windows, target_os = "macos"))]
     fn stand_in_parent(mode: &str) -> std::process::Child {
-        crate::quiet_command(&std::env::current_exe().unwrap())
+        crate::quiet_command(std::env::current_exe().unwrap())
             .args(["--exact", PARENT_HELPER, "--nocapture", PARENT_MARKER])
             .env(HELPER_MODE, mode)
             .stdin(std::process::Stdio::piped())

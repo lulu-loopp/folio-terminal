@@ -183,8 +183,10 @@ pub struct AgentRecordV1 {
     pub cwd: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub home: Option<String>,
+    /// Boxed: most records hold none, and the leaf this rides in stays the size the layout's
+    /// other nodes are.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub launch: Option<AgentLaunchV1>,
+    pub launch: Option<Box<AgentLaunchV1>>,
 }
 
 impl AgentRecordV1 {
@@ -384,7 +386,7 @@ impl LayoutNodeV1 {
                     .and_then(|agent| agent.launch.as_mut())
                     .filter(|launch| !launch.is_well_formed())
                 {
-                    *launch = AgentLaunchV1::unread();
+                    **launch = AgentLaunchV1::unread();
                     report.unread_launches += 1;
                 }
             }

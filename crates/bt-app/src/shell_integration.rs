@@ -10641,7 +10641,7 @@ mod tests {
                             home: Some(configuration.display().to_string()),
                             // Row 74: launch words a shell would split or run if they were
                             // handed to it bare — a `;`, a space.
-                            launch: Some(bt_persist::AgentLaunchV1 {
+                            launch: Some(Box::new(bt_persist::AgentLaunchV1 {
                                 args: vec![
                                     "--model".to_owned(),
                                     "opus; exit 3".to_owned(),
@@ -10650,7 +10650,7 @@ mod tests {
                                 ],
                                 dropped: Vec::new(),
                                 unread: false,
-                            }),
+                            })),
                         },
                         hand_back: Some(id.to_owned()),
                     }),
