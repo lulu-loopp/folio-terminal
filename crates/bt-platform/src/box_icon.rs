@@ -356,9 +356,11 @@ mod tests {
         }
     }
 
-    /// What this thread's dresser slot holds: the box it noted and the two icons it wears, by
-    /// handle; `None` when no box is being raised.
-    fn the_slot() -> Option<(Option<HWND>, Option<(isize, isize)>)> {
+    /// A dresser as the slot holds it: the box it noted, and the two icons it wears by handle.
+    type SlotHolds = (Option<HWND>, Option<(isize, isize)>);
+
+    /// What this thread's dresser slot holds; `None` when no box is being raised.
+    fn the_slot() -> Option<SlotHolds> {
         DRESSER.with(|slot| {
             slot.borrow().as_ref().map(|dresser| {
                 (
