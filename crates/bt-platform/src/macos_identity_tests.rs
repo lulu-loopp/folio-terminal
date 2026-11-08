@@ -323,9 +323,9 @@ mod on_macos {
     /// pinned at the first one any test takes, and its rest is a real one, so the child runs. A
     /// real `codesign` or `spctl` handed it is answered by its own exit, awaited as state, never
     /// raced by its bound; one that never exits is the suite watchdog's to name.
-    struct Awaited;
+    struct ExitAwaited;
 
-    impl IdentityClock for Awaited {
+    impl LockClock for ExitAwaited {
         fn now(&self) -> Instant {
             static PINNED: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
             *PINNED.get_or_init(Instant::now)
@@ -336,9 +336,9 @@ mod on_macos {
         }
     }
 
-    /// What a [`Counted`] clock does with one rest between two looks at the child.
+    /// What a [`CountedRests`] clock does with one rest between two looks at the child.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    enum Turn {
+    enum RestTurn {
         /// Rest a real moment without moving the reading: the child's own movement is awaited as
         /// state, within the suite's patience ([`crate::door_skipped::PATIENCE`]).
         Await,
@@ -347,25 +347,25 @@ mod on_macos {
     }
 
     /// How many awaited rests make the suite's patience.
-    const PATIENT_RESTS: u32 =
+    const PATIENT_LOOKS: u32 =
         (crate::door_skipped::PATIENCE.as_millis() / arm::POLL.as_millis()) as u32;
 
-    /// **A test's [`IdentityClock`]**: its reading moves only by what `turn` spends, so a child's
+    /// **A test's [`LockClock`]**: its reading moves only by what `turn` spends, so a child's
     /// bound ends at a count of the test's and never on real time. An awaited rest is a real
     /// rest with the reading unmoved; past the suite's patience of them the clock gives up — it
     /// spends a whole hour, so the call ends — and the test fails by name (`gave_up`), never
     /// hangs.
-    struct Counted {
+    struct CountedRests {
         began: Instant,
         moved: Cell<Duration>,
         spent: Cell<u32>,
         awaited: Cell<u32>,
         gave_up: Cell<bool>,
-        turn: RefCell<Box<dyn FnMut() -> Turn>>,
+        turn: RefCell<Box<dyn FnMut() -> RestTurn>>,
     }
 
-    impl Counted {
-        fn new(turn: impl FnMut() -> Turn + 'static) -> Self {
+    impl CountedRests {
+        fn new(turn: impl FnMut() -> RestTurn + 'static) -> Self {
             Self {
                 began: Instant::now(),
                 moved: Cell::new(Duration::ZERO),
@@ -377,7 +377,7 @@ mod on_macos {
         }
     }
 
-    impl IdentityClock for Counted {
+    impl LockClock for CountedRests {
         fn now(&self) -> Instant {
             self.began + self.moved.get()
         }
@@ -385,15 +385,15 @@ mod on_macos {
         fn pause(&self, pause: Duration) {
             let turn = (self.turn.borrow_mut())();
             match turn {
-                Turn::Spend(by) => {
+                RestTurn::Spend(by) => {
                     self.spent.set(self.spent.get() + 1);
                     self.moved.set(self.moved.get() + by);
                 }
-                Turn::Await if self.awaited.get() < PATIENT_RESTS => {
+                RestTurn::Await if self.awaited.get() < PATIENT_LOOKS => {
                     self.awaited.set(self.awaited.get() + 1);
                     std::thread::sleep(pause);
                 }
-                Turn::Await => {
+                RestTurn::Await => {
                     self.gave_up.set(true);
                     self.moved.set(self.moved.get() + Duration::from_secs(3600));
                 }
@@ -463,15 +463,20 @@ mod on_macos {
     fn an_ad_hoc_bundle_is_refused_by_the_developer_id_requirement() {
         let root = scratch("ad-hoc");
         let bundle = ad_hoc_bundle(&root);
-        let designated = designated_requirement_of(&bundle.to_string_lossy(), &Awaited).unwrap();
+        let designated =
+            designated_requirement_of(&bundle.to_string_lossy(), &ExitAwaited).unwrap();
         assert!(designated.starts_with("cdhash H\""), "{designated}");
 
         assert_eq!(
-            verify_against(&bundle, &designated, &Awaited),
+            verify_against(&bundle, &designated, &ExitAwaited),
             Ok(Verified(()))
         );
-        let refusal = verify_bundle_on(&bundle, &Requirement::of_designated(designated), &Awaited)
-            .unwrap_err();
+        let refusal = verify_bundle_on(
+            &bundle,
+            &Requirement::of_designated(designated),
+            &ExitAwaited,
+        )
+        .unwrap_err();
         assert_eq!(
             (refusal.stage, refusal.why.clone()),
             (Stage::Requirement, Why::NotSatisfied),
@@ -489,13 +494,14 @@ mod on_macos {
     fn a_bundle_changed_after_signing_fails_code_validity() {
         let root = scratch("changed");
         let bundle = ad_hoc_bundle(&root);
-        let designated = designated_requirement_of(&bundle.to_string_lossy(), &Awaited).unwrap();
+        let designated =
+            designated_requirement_of(&bundle.to_string_lossy(), &ExitAwaited).unwrap();
         let plist = bundle.join("Contents/Info.plist");
         let mut text = std::fs::read_to_string(&plist).unwrap();
         text.push('\n');
         std::fs::write(&plist, text).unwrap();
 
-        let refusal = verify_against(&bundle, &designated, &Awaited).unwrap_err();
+        let refusal = verify_against(&bundle, &designated, &ExitAwaited).unwrap_err();
         assert_eq!(
             (refusal.stage, refusal.why.clone()),
             (Stage::Validity, Why::Failed(Some(1))),
@@ -518,13 +524,13 @@ mod on_macos {
     /// designated half and `verify_against` refuses it.
     #[test]
     fn the_running_requirement_is_read_from_the_running_code() {
-        let running = running_requirement_on(&Awaited).unwrap();
+        let running = running_requirement_on(&ExitAwaited).unwrap();
         let executable = std::env::current_exe().unwrap();
         assert_eq!(
-            verify_against(&executable, running.designated(), &Awaited),
+            verify_against(&executable, running.designated(), &ExitAwaited),
             Ok(Verified(()))
         );
-        let refusal = verify_bundle_on(&executable, &running, &Awaited).unwrap_err();
+        let refusal = verify_bundle_on(&executable, &running, &ExitAwaited).unwrap_err();
         assert_eq!(
             (refusal.stage, refusal.why.clone()),
             (Stage::Requirement, Why::NotSatisfied),
@@ -543,7 +549,7 @@ mod on_macos {
     fn an_ad_hoc_bundle_is_never_accepted_by_spctl() {
         let root = scratch("assess");
         let bundle = ad_hoc_bundle(&root);
-        match assess_on(&bundle, &Awaited).unwrap() {
+        match assess_on(&bundle, &ExitAwaited).unwrap() {
             Assessment::Rejected { .. } | Assessment::Disabled => {}
             accepted @ Assessment::Accepted { .. } => panic!("{accepted:?}"),
         }
@@ -569,16 +575,16 @@ mod on_macos {
         let in_bound = u32::try_from(DISPLAY_BOUND.as_millis() / arm::POLL.as_millis()).unwrap();
         let (seen, answer) = (said.clone(), late.clone());
         let mut spent = 0;
-        let clock = Counted::new(move || {
+        let clock = CountedRests::new(move || {
             if !seen.exists() {
-                return Turn::Await;
+                return RestTurn::Await;
             }
             if spent < in_bound {
                 spent += 1;
-                return Turn::Spend(arm::POLL);
+                return RestTurn::Spend(arm::POLL);
             }
             std::fs::write(&answer, b"").unwrap();
-            Turn::Await
+            RestTurn::Await
         });
         let (said_text, late_text) = (said.to_string_lossy(), late.to_string_lossy());
         let arguments: [&str; 5] = ["-c", LATE_CHILD, "late-child", &said_text, &late_text];
@@ -610,8 +616,8 @@ mod on_macos {
     /// RED (T-CODESIGN-CHILD-BOUND-ON-A-CLOCK) — **a child that answers inside its bound is read:
     /// its exit status and both of its streams, as text.**
     ///
-    /// A scripted child on [`Awaited`], whose deadline never comes: the answer is the child's own
-    /// exit, awaited as state.
+    /// A scripted child on [`ExitAwaited`], whose deadline never comes: the answer is the child's
+    /// own exit, awaited as state.
     ///
     /// MUTATION: hand this test a clock already spent past its bound at the first rest (the
     /// zero-budget plant): the child is ended before it answers.
@@ -622,7 +628,7 @@ mod on_macos {
             SH,
             &["-c", "printf said; printf err >&2; exit 3"],
             DISPLAY_BOUND,
-            &Awaited,
+            &ExitAwaited,
         )
         .map(|answer| (answer.status, answer.stdout, answer.stderr));
         assert_eq!(answer, Ok((Some(3), "said".to_owned(), "err".to_owned())));

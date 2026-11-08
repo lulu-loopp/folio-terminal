@@ -846,10 +846,21 @@ pub fn hold_within(path: &Path, hold: Hold, wait: Duration) -> Result<Option<Hel
 /// `update_apply::WaitClock`, through a small adapter that carries the
 /// worker its pause needs) passes that clock here instead of writing a lock
 /// loop beside this one.
+///
+/// Its second user is the macOS identity door's child poll
+/// (`macos_identity`, T-CODESIGN-CHILD-BOUND-ON-A-CLOCK, 0.4.9 plan row 151):
+/// every `codesign` and `spctl` run's bound is set on [`LockClock::now`] when
+/// the child has started and read on it after every look, and the rest
+/// between two looks is [`LockClock::pause`]; [`WallLockClock`] in the
+/// product, through that module's public doors, and a counted clock in its
+/// tests, so "the bound is spent" is a count of the test's and "the child
+/// answered" is the child's own exit, never a race between a real tool and a
+/// real bound.
 pub trait LockClock {
     /// The monotonic reading the deadline is set and read on.
     fn now(&self) -> Instant;
-    /// One pause between two asks of a lock somebody else holds.
+    /// One pause between two asks of a lock somebody else holds, or between
+    /// two looks at a running child.
     fn pause(&self, pause: Duration);
 }
 

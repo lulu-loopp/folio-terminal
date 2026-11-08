@@ -58,8 +58,9 @@
 //! **Off macOS** every call is refused with [`Why::NotMacOs`], naming this
 //! door; the parsers and the decision are pure and compile everywhere.
 
+use crate::install_txn::{LockClock, WallLockClock};
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// Apple's requirement for a **Developer ID application**: anchored at Apple,
 /// the intermediate is Developer ID's (`1.2.840.113635.100.6.2.6`) and the
@@ -276,18 +277,18 @@ fn first_line(output: &str) -> Option<String> {
 /// fails), or its answer is not one designated requirement; [`Why::NotMacOs`]
 /// off macOS.
 pub fn running_requirement() -> Result<Requirement, Refusal> {
-    running_requirement_on(&WallClock)
+    running_requirement_on(&WallLockClock)
 }
 
 /// [`running_requirement`] with its child's bound read on `clock`.
-fn running_requirement_on(clock: &dyn IdentityClock) -> Result<Requirement, Refusal> {
+fn running_requirement_on(clock: &dyn LockClock) -> Result<Requirement, Refusal> {
     designated_requirement_of(&std::process::id().to_string(), clock)
         .map(Requirement::of_designated)
 }
 
 /// The designated requirement `codesign` prints for `code` — a path, or a
 /// process id in decimal — with the child's bound read on `clock`.
-fn designated_requirement_of(code: &str, clock: &dyn IdentityClock) -> Result<String, Refusal> {
+fn designated_requirement_of(code: &str, clock: &dyn LockClock) -> Result<String, Refusal> {
     let stage = Stage::RunningRequirement;
     let answer = arm::run(stage, CODESIGN, &["-d", "-r-", code], DISPLAY_BOUND, clock)?;
     if answer.status != Some(0) {
@@ -340,14 +341,14 @@ pub fn parse_designated(stdout: &str) -> Option<String> {
 /// A [`Refusal`] at [`Stage::Validity`] or [`Stage::Requirement`];
 /// [`Why::NotMacOs`] off macOS.
 pub fn verify_bundle(path: &Path, requirement: &Requirement) -> Result<Verified, Refusal> {
-    verify_bundle_on(path, requirement, &WallClock)
+    verify_bundle_on(path, requirement, &WallLockClock)
 }
 
 /// [`verify_bundle`] with both children's bounds read on `clock`.
 fn verify_bundle_on(
     path: &Path,
     requirement: &Requirement,
-    clock: &dyn IdentityClock,
+    clock: &dyn LockClock,
 ) -> Result<Verified, Refusal> {
     verify_against(path, &requirement.text(), clock)
 }
@@ -355,7 +356,7 @@ fn verify_bundle_on(
 fn verify_against(
     path: &Path,
     requirement: &str,
-    clock: &dyn IdentityClock,
+    clock: &dyn LockClock,
 ) -> Result<Verified, Refusal> {
     const STRICT: [&str; 4] = ["--verify", "--strict", "--deep", "--all-architectures"];
     let target = path.to_string_lossy();
@@ -400,11 +401,11 @@ fn verify_against(
 /// [`Stage::GatekeeperAssessment`] when a tool did not start, ran past its
 /// bound, or answered outside its grammar; [`Why::NotMacOs`] off macOS.
 pub fn assess(path: &Path) -> Result<Assessment, Refusal> {
-    assess_on(path, &WallClock)
+    assess_on(path, &WallLockClock)
 }
 
 /// [`assess`] with both children's bounds read on `clock`.
-fn assess_on(path: &Path, clock: &dyn IdentityClock) -> Result<Assessment, Refusal> {
+fn assess_on(path: &Path, clock: &dyn LockClock) -> Result<Assessment, Refusal> {
     let stage = Stage::GatekeeperStatus;
     let status = arm::run(stage, SPCTL, &["--status"], DISPLAY_BOUND, clock)?;
     let enabled = if status.status == Some(0) {
@@ -541,44 +542,9 @@ struct Answer {
     stderr: String,
 }
 
-/// **The clock a child's bound is set and read on, and the rest between two
-/// looks at the child** (T-CODESIGN-CHILD-BOUND-ON-A-CLOCK, plan row 151). The
-/// deadline is set on [`IdentityClock::now`] when the child has started, and
-/// read on it after every look; the rest between two looks is
-/// [`IdentityClock::pause`]. [`WallClock`] in the product, through the public
-/// doors ([`running_requirement`], [`verify_bundle`], [`assess`]); a test hands
-/// a counted clock, so "the bound is spent" is a count of the test's and "the
-/// child answered" is the child's own exit, never a race between a real tool
-/// and a real bound.
-///
-/// Neither of the crate's other clocks fits. [`crate::ProbeClock`]'s rest takes
-/// a [`crate::admission::WorkerCtx`], and these doors have none (the worker
-/// rule here is still the module doc's sentence); `launch_conversation`'s
-/// `LaunchClock` waits on another end, not between two looks.
-pub(crate) trait IdentityClock {
-    /// The monotonic reading a child's deadline is set and read on.
-    fn now(&self) -> Instant;
-    /// The rest of `pause` between two looks at the running child.
-    fn pause(&self, pause: Duration);
-}
-
-/// **The product's [`IdentityClock`]**: the monotonic clock, and each rest a
-/// sleep of the thread for as long as it was asked to be.
-pub(crate) struct WallClock;
-
-impl IdentityClock for WallClock {
-    fn now(&self) -> Instant {
-        Instant::now()
-    }
-
-    fn pause(&self, pause: Duration) {
-        std::thread::sleep(pause);
-    }
-}
-
 #[cfg(target_os = "macos")]
 mod arm {
-    use super::{Answer, IdentityClock, OUTPUT_BOUND, Refusal, Stage, Why};
+    use super::{Answer, LockClock, OUTPUT_BOUND, Refusal, Stage, Why};
     use std::io::{self, Read};
     use std::os::fd::AsRawFd;
     use std::time::Duration;
@@ -625,13 +591,15 @@ mod arm {
     /// door; a child past its bound, or past [`OUTPUT_BOUND`] on a stream, is
     /// ended by its own handle and the call refused at `stage` — one past its
     /// bound quoting the first line of what it had said by then. The bound is
-    /// set and read on `clock`, which also rests [`POLL`] between two looks.
+    /// set and read on `clock` ([`crate::install_txn::LockClock`]: the public
+    /// doors hand [`crate::install_txn::WallLockClock`], a test a counted
+    /// clock), which also rests [`POLL`] between two looks.
     pub(super) fn run(
         stage: Stage,
         program: &str,
         arguments: &[&str],
         bound: Duration,
-        clock: &dyn IdentityClock,
+        clock: &dyn LockClock,
     ) -> Result<Answer, Refusal> {
         let refuse = |why| Refusal::at(stage, why);
         let mut command = crate::quiet_command(program);
@@ -692,7 +660,7 @@ mod arm {
 
 #[cfg(not(target_os = "macos"))]
 mod arm {
-    use super::{Answer, IdentityClock, Refusal, Stage, Why};
+    use super::{Answer, LockClock, Refusal, Stage, Why};
     use std::time::Duration;
 
     /// Refused by name: this door has no arm off macOS, and its clock is never
@@ -702,7 +670,7 @@ mod arm {
         _program: &str,
         _arguments: &[&str],
         _bound: Duration,
-        _clock: &dyn IdentityClock,
+        _clock: &dyn LockClock,
     ) -> Result<Answer, Refusal> {
         Err(Refusal::at(stage, Why::NotMacOs))
     }
