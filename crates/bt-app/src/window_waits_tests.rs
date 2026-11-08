@@ -5430,8 +5430,9 @@ const ADMISSIONS: [&[&str]; 2] = [&["bt_platform", "admission"], &["bt_effects",
 
 /// **The doors whose every call is pinned**, row for row: `diagnostics.log`'s settle (row 30) is
 /// admitted twice in `fn main`, in the build-error arm (after `build`) and at the tail (after
-/// `run_app`), and once in `session_end::fence_the_log`, at `WM_ENDSESSION(TRUE)` — a process the
-/// system ends never reaches `fn main`'s way out (ruled 2026-11-03, plan row 201); the trace's
+/// `run_app`), and once in `session_end::fence_the_log`, at `WM_ENDSESSION(TRUE)` and, on macOS,
+/// before AppKit's quit is answered `NSTerminateNow` — a process the system ends never reaches
+/// `fn main`'s way out (ruled 2026-11-03, plan row 201; 2026-11-04, 0.4.10 plan row 17); the trace's
 /// flush (row 17) is admitted once, inside its one road `Shutdown::flush_through_its_door`, and
 /// `main` takes that road on the same two ways out.
 const DOOR_PINS: [DoorPin; 6] = [
@@ -9370,7 +9371,7 @@ fn the_effects_section_is_the_effect_functions_inside_the_doors() {
 /// The registry's sections, each headed `# <name>` once, in this order: a closed list, so a section
 /// misspelled, unknown or written twice — a second `# graphs` after the first, which
 /// [`section_in`] would never read — is refused by name rather than read past.
-const REGISTRY_SECTIONS: [&str; 11] = [
+const REGISTRY_SECTIONS: [&str; 12] = [
     "rows",
     "doors",
     "vocabulary",
@@ -9382,6 +9383,7 @@ const REGISTRY_SECTIONS: [&str; 11] = [
     "owners",
     "completions",
     "request-doors",
+    "request-door-cuts",
 ];
 
 /// **The registry's section headers are the closed list** [`REGISTRY_SECTIONS`]: every line that
@@ -9983,6 +9985,108 @@ fn a_wait_through_a_verb_from_blocking_outside_a_door_is_a_bare_site() {
         )),
         "the control: `owned` takes a `WaitToken` and is not a door function; door effects {:?}",
         in_doors.keys().collect::<Vec<_>>()
+    );
+}
+
+/// A planted crate with a site of every wait plan row 181 added to the vocabulary:
+/// `GetOverlappedResult` imported and called bare, and called by its whole path, each with its wait
+/// flag `true`, `false` and a variable; `MsgWaitForMultipleObjectsEx`, `GetQueuedCompletionStatus`
+/// and `WaitNamedPipeW` by their whole paths only (the product imports them and calls them bare,
+/// the shape `GetOverlappedResult` stands for here); `libc::poll` and `libc::waitid` by path, and
+/// `waitpid` imported and called bare. `polls_its_own` calls a first-party `poll` bare and a
+/// first-party method `poll` (the control).
+const PLANTED_WAITS_IN_NEITHER_LIST: &str = "
+use windows::Win32::System::IO::GetOverlappedResult;
+use libc::waitpid;
+pub struct Pump;
+impl Pump { pub fn poll(&self) {} }
+pub fn poll() {}
+pub fn overlapped_bare(h: Handle, o: &Overlapped, n: &mut u32, flag: bool) {
+let _ = unsafe { GetOverlappedResult(h, o, n, true) };
+let _ = unsafe { GetOverlappedResult(h, o, n, false) };
+let _ = unsafe { GetOverlappedResult(h, o, n, flag) };
+}
+pub fn overlapped_by_path(h: Handle, o: &Overlapped, n: &mut u32, flag: bool) {
+let _ = unsafe { windows::Win32::System::IO::GetOverlappedResult(h, o, n, true) };
+let _ = unsafe { windows::Win32::System::IO::GetOverlappedResult(h, o, n, false) };
+let _ = unsafe { windows::Win32::System::IO::GetOverlappedResult(h, o, n, flag) };
+}
+pub fn message_wait(d: u32) {
+let _ = unsafe { windows::Win32::UI::WindowsAndMessaging::MsgWaitForMultipleObjectsEx(None, d, Mask, Flags) };
+}
+pub fn port_and_pipe(h: Handle, n: &mut u32, k: &mut usize, o: &mut Packet, name: Name, d: u32) {
+let _ = unsafe { windows::Win32::System::IO::GetQueuedCompletionStatus(h, n, k, o, d) };
+let _ = unsafe { windows::Win32::System::Pipes::WaitNamedPipeW(name, d) };
+}
+pub fn unix_waits(f: &mut [Fd], p: i32, s: &mut i32, i: &mut Info) {
+let _ = unsafe { libc::poll(f.as_mut_ptr(), 1, -1) };
+let _ = unsafe { libc::waitid(0, 0, i, 0) };
+let _ = unsafe { waitpid(p, s, 0) };
+}
+pub fn polls_its_own(pump: &Pump) {
+poll();
+pump.poll();
+}
+";
+
+/// RED (T-WAITS-IN-NEITHER-LIST, plan row 181) — **a wait neither the vocabulary nor
+/// bt-source's `BLOCKING` named before row 181 is a bare site outside a door, imported and bare or
+/// by its whole path, and a flag that makes the call return at once does not take it out**
+/// (ruling R1: `GetOverlappedResult` and `libc::waitid` are counted at every call, whatever their
+/// flag, as the A2e lint will ban every call).
+///
+/// Against the planted crate ([`PLANTED_WAITS_IN_NEITHER_LIST`]): `overlapped_bare` and
+/// `overlapped_by_path` hold three `GetOverlappedResult` sites each (flag `true`, `false`, a
+/// variable); `message_wait`, `port_and_pipe` and `unix_waits` one site of each of their calls,
+/// `waitpid` imported and called bare; `polls_its_own`, which calls only first-party `poll`s,
+/// holds none (the control).
+///
+/// MUTATION: delete the registry's `windows::Win32::System::IO::GetOverlappedResult` line and
+/// `overlapped_bare`'s and `overlapped_by_path`'s sites leave the inventory; delete the
+/// `libc::waitpid` line and `unix_waits`' imported site leaves it.
+#[test]
+fn a_wait_neither_list_named_is_a_bare_site_whatever_its_flag() {
+    let world = planted_world("ww-neither-list", PLANTED_WAITS_IN_NEITHER_LIST);
+    let (bare, _, _) = vocabulary_sites_in(&world, &[]);
+    let mine: BTreeMap<(&str, &str), usize> = bare
+        .iter()
+        .filter(|((package, _, _, _), _)| package == "planted")
+        .map(|((_, _, item, entry), count)| ((item.as_str(), entry.as_str()), *count))
+        .collect();
+    let overlapped = "windows::Win32::System::IO::GetOverlappedResult";
+    let wanted: BTreeMap<(&str, &str), usize> = [
+        (("crate::overlapped_bare", overlapped), 3),
+        (("crate::overlapped_by_path", overlapped), 3),
+        (
+            (
+                "crate::message_wait",
+                "windows::Win32::UI::WindowsAndMessaging::MsgWaitForMultipleObjectsEx",
+            ),
+            1,
+        ),
+        (
+            (
+                "crate::port_and_pipe",
+                "windows::Win32::System::IO::GetQueuedCompletionStatus",
+            ),
+            1,
+        ),
+        (
+            (
+                "crate::port_and_pipe",
+                "windows::Win32::System::Pipes::WaitNamedPipeW",
+            ),
+            1,
+        ),
+        (("crate::unix_waits", "libc::poll"), 1),
+        (("crate::unix_waits", "libc::waitid"), 1),
+        (("crate::unix_waits", "libc::waitpid"), 1),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(
+        mine, wanted,
+        "the planted waits are not the bare sites they are (and `polls_its_own` holds none)"
     );
 }
 
@@ -10945,13 +11049,111 @@ fn every_request_door_has_its_line() {
     );
 }
 
+/// `# request-door-cuts`' columns (plan row 52): the door, what its C1 walk enters, what it walks
+/// beside, and the row's dated reason.
+const REQUEST_DOOR_CUT_COLUMNS: [&str; 4] = ["door", "enqueue", "beside", "reason"];
+
+/// **What `# request-door-cuts` refuses against `# request-doors`** (plan row 52): a cut whose door
+/// is no `# request-doors` line asked on the window, a door cut twice, an empty cell, no enqueue, and
+/// a reason not dated `YYYY-MM-DD: why`. Whether each name is the door's direct callee is
+/// bt-source's guard's to read.
+fn request_door_cut_failures(lines: &[Vec<&str>], cuts: &[Vec<&str>]) -> Vec<String> {
+    let walked: BTreeSet<&str> = lines
+        .iter()
+        .filter(|cells| cells[1] == "window")
+        .map(|cells| cells[0])
+        .collect();
+    let mut failures = Vec::new();
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    for cells in cuts {
+        let door = cells[0];
+        if !seen.insert(door) {
+            failures.push(format!("`{door}` has two `# request-door-cuts` lines"));
+        }
+        if !walked.contains(door) {
+            failures.push(format!(
+                "`{door}` is cut and is no `# request-doors` line asked on the window"
+            ));
+        }
+        if cells.iter().any(|cell| cell.trim().is_empty()) {
+            failures.push(format!("`{door}`'s cut: an empty cell (`—` is none)"));
+        }
+        if cells[1] == "—" {
+            failures.push(format!("`{door}`'s cut names no enqueue"));
+        }
+        let dated = cells[3].split_once(": ").is_some_and(|(date, why)| {
+            let parts: Vec<&str> = date.split('-').collect();
+            parts.len() == 3
+                && [4, 2, 2].iter().zip(&parts).all(|(len, part)| {
+                    part.len() == *len && part.bytes().all(|b| b.is_ascii_digit())
+                })
+                && !why.trim().is_empty()
+        });
+        if !dated {
+            failures.push(format!(
+                "`{door}`'s cut reason is not dated `YYYY-MM-DD: why`"
+            ));
+        }
+    }
+    failures
+}
+
+/// RED (plan row 52) — **every cut is a walked request door's, once, with an enqueue and a dated
+/// reason**: the live registry passes; a cut planted on a door not walked (`main`), the hand-off's
+/// cut written twice, and an undated reason are each refused by name.
+///
+/// MUTATION: let [`request_door_cut_failures`] read only `seen` — the cut of `main` passes.
+#[test]
+fn every_request_door_cut_is_a_walked_doors() {
+    let lines = section("request-doors", &REQUEST_DOOR_COLUMNS);
+    let cuts = section("request-door-cuts", &REQUEST_DOOR_CUT_COLUMNS);
+    let failures = request_door_cut_failures(&lines, &cuts);
+    assert!(
+        failures.is_empty(),
+        "`# request-door-cuts` and `# request-doors`:\n  {}",
+        failures.join("\n  ")
+    );
+    let planted = |row: Vec<&'static str>| -> Vec<String> {
+        let mut cuts = cuts.clone();
+        cuts.push(row);
+        request_door_cut_failures(&lines, &cuts)
+    };
+    assert_eq!(
+        planted(vec![
+            "main",
+            "Runtime::hand_off",
+            "—",
+            "2026-11-02: planted"
+        ]),
+        ["`main` is cut and is no `# request-doors` line asked on the window"]
+    );
+    assert_eq!(
+        planted(vec![
+            "Runtime::hand_off",
+            "Runtime::answer_handoff",
+            "—",
+            "2026-11-02: planted"
+        ]),
+        ["`Runtime::hand_off` has two `# request-door-cuts` lines"]
+    );
+    assert_eq!(
+        planted(vec![
+            "Runtime::submit_clipboard_write",
+            "Runtime::ask_the_clipboard",
+            "—",
+            "planted"
+        ]),
+        ["`Runtime::submit_clipboard_write`'s cut reason is not dated `YYYY-MM-DD: why`"]
+    );
+}
+
 /// **The mailbox items, a closed list, each with its dated reason** (the re-check of the review of
 /// T-REQUEST-DOOR-GUARD, R1): a `mailbox` item's own lock is exempt on every door's road whose row
 /// names it, a declaration the guard cannot prove (the engine reads no flow). So the exemption is
 /// a reviewed diff: a `# request-doors` cell that names an item this list does not is refused, and
 /// so is a line here no cell names. The reason is the item's, whichever door's road meets it: what
 /// its body holds its lock across, and why the window thread waits on no worker for longer.
-const MAILBOX: [(&str, &str); 35] = [
+const MAILBOX: [(&str, &str); 41] = [
     (
         "lane::lock",
         "2026-10-24: the lane's lock helper (`Mutex::lock`, a poison read through); it holds \
@@ -11128,6 +11330,37 @@ const MAILBOX: [(&str, &str); 35] = [
         "watch_steward::Steward::lock",
         "2026-10-24: the steward's asks, taken by the ear's door for a want's update; the worker \
          takes them once a round",
+    ),
+    (
+        "clipboard_lane::ClipboardLane::submit",
+        "2026-11-02: the last paste's mark (`last_paste`), taken by the window's door to stamp a \
+         paste and let go before the lane's admission; the clipboard's worker never takes it \
+         (plan row 52, R4)",
+    ),
+    (
+        "clipboard_lane::ClipboardLane::a_paste_was_asked_after",
+        "2026-11-02: the last paste's mark (`last_paste`), taken for one read on the window \
+         thread; the clipboard's worker never takes it (plan row 52, R4)",
+    ),
+    (
+        "ClipboardPictureMailbox::withdraw",
+        "2026-11-02: the picture inbox, held to mint a generation and drop what it held; the \
+         saving thread takes it only to deposit an answer (plan row 52)",
+    ),
+    (
+        "ClipboardPictureMailbox::refuse",
+        "2026-11-02: the picture inbox, held to count one refusal for the next turn's toast; the \
+         saving thread takes it only to deposit an answer (plan row 52)",
+    ),
+    (
+        "bt_pty::Retirements::begin",
+        "2026-11-02: the retirement count, held for one increment before the teardown's thread \
+         starts; the thread takes it only to decrement and notify (plan row 52, R6)",
+    ),
+    (
+        "bt_pty::Retirements::end",
+        "2026-11-02: the retirement count, held for one decrement and a notify when the teardown's \
+         thread could not start (plan row 52, R6)",
     ),
 ];
 

@@ -830,20 +830,22 @@ pub fn retire_session(session: PtySession) {
 fn retire_within(budget: Duration, teardown: impl FnOnce() + Send + 'static) {
     let outstanding = retirements();
     outstanding.begin();
-    let handed = std::thread::Builder::new()
-        .name("pty-retirement".to_string())
-        .spawn(move || {
-            let started = Instant::now();
-            teardown();
-            let spent = started.elapsed();
-            if spent > budget {
-                crate::say(format!(
-                    "a pane took {} ms to close, on a thread of its own rather than the window's",
-                    spent.as_millis()
-                ));
-            }
-            retirements().end();
-        });
+    // Typed where it is bound, so the call graph reads `spawn` as the standard library's and its
+    // closure as the worker's (plan row 52: the request-door guard's table of standard spawns).
+    let builder: std::thread::Builder =
+        std::thread::Builder::new().name("pty-retirement".to_string());
+    let handed = builder.spawn(move || {
+        let started = Instant::now();
+        teardown();
+        let spent = started.elapsed();
+        if spent > budget {
+            crate::say(format!(
+                "a pane took {} ms to close, on a thread of its own rather than the window's",
+                spent.as_millis()
+            ));
+        }
+        retirements().end();
+    });
     if handed.is_err() {
         outstanding.end();
     }
@@ -2088,15 +2090,24 @@ fn through_the_interpreter(
     program: &OsStr,
     args: &[OsString],
 ) -> Option<(OsString, Vec<OsString>, OsString)> {
-    let script = Path::new(program).extension().is_some_and(|extension| {
-        extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat")
-    });
-    if !script {
+    if !is_interpreted_script(program) {
         return None;
     }
     let interpreter = std::env::var_os("ComSpec").unwrap_or_else(|| OsString::from("cmd.exe"));
     let switches = vec![OsString::from("/s"), OsString::from("/c")];
     Some((interpreter, switches, interpreter_line(program, args)))
+}
+
+/// **Whether `program` is a batch file**, which [`through_the_interpreter`] hands to `cmd.exe`:
+/// its extension is `.cmd` or `.bat`, either case. Asked by a caller whose arguments are not the
+/// reader's own profile rows — an agent's recorded launch words (`bt-app`'s `agent_resume`, 0.4.10
+/// plan row 74) — because `cmd` still expands `%…%` inside the quotes this crate puts around each
+/// token, and a shim's `%*` splits the words again by rules of its own.
+#[must_use]
+pub fn is_interpreted_script(program: &OsStr) -> bool {
+    Path::new(program).extension().is_some_and(|extension| {
+        extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat")
+    })
 }
 
 /// The line `cmd.exe` is handed after `/s /c`, quoted by cmd's own rules.

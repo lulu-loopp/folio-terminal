@@ -737,6 +737,31 @@ row names exactly one item on its arm (`-` for an item on no predicate, else its
 verdict in the list names one item per `cfg` arm; a key that names nothing, or two items on one
 arm, is refused by its row's line (`window_waits.tsv:<line>`, `REQUEST-DOOR-SITES.tsv:<line>`),
 as every other refusal of the registry's cells is.
+Since 2026-11-02 (T-GESTURE-DOORS-ANSWER-OFF-THE-GESTURE, 0.4.9 plan row 52, the owner's ruling)
+a gesture door whose road goes on past its enqueue (it answers, draws, closes a tab) is cut one level
+down by a row of `window_waits.tsv`'s `# request-door-cuts` (`door`, `enqueue`, `beside`, `reason`):
+`Runtime::hand_off`, `Runtime::ask_for_a_paste`, `Runtime::paste_from_clipboard_into`,
+`Runtime::reap_exited_tabs` and `Runtime::close_pane`. Every direct first-party callee of the door's
+body is named in `enqueue` (walked under C1 to the row's boundary) or in `beside` (the gesture's own
+window work, not entered by the C1 walk), or is already a stop; an enqueue is called in the body
+itself, never only inside a closure literal, and a closure handed to a `beside` call is beside's;
+every other shape, a stale name and an undated reason are refused by the registry's line and the
+call's `file:line`. The `beside` side is walked once more, and what it meets stays listed when it
+is a breach whatever is read (an effect, a blocking primitive, a door-level finding) or a row
+already read; an `unreviewed` unresolved edge met only beside a cut is counted in the list's header
+and rendered in `target/request-door-sites/beside.tsv`. A foreign boundary entry may name the
+standard library's thread spawns' closure argument (`std::thread::spawn@0`,
+`std::thread::Builder::spawn@0`, the guard's closed `STD_SPAWNS` table), so the PTY retirement
+thread's body is the thread's, not the door's. `Runtime::submit_clipboard_write` and
+`Runtime::save_clipboard_picture` stay walked whole: their whole road is the enqueue's, and the
+picture save's refusal is answered on the next turn through its own inbox. **Since 2026-11-04**
+(the first real-tree run, coordinator's ruling) the two walks read the door's one
+`# request-doors` row and owe its boundary together: an entry is `Unmet` only when neither walk
+meets it, since the road beside an enqueue starts lanes and threads of its own (close_pane's and
+reap's `close_tab` reaches the computation lane), stopped and excused by the same cells; and a cut
+whose `enqueue` meets none of its boundary is refused, since it has cut the enqueue away. The
+list's comment lines, which carry that header count, are held equal to the tree with its rows
+(2026-11-04, review N1), so a landing that moves a beside key regenerates the count.
 
 **The sites, by site.** `docs/plans/REQUEST-DOOR-SITES.tsv` lists every failure keyed by file,
 item, kind and name (no line), with `sites`, a verdict and a reason: `std` or `follows <key>; …`
@@ -1236,6 +1261,25 @@ row 163 judged bt-platform's product kernel waits at `f641b0064` and recorded th
 `deferred_removal`'s `READY_WITHIN` is plan row 193). A new product Win32 or `libc` wait is noticed by the
 window-thread bare-site gate, which every product call of those verbs answers to; a new socket or WinHTTP
 timeout in the product is review's.
+
+2026-11-04 (T-ATTENTION-ENDPOINT-WAITS-ON-A-CLOCK, 0.4.10 plan row 13, 0.4.9 row 192): the attention
+endpoint's three waits for the other end are `launch_conversation::LaunchClock`'s, its fifth user: the
+Windows listener's first word (`FIRST_WORD_WITHIN`, through `first_word_on`, which the launch endpoint
+shares), each attached caller's `READ_DEADLINE` on both platforms (the listener's one timed
+`WaitForMultipleObjects` or `poll` is a `LaunchClock::wait` while somebody is reading, and every reading of
+the deadline is the clock's, handed to the helpers as `now`), and the client's one wait past a busy
+endpoint inside `attention_pipe::open_client`. That last one is a kernel wait whose timeout is an argument,
+so the clock's bound goes inside `WaitNamedPipeW` (kept away from `0`, which is the pipe's default wait, and
+from `NMPWAIT_WAIT_FOREVER`) rather than a real 100 ms being counted around it: `LaunchClock::spent`, which
+counted the launch wire's busy waits after `open_client` had really made them (the 2026-11-01 paragraph
+above), is gone, and every caller of `open_client` (the attention verb, the launch handover, the elevated
+pane's host) passes its own clock. `AttentionPipe::start` and `send_line` are the real-clock doors over
+`start_on` and `send_line_on`, so their signatures, which are one on every arm, did not move. What stays on
+the real clock: the two 250 ms write deadlines (Windows `write_bounded`, Unix `WRITE_DEADLINE`), which
+buffering decides, not the endpoint; and bt-app's
+`attention_wire::tests::a_permission_request_crosses_the_endpoint_and_mints_an_episode`, which crosses the
+real endpoint from another crate and cannot be handed the crate-private clock without a product knob. Both
+are noted in TIMING-BOUND.
 
 ## Suite watchdog
 

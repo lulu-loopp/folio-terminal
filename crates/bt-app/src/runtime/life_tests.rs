@@ -951,6 +951,7 @@ fn an_agent_pane_the_systems_end_kept_keeps_its_session_record() {
         id: "0b9c7e1a-4f3d-4c2b-9a8e-5d6f7a8b9c0d".to_owned(),
         cwd: "C:/work/resume".to_owned(),
         home: None,
+        launch: None,
     };
     let seat = {
         let mut runtime = application.runtime();
@@ -988,6 +989,7 @@ fn resumed_claude(hand_back: &str) -> crate::agent_resume::SeedAgent {
             resume_id: "0b9c7e1a-4f3d-4c2b-9a8e-5d6f7a8b9c0d".to_owned(),
             cwd: "C:/work/resume-gone".to_owned(),
             home: None,
+            launch: None,
         },
         hand_back: Some(hand_back.to_owned()),
     })

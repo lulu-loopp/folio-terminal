@@ -3818,7 +3818,7 @@ pub enum SettingsRow {
     TurnEndNotifications,
     /// **Whether a restart brings back the agents that were running in panes**, each through its
     /// own vendor's resume command (0.4.9 plan row 195; `crate::agent_resume`). On by default.
-    /// Windows only in 0.4.9 ([`Capability::AgentResume`]); the Mac is plan row 197.
+    /// On Windows and macOS ([`Capability::AgentResume`]; the Mac since T-AGENT-RESUME-ON-MACOS).
     ResumeAgents,
     /// Whether new PowerShell panes receive Folio's process-scoped integration — and, for a
     /// Windows PowerShell pane, Folio's own PSReadLine with it (T-INTEGRATION-INJECT-2-BUILD:
@@ -4183,7 +4183,7 @@ impl SettingsRow {
             Self::PowerShellProfileLine => Text::RowPowerShellProfileLine.text(),
             Self::LegacyPsReadLine => Text::RowLegacyPsReadLine.text(),
             Self::ClaudeHooks => Text::RowClaudeHooks.text(),
-            Self::CodexNotify => Text::RowCodexNotify.text(),
+            Self::CodexNotify => Text::RowCodexHooks.text(),
             Self::CopilotHooks => Text::RowCopilotHooks.text(),
             Self::GitPanel => Text::RowGitPanel.text(),
             Self::KeyHints => Text::RowKeyHints.text(),
@@ -4352,7 +4352,12 @@ impl SettingsRow {
             Self::MultilinePaste => Text::DescMultilinePaste.text(),
             Self::Notifications => Text::DescNotifications.text(),
             Self::TurnEndNotifications => Text::DescTurnEndNotifications.text(),
-            Self::ResumeAgents => Text::DescResumeAgents.text(),
+            // **What resume cannot do, while it cannot** (0.4.10 plan row 67b): an agent whose
+            // hooks are not this copy's never tells this copy which session it was in, so the
+            // row names it — the switch that puts them back is a row away.
+            Self::ResumeAgents => values
+                .resume_agents_line
+                .unwrap_or(Text::DescResumeAgents.text()),
             // **The one row on this page whose line is a function of something
             // that is not its own answer** (§7.56). An intent recorded on the
             // first-run card is outstanding until a PowerShell says where its
@@ -4370,16 +4375,21 @@ impl SettingsRow {
             // this build will not edit — a link out of the agent's own folder, a file shared by
             // hard links, a read-only one — the switch beside it has nothing true to say, so the
             // sentence says what the machine is instead (closure review R1).
-            Self::ClaudeHooks => {
-                values.agent_config_refusals[0].unwrap_or(Text::DescClaudeHooks.text())
-            }
+            // And what the start-time scan found there, when that is something to say (0.4.10 plan
+            // row 67b): another copy's hooks, a file Folio cannot read, an entry it cannot classify.
+            Self::ClaudeHooks => values.agent_config_refusals[0]
+                .or(values.agent_row_lines[0])
+                .unwrap_or(Text::DescClaudeHooks.text()),
             // Two facts and no third, the row above's shape: what is written and
             // where, then which of the two things an agent can say this one
             // carries — because a reader who installs it expecting a dot on a
-            // waiting pane has been told something that is not true.
-            Self::CodexNotify => {
-                values.agent_config_refusals[1].unwrap_or(Text::DescCodexNotify.text())
-            }
+            // waiting pane has been told something that is not true. **Which
+            // file, by codex's version** (0.4.10 plan row 69c): the hook in
+            // `hooks.json`, or — on a codex below 0.148, which the sentence names —
+            // the `notify` line in `config.toml` (`attention_codex::row_description`).
+            Self::CodexNotify => values.agent_config_refusals[1]
+                .or(values.agent_row_lines[1])
+                .unwrap_or_else(crate::attention_codex::row_description),
             // **Not a constant, and it is the row above's two facts plus a third
             // that is only sometimes true**: a copilot older than `1.0.26`
             // reported a permission prompt for tool calls nobody was ever asked
@@ -4388,9 +4398,11 @@ impl SettingsRow {
             // to fix before the switch means anything, so the sentence says which
             // one they are looking at instead of describing a switch that would
             // not work. See `attention_copilot::row_description`.
-            Self::CopilotHooks => values.agent_config_refusals[2].unwrap_or_else(|| {
-                crate::attention_copilot::row_description(values.copilot_readiness)
-            }),
+            Self::CopilotHooks => values.agent_config_refusals[2]
+                .or(values.agent_row_lines[2])
+                .unwrap_or_else(|| {
+                    crate::attention_copilot::row_description(values.copilot_readiness)
+                }),
             // Says what Off *does* rather than what it hides, because what it
             // does is the reason to reach for it: no page, no chord, and no `git`
             // process started on your behalf.
@@ -6729,6 +6741,14 @@ pub struct SettingsValues {
     /// instead of offering a press that cannot happen (closure review R1). Handed in for
     /// `copilot_readiness`'s reason — the answer is a file on disk and this row is drawn per frame.
     pub agent_config_refusals: [Option<&'static str>; 3],
+    /// **What each agent's row says of what the start-time scan found** (0.4.10 plan row 67b),
+    /// when it has something to say: hooks another copy of Folio runs, a file Folio cannot read,
+    /// an entry it cannot classify. Unlike a refusal, the switch beside it stays pressable.
+    /// Handed in for `agent_config_refusals`' reason.
+    pub agent_row_lines: [Option<&'static str>; 3],
+    /// **The resume row's line while resume is on and an agent it resumes has no hooks of this
+    /// copy's** (0.4.10 plan row 67b, R5): `None` keeps the row's own sentence.
+    pub resume_agents_line: Option<&'static str>,
     /// Whether the automatic update check is scheduled once a day (§7.51).
     pub update_check: bool,
     /// The About Version row derived this frame from the check and job owners.
@@ -6948,6 +6968,8 @@ impl SettingsValues {
             copilot_hooks: false,
             copilot_readiness: crate::attention_copilot::Readiness::Unknown,
             agent_config_refusals: [None; 3],
+            agent_row_lines: [None; 3],
+            resume_agents_line: None,
             update_check: true,
             version_update: crate::update_card::VersionRow::default(),
             update_mark: false,
@@ -20314,7 +20336,7 @@ mod tests {
     /// string read off this machine, so its length is a fact about the machine
     /// rather than about the copy. What is held here instead is the entry it
     /// falls back to when there is no version to name.
-    const OTHERWISE: [(SettingsRow, Text, bt_platform::HostPlatform); 24] = {
+    const OTHERWISE: [(SettingsRow, Text, bt_platform::HostPlatform); 31] = {
         use bt_platform::HostPlatform::{MacOs, Windows};
         [
             // The other end of a value the fixture had to pick one end of.
@@ -20416,6 +20438,45 @@ mod tests {
             (
                 SettingsRow::ProfileProgram,
                 Text::ProfilesProgramHasArguments,
+                Windows,
+            ),
+            // What an agent's row says over what the start-time scan found (0.4.10 plan row
+            // 67b), one entry per fixed sentence; the lines naming another copy, the events an
+            // entry of Folio's was put under and a writer's refusal carry what was read off the
+            // machine, and are outside the list for the version line's reason above.
+            (
+                SettingsRow::ClaudeHooks,
+                Text::AgentHooksUnreadable,
+                Windows,
+            ),
+            (
+                SettingsRow::ClaudeHooks,
+                Text::AgentHooksUnclassified,
+                Windows,
+            ),
+            (
+                SettingsRow::ClaudeHooks,
+                Text::AgentHooksDuplicateKeyRow,
+                Windows,
+            ),
+            (
+                SettingsRow::ClaudeHooks,
+                Text::AgentHooksRepairHeld,
+                Windows,
+            ),
+            (
+                SettingsRow::ClaudeHooks,
+                Text::AgentHooksOwnerUnknown,
+                Windows,
+            ),
+            (
+                SettingsRow::CodexNotify,
+                Text::AgentCodexNotifyTaken,
+                Windows,
+            ),
+            (
+                SettingsRow::CopilotHooks,
+                Text::AgentCopilotFileTaken,
                 Windows,
             ),
         ]
@@ -27626,7 +27687,8 @@ mod tests {
                 SettingsRow::CopilotHooks,
                 SettingsRow::TurnEndNotifications,
             ];
-            // The resume switch where this build resumes (row 195; the Mac is row 197).
+            // The resume switch where this build resumes (row 195; the Mac since
+            // T-AGENT-RESUME-ON-MACOS).
             if Capability::AgentResume.on(bt_platform::host_platform()) {
                 expected.push(SettingsRow::ResumeAgents);
             }
@@ -27735,7 +27797,7 @@ mod tests {
         let refused = crate::i18n::Text::AgentConfigLink.text();
         for (index, row, plain) in [
             (0, SettingsRow::ClaudeHooks, Text::DescClaudeHooks.text()),
-            (1, SettingsRow::CodexNotify, Text::DescCodexNotify.text()),
+            (1, SettingsRow::CodexNotify, Text::DescCodexHooks.text()),
             (
                 2,
                 SettingsRow::CopilotHooks,
@@ -28829,15 +28891,17 @@ mod tests {
     fn a_mac_is_not_offered_a_row_about_a_facility_it_has_not_got() {
         use bt_platform::HostPlatform::{MacOs, Windows};
 
-        // `ResumeAgents` since row 195: 0.4.9 resumes agents on Windows only (plan row 197).
-        const NOT_ON_A_MAC: [SettingsRow; 3] = [
-            SettingsRow::ContextMenu,
-            SettingsRow::Acrylic,
-            SettingsRow::ResumeAgents,
-        ];
+        const NOT_ON_A_MAC: [SettingsRow; 2] = [SettingsRow::ContextMenu, SettingsRow::Acrylic];
         for layout in [TabLayoutMode::Horizontal, TabLayoutMode::Vertical] {
             let mac = visible_rows_for(MacOs, layout);
             let windows = visible_rows_for(Windows, layout);
+            // `ResumeAgents` was on the list from row 195 until T-AGENT-RESUME-ON-MACOS: a Mac
+            // resumes agents too, through the pane's own shell.
+            assert!(
+                mac.contains(&SettingsRow::ResumeAgents)
+                    && windows.contains(&SettingsRow::ResumeAgents),
+                "{layout:?}: both platforms resume agents, and both pages hold the switch"
+            );
             for row in NOT_ON_A_MAC {
                 assert!(
                     !mac.contains(&row),

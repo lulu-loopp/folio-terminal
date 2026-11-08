@@ -42,7 +42,9 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+mod agent_hooks_step;
 mod agent_resume;
+mod agent_turns;
 mod animation;
 mod app_delegate_wire;
 mod arrival;
@@ -56,6 +58,7 @@ mod attention_wire;
 mod attention_words;
 mod card_trace;
 mod cardhint;
+mod carry_pass;
 mod cli;
 mod clipboard_lane;
 mod clipboard_picture;
@@ -731,9 +734,15 @@ enum AppEvent {
     /// `explorer_menu::state()` and `explorer_menu::take_outcome()` by the time
     /// this is sent, and this says only that something did.
     ExplorerPackageChanged,
+    /// **The carry pass's agent-hooks step published what it found** (0.4.10 plan row 67b): the
+    /// answer is in `agent_hooks_step::AGENT_HOOKS`, and the handler sets the Agents rows from it
+    /// and raises the notice of each repair of a gone copy's hooks. Owed a wake for
+    /// [`Self::ExplorerPackageChanged`]'s reason: the scan lands seconds into a launch, or behind a
+    /// modal, on a window that may have nothing else coming.
+    AgentHooksScanned,
     /// **The machine listed its monospaced families** (GitHub issue #3).
     ///
-    /// The tenth of the same family and the newest, and it is owed a wake for
+    /// The tenth of the same family, and it is owed a wake for
     /// [`Self::CopilotProbed`]'s reason with one more on top: the walk was
     /// started by the press that opened the dialog, so the reader is looking at
     /// a picker that is holding one row — the family in force — and waiting for
@@ -1058,6 +1067,7 @@ impl AppEvent {
             | Self::CopilotProbed
             | Self::UpdateChecked
             | Self::ExplorerPackageChanged
+            | Self::AgentHooksScanned
             | Self::FontsScanned
             | Self::TaskbarAnswered
             | Self::ProgramsAnswered
@@ -1487,6 +1497,9 @@ struct ClipboardPictureInbox {
     /// The generation the window is waiting for. Bumped by every new paste.
     wanted: u64,
     landed: Option<ClipboardPictureAnswer>,
+    /// The saves refused at the door since the window last looked (plan row 52): each is said on
+    /// the turn the inbox's wake brings, in the notice the door used to draw itself.
+    refused: usize,
 }
 
 impl ClipboardPictureMailbox {
@@ -1509,6 +1522,26 @@ impl ClipboardPictureMailbox {
     /// The inbox itself, for the worker to leave its answer in.
     fn inbox(&self) -> Arc<std::sync::Mutex<ClipboardPictureInbox>> {
         Arc::clone(&self.inbox)
+    }
+
+    /// One save refused at its door, counted for the next look (plan row 52): the generation is
+    /// left alone, so the paste a running save answers is still the one waited for.
+    fn refuse(&self) {
+        self.inbox
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .refused += 1;
+    }
+
+    /// How many saves were refused at the door since the last look, and none from now on.
+    fn take_refusals(&mut self) -> usize {
+        std::mem::take(
+            &mut self
+                .inbox
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .refused,
+        )
     }
 
     /// Take whatever landed, and answer with it only if it is still an answer to
@@ -7651,6 +7684,10 @@ struct ShellSession {
     /// layout writes so a restart can resume it, and — for a pane born as a resume — whether that
     /// resume ever ran. See [`agent_resume::AgentAccount`].
     agent: agent_resume::AgentAccount,
+    /// **This pane's agent's turns, as its blue dot reads them** (0.4.10 plan row 75): for a pane
+    /// whose agent's hooks are heard, "finished" is a turn's end and not the bytes it draws. See
+    /// [`agent_turns::TurnAccount`].
+    turn_account: agent_turns::TurnAccount,
     grid: GridSize,
     conpty_grid: GridSize,
     pending_pty_resize: Option<PendingPtyResize>,
@@ -9255,13 +9292,27 @@ struct App<B: Backend = Native> {
     /// a second to draw one tick would be reading it sixty times a second. So it is cached at the
     /// two moments it can change — the launch, and a press on the row.
     ///
-    /// **Not repaired at launch, unlike the verb above.** A menu entry pointing at a `folio.exe`
-    /// that has moved opens nothing and the user cannot tell why; a hook command pointing at one
-    /// fails, is retried by nobody, and leaves an agent as silent as it was before anyone installed
-    /// anything. The second is a feature that has stopped working, not a broken thing on somebody's
-    /// desktop — and rewriting a file belonging to another program at every launch, without being
-    /// asked, is not something this build does.
+    /// **Repaired at start since 0.4.10, for two states only** (plan row 67b, reversing the
+    /// 2026-08-25 stance that hooks are not repaired at launch): hooks naming a copy that is gone,
+    /// and this copy's own in an older shape, are pointed here by the carry pass's worker
+    /// (`agent_hooks_step`). The stance's premise was that a dead hook is a feature that has
+    /// stopped working; row 195 made the hooks how a restart brings sessions back, so a dead one is
+    /// resume quietly doing nothing. Every other state is said, never written.
+    ///
+    /// **Not read at launch.** The launch reads no agent's file on this thread: until the scan's
+    /// first answer ([`Self::agent_rows_known`]) the switch reads Off, and the answer sets it.
     claude_hooks_installed: bool,
+    /// **What the newest start-time scan found in each agent's configuration**
+    /// (`agent_hooks_step::HooksSnapshot`), in the `agent_takeovers` order — what the Agents rows'
+    /// lines are said from, with why a due repair was not written. `None` for a family a press has
+    /// written since, until the scan the press asked for answers.
+    agent_hooks_found: [Option<(
+        attention_ownership::HooksFound,
+        Option<agent_hooks_step::Unrepaired>,
+    )>; 3],
+    /// **Whether a scan has answered at all** in this process: before it, nothing about the agents'
+    /// files is known on this thread, and the resume row says nothing about their hooks.
+    agent_rows_known: bool,
     /// **Why each agent's configuration file will not be edited, when it will not be** — the
     /// `agent_takeovers` order, Claude Code then codex then copilot.
     ///
@@ -9808,6 +9859,8 @@ impl<B: Backend> App<B> {
             explorer_package_asked_place: explorer_menu::ExplorerPlace::default(),
             explorer_package_announce: Announce::Everything,
             agent_takeovers: Default::default(),
+            agent_hooks_found: Default::default(),
+            agent_rows_known: false,
             profiles_file_broken: false,
             pins_file_broken: false,
             settings_file_broken: false,
@@ -15166,6 +15219,8 @@ fn release_trial_writer(writer: update_trial::Writer, stores: &mut TrialStores<'
         Writer::RecoveredAnnouncement => recovered::ask(&persist::storage_dir()),
         // The trial is committed: it is the person's Folio, and the system may start it again.
         Writer::RestartRegistration => (stores.restart)(),
+        // The pass again, on its worker: what it held back, it now writes.
+        Writer::AgentHooksRepair => carry_pass::begin_carry_pass(),
     }
 }
 
@@ -16530,6 +16585,7 @@ impl ShellSession {
             last_seen_revision: self.last_seen_revision,
             tab_is_active,
             awaiting: self.attention.ledger.ticket().is_some(),
+            turn: self.turn_account.agent_turn(),
         }
     }
 }
@@ -22678,6 +22734,11 @@ struct SessionFacts {
     /// is the user's, and no snapshot of a `SessionStatus` can answer the
     /// second.
     awaiting: bool,
+    /// **This pane's agent's turns, when its hooks are heard** (0.4.10 plan row 75) —
+    /// [`agent_turns::TurnAccount::agent_turn`]. `Some` replaces the shell's reading of
+    /// "finished": the agent's turn end instead of its bytes, the agent's turn instead of the
+    /// shell's `working`. `None` is every other pane, read as before.
+    turn: Option<agent_turns::AgentTurn>,
 }
 
 impl SessionFacts {
@@ -22689,6 +22750,21 @@ impl SessionFacts {
     /// wears a dot telling you to look at it.
     fn has_unseen_output(self) -> bool {
         !self.tab_is_active && self.output_revision > self.last_seen_revision
+    }
+
+    /// **Whether an agent's turn ended where the user has not seen it** (0.4.10 plan row 75) —
+    /// [`Self::has_unseen_output`]'s sentence for a pane read by its agent's turns.
+    ///
+    /// The end is held at the output revision the pane had reached when it was heard, and seeing
+    /// is painting, as it is for every pane: a turn whose last words were painted before the user
+    /// left is not news, and a turn that went on writing after they left is. What the agent draws
+    /// between turns — a status line, a repaint for a focus report — moves the output revision and
+    /// nothing else, so it lights nothing.
+    fn has_unseen_turn_end(self, turn: agent_turns::AgentTurn) -> bool {
+        !self.tab_is_active
+            && turn
+                .ended_at
+                .is_some_and(|ended| ended > self.last_seen_revision)
     }
 
     /// What this session is claiming right now.
@@ -22711,16 +22787,33 @@ impl SessionFacts {
     /// The bell is the exception to both: it is latched by the session and
     /// survives whatever else is happening, because a bell is a thing that
     /// *rang*, not a state the session is in.
+    ///
+    /// **For a pane read by its agent's turns** (0.4.10 plan row 75) the two readings of
+    /// "finished" are the agent's and not the shell's: work in flight is a turn under way, unread
+    /// is a turn's end the user has not seen, and the shell's exit code says nothing about the
+    /// agent's turn — a typed agent stands on the shell's previous command, whose failure is not
+    /// the agent's (the owner's ruling R5, 2026-11-06: a failed turn is a plain blue end).
     fn claim(self) -> StatusClaim {
-        let work_in_flight = self.status.working || self.status.progress.is_some();
-        let unread = !work_in_flight && self.has_unseen_output();
+        let (work_in_flight, unseen, exit_speaks) = match self.turn {
+            Some(turn) => (
+                turn.running || self.status.progress.is_some(),
+                self.has_unseen_turn_end(turn),
+                false,
+            ),
+            None => (
+                self.status.working || self.status.progress.is_some(),
+                self.has_unseen_output(),
+                true,
+            ),
+        };
+        let unread = !work_in_flight && unseen;
         if self.awaiting {
             // Above every suppression below it, and deliberately: a queue place
             // is not a claim *about output*, so neither "work in flight" nor
             // "you have already looked" has anything to say about it. §7.1.5b:
             // 看一眼阻塞的 agent 不解除阻塞.
             StatusClaim::Awaiting
-        } else if unread && self.status.failure_exit_code.is_some() {
+        } else if unread && exit_speaks && self.status.failure_exit_code.is_some() {
             StatusClaim::Failed
         } else if self.status.bell_latched() {
             StatusClaim::Bell
@@ -22956,18 +23049,39 @@ fn deliver_attention(
                 );
                 break;
             }
+            // **Which hook reached which pane, every time** (0.4.10 plan row 75): the arrival
+            // itself, which the decisions below record only when one is taken — so the gap between
+            // a turn's end and whatever comes next can be read off the trace.
+            emit_attention_lines(
+                trace,
+                vec![attention_trace::hear_line(
+                    at,
+                    &message.family,
+                    &message.event,
+                )],
+            );
             // **Any hook from the pane says its resumed agent ran** (row 195, review N3) — a
             // submitted prompt as much as a finished turn — so its end is no failed resume.
             leaf.agent.spoke();
+            // What the pane's program makes it, asked once for the two accounts below.
+            let child = leaf
+                .agent
+                .child(leaf.launch.program.as_deref(), leaf.session.command_marks());
             // **The session the turn ended in, heard by the pane it ended in** (row 195).
             if let Some(heard) = &message.resume
                 && let Some(vendor) = agent_resume::vendor(&message.family)
             {
-                let child = agent_resume::child_of(
-                    leaf.launch.program.as_deref(),
-                    leaf.session.command_marks(),
-                );
                 recorded |= leaf.agent.hear(vendor, heard, child);
+            }
+            // **And the turn itself, which is what an agent pane's blue dot is read from**
+            // (row 75): ended, begun, or reported in from inside one.
+            if let Some(step) = asks.turn {
+                leaf.turn_account.hear_turn_step(
+                    step,
+                    &message.family,
+                    child,
+                    leaf.output_revision,
+                );
             }
             if let Some(event) = asks.ledger.clone() {
                 // The clock mirrors the arrival rather than the ledger's answer, and deliberately:
@@ -31533,7 +31647,9 @@ fn birth_here(
     programs: &profiles::ProfilePrograms,
 ) -> Result<(LeafSeed, Started), Vec<String>> {
     let (identity, started) = decided_birth(seed, stored_default, programs)?;
-    if let Some(shell) = handed_back_seed(seed, &started) {
+    if let Some(shell) = handed_back_seed(seed, &started)
+        .or_else(|| shell_cannot_resume(seed, profiles::row_of(&identity).as_ref(), &started))
+    {
         return birth_here(&shell, stored_default, programs);
     }
     match resolved_birth_seed(seed, &identity) {
@@ -31635,26 +31751,79 @@ fn adopt_program_answers(
         .program(attention_copilot::PROFILE_ID)
         .map(std::ffi::OsStr::to_owned)
         != copilot_before;
+    // **codex's version is asked of the program this walk found** (0.4.10 plan row 69c, R17), on
+    // the carry pass's worker: a codex found, moved or gone is a reason to scan again, once the
+    // agents' folders are known — the first answer below runs the pass anyway. A walk that has
+    // answered and has no `codex` row (a Mac's table has none) has found no codex.
+    let walked = attention_hooks::AGENT_HOMES.answered() || answers.facts.is_some();
+    let codex_moved = attention_codex::adopt_walk_program(
+        programs
+            .answer(attention_codex::PROFILE_ID)
+            .or_else(|| walked.then_some(None)),
+    );
+    if codex_moved && attention_hooks::AGENT_HOMES.answered() {
+        carry_pass::begin_carry_pass();
+    }
     if let Some(facts) = answers.facts {
         if wsl::adopt(facts.wsl) {
             profiles::names_changed();
             news.names = true;
         }
         news.git = git::GIT_LOCATION.adopt(facts.git);
-        news.agent_homes = attention_hooks::AGENT_HOMES.adopt(facts.generation, facts.agent_homes);
+        // **The first answer is news too** (0.4.10 plan row 67b): before it no agent's file has
+        // been read in this process, whether or not the walk's folders differ from the launch's.
+        let first = !attention_hooks::AGENT_HOMES.answered();
+        news.agent_homes =
+            attention_hooks::AGENT_HOMES.adopt(facts.generation, facts.agent_homes) || first;
+        if news.agent_homes {
+            // Where the agents keep their files is the account's own now: the carry pass reads
+            // them there, on its worker, wherever this answer was adopted — the launch adopts the
+            // walk before it has a window to take news to.
+            carry_pass::begin_carry_pass();
+        }
     }
     news
 }
 
-/// **The three agent rows, read off their files again** — `Runtime::refresh_agent_rows`'s body,
-/// and the program walk's adopter's when the folders the files live in moved (T-FRESH-FACTS). The
-/// copilot readiness is read again with them: whether its hooks are switched off is a file in the
-/// same folder.
-fn read_the_agent_rows_again<B: Backend>(app: &mut App<B>) {
-    (app.claude_hooks_installed, app.agent_config_refusals[0]) = attention_hooks::row_state();
-    (app.codex_notify_installed, app.agent_config_refusals[1]) = attention_codex::row_state();
-    (app.copilot_hooks_installed, app.agent_config_refusals[2]) = attention_copilot::row_state();
-    app.copilot_readiness = attention_copilot::readiness();
+/// **The three agent rows, set from the start-time scan's answer** (0.4.10 plan row 67b) — what
+/// the window does with `agent_hooks_step::HooksSnapshot`, and all it does: the files were read on
+/// the carry pass's worker. Whether the switch is On (this copy's hooks, in today's form or an
+/// older one), the reason a file will not be edited at all, what each row says, and Copilot's
+/// readiness, which reads a file in the same folder.
+fn adopt_agent_hooks_snapshot<B: Backend>(
+    app: &mut App<B>,
+    snapshot: &agent_hooks_step::HooksSnapshot,
+) {
+    let installed = [
+        &mut app.claude_hooks_installed,
+        &mut app.codex_notify_installed,
+        &mut app.copilot_hooks_installed,
+    ];
+    for ((installed, refusal), found) in installed
+        .into_iter()
+        .zip(&mut app.agent_config_refusals)
+        .zip(&snapshot.found)
+    {
+        *installed = found.is_this_copys();
+        *refusal = match found {
+            attention_ownership::HooksFound::Refused(reason) => Some(*reason),
+            _ => None,
+        };
+    }
+    app.agent_hooks_found = std::array::from_fn(|index| {
+        Some((snapshot.found[index].clone(), snapshot.unrepaired[index]))
+    });
+    app.agent_rows_known = true;
+    app.copilot_readiness = snapshot.copilot_readiness;
+}
+
+/// **A press on agent row `family` asks the scan again** (0.4.10 plan row 67b): the row's line and
+/// the resume row's are the scan's, so the row says its own sentence until the pass the press
+/// starts answers, off this thread. With [`adopt_agent_hooks_snapshot`], the one writer of
+/// `App::agent_hooks_found`.
+fn agent_row_asked_again<B: Backend>(app: &mut App<B>, family: usize) {
+    app.agent_hooks_found[family] = None;
+    carry_pass::begin_carry_pass();
 }
 
 /// **The startup trace's two shell lines, held while a launch tab's shell is being born**.
@@ -33141,7 +33310,7 @@ fn create_leaf_session(
             environment,
         );
         // **A restored agent is started as its vendor's resume** (row 195).
-        let resuming = compose_resume(&mut command, seed, &started);
+        let resuming = compose_resume(&mut command, seed, &started, row, Path::new(&program));
         let gone_spec = birth_unless_gone(unless_gone.as_ref(), resuming, |gone| {
             shell_integration::shell_command(
                 row,
@@ -33244,6 +33413,9 @@ fn create_leaf_session(
         &seed.agent,
         shell.is_some() && resuming_vendor(seed, &started).is_some(),
     );
+    // **A resume's turns are its agent's from birth** (row 75): its record was written by that
+    // agent's own `Stop`, so what it draws while it reloads is no finished turn.
+    leaf.session.turn_account = agent_turns::TurnAccount::born_beside(&leaf.session.agent);
     match shell {
         // **Born later, standing where its shell will stand.** The place is said now, from the
         // decision, so a pane split off or restarted from this one while it is being born is put
@@ -33273,25 +33445,62 @@ fn create_leaf_session(
 }
 
 /// **A restored agent's command line is its vendor's resume** (0.4.9 plan row 195): the profile's
-/// environment stays, its arguments give way to the resume's — a grant is never resurrected, and a
-/// positional word would break `codex resume <id>` — and the configuration folder the session
-/// lives in is the one it was recorded under. Answers whether the birth is a resume; `false`, and
-/// `command` untouched, for every other birth.
+/// environment stays, its arguments give way to the resume's, and the configuration folder the
+/// session lives in is the one it was recorded under. Answers whether the birth is a resume;
+/// `false`, and `command` untouched, for every other birth.
+///
+/// **And the resume is handed the agent's launch** (0.4.10 plan row 74): the words the recorded
+/// agent was started with that its vendor's table carries, after the resume's own
+/// ([`agent_resume::replayed_launch`]), as `program` — the program this birth starts — can carry
+/// them. A profile's own arguments come back this way too: they are the words its agent was
+/// started with, read off that agent's own command line. What the launch could not carry, the
+/// pane says in its first line ([`resumed_without_line`]).
+///
+/// **A shell pane's resume is that shell `exec`ing the vendor** (the Mac's road,
+/// `agent_resume::Road::ThroughTheShell`; T-AGENT-RESUME-ON-MACOS): `row` is the shell's, its own
+/// words stay as its door composed them (zsh's `-l`, bash's `--init-file … -i`), and the shell is
+/// told to be interactive, so it reads the startup files a typed agent's `PATH` came from, and to
+/// run the one command `agent_resume::Vendor::shell_command` spells. A shell whose spelling is not
+/// verified is no resume here: [`birth_here`] has already handed such a seed its shell with the
+/// line ([`shell_cannot_resume`]).
 fn compose_resume(
     command: &mut shell_integration::ShellCommand,
     seed: &LeafSeed,
     started: &Started,
+    row: &profiles::Profile,
+    program: &Path,
 ) -> bool {
     let Some((vendor, record)) = resuming_vendor(seed, started) else {
         return false;
     };
+    let launch = agent_resume::replayed_launch(vendor, record, program).words;
+    let through_the_shell = !vendor.is_started_by(&seed.profile);
+    let shell = profiles::command_flags(&row.program).filter(|_| through_the_shell);
+    if through_the_shell && shell.is_none() {
+        return false;
+    }
     if let Some(home) = &record.home {
         command.environment.push((
             std::ffi::OsString::from(vendor.home_variable),
             std::ffi::OsString::from(home),
         ));
     }
-    command.arguments = vendor.arguments(&record.resume_id);
+    if let Some(flags) = shell {
+        // Once: bash's door already made it interactive (`-i`, or a row's own `--interactive`).
+        if !command
+            .arguments
+            .iter()
+            .any(|word| word == flags.interactive || word == "--interactive")
+        {
+            command.arguments.push(flags.interactive.into());
+        }
+        command.arguments.push(flags.command.into());
+        command
+            .arguments
+            .push(vendor.shell_command(&record.resume_id, &launch));
+        return true;
+    }
+    command.arguments = vendor.arguments(&record.resume_id, &launch);
     true
 }
 
@@ -33416,6 +33625,8 @@ fn bare_leaf(
             attention_ended: false,
             // Told what it is born as by `create_leaf_session`, once the birth is decided.
             agent: agent_resume::AgentAccount::default(),
+            // Likewise: a resume is bound from birth, any other pane at its agent's first turn.
+            turn_account: agent_turns::TurnAccount::default(),
             grid,
             conpty_grid: grid,
             pending_pty_resize: None,
@@ -33487,6 +33698,28 @@ fn could_not_resume_line(seed: &LeafSeed, started: &Started, stood_in: bool) -> 
     }
 }
 
+/// **The line a resumed pane opens with when its launch did not all come back** (0.4.10 plan row
+/// 74): the flags the recorded agent was started with that the resume was not handed, or that its
+/// launch could not be read — for a resume this birth started (`agent`'s own word,
+/// [`agent_resume::AgentAccount::resume_runs`]: not one that fell back, was stood in for, or found
+/// its folder gone), by the program it started ([`agent_resume::replayed_launch`], the same answer
+/// [`compose_resume`] composed from). `None` for every other pane, and for a launch that came back
+/// whole or was never recorded.
+fn resumed_without_line(
+    seed: &LeafSeed,
+    decision: &BirthDecision,
+    agent: &agent_resume::AgentAccount,
+) -> Option<String> {
+    let (vendor, record) = resuming_vendor(seed, &decision.started)?;
+    let program = decision
+        .program
+        .as_deref()
+        .filter(|_| agent.resume_runs())?;
+    agent_resume::replayed_launch(vendor, record, program)
+        .said
+        .map(|said| said.text())
+}
+
 /// The could-not-resume line's facts for a resume this build knows the vendor of.
 fn could_not_resume(resume: &agent_resume::Resume) -> Option<agent_resume::CouldNotResume> {
     agent_resume::vendor(&resume.record.vendor).map(|vendor| agent_resume::CouldNotResume {
@@ -33511,6 +33744,34 @@ fn handed_back_seed(seed: &LeafSeed, started: &Started) -> Option<LeafSeed> {
     let could = could_not_resume(resume)?;
     Some(LeafSeed {
         profile,
+        agent: agent_resume::SeedAgent::CouldNotResume(could),
+        ..seed.clone()
+    })
+}
+
+/// **A resume the pane's shell cannot be told to start comes back as that shell, saying so**
+/// (T-AGENT-RESUME-ON-MACOS): on the Mac's road the shell `exec`s the vendor, and a shell whose
+/// interactive one-command spelling is not verified (`profiles::CommandFlags`: fish, nu, csh, a
+/// shell of no known family) is handed no command it might read another way. The pane is born as
+/// its own shell, in the session's folder, with the could-not-resume line, and its record goes
+/// the way every failed resume's does. `row` is the row the birth starts (`None`: no row, which a
+/// birth started as asked never is); `None` for any other seed, and for a pane whose own program
+/// is the vendor's.
+fn shell_cannot_resume(
+    seed: &LeafSeed,
+    row: Option<&profiles::Profile>,
+    started: &Started,
+) -> Option<LeafSeed> {
+    let agent_resume::SeedAgent::Resume(resume) = &seed.agent else {
+        return None;
+    };
+    let row = row.filter(|_| *started == Started::AsAsked)?;
+    let vendor = agent_resume::vendor(&resume.record.vendor)?;
+    if vendor.is_started_by(&row.id) || profiles::command_flags(&row.program).is_some() {
+        return None;
+    }
+    let could = could_not_resume(resume)?;
+    Some(LeafSeed {
         agent: agent_resume::SeedAgent::CouldNotResume(could),
         ..seed.clone()
     })
@@ -33542,6 +33803,8 @@ fn finish_leaf_birth(
     let stood_in = shell_fallback.is_some() && leaf.agent.is_resumed();
     if stood_in {
         leaf.agent = agent_resume::AgentAccount::default();
+        // Nor are its turns an agent's (row 75): the stand-in is read by the shell's rule.
+        leaf.turn_account = agent_turns::TurnAccount::default();
     }
     // **A pane born on the inbox ConPTY says so, once, and why** (T-KEYBOARD-RECORDS). The
     // process falls back to Windows' own ConPTY when the packaged pair is missing or will not
@@ -33646,6 +33909,12 @@ fn finish_leaf_birth(
         session
             .feed(banner_line(&line).as_bytes())
             .context("write the could-not-resume line into the leaf's first line")?;
+    }
+    // **And a resume whose launch did not all come back** (row 74): the flags it came back without.
+    if let Some(line) = resumed_without_line(seed, decision, &leaf.agent).filter(|_| !in_birth) {
+        session
+            .feed(banner_line(&line).as_bytes())
+            .context("write the resumed-without line into the leaf's first line")?;
     }
     if let Some(bytes) = probe_input.filter(|_| !in_birth) {
         session
@@ -35225,6 +35494,15 @@ impl Runtime<'_, Native> {
                 let _ = proxy.send_event(AppEvent::ExplorerPackageChanged);
             });
         }
+        // **And the carry pass's** (0.4.10 plan row 67b): it can write too — an agent's hooks that
+        // name a copy that is gone — and lands after the program walk, which is after the first
+        // frame on most launches. Installed before the walk can answer, so before the pass runs.
+        {
+            let proxy = proxy.clone();
+            agent_hooks_step::install_hooks_wake(move || {
+                let _ = proxy.send_event(AppEvent::AgentHooksScanned);
+            });
+        }
         // **And the sixth's** (GitHub issue #3), which is the only one of them
         // that is started by a *press* rather than by startup or by a pane: the
         // gear asks the machine for its monospaced families, and the picker is
@@ -35655,6 +35933,11 @@ impl Runtime<'_, Native> {
                     let startup_dpi = dpi_snapshot(&window)?;
                     let physical = window.inner_size();
                     let startup_scale_factor = startup_dpi.authoritative_scale;
+                    // **The program's icon, at the scale the renderer is about to be born at**
+                    // (0.4.10 plan row 71): the window is still hidden, and the snap layouts,
+                    // Alt+Tab and Task View read the window's own icon, which nothing else
+                    // gives it. A later scale change wears it again (`apply_scale_factor`).
+                    window.wear_the_app_icon(startup_scale_factor);
                     let phase_started = Instant::now();
                     // The visual tree first, because the swapchain hangs off it. Its
                     // `topmost = true` target composes above this window's own painting, so
@@ -36093,12 +36376,6 @@ impl Runtime<'_, Native> {
                 }
             });
         let git_worker = git::GitWorker::spawn(proxy.clone(), Arc::clone(git_mutations.turns()))?;
-        // **One read per family, and both of the row's facts come out of it**: whether this copy's
-        // marks are in that file, and — when the file is one this build will not edit — the reason
-        // the row has to say instead of `Off` (closure review R1).
-        let claude_row = attention_hooks::row_state();
-        let codex_row = attention_codex::row_state();
-        let copilot_row = attention_copilot::row_state();
         let mut app = App::assemble(AppParts {
             gpu,
             tab_ids,
@@ -36126,16 +36403,17 @@ impl Runtime<'_, Native> {
             // Reads the registry once and, on a machine whose `folio.exe`
             // has moved since, writes the verb again — see the field.
             context_menu_installed: context_menu::reassert(),
-            claude_hooks_installed: claude_row.0,
-            // The same, over codex's own file — see the field above's note, which holds word for
-            // word for this one.
-            codex_notify_installed: codex_row.0,
-            // And again over copilot's own hooks directory. The readiness beside it starts at
-            // `Unknown` on every machine, because the probe that could better it has not been
-            // started — nothing has shown the page it is printed on yet.
-            copilot_hooks_installed: copilot_row.0,
-            agent_config_refusals: [claude_row.1, codex_row.1, copilot_row.1],
-            copilot_readiness: attention_copilot::readiness(),
+            // **Nothing about the agents' files is read on this thread at launch** (0.4.10 plan
+            // row 67b): the carry pass reads them on its worker once the program walk has said
+            // where they are, and its answer sets these. Until then each switch reads Off and no
+            // row says anything of its own.
+            claude_hooks_installed: false,
+            codex_notify_installed: false,
+            // The readiness starts at `Unknown` on every machine, because the probe that could
+            // better it has not been started — nothing has shown the page it is printed on yet.
+            copilot_hooks_installed: false,
+            agent_config_refusals: [None; 3],
+            copilot_readiness: attention_copilot::Readiness::Unknown,
             // Nobody has been asked yet, which is the only thing a launch can
             // truthfully say about it — see the field.
             notifications: NotificationDesk::new(proxy.clone()),
@@ -46760,11 +47038,6 @@ impl<B: Backend> FolioApp<B> {
             // The parser questions about the PowerShell rows, as after a table change.
             shell_integration::begin_powershell_preparation_for(&app.profile_programs);
         }
-        if news.agent_homes {
-            // Where an agent keeps its configuration moved: its row reads the file there now,
-            // once for the process (the rows are the application's).
-            read_the_agent_rows_again(app);
-        }
         if news.copilot {
             attention_copilot::reask_probe(attention_copilot::ProbeTrigger::ProgramMoved);
         }
@@ -48866,6 +49139,7 @@ impl<B: Backend> FolioApp<B> {
     /// stopped answering. It cannot arrive from AppKit, and it is one line
     /// against a hang at a boundary this program does not own.
     fn begin_the_systems_quit(&mut self, answer: bt_platform::TerminationAnswer) {
+        session_end::the_systems_quit_asked(answer.reason());
         if self.termination.is_some() {
             if let Err(reason) = answer.answer(bt_platform::TerminationDecision::Cancel) {
                 crate::diagnostics::stderr_line(format!(
@@ -48898,6 +49172,19 @@ impl<B: Backend> FolioApp<B> {
         let Some(answer) = self.termination.take() else {
             return;
         };
+        // **The last word before AppKit may end the process** (0.4.10 plan row 17). `NSTerminateNow`
+        // lets `-[NSApplication terminate:]` go on to `exit()`, and `fn main`'s way out, its fence
+        // among it, is never reached; so what became of the quit's save is said and the log is
+        // fenced here, before the answer, once for the process and within the fence's own bound.
+        if decision == bt_platform::TerminationDecision::Now {
+            session_end::at_the_systems_quit(
+                self.app
+                    .as_ref()
+                    .map_or(persist::ClosedSave::NoSession, |app| {
+                        app.session_store.what_the_close_left()
+                    }),
+            );
+        }
         if let Err(reason) = answer.answer(decision) {
             crate::diagnostics::stderr_line(format!(
                 "{APP_NAME} could not answer the quit the system asked for: {reason}"
@@ -49355,6 +49642,47 @@ impl<B: Backend> FolioApp<B> {
             }
         }
         Ok(())
+    }
+
+    /// **Set the Agents rows from the scan, and say each repair of a gone copy's hooks once**
+    /// (0.4.10 plan row 67b, R8): one notice per family, on the window the keyboard is on, else the
+    /// oldest standing one; every window's chrome redrawn, because the rows are facts about the
+    /// machine and any window may be showing the page.
+    fn adopt_agent_hooks_scan(&mut self) -> Result<()> {
+        let Some(snapshot) = agent_hooks_step::AGENT_HOOKS.take_snapshot() else {
+            return Ok(());
+        };
+        let Some(app) = self.app.as_mut() else {
+            return Ok(());
+        };
+        adopt_agent_hooks_snapshot(app, &snapshot);
+        let oldest_standing = |app: &mut Self| {
+            (0..app.windows.len()).find_map(|index| {
+                let id = app.windows.key_at(index)?;
+                app.windows
+                    .get_mut(id)
+                    .is_some_and(|window| window.leaving.is_none())
+                    .then_some(id)
+            })
+        };
+        let told = self.frontmost_window().or_else(|| oldest_standing(self));
+        self.for_each_window(|runtime| {
+            if Some(runtime.window_id()) == told {
+                for notice in &snapshot.notices {
+                    runtime.toast(
+                        toast::ToastKind::Ok,
+                        toast::ToastAnchor::Window,
+                        None,
+                        notice.text().to_owned(),
+                    )?;
+                }
+            }
+            if runtime.refresh_chrome() {
+                runtime.present_chrome_change()
+            } else {
+                Ok(())
+            }
+        })
     }
 
     fn announce_recovered_edits(&mut self) -> Result<()> {
@@ -52408,6 +52736,9 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                     }
                 })
             }
+            // **The carry pass's answer about the agents' hooks**: the rows set from it, its
+            // notices raised once on the focused window, every window redrawn.
+            AppEvent::AgentHooksScanned => self.adopt_agent_hooks_scan(),
             // **The one place the family list moves onto the screen.** The walk
             // finished on a worker and left its answer in `settings`' mailbox;
             // this is between two frames, which is the whole reason the worker
@@ -52455,6 +52786,10 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 if let Some(app) = self.app.as_mut() {
                     app.copilot_readiness = attention_copilot::readiness();
                 }
+                // **The version is the start-time repair's gate for Copilot's hooks** (0.4.10 plan
+                // row 67b, R9): a repair that waited for it runs now, and the scan's snapshot,
+                // which carries readiness too, is read after this answer.
+                carry_pass::begin_carry_pass();
                 self.for_each_window(|runtime| {
                     if runtime.refresh_chrome() {
                         runtime.present_chrome_change()
@@ -54189,6 +54524,86 @@ fn option_as_alt(window: &Window, option_sends_alt: bool) {
     {
         let _ = (window, option_sends_alt);
     }
+}
+
+/// **The sides of the shell's two icons at `scale_factor`**, in physical pixels: the small one
+/// (`SM_CXSMICON`, 16 at 96 DPI) and the big one (`SM_CXICON`, 32), scaled as Windows scales them
+/// for a display (0.4.10 plan row 71).
+///
+/// Both are asked for by size. Left to `LR_DEFAULTSIZE` they would both be the big size, and the
+/// small icon would be the big one shrunk by whoever draws it. `folio.ico` holds 16, 20, 24 and
+/// 32, and 32, 40, 48 and 64, which are these sides at 100, 125, 150 and 200 %, so on those
+/// displays the image each surface is handed was drawn at its size.
+#[cfg(windows)]
+fn app_icon_sides(scale_factor: f64) -> (u32, u32) {
+    (
+        (16.0 * scale_factor).round() as u32,
+        (32.0 * scale_factor).round() as u32,
+    )
+}
+
+/// [`WindowHost::wear_the_app_icon`] for winit's window (0.4.10 plan row 71).
+///
+/// **What it is for.** Windows draws a window's own icon (`WM_GETICON`, and then the window
+/// class's) in the snap layouts, in Snap Assist, in Alt+Tab, in Task View and over a taskbar
+/// button's thumbnails. winit registers its window class with no icon, and a window nobody gave
+/// one is an empty slot in each of them. The executable's icon is not that icon: Explorer and the
+/// taskbar button draw it from the file, and no window carries it.
+///
+/// **So the window is given the executable's own group** ([`bt_winres::APP_ICON_GROUP`], the
+/// group the build script filed `folio.ico` under), at the two sides `app_icon_sides` gives for
+/// the scale its renderer is drawn at: the small one as `ICON_SMALL` (winit's `set_window_icon`)
+/// and the big one as `ICON_BIG` (`set_taskbar_icon`). `ICON_SMALL2` answers the small one by
+/// itself. winit keeps each `Icon` with its window and destroys the handle it replaces, so a
+/// window that wears its icon again after a scale change leaves nothing behind.
+///
+/// A refusal is one diagnostics line and a window without an icon, as every window was before:
+/// the group is linked into every build that opens a window, so the refusal left is the
+/// system's own (`LoadImageW` out of handles).
+///
+/// Off Windows this is nothing: a macOS application's icon is its bundle's (`CFBundleIconFile`),
+/// and winit's `set_window_icon` does nothing there.
+fn wear_app_icon(window: &Window, scale_factor: f64) {
+    #[cfg(windows)]
+    {
+        use winit::platform::windows::WindowExtWindows;
+        match app_icons_at(scale_factor) {
+            Ok((small, big)) => {
+                window.set_window_icon(Some(small));
+                window.set_taskbar_icon(Some(big));
+            }
+            Err(error) => crate::diagnostics::stderr_line(format!(
+                "recoverable window icon load failure at scale {scale_factor}: {error}"
+            )),
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (window, scale_factor);
+    }
+}
+
+/// **The executable's icon group, loaded at the small and the big side for `scale_factor`** —
+/// `LoadImageW` of this process's own module (`app_icon_from`).
+#[cfg(windows)]
+fn app_icons_at(
+    scale_factor: f64,
+) -> Result<(winit::window::Icon, winit::window::Icon), winit::window::BadIcon> {
+    let (small, big) = app_icon_sides(scale_factor);
+    Ok((
+        app_icon_from(bt_winres::APP_ICON_GROUP, small)?,
+        app_icon_from(bt_winres::APP_ICON_GROUP, big)?,
+    ))
+}
+
+/// One icon group of this process's own executable, at one side — winit's
+/// `Icon::from_resource`, which is `LoadImageW` of the module winit is linked into
+/// (`__ImageBase`, which here is the executable), `IMAGE_ICON`, `side` by `side`: the image of
+/// the group nearest that side, scaled to it when none is exactly it.
+#[cfg(windows)]
+fn app_icon_from(group: u16, side: u32) -> Result<winit::window::Icon, winit::window::BadIcon> {
+    use winit::platform::windows::IconExtWindows;
+    winit::window::Icon::from_resource(group, Some(PhysicalSize::new(side, side)))
 }
 
 /// **The window's ground is told the new size before anything else is**
@@ -56144,6 +56559,127 @@ mod opening_window_tests {
         assert_eq!(
             attributes.inner_size,
             Some(LogicalSize::new(INITIAL_WIDTH, INITIAL_HEIGHT).into())
+        );
+    }
+}
+
+/// **The program's icon on its own windows** (0.4.10 plan row 71): every window is born wearing
+/// it, and this executable holds it at every side the shell asks for. The scale change's half is
+/// `app_dpi_tests::a_scale_change_wears_the_programs_icon_at_the_new_scale`, on the headless
+/// window.
+#[cfg(test)]
+mod app_icon_tests {
+    use crate::test_support::method_body;
+
+    /// RED (0.4.10 plan row 71) — **every window this process opens is born wearing the
+    /// program's icon, at the scale its renderer is born at, before the renderer exists.**
+    ///
+    /// **The two constructors are the only roads to a window**, and that is asked first: every
+    /// product call of winit's `create_window` stands in `Runtime::create` or
+    /// `Runtime::open_window`, one each (review N3). A third road, a window made again after a
+    /// device loss for instance, would be born with no icon of its own while every pin below
+    /// stayed green; it is named here instead, and joins the list below with its door. Both take
+    /// winit's own window, so no headless window is born on either: the order is held against
+    /// the source. After the scale is read, because the icon is worn at the renderer's scale and
+    /// a later change wears it again only when that scale moves; before the renderer, because the
+    /// window is still hidden there and the first frame shows it.
+    ///
+    /// MUTATIONS: drop the door from `Runtime::create`
+    /// (`plant-71-a-first-window-born-without-the-icon.py`) or from `Runtime::open_window`
+    /// (`plant-71-b-second-window-born-without-the-icon.py`), and the panic names that
+    /// constructor; open a third road to a window (`plant-71-e-a-third-road-to-a-window.py`),
+    /// and the first assertion names it.
+    #[test]
+    fn every_window_is_born_wearing_the_programs_icon() {
+        let index = crate::test_support::source();
+        let calls = crate::test_support::found(
+            bt_source::needle!(bt_source::Pattern::identifier("create_window")),
+            bt_source::View::Identifiers,
+        )
+        .in_the_product(index);
+        let roads: std::collections::BTreeSet<String> = calls
+            .owners(index)
+            .into_keys()
+            .map(|identity| match identity.type_owner {
+                Some(owner) => format!("{owner}::{}", identity.name),
+                None => identity.name,
+            })
+            .collect();
+        assert_eq!(
+            (
+                calls.len(),
+                roads.iter().map(String::as_str).collect::<Vec<_>>()
+            ),
+            (2, vec!["Runtime::create", "Runtime::open_window"]),
+            "the product makes a window in exactly these two constructors, once each; a new road \
+             to a window wears the program's icon too, and joins this list"
+        );
+        for (owner, scale, renderer) in [
+            (
+                "create",
+                "startup_scale_factor",
+                "gpu_door::open_first_window(",
+            ),
+            ("open_window", "scale_factor", "WindowRenderer::new("),
+        ] {
+            let body = method_body("Runtime", owner);
+            let made = body
+                .find(".create_window(attributes)")
+                .unwrap_or_else(|| panic!("`Runtime::{owner}` constructs a window"));
+            let scaled = made
+                + body[made..]
+                    .find(&format!("let {scale} ="))
+                    .unwrap_or_else(|| panic!("`Runtime::{owner}` reads the renderer's scale"));
+            let worn = body
+                .find(&format!("window.wear_the_app_icon({scale});"))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "`Runtime::{owner}` puts the program's icon on the window it makes, at \
+                         the renderer's scale"
+                    )
+                });
+            let born = body
+                .find(renderer)
+                .unwrap_or_else(|| panic!("`Runtime::{owner}` gives its window a renderer"));
+            assert!(
+                made < scaled && scaled < worn && worn < born,
+                "`Runtime::{owner}`: the window is made, its scale read, the icon worn at that \
+                 scale and only then is the renderer born"
+            );
+        }
+    }
+
+    /// PIN (0.4.10 plan row 71) — **the shell's two sides at the four scales `folio.ico` was
+    /// drawn for are the system's own** (`SM_CXSMICON` and `SM_CXICON` at 96, 120, 144 and 192
+    /// DPI), each an image the file holds.
+    #[cfg(windows)]
+    #[test]
+    fn the_two_sides_are_the_systems_at_every_scale_the_icon_file_was_drawn_for() {
+        assert_eq!(
+            [1.0, 1.25, 1.5, 2.0].map(super::app_icon_sides),
+            [(16, 32), (20, 40), (24, 48), (32, 64)]
+        );
+    }
+
+    /// RED (0.4.10 plan row 71) — **this executable carries the program's icon group, and it
+    /// loads at both sides at every scale the icon file was drawn for**: the eight loads succeed
+    /// from this module's own table, and a group the build did not file is refused.
+    ///
+    /// Real `LoadImageW` calls: the build script links `folio.res` into every unit of the bin
+    /// target, this unit-test executable included (`build.rs`, `rustc-link-arg-bins`).
+    ///
+    /// MUTATION (`plant-71-d-the-wrong-group.py`): ask for group 2 and every load is refused.
+    #[cfg(windows)]
+    #[test]
+    fn this_executable_carries_the_programs_icon_at_every_side_the_shell_asks_for() {
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            if let Err(error) = super::app_icons_at(scale) {
+                panic!("the program's icon does not load at scale {scale}: {error}");
+            }
+        }
+        assert!(
+            super::app_icon_from(bt_winres::APP_ICON_GROUP + 1, 32).is_err(),
+            "a group the build did not file is refused"
         );
     }
 }
@@ -59027,9 +59563,10 @@ mod platform_gate_tests {
         // Windows-only test fixture: the `pi` row, which only the Windows table ships, reopened
         // from a Recent row, beside its every-platform twin on the host's fallback shell.
         "app_files_tests.rs",
-        // Windows-only test fixture: a saved pane born through its vendor's resume, beside the
-        // shell that is handed back, `pwsh`, which only the Windows table ships (row 195; 0.4.9
-        // resumes on Windows only, plan row 197); the resume's decision itself is portable.
+        // Test fixtures of one platform's table each: a saved pane born through its vendor's
+        // shipped profile beside the `pwsh` it hands back (Windows, row 195), and its macOS twin,
+        // a zsh or bash pane `exec`ing the vendor (T-AGENT-RESUME-ON-MACOS); the road itself is a
+        // value of the platform, tested on both.
         "app_agent_resume_tests.rs",
         // Windows-only test fixtures: a share named by a document (`\\server\share`).
         "app_preview_tests.rs",
@@ -59061,7 +59598,8 @@ mod platform_gate_tests {
         // attributes taken off by `xattr`; the channel's derivation is portable.
         "install_channel.rs",
         // The startup path: the native-window door's two arms, and the five
-        // platform calls M1-1 made non-fatal.
+        // platform calls M1-1 made non-fatal; and winit's own window extensions
+        // (macOS's Option key, the Windows window's icon).
         "main.rs",
         // Windows-only test fixtures: the Store PowerShell's app execution alias and package (an
         // MSIX fact), and the never-settling check's program, Windows PowerShell beside its Unix
@@ -62014,6 +62552,51 @@ mod quit_with_no_window_tests {
             finished < now,
             "AppKit is let go only after the session is on the disk"
         );
+        // **And the request says why it came, and the answer fences the log before it is given**
+        // (0.4.10 plan row 17): `NSTerminateNow` lets AppKit `exit()` and `fn main`'s fence is
+        // never reached. MUTATION (plant 17-a′): move the `at_the_systems_quit` call below the
+        // `answer.answer(decision)` statement.
+        let said = begin
+            .find("session_end::the_systems_quit_asked(answer.reason());")
+            .expect("the request says why AppKit asked");
+        let parked = begin
+            .find("self.termination = Some(answer);")
+            .expect("and is parked");
+        assert!(said < parked, "{begin}");
+        let answering = method_body("FolioApp", "answer_the_systems_quit");
+        let taken = answering
+            .find("self.termination.take()")
+            .expect("the answer is AppKit's request");
+        let gated = answering
+            .find("decision == bt_platform::TerminationDecision::Now")
+            .expect("the end is NSTerminateNow's");
+        let ended = answering
+            .find("session_end::at_the_systems_quit(")
+            .expect("the quit says its save and fences the log");
+        let replied = answering
+            .find("answer.answer(decision)")
+            .expect("and then answers AppKit");
+        assert!(
+            taken < gated && gated < ended && ended < replied,
+            "the log is fenced before AppKit is answered: {answering}"
+        );
+        // **And the end it calls is handed the real log and the real fence** (0.4.10 plan row 17,
+        // review N1): `the_systems_quit_ends_with` is tested with a recorder for both, so the one
+        // product caller is the last connection to `diagnostics::note` and `fence_the_log`.
+        // MUTATION (plant 17-a3): hand `&mut || {}` for the fence in `at_the_systems_quit`.
+        let handed = item_body(
+            &bt_source::ItemQuery::function("at_the_systems_quit").in_module("crate::session_end"),
+        );
+        let end = handed
+            .find("the_systems_quit_ends_with(")
+            .expect("the NSTerminateNow end is the tested one");
+        let sayer = handed
+            .find("&mut crate::diagnostics::note")
+            .expect("the NSTerminateNow end is handed the log and its fence");
+        let fence = handed
+            .find("&mut fence_the_log")
+            .expect("the NSTerminateNow end is handed the log and its fence");
+        assert!(end < sayer && sayer < fence, "{handed}");
     }
 }
 

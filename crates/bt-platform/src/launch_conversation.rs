@@ -22,7 +22,8 @@ use std::{
 /// the reply on Windows, every frame on Unix), the server's step deadline, and the Windows
 /// listener's first word. Each arm reads its deadline on [`LaunchClock::now`] and hands each of
 /// those waits to [`LaunchClock::wait`]; the Windows busy retry's own waits, made inside the
-/// client's open, are counted through [`LaunchClock::spent`]. The Windows writes are not here:
+/// client's open (`attention_pipe::open_client`), are each one [`LaunchClock::wait`] there too
+/// (T-ATTENTION-ENDPOINT-WAITS-ON-A-CLOCK). The Windows writes are not here:
 /// each is `attention_pipe::write_bounded`'s own real 250 ms, which buffering decides, not the
 /// peer (noted in `docs/plans/TIMING-BOUND-TESTS.tsv`). [`RealClock`]
 /// in the product, through `hand_over` and `LaunchPipe::start`; a test hands a counted clock, so
@@ -37,17 +38,18 @@ use std::{
 ///
 /// The macOS update check (`http::Exchange::wait`, macOS) is its fourth user (0.4.9 plan row 150):
 /// one wait, up to the request's `budget + phase_timeout`, for the session delegate's completion.
+///
+/// The attention endpoint (`crate::attention_pipe`, both platforms) is its fifth user
+/// (T-ATTENTION-ENDPOINT-WAITS-ON-A-CLOCK): the Windows listener's first word, each attached
+/// caller's read deadline, and the client's one wait past a busy endpoint inside
+/// `attention_pipe::open_client`, which the launch wire and the elevated pane's client share. Its
+/// writes stay real, for the launch wire's reason above.
 pub(crate) trait LaunchClock: Send + Sync {
     /// The monotonic reading a deadline is set and read on.
     fn now(&self) -> Instant;
     /// Wait up to `bound` for the other end. `ready(d)` makes the transport's own wait of `d` and
     /// answers whether the other end acted inside it; this answers the same.
     fn wait(&self, bound: Duration, ready: &mut dyn FnMut(Duration) -> bool) -> bool;
-    /// A wait of `waited` the transport has already made on its own, outside [`Self::wait`] (the
-    /// Windows client's open, past a busy endpoint): nothing on the real clock, which has moved by
-    /// it already. Only the Windows transport makes such a wait.
-    #[cfg(windows)]
-    fn spent(&self, waited: Duration);
 }
 
 /// **The product's [`LaunchClock`]**: the monotonic clock, and each wait made once, as long as it
@@ -62,9 +64,6 @@ impl LaunchClock for RealClock {
     fn wait(&self, bound: Duration, ready: &mut dyn FnMut(Duration) -> bool) -> bool {
         ready(bound)
     }
-
-    #[cfg(windows)]
-    fn spent(&self, _waited: Duration) {}
 }
 
 /// What a [`CountedClock`] does with one wait it is asked for.
@@ -133,16 +132,6 @@ impl LaunchClock for CountedClock {
         }
         self.moves_by(bound);
         false
-    }
-
-    /// A wait the transport made on its own (a busy endpoint's) is asked of `turn` like any
-    /// other: `Spend` moves the clock by it; `Await` does not — the other end frees the endpoint
-    /// in its own time, and the transport asks again.
-    #[cfg(windows)]
-    fn spent(&self, waited: Duration) {
-        if self.turn_for(waited) == Turn::Spend {
-            self.moves_by(waited);
-        }
     }
 }
 

@@ -236,9 +236,10 @@ pub enum Capability {
     OptionKey,
     /// Bringing back, at a restart, the agents that were running in panes (0.4.9 plan row 195).
     ///
-    /// Windows only **in 0.4.9**, and the boundary is the verification rather than the mechanism:
-    /// the record is written on every platform and read back only where the resume was tried on
-    /// the vendors' own CLIs. The Mac is plan row 197.
+    /// **Windows and macOS** (macOS since T-AGENT-RESUME-ON-MACOS, 0.4.10 plan row 15), each by its
+    /// own road (`crate::agent_resume::Road`): on Windows the vendor's program is started, on a
+    /// Mac the pane's own shell starts it. Another Unix has no build, and so no road anybody has
+    /// tried.
     AgentResume,
 }
 
@@ -255,12 +256,10 @@ impl Capability {
     pub const fn on(self, platform: HostPlatform) -> bool {
         match self {
             Self::UpdateCheck => true,
-            Self::ExplorerMenu
-            | Self::AgentDiscovery
-            | Self::WindowBackdrop
-            | Self::AgentResume => {
+            Self::ExplorerMenu | Self::AgentDiscovery | Self::WindowBackdrop => {
                 matches!(platform, HostPlatform::Windows)
             }
+            Self::AgentResume => matches!(platform, HostPlatform::Windows | HostPlatform::MacOs),
             Self::OptionKey => matches!(platform, HostPlatform::MacOs),
         }
     }
@@ -332,15 +331,25 @@ pub struct Machine {
     pub claude_found: bool,
     /// …and its hook is not in `~/.claude/settings.json` yet.
     pub claude_installable: bool,
+    /// …but the file holds hooks of a living other copy of Folio, or of one the machine will not
+    /// say about: the row is offered and arrives Off, because a take-over is never a first-run
+    /// act (0.4.10 plan row 67b, ruling N3).
+    pub claude_over_another: bool,
     pub codex_found: bool,
     pub codex_installable: bool,
+    pub codex_over_another: bool,
     pub copilot_found: bool,
     pub copilot_installable: bool,
+    pub copilot_over_another: bool,
     /// **How this copy was installed** — `install_channel`'s fact, read through
     /// `install_channel::channel()`, and [`Channel::Unknown`] when the card's
     /// one turn of waiting ran out before it landed. Decides whether the
     /// Explorer row arrives on ([`explorer_arrives_on`]).
     pub install_channel: Channel,
+    /// Whether "Resume agents after restart" is on — the one stored answer the card reads, because
+    /// it decides whether the two agents resume brings back arrive on
+    /// ([`agent_arrives_on`]).
+    pub resume_agents: bool,
 }
 
 /// What the pointer resting on a row earns.
@@ -374,9 +383,7 @@ impl Tip {
             Self::ClaudeSettings => {
                 crate::i18n::first_run_tip_claude(&crate::attention_hooks::settings_path_shown())
             }
-            Self::CodexConfig => {
-                crate::i18n::first_run_tip_codex(&crate::attention_codex::config_path_shown())
-            }
+            Self::CodexConfig => crate::attention_codex::first_run_tip(),
             Self::CopilotHooks => {
                 crate::i18n::first_run_tip_copilot(&crate::attention_copilot::hooks_path_shown())
             }
@@ -470,24 +477,27 @@ pub fn rows_for(platform: HostPlatform, machine: &Machine) -> Vec<Row> {
         (
             RowKind::Claude,
             machine.claude_found && machine.claude_installable,
+            machine.claude_over_another,
             Text::FirstRunRowClaude,
             Tip::ClaudeSettings,
         ),
         (
             RowKind::Codex,
             machine.codex_found && machine.codex_installable,
+            machine.codex_over_another,
             Text::FirstRunRowCodex,
             Tip::CodexConfig,
         ),
         (
             RowKind::Copilot,
             machine.copilot_found && machine.copilot_installable,
+            machine.copilot_over_another,
             Text::FirstRunRowCopilot,
             Tip::CopilotHooks,
         ),
     ];
     let mut opened = false;
-    for (kind, found, line, tip) in agents {
+    for (kind, found, over_another, line, tip) in agents {
         if !offered(kind) || !found {
             continue;
         }
@@ -496,11 +506,31 @@ pub fn rows_for(platform: HostPlatform, machine: &Machine) -> Vec<Row> {
             group_break_above: !opened,
             line,
             tip,
-            on: false,
+            // Over another copy's hooks the row is the person's to switch on: its press is the
+            // take-over the toast then asks them to confirm (ruling N3).
+            on: !over_another && agent_arrives_on(kind, machine.resume_agents),
         });
         opened = true;
     }
     rows
+}
+
+/// **Whether Claude Code's and Codex's rows arrive switched on while resume is** (the owner's
+/// ruling of 2026-11-04 on 0.4.10 plan row 67, R6): resume, on by default, brings those two
+/// agents' sessions back only through their hooks, so a card that offered them switched off was
+/// offering a resume that could not work. The card's rule that every other row arrives off is
+/// amended for these two rows alone, and the person can still switch either off. One constant, so
+/// the ruling is one line.
+pub const RESUMED_AGENT_ROWS_ARRIVE_ON: bool = true;
+
+/// Whether an agent row arrives on: Claude Code's and Codex's, while resume is on and
+/// [`RESUMED_AGENT_ROWS_ARRIVE_ON`] says so; Copilot's never (this build resumes no Copilot
+/// session).
+#[must_use]
+pub fn agent_arrives_on(kind: RowKind, resume_agents: bool) -> bool {
+    RESUMED_AGENT_ROWS_ARRIVE_ON
+        && resume_agents
+        && matches!(kind, RowKind::Claude | RowKind::Codex)
 }
 
 /// **Whether the Explorer row arrives switched on** (U-3; owner ruling
@@ -2017,11 +2047,18 @@ mod tests {
             explorer_first_page_available: true,
             claude_found: true,
             claude_installable: true,
+            claude_over_another: false,
             codex_found: true,
             codex_installable: true,
+            codex_over_another: false,
             copilot_found: true,
             copilot_installable: true,
+            copilot_over_another: false,
             install_channel: Channel::Ours,
+            // Off, so the pins below state the card's own rule; the two rows resume turns on are
+            // the ruling of 2026-11-04's, pinned on their own
+            // (`with_resume_on_the_claude_code_and_codex_rows_arrive_on`).
+            resume_agents: false,
         }
     }
 
@@ -2364,6 +2401,9 @@ mod tests {
     /// the Explorer row arrive on where a package manager will take the verb
     /// away again, so the pin now states that exception and nothing wider —
     /// on a copy unpacked by hand every row after the first still arrives off.
+    /// The owner's ruling of 2026-11-04 (0.4.10 plan row 67, R6) adds the two agent rows resume
+    /// needs while resume is on; this pin's machine has it off, and
+    /// `with_resume_on_the_claude_code_and_codex_rows_arrive_on` pins that exception.
     ///
     /// MUTATION: ship any other row on and a machine gets a registry key or
     /// somebody's `~/.claude/settings.json` edited by a reader who pressed the
@@ -2395,6 +2435,76 @@ mod tests {
             on,
             [RowKind::Explorer],
             "with an uninstall hook the Explorer row, and nothing else, joins the update check"
+        );
+    }
+
+    /// PIN (the owner's ruling of 2026-11-04 on 0.4.10 plan row 67, R6) — **while resume is on,
+    /// Claude Code's and Codex's rows arrive on, and an untouched card's `Done` installs their
+    /// hooks; Copilot's never does, and with resume off neither does.**
+    ///
+    /// MUTATION: `RESUMED_AGENT_ROWS_ARRIVE_ON = false` and a first run with resume on, the default,
+    /// brings no session back after a restart until somebody finds the hooks rows.
+    #[test]
+    fn with_resume_on_the_claude_code_and_codex_rows_arrive_on() {
+        let resumed = rows(&Machine {
+            resume_agents: true,
+            ..every_row()
+        });
+        let on: Vec<RowKind> = resumed
+            .iter()
+            .filter(|row| row.on)
+            .map(|row| row.kind)
+            .collect();
+        assert_eq!(on, [RowKind::Update, RowKind::Claude, RowKind::Codex]);
+        assert_eq!(
+            applications(&resumed, ExplorerShape::FirstPageAndClassic),
+            [
+                Application::UpdateCheck(true),
+                Application::ClaudeHooks,
+                Application::CodexNotify
+            ],
+            "an untouched card with resume on did not bring the hooks resume needs"
+        );
+        let resting = rows(&every_row());
+        assert!(
+            resting
+                .iter()
+                .filter(|row| matches!(
+                    row.kind,
+                    RowKind::Claude | RowKind::Codex | RowKind::Copilot
+                ))
+                .all(|row| !row.on),
+            "with resume off an agent row arrived on"
+        );
+        assert!(!agent_arrives_on(RowKind::Copilot, true));
+    }
+
+    /// RED (0.4.10 plan row 67b, ruling N3) — **a row over a living other copy's hooks is offered
+    /// and arrives Off, resume on or not**: a take-over is never a first-run act, so an untouched
+    /// card's `Done` asks nothing of that file; the row beside it arrives as it would.
+    ///
+    /// MUTATION: the row's arrival ignores the other copy (`plant-67b-first-run-takes-over.py`):
+    /// Claude Code's row arrives on over copy A's hooks, and `Done` asks for the take-over.
+    #[test]
+    fn a_row_over_a_living_other_copys_hooks_arrives_off() {
+        let over = rows(&Machine {
+            resume_agents: true,
+            claude_over_another: true,
+            ..every_row()
+        });
+        let claude = over
+            .iter()
+            .find(|row| row.kind == RowKind::Claude)
+            .expect("the row is offered, for the person to switch on");
+        assert!(!claude.on, "a first run took another copy's hooks");
+        assert!(
+            over.iter().any(|row| row.kind == RowKind::Codex && row.on),
+            "the row beside it lost its own arrival"
+        );
+        assert!(
+            !applications(&over, ExplorerShape::FirstPageAndClassic)
+                .contains(&Application::ClaudeHooks),
+            "an untouched Done asked for a take-over"
         );
     }
 
@@ -3563,7 +3673,7 @@ mod tests {
         // file, and no two rows name the same one.
         for (row, named) in [
             (2_usize, "settings.json"),
-            (3, "config.toml"),
+            (3, "hooks.json"),
             (4, "folio.json"),
         ] {
             assert!(
@@ -3998,7 +4108,7 @@ mod clock_edge_tests {
         for reader in [
             "explorer_menu::package_file()",
             "attention_hooks::state()",
-            "attention_codex::state()",
+            "attention_codex::first_run_installable()",
             "attention_copilot::state()",
         ] {
             assert!(

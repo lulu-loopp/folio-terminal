@@ -107,6 +107,8 @@ use windows::Win32::{
 };
 use windows::core::PCWSTR;
 
+use crate::launch_conversation::{LaunchClock, RealClock};
+
 /// The longest single frame this endpoint will take, in bytes.
 ///
 /// Four kilobytes is far more than the grammar needs — the longest legal message is a verb, a
@@ -140,7 +142,19 @@ pub const MAX_FRAMES_PER_SECOND: u32 = 512;
 /// that keeps one stalled caller from wedging the doorbell for everyone. `folio attention` writes
 /// its line and closes within a millisecond of connecting; a quarter of a second is three orders of
 /// magnitude of slack.
+///
+/// **Read on the endpoint's clock** (T-ATTENTION-ENDPOINT-WAITS-ON-A-CLOCK): an attached caller's
+/// start is the clock's reading when its read was posted, and the listener's one wait for it is a
+/// [`LaunchClock::wait`] — the real clock in the product, a counted one in a test, so "the caller
+/// said its line in time" and "the caller ran out of time" are facts of the test.
 const READ_DEADLINE: Duration = Duration::from_millis(250);
+
+/// How long [`AttentionPipe::start`] waits for its listener's first word: that the endpoint is up,
+/// or why it could not be. The listener says it after one `CreateNamedPipeW` and one
+/// `ConnectNamedPipe` — nothing that waits — so this is the bound on a thread that was never
+/// scheduled, and a start past it has no endpoint. Waited for on the endpoint's clock
+/// (`crate::first_word_on`, the launch endpoint's twin).
+const FIRST_WORD_WITHIN: Duration = Duration::from_secs(5);
 
 /// How long `folio attention` waits for a busy endpoint before giving up.
 ///
@@ -149,7 +163,12 @@ const READ_DEADLINE: Duration = Duration::from_millis(250);
 /// and waits exactly this long for the instance to come free. Past that the verb exits non-zero
 /// rather than queueing — an attention signal that arrives a second late has already been overtaken
 /// by whatever the user did in the meantime.
-pub(crate) const CLIENT_BUSY_WAIT_MS: u32 = 100;
+///
+/// **Waited on the caller's clock, inside it** (T-ATTENTION-ENDPOINT-WAITS-ON-A-CLOCK):
+/// `WaitNamedPipeW` takes its timeout as an argument, so [`open_client`] hands it the clock's
+/// bound like any other kernel wait — the product's clock waits exactly this, a test's counted
+/// clock awaits a free instance within its patience or spends this without waiting.
+pub(crate) const CLIENT_BUSY_WAIT: Duration = Duration::from_millis(100);
 
 /// `SE_GROUP_LOGON_ID` from `winnt.h`.
 ///
@@ -437,9 +456,23 @@ impl AttentionPipe {
     /// The parameter stays because **a door in this crate has one signature on every platform**
     /// (`docs/plans/port/macos-plan-2026-09-12.md` §4.4 ②, and [`crate::handoff`]'s own rule for
     /// the window `NSWorkspace` has nothing to be given), and it is consumed with `let _ =` at the
-    /// top of the body so that a reader meets the fact rather than deducing it.
+    /// top of [`Self::start_on`]'s body so that a reader meets the fact rather than deducing it.
+    ///
+    /// Its waits — the listener's first word, and each attached caller's [`READ_DEADLINE`] — are
+    /// read on the real clock ([`Self::start_on`]).
     pub fn start(
         directory: &std::path::Path,
+        deliver: impl Fn(String) + Send + 'static,
+    ) -> io::Result<Self> {
+        Self::start_on(directory, Arc::new(RealClock), deliver)
+    }
+
+    /// [`Self::start`] with its waits on `clock` (T-ATTENTION-ENDPOINT-WAITS-ON-A-CLOCK): the
+    /// listener's first word ([`FIRST_WORD_WITHIN`]) and the deadline of every caller the listener
+    /// serves ([`READ_DEADLINE`]).
+    pub(crate) fn start_on(
+        directory: &std::path::Path,
+        clock: Arc<dyn LaunchClock>,
         deliver: impl Fn(String) + Send + 'static,
     ) -> io::Result<Self> {
         let _ = directory;
@@ -470,6 +503,7 @@ impl AttentionPipe {
         let listener = {
             let name = name.clone();
             let counts = Arc::clone(&counts);
+            let clock = Arc::clone(&clock);
             crate::spawn_at_priority(
                 "folio-attention-endpoint",
                 crate::ThreadPriority::Normal,
@@ -478,6 +512,7 @@ impl AttentionPipe {
                         &name,
                         descriptor,
                         stop_for_thread,
+                        &*clock,
                         &counts,
                         &armed,
                         &deliver,
@@ -491,8 +526,8 @@ impl AttentionPipe {
         let stop = SendHandle(stop.into_raw());
         // The thread's first word. A timeout rather than a bare `recv` because a listener that
         // never speaks is a bug in this file, and hanging the launch over it would turn a bug into
-        // a product that does not start.
-        match crate::listener_says_within(&first_word, Duration::from_secs(5)) {
+        // a product that does not start. Waited for on the endpoint's clock.
+        match crate::first_word_on(&*clock, &first_word, FIRST_WORD_WITHIN) {
             Ok(Ok(())) => Ok(Self {
                 name,
                 stop,
@@ -831,12 +866,12 @@ impl Instance {
         }
     }
 
-    /// **Post the read, now.** Called the instant a connect completes and never later.
-    fn post_read(&mut self) -> Posted {
+    /// **Post the read, now.** Called the instant a connect completes and never later; `now` is
+    /// the endpoint's clock's reading at that instant, which its [`READ_DEADLINE`] is measured
+    /// from.
+    fn post_read(&mut self, now: Instant) -> Posted {
         self.reset();
-        self.phase = Phase::Reading {
-            since: Instant::now(),
-        };
+        self.phase = Phase::Reading { since: now };
         // SAFETY: both the buffer and the boxed `OVERLAPPED` belong to this instance and outlive
         // the operation, which `Drop` cancels if it is still outstanding.
         let issued = unsafe {
@@ -1008,24 +1043,31 @@ impl Instance {
 /// `READ_DEADLINE` is still the bound on a caller that attaches and says nothing — but it now
 /// costs that caller its own instance rather than the whole endpoint's attention, and the loop
 /// sweeps it on the timeout of the same wait it is already doing.
+///
+/// **Every reading and that one timed wait are the endpoint's `clock`'s**
+/// (T-ATTENTION-ENDPOINT-WAITS-ON-A-CLOCK): while some instance is reading, the wait is a
+/// [`LaunchClock::wait`] of what is left of the nearest deadline, and a wait the clock ends is
+/// that deadline's timeout; while none is, the wait has no length of time at all — a caller or the
+/// stop event ends it — and is made as it always was.
 fn listen(
     name: &str,
     descriptor: SecurityDescriptor,
     stop: SendHandle,
+    clock: &dyn LaunchClock,
     counts: &Mutex<PipeCounts>,
     armed: &mpsc::Sender<io::Result<()>>,
     deliver: &(impl Fn(String) + Send + ?Sized),
 ) {
     let attributes = descriptor.attributes();
     let wide_name = wide(name);
-    let mut rate = RateLimit::new(Instant::now());
+    let mut rate = RateLimit::new(clock.now());
     let mut pool: Vec<Instance> = Vec::new();
     for index in 0..MAX_INSTANCES as usize {
         match Instance::open(&wide_name, &attributes, index == 0) {
             Ok((mut instance, attached)) => {
                 if attached {
                     note_accepted(counts);
-                    let _ = instance.post_read();
+                    let _ = instance.post_read(clock.now());
                 }
                 pool.push(instance);
                 // The first instance's success is the word that makes `start` mean what it says: a
@@ -1046,24 +1088,39 @@ fn listen(
         }
     }
     loop {
-        let now = Instant::now();
-        let timeout = pool
+        let now = clock.now();
+        let left = pool
             .iter()
             .filter_map(|instance| instance.remaining(now))
-            .min()
-            .map_or(INFINITE, |left| {
-                u32::try_from(left.as_millis()).unwrap_or(INFINITE).max(1)
-            });
+            .min();
         let mut handles = pool
             .iter()
             .map(|instance| instance.event.handle())
             .collect::<Vec<_>>();
         handles.push(stop.0);
-        // SAFETY: every handle is owned by this thread's pool, or is the stop event, which outlives
-        // the listener.
-        let answer = unsafe { WaitForMultipleObjects(&handles, false, timeout) };
+        // **The listener's one kernel wait**, for a caller, a read or the stop, of `milliseconds`:
+        // one site for both lengths below, so the bare-site inventory still counts one.
+        let mut answer = WAIT_TIMEOUT;
+        let mut wait_for = |milliseconds: u32| {
+            // SAFETY: every handle is owned by this thread's pool, or is the stop event, which
+            // outlives the listener.
+            answer = unsafe { WaitForMultipleObjects(&handles, false, milliseconds) };
+            answer != WAIT_TIMEOUT
+        };
+        match left {
+            // Nobody is reading: a wait for a caller or the stop, with no length of time.
+            None => {
+                wait_for(INFINITE);
+            }
+            // **The nearest read deadline, on the endpoint's clock.** The clock's wait is this one
+            // kernel wait of its bound; a wait it ends is the deadline's timeout, and the sweep
+            // below reads the deadline on the same clock.
+            Some(left) => {
+                clock.wait(left, &mut |bound| wait_for(wait_milliseconds(bound)));
+            }
+        }
         if answer == WAIT_TIMEOUT {
-            sweep(&mut pool, counts);
+            sweep(&mut pool, counts, clock);
             if pool.is_empty() {
                 return;
             }
@@ -1082,7 +1139,7 @@ fn listen(
             // A client has attached. **Post its read before anything else happens.**
             Phase::Connecting => {
                 note_accepted(counts);
-                match pool[index].post_read() {
+                match pool[index].post_read(clock.now()) {
                     Posted::Pending => None,
                     Posted::Oversize => Some(Frame::Oversize),
                     Posted::Failed => Some(Frame::Silent),
@@ -1096,7 +1153,7 @@ fn listen(
         match frame {
             Frame::Line(read) => {
                 let mut counts = counts.lock().unwrap_or_else(PoisonError::into_inner);
-                if rate.admit(Instant::now()) {
+                if rate.admit(clock.now()) {
                     counts.delivered += 1;
                     drop(counts);
                     let line = String::from_utf8_lossy(&pool[index].buffer[..read]).into_owned();
@@ -1115,10 +1172,20 @@ fn listen(
                 counts.lock().unwrap_or_else(PoisonError::into_inner).silent += 1;
             }
         }
-        if !relist(&mut pool, index, counts) {
+        if !relist(&mut pool, index, counts, clock) {
             return;
         }
     }
+}
+
+/// **A wait's bound in the milliseconds a Win32 wait takes**, rounded down and kept inside
+/// `1 ..= u32::MAX - 1`. Neither end is a length of time: `0` asks for no wait at all — and, to
+/// `WaitNamedPipeW`, is `NMPWAIT_USE_DEFAULT_WAIT`, the pipe's default, which for an endpoint
+/// created with none is 50 ms — and `u32::MAX` is `INFINITE` (`NMPWAIT_WAIT_FOREVER`).
+fn wait_milliseconds(bound: Duration) -> u32 {
+    u32::try_from(bound.as_millis())
+        .unwrap_or(u32::MAX)
+        .clamp(1, u32::MAX - 1)
 }
 
 /// One more client through the door, for the conservation law in [`PipeCounts::accepted`].
@@ -1132,13 +1199,20 @@ fn note_accepted(counts: &Mutex<PipeCounts>) {
 /// Put one instance back to listening, dropping it if it will not go.
 ///
 /// `false` only when the pool has emptied, which is the one condition that ends the listener.
-fn relist(pool: &mut Vec<Instance>, index: usize, counts: &Mutex<PipeCounts>) -> bool {
+/// A caller already waiting is timed from the endpoint's clock read once the instance has been
+/// recycled for it, as `post_read` read it before the clock was handed in (review N2).
+fn relist(
+    pool: &mut Vec<Instance>,
+    index: usize,
+    counts: &Mutex<PipeCounts>,
+    clock: &dyn LaunchClock,
+) -> bool {
     match pool[index].recycle() {
         Ok(true) => {
             // Somebody was already waiting for this instance. Their read starts now, not on the
             // next turn of the loop.
             note_accepted(counts);
-            let _ = pool[index].post_read();
+            let _ = pool[index].post_read(clock.now());
             true
         }
         Ok(false) => true,
@@ -1149,9 +1223,10 @@ fn relist(pool: &mut Vec<Instance>, index: usize, counts: &Mutex<PipeCounts>) ->
     }
 }
 
-/// Take back the instances whose clients attached and then said nothing.
-fn sweep(pool: &mut Vec<Instance>, counts: &Mutex<PipeCounts>) {
-    let now = Instant::now();
+/// Take back the instances whose clients attached and then said nothing, by one reading of the
+/// endpoint's clock.
+fn sweep(pool: &mut Vec<Instance>, counts: &Mutex<PipeCounts>, clock: &dyn LaunchClock) {
+    let now = clock.now();
     let mut index = 0;
     while index < pool.len() {
         let expired = pool[index]
@@ -1159,7 +1234,7 @@ fn sweep(pool: &mut Vec<Instance>, counts: &Mutex<PipeCounts>) {
             .is_some_and(|left| left.is_zero());
         if expired {
             counts.lock().unwrap_or_else(PoisonError::into_inner).silent += 1;
-            if !relist(pool, index, counts) {
+            if !relist(pool, index, counts, clock) {
                 return;
             }
         }
@@ -1211,13 +1286,22 @@ impl Drop for Overlapped {
 /// **`folio attention`'s whole conversation**: connect, write one line, close.
 ///
 /// Bounded end to end. The endpoint serves one client at a time, so a busy answer is ordinary
-/// rather than exceptional, and it is waited on for [`CLIENT_BUSY_WAIT_MS`] and then given up on —
+/// rather than exceptional, and it is waited on for [`CLIENT_BUSY_WAIT`] and then given up on —
 /// the verb's contract is that it never blocks, and "never" has to be a number somewhere.
 ///
 /// No reply is read, and there is none to read: the endpoint's pipe is inbound-only. A verb that
 /// waited for an acknowledgement would be a verb that could hang on a window that is busy painting,
 /// which is precisely the moment a hook is most likely to fire.
+///
+/// The busy wait is made on the real clock ([`send_line_on`]).
 pub fn send_line(endpoint: &str, line: &str) -> io::Result<()> {
+    send_line_on(endpoint, line, &RealClock)
+}
+
+/// [`send_line`] with its wait past a busy endpoint on `clock`
+/// (T-ATTENTION-ENDPOINT-WAITS-ON-A-CLOCK). The write's own deadline stays real
+/// ([`write_bounded`]): buffering decides it, not the endpoint.
+fn send_line_on(endpoint: &str, line: &str, clock: &dyn LaunchClock) -> io::Result<()> {
     if line.len() > MAX_MESSAGE_BYTES {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -1236,7 +1320,7 @@ pub fn send_line(endpoint: &str, line: &str) -> io::Result<()> {
         ));
     }
     let wide_name = wide(endpoint);
-    let handle = open_client(&wide_name, GENERIC_WRITE.0)?;
+    let handle = open_client(&wide_name, GENERIC_WRITE.0, clock)?;
     write_bounded(handle.0, line.as_bytes())
 }
 
@@ -1332,7 +1416,16 @@ pub(crate) fn write_bounded(pipe: HANDLE, bytes: &[u8]) -> io::Result<()> {
 /// request and reads the answer back. Everything else about the open — the impersonation level, the
 /// overlapped flag, the one retry past a busy endpoint — is the same discipline for both and is
 /// therefore written once.
-pub(crate) fn open_client(wide_name: &[u16], access: u32) -> io::Result<OwnedHandle> {
+///
+/// **The one wait past a busy endpoint is made on `clock`, the caller's**
+/// (T-ATTENTION-ENDPOINT-WAITS-ON-A-CLOCK): the verb's, the launch's budget or the elevated
+/// attempt's. `WaitNamedPipeW` takes its timeout as an argument, so the clock's bound goes inside
+/// it rather than a real 100 ms being counted around it.
+pub(crate) fn open_client(
+    wide_name: &[u16],
+    access: u32,
+    clock: &dyn LaunchClock,
+) -> io::Result<OwnedHandle> {
     // **What the server may do with this client's token** (R2-27). Without `SECURITY_SQOS_PRESENT`
     // the level is the driver's default, which for a named pipe is impersonation — a server that
     // opened this handle could act as the caller against anything on the machine. `IDENTIFICATION`
@@ -1364,9 +1457,13 @@ pub(crate) fn open_client(wide_name: &[u16], access: u32) -> io::Result<OwnedHan
                     // succeeded lead to the same next move, which is to try the open once more and
                     // let *that* say whether the endpoint is free. Branching here would put the
                     // decision in two places.
-                    // SAFETY: `wide_name` is NUL-terminated and outlives the call.
-                    let _free =
-                        unsafe { WaitNamedPipeW(PCWSTR(wide_name.as_ptr()), CLIENT_BUSY_WAIT_MS) };
+                    let _free = clock.wait(CLIENT_BUSY_WAIT, &mut |bound| {
+                        // SAFETY: `wide_name` is NUL-terminated and outlives the call.
+                        unsafe {
+                            WaitNamedPipeW(PCWSTR(wide_name.as_ptr()), wait_milliseconds(bound))
+                        }
+                        .as_bool()
+                    });
                     continue;
                 }
                 return Err(win32_io_error(error));
@@ -1426,6 +1523,36 @@ pub(crate) fn win32_of(error: &windows::core::Error) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::door_skipped;
+    use crate::launch_conversation::{CountedClock, Turn};
+
+    /// **A clock whose every wait awaits the other end** within the suite's patience
+    /// (T-ATTENTION-ENDPOINT-WAITS-ON-A-CLOCK): an endpoint or a verb on it never races a real
+    /// deadline against a thread of this test.
+    fn answering() -> Arc<CountedClock> {
+        Arc::new(CountedClock::answering())
+    }
+
+    /// **An endpoint on `clock`**, delivering into the channel it hands back — read with the
+    /// suite's patience ([`door_skipped::received`]), never a real bound of its own.
+    fn served_on(clock: &Arc<CountedClock>) -> (AttentionPipe, mpsc::Receiver<String>) {
+        let (sender, lines) = mpsc::channel();
+        let pipe = AttentionPipe::start_on(
+            &any_data_directory(),
+            Arc::clone(clock) as Arc<dyn LaunchClock>,
+            move |line| {
+                let _ = sender.send(line);
+            },
+        )
+        .expect("open the endpoint");
+        (pipe, lines)
+    }
+
+    /// One line through the verb, its busy wait (if it meets one) on a clock that awaits a free
+    /// instance within the suite's patience.
+    fn sent(pipe: &AttentionPipe, line: &str) {
+        send_line_on(pipe.name(), line, &CountedClock::answering()).expect("write");
+    }
 
     /// **A data directory, for a parameter this arm does not read.**
     ///
@@ -1505,20 +1632,28 @@ mod tests {
     ///
     /// End to end against the real kernel object, because the two things worth pinning here are
     /// both properties of the real one: that a client can connect the instant `start` hands back,
-    /// and that the bytes arrive whole.
+    /// and that the bytes arrive whole. The endpoint's waits are on a clock that awaits the other
+    /// end (T-ATTENTION-ENDPOINT-WAITS-ON-A-CLOCK), and the first of them is the listener's first
+    /// word, asked for its whole bound. The line goes through the real door: one caller against a
+    /// fresh endpoint finds its first instance listening, so it meets no busy wait.
     #[test]
     fn a_line_written_the_instant_the_endpoint_opens_arrives_whole() {
-        let (sender, lines) = mpsc::channel();
-        let pipe = AttentionPipe::start(&any_data_directory(), move |line| {
-            let _ = sender.send(line);
-        })
-        .expect("open the endpoint");
+        let clock = answering();
+        let (pipe, lines) = served_on(&clock);
+        assert_eq!(
+            clock.asked().first(),
+            Some(&FIRST_WORD_WITHIN),
+            "the listener's first word is waited for on the endpoint's clock"
+        );
         send_line(pipe.name(), r#"{"v":1,"event":"PermissionRequest"}"#).expect("write one line");
-        let line = lines
-            .recv_timeout(Duration::from_secs(5))
-            .expect("the endpoint delivered nothing");
+        let line = door_skipped::received(&lines, "the endpoint's delivery");
         assert_eq!(line, r#"{"v":1,"event":"PermissionRequest"}"#);
         assert_eq!(pipe.counts().delivered, 1);
+        assert_eq!(
+            clock.moved(),
+            Duration::ZERO,
+            "no wait of the endpoint ran out"
+        );
     }
 
     /// **A whole turn's worth of hooks, back to back, and not one of them lost.**
@@ -1533,24 +1668,21 @@ mod tests {
     /// processes landing on whichever instance is free, so the endpoint does not promise the order
     /// two of them are read in and could not keep such a promise if it made one. What it promises
     /// is that a frame it accepted arrives, and that is what is asserted.
+    ///
+    /// The endpoint and the verb are on clocks that await the other end
+    /// (T-ATTENTION-ENDPOINT-WAITS-ON-A-CLOCK), so a caller descheduled between its connect and its
+    /// write, or one that finds every instance taken, waits for the listener within the suite's
+    /// patience rather than inside a real 250 ms or 100 ms.
     #[test]
     fn a_whole_turn_of_hooks_arrives_with_none_of_them_lost() {
         const FRAMES: usize = 8;
-        let (sender, lines) = mpsc::channel();
-        let pipe = AttentionPipe::start(&any_data_directory(), move |line| {
-            let _ = sender.send(line);
-        })
-        .expect("open the endpoint");
+        let (pipe, lines) = served_on(&answering());
         for index in 0..FRAMES {
-            send_line(pipe.name(), &format!("frame {index}")).expect("write");
+            sent(&pipe, &format!("frame {index}"));
         }
-        let mut arrived = Vec::new();
-        while arrived.len() < FRAMES {
-            match lines.recv_timeout(Duration::from_secs(5)) {
-                Ok(line) => arrived.push(line),
-                Err(_) => break,
-            }
-        }
+        let mut arrived = (0..FRAMES)
+            .map(|_| door_skipped::received(&lines, "a frame of the turn"))
+            .collect::<Vec<_>>();
         arrived.sort();
         let mut expected = (0..FRAMES)
             .map(|index| format!("frame {index}"))
@@ -1575,24 +1707,18 @@ mod tests {
     ///
     /// Kept just under the rate bound, because a throttled frame is a frame the endpoint **did**
     /// refuse — a different sentence from losing one, counted separately, and not what this is for.
+    /// On clocks that await the other end, as the turn above: `silent == 0` is then the endpoint's
+    /// answer, never a caller's scheduling.
     #[test]
     fn a_flood_far_past_any_real_producer_still_loses_nothing() {
         const FRAMES: usize = 40;
-        let (sender, lines) = mpsc::channel();
-        let pipe = AttentionPipe::start(&any_data_directory(), move |line| {
-            let _ = sender.send(line);
-        })
-        .expect("open the endpoint");
+        let (pipe, lines) = served_on(&answering());
         for index in 0..FRAMES {
-            send_line(pipe.name(), &format!("frame {index}")).expect("write");
+            sent(&pipe, &format!("frame {index}"));
         }
-        let mut arrived = Vec::new();
-        while arrived.len() < FRAMES {
-            match lines.recv_timeout(Duration::from_secs(10)) {
-                Ok(line) => arrived.push(line),
-                Err(_) => break,
-            }
-        }
+        let mut arrived = (0..FRAMES)
+            .map(|_| door_skipped::received(&lines, "a frame of the flood"))
+            .collect::<Vec<_>>();
         arrived.sort();
         let mut expected = (0..FRAMES)
             .map(|index| format!("frame {index}"))
@@ -1612,22 +1738,14 @@ mod tests {
     /// anybody having to guess in advance what that path is.
     #[test]
     fn every_client_that_attaches_is_accounted_for() {
-        let (sender, lines) = mpsc::channel();
-        let pipe = AttentionPipe::start(&any_data_directory(), move |line| {
-            let _ = sender.send(line);
-        })
-        .expect("open the endpoint");
+        let (pipe, lines) = served_on(&answering());
         // A mixture on purpose: ordinary frames, and one the verb itself refuses to put on the wire.
         for index in 0..12 {
-            send_line(pipe.name(), &format!("frame {index}")).expect("write");
+            sent(&pipe, &format!("frame {index}"));
         }
         assert!(send_line(pipe.name(), &"x".repeat(MAX_MESSAGE_BYTES + 1)).is_err());
-        let mut arrived = 0;
-        while arrived < 12 {
-            match lines.recv_timeout(Duration::from_secs(10)) {
-                Ok(_) => arrived += 1,
-                Err(_) => break,
-            }
+        for _ in 0..12 {
+            door_skipped::received(&lines, "an ordinary frame");
         }
         let counts = pipe.counts();
         assert_eq!(
@@ -1662,14 +1780,14 @@ mod tests {
         // A client that attaches and then says nothing: the read this posts stays with the kernel
         // for as long as the client holds the connection open, which is what makes the cancellation
         // below a cancellation of something real.
-        let _client =
-            open_client(&wide_name, GENERIC_WRITE.0).expect("connect to our own endpoint");
+        let _client = open_client(&wide_name, GENERIC_WRITE.0, &RealClock)
+            .expect("connect to our own endpoint");
         let handles = [instance.event.handle()];
         // SAFETY: the handle belongs to the instance this thread owns.
         let answer = unsafe { WaitForMultipleObjects(&handles, false, 5_000) };
         assert_eq!(answer, WAIT_OBJECT_0, "the connect never completed");
         assert!(
-            matches!(instance.post_read(), Posted::Pending),
+            matches!(instance.post_read(Instant::now()), Posted::Pending),
             "a client that has said nothing leaves the read with the kernel"
         );
         assert!(instance.outstanding, "the kernel holds the structure");
@@ -1690,11 +1808,7 @@ mod tests {
     /// A frame over the bound is refused whole rather than truncated and parsed.
     #[test]
     fn an_oversized_frame_is_dropped_and_counted() {
-        let (sender, lines) = mpsc::channel();
-        let pipe = AttentionPipe::start(&any_data_directory(), move |line| {
-            let _ = sender.send(line);
-        })
-        .expect("open the endpoint");
+        let (pipe, lines) = served_on(&answering());
         // The client's own bound refuses it before a byte moves, which is the first of the two
         // gates; the endpoint's is the second and is what the count below proves.
         let too_long = "x".repeat(MAX_MESSAGE_BYTES + 1);
@@ -1702,11 +1816,9 @@ mod tests {
             send_line(pipe.name(), &too_long).is_err(),
             "the verb must not put a frame on the wire that the endpoint would refuse"
         );
-        send_line(pipe.name(), "after").expect("write");
+        sent(&pipe, "after");
         assert_eq!(
-            lines
-                .recv_timeout(Duration::from_secs(5))
-                .expect("delivery"),
+            door_skipped::received(&lines, "the next caller's line"),
             "after",
             "an oversized frame must not wedge the endpoint for the next caller"
         );
@@ -1753,26 +1865,37 @@ mod tests {
         );
     }
 
-    /// A verb aimed at an endpoint that is not there fails at once rather than waiting on it.
+    /// **A verb aimed at an endpoint that is not there fails at once rather than waiting on it**:
+    /// on its clock, it asked for no wait at all (T-ATTENTION-ENDPOINT-WAITS-ON-A-CLOCK) — a
+    /// name with nobody behind it is not a busy endpoint.
+    ///
+    /// This reads the waits `send_line_on` asks its clock for, not the real door's elapsed time
+    /// (row 147's conversion, ruling R7): a real wait added outside the clock on the not-found
+    /// road would pass here, as review N4 notes; the busy road's are the busy tests' and plants'.
+    ///
+    /// MUTATION: treat `ERROR_FILE_NOT_FOUND` like `ERROR_PIPE_BUSY` in `open_client` and the verb
+    /// asks for one busy wait.
     #[test]
     fn the_verb_gives_up_on_an_endpoint_that_does_not_exist() {
-        let began = Instant::now();
-        let answer = send_line(
+        let asking = CountedClock::answering();
+        let answer = send_line_on(
             &endpoint_name(&session_tag("S-1-5-5-0-9"), 1, 0xdead_beef),
             "wait",
+            &asking,
         );
         assert!(answer.is_err(), "there is no such endpoint");
-        assert!(
-            began.elapsed() < Duration::from_secs(1),
-            "the verb waited {:?} on a name that does not exist",
-            began.elapsed()
+        assert_eq!(
+            asking.asked(),
+            Vec::<Duration>::new(),
+            "the verb waited on a name that does not exist"
         );
+        assert_eq!(asking.moved(), Duration::ZERO);
     }
 
     /// Retiring the endpoint closes it, and the verb can tell.
     #[test]
     fn a_retired_endpoint_stops_answering() {
-        let pipe = AttentionPipe::start(&any_data_directory(), |_| {}).expect("open the endpoint");
+        let (pipe, _lines) = served_on(&answering());
         let name = pipe.name().to_owned();
         send_line(&name, "before").expect("the endpoint is open");
         assert!(
@@ -1786,7 +1909,10 @@ mod tests {
     }
 
     /// An endpoint whose listener stands inside `deliver` until the test lets it go, and the flag
-    /// `deliver` raises on its way out.
+    /// `deliver` raises on its way out. Each line `deliver` is handed waits for one release, or
+    /// for none once the release is dropped. The endpoint's waits are on a clock that awaits the
+    /// other end (T-ATTENTION-ENDPOINT-WAITS-ON-A-CLOCK), so the holding line reaches `deliver`
+    /// whatever its thread's scheduling, never inside 250 ms of real time or not at all.
     fn a_held_endpoint() -> (
         AttentionPipe,
         mpsc::Sender<()>,
@@ -1796,11 +1922,15 @@ mod tests {
         let (release, held) = mpsc::channel::<()>();
         let left = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let leaving = Arc::clone(&left);
-        let pipe = AttentionPipe::start(&any_data_directory(), move |_line| {
-            let _ = entered.send(());
-            let _ = held.recv();
-            leaving.store(true, std::sync::atomic::Ordering::SeqCst);
-        })
+        let pipe = AttentionPipe::start_on(
+            &any_data_directory(),
+            answering() as Arc<dyn LaunchClock>,
+            move |_line| {
+                let _ = entered.send(());
+                let _ = held.recv();
+                leaving.store(true, std::sync::atomic::Ordering::SeqCst);
+            },
+        )
         .expect("open the endpoint");
         send_line(pipe.name(), "hold").expect("write one line");
         crate::door_skipped::received(&inside, "the listener inside `deliver`");
@@ -1883,5 +2013,187 @@ mod tests {
             "a listener held in its closure has not left within no time at all"
         );
         drop(release);
+    }
+
+    /// RED (T-ATTENTION-ENDPOINT-WAITS-ON-A-CLOCK) — **the listener's first word is waited for on
+    /// the endpoint's clock, and the wait ends at its bound on that clock.**
+    ///
+    /// The clock spends its first wait — the whole of [`FIRST_WORD_WITHIN`], asked for once —
+    /// without listening, so the word is late by construction: `start` answers that the endpoint
+    /// never came up, having waited for nothing in real time, and the clock moved by exactly the
+    /// bound. The listener it started has been told to stop and joined.
+    ///
+    /// MUTATION: wait for the first word with `listener_says_within` outside `clock.wait` in
+    /// `start_on` and the endpoint opens, and the clock records no wait; wait with a bare
+    /// `recv()` and the same.
+    #[test]
+    fn the_listeners_first_word_is_waited_for_on_the_endpoints_clock() {
+        let clock = Arc::new(CountedClock::new(|number, _| {
+            if number == 1 {
+                Turn::Spend
+            } else {
+                Turn::Await
+            }
+        }));
+        let Err(refused) = AttentionPipe::start_on(
+            &any_data_directory(),
+            Arc::clone(&clock) as Arc<dyn LaunchClock>,
+            |_| {},
+        ) else {
+            panic!("an endpoint whose first word never came within its bound was handed back");
+        };
+        assert!(
+            refused.to_string().contains("never came up"),
+            "the refusal says the endpoint never came up: {refused}"
+        );
+        assert_eq!(
+            clock.asked(),
+            vec![FIRST_WORD_WITHIN],
+            "the one wait is the first word's, asked for its whole bound"
+        );
+        assert_eq!(clock.moved(), FIRST_WORD_WITHIN);
+    }
+
+    /// RED (T-ATTENTION-ENDPOINT-WAITS-ON-A-CLOCK) — **a caller that attaches and says nothing is
+    /// let go at its deadline, on the endpoint's clock.**
+    ///
+    /// A client attaches and holds its connection silent. The endpoint's clock awaits the other
+    /// end on every wait but the first of [`READ_DEADLINE`], which it spends — the deadline runs
+    /// out on the count, not in real time — and tells the test. The next caller's line is
+    /// delivered after that, so the silent one has been swept: one silent, one delivered, two
+    /// attached, and the clock moved by exactly one deadline. The silent caller's late write is
+    /// refused, because its instance has been handed back.
+    ///
+    /// MUTATION: read `listen`'s `now` (or `post_read`'s start) on `Instant::now()` and the
+    /// handed-clock guard names the function; wait `INFINITE` while an instance is reading and the
+    /// deadline is never asked for, so the test fails at the suite's patience.
+    #[test]
+    fn a_caller_that_attaches_and_says_nothing_is_let_go_at_its_deadline_on_the_count() {
+        let (asked_for, deadline_asked) = mpsc::channel();
+        let mut spent = false;
+        let clock = Arc::new(CountedClock::new(move |_, bound| {
+            if bound == READ_DEADLINE && !spent {
+                spent = true;
+                let _ = asked_for.send(());
+                Turn::Spend
+            } else {
+                Turn::Await
+            }
+        }));
+        let (pipe, lines) = served_on(&clock);
+        let silent = open_client(&wide(pipe.name()), GENERIC_WRITE.0, &RealClock)
+            .expect("attach and say nothing");
+        door_skipped::received(&deadline_asked, "the silent caller's read deadline");
+        sent(&pipe, "after");
+        assert_eq!(
+            door_skipped::received(&lines, "the next caller's line"),
+            "after"
+        );
+        let counts = pipe.counts();
+        assert_eq!(
+            (counts.accepted, counts.delivered, counts.silent),
+            (2, 1, 1),
+            "the silent caller is swept at its deadline and the next one is served: {counts:?}"
+        );
+        assert_eq!(
+            clock.moved(),
+            READ_DEADLINE,
+            "one deadline ran out, on the count"
+        );
+        let asked = clock.asked();
+        assert_eq!(asked.first(), Some(&FIRST_WORD_WITHIN));
+        assert!(
+            asked[1..].iter().all(|bound| *bound == READ_DEADLINE),
+            "every wait for a caller is its read deadline: {asked:?}"
+        );
+        assert!(
+            write_bounded(silent.0, b"too late").is_err(),
+            "the late line meets an instance that has been handed back"
+        );
+    }
+
+    /// The held endpoint of [`a_held_endpoint`] with every other instance taken too: three more
+    /// callers each attach to an instance of their own and write, and none of the four can be
+    /// handed back while the listener stands in `deliver`. The next open is busy, and nothing frees
+    /// an instance until the test lets the listener go.
+    fn a_busy_endpoint() -> (AttentionPipe, mpsc::Sender<()>) {
+        let (pipe, release, _left) = a_held_endpoint();
+        for index in 1..MAX_INSTANCES {
+            sent(&pipe, &format!("fill {index}"));
+        }
+        (pipe, release)
+    }
+
+    /// One `send_line_on` on a thread of its own, its answer (the OS code of a refusal) heard by
+    /// the test within the suite's patience.
+    fn sent_on_a_thread(
+        name: &str,
+        clock: &Arc<CountedClock>,
+    ) -> mpsc::Receiver<Result<(), Option<i32>>> {
+        let (answered, heard) = mpsc::channel();
+        let (name, clock) = (name.to_owned(), Arc::clone(clock));
+        std::thread::spawn(move || {
+            let answer = send_line_on(&name, "past the busy answer", &*clock);
+            let _ = answered.send(answer.map_err(|error| error.raw_os_error()));
+        });
+        heard
+    }
+
+    /// RED (T-ATTENTION-ENDPOINT-WAITS-ON-A-CLOCK) — **an endpoint that stays busy costs the verb
+    /// one busy wait, on the count.**
+    ///
+    /// Every instance is taken and stays taken. The verb's clock spends its wait — the whole of
+    /// [`CLIENT_BUSY_WAIT`], asked for once — without waiting, so the one retry meets the same
+    /// busy answer and the verb refuses with it; the clock moved by exactly the bound.
+    ///
+    /// MUTATION: make `open_client`'s `WaitNamedPipeW` outside `clock.wait` and the clock records
+    /// no wait; retry past the busy answer without the one-retry bound and the verb does not
+    /// answer within the suite's patience.
+    #[test]
+    fn a_busy_endpoint_costs_the_verb_one_busy_wait_on_the_count() {
+        let (pipe, release) = a_busy_endpoint();
+        let asking = Arc::new(CountedClock::new(|_, _| Turn::Spend));
+        let answer = door_skipped::received(
+            &sent_on_a_thread(pipe.name(), &asking),
+            "the verb past a busy endpoint",
+        );
+        drop(release);
+        assert_eq!(
+            answer,
+            Err(Some(ERROR_PIPE_BUSY.0 as i32)),
+            "an endpoint that stays busy refuses the verb"
+        );
+        assert_eq!(asking.asked(), vec![CLIENT_BUSY_WAIT]);
+        assert_eq!(asking.moved(), CLIENT_BUSY_WAIT);
+    }
+
+    /// RED (T-ATTENTION-ENDPOINT-WAITS-ON-A-CLOCK) — **an endpoint freed once the verb has been
+    /// answered busy takes its line**, and the wait was the clock's, not a real 100 ms.
+    ///
+    /// Every instance is taken; the verb's clock awaits a free one within the suite's patience and
+    /// tells the test when it is asked, which is after the busy answer and before
+    /// `WaitNamedPipeW` is entered. Only then does the test let the listener go — the answer is
+    /// late by construction — and the verb's one retry is answered: the line is taken, the one
+    /// wait asked was the busy wait's bound, and the clock did not move. Whether the kernel wait
+    /// itself returns on the free, or the free came before it was entered, is the kernel's; both
+    /// orders end in the line taken (review N3).
+    #[test]
+    fn a_busy_endpoint_freed_while_the_verb_waits_takes_the_line() {
+        let (pipe, release) = a_busy_endpoint();
+        let (waiting, seen_waiting) = mpsc::channel();
+        let asking = Arc::new(CountedClock::new(move |_, _| {
+            let _ = waiting.send(());
+            Turn::Await
+        }));
+        let heard = sent_on_a_thread(pipe.name(), &asking);
+        door_skipped::received(&seen_waiting, "the verb waiting past a busy endpoint");
+        drop(release);
+        assert_eq!(
+            door_skipped::received(&heard, "the verb, once an instance is free"),
+            Ok(()),
+            "the endpoint freed while the verb waited takes its line"
+        );
+        assert_eq!(asking.asked(), vec![CLIENT_BUSY_WAIT]);
+        assert_eq!(asking.moved(), Duration::ZERO, "nothing ran out");
     }
 }

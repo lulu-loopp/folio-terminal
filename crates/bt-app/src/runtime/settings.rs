@@ -10,7 +10,7 @@
 
 use crate::window_seam::prelude::*;
 use crate::{
-    Announce, ApplicationChange, FilePick, RAIL_TRANSITION, RevealTween, Runtime,
+    Announce, ApplicationChange, FilePick, RAIL_TRANSITION, RevealTween, Runtime, agent_hooks_step,
     attention_copilot, attention_wire, block_max_height_px, cardhint, context_menu, explorer_menu,
     handoff_lane, hang_watch, i18n, install_minimum_contrast, marks, preview, profiles,
     programs_lane, psreadline, rail_state_for, schemes, seats, settings, shell_integration,
@@ -2234,7 +2234,8 @@ impl<B: Backend> Runtime<'_, B> {
         // **The agent rows' own edge**, and it is not a convenience: their switches are inert
         // while the file they name is one this build will not edit, so a press cannot be what
         // notices that the reader has unpicked the link or cleared the read-only bit. Opening the
-        // page is (re-review, round 3). One re-read per visit, never per frame and never per turn.
+        // page is (re-review, round 3). One scan per visit, never per frame and never per turn,
+        // and on the carry pass's worker (0.4.10 plan row 67b, R7): its answer redraws the page.
         let agents_opened = self
             .window
             .settings
@@ -2259,18 +2260,6 @@ impl<B: Backend> Runtime<'_, B> {
             // Every row's program, and WSL's distributions, asked again as the page opens.
             self.ask_the_program_walk(programs_lane::Trigger::ProfilesPage);
         }
-        // Use the refreshed fact on this very layout, including its geometry.
-        let refreshed_values = agents_opened.then(|| settings::SettingsValues {
-            claude_hooks: self.app.claude_hooks_installed,
-            codex_notify: self.app.codex_notify_installed,
-            copilot_hooks: self.app.copilot_hooks_installed,
-            agent_config_refusals: self.app.agent_config_refusals,
-            ..values.clone()
-        });
-        let content = settings::SettingsContent {
-            values: refreshed_values.as_ref().unwrap_or(&values),
-            ..content
-        };
         // The second probe on the same door and for the same argument: the page that prints which
         // copilot this machine has is the page that asks. Idempotent, and an atomic load after the
         // first call — see `attention_copilot::begin_probe`.
@@ -2684,6 +2673,23 @@ impl<B: Backend> Runtime<'_, B> {
             // answer is not `Off` at all. Handed in, never asked for here — the three sentences
             // are read off the disk and this runs on every frame the dialog is up.
             agent_config_refusals: self.app.agent_config_refusals,
+            // What each row says of what the start-time scan found (0.4.10 plan row 67b), and
+            // what the resume row says of the hooks resume needs — both said from the scan's
+            // answer, here and in the language in force, never read off the disk.
+            agent_row_lines: self.app.agent_hooks_found.each_ref().map(|found| {
+                found.as_ref().and_then(|(found, unrepaired)| {
+                    agent_hooks_step::hooks_row_line(found, *unrepaired)
+                })
+            }),
+            resume_agents_line: agent_hooks_step::resume_row_line(
+                self.app.settings_store.loaded().resume_agents,
+                self.app.agent_rows_known,
+                [
+                    self.app.claude_hooks_installed,
+                    self.app.codex_notify_installed,
+                    self.app.copilot_hooks_installed,
+                ],
+            ),
             // And over copilot's own hooks directory, with the second fact this one needs beside
             // it: whether the copilot on this machine can carry the signal at all.
             copilot_hooks: self.app.copilot_hooks_installed,

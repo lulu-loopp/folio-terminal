@@ -122,7 +122,7 @@ const INVENTORY: &[Mark] = &[
         writer: "attention_hooks.rs:apply_at",
     },
     Mark {
-        name: "Codex notify",
+        name: "Codex hooks",
         says: Text::CleanupMarkCodex,
         kind: Kind::PerCopy,
         remover: Remover::Agent(1),
@@ -352,6 +352,13 @@ enum Fate {
     /// (audit 3, E-1). Not [`Fate::Left`], which is about another *Folio* copy
     /// still installed on the machine.
     LeftNotOurs(Vec<PathBuf>),
+    /// Folio's entry went, or was not there, and a second file the removal reads was left as it
+    /// was because it could not be read — for the reason carried, in the owner's words. Not a
+    /// refusal: the cleanup goes on (0.4.10 plan row 69, review N5).
+    LeftUnread {
+        removed: bool,
+        reason: String,
+    },
     Refused(Why),
     Kept(Text),
     /// The program's own files: handed to the remover, which takes them once
@@ -459,6 +466,18 @@ impl Entry {
                 format!("{} {}", Text::CleanupNotOurs.in_lang(lang), paths(left))
             }
             Fate::Kept(reason) => reason.in_lang(lang).to_owned(),
+            Fate::LeftUnread { removed, reason } => {
+                let gone = if *removed {
+                    Text::CleanupRemoved
+                } else {
+                    Text::CleanupAbsent
+                };
+                format!(
+                    "{} ({})",
+                    gone.in_lang(lang),
+                    reason.replace(['\n', '\r'], " ")
+                )
+            }
             Fate::Refused(why) => format!(
                 "{} ({})",
                 Text::CleanupRefused.in_lang(lang),
@@ -773,10 +792,13 @@ fn push_unique(paths: &mut Vec<PathBuf>, path: PathBuf) {
         paths.push(path);
     }
 }
+/// The file each family's removal is pressed on. codex's is `hooks.json`, the file its hook is in;
+/// the operation also reads the `config.toml` beside it, and takes out the `notify` line an
+/// earlier Folio wrote there (0.4.10 plan row 69a).
 fn agent_path(index: usize, root: &Path) -> PathBuf {
     root.join(match index {
         0 => "settings.json",
-        1 => "config.toml",
+        1 => "hooks.json",
         _ => "hooks/folio.json",
     })
 }
@@ -792,6 +814,10 @@ fn agent_fate(outcome: Outcome) -> Fate {
         Outcome::Removed => Fate::Removed,
         Outcome::Unchanged => Fate::Absent,
         Outcome::LeftOther(paths) => Fate::Left(paths),
+        Outcome::LeftUnread { removed, reason } => Fate::LeftUnread {
+            removed,
+            reason: reason.to_owned(),
+        },
         Outcome::Refused(reason) => Fate::Refused(Why::Other(reason.to_owned())),
         Outcome::Installed | Outcome::TakeOverRequired(_) => {
             Fate::Refused(Why::Said(Text::CleanupUnexpected))

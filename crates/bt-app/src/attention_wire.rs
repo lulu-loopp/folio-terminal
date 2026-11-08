@@ -33,6 +33,16 @@
 //! ([`crate::agent_resume::Heard::is_well_formed`]); a line whose `resume` is anything else is a
 //! line from something that is not `folio attention`, and is dropped whole.
 //!
+//! **And beside it, since 0.4.10 plan row 74, how that session's agent was started**: `launch`,
+//! the words of the agent's own command line its vendor's table carries and the names of the
+//! flags it does not (`{"args": […], "dropped": […]}`), or `{"unread": true}` when the hook could
+//! not read it. The verb reads it from its own parent process — the agent that ran the hook —
+//! and only on a line that carries a `resume`. A key of its own rather than one inside `resume`,
+//! whose keys are closed: a window older than this build reads past a key it does not know and
+//! still records the session, where a fourth key inside `resume` would make it drop the line.
+//! The same rules hold — named fields, checked at both ends, the whole line within the endpoint's
+//! frame — and a launch that would not fit is sent as unread.
+//!
 //! The words are the wider of the two doors and are worth stating exactly. What crosses is at most
 //! eighty-one characters of prose with no control character in it, produced by
 //! [`crate::attention_words`] from a source a row declared, and the far end refuses a line whose
@@ -87,11 +97,12 @@ const INBOX_BOUND: usize = 256;
 
 /// One arrival, in the words it crosses the pipe in.
 ///
-/// Six fields and three of them are usually absent. `family` and `event` together name a row of
+/// Seven fields and four of them are usually absent. `family` and `event` together name a row of
 /// the mapping table; `capability` names the pane; `id` is present only when that row declared a
 /// field path, which today no row does; `text` is present only when a turn-end row declared where
 /// its words live **and** they were there to be found; `resume` only when a turn-end row declared
-/// where its session is named and the payload named a well-formed one.
+/// where its session is named and the payload named a well-formed one; `another_client` only when
+/// a turn-end row declared the interactive client and the payload named another.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Message {
     pub capability: String,
@@ -104,8 +115,15 @@ pub(crate) struct Message {
     pub text: Option<String>,
     /// **The session the turn ended in** (row 195), already checked. `None` for every row that
     /// declares no [`Resume`](crate::attention_map::Resume) source and for a payload that named
-    /// none this build could resume.
+    /// none this build could resume. Its `launch` (row 74) crosses as the line's own `launch` key.
     pub resume: Option<crate::agent_resume::Heard>,
+    /// **The turn was another client's** (0.4.10 plan row 75, review N1): a turn-end row declares
+    /// the vendor's interactive client (`only_client`) and the payload names another, or none —
+    /// codex's `notify` from a `codex exec` an agent in the pane started. Decided in the verb, the
+    /// only process that holds the payload, by the check [`heard`] makes for the session
+    /// ([`ran_in_the_interactive_client`]), and crossing as `"another_client": true`. Such a turn
+    /// end is no step of the pane's agent's turns ([`asks_of`]).
+    pub another_client: bool,
 }
 
 /// The wire's version, and the reason for it: a `folio.exe` on `PATH` may be a different build from
@@ -137,6 +155,12 @@ impl Message {
                 session.insert("home".to_owned(), home.clone().into());
             }
             value.insert("resume".to_owned(), serde_json::Value::Object(session));
+            if let Some(launch) = &resume.launch {
+                value.insert("launch".to_owned(), launch_value(launch));
+            }
+        }
+        if self.another_client {
+            value.insert("another_client".to_owned(), true.into());
         }
         serde_json::Value::Object(value).to_string()
     }
@@ -182,7 +206,13 @@ impl Message {
                 Some(words.to_owned())
             }
         };
+        let launch = match object.get("launch") {
+            None => None,
+            Some(value) => Some(launch_of_value(value)?),
+        };
         let resume = match object.get("resume") {
+            // A launch is a session's; one with no session is no line `folio attention` sends.
+            None if launch.is_some() => return None,
             None => None,
             Some(value) => {
                 let session = value.as_object()?;
@@ -196,6 +226,7 @@ impl Message {
                     id: field("id")??,
                     cwd: field("cwd")??,
                     home: field("home")?,
+                    launch,
                 };
                 // **Checked again here**, for `id`'s reason: this end has no cause to trust that
                 // the far end applied the shape, and the id is handed to a vendor's command line.
@@ -209,6 +240,12 @@ impl Message {
                 Some(heard)
             }
         };
+        // Absent from every line but a turn end another client ran, and from a verb of a build
+        // before row 75's review, which is read as it always was.
+        let another_client = match object.get("another_client") {
+            None => false,
+            Some(value) => value.as_bool()?,
+        };
         Some(Self {
             capability: text("cap")?,
             family: text("family")?,
@@ -216,8 +253,141 @@ impl Message {
             id,
             text: words,
             resume,
+            another_client,
         })
     }
+}
+
+/// **A launch as it crosses**: its record's own shape (`bt_persist::AgentLaunchV1`), each key
+/// absent when empty.
+fn launch_value(launch: &bt_persist::AgentLaunchV1) -> serde_json::Value {
+    let mut value = serde_json::Map::new();
+    let words = |words: &[String]| {
+        serde_json::Value::Array(words.iter().cloned().map(serde_json::Value::from).collect())
+    };
+    if !launch.args.is_empty() {
+        value.insert("args".to_owned(), words(&launch.args));
+    }
+    if !launch.dropped.is_empty() {
+        value.insert("dropped".to_owned(), words(&launch.dropped));
+    }
+    if launch.unread {
+        value.insert("unread".to_owned(), true.into());
+    }
+    serde_json::Value::Object(value)
+}
+
+/// **A launch read back** — or `None` for anything [`launch_value`] could not have written: a
+/// key beyond the three, a word that is not a string, a launch
+/// [`crate::agent_resume::launch_is_well_formed`] refuses. Checked here for the resume's own
+/// reason: these words are handed to a vendor's command line.
+fn launch_of_value(value: &serde_json::Value) -> Option<bt_persist::AgentLaunchV1> {
+    let object = value.as_object()?;
+    if !object
+        .keys()
+        .all(|key| matches!(key.as_str(), "args" | "dropped" | "unread"))
+    {
+        return None;
+    }
+    let words = |key: &str| -> Option<Vec<String>> {
+        match object.get(key) {
+            None => Some(Vec::new()),
+            Some(value) => value
+                .as_array()?
+                .iter()
+                .map(|word| word.as_str().map(str::to_owned))
+                .collect(),
+        }
+    };
+    let launch = bt_persist::AgentLaunchV1 {
+        args: words("args")?,
+        dropped: words("dropped")?,
+        unread: match object.get("unread") {
+            None => false,
+            Some(value) => value.as_bool()?,
+        },
+    };
+    crate::agent_resume::launch_is_well_formed(&launch).then_some(launch)
+}
+
+/// A process this one descends from, by its pid and start instant.
+type AncestorProcess = bt_platform::install_flip::Running;
+
+/// **The command line of the agent that ran this hook** (row 74; review N1): this process's
+/// parent's, which is the agent for Claude Code's exec-form hook and for codex's `notify` program
+/// — or, when that parent is the shell codex runs Folio's own `Stop` entry through
+/// ([`crate::attention_codex::hook_shell_runs`], on `platform`) and the entry names this very
+/// program, that shell's parent: **one generation up, and no further**, because on Windows no
+/// shell `exec`s what it runs. Any other parent is answered as it is, and the vendor's table reads
+/// a shell, a wrapper or anybody else's program as a launch not read. `None` when the parent was
+/// not read, or the shell's parent was not.
+///
+/// Pure but for its doors, so a test hands it any line: `parent` is this process's parent as the
+/// door read it, `is_this_program` says whether a path names the running program, and
+/// `parent_line_of` reads the parent of a process this one descends from
+/// ([`bt_platform::process_folder::arguments_of_parent_of`], whose pid and start checks hold the
+/// shell and its parent alike).
+#[must_use]
+pub(crate) fn agent_line(
+    family: &str,
+    parent: Option<bt_platform::process_folder::AncestorLine>,
+    platform: bt_platform::HostPlatform,
+    is_this_program: impl FnOnce(&std::path::Path) -> bool,
+    parent_line_of: impl FnOnce(AncestorProcess) -> Option<Vec<std::ffi::OsString>>,
+) -> Option<Vec<std::ffi::OsString>> {
+    let parent = parent?;
+    let through_our_hook = family == attention_map::CODEX
+        && parent
+            .words
+            .iter()
+            .map(|word| word.to_str().map(str::to_owned))
+            .collect::<Option<Vec<String>>>()
+            .and_then(|words| crate::attention_codex::hook_shell_runs(&words, platform))
+            .is_some_and(|path| is_this_program(path.as_path()));
+    if through_our_hook {
+        parent_line_of(parent.process)
+    } else {
+        Some(parent.words)
+    }
+}
+
+/// **The line with its agent's launch** (row 74): what `parent_line` — the agent's command line
+/// ([`agent_line`]), asked only for a line that names a session — says about how the agent was
+/// started, by `vendor`'s table ([`crate::agent_resume::Vendor::launch_of`]).
+///
+/// Pure but for `parent_line`, so a test hands it any command line, or none. A run that answers and
+/// exits (`claude -p`) names no session, so its line goes without its `resume`. A command line that
+/// was not there, or not in a shape the table names, is an unread launch; so is one whose line would
+/// not fit the endpoint's frame ([`bt_platform::attention_pipe::MAX_MESSAGE_BYTES`]) — the
+/// session still crosses, and the resumed pane says it came back without its launch arguments.
+#[must_use]
+pub(crate) fn with_launch(
+    mut message: Message,
+    vendor: &crate::agent_resume::Vendor,
+    parent_line: impl FnOnce() -> Option<Vec<std::ffi::OsString>>,
+) -> Message {
+    let Some(resume) = message.resume.as_mut() else {
+        return message;
+    };
+    let launch = match parent_line().map(|argv| vendor.launch_of(&argv)) {
+        Some(crate::agent_resume::LaunchRead::Headless) => {
+            message.resume = None;
+            return message;
+        }
+        Some(crate::agent_resume::LaunchRead::Read(launch))
+            if crate::agent_resume::launch_is_well_formed(&launch) =>
+        {
+            launch
+        }
+        Some(_) | None => bt_persist::AgentLaunchV1::unread(),
+    };
+    resume.launch = Some(launch);
+    if message.encode().len() > bt_platform::attention_pipe::MAX_MESSAGE_BYTES
+        && let Some(resume) = message.resume.as_mut()
+    {
+        resume.launch = Some(bt_persist::AgentLaunchV1::unread());
+    }
+    message
 }
 
 /// The most characters a quoted sentence may cross as: [`crate::attention_words::LIMIT`] of
@@ -290,12 +460,16 @@ pub(crate) struct Asks {
     pub ledger: Option<Event>,
     /// The event lane: a turn ended, and this is who said so.
     pub turn_end: Option<crate::attention::Via>,
+    /// **What the arrival says about the pane's turn** (0.4.10 plan row 75): ended, begun, or
+    /// heard from inside one — [`attention_map::turn_step`], read off the same tables as the two
+    /// lanes above. It is what an agent pane's blue dot is read from ([`crate::agent_turns`]).
+    pub turn: Option<attention_map::TurnStep>,
 }
 
 impl Asks {
     #[must_use]
     pub(crate) fn is_empty(&self) -> bool {
-        self.ledger.is_none() && self.turn_end.is_none()
+        self.ledger.is_none() && self.turn_end.is_none() && self.turn.is_none()
     }
 }
 
@@ -319,6 +493,12 @@ pub(crate) fn asks_of(installed: &[crate::attention::MappingRow], message: &Mess
         ledger: attention_map::row(attention_map::ROWS, &message.family, &message.event)
             .map(|row| attention_map::event_for(installed, row, message.id.as_deref())),
         turn_end: attention_map::turn_end(&message.family, &message.event),
+        // A turn end another client ran is no step of the pane's agent (review N1).
+        turn: if message.another_client {
+            None
+        } else {
+            attention_map::turn_step(&message.family, &message.event)
+        },
     }
 }
 
@@ -452,13 +632,16 @@ pub(crate) fn known_events() -> Vec<String> {
 /// **What `folio attention` does, from a process with no window and no console.**
 ///
 /// The whole of it is: read two variables, look one row up, write one line, exit. There is no
-/// retry, no queue, no file and no wait for an answer — the endpoint's pipe is inbound-only and
-/// there is nothing to wait for. A hook that took a second to run would be a hook the user feels,
-/// because the one that matters most fires while Claude Code is holding an approval open.
+/// retry, no queue, no file but the one `diagnostics.log` line of a send that failed, and no wait
+/// for an answer — the endpoint's pipe is inbound-only and there is nothing to wait for. A hook
+/// that took a second to run would be a hook the user feels, because the one that matters most
+/// fires while Claude Code is holding an approval open.
 ///
 /// **Exit codes**, and they are for a person reading a hook log rather than for a program:
-/// `0` said; `1` there was nowhere to say it (not in a Folio pane, or the window has gone);
-/// `2` the call itself was wrong. None of them is ever a reason to block.
+/// `0` said; `1` there was nowhere to say it (not in a Folio pane, or the window has gone — the
+/// second also a line in `diagnostics.log`); `2` the call itself was wrong. None of them is ever a
+/// reason to block. A row whose program runs its hooks in every session, Folio's or not, exits `0`
+/// where no pane is named at all ([`nowhere_exit`]).
 pub(crate) fn run_verb(call: Result<crate::cli::AttentionCall, crate::cli::AttentionFault>) -> i32 {
     let call = match call {
         Ok(call) => call,
@@ -492,7 +675,7 @@ pub(crate) fn run_verb(call: Result<crate::cli::AttentionCall, crate::cli::Atten
         // Not a failure worth a sentence on a console nobody is looking at: it means the caller is
         // not running inside a Folio pane, which is the ordinary state of every other terminal on
         // the machine. The code says so and nothing is printed.
-        return 1;
+        return nowhere_exit(family, event);
     };
     let payload = payload_of(call.payload.as_ref())
         .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok());
@@ -506,9 +689,56 @@ pub(crate) fn run_verb(call: Result<crate::cli::AttentionCall, crate::cli::Atten
         resume.home = variable(vendor.home_variable)
             .filter(|home| crate::agent_resume::folder_is_well_formed(home));
     }
+    // **And how the agent was started, from the agent's own command line** — this process's
+    // parent, or, through codex's hook shell, that shell's parent (row 74, review N1). Read here,
+    // and only for a line that names a session.
+    if let Some(vendor) = crate::agent_resume::vendor(family) {
+        message = with_launch(message, vendor, || {
+            agent_line(
+                family,
+                bt_platform::process_folder::parent_arguments().ok(),
+                bt_platform::host_platform(),
+                |path| {
+                    std::env::current_exe()
+                        .is_ok_and(|exe| crate::explorer_menu::same_path(path, &exe))
+                },
+                |shell| {
+                    bt_platform::process_folder::arguments_of_parent_of(shell)
+                        .ok()
+                        .map(|line| line.words)
+                },
+            )
+        });
+    }
     match bt_platform::attention_pipe::send_line(&endpoint, &message.encode()) {
         Ok(()) => 0,
-        Err(_) => 1,
+        // **In a pane whose window did not take the line**: a failure for every row, codex's
+        // `Stop` too — its "hook failed" is the one witness a person has of it (review N4) — and
+        // said in the data directory's `diagnostics.log`, since this process has no console.
+        Err(error) => {
+            crate::diagnostics::append_note(
+                &crate::diagnostics::log_path(&crate::persist::storage_dir_as_it_stands()),
+                &not_taken_line(&call.event, &error),
+            );
+            1
+        }
+    }
+}
+
+/// The one `diagnostics.log` line of a call whose pane's window did not take its line.
+#[must_use]
+fn not_taken_line(event: &str, error: &std::io::Error) -> String {
+    format!("folio attention: {event}: this pane's window did not take the line ({error})")
+}
+
+/// **The exit when there was nowhere to say it** — no Folio pane named in this process's
+/// environment: `1`, unless the turn-end row says its program would read that as a failed hook
+/// ([`attention_map::Nowhere::Quiet`], codex's `Stop`, which codex runs in every session).
+#[must_use]
+fn nowhere_exit(family: &str, event: &str) -> i32 {
+    match attention_map::turn_end_row(family, event).map(|row| row.nowhere) {
+        Some(attention_map::Nowhere::Quiet) => 0,
+        Some(attention_map::Nowhere::Says) | None => 1,
     }
 }
 
@@ -539,6 +769,15 @@ pub(crate) fn message_for(
     let resume = attention_map::turn_end_row(family, event)
         .filter(|_| crate::agent_resume::vendor(family).is_some())
         .and_then(|row| heard(row.resume, payload));
+    // And whether the turn was another client's (row 75, review N1): by the same check the
+    // session's is, so the two can never come to disagree about which turns are the pane's.
+    let another_client =
+        attention_map::turn_end_row(family, event).is_some_and(|row| match row.resume {
+            attention_map::Resume::Fields { only_client, .. } => {
+                !ran_in_the_interactive_client(only_client, payload)
+            }
+            attention_map::Resume::None => false,
+        });
     Message {
         capability,
         family: family.to_owned(),
@@ -546,6 +785,7 @@ pub(crate) fn message_for(
         id,
         text,
         resume,
+        another_client,
     }
 }
 
@@ -568,17 +808,35 @@ fn heard(
     let payload = payload?;
     // A turn another client ran — `codex exec`, started by an agent in the pane — is not the
     // pane's session (review F1), and neither is one whose payload does not say (re-review RN1).
-    if let Some((field, interactive)) = only_client
-        && payload.get(field).and_then(serde_json::Value::as_str) != Some(interactive)
-    {
+    if !ran_in_the_interactive_client(only_client, Some(payload)) {
         return None;
     }
     let heard = crate::agent_resume::Heard {
         id: payload.get(id)?.as_str()?.to_owned(),
         cwd: payload.get(cwd)?.as_str()?.to_owned(),
         home: None,
+        launch: None,
     };
     heard.is_well_formed().then_some(heard)
+}
+
+/// **Whether a turn was run by the vendor's interactive client**, by a row's declared
+/// `only_client` (`attention_map::Resume::Fields`): always, for a row that declares none; for one
+/// that does, only when the payload's field says the interactive client — a payload that says
+/// another, or does not say, ran elsewhere (review F1, re-review RN1). The one check behind both
+/// what the session is ([`heard`]) and whether the turn is the pane's at all
+/// ([`Message::another_client`], row 75's review N1).
+#[must_use]
+fn ran_in_the_interactive_client(
+    only_client: Option<(&'static str, &'static str)>,
+    payload: Option<&serde_json::Value>,
+) -> bool {
+    only_client.is_none_or(|(field, interactive)| {
+        payload
+            .and_then(|payload| payload.get(field))
+            .and_then(serde_json::Value::as_str)
+            == Some(interactive)
+    })
 }
 
 /// The sentence a row's declared source holds, cleaned to what a toast may carry.
@@ -618,10 +876,18 @@ fn payload_of(source: Option<&crate::cli::AttentionPayload>) -> Option<String> {
     }
 }
 
-/// The most of a hook payload this will read. Claude Code's `Stop` payload is a few hundred bytes;
-/// this is two orders of magnitude of headroom and still a bound, so a handle that turned out to
-/// be a firehose cannot hold the hook open forever.
-const MAX_PAYLOAD_BYTES: u64 = 64 * 1024;
+/// **The most of a hook payload this will read: 16 MiB**, sized by the largest payload a row reads.
+///
+/// Claude Code's `Stop` payload is a few hundred bytes, but codex's `Stop` request carries the
+/// turn's whole final answer, `last_assistant_message`, and a request cut short is no JSON at all:
+/// no words and no session, so a pane whose first long turn followed a `/clear` would go on
+/// resuming the session before it (0.4.10 plan row 69, review N3). codex sets no limit of its own
+/// on the request; what bounds the answer is the model's window, and the largest in its
+/// `models.json` at `rust-v0.166.0` is 872,000 tokens (`max_context_window`) — about 3.5 MB at four
+/// bytes a token. This is more than four times that, so a JSON-escaped answer of a whole window
+/// fits, and still a bound: a handle that turned out to be a firehose costs this process 16 MiB
+/// for the moment it lives, and [`STDIN_BUDGET`] bounds it in time.
+const MAX_PAYLOAD_BYTES: u64 = 16 * 1024 * 1024;
 
 /// **How long this waits for a payload before going without one.**
 ///
@@ -771,6 +1037,7 @@ mod tests {
             id: None,
             text: None,
             resume: None,
+            another_client: false,
         };
         assert_eq!(Message::decode(&message.encode()), Some(message));
     }
@@ -789,6 +1056,7 @@ mod tests {
             id: None,
             text: None,
             resume: None,
+            another_client: false,
         }
         .encode();
         for coordinate in ["tab", "seat", "window", "pane", "leaf", "index"] {
@@ -841,6 +1109,7 @@ mod tests {
             id: None,
             text: Some("收官了。".to_owned()),
             resume: None,
+            another_client: false,
         };
         assert_eq!(Message::decode(&message.encode()), Some(message));
     }
@@ -918,8 +1187,9 @@ mod tests {
             Some("Done.".to_owned()),
             "the marks around the words are not the words"
         );
-        // A family with no declared source quotes nothing, whatever is in its payload — the pin on
-        // "declared, never inferred". `stop` is codex's other turn-end row and it is one of these.
+        // A row quotes only from the field it declares — the pin on "declared, never inferred".
+        // `stop` is codex's other turn-end row, and its hook request spells the field
+        // `last_assistant_message`: the notify payload's `last-assistant-message` is not it.
         assert_eq!(
             message_for("c".to_owned(), CODEX, "stop", Some(&codex)).text,
             None
@@ -962,6 +1232,7 @@ mod tests {
             id: None,
             text: None,
             resume: None,
+            another_client: false,
         };
         let stop = |payload: Option<&serde_json::Value>| {
             message_for("c".to_owned(), CLAUDE_CODE, "Stop", payload)
@@ -1022,12 +1293,14 @@ mod tests {
             id: None,
             text: None,
             resume: None,
+            another_client: false,
         };
         assert_eq!(
             asks_of(&claude, &message("PermissionRequest")),
             Asks {
                 ledger: Some(Event::StrongWait(WaitSlot::Level(WaitKind::Permission))),
                 turn_end: None,
+                turn: None,
             }
         );
         // **`Stop` reaches both lanes, and this is the assertion that keeps it doing so.** A lookup
@@ -1044,12 +1317,14 @@ mod tests {
             id: None,
             text: None,
             resume: None,
+            another_client: false,
         };
         assert_eq!(
             asks_of(&installed(PI), &settled),
             Asks {
                 ledger: None,
                 turn_end: Some(Via::AgentSettled),
+                turn: Some(attention_map::TurnStep::Ended),
             }
         );
         // And a name from nowhere asks nothing at all.
@@ -1063,6 +1338,7 @@ mod tests {
                     id: None,
                     text: None,
                     resume: None,
+                    another_client: false,
                 }
             )
             .is_empty()
@@ -1167,6 +1443,7 @@ mod tests {
                 id: None,
                 text: None,
                 resume: None,
+                another_client: false,
             }
             .encode();
             send_line(endpoint.name(), &line).expect("the endpoint took the line");
@@ -1541,7 +1818,9 @@ mod tests {
                 id: SESSION.to_owned(),
                 cwd: r"C:\work\resume".to_owned(),
                 home: Some(r"C:\work\config".to_owned()),
+                launch: None,
             }),
+            another_client: false,
         };
         assert_eq!(Message::decode(&message.encode()), Some(message));
     }
@@ -1590,11 +1869,11 @@ mod tests {
         );
     }
 
-    /// **Which rows name a session** (row 195): Claude Code's `Stop` and codex's
-    /// `agent-turn-complete`, from the fields each payload names it by — and no other row, whatever
-    /// its payload holds.
+    /// **Which rows name a session** (row 195): Claude Code's `Stop`, codex's
+    /// `agent-turn-complete` and, since 0.4.10 (plan row 69), codex's `Stop` hook, from the fields
+    /// each payload names it by — and no other row, whatever its payload holds.
     #[test]
-    fn only_the_two_declared_turn_ends_carry_a_session() {
+    fn only_the_three_declared_turn_ends_carry_a_session() {
         let claude = serde_json::json!({ "session_id": SESSION, "cwd": r"C:\work" });
         assert_eq!(
             message_for("c".to_owned(), CLAUDE_CODE, "Stop", Some(&claude))
@@ -1645,7 +1924,6 @@ mod tests {
             (CLAUDE_CODE, "StopFailure"),
             (CLAUDE_CODE, "SessionEnd"),
             (CLAUDE_CODE, "Notification"),
-            (CODEX, "stop"),
             (PI, "agent_settled"),
         ] {
             assert_eq!(
@@ -1654,5 +1932,508 @@ mod tests {
                 "{family}:{event}"
             );
         }
+    }
+
+    /// A Claude Code turn's line that names [`SESSION`], before the hook has read its launch.
+    fn session_line() -> Message {
+        Message {
+            capability: "0123456789abcdef0123456789abcdef".to_owned(),
+            family: CLAUDE_CODE.to_owned(),
+            event: "Stop".to_owned(),
+            id: None,
+            text: None,
+            resume: Some(crate::agent_resume::Heard {
+                id: SESSION.to_owned(),
+                cwd: r"C:\work\resume".to_owned(),
+                home: None,
+                launch: None,
+            }),
+            another_client: false,
+        }
+    }
+
+    /// A command line of `words`.
+    fn hook_parent_line(words: &[&str]) -> Vec<std::ffi::OsString> {
+        words.iter().map(std::ffi::OsString::from).collect()
+    }
+
+    /// The launch a sent line carries.
+    fn launch_sent(message: &Message) -> Option<bt_persist::AgentLaunchV1> {
+        message
+            .resume
+            .as_ref()
+            .and_then(|heard| heard.launch.clone())
+    }
+
+    /// RED (row 74, review N1) — **through codex's hook shell the agent is read one generation
+    /// up, and through no other parent**: on Windows codex runs Folio's `Stop` entry as
+    /// `pwsh -NoProfile -Command "& '<folio.exe>' attention codex:stop --json -"`, so the hook's
+    /// parent is that shell; when its line is exactly that and names this program, the shell's
+    /// parent — the agent — is asked for, and its words are the launch. Claude Code's parent, a
+    /// codex parent, a person's own PowerShell, and the hook line of another program are answered
+    /// as they are, the shell's parent never asked; and a shell whose parent cannot be read is no
+    /// line at all.
+    ///
+    /// MUTATION (plant `plant-74-hook-shell-not-crossed.py`): `agent_line` answers the parent
+    /// always — the hook shell's own words come back, and the Codex launch through it is unread.
+    #[test]
+    fn through_codexs_hook_shell_the_agent_is_read_one_generation_up() {
+        use bt_platform::HostPlatform;
+        use bt_platform::install_flip::Running;
+        use bt_platform::process_folder::AncestorLine;
+        let folio = r"C:\Program Files\Folio\folio.exe";
+        let shell = Running {
+            pid: 40,
+            started: 2,
+        };
+        let command = format!("& '{folio}' attention codex:stop --json -");
+        let hook = AncestorLine {
+            process: shell,
+            words: hook_parent_line(&[
+                r"C:\Program Files\PowerShell\7\pwsh.exe",
+                "-NoProfile",
+                "-Command",
+                command.as_str(),
+            ]),
+        };
+        let agent = hook_parent_line(&["codex", "--yolo", "-m", "o3"]);
+        let through = agent_line(
+            CODEX,
+            Some(hook.clone()),
+            HostPlatform::Windows,
+            |path| path == std::path::Path::new(folio),
+            |asked| {
+                assert_eq!(asked, shell, "the shell's own parent is asked for");
+                Some(agent.clone())
+            },
+        );
+        assert_eq!(through.as_ref(), Some(&agent));
+        let codex = &crate::agent_resume::VENDORS[1];
+        let message = with_launch(
+            Message {
+                family: CODEX.to_owned(),
+                ..session_line()
+            },
+            codex,
+            || through,
+        );
+        assert_eq!(
+            launch_sent(&message),
+            Some(bt_persist::AgentLaunchV1 {
+                args: ["--yolo", "-m", "o3"].map(str::to_owned).to_vec(),
+                dropped: Vec::new(),
+                unread: false,
+            }),
+            "the agent's launch, read through its hook shell"
+        );
+        // Every other parent is answered as it is, and its own parent is never asked for.
+        let never = |_: Running| -> Option<Vec<std::ffi::OsString>> {
+            panic!("only codex's hook shell is stepped through")
+        };
+        let own_powershell = AncestorLine {
+            process: shell,
+            words: hook_parent_line(&[r"C:\Program Files\PowerShell\7\pwsh.exe", "-NoLogo"]),
+        };
+        for (family, parent, ours) in [
+            (CLAUDE_CODE, hook.clone(), true),
+            (CODEX, own_powershell, true),
+            (CODEX, hook.clone(), false),
+            (
+                CODEX,
+                AncestorLine {
+                    process: shell,
+                    words: agent,
+                },
+                true,
+            ),
+        ] {
+            assert_eq!(
+                agent_line(
+                    family,
+                    Some(parent.clone()),
+                    HostPlatform::Windows,
+                    |_| ours,
+                    never
+                ),
+                Some(parent.words.clone()),
+                "{family}: {parent:?}"
+            );
+        }
+        assert_eq!(
+            agent_line(CODEX, None, HostPlatform::Windows, |_| true, never),
+            None,
+            "no parent read, no line"
+        );
+        assert_eq!(
+            agent_line(CODEX, Some(hook), HostPlatform::Windows, |_| true, |_| None),
+            None,
+            "a hook shell whose parent was not read is no line, never the shell's own"
+        );
+    }
+
+    /// **A session's launch crosses the wire and comes back the same** (row 74): the words, the
+    /// dropped names, and an unread one, as the line's own `launch` key beside `resume`.
+    #[test]
+    fn a_turns_launch_survives_the_wire() {
+        let claude = &crate::agent_resume::VENDORS[0];
+        let message = with_launch(session_line(), claude, || {
+            Some(hook_parent_line(&[
+                "claude",
+                "--model",
+                "opus",
+                "--add-dir",
+                r"D:\a b",
+                "-w",
+                "x",
+            ]))
+        });
+        assert_eq!(
+            launch_sent(&message),
+            Some(bt_persist::AgentLaunchV1 {
+                args: ["--model", "opus", "--add-dir", r"D:\a b"]
+                    .map(str::to_owned)
+                    .to_vec(),
+                dropped: vec!["-w".to_owned()],
+                unread: false,
+            })
+        );
+        let line = message.encode();
+        let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert!(value.get("launch").is_some(), "its own key: {line}");
+        assert_eq!(
+            value["resume"].as_object().map(|session| session.len()),
+            Some(2),
+            "and `resume` keeps the keys an older window reads: {line}"
+        );
+        assert_eq!(Message::decode(&line), Some(message));
+        let unread = with_launch(session_line(), claude, || None);
+        assert_eq!(
+            launch_sent(&unread),
+            Some(bt_persist::AgentLaunchV1::unread()),
+            "a command line the hook could not read"
+        );
+        assert_eq!(Message::decode(&unread.encode()), Some(unread));
+        let unshaped = with_launch(session_line(), claude, || {
+            Some(hook_parent_line(&["bash", "-c", "claude --model opus"]))
+        });
+        assert_eq!(
+            launch_sent(&unshaped),
+            Some(bt_persist::AgentLaunchV1::unread()),
+            "a shape the table does not name"
+        );
+        let unsessioned = Message {
+            resume: None,
+            ..session_line()
+        };
+        assert_eq!(
+            with_launch(unsessioned.clone(), claude, || panic!(
+                "a line that names no session asks for no launch"
+            )),
+            unsessioned
+        );
+    }
+
+    /// RED (row 74, T7) — **a launch on the wire is bounded and checked at both ends**: a word
+    /// with a control character in it, or a launch the frame could not carry, is sent as unread
+    /// (the session still crosses); a `launch` this build could not have written — a fourth key,
+    /// a word that is not a string, a name that is not a flag, an unread one with words — drops
+    /// the line, and so does a `launch` with no session. The line's top-level keys stay open, which
+    /// is what lets a window older than this build read the session past a `launch` it does not
+    /// know.
+    ///
+    /// MUTATION (plant `plant-74-wire-unchecked.py`): `launch_of_value` takes any object, and the
+    /// window records words no build could have sent.
+    #[test]
+    fn launch_on_the_wire_is_bounded_and_checked() {
+        let claude = &crate::agent_resume::VENDORS[0];
+        let controlled = with_launch(session_line(), claude, || {
+            Some(hook_parent_line(&[
+                "claude",
+                "--append-system-prompt",
+                "a\u{1b}[2Jb",
+            ]))
+        });
+        assert_eq!(
+            launch_sent(&controlled),
+            Some(bt_persist::AgentLaunchV1::unread())
+        );
+        // Words the record could hold that the frame could not carry with the line around them,
+        // and words not even the record could hold.
+        let frame = bt_platform::attention_pipe::MAX_MESSAGE_BYTES;
+        let (filling, half) = ("x".repeat(frame - 50), "x".repeat(frame / 2));
+        for words in [
+            vec!["claude", "--append-system-prompt", filling.as_str()],
+            vec![
+                "claude",
+                "--append-system-prompt",
+                half.as_str(),
+                "--model",
+                half.as_str(),
+            ],
+        ] {
+            let oversize = with_launch(session_line(), claude, || Some(hook_parent_line(&words)));
+            assert_eq!(
+                launch_sent(&oversize),
+                Some(bt_persist::AgentLaunchV1::unread()),
+                "a launch the frame could not carry"
+            );
+            assert_eq!(
+                oversize.resume.as_ref().map(|heard| heard.id.as_str()),
+                Some(SESSION),
+                "and the session still crosses"
+            );
+            assert!(oversize.encode().len() <= frame);
+        }
+        let line = |launch: &str| {
+            format!(
+                r#"{{"v":1,"cap":"c","family":"claude-code","event":"Stop","resume":{{"id":"{SESSION}","cwd":"C:\\work"}},"launch":{launch}}}"#
+            )
+        };
+        for bad in [
+            r#"{"args":["--model","opus"],"grant":"all"}"#,
+            r#"{"args":["--model",3]}"#,
+            r#"{"args":"--model opus"}"#,
+            r#"{"dropped":["worktree"]}"#,
+            r#"{"dropped":[""]}"#,
+            r#"{"unread":true,"args":["--model","opus"]}"#,
+            r#"{"unread":"yes"}"#,
+            r#"{"args":["a\u001bb"]}"#,
+            r#"["--model","opus"]"#,
+        ] {
+            assert_eq!(Message::decode(&line(bad)), None, "accepted: {bad}");
+        }
+        assert!(
+            Message::decode(&line(r#"{"args":["--model","opus"],"dropped":["-w"]}"#)).is_some(),
+            "the well-formed one, for contrast"
+        );
+        assert_eq!(
+            Message::decode(
+                r#"{"v":1,"cap":"c","family":"claude-code","event":"Stop","launch":{"args":["--model","opus"]}}"#
+            ),
+            None,
+            "a launch with no session"
+        );
+        assert!(
+            Message::decode(&format!(
+                r#"{{"v":1,"cap":"c","family":"claude-code","event":"Stop","resume":{{"id":"{SESSION}","cwd":"C:\\work"}},"later":{{"any":1}}}}"#
+            ))
+            .is_some_and(|message| message.resume.is_some()),
+            "a top-level key this build does not know is read past"
+        );
+    }
+
+    /// RED (row 75, review N1) — **a turn end another client ran is no step of the pane's
+    /// agent**: codex's `notify` from a `codex exec` an agent in the pane started says so across
+    /// the wire, by the one check that refuses its session, and the window reads no turn from it;
+    /// the interactive client's crosses as a turn's end. A row that declares no client never says
+    /// another ran.
+    ///
+    /// MUTATION: read `turn_step` in `asks_of` whatever `another_client` says, and the
+    /// `codex-exec` client's turn is a step: the second assertion goes red.
+    #[test]
+    fn a_turn_end_another_client_ran_crosses_as_no_step() {
+        let ran_by = |client: Option<&str>| {
+            let mut payload = serde_json::json!({ "thread-id": SESSION, "cwd": "/srv/work" });
+            if let Some(client) = client {
+                payload["client"] = serde_json::json!(client);
+            }
+            message_for("c".to_owned(), CODEX, "agent-turn-complete", Some(&payload))
+        };
+        let exec = ran_by(Some("codex-exec"));
+        assert!(exec.another_client, "the payload names another client");
+        assert_eq!(
+            asks_of(&[], &exec).turn,
+            None,
+            "no step of the pane's agent"
+        );
+        assert_eq!(
+            Message::decode(&exec.encode()),
+            Some(exec.clone()),
+            "and it crosses as it was sent"
+        );
+        assert!(
+            ran_by(None).another_client,
+            "nor a payload that names no client"
+        );
+        let interactive = ran_by(Some("codex-tui"));
+        assert!(!interactive.another_client);
+        assert_eq!(
+            asks_of(&[], &interactive).turn,
+            Some(attention_map::TurnStep::Ended)
+        );
+        for (family, event) in [
+            (CLAUDE_CODE, "Stop"),
+            (CODEX, "stop"),
+            (PI, "agent_settled"),
+        ] {
+            let message = message_for("c".to_owned(), family, event, Some(&serde_json::json!({})));
+            assert!(!message.another_client, "{family}:{event}");
+            assert_eq!(
+                asks_of(&[], &message).turn,
+                Some(attention_map::TurnStep::Ended),
+                "{family}:{event}"
+            );
+        }
+        assert_eq!(
+            Message::decode(
+                r#"{"v":1,"cap":"c","family":"codex","event":"stop","another_client":"yes"}"#
+            ),
+            None,
+            "a flag that is not a boolean drops the line"
+        );
+    }
+
+    /// **codex's `Stop` hook request reaches the wire with its words and its session** (plan row
+    /// 69), on the fields `stop.command.input.schema.json` names at `rust-v0.166.0`. The request
+    /// names no client, so no client is asked for (R14); without a `session_id` it names no
+    /// session and the turn's end is still sent.
+    #[test]
+    fn the_stop_payload_reaches_the_wire_with_its_session() {
+        let request = serde_json::json!({
+            "session_id": SESSION,
+            "turn_id": "turn-1",
+            "transcript_path": null,
+            "cwd": "/srv/work",
+            "hook_event_name": "Stop",
+            "model": "gpt-5.5",
+            "permission_mode": "default",
+            "stop_hook_active": false,
+            "last_assistant_message": "**Done.** The rest is detail.",
+        });
+        let message = message_for("c".to_owned(), CODEX, "stop", Some(&request));
+        assert_eq!(message.text, Some("Done.".to_owned()));
+        assert_eq!(
+            message.resume.map(|heard| (heard.id, heard.cwd)),
+            Some((SESSION.to_owned(), "/srv/work".to_owned()))
+        );
+        // A continued turn (`stop_hook_active`) ends again later, and each end is a turn's end.
+        let mut continued = request.clone();
+        continued["stop_hook_active"] = serde_json::json!(true);
+        assert!(
+            message_for("c".to_owned(), CODEX, "stop", Some(&continued))
+                .resume
+                .is_some()
+        );
+        let mut unnamed = request.clone();
+        unnamed
+            .as_object_mut()
+            .expect("an object")
+            .remove("session_id");
+        let message = message_for("c".to_owned(), CODEX, "stop", Some(&unnamed));
+        assert_eq!(message.resume, None);
+        assert_eq!(message.text, Some("Done.".to_owned()));
+        // The notify payload's spellings are not this row's.
+        let notify = serde_json::json!({
+            "thread-id": SESSION,
+            "cwd": "/srv/work",
+            "client": "codex-tui",
+            "last-assistant-message": "Done.",
+        });
+        let message = message_for("c".to_owned(), CODEX, "stop", Some(&notify));
+        assert_eq!((message.text, message.resume), (None, None));
+    }
+
+    /// **A codex hook outside a Folio pane exits 0** (plan row 69): codex runs its hooks in every
+    /// session and shows a non-zero exit as a failed hook, so its `Stop` row is the one that keeps
+    /// quiet where no pane is named. Every other row still says so with a 1 — and **inside a pane
+    /// whose window did not take the line, every row exits 1, codex's too, and says it in
+    /// `diagnostics.log`** (review N4): that "hook failed" is the one witness a person has.
+    ///
+    /// RED GATE: `plant-69-exit-one-outside.py` has the verb exit a bare 1 when no pane is named,
+    /// and `plant-69-send-failure-quiet.py` has a failed send exit as if no pane were named; the
+    /// reading of `run_verb` below finds each.
+    #[test]
+    fn a_codex_hook_outside_a_folio_pane_exits_zero() {
+        assert_eq!(nowhere_exit(CODEX, "stop"), 0);
+        for (family, event) in [
+            (CLAUDE_CODE, "Stop"),
+            (CLAUDE_CODE, "StopFailure"),
+            (CLAUDE_CODE, "PermissionRequest"),
+            (CODEX, "agent-turn-complete"),
+            (CODEX, "permission-request"),
+            (PI, "agent_settled"),
+        ] {
+            assert_eq!(nowhere_exit(family, event), 1, "{family}:{event}");
+        }
+        assert_eq!(
+            attention_map::TURN_END
+                .iter()
+                .filter(|row| row.nowhere == attention_map::Nowhere::Quiet)
+                .map(|row| (row.family, row.event))
+                .collect::<Vec<_>>(),
+            [(CODEX, "stop")],
+            "a second quiet row is a decision, not a refactor"
+        );
+        // And the verb asks it where no pane is named, and there alone; a send the window did not
+        // take is a 1 with its line in the log. `run_verb` reads this process's environment, so it
+        // is read here.
+        let verb = crate::test_support::squeezed(crate::test_support::item_body(
+            &bt_source::ItemQuery::function("run_verb").in_module("crate::attention_wire"),
+        ));
+        assert!(verb.contains("else{returnnowhere_exit(family,event);};"));
+        assert_eq!(verb.matches("nowhere_exit(").count(), 1, "{verb}");
+        assert!(
+            verb.contains(
+                "Err(error)=>{crate::diagnostics::append_note(&crate::diagnostics::log_path(\
+                 &crate::persist::storage_dir_as_it_stands()),&not_taken_line(&call.event,&error),\
+                 );1}"
+            ),
+            "{verb}"
+        );
+        assert!(!verb.contains("return1;"));
+        let line = not_taken_line(
+            "codex:stop",
+            &std::io::Error::new(std::io::ErrorKind::TimedOut, "the endpoint stayed busy"),
+        );
+        assert_eq!(
+            line,
+            "folio attention: codex:stop: this pane's window did not take the line (the endpoint \
+             stayed busy)"
+        );
+    }
+
+    /// RED (plan row 69, review N3) — **a codex `Stop` request whose final answer is a megabyte
+    /// still names its session**, read whole off a real standard input: the bound is sized by the
+    /// largest payload a row reads. At 64 KiB the request was cut, was no JSON, and the line went
+    /// out with neither words nor session.
+    ///
+    /// MUTATION: `plant-69-payload-bound-small.py` puts the bound back at 64 KiB and the payload is
+    /// cut short.
+    #[test]
+    fn a_stop_request_carrying_a_megabyte_answer_still_names_its_session() {
+        let answer = format!("**Done.** {}", "答案 and code `x` ".repeat(1 << 16));
+        assert!(answer.len() > 1 << 20, "a megabyte of answer");
+        let request = serde_json::json!({
+            "session_id": SESSION,
+            "turn_id": "turn-1",
+            "transcript_path": null,
+            "cwd": "/srv/work",
+            "hook_event_name": "Stop",
+            "model": "gpt-5.5",
+            "permission_mode": "default",
+            "stop_hook_active": false,
+            "last_assistant_message": answer,
+        })
+        .to_string();
+        if !crate::test_support::alone_in_a_process(
+            "attention_wire::tests::a_stop_request_carrying_a_megabyte_answer_still_names_its_session",
+            request.as_bytes(),
+        ) {
+            return;
+        }
+        let payload = payload_on_stdin(
+            &crate::lane::Executor::thread_door(bt_platform::ThreadPriority::Normal),
+            crate::lane::PATIENCE,
+            |line| panic!("the reader started and returned, so nothing is said: {line}"),
+        )
+        .expect("the whole request");
+        assert_eq!(payload.len(), request.len());
+        let payload = serde_json::from_str::<serde_json::Value>(&payload).expect("JSON");
+        let message = message_for("c".to_owned(), CODEX, "stop", Some(&payload));
+        assert_eq!(
+            message.resume.map(|heard| (heard.id, heard.cwd)),
+            Some((SESSION.to_owned(), "/srv/work".to_owned()))
+        );
+        assert_eq!(message.text, Some("Done.".to_owned()));
     }
 }
