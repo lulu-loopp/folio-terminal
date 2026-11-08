@@ -423,7 +423,7 @@ enum Advancer {
 }
 
 impl Advancer {
-    const ALL: [Self; 7] = [
+    const SEVEN: [Self; 7] = [
         Self::MathTools,
         Self::Tooltip,
         Self::KeyHint,
@@ -434,7 +434,7 @@ impl Advancer {
     ];
 
     /// One turn's run of this advancer, as `Runtime::turn` runs it.
-    fn advance(self, runtime: &mut Runtime<'_, Headless>, now: Instant) {
+    fn run_alone(self, runtime: &mut Runtime<'_, Headless>, now: Instant) {
         match self {
             Self::MathTools => runtime.advance_math_tools_if_due(now),
             Self::Tooltip => runtime.advance_tooltip_if_due(now),
@@ -474,7 +474,7 @@ impl Advancer {
             }
             // The command modifier held for its 800ms, its card promoted at `at` and fading in.
             Self::KeyHint => {
-                let held = command();
+                let held = the_hosts_command_modifier();
                 let pressed = at
                     .checked_sub(crate::keyhint::KEY_HINT_DELAY)
                     .expect("the process is older than a hold");
@@ -509,7 +509,7 @@ impl Advancer {
                     PeekClock::Settling(at),
                 ));
                 runtime.window.frame_clock.open(None, at);
-                Self::FilePeek.advance(runtime, at);
+                Self::FilePeek.run_alone(runtime, at);
                 assert!(
                     runtime
                         .window
@@ -532,7 +532,7 @@ impl Advancer {
                     at,
                 );
                 runtime.window.frame_clock.open(None, at);
-                Self::Float.advance(runtime, at);
+                Self::Float.run_alone(runtime, at);
             }
         }
     }
@@ -567,7 +567,7 @@ fn a_files_tenant() -> crate::float::FloatTenant {
 
 /// This host's command modifier: Control, or Command on a Mac — `input::is_command_chord`'s
 /// answer, not a second decision.
-fn command() -> winit::keyboard::ModifiersState {
+fn the_hosts_command_modifier() -> winit::keyboard::ModifiersState {
     use winit::keyboard::ModifiersState;
     [ModifiersState::CONTROL, ModifiersState::SUPER]
         .into_iter()
@@ -587,7 +587,7 @@ fn command() -> winit::keyboard::ModifiersState {
 /// refused turn owes nothing.
 #[test]
 fn an_advancer_with_work_on_a_refused_turn_still_owes_its_frame() {
-    for advancer in Advancer::ALL {
+    for advancer in Advancer::SEVEN {
         let mut folio = HeadlessFolio::with_tabs(
             "wake-fold-advancer-work",
             vec![tab_holding(leaf_saying("工作 work\r\n"))],
@@ -611,7 +611,7 @@ fn an_advancer_with_work_on_a_refused_turn_still_owes_its_frame() {
             "{advancer:?}: the fixture's own precondition: the gate refuses this turn"
         );
         runtime.window.frame_clock.take_skipped();
-        advancer.advance(&mut runtime, refused);
+        advancer.run_alone(&mut runtime, refused);
         assert!(
             runtime.window.frame_clock.owes_a_frame(),
             "{advancer:?}: an advancer with work on a refused turn owes its frame"
@@ -629,7 +629,7 @@ fn an_advancer_with_work_on_a_refused_turn_still_owes_its_frame() {
             runtime.window.frame_clock.admits(),
             "{advancer:?}: the fixture's own precondition: the gate admits the booked turn"
         );
-        advancer.advance(&mut runtime, admitted);
+        advancer.run_alone(&mut runtime, admitted);
         assert!(
             !runtime.window.frame_clock.owes_a_frame(),
             "{advancer:?}: the admitted turn is not refused again"
