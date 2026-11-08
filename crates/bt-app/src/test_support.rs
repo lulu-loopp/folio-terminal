@@ -330,6 +330,7 @@ pub(crate) fn saved_tab(profile_id: &str, cwd: &str, name: Option<&str>, pinned:
             manual_name: name.map(str::to_owned),
             card_skip: 0,
             last_command: String::new(),
+            agent: None,
         })),
         pinned,
         focused_leaf: "leaf-0".to_owned(),
@@ -393,6 +394,7 @@ fn shells_tab(cwd: &Path, shells: usize) -> TabV1 {
             manual_name: None,
             card_skip: 0,
             last_command: String::new(),
+            agent: None,
         })))
     };
     let root = if shells == 2 {
@@ -509,6 +511,7 @@ pub(crate) fn saved_row_of_two(left: &str, right: &str) -> TabV1 {
             manual_name: None,
             card_skip: 0,
             last_command: String::new(),
+            agent: None,
         })))
     };
     TabV1 {
@@ -540,6 +543,7 @@ pub(crate) fn saved_files_and_terminal(files: bt_persist::FilesLeafV1) -> TabV1 
                     manual_name: None,
                     card_skip: 0,
                     last_command: String::new(),
+                    agent: None,
                 }))),
             ],
         }),
@@ -690,6 +694,25 @@ pub(crate) fn facts_with(
         // ledger, and a place in the queue outranks every one of its rules.
         // The tests that are about the queue say so ([`waiting`]).
         awaiting: false,
+        // A shell's rule: no agent's turns are heard here. The tests about an agent pane's turns
+        // say so ([`agent_turn_facts`]).
+        turn: None,
+    }
+}
+
+/// **An agent pane read by its turns** (0.4.10 plan row 75): `ended_at` is the output revision
+/// its latest turn ended at, `running` whether a turn is under way, and `output` / `seen` the
+/// bytes it drew and how much of them was painted.
+pub(crate) fn agent_turn_facts(
+    ended_at: Option<u64>,
+    running: bool,
+    output_revision: u64,
+    last_seen_revision: u64,
+    tab_is_active: bool,
+) -> SessionFacts {
+    SessionFacts {
+        turn: Some(crate::agent_turns::AgentTurn { ended_at, running }),
+        ..facts_with(quiet(), output_revision, last_seen_revision, tab_is_active)
     }
 }
 
@@ -1434,6 +1457,7 @@ pub(crate) fn solved_lopsided_split(
                 manual_name: None,
                 card_skip: 0,
                 last_command: String::new(),
+                agent: None,
             }),
         ))
     };
@@ -2675,6 +2699,43 @@ pub(crate) fn a_quiet_shell(
         .map(bt_pty::test_shell::TestShell::into_session)
 }
 
+/// **A pane whose real shell is reaped when the pane is dropped** (plan row 188), on a passing
+/// run and on an unwinding one alike. A pane's own drop kills its shell and waits for nothing
+/// (`PtySession`'s `Drop`, D-81), so a shell's [`bt_pty::test_shell::Hygiene`] dropped straight
+/// after it could still find the dying child holding its files (a Windows PowerShell's module
+/// analysis cache was measured left behind). This waits for the seated shell to end before the
+/// pane goes: within `PtySession::shutdown`'s budgets for the reap and the reader, while the
+/// pseudoconsole's close (`ClosePseudoConsole`) has none — the same wait `TestShell`'s `Drop`
+/// makes. Declare it after the channel or binding that holds the shell's `Hygiene`, so it is
+/// dropped first.
+pub(crate) struct ReapedPane(pub(crate) TerminalPane);
+
+impl std::ops::Deref for ReapedPane {
+    type Target = TerminalPane;
+
+    fn deref(&self) -> &TerminalPane {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for ReapedPane {
+    fn deref_mut(&mut self) -> &mut TerminalPane {
+        &mut self.0
+    }
+}
+
+impl Drop for ReapedPane {
+    fn drop(&mut self) {
+        if let Some(pty) = self.0.session.life.pty_mut() {
+            // A drop cannot answer an error, so the reap's result is not read: the shell's
+            // folder is what the reap is for. A reader thread that panicked is still re-raised
+            // here (`shutdown` joins it), which aborts the test process if this drop runs while
+            // unwinding — the same exposure `TestShell`'s `Drop` has.
+            let _ = pty.shutdown();
+        }
+    }
+}
+
 /// One shell with a word in it that no other shell in the test has.
 ///
 /// `pty: None` — this is the same shell-less mode `BT_PROBE_INPUT` uses, so
@@ -2757,6 +2818,10 @@ pub(crate) fn leaf_saying(text: &str) -> TerminalPane {
             paste_hold: None,
             // A fixture is not a restore, so nothing is owed to its prompt.
             pending_typing: None,
+            agent: crate::agent_resume::AgentAccount::default(),
+            // Nor are its turns any agent's: a fixture is read by the shell's rule until a test
+            // delivers it a hook.
+            turn_account: crate::agent_turns::TurnAccount::default(),
         },
         view: TermView {
             projection,
@@ -3895,7 +3960,7 @@ pub(crate) fn shown_and_opened(
     seat: u64,
     key: &str,
     serial: u64,
-    frames: Result<animation::Animation, animation::AnimationRefusal>,
+    frames: Result<animation::Animation, animation::NotOpened>,
 ) {
     let path = PathBuf::from(key);
     assert_eq!(
@@ -3925,7 +3990,7 @@ pub(crate) fn answer_awaited(
     cache: &mut AnimationCache,
     key: &str,
     serial: u64,
-    frames: Result<animation::Animation, animation::AnimationRefusal>,
+    frames: Result<animation::Animation, animation::NotOpened>,
 ) -> bool {
     let asked = cache
         .awaited(key)

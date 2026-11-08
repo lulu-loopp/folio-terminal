@@ -710,8 +710,10 @@ jobs:
       # that does not end is red, timed from its start, with its name and its process tree gone; slow
       # ones that end leave the tracked set and are green; a binary that ends mid-test leaves no
       # phantom hang for the next one, whichever of cargo's two pipes is read first (row 171);
+      # a test's child process that starts a report of its own mid-binary suspends the named tests
+      # without a false "ended with their binary" and a hang behind it is still named (row 203);
       # silence is red with no name; words and exit codes pass through; and the shapes in which
-      # libtest prints no names are refused. No cargo; about 52 s on the 9950X.
+      # libtest prints no names are refused. No cargo; about 78 s on the 9950X (2026-11-03).
       - name: the suite watchdog can actually fail
         shell: pwsh
         run: ./scripts/ci/check-test-watchdog.ps1

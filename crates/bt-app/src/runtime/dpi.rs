@@ -643,6 +643,10 @@ impl<B: Backend> Runtime<'_, B> {
         // frame it is drawn — and this one is not: it is physical pixels, kept
         // from the display the list was last scrolled on.
         self.restate_panel_scroll(measured_at, scale_factor);
+        // **And the program's icon, at the scale the window is now drawn at** (0.4.10 plan row
+        // 71): the window was born wearing it at the old one, and the snap layouts, Alt+Tab and
+        // Task View draw it at this display's size.
+        self.window.window.wear_the_app_icon(scale_factor);
         // Every shell in every tab: a DPI change is a fact about the display, so
         // no screen anywhere in the window is exempt from it.
         //

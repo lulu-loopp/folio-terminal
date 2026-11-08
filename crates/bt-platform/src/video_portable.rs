@@ -402,9 +402,25 @@ pub mod engine {
         Unsupported,
         /// Something else went wrong, and it says what.
         Other(&'static str),
+        /// The engine thread did not build its player inside [`OPEN_BUDGET`]
+        /// and has said nothing — the Windows arm's variant, so the open
+        /// budget's run-out is its own cause on both arms rather than one more
+        /// `Other` (plan row 152).
+        Unresponsive,
         /// **The engine's own refusal**: the source said neither what it is
         /// nor why it could not be opened within [`LOAD_BUDGET`] of the open.
         NotLoaded,
+    }
+
+    impl EngineError {
+        /// **Whether this says the player did not come up on this machine,
+        /// and nothing about the file** — the Windows arm's question (plan
+        /// row 189). Here that is [`Self::Unresponsive`] alone: an engine not
+        /// built within [`OPEN_BUDGET`], or whose thread could not be started.
+        #[must_use]
+        pub fn is_about_the_machine(self) -> bool {
+            matches!(self, Self::Unresponsive)
+        }
     }
 
     /// What the engine is doing right now. See the module note.
@@ -508,7 +524,7 @@ pub mod engine {
     #[cfg(not(target_os = "macos"))]
     mod no_player {
         use std::path::Path;
-        use std::time::Duration;
+        use std::time::{Duration, Instant};
 
         use super::{EngineError, EngineState, Frame, FrameCost};
 
@@ -535,6 +551,19 @@ pub mod engine {
             /// Unreachable.
             #[must_use]
             pub fn state(&self) -> EngineState {
+                match self._never {}
+            }
+
+            /// Unreachable.
+            #[must_use]
+            pub fn state_at(&self, now: impl FnOnce() -> Instant) -> EngineState {
+                let _ = now;
+                match self._never {}
+            }
+
+            /// Unreachable.
+            #[must_use]
+            pub fn open_runs_out_at(&self) -> Option<Instant> {
                 match self._never {}
             }
 

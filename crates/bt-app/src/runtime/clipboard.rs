@@ -312,6 +312,16 @@ impl<B: Backend> Runtime<'_, B> {
         self.app.settings_store.store(settings);
     }
 
+    /// Store the reader's answer about resuming agents after a restart (0.4.9 plan row 195).
+    ///
+    /// [`Self::apply_multiline_paste_ask`]'s shape: the switch is read at the next launch's
+    /// restore and at the restore card's answer, each time from the loaded settings.
+    pub(crate) fn apply_resume_agents(&mut self, enabled: bool) {
+        let mut settings = self.app.settings_store.loaded().clone();
+        settings.resume_agents = enabled;
+        self.app.settings_store.store(settings);
+    }
+
     /// Put one row's whole path on the clipboard (K143).
     ///
     /// The path as the *user* would write it — `full_path`'s own separators —
