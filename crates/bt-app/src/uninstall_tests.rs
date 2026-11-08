@@ -664,6 +664,218 @@ fn uninstall_door_precedes_every_startup_effect() {
     }
 }
 
+/// The calls a function body makes with the carry worker's context, `path::to::member(ctx)`, by
+/// their paths as written.
+fn calls_handed_the_context(body: &str) -> Vec<&str> {
+    let mut calls = Vec::new();
+    let mut rest = body;
+    while let Some(at) = rest.find("(ctx)") {
+        let before = &rest[..at];
+        let start = before
+            .rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == ':'))
+            .map_or(0, |index| index + 1);
+        calls.push(&before[start..]);
+        rest = &rest[at + "(ctx)".len()..];
+    }
+    calls
+}
+
+/// Whether `text` names a date, `YYYY-MM-DD`.
+fn names_a_date(text: &str) -> bool {
+    text.as_bytes().windows(10).any(|window| {
+        window.iter().enumerate().all(|(index, byte)| match index {
+            4 | 7 => *byte == b'-',
+            _ => byte.is_ascii_digit(),
+        })
+    })
+}
+
+/// RED (0.4.10 plan row 68a, R1; rulings R-A, R-C, R-E of 2026-11-07) — **every owned thing says
+/// how an update carries it, and the start writers and the carry pass agree with what is said**:
+///
+/// 1. every row of the inventory declares at least one [`CarryRule`];
+/// 2. every member of `update_trial::Writer::ALL` — every durable writer a start makes — is named
+///    by some row's rule, so a new start writer must say which owned thing it carries;
+/// 3. every owner check a row declares is called by `carry_pass::run_carry_steps` with the worker's
+///    context, or is owed by a later part and still runs where it ran when it was owed
+///    (`Runtime::create`); and every member that body calls is a check some row declares — so an
+///    owed seam ends the day its part lands: the part that moves its check takes the old call away,
+///    and the part that adds its member adds a call, and either is red until `in_the_pass` answers
+///    `Ok` for it;
+/// 4. every check in the pass names the test that brings its old shape to today's, and `bt_source`
+///    finds that test; only an owed check may name none (the classic verb's, 68b's finding);
+/// 5. every retirement names the dated ruling that keeps it.
+///
+/// MUTATIONS: the pass stops calling its member (`plant-68a-pass-skips-its-member.py`); a start
+/// writer loses its row (`plant-68a-writer-claimed-by-no-row.py`); the old-shape test is renamed
+/// (`plant-68a-old-shape-test-renamed.py`); an owed check is said to be in the pass before it is
+/// (`plant-68a-owed-check-half-moved.py`).
+#[test]
+fn every_owned_thing_says_how_an_update_carries_it() {
+    use crate::carry_pass::{CarryCheck, CarryRule};
+    use crate::update_trial::Writer;
+    let rules = || {
+        INVENTORY
+            .iter()
+            .flat_map(|mark| mark.carry.iter().map(move |rule| (mark, *rule)))
+    };
+    for mark in INVENTORY {
+        assert!(
+            !mark.carry.is_empty(),
+            "{} says nothing of how an update carries it",
+            mark.name
+        );
+    }
+    let claimed: Vec<Writer> = rules()
+        .flat_map(|(_, rule)| match rule {
+            CarryRule::Document { writers, .. } => writers.to_vec(),
+            CarryRule::BuildBytes(writer) | CarryRule::OwnerChecked { writer, .. } => {
+                vec![writer]
+            }
+            CarryRule::Process { held } | CarryRule::Identity { held } => {
+                held.into_iter().collect()
+            }
+            CarryRule::Transaction | CarryRule::Retired { .. } | CarryRule::Absent => Vec::new(),
+        })
+        .collect();
+    for writer in Writer::ALL {
+        assert!(
+            claimed.contains(&writer),
+            "{writer:?} is a start writer no owned thing's carry rule names"
+        );
+    }
+    let pass = crate::test_support::free_fn_body("run_carry_steps");
+    let create = crate::test_support::method_body("Runtime", "create");
+    let checks: Vec<(&str, CarryCheck)> = rules()
+        .filter_map(|(mark, rule)| match rule {
+            CarryRule::OwnerChecked { check, .. } => Some((mark.name, check)),
+            _ => None,
+        })
+        .collect();
+    let mut members = Vec::new();
+    for (name, check) in &checks {
+        match check.in_the_pass() {
+            Ok(member) => {
+                assert!(
+                    calls_handed_the_context(pass).contains(&member),
+                    "{name}: {check:?} is in the pass by its declaration, and \
+                     `run_carry_steps` does not call {member}(ctx)"
+                );
+                members.push(member);
+            }
+            Err(owed) => assert!(
+                create.contains(owed.runs_today),
+                "{name}: {check:?} no longer runs where it was owed ({}): part {} has moved it, \
+                 so `CarryCheck::in_the_pass` answers its call in the pass",
+                owed.runs_today,
+                owed.part
+            ),
+        }
+        match check.old_shape_test() {
+            Some((module, test)) => {
+                let found = source()
+                    .find(
+                        &bt_source::ItemQuery::function(test)
+                            .in_module(module)
+                            .one_per_variant(),
+                    )
+                    .unwrap_or_else(|failure| panic!("{name}: {test}: {failure}"));
+                assert!(
+                    !found.is_empty(),
+                    "{name}: {check:?}'s old-shape test {module}::{test} is gone"
+                );
+            }
+            None => assert!(
+                check.in_the_pass().is_err(),
+                "{name}: {check:?} runs in the pass and names no test of its old shape"
+            ),
+        }
+    }
+    for called in calls_handed_the_context(pass) {
+        assert!(
+            members.contains(&called),
+            "the pass calls {called}(ctx), which no owned thing declares as its check"
+        );
+    }
+    for (mark, rule) in rules() {
+        match rule {
+            CarryRule::Retired { ruling } => assert!(
+                names_a_date(ruling),
+                "{}: the ruling that retires it has no date: {ruling}",
+                mark.name
+            ),
+            CarryRule::Document { readers, .. } => {
+                for reader in readers {
+                    assert!(
+                        reader_found(reader),
+                        "{}: the reader {reader} is gone",
+                        mark.name
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Whether a reader a `CarryRule::Document` names — `file.rs:function` or `file.rs:Type::method`,
+/// in this package or, by a `../<package>/src/` path, in another — is an item of that package.
+fn reader_found(reader: &str) -> bool {
+    let (file, item) = reader
+        .rsplit_once(".rs:")
+        .unwrap_or_else(|| panic!("a reader is `file.rs:item`: {reader}"));
+    let index = match file.strip_prefix("../") {
+        Some(other) => bt_source::Index::of_package(
+            other.split_once('/').map_or(other, |(package, _)| package),
+        ),
+        None => source(),
+    };
+    let query = match item.split_once("::") {
+        Some((owner, name)) => bt_source::ItemQuery::method(owner, name),
+        None => bt_source::ItemQuery::function(item),
+    };
+    index
+        .find(&query.one_per_variant())
+        .is_ok_and(|found| !found.is_empty())
+}
+
+/// RED (0.4.10 plan row 68a, R-B of 2026-11-07) — **the rows this door does not remove add
+/// nothing to its output**: over the same state, both verbs' transcripts with the rows that
+/// `Remover::OutsideTheDoor` holds are byte for byte the transcripts without them, which is the
+/// inventory as it stood before row 68a listed them.
+#[test]
+fn the_rows_outside_the_door_add_nothing_to_its_output() {
+    let before: Vec<Mark> = INVENTORY
+        .iter()
+        .copied()
+        .filter(|mark| mark.remover != Remover::OutsideTheDoor)
+        .collect();
+    assert_eq!(before.len(), 29, "the inventory as row 68a found it");
+    for purge in [false, true] {
+        let transcript = |tag: String, inventory: &[Mark]| {
+            let (root, scope) = sandbox(&tag);
+            let legacy = seed(&scope, &scope.exe);
+            let report =
+                super::execute_over(inventory, &scope, purge, system_absent, |_| Some(()), None);
+            drop(legacy);
+            let said = format!(
+                "{}--\n{}exit={}",
+                report.stdout(),
+                report.stderr(),
+                report.code
+            )
+            .replace(&root.display().to_string(), "<root>");
+            let _ = fs::remove_dir_all(&root);
+            said
+        };
+        assert_eq!(
+            transcript(format!("outside-the-door-{purge}"), INVENTORY),
+            transcript(format!("before-68a-{purge}"), &before),
+            "purge={purge}"
+        );
+    }
+}
+
 #[test]
 fn uninstall_source_guard_pins_known_writers_and_inventory() {
     use bt_source::{Index, ItemQuery};
@@ -684,8 +896,11 @@ fn uninstall_source_guard_pins_known_writers_and_inventory() {
         (
             Remover::Profiles,
             app,
-            function("crate::shell_integration", "add_to_profile"),
-            "add_to_profile",
+            function(
+                "crate::shell_integration::profile_runtime",
+                "install_recorded",
+            ),
+            "profile_runtime.rs:install_recorded",
         ),
         (
             Remover::Agent(0),
@@ -716,6 +931,36 @@ fn uninstall_source_guard_pins_known_writers_and_inventory() {
             app,
             function("crate::explorer_menu", "request"),
             "request",
+        ),
+        (
+            Remover::Explorer,
+            app,
+            function("crate::context_menu", "reassert"),
+            "context_menu.rs:reassert",
+        ),
+        (
+            Remover::Explorer,
+            app,
+            function("crate::explorer_menu", "probe"),
+            "explorer_menu.rs:probe",
+        ),
+        (
+            Remover::OutsideTheDoor,
+            app,
+            ItemQuery::method("FolioApp", "register_for_restart").one_per_variant(),
+            "FolioApp::register_for_restart",
+        ),
+        (
+            Remover::OutsideTheDoor,
+            platform,
+            function("crate::macos_services", "install"),
+            "macos_services.rs:install",
+        ),
+        (
+            Remover::OutsideTheDoor,
+            app,
+            function("crate::update_apply", "write_journal"),
+            "update_apply.rs:write_journal",
         ),
         (
             Remover::Toast,
@@ -845,7 +1090,7 @@ fn uninstall_source_guard_pins_known_writers_and_inventory() {
             .unwrap(),
         Path::new("local/Folio")
     );
-    assert_eq!(INVENTORY.len(), 29);
+    assert_eq!(INVENTORY.len(), 33);
     // The update entrance's writer is in `bt-platform` and is asked for by its
     // identity through `bt-source`, not by a file (U-22): `logon_hook::arm_in`
     // is the one function that writes a `Run` value, and the row names it.

@@ -2,6 +2,15 @@
 //! form** (0.4.10 plan rows 67b and 68; the owner's ruling of 2026-11-04 that every new version
 //! brings the old version's things along).
 //!
+//! **Every owned thing says how an update carries it** (row 68a, R1): each row of the uninstall
+//! inventory (`uninstall::INVENTORY`) declares its [`CarryRule`]s — a document found by name and
+//! walked forward by its reads, bytes this build writes again where they differ, an entry that
+//! names a program and is checked by this pass, a transaction's own, a process's own, the
+//! system's under an identity no copy changes, a ruled retirement, or nothing at all. The guard
+//! beside the inventory (`uninstall_tests::every_owned_thing_says_how_an_update_carries_it`) holds
+//! every row to one, every start writer of the update trial to a row, and every owner check to a
+//! call in [`run_carry_steps`] or to the part that owes it (`Owed`).
+//!
 //! One pass and not one worker per thing (row 68, R1): a list of steps, run in order on one
 //! below-normal worker started through the thread door, never on the window thread. Each step asks
 //! the update trial's gate for its own writer before it writes (`update_trial::defer`, the
@@ -23,6 +32,132 @@ use std::sync::{Mutex, OnceLock, PoisonError};
 use bt_platform::admission::WorkerCtx;
 
 use crate::agent_hooks_step::HooksSnapshot;
+use crate::update_trial::Writer;
+
+/// **How an update brings one owned thing to this build's form** (0.4.10 plan row 68a, R1) —
+/// declared on every row of the uninstall inventory, a row holding as many as it carries things.
+///
+/// Read by the guard beside the inventory and by nothing in the product: the rule is what the
+/// code does, said where the thing is listed, so a new thing or a new start writer cannot land
+/// without saying it.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "permanent: the declaration is read by the inventory's guard, never by the product"
+    )
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CarryRule {
+    /// Found by name in a folder every copy of the account shares, and brought forward by its
+    /// `readers` (a document's migration chain, a record's versioned read); `writers` are the
+    /// update trial's writers that hold its writes. **`readers` and `writers` both empty** is a
+    /// thing no build reads back (a copy of the person's bytes, a staging folder, a log): every
+    /// build's shape is the same, so there is nothing to carry.
+    Document {
+        readers: &'static [&'static str],
+        writers: &'static [Writer],
+    },
+    /// Rewritten from this build's own bytes wherever it differs, by the writer named.
+    BuildBytes(Writer),
+    /// Names a program: the pass classifies each entry, repairs only this copy's old shape and a
+    /// dead owner's through the switch's own writer, held during a trial by `writer`.
+    OwnerChecked { check: CarryCheck, writer: Writer },
+    /// Exists for one transaction — an update's, an uninstall's — and is retired by it.
+    Transaction,
+    /// Made again by each process; `held` is the trial writer that holds it, where one does.
+    Process { held: Option<Writer> },
+    /// Kept by the system under an identity no copy changes (the toast identity, the bundle id);
+    /// `held` as for [`Self::Process`].
+    Identity { held: Option<Writer> },
+    /// Written only by older Folios, kept or offered by the dated ruling named.
+    Retired { ruling: &'static str },
+    /// Nothing writes it.
+    Absent,
+}
+
+/// **One owner check of the pass** — what a [`CarryRule::OwnerChecked`] row is checked by.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "permanent: the declaration is read by the inventory's guard, never by the product"
+    )
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CarryCheck {
+    /// An agent's hooks, by its index in `agent_hooks_step::HOOKS_FAMILIES`.
+    AgentHooks(usize),
+    /// The Explorer first page's package registration.
+    ExplorerPackage,
+    /// The Explorer classic verb.
+    ExplorerClassic,
+    /// Folio's own old `$PROFILE` line forms.
+    ProfileLines,
+}
+
+/// **A check the inventory declares and a later part owes the pass** (0.4.10 plan row 68a, the
+/// named seam; R-A of 2026-11-07): the part, and the call it still runs by today, in
+/// `Runtime::create`.
+///
+/// **It cannot outlive its part.** The guard holds `runs_today` to `Runtime::create`'s body, and
+/// every call in [`run_carry_steps`] to a check that answers it is in the pass: a part that moves
+/// its check takes the call out of `Runtime::create`, and one that adds a member leaves a call the
+/// guard reads as undeclared — either is red until the check answers `Ok` here instead.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Owed {
+    pub(crate) part: &'static str,
+    pub(crate) runs_today: &'static str,
+}
+
+#[cfg(test)]
+impl CarryCheck {
+    /// **Where the check runs**: `Ok` with its call in [`run_carry_steps`], or the part that owes
+    /// the move.
+    pub(crate) fn in_the_pass(self) -> Result<&'static str, Owed> {
+        match self {
+            Self::AgentHooks(_) => Ok("crate::agent_hooks_step::run_agent_hooks_step"),
+            Self::ExplorerPackage => Err(Owed {
+                part: "68b",
+                runs_today: "explorer_menu::begin_probe();",
+            }),
+            Self::ExplorerClassic => Err(Owed {
+                part: "68b",
+                runs_today: "context_menu_installed: context_menu::reassert(),",
+            }),
+            Self::ProfileLines => Err(Owed {
+                part: "68c",
+                runs_today: "migration: shell_integration::begin_startup_migration,",
+            }),
+        }
+    }
+
+    /// **The test that brings the old shape this check repairs to today's**: its module and its
+    /// name. `None` only where the ruling that owes the check owes the test too (the classic verb,
+    /// 68b's finding, R-C of 2026-11-07).
+    pub(crate) fn old_shape_test(self) -> Option<(&'static str, &'static str)> {
+        match self {
+            Self::AgentHooks(1) => Some((
+                "crate::agent_hooks_step::tests",
+                "a_gone_copys_codex_hook_and_line_are_repaired_into_the_hook",
+            )),
+            Self::AgentHooks(_) => Some((
+                "crate::agent_hooks_step::tests",
+                "every_historical_shape_of_this_copy_is_brought_to_the_current_one",
+            )),
+            Self::ExplorerPackage => Some((
+                "crate::explorer_menu::tests",
+                "an_older_registration_is_renewed_only_after_the_trial_commits",
+            )),
+            Self::ExplorerClassic => None,
+            Self::ProfileLines => Some((
+                "crate::shell_integration::profile_marks::tests",
+                "shell_integration_rewrite_table_preserves_every_other_byte",
+            )),
+        }
+    }
+}
 
 /// **A member's answer for one round**: its part of the snapshot, how many checks it ran, and how
 /// many of them said something new (`changed`, the diagnostics lines it wrote).
@@ -115,7 +250,8 @@ pub(crate) fn take_carry_snapshot() -> Option<CarrySnapshot> {
 /// Each member is called by name, never through a list of function pointers: the worker's context
 /// is followed from the thread door to every function it is handed along calls the source guards
 /// resolve (`window_waits_tests::every_worker_door_body_is_reached_from_a_completions_door`), and a
-/// call through a pointer is one they do not follow.
+/// call through a pointer is one they do not follow. The inventory's guard reads this body for its
+/// members (`CarryCheck::in_the_pass`).
 pub(crate) fn run_carry_steps(ctx: &WorkerCtx) {
     let round = CarryRound {
         hooks: crate::agent_hooks_step::run_agent_hooks_step(ctx),
