@@ -49699,8 +49699,10 @@ impl<B: Backend> FolioApp<B> {
     /// chrome redrawn, because the rows are facts about the machine and any window may be showing
     /// the page. A snapshot no member answered for has nothing to set.
     fn adopt_carry_snapshot(&mut self) -> Result<()> {
-        let Some(snapshot) = carry_pass::take_carry_snapshot().and_then(|carried| carried.hooks)
-        else {
+        let Some(carried) = carry_pass::take_carry_snapshot() else {
+            return Ok(());
+        };
+        let Some(snapshot) = carried.hooks else {
             return Ok(());
         };
         let Some(app) = self.app.as_mut() else {

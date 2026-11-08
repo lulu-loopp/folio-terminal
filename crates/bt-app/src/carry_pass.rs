@@ -194,7 +194,7 @@ impl CarryPublished {
             Some(answer) => {
                 checks += answer.checks;
                 changed += answer.changed;
-                Some(answer.part.after(untaken.hooks))
+                Some(answer.part.keeping_untaken(untaken.hooks))
             }
             None => untaken.hooks,
         };

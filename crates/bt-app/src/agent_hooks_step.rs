@@ -206,7 +206,7 @@ impl HooksSnapshot {
     /// **This run's answers in place of a part the window has not taken**: the untaken part's
     /// notices are still owed, so they are handed on, before this run's own.
     #[must_use]
-    pub(crate) fn after(mut self, untaken: Option<Self>) -> Self {
+    pub(crate) fn keeping_untaken(mut self, untaken: Option<Self>) -> Self {
         if let Some(untaken) = untaken {
             let mine = std::mem::replace(&mut self.notices, untaken.notices);
             self.notices.extend(mine);
