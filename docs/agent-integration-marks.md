@@ -277,7 +277,9 @@ reads its file once (`Config::with_one_read`), so a press that wrote after the
 scan makes the repair's write refuse rather than undo it. A due repair that
 was held or refused is said on the row with its reason, and the resume row
 counts those hooks as missing; hooks in an old shape are never counted as this
-copy's. Each repair writes a `BT_AGENT_HOOKS` diagnostics line; a dead owner's
+copy's. Each family writes one `BT_AGENT_HOOKS` diagnostics line when its
+answer changes (a start says each once; a due repair's line says how it went),
+and the start-time pass one `BT_CARRY` line per round; a dead owner's repair
 also raises one notice per family, and only when the rescan finds the hooks
 this copy's (otherwise the line says `repaired=lost`). A drift repair raises
 none: it rewrites only what makes an entry old (an old form is replaced, a
