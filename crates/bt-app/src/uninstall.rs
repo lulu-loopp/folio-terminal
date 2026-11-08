@@ -333,8 +333,9 @@ const INVENTORY: &[Mark] = &[
     // The native remover's per-user folder (`REMOVER_HOME`), purged like a data
     // root except by the run that has just started a remover there: that
     // remover removes it when it leaves it empty. A remover that was ended
-    // before it could, and whose copy was still held past the delete backoff,
-    // leaves its copy here for the next purge.
+    // before it could (killed, or the power lost), or a remover the door
+    // stopped whose copy was still held past the delete backoff, leaves its
+    // copy here for the next purge.
     Mark {
         name: "Uninstaller staging",
         says: Text::CleanupMarkRemoverHome,

@@ -206,19 +206,19 @@ fn schedule_by(
         COPY_NAME_UNIX
     });
     if let Err(error) = copy_new(worker, &removal.program, &copy) {
-        discard_private(&copy, &private);
+        discard_copy(worker, &copy, &private);
         return Err(error);
     }
     match FileIdentity::of(&copy) {
         Ok(identity) if identity == removal.program_identity => {}
         Ok(_) => {
-            discard_private(&copy, &private);
+            discard_copy(worker, &copy, &private);
             return Err(io::Error::other(
                 "the private remover copy differs from the running executable",
             ));
         }
         Err(error) => {
-            discard_private(&copy, &private);
+            discard_copy(worker, &copy, &private);
             return Err(error);
         }
     }
@@ -229,7 +229,7 @@ fn schedule_by(
     let copy_guard = match guard_copy(&copy) {
         Ok(guard) => guard,
         Err(error) => {
-            discard_private(&copy, &private);
+            discard_copy(worker, &copy, &private);
             return Err(error);
         }
     };
@@ -269,7 +269,7 @@ fn schedule_by(
         Ok(child) => child,
         Err(error) => {
             drop(copy_guard);
-            discard_private(&copy, &private);
+            discard_copy(worker, &copy, &private);
             return Err(error);
         }
     };
@@ -424,42 +424,52 @@ fn stop_child(
 ) -> io::Result<()> {
     let _ = child.kill();
     let _ = child.wait();
-    discard_stopped(worker, copy, private);
+    // The process handle goes before the discard, so nothing of this process
+    // holds the stopped child. Whether an open process handle prolongs the
+    // killed image's hold on its file is not measured (plan row 65's review,
+    // Q1); closing it first costs nothing.
+    drop(child);
+    discard_copy(worker, copy, private);
     Err(error)
 }
 
-/// **A stopped remover's copy goes with it** (0.4.10 plan row 65): on Windows
-/// the killed image still holds its file for a moment after `wait` returns, so
-/// one delete would nearly always fail and leave the copy for the next purge.
-/// The delete is tried on the remover's own delete backoff — `DELETE_ATTEMPTS`
-/// tries, pausing `FIRST_DELETE_BACKOFF` doubled up to `MAX_DELETE_BACKOFF` —
-/// and a copy still held after the last try is left for the next purge's
+/// **A refused schedule's copy and private folder go** (0.4.10 plan row 65):
+/// every road of `schedule_by` that gives up after the private folder was made
+/// ends here, a stopped child's and a refused copy's alike. On Windows a killed
+/// image still holds its file for a moment after `wait` returns, so one delete
+/// would nearly always fail and leave the copy for the next purge. Each try
+/// deletes the copy and then the private folder, on the remover's own delete
+/// backoff — `DELETE_ATTEMPTS` tries, pausing `FIRST_DELETE_BACKOFF` doubled up
+/// to `MAX_DELETE_BACKOFF` — until the private folder is gone; the per-user
+/// folder is retired after. A road where the first try succeeds pauses not at
+/// all; a copy still held after the last try is left for the next purge's
 /// "Uninstaller staging" row.
-fn discard_stopped(worker: &WorkerCtx, copy: &Path, private: &Path) {
+fn discard_copy(worker: &WorkerCtx, copy: &Path, private: &Path) {
     let mut backoff = FIRST_DELETE_BACKOFF;
     for attempt in 0..DELETE_ATTEMPTS {
-        match fs::remove_file(copy) {
-            Ok(()) => break,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => break,
-            Err(_) if attempt + 1 < DELETE_ATTEMPTS => {
-                crate::wait::sleep_within(worker, backoff);
-                backoff = next_delete_backoff(backoff);
-            }
-            Err(_) => {}
+        if absent_after(fs::remove_file(copy)) && absent_after(fs::remove_dir(private)) {
+            break;
+        }
+        if attempt + 1 < DELETE_ATTEMPTS {
+            crate::wait::sleep_within(worker, backoff);
+            backoff = next_delete_backoff(backoff);
         }
     }
     retire_private(private);
+}
+
+/// Whether a removal left its path absent: it removed it, or found nothing.
+fn absent_after(removal: io::Result<()>) -> bool {
+    match removal {
+        Ok(()) => true,
+        Err(error) => error.kind() == io::ErrorKind::NotFound,
+    }
 }
 
 /// The pause after `backoff` on the remover's delete backoff: doubled, up to
 /// `MAX_DELETE_BACKOFF`.
 fn next_delete_backoff(backoff: Duration) -> Duration {
     (backoff * 2).min(MAX_DELETE_BACKOFF)
-}
-
-fn discard_private(copy: &Path, private: &Path) {
-    let _ = fs::remove_file(copy);
-    retire_private(private);
 }
 
 /// **The remover's folders go when nothing of them remains**: the private
@@ -1615,16 +1625,19 @@ mod tests {
     /// The real copy is started (the copied test executable, as in
     /// `a_native_remover_copy_runs_the_plan`), and the counted clock `schedule_by` is handed spends
     /// the bound without looking at the child (0.4.10 plan row 66), so the child's own speed never
-    /// enters the verdict and no real time is waited. The one wait is asked for the caller's bound.
+    /// enters the verdict and the readiness wait waits no real time. The one wait is asked for the
+    /// caller's bound. The stopped copy's discard may pause on the real delete backoff (at most
+    /// 9.15 s) while Windows still holds the killed image (row 65); the timing scan ends at
+    /// `schedule_by` and does not see it (noted in `docs/plans/TIMING-BOUND-TESTS.tsv`).
     ///
     /// MUTATION: in `schedule_by`, ask the clock for a constant ten seconds instead of
     /// `ready_within` — the wait is asked for 10 s, not 1.234 s. MUTATION: wait with
     /// `received.recv_timeout` directly instead of on the clock — the clock is never asked.
     ///
     /// RED (0.4.10 plan row 65, T-STOPPED-REMOVER-COPY-DELETED-WITH-A-RETRY) — **the stopped
-    /// remover's private folder is gone when `schedule_by` returns**. MUTATION: `discard_stopped`
-    /// tries the delete once — on Windows the killed image still holds the copy and the folder
-    /// stays. MUTATION: `stop_child` discards nothing — the folder stays on every platform.
+    /// remover's private folder is gone when `schedule_by` returns**. MUTATION: `discard_copy`
+    /// tries once — on Windows the killed image still holds the copy and the folder stays.
+    /// MUTATION: `stop_child` discards nothing — the folder stays on every platform.
     #[cfg(any(windows, unix))]
     #[test]
     fn a_remover_not_ready_within_the_callers_bound_is_stopped_at_that_bound() {
@@ -1673,7 +1686,7 @@ mod tests {
             "a stopped remover removed nothing"
         );
         // On Windows the killed image still holds the copy right after `wait` (a single delete
-        // lost in 19 of 20 runs on 2026-11-04); `stop_child` retries it on the delete backoff
+        // lost in 19 of 20 runs on 2026-11-04); `discard_copy` retries it on the delete backoff
         // (0.4.10 plan row 65), so the folder is gone here on every platform.
         assert!(
             !private_after.exists(),
