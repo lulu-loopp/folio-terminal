@@ -893,6 +893,16 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     # persistent domain, which is the supported way to read another domain of
     # the same user — and `NSValue` for the `NSNumber` that preference arrives
     # as.
+    # 0.4.10 plan row 17: why AppKit asked to quit — `+[NSAppleEventManager
+    # sharedAppleEventManager]`, its `currentAppleEvent` and the reason
+    # descriptor's `typeCodeValue` (`src/macos_app.rs`, `the_quit_events_reason`).
+    # **Not a package**: `NSAppleEventDescriptor` turns on `objc2-foundation`'s
+    # `bitflags` edge, which `Cargo.lock` already lists; `NSAppleEventManager`
+    # turns on nothing. The one selector between them,
+    # `attributeDescriptorForKeyword:`, is typed only behind
+    # `objc2-core-services`, a package, and is sent by name instead.
+    "NSAppleEventDescriptor",
+    "NSAppleEventManager",
     "std",
 ] }
 objc2-user-notifications = { version = "0.3", default-features = false, features = [

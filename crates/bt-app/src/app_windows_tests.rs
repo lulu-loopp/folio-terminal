@@ -772,6 +772,7 @@ fn saved_window(bounds: WindowBoundsV1, maximized: bool) -> SessionWindowV1 {
                 manual_name: None,
                 card_skip: 0,
                 last_command: String::new(),
+                agent: None,
             })),
             pinned: false,
             focused_leaf: "leaf-0".to_owned(),
@@ -1401,8 +1402,11 @@ fn one_turn_asks_the_desktop_where_the_window_is_exactly_once() {
 /// so a notification that arrived during a drag would wait for the hand to let
 /// go. Coordinator ruling 2026-09-24: the arm keeps a reading of its own, taken
 /// through the one writer, and decides the delivery on it. So the writer has
-/// these callers — the turn's head, the window's birth and this arm, and since
-/// ticket 62 the re-placing of a taskbar flash the lane's answer contradicts —
+/// these callers — the turn's head, the window's birth and this arm, since
+/// ticket 62 the re-placing of a taskbar flash the lane's answer contradicts,
+/// and since 0.4.10 plan row 72 (re-review R2) the two stops that choose the
+/// window their box is owned by (`fail` and `stop_every_window_keeping_in`,
+/// pinned by `every_box_a_stop_raises_while_a_window_stands_is_owned_by_one`) —
 /// and in the arm the reading comes before the delivery that reads it.
 ///
 /// MUTATION: drop `runtime.observe_window_place()` from the `AttentionSpoke`
@@ -1414,7 +1418,9 @@ fn a_delivery_between_turns_is_decided_on_a_fresh_reading_of_its_own() {
         reader_names(&writers),
         vec![
             "dress_new_window".to_owned(),
+            "fail".to_owned(),
             "replace_contradicted_flash".to_owned(),
+            "stop_every_window_keeping_in".to_owned(),
             "turn".to_owned(),
             "user_event".to_owned()
         ],
@@ -1422,8 +1428,10 @@ fn a_delivery_between_turns_is_decided_on_a_fresh_reading_of_its_own() {
         writers.report(source())
     );
     // Four since ticket 62: re-placing a flash the taskbar lane's answer contradicts decides
-    // again on a reading of its own, through the same writer.
-    assert_eq!(writers.len(), 4, "{}", writers.report(source()));
+    // again on a reading of its own, through the same writer. Six since 0.4.10 plan row 72
+    // (re-review R2): a stop reads every window's place fresh before it chooses its box's owner,
+    // since a window left behind on another virtual desktop takes no turn.
+    assert_eq!(writers.len(), 6, "{}", writers.report(source()));
     let arm = attention_spoke_arm();
     let observed = arm
         .find("runtime.observe_window_place();")
@@ -1604,6 +1612,7 @@ fn a_files_only_tab_is_named_on_the_restore_prompt_by_the_folder_it_held() {
                 manual_name: None,
                 card_skip: 0,
                 last_command: String::new(),
+                agent: None,
             }))),
         ],
     });
