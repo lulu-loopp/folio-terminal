@@ -7882,8 +7882,10 @@ pub enum PreviewAnswer {
     Size(Option<u64>),
     /// **How many pages the document at this path holds**, or `None` for a file
     /// whose structure would not say — which the card leaves unsaid rather than
-    /// turning into an error of its own (user ruling 2026-08-25).
-    PageCount(Option<u32>),
+    /// turning into an error of its own (user ruling 2026-08-25) — or
+    /// [`crate::pdf::Held`] for a file another program holds at this moment,
+    /// which the card asks once more (T-HELD-FILE-IN-THE-PDF-LANE).
+    PageCount(Result<Option<u32>, crate::pdf::Held>),
 }
 
 /// How large a file is, without reading it.

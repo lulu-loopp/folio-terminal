@@ -440,7 +440,9 @@ fn a_store_powershell_pane_takes_its_turn_with_a_check_of_its_package() {
     hold.release();
     wait_until("the shell born once the check settled", || shell.answered());
     let born = shell.take().expect("the answer");
-    let mut session = born.session.expect("the shell was not started");
+    let Some(Ok(mut session)) = born.session else {
+        panic!("the shell was not started");
+    };
     assert!(
         session.take_shell_fallback().is_none(),
         "the Store alias did not start: its pane was born on the last-resort retry"

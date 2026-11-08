@@ -581,6 +581,9 @@ impl<B: Backend> Runtime<'_, B> {
             SettingChange::MultilinePaste(enabled) => {
                 self.apply_multiline_paste_ask(enabled);
             }
+            SettingChange::ResumeAgents(enabled) => {
+                self.apply_resume_agents(enabled);
+            }
             SettingChange::WebPages(scheme) => {
                 self.apply_web_color_scheme(scheme)?;
             }

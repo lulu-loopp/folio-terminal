@@ -55,9 +55,11 @@ App.startup_shells	-	LIFE	the application (Runtime::create)	T-PROGRAMS-REFRESH (
 App.tab_ids	-	LIFE	tabs	the 2026-09-25 table
 App.web_spare	-	LIFE	web	proposed by census-1
 App.web_warmup	-	LIFE	web	proposed by census-1
+ShellSession.agent	-	LIFE	agent_resume (AgentAccount's transitions)	T-AGENT-RESUME-AFTER-RESTART (0.4.9 plan row 195, 2026-11-03): the account of the agent a pane runs and the session it named, one fact written only through AgentAccount's transitions (born at the leaf birth, heard from the attention wire, settled and ended by the reaper, handed back by the terminal and the landing)
 ShellSession.attention	-	LIFE	attention (→ bt-workbench)	the 2026-09-25 table; 2026-10-27 (O-4a, M7): the nest of the account, its ledger, bell edge, clock and capability, one fact
 ShellSession.life	-	LIFE	main (the leaf-birth road; ShellLife's transitions)	2026-10-27 (O-4b, M6): the nest of the shell's life, its phase (the PTY inside it) and the spawn-fallback hand-off, one fact written only through ShellLife's transitions (bt-source census pin the_shell_life_is_one_fact_written_only_by_its_transitions); replaces the rows LeafSession.pty (panes, the 2026-09-25 table) and LeafSession.spawn_fallback (main, T-SHELL-BIRTH-DEATH 2026-10-10)
 ShellSession.session	-	HUB	terminal	the 2026-09-25 table
+ShellSession.turn_account	-	LIFE	agent_turns (TurnAccount's transitions)	T-UNREAD-DOT-ON-EVERY-BACKGROUND-TAB (0.4.10 plan row 75, 2026-11-06): the account of the pane's agent's turns its blue dot reads, one fact written only through TurnAccount's transitions (born beside the agent account at the leaf birth, heard from the attention wire, settled by the reaper with its command)
 ShellSession.wake	-	LIFE	main (the leaf-birth road, finish_leaf_birth)	T-SHELL-BIRTH-DEATH (2026-10-10): the field is Some from when a shell is asked until the pane is left without one; the birth road sets it, and runtime::tabs clears it when the reaper retires a birth-death PTY and keeps the pane
 TabState.file_trees	-	OBS	files	the 2026-09-25 table
 TabState.files	-	VIEW	files	the 2026-09-25 table
@@ -91,6 +93,7 @@ WindowRuntime.composing	-	VIEW	keyboard	the 2026-09-25 table
 WindowRuntime.cursor_blink	-	VIEW	keyboard	the 2026-09-25 table
 WindowRuntime.dirty_gate	the pending destructive request	DUR	windows	revision (b)4 split
 WindowRuntime.dirty_gate	hover over the gate's card	VIEW	mouse	revision (b)4 split
+WindowRuntime.drawn_fields	-	PROJ	frame	0.4.9 plan row 180 (was rename_drawn, row 179): the drawn run of every one-line field, each part written by the pass that paints its field (the name editor's five painters, the find bar, a graph's search, the settings dialog, the palette, the git menu) rewritten by every paint of that field and dropped by its close or by the first paint that no longer draws it; read by runtime::pointer::field_caret
 WindowRuntime.file_menu	-	VIEW	floats	the 2026-09-25 table
 WindowRuntime.files_notice	-	PROJ	files	the 2026-09-25 table
 WindowRuntime.files_row_clicks	-	VIEW	files	the 2026-09-25 table
@@ -136,7 +139,6 @@ WindowRuntime.rail_scroll	-	VIEW	panes	the 2026-09-25 table
 WindowRuntime.rename	-	VIEW	tabs	the 2026-09-25 table
 WindowRuntime.rename_blink	-	VIEW	tabs	the 2026-09-25 table
 WindowRuntime.rename_caret_line	-	PROJ	tabs	the 2026-09-25 table
-WindowRuntime.rename_drawn	-	PROJ	tabs	0.4.9 plan row 179: the drawn run of the name editor, written beside rename_caret_line by the same five painters
 WindowRuntime.renderer	-	RES	—	the 2026-09-25 table
 WindowRuntime.restore_prompt	-	VIEW	windows	proposed by census-1: the restore card, ruled a full-window gate on 2026-09-25
 WindowRuntime.revealed_foot	-	ASYNC	handoff	the 2026-09-25 table

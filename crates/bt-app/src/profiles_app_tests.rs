@@ -266,6 +266,7 @@ fn two_panes_save_and_revive_their_own_two_folders() {
             manual_name: None,
             card_skip: 0,
             last_command: String::new(),
+            agent: None,
         },
         &|seat| panic!("a tree of two terminals has no files leaf to ask about ({seat:?})"),
     );

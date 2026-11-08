@@ -2190,13 +2190,16 @@ impl SessionStore {
         if !degradation.is_clean() {
             crate::diagnostics::stderr_line(format!(
                 "BT_PERSIST session.json degraded: {} clamped ratios, {} unknown leaves, \
-                 {} windows, {} tabs and {} panes past the ceiling, {} impossible commands",
+                 {} windows, {} tabs and {} panes past the ceiling, {} impossible commands, \
+                 {} impossible agent records, {} impossible agent launches",
                 degradation.clamped_ratios,
                 degradation.unknown_leaves,
                 degradation.dropped_windows,
                 degradation.dropped_tabs,
                 degradation.dropped_panes,
-                degradation.dropped_commands
+                degradation.dropped_commands,
+                degradation.dropped_agents,
+                degradation.unread_launches
             ));
         }
         // **Only the ceiling is said out loud** (review row R4-9). A clamped
@@ -3088,6 +3091,37 @@ impl SessionStore {
             self.armed = false;
         }
     }
+
+    /// **What this run's session save came to, as [`Self::close`] decided it** (0.4.10 plan row
+    /// 17), for the line AppKit's quit is answered `NSTerminateNow` with.
+    ///
+    /// Read after the close: a writer that ran out of its budget — the quit's write, or the
+    /// close's own wait for the writer — is stalled, and the close left `session.lock` standing
+    /// over it; any other writer's document landed and the lock is gone. A refused write never
+    /// gets this far on that road: the quit is abandoned and AppKit is answered
+    /// `NSTerminateCancel`.
+    pub(crate) fn what_the_close_left(&self) -> ClosedSave {
+        if !self.writes_to_disk() {
+            ClosedSave::NoSession
+        } else if self.writer.stalled {
+            ClosedSave::NotLanded
+        } else {
+            ClosedSave::Landed
+        }
+    }
+}
+
+/// **What a run's session save came to at its close** ([`SessionStore::what_the_close_left`],
+/// 0.4.10 plan row 17).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ClosedSave {
+    /// The document is on the disk and `session.lock` is gone.
+    Landed,
+    /// The save did not finish inside its budget, and `session.lock` stands.
+    NotLanded,
+    /// This run writes no session: it is not the document's writer of record, or an update's
+    /// trial defers its writes.
+    NoSession,
 }
 
 /// **The queue of a lane the test serves** ([`StorageLane::held`]): the test is
@@ -7026,6 +7060,62 @@ pub(crate) mod tests {
             "the way out's close hands nothing over"
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (0.4.10 plan row 17) — **what the close left is what AppKit's quit is answered
+    /// with**: a document that landed drops `session.lock` and says so; a save whose budget ran
+    /// out leaves the lock standing and says that; a run that writes no session says it had none.
+    ///
+    /// MUTATION: answer `Landed` in `SessionStore::what_the_close_left` whatever the writer
+    /// came to — the spent budget's store says its save landed over a lock that stands.
+    #[test]
+    fn what_the_close_left_is_whether_the_save_landed_and_the_lock_went() {
+        crate::test_support::on_the_window_thread_exiting();
+        // Landed: a real writer, within the suite's patience.
+        let root = appdata("close-left-landed");
+        let sentinel = root.join("session.lock");
+        let mut store = SessionStore::armed_at(root.join(SESSION_FILE_NAME), sentinel.clone());
+        store.set_save_budget(crate::lane::PATIENCE);
+        assert!(sentinel.is_file(), "the run's sentinel stands");
+        store.record(a_layout(1), Instant::now());
+        assert_eq!(store.flush_judged(), Ok(()), "the layout lands");
+        store.close();
+        assert!(!sentinel.is_file(), "the close drops the sentinel");
+        assert_eq!(store.what_the_close_left(), ClosedSave::Landed);
+        let _ = std::fs::remove_dir_all(&root);
+
+        // Not landed: the quit's budget is spent with a change owed.
+        let (store, _jobs, _answer, spent_root) = a_store_the_test_answers("close-left-spent");
+        let mut store = store.armed();
+        let spent_sentinel = spent_root.join("session.lock");
+        assert!(spent_sentinel.is_file(), "the run's sentinel stands");
+        let start = Instant::now();
+        store.record(a_layout(1), start);
+        let spent = start + SESSION_DEBOUNCE;
+        assert!(
+            store
+                .flush_for_quit(spent, spent)
+                .is_err_and(|refusal| refusal.quit_may_proceed()),
+            "the quit's budget is spent and the quit goes on"
+        );
+        store.close();
+        assert!(
+            spent_sentinel.is_file(),
+            "the lock stands over a save nobody heard land"
+        );
+        assert_eq!(store.what_the_close_left(), ClosedSave::NotLanded);
+        let _ = std::fs::remove_dir_all(&spent_root);
+
+        // No session: a run that is not the document's writer of record.
+        let none_root = appdata("close-left-none");
+        let mut store = SessionStore::at(
+            none_root.join(SESSION_FILE_NAME),
+            none_root.join("session.lock"),
+        );
+        store.writer_of_record = false;
+        store.close();
+        assert_eq!(store.what_the_close_left(), ClosedSave::NoSession);
+        let _ = std::fs::remove_dir_all(&none_root);
     }
 
     /// RED (T-SESSION-WRITER-NO-TIMER-RETRY round 4) — **an update quit's refusal that is the

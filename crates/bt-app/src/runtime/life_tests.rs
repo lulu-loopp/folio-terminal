@@ -148,16 +148,16 @@ fn birth(waiting: BirthWait) -> PaneBirth {
 fn pending(shell: pty_door::ShellBirth) -> BirthDeathFallback {
     BirthDeathFallback {
         landing: landing(shell),
-        exit: crate::exit_diagnostics::ShellExit {
-            seat: 1,
-            code: Some(23),
-            elapsed: Duration::from_millis(400),
-            program: Some(PathBuf::from("壳 shell")),
-            tab: 1,
-            disposition: crate::exit_diagnostics::ShellExitDisposition::BirthDeathFellBack(
+        exit: crate::exit_diagnostics::ShellExit::unprobed(
+            1,
+            Some(23),
+            Duration::from_millis(400),
+            Some(PathBuf::from("壳 shell")),
+            1,
+            crate::exit_diagnostics::ShellExitDisposition::BirthDeathFellBack(
                 bt_pty::LAST_RESORT_SHELL,
             ),
-        },
+        ),
     }
 }
 
@@ -675,4 +675,491 @@ fn a_restart_over_a_pending_birth_abandons_the_old_birth() {
         "the old birth's number is abandoned, not forgotten"
     );
     gate.release();
+}
+
+// ── A shell the system ends is not an edit (plan row 191) ─────────────────────────────────────
+//
+// The owner's three shutdowns of 2026-11-02 (0.4.8): every pane's shell ended with
+// `DBG_TERMINATE_PROCESS` one reaper turn after another, before the system asked Folio's window
+// anything, and each exit closed its tab — pinned or not — into Recent; the question then wrote
+// what was left. Here the window holds single-pane tabs whose shells the test ends with a code,
+// the reaper takes its turns, and the system's question is asked through the window procedure's
+// own seam and settled by the application's own turn, writing through a working storage worker.
+
+/// `pinned.len()` single-pane tabs, tab `n` (from 1) pinned as `pinned[n - 1]` says, the layout
+/// recorded as it stands — what every change before the shutdown left in the store — on a
+/// working storage lane in `home`.
+fn a_window_of(tag: &str, home: &test_support::EndSessionHome, pinned: &[bool]) -> Application {
+    let tabs = pinned
+        .iter()
+        .enumerate()
+        .map(|(at, pin)| {
+            let mut tab = test_support::ringing_tab(at as u64 + 1, 1);
+            tab.pinned = *pin;
+            // A name of its own, so a retired tab is a row Recent keeps (`Seed::names_itself`).
+            tab.manual_name = Some(format!("tab {}", at + 1));
+            tab
+        })
+        .collect();
+    let mut folio = HeadlessFolio::with_tabs(tag, tabs, 0);
+    let mut store =
+        crate::persist::SessionStore::at_waking(home.session(), home.sentinel(), || {}).armed();
+    store.set_save_budget(crate::lane::PATIENCE);
+    folio.app.storage_on(store);
+    let mut application = Application::of(folio);
+    application.runtime().mark_session_dirty(Instant::now());
+    application
+}
+
+type Application = crate::headless::HeadlessApplication;
+
+/// The system ends the shell of tab `id` with `code`, and the reaper takes its turn.
+fn ends(application: &mut Application, id: u64, code: u32) {
+    let mut runtime = application.runtime();
+    let tab = runtime
+        .window
+        .tabs
+        .iter_mut()
+        .find(|tab| tab.id == crate::TabId(id))
+        .unwrap_or_else(|| panic!("tab {id} is still in the window"));
+    for (_, leaf) in tab.leaves_mut() {
+        leaf.life.land(Some(PtySession::fake_exited(
+            Duration::from_secs(60),
+            code,
+            b"",
+            false,
+        )));
+    }
+    runtime
+        .reap_exited_tabs(Instant::now())
+        .expect("the reaper takes its turn");
+}
+
+/// The tab ids in the window, in strip order.
+fn tab_ids(application: &mut Application) -> Vec<u64> {
+    application
+        .runtime()
+        .window
+        .tabs
+        .iter()
+        .map(|tab| tab.id.0)
+        .collect()
+}
+
+/// How many rows Recent holds in the running application.
+fn recent_rows(application: &Application) -> usize {
+    application
+        .folio
+        .app
+        .as_ref()
+        .expect("the application")
+        .recent
+        .len()
+}
+
+/// The system asks, and the application's turn settles it, keeping in `home`.
+fn the_question_is_settled(application: &mut Application, home: &test_support::EndSessionHome) {
+    assert_eq!(test_support::the_system_asks(), Some(1));
+    let recovery = home.0.join(crate::preview::RECOVERED_FOLDER);
+    let _ = application
+        .folio
+        .settle_session_end_keeping_in(&application.event_loop, &recovery);
+}
+
+const SYSTEM_ENDED: u32 = bt_platform::session_end::SYSTEM_ENDED_EXIT_CODE;
+
+/// RED (plan row 191) — **a shell the system ends keeps its pinned tab in the window and in the
+/// document**: the pane stays, kept without a shell and saying why; nothing goes into Recent; the
+/// document the store holds is the one before the exit.
+///
+/// MUTATION (plant `plant-191-a-no-classification.py`): the reaper reads no exit code — the tab is
+/// retired into Recent and the document loses it.
+#[test]
+fn a_shell_the_system_ends_keeps_its_pinned_tab_in_the_document() {
+    let home = test_support::EndSessionHome::new("row191-pinned");
+    let mut application = a_window_of("row191-pinned", &home, &[true, true]);
+    let before = application
+        .folio
+        .app
+        .as_ref()
+        .expect("the application")
+        .session_store
+        .loaded()
+        .clone();
+    ends(&mut application, 2, SYSTEM_ENDED);
+    assert_eq!(tab_ids(&mut application), [1, 2], "the tab stays");
+    {
+        let runtime = application.runtime();
+        let pane = runtime.window.tabs[1]
+            .panes_mut()
+            .next()
+            .expect("the tab's pane")
+            .1;
+        assert_eq!(
+            name_of(&pane.session.life),
+            Name::Kept,
+            "kept, without a shell"
+        );
+        let visible: String = pane
+            .session
+            .session
+            .terminal()
+            .visible_text()
+            .join("")
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect();
+        assert!(
+            visible.contains("[Folio]Endedbythesystematshutdown"),
+            "the pane says why: {visible:?}"
+        );
+        assert!(
+            !visible.contains("1073807364"),
+            "and only why: the code and the age are the diagnostics line's (ruling R2): {visible:?}"
+        );
+    }
+    assert_eq!(recent_rows(&application), 0, "nothing goes into Recent");
+    let app = application.folio.app.as_ref().expect("the application");
+    assert_eq!(
+        app.session_store.loaded(),
+        &before,
+        "nothing is recorded: the document is the one before the exit"
+    );
+}
+
+/// RED (plan row 191) — **an unpinned tab whose shell the system ends stays in the layout for the
+/// restore card**: after the question's write, the next start opens the pinned tab and asks about
+/// the unpinned one, as after a quit.
+///
+/// MUTATION (plant `plant-191-b-pinned-only.py`): keep the pane only in a pinned tab — the unpinned
+/// one is retired and the card has nothing to ask.
+#[test]
+fn a_shell_the_system_ends_keeps_an_unpinned_tab_for_the_card() {
+    let home = test_support::EndSessionHome::new("row191-unpinned");
+    let mut application = a_window_of("row191-unpinned", &home, &[true, false]);
+    ends(&mut application, 2, SYSTEM_ENDED);
+    the_question_is_settled(&mut application, &home);
+    let (plan, _) = test_support::launch_plan_on_disk(&home.session());
+    assert_eq!(
+        (plan.open.len(), plan.ask.len()),
+        (1, 1),
+        "the pinned tab opens and the unpinned one is the card's question"
+    );
+    assert!(plan.open[0].pinned && !plan.ask[0].pinned);
+}
+
+/// RED (plan row 191) — **the owner's case: eight tabs whose shells the system ends one turn after
+/// another, then the system's question, write all eight with their pins and no Recent row.**
+///
+/// MUTATION (plant `plant-191-c-active-tab-only.py`): keep the pane only in the active tab — seven
+/// tabs go into Recent and the document holds what is left.
+#[test]
+fn eight_tabs_the_system_ends_then_its_question_write_all_eight_with_their_pins() {
+    let home = test_support::EndSessionHome::new("row191-owner");
+    let pins = [true, true, true, true, true, false, false, false];
+    let mut application = a_window_of("row191-owner", &home, &pins);
+    for id in (1..=8).rev() {
+        ends(&mut application, id, SYSTEM_ENDED);
+    }
+    assert_eq!(tab_ids(&mut application), [1, 2, 3, 4, 5, 6, 7, 8]);
+    the_question_is_settled(&mut application, &home);
+    let windows = test_support::windows_on_disk(&home.session());
+    assert_eq!(windows.len(), 1, "one window");
+    assert_eq!(
+        windows[0]
+            .tabs
+            .iter()
+            .map(|tab| tab.pinned)
+            .collect::<Vec<_>>(),
+        pins,
+        "all eight tabs, each with its pin"
+    );
+    let (read, _, _) = bt_persist::read_session(&home.session());
+    assert!(read.recent.is_empty(), "no Recent row: {:?}", read.recent);
+    assert_eq!(recent_rows(&application), 0);
+}
+
+/// RED (plan row 191, the unchanged half) — **a shell's own exit still closes its tab**: any other
+/// code retires the tab into Recent as before, pinned or not.
+///
+/// MUTATION (plant `plant-191-d-every-exit-is-the-systems.py`): read every exit as the system's —
+/// the tab stays.
+#[test]
+fn a_shells_own_exit_still_retires_its_tab() {
+    let home = test_support::EndSessionHome::new("row191-own-exit");
+    let mut application = a_window_of("row191-own-exit", &home, &[true, true]);
+    ends(&mut application, 2, 1);
+    assert_eq!(tab_ids(&mut application), [1], "the pinned tab is retired");
+    assert_eq!(recent_rows(&application), 1, "into Recent");
+}
+
+/// RED (plan row 191) — **a pane the system's end kept restarts into a live shell, or closes, as a
+/// kept birth death does.**
+///
+/// MUTATION (plant `plant-191-e-shell-left-in-the-pane.py`): leave the ended shell in the pane
+/// (drop the `release_dead_shell` call) — the pane is not Kept, and the restart's landing finds a
+/// pane that never let go of its shell.
+#[test]
+fn a_pane_the_systems_end_kept_restarts_or_closes_like_a_kept_pane() {
+    let home = test_support::EndSessionHome::new("row191-restart");
+    let mut application = a_window_of("row191-restart", &home, &[true, true]);
+    ends(&mut application, 2, SYSTEM_ENDED);
+    application
+        .runtime()
+        .close_tab(1)
+        .expect("the person closes the kept tab");
+    assert_eq!(tab_ids(&mut application), [1], "the kept tab closes");
+    assert_eq!(
+        recent_rows(&application),
+        1,
+        "and goes into Recent, as a close does"
+    );
+    ends(&mut application, 1, SYSTEM_ENDED);
+    let mut runtime = application.runtime();
+    let seat = runtime.seats.identity();
+    assert_eq!(name_of(&runtime.sessions[&seat].session.life), Name::Kept);
+    runtime
+        .restart_shell(seat)
+        .expect("the restart is asked for");
+    let pane = runtime.sessions.get_mut(&seat).expect("the pane");
+    pane.take_successor().expect("the replacement");
+    pane.await_successor(answered_successor());
+    runtime.land_births().expect("the landing");
+    let life = &runtime.sessions[&seat].session.life;
+    assert_eq!(
+        name_of(life),
+        Name::Live,
+        "the kept pane runs a shell again"
+    );
+    assert!(life.pty().is_some());
+}
+
+/// RED (plan rows 195 and 191) — **an agent pane the system's end kept keeps its session's
+/// record**: the record is what the next start resumes, and the system ending the agent is not the
+/// agent ending by itself (`AgentAccount::child_ended` is read only after the system's end has
+/// been told apart). The document the question writes then holds it.
+///
+/// MUTATION (plant `plant-195-system-end-clears-the-record.py`): read `child_ended` on the
+/// system-ended road too (before `keep_system_ended_face`), and the record is gone with the
+/// system's end.
+#[test]
+fn an_agent_pane_the_systems_end_kept_keeps_its_session_record() {
+    let home = test_support::EndSessionHome::new("row195-system-end");
+    let mut application = a_window_of("row195-system-end", &home, &[true, true]);
+    let vendor = &crate::agent_resume::VENDORS[0];
+    let heard = crate::agent_resume::Heard {
+        id: "0b9c7e1a-4f3d-4c2b-9a8e-5d6f7a8b9c0d".to_owned(),
+        cwd: "C:/work/resume".to_owned(),
+        home: None,
+        launch: None,
+    };
+    let seat = {
+        let mut runtime = application.runtime();
+        let seat = runtime.seats.identity();
+        let leaf = &mut runtime.sessions.get_mut(&seat).expect("the pane").session;
+        leaf.launch.program = Some(PathBuf::from("claude.exe"));
+        assert!(
+            leaf.agent
+                .hear(vendor, &heard, crate::agent_resume::Child::Agent(vendor))
+        );
+        seat
+    };
+    ends(&mut application, 1, SYSTEM_ENDED);
+    let runtime = application.runtime();
+    let leaf = &runtime.sessions[&seat].session;
+    assert_eq!(name_of(&leaf.life), Name::Kept, "the pane is kept");
+    assert_eq!(
+        leaf.agent.record(),
+        Some(&heard.record(vendor)),
+        "and its session's record with it"
+    );
+    assert_eq!(
+        runtime.window.tabs[0].term_leaf(seat, false).agent,
+        Some(heard.record(vendor)),
+        "which the layout writes"
+    );
+}
+
+/// The Claude Code record the row 195 tests below resume: a made-up session in a folder that is
+/// only a name.
+fn resumed_claude(hand_back: &str) -> crate::agent_resume::SeedAgent {
+    crate::agent_resume::SeedAgent::Resume(crate::agent_resume::Resume {
+        record: bt_persist::AgentRecordV1 {
+            vendor: crate::attention_map::CLAUDE_CODE.to_owned(),
+            resume_id: "0b9c7e1a-4f3d-4c2b-9a8e-5d6f7a8b9c0d".to_owned(),
+            cwd: "C:/work/resume-gone".to_owned(),
+            home: None,
+            launch: None,
+        },
+        hand_back: Some(hand_back.to_owned()),
+    })
+}
+
+/// The profile a pane in birth was asked to be born as.
+fn asked_profile(life: &ShellLife) -> String {
+    life.birth()
+        .expect("a shell is being born")
+        .seed
+        .profile
+        .clone()
+}
+
+/// RED (row 195, review F5, re-review RN3) — **Restart shell, Duplicate tab and a split of a
+/// resumed shell pane start its shell**: a Git Bash pane whose typed `claude` came back runs the
+/// `claude` profile, and each of the three asks for Git Bash, never a fresh agent.
+///
+/// MUTATION (plant `plant-195-restart-starts-fresh-agent.py`): `ShellSession::own_profile`
+/// answering the launch's profile, and each of the three asks for `claude`.
+#[test]
+fn a_resumed_shell_panes_restart_duplicate_and_split_start_its_shell() {
+    let home = test_support::EndSessionHome::new("row195-own-profile");
+    let mut application = a_window_of("row195-own-profile", &home, &[true]);
+    let mut runtime = application.runtime();
+    let seat = runtime.seats.identity();
+    {
+        let leaf = &mut runtime.sessions.get_mut(&seat).expect("the pane").session;
+        leaf.launch.profile = "claude".to_owned();
+        leaf.agent = crate::agent_resume::AgentAccount::born(&resumed_claude("gitbash"), true);
+    }
+    runtime
+        .restart_shell(seat)
+        .expect("the restart is asked for");
+    let restarted = runtime
+        .sessions
+        .get_mut(&seat)
+        .expect("the pane")
+        .take_successor()
+        .expect("the replacement");
+    assert_eq!(
+        asked_profile(&restarted.session.life),
+        "gitbash",
+        "Restart shell"
+    );
+    let tab = runtime.window.tabs[runtime.window.active_tab].id;
+    assert!(
+        runtime
+            .tab_state(tab)
+            .and_then(|state| state.focused())
+            .is_some(),
+        "the tab's focused pane is the resumed one"
+    );
+    runtime
+        .duplicate_tab(tab)
+        .expect("the duplicate is asked for");
+    assert_eq!(runtime.window.tabs.len(), 2, "the duplicate tab");
+    let duplicate = &runtime.window.tabs[runtime.window.active_tab];
+    assert_eq!(
+        asked_profile(&duplicate.focused().expect("its pane").life),
+        "gitbash",
+        "Duplicate tab"
+    );
+    // Back to the resumed pane's tab, the first, for the split.
+    runtime
+        .activate_tab(0, true)
+        .expect("the source tab is in front");
+    runtime
+        .split_seat(seat, bt_layout::Axis::Row, false, crate::SplitSeed::Inherit)
+        .expect("the split is asked for");
+    let arrived = runtime
+        .sessions
+        .keys()
+        .copied()
+        .find(|other| *other != seat)
+        .expect("the split's pane");
+    assert_eq!(
+        asked_profile(&runtime.sessions[&arrived].session.life),
+        "gitbash",
+        "the split"
+    );
+}
+
+/// RED (row 195, review F3, re-review RN4) — **the gone-folder road, end to end**: a resume whose
+/// birth found its folder gone and started nothing lands as a pane with no shell, saying so in
+/// `diagnostics.log`; the reaper's next turn hands the pane its own shell, asked for with the
+/// could-not-resume line, and the record is gone.
+///
+/// MUTATION (plants `plant-195-gone-folder-landing-marks-nothing.py`,
+/// `plant-195-gone-folder-reaper-owes-nothing.py`): the landing not marking the account, or the
+/// reaper not queueing the hand-back it is owed, and no shell is asked for.
+#[test]
+fn a_resume_whose_folder_is_gone_lands_and_is_handed_its_shell_with_the_line() {
+    let home = test_support::EndSessionHome::new("row195-gone-road");
+    let mut application = a_window_of("row195-gone-road", &home, &[true]);
+    let mut runtime = application.runtime();
+    let seat = runtime.seats.identity();
+    let gone = crate::profiles::GoneFolder {
+        folder: PathBuf::from("C:/work/resume-gone"),
+        place: crate::profiles::spawn_place(
+            crate::profiles::index_of_id(crate::profiles::fallback_profile_id()),
+            None,
+            &bt_pty::SystemShellEnvironment,
+        )
+        .place,
+    };
+    let (wake, heard) = waking();
+    let shell = pty_door::request(
+        move |_| pty_door::Born {
+            session: None,
+            folder_gone: true,
+        },
+        wake,
+    )
+    .expect("the birth worker starts");
+    while !shell.answered() {
+        crate::lane::receive(&heard, "the birth's wake");
+    }
+    let seed = LeafSeed {
+        profile: "claude".to_owned(),
+        agent: resumed_claude("gitbash"),
+        ..LeafSeed::default()
+    };
+    let mut notes = Vec::new();
+    {
+        let pane = runtime.sessions.get_mut(&seat).expect("the pane");
+        crate::await_shell(
+            &mut pane.session,
+            shell,
+            BirthDecision {
+                spawn_profile: "claude".to_owned(),
+                spawn_place: Some(PathBuf::from("C:/work/resume-gone")),
+                unless_gone: Some(Box::new(gone)),
+                ..decision()
+            },
+            &seed,
+        );
+        pane.session.agent = crate::agent_resume::AgentAccount::born(&seed.agent, true);
+        let refusal = crate::runtime::panes::land_shell_birth(pane, |line| {
+            notes.push(line.to_owned());
+        })
+        .expect("the landing");
+        assert!(refusal.is_none(), "{refusal:?}");
+        assert!(pane.session.life.pty().is_none(), "nothing was started");
+    }
+    assert!(
+        notes.len() == 1 && notes[0].contains("resume-gone") && notes[0].contains("not resumed"),
+        "the landing says so: {notes:?}"
+    );
+    runtime
+        .reap_exited_tabs(Instant::now())
+        .expect("the reaper takes its turn");
+    assert_eq!(tab_ids(&mut application), [1], "the tab is kept meanwhile");
+    let mut runtime = application.runtime();
+    let pane = runtime.sessions.get_mut(&seat).expect("the pane");
+    assert_eq!(pane.session.agent.record(), None, "the record is gone");
+    let shell = pane
+        .take_successor()
+        .expect("the hand-back's shell is asked for");
+    let birth = shell.session.life.birth().expect("a shell is being born");
+    assert_eq!(birth.seed.profile, "gitbash", "the pane's own shell");
+    let crate::agent_resume::SeedAgent::CouldNotResume(could) = &birth.seed.agent else {
+        panic!(
+            "the shell is asked for with the line: {:?}",
+            birth.seed.agent
+        );
+    };
+    assert!(
+        could.text().contains("Claude Code session 0b9c7e1a"),
+        "{}",
+        could.text()
+    );
 }

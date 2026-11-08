@@ -695,7 +695,7 @@ impl<B: Backend> Runtime<'_, B> {
         // carried into the tab, it is born with again.
         let seed = born_in_tab(
             restart_seed(
-                &leaf.session.launch.profile,
+                leaf.session.own_profile(),
                 leaf.session.seed_place_for_a_new_shell(),
             ),
             self.window.tabs[self.window.active_tab]
@@ -707,33 +707,9 @@ impl<B: Backend> Runtime<'_, B> {
         // than the new leaf being repaired to it afterwards. Nothing else of the old view is
         // carried — its selection, its frames and its resize debt belong to a transcript that
         // is about to end. A spawn that fails leaves the old leaf exactly as it was.
-        let text_scale = leaf.view.text_scale;
-        let scale = self.window.renderer.scale_factor() as f32;
-        let Some(body) = seats::pane_body_viewport(&self.seats, &self.seat_layout, seat, scale)
-        else {
+        let Some(spawned) = self.bear_successor(self.window.active_tab, seat, &seed)? else {
             return Ok(());
         };
-        let wake = &self.window.pty_wake;
-        let formulas = FormulaSwitches::from_settings(self.app.settings_store.loaded());
-        let scrollback = scrollback_quota(self.app.settings_store.loaded().scrollback_lines);
-        let view = LeafView::at(&mut self.app.gpu, &self.window.renderer, text_scale)?;
-        let spawned = create_leaf_session(
-            view,
-            body,
-            LeafId {
-                tab: self.window.tabs[self.window.active_tab].id,
-                seat,
-            },
-            wake,
-            None,
-            &seed,
-            &self.app.profile_programs,
-            &self.app.settings_store.loaded().default_profile,
-            formulas,
-            scrollback,
-            self.app.settings_store.loaded().line_wrapping,
-            &bt_pty::SystemShellEnvironment,
-        )?;
         // **A replacement still being born waits beside the shell it replaces** (T-BIRTH-OFF-WINDOW):
         // the old shell goes on being the one typed into until the new one lands
         // (`Runtime::land_births`), and a birth that fails leaves it as it was. A replacement
@@ -746,6 +722,48 @@ impl<B: Backend> Runtime<'_, B> {
             return Ok(());
         }
         self.replace_restarted_shell(seat, spawned)
+    }
+
+    /// **A successor for one pane, born at the rung the pane has** (ticket 37) — the
+    /// constructor's call for *Restart shell* ([`Self::restart_shell`]) and for an ended agent's
+    /// hand-back ([`Self::hand_back_shell`], row 195), in tab `tab_index`, which need not be the
+    /// one in view. Only the old view's rung is carried. `None` when the seat holds no terminal or
+    /// has no body to be born into; the old leaf is left as it was either way.
+    fn bear_successor(
+        &mut self,
+        tab_index: usize,
+        seat: SeatId,
+        seed: &crate::LeafSeed,
+    ) -> Result<Option<crate::TerminalPane>> {
+        let tab = &self.window.tabs[tab_index];
+        let Some(leaf) = tab.sessions.get(&seat) else {
+            return Ok(None);
+        };
+        let text_scale = leaf.view.text_scale;
+        let scale = self.window.renderer.scale_factor() as f32;
+        let Some(body) = seats::pane_body_viewport(&tab.seats, &tab.seat_layout, seat, scale)
+        else {
+            return Ok(None);
+        };
+        let tab_id = tab.id;
+        let formulas = FormulaSwitches::from_settings(self.app.settings_store.loaded());
+        let scrollback = scrollback_quota(self.app.settings_store.loaded().scrollback_lines);
+        let view = LeafView::at(&mut self.app.gpu, &self.window.renderer, text_scale)?;
+        create_leaf_session(
+            view,
+            body,
+            LeafId { tab: tab_id, seat },
+            &self.window.pty_wake,
+            None,
+            seed,
+            &self.app.profile_programs,
+            &self.app.settings_store.loaded().default_profile,
+            formulas,
+            scrollback,
+            self.app.settings_store.loaded().line_wrapping,
+            &bt_pty::SystemShellEnvironment,
+        )
+        .map(Some)
     }
 
     /// **The restarted shell takes the pane** — the old leaf is dropped here, by the insert:
@@ -778,6 +796,58 @@ impl<B: Backend> Runtime<'_, B> {
         self.settle_seat_set_change()?;
         self.refresh_chrome();
         self.repaint_pane_change(seat)
+    }
+
+    /// **A pane whose resumed agent ended gets its shell back, in the same folder** (0.4.9 plan
+    /// row 195; [`crate::agent_resume::Ended::HandBack`]) — in tab `tab_index`, which need not be
+    /// the one in view.
+    ///
+    /// *Restart shell*'s road with the reaper's address: the shell is born beside the agent pane
+    /// that ended (`TerminalPane::successor`) and takes its place when it lands
+    /// ([`Self::land_restart`]); the pane holds its tab meanwhile
+    /// ([`crate::agent_resume::AgentAccount::handing_back`]). `failed` is the line a resume that
+    /// never ran opens the shell with. A shell that cannot be asked for leaves the pane to end the
+    /// way an exited pane ends.
+    pub(in crate::runtime) fn hand_back_shell(
+        &mut self,
+        tab_index: usize,
+        seat: SeatId,
+        profile: Option<String>,
+        cwd: PathBuf,
+        failed: Option<crate::agent_resume::CouldNotResume>,
+    ) -> Result<()> {
+        let tab = &self.window.tabs[tab_index];
+        let seed = born_in_tab(
+            crate::LeafSeed {
+                agent: failed.map_or(
+                    crate::agent_resume::SeedAgent::None,
+                    crate::agent_resume::SeedAgent::CouldNotResume,
+                ),
+                ..restart_seed(
+                    &crate::agent_resume::hand_back_profile(profile),
+                    Some(cwd)
+                        .filter(|cwd| !cwd.as_os_str().is_empty())
+                        .map(crate::profiles::SeedPlace::Carried),
+                )
+            },
+            tab.carried_environment.as_ref(),
+        );
+        let Some(spawned) = self.bear_successor(tab_index, seat, &seed)? else {
+            return Ok(());
+        };
+        self.mark_session_dirty(Instant::now());
+        if spawned.session.life.birth().is_some() {
+            if let Some(leaf) = self.window.tabs[tab_index].sessions.get_mut(&seat) {
+                leaf.session.agent.begin_hand_back();
+                leaf.await_successor(Box::new(spawned));
+            }
+            return Ok(());
+        }
+        if tab_index == self.window.active_tab {
+            return self.replace_restarted_shell(seat, spawned);
+        }
+        self.window.tabs[tab_index].sessions.insert(seat, spawned);
+        Ok(())
     }
 
     /// Put one row's path into the shell's input line and give it the keyboard
@@ -2410,6 +2480,7 @@ pub(crate) fn restart_seed(profile: &str, standing_in: Option<profiles::SeedPlac
         // Not the seed's to say: a Restart shell is born in its tab, and `born_in_tab` gives it
         // the tab's carried environment (coordinator's ruling 2026-10-09).
         carried_environment: None,
+        agent: crate::agent_resume::SeedAgent::None,
     }
 }
 

@@ -116,6 +116,13 @@ fn posix(text: &str) -> String {
     format!("'{}'", text.replace('\'', "'\\''"))
 }
 
+/// **One word in POSIX single quotes**, whatever it holds: a quote of its own is closed, escaped and
+/// reopened. What the Mac's resume road hands a shell for each of an agent's launch words
+/// (`agent_resume::Vendor::shell_command`, 0.4.10 plan row 74).
+pub(crate) fn posix_literal(text: &str) -> String {
+    posix(text)
+}
+
 /// A csh/tcsh word. Those shells perform history expansion even inside single
 /// quotes, so `!` must be escaped in addition to the ordinary quote splice.
 fn csh(text: &str) -> String {

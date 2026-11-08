@@ -877,7 +877,14 @@ mod tests {
     };
     use crate::launch_conversation::{CountedClock, Turn};
 
-    const IDLE: Duration = Duration::from_secs(5);
+    /// The idle bound every download here that must get an answer is handed: the
+    /// suite's patience, not a 5 s race with the loopback server's thread (plan
+    /// row 163). It is both WinHTTP's four phase timeouts (`WinHttpSetTimeouts`)
+    /// and the silence deadline. Running out of it is still a real bound, the
+    /// suite's convention: the test's red, by name, not a 5 s race. The tests
+    /// that are about a deadline hand their own (`stretch`,
+    /// `DOWNLOAD_IDLE_TIMEOUT`).
+    const IDLE: Duration = crate::door_skipped::PATIENCE;
     /// Longer than any of these exchanges takes: the redirect loop's bound.
     const BUDGET: Duration = Duration::from_secs(20);
 
@@ -1033,14 +1040,16 @@ mod tests {
     /// right, and not one byte of it reaches a file.
     ///
     /// MUTATION: skip `admit_length` in `download_from`, and this waits for
-    /// the idle timeout and fails at the body stage instead.
+    /// the idle timeout and fails at the body stage instead. The server's
+    /// pause is twice the idle bound, so it is the idle deadline that ends the
+    /// wait, never the server's close.
     #[test]
     fn an_announced_length_over_the_ceiling_is_refused_before_the_body() {
         let directory = scratch("announced-over");
         let server = serve(|_| {
             vec![
                 Step::Send(begun(&["Content-Length: 1073741824".to_owned()])),
-                Step::Pause(Duration::from_secs(10)),
+                Step::Pause(IDLE * 2),
             ]
         });
         let port = server.port();

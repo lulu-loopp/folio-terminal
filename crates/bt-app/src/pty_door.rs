@@ -142,21 +142,25 @@ pub(crate) struct ShellSpec {
 /// [`ShellSpec::unless_gone`].
 pub(crate) struct GoneSpec {
     pub(crate) folder: PathBuf,
-    pub(crate) arguments: Vec<OsString>,
+    /// The command line to start instead, or `None` to start nothing: a resumed agent is never run
+    /// in a folder its session was not filed under (row 195, review F3).
+    pub(crate) arguments: Option<Vec<OsString>>,
     pub(crate) working_directory: Option<PathBuf>,
 }
 
 /// **What a shell's birth answers**: the session, or why there is none, and whether the folder
 /// the pane carried was found gone — the pane then stands where no folder would have put it.
+/// `session` is `None` when nothing was asked of `bt-pty`: the folder was gone and the birth's
+/// [`GoneSpec`] starts nothing in its place.
 pub(crate) struct Born {
-    pub(crate) session: Result<PtySession, PtyError>,
+    pub(crate) session: Option<Result<PtySession, PtyError>>,
     pub(crate) folder_gone: bool,
 }
 
 impl From<Result<PtySession, PtyError>> for Born {
     fn from(session: Result<PtySession, PtyError>) -> Self {
         Self {
-            session,
+            session: Some(session),
             folder_gone: false,
         }
     }
@@ -232,7 +236,20 @@ fn bear(
     let gone = gone_place(unless_gone, &Path::is_dir);
     let folder_gone = gone.is_some();
     let (arguments, working_directory) = match gone {
-        Some(gone) => (gone.arguments, gone.working_directory),
+        Some(GoneSpec {
+            arguments: Some(arguments),
+            working_directory,
+            ..
+        }) => (arguments, working_directory),
+        // A birth that starts nothing when its folder is gone (row 195, review F3).
+        Some(GoneSpec {
+            arguments: None, ..
+        }) => {
+            return Born {
+                session: None,
+                folder_gone,
+            };
+        }
         None => (arguments, working_directory),
     };
     // **A Windows PowerShell 5.1 birth composes from the edition's known language mode**
@@ -264,7 +281,7 @@ fn bear(
     {
         crate::diagnostics::stderr_line(line.to_string());
         return Born {
-            session: Err(PtyError::Backend(line)),
+            session: Some(Err(PtyError::Backend(line))),
             folder_gone,
         };
     }
@@ -334,7 +351,7 @@ fn bear(
             }
         });
     Born {
-        session,
+        session: Some(session),
         folder_gone,
     }
 }
@@ -454,7 +471,7 @@ pub(crate) fn panic_message(panic: &(dyn std::any::Any + Send)) -> &str {
 
 /// A session nobody will take, taken apart on a thread of its own (`bt_pty::retire_session`).
 fn retire(answer: Born) {
-    if let Ok(session) = answer.session {
+    if let Some(Ok(session)) = answer.session {
         bt_pty::retire_session(session);
     }
 }
@@ -698,7 +715,7 @@ mod tests {
         let born = shell
             .take()
             .expect("the answer is published before the wake");
-        let Err(PtyError::Backend(said)) = born.session else {
+        let Some(Err(PtyError::Backend(said))) = born.session else {
             panic!("a panicked birth is a backend error");
         };
         assert_eq!(said, BIRTH_PANICKED, "and says none of the panic's text");

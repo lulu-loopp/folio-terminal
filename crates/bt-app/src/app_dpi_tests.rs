@@ -523,3 +523,57 @@ fn one_cell_terminal_and_zero_pixel_transition_are_defended() {
         .unwrap();
     assert_eq!(session.terminal().visible_text(), ["A"]);
 }
+
+/// RED (0.4.10 plan row 71) — **a scale change puts the program's icon on the window again, at
+/// the scale the window is now drawn at, and a change that moves nothing wears nothing.**
+///
+/// The snap layouts, Alt+Tab and Task View draw a window's own icon at its display's size, and
+/// the window was born wearing it at the old display's (`Runtime::create`, `Runtime::open_window`,
+/// held by `app_icon_tests::every_window_is_born_wearing_the_programs_icon`). The scale is the
+/// renderer's, so the icon follows the same settled change the font does: a drag across a seam
+/// pays for it once, when the hand lets go (`reconcile_authoritative_dpi`).
+///
+/// MUTATION (`plant-71-c-scale-change-keeps-the-old-icon.py`): drop the door from
+/// `Runtime::apply_scale_factor` and the first assertion finds no icon worn.
+#[test]
+fn a_scale_change_wears_the_programs_icon_at_the_new_scale() {
+    let mut folio = crate::headless::HeadlessFolio::with_tabs(
+        "icon-scale",
+        vec![crate::test_support::tab_holding(
+            crate::test_support::leaf_saying("icon"),
+        )],
+        0,
+    );
+    let worn = |folio: &crate::headless::HeadlessFolio| -> Vec<f64> {
+        folio
+            .ledger
+            .take()
+            .into_iter()
+            .filter_map(|effect| match effect {
+                crate::headless::WindowEffect::AppIcon(scale) => Some(scale),
+                _ => None,
+            })
+            .collect()
+    };
+
+    folio.window.window.scale = 1.5;
+    folio
+        .runtime()
+        .scale_factor_changed()
+        .expect("the scale change is answered");
+    assert_eq!(
+        worn(&folio),
+        [1.5],
+        "the window wears the program's icon once, at the scale it is now drawn at"
+    );
+
+    folio
+        .runtime()
+        .scale_factor_changed()
+        .expect("the same scale, announced again");
+    assert_eq!(
+        worn(&folio),
+        Vec::<f64>::new(),
+        "an announcement that moves no scale wears nothing"
+    );
+}
