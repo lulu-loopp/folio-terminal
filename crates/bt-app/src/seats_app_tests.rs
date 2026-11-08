@@ -1802,6 +1802,7 @@ fn a_restored_split_tree_reaches_zero_pty_resize_requests_after_a_matching_dpi_s
                     manual_name: None,
                     card_skip: 0,
                     last_command: String::new(),
+                    agent: None,
                 }),
             )),
             Box::new(bt_persist::LayoutNodeV1::Leaf(

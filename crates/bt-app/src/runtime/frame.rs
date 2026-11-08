@@ -1641,8 +1641,8 @@ impl<B: Backend> Runtime<'_, B> {
     ///
     /// The only writer of [`WindowRuntime::observed_place`] and the four fields it is written
     /// with (`window_hidden`, `window_exposed`, `taskbar_reading`, `attention_sampled_at`),
-    /// and the only caller of [`sample_window_place`]. Called from three places, and each is
-    /// the moment a delivery can be decided:
+    /// and the only caller of [`sample_window_place`]. Called from these places, and each is
+    /// the moment a delivery, or the owner of a stop's box, can be decided:
     ///
     /// * **the head of [`Self::turn`]** — one reading shared by `drain_pty` and
     ///   `advance_strip_animation`, which used to take one each on the same turn (owner's
@@ -1655,7 +1655,11 @@ impl<B: Backend> Runtime<'_, B> {
     ///   turn would wait for the hand to let go of the frame;
     /// * **the re-placing of a taskbar flash** the taskbar lane's newest answer contradicts
     ///   (`Runtime::replace_contradicted_flash`, ticket 62), so the delivery is decided again on
-    ///   a reading that carries the answer.
+    ///   a reading that carries the answer;
+    /// * **a stop about to raise its box** (`FolioApp::fail` and
+    ///   `FolioApp::stop_every_window_keeping_in`, 0.4.10 plan row 72, re-review R2), on every
+    ///   standing window before the box's owner is chosen: a window left behind on another
+    ///   virtual desktop takes no turn, so its last reading can say it is on the screen.
     ///
     /// "Every turn, never cached across them" (user rulings 2026-08-28 and 2026-09-01) holds for
     /// hidden, exposed and focus: a turn's head replaces the reading before anything in that turn

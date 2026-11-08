@@ -77,6 +77,7 @@ pub const SETTINGS_MIGRATIONS: &[(u32, MigrationStep)] = &[
     (36, migrate_settings_v36_to_v37),
     (37, migrate_settings_v37_to_v38),
     (38, migrate_settings_v38_to_v39),
+    (39, migrate_settings_v39_to_v40),
 ];
 
 fn migrate_settings_v1_to_v2(mut value: Value) -> Value {
@@ -888,6 +889,20 @@ fn migrate_settings_v38_to_v39(mut value: Value) -> Value {
     value
 }
 
+/// v39 -> v40: `resume_agents`, the Agents page's switch over bringing a pane's agent back
+/// through its vendor's resume command after a restart (0.4.9 plan row 195), written **on**.
+///
+/// The owner's ruling and not a behaviour carried forward ("agent 要自动 resume, 可以有开关, 默认
+/// 打开", 2026-09-18): no build before this one resumed anything, and the switch is what keeps
+/// the resume a choice. One key, [`migrate_settings_v38_to_v39`]'s shape; no sibling is read.
+fn migrate_settings_v39_to_v40(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("schema_version".to_owned(), Value::from(40));
+        object.insert("resume_agents".to_owned(), Value::Bool(true));
+    }
+    value
+}
+
 /// v2 records the keyboard dialect that wrote the chords. A v1 file cannot
 /// supply that fact, so it migrates explicitly to `unknown` and keeps the old
 /// literal-modifier behaviour.
@@ -955,6 +970,8 @@ pub const SESSION_MIGRATIONS: &[(u32, MigrationStep)] = &[
     (12, migrate_session_v12_to_v13),
     (13, migrate_session_v13_to_v14),
     (14, migrate_session_v14_to_v15),
+    (15, migrate_session_v15_to_v16),
+    (16, migrate_session_v16_to_v17),
 ];
 
 fn migrate_session_v1_to_v2(mut value: Value) -> Value {
@@ -1285,6 +1302,33 @@ fn migrate_session_v13_to_v14(mut value: Value) -> Value {
 fn migrate_session_v14_to_v15(mut value: Value) -> Value {
     if let Some(object) = value.as_object_mut() {
         object.insert("schema_version".to_owned(), Value::from(15));
+    }
+    value
+}
+
+/// **v16 takes the number and nothing else** (rule 3), and no record is the whole of what a v15
+/// document can honestly say.
+///
+/// [`crate::TermLeafV1::agent`] is what an agent's own hook said from inside a pane, and no build
+/// before this one kept it, so there is no older key to read it out of. A pane restored from a v15
+/// document comes back as its profile, exactly as it did under the build that wrote it.
+fn migrate_session_v15_to_v16(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("schema_version".to_owned(), Value::from(16));
+    }
+    value
+}
+
+/// **v17 takes the number and nothing else** (rule 3): a v16 agent record keeps no launch, and
+/// "not read" is not "read, and empty".
+///
+/// [`crate::AgentRecordV1::launch`] is what the agent's own hook read of how the agent was started,
+/// and no build before this one read it. A record migrated from v16 has no `launch` key, and its
+/// pane resumes exactly as the build that wrote it resumed it — with the vendor's own defaults, and
+/// no line about arguments it never knew of.
+fn migrate_session_v16_to_v17(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("schema_version".to_owned(), Value::from(17));
     }
     value
 }
@@ -3151,6 +3195,78 @@ mod tests {
             absent.web_color_scheme,
             crate::WebColorSchemeV1::FollowTheme
         );
+    }
+
+    /// RED (row 195) — **the v39 -> v40 step writes `resume_agents` on, and leaves every sibling
+    /// exactly as it found it.** The owner ruled the resume on by default (2026-09-18); a step
+    /// that wrote `false` would leave every upgrading reader without the feature they asked for.
+    ///
+    /// MUTATION: write `false` in `migrate_settings_v39_to_v40` — the first assertion goes red.
+    #[test]
+    fn migrate_settings_v39_to_v40_writes_the_resume_switch_on_and_leaves_every_sibling_alone() {
+        let before = json!({
+            "schema_version": 39,
+            "theme_mode": "Dark",
+            "web_pages_used": "Used",
+            "turn_end_notification": false
+        });
+        let migrated = migrate_value(before.clone(), 39, 40, SETTINGS_MIGRATIONS).unwrap();
+        assert_eq!(migrated["resume_agents"], json!(true));
+        assert_eq!(migrated["schema_version"], json!(40));
+        for (key, value) in before.as_object().expect("an object") {
+            if key != "schema_version" {
+                assert_eq!(&migrated[key], value, "{key} is left as it was");
+            }
+        }
+    }
+
+    /// The v15 -> v16 session step takes the number and nothing else: no older key holds an agent.
+    #[test]
+    fn migrate_session_v15_to_v16_takes_the_number_and_invents_no_agent() {
+        let before = json!({
+            "schema_version": 15,
+            "windows": [],
+            "recent": [],
+            "recent_folders": []
+        });
+        let migrated = migrate_value(before.clone(), 15, 16, SESSION_MIGRATIONS).unwrap();
+        let mut expected = before;
+        expected["schema_version"] = json!(16);
+        assert_eq!(migrated, expected);
+    }
+
+    /// RED (row 74, T4) — **the v16 -> v17 session step takes the number and invents no launch**: a
+    /// v16 pane's agent record comes through with exactly its keys, and no `launch` key — the key
+    /// whose absence makes the resume what v16's was.
+    ///
+    /// MUTATION (plant `plant-74-old-record-invents.py`): the step writes `launch: {}` into each
+    /// record — the record grows a key and the comparison goes red.
+    #[test]
+    fn migrate_session_v16_to_v17_takes_the_number_and_invents_no_launch() {
+        let before = json!({
+            "schema_version": 16,
+            "windows": [{
+                "tabs": [{
+                    "root": {
+                        "kind": "term",
+                        "profile": "claude",
+                        "agent": {
+                            "vendor": "claude-code",
+                            "resume_id": "0f8b6a2e-3c1d-4e5f-9a7b-1c2d3e4f5a6b",
+                            "cwd": "C:\\work"
+                        }
+                    }
+                }]
+            }],
+            "recent": [],
+            "recent_folders": []
+        });
+        let migrated = migrate_value(before.clone(), 16, 17, SESSION_MIGRATIONS).unwrap();
+        let mut expected = before;
+        expected["schema_version"] = json!(17);
+        assert_eq!(migrated, expected);
+        let agent = &migrated["windows"][0]["tabs"][0]["root"]["agent"];
+        assert!(agent.get("launch").is_none(), "no launch key: {agent}");
     }
 
     /// RED (60) — **the v38 -> v39 step adds the web-pages receipt as `Never`, and leaves every

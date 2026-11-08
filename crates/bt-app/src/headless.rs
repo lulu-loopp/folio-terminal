@@ -67,6 +67,11 @@ pub(crate) enum WindowEffect {
     ImeArea([i32; 4]),
     /// macOS's Option key told to send Alt, or not.
     OptionAsAlt(bool),
+    /// The program's own icon worn at a scale (`WindowHost::wear_the_app_icon`).
+    AppIcon(f64),
+    /// The system's box said over the window (`WindowHost::say_in_a_box`), with its text — kept
+    /// here, and raised nowhere.
+    SaidInABox(String),
     /// The window's input-method facts read (`WindowHost::ime_facts`).
     ImeFactsRead,
     /// A line the window's runtime said in `diagnostics.log` (`WindowHost::note`), as it would
@@ -103,6 +108,9 @@ pub(crate) enum WindowEffect {
     RestartRegistered { flags: u32 },
     /// That registration taken back (`Backend::withdraw_restart`).
     RestartWithdrawn,
+    /// The system asked to end the program before the processes at the default shutdown level,
+    /// at this level (`Backend::ask_to_be_ended_first`, plan row 191).
+    ShutdownLevelAsked { level: u32 },
     /// A page's place in the window asked for, for the web engine (`WindowHost::page_address`).
     PageAddressed(bt_platform::PageVisual),
     /// A hand-off to the system: a file opened, a path revealed, an address handed over.
@@ -312,6 +320,13 @@ impl Backend for Headless {
         event_loop.ledger.record(WindowEffect::RestartWithdrawn);
         Ok(())
     }
+
+    fn ask_to_be_ended_first(event_loop: &HeadlessLoop, level: u32) -> Result<(), String> {
+        event_loop
+            .ledger
+            .record(WindowEffect::ShutdownLevelAsked { level });
+        Ok(())
+    }
 }
 
 /// **A window with no window**: an id, a size, a scale and a ledger.
@@ -345,6 +360,8 @@ pub(crate) struct HeadlessWindow {
 /// driven too; a test that wants the refusal scripts it.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct PlatformAnswers {
+    /// `WindowHost::is_visible`, winit's own reading: `Some(true)`.
+    pub(crate) visible: Option<bool>,
     /// `WindowHost::is_minimized`, winit's own reading: `Some(false)`.
     pub(crate) minimized: Option<bool>,
     /// `WindowHost::is_iconic`: `false`.
@@ -377,6 +394,7 @@ pub(crate) struct PlatformAnswers {
 impl Default for PlatformAnswers {
     fn default() -> Self {
         Self {
+            visible: Some(true),
             minimized: Some(false),
             iconic: false,
             cloaked: false,
@@ -423,7 +441,7 @@ impl WindowHost for HeadlessWindow {
         self.scale
     }
     fn is_visible(&self) -> Option<bool> {
-        Some(true)
+        self.answers.get().visible
     }
     fn is_maximized(&self) -> bool {
         false
@@ -560,6 +578,7 @@ impl WindowHost for HeadlessWindow {
         &self,
         _hear: Box<dyn Fn(bt_platform::session_end::SessionEnd)>,
         _reason: Box<dyn Fn() -> String>,
+        _ending: std::rc::Rc<dyn Fn()>,
     ) -> Option<bt_platform::session_end::SessionEndWatch> {
         self.ledger.record(WindowEffect::SessionEndWatched);
         None
@@ -583,6 +602,14 @@ impl WindowHost for HeadlessWindow {
     fn set_option_as_alt(&self, option_sends_alt: bool) {
         self.ledger
             .record(WindowEffect::OptionAsAlt(option_sends_alt));
+    }
+    fn wear_the_app_icon(&self, scale_factor: f64) {
+        self.ledger.record(WindowEffect::AppIcon(scale_factor));
+    }
+    fn say_in_a_box(&self, seen: bt_platform::SeenBox, text: &str) {
+        let _ = seen;
+        self.ledger
+            .record(WindowEffect::SaidInABox(text.to_owned()));
     }
     fn clipboard(
         &self,
@@ -1643,6 +1670,7 @@ impl HeadlessApplication {
             ))),
             crate::profiles::settle_registry(),
             crate::explorer_menu::settle_package(),
+            crate::settings::settle_notices(),
         );
         application.app = Some(app);
         application.windows.insert(id, window);
@@ -2080,6 +2108,7 @@ mod tests {
             PhysicalSize::new(3, 18).into(),
         );
         window.set_option_as_alt(true);
+        window.wear_the_app_icon(1.25);
         window.note("诊断 a line, said as it is written");
         // The window's questions to the system answer the documented stand-ins, and record
         // nothing; its instructions record what they were told.
@@ -2117,7 +2146,11 @@ mod tests {
         assert!(window.watch_system_settings(Box::new(|_| {})).is_none());
         assert!(
             window
-                .watch_session_end(Box::new(|_| {}), Box::new(String::new))
+                .watch_session_end(
+                    Box::new(|_| {}),
+                    Box::new(String::new),
+                    std::rc::Rc::new(|| {})
+                )
                 .is_none()
         );
         assert!(
@@ -2265,6 +2298,7 @@ mod tests {
                 WindowEffect::Cursor(Cursor::Icon(CursorIcon::Text)),
                 WindowEffect::ImeArea([10, 20, 3, 18]),
                 WindowEffect::OptionAsAlt(true),
+                WindowEffect::AppIcon(1.25),
                 WindowEffect::Noted("诊断 a line, said as it is written".to_owned()),
                 WindowEffect::StoodAt(bt_platform::WindowRect {
                     left: 10,
