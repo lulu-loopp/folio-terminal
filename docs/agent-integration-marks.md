@@ -289,6 +289,36 @@ only once its version has been asked, since the version decides which file the
 repair writes (row 69c). On a Codex that runs hooks, a gone copy's `notify` line
 is repaired into the hook, and this copy's working line alone is left as it is.
 
+## The hook reads how its agent was started (0.4.10 plan row 74)
+
+A turn end that names a session (Claude Code's `Stop`, Codex's `Stop` hook
+or its older `agent-turn-complete` notify line) also says how the agent was
+started: `folio attention` reads the agent's command line. For Claude Code
+and for Codex's `notify` program that is its own parent process's, because
+Claude Code runs an `args` hook directly and Codex spawns `notify` from its
+own process. Codex runs its `Stop` hook through the session's shell instead
+(`pwsh -NoProfile -Command "& '<folio.exe>' attention codex:stop --json -"`
+on Windows, `<shell> -c '<sh form>'` elsewhere), and a Windows shell never
+execs what it runs, so the hook's parent is that shell: when the parent's
+command line is exactly that spawn of Folio's own entry, naming this very
+program, the verb reads the shell's parent instead, one generation up and no
+further, with the same pid and start checks on both (review N1, 2026-11-07).
+A shell that execs the entry (bash, zsh) leaves the agent as the parent and
+needs no step. The read is bounded and waits on nothing (Windows: the
+process's PEB, asked to be running before and after; macOS:
+`KERN_PROCARGS2`). Each vendor's table keeps the session flags, drops the
+first start's own flags and any value that can hold a credential by name,
+and every prompt silently. A flag the table does not know leaves a Codex
+launch not read, and is dropped and named, with the word after it unless
+that word is a flag, in a Claude Code one. The line carries the result as a
+top-level `launch` key beside
+`resume` (wire version 1). Nothing changes in the installed entries: the
+same `args` arrays, the same command string, the same events. A hook entry
+that runs through any other shell line (an old shell template, a person's
+own wrapper) has a parent whose command line is not a shape the table
+names: that launch is not read, and the resumed pane says it came back
+without its launch arguments.
+
 ## Take-over and the settings row
 
 The existing settings switch reports its result through a toast. A foreign live

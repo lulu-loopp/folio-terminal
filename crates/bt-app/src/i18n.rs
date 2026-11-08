@@ -5299,8 +5299,8 @@ impl Text {
             Self::RowResumeAgents => pick(lang, "Resume agents after restart", "重启后恢复 agent"),
             Self::DescResumeAgents => pick(
                 lang,
-                "When Folio reopens, panes that were running Claude Code or Codex resume their sessions.",
-                "Folio 重新打开时，运行过 Claude Code 或 Codex 的窗格恢复各自的会话。",
+                "When Folio reopens, panes running Claude Code or Codex resume their sessions with their launch arguments.",
+                "Folio 重新打开时，运行过 Claude Code 或 Codex 的窗格以原启动参数恢复各自的会话。",
             ),
             Self::ToastTurnFinished => pick(lang, "Turn finished", "回合结束"),
             Self::ToastWaitingForYou => pick(lang, "Waiting for you", "正在等你回答"),
@@ -6813,6 +6813,20 @@ pub fn could_not_resume_text(title: &str, id: &str) -> String {
     match current() {
         Lang::English => format!("{title} session {id} could not be resumed."),
         Lang::Chinese => format!("{title} 会话 {id} 无法恢复。"),
+    }
+}
+
+/// **The line a resumed pane opens with when its launch did not all come back** (0.4.10 plan row
+/// 74): the vendor's title and the flags it was started with that the resume was not handed, by
+/// name and never with a value — or, with none named, that the launch could not be read. The
+/// Chinese is a draft (`zh pending`).
+#[must_use]
+pub fn resumed_without_text(title: &str, flags: &[String]) -> String {
+    match (current(), flags.is_empty()) {
+        (Lang::English, true) => format!("{title} resumed without its launch arguments."),
+        (Lang::English, false) => format!("{title} resumed without {}.", flags.join(", ")),
+        (Lang::Chinese, true) => format!("{title} 恢复时未带启动参数。"),
+        (Lang::Chinese, false) => format!("{title} 恢复时未带 {}。", flags.join("、")),
     }
 }
 

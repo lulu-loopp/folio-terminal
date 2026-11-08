@@ -10639,6 +10639,18 @@ mod tests {
                             resume_id: SESSION.to_owned(),
                             cwd: folder.display().to_string(),
                             home: Some(configuration.display().to_string()),
+                            // Row 74: launch words a shell would split or run if they were
+                            // handed to it bare — a `;`, a space.
+                            launch: Some(Box::new(bt_persist::AgentLaunchV1 {
+                                args: vec![
+                                    "--model".to_owned(),
+                                    "opus; exit 3".to_owned(),
+                                    "--add-dir".to_owned(),
+                                    "/work/a b".to_owned(),
+                                ],
+                                dropped: Vec::new(),
+                                unread: false,
+                            })),
                         },
                         hand_back: Some(id.to_owned()),
                     }),
@@ -10650,7 +10662,13 @@ mod tests {
                 };
                 let mut command = shipped_command(row, &[], scripts, &bare());
                 assert!(
-                    crate::compose_resume(&mut command, &seed, &crate::Started::AsAsked, row),
+                    crate::compose_resume(
+                        &mut command,
+                        &seed,
+                        &crate::Started::AsAsked,
+                        row,
+                        program
+                    ),
                     "{id}: the birth is a resume"
                 );
                 command
@@ -10698,7 +10716,9 @@ mod tests {
                     let folder = std::fs::canonicalize(&folder).unwrap();
                     let pid = session.child_id().expect("the child has a pid");
                     for fact in [
-                        format!("argv=[--resume {SESSION}]"),
+                        format!(
+                            "argv=[--resume {SESSION} --model opus; exit 3 --add-dir /work/a b]"
+                        ),
                         format!("cwd=[{}]", folder.display()),
                         format!("home=[{}]", configuration.display()),
                         format!("pid=[{pid}]"),

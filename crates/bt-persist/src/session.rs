@@ -51,7 +51,15 @@ use crate::layout::LayoutNodeV1;
 /// **v16 lets a pane remember the agent it was running** ([`crate::TermLeafV1::agent`], 0.4.9
 /// plan row 195): the vendor, the id that vendor resumes by, the folder and, when one was set, the
 /// vendor's configuration folder — what the vendor's own resume command needs and nothing more.
-pub const SESSION_SCHEMA_VERSION: u32 = 16;
+/// **v17 lets that record carry the agent's launch words** ([`crate::AgentLaunchV1`], 0.4.10 plan
+/// row 74): the flags the agent was started with that its vendor's resume does not bring back by
+/// itself, so a session started with `--dangerously-skip-permissions` or `--model opus` comes back
+/// the way it was started. **They are written in the clear**, as the plaintext clause above writes
+/// a URL: they are the person's own command line, and the values that hold credentials are never
+/// among them — inline `--settings`, `--mcp-config` or `--agents` JSON, and a Codex `-c` whose key
+/// is not on its stated list of keys that hold none, are dropped and only their flag named (row
+/// 74's R5 and review N2).
+pub const SESSION_SCHEMA_VERSION: u32 = 17;
 
 /// **What a preview row's string names** — schema v11.
 ///
@@ -415,6 +423,9 @@ pub struct DegradationReport {
     /// Agent records no build could have written (an id that is not UUID-shaped, an empty vendor
     /// or folder), dropped with the pane kept (row 195).
     pub dropped_agents: u32,
+    /// Agent launches no build could have written (`unread` beside words), kept as unread with the
+    /// record and the pane kept (row 74): the resume runs without them and the pane says so.
+    pub unread_launches: u32,
 }
 
 impl DegradationReport {
@@ -427,6 +438,7 @@ impl DegradationReport {
             && self.dropped_panes == 0
             && self.dropped_commands == 0
             && self.dropped_agents == 0
+            && self.unread_launches == 0
     }
 }
 
@@ -1074,6 +1086,7 @@ mod tests {
             resume_id: resume_id.to_owned(),
             cwd: "C:\\work".to_owned(),
             home: None,
+            launch: None,
         }
     }
 
@@ -1151,6 +1164,91 @@ mod tests {
         );
         assert_eq!(report.dropped_agents, 1);
         assert_eq!(session.windows[0].tabs.len(), 2, "both panes are kept");
+    }
+
+    /// The keys of the JSON object at `value`, sorted.
+    fn keys_of(value: &serde_json::Value) -> Vec<String> {
+        let mut keys: Vec<String> = value
+            .as_object()
+            .expect("an object")
+            .keys()
+            .cloned()
+            .collect();
+        keys.sort();
+        keys
+    }
+
+    /// RED (row 74, T9) — **the agent record's keys are v17's, and v17's only**: the guard row 68
+    /// asks of every key set (a key changes only with a schema bump). Every key a record can write
+    /// is written here — a launch that carried words and named a dropped flag, and one that could
+    /// not be read — and the sets are pinned beside the version they belong to.
+    ///
+    /// MUTATIONS: leave `SESSION_SCHEMA_VERSION` at 16 (plant `plant-74-no-bump.py`) — the first
+    /// assertion goes red; rename a launch key — the key-set assertions do.
+    #[test]
+    fn the_v17_agent_record_writes_the_pinned_keys() {
+        assert_eq!(
+            SESSION_SCHEMA_VERSION, 17,
+            "the launch keys below are v17's: a new key is a new version"
+        );
+        let carried = crate::layout::AgentRecordV1 {
+            home: Some("D:\\accounts\\second".to_owned()),
+            launch: Some(Box::new(crate::layout::AgentLaunchV1 {
+                args: vec!["--model".to_owned(), "opus".to_owned()],
+                dropped: vec!["-w".to_owned()],
+                unread: false,
+            })),
+            ..claude_record("0f8b6a2e-3c1d-4e5f-9a7b-1c2d3e4f5a6b")
+        };
+        let written = serde_json::to_value(&carried).expect("a record serialises");
+        assert_eq!(
+            keys_of(&written),
+            ["cwd", "home", "launch", "resume_id", "vendor"]
+        );
+        assert_eq!(keys_of(&written["launch"]), ["args", "dropped"]);
+        let unread = serde_json::to_value(crate::layout::AgentLaunchV1::unread())
+            .expect("a launch serialises");
+        assert_eq!(keys_of(&unread), ["unread"]);
+        assert_eq!(unread["unread"], serde_json::json!(true));
+        let back: crate::layout::AgentRecordV1 =
+            serde_json::from_value(written).expect("and reads back");
+        assert_eq!(back, carried);
+    }
+
+    /// RED (row 74) — **a launch no build could have written is read as unread, and the session it
+    /// rides on is kept**: the resume still runs, with the vendor's defaults, and the pane says it
+    /// came back without its launch arguments.
+    ///
+    /// MUTATION: drop the launch arm of `LayoutNodeV1::degrade_in_place` — the forged launch comes
+    /// back with its words.
+    #[test]
+    fn a_launch_no_build_wrote_is_unread_and_its_session_kept() {
+        let forged = crate::layout::AgentRecordV1 {
+            launch: Some(Box::new(crate::layout::AgentLaunchV1 {
+                args: vec!["--dangerously-skip-permissions".to_owned()],
+                dropped: Vec::new(),
+                unread: true,
+            })),
+            ..claude_record("0f8b6a2e-3c1d-4e5f-9a7b-1c2d3e4f5a6b")
+        };
+        let mut session = SessionV1 {
+            windows: vec![SessionWindowV1 {
+                tabs: vec![one_tab(agent_leaf(Some(forged.clone())))],
+                ..SessionWindowV1::default()
+            }],
+            ..SessionV1::default()
+        };
+        let report = session.degrade_in_place();
+        assert_eq!(
+            agents_of(&session),
+            vec![Some(crate::layout::AgentRecordV1 {
+                launch: Some(Box::new(crate::layout::AgentLaunchV1::unread())),
+                ..forged
+            })]
+        );
+        assert_eq!(report.unread_launches, 1);
+        assert_eq!(report.dropped_agents, 0, "the session is kept");
+        assert!(!report.is_clean());
     }
 
     /// The one shape check: `8-4-4-4-12` hexadecimal, either case, and nothing else.

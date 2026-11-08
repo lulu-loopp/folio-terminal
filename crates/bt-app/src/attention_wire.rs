@@ -33,6 +33,16 @@
 //! ([`crate::agent_resume::Heard::is_well_formed`]); a line whose `resume` is anything else is a
 //! line from something that is not `folio attention`, and is dropped whole.
 //!
+//! **And beside it, since 0.4.10 plan row 74, how that session's agent was started**: `launch`,
+//! the words of the agent's own command line its vendor's table carries and the names of the
+//! flags it does not (`{"args": […], "dropped": […]}`), or `{"unread": true}` when the hook could
+//! not read it. The verb reads it from its own parent process — the agent that ran the hook —
+//! and only on a line that carries a `resume`. A key of its own rather than one inside `resume`,
+//! whose keys are closed: a window older than this build reads past a key it does not know and
+//! still records the session, where a fourth key inside `resume` would make it drop the line.
+//! The same rules hold — named fields, checked at both ends, the whole line within the endpoint's
+//! frame — and a launch that would not fit is sent as unread.
+//!
 //! The words are the wider of the two doors and are worth stating exactly. What crosses is at most
 //! eighty-one characters of prose with no control character in it, produced by
 //! [`crate::attention_words`] from a source a row declared, and the far end refuses a line whose
@@ -105,7 +115,7 @@ pub(crate) struct Message {
     pub text: Option<String>,
     /// **The session the turn ended in** (row 195), already checked. `None` for every row that
     /// declares no [`Resume`](crate::attention_map::Resume) source and for a payload that named
-    /// none this build could resume.
+    /// none this build could resume. Its `launch` (row 74) crosses as the line's own `launch` key.
     pub resume: Option<crate::agent_resume::Heard>,
     /// **The turn was another client's** (0.4.10 plan row 75, review N1): a turn-end row declares
     /// the vendor's interactive client (`only_client`) and the payload names another, or none —
@@ -145,6 +155,9 @@ impl Message {
                 session.insert("home".to_owned(), home.clone().into());
             }
             value.insert("resume".to_owned(), serde_json::Value::Object(session));
+            if let Some(launch) = &resume.launch {
+                value.insert("launch".to_owned(), launch_value(launch));
+            }
         }
         if self.another_client {
             value.insert("another_client".to_owned(), true.into());
@@ -193,7 +206,13 @@ impl Message {
                 Some(words.to_owned())
             }
         };
+        let launch = match object.get("launch") {
+            None => None,
+            Some(value) => Some(launch_of_value(value)?),
+        };
         let resume = match object.get("resume") {
+            // A launch is a session's; one with no session is no line `folio attention` sends.
+            None if launch.is_some() => return None,
             None => None,
             Some(value) => {
                 let session = value.as_object()?;
@@ -207,6 +226,7 @@ impl Message {
                     id: field("id")??,
                     cwd: field("cwd")??,
                     home: field("home")?,
+                    launch,
                 };
                 // **Checked again here**, for `id`'s reason: this end has no cause to trust that
                 // the far end applied the shape, and the id is handed to a vendor's command line.
@@ -236,6 +256,138 @@ impl Message {
             another_client,
         })
     }
+}
+
+/// **A launch as it crosses**: its record's own shape (`bt_persist::AgentLaunchV1`), each key
+/// absent when empty.
+fn launch_value(launch: &bt_persist::AgentLaunchV1) -> serde_json::Value {
+    let mut value = serde_json::Map::new();
+    let words = |words: &[String]| {
+        serde_json::Value::Array(words.iter().cloned().map(serde_json::Value::from).collect())
+    };
+    if !launch.args.is_empty() {
+        value.insert("args".to_owned(), words(&launch.args));
+    }
+    if !launch.dropped.is_empty() {
+        value.insert("dropped".to_owned(), words(&launch.dropped));
+    }
+    if launch.unread {
+        value.insert("unread".to_owned(), true.into());
+    }
+    serde_json::Value::Object(value)
+}
+
+/// **A launch read back** — or `None` for anything [`launch_value`] could not have written: a
+/// key beyond the three, a word that is not a string, a launch
+/// [`crate::agent_resume::launch_is_well_formed`] refuses. Checked here for the resume's own
+/// reason: these words are handed to a vendor's command line.
+fn launch_of_value(value: &serde_json::Value) -> Option<bt_persist::AgentLaunchV1> {
+    let object = value.as_object()?;
+    if !object
+        .keys()
+        .all(|key| matches!(key.as_str(), "args" | "dropped" | "unread"))
+    {
+        return None;
+    }
+    let words = |key: &str| -> Option<Vec<String>> {
+        match object.get(key) {
+            None => Some(Vec::new()),
+            Some(value) => value
+                .as_array()?
+                .iter()
+                .map(|word| word.as_str().map(str::to_owned))
+                .collect(),
+        }
+    };
+    let launch = bt_persist::AgentLaunchV1 {
+        args: words("args")?,
+        dropped: words("dropped")?,
+        unread: match object.get("unread") {
+            None => false,
+            Some(value) => value.as_bool()?,
+        },
+    };
+    crate::agent_resume::launch_is_well_formed(&launch).then_some(launch)
+}
+
+/// A process this one descends from, by its pid and start instant.
+type AncestorProcess = bt_platform::install_flip::Running;
+
+/// **The command line of the agent that ran this hook** (row 74; review N1): this process's
+/// parent's, which is the agent for Claude Code's exec-form hook and for codex's `notify` program
+/// — or, when that parent is the shell codex runs Folio's own `Stop` entry through
+/// ([`crate::attention_codex::hook_shell_runs`], on `platform`) and the entry names this very
+/// program, that shell's parent: **one generation up, and no further**, because on Windows no
+/// shell `exec`s what it runs. Any other parent is answered as it is, and the vendor's table reads
+/// a shell, a wrapper or anybody else's program as a launch not read. `None` when the parent was
+/// not read, or the shell's parent was not.
+///
+/// Pure but for its doors, so a test hands it any line: `parent` is this process's parent as the
+/// door read it, `is_this_program` says whether a path names the running program, and
+/// `parent_line_of` reads the parent of a process this one descends from
+/// ([`bt_platform::process_folder::arguments_of_parent_of`], whose pid and start checks hold the
+/// shell and its parent alike).
+#[must_use]
+pub(crate) fn agent_line(
+    family: &str,
+    parent: Option<bt_platform::process_folder::AncestorLine>,
+    platform: bt_platform::HostPlatform,
+    is_this_program: impl FnOnce(&std::path::Path) -> bool,
+    parent_line_of: impl FnOnce(AncestorProcess) -> Option<Vec<std::ffi::OsString>>,
+) -> Option<Vec<std::ffi::OsString>> {
+    let parent = parent?;
+    let through_our_hook = family == attention_map::CODEX
+        && parent
+            .words
+            .iter()
+            .map(|word| word.to_str().map(str::to_owned))
+            .collect::<Option<Vec<String>>>()
+            .and_then(|words| crate::attention_codex::hook_shell_runs(&words, platform))
+            .is_some_and(|path| is_this_program(path.as_path()));
+    if through_our_hook {
+        parent_line_of(parent.process)
+    } else {
+        Some(parent.words)
+    }
+}
+
+/// **The line with its agent's launch** (row 74): what `parent_line` — the agent's command line
+/// ([`agent_line`]), asked only for a line that names a session — says about how the agent was
+/// started, by `vendor`'s table ([`crate::agent_resume::Vendor::launch_of`]).
+///
+/// Pure but for `parent_line`, so a test hands it any command line, or none. A run that answers and
+/// exits (`claude -p`) names no session, so its line goes without its `resume`. A command line that
+/// was not there, or not in a shape the table names, is an unread launch; so is one whose line would
+/// not fit the endpoint's frame ([`bt_platform::attention_pipe::MAX_MESSAGE_BYTES`]) — the
+/// session still crosses, and the resumed pane says it came back without its launch arguments.
+#[must_use]
+pub(crate) fn with_launch(
+    mut message: Message,
+    vendor: &crate::agent_resume::Vendor,
+    parent_line: impl FnOnce() -> Option<Vec<std::ffi::OsString>>,
+) -> Message {
+    let Some(resume) = message.resume.as_mut() else {
+        return message;
+    };
+    let launch = match parent_line().map(|argv| vendor.launch_of(&argv)) {
+        Some(crate::agent_resume::LaunchRead::Headless) => {
+            message.resume = None;
+            return message;
+        }
+        Some(crate::agent_resume::LaunchRead::Read(launch))
+            if crate::agent_resume::launch_is_well_formed(&launch) =>
+        {
+            launch
+        }
+        Some(_) | None => bt_persist::AgentLaunchV1::unread(),
+    };
+    resume.launch = Some(launch);
+    if message.encode().len() > bt_platform::attention_pipe::MAX_MESSAGE_BYTES
+        && let Some(resume) = message.resume.as_mut()
+    {
+        resume.launch = Some(bt_persist::AgentLaunchV1::unread());
+    }
+    message
 }
 
 /// The most characters a quoted sentence may cross as: [`crate::attention_words::LIMIT`] of
@@ -537,6 +689,27 @@ pub(crate) fn run_verb(call: Result<crate::cli::AttentionCall, crate::cli::Atten
         resume.home = variable(vendor.home_variable)
             .filter(|home| crate::agent_resume::folder_is_well_formed(home));
     }
+    // **And how the agent was started, from the agent's own command line** — this process's
+    // parent, or, through codex's hook shell, that shell's parent (row 74, review N1). Read here,
+    // and only for a line that names a session.
+    if let Some(vendor) = crate::agent_resume::vendor(family) {
+        message = with_launch(message, vendor, || {
+            agent_line(
+                family,
+                bt_platform::process_folder::parent_arguments().ok(),
+                bt_platform::host_platform(),
+                |path| {
+                    std::env::current_exe()
+                        .is_ok_and(|exe| crate::explorer_menu::same_path(path, &exe))
+                },
+                |shell| {
+                    bt_platform::process_folder::arguments_of_parent_of(shell)
+                        .ok()
+                        .map(|line| line.words)
+                },
+            )
+        });
+    }
     match bt_platform::attention_pipe::send_line(&endpoint, &message.encode()) {
         Ok(()) => 0,
         // **In a pane whose window did not take the line**: a failure for every row, codex's
@@ -642,6 +815,7 @@ fn heard(
         id: payload.get(id)?.as_str()?.to_owned(),
         cwd: payload.get(cwd)?.as_str()?.to_owned(),
         home: None,
+        launch: None,
     };
     heard.is_well_formed().then_some(heard)
 }
@@ -1644,6 +1818,7 @@ mod tests {
                 id: SESSION.to_owned(),
                 cwd: r"C:\work\resume".to_owned(),
                 home: Some(r"C:\work\config".to_owned()),
+                launch: None,
             }),
             another_client: false,
         };
@@ -1757,6 +1932,294 @@ mod tests {
                 "{family}:{event}"
             );
         }
+    }
+
+    /// A Claude Code turn's line that names [`SESSION`], before the hook has read its launch.
+    fn session_line() -> Message {
+        Message {
+            capability: "0123456789abcdef0123456789abcdef".to_owned(),
+            family: CLAUDE_CODE.to_owned(),
+            event: "Stop".to_owned(),
+            id: None,
+            text: None,
+            resume: Some(crate::agent_resume::Heard {
+                id: SESSION.to_owned(),
+                cwd: r"C:\work\resume".to_owned(),
+                home: None,
+                launch: None,
+            }),
+            another_client: false,
+        }
+    }
+
+    /// A command line of `words`.
+    fn hook_parent_line(words: &[&str]) -> Vec<std::ffi::OsString> {
+        words.iter().map(std::ffi::OsString::from).collect()
+    }
+
+    /// The launch a sent line carries.
+    fn launch_sent(message: &Message) -> Option<bt_persist::AgentLaunchV1> {
+        message
+            .resume
+            .as_ref()
+            .and_then(|heard| heard.launch.clone())
+    }
+
+    /// RED (row 74, review N1) — **through codex's hook shell the agent is read one generation
+    /// up, and through no other parent**: on Windows codex runs Folio's `Stop` entry as
+    /// `pwsh -NoProfile -Command "& '<folio.exe>' attention codex:stop --json -"`, so the hook's
+    /// parent is that shell; when its line is exactly that and names this program, the shell's
+    /// parent — the agent — is asked for, and its words are the launch. Claude Code's parent, a
+    /// codex parent, a person's own PowerShell, and the hook line of another program are answered
+    /// as they are, the shell's parent never asked; and a shell whose parent cannot be read is no
+    /// line at all.
+    ///
+    /// MUTATION (plant `plant-74-hook-shell-not-crossed.py`): `agent_line` answers the parent
+    /// always — the hook shell's own words come back, and the Codex launch through it is unread.
+    #[test]
+    fn through_codexs_hook_shell_the_agent_is_read_one_generation_up() {
+        use bt_platform::HostPlatform;
+        use bt_platform::install_flip::Running;
+        use bt_platform::process_folder::AncestorLine;
+        let folio = r"C:\Program Files\Folio\folio.exe";
+        let shell = Running {
+            pid: 40,
+            started: 2,
+        };
+        let command = format!("& '{folio}' attention codex:stop --json -");
+        let hook = AncestorLine {
+            process: shell,
+            words: hook_parent_line(&[
+                r"C:\Program Files\PowerShell\7\pwsh.exe",
+                "-NoProfile",
+                "-Command",
+                command.as_str(),
+            ]),
+        };
+        let agent = hook_parent_line(&["codex", "--yolo", "-m", "o3"]);
+        let through = agent_line(
+            CODEX,
+            Some(hook.clone()),
+            HostPlatform::Windows,
+            |path| path == std::path::Path::new(folio),
+            |asked| {
+                assert_eq!(asked, shell, "the shell's own parent is asked for");
+                Some(agent.clone())
+            },
+        );
+        assert_eq!(through.as_ref(), Some(&agent));
+        let codex = &crate::agent_resume::VENDORS[1];
+        let message = with_launch(
+            Message {
+                family: CODEX.to_owned(),
+                ..session_line()
+            },
+            codex,
+            || through,
+        );
+        assert_eq!(
+            launch_sent(&message),
+            Some(bt_persist::AgentLaunchV1 {
+                args: ["--yolo", "-m", "o3"].map(str::to_owned).to_vec(),
+                dropped: Vec::new(),
+                unread: false,
+            }),
+            "the agent's launch, read through its hook shell"
+        );
+        // Every other parent is answered as it is, and its own parent is never asked for.
+        let never = |_: Running| -> Option<Vec<std::ffi::OsString>> {
+            panic!("only codex's hook shell is stepped through")
+        };
+        let own_powershell = AncestorLine {
+            process: shell,
+            words: hook_parent_line(&[r"C:\Program Files\PowerShell\7\pwsh.exe", "-NoLogo"]),
+        };
+        for (family, parent, ours) in [
+            (CLAUDE_CODE, hook.clone(), true),
+            (CODEX, own_powershell, true),
+            (CODEX, hook.clone(), false),
+            (
+                CODEX,
+                AncestorLine {
+                    process: shell,
+                    words: agent,
+                },
+                true,
+            ),
+        ] {
+            assert_eq!(
+                agent_line(
+                    family,
+                    Some(parent.clone()),
+                    HostPlatform::Windows,
+                    |_| ours,
+                    never
+                ),
+                Some(parent.words.clone()),
+                "{family}: {parent:?}"
+            );
+        }
+        assert_eq!(
+            agent_line(CODEX, None, HostPlatform::Windows, |_| true, never),
+            None,
+            "no parent read, no line"
+        );
+        assert_eq!(
+            agent_line(CODEX, Some(hook), HostPlatform::Windows, |_| true, |_| None),
+            None,
+            "a hook shell whose parent was not read is no line, never the shell's own"
+        );
+    }
+
+    /// **A session's launch crosses the wire and comes back the same** (row 74): the words, the
+    /// dropped names, and an unread one, as the line's own `launch` key beside `resume`.
+    #[test]
+    fn a_turns_launch_survives_the_wire() {
+        let claude = &crate::agent_resume::VENDORS[0];
+        let message = with_launch(session_line(), claude, || {
+            Some(hook_parent_line(&[
+                "claude",
+                "--model",
+                "opus",
+                "--add-dir",
+                r"D:\a b",
+                "-w",
+                "x",
+            ]))
+        });
+        assert_eq!(
+            launch_sent(&message),
+            Some(bt_persist::AgentLaunchV1 {
+                args: ["--model", "opus", "--add-dir", r"D:\a b"]
+                    .map(str::to_owned)
+                    .to_vec(),
+                dropped: vec!["-w".to_owned()],
+                unread: false,
+            })
+        );
+        let line = message.encode();
+        let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert!(value.get("launch").is_some(), "its own key: {line}");
+        assert_eq!(
+            value["resume"].as_object().map(|session| session.len()),
+            Some(2),
+            "and `resume` keeps the keys an older window reads: {line}"
+        );
+        assert_eq!(Message::decode(&line), Some(message));
+        let unread = with_launch(session_line(), claude, || None);
+        assert_eq!(
+            launch_sent(&unread),
+            Some(bt_persist::AgentLaunchV1::unread()),
+            "a command line the hook could not read"
+        );
+        assert_eq!(Message::decode(&unread.encode()), Some(unread));
+        let unshaped = with_launch(session_line(), claude, || {
+            Some(hook_parent_line(&["bash", "-c", "claude --model opus"]))
+        });
+        assert_eq!(
+            launch_sent(&unshaped),
+            Some(bt_persist::AgentLaunchV1::unread()),
+            "a shape the table does not name"
+        );
+        let unsessioned = Message {
+            resume: None,
+            ..session_line()
+        };
+        assert_eq!(
+            with_launch(unsessioned.clone(), claude, || panic!(
+                "a line that names no session asks for no launch"
+            )),
+            unsessioned
+        );
+    }
+
+    /// RED (row 74, T7) — **a launch on the wire is bounded and checked at both ends**: a word
+    /// with a control character in it, or a launch the frame could not carry, is sent as unread
+    /// (the session still crosses); a `launch` this build could not have written — a fourth key,
+    /// a word that is not a string, a name that is not a flag, an unread one with words — drops
+    /// the line, and so does a `launch` with no session. The line's top-level keys stay open, which
+    /// is what lets a window older than this build read the session past a `launch` it does not
+    /// know.
+    ///
+    /// MUTATION (plant `plant-74-wire-unchecked.py`): `launch_of_value` takes any object, and the
+    /// window records words no build could have sent.
+    #[test]
+    fn launch_on_the_wire_is_bounded_and_checked() {
+        let claude = &crate::agent_resume::VENDORS[0];
+        let controlled = with_launch(session_line(), claude, || {
+            Some(hook_parent_line(&[
+                "claude",
+                "--append-system-prompt",
+                "a\u{1b}[2Jb",
+            ]))
+        });
+        assert_eq!(
+            launch_sent(&controlled),
+            Some(bt_persist::AgentLaunchV1::unread())
+        );
+        // Words the record could hold that the frame could not carry with the line around them,
+        // and words not even the record could hold.
+        let frame = bt_platform::attention_pipe::MAX_MESSAGE_BYTES;
+        let (filling, half) = ("x".repeat(frame - 50), "x".repeat(frame / 2));
+        for words in [
+            vec!["claude", "--append-system-prompt", filling.as_str()],
+            vec![
+                "claude",
+                "--append-system-prompt",
+                half.as_str(),
+                "--model",
+                half.as_str(),
+            ],
+        ] {
+            let oversize = with_launch(session_line(), claude, || Some(hook_parent_line(&words)));
+            assert_eq!(
+                launch_sent(&oversize),
+                Some(bt_persist::AgentLaunchV1::unread()),
+                "a launch the frame could not carry"
+            );
+            assert_eq!(
+                oversize.resume.as_ref().map(|heard| heard.id.as_str()),
+                Some(SESSION),
+                "and the session still crosses"
+            );
+            assert!(oversize.encode().len() <= frame);
+        }
+        let line = |launch: &str| {
+            format!(
+                r#"{{"v":1,"cap":"c","family":"claude-code","event":"Stop","resume":{{"id":"{SESSION}","cwd":"C:\\work"}},"launch":{launch}}}"#
+            )
+        };
+        for bad in [
+            r#"{"args":["--model","opus"],"grant":"all"}"#,
+            r#"{"args":["--model",3]}"#,
+            r#"{"args":"--model opus"}"#,
+            r#"{"dropped":["worktree"]}"#,
+            r#"{"dropped":[""]}"#,
+            r#"{"unread":true,"args":["--model","opus"]}"#,
+            r#"{"unread":"yes"}"#,
+            r#"{"args":["a\u001bb"]}"#,
+            r#"["--model","opus"]"#,
+        ] {
+            assert_eq!(Message::decode(&line(bad)), None, "accepted: {bad}");
+        }
+        assert!(
+            Message::decode(&line(r#"{"args":["--model","opus"],"dropped":["-w"]}"#)).is_some(),
+            "the well-formed one, for contrast"
+        );
+        assert_eq!(
+            Message::decode(
+                r#"{"v":1,"cap":"c","family":"claude-code","event":"Stop","launch":{"args":["--model","opus"]}}"#
+            ),
+            None,
+            "a launch with no session"
+        );
+        assert!(
+            Message::decode(&format!(
+                r#"{{"v":1,"cap":"c","family":"claude-code","event":"Stop","resume":{{"id":"{SESSION}","cwd":"C:\\work"}},"later":{{"any":1}}}}"#
+            ))
+            .is_some_and(|message| message.resume.is_some()),
+            "a top-level key this build does not know is read past"
+        );
     }
 
     /// RED (row 75, review N1) — **a turn end another client ran is no step of the pane's

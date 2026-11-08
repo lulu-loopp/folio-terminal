@@ -360,6 +360,7 @@ mod tests {
                 resume_id: "0b9c7e1a-4f3d-4c2b-9a8e-5d6f7a8b9c0d".to_owned(),
                 cwd: r"C:\work\resume".to_owned(),
                 home: None,
+                launch: None,
             },
             hand_back: None,
         });

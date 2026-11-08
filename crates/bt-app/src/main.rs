@@ -33354,7 +33354,7 @@ fn create_leaf_session(
             environment,
         );
         // **A restored agent is started as its vendor's resume** (row 195).
-        let resuming = compose_resume(&mut command, seed, &started, row);
+        let resuming = compose_resume(&mut command, seed, &started, row, Path::new(&program));
         let gone_spec = birth_unless_gone(unless_gone.as_ref(), resuming, |gone| {
             shell_integration::shell_command(
                 row,
@@ -33489,10 +33489,16 @@ fn create_leaf_session(
 }
 
 /// **A restored agent's command line is its vendor's resume** (0.4.9 plan row 195): the profile's
-/// environment stays, its arguments give way to the resume's — a grant is never resurrected, and a
-/// positional word would break `codex resume <id>` — and the configuration folder the session
-/// lives in is the one it was recorded under. Answers whether the birth is a resume; `false`, and
-/// `command` untouched, for every other birth.
+/// environment stays, its arguments give way to the resume's, and the configuration folder the
+/// session lives in is the one it was recorded under. Answers whether the birth is a resume;
+/// `false`, and `command` untouched, for every other birth.
+///
+/// **And the resume is handed the agent's launch** (0.4.10 plan row 74): the words the recorded
+/// agent was started with that its vendor's table carries, after the resume's own
+/// ([`agent_resume::replayed_launch`]), as `program` — the program this birth starts — can carry
+/// them. A profile's own arguments come back this way too: they are the words its agent was
+/// started with, read off that agent's own command line. What the launch could not carry, the
+/// pane says in its first line ([`resumed_without_line`]).
 ///
 /// **A shell pane's resume is that shell `exec`ing the vendor** (the Mac's road,
 /// `agent_resume::Road::ThroughTheShell`; T-AGENT-RESUME-ON-MACOS): `row` is the shell's, its own
@@ -33506,10 +33512,12 @@ fn compose_resume(
     seed: &LeafSeed,
     started: &Started,
     row: &profiles::Profile,
+    program: &Path,
 ) -> bool {
     let Some((vendor, record)) = resuming_vendor(seed, started) else {
         return false;
     };
+    let launch = agent_resume::replayed_launch(vendor, record, program).words;
     let through_the_shell = !vendor.is_started_by(&seed.profile);
     let shell = profiles::command_flags(&row.program).filter(|_| through_the_shell);
     if through_the_shell && shell.is_none() {
@@ -33533,10 +33541,10 @@ fn compose_resume(
         command.arguments.push(flags.command.into());
         command
             .arguments
-            .push(vendor.shell_command(&record.resume_id));
+            .push(vendor.shell_command(&record.resume_id, &launch));
         return true;
     }
-    command.arguments = vendor.arguments(&record.resume_id);
+    command.arguments = vendor.arguments(&record.resume_id, &launch);
     true
 }
 
@@ -33734,6 +33742,28 @@ fn could_not_resume_line(seed: &LeafSeed, started: &Started, stood_in: bool) -> 
     }
 }
 
+/// **The line a resumed pane opens with when its launch did not all come back** (0.4.10 plan row
+/// 74): the flags the recorded agent was started with that the resume was not handed, or that its
+/// launch could not be read — for a resume this birth started (`agent`'s own word,
+/// [`agent_resume::AgentAccount::resume_runs`]: not one that fell back, was stood in for, or found
+/// its folder gone), by the program it started ([`agent_resume::replayed_launch`], the same answer
+/// [`compose_resume`] composed from). `None` for every other pane, and for a launch that came back
+/// whole or was never recorded.
+fn resumed_without_line(
+    seed: &LeafSeed,
+    decision: &BirthDecision,
+    agent: &agent_resume::AgentAccount,
+) -> Option<String> {
+    let (vendor, record) = resuming_vendor(seed, &decision.started)?;
+    let program = decision
+        .program
+        .as_deref()
+        .filter(|_| agent.resume_runs())?;
+    agent_resume::replayed_launch(vendor, record, program)
+        .said
+        .map(|said| said.text())
+}
+
 /// The could-not-resume line's facts for a resume this build knows the vendor of.
 fn could_not_resume(resume: &agent_resume::Resume) -> Option<agent_resume::CouldNotResume> {
     agent_resume::vendor(&resume.record.vendor).map(|vendor| agent_resume::CouldNotResume {
@@ -33923,6 +33953,12 @@ fn finish_leaf_birth(
         session
             .feed(banner_line(&line).as_bytes())
             .context("write the could-not-resume line into the leaf's first line")?;
+    }
+    // **And a resume whose launch did not all come back** (row 74): the flags it came back without.
+    if let Some(line) = resumed_without_line(seed, decision, &leaf.agent).filter(|_| !in_birth) {
+        session
+            .feed(banner_line(&line).as_bytes())
+            .context("write the resumed-without line into the leaf's first line")?;
     }
     if let Some(bytes) = probe_input.filter(|_| !in_birth) {
         session

@@ -26,6 +26,17 @@ fn claude_record() -> AgentRecordV1 {
         resume_id: SESSION.to_owned(),
         cwd: FOLDER.to_owned(),
         home: None,
+        launch: None,
+    }
+}
+
+/// **The program a birth of `row` starts**, as far as a resume's composition asks of it (whether
+/// it is a batch file, [`agent_resume::replayed_launch`]): the row's path, or its id for a row that
+/// names its program some other way.
+fn started_program(row: &profiles::Profile) -> PathBuf {
+    match &row.program {
+        profiles::ProgramSource::Path(path) => path.clone(),
+        _ => PathBuf::from(&row.id),
     }
 }
 
@@ -64,8 +75,8 @@ const RESUMING: Restore = Restore {
 /// `revive_plan_with` → `birth_here` → `shell_integration::shell_command` → `compose_resume` →
 /// `AgentAccount::born`; only the spawn itself is not made.
 ///
-/// MUTATION: `vendor.arguments(&record.resume_id)` in `compose_resume` → `Vec::new()` (the id
-/// dropped), and the pane is born as the bare program: the arguments assertion goes red.
+/// MUTATION: `vendor.arguments(&record.resume_id, &launch)` in `compose_resume` → `Vec::new()`
+/// (the id dropped), and the pane is born as the bare program: the arguments assertion goes red.
 #[cfg(windows)]
 #[test]
 fn a_saved_agent_pane_with_a_recorded_session_is_born_through_its_vendors_resume() {
@@ -97,7 +108,7 @@ fn a_saved_agent_pane_with_a_recorded_session_is_born_through_its_vendors_resume
             shell_integration::Scripts::installed(),
             &bt_pty::SystemShellEnvironment,
         );
-        let resumed = compose_resume(&mut command, &born, &started, &row);
+        let resumed = compose_resume(&mut command, &born, &started, &row, &started_program(&row));
         let expected = vec![OsString::from("--resume"), OsString::from(SESSION)];
         assert_eq!(
             command.arguments, expected,
@@ -132,7 +143,7 @@ fn a_saved_agent_pane_with_a_recorded_session_is_born_through_its_vendors_resume
         shell_integration::Scripts::installed(),
         &bt_pty::SystemShellEnvironment,
     );
-    compose_resume(&mut command, &born, &started, &row);
+    compose_resume(&mut command, &born, &started, &row, &started_program(&row));
     assert!(command.environment.contains(&(
         OsString::from("CLAUDE_CONFIG_DIR"),
         OsString::from(r"C:\work\second-config")
@@ -268,6 +279,7 @@ fn a_resumed_agent_that_exits_before_a_hook_hands_back_its_shell_with_one_line()
             id: SESSION.to_owned(),
             cwd: FOLDER.to_owned(),
             home: None,
+            launch: None,
         },
         crate::agent_resume::Child::Agent(&VENDORS[0]),
     );
@@ -325,6 +337,7 @@ fn a_record_is_cleared_by_the_agents_own_exit_and_not_by_session_end() {
         id: SESSION.to_owned(),
         cwd: FOLDER.to_owned(),
         home: None,
+        launch: None,
     };
     let mut places = attention::Places::default();
     let now = Instant::now();
@@ -408,6 +421,7 @@ fn a_typed_agents_record_ends_with_the_command_it_was_typed_as() {
         id: SESSION.to_owned(),
         cwd: FOLDER.to_owned(),
         home: None,
+        launch: None,
     };
     let child =
         crate::agent_resume::child_of(Some(Path::new("pwsh.exe")), leaf.session.command_marks());
@@ -499,6 +513,7 @@ fn a_typed_agents_record_is_its_first_vendors_and_keeps_its_first_folder() {
         id: SESSION.to_owned(),
         cwd: FOLDER.to_owned(),
         home: None,
+        launch: None,
     };
     let (claude, codex) = (&VENDORS[0], &VENDORS[1]);
     assert!(
@@ -509,6 +524,7 @@ fn a_typed_agents_record_is_its_first_vendors_and_keeps_its_first_folder() {
         id: "2d3e4f5a-6b7c-4d8e-9f0a-1b2c3d4e5f6a".to_owned(),
         cwd: r"C:\work\resume\scratch".to_owned(),
         home: None,
+        launch: None,
     };
     assert!(
         !leaf
@@ -521,6 +537,7 @@ fn a_typed_agents_record_is_its_first_vendors_and_keeps_its_first_folder() {
         id: "3e4f5a6b-7c8d-4e9f-8a1b-2c3d4e5f6a7b".to_owned(),
         cwd: r"C:\work\resume\crates\bt-app".to_owned(),
         home: Some(r"C:\work\elsewhere-config".to_owned()),
+        launch: None,
     };
     assert!(
         leaf.agent
@@ -881,7 +898,13 @@ fn a_shell_panes_resume_keeps_its_shells_words_and_execs_the_vendor() {
             &ZshAccount,
         );
         assert!(
-            compose_resume(&mut command, &seed, &Started::AsAsked, &row),
+            compose_resume(
+                &mut command,
+                &seed,
+                &Started::AsAsked,
+                &row,
+                &started_program(&row)
+            ),
             "{id}: the birth is a resume"
         );
         assert_eq!(command.arguments, expected, "{id}: the shell, told to exec");
@@ -901,7 +924,13 @@ fn a_shell_panes_resume_keeps_its_shells_words_and_execs_the_vendor() {
         named_scripts(),
         &ZshAccount,
     );
-    compose_resume(&mut command, &seed, &Started::AsAsked, &row);
+    compose_resume(
+        &mut command,
+        &seed,
+        &Started::AsAsked,
+        &row,
+        &started_program(&row),
+    );
     assert!(
         command.environment.contains(&(
             OsString::from("CLAUDE_CONFIG_DIR"),
@@ -951,7 +980,13 @@ fn a_shell_without_a_known_spelling_comes_back_with_the_line() {
     );
     let before = command.arguments.clone();
     assert!(
-        !compose_resume(&mut command, &seed, &Started::AsAsked, &fish),
+        !compose_resume(
+            &mut command,
+            &seed,
+            &Started::AsAsked,
+            &fish,
+            &started_program(&fish)
+        ),
         "and no resume is composed for it"
     );
     assert_eq!(command.arguments, before);
@@ -1004,6 +1039,7 @@ fn a_resumed_pane_is_its_vendors_agent_whatever_its_program() {
         id: "1c9c7e1a-4f3d-4c2b-9a8e-5d6f7a8b9c0d".to_owned(),
         cwd: FOLDER.to_owned(),
         home: None,
+        launch: None,
     };
     let child = account.child(zsh, &[]);
     assert!(
@@ -1060,6 +1096,7 @@ fn a_resumed_shell_panes_clear_is_heard_through_the_attention_road() {
         id: "1c9c7e1a-4f3d-4c2b-9a8e-5d6f7a8b9c0d".to_owned(),
         cwd: FOLDER.to_owned(),
         home: None,
+        launch: None,
     };
     let mut places = attention::Places::default();
     let owed = deliver_attention(
@@ -1195,7 +1232,7 @@ fn a_saved_shell_pane_with_a_recorded_session_is_born_as_its_shell_execing_the_v
         expected.push(OsString::from("-c"));
         expected.push(OsString::from(command_word));
         assert!(
-            compose_resume(&mut command, &born, &started, &row),
+            compose_resume(&mut command, &born, &started, &row, &started_program(&row)),
             "{saved_as}: the birth is a resume"
         );
         assert_eq!(
@@ -1210,5 +1247,805 @@ fn a_saved_shell_pane_with_a_recorded_session_is_born_as_its_shell_execing_the_v
             saved_as,
             "{saved_as}: the layout goes on writing the pane as its shell"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Row 74: the resume carries the agent's launch arguments
+// ---------------------------------------------------------------------------
+
+/// The words of one command line.
+fn launch_words(line: &[&str]) -> Vec<String> {
+    line.iter().map(|word| (*word).to_owned()).collect()
+}
+
+/// A command line as the hook reads it off its parent.
+fn agent_argv(line: &[&str]) -> Vec<OsString> {
+    line.iter().map(OsString::from).collect()
+}
+
+/// What a vendor's table makes of `line`, the agent's whole command line.
+fn launch_read(
+    vendor: &crate::agent_resume::Vendor,
+    line: &[&str],
+) -> crate::agent_resume::LaunchRead {
+    vendor.launch_of(&agent_argv(line))
+}
+
+/// A read launch that carried `args` and named `dropped`.
+fn read_launch(args: &[&str], dropped: &[&str]) -> crate::agent_resume::LaunchRead {
+    crate::agent_resume::LaunchRead::Read(bt_persist::AgentLaunchV1 {
+        args: launch_words(args),
+        dropped: launch_words(dropped),
+        unread: false,
+    })
+}
+
+/// A Claude Code record of [`SESSION`] whose agent was started with `args`, dropping `dropped`.
+fn launched_claude(args: &[&str], dropped: &[&str]) -> AgentRecordV1 {
+    AgentRecordV1 {
+        launch: Some(Box::new(bt_persist::AgentLaunchV1 {
+            args: launch_words(args),
+            dropped: launch_words(dropped),
+            unread: false,
+        })),
+        ..claude_record()
+    }
+}
+
+/// The native Claude Code a Windows birth starts.
+const NATIVE_CLAUDE: &str = r"C:\Users\someone\.local\bin\claude.exe";
+
+/// RED (row 74, T1, Windows) — **a resume is composed from the recorded launch**: a saved pane
+/// whose agent was started with `--dangerously-skip-permissions --model opus --add-dir "D:\a b"`
+/// is born as the vendor's resume followed by exactly those words, in their order, the folder with
+/// a space in it one word.
+///
+/// MUTATION (plant `plant-74-args-not-composed.py`): `compose_resume` hands the vendor an empty
+/// launch, and the pane resumes with the vendor's defaults: the arguments assertion goes red.
+#[cfg(windows)]
+#[test]
+fn a_resume_is_composed_from_the_recorded_launch() {
+    let every_row =
+        profiles::ProfilePrograms::with_only(&(0..profiles::count()).collect::<Vec<_>>());
+    let launch = [
+        "--dangerously-skip-permissions",
+        "--model",
+        "opus",
+        "--add-dir",
+        r"D:\a b",
+    ];
+    let tab = saved_agent_tab("claude", "", Some(launched_claude(&launch, &[])));
+    let seed = revived_seed(&tab, RESUMING);
+    let (born, started) = birth_here(&seed, "", &every_row).expect("every row is answered");
+    assert_eq!(born.profile, "claude", "born as the vendor's program");
+    let row = profiles::row_of(&born.profile).expect("the claude row is shipped");
+    let mut command = shell_integration::shell_command(
+        &row,
+        &profiles::ShellProgram::Native,
+        &[],
+        shell_integration::Scripts::installed(),
+        &bt_pty::SystemShellEnvironment,
+    );
+    assert!(compose_resume(
+        &mut command,
+        &born,
+        &started,
+        &row,
+        Path::new(NATIVE_CLAUDE)
+    ));
+    let expected: Vec<OsString> = ["--resume", SESSION]
+        .iter()
+        .chain(&launch)
+        .map(OsString::from)
+        .collect();
+    assert_eq!(command.arguments, expected, "the resume, then the launch");
+}
+
+/// RED (row 74, T1's shell arm) — **a shell's resume hands each launch word over in single
+/// quotes**: the Mac's road `exec`s the vendor with its resume words bare and every launch word
+/// quoted, so a folder with a space, a `;` and a quote of its own are each one word to the shell,
+/// never syntax. Pinned for real on the Mac by `shell_integration`'s
+/// `a_resume_through_the_shell_is_the_vendors_process_and_a_missing_vendor_hands_back_the_shell`.
+///
+/// MUTATION (plant `plant-74-mac-unquoted.py`): push each launch word into the command bare —
+/// the `;` word ends the `exec` and the comparison goes red.
+#[test]
+fn a_shell_resume_quotes_each_launch_word() {
+    let launch = ["--model", "opus; exit 3", "--add-dir", "/work/a b", "it's"];
+    let row = mac_row("zsh");
+    let seed = resume_seed("zsh", launched_claude(&launch, &[]));
+    let mut command = shell_integration::shell_command(
+        &row,
+        &profiles::shipped_kind(&row),
+        &[],
+        named_scripts(),
+        &ZshAccount,
+    );
+    assert!(compose_resume(
+        &mut command,
+        &seed,
+        &Started::AsAsked,
+        &row,
+        &started_program(&row)
+    ));
+    assert_eq!(
+        command.arguments.last(),
+        Some(&OsString::from(format!(
+            "exec claude --resume {SESSION} '--model' 'opus; exit 3' '--add-dir' '/work/a b' \
+             'it'\\''s'"
+        ))),
+        "{:?}",
+        command.arguments
+    );
+}
+
+/// RED (row 74, T2) — **the table carries the session's flags, drops the one-time ones by name,
+/// and drops a prompt and the resume's own words without a word**: `-w feat` makes a worktree
+/// (named), `--fork-session` is the resume's (silent), `"fix the bug"` is the first prompt
+/// (silent), `--model opus` comes back. A variadic flag takes every word up to the next flag, `--`
+/// ends the flags, an attached long value stays one word, and inline JSON — `--settings`,
+/// `--mcp-config`, `--agents` (review N2) — is dropped and named while a file is carried. A flag
+/// the table does not know is
+/// [`a_flag_newer_than_claudes_table_is_dropped_and_named_and_the_rest_read`]'s.
+///
+/// MUTATIONS: `-w` carried (plant `plant-74-one-shot-carried.py`) — the first case's `args` and
+/// `dropped` go red; `name_dropped` writing nothing (plant `plant-74-drop-unsaid.py`) — every
+/// `dropped` goes red, and so does the line; `--agents` carried whatever its value (plant
+/// `plant-74-secret-carried.py`) — the inline-JSON case goes red.
+#[test]
+fn the_carry_table_drops_one_shot_words_and_names_the_flags() {
+    let claude = &VENDORS[0];
+    assert_eq!(
+        launch_read(
+            claude,
+            &[
+                NATIVE_CLAUDE,
+                "-w",
+                "feat",
+                "--fork-session",
+                "--model",
+                "opus",
+                "fix the bug"
+            ]
+        ),
+        read_launch(&["--model", "opus"], &["-w"])
+    );
+    assert_eq!(
+        launch_read(
+            claude,
+            &[
+                "claude",
+                "--add-dir",
+                "a",
+                "b c",
+                "--debug=hooks",
+                "--",
+                "--verbose",
+                "a prompt"
+            ]
+        ),
+        read_launch(&["--add-dir", "a", "b c", "--debug=hooks"], &[]),
+        "a variadic flag stops at the next flag, and `--` ends the flags"
+    );
+    assert_eq!(
+        launch_read(claude, &["claude", "--bg", "--verbose", "-n", "mine"]),
+        read_launch(&["--verbose"], &["--bg", "-n"]),
+        "the one-time ones are named, never their values"
+    );
+    assert_eq!(
+        launch_read(
+            claude,
+            &[
+                "claude",
+                "--settings",
+                r#"{"apiKeyHelper": "secret"}"#,
+                "--mcp-config",
+                "servers.json",
+                " {\"x\": 1}",
+                "--settings=./team.json",
+                "--agents",
+                r#"{"reviewer": {"prompt": "token sk-1"}}"#,
+                "--agents=./agents.json"
+            ]
+        ),
+        read_launch(
+            &[
+                "--mcp-config",
+                "servers.json",
+                "--settings=./team.json",
+                "--agents=./agents.json"
+            ],
+            &["--settings", "--mcp-config", "--agents"]
+        ),
+        "inline JSON is dropped and named; a file is carried"
+    );
+    assert_eq!(
+        launch_read(claude, &["claude", "-cdhooks"]),
+        read_launch(&["-dhooks"], &[]),
+        "short flags run together: `-c` is the resume's, `-d` takes the rest of the word"
+    );
+    // The line names the dropped flags, never a value.
+    let record = launched_claude(&["--model", "opus"], &["-w", "--bg"]);
+    let replayed = crate::agent_resume::replayed_launch(claude, &record, Path::new(NATIVE_CLAUDE));
+    assert_eq!(replayed.words, launch_words(&["--model", "opus"]));
+    assert_eq!(
+        replayed.said.map(|said| said.text()).as_deref(),
+        Some("Claude Code resumed without -w, --bg.")
+    );
+}
+
+/// RED (row 74, T3) — **a resumed agent's own command line carries the same launch**: the words
+/// the resume itself put before the launch are the resume's (`--resume <id>`, `resume <id>`), so a
+/// resumed pane's next turn records what it was resumed with, and restart after restart keeps it.
+#[test]
+fn a_resumed_agents_own_argv_carries_the_same_launch() {
+    let (claude, codex) = (&VENDORS[0], &VENDORS[1]);
+    let resumed: Vec<String> = claude
+        .arguments(SESSION, &launch_words(&["--model", "opus"]))
+        .iter()
+        .map(|word| word.to_string_lossy().into_owned())
+        .collect();
+    let line: Vec<&str> = std::iter::once("claude")
+        .chain(resumed.iter().map(String::as_str))
+        .collect();
+    assert_eq!(
+        launch_read(claude, &line),
+        read_launch(&["--model", "opus"], &[])
+    );
+    assert_eq!(
+        launch_read(codex, &["codex", "resume", SESSION, "-a", "never"]),
+        read_launch(&["-a", "never"], &[])
+    );
+}
+
+/// RED (row 74, T5) — **a Codex launch is replayed after its subcommand**: `codex -m o3 -a never
+/// "go"` carries `-m o3 -a never` and not the prompt, and the resume is `resume <id>` and then
+/// those words — `-p` is Codex's profile, carried, where Claude Code's `-p` is a printed run; a
+/// value attached by `=` to a short flag is clap's.
+///
+/// MUTATION (plant `plant-74-codex-before-subcommand.py`): `Vendor::arguments` puts the launch
+/// before the resume's own words — `codex -m o3 … resume <id>` — and the composition goes red.
+#[test]
+fn a_codex_launch_is_replayed_after_its_subcommand() {
+    let codex = &VENDORS[1];
+    assert_eq!(
+        launch_read(
+            codex,
+            &[
+                r"C:\npm\node_modules\@openai\codex\vendor\x86_64-pc-windows-msvc\bin\codex.exe",
+                "-m",
+                "o3",
+                "-a",
+                "never",
+                "-p",
+                "work",
+                "-s=workspace-write",
+                "go"
+            ]
+        ),
+        read_launch(
+            &[
+                "-m",
+                "o3",
+                "-a",
+                "never",
+                "-p",
+                "work",
+                "-s=workspace-write"
+            ],
+            &[]
+        )
+    );
+    assert_eq!(
+        codex.arguments(SESSION, &launch_words(&["-m", "o3", "-a", "never"])),
+        agent_argv(&["resume", SESSION, "-m", "o3", "-a", "never"])
+    );
+    assert_eq!(
+        launch_read(
+            codex,
+            &["codex", "--yolo", "-i", "a.png", "b.png", "--worktree"]
+        ),
+        read_launch(&["--yolo"], &["-i", "--worktree"]),
+        "an image belongs to the first prompt, a worktree is made once"
+    );
+}
+
+/// RED (row 74, review N2) — **a Codex `-c` is carried only for a key that holds no credential**:
+/// `model`, `model_reasoning_effort`, `sandbox_mode` and the rest of the stated list come back in
+/// every spelling clap takes (`-c v`, `-cv`, `-c=v`, `--config v`, `--config=v`), a key with spaces
+/// around it as Codex trims it; an MCP server's environment, a provider's token, a header, any
+/// other key, a dotted key under a listed one and a value with no `=` are dropped and named, their
+/// value never written.
+///
+/// MUTATION (plant `plant-74-secret-carried.py`): `-c` carried whatever its key — the
+/// `GITHUB_TOKEN` case goes red.
+#[test]
+fn a_codex_config_override_is_carried_only_for_a_key_with_no_secret() {
+    let codex = &VENDORS[1];
+    assert_eq!(
+        launch_read(
+            codex,
+            &[
+                "codex",
+                "-c",
+                r#"model="o3""#,
+                "-cmodel_reasoning_effort=high",
+                "-c=sandbox_mode=workspace-write",
+                "--config",
+                " approval_policy = \"never\"",
+                "--config=profile=work",
+                "-c",
+                "web_search=live"
+            ]
+        ),
+        read_launch(
+            &[
+                "-c",
+                r#"model="o3""#,
+                "-cmodel_reasoning_effort=high",
+                "-c=sandbox_mode=workspace-write",
+                "--config",
+                " approval_policy = \"never\"",
+                "--config=profile=work",
+                "-c",
+                "web_search=live"
+            ],
+            &[]
+        )
+    );
+    for (spelled, value) in [
+        ("-c", r#"mcp_servers.github.env.GITHUB_TOKEN="ghp_secret""#),
+        (
+            "-c",
+            r#"model_providers.x.experimental_bearer_token="sk-secret""#,
+        ),
+        (
+            "-c",
+            r#"model_providers.x.http_headers.Authorization="Bearer t""#,
+        ),
+        ("--config", r#"shell_environment_policy.set.API_KEY="k""#),
+        ("-c", r#"model.extra="x""#),
+        ("-c", "model"),
+        ("-c", r#"chatgpt_base_url="https://u:p@host""#),
+    ] {
+        assert_eq!(
+            launch_read(codex, &["codex", "--yolo", spelled, value, "-m", "o3"]),
+            read_launch(&["--yolo", "-m", "o3"], &[spelled]),
+            "{spelled} {value}"
+        );
+        let attached = format!("{spelled}={value}");
+        assert_eq!(
+            launch_read(codex, &["codex", attached.as_str()]),
+            read_launch(&[], &[spelled]),
+            "{attached}"
+        );
+    }
+}
+
+/// RED (row 74, the coordinator's rulings of 2026-11-07) — **a Codex `--remote` is carried only
+/// when its address has no userinfo, no query and no fragment**: `ws://host:port`,
+/// `wss://host:port/`, a path after the authority, `unix://` and `unix://PATH` come back, split or
+/// attached; `wss://user:pass@host`, `ws://token@host`, an address with a `?` or a `#` anywhere
+/// (re-review F1: `wss://host/?token=…` names no user and still holds a secret) and a form Codex
+/// does not document are dropped and named `--remote`, the address never written. An `@` past
+/// the authority, or in a socket's path, is no userinfo.
+///
+/// MUTATION (plant `plant-74-secret-carried.py`, its third site): `--remote` carried whatever its
+/// address — the userinfo cases go red.
+#[test]
+fn a_codex_remote_is_carried_only_without_userinfo() {
+    let codex = &VENDORS[1];
+    for address in [
+        "ws://127.0.0.1:4500",
+        "wss://example.com:443/",
+        "wss://example.com/a@b",
+        "unix://",
+        "unix://codex.sock",
+        "unix:///run/user/501/codex@daemon",
+    ] {
+        assert_eq!(
+            launch_read(codex, &["codex", "--remote", address]),
+            read_launch(&["--remote", address], &[]),
+            "{address}"
+        );
+        let attached = format!("--remote={address}");
+        assert_eq!(
+            launch_read(codex, &["codex", attached.as_str()]),
+            read_launch(&[attached.as_str()], &[]),
+            "{attached}"
+        );
+    }
+    for address in [
+        "wss://user:pass@example.com:443/",
+        "ws://token@127.0.0.1:4500",
+        "wss://@example.com",
+        "wss://example.com:443/?token=abc",
+        "ws://127.0.0.1:4500#session",
+        "wss://example.com/path?x",
+        "unix:///run/user/501/codex.sock?token=x",
+        "WSS://example.com",
+        "example.com:443",
+        "http://example.com",
+    ] {
+        assert_eq!(
+            launch_read(codex, &["codex", "--remote", address, "--search"]),
+            read_launch(&["--search"], &["--remote"]),
+            "{address}"
+        );
+        let attached = format!("--remote={address}");
+        assert_eq!(
+            launch_read(codex, &["codex", attached.as_str()]),
+            read_launch(&[], &["--remote"]),
+            "{attached}"
+        );
+    }
+}
+
+/// RED (row 74, review N3) — **every flag a Codex launch carries is one `codex resume` takes**,
+/// because the resume hands them after its own `resume <id>`, and a flag `resume` refused would end
+/// the resume itself. The set is read off `codex resume`'s parser at `rust-v0.166.0`
+/// (`ResumeCommand` in `codex-rs/cli/src/main.rs`, with `SessionTuiCli`, `SharedCliOptions` and
+/// the root's global `-c`, `--enable` and `--disable`); a row added to the table and carried has
+/// to be added here from that source, and one `resume` does not list is `Dropped`.
+#[test]
+fn every_carried_codex_flag_is_one_codex_resume_takes() {
+    let resume_takes = [
+        "-m",
+        "--model",
+        "--oss",
+        "--local-provider",
+        "-p",
+        "--profile",
+        "-s",
+        "--sandbox",
+        "--approve-for-me",
+        "--not-so-yolo",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--yolo",
+        "--dangerously-bypass-hook-trust",
+        "-C",
+        "--cd",
+        "--add-dir",
+        "--strict-config",
+        "-a",
+        "--ask-for-approval",
+        "--search",
+        "--no-alt-screen",
+        "--no-daemon",
+        "--remote",
+        "--remote-auth-token-env",
+        "-c",
+        "--config",
+        "--enable",
+        "--disable",
+    ];
+    let mut carried: Vec<&str> = crate::agent_resume::CODEX_LAUNCH
+        .flags
+        .iter()
+        .filter(|flag| flag.fate == crate::agent_resume::FlagFate::Carried)
+        .flat_map(|flag| flag.names.iter().copied())
+        .collect();
+    carried.sort_unstable();
+    let mut expected = resume_takes.to_vec();
+    expected.sort_unstable();
+    assert_eq!(carried, expected, "the carried set is `codex resume`'s");
+}
+
+/// RED (row 74, re-review F2, ruled (a)) — **a flag newer than Claude Code's table is dropped and
+/// named, and the rest of the launch is read**: the owner's case, a bypass and a model beside a
+/// flag 2.1.319's `--help` does not list, comes back with the bypass and the model, and the pane's
+/// line names the new flag. Its arity is not known, so the word after it goes with it unless that
+/// word is a flag — a value is never written, and a word that was the first prompt is dropped
+/// anyway; `-p` after it is still seen. An unknown short letter with letters after it (`-Zp`)
+/// still ends the read: those may be its value or more flags, `-p` among them. Codex keeps
+/// "unknown ends the read" ([`a_headless_run_names_no_session`]).
+///
+/// MUTATIONS: Claude Code's table ending the read at an unknown flag (plant
+/// `plant-74-claude-unknown-ends-read.py`) — the read cases go red; the bundle guard gone (plant
+/// `plant-74-short-bundle-guessed.py`) — the `-Zp` and `-Zv` cases go red.
+#[test]
+fn a_flag_newer_than_claudes_table_is_dropped_and_named_and_the_rest_read() {
+    let claude = &VENDORS[0];
+    let read_as = |line: &[&str], args: &[&str], dropped: &[&str]| {
+        assert_eq!(
+            launch_read(claude, line),
+            read_launch(args, dropped),
+            "{line:?}"
+        );
+    };
+    read_as(
+        &[
+            "claude",
+            "--dangerously-skip-permissions",
+            "--some-new-flag",
+            "value",
+            "--model",
+            "opus",
+        ],
+        &["--dangerously-skip-permissions", "--model", "opus"],
+        &["--some-new-flag"],
+    );
+    read_as(
+        &["claude", "--some-new-flag", "--model", "opus"],
+        &["--model", "opus"],
+        &["--some-new-flag"],
+    );
+    read_as(
+        &["claude", "--verbose", "--frobnicate=loud"],
+        &["--verbose"],
+        &["--frobnicate"],
+    );
+    read_as(
+        &["claude", "--frobnicate", "loud", "--verbose", "fix the bug"],
+        &["--verbose"],
+        &["--frobnicate"],
+    );
+    read_as(&["claude", "-Z", "--verbose"], &["--verbose"], &["-Z"]);
+    read_as(&["claude", "-Z", "fix the bug"], &[], &["-Z"]);
+    for line in [
+        &["claude", "--frobnicate", "loud", "-p", "summarise"][..],
+        &["claude", "-Z", "-p"],
+    ] {
+        assert_eq!(
+            launch_read(claude, line),
+            crate::agent_resume::LaunchRead::Headless,
+            "{line:?}"
+        );
+    }
+    for line in [
+        &["claude", "-Zp", "summarise"][..],
+        &["claude", "-Zv", "--verbose"],
+    ] {
+        assert_eq!(
+            launch_read(claude, line),
+            crate::agent_resume::LaunchRead::Unread,
+            "a bundled unknown letter ends the read: {line:?}"
+        );
+    }
+}
+
+/// RED (row 74, T6) — **a run that answers and exits names no session**: a Claude Code whose
+/// command line holds `-p` (a nested `claude -p` inside the pane's own agent, row 195's named
+/// limit) and a `codex exec` read as headless, and the hook's line goes without its `resume` — the
+/// pane keeps the session it had.
+///
+/// A flag Codex's table does not know ends the read (review N4; kept by re-review F2's ruling):
+/// the word after it may be its value or the subcommand, so `--newflag v exec` is not read.
+///
+/// MUTATIONS (plant `plant-74-headless-recorded.py`): `--print` carried like any switch, and the
+/// headless run's turn is sent with its session; (plant `plant-74-unknown-flag-skipped.py`)
+/// Codex's table reading an unknown flag as Claude Code's does, and the unknown-flag cases go
+/// red.
+#[test]
+fn a_headless_run_names_no_session() {
+    let (claude, codex) = (&VENDORS[0], &VENDORS[1]);
+    for line in [
+        &["claude", "-p", "summarise"][..],
+        &["claude", "--model", "haiku", "--print"],
+        &["claude", "-cp"],
+    ] {
+        assert_eq!(
+            launch_read(claude, line),
+            crate::agent_resume::LaunchRead::Headless,
+            "{line:?}"
+        );
+    }
+    for line in [
+        &["codex", "exec", "--json", "go"][..],
+        &["codex", "e", "go"],
+        &["codex", "--yolo", "mcp-server"],
+        &["codex", "-m", "o3", "app-server"],
+        &["codex", "review"],
+        &["codex", "cloud-tasks"],
+        &["codex", "help"],
+    ] {
+        assert_eq!(
+            launch_read(codex, line),
+            crate::agent_resume::LaunchRead::Headless,
+            "{line:?}"
+        );
+    }
+    // A flag the table does not know may take the next word as its value or not: the read ends
+    // there, and the subcommand after it is never taken for a prompt (review N4).
+    for line in [
+        &["codex", "--newflag", "v", "exec", "go"][..],
+        &["codex", "--newflag", "--search"],
+        &["codex", "-Z", "--search"],
+    ] {
+        assert_eq!(
+            launch_read(codex, line),
+            crate::agent_resume::LaunchRead::Unread,
+            "{line:?}"
+        );
+    }
+    // A session's own subcommands are no headless run.
+    assert_eq!(
+        launch_read(codex, &["codex", "fork", SESSION, "--search"]),
+        read_launch(&["--search"], &[])
+    );
+
+    let message = attention_wire::Message {
+        capability: "cap".to_owned(),
+        family: attention_map::CLAUDE_CODE.to_owned(),
+        event: "Stop".to_owned(),
+        id: None,
+        text: None,
+        resume: Some(Heard {
+            id: SESSION.to_owned(),
+            cwd: FOLDER.to_owned(),
+            home: None,
+            launch: None,
+        }),
+        another_client: false,
+    };
+    let sent = attention_wire::with_launch(message.clone(), claude, || {
+        Some(agent_argv(&["claude", "-p", "summarise"]))
+    });
+    assert_eq!(sent.resume, None, "a printed run's turn names no session");
+    assert_eq!(sent.text, message.text, "and the line still goes");
+}
+
+/// RED (row 74, T8) — **a batch file is handed no word `cmd.exe` would rewrite**: through npm's
+/// `claude.cmd` a launch with a `%`, a `"` or a `!` in any word is not carried at all, and the pane
+/// says it came back without its launch arguments; the same launch through the native program is
+/// carried whole, and a batch file is handed a launch with none of them.
+///
+/// MUTATION (plant `plant-74-cmd-unsafe-carried.py`): the batch-file refusal dropped from
+/// `replayed_launch`, and `%PATH%` reaches `cmd`.
+#[test]
+fn a_cmd_shim_resume_carries_no_word_cmd_would_rewrite() {
+    let claude = &VENDORS[0];
+    let shim = Path::new(r"C:\Users\someone\AppData\Roaming\npm\claude.CMD");
+    for word in ["%PATH%", r#"say "hi""#, "bang!"] {
+        let record = launched_claude(&["--append-system-prompt", word], &[]);
+        let through_cmd = crate::agent_resume::replayed_launch(claude, &record, shim);
+        assert!(through_cmd.words.is_empty(), "{word}: not carried");
+        assert_eq!(
+            through_cmd.said.map(|said| said.text()).as_deref(),
+            Some("Claude Code resumed without its launch arguments."),
+            "{word}"
+        );
+        let native =
+            crate::agent_resume::replayed_launch(claude, &record, Path::new(NATIVE_CLAUDE));
+        assert_eq!(
+            native.words,
+            launch_words(&["--append-system-prompt", word])
+        );
+        assert_eq!(native.said, None);
+    }
+    let plain = launched_claude(&["--model", "opus"], &[]);
+    assert_eq!(
+        crate::agent_resume::replayed_launch(claude, &plain, shim).words,
+        launch_words(&["--model", "opus"])
+    );
+}
+
+/// RED (row 74) — **the pane opens with the one line, only for a resume its birth started**: the
+/// flags the launch dropped, or that the launch could not be read; nothing for a launch carried
+/// whole, for a record that never had one (an old record, T4's other half) and for a resume whose
+/// folder was found gone, which says the could-not-resume line instead.
+#[test]
+fn a_resumed_pane_says_what_its_launch_came_back_without() {
+    let decision = |program: &str| BirthDecision {
+        started: Started::AsAsked,
+        spawn_profile: "claude".to_owned(),
+        spawn_place: Some(PathBuf::from(FOLDER)),
+        at_shell_home: false,
+        named: false,
+        program: Some(PathBuf::from(program)),
+        program_kind: profiles::ShellProgram::Native,
+        unless_gone: None,
+    };
+    let line = |record: AgentRecordV1, started: bool| {
+        let seed = resume_seed("claude", record);
+        let mut account = AgentAccount::born(&seed.agent, true);
+        if !started {
+            account.not_started();
+        }
+        resumed_without_line(&seed, &decision(NATIVE_CLAUDE), &account)
+    };
+    assert_eq!(
+        line(launched_claude(&["--model", "opus"], &["-w"]), true).as_deref(),
+        Some("Claude Code resumed without -w.")
+    );
+    assert_eq!(
+        line(
+            AgentRecordV1 {
+                launch: Some(Box::new(bt_persist::AgentLaunchV1::unread())),
+                ..claude_record()
+            },
+            true
+        )
+        .as_deref(),
+        Some("Claude Code resumed without its launch arguments.")
+    );
+    assert_eq!(line(launched_claude(&["--model", "opus"], &[]), true), None);
+    assert_eq!(
+        line(claude_record(), true),
+        None,
+        "an old record says nothing"
+    );
+    assert_eq!(
+        line(launched_claude(&[], &["-w"]), false),
+        None,
+        "a resume that was not started says the other line"
+    );
+    // An old record resumes exactly as it did before row 74.
+    let old = crate::agent_resume::replayed_launch(
+        &VENDORS[0],
+        &claude_record(),
+        Path::new(NATIVE_CLAUDE),
+    );
+    assert!(old.words.is_empty() && old.said.is_none());
+    assert_eq!(
+        VENDORS[0].arguments(SESSION, &old.words),
+        agent_argv(&["--resume", SESSION])
+    );
+}
+
+/// RED (row 74) — **a launch is read only off a shape the table names**: the vendor's own program
+/// (any case, a Windows `.exe`, or a Codex named by its target), or `node` and the vendor's entry
+/// script; a wrapper, a runtime flag before the script and another program are a launch not read.
+#[test]
+fn a_launch_is_read_only_off_a_shape_the_table_names() {
+    let (claude, codex) = (&VENDORS[0], &VENDORS[1]);
+    for line in [
+        &[r"C:\Users\someone\.local\bin\CLAUDE.EXE", "--verbose"][..],
+        &["/opt/homebrew/bin/claude", "--verbose"],
+        &[
+            r"C:\Program Files\nodejs\node.exe",
+            r"C:\Users\someone\AppData\Roaming\npm\node_modules\@anthropic-ai\claude-code\cli.js",
+            "--verbose",
+        ],
+        &["node", "/usr/local/bin/claude", "--verbose"],
+    ] {
+        assert_eq!(
+            launch_read(claude, line),
+            read_launch(&["--verbose"], &[]),
+            "{line:?}"
+        );
+    }
+    for line in [
+        &[
+            "node",
+            "--inspect",
+            "/usr/local/lib/claude-code/cli.js",
+            "--verbose",
+        ][..],
+        &["npx", "@anthropic-ai/claude-code", "--verbose"],
+        &["node", "/usr/local/lib/not-claude-code/cli.js"],
+        &["node", "/usr/local/lib/claude-code/cli.js", "--verbose"],
+        &["bash", "-c", "claude --verbose"],
+        &[],
+    ] {
+        assert_eq!(
+            launch_read(claude, line),
+            crate::agent_resume::LaunchRead::Unread,
+            "{line:?}"
+        );
+    }
+    assert_eq!(
+        launch_read(codex, &["codex-aarch64-apple-darwin", "--search"]),
+        read_launch(&["--search"], &[])
+    );
+}
+
+/// **Every shell the resume road runs a command through quotes the POSIX way** (row 74): the
+/// launch words [`crate::agent_resume::Vendor::shell_command`] hands a shell are in POSIX single
+/// quotes, which are literal only in a shell of that grammar. A family is given
+/// [`profiles::CommandFlags`] — becomes a road — only with that grammar; one of another (fish's
+/// quotes take a backslash, csh's a `!`) is added with its own quoting first.
+#[test]
+fn every_shell_the_resume_road_runs_quotes_the_posix_way() {
+    for family in profiles::SHELL_FAMILIES {
+        if family.command_flags.is_some() {
+            assert_eq!(
+                family.grammar,
+                crate::shell_literal::ShellGrammar::Posix,
+                "{:?}",
+                family.stems
+            );
+        }
     }
 }
