@@ -708,8 +708,8 @@ fn names_a_date(text: &str) -> bool {
 ///
 /// MUTATIONS: the pass stops calling its member (`plant-68a-pass-skips-its-member.py`); a start
 /// writer loses its row (`plant-68a-writer-claimed-by-no-row.py`); the old-shape test is renamed
-/// (`plant-68a-old-shape-test-renamed.py`); an owed check is said to be in the pass before it is
-/// (`plant-68a-owed-check-half-moved.py`).
+/// (`plant-68a-old-shape-test-renamed.py`); an owed check leaves `Runtime::create` while its
+/// declaration still owes it (`plant-68a-owed-check-half-moved.py`).
 #[test]
 fn every_owned_thing_says_how_an_update_carries_it() {
     use crate::carry_pass::{CarryCheck, CarryRule};
