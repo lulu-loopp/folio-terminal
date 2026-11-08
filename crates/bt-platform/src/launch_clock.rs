@@ -6,6 +6,7 @@
 //! it from here.
 
 use std::time::{Duration, Instant};
+
 /// **The clock the launch wire's waits are read on, and the waits themselves**
 /// (T-LAUNCH-HANDOVER-BUDGET-ON-A-CLOCK). A wait of the conversation is a wait for the other end
 /// to act, at either end: the second launch's budget ([`crate::launch_pipe::HANDOVER_BUDGET`]:
