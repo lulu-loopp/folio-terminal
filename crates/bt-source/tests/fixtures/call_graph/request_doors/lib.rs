@@ -443,3 +443,71 @@ pub fn submit_peeks_through_alias(lane: &'static Lane, job: u32) {
     let _ = lane.peek_through_alias();
     submit_through(lane, job);
 }
+
+/// Plan row 52: a gesture door cut at its enqueue — it enqueues, then answers on the window.
+pub fn gesture(lane: &'static Lane, job: u32) {
+    gesture_enqueue(lane, job);
+    gesture_answer(job);
+    gesture_glances();
+}
+
+/// The gesture's enqueue: the mailbox, the notify, the worker handed to the thread door.
+pub fn gesture_enqueue(lane: &'static Lane, job: u32) {
+    lane.offer(job);
+    spawn(move || lane.serve());
+}
+
+/// The gesture's answer, beside its enqueue: a file write and an owner door's body.
+pub fn gesture_answer(job: u32) {
+    record(job);
+    present();
+}
+
+/// Beside the gesture's enqueue: two names nothing holds.
+pub fn gesture_glances() {
+    nowhere();
+    let _ = nowhere_made();
+}
+
+/// A cut door with a direct callee its row names in neither cell.
+pub fn gesture_strays(lane: &'static Lane, job: u32) {
+    gesture_enqueue(lane, job);
+    gesture_answer(job);
+    let _ = lane.peek(); // gesture_strays
+}
+
+/// A beside helper that runs the closure its caller writes.
+pub fn answer_with(job: u32, then: impl FnOnce()) {
+    let _ = job;
+    then();
+}
+
+/// A cut door whose enqueue is called only inside a closure literal.
+pub fn gesture_in_a_closure(lane: &'static Lane, job: u32) {
+    answer_with(job, move || gesture_enqueue(lane, job)); // gesture_in_a_closure
+}
+
+/// A cut door that writes a file in the closure it hands to a beside call.
+pub fn gesture_hands_beside(lane: &'static Lane, job: u32) {
+    gesture_enqueue(lane, job);
+    answer_with(job, move || record(job));
+}
+
+/// R6: the worker handed to a typed standard thread builder's spawn.
+pub fn submit_on_a_builder(lane: &'static Lane, job: u32) {
+    lane.offer(job);
+    let builder: std::thread::Builder = std::thread::Builder::new();
+    let _ = builder.spawn(move || lane.serve());
+}
+
+/// Plan row 52 (ruling 2026-11-04): a cut door whose enqueue meets one boundary entry (the notify)
+/// and whose beside side meets the other (the thread door, started beside the enqueue).
+pub fn gesture_starts_beside(lane: &'static Lane, job: u32) {
+    lane.offer(job);
+    gesture_starts(lane);
+}
+
+/// Beside `gesture_starts_beside`'s enqueue: the worker handed to the thread door.
+pub fn gesture_starts(lane: &'static Lane) {
+    spawn(move || lane.serve());
+}

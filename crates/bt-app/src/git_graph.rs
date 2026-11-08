@@ -1915,6 +1915,10 @@ pub struct GraphToolbar {
     pub search_focused: bool,
     /// Where the caret is, in pixels from the text's own left edge.
     pub caret_x: f32,
+    /// **Where the search's selection is washed**, in window pixels cut to the text's run —
+    /// `None` for a bare caret. Not measured by the build, which has no run of the text: the
+    /// window writes it from the run it records for a press (0.4.9 plan row 180, ruling 1).
+    pub search_selection: Option<[f32; 2]>,
     /// **A question is in flight** (T5): the branch goes quiet until it lands.
     pub busy: bool,
 }
@@ -2620,6 +2624,7 @@ fn toolbar_of(
             tool_font,
             crate::git_panel::MeasureFace::PLAIN,
         ),
+        search_selection: None,
         busy,
     }
 }
@@ -4275,6 +4280,18 @@ fn push_toolbar(
             });
         }
         let text_rect = inside.text;
+        // The selection behind the query, at the caret bar's height — the settings dialog's wash.
+        if let Some([from, to]) = toolbar.search_selection {
+            let inset = (GRAPH_SEARCH_CARET_INSET_LOGICAL_PX * scale).round();
+            sprites.push(
+                ChromeSprite::new(
+                    ChromeMark::Fill,
+                    clip([from, field[1] + inset, to, field[3] - inset]),
+                    palette.accent,
+                )
+                .with_opacity(crate::text_field::SELECTION_WASH_ALPHA),
+            );
+        }
         labels.push(ChromeLabel {
             mono: false,
             text: toolbar.search.clone(),

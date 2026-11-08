@@ -76,8 +76,9 @@ pub use keybindings::{
     BindingOverrideV1, KEYBINDINGS_SCHEMA_VERSION, KeybindingsPlatformV1, KeybindingsV1,
 };
 pub use layout::{
-    FilesLeafV1, FilesViewV1, LayoutNodeV1, LeafNodeV1, MAX_LAST_COMMAND_CHARS, PreviewLeafV1,
-    RATIO_PPM_MAX, SplitDirV1, SplitNodeV1, TermLeafV1,
+    AgentLaunchV1, AgentRecordV1, FilesLeafV1, FilesViewV1, LayoutNodeV1, LeafNodeV1,
+    MAX_LAST_COMMAND_CHARS, PreviewLeafV1, RATIO_PPM_MAX, SplitDirV1, SplitNodeV1, TermLeafV1,
+    resume_id_is_well_formed,
 };
 pub use migrate::{
     DocumentBytes, FallbackReason, KEYBINDINGS_MIGRATIONS, Keeping, MAX_DOCUMENT_BYTES,

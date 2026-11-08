@@ -334,7 +334,14 @@ use serde::{Deserialize, Serialize};
 /// structural step stays pure; the upgrade is completed at startup by the window process, which
 /// reads the saved session it has already loaded for typed page records and writes `Used` through
 /// the receipt's one writer when it finds one.
-pub const SETTINGS_SCHEMA_VERSION: u32 = 39;
+///
+/// **v40 carries `resume_agents`**, the Agents page's switch over bringing back, after a restart,
+/// the agent a pane was running — through the vendor's own resume command (0.4.9 plan row 195).
+///
+/// **It lands on**, which is the owner's ruling rather than a behaviour carried forward ("agent
+/// 要自动 resume, 可以有开关, 默认打开", 2026-09-18): no build before this one resumed an agent,
+/// and the row keeps the resume a choice — off, a pane comes back as its profile, as before.
+pub const SETTINGS_SCHEMA_VERSION: u32 = 40;
 
 /// The profile id a `settings.json` that has never named one is read as.
 ///
@@ -588,6 +595,7 @@ pub const DEFAULT_FOCUS_CARD_HEIGHT: u32 = 160;
 ///   "cards_gesture_hint_offer": true | false,
 ///   "copy_on_select": true | false,
 ///   "multiline_paste_ask": true | false,
+///   "resume_agents": true | false,
 ///   "update_check": true | false,
 ///   "quake_height": 20..=100,
 ///   "quake_width": 30..=100,
@@ -1123,6 +1131,13 @@ pub struct SettingsV1 {
     /// Off, every paste takes the road it took before this key existed.
     #[serde(default = "default_multiline_paste_ask")]
     pub multiline_paste_ask: bool,
+    /// **Whether a pane whose agent was running comes back through that agent's own resume
+    /// command** after Folio restarts (v40, 0.4.9 plan row 195; owner's ruling 2026-09-18).
+    ///
+    /// Off, the record a pane keeps of its agent is still written — so turning this back on works
+    /// at the next start — and a restored pane comes back as its profile, as before this key.
+    #[serde(default = "default_resume_agents")]
+    pub resume_agents: bool,
     /// **Whether this build asks the releases page whether a newer one exists** (v26,
     /// `docs/DESIGN.md` §7.51).
     ///
@@ -1436,6 +1451,12 @@ fn default_multiline_paste_ask() -> bool {
     true
 }
 
+/// The same door for v40's key: `false` is a reader who turned the resume off, which is an answer
+/// nobody gives by leaving a line out.
+fn default_resume_agents() -> bool {
+    true
+}
+
 impl Default for SettingsV1 {
     fn default() -> Self {
         Self {
@@ -1495,6 +1516,8 @@ impl Default for SettingsV1 {
             copy_on_select: true,
             // The owner's ruling of 2026-09-22: on by default.
             multiline_paste_ask: true,
+            // The owner's ruling of 2026-09-18: on by default (row 195).
+            resume_agents: true,
             // A preview has no other way to say that it has been superseded.
             update_check: true,
             // Tall enough to read a command's output, short enough that the window it came down

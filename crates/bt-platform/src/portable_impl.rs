@@ -1983,7 +1983,7 @@ pub enum SeenBox {}
 #[cfg(not(any(windows, target_os = "macos")))]
 impl SeenBox {
     /// Never runs: there is no `SeenBox` to call it on.
-    pub fn say(self, _title: &str, _text: &str) {
+    pub fn say(self, _over: Option<crate::NativeWindow>, _title: &str, _text: &str) {
         match self {}
     }
 }

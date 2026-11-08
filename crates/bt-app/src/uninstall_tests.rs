@@ -546,14 +546,30 @@ fn uninstall_history_finds_redirected_module_and_agent_roots() {
         ),
         Outcome::Installed
     );
+    // And the `notify` line an earlier Folio wrote beside it (0.4.10 plan row 69a): one removal
+    // takes out both of the copy's entries, and nothing else of the file.
+    let mut line = toml_edit::Array::new();
+    for word in crate::attention_codex::program_for(&scope.exe) {
+        line.push(word);
+    }
+    let config = old_agent.join("config.toml");
+    fs::write(
+        &config,
+        format!(
+            "model = \"gpt-5\"\nnotify = {}\n",
+            toml_edit::Value::Array(line)
+        ),
+    )
+    .unwrap();
     let report = execute(&scope, false, system_absent);
     assert_eq!(report.code, 0, "{}", report.stderr());
     assert!(!crate::psreadline::module_directory(&historical).exists());
     assert!(
         !fs::read_to_string(agent_path(1, &old_agent))
             .unwrap()
-            .contains("notify =")
+            .contains("attention")
     );
+    assert_eq!(fs::read_to_string(config).unwrap(), "model = \"gpt-5\"\n");
     fs::remove_dir_all(root).unwrap();
 }
 

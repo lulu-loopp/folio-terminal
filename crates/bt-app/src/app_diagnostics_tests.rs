@@ -1091,3 +1091,175 @@ fn a_forced_stop_during_the_documents_phase_disposes_of_the_held_release() {
     assert!(!quit.release_on_a_stop(), "and nothing is held any more");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// RED (0.4.10 plan row 72, T-MESSAGE-BOX-WEARS-THE-ICON; review N2) — **a stop's box is owned
+/// by the window the keyboard is on, else by the first window still standing on the screen, and
+/// by none when no window stands there**: a window on its way out owns nothing, focused or not,
+/// and neither does a window the reader cannot see — hidden (iconic or cloaked as sampled), never
+/// shown, put away, or minimised.
+///
+/// MUTATION (`plant-72-b-the-first-window-owns-every-box.py`): ask the first standing window
+/// before the focused one, and the focused second window is passed over.
+/// MUTATION (`plant-72-f-a-window-off-the-screen-owns-the-box.py`): stop passing over the windows
+/// off the screen, and the hidden first window owns the box.
+#[test]
+fn a_stops_box_is_owned_by_the_focused_window_else_the_first_standing() {
+    /// One window as a stop finds it.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum Found {
+        Standing,
+        Focused,
+        Leaving,
+        FocusedLeaving,
+        /// Iconic or cloaked, as last sampled.
+        Hidden,
+        NeverShown,
+        /// Not visible: a quake window put away.
+        PutAway,
+        Minimised,
+    }
+    use Found::{
+        Focused, FocusedLeaving, Hidden, Leaving, Minimised, NeverShown, PutAway, Standing,
+    };
+    /// The window `id` set as `found`, every other reading as a standing window's.
+    fn stand(
+        windows: &mut Windows<WindowId, WindowRuntime<crate::headless::Headless>>,
+        id: WindowId,
+        found: Found,
+    ) {
+        let runtime = windows.get_mut(id).expect("an open window");
+        runtime.window_focused = matches!(found, Found::Focused | Found::FocusedLeaving);
+        runtime.leaving =
+            matches!(found, Found::Leaving | Found::FocusedLeaving).then(Instant::now);
+        runtime.window_hidden = matches!(found, Found::Hidden);
+        runtime.window_shown = !matches!(found, Found::NeverShown);
+        runtime
+            .window
+            .answers
+            .set(crate::headless::PlatformAnswers {
+                visible: Some(!matches!(found, Found::PutAway)),
+                minimized: Some(matches!(found, Found::Minimised)),
+                ..crate::headless::PlatformAnswers::default()
+            });
+    }
+    let window = |tag: &str| {
+        crate::headless::HeadlessFolio::with_tabs(
+            tag,
+            vec![crate::test_support::tab_holding(
+                crate::test_support::leaf_saying("盒子 a box"),
+            )],
+            0,
+        )
+    };
+    let first = window("box-owner-first");
+    let second = window("box-owner-second");
+    let (one, two) = (WindowId::from(1), WindowId::from(2));
+    let mut windows = Windows::new();
+    windows.insert(one, first.window);
+    windows.insert(two, second.window);
+    let owner = |windows: &Windows<WindowId, WindowRuntime<crate::headless::Headless>>| {
+        let owner = the_box_owner(windows)?;
+        windows
+            .in_order()
+            .find(|(_, runtime)| std::ptr::eq(&runtime.window, owner))
+            .map(|(id, _)| id)
+    };
+    let cases = [
+        ((Standing, Focused), Some(two)),
+        ((Standing, Standing), Some(one)),
+        ((Leaving, Standing), Some(two)),
+        ((Standing, FocusedLeaving), Some(one)),
+        ((FocusedLeaving, FocusedLeaving), None),
+        ((Hidden, Standing), Some(two)),
+        ((NeverShown, Standing), Some(two)),
+        ((PutAway, Standing), Some(two)),
+        ((Minimised, Standing), Some(two)),
+        ((Hidden, Minimised), None),
+        ((NeverShown, PutAway), None),
+    ];
+    let found: Vec<_> = cases
+        .iter()
+        .map(|&((first, second), _)| {
+            stand(&mut windows, one, first);
+            stand(&mut windows, two, second);
+            ((first, second), owner(&windows))
+        })
+        .collect();
+    assert_eq!(
+        found,
+        cases.to_vec(),
+        "the focused window on the screen, else the first one on the screen, else none"
+    );
+}
+
+/// RED (0.4.10 plan row 72) — **every box a stop raises while its windows stand is owned by one
+/// of them**: the product builds the box over a window at exactly two sites — `FolioApp::fail`
+/// (a frame-shape stop's alert) and `FolioApp::stop_every_window_keeping_in` (the lost-change
+/// notice) — each over `the_box_owner(&self.windows)`, asked after every window's place has been
+/// read fresh (re-review R2: a window left on another virtual desktop takes no turn, so its last
+/// reading can say it is on the screen); the box raises itself over the window it was handed;
+/// and winit's window hands the system its own handle as the box's owner. The panic hook's box
+/// is the one ownerless box raised with windows standing (R1), and it is not built here
+/// (`SystemBox`).
+///
+/// MUTATION (`plant-72-a-a-stop-box-owned-by-nobody.py`): build the stop's notice over no window
+/// (`BoxOver(over.filter(|_| false))`), and its site is refused.
+#[test]
+fn every_box_a_stop_raises_while_a_window_stands_is_owned_by_one() {
+    let index = crate::test_support::source();
+    let built = crate::test_support::found(
+        bt_source::needle!(bt_source::Pattern::call("BoxOver")),
+        bt_source::View::Identifiers,
+    )
+    .in_the_product(index);
+    let sites: std::collections::BTreeSet<String> = built
+        .owners(index)
+        .into_keys()
+        .map(|identity| match identity.type_owner {
+            Some(owner) => format!("{owner}::{}", identity.name),
+            None => identity.name,
+        })
+        .collect();
+    assert_eq!(
+        (
+            built.len(),
+            sites.iter().map(String::as_str).collect::<Vec<_>>()
+        ),
+        (
+            2,
+            vec!["FolioApp::fail", "FolioApp::stop_every_window_keeping_in"]
+        ),
+        "a box over a standing window is built at these two stops, once each; a new one is owned \
+         by a window too, and joins this list"
+    );
+    for site in ["fail", "stop_every_window_keeping_in"] {
+        let body = crate::test_support::method_body("FolioApp", site);
+        let observed = body
+            .find("runtime.observe_window_place();")
+            .unwrap_or_else(|| panic!("`FolioApp::{site}` reads every window's place fresh"));
+        let lent = body
+            .find("let over = the_box_owner(&self.windows);")
+            .unwrap_or_else(|| panic!("`FolioApp::{site}` asks which window owns its box"));
+        let raised = body
+            .find("BoxOver(over)")
+            .unwrap_or_else(|| panic!("`FolioApp::{site}` raises its box over that window"));
+        assert!(
+            observed < lent && lent < raised,
+            "`FolioApp::{site}`: the places are read, then the owner is chosen, then the box is built"
+        );
+    }
+    let raise = crate::test_support::item_body(
+        &bt_source::ItemQuery::method("BoxOver", "raise").of_trait("SystemBoxes"),
+    );
+    assert!(
+        raise.contains("Some(window) => window.say_in_a_box(seen, text),"),
+        "the box is said over the window it was handed:\n{raise}"
+    );
+    let over_winit = crate::test_support::item_body(
+        &bt_source::ItemQuery::method("Arc", "say_in_a_box").of_trait("WindowHost"),
+    );
+    assert!(
+        over_winit.contains("seen.say(crate::native_window_of(self).ok(), crate::APP_NAME, text);"),
+        "winit's window is the box's owner:\n{over_winit}"
+    );
+}

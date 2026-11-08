@@ -1130,6 +1130,146 @@ fn the_copy_writes_refusal_is_said_once() {
     );
 }
 
+/// The first six columns of the focused shell's first row, selected as a drag would leave them.
+fn select_the_first_six(folio: &mut HeadlessFolio) {
+    let mut runtime = folio.runtime();
+    let leaf = runtime.focused_pane_mut().expect("the shell");
+    let frame = leaf
+        .session
+        .session
+        .viewport_frame(&mut leaf.view.projection)
+        .expect("a frame");
+    let selection = bt_viewport::ViewSelection {
+        start: frame
+            .anchor_at(0, 0, bt_doc::Bias::Before)
+            .unwrap()
+            .unwrap(),
+        end: frame.anchor_at(0, 6, bt_doc::Bias::After).unwrap().unwrap(),
+    };
+    leaf.session
+        .session
+        .set_view_selection(Some(selection.clone()));
+    leaf.view.projection.set_selection(Some(selection));
+}
+
+/// RED (plan row 52, R4) — **a copy while the clipboard is held never holds the window**: the
+/// clipboard's worker stands in its hold (another program holding the clipboard), and `Ctrl+C` on
+/// a selection returns; a key typed next reaches the shell while the hold stands; once the hold
+/// lets go the copy lands, once. [`crate::lane::Hold::release`] fails the test if the hold had let
+/// go on its own: something waited on the worker standing in it.
+///
+/// MUTATION: serve the write on the window thread in the headless `WindowHost::clipboard` (the
+/// door stands in the hold itself) — the hold lapses at its patience and the release fails.
+#[test]
+fn a_copy_while_the_clipboard_is_held_never_holds_the_window() {
+    let mut folio = a_window_pasting("clipboard-lane-held-copy", "held 持有");
+    select_the_first_six(&mut folio);
+    let hold = folio.window.window.clipboard.clone();
+    hold.worker_hold().hold();
+    chord(&mut folio, "c", KeyCode::KeyC);
+    hold.worker_hold()
+        .wait_standing("the copy on the clipboard lane's worker");
+    type_key(&mut folio, "x", KeyCode::KeyX);
+    assert_eq!(
+        sent_to_the_shell(&mut folio, 0),
+        "x",
+        "the key typed while the copy is held reaches the shell"
+    );
+    hold.worker_hold().release();
+    assert_eq!(
+        written(&mut folio).len(),
+        1,
+        "the copy lands once the clipboard lets go"
+    );
+}
+
+/// RED (plan row 52, R5) — **a picture save refused at its door is said on the next turn, never on
+/// the paste's own**: with every place taken, the door returns with nothing drawn and wakes the
+/// window as the saving thread does (`ClipboardPictureReady`); the next look draws the one notice
+/// the door used to draw, in its kind and words. A save still running for an earlier paste lands
+/// as it would have: the refusal mints no generation, so the earlier answer is still the one
+/// waited for, and its path reaches the shell.
+///
+/// It takes every place of the process-global `CLIPBOARD_PICTURE_JOBS_RUNNING` for its whole length,
+/// so it must stay the binary's only test that takes a place (review N5, 2026-11-04): a second test
+/// that saves a picture would find the places gone, or leave this one short of four. The test-globals
+/// guard does not see the global, which is written in the product's `ClipboardPictureJob::take`
+/// through `fetch_update`, so `docs/plans/TEST-GLOBALS.tsv` holds no row for it (its note says why).
+///
+/// MUTATIONS: draw the notice in `Runtime::save_clipboard_picture` as before plan row 52 — a notice
+/// on the paste's own turn; withdraw a generation on a refusal — the earlier save's path is dropped.
+#[test]
+fn a_picture_save_refused_at_its_door_is_said_on_the_next_turn() {
+    let mut folio = a_window_pasting("clipboard-picture-refused", "unused 未用");
+    let events = crate::headless::LoopEvents::default();
+    folio.app.event_proxy = events.proxy();
+    let target = {
+        let runtime = folio.runtime();
+        let tab = &runtime.window.tabs[0];
+        let (seat, pane) = tab.sessions.iter().next().expect("the shell");
+        crate::PasteTarget {
+            tab: tab.id,
+            seat: *seat,
+            incarnation: pane.session.incarnation,
+        }
+    };
+    // Every place in the queue, held by the test and given back at its end.
+    let places: Vec<crate::ClipboardPictureJob> =
+        std::iter::from_fn(crate::ClipboardPictureJob::take).collect();
+    assert_eq!(places.len(), crate::CLIPBOARD_PICTURE_JOBS);
+    let earlier = folio.runtime().window.clipboard_picture.withdraw();
+    let words = crate::i18n::Text::PasteClipboardPicture.text();
+    folio
+        .runtime()
+        .save_clipboard_picture(target, Vec::new())
+        .expect("the door returns");
+    assert_eq!(
+        notices(&mut folio, words),
+        0,
+        "nothing is drawn on the paste's own turn"
+    );
+    assert!(
+        matches!(
+            events.take().as_slice(),
+            [crate::AppEvent::ClipboardPictureReady]
+        ),
+        "the window is woken, once"
+    );
+    let inbox = folio.runtime().window.clipboard_picture.inbox();
+    crate::runtime::deliver_clipboard_picture(
+        &inbox,
+        crate::ClipboardPictureAnswer {
+            generation: earlier,
+            target,
+            result: Ok(std::path::PathBuf::from("planted-picture.png")),
+        },
+    );
+    folio
+        .runtime()
+        .adopt_clipboard_picture()
+        .expect("the wake's look is answered");
+    let said: Vec<crate::toast::ToastKind> = folio
+        .runtime()
+        .window
+        .toasts
+        .toasts()
+        .iter()
+        .filter(|toast| toast.body() == words)
+        .map(|toast| toast.kind())
+        .collect();
+    assert_eq!(
+        said,
+        [crate::toast::ToastKind::Error],
+        "one notice, the door's"
+    );
+    assert!(
+        sent_to_the_shell(&mut folio, 0).contains("planted-picture.png"),
+        "the earlier save's answer lands: {:?}",
+        sent_to_the_shell(&mut folio, 0)
+    );
+    drop(places);
+}
+
 /// The bodies of the notices on window `id` of `application`, oldest first.
 fn notices_of(application: &mut HeadlessApplication, id: WindowId) -> Vec<String> {
     application

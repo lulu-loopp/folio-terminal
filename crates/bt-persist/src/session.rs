@@ -48,7 +48,18 @@ use crate::layout::LayoutNodeV1;
 /// pointed a files column at, newest first, so the root menu can offer them back. It is a fact
 /// about the *process* and not about one window — every window's root menu reads the one list — so
 /// it sits beside [`SessionV1::recent`] at the top level, on that field's own argument.
-pub const SESSION_SCHEMA_VERSION: u32 = 15;
+/// **v16 lets a pane remember the agent it was running** ([`crate::TermLeafV1::agent`], 0.4.9
+/// plan row 195): the vendor, the id that vendor resumes by, the folder and, when one was set, the
+/// vendor's configuration folder — what the vendor's own resume command needs and nothing more.
+/// **v17 lets that record carry the agent's launch words** ([`crate::AgentLaunchV1`], 0.4.10 plan
+/// row 74): the flags the agent was started with that its vendor's resume does not bring back by
+/// itself, so a session started with `--dangerously-skip-permissions` or `--model opus` comes back
+/// the way it was started. **They are written in the clear**, as the plaintext clause above writes
+/// a URL: they are the person's own command line, and the values that hold credentials are never
+/// among them — inline `--settings`, `--mcp-config` or `--agents` JSON, and a Codex `-c` whose key
+/// is not on its stated list of keys that hold none, are dropped and only their flag named (row
+/// 74's R5 and review N2).
+pub const SESSION_SCHEMA_VERSION: u32 = 17;
 
 /// **What a preview row's string names** — schema v11.
 ///
@@ -409,6 +420,12 @@ pub struct DegradationReport {
     /// [`crate::layout::MAX_LAST_COMMAND_CHARS`], which are cleared rather than
     /// shortened (review row R1-24).
     pub dropped_commands: u32,
+    /// Agent records no build could have written (an id that is not UUID-shaped, an empty vendor
+    /// or folder), dropped with the pane kept (row 195).
+    pub dropped_agents: u32,
+    /// Agent launches no build could have written (`unread` beside words), kept as unread with the
+    /// record and the pane kept (row 74): the resume runs without them and the pane says so.
+    pub unread_launches: u32,
 }
 
 impl DegradationReport {
@@ -420,6 +437,8 @@ impl DegradationReport {
             && self.dropped_tabs == 0
             && self.dropped_panes == 0
             && self.dropped_commands == 0
+            && self.dropped_agents == 0
+            && self.unread_launches == 0
     }
 }
 
@@ -848,6 +867,7 @@ mod tests {
                         manual_name: None,
                         card_skip: 0,
                         last_command: String::new(),
+                        agent: None,
                     },
                 )),
                 pinned: false,
@@ -917,6 +937,7 @@ mod tests {
             manual_name: None,
             card_skip: 0,
             last_command: last_command.to_string(),
+            agent: None,
         }))
     }
 
@@ -1046,5 +1067,210 @@ mod tests {
             "the impossible one is cleared and the ordinary one is untouched"
         );
         assert_eq!(report.dropped_commands, 1);
+    }
+
+    /// One terminal leaf carrying `agent`.
+    fn agent_leaf(agent: Option<crate::layout::AgentRecordV1>) -> LayoutNodeV1 {
+        LayoutNodeV1::Leaf(crate::layout::LeafNodeV1::Term(crate::layout::TermLeafV1 {
+            agent,
+            ..match term_leaf("") {
+                LayoutNodeV1::Leaf(crate::layout::LeafNodeV1::Term(leaf)) => leaf,
+                _ => unreachable!("term_leaf builds a term leaf"),
+            }
+        }))
+    }
+
+    fn claude_record(resume_id: &str) -> crate::layout::AgentRecordV1 {
+        crate::layout::AgentRecordV1 {
+            vendor: "claude-code".to_owned(),
+            resume_id: resume_id.to_owned(),
+            cwd: "C:\\work".to_owned(),
+            home: None,
+            launch: None,
+        }
+    }
+
+    fn agents_of(session: &SessionV1) -> Vec<Option<crate::layout::AgentRecordV1>> {
+        session.windows[0]
+            .tabs
+            .iter()
+            .map(|tab| match &tab.root {
+                LayoutNodeV1::Leaf(crate::layout::LeafNodeV1::Term(leaf)) => leaf.agent.clone(),
+                other => panic!("a term leaf, not {other:?}"),
+            })
+            .collect()
+    }
+
+    /// RED (row 195) — **a pane's agent record crosses the disk and back, and a pane without one
+    /// writes the bytes it always wrote.**
+    ///
+    /// MUTATION: drop `skip_serializing_if` from `TermLeafV1::agent` and the second assertion goes
+    /// red (every pane grows an `"agent": null`); drop the field and the first does.
+    #[test]
+    fn an_agent_record_round_trips_and_a_pane_without_one_writes_no_key() {
+        let record = crate::layout::AgentRecordV1 {
+            home: Some("D:\\accounts\\second".to_owned()),
+            ..claude_record("0f8b6a2e-3c1d-4e5f-9a7b-1c2d3e4f5a6b")
+        };
+        let session = SessionV1 {
+            windows: vec![SessionWindowV1 {
+                tabs: vec![
+                    one_tab(agent_leaf(Some(record.clone()))),
+                    one_tab(agent_leaf(None)),
+                ],
+                ..SessionWindowV1::default()
+            }],
+            ..SessionV1::default()
+        };
+        let text = serde_json::to_string(&session).expect("a session serialises");
+        let back: SessionV1 = serde_json::from_str(&text).expect("and reads back");
+        assert_eq!(agents_of(&back), vec![Some(record), None]);
+        assert_eq!(
+            text.matches("\"agent\"").count(),
+            1,
+            "only the pane with an agent says so: {text}"
+        );
+    }
+
+    /// RED (row 195) — **a record no build could have written is dropped on the way in, and its
+    /// pane is kept.** The id is the one thing the vendor's resume command is handed, and an id of
+    /// any shape but a UUID's names no session either vendor files.
+    ///
+    /// MUTATION: drop the agent arm of `LayoutNodeV1::degrade_in_place` and the forged record comes
+    /// back whole.
+    #[test]
+    fn an_agent_record_whose_id_is_not_a_uuid_is_dropped_and_its_pane_kept() {
+        let mut session = SessionV1 {
+            windows: vec![SessionWindowV1 {
+                tabs: vec![
+                    one_tab(agent_leaf(Some(claude_record(
+                        "--dangerously-skip-permissions",
+                    )))),
+                    one_tab(agent_leaf(Some(claude_record(
+                        "0f8b6a2e-3c1d-4e5f-9a7b-1c2d3e4f5a6b",
+                    )))),
+                ],
+                ..SessionWindowV1::default()
+            }],
+            ..SessionV1::default()
+        };
+        let report = session.degrade_in_place();
+        assert_eq!(
+            agents_of(&session),
+            vec![
+                None,
+                Some(claude_record("0f8b6a2e-3c1d-4e5f-9a7b-1c2d3e4f5a6b"))
+            ]
+        );
+        assert_eq!(report.dropped_agents, 1);
+        assert_eq!(session.windows[0].tabs.len(), 2, "both panes are kept");
+    }
+
+    /// The keys of the JSON object at `value`, sorted.
+    fn keys_of(value: &serde_json::Value) -> Vec<String> {
+        let mut keys: Vec<String> = value
+            .as_object()
+            .expect("an object")
+            .keys()
+            .cloned()
+            .collect();
+        keys.sort();
+        keys
+    }
+
+    /// RED (row 74, T9) — **the agent record's keys are v17's, and v17's only**: the guard row 68
+    /// asks of every key set (a key changes only with a schema bump). Every key a record can write
+    /// is written here — a launch that carried words and named a dropped flag, and one that could
+    /// not be read — and the sets are pinned beside the version they belong to.
+    ///
+    /// MUTATIONS: leave `SESSION_SCHEMA_VERSION` at 16 (plant `plant-74-no-bump.py`) — the first
+    /// assertion goes red; rename a launch key — the key-set assertions do.
+    #[test]
+    fn the_v17_agent_record_writes_the_pinned_keys() {
+        assert_eq!(
+            SESSION_SCHEMA_VERSION, 17,
+            "the launch keys below are v17's: a new key is a new version"
+        );
+        let carried = crate::layout::AgentRecordV1 {
+            home: Some("D:\\accounts\\second".to_owned()),
+            launch: Some(Box::new(crate::layout::AgentLaunchV1 {
+                args: vec!["--model".to_owned(), "opus".to_owned()],
+                dropped: vec!["-w".to_owned()],
+                unread: false,
+            })),
+            ..claude_record("0f8b6a2e-3c1d-4e5f-9a7b-1c2d3e4f5a6b")
+        };
+        let written = serde_json::to_value(&carried).expect("a record serialises");
+        assert_eq!(
+            keys_of(&written),
+            ["cwd", "home", "launch", "resume_id", "vendor"]
+        );
+        assert_eq!(keys_of(&written["launch"]), ["args", "dropped"]);
+        let unread = serde_json::to_value(crate::layout::AgentLaunchV1::unread())
+            .expect("a launch serialises");
+        assert_eq!(keys_of(&unread), ["unread"]);
+        assert_eq!(unread["unread"], serde_json::json!(true));
+        let back: crate::layout::AgentRecordV1 =
+            serde_json::from_value(written).expect("and reads back");
+        assert_eq!(back, carried);
+    }
+
+    /// RED (row 74) — **a launch no build could have written is read as unread, and the session it
+    /// rides on is kept**: the resume still runs, with the vendor's defaults, and the pane says it
+    /// came back without its launch arguments.
+    ///
+    /// MUTATION: drop the launch arm of `LayoutNodeV1::degrade_in_place` — the forged launch comes
+    /// back with its words.
+    #[test]
+    fn a_launch_no_build_wrote_is_unread_and_its_session_kept() {
+        let forged = crate::layout::AgentRecordV1 {
+            launch: Some(Box::new(crate::layout::AgentLaunchV1 {
+                args: vec!["--dangerously-skip-permissions".to_owned()],
+                dropped: Vec::new(),
+                unread: true,
+            })),
+            ..claude_record("0f8b6a2e-3c1d-4e5f-9a7b-1c2d3e4f5a6b")
+        };
+        let mut session = SessionV1 {
+            windows: vec![SessionWindowV1 {
+                tabs: vec![one_tab(agent_leaf(Some(forged.clone())))],
+                ..SessionWindowV1::default()
+            }],
+            ..SessionV1::default()
+        };
+        let report = session.degrade_in_place();
+        assert_eq!(
+            agents_of(&session),
+            vec![Some(crate::layout::AgentRecordV1 {
+                launch: Some(Box::new(crate::layout::AgentLaunchV1::unread())),
+                ..forged
+            })]
+        );
+        assert_eq!(report.unread_launches, 1);
+        assert_eq!(report.dropped_agents, 0, "the session is kept");
+        assert!(!report.is_clean());
+    }
+
+    /// The one shape check: `8-4-4-4-12` hexadecimal, either case, and nothing else.
+    #[test]
+    fn a_resume_id_is_uuid_shaped_or_it_is_not_one() {
+        for good in [
+            "0f8b6a2e-3c1d-4e5f-9a7b-1c2d3e4f5a6b",
+            "019A0B1C-2D3E-7F40-8a9b-0c1d2e3f4a5b",
+        ] {
+            assert!(crate::resume_id_is_well_formed(good), "{good}");
+        }
+        for bad in [
+            "",
+            "0f8b6a2e3c1d4e5f9a7b1c2d3e4f5a6b",
+            "0f8b6a2e-3c1d-4e5f-9a7b-1c2d3e4f5a6",
+            "0f8b6a2e-3c1d-4e5f-9a7b-1c2d3e4f5a6bb",
+            "0f8b6a2g-3c1d-4e5f-9a7b-1c2d3e4f5a6b",
+            "0f8b6a2e-3c1d-4e5f-9a7b-1c2d3e4f5a6b-",
+            " 0f8b6a2e-3c1d-4e5f-9a7b-1c2d3e4f5a6b",
+            "my-session",
+        ] {
+            assert!(!crate::resume_id_is_well_formed(bad), "{bad:?}");
+        }
     }
 }

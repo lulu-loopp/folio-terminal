@@ -271,8 +271,9 @@ fn resource_bytes(icon: &Path, version: &str, manifest: Option<&str>) -> Vec<u8>
     let mut file = bt_winres::ResourceFile::new();
     // Group one, because Explorer draws an executable with its lowest-numbered
     // icon group and `bt_platform::context_menu_shape` registers `folio.exe,0`
-    // meaning exactly that one.
-    file.add_icon(1, &icon);
+    // meaning exactly that one. The program's windows load the same group back
+    // (`wear_app_icon`), through the same constant.
+    file.add_icon(bt_winres::APP_ICON_GROUP, &icon);
     file.add_version_info(&bt_winres::VersionInfo {
         file_version: numbers,
         product_version: numbers,
