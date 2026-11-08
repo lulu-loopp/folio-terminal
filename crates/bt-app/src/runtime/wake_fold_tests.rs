@@ -453,12 +453,9 @@ impl Advancer {
         match self {
             // The formula marks arriving, with no pointer in the window to move their ink.
             Self::MathTools => {
-                runtime.window.math_tools =
-                    Some(crate::formula_tools::FormulaToolFollow::arriving(
-                        &a_bands_marks(),
-                        None,
-                        at,
-                    ));
+                runtime.window.math_tools = Some(
+                    crate::formula_tools::FormulaToolFollow::arriving(&a_bands_marks(), None, at),
+                );
             }
             // A tab's tip, promoted at `at` and fading in.
             Self::Tooltip => {
