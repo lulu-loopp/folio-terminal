@@ -184,6 +184,15 @@ pub(crate) enum SpareDue {
 }
 
 impl WebWarmup {
+    /// **The clock as already fired, both turns**, for a headless fixture whose turns run on a
+    /// clock it holds (plan row 189): the warm-up's ask is a deferrable unit, whose allowance is
+    /// read on the real clock and begun only by the event loop, so a headless turn handed an
+    /// instant past the grace would be refused it and book its own instant again, in the past.
+    #[cfg(test)]
+    pub(crate) fn already_fired(&mut self) {
+        self.stage = Stage::Done;
+    }
+
     /// **Something stirred at `at`**: the quiet stretch starts again from here.
     pub(crate) fn stir(&mut self, at: Instant) {
         self.stirred_at = Some(self.stirred_at.map_or(at, |stirred| stirred.max(at)));

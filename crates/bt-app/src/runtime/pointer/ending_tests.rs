@@ -6,7 +6,7 @@
 use super::*;
 use crate::headless::key_down;
 use crate::headless::{Headless, HeadlessApplication, HeadlessFolio};
-use crate::runtime::pointer::{CaptureOwner, PointerCapture};
+use crate::runtime::pointer::{CaptureOwner, FieldDrag, PointerCapture};
 use crate::test_support::{buffer_saying, cross_tab, host_spelling, seat_of, tab_with_a_preview};
 use crate::{
     DividerDrag, DividerGrip, Drag, DragCarry, DragLatch, DragSource, FilePeekPress, FloatDrag,
@@ -161,13 +161,23 @@ fn every_owner(on: On) -> Vec<CaptureOwner> {
             key: "notes.md".to_owned(),
             latch,
         }),
-        CaptureOwner::RenameSelection(RenameSubject::Tab(on.tab)),
-        CaptureOwner::RenameSelection(RenameSubject::WebAddress {
+        CaptureOwner::FieldSelection(FieldDrag::Name(RenameSubject::Tab(on.tab))),
+        CaptureOwner::FieldSelection(FieldDrag::Name(RenameSubject::WebAddress {
             leaf: crate::LeafId {
                 tab: on.shell.tab,
                 seat: on.shell.seat,
             },
-        }),
+        })),
+        CaptureOwner::FieldSelection(FieldDrag::FindBar(crate::LeafId {
+            tab: on.shell.tab,
+            seat: on.shell.seat,
+        })),
+        CaptureOwner::FieldSelection(FieldDrag::GraphSearch(on.tab, on.surface)),
+        CaptureOwner::FieldSelection(FieldDrag::Settings(settings::SettingsTarget::Field(
+            settings::SettingsRow::QuakeCommand,
+        ))),
+        CaptureOwner::FieldSelection(FieldDrag::Palette),
+        CaptureOwner::FieldSelection(FieldDrag::GitPrompt),
     ]
 }
 
@@ -175,12 +185,37 @@ fn every_owner(on: On) -> Vec<CaptureOwner> {
 /// address field on `on`'s pane). It shares its kind's name with the drag across a tab's name, and
 /// the doors part the two: this one leaves the glass with its pane and goes with it, a tab's name
 /// does neither (0.4.9 plan row 179, review F2). The doors' lists name it by this label.
-const PANE_RENAME: &str = "RenameSelection on a pane";
+const PANE_RENAME: &str = "FieldSelection on a pane";
 
-/// The name the doors' lists know `owner` by: its kind's name, except for [`PANE_RENAME`].
+/// **A drag across the find bar** (C25, row 180), whose capsule stands on `on`'s pane: the doors
+/// treat it as [`PANE_RENAME`] is treated.
+const FIND_BAR: &str = "FieldSelection in the find bar";
+
+/// **A drag across a commit graph's search** (C25, row 180), on `on`'s surface: the doors treat it
+/// as a selection drawn on that surface (`EditSelection`) is treated.
+const GRAPH_SEARCH: &str = "FieldSelection in a graph's search";
+
+/// **A drag across a field of the settings sheet** (C25, row 180): gone with the sheet, as the
+/// sheet's slider is.
+const SETTINGS_FIELD: &str = "FieldSelection in the settings sheet";
+
+/// **A drag across the palette's box** and **across a git menu's prompt** (C25, row 180): popups of
+/// the window, which no tab, pane or surface takes away.
+const PALETTE: &str = "FieldSelection in the palette";
+const GIT_PROMPT: &str = "FieldSelection in a git prompt";
+
+/// The name the doors' lists know `owner` by: its kind's name, except for C25's arms, which the
+/// doors part by what the field is drawn on.
 fn label(owner: &CaptureOwner) -> &'static str {
     match owner {
-        CaptureOwner::RenameSelection(RenameSubject::WebAddress { .. }) => PANE_RENAME,
+        CaptureOwner::FieldSelection(FieldDrag::Name(RenameSubject::WebAddress { .. })) => {
+            PANE_RENAME
+        }
+        CaptureOwner::FieldSelection(FieldDrag::FindBar(_)) => FIND_BAR,
+        CaptureOwner::FieldSelection(FieldDrag::GraphSearch(..)) => GRAPH_SEARCH,
+        CaptureOwner::FieldSelection(FieldDrag::Settings(_)) => SETTINGS_FIELD,
+        CaptureOwner::FieldSelection(FieldDrag::Palette) => PALETTE,
+        CaptureOwner::FieldSelection(FieldDrag::GitPrompt) => GIT_PROMPT,
         owner => owner.name(),
     }
 }
@@ -212,8 +247,13 @@ fn every_name() -> Vec<&'static str> {
         "SettingsSlider",
         "SettingsMenuBar",
         "RowMiddlePress",
-        "RenameSelection",
+        "FieldSelection",
         PANE_RENAME,
+        FIND_BAR,
+        GRAPH_SEARCH,
+        SETTINGS_FIELD,
+        PALETTE,
+        GIT_PROMPT,
     ]
 }
 
@@ -323,8 +363,9 @@ fn each_owner_against_and_gone(
     }
 }
 
-/// The owner kinds whose payload names a tab-bound surface (R-9's *off the glass*).
-const TAB_BOUND: [&str; 17] = [
+/// The owner kinds whose payload names a tab-bound surface (R-9's *off the glass*). The last is
+/// the formula block, which names no pane, and so no zoom takes it.
+const TAB_BOUND: [&str; 19] = [
     "Divider",
     "PanePress",
     "RowPress",
@@ -335,23 +376,26 @@ const TAB_BOUND: [&str; 17] = [
     "BlockThumb",
     "PicturePan",
     "EditSelection",
+    GRAPH_SEARCH,
     "RenderedSelection",
     "TerminalThumb",
     "TerminalFootMark",
     PANE_RENAME,
+    FIND_BAR,
     "Route::Local",
     "Route::Forward",
     "Route::MathBlock",
 ];
 
 /// The gestures held on a preview surface's document.
-const ON_A_DOCUMENT: [&str; 7] = [
+const ON_A_DOCUMENT: [&str; 8] = [
     "VideoBar",
     "VideoPicture",
     "PreviewBodyThumb",
     "BlockThumb",
     "PicturePan",
     "EditSelection",
+    GRAPH_SEARCH,
     "RenderedSelection",
 ];
 
@@ -511,7 +555,7 @@ fn each_door_ends_a_held_capture() {
         &mut application,
         "a zoom",
         "off the glass",
-        &TAB_BOUND[..16],
+        &TAB_BOUND[..TAB_BOUND.len() - 1],
         |runtime| every_owner(on_pane(runtime, 1)),
         |application| {
             let mut runtime = application.runtime();
@@ -585,6 +629,7 @@ fn each_door_ends_a_held_capture() {
             "BlockThumb",
             "PicturePan",
             "EditSelection",
+            GRAPH_SEARCH,
             "RenderedSelection",
         ],
         floating,
@@ -613,6 +658,7 @@ fn each_door_ends_a_held_capture() {
             "BlockThumb",
             "PicturePan",
             "EditSelection",
+            GRAPH_SEARCH,
             "RenderedSelection",
         ],
         on_the_card,
@@ -624,7 +670,7 @@ fn each_door_ends_a_held_capture() {
         &mut application,
         "the settings sheet shut by the gear",
         "owner gone",
-        &["SettingsSlider", "SettingsMenuBar"],
+        &["SettingsSlider", "SettingsMenuBar", SETTINGS_FIELD],
         |runtime| every_owner(on_pane(runtime, 0)),
         |application| {
             let mut runtime = application.runtime();
@@ -684,12 +730,14 @@ fn each_door_ends_a_held_capture() {
         "BlockThumb",
         "PicturePan",
         "EditSelection",
+        GRAPH_SEARCH,
         "RenderedSelection",
         "TerminalThumb",
         "TerminalFootMark",
         "Route::Local",
         "Route::Forward",
         PANE_RENAME,
+        FIND_BAR,
     ];
     for which in 0..all.len() {
         let mut application = two_tabs("ending-doors-pane");
@@ -740,6 +788,7 @@ fn each_door_ends_a_held_capture() {
             "BlockThumb",
             "PicturePan",
             "EditSelection",
+            GRAPH_SEARCH,
             "RenderedSelection",
             "TerminalThumb",
             "TerminalFootMark",
@@ -750,9 +799,11 @@ fn each_door_ends_a_held_capture() {
             "GlanceHeadPress",
             "GlanceThumb",
             // A drag across the tab's name editor, gone with the tab its name is, and one across
-            // a name drawn on one of its panes, gone with the tab that pane is in.
-            "RenameSelection",
+            // a name drawn on one of its panes — or across the find bar on one — gone with the
+            // tab that pane is in.
+            "FieldSelection",
             PANE_RENAME,
+            FIND_BAR,
         ],
         |runtime| every_owner(on_pane(runtime, 0)),
         |application| {

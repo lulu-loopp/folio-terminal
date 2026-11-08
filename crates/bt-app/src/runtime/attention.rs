@@ -713,15 +713,15 @@ impl<B: Backend> Runtime<'_, B> {
         notice::claim(&strip.bar, position.x as f32, position.y as f32)
     }
 
-    /// **Re-read all three agent configurations**, on the one edge that can afford it.
+    /// **Ask for all three agent configurations again**, on the Agents page's open edge (0.4.10
+    /// plan row 67b, R7).
     ///
-    /// The same three reads the launch makes, and the same pair of facts out of each: whether this
-    /// copy's marks are in that file, and — when the file is one this build will not edit — the
-    /// reason the row says instead of `Off`. A refused row takes no press at all, so this is the
-    /// only way a machine that has been put right becomes a machine Folio will act on again
-    /// without a relaunch.
+    /// The carry pass reads them on its worker, repairs what it may, and its answer sets the rows
+    /// (`adopt_agent_hooks_snapshot`); nothing is read here. A refused row takes no press at all,
+    /// so this is the only way a machine that has been put right becomes a machine Folio will act
+    /// on again without a relaunch.
     pub(crate) fn refresh_agent_rows(&mut self) {
-        crate::read_the_agent_rows_again(self.app);
+        crate::carry_pass::begin_carry_pass();
     }
 
     /// Whether one of the built-in agent profiles has its program on this

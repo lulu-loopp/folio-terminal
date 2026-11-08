@@ -10,7 +10,7 @@
 
 use crate::window_seam::prelude::*;
 use crate::{
-    Announce, ApplicationChange, FilePick, RAIL_TRANSITION, RevealTween, Runtime,
+    Announce, ApplicationChange, FilePick, RAIL_TRANSITION, RevealTween, Runtime, agent_hooks_step,
     attention_copilot, attention_wire, block_max_height_px, cardhint, context_menu, explorer_menu,
     handoff_lane, hang_watch, i18n, install_minimum_contrast, marks, preview, profiles,
     programs_lane, psreadline, rail_state_for, schemes, seats, settings, shell_integration,
@@ -279,6 +279,9 @@ impl<B: Backend> Runtime<'_, B> {
         }
         if let Some(enabled) = settings::turn_end_notification_requested(target) {
             self.apply_turn_end_notification(enabled);
+        }
+        if let Some(enabled) = settings::resume_agents_requested(target) {
+            self.apply_resume_agents(enabled);
         }
         if let Some(enabled) = settings::shell_integration_requested(target) {
             self.apply_shell_integration(enabled)?;
@@ -691,6 +694,7 @@ impl<B: Backend> Runtime<'_, B> {
             | Row::MultilinePaste
             | Row::Notifications
             | Row::TurnEndNotifications
+            | Row::ResumeAgents
             | Row::ShellIntegration
             // And doubly never again, for `ContextMenu`'s reason over a different store: what a
             // reset would be putting back is not a value in this file, it is a block in the user's
@@ -1244,6 +1248,21 @@ impl<B: Backend> Runtime<'_, B> {
                     self.apply_slider(row, value)?;
                 }
                 self.latch_settings_slider_drag(row);
+            }
+            // **A press in a field puts the caret at the seam under it**, once the focus is
+            // there, and a drag from there selects (0.4.9 plan row 180): the field the press
+            // landed in reads the run it was drawn as — from its start, when it did not hold the
+            // focus until now.
+            (
+                target @ (settings::SettingsTarget::Field(_)
+                | settings::SettingsTarget::EnvName(_)
+                | settings::SettingsTarget::EnvValue(_)),
+                _,
+            ) if self.window.settings.text_field(target).is_some() => {
+                self.press_field(
+                    crate::runtime::pointer::FieldDrag::Settings(target),
+                    position,
+                )?;
             }
             // Turning a page puts the reader at the top of it.
             (settings::SettingsTarget::Nav(_), settings::SettingsKeyVerdict::Moved) => {
@@ -1985,15 +2004,90 @@ impl<B: Backend> Runtime<'_, B> {
         let layout = self.settings_layout()?;
         let (rect, mono) = layout.text_field_box(target)?;
         let scale = layout.scale();
+        let scroll = self.settle_settings_field_scroll(&layout);
         let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
         let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
         Some(settings::field_caret_line(
             rect,
             &shown[..caret],
+            scroll,
             mono,
             scale,
             &mut measure,
         ))
+    }
+
+    /// **How far the focused field's text is pushed left this frame**, settled from how far it
+    /// was and kept for the next (0.4.9 plan row 180, ruling 2; [`settings::settle_field_scroll`]).
+    /// `0` when no field holds the keyboard. Asked by the painter and by the input method's
+    /// caret, so the two read one scroll.
+    pub(in crate::runtime) fn settle_settings_field_scroll(
+        &mut self,
+        layout: &settings::SettingsLayout,
+    ) -> f32 {
+        let settled = self.settled_settings_field_scroll(layout);
+        // Kept only while a field holds the keyboard: a field drawn without the focus is drawn
+        // from its start, and one the focus comes back to must start from where it was drawn.
+        self.window.settings.keep_field_scroll(settled);
+        settled.map_or(0.0, |(_, scroll)| scroll)
+    }
+
+    /// [`Self::settle_settings_field_scroll`]'s answer before it is kept: the focused field and
+    /// its settled scroll, or `None` when the focus is on no text field this layout places.
+    fn settled_settings_field_scroll(
+        &mut self,
+        layout: &settings::SettingsLayout,
+    ) -> Option<(settings::SettingsTarget, f32)> {
+        let target = self.window.settings.focus()?;
+        let field = self.window.settings.text_field(target)?;
+        let (rect, mono) = layout.text_field_box(target)?;
+        let shown = field.composed().into_owned();
+        let caret = field.composed_selection().end;
+        let held = self.window.settings.field_scroll(target);
+        let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+        let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
+        let scroll = settings::settle_field_scroll(
+            rect,
+            &shown,
+            caret,
+            held,
+            mono,
+            layout.scale(),
+            &mut measure,
+        );
+        Some((target, scroll))
+    }
+
+    /// **Every text field the dialog drew, as it drew it**, left for a press to read (0.4.9 plan
+    /// row 180, ruling 3): the focused one pushed left by its settled `scroll`, every other from
+    /// its start, each shaped in the face its field is set in — what the painter laid out.
+    pub(in crate::runtime) fn record_settings_field_runs(
+        &mut self,
+        layout: &settings::SettingsLayout,
+        scroll: f32,
+    ) {
+        let focus = self.window.settings.focus();
+        let scale = layout.scale();
+        let mut runs = Vec::new();
+        for (target, rect, mono) in layout.text_fields() {
+            let Some(field) = self.window.settings.text_field(target) else {
+                continue;
+            };
+            let shown = field.composed().into_owned();
+            let ([left, _], font) = settings::field_text_run(rect, mono, scale);
+            let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+            let advances = renderer.chrome_text_advances(gpu, &shown, font);
+            runs.push((
+                target,
+                crate::text_field::DrawnRun {
+                    left,
+                    scroll_px: if focus == Some(target) { scroll } else { 0.0 },
+                    shown,
+                    advances,
+                },
+            ));
+        }
+        self.window.drawn_fields.settings = runs;
     }
 
     /// **Open the settings dialog on one row.**
@@ -2138,7 +2232,8 @@ impl<B: Backend> Runtime<'_, B> {
         // **The agent rows' own edge**, and it is not a convenience: their switches are inert
         // while the file they name is one this build will not edit, so a press cannot be what
         // notices that the reader has unpicked the link or cleared the read-only bit. Opening the
-        // page is (re-review, round 3). One re-read per visit, never per frame and never per turn.
+        // page is (re-review, round 3). One scan per visit, never per frame and never per turn,
+        // and on the carry pass's worker (0.4.10 plan row 67b, R7): its answer redraws the page.
         let agents_opened = self
             .window
             .settings
@@ -2163,18 +2258,6 @@ impl<B: Backend> Runtime<'_, B> {
             // Every row's program, and WSL's distributions, asked again as the page opens.
             self.ask_the_program_walk(programs_lane::Trigger::ProfilesPage);
         }
-        // Use the refreshed fact on this very layout, including its geometry.
-        let refreshed_values = agents_opened.then(|| settings::SettingsValues {
-            claude_hooks: self.app.claude_hooks_installed,
-            codex_notify: self.app.codex_notify_installed,
-            copilot_hooks: self.app.copilot_hooks_installed,
-            agent_config_refusals: self.app.agent_config_refusals,
-            ..values.clone()
-        });
-        let content = settings::SettingsContent {
-            values: refreshed_values.as_ref().unwrap_or(&values),
-            ..content
-        };
         // The second probe on the same door and for the same argument: the page that prints which
         // copilot this machine has is the page that asks. Idempotent, and an atomic load after the
         // first call — see `attention_copilot::begin_probe`.
@@ -2541,6 +2624,7 @@ impl<B: Backend> Runtime<'_, B> {
             multiline_paste_ask: self.app.settings_store.loaded().multiline_paste_ask,
             terminal_notifications: self.app.settings_store.loaded().terminal_notifications,
             turn_end_notification: self.app.settings_store.loaded().turn_end_notification,
+            resume_agents: self.app.settings_store.loaded().resume_agents,
             shell_integration: self.app.settings_store.loaded().shell_integration,
             powershell_profile_line_present: shell_integration::powershell_profile_line_present(),
             git_panel: self.app.settings_store.loaded().git_panel,
@@ -2587,6 +2671,23 @@ impl<B: Backend> Runtime<'_, B> {
             // answer is not `Off` at all. Handed in, never asked for here — the three sentences
             // are read off the disk and this runs on every frame the dialog is up.
             agent_config_refusals: self.app.agent_config_refusals,
+            // What each row says of what the start-time scan found (0.4.10 plan row 67b), and
+            // what the resume row says of the hooks resume needs — both said from the scan's
+            // answer, here and in the language in force, never read off the disk.
+            agent_row_lines: self.app.agent_hooks_found.each_ref().map(|found| {
+                found.as_ref().and_then(|(found, unrepaired)| {
+                    agent_hooks_step::hooks_row_line(found, *unrepaired)
+                })
+            }),
+            resume_agents_line: agent_hooks_step::resume_row_line(
+                self.app.settings_store.loaded().resume_agents,
+                self.app.agent_rows_known,
+                [
+                    self.app.claude_hooks_installed,
+                    self.app.codex_notify_installed,
+                    self.app.copilot_hooks_installed,
+                ],
+            ),
             // And over copilot's own hooks directory, with the second fact this one needs beside
             // it: whether the copilot on this machine can carry the signal at all.
             copilot_hooks: self.app.copilot_hooks_installed,

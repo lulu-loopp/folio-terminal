@@ -138,6 +138,7 @@ use objc2_foundation::{
 };
 
 use crate::https_download::{Deadlines, Destination, Partial, admit_length};
+use crate::launch_conversation::{LaunchClock, RealClock};
 
 /// The one request this module knows how to make.
 ///
@@ -245,21 +246,38 @@ impl Exchange {
     ///
     /// The deadline is the one failure this side owns: every other outcome is
     /// something the delegate wrote down.
-    fn wait(&self, deadline: Duration) -> Result<Vec<u8>, String> {
-        let started = Instant::now();
-        let mut progress = self.locked();
-        while !progress.done {
-            let left = deadline.saturating_sub(started.elapsed());
-            if left.is_zero() {
-                return Err("the body did not arrive inside its budget".to_owned());
+    ///
+    /// The deadline is read on `clock` (0.4.9 plan row 150): the product hands
+    /// [`RealClock`], whose one wait is this condvar loop for the whole
+    /// deadline, so the update check waits as long on the same signal as it
+    /// always did; a test hands a counted clock, so "the delegate finished in
+    /// time" and "the budget ran out" are facts of the test rather than a race
+    /// with a real window. **The clock is the sole judge**: `done` is read only
+    /// inside its wait, and a wait it says ran out is the budget's refusal
+    /// whatever the delegate has written since.
+    fn wait(&self, deadline: Duration, clock: &dyn LaunchClock) -> Result<Vec<u8>, String> {
+        let mut answer = None;
+        let answered = clock.wait(deadline, &mut |bound: Duration| {
+            let started = Instant::now();
+            let mut progress = self.locked();
+            while !progress.done {
+                let left = bound.saturating_sub(started.elapsed());
+                if left.is_zero() {
+                    return false;
+                }
+                let (next, _) = self
+                    .finished
+                    .wait_timeout(progress, left)
+                    .expect("the update check's exchange is not held across a panic");
+                progress = next;
             }
-            let (next, _) = self
-                .finished
-                .wait_timeout(progress, left)
-                .expect("the update check's exchange is not held across a panic");
-            progress = next;
+            answer = Some(outcome(&mut progress));
+            true
+        });
+        match (answered, answer) {
+            (true, Some(answer)) => answer,
+            _ => Err("the body did not arrive inside its budget".to_owned()),
         }
-        outcome(&mut progress)
     }
 }
 
@@ -485,7 +503,7 @@ fn address(host: &str, path: &str) -> Result<Retained<NSURL>, String> {
 /// not arrive whole.
 pub fn https_get(request: &HttpsGet<'_>) -> Result<String, String> {
     let url = address(request.host, request.path)?;
-    fetch(&url, request)
+    fetch(&url, request, &RealClock)
 }
 
 /// **The whole of the exchange, once the address is settled** — the session,
@@ -499,7 +517,12 @@ pub fn https_get(request: &HttpsGet<'_>) -> Result<String, String> {
 /// is that this half can be put to a server on this machine's own loopback,
 /// which is how the delegate's three decisions are proved without the public
 /// internet answering for them. See this module's own tests.
-fn fetch(url: &NSURL, request: &HttpsGet<'_>) -> Result<String, String> {
+///
+/// `clock` is what this thread's own wait, `budget + phase_timeout`, is read
+/// on: [`https_get`] hands [`RealClock`], and the tests a counted clock (see
+/// [`Exchange::wait`]). The session's own two timeouts are Foundation's timers
+/// on real time either way.
+fn fetch(url: &NSURL, request: &HttpsGet<'_>, clock: &dyn LaunchClock) -> Result<String, String> {
     let exchange = Arc::new(Exchange::new(request.cap));
     let transport = Transport::new(Arc::clone(&exchange));
 
@@ -541,7 +564,7 @@ fn fetch(url: &NSURL, request: &HttpsGet<'_>) -> Result<String, String> {
     let task = session.dataTaskWithRequest(&http);
     task.resume();
 
-    let answer = exchange.wait(request.budget + request.phase_timeout);
+    let answer = exchange.wait(request.budget + request.phase_timeout, clock);
     // **Unconditional, on every path.** A session with a delegate retains that
     // delegate until it is invalidated, and a task this thread gave up waiting
     // for is a task that must stop. `invalidateAndCancel` is both.
@@ -905,8 +928,9 @@ mod tests {
 
     use objc2_foundation::{NSString, NSURL};
 
-    use super::{HttpsGet, fetch, https_get};
+    use super::{HttpsGet, address, fetch, https_get};
     use crate::https_download::loopback::{Entry, Served, Step, serve};
+    use crate::launch_conversation::{CountedClock, Turn};
 
     /// The product's own numbers, so that what these cases exercise is what
     /// `bt_app::update` exercises.
@@ -972,8 +996,8 @@ mod tests {
     /// `a_plain_http_address_is_refused_without_a_round_trip` below pin, and
     /// what makes a loopback port unreachable *through* the door. So the two
     /// halves are asked separately: those two cases are about the address, and
-    /// these three are about everything the session and its delegate do once
-    /// there is one.
+    /// the loopback cases that call this are about everything the session and
+    /// its delegate do once there is one.
     ///
     /// **App Transport Security does not stand in the way, and the reason is
     /// worth writing down rather than discovering twice.** ATS reads
@@ -984,10 +1008,19 @@ mod tests {
     /// host that is an IP literal (which is the gap `NSAllowsLocalNetworking`
     /// exists to cover for names like `localhost` and `*.local`). The address
     /// below is `127.0.0.1`, so a plaintext request to it is not a request ATS
-    /// has anything to say about. If that ever stops being true, these three
-    /// fail together with `NSURLSession: … App Transport Security policy
+    /// has anything to say about. If that ever stops being true, every loopback
+    /// case fails together with `NSURLSession: … App Transport Security policy
     /// requires the use of a secure connection`, which names itself.
-    fn ask_this_machine(port: u16, path: &str, cap: usize) -> Result<String, String> {
+    ///
+    /// The wait is read on `clock` (0.4.9 plan row 150): a counted clock, so
+    /// whether the answer came inside the budget is the clock's count and not
+    /// a race with 20 s of real time.
+    fn ask_this_machine(
+        port: u16,
+        path: &str,
+        cap: usize,
+        clock: &CountedClock,
+    ) -> Result<String, String> {
         let composed = format!("http://127.0.0.1:{port}{path}");
         let url = NSURL::URLWithString(&NSString::from_str(&composed))
             .expect("a loopback address this system can read");
@@ -1001,7 +1034,32 @@ mod tests {
                 budget: BUDGET,
                 cap,
             },
+            clock,
         )
+    }
+
+    /// **The answer ended every wait, and the budget ended none** — the
+    /// counted clock was asked `asks` times for the product's own
+    /// `budget + phase_timeout`, and none of those waits ran out.
+    ///
+    /// Under [`Turn::Await`] each of those waits is awaited within the suite's
+    /// patience (`door_skipped::PATIENCE`, 10 s), not the product's 20 s, so a
+    /// case is called "the budget ran out" after 10 s of real time where it
+    /// used to be 20 s. That cannot bite: Foundation's own timers
+    /// (`phase_timeout`, 5 s idle, and `budget`, 15 s whole) end a stalled
+    /// request first, with its own sentence, and this wait only ever sees the
+    /// delegate's completion after them.
+    fn the_answer_ended_the_wait(clock: &CountedClock, asks: usize) {
+        assert_eq!(
+            clock.asked(),
+            vec![BUDGET + PHASE; asks],
+            "the wait is read on the clock it was handed, for the whole budget"
+        );
+        assert_eq!(
+            clock.moved(),
+            Duration::ZERO,
+            "the answer ended the wait, not the budget"
+        );
     }
 
     /// **A releases list, fetched and handed back whole** — the `Ok` path, and
@@ -1020,8 +1078,15 @@ mod tests {
         const RELEASES: &str = r#"[{"tag_name":"v0.3.0","name":"Folio 0.3.0","draft":false}]"#;
         let server = answering(response(200, "OK", RELEASES));
         let port = server.port();
-        let body = ask_this_machine(port, "/repos/lulu-loopp/folio-terminal/releases", CAP)
-            .expect("the releases list");
+        let clock = CountedClock::answering();
+        let body = ask_this_machine(
+            port,
+            "/repos/lulu-loopp/folio-terminal/releases",
+            CAP,
+            &clock,
+        )
+        .expect("the releases list");
+        the_answer_ended_the_wait(&clock, 1);
         assert_eq!(body, RELEASES, "the body arrived whole and in order");
         assert!(
             body.trim_start().starts_with('['),
@@ -1057,19 +1122,35 @@ mod tests {
     /// for. The assertion on the clock is the important half: a door that
     /// answered only after the whole budget would carry the same `Err` and be a
     /// very different feature.
+    ///
+    /// The clock is a counted one (0.4.9 plan row 150), so "inside the
+    /// deadline" is the count's: the refusal ended the one wait for the
+    /// product's `budget + phase_timeout`, and the budget moved the clock by
+    /// nothing. That is why this asks [`super::fetch`] with the address the
+    /// door itself composes, rather than the door, which reads the real clock:
+    /// `https://127.0.0.1/`, port 443.
     #[test]
     fn a_closed_port_is_refused_inside_the_deadline() {
-        let started = Instant::now();
-        let refusal = ask("127.0.0.1", "/").expect_err("nothing is listening on 443 here");
+        let clock = CountedClock::answering();
+        let url = address("127.0.0.1", "/").expect("a host and a path");
+        let refusal = fetch(
+            &url,
+            &HttpsGet {
+                host: "127.0.0.1",
+                path: "/",
+                user_agent: "Folio",
+                phase_timeout: PHASE,
+                budget: BUDGET,
+                cap: CAP,
+            },
+            &clock,
+        )
+        .expect_err("nothing is listening on 443 here");
         assert!(
             refusal.starts_with("NSURLSession: "),
             "the transport is what refused: {refusal}"
         );
-        assert!(
-            started.elapsed() < BUDGET + PHASE,
-            "the refusal is inside the deadline: {:?}",
-            started.elapsed()
-        );
+        the_answer_ended_the_wait(&clock, 1);
     }
 
     /// **`http://` never leaves this function**, and it is refused without a
@@ -1131,9 +1212,16 @@ mod tests {
         assert!(long.len() > 64, "the body has to be longer than the cap");
         let server = answering(response(200, "OK", &long));
         let port = server.port();
-        let refusal = ask_this_machine(port, "/repos/lulu-loopp/folio-terminal/releases", 64)
-            .expect_err("64 bytes is not a release list");
+        let clock = CountedClock::answering();
+        let refusal = ask_this_machine(
+            port,
+            "/repos/lulu-loopp/folio-terminal/releases",
+            64,
+            &clock,
+        )
+        .expect_err("64 bytes is not a release list");
         assert_eq!(refusal, "the body is longer than 64 bytes");
+        the_answer_ended_the_wait(&clock, 1);
     }
 
     /// **A status that is not `200` is carried as the number**, in the sentence
@@ -1151,13 +1239,16 @@ mod tests {
     fn a_status_that_is_not_200_comes_back_as_the_number() {
         let server = answering(response(404, "Not Found", r#"{"message":"Not Found"}"#));
         let port = server.port();
+        let clock = CountedClock::answering();
         let refusal = ask_this_machine(
             port,
             "/repos/lulu-loopp/folio-terminal-not-a-repo/releases",
             CAP,
+            &clock,
         )
         .expect_err("there is no such repository");
         assert_eq!(refusal, "the server answered 404");
+        the_answer_ended_the_wait(&clock, 1);
     }
 
     /// RED (row 127) — **one canned response is given to every ask**, one
@@ -1169,19 +1260,65 @@ mod tests {
     fn a_canned_response_answers_every_ask() {
         const RELEASES: &str = r#"[{"tag_name":"v0.3.0"}]"#;
         let server = answering(response(200, "OK", RELEASES));
+        let clock = CountedClock::answering();
         for _ in 0..2 {
             let body = ask_this_machine(
                 server.port(),
                 "/repos/lulu-loopp/folio-terminal/releases",
                 CAP,
+                &clock,
             )
             .expect("every ask is answered");
             assert_eq!(body, RELEASES);
         }
+        the_answer_ended_the_wait(&clock, 2);
         let paths = server.stop();
         assert_eq!(
             paths,
             vec![Entry::Served(Some("/repos/lulu-loopp/folio-terminal/releases".to_owned())); 2]
+        );
+    }
+
+    /// RED (row 150) — **an answer that comes after the budget is the
+    /// budget's refusal**, in this side's own sentence.
+    ///
+    /// The server answers a whole `200` at once; the clock spends the whole
+    /// `budget + phase_timeout` of its one wait before anything is looked at,
+    /// so on the count every answer the delegate writes down is late. The
+    /// verdict cannot race the server: a spent wait never makes the
+    /// transport's own wait, so whether the real answer has already arrived
+    /// changes nothing. The session is cancelled on the way out, and whatever
+    /// the delegate still says lands on the exchange its own reference keeps.
+    ///
+    /// MUTATION: let the wait read the real clock in place of the one it was
+    /// handed, or answer with what the delegate wrote when the clock said the
+    /// budget ran out, and this comes back `Ok` or with another sentence;
+    /// wait for `budget` alone and the bound asked for is 15 s, not 20 s.
+    /// Reading `done` before asking the clock is red only when the answer
+    /// happens to arrive first, which is why the wait's doc says the clock is
+    /// the sole judge.
+    #[test]
+    fn a_late_answer_is_the_budget_refusal() {
+        const RELEASES: &str = r#"[{"tag_name":"v0.3.0"}]"#;
+        let server = answering(response(200, "OK", RELEASES));
+        let clock = CountedClock::new(|_, _| Turn::Spend);
+        let refusal = ask_this_machine(
+            server.port(),
+            "/repos/lulu-loopp/folio-terminal/releases",
+            CAP,
+            &clock,
+        )
+        .expect_err("an answer after the budget is not an answer");
+        assert_eq!(refusal, "the body did not arrive inside its budget");
+        assert_eq!(
+            clock.asked(),
+            vec![BUDGET + PHASE],
+            "one wait, for the product's whole budget"
+        );
+        assert_eq!(
+            clock.moved(),
+            BUDGET + PHASE,
+            "the budget, not the answer, ended the wait"
         );
     }
 
@@ -1205,7 +1342,14 @@ mod tests {
             loopback::{Entry, Step, begun, body, head, ok, serve},
         };
 
-        const IDLE: Duration = Duration::from_secs(5);
+        /// The idle bound every download here that must get an answer is handed:
+        /// the suite's patience, not a 5 s race with the loopback server's thread
+        /// (plan row 163). It is both the session's request and resource timeouts
+        /// and the silence deadline. Running out of it is still a real bound, the
+        /// suite's convention: the test's red, by name, not a 5 s race. The tests
+        /// that are about a deadline hand their own (`stretch`,
+        /// `DOWNLOAD_IDLE_TIMEOUT`).
+        const IDLE: Duration = crate::door_skipped::PATIENCE;
 
         fn scratch(name: &str) -> PathBuf {
             let directory = std::env::temp_dir()
@@ -1344,14 +1488,17 @@ mod tests {
         /// RED (U-7) — **a `Content-Length` over the ceiling is refused at the
         /// headers, before any body or file.**
         ///
-        /// MUTATION: drop `admit_length` from `didReceiveResponse:`.
+        /// MUTATION: drop `admit_length` from `didReceiveResponse:`, and this
+        /// waits for the idle timeout instead. The
+        /// server's pause is twice the idle bound, so it is the idle deadline
+        /// that ends the wait, never the server's close.
         #[test]
         fn an_announced_length_over_the_ceiling_is_refused_before_the_body() {
             let directory = scratch("announced-over");
             let server = serve(|_| {
                 vec![
                     Step::Send(begun(&["Content-Length: 1073741824".to_owned()])),
-                    Step::Pause(Duration::from_secs(10)),
+                    Step::Pause(IDLE * 2),
                 ]
             });
             let port = server.port();

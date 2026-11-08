@@ -1231,6 +1231,7 @@ impl<B: Backend> Runtime<'_, B> {
             Popup::Palette => {
                 self.window.palette = None;
                 self.window.palette_layout = None;
+                self.window.drawn_fields.palette = None;
             }
         }
         // **And the rail is asked again, because its answer just changed under a
@@ -3193,6 +3194,12 @@ impl<B: Backend> Runtime<'_, B> {
         // chrome pass and are not this pass's to throw away.
         self.window
             .git_graphs_shown
+            .retain(|surface, _| !matches!(surface, PreviewSurface::Float(_)));
+        // And their search runs with them (row 180 review N3): a window still
+        // drawn records its run again in `push_float_graph`.
+        self.window
+            .drawn_fields
+            .graph_search
             .retain(|surface, _| !matches!(surface, PreviewSurface::Float(_)));
         let scale = self.window.renderer.scale_factor() as f32;
         let mut layers = marks::Band::default();
