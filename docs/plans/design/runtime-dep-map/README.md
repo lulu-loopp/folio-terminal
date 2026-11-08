@@ -148,9 +148,12 @@ exact count of what it does see.
   `PreviewPane`, `DocumentView`, `PictureView` and `TerminalPane` have none: O-7
   and O-8 put their writes inside their own types, and the pane's writes are its
   own methods (O-5b).
-- **unclassified.tsv**: **256 items, 231 free functions and 25 `Runtime`
-  methods**, still in `main.rs` (at K2 batch 27's head, which moved seven methods; 263, 231 and 32
-  before it, at plan row 102's head, whose alert state splits
+- **unclassified.tsv**: **269 items, 244 free functions and 25 `Runtime`
+  methods**, still in `main.rs` (at K2 batch 27's head, which moved seven methods; 276, 244 and 32
+  before it, at main `27575f724`, where the rows landed since `f641b0064` added fifteen root free
+  functions (the agent resume road, the agent hooks' snapshot, the message box's icon) and took out two
+  (`read_the_agent_rows_again`, and `revive_plan`, now `revive_plan_with`);
+  263, 231 and 32 at plan row 102's head, whose alert state splits
   `claim_the_alert` into `the_alert_on_a_watching_console` and adds `a_panics_turn`,
   `a_stops_claim`, `a_stops_alert_said`, their three steps, `the_panic_hooks_end` and
   `leave_by_the_panic_road`; 255, 223 and 32 before it, at plan row 105's head, which made the free function
