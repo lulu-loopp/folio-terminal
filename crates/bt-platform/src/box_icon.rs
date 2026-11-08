@@ -119,7 +119,7 @@ fn icon_of_this_module(side: u32) -> Option<HICON> {
 /// **The effective DPI of the display `window` is on**, read with this thread per-monitor aware
 /// for the one read and then put back as it was: what an aware process's `GetDpiForWindow`
 /// answers, and the display's own scale in a process that is not aware yet. 96 when the system
-/// will not say (a Windows without per-thread awareness reads 96 in an unaware process too).
+/// will not say.
 fn display_dpi_of(window: HWND) -> u32 {
     let mut dpi_x = 0_u32;
     let mut dpi_y = 0_u32;
@@ -296,7 +296,9 @@ unsafe extern "system" fn box_hook(code: i32, wparam: WPARAM, lparam: LPARAM) ->
 
 #[cfg(test)]
 mod tests {
-    use windows::Win32::UI::HiDpi::{AreDpiAwarenessContextsEqual, GetThreadDpiAwarenessContext};
+    use windows::Win32::UI::HiDpi::{
+        AreDpiAwarenessContextsEqual, GetDpiForWindow, GetThreadDpiAwarenessContext,
+    };
     use windows::Win32::UI::WindowsAndMessaging::{
         CreateIcon, CreateWindowExW, DestroyWindow, WINDOW_EX_STYLE, WM_GETICON, WS_POPUP,
     };
@@ -443,14 +445,52 @@ mod tests {
         }
     }
 
-    /// RED (0.4.10 plan row 72, review N3) — **the display's scale is read aware, and the thread
-    /// is left as it was**: the read switches this thread to per-monitor awareness for itself
-    /// alone, so the thread's awareness context after it is the one before it, and the answer is
-    /// a display's DPI. This test executable has no manifest: before the switch, its thread is
-    /// the unaware one a box before Folio's first window is raised from.
+    /// RED (0.4.10 plan row 72, review N3; re-review R1) — **the display's scale is read aware,
+    /// and the thread is left as it was**: `display_dpi_of` switches this thread to per-monitor
+    /// awareness before it reads the monitor's DPI and puts the thread's own context back after
+    /// it, and the box is dressed at what it answers. Read from this test's thread — the
+    /// executable has no manifest, so the thread is the unaware one a box before Folio's first
+    /// window is raised from, where an unaware read answers 96 on every display — the answer is
+    /// the DPI a per-monitor-aware window on that display has, and the thread's awareness context
+    /// after the read is the one before it.
+    ///
+    /// MUTATION (`plant-72-g-the-scale-read-unaware.py`): drop the switch, and the order is
+    /// refused (and on a scaled display the answer is 96, not the display's DPI).
     #[test]
     fn the_displays_scale_is_read_aware_and_the_thread_is_left_as_it_was() {
-        let window = hidden(w!("#32770"));
+        let read =
+            source_test::body(&ItemQuery::function("display_dpi_of").in_module("crate::box_icon"));
+        let switched = read
+            .find("SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)")
+            .expect("the thread is switched to per-monitor awareness");
+        let asked = read
+            .find("GetDpiForMonitor(")
+            .expect("the monitor's DPI is read");
+        let put_back = read
+            .find("SetThreadDpiAwarenessContext(before)")
+            .expect("the thread's own context is put back");
+        assert!(
+            switched < asked && asked < put_back,
+            "the thread is switched before the read and put back after it:\n{read}"
+        );
+        let dressed_at = source_test::body(
+            &ItemQuery::method("BoxDresser", "the_box_at").in_module("crate::box_icon"),
+        );
+        assert!(
+            dressed_at.contains("display_dpi_of(window)"),
+            "the box is dressed at the display's scale read aware:\n{dressed_at}"
+        );
+
+        // A window made per-monitor aware knows its display's DPI whatever the thread reading it.
+        // SAFETY: this thread's own context, switched for the one creation and put back.
+        let window = unsafe {
+            let own = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+            let window = hidden(w!("#32770"));
+            let _ = SetThreadDpiAwarenessContext(own);
+            window
+        };
+        // SAFETY: a live window.
+        let displays = unsafe { GetDpiForWindow(window) };
         // SAFETY: reads of this thread's own context.
         let before = unsafe { GetThreadDpiAwarenessContext() };
         let dpi = display_dpi_of(window);
@@ -459,7 +499,7 @@ mod tests {
         // SAFETY: two contexts this thread was answered.
         let same = unsafe { AreDpiAwarenessContextsEqual(before, after) };
         assert!(same.as_bool(), "the thread's awareness is put back");
-        assert!(dpi >= 96, "a display's DPI: {dpi}");
+        assert_eq!(dpi, displays, "the display's DPI, read aware");
         // SAFETY: a window this test made.
         let _ = unsafe { DestroyWindow(window) };
     }
