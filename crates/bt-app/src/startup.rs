@@ -4,8 +4,8 @@
 //! A start is split in two by the event loop, and so is this order. [`begin`] is the process's
 //! half, which `fn main` calls before there is a loop: the removal verbs, the command line, the
 //! hand-over. [`resume`] is the first window's half, which `Runtime::create` calls when the loop
-//! first resumes: Windows PowerShell's language question, the startup migration and the
-//! script's preparation before the window, the
+//! first resumes: Windows PowerShell's language question, the startup migration, the
+//! script's preparation and the carry pass before the window, the
 //! window, the PowerShell questions before the first tab, the first tab. The window's
 //! half needs the running loop the process's half builds, so nothing can call it first.
 //!
@@ -14,6 +14,7 @@
 //! ran (`headless::StartupStep`). What the order is, is this module's — the one thing a test of
 //! the steps' order reads, and the one thing the product cannot do differently.
 
+use crate::carry_pass::CarryBegun;
 use crate::shell_integration::{LanguageAsked, Migrated, QuestionsAsked, ScriptPrepared};
 
 /// **The process's steps, in the fields' order**: what [`begin`] is handed.
@@ -45,11 +46,11 @@ pub(crate) fn begin<Request, Resident>(
 
 /// **The first window's steps, in the fields' order**: what [`resume`] is handed.
 ///
-/// Four of them answer a witness only their product function makes (`LanguageAsked`,
-/// `Migrated`, `ScriptPrepared`, `QuestionsAsked`), so the workers' steps cannot be handed each
-/// other's call, and none of the four can be handed no call. The window's and the first tab's are
-/// told apart by what they take and answer.
-pub(crate) struct FirstWindow<Language, Migration, Script, Window, Questions, FirstTab> {
+/// Five of them answer a witness only their product function makes (`LanguageAsked`,
+/// `Migrated`, `ScriptPrepared`, `CarryBegun`, `QuestionsAsked`), so the workers' steps cannot be
+/// handed each other's call, and none of the five can be handed no call. The window's and the
+/// first tab's are told apart by what they take and answer.
+pub(crate) struct FirstWindow<Language, Migration, Script, CarryStep, Window, Questions, FirstTab> {
     /// Windows PowerShell's language-mode question (`shell_integration::begin_language_question`,
     /// T-INTEGRATION-INJECT-2-BUILD round 3b): first, so the first 5.1 birth waits for as little
     /// of it as there is left.
@@ -60,6 +61,10 @@ pub(crate) struct FirstWindow<Language, Migration, Script, Window, Questions, Fi
     /// Folio's own `folio.ps1`, compared and repaired on a worker nobody waits for
     /// (`shell_integration::begin_powershell_script_preparation`).
     pub(crate) script: Script,
+    /// The carry pass, begun on its worker nobody waits for (`carry_pass::begin_carry_at_start`,
+    /// 0.4.10 plan row 68a): what an older Folio wrote, brought to this build's form at every
+    /// start.
+    pub(crate) carry: CarryStep,
     /// The window, opened through the backend's door, with what it is painted with.
     pub(crate) window: Window,
     /// The parser questions about the PowerShell rows, put to the probe on a worker nobody waits
@@ -70,12 +75,13 @@ pub(crate) struct FirstWindow<Language, Migration, Script, Window, Questions, Fi
 }
 
 /// **The first window's half of a start**: Windows PowerShell's language question, the startup
-/// migration and the script's preparation, then the window, then the PowerShell questions, then
-/// the first tab.
+/// migration, the script's preparation and the carry pass, then the window, then the PowerShell
+/// questions, then the first tab.
 ///
-/// The three workers start before the window because none is the window's to wait for: what they
+/// The four workers start before the window because none is the window's to wait for: what they
 /// do is done by the time a PowerShell is born, or that birth waits for the language answer (on
-/// its birth worker) or prepares the script itself.
+/// its birth worker) or prepares the script itself; the carry pass's answer is adopted whenever
+/// it lands.
 /// The questions are asked before the first tab because a PowerShell row's pane composes its
 /// command line from the answer, and a question asked after the birth is one the birth could not
 /// have found answered in time. `answers` is what the steps share: the program walk's answers, which the
@@ -86,6 +92,7 @@ pub(crate) fn resume<Answers, Window, Tabs, Error>(
         impl FnOnce() -> LanguageAsked,
         impl FnOnce() -> Migrated,
         impl FnOnce() -> ScriptPrepared,
+        impl FnOnce() -> CarryBegun,
         impl FnOnce(&mut Answers) -> Result<Window, Error>,
         impl FnOnce(&mut Answers) -> QuestionsAsked,
         impl FnOnce(&mut Answers, &mut Window) -> Result<Tabs, Error>,
@@ -94,6 +101,7 @@ pub(crate) fn resume<Answers, Window, Tabs, Error>(
     let LanguageAsked { .. } = (steps.language)();
     let Migrated { .. } = (steps.migration)();
     let ScriptPrepared { .. } = (steps.script)();
+    let CarryBegun { .. } = (steps.carry)();
     let mut window = (steps.window)(answers)?;
     let QuestionsAsked { .. } = (steps.questions)(answers);
     let tabs = (steps.first_tab)(answers, &mut window)?;
@@ -251,17 +259,19 @@ mod tests {
         ]
     }
 
-    /// RED (T-STARTUP-ORDER-SHARED; T-INTEGRATION-INJECT-2-BUILD round 3b) — **a start runs its
-    /// nine steps in one order**: a removal verb, the command line, the hand-over, Windows
-    /// PowerShell's language question, the startup migration, the script's preparation, the
-    /// window, the PowerShell questions, the first tab — through `begin` and `resume`,
+    /// RED (T-STARTUP-ORDER-SHARED; T-INTEGRATION-INJECT-2-BUILD round 3b; 0.4.10 plan row 68a)
+    /// — **a start runs its ten steps in one order**: a removal verb, the command line, the
+    /// hand-over, Windows PowerShell's language question, the startup migration, the script's
+    /// preparation, the carry pass, the window, the PowerShell questions, the first tab — through
+    /// `begin` and `resume`,
     /// the functions `main` and `Runtime::create` call, with the headless start's stand-ins. The
     /// hand-over is handed what the parse read.
     ///
     /// MUTATIONS: swap the removal and the parse in `begin` — the command line is read before a
     /// removal verb is answered; swap the script's preparation and the window in
     /// `resume` — the window opens before the script is being prepared; ask the language question
-    /// after the window — the first 5.1 pane would wait for all of it.
+    /// after the window — the first 5.1 pane would wait for all of it; begin the carry pass after
+    /// the window (`plant-68a-carry-step-after-the-window.py`).
     #[test]
     fn the_startup_steps_run_in_their_order() {
         let argv = r"folio --cwd D:\项目 --profile pwsh";
@@ -275,6 +285,7 @@ mod tests {
                 StartupStep::LanguageQuestion,
                 StartupStep::StartupMigration,
                 StartupStep::ScriptPreparation,
+                StartupStep::CarryPass,
                 StartupStep::WindowOpened,
                 StartupStep::PowerShellQuestions,
                 StartupStep::FirstTab,

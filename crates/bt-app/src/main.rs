@@ -734,12 +734,12 @@ enum AppEvent {
     /// `explorer_menu::state()` and `explorer_menu::take_outcome()` by the time
     /// this is sent, and this says only that something did.
     ExplorerPackageChanged,
-    /// **The carry pass's agent-hooks step published what it found** (0.4.10 plan row 67b): the
-    /// answer is in `agent_hooks_step::AGENT_HOOKS`, and the handler sets the Agents rows from it
-    /// and raises the notice of each repair of a gone copy's hooks. Owed a wake for
+    /// **A round of the carry pass published what its members found** (0.4.10 plan rows 67b, 68a):
+    /// the answer is `carry_pass::take_carry_snapshot`'s, and the handler sets the Agents rows from
+    /// its agents' part and raises the notice of each repair of a gone copy's hooks. Owed a wake for
     /// [`Self::ExplorerPackageChanged`]'s reason: the scan lands seconds into a launch, or behind a
     /// modal, on a window that may have nothing else coming.
-    AgentHooksScanned,
+    CarryPassAnswered,
     /// **The machine listed its monospaced families** (GitHub issue #3).
     ///
     /// The tenth of the same family, and it is owed a wake for
@@ -1067,7 +1067,7 @@ impl AppEvent {
             | Self::CopilotProbed
             | Self::UpdateChecked
             | Self::ExplorerPackageChanged
-            | Self::AgentHooksScanned
+            | Self::CarryPassAnswered
             | Self::FontsScanned
             | Self::TaskbarAnswered
             | Self::ProgramsAnswered
@@ -35494,13 +35494,14 @@ impl Runtime<'_, Native> {
                 let _ = proxy.send_event(AppEvent::ExplorerPackageChanged);
             });
         }
-        // **And the carry pass's** (0.4.10 plan row 67b): it can write too — an agent's hooks that
-        // name a copy that is gone — and lands after the program walk, which is after the first
-        // frame on most launches. Installed before the walk can answer, so before the pass runs.
+        // **And the carry pass's** (0.4.10 plan rows 67b, 68a): it can write too — an agent's hooks
+        // that name a copy that is gone — and its members land after the program walk, which is
+        // after the first frame on most launches. One wake per round. Installed before the start's
+        // carry step begins the pass, so before any round ends.
         {
             let proxy = proxy.clone();
-            agent_hooks_step::install_hooks_wake(move || {
-                let _ = proxy.send_event(AppEvent::AgentHooksScanned);
+            carry_pass::install_carry_wake(move || {
+                let _ = proxy.send_event(AppEvent::CarryPassAnswered);
             });
         }
         // **And the sixth's** (GitHub issue #3), which is the only one of them
@@ -35771,6 +35772,10 @@ impl Runtime<'_, Native> {
                     // The parser questions about the PowerShell rows follow when the walk has answered them.
                     shell_integration::begin_powershell_script_preparation()
                 },
+                // **The carry pass, begun by every start** (0.4.10 plan row 68a): what an older
+                // Folio wrote is brought to this build's form on its worker, which nobody waits
+                // for; a member with nothing to look at yet answers when it can.
+                carry: carry_pass::begin_carry_at_start,
                 window: |profile_programs: &mut profiles::ProfilePrograms| -> Result<OpenedWindow> {
                     // **The canvas, settled before there is a window to paint one in**
                     // (§7.46 ②). Everything below this point — the first frame, the first
@@ -49644,12 +49649,14 @@ impl<B: Backend> FolioApp<B> {
         Ok(())
     }
 
-    /// **Set the Agents rows from the scan, and say each repair of a gone copy's hooks once**
-    /// (0.4.10 plan row 67b, R8): one notice per family, on the window the keyboard is on, else the
-    /// oldest standing one; every window's chrome redrawn, because the rows are facts about the
-    /// machine and any window may be showing the page.
-    fn adopt_agent_hooks_scan(&mut self) -> Result<()> {
-        let Some(snapshot) = agent_hooks_step::AGENT_HOOKS.take_snapshot() else {
+    /// **Adopt the carry pass's snapshot** (0.4.10 plan row 68a): set the Agents rows from its
+    /// agents' part, and say each repair of a gone copy's hooks once (row 67b, R8): one notice per
+    /// family, on the window the keyboard is on, else the oldest standing one; every window's
+    /// chrome redrawn, because the rows are facts about the machine and any window may be showing
+    /// the page. A snapshot no member answered for has nothing to set.
+    fn adopt_carry_snapshot(&mut self) -> Result<()> {
+        let Some(snapshot) = carry_pass::take_carry_snapshot().and_then(|carried| carried.hooks)
+        else {
             return Ok(());
         };
         let Some(app) = self.app.as_mut() else {
@@ -52736,9 +52743,9 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                     }
                 })
             }
-            // **The carry pass's answer about the agents' hooks**: the rows set from it, its
-            // notices raised once on the focused window, every window redrawn.
-            AppEvent::AgentHooksScanned => self.adopt_agent_hooks_scan(),
+            // **The carry pass's round**: the agents' rows set from its part, its notices raised
+            // once on the focused window, every window redrawn.
+            AppEvent::CarryPassAnswered => self.adopt_carry_snapshot(),
             // **The one place the family list moves onto the screen.** The walk
             // finished on a worker and left its answer in `settings`' mailbox;
             // this is between two frames, which is the whole reason the worker
