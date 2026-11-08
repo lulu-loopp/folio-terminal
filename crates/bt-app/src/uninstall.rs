@@ -333,7 +333,8 @@ const INVENTORY: &[Mark] = &[
     // The native remover's per-user folder (`REMOVER_HOME`), purged like a data
     // root except by the run that has just started a remover there: that
     // remover removes it when it leaves it empty. A remover that was ended
-    // before it could leaves its copy here for the next purge.
+    // before it could, and whose copy was still held past the delete backoff,
+    // leaves its copy here for the next purge.
     Mark {
         name: "Uninstaller staging",
         says: Text::CleanupMarkRemoverHome,
@@ -1615,8 +1616,9 @@ const AFTER_PID_POLL: Duration = Duration::from_millis(100);
 /// copy of this executable must start — a new file an antivirus may scan
 /// first — parse the plan it inherits and print its ready line. A remover
 /// that has not by then is stopped and the program's row says why; its copy
-/// is discarded, or, while the stopped image still holds it (Windows), left
-/// for the next purge's "Uninstaller staging" row; nothing has been removed.
+/// is discarded, on the remover's delete backoff while the stopped image still
+/// holds it (Windows, plan row 65), and only a copy held past that is left for
+/// the next purge's "Uninstaller staging" row; nothing has been removed.
 const REMOVER_READY_WITHIN: Duration = Duration::from_secs(10);
 
 /// **The language the `--uninstall` door speaks**: the one `settings.json`

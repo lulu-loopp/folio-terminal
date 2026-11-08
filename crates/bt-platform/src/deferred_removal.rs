@@ -164,8 +164,9 @@ type ReadyAnswer = io::Result<String>;
 /// **How long the acknowledgement may take is the caller's** (0.4.10 plan row
 /// 14): `ready_within` bounds the one wait, the product's door passes its own
 /// bound and a test chooses its own. A child that has not answered by then is
-/// stopped; its copy is discarded, or, while the stopped image still holds it
-/// (Windows), left for the next purge's "Uninstaller staging" row. Nothing has
+/// stopped and its copy discarded, retried on the delete backoff while the
+/// stopped image still holds it (Windows, plan row 65); only a copy held past
+/// that is left for the next purge's "Uninstaller staging" row. Nothing has
 /// been removed.
 ///
 /// # Errors
@@ -412,7 +413,7 @@ fn validate_private_root(path: &Path) -> io::Result<()> {
 }
 
 fn stop_child(
-    _worker: &WorkerCtx,
+    worker: &WorkerCtx,
     mut child: Child,
     copy: &Path,
     private: &Path,
@@ -420,8 +421,37 @@ fn stop_child(
 ) -> io::Result<()> {
     let _ = child.kill();
     let _ = child.wait();
-    discard_private(copy, private);
+    discard_stopped(worker, copy, private);
     Err(error)
+}
+
+/// **A stopped remover's copy goes with it** (0.4.10 plan row 65): on Windows
+/// the killed image still holds its file for a moment after `wait` returns, so
+/// one delete would nearly always fail and leave the copy for the next purge.
+/// The delete is tried on the remover's own delete backoff — `DELETE_ATTEMPTS`
+/// tries, pausing `FIRST_DELETE_BACKOFF` doubled up to `MAX_DELETE_BACKOFF` —
+/// and a copy still held after the last try is left for the next purge's
+/// "Uninstaller staging" row.
+fn discard_stopped(worker: &WorkerCtx, copy: &Path, private: &Path) {
+    let mut backoff = FIRST_DELETE_BACKOFF;
+    for attempt in 0..DELETE_ATTEMPTS {
+        match fs::remove_file(copy) {
+            Ok(()) => break,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => break,
+            Err(_) if attempt + 1 < DELETE_ATTEMPTS => {
+                crate::wait::sleep_within(worker, backoff);
+                backoff = next_delete_backoff(backoff);
+            }
+            Err(_) => {}
+        }
+    }
+    retire_private(private);
+}
+
+/// The pause after `backoff` on the remover's delete backoff: doubled, up to
+/// `MAX_DELETE_BACKOFF`.
+fn next_delete_backoff(backoff: Duration) -> Duration {
+    (backoff * 2).min(MAX_DELETE_BACKOFF)
 }
 
 fn discard_private(copy: &Path, private: &Path) {
@@ -860,7 +890,7 @@ fn remove_with(
         }
         if attempt + 1 < attempts {
             crate::wait::sleep_within(worker, backoff);
-            backoff = (backoff * 2).min(MAX_DELETE_BACKOFF);
+            backoff = next_delete_backoff(backoff);
         }
     }
 
@@ -1588,6 +1618,11 @@ mod tests {
     /// MUTATION: in `schedule_by`, hand `wait` a constant ten seconds instead of `ready_within` —
     /// the wait is asked for 10 s, not 1.234 s. MUTATION: wait with `received.recv_timeout`
     /// directly instead of through `wait` — the handed wait is never asked.
+    ///
+    /// RED (0.4.10 plan row 65, T-STOPPED-REMOVER-COPY-DELETED-WITH-A-RETRY) — **the stopped
+    /// remover's private folder is gone when `schedule_by` returns**. MUTATION: `discard_stopped`
+    /// tries the delete once — on Windows the killed image still holds the copy and the folder
+    /// stays. MUTATION: `stop_child` discards nothing — the folder stays on every platform.
     #[cfg(any(windows, unix))]
     #[test]
     fn a_remover_not_ready_within_the_callers_bound_is_stopped_at_that_bound() {
@@ -1608,7 +1643,6 @@ mod tests {
             },
             Some(install),
         );
-        #[cfg(unix)]
         let private_after = private_root.clone();
         let (answer, asked) = on_worker(move |worker| {
             let mut asked = None;
@@ -1634,12 +1668,9 @@ mod tests {
             b"owned",
             "a stopped remover removed nothing"
         );
-        // Unix removes a running image's name, so the stopped copy's private folder is gone. Not
-        // asserted on Windows: `stop_child` discards it once, right after the kill, and the killed
-        // image is still held at that moment in nearly every run (19 of 20 on 2026-11-04), so the
-        // copy stays for the next purge's "Uninstaller staging" row, as that row says of a remover
-        // that was ended.
-        #[cfg(unix)]
+        // On Windows the killed image still holds the copy right after `wait` (a single delete
+        // lost in 19 of 20 runs on 2026-11-04); `stop_child` retries it on the delete backoff
+        // (0.4.10 plan row 65), so the folder is gone here on every platform.
         assert!(
             !private_after.exists(),
             "a stopped remover's private folder is discarded"
