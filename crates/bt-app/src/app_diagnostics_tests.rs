@@ -1195,10 +1195,12 @@ fn a_stops_box_is_owned_by_the_focused_window_else_the_first_standing() {
 /// RED (0.4.10 plan row 72) — **every box a stop raises while its windows stand is owned by one
 /// of them**: the product builds the box over a window at exactly two sites — `FolioApp::fail`
 /// (a frame-shape stop's alert) and `FolioApp::stop_every_window_keeping_in` (the lost-change
-/// notice) — each over `the_box_owner(&self.windows)`; the box raises itself over the window it
-/// was handed; and winit's window hands the system its own handle as the box's owner. The panic
-/// hook's box is the one ownerless box raised with windows standing (R1), and it is not built
-/// here (`SystemBox`).
+/// notice) — each over `the_box_owner(&self.windows)`, asked after every window's place has been
+/// read fresh (re-review R2: a window left on another virtual desktop takes no turn, so its last
+/// reading can say it is on the screen); the box raises itself over the window it was handed;
+/// and winit's window hands the system its own handle as the box's owner. The panic hook's box
+/// is the one ownerless box raised with windows standing (R1), and it is not built here
+/// (`SystemBox`).
 ///
 /// MUTATION (`plant-72-a-a-stop-box-owned-by-nobody.py`): build the stop's notice over no window
 /// (`BoxOver(over.filter(|_| false))`), and its site is refused.
@@ -1232,6 +1234,9 @@ fn every_box_a_stop_raises_while_a_window_stands_is_owned_by_one() {
     );
     for site in ["fail", "stop_every_window_keeping_in"] {
         let body = crate::test_support::method_body("FolioApp", site);
+        let observed = body
+            .find("runtime.observe_window_place();")
+            .unwrap_or_else(|| panic!("`FolioApp::{site}` reads every window's place fresh"));
         let lent = body
             .find("let over = the_box_owner(&self.windows);")
             .unwrap_or_else(|| panic!("`FolioApp::{site}` asks which window owns its box"));
@@ -1239,8 +1244,8 @@ fn every_box_a_stop_raises_while_a_window_stands_is_owned_by_one() {
             .find("BoxOver(over)")
             .unwrap_or_else(|| panic!("`FolioApp::{site}` raises its box over that window"));
         assert!(
-            lent < raised,
-            "`FolioApp::{site}`: the owner is chosen before the box is built"
+            observed < lent && lent < raised,
+            "`FolioApp::{site}`: the places are read, then the owner is chosen, then the box is built"
         );
     }
     let raise = crate::test_support::item_body(

@@ -15374,9 +15374,11 @@ impl<W: WindowHost> NativeSay for BoxOver<'_, W> {
 /// **The window a stop's box is owned by** (0.4.10 plan row 72): of the windows on the screen
 /// and not on their way out, the one the keyboard is on, else the first in the opening order;
 /// `None` when none is. A window is off the screen when it has never been shown, is hidden
-/// (a quake window put away), is minimised, or is iconic or cloaked as last sampled (on another
-/// virtual desktop): an owned box has no taskbar button of its own and keeps to its owner's
-/// desktop, so a box owned by such a window could be on no taskbar the reader sees (review N2).
+/// (a quake window put away), is minimised, or is iconic or cloaked (on another virtual desktop)
+/// as last sampled, which both callers read fresh just before they ask (re-review R2: a window
+/// left behind on another desktop takes no turn). An owned box has no taskbar button of its own
+/// and keeps to its owner's desktop, so a box owned by such a window could be on no taskbar the
+/// reader sees (review N2).
 /// With none on the screen the box is ownerless, and has its own button and the program's icon.
 /// Read off the windows as [`FolioApp::frontmost_window`] reads them, and from the windows
 /// alone, so a stop can lend the box its owner while it holds the application.
@@ -51312,7 +51314,15 @@ impl<B: Backend> FolioApp<B> {
             return;
         }
         crate::diagnostics::stderr_line(format!("{APP_NAME} stopped: {error:#}"));
-        // The alert's box is owned by a window that still stands (0.4.10 plan row 72).
+        // The alert's box is owned by a window that still stands on the screen (0.4.10 plan
+        // row 72).
+        // Each window's place read fresh first, through the one writer, as the attention arm
+        // reads it (re-review R2): a window left behind on another virtual desktop takes no turn,
+        // so its last sampled reading can still say it is on the screen.
+        let _ = self.for_each_window(|runtime| {
+            runtime.observe_window_place();
+            Ok(())
+        });
         let over = the_box_owner(&self.windows);
         report_frame_shape_stop(&error, &panic_log_path(), |path| {
             announce_frame_shape_stop(path, &mut BoxOver(over));
@@ -51380,7 +51390,14 @@ impl<B: Backend> FolioApp<B> {
         // **The four hand-editable documents' owed changes** (T-QUIT-DOCUMENTS;
         // revisions (c)2 and (d)3), into the same folder — and every one that could be kept
         // nowhere said through the system's own box, before a window closes — owned by a window
-        // that still stands (0.4.10 plan row 72).
+        // that still stands on the screen (0.4.10 plan row 72).
+        // Each window's place read fresh first, through the one writer, as the attention arm
+        // reads it (re-review R2): a window left behind on another virtual desktop takes no turn,
+        // so its last sampled reading can still say it is on the screen.
+        let _ = self.for_each_window(|runtime| {
+            runtime.observe_window_place();
+            Ok(())
+        });
         if let Some(app) = self.app.as_mut() {
             let over = the_box_owner(&self.windows);
             app.with_documents(|documents| {
