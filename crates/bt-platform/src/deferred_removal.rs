@@ -28,6 +28,7 @@ use std::time::{Duration, Instant};
 
 use crate::admission::WorkerCtx;
 use crate::install_flip::Running;
+use crate::launch_clock::{LaunchClock, RealClock};
 
 /// The internal, undocumented argv door served by the copied executable.
 /// Exact spelling is routing, not caller or plan authentication.
@@ -180,28 +181,20 @@ pub fn schedule(
     private_root: &Path,
     ready_within: Duration,
 ) -> io::Result<()> {
-    schedule_by(
-        worker,
-        removal,
-        private_root,
-        ready_within,
-        |answers: &mpsc::Receiver<ReadyAnswer>, within| answers.recv_timeout(within),
-    )
+    schedule_by(worker, removal, private_root, ready_within, &RealClock)
 }
 
-/// [`schedule`], with its one wait — for the reader's answer, up to `ready_within` — made by
-/// `wait`: the real `recv_timeout` in the product; in a test, a wait that writes down the bound it
-/// was asked for and answers as the test decides, so "the bound ran out" is a fact of the test,
-/// never a race against a real child's start.
+/// [`schedule`], with its one wait — for the reader's answer, up to `ready_within` — made on
+/// `clock` (0.4.10 plan row 66): [`RealClock`] in the product, which makes the one `recv_timeout`
+/// of the whole bound; in a test, a counted clock that writes down the bound it was asked for and
+/// spends it without waiting, so "the bound ran out" is a fact of the test, never a race against
+/// a real child's start.
 fn schedule_by(
     worker: &WorkerCtx,
     removal: &Removal,
     private_root: &Path,
     ready_within: Duration,
-    wait: impl FnOnce(
-        &mpsc::Receiver<ReadyAnswer>,
-        Duration,
-    ) -> Result<ReadyAnswer, mpsc::RecvTimeoutError>,
+    clock: &dyn LaunchClock,
 ) -> io::Result<()> {
     validate(removal, private_root)?;
     fs::create_dir_all(private_root)?;
@@ -322,9 +315,19 @@ fn schedule_by(
         drop(copy_guard);
         return stop_child(worker, child, &copy, &private, error);
     }
-    let answer = wait(&received, ready_within);
+    let mut answer = None;
+    clock.wait(
+        ready_within,
+        &mut |within| match received.recv_timeout(within) {
+            Err(mpsc::RecvTimeoutError::Timeout) => false,
+            heard => {
+                answer = Some(heard);
+                true
+            }
+        },
+    );
     match answer {
-        Ok(Ok(line)) if line.trim_end() == READY_LINE => {
+        Some(Ok(Ok(line))) if line.trim_end() == READY_LINE => {
             match child.try_wait() {
                 Ok(Some(status)) => {
                     drop(copy_guard);
@@ -356,7 +359,7 @@ fn schedule_by(
             drop(copy_guard);
             Ok(())
         }
-        Ok(Ok(line)) => {
+        Some(Ok(Ok(line))) => {
             drop(copy_guard);
             stop_child(
                 worker,
@@ -366,11 +369,11 @@ fn schedule_by(
                 io::Error::other(format!("unexpected remover readiness: {line:?}")),
             )
         }
-        Ok(Err(error)) => {
+        Some(Ok(Err(error))) => {
             drop(copy_guard);
             stop_child(worker, child, &copy, &private, error)
         }
-        Err(mpsc::RecvTimeoutError::Timeout) => {
+        None | Some(Err(mpsc::RecvTimeoutError::Timeout)) => {
             drop(copy_guard);
             stop_child(
                 worker,
@@ -380,7 +383,7 @@ fn schedule_by(
                 io::Error::new(io::ErrorKind::TimedOut, "the remover did not become ready"),
             )
         }
-        Err(mpsc::RecvTimeoutError::Disconnected) => {
+        Some(Err(mpsc::RecvTimeoutError::Disconnected)) => {
             drop(copy_guard);
             stop_child(
                 worker,
@@ -1201,6 +1204,7 @@ fn self_delete(_path: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::launch_clock::{CountedClock, Turn};
 
     fn sandbox(tag: &str) -> PathBuf {
         let root = bt_testpath::temp_path(&format!("folio-native-removal-{tag}"));
@@ -1253,8 +1257,8 @@ mod tests {
     /// MUTATION: in `retire_private`, leave the per-user folder — an empty `Folio-uninstall`
     /// stays behind.
     ///
-    /// A refused schedule also waits for nothing (0.4.10 plan row 14): the wait it is handed is
-    /// never asked.
+    /// A refused schedule also waits for nothing (0.4.10 plan row 14): the clock it is handed is
+    /// never asked (plan row 66).
     #[test]
     fn a_refused_schedule_leaves_no_remover_folder() {
         let root = sandbox("refused-schedule");
@@ -1275,24 +1279,22 @@ mod tests {
             )
         };
         let private_root = removers.clone();
-        let (answer, asked) = on_worker(move |worker| {
-            let mut asked = None;
+        let (answer, clock) = on_worker(move |worker| {
+            let clock = CountedClock::new(|_, _| Turn::Spend);
             let answer = schedule_by(
                 worker,
                 &removal,
                 &private_root,
                 crate::door_skipped::PATIENCE,
-                |_, within| {
-                    asked = Some(within);
-                    Err(mpsc::RecvTimeoutError::Timeout)
-                },
+                &clock,
             );
-            (answer, asked)
+            (answer, clock)
         });
         let error = answer.unwrap_err().to_string();
         assert!(error.contains("differs"), "{error}");
         assert_eq!(
-            asked, None,
+            clock.asked(),
+            Vec::<Duration>::new(),
             "a refused schedule waited for a readiness answer"
         );
         assert!(!removers.exists(), "the remover's folder stayed");
@@ -1611,13 +1613,13 @@ mod tests {
     /// not ready within the caller's bound is stopped at that bound, and nothing is removed**.
     ///
     /// The real copy is started (the copied test executable, as in
-    /// `a_native_remover_copy_runs_the_plan`), and the wait `schedule_by` is handed answers that
-    /// the bound ran out without looking at the child, so the child's own speed never enters the
-    /// verdict and no real time is waited. The one wait is asked for the caller's bound.
+    /// `a_native_remover_copy_runs_the_plan`), and the counted clock `schedule_by` is handed spends
+    /// the bound without looking at the child (0.4.10 plan row 66), so the child's own speed never
+    /// enters the verdict and no real time is waited. The one wait is asked for the caller's bound.
     ///
-    /// MUTATION: in `schedule_by`, hand `wait` a constant ten seconds instead of `ready_within` —
-    /// the wait is asked for 10 s, not 1.234 s. MUTATION: wait with `received.recv_timeout`
-    /// directly instead of through `wait` — the handed wait is never asked.
+    /// MUTATION: in `schedule_by`, ask the clock for a constant ten seconds instead of
+    /// `ready_within` — the wait is asked for 10 s, not 1.234 s. MUTATION: wait with
+    /// `received.recv_timeout` directly instead of on the clock — the clock is never asked.
     ///
     /// RED (0.4.10 plan row 65, T-STOPPED-REMOVER-COPY-DELETED-WITH-A-RETRY) — **the stopped
     /// remover's private folder is gone when `schedule_by` returns**. MUTATION: `discard_stopped`
@@ -1644,18 +1646,20 @@ mod tests {
             Some(install),
         );
         let private_after = private_root.clone();
-        let (answer, asked) = on_worker(move |worker| {
-            let mut asked = None;
-            let answer = schedule_by(worker, &plan, &private_root, BOUND, |_, within| {
-                asked = Some(within);
-                Err(mpsc::RecvTimeoutError::Timeout)
-            });
-            (answer, asked)
+        let (answer, clock) = on_worker(move |worker| {
+            let clock = CountedClock::new(|_, _| Turn::Spend);
+            let answer = schedule_by(worker, &plan, &private_root, BOUND, &clock);
+            (answer, clock)
         });
         assert_eq!(
-            asked,
-            Some(BOUND),
+            clock.asked(),
+            vec![BOUND],
             "the readiness wait is asked for the caller's bound"
+        );
+        assert_eq!(
+            clock.moved(),
+            BOUND,
+            "the whole bound is spent, on the count"
         );
         let error = answer.unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::TimedOut, "{error}");
