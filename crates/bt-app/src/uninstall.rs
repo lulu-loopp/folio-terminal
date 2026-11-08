@@ -1034,7 +1034,7 @@ fn execute(
 fn execute_with_claim<T>(
     scope: &Scope,
     purge: bool,
-    mut system: impl FnMut(Remover) -> Vec<Entry>,
+    system: impl FnMut(Remover) -> Vec<Entry>,
     claim: impl FnMut(&Path) -> Option<T>,
     program: Option<ProgramStep<'_>>,
 ) -> Report {

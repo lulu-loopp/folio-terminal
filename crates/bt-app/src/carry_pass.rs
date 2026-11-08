@@ -40,13 +40,6 @@ use crate::update_trial::Writer;
 /// Read by the guard beside the inventory and by nothing in the product: the rule is what the
 /// code does, said where the thing is listed, so a new thing or a new start writer cannot land
 /// without saying it.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "permanent: the declaration is read by the inventory's guard, never by the product"
-    )
-)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CarryRule {
     /// Found by name in a folder every copy of the account shares, and brought forward by its
@@ -77,13 +70,6 @@ pub(crate) enum CarryRule {
 }
 
 /// **One owner check of the pass** — what a [`CarryRule::OwnerChecked`] row is checked by.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "permanent: the declaration is read by the inventory's guard, never by the product"
-    )
-)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CarryCheck {
     /// An agent's hooks, by its index in `agent_hooks_step::HOOKS_FAMILIES`.
