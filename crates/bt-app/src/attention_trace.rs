@@ -36,6 +36,13 @@
 //!   because most claim changes are unread, bell or work in flight and belong to no request.
 //! * `jump queue=<k> from=<ticket|none> to=tab=<i>,seat=<n>,ticket=<k>` —
 //!   `Ctrl+Shift+A` walking the queue, which consumes nothing.
+//! * `hear tab=<i> seat=<n> episode=- event=<family>:<event>` — **a hook's line reached a pane** (0.4.10
+//!   plan row 75), every time, whether or not anything was decided. The one station written on an
+//!   arrival rather than on a decision, and the exception is the point: the decisions above record
+//!   a turn's end once per turn and a prompt only when it clears something, so without it the gap
+//!   between a turn's end and whatever the agent does next is in no file at all. One line per hook
+//!   — a handful per turn — is not the sixty-a-second the rule above guards against. See
+//!   [`hear_line`].
 //!
 //! **`look` was a station here until A2 and is gone**, which is worth saying rather than deleting
 //! in silence: it recorded a look retiring a bell latch while a place stood, and it existed because
@@ -64,4 +71,31 @@ pub fn global() -> Option<&'static Trace> {
 /// in the process.
 pub fn line(message: impl FnOnce() -> String) {
     emit(global(), message);
+}
+
+/// **The `hear` station's line**: which hook reached which pane (0.4.10 plan row 75). Formatted
+/// here and emitted by `deliver_attention`, so its exact bytes are pinned without a terminal.
+#[must_use]
+pub(crate) fn hear_line(at: crate::attention::Site, family: &str, event: &str) -> String {
+    format!("hear {at} episode=- event={family}:{event}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The `hear` line, byte for byte: the pane by the same `tab=`/`seat=` every other station
+    /// writes, `episode=-` because an arrival is no request's (every line names one, or says it
+    /// names none), and the arrival by the `<family>:<event>` the hook's own command line carries.
+    #[test]
+    fn the_hear_line_names_the_pane_and_the_hook() {
+        let at = crate::attention::Site {
+            tab: 2,
+            seat: bt_layout::SeatId(3),
+        };
+        assert_eq!(
+            hear_line(at, "claude-code", "Stop"),
+            "hear tab=2 seat=SeatId(3) episode=- event=claude-code:Stop"
+        );
+    }
 }

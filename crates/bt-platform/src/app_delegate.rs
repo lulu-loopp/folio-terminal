@@ -262,6 +262,63 @@ impl TerminationDecision {
     }
 }
 
+/// **Why AppKit asked the application to terminate** (0.4.10 plan row 17) — the quit Apple
+/// event's `kAEQuitReason` attribute, read on the delegate's stack.
+///
+/// loginwindow sends `aevt/quit` with the reason a log-out, a restart or a shut-down gives; the
+/// Dock's *Quit*, Activity Monitor's and an AppleScript `quit` send it without one, and a
+/// `terminate:` that no Apple event carried has no current event at all. Both of those are
+/// [`Self::NoneGiven`]. The codes are `AERegistry.h`'s, written out here so that the mapping is
+/// the same function on every platform.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuitReason {
+    /// `kAELogOut` (`logo`) or `kAEReallyLogOut` (`rlgo`).
+    LogOut,
+    /// `kAEShowRestartDialog` (`rrst`) or `kAERestart` (`rest`).
+    Restart,
+    /// `kAEShowShutdownDialog` (`rsdn`) or `kAEShutDown` (`shut`).
+    ShutDown,
+    /// No reason attribute, or no current Apple event.
+    NoneGiven,
+    /// A reason this table does not know, kept as its four-character code.
+    Other(u32),
+}
+
+/// `kAEQuitReason`, the attribute the quit event carries its reason in.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) const AE_QUIT_REASON: u32 = u32::from_be_bytes(*b"why?");
+
+impl QuitReason {
+    /// The reason a quit event's `kAEQuitReason` code names; `None` is an event without one.
+    #[must_use]
+    pub fn from_code(code: Option<u32>) -> Self {
+        let Some(code) = code else {
+            return Self::NoneGiven;
+        };
+        match &code.to_be_bytes() {
+            b"logo" | b"rlgo" => Self::LogOut,
+            b"rrst" | b"rest" => Self::Restart,
+            b"rsdn" | b"shut" => Self::ShutDown,
+            _ => Self::Other(code),
+        }
+    }
+
+    /// The reason in the words the diagnostics line says it with.
+    #[must_use]
+    pub fn words(self) -> String {
+        match self {
+            Self::LogOut => "log out".to_owned(),
+            Self::Restart => "restart".to_owned(),
+            Self::ShutDown => "shut down".to_owned(),
+            Self::NoneGiven => "no reason given".to_owned(),
+            Self::Other(code) => format!(
+                "reason '{}'",
+                String::from_utf8_lossy(&code.to_be_bytes()).escape_debug()
+            ),
+        }
+    }
+}
+
 /// The one answer a termination request gets, and the flag that makes it one.
 #[derive(Debug)]
 struct TerminationSlot {
@@ -281,21 +338,30 @@ struct TerminationSlot {
 #[derive(Debug, Clone)]
 pub struct TerminationAnswer {
     slot: Arc<TerminationSlot>,
+    reason: QuitReason,
 }
 
 impl TerminationAnswer {
-    /// A fresh, unanswered request.
+    /// A fresh, unanswered request, asked for `reason`.
     ///
     /// Built by `applicationShouldTerminate:` and by nothing else, which is why
     /// it is unreachable on a machine with no such selector — the whole of the
     /// gate below.
     #[cfg(any(target_os = "macos", test))]
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(reason: QuitReason) -> Self {
         Self {
             slot: Arc::new(TerminationSlot {
                 answered: AtomicBool::new(false),
             }),
+            reason,
         }
+    }
+
+    /// **Why AppKit asked** (0.4.10 plan row 17): what the quit event said, read when the request
+    /// arrived.
+    #[must_use]
+    pub fn reason(&self) -> QuitReason {
+        self.reason
     }
 
     /// Whether this request has already been answered.
@@ -823,7 +889,7 @@ mod tests {
     /// succeeds; drop the rollback and the other branch fails.
     #[test]
     fn a_termination_request_is_answered_exactly_once() {
-        let answer = TerminationAnswer::new();
+        let answer = TerminationAnswer::new(QuitReason::NoneGiven);
         assert!(!answer.is_answered());
         match answer.answer(TerminationDecision::Now) {
             Ok(()) => {
@@ -857,7 +923,7 @@ mod tests {
     /// sharing the slot through the `Arc` and the clone answers a second time.
     #[test]
     fn a_cloned_answer_is_the_same_request() {
-        let answer = TerminationAnswer::new();
+        let answer = TerminationAnswer::new(QuitReason::LogOut);
         let also = answer.clone();
         match answer.answer(TerminationDecision::Cancel) {
             Ok(()) => {
@@ -869,6 +935,54 @@ mod tests {
                 "the clone is the same request, and that request is still outstanding"
             ),
         }
+        assert_eq!(
+            also.reason(),
+            QuitReason::LogOut,
+            "and it was asked for the same reason"
+        );
+    }
+
+    /// RED (0.4.10 plan row 17) — **the quit event's reason is read as AppKit's own codes say
+    /// it**: both spellings of a log-out, a restart and a shut-down, an event with none, and a code
+    /// the table does not know, kept and said as its four characters.
+    ///
+    /// MUTATION: map `rlgo` (the log-out loginwindow sends) to `NoneGiven`, or say `ShutDown` as
+    /// "restart".
+    #[test]
+    fn the_quit_reason_is_read_from_appkits_codes() {
+        let code = |four: &[u8; 4]| Some(u32::from_be_bytes(*four));
+        for (four, reason) in [
+            (b"logo", QuitReason::LogOut),
+            (b"rlgo", QuitReason::LogOut),
+            (b"rrst", QuitReason::Restart),
+            (b"rest", QuitReason::Restart),
+            (b"rsdn", QuitReason::ShutDown),
+            (b"shut", QuitReason::ShutDown),
+        ] {
+            assert_eq!(QuitReason::from_code(code(four)), reason, "{four:?}");
+        }
+        assert_eq!(QuitReason::from_code(None), QuitReason::NoneGiven);
+        assert_eq!(super::AE_QUIT_REASON, u32::from_be_bytes(*b"why?"));
+        let words: Vec<String> = [
+            QuitReason::LogOut,
+            QuitReason::Restart,
+            QuitReason::ShutDown,
+            QuitReason::NoneGiven,
+            QuitReason::from_code(code(b"zzzz")),
+        ]
+        .into_iter()
+        .map(QuitReason::words)
+        .collect();
+        assert_eq!(
+            words,
+            [
+                "log out",
+                "restart",
+                "shut down",
+                "no reason given",
+                "reason 'zzzz'"
+            ]
+        );
     }
 
     /// RED — **the delegate is installed once, and a door that could not be

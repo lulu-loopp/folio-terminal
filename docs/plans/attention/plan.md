@@ -70,6 +70,7 @@ Claude Code 全程住在备用屏(实测:`?1049h` 在会话第 86 字节,`?1049l
 - **装了 shell 整合**(用户的机器就是):shell 在启动 claude *之前*于主屏发 `133;C` ⇒ `working = true` 且**一直不落**(`D` 只认主屏,而 claude 活着的时候主屏没有 `D`)。于是:`session_is_breathing = working && !alternate_screen` = **false**(不呼吸);而 `claim()` 里 `work_in_flight = working || progress` = **true** ⇒ `unread` 被抑制 ⇒ **也没有蓝点**。加上不发 9;4(无环)、以及 D5/D10 那条闸门让它多数时候不响铃(无橙点)—— **这个 tab 上一个像素都没有。** 两处抑制读的是两个不同的事实,合起来把 tab 涂黑,而它们各自都是对的。
 - **没装 shell 整合**:`working` 永远为 false ⇒ 只要 claude 在画面上动,`output_revision` 就涨(`main.rs:13745`,alt 屏不豁免)⇒ 后台 tab 挂一枚**蓝点**,而蓝点的断言是「**完成**·未读」。**一个正在跑的 agent 被投影成「跑完了」。**
 两个分支给出两个不同的错答案,而用户看到哪一个取决于他装没装 `folio.ps1`。
+**0.4.10 行 75 就地记(2026-11-06,T-UNREAD-DOT-ON-EVERY-BACKGROUND-TAB):D4 两个分支都已收口。** 0.4.9 行 195 把每个恢复的 agent pane 直接以 vendor 程序启动(没有 shell、没有 `133`),于是用户的机器整体落进第二个分支 —— 每个后台 agent tab 都挂蓝点。修法:hook 能到达的 agent pane,「完成」读 agent 自己的回合(`Stop` / `agentStop` / `agent-turn-complete` / `agent_settled`),不读字节、也不读 shell 的 `working`;下一个回合开始(`UserPromptSubmit` 一类)或回合内的回报(`attention_map::TURN_WITHIN`)= 工作中,压住蓝点;看一眼(绘制)即熄。第一个分支(在 pwsh 里敲 `claude`)因此也在回合结束时有点。蓝点仍是「未读·完成」,不是「等你」—— A6 不动。无宽限(用户裁 R1=A);`BT_ATTENTION_TRACE` 新增 `hear` 一行供日后量间隔。见 `crates/bt-app/src/agent_turns.rs`。
 
 **D5 —— 该亮不亮:铃的闸门是「用户还在不在看」,而那个事实 Folio 从不供给。**
 见 §2 与 `evidence-2026-08-25.md`。单变量对照:录音 B(短回合、不发焦点事件)**零 BEL**,录音 D(同一句 prompt、同样短的回合,只多发一次 `ESC [ O`)**一枚 BEL**,签名与录音 C 那枚逐字节相同。`preferredNotifChannel: terminal_bell` 三段录音全部继承了用户真实的那份 settings。

@@ -90,14 +90,15 @@
 use std::ffi::{CStr, c_char, c_void};
 use std::sync::{Arc, OnceLock};
 
+use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, Bool, Sel};
 use objc2::{MainThreadMarker, msg_send, sel};
 use objc2_app_kit::{NSApplication, NSApplicationTerminateReply};
-use objc2_foundation::{NSArray, NSURL};
+use objc2_foundation::{NSAppleEventDescriptor, NSAppleEventManager, NSArray, NSURL};
 
 use crate::app_delegate::{
-    AppDelegateEvent, AppDelegateEventKind, AppDelegateOrigin, Outbox, TerminationAnswer,
-    path_from_file_url,
+    AE_QUIT_REASON, AppDelegateEvent, AppDelegateEventKind, AppDelegateOrigin, Outbox, QuitReason,
+    TerminationAnswer, path_from_file_url,
 };
 use crate::macos_impl::off_the_window_thread;
 use crate::menu::AppMenuAction;
@@ -187,6 +188,10 @@ extern "C-unwind" fn should_handle_reopen(
 /// What completes it is [`TerminationAnswer::answer`], from winit's own handler.
 /// See rule ② in [`app_delegate`](crate::app_delegate)'s header for why it
 /// cannot be the main dispatch queue instead.
+///
+/// **The request carries why it was asked** (0.4.10 plan row 17): the quit Apple
+/// event's reason, read here because the current event is AppKit's only while
+/// this method runs. A read and nothing else — no loop is turned.
 extern "C-unwind" fn should_terminate(
     _this: &AnyObject,
     _cmd: Sel,
@@ -194,9 +199,31 @@ extern "C-unwind" fn should_terminate(
 ) -> NSApplicationTerminateReply {
     post(
         AppDelegateOrigin::Termination,
-        AppDelegateEventKind::TerminationRequested(TerminationAnswer::new()),
+        AppDelegateEventKind::TerminationRequested(TerminationAnswer::new(QuitReason::from_code(
+            the_quit_events_reason(),
+        ))),
     );
     NSApplicationTerminateReply::TerminateLater
+}
+
+/// **The `kAEQuitReason` code of the Apple event AppKit is handling now**, or `None`
+/// when there is no current event or it carries no reason (0.4.10 plan row 17).
+///
+/// `-[NSAppleEventManager currentAppleEvent]`, then `attributeDescriptorForKeyword:`
+/// and `typeCodeValue`, as Apple's own note on telling a log-out from a quit reads
+/// it. The manager, the event and the code are `objc2-foundation`'s typed getters;
+/// `attributeDescriptorForKeyword:` alone is sent by name, because its typed binding
+/// is gated on `objc2-core-services`, a package this workspace does not carry and
+/// this one selector does not justify (the registry's `# owners` row for this item).
+fn the_quit_events_reason() -> Option<u32> {
+    let event = NSAppleEventManager::sharedAppleEventManager().currentAppleEvent()?;
+    // SAFETY: `-[NSAppleEventDescriptor attributeDescriptorForKeyword:]` takes an
+    // `AEKeyword`, a four-character code (`u32`), and answers a descriptor or nil; a
+    // getter on the event AppKit is handling, on the main thread, inside the delegate
+    // method AppKit is calling.
+    let reason: Option<Retained<NSAppleEventDescriptor>> =
+        unsafe { msg_send![&*event, attributeDescriptorForKeyword: AE_QUIT_REASON] };
+    Some(reason?.typeCodeValue())
 }
 
 /// `applicationShouldTerminateAfterLastWindowClosed:`

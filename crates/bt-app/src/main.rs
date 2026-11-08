@@ -42,6 +42,9 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+mod agent_hooks_step;
+mod agent_resume;
+mod agent_turns;
 mod animation;
 mod app_delegate_wire;
 mod arrival;
@@ -55,6 +58,7 @@ mod attention_wire;
 mod attention_words;
 mod card_trace;
 mod cardhint;
+mod carry_pass;
 mod cli;
 mod clipboard_lane;
 mod clipboard_picture;
@@ -730,9 +734,15 @@ enum AppEvent {
     /// `explorer_menu::state()` and `explorer_menu::take_outcome()` by the time
     /// this is sent, and this says only that something did.
     ExplorerPackageChanged,
+    /// **The carry pass's agent-hooks step published what it found** (0.4.10 plan row 67b): the
+    /// answer is in `agent_hooks_step::AGENT_HOOKS`, and the handler sets the Agents rows from it
+    /// and raises the notice of each repair of a gone copy's hooks. Owed a wake for
+    /// [`Self::ExplorerPackageChanged`]'s reason: the scan lands seconds into a launch, or behind a
+    /// modal, on a window that may have nothing else coming.
+    AgentHooksScanned,
     /// **The machine listed its monospaced families** (GitHub issue #3).
     ///
-    /// The tenth of the same family and the newest, and it is owed a wake for
+    /// The tenth of the same family, and it is owed a wake for
     /// [`Self::CopilotProbed`]'s reason with one more on top: the walk was
     /// started by the press that opened the dialog, so the reader is looking at
     /// a picker that is holding one row — the family in force — and waiting for
@@ -1057,6 +1067,7 @@ impl AppEvent {
             | Self::CopilotProbed
             | Self::UpdateChecked
             | Self::ExplorerPackageChanged
+            | Self::AgentHooksScanned
             | Self::FontsScanned
             | Self::TaskbarAnswered
             | Self::ProgramsAnswered
@@ -1121,6 +1132,70 @@ struct BackgroundDecode {
     /// not its sentence, so the card can be written in the window's language
     /// (`i18n::background_picture_refused`).
     result: Result<Arc<bt_render::BackgroundImage>, bt_term::BackgroundImageError>,
+    /// **Which read this answers**: the first, or the one more ask a held answer earns
+    /// (T-HELD-FILE-IN-THE-OTHER-PICTURE-LANES); see [`BackgroundDecode::answer`].
+    asked: BackgroundAsk,
+}
+
+/// **Which read of the ground a question is** (T-HELD-FILE-IN-THE-OTHER-PICTURE-LANES): every
+/// caller asks [`BackgroundAsk::FIRST`]; only [`BackgroundDecode::answer`] mints the one more
+/// ask, so the bound is decided in one pure place and carried, not re-spelled, by the worker.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct BackgroundAsk {
+    /// This read is the one more ask a held first read earned.
+    once_more: bool,
+}
+
+impl BackgroundAsk {
+    /// A first read: a new window, or a picture chosen.
+    const FIRST: Self = Self { once_more: false };
+
+    /// The worker's answer to this question, carrying which read it was.
+    fn answered(
+        self,
+        generation: u64,
+        file: String,
+        result: Result<Arc<bt_render::BackgroundImage>, bt_term::BackgroundImageError>,
+    ) -> BackgroundDecode {
+        BackgroundDecode {
+            generation,
+            file,
+            result,
+            asked: self,
+        }
+    }
+}
+
+/// **What the window does with one answer about its ground** — see [`BackgroundDecode::answer`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BackgroundAnswer {
+    /// The picture: put it on the glass.
+    Adopt,
+    /// Another program held the file, and this was the first read: the picture on the glass is
+    /// kept, nothing is said, and the file is read again as the question named here (the one
+    /// more ask).
+    Ask(BackgroundAsk),
+    /// A refusal, or a second held read: the ground goes bare and the card says why.
+    Refuse,
+}
+
+impl BackgroundDecode {
+    /// **The one rule for an answer about the ground** (T-HELD-FILE-IN-THE-OTHER-PICTURE-LANES):
+    /// a file another program holds at this moment ([`bt_term::BackgroundImageError::HeldElsewhere`])
+    /// says nothing about the file, so its first answer asks once more and says nothing — a card
+    /// is an event, and one raised before the second read could contradict a picture that lands
+    /// a moment later. A second held answer is a refusal in the words of an unreadable file. This
+    /// is the run-out bound of row 164 (at most two reads per look, no timer); the next look is a
+    /// new window, or the picture chosen anew.
+    fn answer(&self) -> BackgroundAnswer {
+        match &self.result {
+            Ok(_) => BackgroundAnswer::Adopt,
+            Err(bt_term::BackgroundImageError::HeldElsewhere(_)) if !self.asked.once_more => {
+                BackgroundAnswer::Ask(BackgroundAsk { once_more: true })
+            }
+            Err(_) => BackgroundAnswer::Refuse,
+        }
+    }
 }
 
 /// The picture worker's one-slot mailbox, and the arithmetic that lets a clear
@@ -1422,6 +1497,9 @@ struct ClipboardPictureInbox {
     /// The generation the window is waiting for. Bumped by every new paste.
     wanted: u64,
     landed: Option<ClipboardPictureAnswer>,
+    /// The saves refused at the door since the window last looked (plan row 52): each is said on
+    /// the turn the inbox's wake brings, in the notice the door used to draw itself.
+    refused: usize,
 }
 
 impl ClipboardPictureMailbox {
@@ -1444,6 +1522,26 @@ impl ClipboardPictureMailbox {
     /// The inbox itself, for the worker to leave its answer in.
     fn inbox(&self) -> Arc<std::sync::Mutex<ClipboardPictureInbox>> {
         Arc::clone(&self.inbox)
+    }
+
+    /// One save refused at its door, counted for the next look (plan row 52): the generation is
+    /// left alone, so the paste a running save answers is still the one waited for.
+    fn refuse(&self) {
+        self.inbox
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .refused += 1;
+    }
+
+    /// How many saves were refused at the door since the last look, and none from now on.
+    fn take_refusals(&mut self) -> usize {
+        std::mem::take(
+            &mut self
+                .inbox
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .refused,
+        )
     }
 
     /// Take whatever landed, and answer with it only if it is still an answer to
@@ -1871,8 +1969,8 @@ const DECODE_FAULT: &str = "the decode stopped on a fault";
 /// - a file's pixels are a failed decode filed in the window's cache (`PeekCacheEntry::Failed`,
 ///   the waiting preview panes refusing the picture), which the flyout's next settled hover reads
 ///   again and the card's coming down lets go of, so its next hover asks again;
-/// - an animation's open is unanswered (`AnimationEntry::Unanswered`): no redraw asks again, and
-///   the file's next open lets go of it and asks;
+/// - an animation's open is unanswered (`AnimationEntry::Unanswered { asked_again: true }`): no
+///   redraw asks again, and the file's next open (or its change news) lets go of it and asks;
 /// - an animation's fill releases its reservation, and the animation stands on its last frame;
 /// - a preview formula is refused (`MathRenderError::Aborted`): the page draws its source text,
 ///   and new content is a new formula, asked anew;
@@ -2259,7 +2357,7 @@ enum DecorationWorkerCompletion {
     /// see [`animation::decode`].
     PeekAnimation {
         path: PathBuf,
-        frames: std::result::Result<animation::Animation, animation::AnimationRefusal>,
+        frames: std::result::Result<animation::Animation, animation::NotOpened>,
     },
     /// **The next frames of one animation, and its decoder coming home** — see
     /// [`MathWorkerRequest::AnimationFill`].
@@ -2329,10 +2427,12 @@ enum PeekPageOutcome {
     Unchanged,
     /// It has been — or the window was holding none — and this is what it looks like now. `raster`
     /// is `None` for a file this process will not draw, which is the card's whole degradation
-    /// path: an empty ground under two lines that are still true (`pdf::page_raster`).
+    /// path: an empty ground under two lines that are still true (`pdf::page_raster`); and
+    /// [`pdf::Held`] for a file another program holds at this moment, which the card asks once
+    /// more ([`PeekPageSlot::hear_held`]; T-HELD-FILE-IN-THE-PDF-LANE).
     Drawn {
         mtime: Option<SystemTime>,
-        raster: Option<pdf::PageRaster>,
+        raster: Result<Option<pdf::PageRaster>, pdf::Held>,
     },
 }
 
@@ -6520,6 +6620,9 @@ struct GitPromptDraw {
     before_caret: String,
     preedit: String,
     fault: Option<git::RefNameFault>,
+    /// Where the field's selection is washed, written by the pass that draws the prompt from the
+    /// run it records for a press (0.4.9 plan row 180); `None` until then.
+    selection: Option<[f32; 2]>,
 }
 
 impl GitMenuDraw {
@@ -6534,6 +6637,7 @@ impl GitMenuDraw {
                 before_caret: &prompt.before_caret,
                 preedit: &prompt.preedit,
                 fault: prompt.fault,
+                selection: prompt.selection,
             }),
         }
     }
@@ -6560,6 +6664,7 @@ fn cli_leaf_seed(plan: &cli::CliPlan) -> LeafSeed {
         // `--with-environment` (owner ruling 2026-10-05): the launcher's environment, when the
         // command line asked for it, and the account's otherwise.
         carried_environment: plan.carried_environment.clone(),
+        agent: crate::agent_resume::SeedAgent::None,
     }
 }
 
@@ -7575,6 +7680,14 @@ struct ShellSession {
     /// [`attention::Event::LeafGone`] silently, so only this tells the second walk that the pane
     /// has already ended.
     attention_ended: bool,
+    /// **This pane's agent** (0.4.9 plan row 195): the session its hook last named, which the
+    /// layout writes so a restart can resume it, and — for a pane born as a resume — whether that
+    /// resume ever ran. See [`agent_resume::AgentAccount`].
+    agent: agent_resume::AgentAccount,
+    /// **This pane's agent's turns, as its blue dot reads them** (0.4.10 plan row 75): for a pane
+    /// whose agent's hooks are heard, "finished" is a turn's end and not the bytes it draws. See
+    /// [`agent_turns::TurnAccount`].
+    turn_account: agent_turns::TurnAccount,
     grid: GridSize,
     conpty_grid: GridSize,
     pending_pty_resize: Option<PendingPtyResize>,
@@ -8038,15 +8151,17 @@ enum Phase {
     InBirth(PaneBirth),
     /// A running shell.
     Live(PtySession),
-    /// A shell that exited inside the birth grace, held until its reader has handed over the last
-    /// byte. `exit_age` is the age its exit was first seen at.
+    /// A shell that exited inside the birth grace, or that the system ended with the session (plan
+    /// row 191), held until its reader has handed over the last byte. `exit_age` is the age its
+    /// exit was first seen at.
     ExitDraining { pty: PtySession, exit_age: Duration },
     /// A shell that exited after the birth grace: its one line is said, and the pane keeps its
     /// pseudoconsole until the pane or its tab ends.
     Exited { pty: PtySession, exit_age: Duration },
     /// The last-resort shell being born in place after a silent birth death.
     FallingBack(BirthDeathFallback),
-    /// A birth death kept with its face, without a shell, until the pane is closed or restarted.
+    /// A birth death, or a shell the system ended with the session (plan row 191), kept with its
+    /// face, without a shell, until the pane is closed or restarted.
     Kept,
     /// The shell was retired: by a road that ends the pane, or by the reaper before it decides
     /// what becomes of a birth death. Read as [`Self::Shellless`].
@@ -8116,7 +8231,8 @@ impl ShellLife {
     }
 
     /// Whether this pane keeps its tab from ending although it holds no pseudoconsole: a shell
-    /// being born, a last-resort shell being born, or a birth death kept with its face.
+    /// being born, a last-resort shell being born, or a birth death or a shell the system ended
+    /// kept with its face.
     fn holds_its_tab(&self) -> bool {
         matches!(
             self.phase,
@@ -8183,8 +8299,8 @@ impl ShellLife {
         landing.owed_physical = Some(physical);
     }
 
-    /// **Live → ExitDraining**: the shell exited inside the birth grace, first seen at
-    /// `exit_age`, and its reader has not handed over its last byte.
+    /// **Live → ExitDraining**: the shell exited inside the birth grace, or the system ended it
+    /// (plan row 191), first seen at `exit_age`, and its reader has not handed over its last byte.
     fn exit_draining(&mut self, exit_age: Duration) {
         self.phase = match std::mem::replace(&mut self.phase, Phase::Shellless) {
             Phase::Live(pty) => Phase::ExitDraining { pty, exit_age },
@@ -8206,8 +8322,8 @@ impl ShellLife {
         owed
     }
 
-    /// **Live or ExitDraining → Released**: a birth death's shell leaves the pane, handed back for
-    /// the reaper to retire.
+    /// **Live or ExitDraining → Released**: a birth death's shell, or one the system ended (plan
+    /// row 191), leaves the pane, handed back for the reaper to retire.
     fn release_dead_shell(&mut self) -> Option<PtySession> {
         match std::mem::replace(&mut self.phase, Phase::Released) {
             Phase::Live(pty) | Phase::ExitDraining { pty, .. } => Some(pty),
@@ -8239,7 +8355,8 @@ impl ShellLife {
         }
     }
 
-    /// **Shellless or Released → Kept**: a birth death is kept with its face.
+    /// **Shellless or Released → Kept**: a birth death, or a shell the system ended (plan row
+    /// 191), is kept with its face.
     fn keep_birth_death(&mut self) {
         if self.has_no_shell() {
             self.phase = Phase::Kept;
@@ -8376,6 +8493,21 @@ impl BirthDecision {
             self.spawn_place = gone.place.directory;
             self.at_shell_home = gone.place.at_shell_home;
             self.named = gone.place.named;
+        }
+        self
+    }
+
+    /// **The decision for a resume whose folder the birth found gone, and which started nothing**
+    /// (row 195, review F3): the pane stands where it was put, and a `diagnostics.log` line says
+    /// which folder was gone and that the session was not resumed anywhere else.
+    fn with_resume_not_started(mut self, note: &mut dyn FnMut(&str)) -> Self {
+        if let Some(gone) = self.unless_gone.take() {
+            note(&format!(
+                "{} is not a folder this machine can open now (removed, or on a share that is not \
+                 answering); the agent's session was not resumed anywhere else, and the pane's \
+                 shell is handed back",
+                gone.folder.display()
+            ));
         }
         self
     }
@@ -9160,13 +9292,27 @@ struct App<B: Backend = Native> {
     /// a second to draw one tick would be reading it sixty times a second. So it is cached at the
     /// two moments it can change — the launch, and a press on the row.
     ///
-    /// **Not repaired at launch, unlike the verb above.** A menu entry pointing at a `folio.exe`
-    /// that has moved opens nothing and the user cannot tell why; a hook command pointing at one
-    /// fails, is retried by nobody, and leaves an agent as silent as it was before anyone installed
-    /// anything. The second is a feature that has stopped working, not a broken thing on somebody's
-    /// desktop — and rewriting a file belonging to another program at every launch, without being
-    /// asked, is not something this build does.
+    /// **Repaired at start since 0.4.10, for two states only** (plan row 67b, reversing the
+    /// 2026-08-25 stance that hooks are not repaired at launch): hooks naming a copy that is gone,
+    /// and this copy's own in an older shape, are pointed here by the carry pass's worker
+    /// (`agent_hooks_step`). The stance's premise was that a dead hook is a feature that has
+    /// stopped working; row 195 made the hooks how a restart brings sessions back, so a dead one is
+    /// resume quietly doing nothing. Every other state is said, never written.
+    ///
+    /// **Not read at launch.** The launch reads no agent's file on this thread: until the scan's
+    /// first answer ([`Self::agent_rows_known`]) the switch reads Off, and the answer sets it.
     claude_hooks_installed: bool,
+    /// **What the newest start-time scan found in each agent's configuration**
+    /// (`agent_hooks_step::HooksSnapshot`), in the `agent_takeovers` order — what the Agents rows'
+    /// lines are said from, with why a due repair was not written. `None` for a family a press has
+    /// written since, until the scan the press asked for answers.
+    agent_hooks_found: [Option<(
+        attention_ownership::HooksFound,
+        Option<agent_hooks_step::Unrepaired>,
+    )>; 3],
+    /// **Whether a scan has answered at all** in this process: before it, nothing about the agents'
+    /// files is known on this thread, and the resume row says nothing about their hooks.
+    agent_rows_known: bool,
     /// **Why each agent's configuration file will not be edited, when it will not be** — the
     /// `agent_takeovers` order, Claude Code then codex then copilot.
     ///
@@ -9713,6 +9859,8 @@ impl<B: Backend> App<B> {
             explorer_package_asked_place: explorer_menu::ExplorerPlace::default(),
             explorer_package_announce: Announce::Everything,
             agent_takeovers: Default::default(),
+            agent_hooks_found: Default::default(),
+            agent_rows_known: false,
             profiles_file_broken: false,
             pins_file_broken: false,
             settings_file_broken: false,
@@ -10770,12 +10918,9 @@ struct WindowRuntime<B: Backend = Native> {
     /// rebuild the strip to find out where the letters went. Every other field
     /// answers [`Runtime::field_ime_caret`] from a layout the window keeps.
     rename_caret_line: Option<[f32; 4]>,
-    /// **The open editor's draft as the painter last drew it**, for a press to
-    /// put the caret in (0.4.9 plan row 179): the same pass and the same reason
-    /// as [`Self::rename_caret_line`], one field over. Written beside it by
-    /// every surface that draws the editor, emptied by
-    /// [`Runtime::finish_rename`].
-    rename_drawn: Option<RenameDrawn>,
+    /// **Every one-line field's text as its painter last drew it**, for a press
+    /// to put the caret in (0.4.9 plan rows 179 and 180). See [`DrawnFields`].
+    drawn_fields: DrawnFields,
     cursor_blink: CursorBlink,
     /// Whether the window holds focus.
     ///
@@ -14517,7 +14662,14 @@ impl TabState {
             // at that position *now*: a pane saved after a reorder named whichever
             // profile had slid into its slot, and that wrong id then came back off
             // disk as the pane's shell on the next launch.
-            profile_id: self.leaf_profile(seat),
+            //
+            // **Save for a pane whose agent was resumed in it** (row 195): what it was saved as is
+            // the shell it was before — the profile its hand-back starts and the one a restore
+            // without a resume brings back.
+            profile_id: self.sessions.get(&seat).map_or_else(
+                || self.leaf_profile(seat),
+                |TerminalPane { session: leaf, .. }| leaf.own_profile().to_owned(),
+            ),
             // The one ladder every shell started in this pane's place reads (T-RESTART-CWD).
             cwd: self
                 .sessions
@@ -14570,6 +14722,11 @@ impl TabState {
             } else {
                 String::new()
             },
+            // **The session the pane's agent last named** (row 195), held on the pane.
+            agent: self
+                .sessions
+                .get(&seat)
+                .and_then(|TerminalPane { session: leaf, .. }| leaf.agent.record().cloned()),
         }
     }
 
@@ -15062,6 +15219,8 @@ fn release_trial_writer(writer: update_trial::Writer, stores: &mut TrialStores<'
         Writer::RecoveredAnnouncement => recovered::ask(&persist::storage_dir()),
         // The trial is committed: it is the person's Folio, and the system may start it again.
         Writer::RestartRegistration => (stores.restart)(),
+        // The pass again, on its worker: what it held back, it now writes.
+        Writer::AgentHooksRepair => carry_pass::begin_carry_pass(),
     }
 }
 
@@ -16221,6 +16380,15 @@ impl ShellSession {
         }
     }
 
+    /// **The profile this pane is, for every shell started in its likeness** (row 195, review F5):
+    /// the shell it was before its agent was resumed in it, or the profile it was launched as. The
+    /// session save, Restart shell, Duplicate tab and the splits read this one answer, so a pane
+    /// whose typed agent came back is saved, restarted and copied as the shell it was — and never
+    /// becomes a fresh agent's pane.
+    fn own_profile(&self) -> &str {
+        self.agent.saved_profile(&self.launch.profile)
+    }
+
     /// [`Self::place_where_the_pane_stands`] with the kind a spawn weighs it by: **named** for a
     /// pane born in a named folder ([`Self::born_named`]), **carried** otherwise. Restart shell,
     /// Duplicate tab, Duplicate pane and the splits read this; `profiles::place_for` decides.
@@ -16417,6 +16585,7 @@ impl ShellSession {
             last_seen_revision: self.last_seen_revision,
             tab_is_active,
             awaiting: self.attention.ledger.ticket().is_some(),
+            turn: self.turn_account.agent_turn(),
         }
     }
 }
@@ -19028,42 +19197,36 @@ enum EditorRefusal {
     Address(webhost::AddressRefusal),
 }
 
-/// **What one painter drew the open editor's draft as** (0.4.9 plan row 179):
-/// where the drawn window starts in the window, which string it is a window
-/// onto, and where each of that string's boundaries fell — what a press inside
-/// the box reads to find the seam under the pointer.
+/// **Each one-line field's text as its painter last drew it** (0.4.9 plan rows
+/// 179 and 180): what a press inside a field reads to find the seam under the
+/// pointer ([`text_field::DrawnRun`]).
 ///
-/// **Left behind by the painter, as [`WindowRuntime::rename_caret_line`] is**,
-/// and for its reason: the box is a share of a solve that lives and dies inside
-/// one chrome build, on five surfaces with five geometries, so the press reads
-/// the run the ink was laid out from instead of rebuilding any of them. The
-/// table is the very one [`TabRename::fit`] measured the frame with — one
-/// shaping pass, the frame's own.
-#[derive(Clone, Debug, PartialEq)]
-struct RenameDrawn {
-    /// The window pixel the drawn window's first seam stands on — the box's
-    /// left edge.
-    left: f32,
-    /// The string on the glass, composition included ([`TextField::composed`]).
-    ///
-    /// [`TextField::composed`]: crate::text_field::TextField::composed
-    shown: String,
-    /// The byte of [`Self::shown`] the drawn window starts at
-    /// ([`TabRename::first_visible`] as this frame left it).
-    from: usize,
-    /// Every boundary of [`Self::shown`], as the shaper placed it.
-    advances: bt_render::ChromeTextAdvances,
-}
-
-impl RenameDrawn {
-    /// **The byte a press at window pixel `x` names** — the seam nearest the
-    /// pointer, by [`text_field::caret_at_x`]'s rule, counted from the drawn
-    /// window's start.
-    fn caret_at(&self, x: f32) -> usize {
-        text_field::caret_at_x(&self.shown, self.from, x - self.left, |at| {
-            self.advances.between(self.from, at)
-        })
-    }
+/// **Left behind by the painters, as [`WindowRuntime::rename_caret_line`] is**,
+/// and for its reason: a field's box is a share of a solve that lives inside one
+/// build — five surfaces for the name editor, a capsule, a graph's toolbar, a
+/// palette, a menu turned prompt, a dialog page — so the press reads the run the
+/// ink was laid out from instead of rebuilding any of them. Each is written by
+/// the pass that draws its field and nowhere else.
+#[derive(Debug, Default)]
+struct DrawnFields {
+    /// The open name editor's draft, on whichever of its six subjects it is
+    /// drawn: written beside `rename_caret_line` by the same five painters,
+    /// emptied by [`Runtime::finish_rename`].
+    name: Option<text_field::DrawnRun>,
+    /// The find bar's query, while the capsule is up (`Runtime::search_layers`).
+    find_bar: Option<text_field::DrawnRun>,
+    /// Each commit graph's search, by the surface it is drawn on
+    /// (`Runtime::build_git_graph`, the one derivation a pane and a floating
+    /// window both run).
+    graph_search: BTreeMap<PreviewSurface, text_field::DrawnRun>,
+    /// Every text field the settings dialog drew this frame, by the target that
+    /// names it — the focused one and every other, since a press may land in
+    /// any of them.
+    settings: Vec<(settings::SettingsTarget, text_field::DrawnRun)>,
+    /// The palette's box (`Runtime::palette_layer`).
+    palette: Option<text_field::DrawnRun>,
+    /// The branch prompt a git menu turned into (`Runtime::git_menu_layer`).
+    git_prompt: Option<text_field::DrawnRun>,
 }
 
 impl TabRename {
@@ -19346,7 +19509,7 @@ impl TabRename {
         caret_width: f32,
         scrolls: bool,
         shape: &mut dyn FnMut(&str) -> bt_render::ChromeTextAdvances,
-    ) -> (seats::TabEdit, RenameDrawn) {
+    ) -> (seats::TabEdit, text_field::DrawnRun) {
         let shown = self.field.composed().into_owned();
         // The caret stands **after** the composition, which is the one place the
         // next committed character can go.
@@ -19403,12 +19566,13 @@ impl TabRename {
             selection: band,
             caret_lit: false,
         };
-        // **And the run itself, for a press to read** (row 179): the same table,
-        // so the seam a press finds is the seam this frame drew.
-        let drawn = RenameDrawn {
+        // **And the run itself, for a press to read** (rows 179 and 180): the
+        // same table, so the seam a press finds is the seam this frame drew. The
+        // window's start is a seam, so its scroll is that seam's own pixel.
+        let drawn = text_field::DrawnRun {
             left,
+            scroll_px: advances.upto(from),
             shown,
-            from,
             advances,
         };
         (edit, drawn)
@@ -19419,23 +19583,25 @@ impl TabRename {
         !self.field.preedit().is_empty()
     }
 
-    /// **Put the caret where a press or a drag says** (0.4.9 plan row 179):
-    /// at the seam of the drawn draft nearest window pixel `x`, carrying the
-    /// selection's far end when `extend`. Answers whether the caret or the
-    /// selection moved.
+    /// **Put the caret where a press or a drag says** (0.4.9 plan rows 179 and
+    /// 180): at byte `at` of the drawn draft — the seam the pointer named in the
+    /// run this frame drew ([`text_field::DrawnRun`]) — carrying the selection's
+    /// far end when `extend`, and the drawn window with the caret when the caret
+    /// went in front of it (a drag past the box's left edge, row 179's review
+    /// F5). Answers whether the caret or the selection moved.
     ///
     /// **Asked only with no composition up** (row 179 R5, the caller's
     /// [`Self::composing`]): the IME is editing the text at the caret, and
     /// moving the caret from under it would part the composition from what it
     /// is composing. With none, the string on the glass is the draft itself, so
-    /// every offset `drawn` answers is an offset into [`Self::text`].
-    fn place_at(&mut self, drawn: &RenameDrawn, x: f32, extend: bool) -> bool {
+    /// every offset the run answers is an offset into [`Self::text`].
+    fn place_at(&mut self, at: usize, extend: bool) -> bool {
         debug_assert!(
             !self.composing(),
             "a press places no caret under a composition"
         );
         let was = (self.field.caret(), self.field.selection());
-        self.field.place(drawn.caret_at(x), extend);
+        self.field.place(at, extend);
         self.clamp_scroll();
         (self.field.caret(), self.field.selection()) != was
     }
@@ -20212,14 +20378,80 @@ struct PeekThumbnail {
 /// in this window performs by comparing what came back against what is being
 /// looked at now.
 ///
-/// `answer` is `None` while the read is out, and that is also what it stays as
-/// when the read comes back with nothing to say — a card that told the two apart
-/// would need a word for "asking", and a word that appears for two frames and is
-/// replaced is worse than the space it occupied
-/// ([`file_peek::PeekBody::Facts`]).
+/// The card reads [`Self::stated_pages`]: `None` while the read is out, and that is also what it stays as
+/// when the read comes back with nothing to say — a card that told the two apart would need a word
+/// for "asking", and a word that appears for two frames and is replaced is worse than the space it
+/// occupied ([`file_peek::PeekBody::Facts`]). A file another program held is drawn the same way.
 struct PeekFacts {
     path: PathBuf,
-    answer: Option<u32>,
+    answer: PeekFactsAnswer,
+}
+
+/// **Where the card's page count stands** (T-HELD-FILE-IN-THE-PDF-LANE) — the class's pair
+/// (`once_more` on the read out, `asked_again` on the read unanswered), in the card's own record:
+/// a file another program holds is not a file with no count, so its answer is asked once more by
+/// the next rebuild of the card, with no new input; that ask's held answer is filed asked again,
+/// and then only a new card asks (`hide_file_peek` drops the record). At most two
+/// reads per card.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PeekFactsAnswer {
+    /// A read is out. `once_more` when it is the one more ask after a held answer.
+    Asked { once_more: bool },
+    /// The file's own answer: a count, or `None` when its structure would not say.
+    Answered(Option<u32>),
+    /// Another program held the file. `asked_again` once the one more ask has been spent.
+    Unanswered { asked_again: bool },
+}
+
+impl PeekFacts {
+    /// The record of a count just asked about `path`.
+    fn asked(path: PathBuf) -> Self {
+        Self {
+            path,
+            answer: PeekFactsAnswer::Asked { once_more: false },
+        }
+    }
+
+    /// The count the card prints, if the file has said one.
+    fn stated_pages(&self) -> Option<u32> {
+        match self.answer {
+            PeekFactsAnswer::Answered(pages) => pages,
+            PeekFactsAnswer::Asked { .. } | PeekFactsAnswer::Unanswered { .. } => None,
+        }
+    }
+
+    /// **Whether the card asks the count once more now** — `true`, once, for a held answer not yet
+    /// asked again, and the record says a read is out again. Every rebuild of the card asks this;
+    /// only the first after a held answer is told yes.
+    fn ask_once_more(&mut self) -> bool {
+        if self.answer != (PeekFactsAnswer::Unanswered { asked_again: false }) {
+            return false;
+        }
+        self.answer = PeekFactsAnswer::Asked { once_more: true };
+        true
+    }
+
+    /// File the worker's answer: the file's own, or — for a file another program held — unanswered,
+    /// asked again when the read it answers was the one more ask.
+    ///
+    /// **A held answer is filed only while a read is out** (`Asked`), the class's rule that an
+    /// answer is filed for the read that awaits it: a duplicate held answer arriving after the
+    /// file's own answer must not take a count off the card, and one arriving after the one more
+    /// ask was spent must not open another. The file's own answer is filed whenever it comes: it
+    /// is a fact about the file.
+    fn hear(&mut self, answer: Result<Option<u32>, pdf::Held>) {
+        match (answer, self.answer) {
+            (Ok(pages), _) => self.answer = PeekFactsAnswer::Answered(pages),
+            (Err(pdf::Held), PeekFactsAnswer::Asked { once_more }) => {
+                self.answer = PeekFactsAnswer::Unanswered {
+                    asked_again: once_more,
+                };
+            }
+            // Not awaited: the file's own answer, or the one more ask's, is already in.
+            (Err(pdf::Held), PeekFactsAnswer::Answered(_) | PeekFactsAnswer::Unanswered { .. }) => {
+            }
+        }
+    }
 }
 
 /// **How many drawn pages of one document the window keeps** (user ruling 2026-08-26).
@@ -20274,6 +20506,10 @@ struct PeekPageSlot {
     /// came up. Cleared by `TabState::hide_file_peek` so the next card asks once per page and no
     /// more.
     asked: BTreeSet<u32>,
+    /// **Which pages have been asked once more since the card came up**, after an answer that
+    /// another program held the file (T-HELD-FILE-IN-THE-PDF-LANE; [`Self::hear_held`]) — the
+    /// class's `asked_again`, per page. Cleared with `asked`, so a new card is a new look.
+    asked_again: BTreeSet<u32>,
     /// The drawn pages, **least recently used first** — see [`PEEK_PAGE_CACHE`]. A page this
     /// process will not raster is simply absent, which is what leaves a blank sheet in its slot
     /// rather than a gap; see `pdf::page_raster` for the reasons and
@@ -20307,6 +20543,46 @@ impl PeekPageSlot {
         let entry = self.pages.remove(at);
         self.pages.push(entry);
         true
+    }
+
+    /// **The card came down**: every question it asked is forgotten — so the next card over the
+    /// same file asks the disk once more whether its pixels are still the file's — and so is the
+    /// one more ask a held page spent ([`Self::hear_held`]): the next card is a new look.
+    fn card_down(&mut self) {
+        self.asked.clear();
+        self.asked_again.clear();
+    }
+
+    /// **A page whose file another program held** (T-HELD-FILE-IN-THE-PDF-LANE): the first held
+    /// answer since the card came up lets the page be asked once more — it leaves `asked`, so the
+    /// next rebuild of the card, which this answer's own frame is, asks it with no new input — and
+    /// a second stays asked, so only a new card asks again. At most two reads per page per card.
+    ///
+    /// **Only for a page this card has a question out about**: the slot outlives the card (its
+    /// pixels stay), so a held answer landing after the card came down ([`Self::card_down`]) is
+    /// the answer to a question nobody is asking, and must not spend the next card's one more ask.
+    fn hear_held(&mut self, index: u32) {
+        if self.asked.contains(&index) && self.asked_again.insert(index) {
+            self.asked.remove(&index);
+        }
+    }
+
+    /// **The stamp an answer came home with** (user ruling 2026-08-26): a file that has been
+    /// written is a different document, and the pages already drawn are of the old one. A run of
+    /// pages can be half a report from before a save and half from after — a reader scrolling
+    /// through would watch the document change under the hand, page by page, as each one happened
+    /// to be re-asked. So the stamp is what the cache belongs to, and a new one empties it; and
+    /// every page has to be asked again, including the ones a question is already out about —
+    /// those answers are about the file this is no longer — with the one more ask a held page
+    /// spent: the file changing is a new look (T-HELD-FILE-IN-THE-PDF-LANE). `page` is the page
+    /// this answer is about, which is answered.
+    fn stamped(&mut self, mtime: Option<SystemTime>, page: u32) {
+        if self.mtime != mtime && !self.pages.is_empty() {
+            self.pages.clear();
+            self.card_down();
+            self.asked.insert(page);
+        }
+        self.mtime = mtime;
     }
 
     /// Put one drawn page in, evicting the least recently used while the cache is over
@@ -22458,6 +22734,11 @@ struct SessionFacts {
     /// is the user's, and no snapshot of a `SessionStatus` can answer the
     /// second.
     awaiting: bool,
+    /// **This pane's agent's turns, when its hooks are heard** (0.4.10 plan row 75) —
+    /// [`agent_turns::TurnAccount::agent_turn`]. `Some` replaces the shell's reading of
+    /// "finished": the agent's turn end instead of its bytes, the agent's turn instead of the
+    /// shell's `working`. `None` is every other pane, read as before.
+    turn: Option<agent_turns::AgentTurn>,
 }
 
 impl SessionFacts {
@@ -22469,6 +22750,21 @@ impl SessionFacts {
     /// wears a dot telling you to look at it.
     fn has_unseen_output(self) -> bool {
         !self.tab_is_active && self.output_revision > self.last_seen_revision
+    }
+
+    /// **Whether an agent's turn ended where the user has not seen it** (0.4.10 plan row 75) —
+    /// [`Self::has_unseen_output`]'s sentence for a pane read by its agent's turns.
+    ///
+    /// The end is held at the output revision the pane had reached when it was heard, and seeing
+    /// is painting, as it is for every pane: a turn whose last words were painted before the user
+    /// left is not news, and a turn that went on writing after they left is. What the agent draws
+    /// between turns — a status line, a repaint for a focus report — moves the output revision and
+    /// nothing else, so it lights nothing.
+    fn has_unseen_turn_end(self, turn: agent_turns::AgentTurn) -> bool {
+        !self.tab_is_active
+            && turn
+                .ended_at
+                .is_some_and(|ended| ended > self.last_seen_revision)
     }
 
     /// What this session is claiming right now.
@@ -22491,16 +22787,33 @@ impl SessionFacts {
     /// The bell is the exception to both: it is latched by the session and
     /// survives whatever else is happening, because a bell is a thing that
     /// *rang*, not a state the session is in.
+    ///
+    /// **For a pane read by its agent's turns** (0.4.10 plan row 75) the two readings of
+    /// "finished" are the agent's and not the shell's: work in flight is a turn under way, unread
+    /// is a turn's end the user has not seen, and the shell's exit code says nothing about the
+    /// agent's turn — a typed agent stands on the shell's previous command, whose failure is not
+    /// the agent's (the owner's ruling R5, 2026-11-06: a failed turn is a plain blue end).
     fn claim(self) -> StatusClaim {
-        let work_in_flight = self.status.working || self.status.progress.is_some();
-        let unread = !work_in_flight && self.has_unseen_output();
+        let (work_in_flight, unseen, exit_speaks) = match self.turn {
+            Some(turn) => (
+                turn.running || self.status.progress.is_some(),
+                self.has_unseen_turn_end(turn),
+                false,
+            ),
+            None => (
+                self.status.working || self.status.progress.is_some(),
+                self.has_unseen_output(),
+                true,
+            ),
+        };
+        let unread = !work_in_flight && unseen;
         if self.awaiting {
             // Above every suppression below it, and deliberately: a queue place
             // is not a claim *about output*, so neither "work in flight" nor
             // "you have already looked" has anything to say about it. §7.1.5b:
             // 看一眼阻塞的 agent 不解除阻塞.
             StatusClaim::Awaiting
-        } else if unread && self.status.failure_exit_code.is_some() {
+        } else if unread && exit_speaks && self.status.failure_exit_code.is_some() {
             StatusClaim::Failed
         } else if self.status.bell_latched() {
             StatusClaim::Bell
@@ -22684,6 +22997,10 @@ fn attention_delivery(
 // at, what serial to draw a place from, what arrived, what this machine has installed, when now is,
 // and where the lines go. A struct would move the list rather than shorten it, and would put a
 // name in front of `tabs` that no caller reads back.
+///
+/// **Answers whether a pane's agent record changed** (row 195), which the caller owes the layout a
+/// write for: a turn-end message that names its session is heard by the pane it came from
+/// ([`agent_resume::AgentAccount::hear`]).
 #[allow(clippy::too_many_arguments)]
 fn deliver_attention(
     tabs: &mut [TabState],
@@ -22696,7 +23013,8 @@ fn deliver_attention(
     now: Instant,
     trace: Option<&attention_trace::Trace>,
     raised: &mut Vec<AttentionDelivery>,
-) {
+) -> bool {
+    let mut recorded = false;
     for message in messages {
         let asks = attention_wire::asks_of(installed, message);
         if asks.is_empty() {
@@ -22730,6 +23048,40 @@ fn deliver_attention(
                     )],
                 );
                 break;
+            }
+            // **Which hook reached which pane, every time** (0.4.10 plan row 75): the arrival
+            // itself, which the decisions below record only when one is taken — so the gap between
+            // a turn's end and whatever comes next can be read off the trace.
+            emit_attention_lines(
+                trace,
+                vec![attention_trace::hear_line(
+                    at,
+                    &message.family,
+                    &message.event,
+                )],
+            );
+            // **Any hook from the pane says its resumed agent ran** (row 195, review N3) — a
+            // submitted prompt as much as a finished turn — so its end is no failed resume.
+            leaf.agent.spoke();
+            // What the pane's program makes it, asked once for the two accounts below.
+            let child = leaf
+                .agent
+                .child(leaf.launch.program.as_deref(), leaf.session.command_marks());
+            // **The session the turn ended in, heard by the pane it ended in** (row 195).
+            if let Some(heard) = &message.resume
+                && let Some(vendor) = agent_resume::vendor(&message.family)
+            {
+                recorded |= leaf.agent.hear(vendor, heard, child);
+            }
+            // **And the turn itself, which is what an agent pane's blue dot is read from**
+            // (row 75): ended, begun, or reported in from inside one.
+            if let Some(step) = asks.turn {
+                leaf.turn_account.hear_turn_step(
+                    step,
+                    &message.family,
+                    child,
+                    leaf.output_revision,
+                );
             }
             if let Some(event) = asks.ledger.clone() {
                 // The clock mirrors the arrival rather than the ledger's answer, and deliberately:
@@ -22773,6 +23125,7 @@ fn deliver_attention(
             break;
         }
     }
+    recorded
 }
 
 /// The claim a tab wears: the loudest of the claims its sessions make.
@@ -25130,8 +25483,13 @@ enum AnimationEntry {
     /// for the question that asked it: one that comes home under another identity answers a
     /// question this window no longer asks — the file changed under the decode, and the open
     /// asked again — and is superseded, never filed ([`AnimationCache::awaits`]).
+    ///
+    /// `once_more` says this open is the one more ask a held answer earns
+    /// (T-HELD-FILE-IN-THE-OTHER-PICTURE-LANES): its answer, held again, is filed
+    /// `Unanswered { asked_again: true }` ([`AnimationCache::opened`]).
     Pending {
         asked: computation_lane::ComputationId,
+        once_more: bool,
     },
     /// **One playback of one file, and the number that says which playback it
     /// is** (adversarial review 2026-09-11, B3).
@@ -25175,17 +25533,25 @@ enum AnimationEntry {
     /// names the file, and let go of when the file changes on disk
     /// ([`AnimationCache::let_go_changed_file`]), so the next showing asks about the new bytes.
     Refused(animation::AnimationRefusal),
-    /// **Asked, and no answer came**: the open's work failed on the worker, or its thread could
-    /// not be started. Drawn as a refusal is (the picture lane's still, no notice), and — unlike a
-    /// refusal, which is a fact about the file — let go of by the file's next open
-    /// ([`animations_opened`]), which asks again, or when no surface names the file any more.
-    Unanswered,
+    /// **Asked, and no answer came**: the open's work failed on the worker, its thread could not
+    /// be started, or another program held the file (T-HELD-FILE-IN-THE-OTHER-PICTURE-LANES).
+    /// Drawn as a refusal is (the picture lane's still), with no notice — it says nothing about
+    /// the file — and let go of by the file's next open ([`animations_opened`]), which asks again,
+    /// by the file's change news ([`AnimationCache::let_go_changed_file`]), or when no surface
+    /// names the file any more.
+    ///
+    /// `asked_again` is the run-out bound of row 164, in this record as the peek cache holds it:
+    /// a held file's first answer is `false`, and the next walk asks it once more
+    /// ([`AnimationCache::ask_for_showing`]); that open's answer, held again, is `true`, which no
+    /// walk asks. A failed or unstarted open is `true` from the start: no answer came back to ask
+    /// again on, and the next open is the next look.
+    Unanswered { asked_again: bool },
 }
 
 impl bt_term::Weighed for AnimationEntry {
     fn bytes_held(&self) -> u64 {
         match self {
-            Self::Pending { .. } | Self::Refused(_) | Self::Unanswered => 0,
+            Self::Pending { .. } | Self::Refused(_) | Self::Unanswered { .. } => 0,
             Self::Ready { animation, .. } => animation.bytes_held(),
         }
     }
@@ -25207,7 +25573,7 @@ impl bt_term::Weighed for AnimationEntry {
 /// | state | its one writer | removed by |
 /// |---|---|---|
 /// | `Pending` | [`Self::ask_for_showing`], under the identity of the request it awaits | the answer to that request ([`Self::opened`], [`Self::open_unanswered`]), which files nothing for a file no surface names ([`Self::answered_for_nobody`]); [`Self::let_go_changed_file`] |
-/// | `Unanswered` | [`Self::open_unanswered`] — an open whose work failed, or whose thread could not be started ([`Self::ask_for_showing`]) | [`Self::let_go_on_open`], the file's next open; [`Self::let_go_unnamed`] |
+/// | `Unanswered` | [`Self::open_unanswered`] — an open whose work failed, or whose thread could not be started ([`Self::ask_for_showing`]), `{ asked_again: true }`; [`Self::opened`] — a file another program held, `{ asked_again }` from the awaited `Pending`'s `once_more` | [`Self::let_go_on_open`], the file's next open; [`Self::let_go_unnamed`]; [`Self::let_go_changed_file`]; [`Self::ask_for_showing`], for `{ asked_again: false }` only, by its one more ask |
 /// | `Refused` | [`Self::opened`] | [`Self::let_go_unnamed`]; [`Self::let_go_changed_file`] |
 /// | `Ready` | [`Self::opened`] | [`Self::let_go_on_open`]; [`Self::let_go_unnamed`]; [`Self::let_go_changed_file`]; [`Self::adopt_fill`], when the cursor finds the file changed; weight |
 ///
@@ -25305,7 +25671,7 @@ impl AnimationCache {
     #[cfg(test)]
     fn awaited(&self, key: &str) -> Option<computation_lane::ComputationId> {
         match self.playbacks.peek(key) {
-            Some(AnimationEntry::Pending { asked }) => Some(*asked),
+            Some(AnimationEntry::Pending { asked, .. }) => Some(*asked),
             _ => None,
         }
     }
@@ -25338,7 +25704,9 @@ impl AnimationCache {
     /// each file shown that this window holds nothing for is asked of the worker through `ask`,
     /// once however many surfaces show it. A file this window holds anything for — a playback, a
     /// decode in flight, a refusal, an open that never answered — is not asked again by a walk: a
-    /// redraw is no new input.
+    /// redraw is no new input. The one exception is the run-out bound of row 164: a held file's
+    /// first answer (`Unanswered { asked_again: false }`) is asked once more, as `Pending
+    /// { once_more: true }` (T-HELD-FILE-IN-THE-OTHER-PICTURE-LANES).
     fn ask_for_showing(
         &mut self,
         showing: &[(PreviewSurface, Option<PathBuf>)],
@@ -25375,13 +25743,17 @@ impl AnimationCache {
                 continue;
             };
             let key = normalized_local_image_path_key(path);
-            if self.playbacks.contains_key(&key) {
-                continue;
-            }
+            // The one entry a walk asks about: a held file's first answer, asked once more
+            // (T-HELD-FILE-IN-THE-OTHER-PICTURE-LANES; row 164's bound).
+            let once_more = match self.playbacks.peek(&key) {
+                None => false,
+                Some(AnimationEntry::Unanswered { asked_again: false }) => true,
+                Some(_) => continue,
+            };
             match ask(path) {
                 OpenAsked::Asked(asked) => {
                     self.playbacks
-                        .insert(key, AnimationEntry::Pending { asked });
+                        .insert(key, AnimationEntry::Pending { asked, once_more });
                 }
                 // Asked, and no request was admitted to answer it.
                 OpenAsked::Unstarted => self.open_unanswered(key, None),
@@ -25438,7 +25810,7 @@ impl AnimationCache {
             self.playbacks.peek(key),
             Some(
                 AnimationEntry::Ready { .. }
-                    | AnimationEntry::Unanswered
+                    | AnimationEntry::Unanswered { .. }
                     | AnimationEntry::Refused(_)
             )
         ) {
@@ -25452,7 +25824,7 @@ impl AnimationCache {
     fn awaits(&self, key: &str, asked: computation_lane::ComputationId) -> bool {
         matches!(
             self.playbacks.peek(key),
-            Some(AnimationEntry::Pending { asked: awaited }) if *awaited == asked
+            Some(AnimationEntry::Pending { asked: awaited, .. }) if *awaited == asked
         )
     }
 
@@ -25474,8 +25846,9 @@ impl AnimationCache {
     /// a fact about the bytes, and new bytes are a new question; so is a decode that may have read
     /// the old ones — its answer, when it comes, is awaited by no record and is superseded
     /// ([`Self::awaits`]), and the walk's new open is the one filed. `true` when anything was let
-    /// go of. An open that never answered is no fact about the bytes and waits for the file's next
-    /// open as before.
+    /// go of. So is an open that never answered (T-HELD-FILE-IN-THE-OTHER-PICTURE-LANES): it is no
+    /// fact about the bytes, and the change news is a new look — a writer that held the file is
+    /// done with it, which is how a recording that finishes is asked again.
     fn let_go_changed_file(&mut self, key: &str) -> bool {
         let changed = matches!(
             self.playbacks.peek(key),
@@ -25483,6 +25856,7 @@ impl AnimationCache {
                 AnimationEntry::Ready { .. }
                     | AnimationEntry::Refused(_)
                     | AnimationEntry::Pending { .. }
+                    | AnimationEntry::Unanswered { .. }
             )
         );
         if changed {
@@ -25498,33 +25872,42 @@ impl AnimationCache {
     fn let_go_on_open(&mut self, key: &str) {
         if matches!(
             self.playbacks.get(key),
-            Some(AnimationEntry::Ready { .. } | AnimationEntry::Unanswered)
+            Some(AnimationEntry::Ready { .. } | AnimationEntry::Unanswered { .. })
         ) {
             self.playbacks.remove(key);
         }
     }
 
-    /// **An open that was asked and not answered** — the one writer of
-    /// [`AnimationEntry::Unanswered`], which no walk asks again and the file's next open lets go
-    /// of. `asked` is the request whose work failed on the worker, filed only for the decode in
-    /// flight that awaits it ([`Self::awaits`]): the failure of a superseded open changes nothing.
-    /// `None` is an open no request was admitted for — its thread could not be started — filed
-    /// for a file the walk holds nothing for. Either way a failure for a file no surface names
-    /// files nothing ([`Self::answered_for_nobody`]).
+    /// **An open that was asked and not answered** — the writer of
+    /// [`AnimationEntry::Unanswered`] `{ asked_again: true }` for an open with no answer, which no
+    /// walk asks again and the file's next open lets go of. `asked` is the request whose work
+    /// failed on the worker, filed only for the decode in flight that awaits it
+    /// ([`Self::awaits`]): the failure of a superseded open changes nothing. `None` is an open no
+    /// request was admitted for — its thread could not be started — filed for a file the walk
+    /// holds nothing for, or holds the held answer it was asking once more about
+    /// (`Unanswered { asked_again: false }`, which this ends: the one more ask was spent). Either
+    /// way a failure for a file no surface names files nothing ([`Self::answered_for_nobody`]).
     fn open_unanswered(&mut self, key: String, asked: Option<computation_lane::ComputationId>) {
         let answers_this_open = match asked {
             Some(asked) => self.awaits(&key, asked),
-            None => self.playbacks.peek(&key).is_none(),
+            None => matches!(
+                self.playbacks.peek(&key),
+                None | Some(AnimationEntry::Unanswered { asked_again: false })
+            ),
         };
         if !answers_this_open || self.answered_for_nobody(&key) {
             return;
         }
-        self.playbacks.insert(key, AnimationEntry::Unanswered);
+        self.playbacks
+            .insert(key, AnimationEntry::Unanswered { asked_again: true });
     }
 
     /// **The worker's answer to the open `asked`**, filed whether or not it decoded: a playback
-    /// under the serial minted for it ([`AnimationEntry::Ready`]), or the refusal with its reason
-    /// ([`AnimationEntry::Refused`]) — a refusal is an answer. Filed only for the decode in flight
+    /// under the serial minted for it ([`AnimationEntry::Ready`]), the refusal with its reason
+    /// ([`AnimationEntry::Refused`]) — a refusal is an answer — or, for a file another program
+    /// held, a question not answered ([`AnimationEntry::Unanswered`]), asked again by the next walk
+    /// unless this open was already that one more ask (`once_more`;
+    /// T-HELD-FILE-IN-THE-OTHER-PICTURE-LANES). Filed only for the decode in flight
     /// that awaits `asked` ([`Self::awaits`]): the answer to a superseded open is never filed, and
     /// an answer for a file no surface names any more is filed nowhere
     /// ([`Self::answered_for_nobody`]). `true` when it was filed — the one case that changes what
@@ -25534,9 +25917,16 @@ impl AnimationCache {
         key: String,
         asked: computation_lane::ComputationId,
         serial: u64,
-        frames: Result<animation::Animation, animation::AnimationRefusal>,
+        frames: Result<animation::Animation, animation::NotOpened>,
     ) -> bool {
-        if !self.awaits(&key, asked) || self.answered_for_nobody(&key) {
+        let once_more = match self.playbacks.peek(&key) {
+            Some(AnimationEntry::Pending {
+                asked: awaited,
+                once_more,
+            }) if *awaited == asked => *once_more,
+            _ => return false,
+        };
+        if self.answered_for_nobody(&key) {
             return false;
         }
         self.playbacks.insert(
@@ -25546,7 +25936,10 @@ impl AnimationCache {
                     serial,
                     animation: Box::new(animation),
                 },
-                Err(refusal) => AnimationEntry::Refused(refusal),
+                Err(animation::NotOpened::Refused(refusal)) => AnimationEntry::Refused(refusal),
+                Err(animation::NotOpened::HeldElsewhere) => AnimationEntry::Unanswered {
+                    asked_again: once_more,
+                },
             },
         );
         true
@@ -29088,8 +29481,27 @@ fn plan_launch(saved: &[TabV1], active: usize, cli_wants_pane: bool) -> LaunchPl
 /// leaf at all, and the fallback to `lone_terminal` then zips one seat against
 /// zero saved leaves and produces no entries — which is right, because there
 /// was nothing saved to pair with.
+///
+/// **No agent is resumed by this door** — [`revive_plan_with`] is the one a launch's pinned tabs
+/// and the restore card's reopened ones come back through (row 195), so this one is the tests'.
+#[cfg(test)]
 fn revive_plan(
     tab: &TabV1,
+) -> (
+    seats::Seats,
+    TabSeed,
+    BTreeMap<SeatId, LeafSeed>,
+    BTreeMap<SeatId, seats::FilesLeafState>,
+    PreviewRestore,
+) {
+    revive_plan_with(tab, agent_resume::Restore::off())
+}
+
+/// `revive_plan`, resuming each pane's recorded agent as `restore` allows
+/// ([`agent_resume::revived`], 0.4.9 plan row 195).
+fn revive_plan_with(
+    tab: &TabV1,
+    restore: agent_resume::Restore,
 ) -> (
     seats::Seats,
     TabSeed,
@@ -29134,21 +29546,32 @@ fn revive_plan(
         .terminals()
         .into_iter()
         .zip(saved)
-        .map(|(seat, leaf)| {
+        .map(|(seat, leaf): (SeatId, &TermLeafV1)| {
             // **The saved id, kept as an id** — and swapped for the fallback's here
             // and only here, which is where the reader is owed the sentence about it
             // ([`revived_profile`]). Below this line the seed names a profile that
             // exists, or the unresolved default its birth decides; above it,
             // `unknown_profile_id` carries the name the banner quotes.
             let (profile, unknown_profile_id) = revived_profile(&leaf.profile_id);
+            // **The fifth fact, and the one that may change the first two** (row 195): a pane
+            // whose agent was recorded comes back as that vendor's resume, in the folder the
+            // vendor files the session under — and with nothing typed at it, so no prefill.
+            let (profile, folder, agent) = agent_resume::revived(
+                profile,
+                Some(leaf.cwd.as_str())
+                    .filter(|cwd| !cwd.is_empty())
+                    .map(PathBuf::from),
+                leaf.agent.as_ref(),
+                restore,
+            );
+            let resuming = matches!(agent, agent_resume::SeedAgent::Resume(_));
             (
                 seat,
                 LeafSeed {
                     profile,
-                    unknown_profile_id,
-                    cwd: Some(leaf.cwd.as_str())
-                        .filter(|cwd| !cwd.is_empty())
-                        .map(|cwd| profiles::SeedPlace::Carried(PathBuf::from(cwd))),
+                    // A pane coming back as its agent is not the profile the banner would name.
+                    unknown_profile_id: unknown_profile_id.filter(|_| !resuming),
+                    cwd: folder.map(profiles::SeedPlace::Carried),
                     // The third fact read out of the same saved leaf in the same
                     // pass, for the reason the two above it are: a pane revived
                     // with somebody else's aim is a card pointed at the wrong
@@ -29158,8 +29581,10 @@ fn revive_plan(
                     // three above it's own terms. Empty is `None` rather than an empty command,
                     // so "this shell never reported one" and "this rung does not restore them"
                     // arrive as one case (§7.54e ④).
-                    prefill: Some(leaf.last_command.clone()).filter(|it| !it.is_empty()),
+                    prefill: Some(leaf.last_command.clone())
+                        .filter(|it| !it.is_empty() && !resuming),
                     carried_environment: None,
+                    agent,
                 },
             )
         })
@@ -29440,7 +29865,7 @@ fn collect_term_leaves<'a>(node: &'a LayoutNodeV1, out: &mut Vec<&'a TermLeafV1>
 /// Every Files leaf of a persisted tree, in the order the tree is drawn.
 ///
 /// The exact sibling of [`persisted_term_leaves`], and it has to be the same
-/// walk for the same reason: the pairing in [`revive_plan`] is a `zip` against
+/// walk for the same reason: the pairing in [`revive_plan_with`] is a `zip` against
 /// `Seats::files`, and two walks that agree everywhere except on one shape would
 /// hand a column somebody else's root — which looks like a working files pane
 /// pointed at the wrong folder, not like a bug.
@@ -29634,6 +30059,10 @@ struct LeafSeed {
     /// [`born_in_tab`]; `None` in every other tab. Never saved, so a revived pane takes the
     /// account's environment.
     carried_environment: Option<cli::CarriedEnvironment>,
+    /// **What this pane is born as about an agent** (0.4.9 plan row 195): the vendor's resume a
+    /// restored pane's record asks for ([`agent_resume::revived`]), the failure line a hand-back
+    /// shell opens with, or nothing — which is every seed that is not a restore's.
+    agent: agent_resume::SeedAgent,
 }
 
 /// **The profile a saved pane comes back as, and the id its banner names** — one reading of a
@@ -30919,6 +31348,7 @@ impl SplitSeed {
                 // A split is not a restore; nothing is owed to its prompt.
                 prefill: None,
                 carried_environment: None,
+                agent: crate::agent_resume::SeedAgent::None,
             },
             Self::Profile(profile) => LeafSeed {
                 profile: profile.clone(),
@@ -30934,6 +31364,7 @@ impl SplitSeed {
                 card_skip: 0,
                 prefill: None,
                 carried_environment: None,
+                agent: crate::agent_resume::SeedAgent::None,
             },
             // The chooser answers with a Windows path, because
             // `FOS_FORCEFILESYSTEM` is what makes it answer with a path at all —
@@ -30953,6 +31384,7 @@ impl SplitSeed {
                 card_skip: 0,
                 prefill: None,
                 carried_environment: None,
+                agent: crate::agent_resume::SeedAgent::None,
             },
         }
     }
@@ -31215,6 +31647,11 @@ fn birth_here(
     programs: &profiles::ProfilePrograms,
 ) -> Result<(LeafSeed, Started), Vec<String>> {
     let (identity, started) = decided_birth(seed, stored_default, programs)?;
+    if let Some(shell) = handed_back_seed(seed, &started)
+        .or_else(|| shell_cannot_resume(seed, profiles::row_of(&identity).as_ref(), &started))
+    {
+        return birth_here(&shell, stored_default, programs);
+    }
     match resolved_birth_seed(seed, &identity) {
         (resolved, None) => Ok((resolved, started)),
         (_, Some(_)) => Err(vec![identity]),
@@ -31314,26 +31751,79 @@ fn adopt_program_answers(
         .program(attention_copilot::PROFILE_ID)
         .map(std::ffi::OsStr::to_owned)
         != copilot_before;
+    // **codex's version is asked of the program this walk found** (0.4.10 plan row 69c, R17), on
+    // the carry pass's worker: a codex found, moved or gone is a reason to scan again, once the
+    // agents' folders are known — the first answer below runs the pass anyway. A walk that has
+    // answered and has no `codex` row (a Mac's table has none) has found no codex.
+    let walked = attention_hooks::AGENT_HOMES.answered() || answers.facts.is_some();
+    let codex_moved = attention_codex::adopt_walk_program(
+        programs
+            .answer(attention_codex::PROFILE_ID)
+            .or_else(|| walked.then_some(None)),
+    );
+    if codex_moved && attention_hooks::AGENT_HOMES.answered() {
+        carry_pass::begin_carry_pass();
+    }
     if let Some(facts) = answers.facts {
         if wsl::adopt(facts.wsl) {
             profiles::names_changed();
             news.names = true;
         }
         news.git = git::GIT_LOCATION.adopt(facts.git);
-        news.agent_homes = attention_hooks::AGENT_HOMES.adopt(facts.generation, facts.agent_homes);
+        // **The first answer is news too** (0.4.10 plan row 67b): before it no agent's file has
+        // been read in this process, whether or not the walk's folders differ from the launch's.
+        let first = !attention_hooks::AGENT_HOMES.answered();
+        news.agent_homes =
+            attention_hooks::AGENT_HOMES.adopt(facts.generation, facts.agent_homes) || first;
+        if news.agent_homes {
+            // Where the agents keep their files is the account's own now: the carry pass reads
+            // them there, on its worker, wherever this answer was adopted — the launch adopts the
+            // walk before it has a window to take news to.
+            carry_pass::begin_carry_pass();
+        }
     }
     news
 }
 
-/// **The three agent rows, read off their files again** — `Runtime::refresh_agent_rows`'s body,
-/// and the program walk's adopter's when the folders the files live in moved (T-FRESH-FACTS). The
-/// copilot readiness is read again with them: whether its hooks are switched off is a file in the
-/// same folder.
-fn read_the_agent_rows_again<B: Backend>(app: &mut App<B>) {
-    (app.claude_hooks_installed, app.agent_config_refusals[0]) = attention_hooks::row_state();
-    (app.codex_notify_installed, app.agent_config_refusals[1]) = attention_codex::row_state();
-    (app.copilot_hooks_installed, app.agent_config_refusals[2]) = attention_copilot::row_state();
-    app.copilot_readiness = attention_copilot::readiness();
+/// **The three agent rows, set from the start-time scan's answer** (0.4.10 plan row 67b) — what
+/// the window does with `agent_hooks_step::HooksSnapshot`, and all it does: the files were read on
+/// the carry pass's worker. Whether the switch is On (this copy's hooks, in today's form or an
+/// older one), the reason a file will not be edited at all, what each row says, and Copilot's
+/// readiness, which reads a file in the same folder.
+fn adopt_agent_hooks_snapshot<B: Backend>(
+    app: &mut App<B>,
+    snapshot: &agent_hooks_step::HooksSnapshot,
+) {
+    let installed = [
+        &mut app.claude_hooks_installed,
+        &mut app.codex_notify_installed,
+        &mut app.copilot_hooks_installed,
+    ];
+    for ((installed, refusal), found) in installed
+        .into_iter()
+        .zip(&mut app.agent_config_refusals)
+        .zip(&snapshot.found)
+    {
+        *installed = found.is_this_copys();
+        *refusal = match found {
+            attention_ownership::HooksFound::Refused(reason) => Some(*reason),
+            _ => None,
+        };
+    }
+    app.agent_hooks_found = std::array::from_fn(|index| {
+        Some((snapshot.found[index].clone(), snapshot.unrepaired[index]))
+    });
+    app.agent_rows_known = true;
+    app.copilot_readiness = snapshot.copilot_readiness;
+}
+
+/// **A press on agent row `family` asks the scan again** (0.4.10 plan row 67b): the row's line and
+/// the resume row's are the scan's, so the row says its own sentence until the pass the press
+/// starts answers, off this thread. With [`adopt_agent_hooks_snapshot`], the one writer of
+/// `App::agent_hooks_found`.
+fn agent_row_asked_again<B: Backend>(app: &mut App<B>, family: usize) {
+    app.agent_hooks_found[family] = None;
+    carry_pass::begin_carry_pass();
 }
 
 /// **The startup trace's two shell lines, held while a launch tab's shell is being born**.
@@ -31790,6 +32280,7 @@ mod shell_birth_tests {
             card_skip: 0,
             prefill: None,
             carried_environment: None,
+            agent: crate::agent_resume::SeedAgent::None,
         }
     }
 
@@ -32034,14 +32525,16 @@ mod shell_birth_tests {
             cwd: Some(profiles::SeedPlace::Carried(share.clone())),
             ..seed_of(profile)
         };
-        let mut leaf = bare(&decision, &seed);
+        // Declared before the pane, so an unwinding assertion drops the pane (and its shell)
+        // before the shell's folder, as the passing teardown below does (plan row 188).
+        let (kept, hygiene) = mpsc::channel();
+        let mut leaf = crate::test_support::ReapedPane(bare(&decision, &seed));
         let (asked_by, asked) = mpsc::channel();
         let (answer, share_answers) = mpsc::channel();
-        let (kept, hygiene) = mpsc::channel();
         let (wake, heard) = waking();
         let spec = pty_door::GoneSpec {
             folder: gone.folder.clone(),
-            arguments: Vec::new(),
+            arguments: Some(Vec::new()),
             working_directory: gone.place.working_directory.clone(),
         };
         let shell = pty_door::request(
@@ -32049,10 +32542,10 @@ mod shell_birth_tests {
                 let resolver = share_that_waits(asked_by, share_answers);
                 let folder_gone = pty_door::gone_place(Some(spec), &resolver).is_some();
                 pty_door::Born {
-                    session: a_quiet_shell(born_size()).map(|(session, hygiene)| {
+                    session: Some(a_quiet_shell(born_size()).map(|(session, hygiene)| {
                         let _ = kept.send(hygiene);
                         session
-                    }),
+                    })),
                     folder_gone,
                 }
             },
@@ -32067,10 +32560,12 @@ mod shell_birth_tests {
             "and waits on it, not the window"
         );
         assert_eq!(leaf.session.launch.spawn_place.as_ref(), Some(&share));
+        // The pane itself (`.0`), so the session and the projection are borrowed apart.
         let frame = leaf
+            .0
             .session
             .session
-            .viewport_frame(&mut leaf.view.projection)
+            .viewport_frame(&mut leaf.0.view.projection)
             .expect("the pane draws while its folder is asked about");
         assert!(frame_matches_grid(&frame, leaf.session.grid));
         assert_eq!(
@@ -32139,9 +32634,11 @@ mod shell_birth_tests {
     fn a_pane_draws_before_its_shell_exists_and_its_shell_gets_what_was_typed_in_order() {
         let decision = decided(Started::AsAsked);
         let seed = seed_of(profiles::fallback_profile_id());
-        let mut leaf = bare(&decision, &seed);
-        let (open, gate) = mpsc::channel();
+        // Declared before the pane, so an unwinding assertion drops the pane (and its shell)
+        // before the shell's folder, as the passing teardown below does (plan row 188).
         let (kept, hygiene) = mpsc::channel();
+        let mut leaf = crate::test_support::ReapedPane(bare(&decision, &seed));
+        let (open, gate) = mpsc::channel();
         let (wake, heard) = waking();
         let shell = pty_door::request(shell_once(gate, kept), wake).expect("a birth worker");
         await_shell(&mut leaf.session, shell, decision, &seed);
@@ -32150,10 +32647,12 @@ mod shell_birth_tests {
             leaf.session.life.pty().is_none() && !leaf.session.shell_answered(),
             "nothing is born yet"
         );
+        // The pane itself (`.0`), so the session and the projection are borrowed apart.
         let frame = leaf
+            .0
             .session
             .session
-            .viewport_frame(&mut leaf.view.projection)
+            .viewport_frame(&mut leaf.0.view.projection)
             .expect("a pane in birth projects a frame");
         assert!(
             frame_matches_grid(&frame, leaf.session.grid),
@@ -32362,7 +32861,7 @@ mod shell_birth_tests {
         let seed = seed_of(profiles::WSL_ID);
 
         let (at_once_shell, at_once_hygiene) = a_quiet_shell(born_size()).expect("a real shell");
-        let mut at_once = bare(&decision, &seed);
+        let mut at_once = crate::test_support::ReapedPane(bare(&decision, &seed));
         finish_leaf_birth(
             &mut at_once,
             Some(at_once_shell),
@@ -32373,9 +32872,11 @@ mod shell_birth_tests {
         )
         .expect("born with its shell in hand");
 
-        let mut later = bare(&decision, &seed);
-        let (open, gate) = mpsc::channel();
+        // Declared before the pane, so an unwinding assertion drops the pane (and its shell)
+        // before the shell's folder, as the passing teardown below does (plan row 188).
         let (kept, hygiene) = mpsc::channel();
+        let mut later = crate::test_support::ReapedPane(bare(&decision, &seed));
+        let (open, gate) = mpsc::channel();
         let (wake, heard) = waking();
         let shell = pty_door::request(shell_once(gate, kept), wake).expect("a birth worker");
         await_shell(&mut later.session, shell, decision.clone(), &seed);
@@ -32436,6 +32937,10 @@ mod shell_birth_tests {
     fn a_restart_waiting_on_an_unknown_row_lands_when_the_walk_answers() {
         let decision = decided(Started::AsAsked);
         let seed = seed_of(profiles::fallback_profile_id());
+        // Declared before the pane, so an unwinding assertion drops the pane (and the successor's
+        // shell it holds) before the shell's folder, as the passing teardown below does (plan
+        // row 188).
+        let (kept, hygiene) = mpsc::channel();
         let mut leaf = bare(&decision, &seed);
         finish_leaf_birth(&mut leaf, None, &decision, &seed, None, false).expect("the old pane");
         let mut waiting = bare(&decision, &seed);
@@ -32463,7 +32968,6 @@ mod shell_birth_tests {
         // What `Runtime::land_pane_birth` puts back for a successor whose rows decided it: a
         // pane in birth for its shell.
         let (open, gate) = mpsc::channel();
-        let (kept, hygiene) = mpsc::channel();
         let (wake, heard) = waking();
         let mut remade = bare(&decision, &seed);
         let shell = pty_door::request(shell_once(gate, kept), wake).expect("a birth worker");
@@ -32480,6 +32984,7 @@ mod shell_birth_tests {
         else {
             panic!("the successor's shell was born");
         };
+        let successor = crate::test_support::ReapedPane(*successor);
         assert!(successor.session.life.pty().is_some() && successor.session.life.birth().is_none());
         assert!(!leaf.restart_in_flight(), "the menu row is offered again");
         drop((leaf, successor));
@@ -32804,19 +33309,17 @@ fn create_leaf_session(
             shell_integration::Scripts::installed(),
             environment,
         );
-        // The same row composed for the place the pane opens in when its folder is gone: the
-        // birth worker takes this command line and working directory instead, having asked.
-        let gone_spec = unless_gone.as_ref().map(|gone| pty_door::GoneSpec {
-            folder: gone.folder.clone(),
-            arguments: shell_integration::shell_command(
+        // **A restored agent is started as its vendor's resume** (row 195).
+        let resuming = compose_resume(&mut command, seed, &started, row, Path::new(&program));
+        let gone_spec = birth_unless_gone(unless_gone.as_ref(), resuming, |gone| {
+            shell_integration::shell_command(
                 row,
                 &program_kind,
                 &gone.place.arguments,
                 shell_integration::Scripts::installed(),
                 environment,
             )
-            .arguments,
-            working_directory: gone.place.working_directory.clone(),
+            .arguments
         });
         // **The PowerShell load is finished on the birth worker**, not here: naming `folio.ps1`
         // means preparing it, which is disk work. The switch is read here, once, and travels with
@@ -32903,6 +33406,16 @@ fn create_leaf_session(
         line_wrapping,
         environment,
     );
+    // **What the pane's child is about an agent**: a resume when one was asked for and that program
+    // is the one being started; nothing otherwise — a pane that fell back is the shell it says it
+    // is, and [`finish_leaf_birth`] says the session did not come back.
+    leaf.session.agent = agent_resume::AgentAccount::born(
+        &seed.agent,
+        shell.is_some() && resuming_vendor(seed, &started).is_some(),
+    );
+    // **A resume's turns are its agent's from birth** (row 75): its record was written by that
+    // agent's own `Stop`, so what it draws while it reloads is no finished turn.
+    leaf.session.turn_account = agent_turns::TurnAccount::born_beside(&leaf.session.agent);
     match shell {
         // **Born later, standing where its shell will stand.** The place is said now, from the
         // decision, so a pane split off or restarted from this one while it is being born is put
@@ -32929,6 +33442,98 @@ fn create_leaf_session(
         }
     }
     Ok(leaf)
+}
+
+/// **A restored agent's command line is its vendor's resume** (0.4.9 plan row 195): the profile's
+/// environment stays, its arguments give way to the resume's, and the configuration folder the
+/// session lives in is the one it was recorded under. Answers whether the birth is a resume;
+/// `false`, and `command` untouched, for every other birth.
+///
+/// **And the resume is handed the agent's launch** (0.4.10 plan row 74): the words the recorded
+/// agent was started with that its vendor's table carries, after the resume's own
+/// ([`agent_resume::replayed_launch`]), as `program` — the program this birth starts — can carry
+/// them. A profile's own arguments come back this way too: they are the words its agent was
+/// started with, read off that agent's own command line. What the launch could not carry, the
+/// pane says in its first line ([`resumed_without_line`]).
+///
+/// **A shell pane's resume is that shell `exec`ing the vendor** (the Mac's road,
+/// `agent_resume::Road::ThroughTheShell`; T-AGENT-RESUME-ON-MACOS): `row` is the shell's, its own
+/// words stay as its door composed them (zsh's `-l`, bash's `--init-file … -i`), and the shell is
+/// told to be interactive, so it reads the startup files a typed agent's `PATH` came from, and to
+/// run the one command `agent_resume::Vendor::shell_command` spells. A shell whose spelling is not
+/// verified is no resume here: [`birth_here`] has already handed such a seed its shell with the
+/// line ([`shell_cannot_resume`]).
+fn compose_resume(
+    command: &mut shell_integration::ShellCommand,
+    seed: &LeafSeed,
+    started: &Started,
+    row: &profiles::Profile,
+    program: &Path,
+) -> bool {
+    let Some((vendor, record)) = resuming_vendor(seed, started) else {
+        return false;
+    };
+    let launch = agent_resume::replayed_launch(vendor, record, program).words;
+    let through_the_shell = !vendor.is_started_by(&seed.profile);
+    let shell = profiles::command_flags(&row.program).filter(|_| through_the_shell);
+    if through_the_shell && shell.is_none() {
+        return false;
+    }
+    if let Some(home) = &record.home {
+        command.environment.push((
+            std::ffi::OsString::from(vendor.home_variable),
+            std::ffi::OsString::from(home),
+        ));
+    }
+    if let Some(flags) = shell {
+        // Once: bash's door already made it interactive (`-i`, or a row's own `--interactive`).
+        if !command
+            .arguments
+            .iter()
+            .any(|word| word == flags.interactive || word == "--interactive")
+        {
+            command.arguments.push(flags.interactive.into());
+        }
+        command.arguments.push(flags.command.into());
+        command
+            .arguments
+            .push(vendor.shell_command(&record.resume_id, &launch));
+        return true;
+    }
+    command.arguments = vendor.arguments(&record.resume_id, &launch);
+    true
+}
+
+/// **What a birth starts when the folder it carries is gone** (G-SWEEP-048, #29): the same row
+/// composed for the place the pane opens in instead (`compose`), which the birth worker takes,
+/// having asked. **A resume whose folder is gone is started nowhere** (row 195, review F3): run in
+/// the profile's own folder, a vendor that resumes by id would bring the conversation back in a
+/// folder nobody chose — its sandbox and write scope rooted there — so the birth starts nothing,
+/// and the pane is handed its shell with the could-not-resume line
+/// (`agent_resume::AgentAccount::not_started`).
+fn birth_unless_gone(
+    unless_gone: Option<&profiles::GoneFolder>,
+    resuming: bool,
+    compose: impl FnOnce(&profiles::GoneFolder) -> Vec<std::ffi::OsString>,
+) -> Option<pty_door::GoneSpec> {
+    unless_gone.map(|gone| pty_door::GoneSpec {
+        folder: gone.folder.clone(),
+        arguments: (!resuming).then(|| compose(gone)),
+        working_directory: gone.place.working_directory.clone(),
+    })
+}
+
+/// **The vendor and record a seed resumes, when its profile is the one being started** (row 195).
+fn resuming_vendor<'a>(
+    seed: &'a LeafSeed,
+    started: &Started,
+) -> Option<(&'static agent_resume::Vendor, &'a bt_persist::AgentRecordV1)> {
+    match (&seed.agent, started) {
+        (agent_resume::SeedAgent::Resume(resume), Started::AsAsked) => {
+            agent_resume::vendor(&resume.record.vendor).map(|vendor| (vendor, &resume.record))
+        }
+        _ => None,
+    }
 }
 
 /// **A pane, every part but its shell's** — its session made and dressed for its view, standing
@@ -33018,6 +33623,10 @@ fn bare_leaf(
                 capability,
             },
             attention_ended: false,
+            // Told what it is born as by `create_leaf_session`, once the birth is decided.
+            agent: agent_resume::AgentAccount::default(),
+            // Likewise: a resume is bound from birth, any other pane at its agent's first turn.
+            turn_account: agent_turns::TurnAccount::default(),
             grid,
             conpty_grid: grid,
             pending_pty_resize: None,
@@ -33073,6 +33682,101 @@ fn await_shell(
     });
 }
 
+/// **The line a pane opens with when its agent's session did not come back** (row 195): a
+/// hand-back's, a resume whose profile was not the one started, or one whose program would not
+/// start and was stood in for (`stood_in`, review N2).
+fn could_not_resume_line(seed: &LeafSeed, started: &Started, stood_in: bool) -> Option<String> {
+    match (&seed.agent, started) {
+        (agent_resume::SeedAgent::CouldNotResume(could), _) => Some(could.text()),
+        (agent_resume::SeedAgent::Resume(resume), Started::FellBack(_) | Started::Nothing) => {
+            could_not_resume(resume).map(|could| could.text())
+        }
+        (agent_resume::SeedAgent::Resume(resume), Started::AsAsked) if stood_in => {
+            could_not_resume(resume).map(|could| could.text())
+        }
+        _ => None,
+    }
+}
+
+/// **The line a resumed pane opens with when its launch did not all come back** (0.4.10 plan row
+/// 74): the flags the recorded agent was started with that the resume was not handed, or that its
+/// launch could not be read — for a resume this birth started (`agent`'s own word,
+/// [`agent_resume::AgentAccount::resume_runs`]: not one that fell back, was stood in for, or found
+/// its folder gone), by the program it started ([`agent_resume::replayed_launch`], the same answer
+/// [`compose_resume`] composed from). `None` for every other pane, and for a launch that came back
+/// whole or was never recorded.
+fn resumed_without_line(
+    seed: &LeafSeed,
+    decision: &BirthDecision,
+    agent: &agent_resume::AgentAccount,
+) -> Option<String> {
+    let (vendor, record) = resuming_vendor(seed, &decision.started)?;
+    let program = decision
+        .program
+        .as_deref()
+        .filter(|_| agent.resume_runs())?;
+    agent_resume::replayed_launch(vendor, record, program)
+        .said
+        .map(|said| said.text())
+}
+
+/// The could-not-resume line's facts for a resume this build knows the vendor of.
+fn could_not_resume(resume: &agent_resume::Resume) -> Option<agent_resume::CouldNotResume> {
+    agent_resume::vendor(&resume.record.vendor).map(|vendor| agent_resume::CouldNotResume {
+        title: vendor.title,
+        id: resume.record.resume_id.clone(),
+    })
+}
+
+/// **A resume this machine cannot start comes back as the shell the pane hands back** (row 195,
+/// review N2): a pane where `claude` was typed into Git Bash, restored on a machine with no
+/// `claude` on it, is born as its Git Bash — not as the default profile, which would forget the
+/// pane's own shell after one start — saying which session did not come back. `None` for any other
+/// seed, and for a resume whose own profile was the agent's (it falls back as any profile does).
+fn handed_back_seed(seed: &LeafSeed, started: &Started) -> Option<LeafSeed> {
+    let agent_resume::SeedAgent::Resume(resume) = &seed.agent else {
+        return None;
+    };
+    if *started == Started::AsAsked {
+        return None;
+    }
+    let profile = resume.hand_back.clone()?;
+    let could = could_not_resume(resume)?;
+    Some(LeafSeed {
+        profile,
+        agent: agent_resume::SeedAgent::CouldNotResume(could),
+        ..seed.clone()
+    })
+}
+
+/// **A resume the pane's shell cannot be told to start comes back as that shell, saying so**
+/// (T-AGENT-RESUME-ON-MACOS): on the Mac's road the shell `exec`s the vendor, and a shell whose
+/// interactive one-command spelling is not verified (`profiles::CommandFlags`: fish, nu, csh, a
+/// shell of no known family) is handed no command it might read another way. The pane is born as
+/// its own shell, in the session's folder, with the could-not-resume line, and its record goes
+/// the way every failed resume's does. `row` is the row the birth starts (`None`: no row, which a
+/// birth started as asked never is); `None` for any other seed, and for a pane whose own program
+/// is the vendor's.
+fn shell_cannot_resume(
+    seed: &LeafSeed,
+    row: Option<&profiles::Profile>,
+    started: &Started,
+) -> Option<LeafSeed> {
+    let agent_resume::SeedAgent::Resume(resume) = &seed.agent else {
+        return None;
+    };
+    let row = row.filter(|_| *started == Started::AsAsked)?;
+    let vendor = agent_resume::vendor(&resume.record.vendor)?;
+    if vendor.is_started_by(&row.id) || profiles::command_flags(&row.program).is_some() {
+        return None;
+    }
+    let could = could_not_resume(resume)?;
+    Some(LeafSeed {
+        agent: agent_resume::SeedAgent::CouldNotResume(could),
+        ..seed.clone()
+    })
+}
+
 /// **The half of a pane's birth that needs its shell** — run at creation for a pane with no shell
 /// to wait for, and at the landing for one whose shell was asked of `bt-pty-birth`
 /// (`land_shell_birth`): the same code on both roads, so a pane that waited for its shell is the
@@ -33093,6 +33797,15 @@ fn finish_leaf_birth(
     let mut pty = pty;
     let shell_fallback = pty.as_mut().and_then(PtySession::take_shell_fallback);
     leaf.life.record_spawn_fallback(shell_fallback.clone());
+    // **A stand-in is no resume** (row 195, review N2): when the vendor's program resolved but would
+    // not start, `bt-pty`'s last resort is what runs, and it is no agent this pane can account for
+    // — the record goes, and the pane says which session did not come back.
+    let stood_in = shell_fallback.is_some() && leaf.agent.is_resumed();
+    if stood_in {
+        leaf.agent = agent_resume::AgentAccount::default();
+        // Nor are its turns an agent's (row 75): the stand-in is read by the shell's rule.
+        leaf.turn_account = agent_turns::TurnAccount::default();
+    }
     // **A pane born on the inbox ConPTY says so, once, and why** (T-KEYBOARD-RECORDS). The
     // process falls back to Windows' own ConPTY when the packaged pair is missing or will not
     // load; that pane gets no win32-input-mode key records (`input::key_records`), so a line in
@@ -33187,6 +33900,21 @@ fn finish_leaf_birth(
             // just stopped this leaf from claiming to be.
             .feed(fallback_banner(fallback, &seed.profile).as_bytes())
             .context("write the shell fallback banner into the leaf's first line")?;
+    }
+    // **And a session that did not come back** (row 195): a shell handed back after its resumed
+    // agent exited before a hook spoke, or a resume whose program this machine could not start.
+    if let Some(line) =
+        could_not_resume_line(seed, &decision.started, stood_in).filter(|_| !in_birth)
+    {
+        session
+            .feed(banner_line(&line).as_bytes())
+            .context("write the could-not-resume line into the leaf's first line")?;
+    }
+    // **And a resume whose launch did not all come back** (row 74): the flags it came back without.
+    if let Some(line) = resumed_without_line(seed, decision, &leaf.agent).filter(|_| !in_birth) {
+        session
+            .feed(banner_line(&line).as_bytes())
+            .context("write the resumed-without line into the leaf's first line")?;
     }
     if let Some(bytes) = probe_input.filter(|_| !in_birth) {
         session
@@ -33532,6 +34260,7 @@ fn create_tab_state<G: Glass>(
                     card_skip: 0,
                     prefill: None,
                     carried_environment: None,
+                    agent: crate::agent_resume::SeedAgent::None,
                 }),
                 seed.carried_environment.as_ref(),
             ),
@@ -34080,14 +34809,20 @@ fn new_window_runtime<B: Backend>(parts: NewWindowParts<B>) -> WindowRuntime<B> 
     // system sends the question to holds the document and parks the news; the wake brings the
     // turn that writes it. One per window because the question is sent to every top-level window,
     // and one answer is as good as another: the hold is set once and the write is idempotent.
+    // The last word, `WM_ENDSESSION(TRUE)`, is answered only after `session_end::at_the_end`: a
+    // probe line, a line on the question's save, and the log fenced (plan row 201).
     let session_end_watch = {
         let proxy = event_proxy.clone();
         window.watch_session_end(
             Box::new(move |end| {
+                // The queue as the news found it: read before Folio posts its own wake to it.
+                let queued = bt_platform::session_end::posted_messages_waiting();
                 session_end::hear(end);
-                let _ = proxy.send_event(AppEvent::SessionEnding);
+                let taken = proxy.send_event(AppEvent::SessionEnding).is_ok();
+                session_end::posted(end, queued, taken);
             }),
             Box::new(|| i18n::Text::ShutdownSavingWork.text().to_owned()),
+            std::rc::Rc::new(|| _ = session_end::at_the_end()),
         )
     };
     // **A window is born knowing its display's rate**, before it has drawn
@@ -34204,7 +34939,7 @@ fn new_window_runtime<B: Backend>(parts: NewWindowParts<B>) -> WindowRuntime<B> 
         system_caret: ImeCursorSlot::default(),
         title: TitleSlot::default(),
         rename_caret_line: None,
-        rename_drawn: None,
+        drawn_fields: DrawnFields::default(),
         cursor_blink: CursorBlink::new(Instant::now(), motion),
         // A window is focused when it opens, and `CursorBlink` starts from
         // the same assumption — the two must agree or the strip and the
@@ -34759,6 +35494,15 @@ impl Runtime<'_, Native> {
                 let _ = proxy.send_event(AppEvent::ExplorerPackageChanged);
             });
         }
+        // **And the carry pass's** (0.4.10 plan row 67b): it can write too — an agent's hooks that
+        // name a copy that is gone — and lands after the program walk, which is after the first
+        // frame on most launches. Installed before the walk can answer, so before the pass runs.
+        {
+            let proxy = proxy.clone();
+            agent_hooks_step::install_hooks_wake(move || {
+                let _ = proxy.send_event(AppEvent::AgentHooksScanned);
+            });
+        }
         // **And the sixth's** (GitHub issue #3), which is the only one of them
         // that is started by a *press* rather than by startup or by a pane: the
         // gear asks the machine for its monospaced families, and the picker is
@@ -35189,6 +35933,11 @@ impl Runtime<'_, Native> {
                     let startup_dpi = dpi_snapshot(&window)?;
                     let physical = window.inner_size();
                     let startup_scale_factor = startup_dpi.authoritative_scale;
+                    // **The program's icon, at the scale the renderer is about to be born at**
+                    // (0.4.10 plan row 71): the window is still hidden, and the snap layouts,
+                    // Alt+Tab and Task View read the window's own icon, which nothing else
+                    // gives it. A later scale change wears it again (`apply_scale_factor`).
+                    window.wear_the_app_icon(startup_scale_factor);
                     let phase_started = Instant::now();
                     // The visual tree first, because the swapchain hangs off it. Its
                     // `topmost = true` target composes above this window's own painting, so
@@ -35408,7 +36157,14 @@ impl Runtime<'_, Native> {
                             PreviewRestore::default(),
                         )]
                     } else {
-                        let mut roots: Vec<_> = plan.open.iter().map(revive_plan).collect();
+                        // A launch's pinned tabs resume their agents as this run's settings say
+                        // (row 195), on the same road as a later window's and the card's.
+                        let resuming = agent_resume::Restore::of_this_run(settings_store.loaded());
+                        let mut roots: Vec<_> = plan
+                            .open
+                            .iter()
+                            .map(|tab| revive_plan_with(tab, resuming))
+                            .collect();
                         if let (Some(cli_root), Some(slot)) = (cli_root, cli_slot) {
                             roots.insert(slot, cli_root);
                         }
@@ -35620,12 +36376,6 @@ impl Runtime<'_, Native> {
                 }
             });
         let git_worker = git::GitWorker::spawn(proxy.clone(), Arc::clone(git_mutations.turns()))?;
-        // **One read per family, and both of the row's facts come out of it**: whether this copy's
-        // marks are in that file, and — when the file is one this build will not edit — the reason
-        // the row has to say instead of `Off` (closure review R1).
-        let claude_row = attention_hooks::row_state();
-        let codex_row = attention_codex::row_state();
-        let copilot_row = attention_copilot::row_state();
         let mut app = App::assemble(AppParts {
             gpu,
             tab_ids,
@@ -35653,16 +36403,17 @@ impl Runtime<'_, Native> {
             // Reads the registry once and, on a machine whose `folio.exe`
             // has moved since, writes the verb again — see the field.
             context_menu_installed: context_menu::reassert(),
-            claude_hooks_installed: claude_row.0,
-            // The same, over codex's own file — see the field above's note, which holds word for
-            // word for this one.
-            codex_notify_installed: codex_row.0,
-            // And again over copilot's own hooks directory. The readiness beside it starts at
-            // `Unknown` on every machine, because the probe that could better it has not been
-            // started — nothing has shown the page it is printed on yet.
-            copilot_hooks_installed: copilot_row.0,
-            agent_config_refusals: [claude_row.1, codex_row.1, copilot_row.1],
-            copilot_readiness: attention_copilot::readiness(),
+            // **Nothing about the agents' files is read on this thread at launch** (0.4.10 plan
+            // row 67b): the carry pass reads them on its worker once the program walk has said
+            // where they are, and its answer sets these. Until then each switch reads Off and no
+            // row says anything of its own.
+            claude_hooks_installed: false,
+            codex_notify_installed: false,
+            // The readiness starts at `Unknown` on every machine, because the probe that could
+            // better it has not been started — nothing has shown the page it is printed on yet.
+            copilot_hooks_installed: false,
+            agent_config_refusals: [None; 3],
+            copilot_readiness: attention_copilot::Readiness::Unknown,
             // Nobody has been asked yet, which is the only thing a launch can
             // truthfully say about it — see the field.
             notifications: NotificationDesk::new(proxy.clone()),
@@ -35903,6 +36654,8 @@ impl<B: Backend> Runtime<'_, B> {
     /// verb that hands the reader a document instead.
     fn settings_closed(&mut self) {
         self.end_capture(runtime::OwnerGone(runtime::Gone::SettingsSheet));
+        // The runs of its fields go with it: there is no field left to press in (row 180).
+        self.window.drawn_fields.settings.clear();
     }
 
     /// Discharge what the command line is still owed, on the window it opened.
@@ -43491,6 +44244,7 @@ mod multiwindow_session_tests {
                 manual_name: None,
                 card_skip: 0,
                 last_command: String::new(),
+                agent: None,
             })),
             pinned,
             focused_leaf: "leaf-0".to_owned(),
@@ -43598,6 +44352,7 @@ mod multiwindow_session_tests {
                 manual_name: None,
                 card_skip: 0,
                 last_command: command.to_owned(),
+                agent: None,
             })),
             pinned,
             focused_leaf: "leaf-0".to_owned(),
@@ -46174,8 +46929,10 @@ impl<B: Backend> FolioApp<B> {
     /// `_storage` and `_profiles` are the witnesses that `main` settled the data directory and the
     /// profile table (`startup::Settled`, T-LAZY-INITIALIZERS-BEFORE-THE-LOOP), `_package` that it
     /// settled whether `folio.msix` is beside the executable
-    /// (T-EXPLORER-MENU-PROBE-OFF-THE-WINDOW-THREAD): nothing is read from them; that they exist
-    /// is the proof the loop does not start before any of them.
+    /// (T-EXPLORER-MENU-PROBE-OFF-THE-WINDOW-THREAD), `_notices` whether the notices file is beside
+    /// the running image (T-NOTICES-DESTINATION-OFF-THE-WINDOW-THREAD): nothing is read from them;
+    /// that they exist is the proof the loop does not start before any of them, and each has a
+    /// type of its own, so none can stand in for another.
     fn new(
         proxy: LoopProxy,
         cli: cli::CliRequest,
@@ -46183,6 +46940,7 @@ impl<B: Backend> FolioApp<B> {
         _storage: startup::Settled<persist::DataDirectory>,
         _profiles: startup::Settled<profiles::Registry>,
         _package: startup::Settled<Option<PathBuf>>,
+        _notices: startup::Settled<settings::ShippedNotices>,
     ) -> Self {
         Self {
             app: None,
@@ -46279,11 +47037,6 @@ impl<B: Backend> FolioApp<B> {
         if news.rows {
             // The parser questions about the PowerShell rows, as after a table change.
             shell_integration::begin_powershell_preparation_for(&app.profile_programs);
-        }
-        if news.agent_homes {
-            // Where an agent keeps its configuration moved: its row reads the file there now,
-            // once for the process (the rows are the application's).
-            read_the_agent_rows_again(app);
         }
         if news.copilot {
             attention_copilot::reask_probe(attention_copilot::ProbeTrigger::ProgramMoved);
@@ -48353,6 +49106,25 @@ impl<B: Backend> FolioApp<B> {
         register_restart_now::<B>(event_loop);
     }
 
+    /// **Windows is asked to end this process before the processes at the default shutdown
+    /// level** (plan row 191): `bt_platform::session_end::SHUTDOWN_LEVEL`, above the default every
+    /// console process starts at, so that a restart or a shutdown asks Folio's windows — and
+    /// lets the question write the layout — before it ends the shells in their panes. Without it
+    /// the order between them was the system's, and on the owner's machine the shells went
+    /// first. The kept-pane rule (`runtime::tabs::ended_by_the_system`) stays as the net for that
+    /// order, which a slow window thread can still meet.
+    ///
+    /// Said in `diagnostics.log` either way, in the VM experiment's words, so that a reboot's
+    /// log shows whether the level was in force.
+    fn ask_to_be_ended_before_the_shells(&self, event_loop: &B::Loop) {
+        let level = bt_platform::session_end::SHUTDOWN_LEVEL;
+        let said = match B::ask_to_be_ended_first(event_loop, level) {
+            Ok(()) => "ok".to_owned(),
+            Err(refused) => format!("error {refused}"),
+        };
+        diagnostics::note(&format!("BT_SESSION_END shutdown level {level:#x}: {said}"));
+    }
+
     /// **The system asked this application to quit, and it is waiting** (M3-1).
     ///
     /// Folio's own quit is what runs: the card about unsaved names, the save,
@@ -48367,6 +49139,7 @@ impl<B: Backend> FolioApp<B> {
     /// stopped answering. It cannot arrive from AppKit, and it is one line
     /// against a hang at a boundary this program does not own.
     fn begin_the_systems_quit(&mut self, answer: bt_platform::TerminationAnswer) {
+        session_end::the_systems_quit_asked(answer.reason());
         if self.termination.is_some() {
             if let Err(reason) = answer.answer(bt_platform::TerminationDecision::Cancel) {
                 crate::diagnostics::stderr_line(format!(
@@ -48399,6 +49172,19 @@ impl<B: Backend> FolioApp<B> {
         let Some(answer) = self.termination.take() else {
             return;
         };
+        // **The last word before AppKit may end the process** (0.4.10 plan row 17). `NSTerminateNow`
+        // lets `-[NSApplication terminate:]` go on to `exit()`, and `fn main`'s way out, its fence
+        // among it, is never reached; so what became of the quit's save is said and the log is
+        // fenced here, before the answer, once for the process and within the fence's own bound.
+        if decision == bt_platform::TerminationDecision::Now {
+            session_end::at_the_systems_quit(
+                self.app
+                    .as_ref()
+                    .map_or(persist::ClosedSave::NoSession, |app| {
+                        app.session_store.what_the_close_left()
+                    }),
+            );
+        }
         if let Err(reason) = answer.answer(decision) {
             crate::diagnostics::stderr_line(format!(
                 "{APP_NAME} could not answer the quit the system asked for: {reason}"
@@ -48473,17 +49259,17 @@ impl<B: Backend> FolioApp<B> {
             let Some(app) = self.app.as_mut() else {
                 return kept;
             };
-            match session_end::settle(end, &mut app.session_store, a_quit_holds_it, asked_at) {
-                session_end::Settled::Saved(Ok(()))
+            let settled =
+                session_end::settle(end, &mut app.session_store, a_quit_holds_it, asked_at);
+            // **What became of the layout is said, landed or not** (plan row 191): one line, with
+            // what the document held, so a next start's restore can be read against it.
+            if let Some(line) = session_end::outcome_line(&settled, app.session_store.loaded()) {
+                diagnostics::note(&line);
+            }
+            match settled {
+                session_end::Settled::Saved(_)
                 | session_end::Settled::LeftToTheQuit
                 | session_end::Settled::AlreadySaved => {
-                    lines_down = true;
-                }
-                session_end::Settled::Saved(Err(refusal)) => {
-                    diagnostics::note(&format!(
-                        "{APP_NAME}: the session is ending and its layout was not saved: {}",
-                        refusal.message()
-                    ));
                     lines_down = true;
                 }
                 // Every change the hold kept off the document is recorded now: the windows as
@@ -48856,6 +49642,47 @@ impl<B: Backend> FolioApp<B> {
             }
         }
         Ok(())
+    }
+
+    /// **Set the Agents rows from the scan, and say each repair of a gone copy's hooks once**
+    /// (0.4.10 plan row 67b, R8): one notice per family, on the window the keyboard is on, else the
+    /// oldest standing one; every window's chrome redrawn, because the rows are facts about the
+    /// machine and any window may be showing the page.
+    fn adopt_agent_hooks_scan(&mut self) -> Result<()> {
+        let Some(snapshot) = agent_hooks_step::AGENT_HOOKS.take_snapshot() else {
+            return Ok(());
+        };
+        let Some(app) = self.app.as_mut() else {
+            return Ok(());
+        };
+        adopt_agent_hooks_snapshot(app, &snapshot);
+        let oldest_standing = |app: &mut Self| {
+            (0..app.windows.len()).find_map(|index| {
+                let id = app.windows.key_at(index)?;
+                app.windows
+                    .get_mut(id)
+                    .is_some_and(|window| window.leaving.is_none())
+                    .then_some(id)
+            })
+        };
+        let told = self.frontmost_window().or_else(|| oldest_standing(self));
+        self.for_each_window(|runtime| {
+            if Some(runtime.window_id()) == told {
+                for notice in &snapshot.notices {
+                    runtime.toast(
+                        toast::ToastKind::Ok,
+                        toast::ToastAnchor::Window,
+                        None,
+                        notice.text().to_owned(),
+                    )?;
+                }
+            }
+            if runtime.refresh_chrome() {
+                runtime.present_chrome_change()
+            } else {
+                Ok(())
+            }
+        })
     }
 
     fn announce_recovered_edits(&mut self) -> Result<()> {
@@ -51541,6 +52368,7 @@ mod resident_run_tests {
 
 impl ApplicationHandler<AppEvent> for FolioApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        let _callback = session_end::in_a_callback("resumed");
         if self.app.is_some() {
             return;
         }
@@ -51568,6 +52396,11 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 // loop. Of the starts that open one, only the data directory's owner asks, and an
                 // update's trial only once it is committed (`FolioApp::register_for_restart`).
                 self.register_for_restart(event_loop);
+                // **And to end this process before the shells in its panes** (plan row 191),
+                // once and here for the same reason: the first window is the run's own. Every
+                // start that opens a window asks, owner or not — the level is this process's
+                // place in the shutdown order, not a write anyone could roll back.
+                self.ask_to_be_ended_before_the_shells(event_loop);
                 // A shortcut file that could not be read owes the user a sentence
                 // naming it (§5.3), and this is the first moment there is a window
                 // to say it on — the store was opened before one existed. Anchored
@@ -51632,6 +52465,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: AppEvent) {
+        let _callback = session_end::in_a_callback("user_event");
         if matches!(
             event,
             AppEvent::QuakeSummoned | AppEvent::NotificationClicked
@@ -51902,6 +52736,9 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                     }
                 })
             }
+            // **The carry pass's answer about the agents' hooks**: the rows set from it, its
+            // notices raised once on the focused window, every window redrawn.
+            AppEvent::AgentHooksScanned => self.adopt_agent_hooks_scan(),
             // **The one place the family list moves onto the screen.** The walk
             // finished on a worker and left its answer in `settings`' mailbox;
             // this is between two frames, which is the whole reason the worker
@@ -51949,6 +52786,10 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 if let Some(app) = self.app.as_mut() {
                     app.copilot_readiness = attention_copilot::readiness();
                 }
+                // **The version is the start-time repair's gate for Copilot's hooks** (0.4.10 plan
+                // row 67b, R9): a repair that waited for it runs now, and the scan's snapshot,
+                // which carries readiness too, is read after this answer.
+                carry_pass::begin_carry_pass();
                 self.for_each_window(|runtime| {
                     if runtime.refresh_chrome() {
                         runtime.present_chrome_change()
@@ -51998,7 +52839,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                     let place = runtime.window.observed_place;
                     let mut raised: Vec<AttentionDelivery> = Vec::new();
                     let switches = runtime.notification_switches();
-                    deliver_attention(
+                    let recorded = deliver_attention(
                         &mut runtime.window.tabs,
                         runtime.window.active_tab,
                         place,
@@ -52010,6 +52851,10 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                         attention_trace::global(),
                         &mut raised,
                     );
+                    // A pane's agent named a session it had not named: the layout says so.
+                    if recorded {
+                        runtime.mark_session_dirty(now);
+                    }
                     runtime.raise_attention(raised)
                 })
             }
@@ -52165,6 +53010,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
         window_id: WindowId,
         event: WindowEvent,
     ) {
+        let _callback = session_end::in_a_callback("window_event");
         self.on_window_event(event_loop, window_id, event);
     }
 
@@ -52188,6 +53034,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
         // took any of those states for a stopped pump would file a report on a
         // program that is working.
         hang_watch::beat();
+        let _callback = session_end::in_a_callback("about_to_wait");
         present_diagnostics::turn();
         hang_watch::run_selftest_if_due();
         panic_selftest_if_due();
@@ -52205,6 +53052,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
     /// hang, and would be excused by the deadline it was parked with if the
     /// parking outlived the park.
     fn new_events(&mut self, _event_loop: &ActiveEventLoop, cause: StartCause) {
+        let _callback = session_end::in_a_callback("new_events");
         // The cause is the turn census's (T-IDLE-TURN-COST): what woke this turn.
         hang_watch::woke(match cause {
             StartCause::ResumeTimeReached { .. } => hang_watch::WakeCause::ResumeTimeReached,
@@ -52219,6 +53067,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        let _callback = session_end::in_a_callback("exiting");
         // **A spare still standing is abandoned** (ticket 60, SW-2): the loop is stopping, and a
         // thread that has stopped pumping is not one to wait on its browser with.
         if let Some(app) = self.app.as_mut() {
@@ -53675,6 +54524,86 @@ fn option_as_alt(window: &Window, option_sends_alt: bool) {
     {
         let _ = (window, option_sends_alt);
     }
+}
+
+/// **The sides of the shell's two icons at `scale_factor`**, in physical pixels: the small one
+/// (`SM_CXSMICON`, 16 at 96 DPI) and the big one (`SM_CXICON`, 32), scaled as Windows scales them
+/// for a display (0.4.10 plan row 71).
+///
+/// Both are asked for by size. Left to `LR_DEFAULTSIZE` they would both be the big size, and the
+/// small icon would be the big one shrunk by whoever draws it. `folio.ico` holds 16, 20, 24 and
+/// 32, and 32, 40, 48 and 64, which are these sides at 100, 125, 150 and 200 %, so on those
+/// displays the image each surface is handed was drawn at its size.
+#[cfg(windows)]
+fn app_icon_sides(scale_factor: f64) -> (u32, u32) {
+    (
+        (16.0 * scale_factor).round() as u32,
+        (32.0 * scale_factor).round() as u32,
+    )
+}
+
+/// [`WindowHost::wear_the_app_icon`] for winit's window (0.4.10 plan row 71).
+///
+/// **What it is for.** Windows draws a window's own icon (`WM_GETICON`, and then the window
+/// class's) in the snap layouts, in Snap Assist, in Alt+Tab, in Task View and over a taskbar
+/// button's thumbnails. winit registers its window class with no icon, and a window nobody gave
+/// one is an empty slot in each of them. The executable's icon is not that icon: Explorer and the
+/// taskbar button draw it from the file, and no window carries it.
+///
+/// **So the window is given the executable's own group** ([`bt_winres::APP_ICON_GROUP`], the
+/// group the build script filed `folio.ico` under), at the two sides `app_icon_sides` gives for
+/// the scale its renderer is drawn at: the small one as `ICON_SMALL` (winit's `set_window_icon`)
+/// and the big one as `ICON_BIG` (`set_taskbar_icon`). `ICON_SMALL2` answers the small one by
+/// itself. winit keeps each `Icon` with its window and destroys the handle it replaces, so a
+/// window that wears its icon again after a scale change leaves nothing behind.
+///
+/// A refusal is one diagnostics line and a window without an icon, as every window was before:
+/// the group is linked into every build that opens a window, so the refusal left is the
+/// system's own (`LoadImageW` out of handles).
+///
+/// Off Windows this is nothing: a macOS application's icon is its bundle's (`CFBundleIconFile`),
+/// and winit's `set_window_icon` does nothing there.
+fn wear_app_icon(window: &Window, scale_factor: f64) {
+    #[cfg(windows)]
+    {
+        use winit::platform::windows::WindowExtWindows;
+        match app_icons_at(scale_factor) {
+            Ok((small, big)) => {
+                window.set_window_icon(Some(small));
+                window.set_taskbar_icon(Some(big));
+            }
+            Err(error) => crate::diagnostics::stderr_line(format!(
+                "recoverable window icon load failure at scale {scale_factor}: {error}"
+            )),
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (window, scale_factor);
+    }
+}
+
+/// **The executable's icon group, loaded at the small and the big side for `scale_factor`** —
+/// `LoadImageW` of this process's own module (`app_icon_from`).
+#[cfg(windows)]
+fn app_icons_at(
+    scale_factor: f64,
+) -> Result<(winit::window::Icon, winit::window::Icon), winit::window::BadIcon> {
+    let (small, big) = app_icon_sides(scale_factor);
+    Ok((
+        app_icon_from(bt_winres::APP_ICON_GROUP, small)?,
+        app_icon_from(bt_winres::APP_ICON_GROUP, big)?,
+    ))
+}
+
+/// One icon group of this process's own executable, at one side — winit's
+/// `Icon::from_resource`, which is `LoadImageW` of the module winit is linked into
+/// (`__ImageBase`, which here is the executable), `IMAGE_ICON`, `side` by `side`: the image of
+/// the group nearest that side, scaled to it when none is exactly it.
+#[cfg(windows)]
+fn app_icon_from(group: u16, side: u32) -> Result<winit::window::Icon, winit::window::BadIcon> {
+    use winit::platform::windows::IconExtWindows;
+    winit::window::Icon::from_resource(group, Some(PhysicalSize::new(side, side)))
 }
 
 /// **The window's ground is told the new size before anything else is**
@@ -55634,6 +56563,127 @@ mod opening_window_tests {
     }
 }
 
+/// **The program's icon on its own windows** (0.4.10 plan row 71): every window is born wearing
+/// it, and this executable holds it at every side the shell asks for. The scale change's half is
+/// `app_dpi_tests::a_scale_change_wears_the_programs_icon_at_the_new_scale`, on the headless
+/// window.
+#[cfg(test)]
+mod app_icon_tests {
+    use crate::test_support::method_body;
+
+    /// RED (0.4.10 plan row 71) — **every window this process opens is born wearing the
+    /// program's icon, at the scale its renderer is born at, before the renderer exists.**
+    ///
+    /// **The two constructors are the only roads to a window**, and that is asked first: every
+    /// product call of winit's `create_window` stands in `Runtime::create` or
+    /// `Runtime::open_window`, one each (review N3). A third road, a window made again after a
+    /// device loss for instance, would be born with no icon of its own while every pin below
+    /// stayed green; it is named here instead, and joins the list below with its door. Both take
+    /// winit's own window, so no headless window is born on either: the order is held against
+    /// the source. After the scale is read, because the icon is worn at the renderer's scale and
+    /// a later change wears it again only when that scale moves; before the renderer, because the
+    /// window is still hidden there and the first frame shows it.
+    ///
+    /// MUTATIONS: drop the door from `Runtime::create`
+    /// (`plant-71-a-first-window-born-without-the-icon.py`) or from `Runtime::open_window`
+    /// (`plant-71-b-second-window-born-without-the-icon.py`), and the panic names that
+    /// constructor; open a third road to a window (`plant-71-e-a-third-road-to-a-window.py`),
+    /// and the first assertion names it.
+    #[test]
+    fn every_window_is_born_wearing_the_programs_icon() {
+        let index = crate::test_support::source();
+        let calls = crate::test_support::found(
+            bt_source::needle!(bt_source::Pattern::identifier("create_window")),
+            bt_source::View::Identifiers,
+        )
+        .in_the_product(index);
+        let roads: std::collections::BTreeSet<String> = calls
+            .owners(index)
+            .into_keys()
+            .map(|identity| match identity.type_owner {
+                Some(owner) => format!("{owner}::{}", identity.name),
+                None => identity.name,
+            })
+            .collect();
+        assert_eq!(
+            (
+                calls.len(),
+                roads.iter().map(String::as_str).collect::<Vec<_>>()
+            ),
+            (2, vec!["Runtime::create", "Runtime::open_window"]),
+            "the product makes a window in exactly these two constructors, once each; a new road \
+             to a window wears the program's icon too, and joins this list"
+        );
+        for (owner, scale, renderer) in [
+            (
+                "create",
+                "startup_scale_factor",
+                "gpu_door::open_first_window(",
+            ),
+            ("open_window", "scale_factor", "WindowRenderer::new("),
+        ] {
+            let body = method_body("Runtime", owner);
+            let made = body
+                .find(".create_window(attributes)")
+                .unwrap_or_else(|| panic!("`Runtime::{owner}` constructs a window"));
+            let scaled = made
+                + body[made..]
+                    .find(&format!("let {scale} ="))
+                    .unwrap_or_else(|| panic!("`Runtime::{owner}` reads the renderer's scale"));
+            let worn = body
+                .find(&format!("window.wear_the_app_icon({scale});"))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "`Runtime::{owner}` puts the program's icon on the window it makes, at \
+                         the renderer's scale"
+                    )
+                });
+            let born = body
+                .find(renderer)
+                .unwrap_or_else(|| panic!("`Runtime::{owner}` gives its window a renderer"));
+            assert!(
+                made < scaled && scaled < worn && worn < born,
+                "`Runtime::{owner}`: the window is made, its scale read, the icon worn at that \
+                 scale and only then is the renderer born"
+            );
+        }
+    }
+
+    /// PIN (0.4.10 plan row 71) — **the shell's two sides at the four scales `folio.ico` was
+    /// drawn for are the system's own** (`SM_CXSMICON` and `SM_CXICON` at 96, 120, 144 and 192
+    /// DPI), each an image the file holds.
+    #[cfg(windows)]
+    #[test]
+    fn the_two_sides_are_the_systems_at_every_scale_the_icon_file_was_drawn_for() {
+        assert_eq!(
+            [1.0, 1.25, 1.5, 2.0].map(super::app_icon_sides),
+            [(16, 32), (20, 40), (24, 48), (32, 64)]
+        );
+    }
+
+    /// RED (0.4.10 plan row 71) — **this executable carries the program's icon group, and it
+    /// loads at both sides at every scale the icon file was drawn for**: the eight loads succeed
+    /// from this module's own table, and a group the build did not file is refused.
+    ///
+    /// Real `LoadImageW` calls: the build script links `folio.res` into every unit of the bin
+    /// target, this unit-test executable included (`build.rs`, `rustc-link-arg-bins`).
+    ///
+    /// MUTATION (`plant-71-d-the-wrong-group.py`): ask for group 2 and every load is refused.
+    #[cfg(windows)]
+    #[test]
+    fn this_executable_carries_the_programs_icon_at_every_side_the_shell_asks_for() {
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            if let Err(error) = super::app_icons_at(scale) {
+                panic!("the program's icon does not load at scale {scale}: {error}");
+            }
+        }
+        assert!(
+            super::app_icon_from(bt_winres::APP_ICON_GROUP + 1, 32).is_err(),
+            "a group the build did not file is refused"
+        );
+    }
+}
+
 /// Review X-1 and X-3: the two races a delayed picture paste can lose.
 #[cfg(test)]
 mod clipboard_picture_race_tests {
@@ -55752,17 +56802,83 @@ mod clipboard_picture_race_tests {
 
 #[cfg(test)]
 mod background_mailbox_tests {
-    use super::{BackgroundDecode, BackgroundDecodeMailbox};
+    use super::{BackgroundAnswer, BackgroundAsk, BackgroundDecodeMailbox};
 
     fn land(mailbox: &BackgroundDecodeMailbox, generation: u64) {
         *mailbox
             .slot()
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(BackgroundDecode {
-            generation,
-            file: "ridge.jpg".to_owned(),
-            result: Err(bt_term::BackgroundImageError::UnsupportedFormat),
-        });
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(BackgroundAsk::FIRST.answered(
+                generation,
+                "ridge.jpg".to_owned(),
+                Err(bt_term::BackgroundImageError::UnsupportedFormat),
+            ));
+    }
+
+    /// RED — **a ground another program holds is read once more, keeping the glass and saying
+    /// nothing, and only a second held read is refused** (T-HELD-FILE-IN-THE-OTHER-PICTURE-LANES):
+    /// a held first read asks once more; a held second read is a refusal, which the card says in
+    /// the words of an unreadable file; any other refusal is refused at once, first read or not;
+    /// a picture is adopted either way.
+    ///
+    /// MUTATION: drop the `HeldElsewhere` arm of `BackgroundDecode::answer` — a held first read is
+    /// refused at once (the ground goes bare and a card is raised before the second read); the
+    /// first assertion goes red. Or drop its `!self.asked.once_more` guard — every held read asks
+    /// again, for as long as the file is held; the run below is never refused and goes red. Or let
+    /// the next ask be a first read (`once_more: false`) — the same endless run, the same red.
+    ///
+    /// The run is the bound itself: the question each answer names is the one the next read
+    /// carries (`reload_background_picture(ask)` hands it to the worker, which answers through
+    /// `BackgroundAsk::answered`), so a file held for good is read exactly twice and then refused.
+    #[test]
+    fn a_held_ground_is_read_once_more_before_it_is_refused() {
+        let answer = |result, asked: BackgroundAsk| {
+            asked.answered(1, "ridge.jpg".to_owned(), result).answer()
+        };
+        let held = || {
+            Err(bt_term::BackgroundImageError::HeldElsewhere(
+                "being used by another process".to_owned(),
+            ))
+        };
+        assert_eq!(
+            answer(held(), BackgroundAsk::FIRST),
+            BackgroundAnswer::Ask(BackgroundAsk { once_more: true }),
+            "a held first read asks once more"
+        );
+        let mut asked = BackgroundAsk::FIRST;
+        let mut reads = 0;
+        let refused_after = loop {
+            reads += 1;
+            match answer(held(), asked) {
+                BackgroundAnswer::Ask(next) if reads < 3 => asked = next,
+                BackgroundAnswer::Refuse => break reads,
+                other => panic!("read {reads} of a ground held for good answered {other:?}"),
+            }
+        };
+        assert_eq!(
+            refused_after, 2,
+            "a held first read asks once more, and the held second read is refused"
+        );
+        for asked in [BackgroundAsk::FIRST, BackgroundAsk { once_more: true }] {
+            assert_eq!(
+                answer(
+                    Err(bt_term::BackgroundImageError::Io(
+                        "access is denied".to_owned()
+                    )),
+                    asked
+                ),
+                BackgroundAnswer::Refuse,
+                "a refusal of the disk is said at once"
+            );
+            let picture = std::sync::Arc::new(bt_render::BackgroundImage {
+                key: "ridge".to_owned(),
+                rgba: std::sync::Arc::from(vec![0_u8; 4]),
+                width_px: 1,
+                height_px: 1,
+            });
+            assert_eq!(answer(Ok(picture), asked), BackgroundAnswer::Adopt);
+        }
     }
 
     /// PIN (§7.1.6c-4d, clearing arm; user report 2026-08-18) — **`None`
@@ -57859,6 +58975,11 @@ fn main() -> Result<()> {
     // first-run card read the answer on the window thread, and a press's job looks again for
     // itself on its worker.
     let package = explorer_menu::settle_package();
+    // **And whether the notices file came with it, looked at the same moment and not by a press**
+    // (T-NOTICES-DESTINATION-OFF-THE-WINDOW-THREAD; C1): the About page's licences row reads the
+    // answer on the window thread instead of looking there. The look is beside the image the
+    // links lead to, so a start through a WinGet link (winget before 1.9) finds the file too.
+    let notices = settings::settle_notices();
     // **And from here no trace line is written by the thread that made it**
     // (T-TRACE-OFF-THREAD). `trace_sink` starts one writer thread — and only
     // for a run that asked for a trace — behind a bounded queue that drops and
@@ -58094,6 +59215,7 @@ fn main() -> Result<()> {
         settled,
         registry,
         package,
+        notices,
     );
     let outcome = event_loop
         .run_app(&mut application)
@@ -58197,6 +59319,8 @@ fn main() -> Result<()> {
 //
 // **`main.rs` is still not the same thing as this crate's product text**: it holds fifty-four
 // smaller inline test modules besides. Every pin that reads it says which of the two it means.
+#[cfg(test)]
+mod app_agent_resume_tests;
 #[cfg(test)]
 mod app_attention_tests;
 #[cfg(test)]
@@ -58435,10 +59559,15 @@ mod platform_gate_tests {
 
     /// **The list.** One file per line, in the order `ls` gives them, each with
     /// the reason it is allowed to ask.
-    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 40] = [
+    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 41] = [
         // Windows-only test fixture: the `pi` row, which only the Windows table ships, reopened
         // from a Recent row, beside its every-platform twin on the host's fallback shell.
         "app_files_tests.rs",
+        // Test fixtures of one platform's table each: a saved pane born through its vendor's
+        // shipped profile beside the `pwsh` it hands back (Windows, row 195), and its macOS twin,
+        // a zsh or bash pane `exec`ing the vendor (T-AGENT-RESUME-ON-MACOS); the road itself is a
+        // value of the platform, tested on both.
+        "app_agent_resume_tests.rs",
         // Windows-only test fixtures: a share named by a document (`\\server\share`).
         "app_preview_tests.rs",
         // Windows-only test fixtures: UNC shares, WSL distribution shares and device and
@@ -58469,7 +59598,8 @@ mod platform_gate_tests {
         // attributes taken off by `xattr`; the channel's derivation is portable.
         "install_channel.rs",
         // The startup path: the native-window door's two arms, and the five
-        // platform calls M1-1 made non-fatal.
+        // platform calls M1-1 made non-fatal; and winit's own window extensions
+        // (macOS's Option key, the Windows window's icon).
         "main.rs",
         // Windows-only test fixtures: the Store PowerShell's app execution alias and package (an
         // MSIX fact), and the never-settling check's program, Windows PowerShell beside its Unix
@@ -61422,6 +62552,51 @@ mod quit_with_no_window_tests {
             finished < now,
             "AppKit is let go only after the session is on the disk"
         );
+        // **And the request says why it came, and the answer fences the log before it is given**
+        // (0.4.10 plan row 17): `NSTerminateNow` lets AppKit `exit()` and `fn main`'s fence is
+        // never reached. MUTATION (plant 17-a′): move the `at_the_systems_quit` call below the
+        // `answer.answer(decision)` statement.
+        let said = begin
+            .find("session_end::the_systems_quit_asked(answer.reason());")
+            .expect("the request says why AppKit asked");
+        let parked = begin
+            .find("self.termination = Some(answer);")
+            .expect("and is parked");
+        assert!(said < parked, "{begin}");
+        let answering = method_body("FolioApp", "answer_the_systems_quit");
+        let taken = answering
+            .find("self.termination.take()")
+            .expect("the answer is AppKit's request");
+        let gated = answering
+            .find("decision == bt_platform::TerminationDecision::Now")
+            .expect("the end is NSTerminateNow's");
+        let ended = answering
+            .find("session_end::at_the_systems_quit(")
+            .expect("the quit says its save and fences the log");
+        let replied = answering
+            .find("answer.answer(decision)")
+            .expect("and then answers AppKit");
+        assert!(
+            taken < gated && gated < ended && ended < replied,
+            "the log is fenced before AppKit is answered: {answering}"
+        );
+        // **And the end it calls is handed the real log and the real fence** (0.4.10 plan row 17,
+        // review N1): `the_systems_quit_ends_with` is tested with a recorder for both, so the one
+        // product caller is the last connection to `diagnostics::note` and `fence_the_log`.
+        // MUTATION (plant 17-a3): hand `&mut || {}` for the fence in `at_the_systems_quit`.
+        let handed = item_body(
+            &bt_source::ItemQuery::function("at_the_systems_quit").in_module("crate::session_end"),
+        );
+        let end = handed
+            .find("the_systems_quit_ends_with(")
+            .expect("the NSTerminateNow end is the tested one");
+        let sayer = handed
+            .find("&mut crate::diagnostics::note")
+            .expect("the NSTerminateNow end is handed the log and its fence");
+        let fence = handed
+            .find("&mut fence_the_log")
+            .expect("the NSTerminateNow end is handed the log and its fence");
+        assert!(end < sayer && sayer < fence, "{handed}");
     }
 }
 
@@ -61872,10 +63047,13 @@ mod refused_preview_card_tests {
                 limit: 64_000_000,
             }),
             PictureRefusal::decoded(&Refusal::UnsupportedFormat),
-            // And the three this window raises about itself.
+            // And the five this window raises about itself, the video seat's
+            // three sentences among them (plan row 189).
             PictureRefusal::this_window_cannot(i18n::Text::PreviewFailedImageWorker.text()),
             PictureRefusal::this_window_cannot(i18n::Text::PreviewFailedSeatTooSmall.text()),
             PictureRefusal::this_window_cannot(i18n::Text::VideoFormatCannotPlay.text()),
+            PictureRefusal::this_window_cannot(i18n::Text::VideoDidNotLoad.text()),
+            PictureRefusal::this_window_cannot(i18n::Text::VideoPlayerDidNotStart.text()),
         ]
     }
 

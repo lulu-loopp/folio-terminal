@@ -14,8 +14,8 @@
 
 mod capture;
 mod ending;
+mod field_caret;
 mod release;
-mod rename_caret;
 mod router;
 mod row_middle;
 pub(crate) mod touch;
@@ -29,6 +29,7 @@ pub(crate) use capture::{
 #[cfg(test)]
 pub(crate) use ending::a_capture_still_holds_its_pointer;
 pub(crate) use ending::{Ending, Gone, Leaving, OwnerGone};
+pub(crate) use field_caret::FieldDrag;
 
 #[cfg(test)]
 pub(crate) use router::{BANDS_THAT_TAKE_NO_POINTER, POINTER_LAYERS_TOP_FIRST, Visits};
