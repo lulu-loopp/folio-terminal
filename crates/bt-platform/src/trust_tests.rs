@@ -96,7 +96,7 @@ fn revocation_unknown_is_a_refusal() {
 /// over a real chain).
 #[cfg(windows)]
 #[test]
-fn a_test_signed_file_without_a_revocation_list_is_revocation_unknown() {
+fn a_test_signed_file_without_a_revocation_list_is_revocation_unknown_over_a_real_chain() {
     windows_world::a_test_signed_file_without_a_revocation_list_is_revocation_unknown();
 }
 
@@ -160,7 +160,7 @@ fn offline_revocation_is_named_apart_from_unknown() {
 /// seam, over a real chain).
 #[cfg(windows)]
 #[test]
-fn a_test_signed_file_naming_an_unreachable_list_is_revocation_offline() {
+fn a_test_signed_file_naming_an_unreachable_list_is_revocation_offline_over_a_real_chain() {
     windows_world::a_test_signed_file_naming_an_unreachable_list_is_revocation_offline();
 }
 
