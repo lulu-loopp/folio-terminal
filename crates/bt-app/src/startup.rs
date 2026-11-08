@@ -183,7 +183,7 @@ impl<T: 'static> SettledOnce<T> {
 
 /// **The witness that a [`SettledOnce`] was settled**: only [`SettledOnce::settle`] makes one,
 /// so a function that takes it cannot be called before the settle ran. `FolioApp::new` takes the
-/// two the loop's process settles, which makes "settled before `run_app`" a fact of the types.
+/// four the loop's process settles, which makes "settled before `run_app`" a fact of the types.
 pub(crate) struct Settled<T: 'static> {
     value: &'static T,
 }
