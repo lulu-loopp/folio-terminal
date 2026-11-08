@@ -15350,15 +15350,56 @@ trait NativeSay {
     fn say(&mut self, text: &str);
 }
 
-/// The operating system's own message box ([`bt_platform::SeenBox`]): on a
-/// stop the windows are being taken down and the renderer may be what failed, so,
-/// as before the first window, there is no window to put a card on.
+/// **The operating system's own message box, owned by no window** — the panic hook's
+/// ([`CrashBox`]). It is raised on whichever thread panicked, and a box owned by a window of
+/// another thread would wait for that window's thread to answer it, which may be the thread that
+/// is stuck (0.4.10 plan row 72, R1). It wears the program's icon all the same
+/// (`bt_platform::message_box`).
 struct SystemBox;
 
-impl NativeSay for SystemBox {
+/// **The operating system's own box, over a standing Folio window** ([`bt_platform::SeenBox`],
+/// 0.4.10 plan row 72): on a stop the windows are being taken down and the renderer may be what
+/// failed, so, as before the first window, there is no window to put a card on — but a window
+/// still stands to own the box, so the box has no taskbar button or Alt+Tab entry of its own and
+/// is centred on it. The window is [`the_box_owner`]'s; with none standing on the screen the box
+/// is ownerless, and wears the program's icon itself.
+struct BoxOver<'window, W: WindowHost>(Option<&'window W>);
+
+impl<W: WindowHost> NativeSay for BoxOver<'_, W> {
     fn say(&mut self, text: &str) {
         say_in_a_box_or_on_stderr(self, text);
     }
+}
+
+/// **The window a stop's box is owned by** (0.4.10 plan row 72): of the windows on the screen
+/// and not on their way out, the one the keyboard is on, else the first in the opening order;
+/// `None` when none is. A window is off the screen when it has never been shown, is hidden
+/// (a quake window put away), is minimised, or is iconic or cloaked (on another virtual desktop)
+/// as last sampled, which both callers read fresh just before they ask (re-review R2: a window
+/// left behind on another desktop takes no turn). An owned box has no taskbar button of its own
+/// and keeps to its owner's desktop, so a box owned by such a window could be on no taskbar the
+/// reader sees (review N2).
+/// With none on the screen the box is ownerless, and has its own button and the program's icon.
+/// Read off the windows as [`FolioApp::frontmost_window`] reads them, and from the windows
+/// alone, so a stop can lend the box its owner while it holds the application.
+fn the_box_owner<B: Backend>(windows: &Windows<WindowId, WindowRuntime<B>>) -> Option<&B::Window> {
+    let mut first_standing = None;
+    for (_, runtime) in windows.in_order() {
+        let off_the_screen = !runtime.window_shown
+            || runtime.window_hidden
+            || runtime.window.is_visible() == Some(false)
+            || runtime.window.is_minimized() == Some(true);
+        if runtime.leaving.is_some() || off_the_screen {
+            continue;
+        }
+        if runtime.window_focused {
+            return Some(&runtime.window);
+        }
+        if first_standing.is_none() {
+            first_standing = Some(&runtime.window);
+        }
+    }
+    first_standing
 }
 
 /// **What a stop's notice asks of the system's box** (T-STOP-NOTICE-BOX-QUERY-MACOS, 0.4.9 plan
@@ -15372,7 +15413,7 @@ trait SystemBoxes {
     fn line(&mut self, text: String);
 }
 
-impl SystemBoxes for SystemBox {
+impl<W: WindowHost> SystemBoxes for BoxOver<'_, W> {
     type Seen = bt_platform::SeenBox;
 
     fn would_be_seen(&mut self) -> Option<bt_platform::SeenBox> {
@@ -15380,7 +15421,10 @@ impl SystemBoxes for SystemBox {
     }
 
     fn raise(&mut self, seen: bt_platform::SeenBox, text: &str) {
-        seen.say(APP_NAME, text);
+        match self.0 {
+            Some(window) => window.say_in_a_box(seen, text),
+            None => seen.say(None, APP_NAME, text),
+        }
     }
 
     fn line(&mut self, text: String) {
@@ -51313,8 +51357,18 @@ impl<B: Backend> FolioApp<B> {
             return;
         }
         crate::diagnostics::stderr_line(format!("{APP_NAME} stopped: {error:#}"));
+        // The alert's box is owned by a window that still stands on the screen (0.4.10 plan
+        // row 72).
+        // Each window's place read fresh first, through the one writer, as the attention arm
+        // reads it (re-review R2): a window left behind on another virtual desktop takes no turn,
+        // so its last sampled reading can still say it is on the screen.
+        let _ = self.for_each_window(|runtime| {
+            runtime.observe_window_place();
+            Ok(())
+        });
+        let over = the_box_owner(&self.windows);
         report_frame_shape_stop(&error, &panic_log_path(), |path| {
-            announce_frame_shape_stop(path, &mut SystemBox);
+            announce_frame_shape_stop(path, &mut BoxOver(over));
         });
         let had_windows = !self.windows.is_empty();
         let failure = format!("{error:#}");
@@ -51378,15 +51432,24 @@ impl<B: Backend> FolioApp<B> {
     fn stop_every_window_keeping_in(&mut self, recovery: &Path) -> Result<()> {
         // **The four hand-editable documents' owed changes** (T-QUIT-DOCUMENTS;
         // revisions (c)2 and (d)3), into the same folder — and every one that could be kept
-        // nowhere said through the system's own box, before a window closes.
+        // nowhere said through the system's own box, before a window closes — owned by a window
+        // that still stands on the screen (0.4.10 plan row 72).
+        // Each window's place read fresh first, through the one writer, as the attention arm
+        // reads it (re-review R2): a window left behind on another virtual desktop takes no turn,
+        // so its last sampled reading can still say it is on the screen.
+        let _ = self.for_each_window(|runtime| {
+            runtime.observe_window_place();
+            Ok(())
+        });
         if let Some(app) = self.app.as_mut() {
+            let over = the_box_owner(&self.windows);
             app.with_documents(|documents| {
                 keep_owed_documents_over(
                     documents,
                     recovery,
                     SystemTime::now(),
                     &mut TheDisk,
-                    &mut SystemBox,
+                    &mut BoxOver(over),
                 )
             });
             // **And a trial release a quit held, disposed of** (T-QUIT-DOCUMENTS round 4).
@@ -54533,22 +54596,6 @@ fn option_as_alt(window: &Window, option_sends_alt: bool) {
     }
 }
 
-/// **The sides of the shell's two icons at `scale_factor`**, in physical pixels: the small one
-/// (`SM_CXSMICON`, 16 at 96 DPI) and the big one (`SM_CXICON`, 32), scaled as Windows scales them
-/// for a display (0.4.10 plan row 71).
-///
-/// Both are asked for by size. Left to `LR_DEFAULTSIZE` they would both be the big size, and the
-/// small icon would be the big one shrunk by whoever draws it. `folio.ico` holds 16, 20, 24 and
-/// 32, and 32, 40, 48 and 64, which are these sides at 100, 125, 150 and 200 %, so on those
-/// displays the image each surface is handed was drawn at its size.
-#[cfg(windows)]
-fn app_icon_sides(scale_factor: f64) -> (u32, u32) {
-    (
-        (16.0 * scale_factor).round() as u32,
-        (32.0 * scale_factor).round() as u32,
-    )
-}
-
 /// [`WindowHost::wear_the_app_icon`] for winit's window (0.4.10 plan row 71).
 ///
 /// **What it is for.** Windows draws a window's own icon (`WM_GETICON`, and then the window
@@ -54558,7 +54605,8 @@ fn app_icon_sides(scale_factor: f64) -> (u32, u32) {
 /// taskbar button draw it from the file, and no window carries it.
 ///
 /// **So the window is given the executable's own group** ([`bt_winres::APP_ICON_GROUP`], the
-/// group the build script filed `folio.ico` under), at the two sides `app_icon_sides` gives for
+/// group the build script filed `folio.ico` under), at the two sides
+/// [`bt_platform::program_icon_sides`] gives for
 /// the scale its renderer is drawn at: the small one as `ICON_SMALL` (winit's `set_window_icon`)
 /// and the big one as `ICON_BIG` (`set_taskbar_icon`). `ICON_SMALL2` answers the small one by
 /// itself. winit keeps each `Icon` with its window and destroys the handle it replaces, so a
@@ -54596,7 +54644,7 @@ fn wear_app_icon(window: &Window, scale_factor: f64) {
 fn app_icons_at(
     scale_factor: f64,
 ) -> Result<(winit::window::Icon, winit::window::Icon), winit::window::BadIcon> {
-    let (small, big) = app_icon_sides(scale_factor);
+    let (small, big) = bt_platform::program_icon_sides(scale_factor);
     Ok((
         app_icon_from(bt_winres::APP_ICON_GROUP, small)?,
         app_icon_from(bt_winres::APP_ICON_GROUP, big)?,
@@ -56656,18 +56704,6 @@ mod app_icon_tests {
         }
     }
 
-    /// PIN (0.4.10 plan row 71) — **the shell's two sides at the four scales `folio.ico` was
-    /// drawn for are the system's own** (`SM_CXSMICON` and `SM_CXICON` at 96, 120, 144 and 192
-    /// DPI), each an image the file holds.
-    #[cfg(windows)]
-    #[test]
-    fn the_two_sides_are_the_systems_at_every_scale_the_icon_file_was_drawn_for() {
-        assert_eq!(
-            [1.0, 1.25, 1.5, 2.0].map(super::app_icon_sides),
-            [(16, 32), (20, 40), (24, 48), (32, 64)]
-        );
-    }
-
     /// RED (0.4.10 plan row 71) — **this executable carries the program's icon group, and it
     /// loads at both sides at every scale the icon file was drawn for**: the eight loads succeed
     /// from this module's own table, and a group the build did not file is refused.
@@ -56687,6 +56723,48 @@ mod app_icon_tests {
         assert!(
             super::app_icon_from(bt_winres::APP_ICON_GROUP + 1, 32).is_err(),
             "a group the build did not file is refused"
+        );
+    }
+
+    /// RED (0.4.10 plan row 72) — **the message box's icon is this executable's own group, at
+    /// both sides at every scale the icon file was drawn for**: the loads the box's hook makes
+    /// (`bt_platform::ProgramIcons`), from this unit-test executable, which carries `folio.res` as
+    /// the program does.
+    ///
+    /// MUTATION (`plant-72-e-the-box-asks-the-wrong-group.py`): ask for group 2, and every load
+    /// is refused.
+    #[cfg(windows)]
+    #[test]
+    fn the_box_loads_the_programs_icon_at_every_scale_the_icon_file_was_drawn_for() {
+        for dpi in [96, 120, 144, 192] {
+            assert!(
+                bt_platform::ProgramIcons::at_dpi(dpi).is_some(),
+                "the program's icon does not load for a box at {dpi} DPI"
+            );
+        }
+    }
+
+    /// RED (0.4.10 plan row 72) — **a box said over a headless window is kept in its ledger and
+    /// raised nowhere**: the headless window takes the platform's box and opens nothing, so a
+    /// test that stops an application with windows standing never puts a box on the desktop.
+    #[cfg(windows)]
+    #[test]
+    fn a_box_over_a_headless_window_is_kept_and_raised_nowhere() {
+        use crate::window_seam::WindowHost;
+        let folio = crate::headless::HeadlessFolio::with_tabs(
+            "box-over-headless",
+            vec![crate::test_support::tab_holding(
+                crate::test_support::leaf_saying("盒子 a box"),
+            )],
+            0,
+        );
+        let seen = bt_platform::a_box_would_be_seen().expect("a box is always seen on Windows");
+        folio.window.window.say_in_a_box(seen, "说一句 one thing");
+        assert_eq!(
+            folio.ledger.take(),
+            vec![crate::headless::WindowEffect::SaidInABox(
+                "说一句 one thing".to_owned()
+            )]
         );
     }
 }
@@ -58465,7 +58543,8 @@ fn the_alert_on_a_watching_console(path: &std::path::Path) -> PanicAlert {
 /// window thread *before* the way out, so — unlike the panic hook, which ends the process after
 /// its box — a queued line here is inside the way out's fence, and the box's synchronous
 /// fallback (two lines into `diagnostics.log` beside the writer's queue) has no reason to be
-/// taken. `boxes` is the platform's box ([`SystemBox`]) in the product, a test's own in a test.
+/// taken. `boxes` is the platform's box over a standing window ([`BoxOver`]) in the product, a
+/// test's own in a test.
 ///
 /// **And then the leave a panic owed it** (row 102): a panic that was not contained while this
 /// alert was up returned from its hook so as not to take the box off the screen
