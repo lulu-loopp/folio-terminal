@@ -339,10 +339,7 @@ pub(super) fn stations_line(before: &Reading, after: &Reading, window_ms: u64) -
     if total_ns == 0 {
         return None;
     }
-    let mut listed: Vec<(usize, u64)> = spent
-        .into_iter()
-        .filter(|(_, ns)| *ns >= 1_000)
-        .collect();
+    let mut listed: Vec<(usize, u64)> = spent.into_iter().filter(|(_, ns)| *ns >= 1_000).collect();
     listed.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
     let by_station = listed
         .iter()
