@@ -387,6 +387,10 @@ fn an_idle_turn_inside_the_last_frame_asks_the_gate_nothing() {
         .window
         .last_present_at
         .expect("the fixture's draw reached the glass");
+    // A running window's present is a turn's, and that turn ticked the strip on its way to it:
+    // the strip's own rate is spent until a frame on, as it is after the caret's turn. The
+    // fixture's first paint is an expose with no turn before it, so its strip has never ticked.
+    folio.window.strip_animation_ticked_at = Some(presented);
     let inside = presented + Duration::from_millis(1);
     assert!(
         inside < presented + folio.window.frame_clock.interval(),
