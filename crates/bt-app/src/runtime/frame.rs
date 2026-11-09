@@ -137,9 +137,8 @@ impl<B: Backend> Runtime<'_, B> {
     ///   loop. A paint asked of the platform from here would come back as a second turn: a wake,
     ///   the `RedrawRequested`, and every clock of `about_to_wait` run again. On the VM that
     ///   second turn cost 515 µs of a 3774 µs mark step with three panes.
-    /// - **Anywhere else** (an event handler, Windows' modal size loop, the present's own retry),
-    ///   the platform is asked for a paint, as it always was: no turn end is coming that would
-    ///   pay it.
+    /// - **Anywhere else** (an event handler, Windows' modal size loop), the platform is asked
+    ///   for a paint, as it always was: no turn end is coming that would pay it.
     pub(in crate::runtime) fn ask_for_present(&mut self) {
         if self.window.turn_pays_presents {
             self.window.turn_owes_a_present = true;
@@ -155,16 +154,17 @@ impl<B: Backend> Runtime<'_, B> {
     ///
     /// It pays through [`Self::redraw`], the same function `RedrawRequested` runs, so the frame
     /// is the one the paint would have drawn. Only the turn that pays it is different. Before
-    /// the fold, because the fold reads `last_present_at` and the debts (`turn_facts`), and
-    /// what it books is what the redraw turn's fold booked before.
+    /// the fold, because the fold books the window's next wake from what the present leaves
+    /// (`last_present_at`, and the debts `turn_facts` reads): paid after it, the debt would be
+    /// read as owed at once and book a wake at the turn's own instant.
     ///
     /// **A window on no screen is asked for the paint instead** (ruling R2): a minimized or
     /// cloaked window, or one not shown yet, is a window the platform sends no paint until it
     /// can be seen, and that stays exactly as it was.
     ///
-    /// The flag is lowered first, so every present asked for while this present runs (the
-    /// presenter's own retry, the skirt) is asked of the platform: no later turn end would pay
-    /// it.
+    /// The flag is lowered first, so an ask that reaches [`Self::ask_for_present`] while this
+    /// present runs goes to the platform: no later turn end would pay it. (The presenter's own
+    /// retry and the skirt ask the platform directly and never come through here.)
     fn pay_the_turns_present(&mut self) -> Result<()> {
         self.window.turn_pays_presents = false;
         if !std::mem::take(&mut self.window.turn_owes_a_present) {
@@ -2178,9 +2178,9 @@ impl<B: Backend> Runtime<'_, B> {
         let pty_resize_deadline = self.flush_pending_pty_resize(now)?;
         // **The present this turn was asked for, paid by this turn** (T-TWO-BARE-TURNS-PER-
         // MARK-STEP). After every clock above and the PTY gate, because each of them can publish
-        // the frame it pays; before the input method's flush below, so a caret area the present
-        // wants is told on this turn and not left for the fold to read as owed at once; and
-        // before the fold, because the fold books from the present it reads.
+        // the frame it pays; and before the fold below, because the fold books the next wake from
+        // what the present leaves (`last_present_at`, the debts): a debt still filed there would
+        // be read as owed at once.
         self.pay_the_turns_present()?;
         // **And the input method's caret area, on the same terms** (ticket 63). Every
         // road above — the drain's frames, the IME events' frames, a preview repainted,

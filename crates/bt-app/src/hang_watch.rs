@@ -2206,6 +2206,8 @@ impl Heartbeat {
     /// The charge itself, at `now_ns`: the hold's ledger in whole milliseconds, as it always
     /// was, and the run's per-station time in nanoseconds for the turn census
     /// ([`census::Census::station`]). The clock is the caller's one reading; this reads none.
+    /// The census's part is a relaxed load and store of the entry instant and of the station's
+    /// counter: the window thread is the one writer of both, as of the station itself.
     fn charge(&self, station: Station, now_ns: u64) {
         let now_ms = now_ns / NS_PER_MS;
         let leaving = Station::from_byte(self.station.load(Ordering::Relaxed));
@@ -2213,7 +2215,8 @@ impl Heartbeat {
         self.detail.charge(now_ms.saturating_sub(since));
         self.spent_ms[leaving.slot()].fetch_add(now_ms.saturating_sub(since), Ordering::Relaxed);
         self.station_since_ms.store(now_ms, Ordering::Relaxed);
-        let since_ns = self.station_since_ns.swap(now_ns, Ordering::Relaxed);
+        let since_ns = self.station_since_ns.load(Ordering::Relaxed);
+        self.station_since_ns.store(now_ns, Ordering::Relaxed);
         self.accounts
             .census
             .station(leaving, now_ns.saturating_sub(since_ns));

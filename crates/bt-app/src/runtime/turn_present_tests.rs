@@ -13,8 +13,11 @@
 
 use std::time::{Duration, Instant};
 
+use bt_render::FrameSource;
+
 use crate::headless::{HeadlessFolio, PlatformAnswers, WindowEffect};
 use crate::test_support::{leaf_saying, tab_holding};
+use crate::wake_owner::WakeOwner;
 
 /// Far enough apart that every turn is a new frame for the window's frame clock.
 const STEP: Duration = Duration::from_millis(250);
@@ -22,21 +25,52 @@ const STEP: Duration = Duration::from_millis(250);
 /// A shell whose command is running (OSC 133 C with no D yet), so its tab's mark breathes.
 const WORKING: &str = "\x1b]133;A\x07PS> \x1b]133;B\x07cargo build\x1b]133;C\x07";
 
-/// One window holding one shell that says `text`, its first frame on the glass, its ledger empty.
-fn window_saying(tag: &str, text: &str) -> HeadlessFolio {
+/// **One window holding one shell that says `text`**: its first frame on the glass, the size its
+/// layout gave the shell told and quiet, its ledger empty; with the instant of its last turn.
+///
+/// The tab takes its layout when the window is made, and that opens a resize its shell is told of
+/// over the next turns; each of those turns publishes the resize's own frames, which would stand
+/// in the slot over the frame a test drives. So the window turns, a step apart, until no shell
+/// has a resize open, as `every_visible_pane_settles_its_rows_and_schedules_its_own_artifacts`
+/// settles its panes.
+fn window_saying(tag: &str, text: &str) -> (HeadlessFolio, Instant) {
     let mut folio = HeadlessFolio::with_tabs(tag, vec![tab_holding(leaf_saying(text))], 0);
     folio.draw();
+    let mut now = Instant::now();
+    for _ in 0..8 {
+        if !a_resize_is_open(&mut folio) {
+            break;
+        }
+        now += STEP;
+        turn_at(&mut folio, now);
+    }
+    assert!(
+        !a_resize_is_open(&mut folio),
+        "the fixture's own precondition: the shell has settled its first size"
+    );
     folio.ledger.take();
+    (folio, now)
+}
+
+/// Whether any shell on screen still has a resize open.
+fn a_resize_is_open(folio: &mut HeadlessFolio) -> bool {
     folio
+        .runtime()
+        .sessions
+        .values()
+        .any(|leaf| leaf.session.session.resize_transaction_open())
 }
 
 /// **One turn of the window at `now`**, as the loop takes it (its own clocks, then the loop's
-/// hand-over after it), and what it left on the ledger.
-fn turn_at(folio: &mut HeadlessFolio, now: Instant) -> Vec<WindowEffect> {
+/// hand-over after it): the wake it booked, and what it left on the ledger.
+fn turn_at(
+    folio: &mut HeadlessFolio,
+    now: Instant,
+) -> (Option<(WakeOwner, Instant)>, Vec<WindowEffect>) {
     let mut runtime = folio.runtime();
-    runtime.turn(now, false).expect("the turn is answered");
+    let wake = runtime.turn(now, false).expect("the turn is answered");
     runtime.end_the_turns_presents();
-    folio.ledger.take()
+    (wake, folio.ledger.take())
 }
 
 /// How many presents a ledger holds.
@@ -49,32 +83,29 @@ fn presents(effects: &[WindowEffect]) -> usize {
 
 /// **How many turns of the loop the turn at `now` took to reach the glass**: one when it
 /// presented, two when it asked the platform for a paint (the paint is the second turn, delivered
-/// here), none when nothing was presented or asked for. With the turn's own ledger.
-fn turns_to_the_glass(folio: &mut HeadlessFolio, now: Instant) -> (usize, Vec<WindowEffect>) {
-    let effects = turn_at(folio, now);
+/// here), none when nothing was presented or asked for. With the turn's own wake and ledger.
+fn turns_to_the_glass(
+    folio: &mut HeadlessFolio,
+    now: Instant,
+) -> (usize, Option<(WakeOwner, Instant)>, Vec<WindowEffect>) {
+    let (wake, effects) = turn_at(folio, now);
     if presents(&effects) > 0 {
-        return (1, effects);
+        return (1, wake, effects);
     }
     if effects.contains(&WindowEffect::Redraw) {
         folio.runtime().redraw().expect("the paint is answered");
         let painted = folio.ledger.take();
-        return (if presents(&painted) > 0 { 2 } else { 0 }, effects);
+        return (if presents(&painted) > 0 { 2 } else { 0 }, wake, effects);
     }
-    (0, effects)
+    (0, wake, effects)
 }
 
-/// Whether the frame on the glass draws the letters `text` anywhere in its cells.
-fn the_glass_draws(folio: &HeadlessFolio, text: &str) -> bool {
-    folio
-        .window
-        .last_presented_frame
-        .as_ref()
-        .expect("the window has presented a frame")
-        .cells
-        .iter()
-        .map(|cell| cell.text.as_str())
-        .collect::<String>()
-        .contains(text)
+/// The one present a turn's ledger holds, by its source.
+fn presented_source(effects: &[WindowEffect]) -> Option<FrameSource> {
+    effects.iter().find_map(|effect| match effect {
+        WindowEffect::Presented { source, .. } => Some(*source),
+        _ => None,
+    })
 }
 
 /// RED — **a step of the working mark reaches the glass on the turn that ticked it.**
@@ -83,19 +114,21 @@ fn the_glass_draws(folio: &HeadlessFolio, text: &str) -> bool {
 /// there (`publish_chrome_frame`). That present is the turn's to pay, at its own end; asking the
 /// platform for it is the second turn per step this row removes.
 ///
+/// And the turn's paid debt books no wake at its own instant: the wake it returns is later than
+/// the turn, so the paid present does not come back as a bare second turn through the fold.
+///
 /// MUTATION: make `Runtime::ask_for_present` always ask the platform (drop its deferral) — every
 /// step takes two turns and asks for a paint.
 #[test]
 fn a_working_mark_step_reaches_the_glass_in_its_own_turn() {
-    let mut folio = window_saying("turn-present-mark", WORKING);
+    let (mut folio, mut now) = window_saying("turn-present-mark", WORKING);
     assert!(
         folio.window.tabs[0].fleet_working(),
         "the fixture's own precondition: the shell's command is running, so the mark breathes"
     );
-    let mut now = Instant::now();
     for step in 0..3 {
         now += STEP;
-        let (turns, effects) = turns_to_the_glass(&mut folio, now);
+        let (turns, wake, effects) = turns_to_the_glass(&mut folio, now);
         assert_eq!(
             folio.window.strip_animation_ticked_at,
             Some(now),
@@ -115,6 +148,11 @@ fn a_working_mark_step_reaches_the_glass_in_its_own_turn() {
             1,
             "step {step}: one present: {effects:?}"
         );
+        assert!(
+            wake.is_some_and(|(_, at)| at > now),
+            "step {step}: the turn books its next wake after itself, not at its own instant: \
+             {wake:?}"
+        );
     }
 }
 
@@ -123,10 +161,12 @@ fn a_working_mark_step_reaches_the_glass_in_its_own_turn() {
 /// The blink is a phase in the renderer, and it too owes a present of the picture already on the
 /// glass (`advance_cursor_blink_if_due` → `publish_chrome_frame`).
 ///
+/// And, as for the mark, the wake the blink's turn returns is later than the turn.
+///
 /// MUTATION: as above — each blink takes two turns.
 #[test]
 fn a_caret_blink_reaches_the_glass_in_its_own_turn() {
-    let mut folio = window_saying("turn-present-caret", "PS> ");
+    let (mut folio, _) = window_saying("turn-present-caret", "PS> ");
     assert!(
         folio.runtime().keyboard_owner_is_a_shell(),
         "the fixture's own precondition: a shell holds the keyboard, so its caret blinks"
@@ -138,7 +178,7 @@ fn a_caret_blink_reaches_the_glass_in_its_own_turn() {
             .deadline()
             .expect("a blinking caret has its next phase");
         let lit = folio.window.cursor_blink.visible();
-        let (turns, effects) = turns_to_the_glass(&mut folio, due);
+        let (turns, wake, effects) = turns_to_the_glass(&mut folio, due);
         assert_ne!(
             folio.window.cursor_blink.visible(),
             lit,
@@ -156,6 +196,11 @@ fn a_caret_blink_reaches_the_glass_in_its_own_turn() {
             presents(&effects),
             1,
             "blink {blink}: one present: {effects:?}"
+        );
+        assert!(
+            wake.is_some_and(|(_, at)| at > due),
+            "blink {blink}: the turn books its next wake after itself, not at its own instant: \
+             {wake:?}"
         );
     }
 }
@@ -181,24 +226,17 @@ fn output_held_until(folio: &mut HeadlessFolio, bytes: &[u8], until: Instant) {
 /// The drain's frame enters the slot in `publish_frame_inner` and is presented by the turn that
 /// published it, not by a paint the platform sends afterwards. Driven through the drain's own
 /// deferral, released on its turn (`finish_pty_coalesce_if_due`), which publishes through the same
-/// door the drain does: this headless shell has no reader thread to drain.
-///
-/// What is checked is the output's letters on the glass, not the present's `source`: the slot
-/// holds one frame and the trigger of whichever publish came last, and later in the same turn
-/// another publish (the window's opening size released to its shell, a re-projection) composes
-/// from the same grid and stands in the slot over the drain's.
+/// door the drain does: this headless shell has no reader thread to drain. On a window whose
+/// shell has settled its first size, so the present is the drain's own frame (`PtyOutput`) and no
+/// resize's.
 ///
 /// MUTATION: as above — the output's frame takes two turns.
 #[test]
 fn a_panes_output_reaches_the_glass_in_the_turn_that_publishes_it() {
-    let mut folio = window_saying("turn-present-output", "PS> ");
-    assert!(
-        !the_glass_draws(&folio, "Compiling"),
-        "the fixture's own precondition: the output is not on the glass yet"
-    );
-    let now = Instant::now() + STEP;
+    let (mut folio, settled) = window_saying("turn-present-output", "PS> ");
+    let now = settled + STEP;
     output_held_until(&mut folio, b"   Compiling bt-app v0.0.0\r\n", now);
-    let (turns, effects) = turns_to_the_glass(&mut folio, now);
+    let (turns, _, effects) = turns_to_the_glass(&mut folio, now);
     assert_eq!(
         turns, 1,
         "the output reaches the glass on the turn that published it: {effects:?}"
@@ -207,10 +245,10 @@ fn a_panes_output_reaches_the_glass_in_the_turn_that_publishes_it() {
         !effects.contains(&WindowEffect::Redraw),
         "and the turn asks the platform for no paint: {effects:?}"
     );
-    assert_eq!(presents(&effects), 1, "one present: {effects:?}");
-    assert!(
-        the_glass_draws(&folio, "Compiling"),
-        "the present carries the output: {effects:?}"
+    assert_eq!(
+        presented_source(&effects),
+        Some(FrameSource::PtyOutput),
+        "the present is the output's own frame: {effects:?}"
     );
 }
 
@@ -243,12 +281,12 @@ fn a_window_on_no_screen_still_asks_the_platform_for_its_paint() {
         ),
         ("not shown yet", PlatformAnswers::default(), false),
     ] {
-        let mut folio = window_saying("turn-present-hidden", "PS> ");
+        let (mut folio, settled) = window_saying("turn-present-hidden", "PS> ");
         folio.window.window.answers.set(answers);
         folio.window.window_shown = shown;
-        let now = Instant::now() + STEP;
+        let now = settled + STEP;
         output_held_until(&mut folio, b"   Compiling bt-app v0.0.0\r\n", now);
-        let effects = turn_at(&mut folio, now);
+        let (_, effects) = turn_at(&mut folio, now);
         assert!(
             effects.contains(&WindowEffect::Redraw),
             "{case}: the window asks the platform for the paint: {effects:?}"
@@ -273,7 +311,7 @@ fn a_window_on_no_screen_still_asks_the_platform_for_its_paint() {
 /// asked for.
 #[test]
 fn a_turn_that_left_early_hands_its_present_to_the_platform() {
-    let mut folio = window_saying("turn-present-early", "PS> ");
+    let (mut folio, _) = window_saying("turn-present-early", "PS> ");
     // A turn that raised its flag and returned before its end.
     folio.window.turn_pays_presents = true;
     folio.runtime().ask_for_present();
@@ -292,5 +330,35 @@ fn a_turn_that_left_early_hands_its_present_to_the_platform() {
         folio.ledger.take(),
         vec![WindowEffect::Redraw],
         "and an ask outside any turn is the platform's again"
+    );
+}
+
+/// RED — **the loop hands over every window's deferred present right after that window's turn.**
+///
+/// `end_the_turns_presents` is what lowers the flag after a turn that left before its end (an
+/// error the loop answers with `fail`, a window it keeps). Without the call, that window would go
+/// on deferring the presents its event handlers ask for until its next turn, and in Windows'
+/// modal size loop, where `about_to_wait` does not run, that is no turn at all. The test above
+/// calls the function itself; this one pins where the loop calls it: after `runtime.turn` and
+/// before the turn's answer is looked at, so an error's early `return` cannot skip it.
+///
+/// MUTATION: delete the call in `FolioApp::about_to_wait_inner`, or move it into the `Ok` arm.
+#[test]
+fn the_loop_hands_over_each_windows_deferred_present_after_its_turn() {
+    let body = crate::test_support::method_body("FolioApp", "about_to_wait_inner");
+    let turn = body
+        .find("let turn = runtime.turn(now, application_clocks);")
+        .unwrap_or_else(|| panic!("the windows' own turn has moved:\n{body}"));
+    let hand_over = body
+        .find("runtime.end_the_turns_presents();")
+        .unwrap_or_else(|| {
+            panic!("the loop no longer hands over a turn's deferred present:\n{body}")
+        });
+    let answer = body
+        .find("match turn {")
+        .unwrap_or_else(|| panic!("the turn's answer is no longer matched:\n{body}"));
+    assert!(
+        turn < hand_over && hand_over < answer,
+        "the hand-over stands between the turn and the look at its answer:\n{body}"
     );
 }

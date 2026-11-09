@@ -33,9 +33,12 @@
 //! time is the accounting's — no lock, and no allocation except **once per `AppEvent` variant per
 //! run**, when a variant is first seen and its name is written down
 //! ([`Census::app_event`]). Each station change adds the time spent in the station it leaves to
-//! that station's counter ([`Census::station`]: one relaxed add, on the clock reading the change
-//! already took). The watchdog reads the counters on its own two-second round and writes the
-//! lines only when `BT_PERF_TRACE` is set; nothing here is on a clock of its own.
+//! that station's counter ([`Census::station`]), on the clock reading the change already took: a
+//! relaxed load and store of the station's entry instant and two of its counter, whether or not
+//! `BT_PERF_TRACE` is set, and no read-modify-write. The window thread is the one writer of
+//! both, as it is of the station itself (an admitted door is the window thread's alone). The
+//! watchdog reads the counters on its own two-second round and writes the lines only when
+//! `BT_PERF_TRACE` is set; nothing here is on a clock of its own.
 
 use std::mem::Discriminant;
 use std::sync::OnceLock;
@@ -130,9 +133,14 @@ impl Census {
         }
     }
 
-    /// **The window thread spent `ns` in `station`**, just now: one relaxed add.
+    /// **The window thread spent `ns` in `station`**, just now: a relaxed load and store, because
+    /// the window thread is the counter's one writer (the watchdog only reads it).
     pub(super) fn station(&self, station: Station, ns: u64) {
-        self.station_ns[station.slot()].fetch_add(ns, Ordering::Relaxed);
+        let counter = &self.station_ns[station.slot()];
+        counter.store(
+            counter.load(Ordering::Relaxed).saturating_add(ns),
+            Ordering::Relaxed,
+        );
     }
 
     /// **A turn opens**, owed the wake whose owner is `owner_byte` (the accounting's packing; zero
