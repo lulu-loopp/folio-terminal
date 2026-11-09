@@ -134,13 +134,11 @@ impl Census {
     }
 
     /// **The window thread spent `ns` in `station`**, just now: a relaxed load and store, because
-    /// the window thread is the counter's one writer (the watchdog only reads it).
+    /// the window thread is the counter's one writer (the watchdog only reads it). A plain add: a
+    /// run's nanoseconds reach `u64::MAX` after some 584 years.
     pub(super) fn station(&self, station: Station, ns: u64) {
         let counter = &self.station_ns[station.slot()];
-        counter.store(
-            counter.load(Ordering::Relaxed).saturating_add(ns),
-            Ordering::Relaxed,
-        );
+        counter.store(counter.load(Ordering::Relaxed) + ns, Ordering::Relaxed);
     }
 
     /// **A turn opens**, owed the wake whose owner is `owner_byte` (the accounting's packing; zero
