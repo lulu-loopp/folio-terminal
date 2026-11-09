@@ -13,8 +13,6 @@
 
 use std::time::{Duration, Instant};
 
-use bt_render::FrameSource;
-
 use crate::headless::{HeadlessFolio, PlatformAnswers, WindowEffect};
 use crate::test_support::{leaf_saying, tab_holding};
 
@@ -65,12 +63,18 @@ fn turns_to_the_glass(folio: &mut HeadlessFolio, now: Instant) -> (usize, Vec<Wi
     (0, effects)
 }
 
-/// The one present a turn's ledger holds, by its source.
-fn presented_source(effects: &[WindowEffect]) -> Option<FrameSource> {
-    effects.iter().find_map(|effect| match effect {
-        WindowEffect::Presented { source, .. } => Some(*source),
-        _ => None,
-    })
+/// Whether the frame on the glass draws the letters `text` anywhere in its cells.
+fn the_glass_draws(folio: &HeadlessFolio, text: &str) -> bool {
+    folio
+        .window
+        .last_presented_frame
+        .as_ref()
+        .expect("the window has presented a frame")
+        .cells
+        .iter()
+        .map(|cell| cell.text.as_str())
+        .collect::<String>()
+        .contains(text)
 }
 
 /// RED — **a step of the working mark reaches the glass on the turn that ticked it.**
@@ -179,10 +183,19 @@ fn output_held_until(folio: &mut HeadlessFolio, bytes: &[u8], until: Instant) {
 /// deferral, released on its turn (`finish_pty_coalesce_if_due`), which publishes through the same
 /// door the drain does: this headless shell has no reader thread to drain.
 ///
+/// What is checked is the output's letters on the glass, not the present's `source`: the slot
+/// holds one frame and the trigger of whichever publish came last, and later in the same turn
+/// another publish (the window's opening size released to its shell, a re-projection) composes
+/// from the same grid and stands in the slot over the drain's.
+///
 /// MUTATION: as above — the output's frame takes two turns.
 #[test]
 fn a_panes_output_reaches_the_glass_in_the_turn_that_publishes_it() {
     let mut folio = window_saying("turn-present-output", "PS> ");
+    assert!(
+        !the_glass_draws(&folio, "Compiling"),
+        "the fixture's own precondition: the output is not on the glass yet"
+    );
     let now = Instant::now() + STEP;
     output_held_until(&mut folio, b"   Compiling bt-app v0.0.0\r\n", now);
     let (turns, effects) = turns_to_the_glass(&mut folio, now);
@@ -194,10 +207,10 @@ fn a_panes_output_reaches_the_glass_in_the_turn_that_publishes_it() {
         !effects.contains(&WindowEffect::Redraw),
         "and the turn asks the platform for no paint: {effects:?}"
     );
-    assert_eq!(
-        presented_source(&effects),
-        Some(FrameSource::PtyOutput),
-        "the present is the output's own frame: {effects:?}"
+    assert_eq!(presents(&effects), 1, "one present: {effects:?}");
+    assert!(
+        the_glass_draws(&folio, "Compiling"),
+        "the present carries the output: {effects:?}"
     );
 }
 
