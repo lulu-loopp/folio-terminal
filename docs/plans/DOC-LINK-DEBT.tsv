@@ -1,6 +1,6 @@
 # DOC-LINK-DEBT - every broken intra-doc link in bt-app's documentation, one row per warning
 # (T-DOC-LINK-DEBT, 0.4.9 plan row 78).
-# measured at b65646bf
+# measured at 80774934
 #
 # Measured by scripts/ci/measure-doc-links.ps1: `cargo doc -p bt-app --no-deps --locked
 # --message-format=json` on Windows, every warning whose lint code is
@@ -13,8 +13,8 @@
 # broken link is. A link is fixed (or reworded) and its row leaves in the same commit.
 # A row is `owner`, `target` and `shape`; `module` is the module the owner is written in, so an
 # owner moved to another module is its rows moved (T-MOVED-NOT-ADDED-RULE); `file` is where it is
-# written today and is not compared. When the list is empty, rustdoc's lint is denied in the
-# workspace and the list retires.
+# written today: the shrink check does not compare it, the docs job does. When the list is empty,
+# rustdoc's lint is denied in the workspace and the list retires.
 owner	target	shape	module	file
 crate (outside any item)	Coalescing	unresolved	crate	main.rs
 crate (outside any item)	Coalescing	unresolved	crate	main.rs
