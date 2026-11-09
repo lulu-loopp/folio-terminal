@@ -117,6 +117,29 @@ mod product_retries {
         let _ = crate::pty_door::request_shell_in(turns(), spec(), wake());
         let _ = bear(ctx(), turns(), spec(), Retry::OneShotForATest, wake());
     }
+
+    #[test]
+    fn a_birth_through_a_grouped_import() {
+        use crate::pty_door::{ShellSpec, request_shell};
+        let _ = request_shell(spec(), wake());
+    }
+
+    #[test]
+    fn a_birth_through_the_parent_module() {
+        let _ = super::request_shell(spec(), wake());
+    }
+
+    #[test]
+    fn the_persons_retry_through_a_grouped_import() {
+        use super::Retry::{OneShotForATest, ThePersons};
+        let _ = bear(ctx(), turns(), spec(), ThePersons, wake());
+    }
+
+    #[test]
+    fn the_persons_retry_through_a_glob_import() {
+        use super::Retry::*;
+        let _ = bear(ctx(), turns(), spec(), ThePersons, wake());
+    }
 }
 
 /// A test-build door that gives a test's birth the person's retry: test code too.

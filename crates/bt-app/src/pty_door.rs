@@ -272,7 +272,7 @@ fn bear(
     );
     let composed = planned.composed;
     let args = composed.arguments;
-    let fallback_args = retry.over(planned.last_resort);
+    let fallback_args = retry.retry_arguments(planned.last_resort);
     let inherited: Vec<(OsString, OsString)> = std::env::vars_os().collect();
     // **A carried environment this system cannot give a shell refuses the birth** (F-SWEEP-2-048
     // round 3): said in the diagnostics and on the window's "Shell not started" card, never cut.
@@ -419,7 +419,7 @@ const A_TESTS_RETRY: [&str; 5] = [
 
 impl Retry {
     /// The retry's argument list, given the one the birth composed (`composed`).
-    fn over<'r>(
+    fn retry_arguments<'r>(
         self,
         composed: Box<dyn Fn() -> Vec<OsString> + 'r>,
     ) -> Box<dyn Fn() -> Vec<OsString> + 'r> {
@@ -666,14 +666,14 @@ mod tests {
     /// birth — started when the asked program will not start, or kept for a death at birth —
     /// never runs the account's profile or line editor.
     ///
-    /// MUTATION: have `Retry::over` hand `OneShotForATest` the composed arguments
+    /// MUTATION: have `Retry::retry_arguments` hand `OneShotForATest` the composed arguments
     /// (`plant-182-one-shot-is-the-persons.py`) — the composed retry is `-NoLogo` alone, an
     /// interactive shell with the profile, and this names it.
     #[cfg(windows)]
     #[test]
     fn a_tests_birth_retry_is_a_one_shot_without_the_profile() {
         let composed = Box::new(|| shell_integration::last_resort_arguments(false));
-        let retry = (Retry::OneShotForATest.over(composed))();
+        let retry = (Retry::OneShotForATest.retry_arguments(composed))();
         assert!(
             shell_integration::is_a_profile_free_one_shot(
                 Path::new(bt_pty::LAST_RESORT_SHELL),
