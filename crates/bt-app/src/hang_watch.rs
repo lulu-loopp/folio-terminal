@@ -2522,6 +2522,7 @@ impl Heartbeat {
     }
 
     /// [`Self::at`] on a clock the caller holds. See [`Self::park_at`].
+    #[cfg(test)]
     pub fn at_station(&self, station: Station, now_ms: u64) {
         self.at_station_ns(station, now_ms.saturating_mul(NS_PER_MS));
     }
