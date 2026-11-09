@@ -16667,5 +16667,5 @@ Both are written by the switch's own writer, `apply_resolved` with `Decision::In
 
 **Pinned by**
 - `bt-render-probe/tests/body_layer.rs::the_kept_body_is_the_body_drawn_directly_byte_for_byte` — two windows over one device, one kept and one direct, at scale 1, 1.5 and 2 over an opaque ground, a 60 % one and a 60 % one with a picture: byte equality on every frame through eight mark steps, a pane printing, the caret blinking and changing shape, and a resize, with `body_composes` saying which frames drew the body;
-- `runtime::frame_tests::a_working_mark_steps_over_a_quiet_pane_without_recomposing_it` — the headless glass decides with `BodyKey`, and a breathing mark's presents over panes that said nothing are `BodyUse::Reused`, the frame after a pane printed `Composed`;
+- `runtime::frame::tests::a_working_mark_steps_over_a_quiet_pane_without_recomposing_it` — the headless glass decides with `BodyKey`, and a breathing mark's presents over panes that said nothing are `BodyUse::Reused`, the frame after a pane printed `Composed`;
 - the plants P1–P5 in the row's report.
