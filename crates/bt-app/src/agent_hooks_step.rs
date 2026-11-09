@@ -18,18 +18,24 @@
 //! when a repair is due): the classification is still published, and the commit runs the pass
 //! again. **Never beside a press** (R11 keeps the press on the window thread): a press takes its
 //! family's latch ([`AgentHooksStep::take_latch`]) for its write, and a repair that finds the latch
-//! taken writes nothing. One toast per family whose gone copy's hooks were pointed here (R8), and
-//! one diagnostics line per repair due, `BT_AGENT_HOOKS <family> <state> repaired=<from>`.
+//! taken writes nothing. One toast per family whose gone copy's hooks were pointed here (R8).
+//!
+//! **One diagnostics line per family when its answer changes** (row 68a, R-D of 2026-11-07):
+//! `BT_AGENT_HOOKS <family> <state>`, with ` repaired=<from>` when a repair was due — written,
+//! held, gated, pressed, refused or lost — and the gone programs for a dead owner. A start says
+//! each family once; a run that finds what the last line said says nothing more
+//! ([`AgentHooksStep::say_changed`]). The pass's own line counts the round.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, OnceLock, PoisonError};
+use std::sync::{Mutex, PoisonError};
 
 use bt_platform::admission::WorkerCtx;
 
 use crate::attention_copilot::Readiness;
 use crate::attention_hooks::{Config, Unresolved};
 use crate::attention_ownership::{self as ownership, Decision, HooksFound, Outcome};
+use crate::carry_pass::MemberAnswer;
 use crate::i18n::Text;
 use crate::update_trial::Writer;
 
@@ -122,23 +128,45 @@ pub(crate) struct HooksScan {
     pub(crate) notice: Option<Text>,
     /// Why a repair that was due did not happen, when the row has that to say (review N4).
     pub(crate) unrepaired: Option<Unrepaired>,
+    /// The run's diagnostics line for the family (row 68a): said by [`AgentHooksStep::say_changed`]
+    /// when it differs from the last one said.
+    pub(crate) line: String,
 }
 
 impl HooksScan {
-    fn unrepaired(found: HooksFound) -> Self {
+    fn unrepaired(found: HooksFound, line: String) -> Self {
         Self {
             found,
             repaired_from: None,
             notice: None,
             unrepaired: None,
+            line,
         }
     }
 
-    fn left(found: HooksFound, why: Unrepaired) -> Self {
+    fn left(found: HooksFound, why: Unrepaired, line: String) -> Self {
         Self {
             unrepaired: Some(why),
-            ..Self::unrepaired(found)
+            ..Self::unrepaired(found, line)
         }
+    }
+}
+
+/// **A family's diagnostics line**: its state, and, for a run in which a repair was due, how it
+/// went and the gone programs of a dead owner.
+fn hooks_line(
+    family: &HooksFamily,
+    state: &HooksFound,
+    repair: Option<(&str, &HooksFound)>,
+) -> String {
+    match repair {
+        None => format!("BT_AGENT_HOOKS {} {}", family.tag, state.diagnostic_word()),
+        Some((how, found)) => format!(
+            "BT_AGENT_HOOKS {} {} repaired={how}{}",
+            family.tag,
+            state.diagnostic_word(),
+            gone_programs(found)
+        ),
     }
 }
 
@@ -163,6 +191,30 @@ pub(crate) struct HooksSnapshot {
     pub(crate) notices: Vec<Text>,
 }
 
+impl HooksSnapshot {
+    /// **One run's answers, as the window adopts them**: the families' states, why a due repair
+    /// was not written, Copilot's readiness, and the notices the run's repairs owe.
+    pub(crate) fn of(scans: &[HooksScan; 3], copilot_readiness: Readiness) -> Self {
+        Self {
+            found: std::array::from_fn(|index| scans[index].found.clone()),
+            unrepaired: std::array::from_fn(|index| scans[index].unrepaired),
+            copilot_readiness,
+            notices: scans.iter().filter_map(|scan| scan.notice).collect(),
+        }
+    }
+
+    /// **This run's answers in place of a part the window has not taken**: the untaken part's
+    /// notices are still owed, so they are handed on, before this run's own.
+    #[must_use]
+    pub(crate) fn keeping_untaken(mut self, untaken: Option<Self>) -> Self {
+        if let Some(untaken) = untaken {
+            let mine = std::mem::replace(&mut self.notices, untaken.notices);
+            self.notices.extend(mine);
+        }
+        self
+    }
+}
+
 /// **A family's latch, held** — let go when this is dropped, on a return or as the thread unwinds,
 /// so a panic in a write never leaves the family latched for the rest of the run.
 pub(crate) struct HooksLatchHeld<'a>(&'a AtomicBool);
@@ -174,10 +226,13 @@ impl Drop for HooksLatchHeld<'_> {
 }
 
 /// **The step's state between its runs**: one latch per family, shared with the presses, and the
-/// snapshot waiting for the window.
+/// last diagnostics line said for each family.
 pub(crate) struct AgentHooksStep {
     latches: [AtomicBool; 3],
-    published: Mutex<Option<HooksSnapshot>>,
+    said: Mutex<[Option<String>; 3]>,
+    /// Whether this process has said that this copy's program could not be named, since the
+    /// last scan (the review's N8: said once, and again only after a scan in between).
+    unnamed_said: AtomicBool,
 }
 
 impl AgentHooksStep {
@@ -188,7 +243,8 @@ impl AgentHooksStep {
                 AtomicBool::new(false),
                 AtomicBool::new(false),
             ],
-            published: Mutex::new(None),
+            said: Mutex::new([None, None, None]),
+            unnamed_said: AtomicBool::new(false),
         }
     }
 
@@ -218,13 +274,17 @@ impl AgentHooksStep {
         let mut held = None;
         std::array::from_fn(|index| {
             let family = &HOOKS_FAMILIES[index];
+            let as_found = |found: HooksFound| {
+                let line = hooks_line(family, &found, None);
+                HooksScan::unrepaired(found, line)
+            };
             let config = match paths[index].as_deref().map(Config::resolve) {
-                None => return HooksScan::unrepaired(HooksFound::Nothing),
+                None => return as_found(HooksFound::Nothing),
                 Some(Err(Unresolved::Refused(reason))) => {
-                    return HooksScan::unrepaired(HooksFound::Refused(reason));
+                    return as_found(HooksFound::Refused(reason));
                 }
                 Some(Err(Unresolved::Unreadable)) => {
-                    return HooksScan::unrepaired(HooksFound::Unreadable);
+                    return as_found(HooksFound::Unreadable);
                 }
                 // One read for the run (`Config::with_one_read`): what is classified is what is
                 // edited, and a press that wrote since makes the write refuse rather than undo it.
@@ -232,27 +292,20 @@ impl AgentHooksStep {
             };
             let found = (family.scan)(&config, exe, look);
             if !found.wants_repair() {
-                return HooksScan::unrepaired(found);
+                return as_found(found);
             }
-            let say = |how: &str| {
-                crate::diagnostics::stderr_line(format!(
-                    "BT_AGENT_HOOKS {} {} repaired={how}{}",
-                    family.tag,
-                    found.diagnostic_word(),
-                    gone_programs(&found)
-                ));
-            };
+            let said = |how: &str| hooks_line(family, &found, Some((how, &found)));
             if *held.get_or_insert_with(|| defer(Writer::AgentHooksRepair)) {
-                say("held");
-                return HooksScan::left(found, Unrepaired::Held);
+                let line = said("held");
+                return HooksScan::left(found, Unrepaired::Held, line);
             }
             if !within_its_gate(family) {
-                say("gated");
-                return HooksScan::unrepaired(found);
+                let line = said("gated");
+                return HooksScan::unrepaired(found, line);
             }
             let Some(_latch) = self.take_latch(index) else {
-                say("pressed");
-                return HooksScan::unrepaired(found);
+                let line = said("pressed");
+                return HooksScan::unrepaired(found, line);
             };
             match (family.apply)(&config, Decision::Install, exe, data) {
                 Outcome::Installed => {
@@ -264,61 +317,54 @@ impl AgentHooksStep {
                     let confirmed = now.is_this_copys();
                     let notice = (confirmed && matches!(found, HooksFound::Dead(_)))
                         .then(|| (family.repaired)(config.named()));
-                    crate::diagnostics::stderr_line(format!(
-                        "BT_AGENT_HOOKS {} {} repaired={}{}",
-                        family.tag,
-                        now.diagnostic_word(),
-                        if confirmed {
-                            found.diagnostic_word().to_owned()
-                        } else {
-                            format!("lost ({})", now.diagnostic_word())
-                        },
-                        gone_programs(&found)
-                    ));
+                    let how = if confirmed {
+                        found.diagnostic_word().to_owned()
+                    } else {
+                        format!("lost ({})", now.diagnostic_word())
+                    };
+                    let line = hooks_line(family, &now, Some((&how, &found)));
                     HooksScan {
                         repaired_from: confirmed.then_some(found),
                         notice,
-                        ..HooksScan::unrepaired(now)
+                        ..HooksScan::unrepaired(now, line)
                     }
                 }
                 Outcome::Refused(reason) => {
-                    say(&format!("refused ({reason})"));
-                    HooksScan::left(found, Unrepaired::Refused(reason))
+                    let line = said(&format!("refused ({reason})"));
+                    HooksScan::left(found, Unrepaired::Refused(reason), line)
                 }
                 outcome => {
-                    say(&format!("refused ({outcome:?})"));
-                    HooksScan::unrepaired(found)
+                    let line = said(&format!("refused ({outcome:?})"));
+                    HooksScan::unrepaired(found, line)
                 }
             }
         })
     }
 
-    /// Put one run's answers where the window takes them; a snapshot the window has not taken
-    /// yet hands its notices on to this one.
-    pub(crate) fn publish_scans(&self, scans: &[HooksScan; 3], copilot_readiness: Readiness) {
-        let mut published = self
-            .published
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        let mut notices = published
-            .take()
-            .map(|untaken| untaken.notices)
-            .unwrap_or_default();
-        notices.extend(scans.iter().filter_map(|scan| scan.notice));
-        *published = Some(HooksSnapshot {
-            found: std::array::from_fn(|index| scans[index].found.clone()),
-            unrepaired: std::array::from_fn(|index| scans[index].unrepaired),
-            copilot_readiness,
-            notices,
-        });
+    /// **Say each family's line when it differs from the last one said for that family**
+    /// (row 68a, R-D of 2026-11-07), by `say`; answers how many it said.
+    pub(crate) fn say_changed(&self, scans: &[HooksScan; 3], say: &dyn Fn(String)) -> usize {
+        self.unnamed_said.store(false, Ordering::Relaxed);
+        let mut said = self.said.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut changed = 0;
+        for (last, scan) in said.iter_mut().zip(scans) {
+            if last.as_deref() != Some(scan.line.as_str()) {
+                say(scan.line.clone());
+                *last = Some(scan.line.clone());
+                changed += 1;
+            }
+        }
+        changed
     }
 
-    /// **The newest snapshot, once** — the window's adoption.
-    pub(crate) fn take_snapshot(&self) -> Option<HooksSnapshot> {
-        self.published
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take()
+    /// **Say that no family was scanned, because this copy's program could not be named** — once,
+    /// and again only after a scan has run in between (the review's N8, under R-D's change rule).
+    pub(crate) fn say_unnamed(&self, say: &dyn Fn(String)) {
+        if !self.unnamed_said.swap(true, Ordering::Relaxed) {
+            say(
+                "BT_AGENT_HOOKS not scanned: this copy's own program could not be named".to_owned(),
+            );
+        }
     }
 }
 
@@ -340,33 +386,24 @@ fn gone_programs(found: &HooksFound) -> String {
 /// This process's step.
 pub(crate) static AGENT_HOOKS: AgentHooksStep = AgentHooksStep::new();
 
-/// How a run asks for a frame — installed once, at startup ([`install_hooks_wake`]).
-static HOOKS_WAKE: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
-
-/// Install the wake, once.
-pub(crate) fn install_hooks_wake(wake: impl Fn() + Send + Sync + 'static) {
-    let _ = HOOKS_WAKE.set(Box::new(wake));
-}
-
-/// **The step, on this machine**: the carry pass's member ([`crate::carry_pass::run_carry_steps`]).
+/// **The step, on this machine**: the carry pass's member ([`crate::carry_pass::run_carry_steps`]),
+/// answering its part of the round — three checks, one per family — or nothing.
 ///
 /// **Not before the program walk has answered** (the pane-environment ruling of 2026-10-05: the
 /// folders are the account's current ones, never the launch's): the walk's first answer runs the
-/// pass, so a run asked earlier — an Agents page opened in the first second — has nothing to read
-/// yet and waits for it.
-pub(crate) fn run_agent_hooks_step(ctx: &WorkerCtx) {
+/// pass, so a run asked earlier — the start's own, an Agents page opened in the first second — has
+/// nothing to read yet and answers nothing.
+pub(crate) fn run_agent_hooks_step(ctx: &WorkerCtx) -> Option<MemberAnswer<HooksSnapshot>> {
     if !crate::attention_hooks::AGENT_HOMES.answered() {
-        return;
+        return None;
     }
     // The one family whose file is named by a question of its agent: codex's version decides
     // whether Folio's entry is the hook or the `notify` line (row 69c, R17), so it is settled here,
     // on the pass's worker, before any family's file is named.
     let _ = crate::attention_codex::settle_version(ctx);
     let Some(exe) = ownership::this_copy() else {
-        crate::diagnostics::stderr_line(
-            "BT_AGENT_HOOKS not scanned: this copy's own program could not be named".to_owned(),
-        );
-        return;
+        AGENT_HOOKS.say_unnamed(&crate::diagnostics::stderr_line);
+        return None;
     };
     let paths = HOOKS_FAMILIES.each_ref().map(family_path);
     let scans = AGENT_HOOKS.scan_and_repair(
@@ -377,10 +414,12 @@ pub(crate) fn run_agent_hooks_step(ctx: &WorkerCtx) {
         crate::update_trial::defer,
         &|family| (family.within_its_gate)(),
     );
-    AGENT_HOOKS.publish_scans(&scans, crate::attention_copilot::readiness());
-    if let Some(wake) = HOOKS_WAKE.get() {
-        wake();
-    }
+    let changed = AGENT_HOOKS.say_changed(&scans, &crate::diagnostics::stderr_line);
+    Some(MemberAnswer {
+        part: HooksSnapshot::of(&scans, crate::attention_copilot::readiness()),
+        checks: scans.len(),
+        changed,
+    })
 }
 
 /// **Where a family's file is**: the account's own, in the product.
@@ -403,7 +442,7 @@ fn family_path(family: &HooksFamily) -> Option<PathBuf> {
 /// once, under the build's `target/tb-tests` with the step's own tests' folders.
 #[cfg(test)]
 fn test_process_agent_homes() -> &'static Path {
-    static HOMES: OnceLock<PathBuf> = OnceLock::new();
+    static HOMES: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     HOMES.get_or_init(|| {
         test_scratch_root().join(bt_testpath::unique_name("bt-app-test-process-agent-homes"))
     })
@@ -559,6 +598,15 @@ mod tests {
         files.iter().map(|file| fs::read(file).ok()).collect()
     }
 
+    /// A run's answer for a family without its diagnostics line, which
+    /// `each_family_says_one_line_when_its_answer_changes` pins on its own.
+    fn sans_line(scan: &HooksScan) -> HooksScan {
+        HooksScan {
+            line: String::new(),
+            ..scan.clone()
+        }
+    }
+
     fn found(scans: &[HooksScan; 3]) -> Vec<HooksFound> {
         scans.iter().map(|scan| scan.found.clone()).collect()
     }
@@ -645,8 +693,7 @@ mod tests {
         assert!(!marks.agent_config_roots.claude.is_empty());
         assert!(!marks.agent_config_roots.codex.is_empty());
         assert!(!marks.agent_config_roots.copilot.is_empty());
-        step.publish_scans(&scans, Readiness::Unknown);
-        let snapshot = step.take_snapshot().expect("a run publishes");
+        let snapshot = HooksSnapshot::of(&scans, Readiness::Unknown);
         assert_eq!(
             snapshot.notices,
             [
@@ -674,11 +721,62 @@ mod tests {
         );
         assert!(again.iter().all(|scan| scan.repaired_from.is_none()));
         assert_eq!(bytes(&files), repaired, "a second run wrote");
-        step.publish_scans(&again, Readiness::Unknown);
         assert!(
-            step.take_snapshot().unwrap().notices.is_empty(),
+            HooksSnapshot::of(&again, Readiness::Unknown)
+                .notices
+                .is_empty(),
             "a notice was said twice"
         );
+    }
+
+    /// RED (0.4.10 plan row 68a, R-D of 2026-11-07) — **each family says one line when its answer
+    /// changes, and nothing when it does not**: the run that repairs a gone copy's hooks says how,
+    /// for all three; the next says each is current now; the one after says nothing; a family whose
+    /// file goes says that, alone.
+    ///
+    /// MUTATION: every run says every line (`plant-68a-line-said-every-round.py`).
+    #[test]
+    fn each_family_says_one_line_when_its_answer_changes() {
+        let root = root("hooks-step-lines");
+        let gone = copy_at(&root, "A gone");
+        let here = copy_at(&root, "B here");
+        let files = files_in(&root.join("config"));
+        let data = root.join("data");
+        install_all(&files, &gone, &root.join("gone data"));
+        fs::remove_file(&gone).unwrap();
+        let step = AgentHooksStep::new();
+        let run = || {
+            step.scan_and_repair(
+                &some(&files),
+                &here,
+                &data,
+                &what_stands,
+                never_held,
+                &every_family,
+            )
+        };
+        let heard = std::cell::RefCell::new(Vec::<String>::new());
+        let say = |line: String| heard.borrow_mut().push(line);
+        let said = |scans: &[HooksScan; 3]| {
+            let changed = step.say_changed(scans, &say);
+            assert_eq!(changed, heard.borrow().len(), "the count is the lines said");
+            heard.take()
+        };
+        let was = format!(" (was: {})", gone.display());
+        assert_eq!(
+            said(&run()),
+            ["claude", "codex", "copilot"]
+                .map(|tag| format!("BT_AGENT_HOOKS {tag} current repaired=dead{was}"))
+        );
+        assert_eq!(
+            said(&run()),
+            ["claude", "codex", "copilot"].map(|tag| format!("BT_AGENT_HOOKS {tag} current"))
+        );
+        assert!(said(&run()).is_empty(), "an unchanged answer says nothing");
+        fs::remove_file(&files[0]).unwrap();
+        let after = said(&run());
+        assert_eq!(after.len(), 1, "{after:?}");
+        assert!(after[0].starts_with("BT_AGENT_HOOKS claude "), "{after:?}");
     }
 
     /// Row 69c — **on a codex that runs hooks the repair is the hook's**: a gone copy's hook in
@@ -722,9 +820,8 @@ mod tests {
         );
         let line = fs::read_to_string(&config_toml).unwrap();
         assert!(!line.contains("notify"), "the line is out: {line}");
-        step.publish_scans(&scans, Readiness::Unknown);
         assert_eq!(
-            step.take_snapshot().unwrap().notices,
+            HooksSnapshot::of(&scans, Readiness::Unknown).notices,
             [
                 Text::AgentHooksRepairedClaude,
                 Text::AgentHooksRepairedCodexHook,
@@ -770,9 +867,8 @@ mod tests {
                 Some(HooksFound::Dead(vec![gone.clone()]))
             );
         }
-        step.publish_scans(&scans, Readiness::Unknown);
         assert_eq!(
-            step.take_snapshot().unwrap().notices,
+            HooksSnapshot::of(&scans, Readiness::Unknown).notices,
             [
                 Text::AgentHooksRepairedCodex,
                 Text::AgentHooksRepairedCopilot
@@ -802,8 +898,8 @@ mod tests {
             &|family: &HooksFamily| family.tag != "copilot",
         );
         assert_eq!(
-            scans[2],
-            HooksScan::unrepaired(HooksFound::Dead(vec![gone.clone()]))
+            sans_line(&scans[2]),
+            HooksScan::unrepaired(HooksFound::Dead(vec![gone.clone()]), String::new())
         );
         assert_eq!(fs::read(&files[2]).unwrap(), copilot_before);
         assert!(scans[..2].iter().all(|scan| scan.repaired_from.is_some()));
@@ -836,8 +932,8 @@ mod tests {
         let scans =
             step.scan_and_repair(&some(&files), &here, &data, &what_stands, never_held, &gate);
         assert_eq!(
-            scans[1],
-            HooksScan::unrepaired(HooksFound::Dead(vec![gone.clone()]))
+            sans_line(&scans[1]),
+            HooksScan::unrepaired(HooksFound::Dead(vec![gone.clone()]), String::new())
         );
         assert_eq!(
             (fs::read(&files[1]).unwrap(), fs::read(&hooks_json).ok()),
@@ -1021,7 +1117,11 @@ mod tests {
             assert_eq!(scans[family].found, HooksFound::Current, "{shape}");
             for (index, scan) in scans.iter().enumerate() {
                 if index != family {
-                    assert_eq!(scan, &HooksScan::unrepaired(HooksFound::Current), "{shape}");
+                    assert_eq!(
+                        sans_line(scan),
+                        HooksScan::unrepaired(HooksFound::Current, String::new()),
+                        "{shape}"
+                    );
                 }
             }
             let settings: Value =
@@ -1080,7 +1180,10 @@ mod tests {
             never_held,
             &every_family,
         );
-        assert_eq!(left[0], HooksScan::unrepaired(HooksFound::Current));
+        assert_eq!(
+            sans_line(&left[0]),
+            HooksScan::unrepaired(HooksFound::Current, String::new())
+        );
         assert_eq!(
             fs::read(&files[0]).unwrap(),
             theirs,
@@ -1172,8 +1275,11 @@ mod tests {
                 hooks_row_line(&scans[family].found, scans[family].unrepaired),
                 Some(Text::AgentHooksUnreadable.text())
             );
-            step.publish_scans(&scans, Readiness::Unknown);
-            assert!(step.take_snapshot().unwrap().notices.is_empty());
+            assert!(
+                HooksSnapshot::of(&scans, Readiness::Unknown)
+                    .notices
+                    .is_empty()
+            );
         }
     }
 
@@ -1569,8 +1675,8 @@ mod tests {
             &every_family,
         );
         assert_eq!(
-            scans[0],
-            HooksScan::unrepaired(HooksFound::Dead(vec![gone.clone()]))
+            sans_line(&scans[0]),
+            HooksScan::unrepaired(HooksFound::Dead(vec![gone.clone()]), String::new())
         );
         assert_eq!(
             fs::read(&files[0]).unwrap(),
@@ -1692,23 +1798,53 @@ mod tests {
     /// and no readiness, and the adoption reads none. What the window thread still reads is the
     /// presses' (R11) and the first-run card's three `state()` questions and three
     /// `held_by_another` ones (ruling N3), asked once on a first run (report §2.2).
+    ///
+    /// The start's carry step (0.4.10 plan row 68a, `startup::FirstWindow::carry`) is written
+    /// inside `Runtime::create`, so it is held to the same: it begins the pass and reads nothing,
+    /// and so do the step's own function (`carry_pass::begin_carry_at_start`) and the window's
+    /// adoption of the round (`FolioApp::adopt_carry_snapshot`), both on the window thread (the
+    /// review's N5).
+    /// MUTATION: the step reads a row first (`plant-68a-carry-step-reads-on-the-window-thread.py`).
     #[test]
     fn the_window_thread_reads_no_agent_file_at_start() {
-        let create = crate::test_support::method_body("Runtime", "create");
-        for read in [
-            "row_state(",
-            "attention_copilot::readiness(",
-            "attention_hooks::state(",
-            "attention_codex::state(",
-            "attention_copilot::state(",
-        ] {
+        use crate::test_support::{free_fn_body, method_body, squeezed};
+        let create = method_body("Runtime", "create");
+        assert!(
+            squeezed(create).contains(&squeezed("carry: carry_pass::begin_carry_at_start,")),
+            "the start's carry step is not where this test reads"
+        );
+        let window_thread = [
+            ("Runtime::create", create),
+            ("begin_carry_at_start", free_fn_body("begin_carry_at_start")),
+            (
+                "FolioApp::adopt_carry_snapshot",
+                method_body("FolioApp", "adopt_carry_snapshot"),
+            ),
+            (
+                "adopt_agent_hooks_snapshot",
+                free_fn_body("adopt_agent_hooks_snapshot"),
+            ),
+        ];
+        for (name, body) in window_thread {
+            let body = squeezed(body);
+            for read in [
+                "row_state(",
+                "attention_copilot::readiness(",
+                "attention_hooks::state(",
+                "attention_codex::state(",
+                "attention_copilot::state(",
+            ] {
+                assert!(
+                    !body.contains(read),
+                    "{name} reads an agent's file on the window thread: {read}"
+                );
+            }
+            // The adoptions take the readiness the snapshot carries, and never ask it.
             assert!(
-                !create.contains(read),
-                "the launch reads an agent's file: {read}"
+                name == "Runtime::create" || !body.contains("readiness()"),
+                "{name} asks copilot's readiness on the window thread"
             );
         }
-        let adopt = crate::test_support::free_fn_body("adopt_agent_hooks_snapshot");
-        assert!(!adopt.contains("row_state(") && !adopt.contains("readiness()"));
     }
 
     /// **The pass runs at the moments the rulings name** (R7): the walk's answer (its first
@@ -1868,8 +2004,14 @@ mod tests {
             &every_family,
         );
         let placed = HooksFound::Placed(vec!["SubagentStop".to_owned()]);
-        assert_eq!(scans[0], HooksScan::unrepaired(placed.clone()));
-        assert_eq!(scans[2], HooksScan::unrepaired(HooksFound::Current));
+        assert_eq!(
+            sans_line(&scans[0]),
+            HooksScan::unrepaired(placed.clone(), String::new())
+        );
+        assert_eq!(
+            sans_line(&scans[2]),
+            HooksScan::unrepaired(HooksFound::Current, String::new())
+        );
         assert_eq!(bytes(&files), edited, "a person's edit was written over");
         let line = hooks_row_line(&scans[0].found, scans[0].unrepaired).expect("said");
         assert_eq!(
@@ -2072,8 +2214,8 @@ mod tests {
             &every_family,
         );
         assert_eq!(
-            held[0],
-            HooksScan::left(HooksFound::Drifted, Unrepaired::Held)
+            sans_line(&held[0]),
+            HooksScan::left(HooksFound::Drifted, Unrepaired::Held, String::new())
         );
         assert_eq!(
             hooks_row_line(&held[0].found, held[0].unrepaired),
@@ -2093,8 +2235,12 @@ mod tests {
         );
         let refusal = Text::AgentConfigNoBackup.text();
         assert_eq!(
-            scans[0],
-            HooksScan::left(HooksFound::Drifted, Unrepaired::Refused(refusal))
+            sans_line(&scans[0]),
+            HooksScan::left(
+                HooksFound::Drifted,
+                Unrepaired::Refused(refusal),
+                String::new()
+            )
         );
         assert_eq!(fs::read(&files[0]).unwrap(), old);
         assert_eq!(
@@ -2219,5 +2365,32 @@ mod tests {
                 family.tag
             );
         }
+    }
+
+    /// RED (0.4.10 plan row 68a, the review's N8) — **a copy that cannot be named is said once**,
+    /// under R-D's change rule: the line is said again only after a scan has run in between.
+    ///
+    /// MUTATION: the line is said every round (`plant-68a-unnamed-said-every-round.py`).
+    #[test]
+    fn an_unnamed_copy_is_said_once_until_a_scan_runs() {
+        let step = AgentHooksStep::new();
+        let heard = std::cell::RefCell::new(Vec::<String>::new());
+        let say = |line: String| heard.borrow_mut().push(line);
+        step.say_unnamed(&say);
+        step.say_unnamed(&say);
+        assert_eq!(
+            heard.take(),
+            ["BT_AGENT_HOOKS not scanned: this copy's own program could not be named"],
+            "an unchanged answer says nothing"
+        );
+        let scans = [0, 1, 2].map(|_| HooksScan::unrepaired(HooksFound::Nothing, String::new()));
+        step.say_changed(&scans, &say);
+        heard.take();
+        step.say_unnamed(&say);
+        assert_eq!(
+            heard.take().len(),
+            1,
+            "a scan in between makes it news again"
+        );
     }
 }

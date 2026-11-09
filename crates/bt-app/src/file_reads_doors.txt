@@ -130,7 +130,7 @@ trace_sink.rs: start: open
 Claim::take: .open
 VideoSeat::open: Engine::open
 VideoSeats::open: VideoSeat::open
-execute_with_claim: Marks::read
+execute_over: Marks::read
 # The install channel (U-1): the marker and scoop's receipt on Lane::Install, each
 # capped; the derivation's one call of the folder read.
 capped: .read_to_end

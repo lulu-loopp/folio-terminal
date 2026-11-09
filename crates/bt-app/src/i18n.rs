@@ -410,6 +410,10 @@ text_entries! {
     CleanupMarkClipboard,
     CleanupMarkPanicLog,
     CleanupMarkRemoverHome,
+    CleanupMarkRestartRegistration,
+    CleanupMarkServicesEntry,
+    CleanupMarkNotificationPermission,
+    CleanupMarkUpdateJournal,
     CleanupKindPerCopy,
     CleanupKindPerAccount,
     CleanupKindData,
@@ -5527,6 +5531,12 @@ impl Text {
             Self::CleanupMarkClipboard => pick(lang, "Clipboard staging", "剪贴板暂存"),
             Self::CleanupMarkPanicLog => pick(lang, "Panic log", "崩溃日志"),
             Self::CleanupMarkRemoverHome => pick(lang, "Uninstaller staging", "卸载程序暂存"),
+            Self::CleanupMarkRestartRegistration => pick(lang, "Restart registration", "重启注册"),
+            Self::CleanupMarkServicesEntry => pick(lang, "Services menu entry", "服务菜单项"),
+            Self::CleanupMarkNotificationPermission => {
+                pick(lang, "Notification permission", "通知权限")
+            }
+            Self::CleanupMarkUpdateJournal => pick(lang, "Update journal", "更新事务记录"),
             Self::CleanupKindPerCopy => pick(lang, "per-copy", "按副本"),
             Self::CleanupKindPerAccount => pick(lang, "per-account", "按账户"),
             Self::CleanupKindData => pick(lang, "data", "数据"),

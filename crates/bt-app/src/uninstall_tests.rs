@@ -664,6 +664,430 @@ fn uninstall_door_precedes_every_startup_effect() {
     }
 }
 
+/// The calls a squeezed function body (`test_support::squeezed`: no comments, no whitespace) makes
+/// with the carry worker's context as an argument, by their paths as written with any turbofish
+/// left out (the review's N2 and N3, the re-review's R3).
+///
+/// The context is `ctx` or `&ctx` standing as a whole argument, in any position: after the call's
+/// `(` or a `,`, before a `,` or the `)`. The call is the innermost `(` left open in front of it,
+/// over balanced brackets; its path is read back from that `(` over identifiers, `::` and a
+/// turbofish's `::<…>`, and a lone `:` (a field's `hooks:`) or any other character ends it. A
+/// context in brackets that are not a call's, or whose call has no path the reader can name (a
+/// closure called in place, a parenthesised expression), fails here, loudly, rather than being
+/// left out.
+fn calls_handed_the_context(squeezed_body: &str) -> Vec<String> {
+    let bytes = squeezed_body.as_bytes();
+    let identifier = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
+    fn unnamed(squeezed_body: &str, at: usize) -> ! {
+        let boundary = |mut index: usize| {
+            while !squeezed_body.is_char_boundary(index) {
+                index -= 1;
+            }
+            index
+        };
+        let around = &squeezed_body
+            [boundary(at.saturating_sub(40))..boundary((at + 40).min(squeezed_body.len()))];
+        panic!("a context call the reader cannot name, at byte {at}: {around}")
+    }
+    let mut calls = Vec::new();
+    let mut from = 0;
+    while let Some(found) = squeezed_body[from..].find("ctx") {
+        let at = from + found;
+        from = at + "ctx".len();
+        let argument = if at > 0 && bytes[at - 1] == b'&' {
+            at - 1
+        } else {
+            at
+        };
+        let opened_by = argument.checked_sub(1).map(|before| bytes[before]);
+        if !matches!(opened_by, Some(b'(' | b',')) || !matches!(bytes.get(from), Some(b')' | b','))
+        {
+            continue;
+        }
+        let mut open = argument - 1;
+        let mut depth = 0usize;
+        loop {
+            match bytes[open] {
+                b')' | b']' | b'}' => depth += 1,
+                b'(' | b'[' | b'{' if depth > 0 => depth -= 1,
+                b'(' => break,
+                b'[' | b'{' => unnamed(squeezed_body, at),
+                _ => {}
+            }
+            open = open
+                .checked_sub(1)
+                .unwrap_or_else(|| unnamed(squeezed_body, at));
+        }
+        let mut start = open;
+        let mut generics = Vec::new();
+        loop {
+            if start > 0 && bytes[start - 1] == b'>' {
+                let close = start;
+                let mut angle = 0usize;
+                loop {
+                    start = start
+                        .checked_sub(1)
+                        .unwrap_or_else(|| unnamed(squeezed_body, at));
+                    match bytes[start] {
+                        b'>' => angle += 1,
+                        b'<' => {
+                            angle -= 1;
+                            if angle == 0 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if start < 2 || &bytes[start - 2..start] != b"::" {
+                    unnamed(squeezed_body, at);
+                }
+                start -= 2;
+                generics.push(start..close);
+            } else if start > 0 && identifier(bytes[start - 1]) {
+                start -= 1;
+            } else if start >= 2 && bytes[start - 1] == b':' && bytes[start - 2] == b':' {
+                start -= 2;
+            } else {
+                break;
+            }
+        }
+        let mut path = String::new();
+        let mut cursor = start;
+        for generic in generics.iter().rev() {
+            path.push_str(&squeezed_body[cursor..generic.start]);
+            cursor = generic.end;
+        }
+        path.push_str(&squeezed_body[cursor..open]);
+        let named = path.trim_start_matches("::");
+        let segments_named = named.split("::").all(|segment| {
+            segment
+                .bytes()
+                .next()
+                .is_some_and(|first| identifier(first) && !first.is_ascii_digit())
+        });
+        if named.is_empty() || !segments_named {
+            unnamed(squeezed_body, at);
+        }
+        calls.push(path);
+    }
+    calls
+}
+
+/// The member reader reads what the pass hands its context to, in any argument position, and
+/// nothing it does not.
+#[test]
+fn the_carry_members_are_read_by_their_context_argument() {
+    use crate::test_support::squeezed;
+    let body = squeezed(concat!(
+        "{\n",
+        "let round = CarryRound {\n",
+        "hooks: crate::a::first(ctx),\n",
+        "other: crate::b::second(ctx, &mut kept),\n",
+        "};\n",
+        "// crate::c::commented(ctx),\n",
+        "let _ = ctx_free(ctxs, ctx.depth(), the.ctx);\n",
+        "let _ = crate::d::third( ctx );\n",
+        "let _ = crate::e::fourth(&ctx);\n",
+        "let _ = crate::f::fifth(&mut kept, [1, 2], ctx);\n",
+        "let _ = crate::g::sixth::<Vec<u8>>(ctx);\n",
+        "let _ = Some(crate::h::seventh(kept(1), ctx));\n",
+        "}",
+    ));
+    assert_eq!(
+        calls_handed_the_context(&body),
+        [
+            "crate::a::first",
+            "crate::b::second",
+            "crate::d::third",
+            "crate::e::fourth",
+            "crate::f::fifth",
+            "crate::g::sixth",
+            "crate::h::seventh",
+        ]
+    );
+}
+
+/// The member reader fails, loudly, on a context handed to a call it cannot name.
+#[test]
+fn a_context_call_the_member_reader_cannot_name_fails_it() {
+    use crate::test_support::squeezed;
+    for unnamed in [
+        "let _ = (|context| context)(ctx);",
+        "let _ = (ctx);",
+        "let _ = [kept, ctx, kept];",
+        "let _ = 1::<u8>(ctx);",
+    ] {
+        let read = std::panic::catch_unwind(|| calls_handed_the_context(&squeezed(unnamed)));
+        let failure = read.expect_err(unnamed);
+        let message = failure
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .unwrap_or_default();
+        assert!(
+            message.starts_with("a context call the reader cannot name"),
+            "{unnamed}: {message}"
+        );
+    }
+}
+
+/// Whether `text` names a date, `YYYY-MM-DD`.
+fn names_a_date(text: &str) -> bool {
+    text.as_bytes().windows(10).any(|window| {
+        window.iter().enumerate().all(|(index, byte)| match index {
+            4 | 7 => *byte == b'-',
+            _ => byte.is_ascii_digit(),
+        })
+    })
+}
+
+/// Whether `bt_source` finds the function `test` in `module` of this package.
+fn test_found(module: &str, test: &str) -> bool {
+    source()
+        .find(
+            &bt_source::ItemQuery::function(test)
+                .in_module(module)
+                .one_per_variant(),
+        )
+        .is_ok_and(|found| !found.is_empty())
+}
+
+/// RED (0.4.10 plan row 68a, R1; rulings R-A, R-C, R-E of 2026-11-07; the review's N2–N4 and N6)
+/// — **every owned thing says how an update carries it, and the start writers and the carry pass
+/// agree with what is said**:
+///
+/// 1. every row of the inventory declares at least one [`CarryRule`];
+/// 2. every member of `update_trial::Writer::ALL` — every durable writer a start makes, and
+///    `update_trial::tests::writer_all_names_every_variant` holds `ALL` to the whole enum — is
+///    named by some row's rule, so a new start writer must say which owned thing it carries;
+/// 3. every owner check a row declares is called by `carry_pass::run_carry_steps` with the worker's
+///    context, and its old sites are gone from `Runtime::create`; or it is owed by a later part,
+///    still runs where it ran when it was owed (`Runtime::create`), and the test that part lands
+///    with is not yet in the program; and every member that body hands the context to is a check
+///    some row declares. So an owed seam ends the day its part lands: the part that moves its check
+///    takes the old call away, the part that lands its test makes `landed_by` found, and the part
+///    that adds its member adds a call; each is red until `in_the_pass` answers `Ok` for it, and
+///    then the old site must be gone. Every statement is read with comments and whitespace
+///    squeezed out, so a comment keeps nothing alive;
+/// 4. an agent's check is its own row's: `AgentHooks(i)` stands on the row `Remover::Agent(i)`;
+/// 5. every check in the pass names the test that brings its old shape to today's, and `bt_source`
+///    finds that test; only an owed check may name none (the classic verb's, 68b's finding);
+/// 6. every retirement names the dated ruling that keeps it, and every document's reader is the
+///    item its file names.
+///
+/// MUTATIONS: the pass stops calling its member (`plant-68a-pass-skips-its-member.py`); a start
+/// writer loses its row (`plant-68a-writer-claimed-by-no-row.py`); the old-shape test is renamed
+/// (`plant-68a-old-shape-test-renamed.py`); an owed check leaves `Runtime::create` while its
+/// declaration still owes it (`plant-68a-owed-check-half-moved.py`); the owed part's test lands
+/// while the check is still owed (`plant-68a-owed-part-landed.py`); two agents' checks swap rows
+/// (`plant-68a-agent-checks-swapped.py`).
+#[test]
+fn every_owned_thing_says_how_an_update_carries_it() {
+    use crate::carry_pass::{CarryCheck, CarryRule};
+    use crate::test_support::squeezed;
+    use crate::update_trial::Writer;
+    let rules = || {
+        INVENTORY
+            .iter()
+            .flat_map(|mark| mark.carry.iter().map(move |rule| (mark, *rule)))
+    };
+    for mark in INVENTORY {
+        assert!(
+            !mark.carry.is_empty(),
+            "{} says nothing of how an update carries it",
+            mark.name
+        );
+    }
+    let claimed: Vec<Writer> = rules()
+        .flat_map(|(_, rule)| match rule {
+            CarryRule::Document { writers, .. } => writers.to_vec(),
+            CarryRule::BuildBytes(writer) | CarryRule::OwnerChecked { writer, .. } => {
+                vec![writer]
+            }
+            CarryRule::Process { held } | CarryRule::Identity { held } => {
+                held.into_iter().collect()
+            }
+            CarryRule::Transaction | CarryRule::Retired { .. } | CarryRule::Absent => Vec::new(),
+        })
+        .collect();
+    for writer in Writer::ALL {
+        assert!(
+            claimed.contains(&writer),
+            "{writer:?} is a start writer no owned thing's carry rule names"
+        );
+    }
+    let pass = squeezed(crate::test_support::free_fn_body("run_carry_steps"));
+    let create = squeezed(crate::test_support::method_body("Runtime", "create"));
+    let handed = calls_handed_the_context(&pass);
+    let checks: Vec<(&Mark, CarryCheck)> = rules()
+        .filter_map(|(mark, rule)| match rule {
+            CarryRule::OwnerChecked { check, .. } => Some((mark, check)),
+            _ => None,
+        })
+        .collect();
+    let mut members = Vec::new();
+    for (mark, check) in &checks {
+        let name = mark.name;
+        if let CarryCheck::AgentHooks(index) = check {
+            assert_eq!(
+                mark.remover,
+                Remover::Agent(*index),
+                "{name}: {check:?} is another agent's check"
+            );
+        }
+        match check.in_the_pass() {
+            Ok(member) => {
+                assert!(
+                    handed.iter().any(|called| called == member.call),
+                    "{name}: {check:?} is in the pass by its declaration, and \
+                     `run_carry_steps` does not hand {}(ctx) the worker's context",
+                    member.call
+                );
+                for retired in member.retired {
+                    assert!(
+                        !create.contains(&squeezed(retired)),
+                        "{name}: {check:?} runs in the pass and still by its old site in \
+                         `Runtime::create`: {retired}"
+                    );
+                }
+                members.push(member.call);
+            }
+            Err(owed) => {
+                assert!(
+                    create.contains(&squeezed(owed.runs_today)),
+                    "{name}: {check:?} no longer runs where it was owed ({}): part {} has moved \
+                     it, so `CarryCheck::in_the_pass` answers its call in the pass",
+                    owed.runs_today,
+                    owed.part
+                );
+                let (module, test) = owed.landed_by;
+                assert!(
+                    !test_found(module, test),
+                    "{name}: {check:?} is owed by part {}, whose test {module}::{test} has \
+                     landed: `CarryCheck::in_the_pass` answers its call in the pass",
+                    owed.part
+                );
+            }
+        }
+        match check.old_shape_test() {
+            Some((module, test)) => assert!(
+                test_found(module, test),
+                "{name}: {check:?}'s old-shape test {module}::{test} is gone"
+            ),
+            None => assert!(
+                check.in_the_pass().is_err(),
+                "{name}: {check:?} runs in the pass and names no test of its old shape"
+            ),
+        }
+    }
+    for called in &handed {
+        assert!(
+            members.contains(&called.as_str()),
+            "the pass hands {called} the worker's context, and no owned thing declares it as its \
+             check"
+        );
+    }
+    for (mark, rule) in rules() {
+        match rule {
+            CarryRule::Retired { ruling } => assert!(
+                names_a_date(ruling),
+                "{}: the ruling that retires it has no date: {ruling}",
+                mark.name
+            ),
+            CarryRule::Document { readers, .. } => {
+                for reader in readers {
+                    assert!(
+                        reader_found(reader),
+                        "{}: the reader {reader} is not in the file it names",
+                        mark.name
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The module a source file declares, by the file's path below its package's `src/`:
+/// `shell_integration/profile_marks.rs` is `crate::shell_integration::profile_marks`, a `mod.rs`
+/// is its folder's module, and `lib.rs` and `main.rs` are `crate`.
+fn module_of_reader_file(file: &str) -> String {
+    let path = file.strip_suffix(".rs").unwrap_or(file);
+    let path = path.strip_suffix("/mod").unwrap_or(path);
+    if path == "lib" || path == "main" {
+        "crate".to_owned()
+    } else {
+        format!("crate::{}", path.replace('/', "::"))
+    }
+}
+
+/// Whether a reader a `CarryRule::Document` names — `file.rs:function` or `file.rs:Type::method`,
+/// in this package or, by a `../<package>/src/` path, in another — is an item of the module that
+/// file declares (the review's N6).
+fn reader_found(reader: &str) -> bool {
+    let (file, item) = reader
+        .split_once(".rs:")
+        .map(|(file, item)| (format!("{file}.rs"), item))
+        .unwrap_or_else(|| panic!("a reader is `file.rs:item`: {reader}"));
+    let (index, file) = match file.strip_prefix("../") {
+        Some(other) => {
+            let (package, below) = other.split_once("/src/").unwrap_or_else(|| {
+                panic!("another package's reader is `../<package>/src/…`: {reader}")
+            });
+            (bt_source::Index::of_package(package), below.to_owned())
+        }
+        None => (source(), file),
+    };
+    let query = match item.split_once("::") {
+        Some((owner, name)) => bt_source::ItemQuery::method(owner, name),
+        None => bt_source::ItemQuery::function(item),
+    };
+    index
+        .find(
+            &query
+                .in_module(&module_of_reader_file(&file))
+                .one_per_variant(),
+        )
+        .is_ok_and(|found| !found.is_empty())
+}
+
+/// RED (0.4.10 plan row 68a, R-B of 2026-11-07) — **the rows this door does not remove add
+/// nothing to its output**: over the same state, both verbs' transcripts with the rows that
+/// `Remover::OutsideTheDoor` holds are byte for byte the transcripts without them, which is the
+/// inventory as it stood before row 68a listed them.
+#[test]
+fn the_rows_outside_the_door_add_nothing_to_its_output() {
+    let before: Vec<Mark> = INVENTORY
+        .iter()
+        .copied()
+        .filter(|mark| mark.remover != Remover::OutsideTheDoor)
+        .collect();
+    assert_eq!(before.len(), 29, "the inventory as row 68a found it");
+    for purge in [false, true] {
+        let transcript = |tag: String, inventory: &[Mark]| {
+            let (root, scope) = sandbox(&tag);
+            let legacy = seed(&scope, &scope.exe);
+            let report =
+                super::execute_over(inventory, &scope, purge, system_absent, |_| Some(()), None);
+            drop(legacy);
+            let said = format!(
+                "{}--\n{}exit={}",
+                report.stdout(),
+                report.stderr(),
+                report.code
+            )
+            .replace(&root.display().to_string(), "<root>");
+            let _ = fs::remove_dir_all(&root);
+            said
+        };
+        assert_eq!(
+            transcript(format!("outside-the-door-{purge}"), INVENTORY),
+            transcript(format!("before-68a-{purge}"), &before),
+            "purge={purge}"
+        );
+    }
+}
+
 #[test]
 fn uninstall_source_guard_pins_known_writers_and_inventory() {
     use bt_source::{Index, ItemQuery};
@@ -684,8 +1108,11 @@ fn uninstall_source_guard_pins_known_writers_and_inventory() {
         (
             Remover::Profiles,
             app,
-            function("crate::shell_integration", "add_to_profile"),
-            "add_to_profile",
+            function(
+                "crate::shell_integration::profile_runtime",
+                "install_recorded",
+            ),
+            "profile_runtime.rs:install_recorded",
         ),
         (
             Remover::Agent(0),
@@ -716,6 +1143,36 @@ fn uninstall_source_guard_pins_known_writers_and_inventory() {
             app,
             function("crate::explorer_menu", "request"),
             "request",
+        ),
+        (
+            Remover::Explorer,
+            app,
+            function("crate::context_menu", "reassert"),
+            "context_menu.rs:reassert",
+        ),
+        (
+            Remover::Explorer,
+            app,
+            function("crate::explorer_menu", "probe"),
+            "explorer_menu.rs:probe",
+        ),
+        (
+            Remover::OutsideTheDoor,
+            app,
+            ItemQuery::method("FolioApp", "register_for_restart").one_per_variant(),
+            "FolioApp::register_for_restart",
+        ),
+        (
+            Remover::OutsideTheDoor,
+            platform,
+            function("crate::macos_services", "install"),
+            "macos_services.rs:install",
+        ),
+        (
+            Remover::OutsideTheDoor,
+            app,
+            function("crate::update_apply", "write_journal"),
+            "update_apply.rs:write_journal",
         ),
         (
             Remover::Toast,
@@ -845,7 +1302,7 @@ fn uninstall_source_guard_pins_known_writers_and_inventory() {
             .unwrap(),
         Path::new("local/Folio")
     );
-    assert_eq!(INVENTORY.len(), 29);
+    assert_eq!(INVENTORY.len(), 33);
     // The update entrance's writer is in `bt-platform` and is asked for by its
     // identity through `bt-source`, not by a file (U-22): `logon_hook::arm_in`
     // is the one function that writes a `Run` value, and the row names it.

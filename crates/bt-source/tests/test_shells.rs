@@ -18,7 +18,7 @@
 //! "test-shell")`, which a product build may turn on, so it is not test code
 //! here — it is the door, and the door is allowed to open.
 //!
-//! Three shapes are refused there:
+//! Four shapes are refused there:
 //!
 //! 1. **A pseudoconsole door** ([`PTY_DOORS`]): `PtySession::spawn` and the
 //!    resolving doors around it, and `BirthFallback::spawn_last_resort`, named
@@ -38,6 +38,17 @@
 //!    word (`git_bash()`, `ComSpec`). Other programs started this way — the
 //!    test binary itself, `where.exe`, `node --version` — are not shells and
 //!    are not this rule's subject.
+//! 4. **The person's birth retry** ([`PRODUCT_RETRIES`], plan row 182):
+//!    `bt-app`'s `pty_door::request_shell`, whose failed-start retry is the
+//!    account's interactive last-resort PowerShell, and `Retry::ThePersons`,
+//!    that retry handed to the birth by name. Both are keyed by their own
+//!    name, which the workspace declares once each, so every spelling that
+//!    reaches them is named: the full path, `super::request_shell`, a bare call
+//!    inside `pty_door`'s own tests, and a grouped or glob import with its use
+//!    (the import itself is named too). A test's birth goes through
+//!    `pty_door::request_shell_in`, whose retry is `Retry::OneShotForATest`, a
+//!    `-NoProfile -NonInteractive` one-shot. A test-build function is test code
+//!    here, so a `request_shell_in` that gave the person's retry is named too.
 //!
 //! # What stays review-owned
 //!
@@ -48,7 +59,8 @@
 //! **A product door a test drives** — this reads the test's own code, and the
 //! shell starts in product code (plan row 174's sweep, 2026-11-02):
 //! `bt-app`'s `pty_door::request_shell_in` asked by a test for a Store
-//! PowerShell (its failed-start retry is plan row 182); the PowerShell probes
+//! PowerShell — its first start, the test's own one-shot argv (its retry is
+//! shape 4's); the PowerShell probes
 //! (`shell_integration::powershell_probe_command`), which are `-NoProfile
 //! -NonInteractive` one-shots and the subject of the tests that run them; and
 //! the runtime's verbs that reach `create_leaf_session` (`split_seat`,
@@ -57,10 +69,14 @@
 //! unknown. A birth fallback a test made is refused at run time by
 //! `spawn_last_resort` itself in a test build (the reaper's road included).
 //! Mechanical `use … as …` aliases of a named door are resolved in their
-//! lexical module or block scope. A parent-module alias needs no alias inference:
-//! the canonical member (`Command::new`, `quiet_command`, `PtySession::spawn`)
-//! remains a literal suffix/identifier in the call. Macro-generated imports and
-//! type aliases that do not come from a `use` declaration stay review-owned.
+//! lexical module or block scope. For the doors keyed by a path, a parent-module
+//! alias needs no alias inference: the canonical member (`Command::new`,
+//! `quiet_command`, `PtySession::spawn`) remains a literal suffix/identifier in
+//! the call. That does not hold for a free function keyed by its module, which a
+//! grouped import or `super::` reaches without the module's name; so the
+//! person's birth retry (shape 4) is keyed by its bare names instead.
+//! Macro-generated imports and type aliases that do not come from a `use`
+//! declaration stay review-owned.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -105,6 +121,15 @@ struct MethodDoor {
     /// The road a test takes instead.
     door: &'static str,
 }
+
+/// The person's birth retry, which a test may not name (plan row 182): the
+/// product's birth door (`pty_door::request_shell`), whose retry is the
+/// account's interactive last-resort shell, and that retry by name
+/// (`Retry::ThePersons`). Matched as identifiers, not paths: each is declared
+/// once in the workspace, and a grouped import, `super::` or a bare call in
+/// `pty_door`'s own tests reaches it without the module's or the enum's name.
+/// A whole identifier, so `request_shell_in` is not one of them.
+const PRODUCT_RETRIES: [&str; 2] = ["request_shell", "ThePersons"];
 
 /// The calls that start a process off a pseudoconsole: the standard library's,
 /// and `bt_platform`'s three doors in front of it.
@@ -516,6 +541,18 @@ fn violations(index: &Index) -> Vec<String> {
             ));
         }
     }
+    for retry in PRODUCT_RETRIES {
+        let spans = in_test_code(index, Pattern::identifier(retry))
+            .into_iter()
+            .chain(aliased_uses(index, &aliases, retry));
+        for span in spans {
+            found.push(format!(
+                "{}: {retry} — a test's shell birth retries through \
+                 pty_door::request_shell_in (Retry::OneShotForATest)",
+                place(index, span)
+            ));
+        }
+    }
     for start in PROCESS_STARTS {
         let pattern = if start.contains("::") {
             Pattern::path(start)
@@ -599,7 +636,10 @@ fn door_definitions(
 /// through `use … as …` and the same call remains a finding. Put back
 /// `fallback.spawn_last_resort(…)` in `bt-app`'s
 /// `a_silent_birth_death_falls_back_in_place_and_keeps_every_restored_tab` (plan row 174,
-/// `plant-174-twin-bypasses-the-door.py`) and its line is named by its call shape.
+/// `plant-174-twin-bypasses-the-door.py`) and its line is named by its call shape. Give
+/// `bt-app`'s `pty_door::request_shell_in` `Retry::ThePersons` (plan row 182,
+/// `plant-182-test-door-gives-the-persons-retry.py`), or have the Store PowerShell test ask
+/// `pty_door::request_shell` (`plant-182-test-calls-the-product-door.py`), and the line is named.
 #[test]
 fn every_real_shell_a_test_starts_goes_through_the_test_shell_door() {
     let indices = workspace_indices();
@@ -636,6 +676,15 @@ fn every_real_shell_a_test_starts_goes_through_the_test_shell_door() {
 /// and one path — is named once each; the method called from product code, the test door and an
 /// unrelated `spawn` are not. MUTATION: drop the [`METHOD_DOORS`] pass and rows 84 and 87
 /// disappear; drop its `paths` filter and row 85 is named twice.
+///
+/// Plan row 182: the person's birth retry asked by a test — the product's birth door and the
+/// retry by name, in a test and in a test-build door, by path, through a grouped import (the
+/// import and the bare use), through `super::` and through a glob import — is named; the same
+/// in product code, the test's door and the test's retry are not. MUTATION: drop the
+/// [`PRODUCT_RETRIES`] pass and rows 111, 112, 123, 124, 129, 134, 135, 141 and 148 disappear;
+/// key it by `Pattern::path("pty_door::request_shell")` and `Pattern::path("Retry::ThePersons")`
+/// again and rows 123, 124, 129, 134, 135 and 141 disappear; drop the `in_the_product` filter
+/// and product rows 103 and 104 are named.
 #[test]
 fn the_guard_names_each_raw_shell_start_and_nothing_else() {
     let index = fixture();
@@ -677,6 +726,24 @@ fn the_guard_names_each_raw_shell_start_and_nothing_else() {
          bt_pty::test_shell::TestShell",
         "87: spawn_last_resort( — a test's birth fallback is started through \
          bt_pty::test_shell::TestShell::spawn_birth_fallback",
+        "111: request_shell — a test's shell birth retries through \
+         pty_door::request_shell_in (Retry::OneShotForATest)",
+        "112: ThePersons — a test's shell birth retries through \
+         pty_door::request_shell_in (Retry::OneShotForATest)",
+        "123: request_shell — a test's shell birth retries through \
+         pty_door::request_shell_in (Retry::OneShotForATest)",
+        "124: request_shell — a test's shell birth retries through \
+         pty_door::request_shell_in (Retry::OneShotForATest)",
+        "129: request_shell — a test's shell birth retries through \
+         pty_door::request_shell_in (Retry::OneShotForATest)",
+        "134: ThePersons — a test's shell birth retries through \
+         pty_door::request_shell_in (Retry::OneShotForATest)",
+        "135: ThePersons — a test's shell birth retries through \
+         pty_door::request_shell_in (Retry::OneShotForATest)",
+        "141: ThePersons — a test's shell birth retries through \
+         pty_door::request_shell_in (Retry::OneShotForATest)",
+        "148: ThePersons — a test's shell birth retries through \
+         pty_door::request_shell_in (Retry::OneShotForATest)",
     ];
     expected.sort_unstable();
     let mut lines = lines;

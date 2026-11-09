@@ -450,3 +450,127 @@ fn the_root_menu_reads_the_shells_folders_once_as_it_opens() {
         "the next opening reads the shell again"
     );
 }
+
+/// The bodies of the frames the window presented since the ledger was last taken — and, when a
+/// turn asked for a redraw, the redraw it asked for, as the event loop would run it.
+fn bodies_presented(folio: &mut HeadlessFolio) -> Vec<bt_render::BodyUse> {
+    let mut effects = folio.ledger.take();
+    if effects
+        .iter()
+        .any(|effect| matches!(effect, WindowEffect::Redraw))
+    {
+        folio
+            .runtime()
+            .redraw()
+            .expect("the redraw a turn asked for");
+        effects.extend(folio.ledger.take());
+    }
+    effects
+        .into_iter()
+        .filter_map(|effect| match effect {
+            WindowEffect::Presented { body, .. } => Some(body),
+            _ => None,
+        })
+        .collect()
+}
+
+/// RED (0.4.9 plan row 64a) — **a working mark breathes over a quiet pane without either pane's
+/// picture being drawn again**, and the first frame after a pane speaks draws them again.
+///
+/// The pane beside the keyboard's starts a command that prints nothing (`OSC 133;C`), so its
+/// tab's mark breathes and every step of the breath is a present. What each present hands the
+/// glass is the renderer's whole input to the window's body — every pane's frame, box, clip,
+/// focus and metrics, and the window's fonts, theme, ground, caret and size — and the glass
+/// decides with the renderer's own key (`bt_render::BodyKey`), so a present that put back the
+/// kept body is one whose every pane and every window fact is the last present's.
+///
+/// The caret is held lit through the steps (its blink is a body input of its own, and is a
+/// redraw of the body by design — `docs/DESIGN.md`, entry of 2026-11-03).
+///
+/// MUTATION (P5): flip the renderer's caret phase on every mark step in
+/// `Runtime::advance_strip_animation` (`self.window.renderer.set_cursor_blink_visible(...)`
+/// with the opposite of what it holds, before `refresh_chrome`) — every step moves a body input,
+/// every present draws the body, and the `Reused` assertion goes red.
+#[test]
+fn a_working_mark_steps_over_a_quiet_pane_without_recomposing_it() {
+    let (mut folio, beside, _watched) = two_shells("headless-mark-over-a-quiet-pane");
+    let mut now = std::time::Instant::now();
+    folio.draw();
+    for _ in 0..8 {
+        if !folio.runtime().sessions[&beside]
+            .session
+            .session
+            .resize_transaction_open()
+        {
+            break;
+        }
+        now += std::time::Duration::from_millis(250);
+        folio
+            .runtime()
+            .turn(now, true)
+            .expect("the turn is answered");
+        folio.draw();
+    }
+    folio
+        .runtime()
+        .sessions
+        .get_mut(&beside)
+        .expect("the pane beside")
+        .session
+        .session
+        .feed(b"\x1b]133;A\x07PS> \x1b]133;B\x07sleep 60\r\n\x1b]133;C\x07")
+        .expect("the command starts");
+    folio.draw();
+    let _ = bodies_presented(&mut folio);
+    assert!(
+        folio.runtime().sessions[&beside]
+            .session
+            .session
+            .status()
+            .working,
+        "the fixture's own precondition: the pane beside is running a command"
+    );
+
+    let chrome_before = folio.window.renderer.chrome.clone();
+    let mut steps = Vec::new();
+    for _ in 0..8 {
+        now += std::time::Duration::from_millis(40);
+        folio.window.cursor_blink.reset(now, folio.app.motion);
+        folio
+            .runtime()
+            .turn(now, true)
+            .expect("the turn is answered");
+        steps.extend(bodies_presented(&mut folio));
+    }
+    assert_ne!(
+        folio.window.renderer.chrome, chrome_before,
+        "the fixture's own precondition: the mark moved on the glass"
+    );
+    assert!(
+        steps.len() >= 4,
+        "eight steps of a breath reach the glass as presents, not {}: {steps:?}",
+        steps.len()
+    );
+    assert!(
+        steps.iter().all(|body| *body == bt_render::BodyUse::Reused),
+        "a mark step over panes that said nothing puts back the body it kept: {steps:?}"
+    );
+
+    // The keyboard's pane speaks: the next frame draws the body again, from the new rows.
+    let focused = folio.window.tabs[0].focused_leaf;
+    folio
+        .runtime()
+        .sessions
+        .get_mut(&focused)
+        .expect("the keyboard's pane")
+        .session
+        .session
+        .feed(b"one more line\r\n")
+        .expect("the pane prints");
+    folio.draw();
+    assert_eq!(
+        bodies_presented(&mut folio),
+        vec![bt_render::BodyUse::Composed],
+        "the frame after a pane printed draws the body from what it printed"
+    );
+}

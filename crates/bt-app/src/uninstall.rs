@@ -1,6 +1,8 @@
 //! One non-interactive cleanup door. Ownership stays with each writer.
 //! The inventory is executable data; historical locations are discovery, never ownership.
+use crate::carry_pass::{CarryCheck, CarryRule};
 use crate::install_channel::Manager;
+use crate::update_trial::Writer;
 use crate::{
     attention_ownership::{Decision, Outcome},
     i18n::{Lang, Text},
@@ -69,6 +71,13 @@ enum Remover {
     Data(HostPlatform, Base, &'static str),
     /// The native remover's per-user folder, `Scope::remover_home`.
     Staging,
+    /// **Removed by something other than this door** (0.4.10 plan row 68a, R-B of 2026-11-07):
+    /// with the program's own files the program row hands on (on Windows, the update home in the
+    /// install folder — its journal, lock and receipts; the Services entry in the macOS bundle),
+    /// with the process that made it (the restart registration), or kept by the system (the
+    /// notification permission). The door prints no row of it, so its output is what it was
+    /// before these rows were listed.
+    OutsideTheDoor,
 }
 impl Remover {
     /// **A data mark's root on `platform`**: its base and the part Folio names,
@@ -84,6 +93,7 @@ impl Remover {
         }
     }
 }
+#[derive(Clone, Copy)]
 struct Mark {
     /// The mark's key, in the words `--uninstall-cleanup` has always printed.
     name: &'static str,
@@ -93,7 +103,33 @@ struct Mark {
     kind: Kind,
     remover: Remover,
     writer: &'static str,
+    /// **How an update brings it to this build's form** (0.4.10 plan row 68a, R1): never empty,
+    /// one rule per thing the row holds. Held to the update trial's writers and the carry pass by
+    /// `uninstall_tests::every_owned_thing_says_how_an_update_carries_it`.
+    carry: &'static [CarryRule],
 }
+
+/// **What brings a data folder's documents forward** (0.4.10 plan row 68a): every document's
+/// migration chain, and the two integration records' versioned reads.
+const DATA_FOLDER_READERS: &[&str] = &[
+    "../bt-persist/src/migrate.rs:parse_document",
+    "shell_integration/profile_marks.rs:Marks::read",
+    "shell_integration/profile_marks.rs:ProfileFiles::read",
+];
+
+/// **The update trial's writers that hold a data folder's writes** (0.4.10 plan row 68a).
+const DATA_FOLDER_WRITERS: &[Writer] = &[
+    Writer::DataFolder,
+    Writer::RefusedCopies,
+    Writer::Session,
+    Writer::Settings,
+    Writer::Keybindings,
+    Writer::Profiles,
+    Writer::Pins,
+    Writer::UpdateCheck,
+    Writer::RecoveredAnnouncement,
+];
+
 // No sound syntax-only test can infer the destination of arbitrary Path arguments or OS
 // framework writes. The source guard pins these named owners and the archive manifest.
 const INVENTORY: &[Mark] = &[
@@ -102,7 +138,13 @@ const INVENTORY: &[Mark] = &[
         says: Text::CleanupMarkProfiles,
         kind: Kind::PerAccount,
         remover: Remover::Profiles,
-        writer: "shell_integration.rs:add_to_profile",
+        writer: "shell_integration/profile_runtime.rs:install_recorded",
+        // Folio's own old line forms, brought to the guarded one by 68c (R2); the guarded line
+        // names the data folder's script, which row "Roaming data" carries.
+        carry: &[CarryRule::OwnerChecked {
+            check: CarryCheck::ProfileLines,
+            writer: Writer::ProfileMigration,
+        }],
     },
     Mark {
         name: "PSReadLine module",
@@ -113,6 +155,9 @@ const INVENTORY: &[Mark] = &[
         // retired by T-INTEGRATION-INJECT-2-BUILD): nothing writes it any more, and the uninstall
         // still removes what an earlier Folio left (owner ruling Q4).
         writer: "none (Folio 0.1.0-0.4.7's psreadline.rs:install_recorded, retired)",
+        carry: &[CarryRule::Retired {
+            ruling: "owner ruling Q4, 2026-10-15; kept by R3, 2026-11-04",
+        }],
     },
     Mark {
         name: "Claude Code hooks",
@@ -120,6 +165,10 @@ const INVENTORY: &[Mark] = &[
         kind: Kind::PerCopy,
         remover: Remover::Agent(0),
         writer: "attention_hooks.rs:apply_at",
+        carry: &[CarryRule::OwnerChecked {
+            check: CarryCheck::AgentHooks(0),
+            writer: Writer::AgentHooksRepair,
+        }],
     },
     Mark {
         name: "Codex hooks",
@@ -127,6 +176,10 @@ const INVENTORY: &[Mark] = &[
         kind: Kind::PerCopy,
         remover: Remover::Agent(1),
         writer: "attention_codex.rs:apply_at",
+        carry: &[CarryRule::OwnerChecked {
+            check: CarryCheck::AgentHooks(1),
+            writer: Writer::AgentHooksRepair,
+        }],
     },
     Mark {
         name: "Copilot hooks",
@@ -134,13 +187,28 @@ const INVENTORY: &[Mark] = &[
         kind: Kind::PerCopy,
         remover: Remover::Agent(2),
         writer: "attention_copilot.rs:apply_at",
+        carry: &[CarryRule::OwnerChecked {
+            check: CarryCheck::AgentHooks(2),
+            writer: Writer::AgentHooksRepair,
+        }],
     },
     Mark {
         name: "Explorer registrations",
         says: Text::CleanupMarkExplorer,
         kind: Kind::PerCopy,
         remover: Remover::Explorer,
-        writer: "context_menu.rs:apply;explorer_menu.rs:request",
+        writer: "context_menu.rs:apply;context_menu.rs:reassert;explorer_menu.rs:request;explorer_menu.rs:probe",
+        // Both owed to 68b (R-C of 2026-11-07), which moves them into the pass together.
+        carry: &[
+            CarryRule::OwnerChecked {
+                check: CarryCheck::ExplorerPackage,
+                writer: Writer::ExplorerRepair,
+            },
+            CarryRule::OwnerChecked {
+                check: CarryCheck::ExplorerClassic,
+                writer: Writer::ExplorerRepair,
+            },
+        ],
     },
     Mark {
         name: "Toast identity",
@@ -148,6 +216,9 @@ const INVENTORY: &[Mark] = &[
         kind: Kind::PerAccount,
         remover: Remover::Toast,
         writer: "../bt-platform/src/lib.rs:Notifier::new;../bt-platform/src/lib.rs:Notifier::register_identity",
+        carry: &[CarryRule::Identity {
+            held: Some(Writer::ToastIdentity),
+        }],
     },
     Mark {
         name: "Update entrance",
@@ -155,6 +226,8 @@ const INVENTORY: &[Mark] = &[
         kind: Kind::PerCopy,
         remover: Remover::Entrance,
         writer: "../bt-platform/src/logon_hook.rs:arm_in",
+        // 68b adds the sweep of an entrance whose program is gone (R5).
+        carry: &[CarryRule::Transaction],
     },
     Mark {
         name: "Start-menu shortcut",
@@ -162,6 +235,7 @@ const INVENTORY: &[Mark] = &[
         kind: Kind::PerAccount,
         remover: Remover::Absent,
         writer: "none (no shortcut writer)",
+        carry: &[CarryRule::Absent],
     },
     Mark {
         name: "Autostart / login item",
@@ -169,6 +243,8 @@ const INVENTORY: &[Mark] = &[
         kind: Kind::PerAccount,
         remover: Remover::Absent,
         writer: "none (no persistent writer)",
+        // Row 22 lands as an owner-checked row from its first commit (R11).
+        carry: &[CarryRule::Absent],
     },
     Mark {
         name: "Quake / global hotkeys",
@@ -176,6 +252,7 @@ const INVENTORY: &[Mark] = &[
         kind: Kind::PerAccount,
         remover: Remover::Absent,
         writer: "../bt-platform/src/hotkey.rs:register (process lifetime)",
+        carry: &[CarryRule::Process { held: None }],
     },
     Mark {
         name: "Roaming data",
@@ -183,6 +260,15 @@ const INVENTORY: &[Mark] = &[
         kind: Kind::Data,
         remover: Remover::Data(HostPlatform::Windows, Base::Roaming, "Folio"),
         writer: "persist.rs:storage_location",
+        carry: &[
+            CarryRule::Document {
+                readers: DATA_FOLDER_READERS,
+                writers: DATA_FOLDER_WRITERS,
+            },
+            CarryRule::BuildBytes(Writer::PowerShellScript),
+            CarryRule::BuildBytes(Writer::BashScript),
+            CarryRule::BuildBytes(Writer::ZshScripts),
+        ],
     },
     Mark {
         name: "Legacy data",
@@ -190,6 +276,10 @@ const INVENTORY: &[Mark] = &[
         kind: Kind::Data,
         remover: Remover::Data(HostPlatform::Windows, Base::Roaming, "BetterTerminal"),
         writer: "persist.rs:storage_location",
+        carry: &[CarryRule::Document {
+            readers: &["persist.rs:relocate"],
+            writers: &[Writer::DataFolderMove],
+        }],
     },
     Mark {
         name: "Local data (including WebView2)",
@@ -199,6 +289,14 @@ const INVENTORY: &[Mark] = &[
         // WebView2's profile, and Folio's PSReadLine module for Windows PowerShell panes
         // (`psmodules\<artefact>`, T-INTEGRATION-INJECT-2-BUILD), which the run takes whole.
         writer: "webhost.rs:user_data_folder_in;shell_integration.rs:install_psreadline_module_at",
+        carry: &[
+            // WebView2's profile, in the engine's own format, found by name.
+            CarryRule::Document {
+                readers: &["webhost.rs:user_data_folder_in"],
+                writers: &[],
+            },
+            CarryRule::BuildBytes(Writer::PsReadLineModule),
+        ],
     },
     Mark {
         name: "Application Support",
@@ -210,6 +308,15 @@ const INVENTORY: &[Mark] = &[
             "Folio",
         ),
         writer: "persist.rs:storage_location;webhost.rs:web_engine_folder",
+        carry: &[
+            CarryRule::Document {
+                readers: DATA_FOLDER_READERS,
+                writers: DATA_FOLDER_WRITERS,
+            },
+            CarryRule::BuildBytes(Writer::PowerShellScript),
+            CarryRule::BuildBytes(Writer::BashScript),
+            CarryRule::BuildBytes(Writer::ZshScripts),
+        ],
     },
     Mark {
         name: "WebKit",
@@ -221,6 +328,7 @@ const INVENTORY: &[Mark] = &[
             "io.github.lulu-loopp.folio",
         ),
         writer: "../bt-platform/src/macos_webview.rs (WebKit, bundle identity)",
+        carry: &[CarryRule::Identity { held: None }],
     },
     Mark {
         name: "Caches",
@@ -232,6 +340,7 @@ const INVENTORY: &[Mark] = &[
             "io.github.lulu-loopp.folio",
         ),
         writer: "../bt-platform/src/macos_webview.rs (WebKit, bundle identity)",
+        carry: &[CarryRule::Identity { held: None }],
     },
     Mark {
         name: "HTTPStorages",
@@ -243,6 +352,7 @@ const INVENTORY: &[Mark] = &[
             "io.github.lulu-loopp.folio",
         ),
         writer: "../bt-platform/src/macos_webview.rs (WebKit, bundle identity)",
+        carry: &[CarryRule::Identity { held: None }],
     },
     Mark {
         name: "Preferences",
@@ -254,6 +364,7 @@ const INVENTORY: &[Mark] = &[
             "io.github.lulu-loopp.folio.plist",
         ),
         writer: "../bt-platform/src/macos_app.rs (AppKit, bundle identity)",
+        carry: &[CarryRule::Identity { held: None }],
     },
     Mark {
         name: "Saved Application State",
@@ -265,6 +376,7 @@ const INVENTORY: &[Mark] = &[
             "io.github.lulu-loopp.folio.savedState",
         ),
         writer: "../bt-platform/src/macos_app.rs (AppKit, bundle identity)",
+        carry: &[CarryRule::Identity { held: None }],
     },
     Mark {
         name: "Unix data",
@@ -272,6 +384,15 @@ const INVENTORY: &[Mark] = &[
         kind: Kind::Data,
         remover: Remover::Data(HostPlatform::OtherUnix, Base::Xdg, "Folio"),
         writer: "persist.rs:storage_location",
+        carry: &[
+            CarryRule::Document {
+                readers: DATA_FOLDER_READERS,
+                writers: DATA_FOLDER_WRITERS,
+            },
+            CarryRule::BuildBytes(Writer::PowerShellScript),
+            CarryRule::BuildBytes(Writer::BashScript),
+            CarryRule::BuildBytes(Writer::ZshScripts),
+        ],
     },
     Mark {
         name: "User configuration recovery copies",
@@ -279,6 +400,11 @@ const INVENTORY: &[Mark] = &[
         kind: Kind::Data,
         remover: Remover::RecoverySnapshots,
         writer: "shell_integration.rs:replace_profile;attention_hooks.rs:Config::land",
+        // Nothing to carry: the person's own bytes as they stood, which no build reads back.
+        carry: &[CarryRule::Document {
+            readers: &[],
+            writers: &[],
+        }],
     },
     // The folder an update's trial stages in the system's temporary directory, named
     // by its transaction (0.4.8 G7). Before the update home's row, which removes the
@@ -289,6 +415,7 @@ const INVENTORY: &[Mark] = &[
         kind: Kind::PerCopy,
         remover: Remover::TrialFolder,
         writer: "shell_integration.rs:trial_script_directory",
+        carry: &[CarryRule::Transaction],
     },
     // The updater's two marks outside the bundle on macOS (0.4.6 U-26;
     // self-update design revision (b), §(b).3). The Windows home and entrance
@@ -300,6 +427,8 @@ const INVENTORY: &[Mark] = &[
         kind: Kind::PerAccount,
         remover: Remover::UpdateEntrances,
         writer: "../bt-platform/src/launch_agent.rs:arm",
+        // 68b adds the sweep of an entrance whose program is gone (R5).
+        carry: &[CarryRule::Transaction],
     },
     Mark {
         name: "Update home beside the bundle",
@@ -307,6 +436,8 @@ const INVENTORY: &[Mark] = &[
         kind: Kind::PerCopy,
         remover: Remover::UpdateHome,
         writer: "update_txn.rs:Home::for_bundle (made by the macOS Prepare, U-27)",
+        // 68b adds the sweep of a home whose bundle is gone (R5).
+        carry: &[CarryRule::Transaction],
     },
     Mark {
         name: "Unix runtime claims",
@@ -314,6 +445,7 @@ const INVENTORY: &[Mark] = &[
         kind: Kind::Data,
         remover: Remover::RuntimeClaims,
         writer: "../bt-platform/src/instance.rs:try_claim_data_directory",
+        carry: &[CarryRule::Process { held: None }],
     },
     // Temp rows apply on every platform (OtherUnix is the all-platform sentinel for Base::Temp).
     Mark {
@@ -322,6 +454,11 @@ const INVENTORY: &[Mark] = &[
         kind: Kind::Data,
         remover: Remover::Data(HostPlatform::OtherUnix, Base::Temp, "folio/clipboard"),
         writer: "clipboard_picture.rs:directory;clipboard_picture.rs:save",
+        // Nothing to carry: pictures staged for one paste, capped, never read by another run.
+        carry: &[CarryRule::Document {
+            readers: &[],
+            writers: &[],
+        }],
     },
     Mark {
         name: "Panic log",
@@ -329,6 +466,11 @@ const INVENTORY: &[Mark] = &[
         kind: Kind::Data,
         remover: Remover::Data(HostPlatform::OtherUnix, Base::Temp, "folio-panic.log"),
         writer: "main.rs:install_panic_log_hook",
+        // Nothing to carry: appended to and read by people, never by a build.
+        carry: &[CarryRule::Document {
+            readers: &[],
+            writers: &[],
+        }],
     },
     // The native remover's per-user folder (`REMOVER_HOME`), purged like a data
     // root except by the run that has just started a remover there: that
@@ -342,6 +484,46 @@ const INVENTORY: &[Mark] = &[
         kind: Kind::Data,
         remover: Remover::Staging,
         writer: "../bt-platform/src/deferred_removal.rs:schedule_by",
+        carry: &[CarryRule::Transaction],
+    },
+    // Four things nothing listed before (0.4.10 plan row 68a, R10), none of which this door
+    // removes itself (R-B): they are listed for how an update carries them.
+    Mark {
+        name: "Restart registration",
+        says: Text::CleanupMarkRestartRegistration,
+        kind: Kind::PerCopy,
+        remover: Remover::OutsideTheDoor,
+        writer: "main.rs:FolioApp::register_for_restart",
+        carry: &[CarryRule::Process {
+            held: Some(Writer::RestartRegistration),
+        }],
+    },
+    Mark {
+        name: "Services menu entry",
+        says: Text::CleanupMarkServicesEntry,
+        kind: Kind::PerCopy,
+        remover: Remover::OutsideTheDoor,
+        writer: "../bt-platform/src/macos_services.rs:install",
+        carry: &[CarryRule::Identity { held: None }],
+    },
+    Mark {
+        name: "Notification permission",
+        says: Text::CleanupMarkNotificationPermission,
+        kind: Kind::PerAccount,
+        remover: Remover::OutsideTheDoor,
+        writer: "none (the system's; asked by ../bt-platform/src/macos_notify.rs:Notifier::new)",
+        carry: &[CarryRule::Identity { held: None }],
+    },
+    // On Windows, the update home inside the install folder (journal, lock, receipts), removed
+    // with the program's files. On macOS the journal is in the home beside the bundle, which the
+    // "Update home beside the bundle" row above removes (the review's N7).
+    Mark {
+        name: "Update journal",
+        says: Text::CleanupMarkUpdateJournal,
+        kind: Kind::PerCopy,
+        remover: Remover::OutsideTheDoor,
+        writer: "update_apply.rs:write_journal (Windows: the update home in the install folder)",
+        carry: &[CarryRule::Transaction],
     },
 ];
 
@@ -648,7 +830,7 @@ impl Scope {
         let mut purge_roots = Vec::new();
         let mut data = Vec::new();
         for mark in INVENTORY {
-            debug_assert!(!mark.writer.is_empty());
+            debug_assert!(!mark.writer.is_empty() && !mark.carry.is_empty());
             if let Some((base, relative)) = mark.remover.data_root_on(platform) {
                 let head = match base {
                     Base::Roaming => named("APPDATA")?,
@@ -858,6 +1040,20 @@ fn execute(
 fn execute_with_claim<T>(
     scope: &Scope,
     purge: bool,
+    system: impl FnMut(Remover) -> Vec<Entry>,
+    claim: impl FnMut(&Path) -> Option<T>,
+    program: Option<ProgramStep<'_>>,
+) -> Report {
+    execute_over(INVENTORY, scope, purge, system, claim, program)
+}
+
+/// [`execute_with_claim`] over the rows of `inventory` — the product's [`INVENTORY`], or, in a
+/// test, the same rows less some, to show what those rows add to the door's output (0.4.10 plan
+/// row 68a, R-B).
+fn execute_over<T>(
+    inventory: &[Mark],
+    scope: &Scope,
+    purge: bool,
     mut system: impl FnMut(Remover) -> Vec<Entry>,
     mut claim: impl FnMut(&Path) -> Option<T>,
     program: Option<ProgramStep<'_>>,
@@ -955,7 +1151,7 @@ fn execute_with_claim<T>(
             )),
         }
     }
-    for mark in INVENTORY {
+    for mark in inventory {
         let label = label(mark, lang);
         match mark.remover {
             Remover::Profiles => {
@@ -1052,7 +1248,8 @@ fn execute_with_claim<T>(
             Remover::Data(..)
             | Remover::RecoverySnapshots
             | Remover::RuntimeClaims
-            | Remover::Staging => {}
+            | Remover::Staging
+            | Remover::OutsideTheDoor => {}
         }
     }
     let refused = |entries: &[Entry]| entries.iter().any(|e| matches!(e.fate, Fate::Refused(_)));

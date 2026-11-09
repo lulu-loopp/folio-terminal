@@ -58,7 +58,7 @@ fn the_identity_oid_is_the_one_that_is_not_the_public_trust_marker() {
 /// could not be checked (offline is accepted), so the updater reads the
 /// chain's own flags: F-5 makes "unknown" a refusal, retried with the next
 /// press. On Windows the same refusal is produced by the real chain engine in
-/// `a_test_signed_file_without_a_revocation_list_is_revocation_unknown`.
+/// `a_test_signed_file_without_a_revocation_list_is_revocation_unknown_over_a_real_chain`.
 ///
 /// MUTATION: drop `CHAIN_REVOCATION_UNKNOWN` or `CHAIN_OFFLINE_REVOCATION`
 /// from `revocation_verdict` and the unknown cases pass.
@@ -88,7 +88,15 @@ fn revocation_unknown_is_a_refusal() {
         trust_verdict(super::TRUST_E_NOSIGNATURE),
         Err(Refusal::Unsigned)
     );
-    #[cfg(windows)]
+}
+
+/// RED (U-15) — **the real chain engine answers revocation "unknown" for a
+/// test-signed file whose policy holds no revocation list**, and revoked for
+/// one whose list names its serial (`revocation_unknown_is_a_refusal`'s seam,
+/// over a real chain).
+#[cfg(windows)]
+#[test]
+fn a_test_signed_file_without_a_revocation_list_is_revocation_unknown_over_a_real_chain() {
     windows_world::a_test_signed_file_without_a_revocation_list_is_revocation_unknown();
 }
 
@@ -101,7 +109,7 @@ fn revocation_unknown_is_a_refusal() {
 /// reason; a list that is missing or does not verify says unknown alone and
 /// keeps "not verified". On Windows the real chain engine gives the offline
 /// answer for a leaf naming a list it cannot reach
-/// (`a_test_signed_file_naming_an_unreachable_list_is_revocation_offline`).
+/// (`a_test_signed_file_naming_an_unreachable_list_is_revocation_offline_over_a_real_chain`).
 ///
 /// MUTATION: test `CHAIN_REVOCATION_UNKNOWN` before `CHAIN_OFFLINE_REVOCATION`
 /// in `revocation_verdict`, or fold `CRYPT_E_REVOCATION_OFFLINE` back into the
@@ -143,7 +151,16 @@ fn offline_revocation_is_named_apart_from_unknown() {
         .to_string(),
         "revocation-unknown: 0x00000040"
     );
-    #[cfg(windows)]
+}
+
+/// RED (0.4.9 T-UPDATE-OFFLINE-IDENTITY-CARD) — **the real chain engine
+/// answers revocation offline for a leaf naming a list it cannot reach**,
+/// under a policy that holds no list and an engine that retrieves nothing:
+/// what a machine with no network sees (`offline_revocation_is_named_apart_from_unknown`'s
+/// seam, over a real chain).
+#[cfg(windows)]
+#[test]
+fn a_test_signed_file_naming_an_unreachable_list_is_revocation_offline_over_a_real_chain() {
     windows_world::a_test_signed_file_naming_an_unreachable_list_is_revocation_offline();
 }
 
@@ -276,9 +293,14 @@ fn the_machine_type_is_read_from_the_pe_header() {
 #[path = "trust_tests_windows.rs"]
 mod windows_world;
 
-/// Off Windows every door refuses by name.
+/// PIN (U-15) — off Windows **every trust door refuses by name**: a release
+/// file, a release package, a sidecar, the file version and the running
+/// build's capability all answer `Unsupported`. What the tests above and below pin over signed files
+/// needs Windows' `WinVerifyTrust` and chain engine, so they are
+/// `#[cfg(windows)]`.
 #[cfg(not(windows))]
-fn refused_off_windows() {
+#[test]
+fn off_windows_every_trust_door_is_refused_by_name() {
     let path = std::path::Path::new("folio.exe");
     let expected = expectation(SUBJECT, IDENTITY);
     assert_eq!(
@@ -290,6 +312,7 @@ fn refused_off_windows() {
         Err(Refusal::Unsupported)
     );
     assert_eq!(super::verify_sidecar(path), Err(Refusal::Unsupported));
+    assert_eq!(super::file_version(path), Err(Refusal::Unsupported));
     assert_eq!(
         super::running_capability(true),
         Capability::Unidentified(Refusal::Unsupported)
@@ -309,12 +332,21 @@ fn refused_off_windows() {
 /// subject).
 ///
 /// MUTATION: skip the version comparison in `compare` and `old.exe` passes.
+#[cfg(windows)]
 #[test]
 fn validly_signed_wrong_product_or_version_is_refused() {
-    #[cfg(windows)]
     windows_world::validly_signed_wrong_product_or_version_is_refused();
-    #[cfg(not(windows))]
-    refused_off_windows();
+}
+
+/// PIN (U-15) — **a subject is parsed into RDNs with the value's case and the
+/// RDNs' order kept** (`msix::distinguished_name`, `CN` first, the order
+/// `PACKAGE_PUBLISHER` and `smoke.ps1` use). The comparison over a signed
+/// leaf is `dn_values_preserve_case_and_order_in_a_signed_leaf`.
+#[test]
+fn dn_values_preserve_case_and_order() {
+    let parsed = crate::msix::distinguished_name(SUBJECT);
+    assert_eq!(parsed[3], ("S".to_owned(), "mi".to_owned()));
+    assert_eq!(parsed[0].0, "CN");
 }
 
 /// RED (U-15) — **a subject is compared as parsed RDNs with the value's case
@@ -327,12 +359,9 @@ fn validly_signed_wrong_product_or_version_is_refused() {
 ///
 /// MUTATION: compare `describe_name(..).to_lowercase()` in `compare` and the
 /// `S=MI` leaf passes.
+#[cfg(windows)]
 #[test]
-fn dn_values_preserve_case_and_order() {
-    let parsed = crate::msix::distinguished_name(SUBJECT);
-    assert_eq!(parsed[3], ("S".to_owned(), "mi".to_owned()));
-    assert_eq!(parsed[0].0, "CN");
-    #[cfg(windows)]
+fn dn_values_preserve_case_and_order_in_a_signed_leaf() {
     windows_world::dn_values_preserve_case_and_order();
 }
 
@@ -350,12 +379,10 @@ fn dn_values_preserve_case_and_order() {
 ///
 /// MUTATION: return `Ok` from step 2 when `rfc3161` is `None` and the unstamped
 /// file passes.
+#[cfg(windows)]
 #[test]
 fn timestamp_policy_accepts_the_packagers_format() {
-    #[cfg(windows)]
     windows_world::timestamp_policy_accepts_the_packagers_format();
-    #[cfg(not(windows))]
-    refused_off_windows();
 }
 
 /// RED (U-15) — **an unsigned running build is not capable**, a flag alone is
@@ -365,12 +392,10 @@ fn timestamp_policy_accepts_the_packagers_format() {
 /// `running_capability(true)` reads the real file and answers `Unsigned`.
 ///
 /// MUTATION: answer `Capable` for `Refusal::Unsigned` in `capability`.
+#[cfg(windows)]
 #[test]
 fn an_unsigned_running_build_is_not_capable() {
-    #[cfg(windows)]
     windows_world::an_unsigned_running_build_is_not_capable();
-    #[cfg(not(windows))]
-    refused_off_windows();
 }
 
 /// RED (U-15) — **a new certificate with the same subject and identity OID,
@@ -378,12 +403,10 @@ fn an_unsigned_running_build_is_not_capable() {
 ///
 /// MUTATION: compare the leaf's DER (a thumbprint pin) and the renewal is
 /// refused.
+#[cfg(windows)]
 #[test]
 fn a_new_certificate_with_the_same_subject_is_accepted() {
-    #[cfg(windows)]
     windows_world::a_new_certificate_with_the_same_subject_is_accepted();
-    #[cfg(not(windows))]
-    refused_off_windows();
 }
 
 /// RED (U-15) — **the same subject with another identity-validation OID is
@@ -391,12 +414,10 @@ fn a_new_certificate_with_the_same_subject_is_accepted() {
 /// a leaf with no identity OID is refused as having none.
 ///
 /// MUTATION: skip the identity comparison in `compare`.
+#[cfg(windows)]
 #[test]
 fn same_dn_with_a_different_identity_is_refused() {
-    #[cfg(windows)]
     windows_world::same_dn_with_a_different_identity_is_refused();
-    #[cfg(not(windows))]
-    refused_off_windows();
 }
 
 /// RED (U-15) — **a leaf that has expired since it signed is accepted when
@@ -410,12 +431,10 @@ fn same_dn_with_a_different_identity_is_refused() {
 ///
 /// MUTATION: build the exclusive chain at the current time (`now`) instead of
 /// the stamped time and the expired leaf is refused.
+#[cfg(windows)]
 #[test]
 fn an_expired_leaf_with_a_valid_timestamp_is_accepted() {
-    #[cfg(windows)]
     windows_world::an_expired_leaf_with_a_valid_timestamp_is_accepted();
-    #[cfg(not(windows))]
-    refused_off_windows();
 }
 
 /// RED (U-15) — **the machine store is never written**: the test policy's
@@ -431,12 +450,10 @@ fn an_expired_leaf_with_a_valid_timestamp_is_accepted() {
 ///
 /// MUTATION: build the test engine without `hExclusiveRoot` and the test root
 /// stops chaining (and `exclusive_roots` is no longer 1).
+#[cfg(windows)]
 #[test]
 fn the_machine_store_is_never_written() {
-    #[cfg(windows)]
     windows_world::the_machine_store_is_never_written();
-    #[cfg(not(windows))]
-    refused_off_windows();
 }
 
 /// E-6 (U-15) — **a released `folio.exe` and `folio.msix` carry an

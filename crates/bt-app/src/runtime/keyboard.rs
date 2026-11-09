@@ -178,10 +178,11 @@ impl<B: Backend> Runtime<'_, B> {
         // O4, 2026-09-18): the eight hundred milliseconds maturing is state and
         // is never paced, and only the fade that follows it is.
         let promoted = self.window.key_hint.activate_if_due(now);
-        if !promoted && !self.animation_frame_is_due() {
+        // Asked only with work: a card that owes no frame asks the gate nothing.
+        if !self.paced_frame(promoted, |rt| rt.key_hint_owes_frame(now)) {
             return Ok(());
         }
-        if (promoted || self.key_hint_owes_frame(now)) && self.refresh_overlay() {
+        if self.refresh_overlay() {
             self.present_chrome_change()?;
         }
         Ok(())

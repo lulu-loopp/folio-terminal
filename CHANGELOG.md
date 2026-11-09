@@ -58,6 +58,7 @@ All notable changes to Folio are recorded here. The format follows
 - A tab's blue dot no longer stands on every tab running Claude Code or Codex that you are not looking at. In a pane whose agent's hooks reach Folio, the dot now appears when the agent finishes a turn while you are elsewhere, goes away while Claude Code or Copilot works on its next turn (a Codex tab's dot waits until you look), and goes out when you look at the pane; an agent started from a shell prompt now gets the dot as well, and another agent's run inside it, such as `codex exec` from Claude Code, does not light it. <!-- zh: pending -->
 - On Windows, the message boxes Folio shows now carry Folio's icon in Alt+Tab and on the taskbar, and the notice Folio shows as it stops while one of its windows is on the screen belongs to that window instead of appearing as a separate program on the taskbar. <!-- zh: pending -->
 - On Windows, when an uninstall stops because Folio's remover did not start in time, the remover's copy of Folio is now removed right away instead of staying in the Folio-uninstall folder until a later uninstall that removes data. <!-- zh: pending -->
+- While a tab's mark breathes or turns for a running command, Folio now spends less processor time on each step of it: the panes are no longer drawn again when nothing in them has changed. The mark moves as often as before, and Folio wakes as often as before. <!-- zh: pending T-WORKING-MARK-CADENCE -->
 
 ## 0.4.8-preview — 2026-10-23
 

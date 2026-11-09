@@ -512,7 +512,7 @@ pub enum Station {
     FileIndex = 21,
     /// The probe and settings family — `PowerShellProfileProbed`, `CopilotProbed`, `UpdateChecked`,
     /// `ExplorerPackageChanged`, `FontsScanned`, `ProgramsAnswered`, `SchemesChanged`,
-    /// `StorageChanged`, `SystemPreferencesChanged`, `NotificationClicked`, `AgentHooksScanned`.
+    /// `StorageChanged`, `SystemPreferencesChanged`, `NotificationClicked`, `CarryPassAnswered`.
     ///
     /// **One station for eleven arms**, because what they have in common is what a
     /// reader of this line needs: every one of them ends in `refresh_chrome` over

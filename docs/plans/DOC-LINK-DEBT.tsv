@@ -1,0 +1,340 @@
+# DOC-LINK-DEBT - every broken intra-doc link in bt-app's documentation, one row per warning
+# (T-DOC-LINK-DEBT, 0.4.9 plan row 78).
+# measured at 80774934
+#
+# Measured by scripts/ci/measure-doc-links.ps1: `cargo doc -p bt-app --no-deps --locked
+# --message-format=json` on Windows, every warning whose lint code is
+# `rustdoc::broken_intra_doc_links`, each keyed to the item whose documentation holds it by
+# bt-source's `doc_link_debt` test target (its module doc states the grammar). Written by
+# scripts/dev/generate-doc-link-debt.ps1; do not edit by hand.
+#
+# **This list only shrinks.** scripts/ci/check-doc-link-debt.ps1 refuses a row the merge base
+# does not have; the `docs` CI job refuses a broken link the list does not hold and a row no
+# broken link is. A link is fixed (or reworded) and its row leaves in the same commit.
+# A row is `owner`, `target` and `shape`; `module` is the module the owner is written in, so an
+# owner moved to another module is its rows moved (T-MOVED-NOT-ADDED-RULE); `file` is where it is
+# written today: the shrink check does not compare it, the docs job does. When the list is empty,
+# rustdoc's lint is denied in the workspace and the list retires.
+owner	target	shape	module	file
+crate (outside any item)	Coalescing	unresolved	crate	main.rs
+crate (outside any item)	Coalescing	unresolved	crate	main.rs
+crate (outside any item)	Ends::worker_ended	unresolved	crate	main.rs
+crate (outside any item)	Executor	unresolved	crate	main.rs
+crate (outside any item)	Executor	unresolved	crate	main.rs
+crate (outside any item)	Executor	unresolved	crate	main.rs
+crate (outside any item)	Executor	unresolved	crate	main.rs
+crate (outside any item)	Ledger	unresolved	crate	main.rs
+crate (outside any item)	Ledger	unresolved	crate	main.rs
+crate (outside any item)	Ledger	unresolved	crate	main.rs
+crate (outside any item)	Ledger::fault	unresolved	crate	main.rs
+crate (outside any item)	Ledger::publish	unresolved	crate	main.rs
+crate (outside any item)	Ledger::worker_ended	unresolved	crate	main.rs
+crate (outside any item)	Queue	unresolved	crate	main.rs
+crate (outside any item)	Queue	unresolved	crate	main.rs
+crate (outside any item)	Request	unresolved	crate	main.rs
+crate (outside any item)	Saying::PerStreak	unresolved	crate	main.rs
+crate (outside any item)	Terminal	unresolved	crate	main.rs
+crate (outside any item)	contain	unresolved	crate	main.rs
+crate (outside any item)	contain	unresolved	crate	main.rs
+crate (outside any item)	is_contained	unresolved	crate	main.rs
+crate (outside any item)	task	unresolved	crate	main.rs
+crate::App::cli_refusals	Self::announce_keybindings_fault	unresolved	crate	main.rs
+crate::App::favicons_changed	App::user_event	unresolved	crate	main.rs
+crate::App::profile_programs	profiles::PROFILES	unresolved	crate	main.rs
+crate::ChevronGates	Self::due	unresolved	crate	main.rs
+crate::CommandFlash	Self::open	unresolved	crate	main.rs
+crate::FolioApp::settle_application_change	App::pending_new_window	unresolved	crate	main.rs
+crate::Layered	Self::ALL	unresolved	crate	main.rs
+crate::Layered::MODAL_BANDS	Self::ALL	unresolved	crate	main.rs
+crate::MarkdownPicture::Ready	Self::content	unresolved	crate	main.rs
+crate::MarkdownPicture::Ready	Self::key	unresolved	crate	main.rs
+crate::MarkdownPictures::generation	PreviewDocumentKey::picture_generation	unresolved	crate	main.rs
+crate::OverInPane	BANDS_OVER_IN_PANE_THAT_TAKE_NO_POINTER	unresolved	crate	main.rs
+crate::OverInPane	Self::band	unresolved	crate	main.rs
+crate::OverlayStack::bands_bottom_first	runtime::pointer::POINTER_LAYERS_TOP_FIRST	unresolved	crate	main.rs
+crate::PREVIEW_IMAGE_TEXTURE_SLACK	ByteLru	unresolved	crate	main.rs
+crate::PageKeepsake::float	Runtime::float_overlay_layer	unresolved	crate	main.rs
+crate::PaneDrawn	Runtime::last_drawn_offset	unresolved	crate	main.rs
+crate::PictureReach	markdown_picture_reach	unresolved	crate	main.rs
+crate::PreviewDocument::Markdown	PreviewDocumentKey::math_generation	unresolved	crate	main.rs
+crate::PreviewMathCache::generation	PreviewDocumentKey::math_generation	unresolved	crate	main.rs
+crate::ShellSession::place_for_a_new_shell	Self::spawn_place	unresolved	crate	main.rs
+crate::ShellSession::report_keyboard_focus	runtime::seat_holds_the_keyboard	unresolved	crate	main.rs
+crate::ShellSession::seed_place_for_a_new_shell	Self::born_named	unresolved	crate	main.rs
+crate::ShellSession::standing_in	bt_term::Session::reference_directory	unresolved	crate	main.rs
+crate::TabPressPromise::Slipped	TabPress::drag_begun	unresolved	crate	main.rs
+crate::TabRename::open_file	TabRename::select_all	unresolved	crate	main.rs
+crate::WebHeadVerb	KeyboardOwner::Rename	unresolved	crate	main.rs
+crate::WindowRuntime::background_picture	Self::apply_window_ground	unresolved	crate	main.rs
+crate::WindowRuntime::command_rails	Self::sweep_command_rails	unresolved	crate	main.rs
+crate::WindowRuntime::compositor	Self::present_seats_and_commit	unresolved	crate	main.rs
+crate::WindowRuntime::focus_mode	Self::set_focus_mode	unresolved	crate	main.rs
+crate::WindowRuntime::foreign	Self::drag	unresolved	crate	main.rs
+crate::WindowRuntime::peek_facts	TabState::hide_file_peek	unresolved	crate	main.rs
+crate::WindowRuntime::peek_picture	TabState::peek_cache	unresolved	crate	main.rs
+crate::WindowRuntime::peek_picture	TabState::peek_thumbnail	unresolved	crate	main.rs
+crate::WindowRuntime::rail	ChromeContent::chevron_turn	unresolved	crate	main.rs
+crate::WindowRuntime::rail	Self::set_rail_state	unresolved	crate	main.rs
+crate::WindowRuntime::rail	TabContent::offset	unresolved	crate	main.rs
+crate::WindowRuntime::settings_scroll	settings::layout_for_menu	unresolved	crate	main.rs
+crate::WindowRuntime::shells_settled_revision	Self::publish_frame_inner	unresolved	crate	main.rs
+crate::WindowRuntime::shells_settled_revision	Self::resize_leaves_to_layout	unresolved	crate	main.rs
+crate::WindowRuntime::shells_settled_revision	Self::settle_seat_set_change	unresolved	crate	main.rs
+crate::WindowRuntime::strip_animation_ticked_at	Self::advance_strip_animation	unresolved	crate	main.rs
+crate::WindowRuntime::unpainted_pane_output	Self::drain_pty	unresolved	crate	main.rs
+crate::WindowRuntime::unpainted_pane_output	Self::finish_synchronized_update_if_due	unresolved	crate	main.rs
+crate::WindowRuntime::unpainted_pane_output	Self::publish_frame_inner	unresolved	crate	main.rs
+crate::WindowRuntime::unpainted_pane_output	Self::redraw	unresolved	crate	main.rs
+crate::WindowRuntime::unpainted_pane_output	Self::redraw	unresolved	crate	main.rs
+crate::WindowRuntime::wheel_events	wheel_burst_collapses_a_run_of_notches	unresolved	crate	main.rs
+crate::animation::Animation::standing_seq	Self::frames_in_file	unresolved	crate::animation	animation.rs
+crate::animation::MAX_ANIMATION_FRAME_BYTES	AnimationRefusal::TooLarge	unresolved	crate::animation	animation.rs
+crate::attention_codex::notify_owner	0	unresolved	crate::attention_codex	attention_codex.rs
+crate::attention_hooks::Config::one_read	land	unresolved	crate::attention_hooks	attention_hooks.rs
+crate::attention_hooks::Landing	land	unresolved	crate::attention_hooks	attention_hooks.rs
+crate::attention_hooks::Standing	land	unresolved	crate::attention_hooks	attention_hooks.rs
+crate::attention_map (outside any item)	a_family_is_rows_and_nothing_else	unresolved	crate::attention_map	attention_map.rs
+crate::clipboard_picture::stamp	plan	unresolved	crate::clipboard_picture	clipboard_picture.rs
+crate::exit_diagnostics::ShellExit::shutting_down	ShellExit::unprobed	unresolved	crate::exit_diagnostics	exit_diagnostics.rs
+crate::file_peek::Life	Runtime	unresolved	crate::file_peek	file_peek.rs
+crate::file_peek::Press	Runtime::press_file_peek	unresolved	crate::file_peek	file_peek.rs
+crate::files::FilesHost::Docked	crate::seats::SeatId	unresolved	crate::files	files.rs
+crate::git::GitWriteVerb	GIT_NEVER_WORDS	unresolved	crate::git	git.rs
+crate::git::write_arguments	GIT_NEVER_WORDS	unresolved	crate::git	git.rs
+crate::git_graph::GraphToolbar::leave_detached	leave_detached_of	unresolved	crate::git_graph	git_graph.rs
+crate::git_panel::empty_block	preview_card_geometry	unresolved	crate::git_panel	git_panel.rs
+crate::hang_watch (outside any item)	BUCKETS	unresolved	crate::hang_watch	hang_watch.rs
+crate::hang_watch (outside any item)	BUDGET_LINES_KEPT	unresolved	crate::hang_watch	hang_watch.rs
+crate::hang_watch (outside any item)	COALESCE_WINDOW	unresolved	crate::hang_watch	hang_watch.rs
+crate::hang_watch (outside any item)	Census::app_event	unresolved	crate::hang_watch	hang_watch.rs
+crate::hang_watch (outside any item)	PRESENT_RESERVE	unresolved	crate::hang_watch	hang_watch.rs
+crate::hang_watch (outside any item)	TURN_BUDGET	unresolved	crate::hang_watch	hang_watch.rs
+crate::hang_watch (outside any item)	TURN_BUDGET	unresolved	crate::hang_watch	hang_watch.rs
+crate::hang_watch (outside any item)	TurnAllowance	unresolved	crate::hang_watch	hang_watch.rs
+crate::hang_watch (outside any item)	WAIT_ALLOWANCE	unresolved	crate::hang_watch	hang_watch.rs
+crate::hang_watch (outside any item)	WAIT_BUDGET	unresolved	crate::hang_watch	hang_watch.rs
+crate::hang_watch (outside any item)	WAIT_BUDGET	unresolved	crate::hang_watch	hang_watch.rs
+crate::hang_watch (outside any item)	super::Heartbeat::deferrable	unresolved	crate::hang_watch	hang_watch.rs
+crate::hang_watch::Heartbeat::at_station	Self::park_at	unresolved	crate::hang_watch	hang_watch.rs
+crate::hang_watch::Heartbeat::beat_at_ns	Self::beat_at	unresolved	crate::hang_watch	hang_watch.rs
+crate::hang_watch::Heartbeat::deferrable	Self::remaining	unresolved	crate::hang_watch	hang_watch.rs
+crate::hang_watch::Heartbeat::park_at_ns	Self::park_at	unresolved	crate::hang_watch	hang_watch.rs
+crate::hang_watch::Heartbeat::woke_at_ns	Self::woke_at	unresolved	crate::hang_watch	hang_watch.rs
+crate::i18n::pick_platform	Text::PLATFORM_COLUMNS	unresolved	crate::i18n	i18n.rs
+crate::icons::ActionIcon::PlayVideo	FILLED_WITH_A_REASON	unresolved	crate::icons	icons.rs
+crate::lane::Ledger::drain_mark	Mark::unmarked_for_a_test	unresolved	crate::lane	lane.rs
+crate::lane::Ledger::worker_ended	Self::fault	unresolved	crate::lane	lane.rs
+crate::mouse_trace::window_line	line	ambiguous	crate::mouse_trace	mouse_trace.rs
+crate::pace (outside any item)	FrameClock::next_frame	unresolved	crate::pace	pace.rs
+crate::pace::FrameClock::deadline	Self::next_frame	unresolved	crate::pace	pace.rs
+crate::pace::FrameClock::refuse	Self::next_frame	unresolved	crate::pace	pace.rs
+crate::pane_head_title	profiles::Profile::title	unresolved	crate	main.rs
+crate::path_opens_as_a_page	a_video_takes_no_page_lane_at_any_door	unresolved	crate	main.rs
+crate::path_opens_as_a_page	preview::PAGE_EXTENSIONS	unresolved	crate	main.rs
+crate::persist::Reply	OnTheWorker::within_patience	unresolved	crate::persist	persist.rs
+crate::persist::SESSION_SAVE_BUDGET	SessionStore::set_save_budget	unresolved	crate::persist	persist.rs
+crate::persist::SessionWriter::budget	SessionStore::set_save_budget	unresolved	crate::persist	persist.rs
+crate::pins_merge (outside any item)	unit	ambiguous	crate::pins_merge	pins_merge.rs
+crate::pins_merge::merge_keys	unit	ambiguous	crate::pins_merge	pins_merge.rs
+crate::preview::PREVIEW_SAVES_OWED	Text::PreviewSaveTooMany	unresolved	crate::preview	preview.rs
+crate::preview::PreviewBuffer::edit_by_caret	Self::edit_content	unresolved	crate::preview	preview.rs
+crate::preview::PreviewBuffer::settle_after_a_change	Self::edit_content	unresolved	crate::preview	preview.rs
+crate::preview::is_readable_unasked	PathNamer::ThisWindow	unresolved	crate::preview	preview.rs
+crate::preview::parse_inline	scan_line	unresolved	crate::preview	preview.rs
+crate::preview::video_fact_lines	crate::file_peek::facts_lines	unresolved	crate::preview	preview.rs
+crate::preview_live::step_by_row	preview_edit::move_caret	unresolved	crate::preview_live	preview_live.rs
+crate::preview_provenance (outside any item)	TextOrigin::text_of	unresolved	crate::preview_provenance	preview_provenance.rs
+crate::preview_provenance (outside any item)	crate::preview_place_at	unresolved	crate::preview_provenance	preview_provenance.rs
+crate::preview_viewport::measure_markdown_intrinsics	lay_markdown_out	unresolved	crate::preview_viewport	preview_viewport.rs
+crate::profiles (outside any item)	PROFILES	unresolved	crate::profiles	profiles.rs
+crate::profiles::MenuRow	PROFILES	unresolved	crate::profiles	profiles.rs
+crate::profiles::MenuRow::Profile	PROFILES	unresolved	crate::profiles	profiles.rs
+crate::profiles::PaneMenuHit::Submenu	PROFILES	unresolved	crate::profiles	profiles.rs
+crate::profiles::PaneMenuLayout::submenu_rows	Self::item	unresolved	crate::profiles	profiles.rs
+crate::profiles::PreviewMenuTarget	crate::pins::row_of	unresolved	crate::profiles	profiles.rs
+crate::profiles::Profile::compared_title	announces_this_profile	unresolved	crate::profiles	profiles.rs
+crate::profiles::Profile::id	Self::title	unresolved	crate::profiles	profiles.rs
+crate::profiles::Qualifier	Profile::title	unresolved	crate::profiles	profiles.rs
+crate::profiles::SeedPlatform	the_default_profile_is_the_users_shell_when_it_names_an_executable	unresolved	crate::profiles	profiles.rs
+crate::profiles::TermMenuHit::Submenu	PROFILES	unresolved	crate::profiles	profiles.rs
+crate::profiles::TermMenuHover::Submenu	PROFILES	unresolved	crate::profiles	profiles.rs
+crate::profiles::WINDOWS_SHIPPED_ORDER	the_automatic_default_walks_the_shipped_order	unresolved	crate::profiles	profiles.rs
+crate::profiles::automatic_profile_in	SHIPPED_ORDER	unresolved	crate::profiles	profiles.rs
+crate::profiles::capability_of_parts	capability_text	unresolved	crate::profiles	profiles.rs
+crate::profiles::capability_text_for_launch	capability_text	unresolved	crate::profiles	profiles.rs
+crate::profiles::fallback_profile	the_fallback_profile_can_always_be_started	unresolved	crate::profiles	profiles.rs
+crate::profiles::fallback_profile_id	nothing_off_windows_ever_names_powershell	unresolved	crate::profiles	profiles.rs
+crate::profiles::set_program_path	capability_text	unresolved	crate::profiles	profiles.rs
+crate::profiles::shipped_order	the_default_profile_is_the_users_shell_when_it_names_an_executable	unresolved	crate::profiles	profiles.rs
+crate::profiles::unavailable_hint_text	ProgramSource::DefaultShell	unresolved	crate::profiles	profiles.rs
+crate::profiles_merge (outside any item)	unit	ambiguous	crate::profiles_merge	profiles_merge.rs
+crate::profiles_merge (outside any item)	unit	ambiguous	crate::profiles_merge	profiles_merge.rs
+crate::profiles_merge::RowMerging	unit	ambiguous	crate::profiles_merge	profiles_merge.rs
+crate::psreadline_resize_repaint_input	bt_term::Session::shell_prompt_opened_in_order	unresolved	crate	main.rs
+crate::push_markdown_table	Runtime::measure_markdown_table	unresolved	crate	main.rs
+crate::quit (outside any item)	QUIT_DOCUMENTS_BY	unresolved	crate::quit	quit.rs
+crate::quit (outside any item)	QUIT_RECOVERY_BY	unresolved	crate::quit	quit.rs
+crate::quit::NO_ANSWER_IN_TIME	QUIT_DOCUMENTS_BY	unresolved	crate::quit	quit.rs
+crate::quit::Quit::budget	Self::set_budget	unresolved	crate::quit	quit.rs
+crate::quit::Quit::documents	QUIT_DOCUMENTS_BY	unresolved	crate::quit	quit.rs
+crate::quit::Quit::documents_by	QUIT_DOCUMENTS_BY	unresolved	crate::quit	quit.rs
+crate::quit::Quit::recovery	QUIT_RECOVERY_BY	unresolved	crate::quit	quit.rs
+crate::quit::Quit::recovery_by	QUIT_RECOVERY_BY	unresolved	crate::quit	quit.rs
+crate::quit::QuitStep::Documents	QUIT_DOCUMENTS_BY	unresolved	crate::quit	quit.rs
+crate::quit::QuitStep::Recovery	QUIT_RECOVERY_BY	unresolved	crate::quit	quit.rs
+crate::restore::QuitContent::message_lines	crate::i18n::quit_unsaved_message	unresolved	crate::restore	restore.rs
+crate::restore::layout	crate::settings::layout_for_menu	unresolved	crate::restore	restore.rs
+crate::restore::unsaved_lines	crate::quit::Quit::begin	unresolved	crate::restore	restore.rs
+crate::runtime::attention::Runtime::raise_notification_refusal	NotificationDesk	unresolved	crate::runtime::attention	runtime/attention.rs
+crate::runtime::diagnostics::Runtime::note_application_change	App::pending_application_change	unresolved	crate::runtime::diagnostics	runtime/diagnostics.rs
+crate::runtime::dpi::Runtime::scale_factor_changed	DpiRectangle	unresolved	crate::runtime::dpi	runtime/dpi.rs
+crate::runtime::dpi::Runtime::settle_deferred_dpi	DpiSettlement	unresolved	crate::runtime::dpi	runtime/dpi.rs
+crate::runtime::files::Runtime::apply_folder_pick_result	WindowRuntime::folder_pick	unresolved	crate::runtime::files	runtime/files.rs
+crate::runtime::files::Runtime::flush_dropped_files	DropBatch	unresolved	crate::runtime::files	runtime/files.rs
+crate::runtime::files::Runtime::locate_folder_in_files_column	Seats::files_seat	unresolved	crate::runtime::files	runtime/files.rs
+crate::runtime::files::Runtime::note_folder_opened	recent_folders::RecentFolders	unresolved	crate::runtime::files	runtime/files.rs
+crate::runtime::files::Runtime::refresh_files_dir	files_watch	unresolved	crate::runtime::files	runtime/files.rs
+crate::runtime::files::Runtime::refresh_files_dirs_at	files_watch	unresolved	crate::runtime::files	runtime/files.rs
+crate::runtime::files::Runtime::settle_files_locate	Self::heal_files_selection	unresolved	crate::runtime::files	runtime/files.rs
+crate::runtime::files::Runtime::toggle_files_pane	WindowRuntime::files_focus	unresolved	crate::runtime::files	runtime/files.rs
+crate::runtime::floats::Runtime::float_hole_level	WindowRuntime::float_hole_level	unresolved	crate::runtime::floats	runtime/floats.rs
+crate::runtime::floats::Runtime::float_layer	OverlayStack::below_the_floats	unresolved	crate::runtime::floats	runtime/floats.rs
+crate::runtime::floats::Runtime::float_layer	WindowRuntime::float_hole_level	unresolved	crate::runtime::floats	runtime/floats.rs
+crate::runtime::frame::Runtime::chrome_target_at	float::FloatPart	unresolved	crate::runtime::frame	runtime/frame.rs
+crate::runtime::frame::Runtime::observe_window_place	FolioApp::order	unresolved	crate::runtime::frame	runtime/frame.rs
+crate::runtime::frame::Runtime::observe_window_place	WindowRuntime::observed_place	unresolved	crate::runtime::frame	runtime/frame.rs
+crate::runtime::frame::Runtime::platform_chrome	App::adopt_platform_chrome	unresolved	crate::runtime::frame	runtime/frame.rs
+crate::runtime::git::Runtime::graph_search_key	preview_edit::command	unresolved	crate::runtime::git	runtime/git.rs
+crate::runtime::git::Runtime::push_float_git_page	WindowRuntime::float_git_pages_shown	unresolved	crate::runtime::git	runtime/git.rs
+crate::runtime::handoff::Runtime::reveal_in_explorer	bt_platform::reveal_in_explorer	unresolved	crate::runtime::handoff	runtime/handoff.rs
+crate::runtime::keyboard::Runtime::flush_ime_cursor_area	IME_CURSOR_AREA_INTERVAL	unresolved	crate::runtime::keyboard	runtime/keyboard.rs
+crate::runtime::keyboard::Runtime::keyboard_owner_is_a_shell	bt_render::seat_caret	unresolved	crate::runtime::keyboard	runtime/keyboard.rs
+crate::runtime::keyboard::Runtime::offer_ime_caret	ImeCursorSlot	unresolved	crate::runtime::keyboard	runtime/keyboard.rs
+crate::runtime::keyboard::Runtime::offer_ime_caret	WindowRuntime::ime_cursor	unresolved	crate::runtime::keyboard	runtime/keyboard.rs
+crate::runtime::keyboard::Runtime::offer_ime_caret	WindowRuntime::system_caret	unresolved	crate::runtime::keyboard	runtime/keyboard.rs
+crate::runtime::keyboard::Runtime::place_system_caret	WindowRuntime::system_caret	unresolved	crate::runtime::keyboard	runtime/keyboard.rs
+crate::runtime::math::Runtime::advance_math_tools_if_due	WindowRuntime::math_copied	unresolved	crate::runtime::math	runtime/math.rs
+crate::runtime::math::Runtime::formula_tool_layers	WindowRuntime::math_tools	unresolved	crate::runtime::math	runtime/math.rs
+crate::runtime::math::Runtime::math_tool_placement	WindowRuntime::math_hover_anchor	unresolved	crate::runtime::math	runtime/math.rs
+crate::runtime::math::Runtime::refresh_math_hover_against_the_picture	WindowRuntime::presented_picture_revision	unresolved	crate::runtime::math	runtime/math.rs
+crate::runtime::math::Runtime::sync_math_tools	WindowRuntime::math_hover_anchor	unresolved	crate::runtime::math	runtime/math.rs
+crate::runtime::mouse::press_reaches_no_grid	seats::terminal_contains	unresolved	crate::runtime::mouse	runtime/mouse.rs
+crate::runtime::panes::Runtime::apply_split_direction	git::GitCache	unresolved	crate::runtime::panes	runtime/panes.rs
+crate::runtime::panes::Runtime::carry_the_pages_of_moved_panes	WindowRuntime::web	unresolved	crate::runtime::panes	runtime/panes.rs
+crate::runtime::panes::Runtime::carry_the_pages_of_moved_panes	move_seat_content	unresolved	crate::runtime::panes	runtime/panes.rs
+crate::runtime::panes::Runtime::carry_the_recordings_of_moved_panes	WindowRuntime::video	unresolved	crate::runtime::panes	runtime/panes.rs
+crate::runtime::panes::Runtime::carry_the_recordings_of_moved_panes	WindowRuntime::web	unresolved	crate::runtime::panes	runtime/panes.rs
+crate::runtime::panes::Runtime::commit_layout_drop	WindowRuntime::drop_preview	unresolved	crate::runtime::panes	runtime/panes.rs
+crate::runtime::panes::Runtime::commit_pane_adopt	pane_into_tab	unresolved	crate::runtime::panes	runtime/panes.rs
+crate::runtime::panes::Runtime::hovered_pane_path_namespace	Self::hover_pane	unresolved	crate::runtime::panes	runtime/panes.rs
+crate::runtime::panes::Runtime::move_pane_to_new_window	App::pending_new_windows	unresolved	crate::runtime::panes	runtime/panes.rs
+crate::runtime::panes::Runtime::move_pane_to_new_window	FolioApp::open_pending_window	unresolved	crate::runtime::panes	runtime/panes.rs
+crate::runtime::panes::Runtime::move_pane_to_new_window	FolioApp::transfer_tab	unresolved	crate::runtime::panes	runtime/panes.rs
+crate::runtime::panes::Runtime::move_pane_to_window	FolioApp::transfer_tab	unresolved	crate::runtime::panes	runtime/panes.rs
+crate::runtime::panes::Runtime::present_seats_and_commit	WindowRuntime::compositor	unresolved	crate::runtime::panes	runtime/panes.rs
+crate::runtime::panes::Runtime::press_command_rail	search::SearchState::set_current	unresolved	crate::runtime::panes	runtime/panes.rs
+crate::runtime::panes::Runtime::publish_layout_events	WindowRuntime::last_layout_events	unresolved	crate::runtime::panes	runtime/panes.rs
+crate::runtime::panes::Runtime::rail_posture	WindowRuntime::rail	unresolved	crate::runtime::panes	runtime/panes.rs
+crate::runtime::panes::Runtime::resize_hidden_leaves_to_layout	WindowRuntime::seat_viewport	unresolved	crate::runtime::panes	runtime/panes.rs
+crate::runtime::panes::Runtime::resize_hidden_leaves_to_layout	commit_leaf_resize	unresolved	crate::runtime::panes	runtime/panes.rs
+crate::runtime::panes::Runtime::restate_panel_scroll	WindowRuntime::rail_scroll	unresolved	crate::runtime::panes	runtime/panes.rs
+crate::runtime::panes::Runtime::restate_panel_scroll	WindowRuntime::tab_scroll	unresolved	crate::runtime::panes	runtime/panes.rs
+crate::runtime::panes::Runtime::select_all_in_pane	DualPlaneSession::select_all_selection	unresolved	crate::runtime::panes	runtime/panes.rs
+crate::runtime::panes::Runtime::stand_in_pane	GhostFace	unresolved	crate::runtime::panes	runtime/panes.rs
+crate::runtime::panes::panel_opacity	the_card_column_is_never_faded_by_a_fold_that_is_not_its_own	unresolved	crate::runtime::panes	runtime/panes.rs
+crate::runtime::panes::tear_pane_into_tab	Seat	unresolved	crate::runtime::panes	runtime/panes.rs
+crate::runtime::peek::Runtime::file_peek_facts	pdf::page_count	unresolved	crate::runtime::peek	runtime/peek.rs
+crate::runtime::peek::Runtime::file_peek_facts	pdf::page_raster	unresolved	crate::runtime::peek	runtime/peek.rs
+crate::runtime::peek::Runtime::file_peek_fitted_pixels	WindowRuntime::peek_cache	unresolved	crate::runtime::peek	runtime/peek.rs
+crate::runtime::peek::Runtime::file_peek_frame	WindowRuntime::video_facts	unresolved	crate::runtime::peek	runtime/peek.rs
+crate::runtime::peek::Runtime::file_peek_native_pixels	WindowRuntime::peek_cache	unresolved	crate::runtime::peek	runtime/peek.rs
+crate::runtime::pointer::Runtime::platform_pointer_now	Self::keep_the_paste_offer	unresolved	crate::runtime::pointer	runtime/pointer/mod.rs
+crate::runtime::preview::Runtime::animation_frame_is_due	pace::FrameClock::open	unresolved	crate::runtime::preview	runtime/preview.rs
+crate::runtime::preview::Runtime::animation_frame_is_due	pace::FrameClock::refuse	unresolved	crate::runtime::preview	runtime/preview.rs
+crate::runtime::preview::Runtime::file_peek_picture	TabState::peek_cache	unresolved	crate::runtime::preview	runtime/preview.rs
+crate::runtime::preview::Runtime::land_preview_source_on	Self::land_page_refusal	unresolved	crate::runtime::preview	runtime/preview.rs
+crate::runtime::preview::Runtime::markdown_pictures_awaited	DocumentPictures::loading	unresolved	crate::runtime::preview	runtime/preview.rs
+crate::runtime::preview::Runtime::open_preview_link	SelectionDrag::hyperlink_control	unresolved	crate::runtime::preview	runtime/preview.rs
+crate::runtime::preview::Runtime::open_preview_link	hyperlink_activation	unresolved	crate::runtime::preview	runtime/preview.rs
+crate::runtime::preview::Runtime::picture_takes_zoom	VIDEO_FRAME_FIT_PX	unresolved	crate::runtime::preview	runtime/preview.rs
+crate::runtime::preview::Runtime::play_video_on	video_seat::VideoSeat::fault	unresolved	crate::runtime::preview	runtime/preview.rs
+crate::runtime::preview::Runtime::press_video_picture	CaptureOwner::VideoPicture	unresolved	crate::runtime::preview	runtime/preview.rs
+crate::runtime::preview::Runtime::press_video_picture	ImageClicks	unresolved	crate::runtime::preview	runtime/preview.rs
+crate::runtime::preview::Runtime::press_video_picture	PreviewBodyRung::VideoPicture	unresolved	crate::runtime::preview	runtime/preview.rs
+crate::runtime::preview::Runtime::preview_document_box	FilePeek::body	unresolved	crate::runtime::preview	runtime/preview.rs
+crate::runtime::preview::Runtime::preview_seat_bar_layers	OverlayStack::preview_bars	unresolved	crate::runtime::preview	runtime/preview.rs
+crate::runtime::preview::Runtime::preview_surface_bar	Self::preview_surface_pane_rect	unresolved	crate::runtime::preview	runtime/preview.rs
+crate::runtime::preview::Runtime::request_animations	AnimationCache	unresolved	crate::runtime::preview	runtime/preview.rs
+crate::runtime::preview::Runtime::service_pictures	AnimationCache::advance_drawn	unresolved	crate::runtime::preview	runtime/preview.rs
+crate::runtime::preview::owe_sharpened_rasters	WindowRuntime::forget_the_picture_in	unresolved	crate::runtime::preview	runtime/preview.rs
+crate::runtime::preview::owe_sharpened_rasters	WindowRuntime::send_owed_markdown_rasters	unresolved	crate::runtime::preview	runtime/preview.rs
+crate::runtime::profiles::Runtime::apply_default_profile	TabState::focused_profile_title	unresolved	crate::runtime::profiles	runtime/profiles.rs
+crate::runtime::profiles::Runtime::new_tab_with_profile	LeafSeed::cwd	unresolved	crate::runtime::profiles	runtime/profiles.rs
+crate::runtime::profiles::Runtime::take_profile_undo	WindowRuntime::profile_undo	unresolved	crate::runtime::profiles	runtime/profiles.rs
+crate::runtime::storage::FolioApp::answer_storage	Runtime::hear_preview_saves	unresolved	crate::runtime::storage	runtime/storage.rs
+crate::runtime::tabs::Runtime::commit_strip_adopt	DragRelease::Adopt	unresolved	crate::runtime::tabs	runtime/tabs.rs
+crate::runtime::tabs::Runtime::commit_strip_extract	DragRelease::Extract	unresolved	crate::runtime::tabs	runtime/tabs.rs
+crate::runtime::tabs::Runtime::move_tab_to_new_window	App::pending_new_windows	unresolved	crate::runtime::tabs	runtime/tabs.rs
+crate::runtime::tabs::Runtime::move_tab_to_new_window	FolioApp::open_pending_window	unresolved	crate::runtime::tabs	runtime/tabs.rs
+crate::runtime::tabs::Runtime::move_tab_to_window	FolioApp	unresolved	crate::runtime::tabs	runtime/tabs.rs
+crate::runtime::tabs::Runtime::tab_menu_subject	TermMenuState	unresolved	crate::runtime::tabs	runtime/tabs.rs
+crate::runtime::tabs::pane_into_new_tab	Seat	unresolved	crate::runtime::tabs	runtime/tabs.rs
+crate::runtime::terminal::Runtime::terminal_link_grasp	HyperlinkHover::underline_target	unresolved	crate::runtime::terminal	runtime/terminal.rs
+crate::runtime::terminal::Runtime::terminal_reference_at	float::FloatTrigger::Reference	unresolved	crate::runtime::terminal	runtime/terminal.rs
+crate::runtime::tooltips::Runtime::tooltip_owes_frame	tab_owes_frame	unresolved	crate::runtime::tooltips	runtime/tooltips.rs
+crate::runtime::web::Runtime::advance_page_foot_clocks	Self::next_deadline	unresolved	crate::runtime::web	runtime/web.rs
+crate::runtime::web::Runtime::open_web_dev_tools	Scope::WebPage	unresolved	crate::runtime::web	runtime/web.rs
+crate::runtime::web::Runtime::page_is_the_typing_target	Runtime::web_keyboard	unresolved	crate::runtime::web	runtime/web.rs
+crate::runtime::windows::Runtime::bring_this_window_forward	FolioApp::raise_for_a_launch	unresolved	crate::runtime::windows	runtime/windows.rs
+crate::runtime::windows::Runtime::cargo_in_flight	FolioApp::settle_drag_handover	unresolved	crate::runtime::windows	runtime/windows.rs
+crate::runtime::windows::Runtime::hand_over_across_windows	FolioApp	unresolved	crate::runtime::windows	runtime/windows.rs
+crate::runtime::windows::Runtime::window_id	ShellAddress	unresolved	crate::runtime::windows	runtime/windows.rs
+crate::search::HistoryScan::unread_through	scan_history	unresolved	crate::search	search.rs
+crate::search::HistoryWindow	scan_history	unresolved	crate::search	search.rs
+crate::search::scan_history_slice	scan_history	unresolved	crate::search	search.rs
+crate::search::scan_history_slice	scan_history_after	unresolved	crate::search	search.rs
+crate::seats::ChromeContent::preview_cards	Self::preview_message	unresolved	crate::seats	seats.rs
+crate::seats::PANE_GHOST_FOLDER_GLYPH_LOGICAL_PX	PANE_HEAD_CHEVRON_GLYPH_LOGICAL_PX	unresolved	crate::seats	seats.rs
+crate::seats::PaneHeadGeometry::control_limit	hit_chrome	unresolved	crate::seats	seats.rs
+crate::seats::PaneHeadGeometry::scrim	marks::ChromeMark::HeadRunScrim	unresolved	crate::seats	seats.rs
+crate::seats::PaneHeadGeometry::scrim	marks::ChromeSprite::above_text	unresolved	crate::seats	seats.rs
+crate::seats::Seats::zoom	crate::profiles::PaneMenuLayout::item	unresolved	crate::seats	seats.rs
+crate::seats::files_tree_geometry	Self::max_scroll	unresolved	crate::seats	seats.rs
+crate::seats::fit_what_fits	hit_chrome	unresolved	crate::seats	seats.rs
+crate::seats::focus_rail_geometry	Self::cards	unresolved	crate::seats	seats.rs
+crate::seats::focus_rail_geometry	Self::max_scroll	unresolved	crate::seats	seats.rs
+crate::seats::focus_rail_geometry	Self::viewport	unresolved	crate::seats	seats.rs
+crate::seats::head_run_revealed	hit_chrome	unresolved	crate::seats	seats.rs
+crate::seats::hit_chrome_in_motion	hit_chrome	unresolved	crate::seats	seats.rs
+crate::seats::hit_files_root	hit_chrome	unresolved	crate::seats	seats.rs
+crate::seats::hit_files_tree	hit_chrome	unresolved	crate::seats	seats.rs
+crate::seats::hit_pane_ghost	hit_chrome	unresolved	crate::seats	seats.rs
+crate::seats::hit_preview_head	hit_chrome	unresolved	crate::seats	seats.rs
+crate::seats::hit_preview_rail	hit_chrome	unresolved	crate::seats	seats.rs
+crate::seats::hit_text_size	hit_chrome	unresolved	crate::seats	seats.rs
+crate::settings::SettingsRow::stated_value	about_version_line	unresolved	crate::settings	settings.rs
+crate::settings::wrapped_description	tests::a_chinese_settings_line_is_filled_before_it_breaks	unresolved	crate::settings	settings.rs
+crate::settings_merge (outside any item)	unit	ambiguous	crate::settings_merge	settings_merge.rs
+crate::settings_merge::Merging::field	unit	ambiguous	crate::settings_merge	settings_merge.rs
+crate::shell_integration::is_powershell	profile_probe	unresolved	crate::shell_integration	shell_integration.rs
+crate::startup::SettledOnce	Self::settled_in_a_test_by	unresolved	crate::startup	startup.rs
+crate::termscroll (outside any item)	cmdrail::RAIL_LANE_GAP_LOGICAL_PX	unresolved	crate::termscroll	termscroll.rs
+crate::termscroll::THUMB_RADIUS_LOGICAL_PX	cmdrail::TICK_RADIUS_LOGICAL_PX	unresolved	crate::termscroll	termscroll.rs
+crate::termscroll::THUMB_REACH_LOGICAL_PX	cmdrail::lay_out	unresolved	crate::termscroll	termscroll.rs
+crate::tooltip::TooltipAnchorId::PreviewBrowser	Self::PaneChevron	unresolved	crate::tooltip	tooltip.rs
+crate::tooltip::TooltipAnchorId::PreviewBrowser	Self::PreviewLock	unresolved	crate::tooltip	tooltip.rs
+crate::trace_sink::Shutdown	Capture	unresolved	crate::trace_sink	trace_sink.rs
+crate::update::OfferState::known	Self::load	unresolved	crate::update	update.rs
+crate::update_apply::WaitClock	CountedClock	unresolved	crate::update_apply	update_apply.rs
+crate::update_apply_macos (outside any item)	Recovered::opens	unresolved	crate::update_apply_macos	update_apply_macos.rs
+crate::update_apply_macos (outside any item)	update_txn::STUCK_ATTEMPT_LIMIT	unresolved	crate::update_apply_macos	update_apply_macos.rs
+crate::update_apply_macos::recover	Recovered::opens	unresolved	crate::update_apply_macos	update_apply_macos.rs
+crate::update_apply_windows::recover	Recovered::opens	unresolved	crate::update_apply_windows	update_apply_windows.rs
+crate::update_handoff::Leaving::leave	crate::update_apply::take_the_window	unresolved	crate::update_handoff	update_handoff.rs
+crate::update_trial (outside any item)	update_txn::trial_sight	unresolved	crate::update_trial	update_trial.rs
+crate::update_txn::Inventories	Inventories::collisions	unresolved	crate::update_txn	update_txn.rs
+crate::update_txn::next	TRANSITIONS	unresolved	crate::update_txn	update_txn.rs
+crate::version (outside any item)	tests	unresolved	crate::version	version.rs
+crate::version::RELEASE_TAG	tests	unresolved	crate::version	version.rs
+crate::video_seat::BarPresence	BarPresence::deadline	unresolved	crate::video_seat	video_seat.rs
+crate::webhost::claimable_chords	Scope	unresolved	crate::webhost	webhost.rs
