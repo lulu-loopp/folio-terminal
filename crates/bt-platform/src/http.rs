@@ -118,7 +118,7 @@ use windows::{
 };
 
 use crate::https_download::{DOWNLOAD_CHUNK_BYTES, Deadlines, Destination, Partial, admit_length};
-use crate::launch_conversation::{LaunchClock, RealClock};
+use crate::launch_clock::{LaunchClock, RealClock};
 
 /// The one request this module knows how to make.
 ///
@@ -875,7 +875,7 @@ mod tests {
         DOWNLOAD_FLOOR_BYTES, DOWNLOAD_IDLE_TIMEOUT,
         loopback::{Entry, Step, begun, body, head, ok, serve},
     };
-    use crate::launch_conversation::{CountedClock, Turn};
+    use crate::launch_clock::{CountedClock, Turn};
 
     /// The idle bound every download here that must get an answer is handed: the
     /// suite's patience, not a 5 s race with the loopback server's thread (plan

@@ -28,6 +28,7 @@ use std::time::{Duration, Instant};
 
 use crate::admission::WorkerCtx;
 use crate::install_flip::Running;
+use crate::launch_clock::{LaunchClock, RealClock};
 
 /// The internal, undocumented argv door served by the copied executable.
 /// Exact spelling is routing, not caller or plan authentication.
@@ -37,7 +38,6 @@ pub const REMOVE_FLAG: &str = "--uninstall-remove";
 pub const REMOVAL_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 const WAIT_POLL: Duration = Duration::from_millis(100);
-const READY_WITHIN: Duration = Duration::from_secs(10);
 const DELETE_ATTEMPTS: usize = 10;
 const FIRST_DELETE_BACKOFF: Duration = Duration::from_millis(50);
 const MAX_DELETE_BACKOFF: Duration = Duration::from_secs(2);
@@ -152,16 +152,50 @@ pub struct Removal {
     pub words: FailureWords,
 }
 
+/// One readiness answer the reader of the remover's stdout hands over: the line
+/// it stopped at (`ready`, a `refused:` line, or an empty line at end of file),
+/// or its read error.
+type ReadyAnswer = io::Result<String>;
+
 /// Create the native remover under `private_root`, start it with breakaway
 /// semantics, and return only after it has parsed its inherited environment
 /// and acknowledged readiness. This is a hand-off protocol, not authentication
 /// against another process running as the same account.
 ///
+/// **How long the acknowledgement may take is the caller's** (0.4.10 plan row
+/// 14): `ready_within` bounds the one wait, the product's door passes its own
+/// bound and a test chooses its own. A child that has not answered by then is
+/// stopped and its copy discarded, retried on the delete backoff while the
+/// stopped image still holds it (Windows, plan row 65); only a copy held past
+/// that is left for the next purge's "Uninstaller staging" row. Nothing has
+/// been removed.
+///
 /// # Errors
 /// The private directory/copy could not be made, the copy differed from the
 /// running executable, the job object refused breakaway, or the child did not
-/// reach its readiness handshake. Nothing has been removed in those cases.
-pub fn schedule(worker: &WorkerCtx, removal: &Removal, private_root: &Path) -> io::Result<()> {
+/// reach its readiness handshake within `ready_within`. Nothing has been
+/// removed in those cases.
+pub fn schedule(
+    worker: &WorkerCtx,
+    removal: &Removal,
+    private_root: &Path,
+    ready_within: Duration,
+) -> io::Result<()> {
+    schedule_by(worker, removal, private_root, ready_within, &RealClock)
+}
+
+/// [`schedule`], with its one wait — for the reader's answer, up to `ready_within` — made on
+/// `clock` (0.4.10 plan row 66): [`RealClock`] in the product, which makes the one `recv_timeout`
+/// of the whole bound; in a test, a counted clock that writes down the bound it was asked for and
+/// spends it without waiting, so "the bound ran out" is a fact of the test, never a race against
+/// a real child's start.
+fn schedule_by(
+    worker: &WorkerCtx,
+    removal: &Removal,
+    private_root: &Path,
+    ready_within: Duration,
+    clock: &dyn LaunchClock,
+) -> io::Result<()> {
     validate(removal, private_root)?;
     fs::create_dir_all(private_root)?;
     validate_private_root(private_root)?;
@@ -172,19 +206,19 @@ pub fn schedule(worker: &WorkerCtx, removal: &Removal, private_root: &Path) -> i
         COPY_NAME_UNIX
     });
     if let Err(error) = copy_new(worker, &removal.program, &copy) {
-        discard_private(&copy, &private);
+        discard_copy(worker, &copy, &private);
         return Err(error);
     }
     match FileIdentity::of(&copy) {
         Ok(identity) if identity == removal.program_identity => {}
         Ok(_) => {
-            discard_private(&copy, &private);
+            discard_copy(worker, &copy, &private);
             return Err(io::Error::other(
                 "the private remover copy differs from the running executable",
             ));
         }
         Err(error) => {
-            discard_private(&copy, &private);
+            discard_copy(worker, &copy, &private);
             return Err(error);
         }
     }
@@ -195,7 +229,7 @@ pub fn schedule(worker: &WorkerCtx, removal: &Removal, private_root: &Path) -> i
     let copy_guard = match guard_copy(&copy) {
         Ok(guard) => guard,
         Err(error) => {
-            discard_private(&copy, &private);
+            discard_copy(worker, &copy, &private);
             return Err(error);
         }
     };
@@ -235,7 +269,7 @@ pub fn schedule(worker: &WorkerCtx, removal: &Removal, private_root: &Path) -> i
         Ok(child) => child,
         Err(error) => {
             drop(copy_guard);
-            discard_private(&copy, &private);
+            discard_copy(worker, &copy, &private);
             return Err(error);
         }
     };
@@ -259,7 +293,7 @@ pub fn schedule(worker: &WorkerCtx, removal: &Removal, private_root: &Path) -> i
             io::Error::other("the remover has no release pipe"),
         );
     };
-    let (sent, received) = mpsc::sync_channel(1);
+    let (sent, received) = mpsc::sync_channel::<ReadyAnswer>(1);
     if let Err(error) = crate::spawn_at_priority(
         "folio-remover-ready",
         crate::ThreadPriority::BelowNormal,
@@ -281,9 +315,19 @@ pub fn schedule(worker: &WorkerCtx, removal: &Removal, private_root: &Path) -> i
         drop(copy_guard);
         return stop_child(worker, child, &copy, &private, error);
     }
-    let answer = received.recv_timeout(READY_WITHIN);
+    let mut answer = None;
+    clock.wait(
+        ready_within,
+        &mut |within| match received.recv_timeout(within) {
+            Err(mpsc::RecvTimeoutError::Timeout) => false,
+            heard => {
+                answer = Some(heard);
+                true
+            }
+        },
+    );
     match answer {
-        Ok(Ok(line)) if line.trim_end() == READY_LINE => {
+        Some(Ok(Ok(line))) if line.trim_end() == READY_LINE => {
             match child.try_wait() {
                 Ok(Some(status)) => {
                     drop(copy_guard);
@@ -315,7 +359,7 @@ pub fn schedule(worker: &WorkerCtx, removal: &Removal, private_root: &Path) -> i
             drop(copy_guard);
             Ok(())
         }
-        Ok(Ok(line)) => {
+        Some(Ok(Ok(line))) => {
             drop(copy_guard);
             stop_child(
                 worker,
@@ -325,11 +369,11 @@ pub fn schedule(worker: &WorkerCtx, removal: &Removal, private_root: &Path) -> i
                 io::Error::other(format!("unexpected remover readiness: {line:?}")),
             )
         }
-        Ok(Err(error)) => {
+        Some(Ok(Err(error))) => {
             drop(copy_guard);
             stop_child(worker, child, &copy, &private, error)
         }
-        Err(mpsc::RecvTimeoutError::Timeout) => {
+        None | Some(Err(mpsc::RecvTimeoutError::Timeout)) => {
             drop(copy_guard);
             stop_child(
                 worker,
@@ -339,7 +383,7 @@ pub fn schedule(worker: &WorkerCtx, removal: &Removal, private_root: &Path) -> i
                 io::Error::new(io::ErrorKind::TimedOut, "the remover did not become ready"),
             )
         }
-        Err(mpsc::RecvTimeoutError::Disconnected) => {
+        Some(Err(mpsc::RecvTimeoutError::Disconnected)) => {
             drop(copy_guard);
             stop_child(
                 worker,
@@ -372,7 +416,7 @@ fn validate_private_root(path: &Path) -> io::Result<()> {
 }
 
 fn stop_child(
-    _worker: &WorkerCtx,
+    worker: &WorkerCtx,
     mut child: Child,
     copy: &Path,
     private: &Path,
@@ -380,13 +424,52 @@ fn stop_child(
 ) -> io::Result<()> {
     let _ = child.kill();
     let _ = child.wait();
-    discard_private(copy, private);
+    // The process handle goes before the discard, so nothing of this process
+    // holds the stopped child. Whether an open process handle prolongs the
+    // killed image's hold on its file is not measured (plan row 65's review,
+    // Q1); closing it first costs nothing.
+    drop(child);
+    discard_copy(worker, copy, private);
     Err(error)
 }
 
-fn discard_private(copy: &Path, private: &Path) {
-    let _ = fs::remove_file(copy);
+/// **A refused schedule's copy and private folder go** (0.4.10 plan row 65):
+/// every road of `schedule_by` that gives up after the private folder was made
+/// ends here, a stopped child's and a refused copy's alike. On Windows a killed
+/// image still holds its file for a moment after `wait` returns, so one delete
+/// would nearly always fail and leave the copy for the next purge. Each try
+/// deletes the copy and then the private folder, on the remover's own delete
+/// backoff — `DELETE_ATTEMPTS` tries, pausing `FIRST_DELETE_BACKOFF` doubled up
+/// to `MAX_DELETE_BACKOFF` — until the private folder is gone; the per-user
+/// folder is retired after. A road where the first try succeeds pauses not at
+/// all; a copy still held after the last try is left for the next purge's
+/// "Uninstaller staging" row.
+fn discard_copy(worker: &WorkerCtx, copy: &Path, private: &Path) {
+    let mut backoff = FIRST_DELETE_BACKOFF;
+    for attempt in 0..DELETE_ATTEMPTS {
+        if absent_after(fs::remove_file(copy)) && absent_after(fs::remove_dir(private)) {
+            break;
+        }
+        if attempt + 1 < DELETE_ATTEMPTS {
+            crate::wait::sleep_within(worker, backoff);
+            backoff = next_delete_backoff(backoff);
+        }
+    }
     retire_private(private);
+}
+
+/// Whether a removal left its path absent: it removed it, or found nothing.
+fn absent_after(removal: io::Result<()>) -> bool {
+    match removal {
+        Ok(()) => true,
+        Err(error) => error.kind() == io::ErrorKind::NotFound,
+    }
+}
+
+/// The pause after `backoff` on the remover's delete backoff: doubled, up to
+/// `MAX_DELETE_BACKOFF`.
+fn next_delete_backoff(backoff: Duration) -> Duration {
+    (backoff * 2).min(MAX_DELETE_BACKOFF)
 }
 
 /// **The remover's folders go when nothing of them remains**: the private
@@ -820,7 +903,7 @@ fn remove_with(
         }
         if attempt + 1 < attempts {
             crate::wait::sleep_within(worker, backoff);
-            backoff = (backoff * 2).min(MAX_DELETE_BACKOFF);
+            backoff = next_delete_backoff(backoff);
         }
     }
 
@@ -1131,6 +1214,7 @@ fn self_delete(_path: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::launch_clock::{CountedClock, Turn};
 
     fn sandbox(tag: &str) -> PathBuf {
         let root = bt_testpath::temp_path(&format!("folio-native-removal-{tag}"));
@@ -1182,6 +1266,9 @@ mod tests {
     ///
     /// MUTATION: in `retire_private`, leave the per-user folder — an empty `Folio-uninstall`
     /// stays behind.
+    ///
+    /// A refused schedule also waits for nothing (0.4.10 plan row 14): the clock it is handed is
+    /// never asked (plan row 66).
     #[test]
     fn a_refused_schedule_leaves_no_remover_folder() {
         let root = sandbox("refused-schedule");
@@ -1202,10 +1289,24 @@ mod tests {
             )
         };
         let private_root = removers.clone();
-        let error = on_worker(move |worker| schedule(worker, &removal, &private_root))
-            .unwrap_err()
-            .to_string();
+        let (answer, clock) = on_worker(move |worker| {
+            let clock = CountedClock::new(|_, _| Turn::Spend);
+            let answer = schedule_by(
+                worker,
+                &removal,
+                &private_root,
+                crate::door_skipped::PATIENCE,
+                &clock,
+            );
+            (answer, clock)
+        });
+        let error = answer.unwrap_err().to_string();
         assert!(error.contains("differs"), "{error}");
+        assert_eq!(
+            clock.asked(),
+            Vec::<Duration>::new(),
+            "a refused schedule waited for a readiness answer"
+        );
         assert!(!removers.exists(), "the remover's folder stayed");
         assert_eq!(fs::read(&program).unwrap(), b"the installed program");
         fs::remove_dir_all(root).unwrap();
@@ -1471,8 +1572,10 @@ mod tests {
 
     /// RED (T-UNINSTALL-UX round 2, mutation `do_not_release_ready_remover`) —
     /// the test helper's native copy uses the same product handshake and then
-    /// removes the sandbox file and the empty folder. The only clock is the
-    /// outer deadlock ceiling around observing the already-produced result.
+    /// removes the sandbox file and the empty folder. Two real bounds stand
+    /// over it: the readiness wait, which this test hands the door suites'
+    /// patience (0.4.10 plan row 14), and the outer deadlock ceiling around
+    /// observing the already-produced result.
     #[test]
     fn a_native_remover_copy_runs_the_plan() {
         if std::env::var_os(key("PRIVATE")).is_some() {
@@ -1502,7 +1605,8 @@ mod tests {
             Some(install.clone()),
         );
         let private_after = private.clone();
-        on_worker(move |worker| schedule(worker, &plan, &private)).unwrap();
+        on_worker(move |worker| schedule(worker, &plan, &private, crate::door_skipped::PATIENCE))
+            .unwrap();
         let until = Instant::now() + Duration::from_secs(30);
         while (install.exists() || private_after.exists()) && Instant::now() < until {
             std::thread::yield_now();
@@ -1511,6 +1615,82 @@ mod tests {
         assert!(
             !private_after.exists(),
             "the native remover removed its private copy last"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// RED (0.4.10 plan row 14, T-DEFERRED-REMOVAL-READY-WITHIN-PARAMETER) — **a remover that is
+    /// not ready within the caller's bound is stopped at that bound, and nothing is removed**.
+    ///
+    /// The real copy is started (the copied test executable, as in
+    /// `a_native_remover_copy_runs_the_plan`), and the counted clock `schedule_by` is handed spends
+    /// the bound without looking at the child (0.4.10 plan row 66), so the child's own speed never
+    /// enters the verdict and the readiness wait waits no real time. The one wait is asked for the
+    /// caller's bound. The stopped copy's discard may pause on the real delete backoff (at most
+    /// 9.15 s) while Windows still holds the killed image (row 65); the timing scan ends at
+    /// `schedule_by` and does not see it (noted in `docs/plans/TIMING-BOUND-TESTS.tsv`).
+    ///
+    /// MUTATION: in `schedule_by`, ask the clock for a constant ten seconds instead of
+    /// `ready_within` — the wait is asked for 10 s, not 1.234 s. MUTATION: wait with
+    /// `received.recv_timeout` directly instead of on the clock — the clock is never asked.
+    ///
+    /// RED (0.4.10 plan row 65, T-STOPPED-REMOVER-COPY-DELETED-WITH-A-RETRY) — **the stopped
+    /// remover's private folder is gone when `schedule_by` returns**. MUTATION: `discard_copy`
+    /// tries once — on Windows the killed image still holds the copy and the folder stays.
+    /// MUTATION: `stop_child` discards nothing — the folder stays on every platform.
+    #[cfg(any(windows, unix))]
+    #[test]
+    fn a_remover_not_ready_within_the_callers_bound_is_stopped_at_that_bound() {
+        const BOUND: Duration = Duration::from_millis(1_234);
+        let root = sandbox("not-ready");
+        let install = root.join("install");
+        let private_root = root.join("local/Folio");
+        fs::create_dir_all(&install).unwrap();
+        let file = install.join("sidecar.bin");
+        fs::write(&file, b"owned").unwrap();
+        let program = root.join("source-test-program.exe");
+        fs::copy(std::env::current_exe().unwrap(), &program).unwrap();
+        let plan = removal(
+            &program,
+            Item::File {
+                path: file.clone(),
+                expected: identity(&file),
+            },
+            Some(install),
+        );
+        let private_after = private_root.clone();
+        let (answer, clock) = on_worker(move |worker| {
+            let clock = CountedClock::new(|_, _| Turn::Spend);
+            let answer = schedule_by(worker, &plan, &private_root, BOUND, &clock);
+            (answer, clock)
+        });
+        assert_eq!(
+            clock.asked(),
+            vec![BOUND],
+            "the readiness wait is asked for the caller's bound"
+        );
+        assert_eq!(
+            clock.moved(),
+            BOUND,
+            "the whole bound is spent, on the count"
+        );
+        let error = answer.unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut, "{error}");
+        assert!(
+            error.to_string().contains("did not become ready"),
+            "{error}"
+        );
+        assert_eq!(
+            fs::read(&file).unwrap(),
+            b"owned",
+            "a stopped remover removed nothing"
+        );
+        // On Windows the killed image still holds the copy right after `wait` (a single delete
+        // lost in 19 of 20 runs on 2026-11-04); `discard_copy` retries it on the delete backoff
+        // (0.4.10 plan row 65), so the folder is gone here on every platform.
+        assert!(
+            !private_after.exists(),
+            "a stopped remover's private folder is discarded"
         );
         let _ = fs::remove_dir_all(root);
     }

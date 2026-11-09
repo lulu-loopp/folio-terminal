@@ -81,7 +81,7 @@ use std::{
 };
 
 use crate::instance::SOCKET_PATH_LIMIT;
-use crate::launch_conversation::{LaunchClock, RealClock};
+use crate::launch_clock::{LaunchClock, RealClock};
 
 /// **The most bytes one frame on this endpoint may carry** — 256 KiB (F-SWEEP-2-048).
 ///
@@ -896,7 +896,7 @@ fn read_frame(mut stream: &UnixStream) -> io::Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::launch_conversation::{CountedClock, Turn};
+    use crate::launch_clock::{CountedClock, Turn};
     use std::sync::mpsc;
 
     /// A data directory no other test in this process is using, so two of them
