@@ -356,6 +356,12 @@ pub(crate) trait WindowHost {
     /// [`crate::wear_app_icon`]: the executable's icon group, at the shell's small and big sizes
     /// for that scale, as the window's own icon on Windows; nothing anywhere else.
     fn wear_the_app_icon(&self, scale_factor: f64);
+    /// **The system's box, raised over this window** (0.4.10 plan row 72) — `seen`'s box, owned
+    /// by this window, saying `text` under the program's name: a stop's last word while its
+    /// windows still stand. The owned box has no taskbar button or Alt+Tab entry of its own, and
+    /// this window answers no input while it is up, as the window thread inside the box's loop
+    /// would not either way.
+    fn say_in_a_box(&self, seen: bt_platform::SeenBox, text: &str);
     /// The window's scale and rectangle as the platform reports them, beside winit's.
     fn dpi_snapshot(&self) -> anyhow::Result<crate::DpiSnapshot>;
     /// **One clipboard request, put on the clipboard lane for this window** — served through this
@@ -560,6 +566,9 @@ impl WindowHost for Arc<Window> {
     }
     fn wear_the_app_icon(&self, scale_factor: f64) {
         crate::wear_app_icon(self, scale_factor);
+    }
+    fn say_in_a_box(&self, seen: bt_platform::SeenBox, text: &str) {
+        seen.say(crate::native_window_of(self).ok(), crate::APP_NAME, text);
     }
     fn dpi_snapshot(&self) -> anyhow::Result<crate::DpiSnapshot> {
         native_dpi_snapshot(self)

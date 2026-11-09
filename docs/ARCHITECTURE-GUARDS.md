@@ -1281,6 +1281,13 @@ buffering decides, not the endpoint; and bt-app's
 real endpoint from another crate and cannot be handed the crate-private clock without a product knob. Both
 are noted in TIMING-BOUND.
 
+2026-11-07 (T-LAUNCHCLOCK-OUT-OF-THE-PLATFORM-GATED-MODULE, 0.4.10 plan row 66): `LaunchClock`, `RealClock`
+and the test's `Turn` and `CountedClock` moved from `launch_conversation`, which is compiled only on Windows
+and Unix, to `launch_clock`, which has no gate; they are unchanged but for the trait doc's sixth-user
+paragraph, and the paragraphs above name the old path. That sixth user is the deferred remover's readiness
+wait (`deferred_removal::schedule_by`, every target), which row 14 had made on a closure of its own because
+the clock's module was gated.
+
 ## Suite watchdog
 
 The rule: a test that hangs ends its run red within 300 s of its start, and is named, wherever a

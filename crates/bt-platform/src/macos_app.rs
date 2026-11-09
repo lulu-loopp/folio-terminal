@@ -610,8 +610,11 @@ pub struct SeenBox(MainThreadMarker);
 
 impl SeenBox {
     /// Raise the box: `crate::macos_dialogs`'s alert, with no fallback — the answer that made
-    /// this value is the reader.
-    pub fn say(self, title: &str, text: &str) {
+    /// this value is the reader. `over` is not asked for (0.4.10 plan row 72): the alert's
+    /// `runModal` is already the application's own, with no Dock or ⌘-Tab entry of its own and
+    /// the application's icon, whichever window stands.
+    pub fn say(self, over: Option<crate::NativeWindow>, title: &str, text: &str) {
+        let _ = over;
         crate::macos_dialogs::raise_alert(self.0, title, text);
     }
 }
