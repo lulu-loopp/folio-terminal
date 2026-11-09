@@ -83,38 +83,69 @@ pub(crate) enum CarryCheck {
 }
 
 /// **A check the inventory declares and a later part owes the pass** (0.4.10 plan row 68a, the
-/// named seam; R-A of 2026-11-07): the part, and the call it still runs by today, in
-/// `Runtime::create`.
+/// named seam; R-A of 2026-11-07): the part, the call it still runs by today in
+/// `Runtime::create`, and the test that part lands with.
 ///
-/// **It cannot outlive its part.** The guard holds `runs_today` to `Runtime::create`'s body, and
-/// every call in [`run_carry_steps`] to a check that answers it is in the pass: a part that moves
-/// its check takes the call out of `Runtime::create`, and one that adds a member leaves a call the
-/// guard reads as undeclared — either is red until the check answers `Ok` here instead.
+/// **It cannot outlive its part** (the review's N2). The guard holds `runs_today` to
+/// `Runtime::create`'s statements, holds `landed_by` to being no test of the program yet, and
+/// reads every member [`run_carry_steps`] hands the worker's context as a declared check: a part
+/// that moves its check takes the call out of `Runtime::create`, one that lands its test makes
+/// `landed_by` found, and one that adds a member leaves a call the guard reads as undeclared —
+/// each is red until the check answers `Ok` here instead.
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Owed {
     pub(crate) part: &'static str,
     pub(crate) runs_today: &'static str,
+    /// The test the part lands with — its module and its name — which the brief of that part
+    /// names as its proof.
+    pub(crate) landed_by: (&'static str, &'static str),
+}
+
+/// **A check that runs in the pass**: its member's call in [`run_carry_steps`], and the sites it
+/// ran by before it was a member, which `Runtime::create` must no longer have (the review's N2: a
+/// part that adds its member and forgets the old site would run the check twice).
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PassMember {
+    pub(crate) call: &'static str,
+    pub(crate) retired: &'static [&'static str],
 }
 
 #[cfg(test)]
 impl CarryCheck {
-    /// **Where the check runs**: `Ok` with its call in [`run_carry_steps`], or the part that owes
+    /// **Where the check runs**: `Ok` with its member in [`run_carry_steps`], or the part that owes
     /// the move.
-    pub(crate) fn in_the_pass(self) -> Result<&'static str, Owed> {
+    pub(crate) fn in_the_pass(self) -> Result<PassMember, Owed> {
         match self {
-            Self::AgentHooks(_) => Ok("crate::agent_hooks_step::run_agent_hooks_step"),
+            // The hooks' own wake left the start when the pass took the round (row 68a).
+            Self::AgentHooks(_) => Ok(PassMember {
+                call: "crate::agent_hooks_step::run_agent_hooks_step",
+                retired: &["agent_hooks_step::install_hooks_wake("],
+            }),
             Self::ExplorerPackage => Err(Owed {
                 part: "68b",
                 runs_today: "explorer_menu::begin_probe();",
+                landed_by: (
+                    "crate::explorer_menu::tests",
+                    "the_carry_pass_probes_the_package_registration",
+                ),
             }),
             Self::ExplorerClassic => Err(Owed {
                 part: "68b",
                 runs_today: "context_menu_installed: context_menu::reassert(),",
+                landed_by: (
+                    "crate::context_menu::tests",
+                    "the_carry_pass_reasserts_the_classic_verb",
+                ),
             }),
             Self::ProfileLines => Err(Owed {
                 part: "68c",
                 runs_today: "migration: shell_integration::begin_startup_migration,",
+                landed_by: (
+                    "crate::shell_integration::profile_marks::tests",
+                    "the_carry_pass_brings_folios_old_profile_lines_forward",
+                ),
             }),
         }
     }
