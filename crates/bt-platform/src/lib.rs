@@ -9356,6 +9356,11 @@ pub(crate) mod peer;
 #[cfg(any(windows, unix))]
 mod launch_conversation;
 
+/// **The clock a wait for the other end is read on** — `LaunchClock`, the
+/// product's `RealClock` and a test's `CountedClock` — on every target, apart from the launch
+/// wire's gate (0.4.10 plan row 66): the deferred remover's readiness wait builds everywhere.
+mod launch_clock;
+
 /// **The second launch's door into the first** — one well-known named pipe per data directory
 /// (`docs/DESIGN.md` §7.59).
 ///
@@ -9639,7 +9644,7 @@ pub(crate) fn listener_says_within<T>(
 /// awaits the word within its patience, or spends the bound without listening.
 #[cfg(windows)]
 pub(crate) fn first_word_on<T>(
-    clock: &dyn launch_conversation::LaunchClock,
+    clock: &dyn launch_clock::LaunchClock,
     said: &std::sync::mpsc::Receiver<T>,
     bound: std::time::Duration,
 ) -> Result<T, std::sync::mpsc::RecvTimeoutError> {

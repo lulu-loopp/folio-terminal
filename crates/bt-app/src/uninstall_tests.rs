@@ -1152,8 +1152,8 @@ fn uninstall_source_guard_pins_known_writers_and_inventory() {
         (
             Remover::Staging,
             platform,
-            function("crate::deferred_removal", "schedule"),
-            "schedule",
+            function("crate::deferred_removal", "schedule_by"),
+            "schedule_by",
         ),
     ] {
         let found = index
