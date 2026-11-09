@@ -10309,12 +10309,13 @@ impl WindowRenderer {
         // body that would come out the same byte for byte, and the loop is skipped. The window's
         // furniture — a working mark's step, a menu, the peek, a fade — moves nothing here.
         let body_state = self.body_state(gpu, ground_alpha);
-        let body_clean = self.body_route == BodyRoute::Layer
-            && self
-                .body
-                .as_ref()
-                .and_then(|body| body.key.as_ref())
-                .is_some_and(|key| key.matches(&body_state, seats));
+        let body_clean = if self.body_route == BodyRoute::Layer
+            && let Some(BodyLayer { key: Some(key), .. }) = &self.body
+        {
+            key.matches(&body_state, seats)
+        } else {
+            false
+        };
         let mut prepared: Vec<PreparedSeat> = Vec::with_capacity(seats.len());
         // Every rendered table on screen, from every seat, gathered as this frame's extra preview
         // bodies. They join the list the caller set rather than forming a pass of their own: a
@@ -11205,6 +11206,8 @@ impl WindowRenderer {
         // configured for render-attachment use and nothing else.
         let body_encode_started = Instant::now();
         let layered = self.body_route == BodyRoute::Layer;
+        // One borrow of the ground's quad for whichever route draws the body below.
+        let ground_buffer = ground_quad.as_ref();
         if layered {
             if self
                 .body
@@ -11230,7 +11233,7 @@ impl WindowRenderer {
                     "Folio body pass",
                     surface,
                 );
-                self.draw_body(&mut pass, gpu, ground_quad.as_ref(), &prepared)?;
+                self.draw_body(&mut pass, gpu, ground_buffer, &prepared)?;
             }
             let whole = [[0.0, 0.0, surface.0 as f32, surface.1 as f32]];
             let instances = group_instances(&whole, [0, 0], 1.0, surface);
@@ -11278,7 +11281,7 @@ impl WindowRenderer {
                 ..Default::default()
             });
             if !layered {
-                self.draw_body(&mut pass, gpu, ground_quad.as_ref(), &prepared)?;
+                self.draw_body(&mut pass, gpu, ground_buffer, &prepared)?;
             }
             // Seat chrome last, with the pass restored to the whole window: it is
             // the one class of draw that legitimately owns the space between
