@@ -15189,9 +15189,8 @@ fn release_trial_writer(writer: update_trial::Writer, stores: &mut TrialStores<'
         Writer::Profiles => stores.profiles.release_trial(),
         Writer::Pins => stores.pins.release_trial(),
         Writer::UpdateCheck => update::release_trial(),
-        Writer::ProfileMigration => {
-            shell_integration::begin_startup_migration();
-        }
+        // The carry pass's `$PROFILE` member, which the trial held back (0.4.10 plan row 68c).
+        Writer::ProfileMigration => carry_pass::begin_carry_pass(),
         Writer::BashScript => {
             let _ = shell_integration::script_path();
         }
@@ -35795,8 +35794,9 @@ impl Runtime<'_, Native> {
         // on a worker, whether the Terminal page owes the copy's removal row.
         psreadline::begin_legacy_observation();
         // **The first window, in `startup::resume`'s order**: Windows PowerShell's language
-        // question, the startup migration and the script's preparation, the window, the
-        // PowerShell questions, the first tab. What the
+        // question, the script's preparation and the carry pass (the `$PROFILE`s' observation and
+        // carry among its members, row 68c), the window, the PowerShell questions, the first tab.
+        // What the
         // steps share is the program walk's answers, adopted by the window's title and by the
         // questions, and read by the first tab.
         let (opened, first) = startup::resume(
@@ -35809,7 +35809,6 @@ impl Runtime<'_, Native> {
                         settings_store.loaded().shell_integration,
                     )
                 },
-                migration: shell_integration::begin_startup_migration,
                 script: || {
                     // Folio's own `folio.ps1`, compared and repaired on a worker nobody waits for: the first
                     // PowerShell birth that arrives before it finishes prepares it on its own birth worker.

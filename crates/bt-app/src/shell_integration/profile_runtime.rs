@@ -3,7 +3,6 @@ use super::{profile_marks::*, *};
 use crate::i18n::Text;
 use std::{io, sync::Mutex};
 
-static STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static REMOVAL: Mutex<Option<RemovalAnswer>> = Mutex::new(None);
 /// Every answered one-click install or Undo not yet delivered, each with the window that asked.
 /// A queue, not a slot: two windows' clicks in flight are two answers, and neither replaces the
@@ -66,65 +65,289 @@ fn script_at(data: &Path) -> PathBuf {
     data.join(SCRIPT_DIRECTORY).join(SCRIPT_FILE_PS1)
 }
 
-/// No profile read, process query, script read or script write happens on the caller, and the
-/// caller waits for nothing: one worker observes whether an older Folio line is present, without
-/// editing a profile, and wakes the window when it knows. Folio's own script is prepared elsewhere
-/// (`shell_integration::begin_powershell_script_preparation` at launch, and on each PowerShell
-/// birth's worker), so this observation never stands between a window and its first pane.
+/// **The carry pass's member for Folio's own `$PROFILE` lines** (0.4.10 plan row 68c): every line
+/// an older Folio wrote ([`LineForm`]) brought to the guarded line for the account's own data root,
+/// and nothing else in any profile touched.
 ///
-/// **Held back in an update's trial** behind [`crate::update_trial::Writer::ProfileMigration`], as
-/// the migration it replaced was. The observation itself only reads; the commit's release calls
-/// this again, so the conditional Settings verb appears then.
+/// It is also the start's observation of the profiles (R1 of 2026-11-09): the editions observed for
+/// the Profiles page and the launch menu, the paths their `$PROFILE`s are at, and whether the
+/// Settings remover has a line to stand for — what `begin_startup_migration` did on a worker of its
+/// own until this row. The carry is made against the same answers, so no second PowerShell starts.
 ///
-/// Answers [`Migrated`], the start's witness that its migration step asked for this.
-pub fn begin_startup_migration() -> Migrated {
-    begin_startup_migration_through(
-        &STARTED,
-        &crate::lane::Executor::thread_door(bt_platform::ThreadPriority::BelowNormal),
-        persist::storage_dir,
-        crate::diagnostics::note,
-    );
-    Migrated(())
+/// **Once per process** (R2): a start's round runs it, and so does an update's commit, whose trial
+/// held it back (`update_trial::Writer::ProfileMigration`, asked before anything is read); the
+/// rounds an Agents-page open, a press or a language change asks for answer `None` here and start
+/// no PowerShell. **Run last in the round**, after a publish (R8): nothing the window adopts from the
+/// earlier members waits for a PowerShell this member starts.
+///
+/// **In a test build it starts no PowerShell and reads no account file** ([`this_accounts_inputs`]).
+pub(crate) fn run_profile_lines_step(
+    ctx: &bt_platform::admission::WorkerCtx,
+) -> Option<crate::carry_pass::MemberAnswer<()>> {
+    PROFILE_LINES.run_once(crate::update_trial::defer, || {
+        let inputs = this_accounts_inputs(ctx);
+        let carried = carry_profile_lines(&inputs.data, inputs.appdata.as_deref(), inputs.answers);
+        let changed = carried.lines.len();
+        for line in carried.lines {
+            crate::diagnostics::stderr_line(line);
+        }
+        crate::carry_pass::MemberAnswer {
+            part: (),
+            checks: carried.checks,
+            changed,
+        }
+    })
 }
 
-/// **That a start's migration step asked for the startup migration** (T-STARTUP-ORDER-SHARED):
-/// the value `startup::FirstWindow::migration` must answer, and only [`begin_startup_migration`]
-/// makes one, so the step cannot be another step's call or no call at all.
-pub struct Migrated(());
+/// **Whether the member has run in this process** — the latch [`run_profile_lines_step`] keeps.
+pub(crate) struct ProfileLinesStep {
+    ran: std::sync::atomic::AtomicBool,
+}
 
+impl ProfileLinesStep {
+    pub(crate) const fn new() -> Self {
+        Self {
+            ran: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// `body`'s answer the first time it is asked for outside an update's trial, `None` otherwise.
+    /// **The latch is set by a run, not by an asking**: a round the trial holds back (`defer`
+    /// answering `true`) reads nothing and leaves it open, so the commit's round runs it.
+    pub(crate) fn run_once<T>(
+        &self,
+        defer: impl FnOnce(crate::update_trial::Writer) -> bool,
+        body: impl FnOnce() -> T,
+    ) -> Option<T> {
+        if defer(crate::update_trial::Writer::ProfileMigration) {
+            return None;
+        }
+        if self.ran.swap(true, std::sync::atomic::Ordering::AcqRel) {
+            return None;
+        }
+        Some(body())
+    }
+}
+
+/// This process's member.
+static PROFILE_LINES: ProfileLinesStep = ProfileLinesStep::new();
+
+/// What the carry works from: the data root, `%APPDATA%`, and where each PowerShell said its
+/// `$PROFILE` is.
+pub(crate) struct ProfileLinesInputs {
+    pub(crate) data: PathBuf,
+    pub(crate) appdata: Option<PathBuf>,
+    pub(crate) answers: PathAnswers,
+}
+
+/// **The account's inputs, or — in a test build — the test process's own.** A test that runs the
+/// pass (an Agents-page open, a press, a trial's commit) must never start a PowerShell or reach a
+/// person's `$PROFILE` (the coordinator's hard rule of 2026-11-09): the test build's inputs are
+/// the test process's scratch data folder, no `%APPDATA%` (so no line has a target and nothing is
+/// written) and no answers, pinned by `a_test_process_never_carries_the_accounts_profile`. The
+/// `agent_hooks_step::family_path` precedent.
+fn this_accounts_inputs(ctx: &bt_platform::admission::WorkerCtx) -> ProfileLinesInputs {
+    #[cfg(test)]
+    {
+        let _ = ctx;
+        test_process_inputs()
+    }
+    #[cfg(not(test))]
+    {
+        account_inputs(ctx)
+    }
+}
+
+/// The test build's inputs: see [`this_accounts_inputs`].
 #[cfg(test)]
-impl Migrated {
-    /// The headless start's stand-in for the step.
-    pub(crate) fn stand_in() -> Self {
-        Self(())
+pub(crate) fn test_process_inputs() -> ProfileLinesInputs {
+    ProfileLinesInputs {
+        data: persist::storage_dir(),
+        appdata: None,
+        answers: Vec::new(),
     }
 }
 
-/// [`begin_startup_migration`] with its latch, the executor its worker is started by, the data
-/// root's reading and the voice a refused start is said in handed in.
+/// **The start's observation, on the pass's worker**: the installed PowerShells looked up in the
+/// account's current environment, each observed, and every answer filed — what the startup's own
+/// worker did until row 68c — then the answers handed to the carry.
+#[cfg(not(test))]
+fn account_inputs(ctx: &bt_platform::admission::WorkerCtx) -> ProfileLinesInputs {
+    let data = persist::storage_dir();
+    let environment = ProbeEnvironment::current(ctx, "PowerShell profile observation");
+    let programs = installed_powershells(&environment);
+    let (report, answers) =
+        observe_profile_lines(ctx, next_observation(), &data, &programs, &environment);
+    for refusal in report.refusals() {
+        crate::diagnostics::stderr_line(format!(
+            "BT_SHELL_PROFILE {}: {}",
+            refusal.path.display(),
+            refusal.reason
+        ));
+    }
+    if let Some(wake) = WAKE.get() {
+        wake();
+    }
+    ProfileLinesInputs {
+        data,
+        appdata: std::env::var_os("APPDATA").map(PathBuf::from),
+        answers,
+    }
+}
+
+/// **What one carry said, and how many profile files it looked at.**
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct ProfileLinesCarried {
+    pub(crate) checks: usize,
+    pub(crate) lines: Vec<String>,
+}
+
+/// **Bring Folio's old lines forward in every profile the record and the answers name**, under
+/// the marks lock: each line in one of Folio's forms ([`LineForm`]) that is not the target —
+/// [`managed_line_for`] the data root — is replaced by it, and nothing else in the file changes
+/// (`rewrite_recorded`: each line's indentation, trailing whitespace and terminator, every other
+/// line and the file's encoding, BOM-less ANSI files byte for byte). The profile is remembered in
+/// the record before it is written. A file with nothing to say says nothing.
 ///
-/// **The latch is set by a start, not by an attempt.** A start the thread door refuses is said
-/// once and leaves the latch open, so the next asking — the commit of an update's trial, the next
-/// launch path that calls this — tries again; before, the latch was taken first and a refused
-/// start meant no startup observation until the Profiles page was opened.
-pub(crate) fn begin_startup_migration_through(
-    latch: &std::sync::atomic::AtomicBool,
-    executor: &crate::lane::Executor,
-    data: impl FnOnce() -> PathBuf,
-    say: impl Fn(&str) + Send + Sync + 'static,
-) {
-    if crate::update_trial::defer(crate::update_trial::Writer::ProfileMigration) {
-        return;
+/// **Left, and said once** (report §1.4): a line naming `folio.ps1` in no form of Folio's; a file
+/// Folio may not edit (a link, a hard link, read-only, changed between the read and the write) or
+/// cannot read, when it holds one of Folio's lines behind the target; a record Folio cannot read;
+/// an account whose record says the person turned the integration off (R4); a data root no guarded
+/// line names (R3). The record is written only where the lock found a data root and only when a
+/// line is carried (R12): a refusal is said, never recorded, so no record is made for an account
+/// Folio never wrote a line for.
+pub(crate) fn carry_profile_lines(
+    data: &Path,
+    appdata: Option<&Path>,
+    answers: PathAnswers,
+) -> ProfileLinesCarried {
+    let say = |path: &Path, what: String| format!("BT_SHELL_PROFILE {}: {what}", path.display());
+    let record_path = data.join(RECORD_FILE);
+    let refused_record = |error: io::Error| ProfileLinesCarried {
+        checks: 0,
+        lines: vec![say(&record_path, format!("left as it is: {error}"))],
+    };
+    let lock = match lock_existing(data, Asker::InApp) {
+        Ok(lock) => lock,
+        Err(error) => return refused_record(error),
+    };
+    let records = lock.is_some();
+    let (mut marks, files) = match Marks::read(data).and_then(|marks| {
+        let files = ProfileFiles::read(data)?;
+        Ok((marks, files))
+    }) {
+        Ok(read) => read,
+        Err(error) => return refused_record(error),
+    };
+    let target = managed_line_for(data, appdata);
+    let (paths, report) = candidates(&marks, &files, answers);
+    let mut lines: Vec<String> = report
+        .files
+        .iter()
+        .filter_map(|file| match &file.fate {
+            Fate::Refused(reason) => Some(say(&file.path, format!("left as it is: {reason}"))),
+            _ => None,
+        })
+        .collect();
+    let script = script_at(data);
+    let forms = owned_forms(&marks, data);
+    let forms = match &target {
+        Ok(line) => forms.targeting(line),
+        Err(_) => forms,
+    };
+    for path in &paths {
+        let said = carry_one(path, &forms, &target, marks.is_off(), || {
+            marks.remember(path, &script);
+            if records { marks.write(data) } else { Ok(()) }
+        });
+        if let Some(what) = said {
+            lines.push(say(path, what));
+        }
     }
-    if latch.swap(true, std::sync::atomic::Ordering::AcqRel) {
-        return;
-    }
-    if !spawn_profile_observation(executor, data(), Vec::new(), Vec::new(), say) {
-        latch.store(false, std::sync::atomic::Ordering::Release);
+    ProfileLinesCarried {
+        checks: paths.len(),
+        lines,
     }
 }
 
-/// Refresh the two edition facts when the Profiles page opens. This is an edge
+/// The sentence for a line that names `folio.ps1` in no form of Folio's.
+const NOT_FOLIOS: &str = "a line naming folio.ps1 is not in one of Folio's forms";
+
+/// **One profile's carry**, and what it says: `None` for a file with nothing to say.
+fn carry_one(
+    path: &Path,
+    forms: &Forms,
+    target: &io::Result<&'static str>,
+    off: bool,
+    record_owned: impl FnOnce() -> io::Result<()>,
+) -> Option<String> {
+    let left = |reason: &dyn std::fmt::Display| Some(format!("left as it is: {reason}"));
+    let target_form = target.as_ref().ok().and_then(|line| forms.form_of(line));
+    let behind = |decoded: &Decoded| -> Vec<LineForm> {
+        decoded
+            .forms_in(forms)
+            .into_iter()
+            .filter(|form| Some(*form) != target_form)
+            .collect()
+    };
+    let bytes = match read_profile_for_edit(path) {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => return None,
+        // Not Folio's to edit (a link, a hard link, read-only): said only when Folio's own line
+        // stands there behind the target, read without the edit's handle to know.
+        Err(refusal) => {
+            let holds_ours =
+                bt_platform::file_reads::read(bt_platform::file_reads::Lane::Settings, path)
+                    .ok()
+                    .and_then(|bytes| Decoded::read(&bytes).ok())
+                    .is_some_and(|decoded| !behind(&decoded).is_empty());
+            return if holds_ours { left(&refusal) } else { None };
+        }
+    };
+    let decoded = match Decoded::read(&bytes) {
+        Ok(decoded) => decoded,
+        Err(refusal) => return left(&refusal),
+    };
+    let behind = behind(&decoded);
+    let edited = decoded.names_the_script_otherwise(forms);
+    if behind.is_empty() {
+        return edited.then(|| format!("left as it is: {NOT_FOLIOS}"));
+    }
+    let names = behind
+        .iter()
+        .map(|form| form.said_as())
+        .collect::<Vec<_>>()
+        .join(", ");
+    if off {
+        return left(&format_args!(
+            "{names}: the PowerShell integration is off for this account"
+        ));
+    }
+    let Some(target_form) = target_form else {
+        return match target {
+            Err(refusal) => left(&format_args!("{names}: {refusal}")),
+            Ok(_) => None,
+        };
+    };
+    let carried = match rewrite_recorded(&bytes, forms, Action::Migrate, record_owned) {
+        Ok(Some(carried)) => carried,
+        Ok(None) => return None,
+        Err(refusal) => return left(&refusal),
+    };
+    if let Err(refusal) = replace_profile(path, &bytes, &carried, None) {
+        return left(&refusal);
+    }
+    let also = if edited {
+        format!("; {NOT_FOLIOS}, and it is left as it is")
+    } else {
+        String::new()
+    };
+    Some(format!(
+        "brought forward from {names} to {}{also}",
+        target_form.said_as()
+    ))
+}
+// Refresh the two edition facts when the Profiles page opens. This is an edge
 /// trigger supplied by Settings, not a polling loop; a second visit asks again —
 /// the observation, a failed `$PROFILE` path, and every parse question that got
 /// no answer (release read m2).
@@ -152,16 +375,15 @@ pub fn begin_profile_observation_for(programs: &profiles::ProfilePrograms) {
 /// as the program walk answered them), each observed; then the parse questions that got no answer.
 ///
 /// Started by `executor` (the thread door, below normal, in the product), and `true` when it was.
-/// **A start the door refuses is said once**, in `say`, and answered `false` — never thrown away:
-/// the startup's latch stays open on it ([`begin_startup_migration_through`]). A panic in the
-/// worker is contained and said the same way, as every lane worker's is.
+/// **A start the door refuses is said once**, in `say`, and answered `false` — never thrown away.
+/// A panic in the worker is contained and said the same way, as every lane worker's is.
 ///
 /// **And it reaches the Profiles page** (T-OBSERVATION-REFUSAL-ON-THE-PAGE): the run is numbered
 /// as it is asked ([`start_profile_observation`]), so a run that never started has a number too,
 /// and a refused start — or a worker that ended before it answered — files
 /// [`Unanswered::NotRun`] for the edition of each of `rows` it had not answered
 /// ([`publish_profile_observation_not_run`]). `rows` are the page's own rows' programs, the
-/// surface that asked; the startup's asking names none, and its refusal is said in `say` alone.
+/// surface that asked.
 pub(super) fn spawn_profile_observation(
     executor: &crate::lane::Executor,
     data: PathBuf,
@@ -193,7 +415,8 @@ pub(super) fn spawn_profile_observation(
                     programs.push(program);
                 }
             }
-            let report = observe_profile_lines(worker, observation, &data, &programs, &environment);
+            let (report, _) =
+                observe_profile_lines(worker, observation, &data, &programs, &environment);
             ask_failed_parse_questions_again(worker, questions, &environment);
             for refusal in report.refusals() {
                 crate::diagnostics::stderr_line(format!(
@@ -249,10 +472,7 @@ pub(super) fn start_profile_observation(
 /// edition, and its row says so; it offers no verb.
 fn profile_carries_an_owned_line(path: &Path, forms: &Forms) -> bool {
     bt_platform::file_reads::read(bt_platform::file_reads::Lane::Settings, path).is_ok_and(
-        |bytes| {
-            Decoded::read(&bytes)
-                .is_ok_and(|decoded| decoded.text.lines().any(|line| forms.owns(line)))
-        },
+        |bytes| Decoded::read(&bytes).is_ok_and(|decoded| decoded.holds_an_owned_line(forms)),
     )
 }
 
@@ -272,14 +492,15 @@ fn owned_forms(marks: &Marks, data: &Path) -> Forms {
 ///
 /// The observations run first: each one that answers files its `$PROFILE` path as the newest
 /// answer for its program ([`file_profile_answer`]), so the removal's path question below is
-/// asked only of an edition that did not answer.
+/// asked only of an edition that did not answer. Answers the report and those answers, which the
+/// start's carry is made against (`run_profile_lines_step`).
 fn observe_profile_lines(
     worker: &bt_platform::admission::WorkerCtx,
     observation: u64,
     data: &Path,
     programs: &[PathBuf],
     environment: &ProbeEnvironment,
-) -> Report {
+) -> (Report, PathAnswers) {
     if !profile_sandboxed() {
         for program in programs {
             match probe_profile_observation(worker, program, environment) {
@@ -305,22 +526,23 @@ fn observe_profile_lines(
         Ok(read) => read,
         Err(error) => {
             publish_powershell_profile_line_present(false);
-            return Report {
+            let report = Report {
                 files: vec![FileReport {
                     path: data.join(RECORD_FILE),
                     fate: Fate::Refused(error.to_string()),
                 }],
             };
+            return (report, answers);
         }
     };
     let forms = owned_forms(&marks, data);
-    let (paths, report) = candidates(&marks, &files, answers);
+    let (paths, report) = candidates(&marks, &files, answers.clone());
     publish_powershell_profile_line_present(
         paths
             .iter()
             .any(|path| profile_carries_an_owned_line(path, &forms)),
     );
-    report
+    (report, answers)
 }
 
 /// What each installed PowerShell answered about where its `$PROFILE` is: `None` for one that
@@ -684,13 +906,19 @@ fn install_for_program(
         return Err(io::Error::other(sentence.text()));
     }
     let data = persist::storage_dir();
+    // The guarded line for this account's own data root, refused where none names its script
+    // (0.4.10 plan row 68c, R3): before 0.4.10 every root was written `MANAGED_LINE`.
+    let line = managed_line_for(
+        &data,
+        std::env::var_os("APPDATA").map(PathBuf::from).as_deref(),
+    )?;
     let script = install_script_at(&data.join(SCRIPT_DIRECTORY), SCRIPT_FILE_PS1, SCRIPT_PS1)
         .map_err(|_| io::Error::other(Text::ShellProfileRefused.text()))?;
     let wrote = install_recorded(
         &observed.path,
         &data,
         &script,
-        MANAGED_LINE,
+        line,
         std::time::SystemTime::now(),
         Some(powershell_edition(program)),
         seen,
@@ -1783,7 +2011,7 @@ mod tests {
             &data,
             Asker::InApp,
             Action::Migrate,
-            managed_line_for(&data, &root),
+            managed_line_for(&data, Some(&root)),
             |_, _| (vec![profile.clone()], Report::default()),
         );
         assert_eq!(report.exit_code(), 0);
@@ -2211,5 +2439,116 @@ mod tests {
             |marks, _| (marks.powershell_profiles.clone(), Report::default()),
         );
         assert!(report.files.iter().all(|f| f.fate == Fate::Unchanged));
+    }
+
+    /// RED (0.4.10 plan row 68c, the coordinator's hard rule of 2026-11-09) — **a test process
+    /// never carries the account's profile**: the inputs the test build's member works from are the
+    /// test process's own scratch data folder, no `%APPDATA%` (so no line has a target and nothing
+    /// is written) and no answers; and neither they nor the test build's arm of
+    /// `this_accounts_inputs` name anything that starts a PowerShell or reads where the account's
+    /// `$PROFILE` is.
+    ///
+    /// MUTATION: the test build's arm asks the account (`plant-68c-test-asks-the-account.py`).
+    #[test]
+    fn a_test_process_never_carries_the_accounts_profile() {
+        use crate::test_support::{free_fn_body, squeezed};
+        let inputs = test_process_inputs();
+        assert_eq!(inputs.data, persist::storage_dir());
+        assert_eq!(inputs.appdata, None);
+        assert!(inputs.answers.is_empty());
+        let chosen = squeezed(free_fn_body("this_accounts_inputs"));
+        let (test_arm, _) = chosen
+            .split_once("#[cfg(not(test))]")
+            .expect("the product's arm is its own");
+        assert!(test_arm.contains("test_process_inputs()"), "{test_arm}");
+        for body in [
+            test_arm.to_owned(),
+            squeezed(free_fn_body("test_process_inputs")),
+        ] {
+            for asks in [
+                "account_inputs",
+                "installed_powershells",
+                "observe_profile_lines",
+                "profile_answers",
+                "probe_",
+                "ProbeEnvironment",
+                "var_os",
+            ] {
+                assert!(!body.contains(asks), "{asks} in {body}");
+            }
+        }
+    }
+
+    /// RED (row 68c, R2) — **the profile lines wait for the trial and run at its commit**: a round
+    /// the update's trial holds back asks for `Writer::ProfileMigration` and runs nothing, leaving
+    /// the member to the commit's round, which runs it; after that it runs no more in the process,
+    /// whatever asks for a round.
+    ///
+    /// MUTATIONS: the trial is not asked (`plant-68c-trial-not-asked.py`); the member runs at every
+    /// round (`plant-68c-runs-every-round.py`).
+    #[test]
+    fn the_profile_lines_wait_for_the_trial_and_run_at_its_commit() {
+        let step = ProfileLinesStep::new();
+        let mut asked = Vec::new();
+        assert_eq!(
+            step.run_once(
+                |writer| {
+                    asked.push(writer);
+                    true
+                },
+                || "ran"
+            ),
+            None,
+            "the trial holds it back"
+        );
+        assert_eq!(asked, [crate::update_trial::Writer::ProfileMigration]);
+        assert_eq!(
+            step.run_once(|_| false, || "ran"),
+            Some("ran"),
+            "the commit's round"
+        );
+        assert_eq!(step.run_once(|_| false, || "ran"), None, "once a process");
+        assert_eq!(step.run_once(|_| true, || "ran"), None);
+    }
+
+    /// RED (row 68c, R3(b)) — **Enable writes the line for the account's own root**: the guarded
+    /// line naming the script the data root holds — the previous name's for an account still on
+    /// it — and the refusal sentence for a root outside `%APPDATA%`, never `MANAGED_LINE` for
+    /// every root as 0.4.7-0.4.9 wrote.
+    ///
+    /// MUTATION: `managed_line_for` answers `MANAGED_LINE` for every root
+    /// (`plant-68c-target-always-folio.py`).
+    #[test]
+    fn enable_writes_the_line_for_the_accounts_own_root() {
+        let appdata = PathBuf::from(r"X:\Roaming");
+        assert_eq!(
+            managed_line_for(&appdata.join(persist::STORAGE_NAME), Some(&appdata)).unwrap(),
+            MANAGED_LINE
+        );
+        assert_eq!(
+            managed_line_for(
+                &appdata.join(persist::PREVIOUS_STORAGE_NAME),
+                Some(&appdata)
+            )
+            .unwrap(),
+            LEGACY_MANAGED_LINE
+        );
+        assert_eq!(
+            managed_line_for(&PathBuf::from(r"X:\portable\Folio"), Some(&appdata))
+                .unwrap_err()
+                .to_string(),
+            Text::ShellProfileOutsideAppData.text()
+        );
+        let enable =
+            crate::test_support::squeezed(crate::test_support::free_fn_body("install_for_program"));
+        assert!(
+            enable.contains("letline=managed_line_for(&data,"),
+            "{enable}"
+        );
+        assert!(
+            enable.contains("install_recorded(&observed.path,&data,&script,line,"),
+            "{enable}"
+        );
+        assert!(!enable.contains("MANAGED_LINE"), "{enable}");
     }
 }

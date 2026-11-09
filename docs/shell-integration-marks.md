@@ -68,22 +68,38 @@ for T-C1. It returns each path and outcome, plus an exit code (0 done/unchanged,
 1 refusal). It has no GUI, handoff, purge or running-instance policy. T-C1 owns
 those outer policies. The settings switch uses the same function on a worker.
 
-Startup checks for a marks record or an existing installed PowerShell script
-(the pre-record evidence of opt-in). With neither, it starts no migration worker
-and launches no PowerShell query. Otherwise a below-normal worker visits recorded
-and currently probed profiles. Before any discovery, script repair or record
-write, the worker reads the account state under the record lock. Off returns
-immediately: zero PowerShell processes, zero script writes, zero record writes.
-Reading the record stays off the window thread; an Off account still has the
-short worker needed to read that authoritative state. The lock also covers
-script repair, so removal cannot be followed by a stale startup repair. Each resolved PowerShell executable is queried at
-most once per process, shared with pane discovery. Queries use `-NoProfile`,
-`-NonInteractive`, a hidden console and a five-second timeout. Documents paths
-are never assembled. `BT_POWERSHELL_PROFILE` replaces the entire candidate set,
-including recorded paths, and suppresses real PowerShell discovery.
+At start, the carry pass (`carry_pass::run_carry_steps`, 0.4.10 plan row 68)
+brings Folio's own old `$PROFILE` lines forward: its last member,
+`shell_integration::run_profile_lines_step` (row 68c), runs once per process,
+after the round's other members are published, so nothing the window adopts
+waits for a PowerShell. During an update's trial it is held back
+(`update_trial::Writer::ProfileMigration`) and runs at the commit. On the pass's
+below-normal worker it observes each installed PowerShell (the observation the
+Profiles page and the launch menu read; `-NoProfile`, `-NonInteractive`, a
+hidden console and a five-second timeout, each executable queried at most once
+per process and shared with pane discovery), then visits the recorded profiles
+and the paths those editions named, under the record lock. Each line in one of
+the six forms Folio has written — the `$env:APPDATA` line of 0.1.0-0.4.2 under
+either root name, the double- and single-quoted literal lines naming a recorded
+or the current script, and the two guarded lines — that is not the guarded line
+for the account's own root is replaced by it. Nothing else in the file changes,
+no backup copy is made, and the record remembers the profile before it is
+written. Each file the carry changed or left is said once in `diagnostics.log`
+(`BT_SHELL_PROFILE <path>: ...`). Left as they are, and said: a line naming
+`folio.ps1` in no form of Folio's; a profile Folio may not edit that holds one
+of its lines; every line of an account whose record says Off (the person's
+decision); and every line when the data root is outside `APPDATA\Folio` and
+`APPDATA\BetterTerminal`. A refusal is never recorded, and discovery alone makes
+no record. Documents paths are never assembled. `BT_POWERSHELL_PROFILE` replaces
+the entire candidate set, including recorded paths, and suppresses real
+PowerShell discovery. A test build's member asks no PowerShell and reads no
+account file.
 
 Profile edits preserve UTF-8, UTF-8 BOM or UTF-16LE BOM and every existing line's
-terminator. Removal consumes only owned lines and their own terminators; blank
+terminator. A BOM-less file that is not UTF-8 (a profile in the system's ANSI code
+page, as Windows PowerShell's `Set-Content` writes one) is held byte for byte: no
+code page is guessed, a line is Folio's when its bytes are the UTF-8 of one of its
+forms, and every other byte is written back as it was (row 68c, R7). Removal consumes only owned lines and their own terminators; blank
 lines and empty profile files remain. Changed profiles get a byte-identical
 dated backup before `bt_persist::atomic_replace_preserving`. Windows uses
 `ReplaceFileW` without ignoring the replacement's own failure, and stages the

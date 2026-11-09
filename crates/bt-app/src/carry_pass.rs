@@ -20,8 +20,12 @@
 //! script's), and so do the moments its members name.
 //!
 //! **Its first member is the agent hooks** ([`crate::agent_hooks_step`], row 67b, with row 69c's
-//! codex version). Rows 68b (the Explorer registrations, the update entrances' orphans) and 68c
-//! (Folio's old `$PROFILE` lines) add theirs to [`run_carry_steps`] rather than a second worker.
+//! codex version). Row 68b (the Explorer registrations, the update entrances' orphans) adds its
+//! members to [`run_carry_steps`] rather than a second worker. **Its last member is Folio's old
+//! `$PROFILE` lines** (`shell_integration::run_profile_lines_step`, row 68c), run once a process
+//! and after the round so far is published: the one member that starts a PowerShell, so nothing
+//! the window adopts — the hooks' answers, and the first-run card that waits on them (row 73) —
+//! waits for one (the coordinator's R8 of 2026-11-09).
 //!
 //! A request while the pass runs is not lost and not doubled: it is written down, and the worker
 //! runs every step once more before it ends ([`begin_carry_pass_with`]).
@@ -139,13 +143,11 @@ impl CarryCheck {
                     "the_carry_pass_reasserts_the_classic_verb",
                 ),
             }),
-            Self::ProfileLines => Err(Owed {
-                part: "68c",
-                runs_today: "migration: shell_integration::begin_startup_migration,",
-                landed_by: (
-                    "crate::shell_integration::profile_marks::tests",
-                    "the_carry_pass_brings_folios_old_profile_lines_forward",
-                ),
+            // The startup's own migration worker left the start when the pass took the lines
+            // (row 68c).
+            Self::ProfileLines => Ok(PassMember {
+                call: "crate::shell_integration::run_profile_lines_step",
+                retired: &["migration: shell_integration::begin_startup_migration,"],
             }),
         }
     }
@@ -170,7 +172,7 @@ impl CarryCheck {
             Self::ExplorerClassic => None,
             Self::ProfileLines => Some((
                 "crate::shell_integration::profile_marks::tests",
-                "shell_integration_rewrite_table_preserves_every_other_byte",
+                "the_carry_pass_brings_folios_old_profile_lines_forward",
             )),
         }
     }
@@ -186,10 +188,13 @@ pub(crate) struct MemberAnswer<T> {
 }
 
 /// **One round's answers, member by member**; `None` for a member that had nothing to look at yet
-/// (the agents' before the program walk has answered).
+/// (the agents' before the program walk has answered) or nothing to do in it (the `$PROFILE`
+/// lines', which run once a process, and are published on their own after the rest).
 #[derive(Debug, Default)]
 pub(crate) struct CarryRound {
     pub(crate) hooks: Option<MemberAnswer<HooksSnapshot>>,
+    /// Folio's old `$PROFILE` lines (row 68c): counted in the round's line, nothing for the window.
+    pub(crate) profile_lines: Option<MemberAnswer<()>>,
 }
 
 /// **What the window adopts**: the newest part of every member, kept until the window takes it.
@@ -222,8 +227,13 @@ impl CarryPublished {
     /// a part a later member adds does not compile here until it is handled — in the empty test
     /// and in the merge (the re-review's R2).
     pub(crate) fn publish(&self, round: CarryRound) -> Option<String> {
-        let CarryRound { hooks } = round;
-        hooks.as_ref()?;
+        let CarryRound {
+            hooks,
+            profile_lines,
+        } = round;
+        if hooks.is_none() && profile_lines.is_none() {
+            return None;
+        }
         let mut published = self.snapshot.lock().unwrap_or_else(PoisonError::into_inner);
         let untaken = published.take().unwrap_or_default();
         let (mut checks, mut changed) = (0, 0);
@@ -235,6 +245,10 @@ impl CarryPublished {
             }
             None => untaken.hooks,
         };
+        if let Some(answer) = profile_lines {
+            checks += answer.checks;
+            changed += answer.changed;
+        }
         *published = Some(CarrySnapshot { hooks });
         Some(format!("BT_CARRY round checks={checks} changed={changed}"))
     }
@@ -265,7 +279,10 @@ pub(crate) fn take_carry_snapshot() -> Option<CarrySnapshot> {
 }
 
 /// **One round of the pass: every member, in the order the pass runs them**, then the round
-/// published and the window woken once — when a member answered. Each member is one run of a
+/// published and the window woken once — when a member answered. **The `$PROFILE` lines run last,
+/// after what the others answered is published** (row 68c, R8): they may start a PowerShell to ask
+/// where its `$PROFILE` is, and nothing the window adopts waits for that; their answer is published
+/// as the round's second line, at its end. Each member is one run of a
 /// step on the pass's worker, handed the worker's context — a step may ask a program a question
 /// there, as the agent hooks ask codex its version (0.4.10 plan row 69c) — and asks the trial's
 /// gate for its own writer before it writes.
@@ -276,9 +293,18 @@ pub(crate) fn take_carry_snapshot() -> Option<CarrySnapshot> {
 /// call through a pointer is one they do not follow. The inventory's guard reads this body for its
 /// members (`CarryCheck::in_the_pass`).
 pub(crate) fn run_carry_steps(ctx: &WorkerCtx) {
-    let round = CarryRound {
+    publish_carry_round(CarryRound {
         hooks: crate::agent_hooks_step::run_agent_hooks_step(ctx),
-    };
+        profile_lines: None,
+    });
+    publish_carry_round(CarryRound {
+        hooks: None,
+        profile_lines: crate::shell_integration::run_profile_lines_step(ctx),
+    });
+}
+
+/// Publish what a round's members answered, say its line, and wake the window once — when one did.
+fn publish_carry_round(round: CarryRound) {
     if let Some(line) = CARRY_PUBLISHED.publish(round) {
         crate::diagnostics::stderr_line(line);
         if let Some(wake) = CARRY_WAKE.get() {
@@ -372,7 +398,8 @@ static CARRY_LATCH: CarryLatch = CarryLatch::new();
 /// the members' rulings name: after the launch's first program walk has said where the agents keep
 /// their files, when a walk moves one of them, at each open of the Agents page, after a press on
 /// one of its rows, and when an update's trial is committed
-/// (`update_trial::Writer::AgentHooksRepair`).
+/// (`update_trial::Writer::AgentHooksRepair`, and `Writer::ProfileMigration` for the `$PROFILE`
+/// lines the trial held back).
 pub(crate) fn begin_carry_pass() {
     begin_carry_pass_with(
         &CARRY_LATCH,
@@ -549,6 +576,7 @@ mod tests {
                 checks: 3,
                 changed: 2,
             }),
+            profile_lines: None,
         });
         assert_eq!(line.as_deref(), Some("BT_CARRY round checks=3 changed=2"));
         let taken = published.take().expect("the round is published");
@@ -584,10 +612,12 @@ mod tests {
         };
         published.publish(CarryRound {
             hooks: answer(vec![Text::AgentHooksRepairedClaude]),
+            profile_lines: None,
         });
         published.publish(CarryRound::default());
         published.publish(CarryRound {
             hooks: answer(vec![Text::AgentHooksRepairedCopilot]),
+            profile_lines: None,
         });
         assert_eq!(
             published.take().and_then(|snapshot| snapshot.hooks),
@@ -596,5 +626,64 @@ mod tests {
                 Text::AgentHooksRepairedCopilot,
             ]))
         );
+    }
+
+    /// RED (0.4.10 plan row 68c, the coordinator's R8 of 2026-11-09) — **the `$PROFILE` lines run
+    /// last, after the round before them is published**: `run_carry_steps` publishes what the
+    /// earlier members answered before it calls the one member that may start a PowerShell, and
+    /// publishes that member's answer at the end; its round is said with its own counts, leaves
+    /// the window's untaken part as it was, and a round no member answered still says nothing.
+    ///
+    /// MUTATIONS: the member is dropped from the pass (`plant-68c-member-not-in-the-pass.py`); a
+    /// round no member answered is said (`plant-68c-empty-round-said.py`).
+    #[test]
+    fn the_profile_lines_are_published_after_the_round_before_them() {
+        use crate::i18n::Text;
+        let steps =
+            crate::test_support::squeezed(crate::test_support::free_fn_body("run_carry_steps"));
+        let hooks = steps
+            .find("crate::agent_hooks_step::run_agent_hooks_step(ctx)")
+            .expect("the hooks are a member");
+        let lines = steps
+            .find("crate::shell_integration::run_profile_lines_step(ctx)")
+            .expect("the $PROFILE lines are a member");
+        let rounds: Vec<usize> = steps
+            .match_indices("publish_carry_round(")
+            .map(|(at, _)| at)
+            .collect();
+        assert_eq!(rounds.len(), 2, "{steps}");
+        assert!(
+            rounds[0] < hooks && hooks < rounds[1] && rounds[1] < lines,
+            "the hooks' round is published before the $PROFILE lines run: {steps}"
+        );
+
+        let published = CarryPublished::new();
+        published.publish(CarryRound {
+            hooks: Some(MemberAnswer {
+                part: hooks_part(vec![Text::AgentHooksRepairedClaude]),
+                checks: 3,
+                changed: 1,
+            }),
+            profile_lines: None,
+        });
+        assert_eq!(
+            published
+                .publish(CarryRound {
+                    hooks: None,
+                    profile_lines: Some(MemberAnswer {
+                        part: (),
+                        checks: 2,
+                        changed: 1,
+                    }),
+                })
+                .as_deref(),
+            Some("BT_CARRY round checks=2 changed=1")
+        );
+        assert_eq!(
+            published.take().and_then(|snapshot| snapshot.hooks),
+            Some(hooks_part(vec![Text::AgentHooksRepairedClaude])),
+            "the window's part is as the round before left it"
+        );
+        assert_eq!(published.publish(CarryRound::default()), None);
     }
 }

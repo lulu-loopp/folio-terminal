@@ -3076,6 +3076,10 @@ text_entries! {
     /// A one-click edit of `$PROFILE` refused because the file is not what the check, or the
     /// write being undone, saw (0.4.8 G7).
     ShellProfileChangedElsewhere,
+    /// Enable via `$PROFILE` refused, and the start's carry of an older Folio line left, because
+    /// the data folder is not `%APPDATA%\Folio` (or its previous name): no guarded line names the
+    /// script there (0.4.10 plan row 68c, R3).
+    ShellProfileOutsideAppData,
     ShellProfileNothing,
     /// A change asked of a worker the thread door would not start — `$PROFILE`'s Enable, Undo or
     /// removal, the Explorer first-page switch — so nothing was changed
@@ -6231,6 +6235,11 @@ impl Text {
                 lang,
                 "$PROFILE was changed elsewhere. Reload this page and try again.",
                 "$PROFILE 已在别处被改动。重新加载此页后重试。",
+            ),
+            Self::ShellProfileOutsideAppData => pick(
+                lang,
+                "Folio's data folder is not in %APPDATA%\\Folio, so $PROFILE cannot load its script.",
+                "Folio 的数据文件夹不在 %APPDATA%\\Folio 下，$PROFILE 无法加载它的脚本。",
             ),
             Self::ShellProfileChanged => pick(
                 lang,

@@ -1961,11 +1961,10 @@ pub(crate) enum StartupStep {
     HandOver,
     /// Windows PowerShell's language-mode question started.
     LanguageQuestion,
-    /// The startup's `$PROFILE` observation started.
-    StartupMigration,
     /// Folio's own script's preparation started.
     ScriptPreparation,
-    /// The carry pass begun (0.4.10 plan row 68a).
+    /// The carry pass begun (0.4.10 plan row 68a), which observes and carries the `$PROFILE`s
+    /// since row 68c.
     CarryPass,
     /// The first window opened, through the backend's door.
     WindowOpened,
@@ -2019,10 +2018,6 @@ pub(crate) fn start(argv: &str, walk: Vec<Vec<String>>) -> HeadlessStart {
             language: || {
                 step(StartupStep::LanguageQuestion);
                 crate::shell_integration::LanguageAsked::stand_in()
-            },
-            migration: || {
-                step(StartupStep::StartupMigration);
-                crate::shell_integration::Migrated::stand_in()
             },
             script: || {
                 step(StartupStep::ScriptPreparation);

@@ -1115,6 +1115,15 @@ fn uninstall_source_guard_pins_known_writers_and_inventory() {
             "profile_runtime.rs:install_recorded",
         ),
         (
+            Remover::Profiles,
+            app,
+            function(
+                "crate::shell_integration::profile_runtime",
+                "carry_profile_lines",
+            ),
+            "profile_runtime.rs:carry_profile_lines",
+        ),
+        (
             Remover::Agent(0),
             app,
             function("crate::attention_hooks", "apply_at"),
