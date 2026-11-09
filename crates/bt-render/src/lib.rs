@@ -10524,7 +10524,7 @@ impl WindowRenderer {
             let status_rect_buffer =
                 gpu.vertex_buffer("status overlay rectangle", status_rect_data);
             // The wash first, the block's own chrome after it: see
-            // [`Self::math_selection_wash_rectangles`] for why this buffer's order is the
+            // [`SeatPainter::math_selection_wash_rectangles`] for why this buffer's order is the
             // z-order that matters here.
             let mut math_overlays = painter.math_selection_wash_rectangles(entry.metrics, frame);
             math_overlays.extend(painter.math_overlay_rectangles(entry.metrics, frame));
@@ -13840,7 +13840,7 @@ fn prepare_text_rows(
 /// A chrome rectangle in whole-surface pixels.
 ///
 /// Deliberately a free function rather than a `WindowRenderer` method: the seat-local
-/// [`WindowRenderer::pixel_rect`] and this one differ in exactly which rectangle they
+/// [`SeatPainter::pixel_rect`] and this one differ in exactly which rectangle they
 /// call "the world", and having them side by side as one method with a flag is
 /// how the two would eventually be confused for each other.
 /// Crop a rectangle to a clip, or `None` when nothing of it survives.
@@ -15850,7 +15850,7 @@ pub fn text_row_cells(
 /// The five boxes one floating chip is drawn from — the face, then its four
 /// hairline edges — each paired with the colour it is painted in.
 ///
-/// Split out of [`WindowRenderer::float_tag_rects`] so the claim "a chip wears
+/// Split out of [`SeatPainter::float_tag_rects`] so the claim "a chip wears
 /// nothing but the palette's own three" can be *measured* rather than read: the
 /// normalisation into clip space needs a live seat, and the colours do not.
 fn float_tag_boxes(
