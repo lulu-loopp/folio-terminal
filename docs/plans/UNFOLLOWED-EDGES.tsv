@@ -10914,7 +10914,7 @@ crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::assemble	Ambiguous	
 crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::bytes_view	Ambiguous	create_view	1	
 crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::bytes_view	Ambiguous	remove_srgb_suffix	1	
 crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::compose_frame	Ambiguous	and_then	1	
-crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::compose_frame	Ambiguous	as_micros	15	2026-11-09: T-WORKING-MARK-CADENCE (0.4.10 plan row 7, 64a); the frame line's body_us, the pane loop and the body's passes in microseconds (Duration::as_micros); a reading of a clock already taken, no wait
+crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::compose_frame	Ambiguous	as_micros	16	2026-11-09: T-WORKING-MARK-CADENCE (0.4.10 plan row 7, 64a); the frame line's body_us and body_key_us (review N4), the pane loop and the body's passes, and the key's comparison and copy, in microseconds (Duration::as_micros); a reading of a clock already taken, no wait
 crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::compose_frame	Ambiguous	as_mut	4	
 crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::compose_frame	Ambiguous	as_slice	2	
 crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::compose_frame	Ambiguous	begin_render_pass	1	
@@ -10923,7 +10923,7 @@ crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::compose_frame	Ambig
 crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::compose_frame	Ambiguous	collect	2	
 crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::compose_frame	Ambiguous	create_view	1	
 crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::compose_frame	Ambiguous	draw	10	
-crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::compose_frame	Ambiguous	elapsed	5	2026-11-09: T-WORKING-MARK-CADENCE (0.4.10 plan row 7, 64a); the two instants the frame line's body_us is read from, the pane loop's and the body passes' (Instant::elapsed); a reading of the clock, no wait
+crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::compose_frame	Ambiguous	elapsed	7	2026-11-09: T-WORKING-MARK-CADENCE (0.4.10 plan row 7, 64a); the instants the frame line's body_us and body_key_us are read from: the pane loop's and the body passes', and the key's comparison and filing (review N4) (Instant::elapsed); a reading of the clock, no wait
 crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::compose_frame	Ambiguous	enumerate	1	
 crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::compose_frame	Ambiguous	extend	1	
 crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::compose_frame	Ambiguous	finish	1	
