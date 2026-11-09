@@ -114,8 +114,8 @@ fn presented_source(effects: &[WindowEffect]) -> Option<FrameSource> {
 /// there (`publish_chrome_frame`). That present is the turn's to pay, at its own end; asking the
 /// platform for it is the second turn per step this row removes.
 ///
-/// And the turn's paid debt books no wake at its own instant: the wake it returns is later than
-/// the turn, so the paid present does not come back as a bare second turn through the fold.
+/// And the wake the turn returns is the mark's own next step, one strip interval after the tick:
+/// not the turn's own instant, and not a bare frame booked for a debt the turn has paid.
 ///
 /// MUTATION: make `Runtime::ask_for_present` always ask the platform (drop its deferral) — every
 /// step takes two turns and asks for a paint.
@@ -126,6 +126,7 @@ fn a_working_mark_step_reaches_the_glass_in_its_own_turn() {
         folio.window.tabs[0].fleet_working(),
         "the fixture's own precondition: the shell's command is running, so the mark breathes"
     );
+    let interval = folio.window.frame_clock.interval();
     for step in 0..3 {
         now += STEP;
         let (turns, wake, effects) = turns_to_the_glass(&mut folio, now);
@@ -133,6 +134,11 @@ fn a_working_mark_step_reaches_the_glass_in_its_own_turn() {
             folio.window.strip_animation_ticked_at,
             Some(now),
             "step {step}: the fixture's own precondition: the strip ticked on this turn"
+        );
+        assert!(
+            folio.window.last_present_at.is_some_and(|at| at <= now),
+            "step {step}: the fixture's own precondition: the turn's present is stamped no later \
+             than the turn's instant, as on the loop"
         );
         assert_eq!(
             turns, 1,
@@ -148,10 +154,10 @@ fn a_working_mark_step_reaches_the_glass_in_its_own_turn() {
             1,
             "step {step}: one present: {effects:?}"
         );
-        assert!(
-            wake.is_some_and(|(_, at)| at > now),
-            "step {step}: the turn books its next wake after itself, not at its own instant: \
-             {wake:?}"
+        assert_eq!(
+            wake,
+            Some((WakeOwner::StripAnimation, now + interval)),
+            "step {step}: the turn's next wake is the mark's next step"
         );
     }
 }
@@ -161,7 +167,7 @@ fn a_working_mark_step_reaches_the_glass_in_its_own_turn() {
 /// The blink is a phase in the renderer, and it too owes a present of the picture already on the
 /// glass (`advance_cursor_blink_if_due` → `publish_chrome_frame`).
 ///
-/// And, as for the mark, the wake the blink's turn returns is later than the turn.
+/// And, as for the mark, the wake the blink's turn returns is the caret's own next phase.
 ///
 /// MUTATION: as above — each blink takes two turns.
 #[test]
@@ -197,10 +203,19 @@ fn a_caret_blink_reaches_the_glass_in_its_own_turn() {
             1,
             "blink {blink}: one present: {effects:?}"
         );
+        let next = folio
+            .window
+            .cursor_blink
+            .deadline()
+            .expect("a blinking caret has its next phase");
         assert!(
-            wake.is_some_and(|(_, at)| at > due),
-            "blink {blink}: the turn books its next wake after itself, not at its own instant: \
-             {wake:?}"
+            next > due,
+            "blink {blink}: the fixture's own precondition: the caret's next phase is later"
+        );
+        assert_eq!(
+            wake,
+            Some((WakeOwner::ShellCaret, next)),
+            "blink {blink}: the turn's next wake is the caret's next phase"
         );
     }
 }
@@ -245,10 +260,62 @@ fn a_panes_output_reaches_the_glass_in_the_turn_that_publishes_it() {
         !effects.contains(&WindowEffect::Redraw),
         "and the turn asks the platform for no paint: {effects:?}"
     );
+    assert_eq!(presents(&effects), 1, "one present: {effects:?}");
     assert_eq!(
         presented_source(&effects),
         Some(FrameSource::PtyOutput),
         "the present is the output's own frame: {effects:?}"
+    );
+}
+
+/// RED — **a turn that refused a frame books the refused frame from the present it paid.**
+///
+/// The frame gate turns the mark's step away when the glass took a picture less than a frame
+/// ago, and the fold books the refused frame's wake one frame after the window's last present
+/// (`FrameClock::owes_a_frame` → `next_animation_deadline`). On this turn the shell's output
+/// also reaches the glass, and that present is the turn's to pay at its own end. Paid before the
+/// fold, the refused frame is booked a frame after the present the turn made; paid after it, the
+/// fold books it from the picture before, which the turn's own present has already replaced.
+///
+/// The strip has not ticked yet (`strip_animation_ticked_at` is `None`), so its next tick is the
+/// frame deadline itself and the wake is the strip's, at that instant. The instant is read back
+/// from the window: a present is stamped with the clock `trace_present` reads, not with the
+/// instant handed to the turn.
+///
+/// MUTATION: move the `pay_the_turns_present` call in `Runtime::turn` below the deadline fold —
+/// the wake is booked a frame after the held picture.
+#[test]
+fn a_refused_frame_is_booked_from_the_present_its_turn_paid() {
+    let (mut folio, settled) = window_saying("turn-present-refused", WORKING);
+    let now = settled + STEP;
+    let interval = folio.window.frame_clock.interval();
+    let held = now - interval / 2;
+    folio.window.last_present_at = Some(held);
+    folio.window.strip_animation_ticked_at = None;
+    output_held_until(&mut folio, b"   Compiling bt-app v0.0.0\r\n", now);
+    let (wake, effects) = turn_at(&mut folio, now);
+    assert!(
+        folio.window.frame_clock.owes_a_frame() && folio.window.strip_animation_ticked_at.is_none(),
+        "the fixture's own precondition: the gate turned the mark's step away"
+    );
+    assert_eq!(
+        presented_source(&effects),
+        Some(FrameSource::PtyOutput),
+        "the fixture's own precondition: the turn presented the output: {effects:?}"
+    );
+    assert_eq!(presents(&effects), 1, "one present: {effects:?}");
+    let presented = folio
+        .window
+        .last_present_at
+        .expect("the turn's present is stamped");
+    assert_ne!(
+        presented, held,
+        "the fixture's own precondition: the turn's present replaced the held one"
+    );
+    assert_eq!(
+        wake,
+        Some((WakeOwner::StripAnimation, presented + interval)),
+        "the refused step is booked a frame after the present this turn paid"
     );
 }
 
@@ -345,9 +412,11 @@ fn a_turn_that_left_early_hands_its_present_to_the_platform() {
 /// MUTATION: delete the call in `FolioApp::about_to_wait_inner`, or move it into the `Ok` arm.
 #[test]
 fn the_loop_hands_over_each_windows_deferred_present_after_its_turn() {
-    let body = crate::test_support::method_body("FolioApp", "about_to_wait_inner");
+    // Comments and whitespace squeezed out, so a comment that quotes the call cannot stand in
+    // for it.
+    let body = crate::test_support::squeezed_body("FolioApp", "about_to_wait_inner");
     let turn = body
-        .find("let turn = runtime.turn(now, application_clocks);")
+        .find("letturn=runtime.turn(now,application_clocks);")
         .unwrap_or_else(|| panic!("the windows' own turn has moved:\n{body}"));
     let hand_over = body
         .find("runtime.end_the_turns_presents();")
@@ -355,7 +424,7 @@ fn the_loop_hands_over_each_windows_deferred_present_after_its_turn() {
             panic!("the loop no longer hands over a turn's deferred present:\n{body}")
         });
     let answer = body
-        .find("match turn {")
+        .find("matchturn{")
         .unwrap_or_else(|| panic!("the turn's answer is no longer matched:\n{body}"));
     assert!(
         turn < hand_over && hand_over < answer,

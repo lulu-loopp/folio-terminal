@@ -154,9 +154,9 @@ impl<B: Backend> Runtime<'_, B> {
     ///
     /// It pays through [`Self::redraw`], the same function `RedrawRequested` runs, so the frame
     /// is the one the paint would have drawn. Only the turn that pays it is different. Before
-    /// the fold, because the fold books the window's next wake from what the present leaves
-    /// (`last_present_at`, and the debts `turn_facts` reads): paid after it, the debt would be
-    /// read as owed at once and book a wake at the turn's own instant.
+    /// the fold, because the fold books a frame the gate refused one frame after
+    /// `last_present_at`: paid after it, the refused frame would be booked from the picture this
+    /// present replaces, a frame early.
     ///
     /// **A window on no screen is asked for the paint instead** (ruling R2): a minimized or
     /// cloaked window, or one not shown yet, is a window the platform sends no paint until it
@@ -2178,9 +2178,8 @@ impl<B: Backend> Runtime<'_, B> {
         let pty_resize_deadline = self.flush_pending_pty_resize(now)?;
         // **The present this turn was asked for, paid by this turn** (T-TWO-BARE-TURNS-PER-
         // MARK-STEP). After every clock above and the PTY gate, because each of them can publish
-        // the frame it pays; and before the fold below, because the fold books the next wake from
-        // what the present leaves (`last_present_at`, the debts): a debt still filed there would
-        // be read as owed at once.
+        // the frame it pays; and before the fold below, because the fold books a refused frame's
+        // wake one frame after `last_present_at`, which this present moves.
         self.pay_the_turns_present()?;
         // **And the input method's caret area, on the same terms** (ticket 63). Every
         // road above — the drain's frames, the IME events' frames, a preview repainted,
