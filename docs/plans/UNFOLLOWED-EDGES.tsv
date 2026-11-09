@@ -4653,6 +4653,7 @@ crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::no
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::note_video_hover	Ambiguous	is_some_and	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::open_crumb_draft	Ambiguous	then	1	2026-10-26: T-SPLIT-2B batch 21; the same site, moved by K2 batch 21 with `open_crumb_draft` from main.rs into runtime/preview.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::open_preview_link	Ambiguous	map	1	
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::paced_frame	Dynamic	owes	1	2026-11-08: T-ADVANCERS-ASK-ONLY-WITH-WORK (0.4.10 plan row 2); the advancer's own frame-debt question, handed in by each of the seven that ask through paced_frame (tooltip_owes_frame, key_hint_owes_frame, CardHint::nudge_moving, toasts_owe_frame, file_peek_owes_frame, a drawn float's fade moving, the formula marks' debt already read): a pure comparison of the drawn state against its clock, asked only when the turn has no news, no wait
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::pop_out_preview	Ambiguous	then_some	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::present_retained_picture	Ambiguous	find	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::present_retained_picture	Ambiguous	iter	1	

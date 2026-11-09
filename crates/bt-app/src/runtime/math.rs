@@ -1789,9 +1789,12 @@ impl<B: Backend> Runtime<'_, B> {
         // Geometry is deliberately absent here: the present this turn requests
         // will derive it from the picture that present actually draws. See
         // [`Self::animation_frame_is_due`].
-        if !self.animation_frame_is_due() {
-            return Ok(());
-        }
+        //
+        // **The copy tick running out and the hover ink moving are news, and
+        // news is never paced** (T-ADVANCERS-ASK-ONLY-WITH-WORK; closure review
+        // O4). Behind the gate, a refused turn would either ask on every turn
+        // a band has marks, or spend the observation on a turn that cannot draw
+        // it and leave the admitted turn after it with nothing to say.
         let spent = hang_watch::during(hang_watch::Station::ClockMathCopy, || {
             retire_spent_math_copy(&mut self.window.math_copied, now)
         });
@@ -1806,11 +1809,16 @@ impl<B: Backend> Runtime<'_, B> {
         } else {
             false
         };
+        let news = hover_moved || spent;
         let owes_frame = self.math_tools_owe_frames(now);
+        // And only a journey's own frames ask the gate, and only while one moves.
+        if !self.paced_frame(news, |_| owes_frame) {
+            return Ok(());
+        }
         // While a formula journey is moving, the present door rebuilds this
         // lane from its handed frame. At rest, a hover-ink change or a spent copy
         // acknowledgement needs no geometry look and can rebuild immediately.
-        if owes_frame || ((hover_moved || spent) && self.refresh_overlay()) {
+        if owes_frame || (news && self.refresh_overlay()) {
             self.present_chrome_change()?;
         }
         Ok(())
