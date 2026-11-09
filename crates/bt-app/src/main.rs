@@ -59559,7 +59559,7 @@ mod platform_gate_tests {
 
     /// **The list.** One file per line, in the order `ls` gives them, each with
     /// the reason it is allowed to ask.
-    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 41] = [
+    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 42] = [
         // Windows-only test fixture: the `pi` row, which only the Windows table ships, reopened
         // from a Recent row, beside its every-platform twin on the host's fallback shell.
         "app_files_tests.rs",
@@ -59618,6 +59618,10 @@ mod platform_gate_tests {
         "profiles_app_tests.rs",
         // A PowerShell module, which is a Windows fact end to end.
         "psreadline.rs",
+        // Only the Windows Store test's birth door and its retry (plan row 182): a test's
+        // last-resort retry is a Windows PowerShell one-shot without the profile; the person's
+        // birth door and its retry are portable.
+        "pty_door.rs",
         // Windows-only test fixtures: the hidden Win32 system caret every layout keeps
         // (T-CARET-EVERY-LAYOUT), beside the every-platform test that the Mac feeds none.
         "runtime/keyboard_tests.rs",
