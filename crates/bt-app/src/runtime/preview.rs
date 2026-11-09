@@ -13445,11 +13445,11 @@ impl<B: Backend> Runtime<'_, B> {
     /// [`crate::pace`].
     ///
     /// A refusal is recorded rather than dropped: see [`pace::FrameClock::refuse`].
-    /// **Asking costs nothing and marks nothing** (review 2026-09-18 round 2).
-    /// It used to record that an animation was running, on the reasoning that
-    /// only a running one would ask; four advancers ask before they have
-    /// established that they hold anything at all, so a window with an empty tip
-    /// host marked itself running for ever. What is mid-flight is reported once
+    /// **Asking marks nothing** (review 2026-09-18 round 2). It used to record
+    /// that an animation was running, on the reasoning that only a running one
+    /// would ask; four advancers then asked before they had established that
+    /// they held anything at all, so a window with an empty tip host marked
+    /// itself running for ever. What is mid-flight is reported once
     /// a turn from the journeys' own predicates — see [`Self::running_journeys`].
     ///
     /// # What may stand behind this, and what may never (closure review O4)
@@ -13487,7 +13487,9 @@ impl<B: Backend> Runtime<'_, B> {
     /// their own work, and one empty `RefusedFrame` wake after every caret
     /// frame for it. So an advancer asks only once it owes a frame — the
     /// shape [`Self::paced_frame`] writes down for the seven that have news of
-    /// their own, and the shape the other five spell out above their ask.
+    /// their own, and the shape four of the other five spell out above their
+    /// ask; the tab strip asks when its own rate tick is due (see
+    /// [`Self::advance_strip_animation`]).
     pub(crate) fn animation_frame_is_due(&mut self) -> bool {
         if self.window.frame_clock.admits() {
             return true;

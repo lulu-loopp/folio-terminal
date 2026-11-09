@@ -12,7 +12,7 @@
 
 use std::time::{Duration, Instant};
 
-use crate::headless::{Headless, HeadlessFolio};
+use crate::headless::{Headless, HeadlessFolio, WindowEffect};
 use crate::test_support::{card_over, cross_tab, leaf_saying, tab_holding};
 use crate::wake_owner::WakeOwner;
 use crate::{Motion, PeekClock, RowHost, Runtime, TabId, foreground_program};
@@ -579,16 +579,28 @@ fn the_hosts_command_modifier() -> winit::keyboard::ModifiersState {
         .expect("one of the two is the host's command modifier")
 }
 
+/// How many frames the window was asked for since the last take of its ledger.
+fn frames_asked_since(folio: &HeadlessFolio) -> usize {
+    folio
+        .ledger
+        .take()
+        .into_iter()
+        .filter(|effect| *effect == WindowEffect::Redraw)
+        .count()
+}
+
 /// RED — **an advancer with work still gets its frame** (T-ADVANCERS-ASK-ONLY-WITH-WORK).
 ///
 /// Asking only with work must not become asking never. Each of the seven, with a journey in
 /// flight that owes it frames, run alone on a turn the frame gate refuses: it asks, the refusal
-/// is counted once, and the frame clock owes the frame — the debt the wake fold books as
-/// `RefusedFrame` at the next frame boundary, which is how the refused frame comes back. On the
-/// turn the gate admits, it is not refused again.
+/// is counted once, the frame clock owes the frame — the debt the wake fold books as
+/// `RefusedFrame` at the next frame boundary, which is how the refused frame comes back — and no
+/// frame is asked for. On the turn the gate admits, it is not refused again, and it asks the
+/// window for its frame.
 ///
-/// MUTATION: answer `news` alone from `Runtime::paced_frame` (a debt never asks) — every row's
-/// refused turn owes nothing.
+/// MUTATIONS: answer `news` alone from `Runtime::paced_frame` (a debt never asks) — every row's
+/// refused turn owes nothing; let a debt ask the gate and then never draw — every row's admitted
+/// turn asks the window for no frame.
 #[test]
 fn an_advancer_with_work_on_a_refused_turn_still_owes_its_frame() {
     for advancer in Advancer::SEVEN {
@@ -603,12 +615,14 @@ fn an_advancer_with_work_on_a_refused_turn_still_owes_its_frame() {
             .window
             .last_present_at
             .expect("the fixture's draw reached the glass");
-        let mut runtime = folio.runtime();
-        let interval = runtime.window.frame_clock.interval();
-        advancer.plant_work(&mut runtime, at);
+        let interval = folio.window.frame_clock.interval();
+        advancer.plant_work(&mut folio.runtime(), at);
+        // The planting's own frames are the fixture's, not the turns' below.
+        folio.ledger.take();
 
         // A turn inside the frame the glass is showing: the gate refuses, and the advancer asks.
         let refused = at + Duration::from_millis(1);
+        let mut runtime = folio.runtime();
         runtime.window.frame_clock.open(Some(at), refused);
         assert!(
             !runtime.window.frame_clock.admits(),
@@ -625,9 +639,15 @@ fn an_advancer_with_work_on_a_refused_turn_still_owes_its_frame() {
             1,
             "{advancer:?}: and asked the gate once"
         );
+        assert_eq!(
+            frames_asked_since(&folio),
+            0,
+            "{advancer:?}: and the refused turn asks the window for no frame"
+        );
 
         // The frame boundary the debt books: the gate admits, and nothing is refused again.
         let admitted = at + interval;
+        let mut runtime = folio.runtime();
         runtime.window.frame_clock.open(Some(at), admitted);
         assert!(
             runtime.window.frame_clock.admits(),
@@ -637,6 +657,10 @@ fn an_advancer_with_work_on_a_refused_turn_still_owes_its_frame() {
         assert!(
             !runtime.window.frame_clock.owes_a_frame(),
             "{advancer:?}: the admitted turn is not refused again"
+        );
+        assert!(
+            frames_asked_since(&folio) >= 1,
+            "{advancer:?}: and the admitted turn asks the window for the frame it owed"
         );
     }
 }
@@ -681,5 +705,71 @@ fn a_spent_copy_tick_is_retired_on_a_refused_turn() {
         runtime.window.frame_clock.take_skipped(),
         0,
         "and news asks the gate nothing"
+    );
+}
+
+/// RED — **the formula hover moving is news, and is not paced** (T-ADVANCERS-ASK-ONLY-WITH-WORK,
+/// ruling R2).
+///
+/// Behind the gate, the hit test that notices the pointer has left a mark ran only on an
+/// admitted turn; observed and then held back, the observation would be spent on a turn that
+/// cannot draw it, and the admitted turn after it would find nothing to say. Above it, a band
+/// whose marks have landed and whose ink still names a mark the pointer has left has the ink put
+/// out on the turn that sees it, refused or not: no gate asked, and the window asked for the
+/// frame.
+///
+/// MUTATION: observe the hover in `Runtime::advance_math_tools_if_due` only on a turn the gate
+/// admits — the refused turn leaves the ink on the mark.
+#[test]
+fn a_stale_formula_hover_is_put_out_on_a_refused_turn() {
+    let mut folio = HeadlessFolio::with_tabs(
+        "wake-fold-formula-hover",
+        vec![tab_holding(leaf_saying("悬停 hover\r\n"))],
+        0,
+    );
+    folio.draw();
+    let at = folio
+        .window
+        .last_present_at
+        .expect("the fixture's draw reached the glass");
+    let landed = at
+        .checked_sub(Duration::from_secs(1))
+        .expect("the process is older than a band's arrival");
+    let refused = at + Duration::from_millis(1);
+    {
+        let mut runtime = folio.runtime();
+        let mut marks =
+            crate::formula_tools::FormulaToolFollow::arriving(&a_bands_marks(), None, landed);
+        marks.observe_hovered(Some(crate::formula_tools::FormulaTool::CopyLatex));
+        runtime.window.math_tools = Some(marks);
+        assert!(
+            !runtime.math_tools_owe_frames(refused),
+            "the fixture's own precondition: the marks have landed and owe no frame"
+        );
+        runtime.window.frame_clock.open(Some(at), refused);
+        runtime.window.frame_clock.take_skipped();
+    }
+    folio.ledger.take();
+    let mut runtime = folio.runtime();
+    runtime
+        .advance_math_tools_if_due(refused)
+        .expect("the advance is answered");
+    assert_eq!(
+        runtime
+            .window
+            .math_tools
+            .as_ref()
+            .and_then(|marks| marks.hovered()),
+        None,
+        "the ink leaves the mark the pointer is not on, on the turn that sees it"
+    );
+    assert_eq!(
+        runtime.window.frame_clock.take_skipped(),
+        0,
+        "and news asks the gate nothing"
+    );
+    assert!(
+        frames_asked_since(&folio) >= 1,
+        "and the window is asked for the frame that shows it"
     );
 }
