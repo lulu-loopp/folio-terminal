@@ -69,6 +69,9 @@ pub(crate) enum WindowEffect {
     OptionAsAlt(bool),
     /// The program's own icon worn at a scale (`WindowHost::wear_the_app_icon`).
     AppIcon(f64),
+    /// The system's box said over the window (`WindowHost::say_in_a_box`), with its text — kept
+    /// here, and raised nowhere.
+    SaidInABox(String),
     /// The window's input-method facts read (`WindowHost::ime_facts`).
     ImeFactsRead,
     /// A line the window's runtime said in `diagnostics.log` (`WindowHost::note`), as it would
@@ -357,6 +360,8 @@ pub(crate) struct HeadlessWindow {
 /// driven too; a test that wants the refusal scripts it.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct PlatformAnswers {
+    /// `WindowHost::is_visible`, winit's own reading: `Some(true)`.
+    pub(crate) visible: Option<bool>,
     /// `WindowHost::is_minimized`, winit's own reading: `Some(false)`.
     pub(crate) minimized: Option<bool>,
     /// `WindowHost::is_iconic`: `false`.
@@ -389,6 +394,7 @@ pub(crate) struct PlatformAnswers {
 impl Default for PlatformAnswers {
     fn default() -> Self {
         Self {
+            visible: Some(true),
             minimized: Some(false),
             iconic: false,
             cloaked: false,
@@ -435,7 +441,7 @@ impl WindowHost for HeadlessWindow {
         self.scale
     }
     fn is_visible(&self) -> Option<bool> {
-        Some(true)
+        self.answers.get().visible
     }
     fn is_maximized(&self) -> bool {
         false
@@ -599,6 +605,11 @@ impl WindowHost for HeadlessWindow {
     }
     fn wear_the_app_icon(&self, scale_factor: f64) {
         self.ledger.record(WindowEffect::AppIcon(scale_factor));
+    }
+    fn say_in_a_box(&self, seen: bt_platform::SeenBox, text: &str) {
+        let _ = seen;
+        self.ledger
+            .record(WindowEffect::SaidInABox(text.to_owned()));
     }
     fn clipboard(
         &self,

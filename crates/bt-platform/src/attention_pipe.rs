@@ -107,7 +107,7 @@ use windows::Win32::{
 };
 use windows::core::PCWSTR;
 
-use crate::launch_conversation::{LaunchClock, RealClock};
+use crate::launch_clock::{LaunchClock, RealClock};
 
 /// The longest single frame this endpoint will take, in bytes.
 ///
@@ -1524,7 +1524,7 @@ pub(crate) fn win32_of(error: &windows::core::Error) -> u32 {
 mod tests {
     use super::*;
     use crate::door_skipped;
-    use crate::launch_conversation::{CountedClock, Turn};
+    use crate::launch_clock::{CountedClock, Turn};
 
     /// **A clock whose every wait awaits the other end** within the suite's patience
     /// (T-ATTENTION-ENDPOINT-WAITS-ON-A-CLOCK): an endpoint or a verb on it never races a real
