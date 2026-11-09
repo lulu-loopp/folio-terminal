@@ -747,7 +747,8 @@ fn each_supported_position_names_its_owner_and_module() {
 ///
 /// MUTATION: delete the function-body refusal, and `body_marker` is keyed to `crate::free`;
 /// make every variant's body a struct-like one's, and `tuple_variant_field_marker` is keyed to
-/// `crate::Picture::Shot`.
+/// `crate::Picture::Shot`; give a trait's `const` no value, and `trait_const_value_marker` is
+/// keyed to `crate::Grow::STEP`.
 #[test]
 fn each_unsupported_position_is_refused_by_name() {
     let (index, directory) = fixture();
@@ -762,6 +763,10 @@ fn each_unsupported_position_is_refused_by_name() {
             "inside an impl block's braces but in no member",
         ),
         ("const_value_marker", "inside a const's or static's value"),
+        (
+            "trait_const_value_marker",
+            "inside a const's or static's value",
+        ),
         (
             "assoc_type_marker",
             "inside a trait's braces but in no member",

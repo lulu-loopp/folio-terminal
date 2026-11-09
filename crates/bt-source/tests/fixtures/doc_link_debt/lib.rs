@@ -65,6 +65,13 @@ pub trait Grow {
 
     /// A default method's doc naming [`default_method_marker`].
     fn grow_by(&mut self) {}
+
+    /// A trait const with a default whose value holds a local item.
+    const STEP: u32 = {
+        /// A local item's doc in a trait const's default naming [`trait_const_value_marker`].
+        const INNER: u32 = 1;
+        INNER
+    };
 }
 
 /// A const's doc naming [`const_marker`].

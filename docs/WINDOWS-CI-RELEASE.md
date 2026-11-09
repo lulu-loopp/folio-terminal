@@ -240,8 +240,8 @@ next `main` push, 41316493392, was cold as well. Cold: 13.87-17.73 min, p50
 34 attempts 41220186308 to 41315580382: green p50 13.5, max 14.97
 (41220409108). Re-derive when the cold max passes 25 / 1.36 = 18.4.
 
-**`docs` is new on 2026-11-02 (T-DOC-LINK-DEBT, plan row 78) and its budget is
-provisional.** It builds bt-app's documentation (`cargo doc -p bt-app
+**`docs` is new on 2026-11-02 (T-DOC-LINK-DEBT, plan row 78) and its budget, 14,
+stands by the 2026-11-09 ruling.** It builds bt-app's documentation (`cargo doc -p bt-app
 --no-deps`, which compiles every dependency's metadata) and bt-source's
 `doc_link_debt` target, and holds `docs/plans/DOC-LINK-DEBT.tsv` to the
 warnings. Before any run measured it, the budget was the 10-minute ceiling
