@@ -225,16 +225,6 @@ impl WinPrepare {
             clock: Arc::new(WallClock),
         }
     }
-
-    /// This driver with `ours` in place of the road's own layout — a test's
-    /// fake layout, which records or refuses (U-41a1).
-    #[cfg(test)]
-    pub(crate) fn laid_out(self, ours: Arc<dyn PreparePoint>) -> Self {
-        Self {
-            layouts: Layouts::of(ours),
-            ..self
-        }
-    }
 }
 
 impl Driver for WinPrepare {

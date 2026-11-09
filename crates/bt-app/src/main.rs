@@ -59647,7 +59647,7 @@ mod platform_gate_tests {
 
     /// **The list.** One file per line, in the order `ls` gives them, each with
     /// the reason it is allowed to ask.
-    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 42] = [
+    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 43] = [
         // Windows-only test fixture: the `pi` row, which only the Windows table ships, reopened
         // from a Recent row, beside its every-platform twin on the host's fallback shell.
         "app_files_tests.rs",
@@ -59735,6 +59735,9 @@ mod platform_gate_tests {
         // Only the held-journal fixtures: a hold that refuses a replacing rename is a
         // Windows fact; their platform-free halves run beside the door everywhere.
         "update_apply_windows_tests.rs",
+        // One test accessor, `Job::take_reports`: the job's inbox read without applying it,
+        // whose one reader is the Windows Prepare's cancel tests; the job itself is portable.
+        "update_job.rs",
         // macOS-only test fixtures: the Prepare over real disk images, signed bundles and
         // Homebrew records, and the guard that detaches an image mounted under a test's folder
         // (`hdiutil`); the Prepare's pure parts run everywhere.
