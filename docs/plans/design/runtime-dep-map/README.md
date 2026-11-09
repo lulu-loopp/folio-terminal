@@ -334,7 +334,8 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
    module to two when three things hold: the module it gains is the fact's census owner, the root writers it
    keeps are anchored at the root (they move by no K2 rule), and an annotation row names that owner. The move
    carries the fact's writers toward its owner and leaves the root only the writes it cannot give up;
-   `App.git_watch`'s annotation is the shape (the application arms a watch, the owner module's turn spends it).
+   `App.git_watch`'s annotation is the nearest shape (the application arms a watch and a topic module's turn spends it;
+   there the owner is the application's `git_watch`, here the module gained is the owner).
    Batch 27's two: `App.scheme_watch` ({root} → {root, settings}; `Runtime::create` arms it at launch and stays,
    `add_scheme` and `advance_scheme_watch` moved) and `WindowRuntime.modifiers` ({root} → {root, keyboard};
    `FolioApp::on_window_event`, the ModifiersChanged door, stays, `adopt_option_as_alt` moved). A fact with no
@@ -483,7 +484,7 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
      `Runtime::adopt_option_as_alt` into `runtime/keyboard.rs` by the owner-arrival rule. `App.scheme_fault`
      moved whole with its one writer, `reread_schemes`. One stays held: `Runtime::advance_storage_watch`
      (below). The `//` header above `settings_closed` ("the hover panels' one-at-a-time rule") is
-     blank-separated from it and stays in `main.rs`, for row 78.
+     blank-separated from it and stays in `main.rs`, for 0.4.9 plan row 78 (T-DOC-LINK-DEBT, 0.4.10 row 4).
    - **Batch 26 (2026-10-29) moved eight of the fifteen rows batch 25 left** (the batch 26 rulings 1–3), and
      their entries leave this list: G5's `pane_into_tab`, `pane_into_new_tab`, `absorb_tab_sessions`,
      `move_seat_content`, `forget_work_in_flight_for_seat` and `closing_this_pane_closes_the_tab`, with G15's
@@ -507,7 +508,8 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
      `runtime/frame.rs`. `drain_leaf_pty`'s doc, which stood above `synchronized_update_committed`, now stands
      above it. Fifteen stay held: `Runtime::return_to_live_for_input`, G3's seven, G5's six and G15's one.
      The `//` note that stood above `tab_queue_leader` ("`attention_is_asked` and `attention_ticket` stood here
-     until A2…") is blank-separated from it and stays in `main.rs`, for row 78 (ruling R6).
+     until A2…") is blank-separated from it and stays in `main.rs`, for 0.4.9 plan row 78 (T-DOC-LINK-DEBT,
+     0.4.10 row 4) (ruling R6).
    - `release_due_leaf_resize` — stayed in `main.rs` (the census rule above). Re-cited 2026-10-29 (K2 batch 26,
      ruling 4): absorbed by plan row 105 (`T-SHELL-SESSION-RELEASE-DUE-SIZE`). **Closed 2026-10-29 by row 105**:
      the release is `ShellSession::release_due_size`, a door beside `ShellSession::propose_size` in `main.rs`'s
