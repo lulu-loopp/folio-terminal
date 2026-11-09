@@ -4784,11 +4784,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// RED (0.4.10 plan row 68a, the review's N4) — **`Writer::ALL` names every writer**: the
-    /// inventory's guard holds every member of `ALL` to a row's carry rule, so a writer missing
-    /// from `ALL` would land without saying what it carries. The match has no wildcard arm: a new
-    /// variant does not compile until it is given its place here, and its place must be its index
-    /// in `ALL`.
+    /// RED (0.4.10 plan row 68a, the review's N4 and the re-review's R1) — **`Writer::ALL` names
+    /// every writer**: the inventory's guard holds every member of `ALL` to a row's carry rule, so
+    /// a writer missing from `ALL` would land without saying what it carries. Membership is read
+    /// from `Writer::is_a_persons_change`, the product's match over every writer, which has no
+    /// wildcard arm, so a new variant does not compile until it has an arm there: the writers
+    /// its arms name are the writers `ALL` lists, each once. The order is held by the match below,
+    /// which has no wildcard arm either: a writer's place is its index in `ALL`.
     #[test]
     fn writer_all_names_every_variant() {
         let place = |writer: Writer| match writer {
@@ -4819,5 +4821,30 @@ mod tests {
                 "{writer:?} is not at its place in Writer::ALL"
             );
         }
+        let arms_body = crate::test_support::squeezed_body("Writer", "is_a_persons_change");
+        assert!(
+            !arms_body.contains("_=>"),
+            "Writer::is_a_persons_change names every writer, with no wildcard arm: {arms_body}"
+        );
+        let mut armed: Vec<&str> = arms_body
+            .split("Writer::")
+            .skip(1)
+            .map(|rest| {
+                let end = rest
+                    .find(|character: char| !character.is_alphanumeric() && character != '_')
+                    .unwrap_or(rest.len());
+                &rest[..end]
+            })
+            .collect();
+        armed.sort_unstable();
+        let mut listed: Vec<String> = Writer::ALL
+            .into_iter()
+            .map(|writer| format!("{writer:?}"))
+            .collect();
+        listed.sort_unstable();
+        assert_eq!(
+            armed, listed,
+            "Writer::is_a_persons_change's arms and Writer::ALL name the same writers, once each"
+        );
     }
 }
