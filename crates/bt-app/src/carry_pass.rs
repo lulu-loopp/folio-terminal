@@ -223,9 +223,7 @@ impl CarryPublished {
     /// and in the merge (the re-review's R2).
     pub(crate) fn publish(&self, round: CarryRound) -> Option<String> {
         let CarryRound { hooks } = round;
-        if hooks.is_none() {
-            return None;
-        }
+        hooks.as_ref()?;
         let mut published = self.snapshot.lock().unwrap_or_else(PoisonError::into_inner);
         let untaken = published.take().unwrap_or_default();
         let (mut checks, mut changed) = (0, 0);
