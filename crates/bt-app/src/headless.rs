@@ -1997,6 +1997,8 @@ pub(crate) enum StartupStep {
     StartupMigration,
     /// Folio's own script's preparation started.
     ScriptPreparation,
+    /// The carry pass begun (0.4.10 plan row 68a).
+    CarryPass,
     /// The first window opened, through the backend's door.
     WindowOpened,
     /// The parser questions about the PowerShell rows put to the probe.
@@ -2057,6 +2059,10 @@ pub(crate) fn start(argv: &str, walk: Vec<Vec<String>>) -> HeadlessStart {
             script: || {
                 step(StartupStep::ScriptPreparation);
                 crate::shell_integration::ScriptPrepared::stand_in()
+            },
+            carry: || {
+                step(StartupStep::CarryPass);
+                crate::carry_pass::CarryBegun::stand_in()
             },
             // Handed the request the run carries, as `Runtime::create` is handed the parsed one.
             window: |answers: &mut Vec<String>| {

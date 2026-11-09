@@ -59,6 +59,16 @@ path = "tests/real_workspace.rs"
 name = "universes"
 path = "tests/universes.rs"
 
+# bt-app's broken doc links against docs/plans/DOC-LINK-DEBT.tsv (T-DOC-LINK-DEBT, plan row 78).
+# `test = false`: it reads rustdoc's warnings, which only scripts/ci/measure-doc-links.ps1 writes
+# (it runs `cargo doc` first, then this by name, `--test doc_link_debt`), so `cargo test -p
+# bt-source` and `cargo clippy --all-targets` leave it out; the measuring script and the `docs`
+# CI job lint it by name. Its fixture cases run with it.
+[[test]]
+name = "doc_link_debt"
+path = "tests/doc_link_debt.rs"
+test = false
+
 # Fixtures only, from here down.
 [[test]]
 name = "dep_map"

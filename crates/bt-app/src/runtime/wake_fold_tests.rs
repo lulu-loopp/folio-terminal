@@ -12,10 +12,10 @@
 
 use std::time::{Duration, Instant};
 
-use crate::headless::HeadlessFolio;
+use crate::headless::{Headless, HeadlessFolio, WindowEffect};
 use crate::test_support::{card_over, cross_tab, leaf_saying, tab_holding};
 use crate::wake_owner::WakeOwner;
-use crate::{PeekClock, RowHost, TabId, foreground_program};
+use crate::{Motion, PeekClock, RowHost, Runtime, TabId, foreground_program};
 
 /// **The class's one assertion**: the wake a turn at `now` booked is ahead of `now`, or absent.
 fn books_nothing_due(wake: Option<(WakeOwner, Instant)>, now: Instant) {
@@ -360,4 +360,416 @@ fn the_storage_watch_is_not_booked_while_a_quit_holds_the_storage_worker() {
         .expect("the turn heard the change and booked its quiet window");
     folio.app.quit = Some(crate::quit::Quit::begin(Vec::new()));
     books_nothing_due(turn(&mut folio, due), due);
+}
+
+/// RED — **an idle turn inside the last present's frame asks the frame gate nothing**
+/// (T-ADVANCERS-ASK-ONLY-WITH-WORK).
+///
+/// Row 12's idle census: after every caret frame the window turned once more for nothing. The
+/// turn inside the frame the glass was showing ran seven advancers that asked the gate before
+/// they had looked at their own work; each refusal booked `RefusedFrame` one interval on, and
+/// that wake drew nothing — `pace_skipped=7` on every present, a third of an idle window's turns.
+/// A window with nothing moving, turned inside its last present's frame, refuses nothing: no
+/// debt, no refusal counted, no `RefusedFrame` handed to the loop. Every gated advancer runs in
+/// the turn, so a new one that asks before it holds work turns this red as well.
+///
+/// MUTATION: ask `self.animation_frame_is_due()` at the head of `Runtime::advance_toasts` — the
+/// turn refuses once and hands the loop `RefusedFrame`.
+#[test]
+fn an_idle_turn_inside_the_last_frame_asks_the_gate_nothing() {
+    let mut folio = HeadlessFolio::with_tabs(
+        "wake-fold-idle-ask",
+        vec![tab_holding(leaf_saying("plain\r\n"))],
+        0,
+    );
+    folio.draw();
+    let presented = folio
+        .window
+        .last_present_at
+        .expect("the fixture's draw reached the glass");
+    // A running window's present is a turn's, and that turn ticked the strip on its way to it:
+    // the strip's own rate is spent until a frame on, as it is after the caret's turn. The
+    // fixture's first paint is an expose with no turn before it, so its strip has never ticked.
+    folio.window.strip_animation_ticked_at = Some(presented);
+    let inside = presented + Duration::from_millis(1);
+    assert!(
+        inside < presented + folio.window.frame_clock.interval(),
+        "the fixture's own precondition: the turn is inside the frame the glass is showing"
+    );
+    folio.window.frame_clock.take_skipped();
+    let wake = turn(&mut folio, inside);
+    assert!(
+        !folio.window.frame_clock.owes_a_frame(),
+        "an idle turn owes no frame"
+    );
+    assert_eq!(
+        folio.window.frame_clock.take_skipped(),
+        0,
+        "and the gate turned nobody away"
+    );
+    assert!(
+        !matches!(wake, Some((WakeOwner::RefusedFrame, _))),
+        "and the loop is handed no refused frame: {wake:?}"
+    );
+}
+
+/// The seven advancers that have news of their own and ask the frame gate through
+/// [`Runtime::paced_frame`], each with work planted for it at `at`.
+#[derive(Clone, Copy, Debug)]
+enum Advancer {
+    MathTools,
+    Tooltip,
+    KeyHint,
+    CardHint,
+    Toasts,
+    FilePeek,
+    Float,
+}
+
+impl Advancer {
+    const SEVEN: [Self; 7] = [
+        Self::MathTools,
+        Self::Tooltip,
+        Self::KeyHint,
+        Self::CardHint,
+        Self::Toasts,
+        Self::FilePeek,
+        Self::Float,
+    ];
+
+    /// One turn's run of this advancer, as `Runtime::turn` runs it.
+    fn run_alone(self, runtime: &mut Runtime<'_, Headless>, now: Instant) {
+        match self {
+            Self::MathTools => runtime.advance_math_tools_if_due(now),
+            Self::Tooltip => runtime.advance_tooltip_if_due(now),
+            Self::KeyHint => runtime.advance_key_hint_if_due(now),
+            Self::CardHint => runtime.advance_card_hint(now),
+            Self::Toasts => runtime.advance_toasts(now),
+            Self::FilePeek => runtime.advance_file_peek(now),
+            Self::Float => runtime.advance_float(now),
+        }
+        .expect("the advance is answered");
+    }
+
+    /// Put a journey in flight that owes this advancer frames from `at` on, with no news left
+    /// for a turn after `at` to carry: the frame it owes is a debt, and a debt is what asks.
+    fn plant_work(self, runtime: &mut Runtime<'_, Headless>, at: Instant) {
+        match self {
+            // The formula marks arriving, with no pointer in the window to move their ink.
+            Self::MathTools => {
+                runtime.window.math_tools = Some(
+                    crate::formula_tools::FormulaToolFollow::arriving(&a_bands_marks(), None, at),
+                );
+            }
+            // A tab's tip, promoted at `at` and fading in.
+            Self::Tooltip => {
+                let tip = (
+                    crate::tooltip::TooltipAnchorId::Tab(0),
+                    crate::tooltip::TipFace::Chrome,
+                );
+                let settled = at
+                    .checked_sub(tip.1.intent_delay())
+                    .expect("the process is older than a tip's intent");
+                runtime.window.tooltip.observe(Some(tip), settled);
+                assert!(
+                    runtime.window.tooltip.activate_if_due(at),
+                    "the fixture's own precondition: the tip comes up at its intent"
+                );
+            }
+            // The command modifier held for its 800ms, its card promoted at `at` and fading in.
+            Self::KeyHint => {
+                let held = the_hosts_command_modifier();
+                let pressed = at
+                    .checked_sub(crate::keyhint::KEY_HINT_DELAY)
+                    .expect("the process is older than a hold");
+                runtime.window.key_hint.observe(held, true, pressed);
+                assert!(
+                    runtime.window.key_hint.activate_if_due(at),
+                    "the fixture's own precondition: the card comes up at the end of the hold"
+                );
+            }
+            // The Cards column's bubble raised at `at`, its nudge moving.
+            Self::CardHint => {
+                runtime.window.card_hint.observe(true, true, at);
+            }
+            // A notice raised at `at` and fading in, on a glass that has not drawn it.
+            Self::Toasts => {
+                runtime.window.toasts.raise(
+                    crate::toast::ToastKind::Info,
+                    crate::toast::ToastAnchor::Window,
+                    None,
+                    "动 arriving",
+                    None,
+                    Motion::Full,
+                    at,
+                );
+            }
+            // A glance card that matured at `at` (its own turn, which is news and goes through)
+            // and whose first frame has not reached the glass: the fade owes it.
+            Self::FilePeek => {
+                runtime.window.file_peek = Some(card_over(
+                    RowHost::Column(bt_layout::SeatId(1)),
+                    std::path::Path::new("一瞥 glance.txt"),
+                    PeekClock::Settling(at),
+                ));
+                runtime.window.frame_clock.open(None, at);
+                Self::FilePeek.run_alone(runtime, at);
+                assert!(
+                    runtime
+                        .window
+                        .file_peek
+                        .as_ref()
+                        .is_some_and(|peek| peek.clock.is_shown()),
+                    "the fixture's own precondition: the card is up"
+                );
+                runtime.window.file_peek_drawn_opacity = None;
+            }
+            // A pinned float opened at `at`, its entrance under way; the turn at `at` takes the
+            // news its opening makes (its first size), so a later turn has none.
+            Self::Float => {
+                runtime.window.float.open(
+                    crate::float::FloatMode::Pinned,
+                    None,
+                    a_files_tenant(),
+                    [100.0, 100.0, 364.0, 400.0],
+                    None,
+                    at,
+                );
+                runtime.window.frame_clock.open(None, at);
+                Self::Float.run_alone(runtime, at);
+            }
+        }
+    }
+}
+
+/// A band's three boxes, as the renderer hands them for a block on screen.
+fn a_bands_marks() -> bt_render::MathToolBoxes {
+    bt_render::MathToolBoxes {
+        anchor: bt_viewport::MathBlockAnchor::History {
+            run: None,
+            start: bt_transcript::TranscriptId(1),
+            end: bt_transcript::TranscriptId(1),
+        },
+        display: bt_viewport::MathBlockDisplay::Rendered,
+        block: [40.0, 10.0, 300.0, 59.0],
+        source: [230.0, 25.0, 249.0, 44.0],
+        copy: [251.0, 25.0, 270.0, 44.0],
+    }
+}
+
+/// A files float's tenant over a folder that is never read.
+fn a_files_tenant() -> crate::float::FloatTenant {
+    crate::float::FloatTenant::Files(Box::new(crate::float::FloatFiles {
+        files: crate::seats::FilesLeafState {
+            root: "C:/x".to_owned(),
+            ..crate::seats::FilesLeafState::default()
+        },
+        width: bt_layout::LogicalPx::px(240),
+        ..crate::float::FloatFiles::default()
+    }))
+}
+
+/// This host's command modifier: Control, or Command on a Mac — `input::is_command_chord`'s
+/// answer, not a second decision.
+fn the_hosts_command_modifier() -> winit::keyboard::ModifiersState {
+    use winit::keyboard::ModifiersState;
+    [ModifiersState::CONTROL, ModifiersState::SUPER]
+        .into_iter()
+        .find(|modifiers| crate::input::is_command_chord(*modifiers))
+        .expect("one of the two is the host's command modifier")
+}
+
+/// How many frames the window was asked for since the last take of its ledger.
+fn frames_asked_since(folio: &HeadlessFolio) -> usize {
+    folio
+        .ledger
+        .take()
+        .into_iter()
+        .filter(|effect| *effect == WindowEffect::Redraw)
+        .count()
+}
+
+/// RED — **an advancer with work still gets its frame** (T-ADVANCERS-ASK-ONLY-WITH-WORK).
+///
+/// Asking only with work must not become asking never. Each of the seven, with a journey in
+/// flight that owes it frames, run alone on a turn the frame gate refuses: it asks, the refusal
+/// is counted once, the frame clock owes the frame — the debt the wake fold books as
+/// `RefusedFrame` at the next frame boundary, which is how the refused frame comes back — and no
+/// frame is asked for. On the turn the gate admits, it is not refused again, and it asks the
+/// window for its frame.
+///
+/// MUTATIONS: answer `news` alone from `Runtime::paced_frame` (a debt never asks) — every row's
+/// refused turn owes nothing; let a debt ask the gate and then never draw — every row's admitted
+/// turn asks the window for no frame.
+#[test]
+fn an_advancer_with_work_on_a_refused_turn_still_owes_its_frame() {
+    for advancer in Advancer::SEVEN {
+        let mut folio = HeadlessFolio::with_tabs(
+            "wake-fold-advancer-work",
+            vec![tab_holding(leaf_saying("工作 work\r\n"))],
+            0,
+        );
+        folio.app.motion = Motion::Full;
+        folio.draw();
+        let at = folio
+            .window
+            .last_present_at
+            .expect("the fixture's draw reached the glass");
+        let interval = folio.window.frame_clock.interval();
+        advancer.plant_work(&mut folio.runtime(), at);
+        // The planting's own frames are the fixture's, not the turns' below.
+        folio.ledger.take();
+
+        // A turn inside the frame the glass is showing: the gate refuses, and the advancer asks.
+        let refused = at + Duration::from_millis(1);
+        let mut runtime = folio.runtime();
+        runtime.window.frame_clock.open(Some(at), refused);
+        assert!(
+            !runtime.window.frame_clock.admits(),
+            "{advancer:?}: the fixture's own precondition: the gate refuses this turn"
+        );
+        runtime.window.frame_clock.take_skipped();
+        advancer.run_alone(&mut runtime, refused);
+        assert!(
+            runtime.window.frame_clock.owes_a_frame(),
+            "{advancer:?}: an advancer with work on a refused turn owes its frame"
+        );
+        assert_eq!(
+            runtime.window.frame_clock.take_skipped(),
+            1,
+            "{advancer:?}: and asked the gate once"
+        );
+        assert_eq!(
+            frames_asked_since(&folio),
+            0,
+            "{advancer:?}: and the refused turn asks the window for no frame"
+        );
+
+        // The frame boundary the debt books: the gate admits, and nothing is refused again.
+        let admitted = at + interval;
+        let mut runtime = folio.runtime();
+        runtime.window.frame_clock.open(Some(at), admitted);
+        assert!(
+            runtime.window.frame_clock.admits(),
+            "{advancer:?}: the fixture's own precondition: the gate admits the booked turn"
+        );
+        advancer.run_alone(&mut runtime, admitted);
+        assert!(
+            !runtime.window.frame_clock.owes_a_frame(),
+            "{advancer:?}: the admitted turn is not refused again"
+        );
+        assert!(
+            frames_asked_since(&folio) >= 1,
+            "{advancer:?}: and the admitted turn asks the window for the frame it owed"
+        );
+    }
+}
+
+/// RED — **the formula copy tick running out is news, and is not paced** (T-ADVANCERS-ASK-ONLY-
+/// WITH-WORK, ruling R2).
+///
+/// Behind the gate, a turn inside the frame the glass is showing either asked on every turn a
+/// band had marks or spent its news where it could not draw it. Above it, the spent tick is
+/// retired on the turn that sees it run out, refused or not, and that turn asks the gate nothing.
+///
+/// MUTATION: move `retire_spent_math_copy` in `Runtime::advance_math_tools_if_due` back below
+/// the frame gate — the refused turn leaves the tick standing.
+#[test]
+fn a_spent_copy_tick_is_retired_on_a_refused_turn() {
+    let mut folio = HeadlessFolio::with_tabs(
+        "wake-fold-copy-tick",
+        vec![tab_holding(leaf_saying("复制 copy\r\n"))],
+        0,
+    );
+    folio.draw();
+    let at = folio
+        .window
+        .last_present_at
+        .expect("the fixture's draw reached the glass");
+    let said = at
+        .checked_sub(crate::FOOT_REVEAL_FEEDBACK)
+        .expect("the process is older than a copy's acknowledgement");
+    let mut runtime = folio.runtime();
+    runtime.window.math_copied = Some((a_bands_marks().anchor, said));
+    let refused = at + Duration::from_millis(1);
+    runtime.window.frame_clock.open(Some(at), refused);
+    runtime.window.frame_clock.take_skipped();
+    runtime
+        .advance_math_tools_if_due(refused)
+        .expect("the advance is answered");
+    assert!(
+        runtime.window.math_copied.is_none(),
+        "the spent tick is retired on the turn that sees it run out"
+    );
+    assert_eq!(
+        runtime.window.frame_clock.take_skipped(),
+        0,
+        "and news asks the gate nothing"
+    );
+}
+
+/// RED — **the formula hover moving is news, and is not paced** (T-ADVANCERS-ASK-ONLY-WITH-WORK,
+/// ruling R2).
+///
+/// Behind the gate, the hit test that notices the pointer has left a mark ran only on an
+/// admitted turn; observed and then held back, the observation would be spent on a turn that
+/// cannot draw it, and the admitted turn after it would find nothing to say. Above it, a band
+/// whose marks have landed and whose ink still names a mark the pointer has left has the ink put
+/// out on the turn that sees it, refused or not: no gate asked, and the window asked for the
+/// frame.
+///
+/// MUTATION: observe the hover in `Runtime::advance_math_tools_if_due` only on a turn the gate
+/// admits — the refused turn leaves the ink on the mark.
+#[test]
+fn a_stale_formula_hover_is_put_out_on_a_refused_turn() {
+    let mut folio = HeadlessFolio::with_tabs(
+        "wake-fold-formula-hover",
+        vec![tab_holding(leaf_saying("悬停 hover\r\n"))],
+        0,
+    );
+    folio.draw();
+    let at = folio
+        .window
+        .last_present_at
+        .expect("the fixture's draw reached the glass");
+    let landed = at
+        .checked_sub(Duration::from_secs(1))
+        .expect("the process is older than a band's arrival");
+    let refused = at + Duration::from_millis(1);
+    {
+        let runtime = folio.runtime();
+        let mut marks =
+            crate::formula_tools::FormulaToolFollow::arriving(&a_bands_marks(), None, landed);
+        marks.observe_hovered(Some(crate::formula_tools::FormulaTool::CopyLatex));
+        runtime.window.math_tools = Some(marks);
+        assert!(
+            !runtime.math_tools_owe_frames(refused),
+            "the fixture's own precondition: the marks have landed and owe no frame"
+        );
+        runtime.window.frame_clock.open(Some(at), refused);
+        runtime.window.frame_clock.take_skipped();
+    }
+    folio.ledger.take();
+    let mut runtime = folio.runtime();
+    runtime
+        .advance_math_tools_if_due(refused)
+        .expect("the advance is answered");
+    assert_eq!(
+        runtime
+            .window
+            .math_tools
+            .as_ref()
+            .and_then(|marks| marks.hovered()),
+        None,
+        "the ink leaves the mark the pointer is not on, on the turn that sees it"
+    );
+    assert_eq!(
+        runtime.window.frame_clock.take_skipped(),
+        0,
+        "and news asks the gate nothing"
+    );
+    assert!(
+        frames_asked_since(&folio) >= 1,
+        "and the window is asked for the frame that shows it"
+    );
 }

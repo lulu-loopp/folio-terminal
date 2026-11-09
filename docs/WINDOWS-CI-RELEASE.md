@@ -219,6 +219,7 @@ Minutes.
 | `gates-can-fail` | Windows | 6.4 / 7.4 | 8.1 / 10.15 (38693069271) | 14 | 20 |
 | `licensing` | Windows | 2.9 / 3.35 | 6.3 / 7.92 (39014776542) | 11 | 16 |
 | `wasm-lib-check` | Windows | 1.3 / 2.5 | 3.8 / 4.77 (38720519586) | 7 | 30 |
+| `docs` (2026-11-02, below) | Windows | not yet measured | 6.07 (42637954622) | 14 (ruled 2026-11-09; the rule gives 9) | 14 (provisional) |
 | `release-script-tests` | Windows | no cache: 1.8 / 2.53 (38687157155) | - | 10 (floor; the rule gives 4) | 10 |
 | `cask-audit` | macOS | no cache: 1.1 / 1.80 (38665182697) | - | 10 (floor; the rule gives 3) | 10 |
 
@@ -238,6 +239,18 @@ next `main` push, 41316493392, was cold as well. Cold: 13.87-17.73 min, p50
 16.6, max 17.73 (41315751889). 17.73 x 1.36 = 24.11, so 25. Restored, over the
 34 attempts 41220186308 to 41315580382: green p50 13.5, max 14.97
 (41220409108). Re-derive when the cold max passes 25 / 1.36 = 18.4.
+
+**`docs` is new on 2026-11-02 (T-DOC-LINK-DEBT, plan row 78) and its budget, 14,
+stands by the 2026-11-09 ruling.** It builds bt-app's documentation (`cargo doc -p bt-app
+--no-deps`, which compiles every dependency's metadata) and bt-source's
+`doc_link_debt` target, and holds `docs/plans/DOC-LINK-DEBT.tsv` to the
+warnings. Before any run measured it, the budget was the 10-minute ceiling
+ruled for it as a separate job (plan row 78), x 1.36, rounded up: 14. Its first
+cold run, 42637954622 (a branch dispatch, 2026-11-09), took 6.07 min, under the
+10-minute line, so it stays a job of its own, and the 14 stands by that ruling
+(the rule alone gives 6.07 x 1.36 = 8.26, so 9). Re-derive by the rule when a
+cold total passes 14 / 1.36 = 10.3. Its cache entry joins `main`'s set (the
+store's budget below) after its first `main` run.
 
 The 1.36 was, when `logic`'s budget was first derived, the slowest cold `test`
 step over the fastest (47.8 / 35.1 min; cause unknown: the fast ones were
@@ -309,6 +322,10 @@ The store on 2026-10-17 (`gh cache list`), 9.97 GB in 11 entries:
 | `licensing` | `main` | 0.14 | current |
 | `logic` | `main` | 1.82 | superseded (the previous `Cargo.lock`) |
 | `logic` | a branch | 1.82 | readable by that branch only |
+
+The `docs` job (2026-11-02, T-DOC-LINK-DEBT) saved its first `main` entry on
+2026-11-09: 0.44 GB, so `main`'s current entries are ten jobs, 6.77 GB (6.33 in
+the table above plus `docs`).
 
 Over the 58 `ci.yml` runs of 2026-10-15..17 branch runs saved 157 entries
 (113.7 GB) and `main` 37 (25.0 GB); the branch entries were read back by their
