@@ -997,6 +997,11 @@ mod tests {
     ///
     /// MUTATION: call `bt_platform::message_box` in any road `show_here` (or in
     /// `leave_armed`) again.
+    ///
+    /// **And every box with the state it is raised in** (0.4.10 plan row 72): owned by a
+    /// standing Folio window at the two stops that raise one while their windows stand, and
+    /// ownerless — wearing the program's icon itself — everywhere else. MUTATION: raise a box
+    /// at a site the table has no state for, and the table is one row short.
     #[test]
     fn every_road_process_shows_its_failure_window_without_an_application() {
         use bt_source::{Found, Index, Search, View, needle};
@@ -1071,6 +1076,91 @@ mod tests {
             callers(search(needle!("bt_platform::standalone_alert("))),
             ["leave_armed", "show_here"],
             "the road processes' failure windows"
+        );
+        // **Every box the product raises, with the state it is raised in** (0.4.10 plan row 72,
+        // T-MESSAGE-BOX-WEARS-THE-ICON). A box raised while a Folio window stands is owned by it
+        // (`BoxOver`) and has no taskbar button or Alt+Tab entry of its own; every other box is
+        // the process's only window there, or is raised on a thread a window's owner could not
+        // answer from, and wears the program's icon itself (`bt_platform::message_box`'s hook).
+        // A new box joins this table with its state.
+        let states = [
+            (
+                "crate::FolioApp::fail",
+                "owned: a frame-shape stop's alert, its windows standing",
+            ),
+            (
+                "crate::FolioApp::stop_every_window_keeping_in",
+                "owned: a stop's lost change, before a window closes",
+            ),
+            (
+                "crate::SystemBox::say_the_crash",
+                "ownerless (R1): on whichever thread panicked, which may not be the window's",
+            ),
+            (
+                "crate::say_at_the_front_door",
+                "ownerless: a launch refused before it has a window",
+            ),
+            (
+                "crate::uninstall::leave_armed",
+                "ownerless: the uninstaller's start, after the loop has closed every window",
+            ),
+            (
+                "crate::uninstall::run_within",
+                "ownerless: the uninstall door's own process, which has no window",
+            ),
+            (
+                "crate::update_handoff::leave_armed",
+                "ownerless: the update's exit guard, after the loop has closed every window",
+            ),
+            (
+                "crate::update_apply_macos::Machine::show_here",
+                "ownerless: the macOS applier, a road process",
+            ),
+            (
+                "crate::update_apply_windows::Machine::show_here",
+                "ownerless: the Windows applier, a road process",
+            ),
+            (
+                "crate::update_recover::Machine::show_here",
+                "ownerless: the recovery build, a road process",
+            ),
+        ];
+        let sites = |found: Found| -> Vec<String> {
+            let mut sites: Vec<String> = found
+                .in_the_product(index)
+                .owners(index)
+                .into_keys()
+                .map(|identity| match identity.type_owner {
+                    Some(owner) => format!("{}::{owner}::{}", identity.module_path, identity.name),
+                    None => format!("{}::{}", identity.module_path, identity.name),
+                })
+                .collect();
+            sites.sort();
+            sites.dedup();
+            sites
+        };
+        let stated = |owned: bool| -> Vec<String> {
+            let mut stated: Vec<String> = states
+                .iter()
+                .filter(|(_, state)| state.starts_with("owned:") == owned)
+                .map(|(site, _)| (*site).to_owned())
+                .collect();
+            stated.sort();
+            stated
+        };
+        assert_eq!(
+            sites(search(needle!("BoxOver("))),
+            stated(true),
+            "every box raised over a standing window, at its stop"
+        );
+        let mut ownerless = sites(search(needle!("bt_platform::message_box(")));
+        ownerless.extend(sites(search(needle!("bt_platform::standalone_alert("))));
+        ownerless.sort();
+        ownerless.dedup();
+        assert_eq!(
+            ownerless,
+            stated(false),
+            "every box with no window to be owned by, which wears the program's icon itself"
         );
     }
 
