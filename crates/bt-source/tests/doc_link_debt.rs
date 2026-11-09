@@ -41,7 +41,8 @@
 //!   (`ItemRecord`), in its declaration (before its body);
 //! * a struct-like variant, anywhere inside its braces: the index keeps no record of a variant's
 //!   fields, so a field's doc there is the variant's (`Picture::Ready`, ruled 2026-11-09);
-//! * a `const` or `static` of a module, an `impl` block or a trait (`ValueRecord`);
+//! * a `const` or `static` of a module, an `impl` block or a trait (`ValueRecord`), before the `=`
+//!   of its value;
 //! * a type alias (`AliasRecord`);
 //! * an `impl` block or a `trait`, in its header (before its braces);
 //! * **no record at all**: `<module> (outside any item)`, the module being the innermost inline
@@ -56,9 +57,10 @@
 //! * a line or column past the file's end;
 //! * a byte inside no doc comment or doc attribute;
 //! * a byte inside a macro's token tree (the parse does not see the items a macro makes);
-//! * a byte inside a function's body (a local item's doc), inside a data type's body but in no
-//!   field or variant, inside a tuple variant's parentheses, or inside an `impl` block's or a
-//!   trait's braces but in no member the index records (an associated type, a macro call);
+//! * a byte inside a function's body or a `const`'s or `static`'s value from its `=` (a local
+//!   item's doc), inside a data type's body but in no field or variant, inside a tuple variant's
+//!   parentheses, or inside an `impl` block's or a trait's braces but in no member the index
+//!   records (an associated type, a macro call);
 //! * a record whose module paths name none, or more than one, under the file's product module.
 //!
 //! # The key
@@ -74,11 +76,12 @@
 //! reads by `module`.
 
 use std::collections::BTreeMap;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use bt_source::{
     CommentKind, ConditionalVariant, DiskScope, FileRecord, Index, ItemKind, ModuleShape, Span,
-    TargetId, TargetKind, TargetRoot, Universe, Vendor, normalized, report,
+    TargetId, TargetKind, TargetRoot, Universe, ValueRecord, Vendor, normalized, report,
 };
 
 fn workspace_root() -> PathBuf {
@@ -105,8 +108,8 @@ const HEADER: &str = "\
 # broken link is. A link is fixed (or reworded) and its row leaves in the same commit.
 # A row is `owner`, `target` and `shape`; `module` is the module the owner is written in, so an
 # owner moved to another module is its rows moved (T-MOVED-NOT-ADDED-RULE); `file` is where it is
-# written today and is not compared. When the list is empty, rustdoc's lint is denied in the
-# workspace and the list retires.
+# written today: the shrink check does not compare it, the docs job does. When the list is empty,
+# rustdoc's lint is denied in the workspace and the list retires.
 owner\ttarget\tshape\tmodule\tfile
 ";
 
@@ -230,35 +233,49 @@ impl Holder<'_> {
         }
     }
 
-    /// The braces (or parentheses) a byte inside of which is in no member of this record.
+    /// The bytes of this record a position inside of which is in no member of it: braces,
+    /// parentheses, or a value.
     ///
     /// A struct-like variant's braces are not among them: the index keeps no record of a
     /// variant's fields, so a byte in one of their docs is the variant's own (ruled
-    /// 2026-11-09). A struct's or a union's body, whose fields the index does record, and a
-    /// tuple variant's parentheses stay refused.
-    fn body(&self, index: &Index) -> Option<(Span, &'static str)> {
+    /// 2026-11-09). A tuple variant's parentheses stay refused. A struct's, a union's or an
+    /// enum's body outside every field or variant cannot hold a doc at all: a doc comment there
+    /// documents nothing and does not parse, so that refusal has no fixture. A `const`'s or a
+    /// `static`'s value, from its `=` to its end, is refused as a function's body is: a doc
+    /// there is a local item's.
+    fn body(&self, index: &Index) -> Option<(Range<usize>, &'static str)> {
+        let bytes = |span: Span| span.start()..span.end();
         match self {
             Holder::Item(record) => record.body().and_then(|body| {
                 if record.kind().is_callable() {
-                    Some((body, "inside a function's body (a local item's doc)"))
+                    Some((bytes(body), "inside a function's body (a local item's doc)"))
                 } else if record.kind() == ItemKind::Variant && index.text(body).starts_with('{') {
                     None
                 } else {
                     Some((
-                        body,
+                        bytes(body),
                         "inside a data type's or a variant's body but in no field",
                     ))
                 }
             }),
             Holder::Impl(record) => Some((
-                record.body(),
+                bytes(record.body()),
                 "inside an impl block's braces but in no member the index records",
             )),
             Holder::Trait(record) => Some((
-                record.body(),
+                bytes(record.body()),
                 "inside a trait's braces but in no member the index records",
             )),
-            Holder::Value(_) | Holder::Alias(_) => None,
+            Holder::Value(record) => {
+                let whole = record.whole();
+                value_equals(record, index.text(whole)).map(|equals| {
+                    (
+                        whole.start() + equals..whole.end(),
+                        "inside a const's or static's value (a local item's doc)",
+                    )
+                })
+            }
+            Holder::Alias(_) => None,
         }
     }
 
@@ -284,6 +301,32 @@ impl Holder<'_> {
             Holder::Trait(record) => record.name().to_owned(),
         }
     }
+}
+
+/// Where the `=` that opens a `const`'s or a `static`'s value stands in `text`, the record's
+/// own bytes, or `None` for a trait's `const` with no default. The index keeps the record's
+/// whole span and not where its value starts, so the bytes are parsed again as what the record
+/// says they are: a trait's member, an `impl` block's member, or a module's item.
+fn value_equals(record: &ValueRecord, text: &str) -> Option<usize> {
+    fn unparsed(text: &str) -> ! {
+        panic!("the index lowered a const or static from bytes that do not parse as one: {text}")
+    }
+    let equals = match (record.type_owner(), record.trait_name()) {
+        (None, Some(_)) => match syn::parse_str::<syn::TraitItem>(text) {
+            Ok(syn::TraitItem::Const(constant)) => constant.default.map(|(equals, _)| equals),
+            _ => unparsed(text),
+        },
+        (Some(_), _) => match syn::parse_str::<syn::ImplItem>(text) {
+            Ok(syn::ImplItem::Const(constant)) => Some(constant.eq_token),
+            _ => unparsed(text),
+        },
+        (None, None) => match syn::parse_str::<syn::Item>(text) {
+            Ok(syn::Item::Const(constant)) => Some(constant.eq_token),
+            Ok(syn::Item::Static(value)) => Some(value.eq_token),
+            _ => unparsed(text),
+        },
+    };
+    equals.map(|equals| equals.span.byte_range().start)
 }
 
 /// Whether `path` is `module` or a module inside it.
@@ -353,7 +396,7 @@ fn key(index: &Index, root: &Path, source: &Path, warning: &Warning) -> Result<R
     let (owner, module) = match innermost {
         Some(holder) => {
             if let Some((body, why)) = holder.body(index)
-                && body.holds(offset)
+                && body.contains(&offset)
             {
                 return refuse(why);
             }
@@ -698,12 +741,27 @@ fn each_supported_position_names_its_owner_and_module() {
 
 /// Every unsupported position is refused, each for its own reason.
 ///
-/// MUTATION: delete the function-body refusal, and `body_marker` is keyed to `crate::free`.
+/// One refusal the grammar lists has no case, because it cannot be written: a data type's body
+/// outside every field or variant. A doc comment there documents nothing and does not parse, so
+/// the index never lowers such a file.
+///
+/// MUTATION: delete the function-body refusal, and `body_marker` is keyed to `crate::free`;
+/// make every variant's body a struct-like one's, and `tuple_variant_field_marker` is keyed to
+/// `crate::Picture::Shot`.
 #[test]
 fn each_unsupported_position_is_refused_by_name() {
     let (index, directory) = fixture();
     let cases = [
         ("body_marker", "inside a function's body"),
+        (
+            "tuple_variant_field_marker",
+            "inside a data type's or a variant's body but in no field",
+        ),
+        (
+            "impl_assoc_type_marker",
+            "inside an impl block's braces but in no member",
+        ),
+        ("const_value_marker", "inside a const's or static's value"),
         (
             "assoc_type_marker",
             "inside a trait's braces but in no member",

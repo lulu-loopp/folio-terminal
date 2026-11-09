@@ -31,6 +31,11 @@ pub enum Picture {
         /// A variant field's doc naming [`variant_field_marker`].
         key: String,
     },
+    /// A tuple variant.
+    Shot(
+        /// A tuple variant field naming [`tuple_variant_field_marker`].
+        u8,
+    ),
 }
 
 impl Pane {
@@ -48,6 +53,11 @@ impl Default for Pane {
     }
 }
 
+impl Grow for Pane {
+    /// An impl's associated type naming [`impl_assoc_type_marker`].
+    type Step = u8;
+}
+
 /// A trait's doc naming [`trait_marker`].
 pub trait Grow {
     /// An associated type's doc naming [`assoc_type_marker`].
@@ -59,6 +69,13 @@ pub trait Grow {
 
 /// A const's doc naming [`const_marker`].
 pub const WIDTH: u32 = 80;
+
+/// A const whose value holds a local item.
+pub const HEIGHT: u32 = {
+    /// A local item's doc in a const's value naming [`const_value_marker`].
+    const INNER: u32 = 1;
+    INNER
+};
 
 /// A static's doc naming [`static_marker`].
 pub static NAME: &str = "fixture";

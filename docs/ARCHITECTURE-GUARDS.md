@@ -1805,7 +1805,8 @@ The rule: no broken intra-doc link is added to bt-app's documentation, and the
 ones that predate the rule only go (T-DOC-LINK-DEBT, 0.4.9 plan row 78, from
 row 59's judgement). `docs/plans/DOC-LINK-DEBT.tsv` holds each, one row per
 rustdoc warning: `owner`, `target`, `shape`, then `module` (where the owner is
-written, for the move rule) and `file` (informative). No line numbers.
+written, for the move rule) and `file` (where it is written today: the `docs`
+job compares it, the shrink check does not). No line numbers.
 
 Two halves. The `docs` CI job runs `scripts/ci/measure-doc-links.ps1`:
 `cargo doc -p bt-app --no-deps --locked --message-format=json` on Windows,
@@ -1831,7 +1832,9 @@ doc is, a code span for a name that is no item, or words), never listed; a
 fixed link's row leaves the list; an owner that moved module is regenerated
 with `scripts/dev/generate-doc-link-debt.ps1` (a lane only; commit first, it
 stamps the commit), and a renamed owner's links are fixed in the renaming
-commit. When the list is empty, `[workspace.lints.rustdoc]
+commit. A `(outside any item)` row is never moved: when its module moves, or
+its doc changes from an outer doc to a `//!`, the moving commit fixes that
+link, as a renaming one does. When the list is empty, `[workspace.lints.rustdoc]
 broken_intra_doc_links = "deny"` replaces both halves (a later row).
 
 ## Machine-independent paths
