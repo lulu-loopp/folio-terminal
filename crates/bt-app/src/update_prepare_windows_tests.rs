@@ -19,22 +19,32 @@ use std::sync::mpsc;
 
 use bt_persist::UpdateCheckV1;
 use bt_platform::HostPlatform;
-use bt_platform::trust_harness::{Behaviour, IDENTITY, OTHER_IDENTITY, SUBJECT, TestCa};
+#[cfg(windows)]
+use bt_platform::trust_harness::OTHER_IDENTITY;
+use bt_platform::trust_harness::{Behaviour, IDENTITY, SUBJECT, TestCa};
 use bt_winres::digest::{hex, sha256};
 use bt_winres::release_manifest::{PROTOCOL, RESOURCE_NAME, archive_root};
 
+#[cfg(windows)]
 use crate::i18n::Text;
 #[cfg(windows)]
 use crate::update_apply::CountedClock;
+#[cfg(windows)]
 use crate::update_archive::tests::{item_under, zip_of};
+#[cfg(windows)]
+use crate::update_job::{Applied, Progress};
 use crate::update_job::{
-    Applied, Bytes, Failure, Fetching, Gathered, Job, Presenters, Progress, Request, State, Verb,
+    Bytes, Failure, Fetching, Gathered, Job, Presenters, Request, State, Verb,
 };
+#[cfg(windows)]
 use crate::update_prepare::{AtLaunch, at_launch, sum_for};
+#[cfg(windows)]
 use crate::update_txn::{Class, Header, HeaderOutcome, Phase, PhaseKind};
 
 /// The running build's `VERSIONINFO`, and the offer's.
+#[cfg(windows)]
 const RUNNING: FileVersion = FileVersion([0, 4, 6, 0]);
+#[cfg(windows)]
 const OFFERED: FileVersion = FileVersion([0, 4, 7, 0]);
 /// The tag every test offers, and the version it names.
 const TAG: &str = "v0.4.7";
@@ -49,6 +59,7 @@ fn offer(txn: u8) -> Offer {
 }
 
 /// Run `body` on a worker the thread door started, and wait for it.
+#[cfg(windows)]
 fn on_a_worker<T: Send + 'static>(body: impl FnOnce(&WorkerCtx) -> T + Send + 'static) -> T {
     let worker = bt_platform::spawn_at_priority(
         "bt-u20-test",
@@ -69,6 +80,7 @@ fn on_a_worker<T: Send + 'static>(body: impl FnOnce(&WorkerCtx) -> T + Send + 's
 /// `folio.exe` — a program at `version`, signed for the test publisher under
 /// `identity`, carrying the release manifest of the others (F-4). Answers
 /// every file with its bytes, `folio.exe` first.
+#[cfg(windows)]
 fn build(
     ca: &TestCa,
     folder: &Path,
@@ -163,6 +175,7 @@ fn build_needing(
 
 /// **The release archive of `files`** under the offer's root, in the layout
 /// `package.ps1` writes.
+#[cfg(windows)]
 fn archive_of(files: &[(String, Vec<u8>)]) -> Vec<u8> {
     let root = archive_root(TO);
     let items: Vec<_> = files
@@ -195,6 +208,7 @@ impl Drop for Scratch {
 
 /// **An install folder running 0.4.6, and a release of 0.4.7**, both signed by
 /// one test root.
+#[cfg(windows)]
 struct Scene {
     scratch: Scratch,
     ca: TestCa,
@@ -203,20 +217,24 @@ struct Scene {
     archive: Vec<u8>,
 }
 
+#[cfg(windows)]
 impl Scene {
-    /// The scene, or `None` off Windows, where no test root can sign.
-    fn new(tag: &str) -> Option<Self> {
-        Self::under(tag, TestCa::new().ok()?)
+    /// The scene: an install and a release one test root signed.
+    fn new(tag: &str) -> Self {
+        Self::under(tag, TestCa::new().expect("Windows has a test root"))
     }
 
     /// [`Scene::new`], **every leaf naming where its revocation list is
     /// published** (`TestCa::naming_its_crls`): under a policy holding no
     /// list, its revocation is offline, as on a machine with no network.
-    fn naming_its_crls(tag: &str) -> Option<Self> {
-        Self::under(tag, TestCa::naming_its_crls().ok()?)
+    fn naming_its_crls(tag: &str) -> Self {
+        Self::under(
+            tag,
+            TestCa::naming_its_crls().expect("Windows has a test root"),
+        )
     }
 
-    fn under(tag: &str, ca: TestCa) -> Option<Self> {
+    fn under(tag: &str, ca: TestCa) -> Self {
         let root = bt_testpath::temp_path(&format!("bt-u20-{tag}"));
         let scratch = Scratch(root.clone());
         let install = root.join("Folio");
@@ -239,13 +257,13 @@ impl Scene {
             IDENTITY,
             "the new build",
         ));
-        Some(Self {
+        Self {
             exe: install.join(EXECUTABLE),
             scratch,
             ca,
             install,
             archive,
-        })
+        }
     }
 
     /// Another build of 0.4.7, in a folder of its own, signed by the same root
@@ -369,6 +387,7 @@ impl Transport for Release {
 }
 
 /// How the stand-in effects copy.
+#[cfg(windows)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Copying {
     /// The product's durable copy.
@@ -389,11 +408,13 @@ enum Copying {
 /// **The effects a test holds a Prepare to**: the space the volume reports
 /// (the real answer unless a test says otherwise) and the copy, which a test
 /// may tell to lie or to fail.
+#[cfg(windows)]
 struct TestTools {
     available: Option<u64>,
     copying: Copying,
 }
 
+#[cfg(windows)]
 impl TestTools {
     fn real() -> Self {
         Self {
@@ -410,6 +431,7 @@ impl TestTools {
     }
 }
 
+#[cfg(windows)]
 impl Tools for TestTools {
     fn available(&self, folder: &Path) -> Result<u64, String> {
         self.available.map_or_else(|| System.available(folder), Ok)
@@ -471,6 +493,7 @@ fn press_with(driver: &WinPrepare, transport: SharedTransport, txn: u8) -> Job<u
 /// inbox without applying it, and answer every report taken, in order. The
 /// last word is the sign the worker holds nothing of the transaction; the
 /// journal's removal is not (the lock is let go after it).
+#[cfg(windows)]
 fn last_word(job: &mut Job<u32>, txn: u8) -> Vec<Progress> {
     let deadline = Instant::now() + Duration::from_secs(60);
     let mut taken = Vec::new();
@@ -522,11 +545,13 @@ fn offered(txn: u8) -> Job<u32> {
 }
 
 /// What the Prepare left behind for the job, read off the disk.
+#[cfg(windows)]
 fn journal_on_disk(home: &Home) -> Journal {
     Journal::parse(&std::fs::read(home.journal()).expect("a journal")).expect("a whole journal")
 }
 
 /// The inventories a `Prepared` journal carries.
+#[cfg(windows)]
 fn inventories(journal: &Journal) -> &Inventories {
     match &journal.body.layout {
         Layout::Members(inventories) => inventories,
@@ -536,6 +561,7 @@ fn inventories(journal: &Journal) -> &Inventories {
 
 /// **The job failed with `stop`, and its card says so and that nothing
 /// changed.**
+#[cfg(windows)]
 fn failed_with(job: &Job<u32>, txn: u8, stop: Stop) {
     assert_eq!(
         job.state(),
@@ -549,22 +575,20 @@ fn failed_with(job: &Job<u32>, txn: u8, stop: Stop) {
     );
 }
 
-/// Off Windows there is no test root: **the Windows Prepare refuses before it
-/// writes anything** — the running build's identity cannot be read there
-/// (`trust` refuses by name), so no home is made.
-fn refused_off_windows() {
-    assert_ne!(bt_platform::host_platform(), HostPlatform::Windows);
+/// PIN — off Windows **the Windows Prepare refuses before it writes
+/// anything**: the running build's identity cannot be read there (`trust`
+/// refuses by name), so the press fails at `Identity` and no home is made.
+/// Everything else this file's Prepare tests pin happens after that check,
+/// over files a Windows test root signed, so they are `#[cfg(windows)]`.
+#[cfg(not(windows))]
+#[test]
+fn off_windows_the_windows_prepare_refuses_at_identity_and_writes_nothing() {
     let root = bt_testpath::temp_path("bt-u20-elsewhere");
     let _scratch = Scratch(root.clone());
     std::fs::create_dir_all(&root).unwrap();
     let exe = root.join(EXECUTABLE);
     std::fs::write(&exe, b"not a program").unwrap();
-    let driver = WinPrepare::with(
-        exe,
-        Some(Channel::Ours),
-        Policy::System,
-        Arc::new(TestTools::real()),
-    );
+    let driver = WinPrepare::with(exe, Some(Channel::Ours), Policy::System, Arc::new(System));
     let job = press(&driver, Arc::new(Release::of(Vec::new())), 1);
     assert_eq!(
         job.state(),
@@ -595,11 +619,10 @@ fn refused_off_windows() {
 ///
 /// MUTATION: in `verify_set`, skip `trust::verify_release_file_under` for
 /// `folio.exe` — the attacker's release is `Verified`.
+#[cfg(windows)]
 #[test]
 fn mutated_asset_hash_pair_refuses_before_swap() {
-    let Some(scene) = Scene::new("mutated") else {
-        return refused_off_windows();
-    };
+    let scene = Scene::new("mutated");
     let before = scene.installed();
 
     let attacker = scene.another_release("attacker", OTHER_IDENTITY, "the attacker's command");
@@ -678,11 +701,10 @@ fn mutated_asset_hash_pair_refuses_before_swap() {
 /// MUTATION: in `trust_refused`, drop the `RevocationOffline` arm — the
 /// offline press fails with `Stop::Identity` and *The update is not
 /// verified.*
+#[cfg(windows)]
 #[test]
 fn an_unreachable_revocation_says_the_network_was_the_reason() {
-    let Some(scene) = Scene::naming_its_crls("offline") else {
-        return refused_off_windows();
-    };
+    let scene = Scene::naming_its_crls("offline");
     let before = scene.installed();
     let release = || Arc::new(Release::of(scene.archive.clone()));
     let heading = |job: &Job<u32>| {
@@ -777,11 +799,10 @@ fn a_trust_refusal_is_named_with_its_code_and_only_offline_is_offline() {
 ///
 /// MUTATION: in `stop_for_archive`, drop the `UpdaterTooOld` arm — the job
 /// fails with `Stop::Identity`.
+#[cfg(windows)]
 #[test]
 fn a_release_that_needs_a_newer_updater_says_this_version_is_too_old() {
-    let Some(scene) = Scene::new("too-old") else {
-        return refused_off_windows();
-    };
+    let scene = Scene::new("too-old");
     let before = scene.installed();
     let folder = scene.scratch.0.join("needs-newer");
     std::fs::create_dir_all(&folder).unwrap();
@@ -823,11 +844,10 @@ fn a_release_that_needs_a_newer_updater_says_this_version_is_too_old() {
 ///
 /// MUTATION: in `still_staged`, skip the digest comparison — the short write
 /// is `Verified`.
+#[cfg(windows)]
 #[test]
 fn short_write_disk_full_and_flush_failure_never_verify() {
-    let Some(scene) = Scene::new("short") else {
-        return refused_off_windows();
-    };
+    let scene = Scene::new("short");
     let before = scene.installed();
     for (txn, copying, stop) in [
         (1, Copying::ShortWrite("uninstall.cmd"), Stop::Identity),
@@ -859,11 +879,10 @@ fn short_write_disk_full_and_flush_failure_never_verify() {
 ///
 /// MUTATION: in `acquire`, fetch into `std::env::temp_dir()` instead of
 /// `folders.download`.
+#[cfg(windows)]
 #[test]
 fn staging_is_always_on_the_destination_volume() {
-    let Some(scene) = Scene::new("volume") else {
-        return refused_off_windows();
-    };
+    let scene = Scene::new("volume");
     let release = Arc::new(Release::of(scene.archive.clone()));
     let job = press(&scene.driver(TestTools::real()), Arc::clone(&release), 1);
     assert!(
@@ -928,11 +947,10 @@ fn staging_is_always_on_the_destination_volume() {
 ///
 /// MUTATION: in `prepare_on`'s error arm, skip `abandon` when the stop is
 /// `Stop::Cancelled`.
+#[cfg(windows)]
 #[test]
 fn cancel_leaves_no_transaction() {
-    let Some(scene) = Scene::new("cancel") else {
-        return refused_off_windows();
-    };
+    let scene = Scene::new("cancel");
     let before = scene.installed();
     let gate = Arc::new(crate::lane::Hold::default());
     gate.hold();
@@ -982,11 +1000,10 @@ fn cancel_leaves_no_transaction() {
 /// MUTATION: in `update_prepare::finish`, post nothing for
 /// `Err(Stop::Cancelled)` (the last word never comes), or post it before
 /// `prepare_on` returns (the lock is still held when it is read).
+#[cfg(windows)]
 #[test]
 fn a_cancelled_prepare_reports_only_after_it_lets_the_lock_go() {
-    let Some(scene) = Scene::new("lastword") else {
-        return refused_off_windows();
-    };
+    let scene = Scene::new("lastword");
     let driver = scene.driver(TestTools::real());
     let home = scene.home();
     for txn in 1..=12u8 {
@@ -1027,11 +1044,10 @@ fn a_cancelled_prepare_reports_only_after_it_lets_the_lock_go() {
 /// the real Prepare wrote.
 ///
 /// MUTATION: set `DEFERRED_LAUNCH_LIMIT` to 1 — the first relaunch discards.
+#[cfg(windows)]
 #[test]
 fn a_deferred_transaction_survives_the_first_relaunch() {
-    let Some(scene) = Scene::new("deferred") else {
-        return refused_off_windows();
-    };
+    let scene = Scene::new("deferred");
     let before = scene.installed();
     let job = press(
         &scene.driver(TestTools::real()),
@@ -1101,11 +1117,10 @@ fn a_deferred_transaction_survives_the_first_relaunch() {
 /// there now.
 ///
 /// MUTATION: in `staged_as_verified`, skip `still_staged`.
+#[cfg(windows)]
 #[test]
 fn revalidation_before_resume_refuses_a_changed_set() {
-    let Some(scene) = Scene::new("revalidate") else {
-        return refused_off_windows();
-    };
+    let scene = Scene::new("revalidate");
     let job = press(
         &scene.driver(TestTools::real()),
         Arc::new(Release::of(scene.archive.clone())),
@@ -1170,11 +1185,10 @@ fn revalidation_before_resume_refuses_a_changed_set() {
 ///
 /// MUTATION: in `update_prepare::abandon`, record `Abandoned` and return
 /// without `clear`.
+#[cfg(windows)]
 #[test]
 fn every_failure_road_removes_the_transaction_and_says_nothing_changed() {
-    let Some(scene) = Scene::new("roads") else {
-        return refused_off_windows();
-    };
+    let scene = Scene::new("roads");
     let before = scene.installed();
     let genuine = || Release::of(scene.archive.clone());
     let roads: Vec<(u8, Release, TestTools, Stop)> = vec![
@@ -1251,6 +1265,7 @@ fn every_failure_road_removes_the_transaction_and_says_nothing_changed() {
 }
 
 /// What the scene's archive declares its members add up to.
+#[cfg(windows)]
 fn declared(archive: &[u8]) -> u64 {
     let root = bt_testpath::temp_path("bt-u20-declared");
     let _scratch = Scratch(root.clone());
@@ -1274,11 +1289,10 @@ fn declared(archive: &[u8]) -> u64 {
 ///
 /// MUTATION: make `rescue_is_the_running_build` answer `Ok(())` — the altered
 /// copy is `Verified`.
+#[cfg(windows)]
 #[test]
 fn the_applier_copy_is_verified_and_never_moved() {
-    let Some(scene) = Scene::new("applier") else {
-        return refused_off_windows();
-    };
+    let scene = Scene::new("applier");
     let job = press(
         &scene.driver(TestTools::real()),
         Arc::new(Release::of(scene.archive.clone())),
@@ -1419,21 +1433,18 @@ fn feed_of(folder: &Path, archive: &[u8], sums: &str) -> crate::update::Feed {
 }
 
 /// RED (U-30b) — **with a release feed, a press copies the feed's asset and
-/// its checksum document instead of downloading them, and the Prepare holds
-/// the copy to its sum exactly as it holds a download.**
+/// its checksum document instead of downloading them** (the Prepare's hold of
+/// the copy to its sum is
+/// `the_feed_s_genuine_release_passes_and_a_wrong_sum_is_refused`).
 ///
-/// First the copy alone, on every platform: the asset lands in the download
-/// folder byte for byte, its bytes reported against the length the list
-/// gives. Then, where a test root can sign, the whole Windows Prepare over a
-/// feed of the genuine release reaches `Verified`, and over the same archive
-/// with a checksum line that is not its own stops at `Sums` with *Nothing
-/// changed*. The page's stand-in is never asked.
+/// The copy alone, on every platform: the asset lands in the download folder
+/// byte for byte, its bytes reported against the length the list gives. The
+/// page's stand-in is never asked.
 ///
 /// MUTATION: make `transport_for` answer `page` whatever `feed` is (the page
-/// is asked and the press fails at `Download`); or skip `matches_its_sum` in
-/// the Windows `fetch` (the wrong sum is `Verified`).
+/// is asked).
 #[test]
-fn the_download_copies_the_feed_asset_and_verifies_its_sum() {
+fn the_download_copies_the_feed_asset_without_asking_the_page() {
     let root = bt_testpath::temp_path("bt-u30b-copy");
     let _scratch = Scratch(root.clone());
     let archive = b"a release archive, by the feed".repeat(5_000);
@@ -1465,10 +1476,22 @@ fn the_download_copies_the_feed_asset_and_verifies_its_sum() {
         })
     );
     assert_eq!(page.calls(), 0, "github.com was contacted");
+}
 
-    let Some(scene) = Scene::new("feed-sum") else {
-        return;
-    };
+/// RED (U-30b) — **the Prepare holds a feed's copy to its sum exactly as it
+/// holds a download**: the whole Windows Prepare over a feed of the genuine
+/// release reaches `Verified`, and over the same archive with a checksum line
+/// that is not its own stops at `Sums` with *Nothing changed*. The page's
+/// stand-in is never asked.
+///
+/// MUTATION: make `transport_for` answer `page` whatever `feed` is (the page
+/// is asked and the press fails at `Download`); or skip `matches_its_sum` in
+/// the Windows `fetch` (the wrong sum is `Verified`).
+#[cfg(windows)]
+#[test]
+fn the_feed_s_genuine_release_passes_and_a_wrong_sum_is_refused() {
+    let page = Arc::new(Page::default());
+    let scene = Scene::new("feed-sum");
     let before = scene.installed();
     let genuine = feed_of(
         &scene.scratch.0.join("feed"),
@@ -1527,11 +1550,10 @@ fn the_download_copies_the_feed_asset_and_verifies_its_sum() {
 ///
 /// MUTATION: in `verify_set`, skip `trust::verify_release_file_under` for
 /// `folio.exe` — the feed's foreign build is `Verified`.
+#[cfg(windows)]
 #[test]
 fn a_feed_asset_signed_by_another_signer_is_refused_as_identity() {
-    let Some(scene) = Scene::new("feed-identity") else {
-        return refused_off_windows();
-    };
+    let scene = Scene::new("feed-identity");
     let before = scene.installed();
     let foreign =
         archive_of(&scene.another_release("foreign", OTHER_IDENTITY, "another signer's command"));
@@ -1661,6 +1683,7 @@ fn at_launch_gathered(knows_the_release: bool) -> Gathered {
 }
 
 /// The product's resumer for `scene`'s running build, under the scene's root.
+#[cfg(windows)]
 fn resumer_of(scene: &Scene) -> crate::update_prepare::Resumer {
     resumer(scene.exe.clone(), scene.ca.policy())
 }
@@ -1668,6 +1691,7 @@ fn resumer_of(scene: &Scene) -> crate::update_prepare::Resumer {
 /// **Download, Later, close**: the real Prepare of `v0.4.7` under
 /// transaction `1` reaches `Verified`, and the process ends — the job and the
 /// lock it held are let go, the journal stays at `Prepared`.
+#[cfg(windows)]
 fn prepared_and_closed(scene: &Scene) {
     let job = press(
         &scene.driver(TestTools::real()),
@@ -1737,11 +1761,10 @@ fn allocated_scene(tag: &str) -> (Scratch, PathBuf, Home, TxnId) {
 ///
 /// MUTATION: in `Job::consider`, skip `self.launch_pass(…)` (take the
 /// ordinary road) — the job waits for the check and never shows the card.
+#[cfg(windows)]
 #[test]
 fn a_later_launch_shows_the_verified_card_from_the_staged_set_without_downloading() {
-    let Some(scene) = Scene::new("resume") else {
-        return refused_off_windows();
-    };
+    let scene = Scene::new("resume");
     let before = scene.installed();
     prepared_and_closed(&scene);
 
@@ -1809,11 +1832,10 @@ fn a_later_launch_shows_the_verified_card_from_the_staged_set_without_downloadin
 /// MUTATION: in `update_prepare::settle_at_launch`, answer
 /// `Landed::Resumed` without calling `resume` (the changed set is shown as
 /// verified).
+#[cfg(windows)]
 #[test]
 fn a_later_launch_discards_a_staged_set_that_fails_revalidation() {
-    let Some(scene) = Scene::new("resume-refused") else {
-        return refused_off_windows();
-    };
+    let scene = Scene::new("resume-refused");
     let before = scene.installed();
     prepared_and_closed(&scene);
     let set = scene
@@ -1853,11 +1875,10 @@ fn a_later_launch_discards_a_staged_set_that_fails_revalidation() {
 /// MUTATION: in `update_prepare::settle_at_launch`, treat
 /// `AtLaunch::Discarded` as a resume of the set the journal names (or set
 /// `DEFERRED_LAUNCH_LIMIT` to 3) — the second launch shows the card again.
+#[cfg(windows)]
 #[test]
 fn the_second_launch_that_finds_a_staged_set_discards_it() {
-    let Some(scene) = Scene::new("resume-twice") else {
-        return refused_off_windows();
-    };
+    let scene = Scene::new("resume-twice");
     let before = scene.installed();
     prepared_and_closed(&scene);
 
@@ -1975,6 +1996,7 @@ fn a_later_launch_that_finds_the_lock_held_changes_nothing_and_offers_nothing() 
 
 /// What the road asked of a layout's Prepare, and the journal on disk when
 /// it asked: `None` where there was none yet.
+#[cfg(windows)]
 type PrepareCall = (
     &'static str,
     Option<(PhaseKind, crate::update_txn::Adapter)>,
@@ -1983,12 +2005,14 @@ type PrepareCall = (
 /// **A fake layout's Prepare** — the harness U-41b and U-41c build theirs on
 /// (managed-update §6): every call recorded with the journal on disk,
 /// delegated to Folio's own layout unless it is told to refuse with `refuse`.
+#[cfg(windows)]
 #[derive(Clone, Default)]
 struct PrepareRecorder {
     calls: Arc<Mutex<Vec<PrepareCall>>>,
     refuse: Option<Stop>,
 }
 
+#[cfg(windows)]
 impl PrepareRecorder {
     fn note(&self, point: &'static str, home: &Home) {
         let on_disk = std::fs::read(home.journal()).ok().map(|bytes| {
@@ -2003,6 +2027,7 @@ impl PrepareRecorder {
     }
 }
 
+#[cfg(windows)]
 impl PreparePoint for PrepareRecorder {
     fn allocated(&self, running: &Running) -> Layout {
         self.calls.lock().unwrap().push(("allocated", None));
@@ -2038,11 +2063,10 @@ impl PreparePoint for PrepareRecorder {
 /// MUTATION: in `prepare_on`, acquire through `Ours` in place of the layout
 /// the adapter names (`layout.prepare` → `Ours.prepare`) — the recorder hears
 /// no `prepare`.
+#[cfg(windows)]
 #[test]
 fn the_press_calls_the_prepare_of_the_layout_its_adapter_names_once_at_allocated() {
-    let Some(scene) = Scene::new("layout-prepare") else {
-        return refused_off_windows();
-    };
+    let scene = Scene::new("layout-prepare");
     let recorder = PrepareRecorder::default();
     let driver = scene
         .driver(TestTools::real())
@@ -2088,11 +2112,10 @@ fn the_press_calls_the_prepare_of_the_layout_its_adapter_names_once_at_allocated
 ///
 /// MUTATION: in `prepare_on`, acquire through `Ours` in place of the layout
 /// the adapter names — the refusal is never met and the job is `Verified`.
+#[cfg(windows)]
 #[test]
 fn a_layout_that_refuses_its_prepare_abandons_and_leaves_nothing() {
-    let Some(scene) = Scene::new("layout-refuses") else {
-        return refused_off_windows();
-    };
+    let scene = Scene::new("layout-refuses");
     let before = scene.installed();
     let recorder = PrepareRecorder {
         refuse: Some(Stop::Copy),
@@ -2178,10 +2201,10 @@ impl WinPrepare {
     }
 }
 
+#[cfg(windows)]
 impl Scene {
     /// A driver whose tools hold the journal ([`ScansTheJournal`]) in `hold`,
     /// and whose held writes are asked again on `clock`.
-    #[cfg(windows)]
     fn scanned(
         &self,
         hold: &Arc<Mutex<Option<ScannerHold>>>,
@@ -2242,7 +2265,7 @@ fn pending_phase(home: &Home) -> PhaseKind {
 #[cfg(windows)]
 #[test]
 fn a_prepare_whose_journal_is_held_writes_it_once_the_hold_lifts() {
-    let scene = Scene::new("journal-held").expect("Windows has a test root");
+    let scene = Scene::new("journal-held");
     let hold: Arc<Mutex<Option<ScannerHold>>> = Arc::default();
     let lifts = Arc::clone(&hold);
     let mut held_pauses = 0;
@@ -2294,7 +2317,7 @@ fn a_prepare_whose_journal_is_held_writes_it_once_the_hold_lifts() {
 #[cfg(windows)]
 #[test]
 fn a_cancel_while_the_journal_is_held_ends_the_wait() {
-    let scene = Scene::new("journal-held-cancel").expect("Windows has a test root");
+    let scene = Scene::new("journal-held-cancel");
     let before = scene.installed();
     let home = scene.home();
     let (paused, paused_seen) = mpsc::channel();

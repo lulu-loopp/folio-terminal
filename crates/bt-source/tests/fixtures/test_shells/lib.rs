@@ -97,3 +97,53 @@ mod birth_fallbacks {
 
 /// A free function of the door's name: its calls would read as the door's too.
 pub fn spawn_last_resort() {}
+
+/// The product's shell birth, its retry the person's (plan row 182): product code names both.
+pub fn create_leaf_session(spec: ShellSpec) {
+    let _ = pty_door::request_shell(spec, wake());
+    let _ = bear(ctx(), turns(), spec, Retry::ThePersons, wake());
+}
+
+#[cfg(test)]
+mod product_retries {
+    #[test]
+    fn a_birth_with_the_persons_retry() {
+        let _ = crate::pty_door::request_shell(spec(), wake());
+        let _ = bear(ctx(), turns(), spec(), Retry::ThePersons, wake());
+    }
+
+    #[test]
+    fn allowed_through_the_tests_retry() {
+        let _ = crate::pty_door::request_shell_in(turns(), spec(), wake());
+        let _ = bear(ctx(), turns(), spec(), Retry::OneShotForATest, wake());
+    }
+
+    #[test]
+    fn a_birth_through_a_grouped_import() {
+        use crate::pty_door::{ShellSpec, request_shell};
+        let _ = request_shell(spec(), wake());
+    }
+
+    #[test]
+    fn a_birth_through_the_parent_module() {
+        let _ = super::request_shell(spec(), wake());
+    }
+
+    #[test]
+    fn the_persons_retry_through_a_grouped_import() {
+        use super::Retry::{OneShotForATest, ThePersons};
+        let _ = bear(ctx(), turns(), spec(), ThePersons, wake());
+    }
+
+    #[test]
+    fn the_persons_retry_through_a_glob_import() {
+        use super::Retry::*;
+        let _ = bear(ctx(), turns(), spec(), ThePersons, wake());
+    }
+}
+
+/// A test-build door that gives a test's birth the person's retry: test code too.
+#[cfg(test)]
+pub(crate) fn request_shell_in(spec: ShellSpec) {
+    let _ = bear(ctx(), turns(), spec, Retry::ThePersons, wake());
+}

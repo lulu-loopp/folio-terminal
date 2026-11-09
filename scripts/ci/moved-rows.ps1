@@ -1,6 +1,7 @@
 # The "moved, not added" rule of the shrink-only lists (T-MOVED-NOT-ADDED-RULE, ruling R1 (a) of
 # T-SPLIT-2B), dot-sourced by check-census-unknowns.ps1, check-pointer-debt.ps1,
-# check-env-doors.ps1, check-window-seam-native.ps1 and check-embedded-spaces.ps1. It is
+# check-env-doors.ps1, check-window-seam-native.ps1, check-embedded-spaces.ps1 and
+# check-doc-link-debt.ps1. It is
 # check-dead-code.ps1's rule (U-44) said once for row shapes whose location is not one column.
 #
 # Each check first matches its tree's rows against the merge base's as it always has. What is left
@@ -131,8 +132,8 @@ function Format-MoveRefusal([object]$Result) {
 #
 # (i) failing with more than one row on a side is AMBIGUOUS and refused; (iii) failing is refused
 # with the form it needs. The lists with no reason column of their own (the census unknowns, the
-# pointer debt) and the one whose rows name no item (embedded spaces) have no rename arm: a
-# renamed item there is an added row, as before.
+# pointer debt, the doc-link debt) and the one whose rows name no item (embedded spaces) have no
+# rename arm: a renamed item there is an added row, as before.
 function Find-RenamedRows {
     param(
         [object[]]$Added,
