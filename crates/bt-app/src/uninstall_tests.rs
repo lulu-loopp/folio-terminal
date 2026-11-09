@@ -665,40 +665,117 @@ fn uninstall_door_precedes_every_startup_effect() {
 }
 
 /// The calls a squeezed function body (`test_support::squeezed`: no comments, no whitespace) makes
-/// with the carry worker's context as their first argument, `path::to::member(ctx)` or
-/// `path::to::member(ctx, …)`, by their paths as written (the review's N2 and N3).
+/// with the carry worker's context as an argument, by their paths as written with any turbofish
+/// left out (the review's N2 and N3, the re-review's R3).
 ///
-/// A path is read back from the `(ctx` over identifiers and `::`; a lone `:` (a field's
-/// `hooks:`) or any other character ends it.
-fn calls_handed_the_context(squeezed_body: &str) -> Vec<&str> {
+/// The context is `ctx` or `&ctx` standing as a whole argument, in any position: after the call's
+/// `(` or a `,`, before a `,` or the `)`. The call is the innermost `(` left open in front of it,
+/// over balanced brackets; its path is read back from that `(` over identifiers, `::` and a
+/// turbofish's `::<…>`, and a lone `:` (a field's `hooks:`) or any other character ends it. A
+/// context in brackets that are not a call's, or whose call has no path the reader can name (a
+/// closure called in place, a parenthesised expression), fails here, loudly, rather than being
+/// left out.
+fn calls_handed_the_context(squeezed_body: &str) -> Vec<String> {
     let bytes = squeezed_body.as_bytes();
+    let identifier = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
+    fn unnamed(squeezed_body: &str, at: usize) -> ! {
+        let boundary = |mut index: usize| {
+            while !squeezed_body.is_char_boundary(index) {
+                index -= 1;
+            }
+            index
+        };
+        let around = &squeezed_body
+            [boundary(at.saturating_sub(40))..boundary((at + 40).min(squeezed_body.len()))];
+        panic!("a context call the reader cannot name, at byte {at}: {around}")
+    }
     let mut calls = Vec::new();
     let mut from = 0;
-    while let Some(found) = squeezed_body[from..].find("(ctx") {
+    while let Some(found) = squeezed_body[from..].find("ctx") {
         let at = from + found;
-        from = at + "(ctx".len();
-        if !matches!(bytes.get(from), Some(b')' | b',')) {
+        from = at + "ctx".len();
+        let argument = if at > 0 && bytes[at - 1] == b'&' {
+            at - 1
+        } else {
+            at
+        };
+        let opened_by = argument.checked_sub(1).map(|before| bytes[before]);
+        if !matches!(opened_by, Some(b'(' | b',')) || !matches!(bytes.get(from), Some(b')' | b','))
+        {
             continue;
         }
-        let mut start = at;
-        while start > 0 {
-            let byte = bytes[start - 1];
-            if byte.is_ascii_alphanumeric() || byte == b'_' {
+        let mut open = argument - 1;
+        let mut depth = 0usize;
+        loop {
+            match bytes[open] {
+                b')' | b']' | b'}' => depth += 1,
+                b'(' | b'[' | b'{' if depth > 0 => depth -= 1,
+                b'(' => break,
+                b'[' | b'{' => unnamed(squeezed_body, at),
+                _ => {}
+            }
+            open = open
+                .checked_sub(1)
+                .unwrap_or_else(|| unnamed(squeezed_body, at));
+        }
+        let mut start = open;
+        let mut generics = Vec::new();
+        loop {
+            if start > 0 && bytes[start - 1] == b'>' {
+                let close = start;
+                let mut angle = 0usize;
+                loop {
+                    start = start
+                        .checked_sub(1)
+                        .unwrap_or_else(|| unnamed(squeezed_body, at));
+                    match bytes[start] {
+                        b'>' => angle += 1,
+                        b'<' => {
+                            angle -= 1;
+                            if angle == 0 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if start < 2 || &bytes[start - 2..start] != b"::" {
+                    unnamed(squeezed_body, at);
+                }
+                start -= 2;
+                generics.push(start..close);
+            } else if start > 0 && identifier(bytes[start - 1]) {
                 start -= 1;
-            } else if byte == b':' && start >= 2 && bytes[start - 2] == b':' {
+            } else if start >= 2 && bytes[start - 1] == b':' && bytes[start - 2] == b':' {
                 start -= 2;
             } else {
                 break;
             }
         }
-        if start < at {
-            calls.push(&squeezed_body[start..at]);
+        let mut path = String::new();
+        let mut cursor = start;
+        for generic in generics.iter().rev() {
+            path.push_str(&squeezed_body[cursor..generic.start]);
+            cursor = generic.end;
         }
+        path.push_str(&squeezed_body[cursor..open]);
+        let named = path.trim_start_matches("::");
+        let segments_named = named.split("::").all(|segment| {
+            segment
+                .bytes()
+                .next()
+                .is_some_and(|first| identifier(first) && !first.is_ascii_digit())
+        });
+        if named.is_empty() || !segments_named {
+            unnamed(squeezed_body, at);
+        }
+        calls.push(path);
     }
     calls
 }
 
-/// The member reader reads what the pass hands its context to, and nothing it does not.
+/// The member reader reads what the pass hands its context to, in any argument position, and
+/// nothing it does not.
 #[test]
 fn the_carry_members_are_read_by_their_context_argument() {
     use crate::test_support::squeezed;
@@ -709,14 +786,49 @@ fn the_carry_members_are_read_by_their_context_argument() {
         "other: crate::b::second(ctx, &mut kept),\n",
         "};\n",
         "// crate::c::commented(ctx),\n",
-        "let _ = ctx_free(ctxs);\n",
+        "let _ = ctx_free(ctxs, ctx.depth(), the.ctx);\n",
         "let _ = crate::d::third( ctx );\n",
+        "let _ = crate::e::fourth(&ctx);\n",
+        "let _ = crate::f::fifth(&mut kept, [1, 2], ctx);\n",
+        "let _ = crate::g::sixth::<Vec<u8>>(ctx);\n",
+        "let _ = Some(crate::h::seventh(kept(1), ctx));\n",
         "}",
     ));
     assert_eq!(
         calls_handed_the_context(&body),
-        ["crate::a::first", "crate::b::second", "crate::d::third"]
+        [
+            "crate::a::first",
+            "crate::b::second",
+            "crate::d::third",
+            "crate::e::fourth",
+            "crate::f::fifth",
+            "crate::g::sixth",
+            "crate::h::seventh",
+        ]
     );
+}
+
+/// The member reader fails, loudly, on a context handed to a call it cannot name.
+#[test]
+fn a_context_call_the_member_reader_cannot_name_fails_it() {
+    use crate::test_support::squeezed;
+    for unnamed in [
+        "let _ = (|context| context)(ctx);",
+        "let _ = (ctx);",
+        "let _ = [kept, ctx, kept];",
+        "let _ = 1::<u8>(ctx);",
+    ] {
+        let read = std::panic::catch_unwind(|| calls_handed_the_context(&squeezed(unnamed)));
+        let failure = read.expect_err(unnamed);
+        let message = failure
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .unwrap_or_default();
+        assert!(
+            message.starts_with("a context call the reader cannot name"),
+            "{unnamed}: {message}"
+        );
+    }
 }
 
 /// Whether `text` names a date, `YYYY-MM-DD`.
@@ -826,7 +938,7 @@ fn every_owned_thing_says_how_an_update_carries_it() {
         match check.in_the_pass() {
             Ok(member) => {
                 assert!(
-                    handed.contains(&member.call),
+                    handed.iter().any(|called| called == member.call),
                     "{name}: {check:?} is in the pass by its declaration, and \
                      `run_carry_steps` does not hand {}(ctx) the worker's context",
                     member.call
@@ -870,7 +982,7 @@ fn every_owned_thing_says_how_an_update_carries_it() {
     }
     for called in &handed {
         assert!(
-            members.contains(called),
+            members.contains(&called.as_str()),
             "the pass hands {called} the worker's context, and no owned thing declares it as its \
              check"
         );
