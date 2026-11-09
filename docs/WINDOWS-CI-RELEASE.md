@@ -323,6 +323,10 @@ The store on 2026-10-17 (`gh cache list`), 9.97 GB in 11 entries:
 | `logic` | `main` | 1.82 | superseded (the previous `Cargo.lock`) |
 | `logic` | a branch | 1.82 | readable by that branch only |
 
+The `docs` job (2026-11-02, T-DOC-LINK-DEBT) saved its first `main` entry on
+2026-11-09: 0.44 GB, so `main`'s current entries are ten jobs, 6.77 GB (6.33 in
+the table above plus `docs`).
+
 Over the 58 `ci.yml` runs of 2026-10-15..17 branch runs saved 157 entries
 (113.7 GB) and `main` 37 (25.0 GB); the branch entries were read back by their
 own branch 18 times. After the toolchain pin, 12 of `main`'s 90 job runs found
