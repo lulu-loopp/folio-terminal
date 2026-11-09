@@ -31166,7 +31166,7 @@ mod tests {
         // of itself is asking about a place it cannot name.
         let wash = only(
             needle!(Pattern::text(concat!(
-                "self.math_selection_wash_",
+                "painter.math_selection_wash_",
                 "rectangles(entry.metrics, frame);"
             ))),
             View::Raw,
@@ -31174,7 +31174,7 @@ mod tests {
         );
         let chrome = only(
             needle!(Pattern::text(concat!(
-                "math_overlays.extend(self.math_overlay_",
+                "math_overlays.extend(painter.math_overlay_",
                 "rectangles(entry.metrics, frame));"
             ))),
             View::Raw,
