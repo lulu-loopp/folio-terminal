@@ -116,7 +116,7 @@ use std::{
 };
 
 use crate::instance::SOCKET_PATH_LIMIT;
-use crate::launch_conversation::{LaunchClock, RealClock};
+use crate::launch_clock::{LaunchClock, RealClock};
 
 /// The longest single frame this endpoint will take, in bytes.
 ///
@@ -906,7 +906,7 @@ pub fn unguessable_bits() -> u128 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::launch_conversation::{CountedClock, Turn};
+    use crate::launch_clock::{CountedClock, Turn};
     use std::sync::mpsc;
 
     /// **An endpoint for `directory` on `clock`**, delivering into the channel

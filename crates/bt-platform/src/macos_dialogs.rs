@@ -799,7 +799,7 @@ unsafe extern "C" {
 /// resident run has no console to write to — and `say_at_the_front_door`, which
 /// is a launch that is about to exit. A controlled stop saying, before its
 /// windows close, the configuration changes it could keep nowhere
-/// (T-QUIT-DOCUMENTS; `bt_app`'s `SystemBox::say`) does not come here, and
+/// (T-QUIT-DOCUMENTS; `bt_app`'s `BoxOver::say`) does not come here, and
 /// neither does `FolioApp::fail`'s frame-shape stop announcing its crash report
 /// on the window thread (`bt_app`'s `announce_frame_shape_stop`): each asks
 /// [`crate::a_box_would_be_seen`] first and raises the box through the
