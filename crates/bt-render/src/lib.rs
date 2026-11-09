@@ -10308,6 +10308,9 @@ impl WindowRenderer {
         // draws reads `body_state` or a seat, and the key holds both; so a key that matches is a
         // body that would come out the same byte for byte, and the loop is skipped. The window's
         // furniture — a working mark's step, a menu, the peek, a fade — moves nothing here.
+        // The key's own price is timed (review N4): the comparison walks every cell of every
+        // pane on every frame, kept body or not.
+        let key_compare_started = Instant::now();
         let body_state = self.body_state(gpu, ground_alpha);
         let body_clean = if self.body_route == BodyRoute::Layer
             && let Some(BodyLayer { key: Some(key), .. }) = &self.body
@@ -10316,6 +10319,7 @@ impl WindowRenderer {
         } else {
             false
         };
+        let key_compared = key_compare_started.elapsed();
         let mut prepared: Vec<PreparedSeat> = Vec::with_capacity(seats.len());
         // Every rendered table on screen, from every seat, gathered as this frame's extra preview
         // bodies. They join the list the caller set rather than forming a pass of their own: a
@@ -11603,6 +11607,9 @@ impl WindowRenderer {
         // The body this frame drew is in its layer now, and only now may the key say so: a frame
         // that left before its submit changed nothing in the texture, and the key it left behind
         // still names what is there.
+        // A composed body's key is a copy of every pane's frame; its price is timed with the
+        // comparison's (review N4).
+        let key_file_started = Instant::now();
         let body_use = if body_clean {
             BodyUse::Reused
         } else {
@@ -11612,6 +11619,7 @@ impl WindowRenderer {
             }
             BodyUse::Composed
         };
+        let key_filed = key_file_started.elapsed();
         phase(PresentPhase::Present);
         match acquired {
             AcquiredFrame::Swapchain(texture) => gpu.queue.present(texture),
@@ -11651,7 +11659,7 @@ impl WindowRenderer {
             // a run with a sink is a `try_send` and nothing else.
             let trace_started = Instant::now();
             bt_viewport::trace::line(format!(
-                "BT_PERF_TRACE frame={} seats={} source={:?} cells={} nonblank_cells={} first_text_row={} last_text_row={} content_fnv={:016x} alt={} digest_us={} validate_us={} viewport_us={} row_compose_us={} rows_reshaped={} row_cache_hits={} row_cache_misses={} row_cache_evictions={} row_cache_resident_bytes={} shape_miss_us={} narrow_hits={} narrow_misses={} narrow_evictions={} narrow_resident_bytes={} wide_hits={} wide_misses={} wide_evictions={} wide_resident_bytes={} atlas_prepare_upload_us={} atlas_hits=unmeasurable_glyphon_0_12 atlas_misses=unmeasurable_glyphon_0_12 atlas_grows=unmeasurable_glyphon_0_12 atlas_evictions=unmeasurable_glyphon_0_12 atlas_upload_bytes=unmeasurable_glyphon_0_12 rectangles_us={} math_prepare_upload_us={} math_blocks={} math_texture_evictions={} math_texture_refusals={} textureless_math_blocks={} math_texture_resident_bytes={} acquire_us={} encode_us={} submit_us={} present_us={} total_us={} trace_us={} body={} body_us={}",
+                "BT_PERF_TRACE frame={} seats={} source={:?} cells={} nonblank_cells={} first_text_row={} last_text_row={} content_fnv={:016x} alt={} digest_us={} validate_us={} viewport_us={} row_compose_us={} rows_reshaped={} row_cache_hits={} row_cache_misses={} row_cache_evictions={} row_cache_resident_bytes={} shape_miss_us={} narrow_hits={} narrow_misses={} narrow_evictions={} narrow_resident_bytes={} wide_hits={} wide_misses={} wide_evictions={} wide_resident_bytes={} atlas_prepare_upload_us={} atlas_hits=unmeasurable_glyphon_0_12 atlas_misses=unmeasurable_glyphon_0_12 atlas_grows=unmeasurable_glyphon_0_12 atlas_evictions=unmeasurable_glyphon_0_12 atlas_upload_bytes=unmeasurable_glyphon_0_12 rectangles_us={} math_prepare_upload_us={} math_blocks={} math_texture_evictions={} math_texture_refusals={} textureless_math_blocks={} math_texture_resident_bytes={} acquire_us={} encode_us={} submit_us={} present_us={} total_us={} trace_us={} body={} body_us={} body_key_us={}",
                 self.perf_frame,
                 seats.len(),
                 trigger.source,
@@ -11695,6 +11703,7 @@ impl WindowRenderer {
                 self.perf_trace_us,
                 body_use.as_str(),
                 (body_prepare + body_encoded).as_micros(),
+                (key_compared + key_filed).as_micros(),
             ));
             self.perf_trace_us = trace_started.elapsed().as_micros();
         }
@@ -36277,6 +36286,49 @@ mod tests {
             let drawn = present(&mut window, &mut gpu, &one_bold_han(metrics));
             assert!(matches!(drawn, PresentOutcome::Presented(_)), "{drawn:?}");
             assert!(all_ink(&window.read_back(&gpu).expect("it reads back")) > 0);
+        }
+
+        /// RED (row 64a, review N1) — **a body that lost its text is not kept**: the frame owed
+        /// again is drawn again, not put back.
+        ///
+        /// A refused frame's body is the grid without its text. Kept under the frame's key, the
+        /// same frame asked again would match it, skip the seat loop, report itself complete and
+        /// stop the retry, and the panes would stay blank until one of them changed. The id
+        /// ceiling refuses the frame (the road the test above pins); the same frame is then
+        /// presented with the ceiling lifted.
+        ///
+        /// MUTATION (P6): file every body (`let body_keepable = true || …` in `compose_frame`) —
+        /// the second present puts back the textless body: `Presented`, no new compose, no ink.
+        #[test]
+        fn a_body_that_lost_its_text_is_drawn_again_for_the_same_frame() {
+            let Some(mut gpu) = on_the_software_adapter(FORMAT) else {
+                return;
+            };
+            regular_only_families(&mut gpu, 16.0);
+            let mut window =
+                WindowRenderer::offscreen(&mut gpu, 240, 80, 1.0, FORMAT).expect("a window");
+            let frame = two_synthesized_cells(window.base_metrics());
+            gpu.synthetic_bold.set_ceiling(1);
+
+            let refused = present(&mut window, &mut gpu, &frame);
+            assert!(
+                matches!(refused, PresentOutcome::PresentedWithoutText(_)),
+                "{refused:?}"
+            );
+            assert_eq!(window.body_composes(), 1, "the refused frame drew its body");
+
+            gpu.synthetic_bold.set_ceiling(usize::MAX);
+            let drawn = present(&mut window, &mut gpu, &frame);
+            assert!(matches!(drawn, PresentOutcome::Presented(_)), "{drawn:?}");
+            assert_eq!(
+                window.body_composes(),
+                2,
+                "the same frame, owed again, draws its body again, not the textless one it drew"
+            );
+            assert!(
+                all_ink(&window.read_back(&gpu).expect("it reads back")) > 0,
+                "its text reaches the glass"
+            );
         }
 
         /// RED (38) — **a synthetic bold glyph is drawn again after the atlas is

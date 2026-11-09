@@ -267,8 +267,10 @@ fn the_kept_body_is_the_body_drawn_directly_byte_for_byte() {
     let restore_style = current_cursor_style();
     let mut gpu = pollster::block_on(GpuContext::headless(FORMAT)).expect("a device");
     for scale in [1.0_f64, 1.5, 2.0] {
-        for (ground_name, ground) in grounds() {
-            let _ = set_window_ground(ground);
+        let all_grounds = grounds();
+        for (index, (ground_name, ground)) in all_grounds.iter().enumerate() {
+            let (_, next_ground) = &all_grounds[(index + 1) % all_grounds.len()];
+            let _ = set_window_ground(ground.clone());
             let at = |frame: &str| format!("scale {scale}, ground {ground_name}, {frame}");
             let width = (f64::from(WIDTH) * scale).round() as u32;
             let height = (f64::from(HEIGHT) * scale).round() as u32;
@@ -316,33 +318,84 @@ fn the_kept_body_is_the_body_drawn_directly_byte_for_byte() {
             same_bytes(&gpu, &kept, &direct, &at("a pane printed"));
             assert_eq!(kept.body_composes(), 2, "{}", at("a pane printed"));
 
-            // Frame 10: the caret blinks off.
+            // Frame 10: a mark step after it. The body this compose filed is put back.
+            for window in [&mut kept, &mut direct] {
+                chrome(window, width, 9);
+                present(&mut gpu, window, &boxes, &frames);
+            }
+            same_bytes(&gpu, &kept, &direct, &at("a mark step after the print"));
+            assert_eq!(
+                kept.body_composes(),
+                2,
+                "{}: the body drawn from the printed rows is the one kept",
+                at("a mark step after the print")
+            );
+
+            // Frame 11: the caret blinks off.
             for window in [&mut kept, &mut direct] {
                 let _ = window.set_cursor_blink_visible(false);
                 present(&mut gpu, window, &boxes, &frames);
             }
-            same_bytes(&gpu, &kept, &direct, &at("the caret blinked"));
-            assert_eq!(kept.body_composes(), 3, "{}", at("the caret blinked"));
+            same_bytes(&gpu, &kept, &direct, &at("the caret blinked off"));
+            assert_eq!(kept.body_composes(), 3, "{}", at("the caret blinked off"));
 
-            // Frame 11: the caret changes shape, lit again.
-            let _ = set_cursor_style(CursorStyle::Underline);
+            // Frame 12: the caret lights again, and nothing else moves.
             for window in [&mut kept, &mut direct] {
                 let _ = window.set_cursor_blink_visible(true);
                 present(&mut gpu, window, &boxes, &frames);
             }
-            same_bytes(&gpu, &kept, &direct, &at("the caret's shape"));
-            assert_eq!(kept.body_composes(), 4, "{}", at("the caret's shape"));
-            let _ = set_cursor_style(restore_style);
+            same_bytes(&gpu, &kept, &direct, &at("the caret blinked on"));
+            assert_eq!(kept.body_composes(), 4, "{}", at("the caret blinked on"));
 
-            // Frame 12: the window is resized; the panes keep their boxes inside it.
+            // Frame 13: the caret changes shape, lit, and nothing else moves.
+            let _ = set_cursor_style(CursorStyle::Underline);
+            for window in [&mut kept, &mut direct] {
+                present(&mut gpu, window, &boxes, &frames);
+            }
+            same_bytes(&gpu, &kept, &direct, &at("the caret's shape"));
+            assert_eq!(kept.body_composes(), 5, "{}", at("the caret's shape"));
+
+            // Frame 14: the window loses the keyboard; its caret goes hollow.
+            for window in [&mut kept, &mut direct] {
+                let _ = window.set_window_focused(false);
+                present(&mut gpu, window, &boxes, &frames);
+            }
+            same_bytes(&gpu, &kept, &direct, &at("the window's focus"));
+            assert_eq!(kept.body_composes(), 6, "{}", at("the window's focus"));
+
+            // Frame 15: the ground changes under the live windows — the next case's ground.
+            let _ = set_window_ground(next_ground.clone());
+            for window in [&mut kept, &mut direct] {
+                present(&mut gpu, window, &boxes, &frames);
+            }
+            same_bytes(&gpu, &kept, &direct, &at("the ground changed"));
+            assert_eq!(kept.body_composes(), 7, "{}", at("the ground changed"));
+
+            // Frame 16: the window is resized; the panes keep their boxes inside it.
+            let (wider, taller) = (width + 37, height + 23);
             for window in [&mut kept, &mut direct] {
                 window
-                    .resize(&gpu, width + 37, height + 23)
+                    .resize(&gpu, wider, taller)
                     .expect("the window resizes");
                 present(&mut gpu, window, &boxes, &frames);
             }
             same_bytes(&gpu, &kept, &direct, &at("a resize"));
-            assert_eq!(kept.body_composes(), 5, "{}", at("a resize"));
+            assert_eq!(kept.body_composes(), 8, "{}", at("a resize"));
+
+            // Frame 17: a mark step at the new size. The body filed into the remade layer is put
+            // back.
+            for window in [&mut kept, &mut direct] {
+                chrome(window, wider, 0);
+                present(&mut gpu, window, &boxes, &frames);
+            }
+            same_bytes(&gpu, &kept, &direct, &at("a mark step after the resize"));
+            assert_eq!(
+                kept.body_composes(),
+                8,
+                "{}: the body drawn at the new size is the one kept",
+                at("a mark step after the resize")
+            );
+            let _ = set_cursor_style(restore_style);
         }
     }
     let _ = set_window_ground(restore_ground);
