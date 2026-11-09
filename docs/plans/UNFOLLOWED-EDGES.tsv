@@ -8133,7 +8133,6 @@ crates/bt-platform/src/deferred_removal.rs	bt-platform crate::deferred_removal::
 crates/bt-platform/src/deferred_removal.rs	bt-platform crate::deferred_removal::copy_new	Ambiguous	open	1	
 crates/bt-platform/src/deferred_removal.rs	bt-platform crate::deferred_removal::copy_new	Ambiguous	permissions	1	
 crates/bt-platform/src/deferred_removal.rs	bt-platform crate::deferred_removal::copy_new	Ambiguous	sync_all	1	
-crates/bt-platform/src/deferred_removal.rs	bt-platform crate::deferred_removal::discard_stopped	Ambiguous	kind	1	2026-11-07: T-STOPPED-REMOVER-COPY-DELETED-WITH-A-RETRY (0.4.10 plan row 65); added: io::Error kind of the stopped remover's failed copy delete (NotFound ends the retry); an in-memory read of the error the delete returned, no wait
 crates/bt-platform/src/deferred_removal.rs	bt-platform crate::deferred_removal::failure_summary	Ambiguous	join	2	
 crates/bt-platform/src/deferred_removal.rs	bt-platform crate::deferred_removal::failure_summary	Ambiguous	to_string	1	
 crates/bt-platform/src/deferred_removal.rs	bt-platform crate::deferred_removal::failure_without_plan	Ambiguous	flush	1	
