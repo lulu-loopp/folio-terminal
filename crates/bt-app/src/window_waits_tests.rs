@@ -4158,14 +4158,18 @@ const PINS: [Pin; 25] = [
 ];
 
 /// The two remover helpers whose raw effects became worker doors are reached only from the worker
-/// roads that own them: `schedule` for the durable private copy, and the copied remover's
-/// `run_from_environment` for its refusal line. This is the call-site half of their `# effects`
-/// rows; the registry guard separately proves that each helper itself takes `WorkerCtx`.
+/// roads that own them: `schedule_by` (`schedule`'s body) for the durable private copy, and the
+/// copied remover's `run_from_environment` for its refusal line. This is the call-site half of
+/// their `# effects` rows; the registry guard separately proves that each helper itself takes
+/// `WorkerCtx`.
 fn the_remover_effect_doors_are_called_only_from_their_worker_roads(world: &World) -> Vec<String> {
     remover_door_failures(
         world.src("bt-platform"),
         &[
-            ("copy_new", "bt-platform crate::deferred_removal::schedule"),
+            (
+                "copy_new",
+                "bt-platform crate::deferred_removal::schedule_by",
+            ),
             (
                 "failure_without_plan",
                 "bt-platform crate::deferred_removal::run_from_environment",

@@ -138,7 +138,7 @@ use objc2_foundation::{
 };
 
 use crate::https_download::{Deadlines, Destination, Partial, admit_length};
-use crate::launch_conversation::{LaunchClock, RealClock};
+use crate::launch_clock::{LaunchClock, RealClock};
 
 /// The one request this module knows how to make.
 ///
@@ -930,7 +930,7 @@ mod tests {
 
     use super::{HttpsGet, address, fetch, https_get};
     use crate::https_download::loopback::{Entry, Served, Step, serve};
-    use crate::launch_conversation::{CountedClock, Turn};
+    use crate::launch_clock::{CountedClock, Turn};
 
     /// The product's own numbers, so that what these cases exercise is what
     /// `bt_app::update` exercises.
