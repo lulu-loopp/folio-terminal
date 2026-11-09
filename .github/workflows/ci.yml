@@ -1625,9 +1625,9 @@ jobs:
   docs:
     if: github.event_name != 'workflow_dispatch' || github.ref != 'refs/heads/main'
     runs-on: windows-2025
-    # Provisional, until runs measure it (docs/WINDOWS-CI-RELEASE.md, "Job budgets"): the
-    # 10-minute ceiling ruled for a separate job (plan row 78), x 1.36, rounded up. Re-derive by
-    # the rule from the first cold runs.
+    # docs/WINDOWS-CI-RELEASE.md, "Job budgets": the 10-minute ceiling ruled for a separate job
+    # (plan row 78), x 1.36, rounded up. The first cold run, 42637954622 (2026-11-09), took
+    # 6.07 min, so the ruling keeps 14; re-derive by the rule when a cold total passes 10.3.
     timeout-minutes: 14
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
