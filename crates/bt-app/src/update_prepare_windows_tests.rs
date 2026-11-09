@@ -1994,6 +1994,21 @@ fn a_later_launch_that_finds_the_lock_held_changes_nothing_and_offers_nothing() 
 
 // ── the layout's Prepare (U-41a1) ───────────────────────────────────────────
 
+/// The test's own way to give a driver a layout (Windows only: its only users
+/// are the tests that press one over a fake layout; `MacPrepare`'s twin is in
+/// `update_prepare_macos_tests`).
+#[cfg(windows)]
+impl WinPrepare {
+    /// This driver with `ours` in place of the road's own layout — a test's
+    /// fake layout, which records or refuses (U-41a1).
+    fn laid_out(self, ours: Arc<dyn PreparePoint>) -> Self {
+        Self {
+            layouts: Layouts::of(ours),
+            ..self
+        }
+    }
+}
+
 /// What the road asked of a layout's Prepare, and the journal on disk when
 /// it asked: `None` where there was none yet.
 #[cfg(windows)]
