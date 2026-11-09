@@ -217,13 +217,19 @@ impl CarryPublished {
     /// taken still owes; a member that did not answer leaves the untaken part as it was. The line,
     /// one per round (R-D of 2026-11-07), says how many checks ran and how many said something
     /// new, so a quiet round is in the log too. **A round no member answered** (the start's own,
-    /// before the program walk has answered) publishes nothing and has no line (the review's N8).
+    /// before the program walk has answered) publishes nothing and has no line (the review's N8):
+    /// a round is empty only when every part is `None`. The round is taken apart with no `..`, so
+    /// a part a later member adds does not compile here until it is handled — in the empty test
+    /// and in the merge (the re-review's R2).
     pub(crate) fn publish(&self, round: CarryRound) -> Option<String> {
-        round.hooks.as_ref()?;
+        let CarryRound { hooks } = round;
+        if hooks.is_none() {
+            return None;
+        }
         let mut published = self.snapshot.lock().unwrap_or_else(PoisonError::into_inner);
         let untaken = published.take().unwrap_or_default();
         let (mut checks, mut changed) = (0, 0);
-        let hooks = match round.hooks {
+        let hooks = match hooks {
             Some(answer) => {
                 checks += answer.checks;
                 changed += answer.changed;
@@ -261,10 +267,10 @@ pub(crate) fn take_carry_snapshot() -> Option<CarrySnapshot> {
 }
 
 /// **One round of the pass: every member, in the order the pass runs them**, then the round
-/// published and the window woken once — when a member answered. Each member is one run of a step on the pass's worker,
-/// handed the worker's context — a step may ask a program a question there, as the agent hooks ask
-/// codex its version (0.4.10 plan row 69c) — and asks the trial's gate for its own writer before it
-/// writes.
+/// published and the window woken once — when a member answered. Each member is one run of a
+/// step on the pass's worker, handed the worker's context — a step may ask a program a question
+/// there, as the agent hooks ask codex its version (0.4.10 plan row 69c) — and asks the trial's
+/// gate for its own writer before it writes.
 ///
 /// Each member is called by name, never through a list of function pointers: the worker's context
 /// is followed from the thread door to every function it is handed along calls the source guards
@@ -364,10 +370,11 @@ impl CarryLatch {
 /// This process's pass.
 static CARRY_LATCH: CarryLatch = CarryLatch::new();
 
-/// **Run the pass**, on its worker — at every start ([`begin_carry_at_start`]), and at the
-/// moments the members' rulings name: after the launch's first program walk has said where the agents keep their files, when a walk moves one of them,
-/// at each open of the Agents page, after a press on one of its rows, and when an update's trial
-/// is committed (`update_trial::Writer::AgentHooksRepair`).
+/// **Run the pass**, on its worker — at every start ([`begin_carry_at_start`]), and at the moments
+/// the members' rulings name: after the launch's first program walk has said where the agents keep
+/// their files, when a walk moves one of them, at each open of the Agents page, after a press on
+/// one of its rows, and when an update's trial is committed
+/// (`update_trial::Writer::AgentHooksRepair`).
 pub(crate) fn begin_carry_pass() {
     begin_carry_pass_with(
         &CARRY_LATCH,

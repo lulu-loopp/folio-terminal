@@ -21,9 +21,9 @@
 //! taken writes nothing. One toast per family whose gone copy's hooks were pointed here (R8).
 //!
 //! **One diagnostics line per family when its answer changes** (row 68a, R-D of 2026-11-07):
-//! `BT_AGENT_HOOKS <family> <state>`, with ` repaired=<from>` when a repair was due — written, held,
-//! gated, pressed, refused or lost — and the gone programs for a dead owner. A start says each
-//! family once; a run that finds what the last line said says nothing more
+//! `BT_AGENT_HOOKS <family> <state>`, with ` repaired=<from>` when a repair was due — written,
+//! held, gated, pressed, refused or lost — and the gone programs for a dead owner. A start says
+//! each family once; a run that finds what the last line said says nothing more
 //! ([`AgentHooksStep::say_changed`]). The pass's own line counts the round.
 
 use std::path::{Path, PathBuf};

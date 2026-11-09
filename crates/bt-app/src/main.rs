@@ -736,9 +736,9 @@ enum AppEvent {
     ExplorerPackageChanged,
     /// **A round of the carry pass published what its members found** (0.4.10 plan rows 67b, 68a):
     /// the answer is `carry_pass::take_carry_snapshot`'s, and the handler sets the Agents rows from
-    /// its agents' part and raises the notice of each repair of a gone copy's hooks. Owed a wake for
-    /// [`Self::ExplorerPackageChanged`]'s reason: the scan lands seconds into a launch, or behind a
-    /// modal, on a window that may have nothing else coming.
+    /// its agents' part and raises the notice of each repair of a gone copy's hooks. Owed a wake
+    /// for [`Self::ExplorerPackageChanged`]'s reason: the scan lands seconds into a launch, or
+    /// behind a modal, on a window that may have nothing else coming.
     CarryPassAnswered,
     /// **The machine listed its monospaced families** (GitHub issue #3).
     ///
