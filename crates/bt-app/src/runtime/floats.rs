@@ -2715,15 +2715,16 @@ impl<B: Backend> Runtime<'_, B> {
         // owes a frame; one standing still owes nothing, which is why the
         // deadline reports nothing then. A turn on which the clocks above
         // changed something has news of its own and goes through.
-        if !changed && !self.animation_frame_is_due() {
+        // Asked only with work: a float standing still asks the gate nothing.
+        if !self.paced_frame(changed, |rt| {
+            rt.window
+                .float
+                .drawn()
+                .any(|win| win.fade(now, rt.app.motion, scale).moving)
+        }) {
             return Ok(());
         }
-        let animating = self
-            .window
-            .float
-            .drawn()
-            .any(|win| win.fade(now, self.app.motion, scale).moving);
-        if (changed || animating) && self.refresh_overlay() {
+        if self.refresh_overlay() {
             self.present_chrome_change()?;
         }
         Ok(())
