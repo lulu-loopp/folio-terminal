@@ -72,10 +72,11 @@ enum Remover {
     /// The native remover's per-user folder, `Scope::remover_home`.
     Staging,
     /// **Removed by something other than this door** (0.4.10 plan row 68a, R-B of 2026-11-07):
-    /// with the program's own files the program row hands on (the update journal in the install
-    /// folder, the Services entry in the bundle), with the process that made it (the restart
-    /// registration), or kept by the system (the notification permission). The door prints no row
-    /// of it, so its output is what it was before these rows were listed.
+    /// with the program's own files the program row hands on (on Windows, the update home in the
+    /// install folder — its journal, lock and receipts; the Services entry in the macOS bundle),
+    /// with the process that made it (the restart registration), or kept by the system (the
+    /// notification permission). The door prints no row of it, so its output is what it was
+    /// before these rows were listed.
     OutsideTheDoor,
 }
 impl Remover {
@@ -511,12 +512,15 @@ const INVENTORY: &[Mark] = &[
         writer: "none (the system's; asked by ../bt-platform/src/macos_notify.rs:Notifier::new)",
         carry: &[CarryRule::Identity { held: None }],
     },
+    // On Windows, the update home inside the install folder (journal, lock, receipts), removed
+    // with the program's files. On macOS the journal is in the home beside the bundle, which the
+    // "Update home beside the bundle" row above removes (the review's N7).
     Mark {
         name: "Update journal",
         says: Text::CleanupMarkUpdateJournal,
         kind: Kind::PerCopy,
         remover: Remover::OutsideTheDoor,
-        writer: "update_apply.rs:write_journal",
+        writer: "update_apply.rs:write_journal (Windows: the update home in the install folder)",
         carry: &[CarryRule::Transaction],
     },
 ];
