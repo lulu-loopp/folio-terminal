@@ -737,7 +737,7 @@ fn a_stale_formula_hover_is_put_out_on_a_refused_turn() {
         .expect("the process is older than a band's arrival");
     let refused = at + Duration::from_millis(1);
     {
-        let mut runtime = folio.runtime();
+        let runtime = folio.runtime();
         let mut marks =
             crate::formula_tools::FormulaToolFollow::arriving(&a_bands_marks(), None, landed);
         marks.observe_hovered(Some(crate::formula_tools::FormulaTool::CopyLatex));
