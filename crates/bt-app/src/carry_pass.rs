@@ -529,6 +529,8 @@ mod tests {
             ],
             unrepaired: [None; 3],
             copilot_readiness: crate::attention_copilot::Readiness::Unknown,
+            copilot_read_after_probe: false,
+            codex_install_refused: false,
             notices,
         }
     }

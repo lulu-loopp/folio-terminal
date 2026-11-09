@@ -9241,9 +9241,6 @@ struct App<B: Backend = Native> {
     /// copy was installed (U-3). Never rearmed: once spent, a still-missing
     /// answer is read as unknown.
     first_run_waited_for_channel: bool,
-    /// Whether the first-run card has already waited its one turn for the program walk's reading
-    /// of the agent folders (`first_run::agent_folders_settled`).
-    first_run_waited_for_agent_folders: bool,
     /// Whether Explorer's right-click menu carries Folio's verb (§7.4).
     ///
     /// Cached for one reason and no other: the settings dialog asks on every
@@ -9313,6 +9310,14 @@ struct App<B: Backend = Native> {
     /// **Whether a scan has answered at all** in this process: before it, nothing about the agents'
     /// files is known on this thread, and the resume row says nothing about their hooks.
     agent_rows_known: bool,
+    /// **Whether the newest scan found codex's install refused** (0.4.10 plan row 73): codex's own
+    /// install refusals, asked on the carry pass's worker (`HooksSnapshot::codex_install_refused`),
+    /// for the first-run card's Codex row.
+    codex_install_refused: bool,
+    /// **Whether [`Self::copilot_readiness`] as the newest scan carried it was read after
+    /// Copilot's version probe came back** (`HooksSnapshot::copilot_read_after_probe`): the
+    /// first-run card offers Copilot's row only on an answer.
+    copilot_read_after_probe: bool,
     /// **Why each agent's configuration file will not be edited, when it will not be** — the
     /// `agent_takeovers` order, Claude Code then codex then copilot.
     ///
@@ -9854,13 +9859,14 @@ impl<B: Backend> App<B> {
             program_news: window_news::WindowSeats::default(),
             first_run_attempted: false,
             first_run_waited_for_channel: false,
-            first_run_waited_for_agent_folders: false,
             explorer_package_asked_by: None,
             explorer_package_asked_place: explorer_menu::ExplorerPlace::default(),
             explorer_package_announce: Announce::Everything,
             agent_takeovers: Default::default(),
             agent_hooks_found: Default::default(),
             agent_rows_known: false,
+            codex_install_refused: false,
+            copilot_read_after_probe: false,
             profiles_file_broken: false,
             pins_file_broken: false,
             settings_file_broken: false,
@@ -31859,6 +31865,8 @@ fn adopt_agent_hooks_snapshot<B: Backend>(
     });
     app.agent_rows_known = true;
     app.copilot_readiness = snapshot.copilot_readiness;
+    app.copilot_read_after_probe = snapshot.copilot_read_after_probe;
+    app.codex_install_refused = snapshot.codex_install_refused;
 }
 
 /// **A press on agent row `family` asks the scan again** (0.4.10 plan row 67b): the row's line and
@@ -52855,12 +52863,11 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 self.for_each_window(|runtime| runtime.replace_contradicted_flash())
             }
             AppEvent::CopilotProbed => {
-                if let Some(app) = self.app.as_mut() {
-                    app.copilot_readiness = attention_copilot::readiness();
-                }
                 // **The version is the start-time repair's gate for Copilot's hooks** (0.4.10 plan
-                // row 67b, R9): a repair that waited for it runs now, and the scan's snapshot,
-                // which carries readiness too, is read after this answer.
+                // row 67b, R9): a repair that waited for it runs now. **Readiness is not read
+                // here** (row 73, its ruling R9): it reads Copilot's settings file, and the round
+                // asked for here reads it on the pass's worker and carries it in its snapshot,
+                // which sets the rows when it lands.
                 carry_pass::begin_carry_pass();
                 self.for_each_window(|runtime| {
                     if runtime.refresh_chrome() {

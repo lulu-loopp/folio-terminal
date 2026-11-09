@@ -711,17 +711,16 @@ pub(crate) fn added_toast(file: Option<&Path>) -> crate::i18n::Text {
     }
 }
 
-/// **Whether the first-run card may offer the Codex row** (row 69's report §1.7, R19): nothing of
-/// Folio's is there yet, and an install of this copy's entry in the file this codex runs it from
-/// ([`entry_path`]) would not be refused — [`install_refusal_at`], the install's own refusals
-/// asked of the same files (the 69c review's C3), so the card offers nothing a press would then
-/// refuse. Another live copy's entry is not a refusal: the press asks about it.
+/// **Whether an install of `exe`'s entry in the file at `path` would be refused** — what the
+/// first-run card asks before it offers the Codex row (row 69's report §1.7, R19; the 69c review's
+/// C3): [`install_refusal_at`], the install's own refusals asked of the same files at the version
+/// held, so the card offers nothing a press would then refuse. Another live copy's entry is not a
+/// refusal: the press asks about it. **Asked on the carry pass's worker** (0.4.10 plan row 73),
+/// after the round has settled the version and of the file it scanned — never on the window
+/// thread, which reads the answer out of the snapshot.
 #[must_use]
-pub(crate) fn first_run_installable() -> bool {
-    state() == State::Absent
-        && entry_path()
-            .zip(ownership::this_copy())
-            .is_some_and(|(path, exe)| install_refusal_at(&path, &exe, &version()).is_none())
+pub(crate) fn install_refused_at(path: &Path, exe: &Path) -> bool {
+    install_refusal_at(path, exe, &version()).is_some()
 }
 
 /// What the two files say today.

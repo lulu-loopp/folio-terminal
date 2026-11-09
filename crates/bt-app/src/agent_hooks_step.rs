@@ -182,23 +182,43 @@ pub(crate) enum Unrepaired {
 }
 
 /// **What the window adopts**: the three answers, why a due repair was not written, Copilot's
-/// readiness read beside them, and the notices the runs since the last adoption owe.
+/// readiness read beside them, and the notices the runs since the last adoption owe — and the two
+/// facts the first-run card needs beside them (0.4.10 plan row 73), so that it reads no agent's
+/// file on the window thread.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct HooksSnapshot {
     pub(crate) found: [HooksFound; 3],
     pub(crate) unrepaired: [Option<Unrepaired>; 3],
     pub(crate) copilot_readiness: Readiness,
+    /// **Whether `copilot_readiness` was read after Copilot's version probe had come back**: a
+    /// readiness of `Unknown` read before it is "not asked yet", one read after it is "asked, and
+    /// nothing to say" — and the first-run card offers Copilot's row only on an answer.
+    pub(crate) copilot_read_after_probe: bool,
+    /// **Whether an install of this copy's codex entry would be refused** — codex's own install
+    /// refusals (`attention_codex::install_refused_at`), asked on the worker at the version the
+    /// round settled, of the file the round scanned. Asked only where the scan's state would let a
+    /// press write ([`press_would_write`]); `false` where it was not asked, which nothing reads on
+    /// its own (`first_run::agent_row_offer`).
+    pub(crate) codex_install_refused: bool,
     pub(crate) notices: Vec<Text>,
 }
 
 impl HooksSnapshot {
     /// **One run's answers, as the window adopts them**: the families' states, why a due repair
-    /// was not written, Copilot's readiness, and the notices the run's repairs owe.
-    pub(crate) fn of(scans: &[HooksScan; 3], copilot_readiness: Readiness) -> Self {
+    /// was not written, Copilot's readiness and whether it was read after the probe, whether
+    /// codex's install would be refused, and the notices the run's repairs owe.
+    pub(crate) fn of(
+        scans: &[HooksScan; 3],
+        copilot_readiness: Readiness,
+        copilot_read_after_probe: bool,
+        codex_install_refused: bool,
+    ) -> Self {
         Self {
             found: std::array::from_fn(|index| scans[index].found.clone()),
             unrepaired: std::array::from_fn(|index| scans[index].unrepaired),
             copilot_readiness,
+            copilot_read_after_probe,
+            codex_install_refused,
             notices: scans.iter().filter_map(|scan| scan.notice).collect(),
         }
     }
@@ -415,11 +435,51 @@ pub(crate) fn run_agent_hooks_step(ctx: &WorkerCtx) -> Option<MemberAnswer<Hooks
         &|family| (family.within_its_gate)(),
     );
     let changed = AGENT_HOOKS.say_changed(&scans, &crate::diagnostics::stderr_line);
+    // The first-run card's two facts (0.4.10 plan row 73), on this worker. Codex's refusal is asked
+    // at the version settled above, of the file just scanned. The probe's state is read before the
+    // readiness, so a readiness said to follow the probe does.
+    let codex_install_refused = codex_install_refused_at(&scans[1], paths[1].as_deref(), &exe);
+    let copilot_read_after_probe = crate::attention_copilot::probe_settled();
+    let copilot_readiness = crate::attention_copilot::readiness();
     Some(MemberAnswer {
-        part: HooksSnapshot::of(&scans, crate::attention_copilot::readiness()),
+        part: HooksSnapshot::of(
+            &scans,
+            copilot_readiness,
+            copilot_read_after_probe,
+            codex_install_refused,
+        ),
         checks: scans.len(),
         changed,
     })
+}
+
+/// **Whether a press of a family's switch would write, by what the scan found** (0.4.10 plan row
+/// 73, ruling R1): the switch reads Off — no Folio entry, a gone copy's, a living other copy's
+/// (whose press is the take-over), one the machine will not say about, or this copy's in an older
+/// shape a repair did not write — and the writer has not already refused this file. A file this
+/// build will not read or edit, an entry it cannot classify, one it declines, and this copy's
+/// hooks in today's form are not.
+#[must_use]
+pub(crate) fn press_would_write(found: &HooksFound, unrepaired: Option<Unrepaired>) -> bool {
+    let switch_off_and_writable = matches!(
+        found,
+        HooksFound::Nothing
+            | HooksFound::Dead(_)
+            | HooksFound::Drifted
+            | HooksFound::OtherCopy(_)
+            | HooksFound::OwnerUnknown
+    );
+    switch_off_and_writable && !matches!(unrepaired, Some(Unrepaired::Refused(_)))
+}
+
+/// **Whether codex's install would be refused**, asked of the file `path` the round scanned for
+/// `exe` — only where the scan's answer would let a press write; `true` where no file could be
+/// named (the card then offers no row, as a press would have nothing to write).
+fn codex_install_refused_at(scan: &HooksScan, path: Option<&Path>, exe: &Path) -> bool {
+    if !press_would_write(&scan.found, scan.unrepaired) {
+        return false;
+    }
+    path.is_none_or(|path| crate::attention_codex::install_refused_at(path, exe))
 }
 
 /// **Where a family's file is**: the account's own, in the product.
@@ -488,34 +548,6 @@ pub(crate) fn hooks_row_line(
             _,
         ) => None,
     }
-}
-
-/// **Whether family `index`'s file holds hooks of a living other copy, or of one the machine will
-/// not say about** — the first-run card's question (0.4.10 plan row 67b, ruling N3): a row over
-/// either arrives Off, because a take-over is never a first-run act. Read on the caller's thread,
-/// beside the card's three `state()` reads, by the start-time scan's own classification.
-#[must_use]
-pub(crate) fn held_by_another(index: usize) -> bool {
-    let family = &HOOKS_FAMILIES[index];
-    let Some(path) = family_path(family) else {
-        return false;
-    };
-    // This copy's program cannot be named, so the row's press would be refused
-    // (`stable_executable`): the row arrives Off rather than switched on for a refusal.
-    let Some(exe) = ownership::this_copy() else {
-        return true;
-    };
-    held_at(family, &path, &exe, &ownership::what_stands)
-}
-
-/// [`held_by_another`] over a named file, with the machine's answer about a path handed in.
-fn held_at(family: &HooksFamily, path: &Path, exe: &Path, look: &dyn ownership::Look) -> bool {
-    Config::resolve(path).is_ok_and(|config| {
-        matches!(
-            (family.scan)(&config, exe, look),
-            HooksFound::OtherCopy(_) | HooksFound::OwnerUnknown
-        )
-    })
 }
 
 /// **The resume row's line** (R5): while resume is on, the agents this build resumes whose hooks
@@ -693,7 +725,7 @@ mod tests {
         assert!(!marks.agent_config_roots.claude.is_empty());
         assert!(!marks.agent_config_roots.codex.is_empty());
         assert!(!marks.agent_config_roots.copilot.is_empty());
-        let snapshot = HooksSnapshot::of(&scans, Readiness::Unknown);
+        let snapshot = HooksSnapshot::of(&scans, Readiness::Unknown, false, false);
         assert_eq!(
             snapshot.notices,
             [
@@ -722,7 +754,7 @@ mod tests {
         assert!(again.iter().all(|scan| scan.repaired_from.is_none()));
         assert_eq!(bytes(&files), repaired, "a second run wrote");
         assert!(
-            HooksSnapshot::of(&again, Readiness::Unknown)
+            HooksSnapshot::of(&again, Readiness::Unknown, false, false)
                 .notices
                 .is_empty(),
             "a notice was said twice"
@@ -821,7 +853,7 @@ mod tests {
         let line = fs::read_to_string(&config_toml).unwrap();
         assert!(!line.contains("notify"), "the line is out: {line}");
         assert_eq!(
-            HooksSnapshot::of(&scans, Readiness::Unknown).notices,
+            HooksSnapshot::of(&scans, Readiness::Unknown, false, false).notices,
             [
                 Text::AgentHooksRepairedClaude,
                 Text::AgentHooksRepairedCodexHook,
@@ -868,7 +900,7 @@ mod tests {
             );
         }
         assert_eq!(
-            HooksSnapshot::of(&scans, Readiness::Unknown).notices,
+            HooksSnapshot::of(&scans, Readiness::Unknown, false, false).notices,
             [
                 Text::AgentHooksRepairedCodex,
                 Text::AgentHooksRepairedCopilot
@@ -1276,7 +1308,7 @@ mod tests {
                 Some(Text::AgentHooksUnreadable.text())
             );
             assert!(
-                HooksSnapshot::of(&scans, Readiness::Unknown)
+                HooksSnapshot::of(&scans, Readiness::Unknown, false, false)
                     .notices
                     .is_empty()
             );
@@ -1796,22 +1828,42 @@ mod tests {
 
     /// T12 — **the window's creation reads no agent's file**: `Runtime::create` asks no row state
     /// and no readiness, and the adoption reads none. What the window thread still reads is the
-    /// presses' (R11) and the first-run card's three `state()` questions and three
-    /// `held_by_another` ones (ruling N3), asked once on a first run (report §2.2).
+    /// presses' (R11).
     ///
     /// The start's carry step (0.4.10 plan row 68a, `startup::FirstWindow::carry`) is written
     /// inside `Runtime::create`, so it is held to the same: it begins the pass and reads nothing,
     /// and so do the step's own function (`carry_pass::begin_carry_at_start`) and the window's
     /// adoption of the round (`FolioApp::adopt_carry_snapshot`), both on the window thread (the
     /// review's N5).
-    /// MUTATION: the step reads a row first (`plant-68a-carry-step-reads-on-the-window-thread.py`).
+    ///
+    /// **And the first-run card reads none either** (0.4.10 plan row 73): its agent rows are said
+    /// from the adopted snapshot by `first_run::agent_row_offer` and it waits for that snapshot by
+    /// `first_run::card_waits_for_the_agents`, so `Runtime::raise_first_run_if_due` and those two
+    /// are held here too; so is the version probe's answer (`AppEvent::CopilotProbed`, ruling R9),
+    /// whose readiness the pass it starts carries.
+    /// MUTATIONS: the step reads a row first (`plant-68a-carry-step-reads-on-the-window-thread.py`);
+    /// the card asks Claude Code's state again (`plant-73-card-reads-claude-state.py`).
     #[test]
     fn the_window_thread_reads_no_agent_file_at_start() {
-        use crate::test_support::{free_fn_body, method_body, squeezed};
+        use crate::test_support::{free_fn_body, item_body, method_body, squeezed};
         let create = method_body("Runtime", "create");
         assert!(
             squeezed(create).contains(&squeezed("carry: carry_pass::begin_carry_at_start,")),
             "the start's carry step is not where this test reads"
+        );
+        let events = item_body(
+            &bt_source::ItemQuery::method("FolioApp", "user_event").of_trait("ApplicationHandler"),
+        );
+        let probed = events
+            .find("AppEvent::CopilotProbed =>")
+            .expect("the version probe's answer is handled");
+        let probed = &events[probed..];
+        let probed = &probed[..probed[1..]
+            .find("AppEvent::")
+            .map_or(probed.len(), |at| at + 1)];
+        assert!(
+            probed.contains("carry_pass::begin_carry_pass()"),
+            "the probe's answer no longer asks the pass, which carries the readiness"
         );
         let window_thread = [
             ("Runtime::create", create),
@@ -1824,6 +1876,17 @@ mod tests {
                 "adopt_agent_hooks_snapshot",
                 free_fn_body("adopt_agent_hooks_snapshot"),
             ),
+            (
+                "Runtime::raise_first_run_if_due",
+                method_body("Runtime", "raise_first_run_if_due"),
+            ),
+            ("agent_row_offer", free_fn_body("agent_row_offer")),
+            (
+                "card_waits_for_the_agents",
+                free_fn_body("card_waits_for_the_agents"),
+            ),
+            ("press_would_write", free_fn_body("press_would_write")),
+            ("AppEvent::CopilotProbed", probed),
         ];
         for (name, body) in window_thread {
             let body = squeezed(body);
@@ -1833,6 +1896,12 @@ mod tests {
                 "attention_hooks::state(",
                 "attention_codex::state(",
                 "attention_copilot::state(",
+                "first_run_installable(",
+                "install_refusal",
+                "install_refused_at(",
+                "scan_resolved(",
+                "Config::resolve(",
+                "hooks_are_switched_off(",
             ] {
                 assert!(
                     !body.contains(read),
@@ -2329,42 +2398,102 @@ mod tests {
         );
     }
 
-    /// N3 — **the first-run card's question**: a file a living other copy's hooks are in, and one
-    /// whose owner the machine will not say about, is held by another; one with no Folio entry, or
-    /// only a gone copy's, is not.
+    /// N3 (0.4.10 plan row 67b; row 73's R7 moves it onto the scan and the card's mapping) — **a
+    /// file a living other copy's hooks are in, and one whose owner the machine will not say about,
+    /// is offered on the first-run card and arrives Off**; one with no Folio entry, or only a gone
+    /// copy's whose repair has not been written, is offered and is nobody else's.
     #[test]
-    fn a_file_another_living_copy_holds_is_said_to_the_first_run_card() {
+    fn a_file_another_living_copy_holds_arrives_off_on_the_first_run_card() {
+        use crate::first_run::{AgentRowOffer, agent_row_offer};
         let root = root("hooks-step-first-run");
         let other = copy_at(&root, "A living");
         let here = copy_at(&root, "B here");
         let files = files_in(&root.join("config"));
         let data = root.join("data");
-        for (family, file) in HOOKS_FAMILIES.iter().zip(&files) {
-            assert!(
-                !held_at(family, file, &here, &what_stands),
-                "no file is held"
-            );
-        }
+        // Gated, so a gone copy's hooks stay as found and nothing here writes but `install_all`.
+        let gated = |_: &HooksFamily| false;
+        let offers = |look: &dyn ownership::Look| {
+            AgentHooksStep::new()
+                .scan_and_repair(&some(&files), &here, &data, look, never_held, &gated)
+                .map(|scan| agent_row_offer(&scan.found, scan.unrepaired, false))
+        };
+        let nobody_elses = AgentRowOffer {
+            offered: true,
+            over_another: false,
+        };
+        let another_copys = AgentRowOffer {
+            offered: true,
+            over_another: true,
+        };
+        assert_eq!(offers(&what_stands), [nobody_elses; 3], "no file is held");
         install_all(&files, &other, &data);
-        for (family, file) in HOOKS_FAMILIES.iter().zip(&files) {
-            assert!(held_at(family, file, &here, &what_stands), "{}", family.tag);
-            let unknown = |path: &Path| {
-                if path == other {
-                    PathStands::Unknown
-                } else {
-                    what_stands(path)
-                }
-            };
-            assert!(held_at(family, file, &here, &unknown), "{}", family.tag);
-        }
+        assert_eq!(offers(&what_stands), [another_copys; 3], "a living copy's");
+        let unknown = |path: &Path| {
+            if path == other {
+                PathStands::Unknown
+            } else {
+                what_stands(path)
+            }
+        };
+        assert_eq!(offers(&unknown), [another_copys; 3], "an unknown owner's");
         fs::remove_file(&other).unwrap();
-        for (family, file) in HOOKS_FAMILIES.iter().zip(&files) {
-            assert!(
-                !held_at(family, file, &here, &what_stands),
-                "{}",
-                family.tag
-            );
-        }
+        assert_eq!(offers(&what_stands), [nobody_elses; 3], "a gone copy's");
+    }
+
+    /// RED (0.4.10 plan row 73, rulings R1 and R2) — **the snapshot carries codex's install
+    /// refusal, asked of the file the round scanned**: a clean folder is an install that writes, a
+    /// `config.toml` this build cannot read refuses it, a family with no file named has nothing a
+    /// press could write, and a state no press would write is not asked at all.
+    ///
+    /// MUTATION: the mapping drops the refusal (`plant-73-codex-refusal-ignored.py`, red in
+    /// `first_run::tests::each_found_state_offers_the_row_a_press_would_write`).
+    #[test]
+    fn the_snapshot_carries_codex_s_install_refusal() {
+        let root = root("hooks-step-codex-refusal");
+        let here = copy_at(&root, "B here");
+        let folder = root.join("config").join("codex");
+        fs::create_dir_all(&folder).unwrap();
+        let hooks = folder.join("hooks.json");
+        let nothing = HooksScan::unrepaired(HooksFound::Nothing, String::new());
+        assert!(
+            !codex_install_refused_at(&nothing, Some(&hooks), &here),
+            "a clean folder: an install writes"
+        );
+        fs::write(folder.join("config.toml"), "this is not = = toml [[[").unwrap();
+        assert!(
+            codex_install_refused_at(&nothing, Some(&hooks), &here),
+            "a config.toml this build cannot read: refused"
+        );
+        assert!(
+            codex_install_refused_at(&nothing, None, &here),
+            "no file named: nothing a press could write"
+        );
+        let current = HooksScan::unrepaired(HooksFound::Current, String::new());
+        assert!(
+            !codex_install_refused_at(&current, Some(&hooks), &here),
+            "not asked where no press would write"
+        );
+    }
+
+    /// RED (0.4.10 plan row 73) — **the card's two facts are asked after what they depend on**:
+    /// codex's refusal after the round settled codex's version (an install's file and its road
+    /// are the version's), and Copilot's probe state before its readiness (a readiness said to
+    /// follow the probe does).
+    ///
+    /// MUTATION: the refusal is asked before the version (`plant-73-refusal-before-the-version.py`).
+    #[test]
+    fn the_step_asks_the_card_s_facts_after_the_version_and_the_probe() {
+        let body = crate::test_support::free_fn_body("run_agent_hooks_step");
+        let at = |needle: &str| {
+            body.find(needle)
+                .unwrap_or_else(|| panic!("`{needle}` is not in the step"))
+        };
+        assert!(at("attention_codex::settle_version(ctx)") < at("codex_install_refused_at("));
+        assert!(at("let paths =") < at("codex_install_refused_at("));
+        assert!(
+            at("attention_copilot::probe_settled()") < at("attention_copilot::readiness()"),
+            "the probe's state is read after the readiness"
+        );
     }
 
     /// RED (0.4.10 plan row 68a, the review's N8) — **a copy that cannot be named is said once**,

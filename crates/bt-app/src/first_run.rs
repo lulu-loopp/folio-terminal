@@ -76,15 +76,65 @@ pub fn install_channel_settled(waited: &mut bool, landed: bool) -> bool {
     false
 }
 
-/// **The card's wait for the program walk's reading of the agent folders** (T-FRESH-FACTS):
-/// [`install_channel_settled`]'s bound — settled once the reading has landed, or after the card
-/// has waited one turn for it.
-pub fn agent_folders_settled(waited: &mut bool, answered: bool) -> bool {
-    if answered || *waited {
-        return true;
+/// **Whether the card still waits for the carry pass's answer about the agents** (0.4.10 plan
+/// row 73, rulings R3 and R5).
+///
+/// The agent rows are said from the pass's adopted snapshot, never from a read on the window
+/// thread, so a card that could offer one waits for it: `found` is, per agent in the Agents
+/// page's order, whether its row is one this platform offers and its program is on this machine;
+/// `answered`, whether the window holds the scan's answer for it (a press sends a family back to
+/// unanswered until the pass it asks for answers); `copilot_read_after_probe`, whether Copilot's
+/// readiness in that answer was read after the version probe came back. Nothing to wait for
+/// where no agent is found — a Mac's card, a machine with no agent — and nothing where this copy's
+/// program cannot be named (`copy_named`): the pass never scans then, and the card offers no
+/// agent row, whose press would be refused.
+///
+/// **No timer of its own** (R4): a pass that never answers holds the card for this run, and as
+/// the card's `Shown` is written only when it goes up, the next launch shows it.
+#[must_use]
+pub(crate) fn card_waits_for_the_agents(
+    found: [bool; 3],
+    answered: [bool; 3],
+    copilot_read_after_probe: bool,
+    copy_named: bool,
+) -> bool {
+    if !copy_named {
+        return false;
     }
-    *waited = true;
-    false
+    let unanswered = found
+        .iter()
+        .zip(answered)
+        .any(|(found, answered)| *found && !answered);
+    unanswered || (found[2] && !copilot_read_after_probe)
+}
+
+/// **One agent row as the card offers it**: whether it is listed, and whether it is over a file
+/// whose hooks are another copy's — a row that arrives Off, because a take-over is never a
+/// first-run act (0.4.10 plan row 67b, ruling N3).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct AgentRowOffer {
+    pub(crate) offered: bool,
+    pub(crate) over_another: bool,
+}
+
+/// **What the scan found, as the card's row** (0.4.10 plan row 73, ruling R1): offered exactly
+/// where a press of the Settings row would write ([`crate::agent_hooks_step::press_would_write`])
+/// and the agent's own install refusal says nothing (`install_refused`, codex's; the others have
+/// none beyond the scan's), so the card offers nothing a press would refuse — the card's switch
+/// means the Settings row's switch, [`crate::explorer_menu::first_page_offered`]'s rule for the
+/// agents. Over another copy's where the file's hooks are a living other copy's or the machine
+/// will not say whose.
+#[must_use]
+pub(crate) fn agent_row_offer(
+    found: &crate::attention_ownership::HooksFound,
+    unrepaired: Option<crate::agent_hooks_step::Unrepaired>,
+    install_refused: bool,
+) -> AgentRowOffer {
+    use crate::attention_ownership::HooksFound;
+    AgentRowOffer {
+        offered: crate::agent_hooks_step::press_would_write(found, unrepaired) && !install_refused,
+        over_another: matches!(found, HooksFound::OtherCopy(_) | HooksFound::OwnerUnknown),
+    }
 }
 
 /// Consume the first ready attempt, including one that cannot show a card.
@@ -319,7 +369,10 @@ impl ExplorerShape {
 /// Every field is something asked of the machine, never of `settings.json`:
 /// three of the four answers are read off the registry and off the agents' own
 /// files, and a card built from stored booleans would be a second copy of a
-/// truth free to disagree with the files it is about.
+/// truth free to disagree with the files it is about. **The agents' files are
+/// read by the carry pass's worker** (0.4.10 plan row 73): the agent fields are
+/// said from its adopted snapshot by [`agent_row_offer`], and the card waits for
+/// it ([`card_waits_for_the_agents`]).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Machine {
     /// Whether Windows shows a first page of its own — and whether the file
@@ -329,7 +382,7 @@ pub struct Machine {
     pub explorer_first_page_available: bool,
     /// `claude` is somewhere on the path this window searched.
     pub claude_found: bool,
-    /// …and its hook is not in `~/.claude/settings.json` yet.
+    /// …and a press of its row would write its hook (the scan's answer, [`agent_row_offer`]).
     pub claude_installable: bool,
     /// …but the file holds hooks of a living other copy of Folio, or of one the machine will not
     /// say about: the row is offered and arrives Off, because a take-over is never a first-run
@@ -2632,27 +2685,6 @@ mod tests {
     /// MUTATION: make `install_channel_settled` answer `landed` (the card
     /// waits for ever on a worker that never came back) or `true` (it never
     /// waits for a fact a millisecond away).
-    /// RED (T-FRESH-FACTS round 2) — **the card waits one turn for the walk's reading of the agent
-    /// folders, never longer.** A launch walk that died never publishes it.
-    ///
-    /// MUTATION (observed red): `agent_folders_settled` answering `answered` (no bound) — the card
-    /// is still waiting after its turn.
-    #[test]
-    fn the_card_waits_one_turn_for_the_agent_folders_and_no_longer() {
-        let mut waited = false;
-        assert!(
-            !agent_folders_settled(&mut waited, false),
-            "one turn is waited"
-        );
-        assert!(
-            agent_folders_settled(&mut waited, false),
-            "and after it the card goes ahead with the folders it has"
-        );
-        let mut fresh = false;
-        assert!(agent_folders_settled(&mut fresh, true));
-        assert!(!fresh, "a reading already there spends no wait");
-    }
-
     #[test]
     fn a_card_built_before_the_install_channel_lands_waits_one_turn_then_shows_the_row_off() {
         let mut waited = false;
@@ -4023,6 +4055,128 @@ mod tests {
             "a window narrower than the card did not hand it 92%"
         );
     }
+
+    /// RED (0.4.10 plan row 73, rulings R3 and R5) — **the card waits for the carry pass's answer
+    /// exactly where an agent row could be offered**: every found agent answered, and Copilot's
+    /// readiness read after its probe; nothing to wait for with no agent found or with a copy
+    /// whose program cannot be named.
+    ///
+    /// MUTATIONS: the card goes ahead with a found agent unanswered
+    /// (`plant-73-card-opens-before-the-answer.py`); a readiness read before the probe is taken
+    /// for an answer (`plant-73-copilot-readiness-before-the-probe.py`); an unnamed copy waits
+    /// (`plant-73-unnamed-copy-waits.py`).
+    #[test]
+    fn the_card_waits_for_the_scan_where_an_agent_row_could_be_offered() {
+        let none = [false; 3];
+        let all = [true; 3];
+        assert!(
+            !card_waits_for_the_agents(none, none, false, true),
+            "no agent found: nothing to wait for (a Mac's card, a machine with no agent)"
+        );
+        assert!(
+            card_waits_for_the_agents([true, false, false], none, false, true),
+            "Claude Code found, no answer yet"
+        );
+        assert!(
+            !card_waits_for_the_agents([true, false, false], [true, false, false], false, true),
+            "Claude Code answered; copilot is not on the path, so its probe is not waited for"
+        );
+        assert!(
+            card_waits_for_the_agents(all, [true, false, true], true, true),
+            "codex found and its answer sent back by a press: the pass the press asked for"
+        );
+        assert!(
+            card_waits_for_the_agents([false, false, true], all, false, true),
+            "copilot answered, but its readiness was read before the probe came back"
+        );
+        assert!(
+            !card_waits_for_the_agents(all, all, true, true),
+            "every found agent answered, copilot's after its probe"
+        );
+        assert!(
+            !card_waits_for_the_agents(all, none, false, false),
+            "a copy whose program cannot be named is scanned by no pass: nothing to wait for"
+        );
+    }
+
+    /// RED (0.4.10 plan row 73, ruling R1) — **each found state offers the row a press would
+    /// write**: listed where the Settings row's switch reads Off and its press would write (no
+    /// entry, a gone copy's, a living other copy's — Off, ruling N3 —, an unknown owner's — Off —,
+    /// this copy's older shape a repair did not write), and not listed over hooks already this
+    /// copy's, a file this build will not read or edit, an entry it cannot classify or declines, a
+    /// repair the writer refused, or codex's install refused.
+    ///
+    /// MUTATIONS: `OwnerUnknown` arrives On (`plant-73-over-another-arrives-on.py`); codex's
+    /// refusal is dropped (`plant-73-codex-refusal-ignored.py`).
+    #[test]
+    fn each_found_state_offers_the_row_a_press_would_write() {
+        use crate::agent_hooks_step::Unrepaired;
+        use crate::attention_ownership::{HooksFound, RowSentence};
+        let program = || vec![PathBuf::from("C:/gone/folio.exe")];
+        let offered = AgentRowOffer {
+            offered: true,
+            over_another: false,
+        };
+        let off = AgentRowOffer {
+            offered: true,
+            over_another: true,
+        };
+        let not_listed = AgentRowOffer::default();
+        let not_listed_over_another = AgentRowOffer {
+            offered: false,
+            over_another: true,
+        };
+        let refused = Some(Unrepaired::Refused("read-only"));
+        let table: [(HooksFound, Option<Unrepaired>, bool, AgentRowOffer); 19] = [
+            (HooksFound::Nothing, None, false, offered),
+            (HooksFound::Dead(program()), None, false, offered),
+            (
+                HooksFound::Dead(program()),
+                Some(Unrepaired::Held),
+                false,
+                offered,
+            ),
+            (HooksFound::Dead(program()), refused, false, not_listed),
+            (HooksFound::Drifted, None, false, offered),
+            (HooksFound::Drifted, Some(Unrepaired::Held), false, offered),
+            (HooksFound::Drifted, refused, false, not_listed),
+            (HooksFound::OtherCopy(program()), None, false, off),
+            (HooksFound::OwnerUnknown, None, false, off),
+            (HooksFound::Current, None, false, not_listed),
+            (
+                HooksFound::Placed(vec!["Stop".to_owned()]),
+                None,
+                false,
+                not_listed,
+            ),
+            (HooksFound::Unreadable, None, false, not_listed),
+            (HooksFound::Refused("a link"), None, false, not_listed),
+            (HooksFound::Unclassified, None, false, not_listed),
+            (
+                HooksFound::Declined(RowSentence::Fixed(Text::AgentCopilotFileTaken)),
+                None,
+                false,
+                not_listed,
+            ),
+            // Codex's own install refusal, asked on the worker.
+            (HooksFound::Nothing, None, true, not_listed),
+            (HooksFound::Dead(program()), None, true, not_listed),
+            (HooksFound::Drifted, None, true, not_listed),
+            (
+                HooksFound::OtherCopy(program()),
+                None,
+                true,
+                not_listed_over_another,
+            ),
+        ];
+        for (found, unrepaired, install_refused, expected) in table {
+            assert_eq!(
+                agent_row_offer(&found, unrepaired, install_refused),
+                expected,
+                "{found:?} {unrepaired:?} refused={install_refused}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -4071,49 +4225,81 @@ mod clock_edge_tests {
             .unwrap_or_else(|failure| panic!("{failure}"))
     }
 
+    /// RED (0.4.10 plan row 73, rulings R1 and R8) — **the card's clock run reads no agent's
+    /// file**: its agent rows are said from the adopted snapshot and it waits for that snapshot
+    /// before its one attempt; what it does read follows the edge, and its waits come before it.
+    ///
+    /// MUTATION: the card asks Claude Code's state again (`plant-73-card-reads-claude-state.py`).
     #[test]
-    fn first_run_clock_run_disk_questions_follow_the_ready_edge() {
+    fn first_run_clock_run_reads_no_agent_file_and_waits_before_the_edge() {
         // **P3's deletion commit for this pin** (`docs/plans/bt-app-split-prep.md`
-        // §6.3, and §6.0 rule 3). The commit before this one read every body
-        // twice — once as a slice of a named file, once as the body of an item
-        // of this crate — and asserted the two were the same bytes; this one
-        // removes the older of the two, because two implementations of one
-        // judgement do not vouch for each other (`docs/CONVENTIONS.md`
-        // §十 rule 4). The pattern is `main.rs::pty_drain_budget_tests`', not
-        // re-derived here.
+        // §6.3, and §6.0 rule 3): the body of an item of this crate, never a slice of a file.
         let body = method_body("Runtime", "raise_first_run_if_due");
+        let compact: String = body.split_whitespace().collect();
         let edge = body
             .find("first_run::take_ready_edge(")
-            .expect("one attempt after the probe settles");
-        let compact: String = body.split_whitespace().collect();
+            .expect("one attempt after the waits");
         assert!(
             compact
                 .contains("letcopilot_ready=!copilot_on_path||attention_copilot::probe_settled();")
         );
-        assert!(compact.contains("if!first_run::take_ready_edge(&mutself.app.first_run_attempted,copilot_ready){returnOk(());}"));
+        // Row 73: the card waits for the carry pass's answer where an agent row could be offered,
+        // and both waits come before the channel's one turn and the edge.
+        let agents = body
+            .find("first_run::card_waits_for_the_agents(")
+            .expect("the card waits for the scan's answer");
+        assert!(agents < edge, "the agents' wait must come before the edge");
+        assert!(compact.contains("letready=copilot_ready&&agents_answered;"));
+        assert!(compact.contains(
+            "if!first_run::take_ready_edge(&mutself.app.first_run_attempted,ready){returnOk(());}"
+        ));
         // U-3: the one turn of waiting for the install channel comes before the
-        // edge and only once the copilot wait is over, and a missing answer is
+        // edge and only once the other waits are over, and a missing answer is
         // built as unknown.
         let wait = body
             .find("first_run::install_channel_settled(")
             .expect("the card waits a turn for the install channel");
-        assert!(wait < edge, "the channel wait must come before the edge");
-        assert!(compact.contains("ifcopilot_ready&&!first_run::install_channel_settled(&mutself.app.first_run_waited_for_channel,install_channel::channel().is_some(),){returnOk(());}"));
+        assert!(
+            agents < wait && wait < edge,
+            "the channel wait sits between"
+        );
+        assert!(compact.contains("ifready&&!first_run::install_channel_settled(&mutself.app.first_run_waited_for_channel,install_channel::channel().is_some(),){returnOk(());}"));
         assert!(compact.contains(
             "install_channel:install_channel::channel().unwrap_or(install_channel::Channel::Unknown),"
         ));
-        for forbidden in ["std::fs::", "search_path(", "Command::"] {
-            assert!(!body.contains(forbidden));
+        for forbidden in [
+            "std::fs::",
+            "search_path(",
+            "Command::",
+            "attention_hooks::state(",
+            "attention_codex::state(",
+            "attention_copilot::state(",
+            "attention_copilot::readiness(",
+            "first_run_installable(",
+            "held_by_another(",
+            "AGENT_HOMES",
+        ] {
+            assert!(!body.contains(forbidden), "the card asks {forbidden}");
         }
-        for reader in [
-            "explorer_menu::package_file()",
-            "attention_hooks::state()",
-            "attention_codex::first_run_installable()",
-            "attention_copilot::state()",
+        // The waits read the adopted answer before the edge; the rows are said from it after.
+        for adopted in [
+            "self.app.agent_hooks_found",
+            "self.app.copilot_read_after_probe",
         ] {
             assert!(
-                body.find(reader).unwrap() > edge,
-                "{reader} must follow the edge"
+                body.find(adopted).is_some_and(|at| at < edge),
+                "{adopted} is not what the card waits on"
+            );
+        }
+        for after in [
+            "first_run::agent_row_offer(",
+            "self.app.codex_install_refused",
+            "self.app.copilot_readiness",
+            "explorer_menu::package_file()",
+        ] {
+            assert!(
+                body.find(after).is_some_and(|at| at > edge),
+                "{after} must follow the edge"
             );
         }
         // Agent availability already has one owner; never add a second PATH cache.
