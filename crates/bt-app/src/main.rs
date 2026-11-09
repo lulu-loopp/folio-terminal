@@ -41531,7 +41531,7 @@ mod file_peek_fade_tests {
         );
 
         assert!(
-            method_body("Runtime", "advance_file_peek").contains("self.file_peek_owes_frame(now)"),
+            method_body("Runtime", "advance_file_peek").contains("rt.file_peek_owes_frame(now)"),
             "and the card's own turn is what wakes the loop while it climbs"
         );
     }

@@ -327,10 +327,11 @@ impl<B: Backend> Runtime<'_, B> {
         // on it, and the refusal books the turn that has. A turn on which the
         // service changed something is not that turn — what it has to say is new
         // — so it goes through.
-        if !moved && !self.animation_frame_is_due() {
+        // And a turn with neither news nor a debt asks the gate nothing.
+        if !self.paced_frame(moved, |rt| rt.toasts_owe_frame(now)) {
             return Ok(());
         }
-        if (moved || self.toasts_owe_frame(now)) && self.refresh_overlay() {
+        if self.refresh_overlay() {
             self.present_chrome_change()?;
         }
         Ok(())
