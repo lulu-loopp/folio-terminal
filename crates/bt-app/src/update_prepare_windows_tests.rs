@@ -1444,7 +1444,7 @@ fn feed_of(folder: &Path, archive: &[u8], sums: &str) -> crate::update::Feed {
 /// MUTATION: make `transport_for` answer `page` whatever `feed` is (the page
 /// is asked).
 #[test]
-fn the_download_copies_the_feed_asset_and_verifies_its_sum() {
+fn the_download_copies_the_feed_asset_without_asking_the_page() {
     let root = bt_testpath::temp_path("bt-u30b-copy");
     let _scratch = Scratch(root.clone());
     let archive = b"a release archive, by the feed".repeat(5_000);

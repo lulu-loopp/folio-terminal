@@ -58,7 +58,7 @@ fn the_identity_oid_is_the_one_that_is_not_the_public_trust_marker() {
 /// could not be checked (offline is accepted), so the updater reads the
 /// chain's own flags: F-5 makes "unknown" a refusal, retried with the next
 /// press. On Windows the same refusal is produced by the real chain engine in
-/// `a_test_signed_file_without_a_revocation_list_is_revocation_unknown`.
+/// `a_test_signed_file_without_a_revocation_list_is_revocation_unknown_over_a_real_chain`.
 ///
 /// MUTATION: drop `CHAIN_REVOCATION_UNKNOWN` or `CHAIN_OFFLINE_REVOCATION`
 /// from `revocation_verdict` and the unknown cases pass.
@@ -109,7 +109,7 @@ fn a_test_signed_file_without_a_revocation_list_is_revocation_unknown_over_a_rea
 /// reason; a list that is missing or does not verify says unknown alone and
 /// keeps "not verified". On Windows the real chain engine gives the offline
 /// answer for a leaf naming a list it cannot reach
-/// (`a_test_signed_file_naming_an_unreachable_list_is_revocation_offline`).
+/// (`a_test_signed_file_naming_an_unreachable_list_is_revocation_offline_over_a_real_chain`).
 ///
 /// MUTATION: test `CHAIN_REVOCATION_UNKNOWN` before `CHAIN_OFFLINE_REVOCATION`
 /// in `revocation_verdict`, or fold `CRYPT_E_REVOCATION_OFFLINE` back into the
@@ -294,8 +294,8 @@ fn the_machine_type_is_read_from_the_pe_header() {
 mod windows_world;
 
 /// PIN (U-15) — off Windows **every trust door refuses by name**: a release
-/// file, a release package, a sidecar and the running build's capability all
-/// answer `Unsupported`. What the tests above and below pin over signed files
+/// file, a release package, a sidecar, the file version and the running
+/// build's capability all answer `Unsupported`. What the tests above and below pin over signed files
 /// needs Windows' `WinVerifyTrust` and chain engine, so they are
 /// `#[cfg(windows)]`.
 #[cfg(not(windows))]
@@ -312,6 +312,7 @@ fn off_windows_every_trust_door_is_refused_by_name() {
         Err(Refusal::Unsupported)
     );
     assert_eq!(super::verify_sidecar(path), Err(Refusal::Unsupported));
+    assert_eq!(super::file_version(path), Err(Refusal::Unsupported));
     assert_eq!(
         super::running_capability(true),
         Capability::Unidentified(Refusal::Unsupported)
