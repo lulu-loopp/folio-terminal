@@ -216,8 +216,10 @@ impl CarryPublished {
     /// A member that answered replaces its part, handing on the notices a part the window has not
     /// taken still owes; a member that did not answer leaves the untaken part as it was. The line,
     /// one per round (R-D of 2026-11-07), says how many checks ran and how many said something
-    /// new, so a quiet round is in the log too.
-    pub(crate) fn publish(&self, round: CarryRound) -> String {
+    /// new, so a quiet round is in the log too. **A round no member answered** (the start's own,
+    /// before the program walk has answered) publishes nothing and has no line (the review's N8).
+    pub(crate) fn publish(&self, round: CarryRound) -> Option<String> {
+        round.hooks.as_ref()?;
         let mut published = self.snapshot.lock().unwrap_or_else(PoisonError::into_inner);
         let untaken = published.take().unwrap_or_default();
         let (mut checks, mut changed) = (0, 0);
@@ -230,7 +232,7 @@ impl CarryPublished {
             None => untaken.hooks,
         };
         *published = Some(CarrySnapshot { hooks });
-        format!("BT_CARRY round checks={checks} changed={changed}")
+        Some(format!("BT_CARRY round checks={checks} changed={changed}"))
     }
 
     /// **The newest snapshot, once** — the window's adoption.
@@ -259,7 +261,7 @@ pub(crate) fn take_carry_snapshot() -> Option<CarrySnapshot> {
 }
 
 /// **One round of the pass: every member, in the order the pass runs them**, then the round
-/// published and the window woken once. Each member is one run of a step on the pass's worker,
+/// published and the window woken once — when a member answered. Each member is one run of a step on the pass's worker,
 /// handed the worker's context — a step may ask a program a question there, as the agent hooks ask
 /// codex its version (0.4.10 plan row 69c) — and asks the trial's gate for its own writer before it
 /// writes.
@@ -273,9 +275,11 @@ pub(crate) fn run_carry_steps(ctx: &WorkerCtx) {
     let round = CarryRound {
         hooks: crate::agent_hooks_step::run_agent_hooks_step(ctx),
     };
-    crate::diagnostics::stderr_line(CARRY_PUBLISHED.publish(round));
-    if let Some(wake) = CARRY_WAKE.get() {
-        wake();
+    if let Some(line) = CARRY_PUBLISHED.publish(round) {
+        crate::diagnostics::stderr_line(line);
+        if let Some(wake) = CARRY_WAKE.get() {
+            wake();
+        }
     }
 }
 
@@ -526,7 +530,10 @@ mod tests {
 
     /// RED (0.4.10 plan row 68a) — **a round is one snapshot and one line**: what its members
     /// answered is taken once by the window, and the round's line counts the checks that ran and
-    /// the ones that said something new — a quiet round says so too (R-D of 2026-11-07).
+    /// the ones that said something new — a quiet round says so too (R-D of 2026-11-07); a round
+    /// no member answered says nothing and publishes nothing (the review's N8).
+    ///
+    /// MUTATION: a round no member answered is said (`plant-68a-empty-round-said.py`).
     #[test]
     fn a_round_publishes_one_snapshot_and_its_line() {
         use crate::i18n::Text;
@@ -538,7 +545,7 @@ mod tests {
                 changed: 2,
             }),
         });
-        assert_eq!(line, "BT_CARRY round checks=3 changed=2");
+        assert_eq!(line.as_deref(), Some("BT_CARRY round checks=3 changed=2"));
         let taken = published.take().expect("the round is published");
         assert_eq!(
             taken.hooks,
@@ -547,9 +554,10 @@ mod tests {
         assert_eq!(published.take(), None, "and taken once");
         assert_eq!(
             published.publish(CarryRound::default()),
-            "BT_CARRY round checks=0 changed=0",
-            "a round whose members had nothing to look at is said as well"
+            None,
+            "a round whose members had nothing to look at says nothing"
         );
+        assert_eq!(published.take(), None, "and publishes nothing");
     }
 
     /// RED (0.4.10 plan row 68a) — **a notice the window has not taken survives the rounds after

@@ -230,6 +230,9 @@ impl Drop for HooksLatchHeld<'_> {
 pub(crate) struct AgentHooksStep {
     latches: [AtomicBool; 3],
     said: Mutex<[Option<String>; 3]>,
+    /// Whether this process has said that this copy's program could not be named, since the
+    /// last scan (the review's N8: said once, and again only after a scan in between).
+    unnamed_said: AtomicBool,
 }
 
 impl AgentHooksStep {
@@ -241,6 +244,7 @@ impl AgentHooksStep {
                 AtomicBool::new(false),
             ],
             said: Mutex::new([None, None, None]),
+            unnamed_said: AtomicBool::new(false),
         }
     }
 
@@ -340,6 +344,7 @@ impl AgentHooksStep {
     /// **Say each family's line when it differs from the last one said for that family**
     /// (row 68a, R-D of 2026-11-07), by `say`; answers how many it said.
     pub(crate) fn say_changed(&self, scans: &[HooksScan; 3], say: &dyn Fn(String)) -> usize {
+        self.unnamed_said.store(false, Ordering::Relaxed);
         let mut said = self.said.lock().unwrap_or_else(PoisonError::into_inner);
         let mut changed = 0;
         for (last, scan) in said.iter_mut().zip(scans) {
@@ -350,6 +355,16 @@ impl AgentHooksStep {
             }
         }
         changed
+    }
+
+    /// **Say that no family was scanned, because this copy's program could not be named** — once,
+    /// and again only after a scan has run in between (the review's N8, under R-D's change rule).
+    pub(crate) fn say_unnamed(&self, say: &dyn Fn(String)) {
+        if !self.unnamed_said.swap(true, Ordering::Relaxed) {
+            say(
+                "BT_AGENT_HOOKS not scanned: this copy's own program could not be named".to_owned(),
+            );
+        }
     }
 }
 
@@ -387,9 +402,7 @@ pub(crate) fn run_agent_hooks_step(ctx: &WorkerCtx) -> Option<MemberAnswer<Hooks
     // on the pass's worker, before any family's file is named.
     let _ = crate::attention_codex::settle_version(ctx);
     let Some(exe) = ownership::this_copy() else {
-        crate::diagnostics::stderr_line(
-            "BT_AGENT_HOOKS not scanned: this copy's own program could not be named".to_owned(),
-        );
+        AGENT_HOOKS.say_unnamed(&crate::diagnostics::stderr_line);
         return None;
     };
     let paths = HOOKS_FAMILIES.each_ref().map(family_path);
@@ -1787,29 +1800,51 @@ mod tests {
     /// `held_by_another` ones (ruling N3), asked once on a first run (report §2.2).
     ///
     /// The start's carry step (0.4.10 plan row 68a, `startup::FirstWindow::carry`) is written
-    /// inside `Runtime::create`, so it is held to the same: it begins the pass and reads nothing.
+    /// inside `Runtime::create`, so it is held to the same: it begins the pass and reads nothing,
+    /// and so do the step's own function (`carry_pass::begin_carry_at_start`) and the window's
+    /// adoption of the round (`FolioApp::adopt_carry_snapshot`), both on the window thread (the
+    /// review's N5).
     /// MUTATION: the step reads a row first (`plant-68a-carry-step-reads-on-the-window-thread.py`).
     #[test]
     fn the_window_thread_reads_no_agent_file_at_start() {
-        let create = crate::test_support::method_body("Runtime", "create");
+        use crate::test_support::{free_fn_body, method_body, squeezed};
+        let create = method_body("Runtime", "create");
         assert!(
-            create.contains("carry: carry_pass::begin_carry_at_start,"),
+            squeezed(create).contains(&squeezed("carry: carry_pass::begin_carry_at_start,")),
             "the start's carry step is not where this test reads"
         );
-        for read in [
-            "row_state(",
-            "attention_copilot::readiness(",
-            "attention_hooks::state(",
-            "attention_codex::state(",
-            "attention_copilot::state(",
-        ] {
+        let window_thread = [
+            ("Runtime::create", create),
+            ("begin_carry_at_start", free_fn_body("begin_carry_at_start")),
+            (
+                "FolioApp::adopt_carry_snapshot",
+                method_body("FolioApp", "adopt_carry_snapshot"),
+            ),
+            (
+                "adopt_agent_hooks_snapshot",
+                free_fn_body("adopt_agent_hooks_snapshot"),
+            ),
+        ];
+        for (name, body) in window_thread {
+            let body = squeezed(body);
+            for read in [
+                "row_state(",
+                "attention_copilot::readiness(",
+                "attention_hooks::state(",
+                "attention_codex::state(",
+                "attention_copilot::state(",
+            ] {
+                assert!(
+                    !body.contains(read),
+                    "{name} reads an agent's file on the window thread: {read}"
+                );
+            }
+            // The adoptions take the readiness the snapshot carries, and never ask it.
             assert!(
-                !create.contains(read),
-                "the launch reads an agent's file: {read}"
+                name == "Runtime::create" || !body.contains("readiness()"),
+                "{name} asks copilot's readiness on the window thread"
             );
         }
-        let adopt = crate::test_support::free_fn_body("adopt_agent_hooks_snapshot");
-        assert!(!adopt.contains("row_state(") && !adopt.contains("readiness()"));
     }
 
     /// **The pass runs at the moments the rulings name** (R7): the walk's answer (its first
@@ -2330,5 +2365,32 @@ mod tests {
                 family.tag
             );
         }
+    }
+
+    /// RED (0.4.10 plan row 68a, the review's N8) — **a copy that cannot be named is said once**,
+    /// under R-D's change rule: the line is said again only after a scan has run in between.
+    ///
+    /// MUTATION: the line is said every round (`plant-68a-unnamed-said-every-round.py`).
+    #[test]
+    fn an_unnamed_copy_is_said_once_until_a_scan_runs() {
+        let step = AgentHooksStep::new();
+        let heard = std::cell::RefCell::new(Vec::<String>::new());
+        let say = |line: String| heard.borrow_mut().push(line);
+        step.say_unnamed(&say);
+        step.say_unnamed(&say);
+        assert_eq!(
+            heard.take(),
+            ["BT_AGENT_HOOKS not scanned: this copy's own program could not be named"],
+            "an unchanged answer says nothing"
+        );
+        let scans = [0, 1, 2].map(|_| HooksScan::unrepaired(HooksFound::Nothing, String::new()));
+        step.say_changed(&scans, &say);
+        heard.take();
+        step.say_unnamed(&say);
+        assert_eq!(
+            heard.take().len(),
+            1,
+            "a scan in between makes it news again"
+        );
     }
 }
