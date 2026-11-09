@@ -24,6 +24,15 @@ pub enum Seat {
     Pane,
 }
 
+/// An enum with a struct-like variant, whose fields the index keeps no record of.
+pub enum Picture {
+    /// A struct-like variant.
+    Ready {
+        /// A variant field's doc naming [`variant_field_marker`].
+        key: String,
+    },
+}
+
 impl Pane {
     /// An associated function's doc naming [`method_marker`].
     pub fn grow(&mut self) {}

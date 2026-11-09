@@ -39,6 +39,8 @@
 //!
 //! * a function, an associated function, a struct, an enum, a union, a field or a variant
 //!   (`ItemRecord`), in its declaration (before its body);
+//! * a struct-like variant, anywhere inside its braces: the index keeps no record of a variant's
+//!   fields, so a field's doc there is the variant's (`Picture::Ready`, ruled 2026-11-09);
 //! * a `const` or `static` of a module, an `impl` block or a trait (`ValueRecord`);
 //! * a type alias (`AliasRecord`);
 //! * an `impl` block or a `trait`, in its header (before its braces);
@@ -54,9 +56,9 @@
 //! * a line or column past the file's end;
 //! * a byte inside no doc comment or doc attribute;
 //! * a byte inside a macro's token tree (the parse does not see the items a macro makes);
-//! * a byte inside a function's body (a local item's doc), inside a data type's or a variant's
-//!   body but in no field, or inside an `impl` block's or a trait's braces but in no member the
-//!   index records (an associated type, a macro call);
+//! * a byte inside a function's body (a local item's doc), inside a data type's body but in no
+//!   field or variant, inside a tuple variant's parentheses, or inside an `impl` block's or a
+//!   trait's braces but in no member the index records (an associated type, a macro call);
 //! * a record whose module paths name none, or more than one, under the file's product module.
 //!
 //! # The key
@@ -75,8 +77,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use bt_source::{
-    CommentKind, ConditionalVariant, DiskScope, FileRecord, Index, ModuleShape, Span, TargetId,
-    TargetKind, TargetRoot, Universe, Vendor, normalized, report,
+    CommentKind, ConditionalVariant, DiskScope, FileRecord, Index, ItemKind, ModuleShape, Span,
+    TargetId, TargetKind, TargetRoot, Universe, Vendor, normalized, report,
 };
 
 fn workspace_root() -> PathBuf {
@@ -229,15 +231,24 @@ impl Holder<'_> {
     }
 
     /// The braces (or parentheses) a byte inside of which is in no member of this record.
-    fn body(&self) -> Option<(Span, &'static str)> {
+    ///
+    /// A struct-like variant's braces are not among them: the index keeps no record of a
+    /// variant's fields, so a byte in one of their docs is the variant's own (ruled
+    /// 2026-11-09). A struct's or a union's body, whose fields the index does record, and a
+    /// tuple variant's parentheses stay refused.
+    fn body(&self, index: &Index) -> Option<(Span, &'static str)> {
         match self {
-            Holder::Item(record) => record.body().map(|body| {
-                let why = if record.kind().is_callable() {
-                    "inside a function's body (a local item's doc)"
+            Holder::Item(record) => record.body().and_then(|body| {
+                if record.kind().is_callable() {
+                    Some((body, "inside a function's body (a local item's doc)"))
+                } else if record.kind() == ItemKind::Variant && index.text(body).starts_with('{') {
+                    None
                 } else {
-                    "inside a data type's or a variant's body but in no field"
-                };
-                (body, why)
+                    Some((
+                        body,
+                        "inside a data type's or a variant's body but in no field",
+                    ))
+                }
             }),
             Holder::Impl(record) => Some((
                 record.body(),
@@ -341,7 +352,7 @@ fn key(index: &Index, root: &Path, source: &Path, warning: &Warning) -> Result<R
         .min_by_key(|holder| holder.whole().len());
     let (owner, module) = match innermost {
         Some(holder) => {
-            if let Some((body, why)) = holder.body()
+            if let Some((body, why)) = holder.body(index)
                 && body.holds(offset)
             {
                 return refuse(why);
@@ -651,6 +662,7 @@ fn each_supported_position_names_its_owner_and_module() {
         ("struct_marker", "crate::Pane", "crate"),
         ("field_marker", "crate::Pane::width", "crate"),
         ("variant_marker", "crate::Seat::Pane", "crate"),
+        ("variant_field_marker", "crate::Picture::Ready", "crate"),
         ("method_marker", "crate::Pane::grow", "crate"),
         ("assoc_const_marker", "crate::Pane::LIMIT", "crate"),
         ("impl_marker", "crate::impl Default for Pane", "crate"),

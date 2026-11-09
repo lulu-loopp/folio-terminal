@@ -1815,9 +1815,11 @@ each to the item whose documentation holds it through the index and fails on a
 broken link the list does not hold and on a row no broken link is. Its module
 doc is the grammar: three message forms (`unresolved`, `ambiguous`,
 `incompatible`), the positions it reads (an item, field, variant, `const`,
-`static`, alias, `impl` or trait declaration; `<module> (outside any item)` for
-a doc in no record), and the positions it refuses by name (a macro's tokens, a
-function body, a type's, `impl`'s or trait's braces outside any recorded member,
+`static`, alias, `impl` or trait declaration; the variant for a doc inside a
+struct-like variant's braces, whose fields the index does not record;
+`<module> (outside any item)` for a doc in no record), and the positions it
+refuses by name (a macro's tokens, a function body, a tuple variant's
+parentheses, a type's, `impl`'s or trait's braces outside any recorded member,
 a byte in no doc comment, a file reached twice or not at all). The other rustdoc
 lints are counted and printed, not gated. `scripts/ci/check-doc-link-debt.ps1`
 (CI `logic`; its cases in `check-doc-link-debt-tests.ps1`; a planted row in

@@ -20,7 +20,7 @@
 # A `cargo doc` that fails, a warning with no single primary span, or a message with a tab or a
 # line break in it ends the script before the target runs: a measurement that did not happen
 # must not look like one that agreed. Not a `check-*` script: it compiles, so locally it runs
-# only on a lane (through ccheck.sh), and in CI in the `docs` job.
+# only on a lane, and in CI in the `docs` job.
 # `scripts/dev/generate-doc-link-debt.ps1` runs it and copies the rendering over the list.
 
 $ErrorActionPreference = "Stop"
