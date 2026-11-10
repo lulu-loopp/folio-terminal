@@ -321,11 +321,12 @@ pub fn disarm_in(registry: &mut impl Registry, key: &str, txn: &[u8; 16]) -> Res
 /// **What the cleanup row did with one entrance value.**
 #[derive(Debug)]
 pub enum Cleaned {
-    /// It named this copy's home, or a program that no longer exists, and it
-    /// is gone.
+    /// Its program was one the row's judge removes — for the uninstall's, this
+    /// copy's home or a program that no longer exists — and it is gone.
     Removed,
-    /// It names a program that exists outside this copy's home — another
-    /// copy's transaction — or no program this door can read; it stays.
+    /// Its program is one the judge leaves — for the uninstall's, one that
+    /// exists outside this copy's home, another copy's transaction — or no
+    /// program this door can read; it stays.
     Left(PathBuf),
     /// It was this copy's, and reading or removing it failed.
     Refused(Refusal),
@@ -353,11 +354,34 @@ pub fn clean_in(
     key: &str,
     home: &Path,
 ) -> Result<Vec<(String, Cleaned)>, Refusal> {
+    let home = crate::instance::canonical_path(home);
+    clean_by(registry, key, |_, program| {
+        !program.exists() || crate::instance::canonical_path(program).starts_with(&home)
+    })
+}
+
+/// **The entrance values over `key`, each judged by its program** — the one
+/// walker for [`clean_in`]'s rule and for a start's sweep of entrances whose
+/// rescue program is gone (`bt-app`'s `update_orphans`, 0.4.10 plan row 68b).
+///
+/// Only values whose name begins [`VALUE_PREFIX`] are read; every other value
+/// of the key is never read and stays byte for byte. A value of another type,
+/// or a command not of [`command`]'s shape, is [`Cleaned::Left`] without
+/// asking the judge. `remove` is handed each readable value's name and the
+/// program its command starts, and answers whether the value goes. The key is
+/// flushed once if anything was removed.
+///
+/// # Errors
+/// As [`clean_in`].
+pub fn clean_by(
+    registry: &mut impl Registry,
+    key: &str,
+    mut remove: impl FnMut(&str, &Path) -> bool,
+) -> Result<Vec<(String, Cleaned)>, Refusal> {
     let names = registry.names(key).map_err(|error| Refusal::Failed {
         stage: Stage::List,
         error,
     })?;
-    let home = crate::instance::canonical_path(home);
     let mut cleaned = Vec::new();
     let mut removed_any = false;
     for name in names
@@ -384,9 +408,7 @@ pub fn clean_in(
             cleaned.push((name, Cleaned::Left(PathBuf::from(stored))));
             continue;
         };
-        let ours =
-            !program.exists() || crate::instance::canonical_path(&program).starts_with(&home);
-        if !ours {
+        if !remove(&name, &program) {
             cleaned.push((name, Cleaned::Left(program)));
             continue;
         }

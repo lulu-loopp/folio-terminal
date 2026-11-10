@@ -244,6 +244,31 @@ pub(crate) fn other_live_by(
     }
 }
 
+/// **Whether a program a mark names is gone, under the start-time scan's rule** (0.4.10 plan row
+/// 67, R4; row 68b, R5): `Ok(true)` when nothing stands at it, by the system's own `NotFound`, on a
+/// volume that is there; `Ok(false)` when a file stands there; "unknown" for an operand that names
+/// no file to ask about, something there that is not a file, a system that will not say, and a
+/// volume that is away or whose way cannot be followed — which writes nothing and is said, as
+/// [`other_live_by`] answers each of them.
+///
+/// [`other_live_by`] asks it of an owner that is not this copy; this asks it of a program with no
+/// copy to compare against — an update's rescue entrance names a program the update itself wrote,
+/// and an Explorer registration's owner is compared with this copy by its caller.
+pub(crate) fn gone_by(program: &Path, look: &(impl Look + ?Sized)) -> Result<bool, &'static str> {
+    let unknown = || Err(crate::i18n::Text::AgentHooksOwnerUnknown.text());
+    if literal_absolute_path(program).is_err() {
+        return unknown();
+    }
+    match look.stands(program) {
+        PathStands::File => Ok(false),
+        PathStands::Missing => match look.volume_of(program) {
+            Some(volume) if look.stands(&volume) == PathStands::Folder => Ok(true),
+            _ => unknown(),
+        },
+        PathStands::Folder | PathStands::Other | PathStands::Unknown => unknown(),
+    }
+}
+
 /// **The machine, as the liveness rule asks it** ([`other_live_by`]): what stands at a path, and
 /// the root of the volume a path that is not there leads to — the second asked only under the
 /// start-time scan's rule (re-review R2, 2026-11-05).

@@ -33,7 +33,9 @@
 //! move: dropped in `Downloads`, tried, then dragged to `C:\Tools`. The menu
 //! entry survives that move pointing at nothing, the click does nothing at all,
 //! and there is no installer anywhere to notice. So every launch reads the
-//! trees, and a set that is present but not what this build would write now is
+//! trees — on the start's carry pass, off the window thread, and held during an
+//! update's trial until its commit (0.4.10 plan row 68b; [`run_classic_step`]) —
+//! and a set that is present but not what this build would write now is
 //! written again — silently, because it is **this user's own data being made to
 //! say what they already asked it to say**. Nothing is created that was not
 //! there: a machine that never installed the verb is left alone
@@ -49,12 +51,15 @@
 //! **live** copy of Folio put there, and rewriting that one is not a repair: it
 //! is this process taking a menu entry off a program that is answering it
 //! perfectly well. The rule is
-//! [`bt_platform::context_menu_reassert_wanted`]'s — rewrite unless a tree names
+//! [`bt_platform::explorer_reassert_wanted`]'s — rewrite unless a tree names
 //! a `folio.exe` that is still on the disk and is not this one — and the day it
 //! was written is the day a debug build, run once out of a scratch folder,
 //! pointed somebody's own right-click menu at a folder that was deleted an hour
-//! later. The explicit switch is not affected: a press asks for *this* Folio by
-//! name, and [`apply`] writes.
+//! later. At start the two facts it takes are the start-time scan's (row 68b,
+//! R5; [`classic_found`]): this one is this copy's file, links followed, and gone
+//! is missing on a volume that is there — a program on a drive that is away is
+//! not gone. The explicit switch is not affected: a press asks for *this* Folio
+//! by name, and [`apply_pressed`] writes.
 //!
 //! # Windows 11's primary menu
 //!
@@ -68,11 +73,18 @@
 //! entry will be found so that nobody has to go looking.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use bt_platform::{CONTEXT_MENU_CLASSES, ContextMenuShape, ContextMenuState, ContextMenuTree};
+use bt_platform::admission::WorkerCtx;
+use bt_platform::{
+    CONTEXT_MENU_CLASSES, ContextMenuShape, ContextMenuState, ContextMenuTree, RegisteredExe,
+};
 
-use crate::explorer_menu::{MenuFate, MenuRemoval};
+use crate::attention_ownership::{Look, gone_by, what_stands};
+use crate::carry_pass::{LastSaid, MemberAnswer};
+use crate::explorer_menu::{MenuFate, MenuRemoval, same_path};
 use crate::i18n::Text;
+use crate::update_trial::Writer;
 
 /// Where `folio.exe` is, as the registry will have to name it.
 ///
@@ -98,7 +110,7 @@ fn executable() -> Option<PathBuf> {
 /// at a string resource, which Explorer would re-read per user language — is the
 /// route the bilingual plan will want and is not this slice: it needs a string
 /// table in the binary's resources, which this product does not have, and the
-/// literal has a repair already ([`reassert`] rewrites a label that no longer
+/// literal has a repair already ([`reassert_in`] rewrites a label that no longer
 /// matches).
 #[must_use]
 pub fn desired() -> Option<ContextMenuShape> {
@@ -169,28 +181,330 @@ pub fn apply(install: bool) -> Result<(), String> {
     )
 }
 
-/// The launch-time repair — see the module header.
+/// The switch's press (`Settings ▸ General ▸ Explorer context menu`): [`apply`],
+/// counted first, so that a start's repair running beside it on the carry pass
+/// yields to it ([`ClassicPresses`]).
+pub fn apply_pressed(install: bool) -> Result<(), String> {
+    PRESSES.record(install);
+    apply(install)
+}
+
+/// **The presses of the switch, as the start's repair asks about them** (0.4.10
+/// plan row 68b, R4).
 ///
-/// Returns whether the machine carries the verb afterwards, which is what the
-/// row is drawn from. A failure to rewrite is not reported anywhere: there is no
-/// window yet to report it on, the entry that is already there goes on being
-/// whatever it was, and the next launch will try again. What it must not do is
-/// stop the launch.
+/// The repair runs on the carry pass's worker and a press on the window thread,
+/// so the two can meet, and **a press after the repair's read wins**: the press
+/// records its wish and counts itself before it writes ([`apply_pressed`]); the
+/// repair writes only if no press landed since its read, and writes the last
+/// press's wish again when one landed during its write ([`reassert_in`]); and an
+/// answer read before the last press is not adopted
+/// ([`adopt_classic_answer`]) — the press's own read is newer.
 ///
-/// Whether it writes at all is [`bt_platform::context_menu_reassert_wanted`]'s
-/// answer, and the disk it is asked about is this one: `is_file` on the path the
-/// registered command line names. The read is done once and both answers — the
-/// write and the row's `On` — come off it, so the row cannot be drawn from a
-/// second reading of a registry this function has since changed.
-pub fn reassert() -> bool {
-    let Some(desired) = desired() else {
-        return false;
-    };
-    let found = bt_platform::read_context_menu(CONTEXT_MENU_CLASSES);
-    if bt_platform::context_menu_reassert_wanted(&found, &desired, |exe| exe.is_file()) {
-        let _ = apply(true);
+/// The wish is stored before the count moves, so whoever sees the count move
+/// reads that press's wish.
+pub(crate) struct ClassicPresses {
+    count: AtomicU64,
+    wish: AtomicBool,
+}
+
+impl ClassicPresses {
+    pub(crate) const fn new() -> Self {
+        Self {
+            count: AtomicU64::new(0),
+            wish: AtomicBool::new(false),
+        }
     }
-    installed(bt_platform::context_menu_verdict(&found, &desired))
+
+    /// A press asking for the verb (`true`) or for its removal.
+    pub(crate) fn record(&self, install: bool) {
+        self.wish.store(install, Ordering::SeqCst);
+        self.count.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// How many presses have landed.
+    pub(crate) fn seen(&self) -> u64 {
+        self.count.load(Ordering::SeqCst)
+    }
+
+    /// The last press's wish.
+    fn wish(&self) -> bool {
+        self.wish.load(Ordering::SeqCst)
+    }
+}
+
+/// This process's presses.
+static PRESSES: ClassicPresses = ClassicPresses::new();
+
+/// **What the classic member answers the window**: whether the machine carries
+/// the verb after the round, and how many presses had landed when the round read
+/// the trees.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ClassicAnswer {
+    pub(crate) installed: bool,
+    pub(crate) presses_seen: u64,
+}
+
+/// **The window takes a round's answer for the row** — unless a press has landed
+/// since the round read the trees: the press read the machine after its own
+/// write, and that read is newer (R4).
+pub(crate) fn adopt_classic_answer(installed: &mut bool, answer: ClassicAnswer) {
+    if answer.presses_seen == PRESSES.seen() {
+        *installed = answer.installed;
+    }
+}
+
+/// **The trees the repair reads and writes**: the account's class store in the
+/// product ([`AccountClasses`]); a test's own.
+pub(crate) trait ClassicStore {
+    /// What each tree holds, in [`bt_platform::CONTEXT_MENU_TREES`]'s order.
+    fn read(&self) -> Vec<ContextMenuTree>;
+    /// Write `shape` into every tree, or take the verb out of every tree.
+    fn write(&self, shape: Option<&ContextMenuShape>) -> Result<(), String>;
+}
+
+/// The account's own class store, written through [`apply`], which tells the
+/// shell.
+struct AccountClasses;
+
+impl ClassicStore for AccountClasses {
+    fn read(&self) -> Vec<ContextMenuTree> {
+        bt_platform::read_context_menu(CONTEXT_MENU_CLASSES)
+    }
+
+    fn write(&self, shape: Option<&ContextMenuShape>) -> Result<(), String> {
+        apply(shape.is_some())
+    }
+}
+
+/// **What the start finds in the trees** — the classic member's word for it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ClassicFound {
+    /// No tree carries the verb: nothing is created.
+    Absent,
+    /// Exactly what this build would write.
+    Current,
+    /// Not what this build would write, and every tree names this copy or no
+    /// program at all: an older shape, a label in a language left, a half set.
+    OldShape,
+    /// A tree names a program that is gone, and none a program that is there.
+    Dead,
+    /// A tree names another copy that is still there: left.
+    AnotherCopy,
+    /// A tree names a program the machine will not say about — a drive that is
+    /// away among them: left.
+    OwnerUnknown,
+}
+
+impl ClassicFound {
+    const fn word(self) -> &'static str {
+        match self {
+            Self::Absent => "absent",
+            Self::Current => "current",
+            Self::OldShape => "old shape",
+            Self::Dead => "dead",
+            Self::AnotherCopy => "another copy",
+            Self::OwnerUnknown => "owner unknown",
+        }
+    }
+
+    /// Whether the start rewrites what it found.
+    const fn wanted(self) -> bool {
+        matches!(self, Self::OldShape | Self::Dead)
+    }
+}
+
+/// **Read the trees against this build, with the start-time scan's ownership
+/// rule** (0.4.10 plan row 68b, R5).
+///
+/// The decision is [`bt_platform::explorer_reassert_wanted`]'s, the one rule
+/// both Explorer registrations obey; what it is handed for each program a tree
+/// names is this rule's: **this copy** when the path leads to this very file,
+/// links and junctions followed ([`same_path`]) — so a verb written through
+/// winget's link (every build up to 0.4.7 named the program by `current_exe`)
+/// is this copy's old shape and not a stranger's (G7) — and otherwise **gone**
+/// only when nothing is at it on a volume that is there ([`gone_by`]). A program
+/// still there, and one the machine will not say about, are a copy that is
+/// still on the disk, and are left.
+pub(crate) fn classic_found(
+    found: &[ContextMenuTree],
+    desired: &ContextMenuShape,
+    this: &Path,
+    look: &(impl Look + ?Sized),
+) -> ClassicFound {
+    match bt_platform::context_menu_verdict(found, desired) {
+        ContextMenuState::Absent => return ClassicFound::Absent,
+        ContextMenuState::Current => return ClassicFound::Current,
+        ContextMenuState::Stale => {}
+    }
+    let named: Vec<(RegisteredExe, Result<bool, &'static str>)> = found
+        .iter()
+        .filter_map(ContextMenuTree::shape)
+        .filter_map(|shape| bt_platform::context_menu_command_exe(&shape.command))
+        .map(Path::new)
+        .map(|exe| {
+            if same_path(exe, this) {
+                let ours = RegisteredExe {
+                    on_disk: true,
+                    ours: true,
+                };
+                return (ours, Ok(false));
+            }
+            let gone = gone_by(exe, look);
+            let named = RegisteredExe {
+                on_disk: gone != Ok(true),
+                ours: false,
+            };
+            (named, gone)
+        })
+        .collect();
+    if bt_platform::explorer_reassert_wanted(named.iter().map(|(exe, _)| *exe)) {
+        if named.iter().any(|(_, gone)| *gone == Ok(true)) {
+            ClassicFound::Dead
+        } else {
+            ClassicFound::OldShape
+        }
+    } else if named
+        .iter()
+        .any(|(exe, gone)| !exe.ours && *gone == Ok(false))
+    {
+        ClassicFound::AnotherCopy
+    } else {
+        ClassicFound::OwnerUnknown
+    }
+}
+
+/// **One run of the start's repair**: what it found, what it did, and the
+/// window's answer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ClassicRun {
+    pub(crate) found: ClassicFound,
+    /// `None` when nothing was due; otherwise `written`, `held`, `pressed` or
+    /// `refused (<reason>)`.
+    pub(crate) repaired: Option<String>,
+    pub(crate) answer: ClassicAnswer,
+}
+
+impl ClassicRun {
+    /// `BT_EXPLORER_CLASSIC <found>[ repaired=<what>]` — no path (the Explorer
+    /// modules' rule).
+    pub(crate) fn line(&self) -> String {
+        match &self.repaired {
+            Some(repaired) => format!(
+                "BT_EXPLORER_CLASSIC {} repaired={repaired}",
+                self.found.word()
+            ),
+            None => format!("BT_EXPLORER_CLASSIC {}", self.found.word()),
+        }
+    }
+}
+
+/// **The start's repair of the classic verb** (0.4.10 plan row 68b) — see the
+/// module header.
+///
+/// One read, classified ([`classic_found`]); the write only when the finding is
+/// this copy's old shape or a dead owner's, and then **only after the trial's
+/// gate has said yes** (`defer` answers `true` to hold it: an update's trial
+/// does not rewrite the verb the build it may roll back to is answering — G6),
+/// and **only if no press has landed since the read** (R4). A press that lands
+/// during the write is written again after it, until none lands. The row's
+/// answer comes off a read after the write, so it is never a second reading of a
+/// registry this function had not yet changed.
+///
+/// A refused write is said and left: the entry goes on being whatever it was,
+/// and the next start asks again.
+pub(crate) fn reassert_in(
+    store: &impl ClassicStore,
+    desired: &ContextMenuShape,
+    this: &Path,
+    look: &(impl Look + ?Sized),
+    defer: impl FnOnce(Writer) -> bool,
+    presses: &ClassicPresses,
+) -> ClassicRun {
+    let seen = presses.seen();
+    let found = store.read();
+    let judged = classic_found(&found, desired, this, look);
+    let run = |repaired: Option<String>, trees: &[ContextMenuTree]| ClassicRun {
+        found: judged,
+        repaired,
+        answer: ClassicAnswer {
+            installed: installed(bt_platform::context_menu_verdict(trees, desired)),
+            presses_seen: seen,
+        },
+    };
+    if !judged.wanted() {
+        return run(None, &found);
+    }
+    if defer(Writer::ExplorerRepair) {
+        return run(Some("held".to_owned()), &found);
+    }
+    if presses.seen() != seen {
+        return run(Some("pressed".to_owned()), &found);
+    }
+    let written = store.write(Some(desired));
+    let mut answered = seen;
+    while presses.seen() != answered {
+        answered = presses.seen();
+        let _ = store.write(presses.wish().then_some(desired));
+    }
+    let repaired = match written {
+        Ok(()) if answered != seen => "pressed".to_owned(),
+        Ok(()) => "written".to_owned(),
+        Err(reason) => format!("refused ({reason})"),
+    };
+    run(Some(repaired), &store.read())
+}
+
+/// The classic member's last line.
+static CLASSIC_SAID: LastSaid = LastSaid::new();
+
+/// **A run as the pass's part**: one check, changed when its line differs from the
+/// last said in this process.
+pub(crate) fn classic_member_answer(
+    run: &ClassicRun,
+    said: &LastSaid,
+    say: &dyn Fn(String),
+) -> MemberAnswer<ClassicAnswer> {
+    let changed = said.say_if_new(run.line(), say);
+    MemberAnswer {
+        part: run.answer,
+        checks: 1,
+        changed: usize::from(changed),
+    }
+}
+
+/// **The classic verb, as a member of the start's carry pass** (0.4.10 plan row
+/// 68b; [`crate::carry_pass::run_carry_steps`]): the account's trees, this
+/// copy's file, this machine's disk, the trial's gate and this process's presses.
+///
+/// Nothing off Windows, where there are no trees; nothing in a test process,
+/// whose pass must never read or write the account's right-click menu — the
+/// tests drive [`reassert_in`] over trees of their own. Nothing, and one line,
+/// when the system will not say where this copy's program is: there is no shape
+/// to compare against.
+pub(crate) fn run_classic_step(_ctx: &WorkerCtx) -> Option<MemberAnswer<ClassicAnswer>> {
+    if !cfg!(windows) || cfg!(test) {
+        return None;
+    }
+    let (Some(this), Some(desired)) = (executable(), desired()) else {
+        CLASSIC_SAID.say_if_new(
+            "BT_EXPLORER_CLASSIC not read: this copy's own program could not be named".to_owned(),
+            &crate::diagnostics::stderr_line,
+        );
+        return None;
+    };
+    let run = reassert_in(
+        &AccountClasses,
+        &desired,
+        &this,
+        &what_stands,
+        crate::update_trial::defer,
+        &PRESSES,
+    );
+    Some(classic_member_answer(
+        &run,
+        &CLASSIC_SAID,
+        &crate::diagnostics::stderr_line,
+    ))
 }
 
 /// **What `--remove-explorer-menu` does about the classic verb** — the package
@@ -245,7 +559,7 @@ pub fn classic_removal(
 /// on the decision.
 ///
 /// The read is done once and both the decision and the sentence come off it, for
-/// [`reassert`]'s reason: a second reading would be of a registry this function
+/// [`reassert_in`]'s reason: a second reading would be of a registry this function
 /// has since changed.
 ///
 /// **The language is deliberately not installed first**, unlike
@@ -322,7 +636,10 @@ fn registered_exe(found: &[ContextMenuTree]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::{Cell, RefCell};
+
     use super::*;
+    use crate::attention_ownership::PathStands;
 
     /// PIN — **the row reads the machine, and `Stale` is still `On`.**
     ///
@@ -343,7 +660,7 @@ mod tests {
 
     /// PIN — **what this build would write names this build's own binary.**
     ///
-    /// The absolute path is the whole reason [`reassert`] exists, so the shape
+    /// The absolute path is the whole reason [`reassert_in`] exists, so the shape
     /// has to be derived from `current_exe` every time it is asked rather than
     /// resolved once and remembered.
     #[test]
@@ -528,6 +845,509 @@ mod tests {
             MenuRemoval::Unanswerable,
             "a machine that will not say where its own folio.exe is cannot say \
              whose the entry is"
+        );
+    }
+
+    // ── the start's repair (0.4.10 plan row 68b) ─────────────────────────────
+
+    /// The label every shape in these tests is written with, unless it says otherwise.
+    const LABEL: &str = "Open Folio here";
+
+    /// A scratch folder under the build directory, removed with the test.
+    fn scratch(tag: &str) -> crate::test_support::ScratchFolder {
+        crate::test_support::ScratchFolder::create(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/tb-tests")
+                .join(bt_testpath::unique_name(tag)),
+        )
+    }
+
+    /// A copy of Folio at `<root>/<folder>/folio.exe`.
+    fn copy_at(root: &Path, folder: &str) -> PathBuf {
+        let exe = root.join(folder).join("folio.exe");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, folder.as_bytes()).unwrap();
+        exe
+    }
+
+    /// What this build writes for `exe`.
+    fn shape_of(exe: &Path) -> ContextMenuShape {
+        bt_platform::context_menu_shape(exe, LABEL)
+    }
+
+    /// Both trees carrying `shape`.
+    fn both(shape: &ContextMenuShape) -> Vec<ContextMenuTree> {
+        vec![ContextMenuTree::Written(shape.clone()); 2]
+    }
+
+    /// **Trees held in memory**, counting the writes; a press can be made to land during the
+    /// first write, before the repair's own write lands over it.
+    struct Trees<'a> {
+        trees: RefCell<Vec<ContextMenuTree>>,
+        writes: Cell<usize>,
+        refuse: Option<&'static str>,
+        press_during_write: Cell<Option<(&'a ClassicPresses, bool)>>,
+    }
+
+    impl<'a> Trees<'a> {
+        fn holding(trees: Vec<ContextMenuTree>) -> Self {
+            Self {
+                trees: RefCell::new(trees),
+                writes: Cell::new(0),
+                refuse: None,
+                press_during_write: Cell::new(None),
+            }
+        }
+
+        fn set(&self, shape: Option<&ContextMenuShape>) {
+            *self.trees.borrow_mut() = match shape {
+                Some(shape) => both(shape),
+                None => vec![ContextMenuTree::Absent; 2],
+            };
+        }
+    }
+
+    impl ClassicStore for Trees<'_> {
+        fn read(&self) -> Vec<ContextMenuTree> {
+            self.trees.borrow().clone()
+        }
+
+        fn write(&self, shape: Option<&ContextMenuShape>) -> Result<(), String> {
+            self.writes.set(self.writes.get() + 1);
+            if let Some((presses, wish)) = self.press_during_write.take() {
+                // The press records its wish, writes it, and the repair's write lands after.
+                presses.record(wish);
+                self.set(if wish { shape } else { None });
+            }
+            if let Some(refusal) = self.refuse {
+                return Err(refusal.to_owned());
+            }
+            self.set(shape);
+            Ok(())
+        }
+    }
+
+    /// **The machine with the drive a program was on unplugged**: what stands is this
+    /// machine's, and the way to a missing program's volume cannot be followed.
+    struct Away;
+
+    impl Look for Away {
+        fn stands(&self, path: &Path) -> PathStands {
+            what_stands(path)
+        }
+
+        fn volume_of(&self, _missing: &Path) -> Option<PathBuf> {
+            None
+        }
+    }
+
+    /// A gate that must not be asked: nothing is due.
+    fn never_asked(writer: Writer) -> bool {
+        panic!("the trial's gate is asked only when a write is due, not for {writer:?}")
+    }
+
+    /// RED (0.4.10 plan row 68b, the guard's `landed_by`) — **the carry pass reasserts the classic
+    /// verb**, with the start-time scan's ownership rule, held during a trial, and says each
+    /// finding once.
+    ///
+    /// Over trees of the test's own (every platform; the pass's own member answers nothing in a
+    /// test process, so the account's menu is never read): a verb naming a `folio.exe` that is
+    /// gone from a volume that is there is rewritten to this build's, and the row reads `On`; a
+    /// verb naming another copy that is still there is left, and so is one naming a program on a
+    /// drive that is away — not gone, only unplugged (R5); a machine with no verb gets none; during
+    /// an update's trial the dead owner's verb is classified and held (`ExplorerRepair` asked, the
+    /// row still `On`, nothing written — G6); and the line is said when the finding changes and
+    /// not on a round that finds the same.
+    ///
+    /// MUTATION: write without asking the gate (`plant-68b-classic-unheld.py`) and the trial's
+    /// case goes red; say the line every round (`plant-68b-classic-line-every-round.py`) and the
+    /// last assertion goes red.
+    #[test]
+    fn the_carry_pass_reasserts_the_classic_verb() {
+        let root = scratch("classic-carry");
+        let here = copy_at(&root, "here");
+        let other = copy_at(&root, "other");
+        let gone = root.join("gone").join("folio.exe");
+        let desired = shape_of(&here);
+        let presses = ClassicPresses::new();
+
+        let dead = Trees::holding(both(&shape_of(&gone)));
+        let run = reassert_in(&dead, &desired, &here, &what_stands, |_| false, &presses);
+        assert_eq!(run.found, ClassicFound::Dead);
+        assert_eq!(run.repaired.as_deref(), Some("written"));
+        assert_eq!(dead.read(), both(&desired), "rewritten to this build's");
+        assert!(run.answer.installed, "and the row reads On");
+
+        for (what, trees, look, expected) in [
+            (
+                "another copy that is still there",
+                both(&shape_of(&other)),
+                &what_stands as &dyn Look,
+                ClassicFound::AnotherCopy,
+            ),
+            (
+                "a program on a drive that is away",
+                both(&shape_of(&gone)),
+                &Away as &dyn Look,
+                ClassicFound::OwnerUnknown,
+            ),
+            (
+                "no verb at all",
+                vec![ContextMenuTree::Absent; 2],
+                &what_stands as &dyn Look,
+                ClassicFound::Absent,
+            ),
+        ] {
+            let store = Trees::holding(trees.clone());
+            let run = reassert_in(&store, &desired, &here, look, never_asked, &presses);
+            assert_eq!(run.found, expected, "{what}");
+            assert_eq!(run.repaired, None, "{what}: nothing is due");
+            assert_eq!(store.writes.get(), 0, "{what}: nothing written");
+            assert_eq!(store.read(), trees, "{what}: left as it was");
+            assert_eq!(
+                run.answer.installed,
+                expected != ClassicFound::Absent,
+                "{what}"
+            );
+        }
+
+        let trial = Trees::holding(both(&shape_of(&gone)));
+        let asked = Cell::new(None);
+        let held = reassert_in(
+            &trial,
+            &desired,
+            &here,
+            &what_stands,
+            |writer| {
+                asked.set(Some(writer));
+                true
+            },
+            &presses,
+        );
+        assert_eq!(
+            asked.get(),
+            Some(Writer::ExplorerRepair),
+            "the gate is asked"
+        );
+        assert_eq!(held.found, ClassicFound::Dead, "the trial classifies");
+        assert_eq!(held.repaired.as_deref(), Some("held"));
+        assert_eq!(trial.writes.get(), 0, "and writes nothing until the commit");
+        assert!(held.answer.installed, "the entry that is there is still On");
+        assert_eq!(held.line(), "BT_EXPLORER_CLASSIC dead repaired=held");
+
+        let said = LastSaid::new();
+        let lines = RefCell::new(Vec::new());
+        let say = |line: String| lines.borrow_mut().push(line);
+        let store = Trees::holding(both(&shape_of(&gone)));
+        let rounds = [0, 1, 2].map(|_| {
+            let run = reassert_in(&store, &desired, &here, &what_stands, |_| false, &presses);
+            classic_member_answer(&run, &said, &say)
+        });
+        assert_eq!(
+            rounds
+                .each_ref()
+                .map(|answer| (answer.checks, answer.changed)),
+            [(1, 1), (1, 1), (1, 0)],
+            "one check a round, changed when the finding changed"
+        );
+        assert_eq!(
+            *lines.borrow(),
+            [
+                "BT_EXPLORER_CLASSIC dead repaired=written",
+                "BT_EXPLORER_CLASSIC current",
+            ],
+            "each finding said once, with no path"
+        );
+    }
+
+    /// RED (0.4.10 plan row 68b; R-C's old-shape test for the classic verb) — **every shape of the
+    /// verb a Folio has written, naming this copy, is brought to this build's**.
+    ///
+    /// The shapes in history: 0.1.0–0.2.x wrote `"<exe>" --cwd "%V"`; 0.3.0 on added
+    /// `--from-explorer`, here in a language the reader has left; every build up to 0.4.7 named
+    /// the program by `current_exe`, which for a copy started through winget's link is the link's
+    /// path — a path that leads to this very file through a link (here a junction to this copy's
+    /// folder), this copy's own and not a stranger's (G7); and a set somebody deleted half of.
+    /// Each is read as this copy's old shape and rewritten to `context_menu_shape(this, label)`.
+    ///
+    /// Over trees of the test's own everywhere; on Windows also over an isolated class store of
+    /// its own (`HKCU\Software\Folio-Test\<tag>`), where another program's verb beside Folio's
+    /// under the same `shell` key is left byte for byte.
+    ///
+    /// MUTATION: compare the registered path with this copy's as two strings again
+    /// (`plant-68b-alias-is-a-stranger.py`) and the link's shape reads as another copy and is
+    /// left.
+    #[test]
+    fn every_historical_shape_of_the_classic_verb_is_brought_to_this_builds() {
+        let root = scratch("classic-shapes");
+        let here = copy_at(&root, "here");
+        let link = root.join("alias");
+        crate::test_support::link_folder_to(&link, here.parent().unwrap());
+        let through_the_link = link.join("folio.exe");
+        assert!(through_the_link.is_file(), "the link leads to this copy");
+        let desired = shape_of(&here);
+        let first = ContextMenuShape {
+            label: LABEL.to_owned(),
+            icon: format!("{},0", here.display()),
+            command: format!("\"{}\" --cwd \"%V\"", here.display()),
+        };
+        let shapes = [
+            ("0.1.0's command line", both(&first)),
+            (
+                "0.3.0's, in the other language",
+                both(&bt_platform::context_menu_shape(&here, "在这里打开 Folio")),
+            ),
+            (
+                "up to 0.4.7's, through winget's link",
+                both(&shape_of(&through_the_link)),
+            ),
+            (
+                "a set somebody deleted half of",
+                vec![
+                    ContextMenuTree::Written(first.clone()),
+                    ContextMenuTree::Absent,
+                ],
+            ),
+        ];
+        for (what, trees) in &shapes {
+            let store = Trees::holding(trees.clone());
+            brought_to_this_builds(&store, &desired, &here, what);
+        }
+        #[cfg(windows)]
+        {
+            let hive = Hive::new("classic-shapes");
+            let beside = hive.another_programs_verb();
+            for (what, trees) in &shapes {
+                hive.plant(trees);
+                brought_to_this_builds(&hive, &desired, &here, what);
+                assert_eq!(
+                    hive.another_programs_verb(),
+                    beside,
+                    "{what}: the other program's verb is left byte for byte"
+                );
+            }
+        }
+    }
+
+    /// One shape through the repair: this copy's old shape, written, and this build's after.
+    fn brought_to_this_builds(
+        store: &impl ClassicStore,
+        desired: &ContextMenuShape,
+        here: &Path,
+        what: &str,
+    ) {
+        let run = reassert_in(
+            store,
+            desired,
+            here,
+            &what_stands,
+            |_| false,
+            &ClassicPresses::new(),
+        );
+        assert_eq!(run.found, ClassicFound::OldShape, "{what}: this copy's");
+        assert_eq!(run.repaired.as_deref(), Some("written"), "{what}");
+        assert_eq!(
+            bt_platform::context_menu_verdict(&store.read(), desired),
+            ContextMenuState::Current,
+            "{what}: brought to this build's"
+        );
+        assert!(run.answer.installed, "{what}");
+    }
+
+    /// **A class store of this test's own** under `HKCU\Software\Folio-Test\<tag>`, written by
+    /// the platform's own writers and read by its reader; `reg.exe` plants what no Folio writes
+    /// (another program's verb, a deleted tree) and takes the whole key away however the test
+    /// ends.
+    #[cfg(windows)]
+    struct Hive {
+        classes: String,
+    }
+
+    #[cfg(windows)]
+    impl Hive {
+        fn new(tag: &str) -> Self {
+            let classes = format!(r"Software\Folio-Test\{}", bt_testpath::unique_name(tag));
+            let hive = Self { classes };
+            hive.reg(&[
+                "add",
+                &hive.key(r"Directory\shell\Other"),
+                "/ve",
+                "/d",
+                "Another program here",
+                "/f",
+            ]);
+            hive.reg(&[
+                "add",
+                &hive.key(r"Directory\shell\Other\command"),
+                "/ve",
+                "/d",
+                r"C:\Other\other.exe %V",
+                "/f",
+            ]);
+            hive
+        }
+
+        fn key(&self, below: &str) -> String {
+            format!(r"HKCU\{}\{below}", self.classes)
+        }
+
+        fn run(args: &[&str]) -> std::process::Output {
+            let hygiene = bt_pty::test_shell::Hygiene::new();
+            let reg = PathBuf::from(std::env::var_os("SystemRoot").expect("Windows names it"))
+                .join("System32")
+                .join("reg.exe");
+            hygiene
+                .command(reg, bt_platform::quiet_command)
+                .args(args)
+                .output()
+                .expect("reg.exe runs")
+        }
+
+        fn reg(&self, args: &[&str]) -> String {
+            let ran = Self::run(args);
+            assert!(
+                ran.status.success(),
+                "reg {args:?}: {}",
+                String::from_utf8_lossy(&ran.stderr)
+            );
+            String::from_utf8_lossy(&ran.stdout).into_owned()
+        }
+
+        /// The other program's verb, every value under it, as `reg query` prints it.
+        fn another_programs_verb(&self) -> String {
+            self.reg(&["query", &self.key(r"Directory\shell\Other"), "/s"])
+        }
+
+        /// Write `trees` as a Folio once did: a shape into every tree, then the trees that are
+        /// absent taken out.
+        fn plant(&self, trees: &[ContextMenuTree]) {
+            let shape = trees
+                .iter()
+                .find_map(ContextMenuTree::shape)
+                .expect("a shape to plant");
+            bt_platform::install_context_menu(&self.classes, shape).expect("the test's own store");
+            for (tree, held) in bt_platform::CONTEXT_MENU_TREES.iter().zip(trees) {
+                if *held == ContextMenuTree::Absent {
+                    self.reg(&["delete", &self.key(&format!(r"{tree}\Folio")), "/f"]);
+                }
+            }
+            assert_eq!(self.read(), trees, "planted as written");
+        }
+    }
+
+    #[cfg(windows)]
+    impl ClassicStore for Hive {
+        fn read(&self) -> Vec<ContextMenuTree> {
+            bt_platform::read_context_menu(&self.classes)
+        }
+
+        fn write(&self, shape: Option<&ContextMenuShape>) -> Result<(), String> {
+            match shape {
+                Some(shape) => bt_platform::install_context_menu(&self.classes, shape),
+                None => bt_platform::remove_context_menu(&self.classes),
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    impl Drop for Hive {
+        fn drop(&mut self) {
+            let _ = Self::run(&["delete", &format!(r"HKCU\{}", self.classes), "/f"]);
+        }
+    }
+
+    /// RED (0.4.10 plan row 68b, R4) — **a press during the classic repair wins**.
+    ///
+    /// The repair runs on the pass's worker and the switch on the window thread. A press that
+    /// lands after the repair's read and before its write is not written over: the repair writes
+    /// nothing and says `pressed`. A press that lands during the repair's write — its own write
+    /// done before the repair's lands over it — has its wish written again after, so the store
+    /// ends as the press asked.
+    ///
+    /// MUTATION: no second write after a press during the repair's
+    /// (`plant-68b-classic-press-loses.py`) and the second case ends with the verb the person just
+    /// took out back in their menu.
+    #[test]
+    fn a_press_during_the_classic_repair_wins() {
+        let root = scratch("classic-press");
+        let here = copy_at(&root, "here");
+        let gone = root.join("gone").join("folio.exe");
+        let desired = shape_of(&here);
+
+        let presses = ClassicPresses::new();
+        let before = Trees::holding(both(&shape_of(&gone)));
+        let run = reassert_in(
+            &before,
+            &desired,
+            &here,
+            &what_stands,
+            |_| {
+                // The press lands while the gate is asked: after the read, before the write.
+                presses.record(false);
+                false
+            },
+            &presses,
+        );
+        assert_eq!(run.repaired.as_deref(), Some("pressed"));
+        assert_eq!(
+            before.writes.get(),
+            0,
+            "the repair does not write over a press"
+        );
+        assert_eq!(
+            run.answer.presses_seen, 0,
+            "the answer is the read before it"
+        );
+
+        let presses = ClassicPresses::new();
+        let during = Trees::holding(both(&shape_of(&gone)));
+        during.press_during_write.set(Some((&presses, false)));
+        let run = reassert_in(&during, &desired, &here, &what_stands, |_| false, &presses);
+        assert_eq!(run.repaired.as_deref(), Some("pressed"));
+        assert_eq!(
+            during.read(),
+            vec![ContextMenuTree::Absent; 2],
+            "the press's wish is what the store ends with"
+        );
+        assert!(
+            !run.answer.installed,
+            "read after the press's wish was written"
+        );
+        assert_eq!(
+            run.answer.presses_seen, 0,
+            "and still not the press's own read"
+        );
+    }
+
+    /// RED (0.4.10 plan row 68b, R4) — **an answer read before the last press is not adopted**:
+    /// the press read the machine after its own write, and that read is newer.
+    ///
+    /// MUTATION: adopt every answer (`plant-68b-stale-classic-adopted.py`) and a round that read
+    /// the verb before the person took it out turns the switch back On.
+    #[test]
+    fn a_classic_answer_older_than_a_press_is_not_adopted() {
+        let read_now = PRESSES.seen();
+        let mut installed = false;
+        adopt_classic_answer(
+            &mut installed,
+            ClassicAnswer {
+                installed: true,
+                presses_seen: read_now,
+            },
+        );
+        assert!(installed, "an answer read after every press is adopted");
+        PRESSES.record(false);
+        installed = false;
+        adopt_classic_answer(
+            &mut installed,
+            ClassicAnswer {
+                installed: true,
+                presses_seen: read_now,
+            },
+        );
+        assert!(
+            !installed,
+            "an answer read before the last press is dropped"
         );
     }
 }

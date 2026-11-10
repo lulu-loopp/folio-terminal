@@ -244,6 +244,9 @@ mod update_prepare_macos;
 // The update job's Windows driver: Prepare, from the press to `Prepared` (0.4.6 ticket U-20).
 mod update_prepare_windows;
 mod update_recover;
+// The update entrances a copy that is gone left behind, swept by the start's carry pass (0.4.10
+// plan row 68b).
+mod update_orphans;
 mod update_startup;
 mod update_trial;
 mod update_txn;
@@ -341,6 +344,7 @@ use runtime::unverified_reference_handoff;
 // test modules.
 #[cfg(test)]
 use computation_lane::raster_peek_page;
+use carry_pass::CarryAsk;
 use explorer_menu::door_language;
 use file_peek::home_shortened_path_on;
 #[cfg(all(test, windows))]
@@ -9251,10 +9255,13 @@ struct App<B: Backend = Native> {
     /// launch, an install and a removal — and at no other, because nothing else
     /// in this process can move it.
     ///
-    /// **Seeded by the launch's own repair**, `context_menu::reassert`: a
+    /// **Seeded by the start's own repair**, the carry pass's classic member
+    /// (`context_menu::run_classic_step`, 0.4.10 plan row 68b), adopted with the
+    /// round's snapshot unless a press landed since the round read the trees: a
     /// `folio.exe` that has been moved since the verb was written leaves a menu
-    /// entry that opens nothing, and the launch is the only moment this product
-    /// has to notice.
+    /// entry that opens nothing, and the start is the only moment this product
+    /// has to notice. `false` until the round answers, as the package row reads
+    /// `Unknown` until its member has.
     context_menu_installed: bool,
     /// **Which window pressed the first-page switch**, until the deployment it
     /// started answers (§7.4a).
@@ -15207,7 +15214,8 @@ fn release_trial_writer(writer: update_trial::Writer, stores: &mut TrialStores<'
         Writer::PsReadLineModule => {
             shell_integration::begin_powershell_script_preparation();
         }
-        Writer::ExplorerRepair => explorer_menu::begin_probe(),
+        // Both Explorer registrations, on the pass's worker (0.4.10 plan row 68b).
+        Writer::ExplorerRepair => carry_pass::begin_carry_pass(CarryAsk::EXPLORER),
         Writer::ToastIdentity => {
             if let Err(error) = bt_platform::Notifier::register_identity(APP_NAME) {
                 crate::diagnostics::stderr_line(format!(
@@ -15220,7 +15228,9 @@ fn release_trial_writer(writer: update_trial::Writer, stores: &mut TrialStores<'
         // The trial is committed: it is the person's Folio, and the system may start it again.
         Writer::RestartRegistration => (stores.restart)(),
         // The pass again, on its worker: what it held back, it now writes.
-        Writer::AgentHooksRepair => carry_pass::begin_carry_pass(),
+        Writer::AgentHooksRepair => carry_pass::begin_carry_pass(CarryAsk::HOOKS),
+        // The sweep again: the dead entrances it held back, it now removes (row 68b).
+        Writer::OrphanSweep => carry_pass::begin_carry_pass(CarryAsk::UPDATE_ORPHANS),
     }
 }
 
@@ -31806,7 +31816,7 @@ fn adopt_program_answers(
             .or_else(|| walked.then_some(None)),
     );
     if codex_moved && attention_hooks::AGENT_HOMES.answered() {
-        carry_pass::begin_carry_pass();
+        carry_pass::begin_carry_pass(CarryAsk::HOOKS);
     }
     if let Some(facts) = answers.facts {
         if wsl::adopt(facts.wsl) {
@@ -31823,7 +31833,7 @@ fn adopt_program_answers(
             // Where the agents keep their files is the account's own now: the carry pass reads
             // them there, on its worker, wherever this answer was adopted — the launch adopts the
             // walk before it has a window to take news to.
-            carry_pass::begin_carry_pass();
+            carry_pass::begin_carry_pass(CarryAsk::HOOKS);
         }
     }
     news
@@ -31867,7 +31877,7 @@ fn adopt_agent_hooks_snapshot<B: Backend>(
 /// `App::agent_hooks_found`.
 fn agent_row_asked_again<B: Backend>(app: &mut App<B>, family: usize) {
     app.agent_hooks_found[family] = None;
-    carry_pass::begin_carry_pass();
+    carry_pass::begin_carry_pass(CarryAsk::HOOKS);
 }
 
 /// **The startup trace's two shell lines, held while a launch tab's shell is being born**.
@@ -35526,12 +35536,12 @@ impl Runtime<'_, Native> {
                 let _ = proxy.send_event(AppEvent::UpdateChecked);
             });
         }
-        // **And the fifth's** (§7.4a), which is the only one of them that can
-        // also *write*: the probe repairs a package registration that names a
-        // folder `folio.exe` has since been dragged out of. Its wake is owed for
-        // the update check's reason and the PSReadLine probe's at once — the row
-        // it draws lives behind a modal, and the answer takes long enough that
-        // nothing else is going to ask for a frame by the time it lands.
+        // **And the fifth's** (§7.4a): a press on the Explorer first page is answered by a
+        // deployment seconds later. Its wake is owed for the update check's reason and the
+        // PSReadLine probe's at once — the row it draws lives behind a modal, and the answer
+        // takes long enough that nothing else is going to ask for a frame by the time it lands.
+        // The start's probe is the carry pass's member since 0.4.10 plan row 68b, and wakes by
+        // the pass's own wake below.
         {
             let proxy = proxy.clone();
             explorer_menu::install_wake(move || {
@@ -35586,13 +35596,6 @@ impl Runtime<'_, Native> {
                 let _ = proxy.send_event(AppEvent::WatchStewardAnswered);
             });
         }
-        // **The probe can repair and renew the package registration**, which
-        // is O's until an update's trial is committed (`update_trial`, F-7,
-        // F-18): the probe asks the trial's gate itself
-        // (`explorer_menu::probe_at_start`), a trial runs it at the commit
-        // instead, and the row reads `Unknown` until then, which it already
-        // treats as "not known yet".
-        explorer_menu::begin_probe();
         // **And an update's trial watches its journal** (`update_trial`): a
         // worker reads it until the transaction is decided, and a commit wakes
         // this loop to write what the trial held back. Nothing at all in any
@@ -36449,9 +36452,10 @@ impl Runtime<'_, Native> {
             motion: read_motion_preference(),
             profile_programs,
             startup_shells,
-            // Reads the registry once and, on a machine whose `folio.exe`
-            // has moved since, writes the verb again — see the field.
-            context_menu_installed: context_menu::reassert(),
+            // **Nothing of Explorer's menu is read on this thread at launch** (0.4.10 plan row
+            // 68b, G6): the carry pass reads the verb on its worker, repairs it there, and its
+            // answer sets this. Until then the row reads Off.
+            context_menu_installed: false,
             // **Nothing about the agents' files is read on this thread at launch** (0.4.10 plan
             // row 67b): the carry pass reads them on its worker once the program walk has said
             // where they are, and its answer sets these. Until then each switch reads Off and no
@@ -49702,13 +49706,22 @@ impl<B: Backend> FolioApp<B> {
         let Some(carried) = carry_pass::take_carry_snapshot() else {
             return Ok(());
         };
-        let Some(snapshot) = carried.hooks else {
-            return Ok(());
-        };
         let Some(app) = self.app.as_mut() else {
             return Ok(());
         };
-        adopt_agent_hooks_snapshot(app, &snapshot);
+        // The classic verb's answer, unless a press has written since its read (row 68b, R4): the
+        // press's own read is the newer one. The package's row reads its module's cells, which
+        // the round wrote on the worker; the redraw below is what it is owed.
+        if let Some(classic) = carried.explorer {
+            context_menu::adopt_classic_answer(&mut app.context_menu_installed, classic);
+        }
+        let notices = match carried.hooks {
+            Some(snapshot) => {
+                adopt_agent_hooks_snapshot(app, &snapshot);
+                snapshot.notices
+            }
+            None => Vec::new(),
+        };
         let oldest_standing = |app: &mut Self| {
             (0..app.windows.len()).find_map(|index| {
                 let id = app.windows.key_at(index)?;
@@ -49721,7 +49734,7 @@ impl<B: Backend> FolioApp<B> {
         let told = self.frontmost_window().or_else(|| oldest_standing(self));
         self.for_each_window(|runtime| {
             if Some(runtime.window_id()) == told {
-                for notice in &snapshot.notices {
+                for notice in &notices {
                     runtime.toast(
                         toast::ToastKind::Ok,
                         toast::ToastAnchor::Window,
@@ -52861,7 +52874,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 // **The version is the start-time repair's gate for Copilot's hooks** (0.4.10 plan
                 // row 67b, R9): a repair that waited for it runs now, and the scan's snapshot,
                 // which carries readiness too, is read after this answer.
-                carry_pass::begin_carry_pass();
+                carry_pass::begin_carry_pass(CarryAsk::HOOKS);
                 self.for_each_window(|runtime| {
                     if runtime.refresh_chrome() {
                         runtime.present_chrome_change()

@@ -1752,7 +1752,7 @@ impl<B: Backend> Runtime<'_, B> {
         if package_job {
             self.request_explorer_package(place, announce);
         }
-        let outcome = context_menu::apply(place.classic());
+        let outcome = context_menu::apply_pressed(place.classic());
         self.app.context_menu_installed = context_menu::installed(context_menu::state());
         match outcome {
             Ok(()) if package_job || announce == Announce::OnlyFailures => Ok(true),

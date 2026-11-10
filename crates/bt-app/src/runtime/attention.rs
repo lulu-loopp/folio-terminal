@@ -721,7 +721,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// so this is the only way a machine that has been put right becomes a machine Folio will act
     /// on again without a relaunch.
     pub(crate) fn refresh_agent_rows(&mut self) {
-        crate::carry_pass::begin_carry_pass();
+        crate::carry_pass::begin_carry_pass(crate::carry_pass::CarryAsk::HOOKS);
     }
 
     /// Whether one of the built-in agent profiles has its program on this

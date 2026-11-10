@@ -197,8 +197,9 @@ const INVENTORY: &[Mark] = &[
         says: Text::CleanupMarkExplorer,
         kind: Kind::PerCopy,
         remover: Remover::Explorer,
-        writer: "context_menu.rs:apply;context_menu.rs:reassert;explorer_menu.rs:request;explorer_menu.rs:probe",
-        // Both owed to 68b (R-C of 2026-11-07), which moves them into the pass together.
+        writer: "context_menu.rs:apply;context_menu.rs:reassert_in;explorer_menu.rs:request;explorer_menu.rs:probe_at_start",
+        // Both moved into the pass together by 68b (R-C of 2026-11-07), held for the trial's
+        // commit by one writer.
         carry: &[
             CarryRule::OwnerChecked {
                 check: CarryCheck::ExplorerPackage,
@@ -226,8 +227,15 @@ const INVENTORY: &[Mark] = &[
         kind: Kind::PerCopy,
         remover: Remover::Entrance,
         writer: "../bt-platform/src/logon_hook.rs:arm_in",
-        // 68b adds the sweep of an entrance whose program is gone (R5).
-        carry: &[CarryRule::Transaction],
+        // Retired with its transaction; one whose rescue program is gone is swept at start (68b,
+        // R5 of 2026-11-04).
+        carry: &[
+            CarryRule::Transaction,
+            CarryRule::OwnerChecked {
+                check: CarryCheck::UpdateOrphans,
+                writer: Writer::OrphanSweep,
+            },
+        ],
     },
     Mark {
         name: "Start-menu shortcut",
@@ -427,8 +435,15 @@ const INVENTORY: &[Mark] = &[
         kind: Kind::PerAccount,
         remover: Remover::UpdateEntrances,
         writer: "../bt-platform/src/launch_agent.rs:arm",
-        // 68b adds the sweep of an entrance whose program is gone (R5).
-        carry: &[CarryRule::Transaction],
+        // Retired with its transaction; one whose rescue program is gone is swept at start (68b,
+        // R5 of 2026-11-04).
+        carry: &[
+            CarryRule::Transaction,
+            CarryRule::OwnerChecked {
+                check: CarryCheck::UpdateOrphans,
+                writer: Writer::OrphanSweep,
+            },
+        ],
     },
     Mark {
         name: "Update home beside the bundle",
@@ -436,7 +451,8 @@ const INVENTORY: &[Mark] = &[
         kind: Kind::PerCopy,
         remover: Remover::UpdateHome,
         writer: "update_txn.rs:Home::for_bundle (made by the macOS Prepare, U-27)",
-        // 68b adds the sweep of a home whose bundle is gone (R5).
+        // A home whose bundle is gone needs a record of the homes no build writes yet: part 68e
+        // (R7 of 2026-11-09).
         carry: &[CarryRule::Transaction],
     },
     Mark {

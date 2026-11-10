@@ -85,7 +85,11 @@ impl<B: Backend> Runtime<'_, B> {
         });
         self.sync_math_layout_key();
         self.refresh_chrome();
-        crate::carry_pass::begin_carry_pass();
+        // The agents' lines, and the classic verb's label, which is in the language the window
+        // writes in (0.4.10 plan row 68b, R2): carried at the change, not at the next start.
+        crate::carry_pass::begin_carry_pass(
+            crate::carry_pass::CarryAsk::HOOKS.and(crate::carry_pass::CarryAsk::EXPLORER_CLASSIC),
+        );
         self.publish_frame(FrameTrigger {
             occurred_at: Instant::now(),
             source: FrameSource::Expose,
