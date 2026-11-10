@@ -2021,6 +2021,67 @@ fn a_promise_on_the_clipboard_is_written_and_pasted_as_a_copied_file_is() {
     let _ = std::fs::remove_dir_all(&staging);
 }
 
+/// RED (plan row 81) — **a panic in the promise's render is the paste's failure, not the
+/// process's end**: the worker contains it, removes the paste's folder and answers
+/// `not-rendered`, which is said on the next turn as any refusal is.
+///
+/// MUTATION: render without `contained_panic::contain` in `Runtime::stage_clipboard_promise` —
+/// the worker dies with its answer owed and the line never comes.
+#[test]
+fn a_promise_whose_render_panics_is_refused_and_leaves_nothing() {
+    let _places = staging_places();
+    let mut folio = a_window_pasting("paste-promise-panics", "unused 未用");
+    let events = crate::headless::LoopEvents::default();
+    folio.app.event_proxy = events.proxy();
+    let clipboard = folio.window.window.clipboard.clone();
+    let staging = clipboard.staged_here();
+    let _ = std::fs::remove_dir_all(&staging);
+    let read_at = clipboard.holds_payload(bt_platform::ClipboardPayload::Promise(
+        bt_platform::PromisedFiles {
+            entries: vec![bt_platform::PromisedEntry {
+                name: "photo.jpg".to_owned(),
+                size: Some(3),
+                folder: false,
+            }],
+            picture_passed_over: false,
+        },
+    ));
+    clipboard.promise_renders(vec![Ok(b"jpg".to_vec())]);
+    clipboard.promise_render_panics();
+    folio.ledger.take();
+    chord(&mut folio, "v", KeyCode::KeyV);
+    folio.settle_clipboard();
+    let mut lines = Vec::new();
+    crate::lane::wait_until("the promise's worker answers its panic", || {
+        folio
+            .runtime()
+            .adopt_clipboard_picture()
+            .expect("the wake's look is answered");
+        lines.extend(refusal_lines(&mut folio));
+        !lines.is_empty()
+    });
+    assert_eq!(
+        lines,
+        [format!(
+            "paste refused: promise (not-rendered); road=promise; sequence={read_at}"
+        )]
+    );
+    let left: Vec<std::path::PathBuf> = std::fs::read_dir(&staging)
+        .expect("the staging folder was made")
+        .flatten()
+        .map(|entry| entry.path())
+        .collect();
+    assert!(
+        left.is_empty(),
+        "the paste's folder went with the panic: {left:?}"
+    );
+    assert!(
+        sent_to_the_shell(&mut folio, 0).is_empty(),
+        "nothing was pasted"
+    );
+    let _ = std::fs::remove_dir_all(&staging);
+}
+
 /// PIN (plan row 81) — **every refusal line is spelled from its value**: each kind, each detail
 /// and each road, in the line's one shape, with words and counts only.
 #[test]

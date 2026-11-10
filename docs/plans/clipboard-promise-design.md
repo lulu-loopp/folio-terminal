@@ -39,7 +39,9 @@ worker:
    the staging folder is the window host's: `%TEMP%\folio\clipboard` in the product, a test's own
    folder headless);
 2. asks the window's clipboard door to render into it (`ClipboardDoor::render_promised_files`;
-   `PlatformClipboard` calls `bt_platform::render_clipboard_promise`, a worker-only door);
+   `PlatformClipboard` calls `bt_platform::render_clipboard_promise`, a worker-only door), inside
+   `contained_panic::contain`: a panic in the render is the paste's `not-rendered`, its folder
+   removed, never the process's end (`window_waits.tsv`'s row conforms);
 3. sweeps the staging folder after a success (`clipboard_picture::sweep_staging`);
 4. lays its answer in the mailbox and wakes the window (`AppEvent::ClipboardPictureReady`).
 

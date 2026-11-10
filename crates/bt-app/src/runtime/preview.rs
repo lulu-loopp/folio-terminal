@@ -14317,11 +14317,23 @@ impl<B: Backend> Runtime<'_, B> {
             move |worker| {
                 let _place = place;
                 let began = Instant::now();
+                // **A panic in the render is the paste's failure, not the process's end**
+                // (`contained_panic::contain`, C2): the render writes only the paste's own
+                // folder, which nothing else reads, and that folder goes with the panic as it
+                // goes with any refusal.
                 let result =
                     clipboard_picture::reserve_staging_folder(worker, &folder, SystemTime::now())
                         .map_err(bt_platform::clipboard_promise::PromiseRefused::WriteFailed)
                         .and_then(|into| {
-                            door.render_promised_files(worker, &promise.entries, &into)
+                            crate::contained_panic::contain(|| {
+                                door.render_promised_files(worker, &promise.entries, &into)
+                            })
+                            .unwrap_or_else(|_| {
+                                let _ = std::fs::remove_dir_all(&into);
+                                Err(bt_platform::clipboard_promise::PromiseRefused::NotRendered(
+                                    None,
+                                ))
+                            })
                         });
                 if result.is_ok() {
                     clipboard_picture::sweep_staging(&folder);

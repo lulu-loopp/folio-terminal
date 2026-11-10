@@ -671,6 +671,8 @@ pub(crate) struct ClipboardScript {
     /// Each promised entry's bytes, in the descriptor's order, or the result code its render
     /// fails with — what the source behind a promise hands over when asked.
     promised: Mutex<Vec<Result<Vec<u8>, u32>>>,
+    /// The source behind the promise panics when its first entry is asked for.
+    promise_panics: Mutex<bool>,
     /// The clipboard's own count of its changes: one more for every copy onto it.
     sequence: Mutex<u64>,
     /// The folder this window's pictures and promises are staged in, under the test's own
@@ -706,6 +708,11 @@ impl HeadlessClipboard {
     /// result code its render fails with.
     pub(crate) fn promise_renders(&self, contents: Vec<Result<Vec<u8>, u32>>) {
         *locked(&self.0.promised) = contents;
+    }
+
+    /// The source behind the promise panics inside its render, as a source's code may.
+    pub(crate) fn promise_render_panics(&self) {
+        *locked(&self.0.promise_panics) = true;
     }
 
     /// The folder this clipboard's pastes are staged in — made on first asking, under a name of
@@ -804,6 +811,7 @@ impl crate::clipboard_lane::ClipboardDoor for HeadlessClipboard {
         let mut source = ScriptedPromise {
             descriptor,
             contents: locked(&self.0.promised).clone(),
+            panics: *locked(&self.0.promise_panics),
         };
         bt_platform::clipboard_promise::render_promise(
             worker,
@@ -819,6 +827,7 @@ impl crate::clipboard_lane::ClipboardDoor for HeadlessClipboard {
 struct ScriptedPromise {
     descriptor: Vec<bt_platform::PromisedEntry>,
     contents: Vec<Result<Vec<u8>, u32>>,
+    panics: bool,
 }
 
 impl bt_platform::clipboard_promise::PromisedContents for ScriptedPromise {
@@ -834,6 +843,7 @@ impl bt_platform::clipboard_promise::PromisedContents for ScriptedPromise {
         index: usize,
         file: &mut bt_platform::clipboard_promise::PromisedFile<'_>,
     ) -> Result<(), bt_platform::clipboard_promise::PromiseRefused> {
+        assert!(!self.panics, "the scripted source panics inside its render");
         match self.contents.get(index) {
             Some(Ok(bytes)) => file.write(bytes),
             Some(Err(code)) => Err(bt_platform::clipboard_promise::PromiseRefused::NotRendered(
