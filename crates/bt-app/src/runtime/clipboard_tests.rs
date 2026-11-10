@@ -2329,7 +2329,12 @@ fn the_promise_is_rendered_on_its_own_worker_only() {
         !serve.contains("render_"),
         "the clipboard lane's worker renders nothing:\n{serve}"
     );
-    let platform = free_calls_of("render_clipboard_promise").in_the_product(source());
+    // Declared in bt-platform, so no declaration of this crate's is left out: every call here is one.
+    let platform = found(
+        needle!(Pattern::call("render_clipboard_promise")),
+        View::Identifiers,
+    )
+    .in_the_product(source());
     assert_eq!(
         reader_names(&platform),
         ["render_promised_files"],
