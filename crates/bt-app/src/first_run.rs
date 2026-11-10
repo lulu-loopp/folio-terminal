@@ -216,13 +216,14 @@ fn adopted_offer(
     }
 }
 
-/// **The diagnostics line the card says when it goes up** (the review's N9): how many of the carry
-/// pass's answers the window had adopted by then — `0` where it waited for none (a Mac, no agent
-/// found, a copy that cannot be named) — so a log tells which answer the card opened on. No path
-/// and no row's state.
+/// **The diagnostics line the card says when it goes up** (the review's N9, worded by its F1):
+/// how many of the carry pass's hooks answers the window had adopted by then. That is a count of
+/// adoptions, not of the pass's rounds: a window takes only the newest of the rounds published
+/// since its last turn, and a round with no hooks part adopts nothing here, so `n` can be lower
+/// than the log's `BT_CARRY round` lines. No path and no row's state.
 #[must_use]
 pub(crate) fn card_opened_line(answers_adopted: u32) -> String {
-    format!("BT_FIRST_RUN card opened on round {answers_adopted}")
+    format!("BT_FIRST_RUN card opened after {answers_adopted} hooks answers")
 }
 
 /// Consume the first ready attempt, including one that cannot show a card.
@@ -4386,12 +4387,20 @@ mod tests {
         );
     }
 
-    /// RED (0.4.10 plan row 73, the review's N9) — **the card's opening line names the round and
-    /// nothing else**: the count of the pass's answers the window had adopted, no path.
+    /// RED (0.4.10 plan row 73, the review's N9 and F1) — **the card's opening line names the
+    /// count of hooks answers the window adopted and nothing else**, no path. The count's wiring
+    /// (the adoption's increment, the card's read) is pinned by
+    /// `app_first_run_tests::the_card_opens_on_the_scans_first_answer`.
     #[test]
     fn the_card_s_opening_line_names_the_round() {
-        assert_eq!(card_opened_line(0), "BT_FIRST_RUN card opened on round 0");
-        assert_eq!(card_opened_line(2), "BT_FIRST_RUN card opened on round 2");
+        assert_eq!(
+            card_opened_line(0),
+            "BT_FIRST_RUN card opened after 0 hooks answers"
+        );
+        assert_eq!(
+            card_opened_line(2),
+            "BT_FIRST_RUN card opened after 2 hooks answers"
+        );
     }
 }
 

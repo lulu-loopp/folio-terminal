@@ -159,6 +159,10 @@ fn the_card_opens_on_the_scans_first_answer() {
         folio.app.settings_store.loaded().first_run_card,
         bt_persist::FirstRunCardV1::Shown
     );
+    assert_eq!(
+        folio.app.carry_answers_adopted, 1,
+        "the card's opening line counts the one hooks answer this window adopted (the review's F1)"
+    );
     let opened = folio.window.first_run.rows().to_vec();
     adopt_agent_hooks_snapshot(
         &mut folio.app,

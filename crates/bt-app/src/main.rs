@@ -9319,7 +9319,9 @@ struct App<B: Backend = Native> {
     /// first-run card offers Copilot's row only on an answer.
     copilot_read_after_probe: bool,
     /// **How many of the carry pass's hooks answers this window has adopted** (0.4.10 plan row
-    /// 73, the review's N9): the round the first-run card's opening line names.
+    /// 73, the review's N9 and F1): the count the first-run card's opening line names. It counts
+    /// adoptions, not the pass's rounds: a window takes only the newest round published since its
+    /// last turn, and a round with no hooks part adopts nothing here.
     carry_answers_adopted: u32,
     /// **Why each agent's configuration file will not be edited, when it will not be** — the
     /// `agent_takeovers` order, Claude Code then codex then copilot.
