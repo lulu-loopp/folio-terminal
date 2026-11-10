@@ -1298,14 +1298,15 @@ mod tests {
     }
 
     /// RED (re-review F2, ruled 2026-11-10) — **a live render that makes no progress keeps its
-    /// folder under a concurrent sweep**: a promise whose source holds its only entry for five
-    /// seconds, under a stall bound far past the test (its watcher looks every second and does not
-    /// give up), is swept every quarter second by sweeps that take any marker two seconds old —
-    /// twice the watcher's look; its folder and its marker stand throughout, because the watcher
-    /// refreshes the marker on every look, progress or not; let go, it is pasted.
+    /// folder under a concurrent sweep**: a promise whose source holds its only entry, under a
+    /// stall bound far past the test (its watcher looks every second and does not give up), is
+    /// watched through five looks — about five seconds without a step; each look refreshes the
+    /// marker, progress or not, and the sweep run after it, which takes any marker one look old,
+    /// leaves the folder and its marker standing. Let go, the promise is pasted. The looks are
+    /// seen as the marker's refreshes: the test awaits each one and reads no clock.
     ///
     /// MUTATION: refresh the marker only when the render advances (`still_going` inside
-    /// `steps != seen`) — the third sweep takes the folder.
+    /// `steps != seen`) — the first look is never seen.
     #[test]
     fn a_render_without_progress_keeps_its_folder_while_its_watcher_looks() {
         let folder = scratch("watched");
@@ -1358,22 +1359,39 @@ mod tests {
         crate::lane::wait_until("the paste's folder is reserved", || {
             standing(&folder) == (1, 1)
         });
-        let started = Instant::now();
-        let mut sweeps = 0;
-        while started.elapsed() < Duration::from_secs(5) {
-            std::thread::sleep(Duration::from_millis(250));
+        let marker = fs::read_dir(&folder)
+            .expect("the staging folder stands")
+            .flatten()
+            .map(|entry| entry.path())
+            .find(|path| path.to_string_lossy().ends_with(WRITING_SUFFIX))
+            .expect("the paste's marker");
+        let refreshed = |marker: &Path| {
+            fs::metadata(marker)
+                .and_then(|meta| meta.modified())
+                .expect("the marker's time")
+        };
+        let mut last = refreshed(&marker);
+        for look in 1..=5 {
+            crate::lane::wait_until(
+                &format!("the watcher's look {look} refreshes the marker"),
+                || refreshed(&marker) > last,
+            );
+            last = refreshed(&marker);
             let swept = folder.clone();
             on_a_worker(move |worker| {
-                sweep_staging(worker, &swept, 2 * watch_interval(bound));
+                sweep_staging(worker, &swept, watch_interval(bound));
             });
-            sweeps += 1;
             assert_eq!(
                 standing(&folder),
                 (1, 1),
-                "sweep {sweeps}, {:?} without progress: the folder and its marker stand",
-                started.elapsed()
+                "after look {look} without a step: the folder and its marker stand"
             );
         }
+        assert_eq!(
+            door.promise_renders_ended(),
+            0,
+            "the render was still held at its first entry"
+        );
         stall.release();
         let pasted = staging
             .join()
