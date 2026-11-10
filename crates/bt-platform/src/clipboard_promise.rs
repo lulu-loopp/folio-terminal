@@ -518,6 +518,9 @@ pub(crate) mod tests {
         /// The descriptor the board holds once an entry has been asked for: a copy made while
         /// the render ran.
         copied_meanwhile: Option<Vec<PromisedEntry>>,
+        /// The render's progress, given up between an entry's two writes: a watcher that gave
+        /// up while the source was handing an entry over.
+        gives_up: Option<std::sync::Arc<RenderProgress>>,
     }
 
     impl Fake {
@@ -527,6 +530,7 @@ pub(crate) mod tests {
                 contents,
                 asked: Vec::new(),
                 copied_meanwhile: None,
+                gives_up: None,
             }
         }
     }
@@ -553,6 +557,9 @@ pub(crate) mod tests {
                 Ok(bytes) => {
                     let (first, second) = bytes.split_at(bytes.len() / 2);
                     file.write(first)?;
+                    if let Some(progress) = &self.gives_up {
+                        progress.mark_given_up();
+                    }
                     file.write(second)
                 }
                 Err(code) => Err(PromiseRefused::NotRendered(Some(*code))),
@@ -886,10 +893,11 @@ pub(crate) mod tests {
     /// RED (review N14) — **a render advances its progress at every step and stops at the next
     /// one once it is given up**: a written promise counts its bytes and its entries; a render
     /// whose watcher abandoned it asks the source for nothing more, refuses `stalled` and leaves
-    /// nothing.
+    /// nothing; one given up while the source is handing an entry over writes not a byte more.
     ///
-    /// MUTATION: drop `progress.still_wanted()` from `render_into`'s loop — the abandoned render asks for
-    /// its entry and is written.
+    /// MUTATIONS: drop `progress.still_wanted()` from `render_into`'s loop — the abandoned render
+    /// asks for its entry and is written; drop it from `PromisedFile::write` — the write after
+    /// the give-up lands.
     #[test]
     fn a_render_advances_its_progress_and_stops_once_given_up() {
         on_a_worker(|worker| {
@@ -919,6 +927,22 @@ pub(crate) mod tests {
                 Err(PromiseRefused::Stalled)
             );
             assert!(source.asked.is_empty(), "nothing more was asked for");
+            assert!(!into.exists(), "the folder went with the refusal");
+
+            let into = scratch("given-up-mid-entry");
+            let offer = [entry("a.txt", Some(2))];
+            let progress = std::sync::Arc::new(RenderProgress::default());
+            let mut source = Fake::of(&offer, vec![Ok(b"ab".to_vec())]);
+            source.gives_up = Some(std::sync::Arc::clone(&progress));
+            assert_eq!(
+                render_promise(worker, &mut source, &offer, &into, PASTE_LIMITS, &progress),
+                Err(PromiseRefused::Stalled)
+            );
+            assert_eq!(
+                progress.steps_taken(),
+                1,
+                "the byte before the give-up, and not one after"
+            );
             assert!(!into.exists(), "the folder went with the refusal");
         });
     }
