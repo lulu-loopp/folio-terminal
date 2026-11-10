@@ -1475,7 +1475,7 @@ fn every_lifecycle_door_ends_the_capture() {
             "the gear",
         ),
         (
-            "crate::Runtime::open_scheme_for_editing",
+            "crate::runtime::preview::Runtime::open_scheme_for_editing",
             "the verb that hands the reader a scheme file",
         ),
     ] {
