@@ -1636,8 +1636,9 @@ fn system_remove(worker: &WorkerCtx, remover: Remover, exe: &Path, lang: Lang) -
 /// shape (`logon_hook::clean_by`: the name `FolioUpdate-<txn8>`, the command
 /// `"<rescue>" --update-recover`) naming its installation home `H`, or a program
 /// that no longer exists — are removed by `clean`, the entrance door's own
-/// remover; another copy's live entrance is left and said, and a value of any
-/// other shape is left unread (0.4.10 plan row 68b, review N1). Only Windows has
+/// remover; another copy's live entrance is left and said; every other value of
+/// the key is left, and a value whose name is not the door's is never read
+/// (`logon_hook::clean_in`; 0.4.10 plan row 68b, review N1). Only Windows has
 /// this entrance (the macOS LaunchAgent is U-26's).
 fn entrance_entries(
     platform: HostPlatform,

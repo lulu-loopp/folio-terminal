@@ -886,7 +886,8 @@ fn test_found(module: &str, test: &str) -> bool {
 /// (`plant-68b-package-member-skipped.py`); the classic verb's reassert is back in
 /// `Runtime::create` (`plant-68b-classic-back-at-create.py`); the trial's release arm calls the
 /// retired probe again (`plant-68b-probe-back-at-the-release.py`); a landed test is renamed
-/// (`plant-68b-landed-test-renamed.py`).
+/// (`plant-68b-landed-test-renamed.py`); the package member is run bare of the boundary that runs
+/// the press behind its latch (`plant-68b-package-member-past-its-boundary.py`).
 #[test]
 fn every_owned_thing_says_how_an_update_carries_it() {
     use crate::carry_pass::{CarryCheck, CarryRule};
@@ -926,6 +927,12 @@ fn every_owned_thing_says_how_an_update_carries_it() {
     let create = squeezed(crate::test_support::method_body("Runtime", "create"));
     let release = squeezed(crate::test_support::free_fn_body("release_trial_writer"));
     let handed = calls_handed_the_context(&pass);
+    // The package member runs through the boundary that runs the press a contained panic left
+    // behind its deployment latch (row 68b, second re-review S2).
+    assert!(
+        pass.contains("package_member_with(asked,behind,"),
+        "run_carry_steps runs the package member through package_member_with: {pass}"
+    );
     let checks: Vec<(&Mark, CarryCheck)> = rules()
         .filter_map(|(mark, rule)| match rule {
             CarryRule::OwnerChecked { check, .. } => Some((mark, check)),
