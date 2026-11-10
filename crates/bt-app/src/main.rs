@@ -1260,10 +1260,33 @@ impl BackgroundDecodeMailbox {
 struct ClipboardPictureAnswer {
     generation: u64,
     target: PasteTarget,
-    /// The file, or the sentence saying which half of the job refused. A reason
-    /// and never a picture: a diagnostic that carried what was on the clipboard
-    /// would be this process writing the reader's own screenshot into a log.
-    result: std::result::Result<PathBuf, String>,
+    /// What was staged: a picture's file, or a promise's (plan row 81).
+    staged: StagingAnswer,
+}
+
+/// **What one staging worker answered** (§7.61; plan row 81) — the picture's save or the
+/// promise's render, each with the clipboard's sequence at the read, for the line it is said in.
+#[derive(Debug)]
+enum StagingAnswer {
+    Picture {
+        sequence: Option<bt_platform::ClipboardSequence>,
+        /// The file, or the sentence saying which half of the job refused. A reason
+        /// and never a picture: a diagnostic that carried what was on the clipboard
+        /// would be this process writing the reader's own screenshot into a log.
+        result: std::result::Result<PathBuf, String>,
+    },
+    Promise {
+        sequence: Option<bt_platform::ClipboardSequence>,
+        /// A picture offered beside the promise did not render: a refusal says so.
+        picture_passed_over: bool,
+        /// What was written, or why nothing was — kinds, counts and codes, never a name.
+        result: std::result::Result<
+            bt_platform::clipboard_promise::RenderedPromise,
+            bt_platform::clipboard_promise::PromiseRefused,
+        >,
+        /// How long the render took, for the line a promise saved says.
+        took: std::time::Duration,
+    },
 }
 
 /// **The next shell's [`ShellSession::incarnation`]**, and the counter behind it.
@@ -1497,9 +1520,10 @@ struct ClipboardPictureInbox {
     /// The generation the window is waiting for. Bumped by every new paste.
     wanted: u64,
     landed: Option<ClipboardPictureAnswer>,
-    /// The saves refused at the door since the window last looked (plan row 52): each is said on
-    /// the turn the inbox's wake brings, in the notice the door used to draw itself.
-    refused: usize,
+    /// The saves refused at the door since the window last looked (plan row 52), each with its
+    /// reason (plan row 81): each is said on the turn the inbox's wake brings, through the door
+    /// every paste refusal leaves by.
+    refused: Vec<runtime::clipboard::PasteRefusal>,
 }
 
 impl ClipboardPictureMailbox {
@@ -1524,17 +1548,19 @@ impl ClipboardPictureMailbox {
         Arc::clone(&self.inbox)
     }
 
-    /// One save refused at its door, counted for the next look (plan row 52): the generation is
-    /// left alone, so the paste a running save answers is still the one waited for.
-    fn refuse(&self) {
+    /// One save refused at its door, kept with its reason for the next look (plan rows 52, 81):
+    /// the generation is left alone, so the paste a running save answers is still the one waited
+    /// for.
+    fn refuse(&self, refusal: runtime::clipboard::PasteRefusal) {
         self.inbox
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .refused += 1;
+            .refused
+            .push(refusal);
     }
 
-    /// How many saves were refused at the door since the last look, and none from now on.
-    fn take_refusals(&mut self) -> usize {
+    /// The saves refused at the door since the last look, in order, and none from now on.
+    fn take_refusals(&mut self) -> Vec<runtime::clipboard::PasteRefusal> {
         std::mem::take(
             &mut self
                 .inbox
@@ -52953,7 +52979,12 @@ struct PreparedClipboardPaste {
     /// **The text is the clipboard's own** (`ClipboardPayload::Text`), as against paths Folio
     /// spelled. The one arm [`runtime::clipboard::paste_road`] may ask about (0.4.4 ticket 02).
     clipboard_text: bool,
-    notice: Option<String>,
+    /// **What this paste refused, if anything** (plan row 81): said through
+    /// `Runtime::refuse_paste` — one line in the log and the notice — before what is left is sent.
+    refused: Option<runtime::clipboard::RefusedKind>,
+    /// **The files a clipboard promise offered** (plan row 81), lifted out as the picture is:
+    /// what is pasted is their paths once a worker has had the source write them.
+    promise: Option<bt_platform::PromisedFiles>,
     /// **Every encoding a picture-and-nothing-else clipboard offered**, best
     /// first, or empty (§7.61).
     ///
@@ -52963,6 +52994,16 @@ struct PreparedClipboardPaste {
     /// and spells the path it answers with through the very same
     /// `shell_literal::paths_text` a copied *file* goes through.
     picture: Vec<bt_platform::PictureBytes>,
+}
+
+#[cfg(test)]
+impl PreparedClipboardPaste {
+    /// The notice this paste's refusal raises, if it refuses anything — what the tests read.
+    fn said_notice(&self) -> Option<String> {
+        self.refused
+            .as_ref()
+            .map(runtime::clipboard::RefusedKind::toast_text)
+    }
 }
 
 /// **Which shape a recalled command's arrival takes** (DESIGN.md §7.55 ⑨).
@@ -56511,7 +56552,10 @@ mod clipboard_picture_race_tests {
         ClipboardPictureAnswer {
             generation,
             target,
-            result: Ok(std::path::PathBuf::from("/tmp/folio/clipboard/shot.png")),
+            staged: super::StagingAnswer::Picture {
+                sequence: None,
+                result: Ok(std::path::PathBuf::from("/tmp/folio/clipboard/shot.png")),
+            },
         }
     }
 
@@ -63399,7 +63443,7 @@ mod clipboard_path_tests {
                 input_line_needs_a_space_first(&session),
             );
             assert_eq!(clipboard.fetched, ["files"]);
-            assert!(prepared.notice.unwrap().contains("bad\\nname"));
+            assert!(prepared.said_notice().unwrap().contains("bad\\nname"));
             let text = prepared.text.unwrap();
             assert_eq!(text, " '/first' '/second space' '/third' ");
             let mut projection = session.new_projection(session.layout_key());
@@ -63438,7 +63482,7 @@ mod clipboard_path_tests {
                 true,
             );
             assert_eq!(prepared.text.as_deref(), Some(text));
-            assert!(prepared.notice.is_none());
+            assert!(prepared.said_notice().is_none());
             assert_eq!(clipboard.fetched, ["files", "text"]);
         }
     }
@@ -63507,7 +63551,7 @@ mod clipboard_path_tests {
             false,
         );
         assert!(prepared.text.is_none());
-        assert!(prepared.notice.is_none());
+        assert!(prepared.said_notice().is_none());
         assert_eq!(prepared.picture, vec![shot()]);
     }
 
@@ -63562,16 +63606,18 @@ mod clipboard_path_tests {
         ] {
             let prepared = prepare_clipboard_paste(payload, &recipient(), false);
             assert!(prepared.text.is_none());
-            assert!(prepared.notice.is_none());
+            assert!(prepared.said_notice().is_none());
             assert!(prepared.picture.is_empty());
         }
         for payload in [
-            ClipboardPayload::Refused(UnsupportedKind::Promise),
+            ClipboardPayload::Refused(UnsupportedKind::Promise {
+                picture_passed_over: false,
+            }),
             ClipboardPayload::Files(vec!["/bad\tname".into()]),
         ] {
             let prepared = prepare_clipboard_paste(payload, &recipient(), true);
             assert!(prepared.text.is_none());
-            assert!(prepared.notice.is_some());
+            assert!(prepared.said_notice().is_some());
         }
     }
 
@@ -63595,7 +63641,7 @@ mod clipboard_path_tests {
         );
         let spend = method_body("Runtime", "spend_paste");
         assert!(
-            spend.contains("self.apply_clipboard_payload(target, payload)"),
+            spend.contains("self.apply_clipboard_payload(target, sequence, payload)"),
             "the payload the lane answered is applied where the paste is spent:\n{spend}"
         );
         assert!(!paste.contains("paste_recipient") && !paste.contains("deliver_paste("));
@@ -63677,7 +63723,8 @@ mod clipboard_path_tests {
                         "{path} is spelled differently when it is dropped"
                     );
                     assert_eq!(
-                        dropped.notice, copied.notice,
+                        dropped.said_notice(),
+                        copied.said_notice(),
                         "{path} is refused differently when it is dropped"
                     );
                 }
@@ -63699,7 +63746,7 @@ mod clipboard_path_tests {
         let unmeasured =
             prepare_dropped_paste(vec![apostrophe.into()], &powershell_recipient(&[]), false);
         assert!(
-            unmeasured.text.is_none() && unmeasured.notice.is_some(),
+            unmeasured.text.is_none() && unmeasured.said_notice().is_some(),
             "until PROBE 2 an apostrophe is refused with a notice rather than \
              guessed at — for a drop exactly as for a copy"
         );
@@ -63732,7 +63779,7 @@ mod clipboard_path_tests {
              paste again"
         );
         let prepared = prepare_dropped_paste(batch.paths, &recipient(), true);
-        assert!(prepared.notice.is_none());
+        assert!(prepared.said_notice().is_none());
         assert_eq!(
             prepared.text.as_deref(),
             Some(" '/first' '/second file' '/third' "),
@@ -63772,7 +63819,7 @@ mod clipboard_path_tests {
                 "the batch has one reader, and it takes the whole of it",
             ),
             (
-                ".paste_paths_into(target, batch.paths, \"write dropped paths to PTY\")",
+                ".paste_paths_into(target, batch.paths, PasteFrom::Drop)",
                 "a dropped batch reaches a shell through one door, and takes the \
                  whole batch with it — which is what makes the focus and the \
                  raise behind its answer happen once per drop and not once per \
@@ -63932,7 +63979,8 @@ mod clipboard_path_tests {
                     );
                     assert_eq!(dragged.text, copied.text, "{name} is spelled a third way");
                     assert_eq!(
-                        dragged.notice, copied.notice,
+                        dragged.said_notice(),
+                        copied.said_notice(),
                         "{name} is refused differently when it comes off the files column"
                     );
                 }
@@ -63979,7 +64027,7 @@ mod clipboard_path_tests {
                 "a preview's centre opens the file as that pane",
             ),
             (
-                "if self.paste_paths_into(target, vec![path], \"write dragged path to PTY\")? {",
+                "if self.paste_paths_into(target, vec![path], PasteFrom::Drag)? {",
                 "a terminal's centre pastes through the external drop's own door, \
                  and asks that door whether anything was actually written",
             ),

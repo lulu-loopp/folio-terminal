@@ -8,6 +8,9 @@ use crate::preview_viewport::{
     Build, GeometryCost, Layout, Realize, Reconcile, RuntimeMeasure, State, View, capture,
 };
 use crate::runtime::attention::settle_attention;
+use crate::runtime::clipboard::{
+    PasteFrom, PasteRefusal, PictureNotSaved, PromiseWhy, RefusedKind,
+};
 use crate::runtime::floats::float_dock_label;
 use crate::runtime::git::graph_key_of;
 use crate::runtime::handoff::{open_local_path_ask, reveal_ask};
@@ -44,19 +47,20 @@ use crate::{
     PreviewPreedit, PreviewRailFrame, PreviewSurface, PreviewTextBox, PreviewTextDrag,
     PreviewTextPiece, PreviewTextSite, PreviewTextWhere, ProseParagraph, ReferenceRow,
     RenameSubject, Reparse, RevealTween, RevealedFoot, RowActivation, Runtime, ScaleWorkerRequest,
-    ScrollThumbState, ShellAddress, SourceBlocks, Step, SurfacePixels, SurfaceSubject, TabClick,
-    TabId, TabRename, TabState, TabTriggerHand, UNVERIFIED_REFERENCE_REFUSAL, VideoGlance,
-    VideoPictureClick, VideoPicturePress, VideoShape, WINDOW_RESIZE_QUIET, WebHeadVerb,
-    WindowRuntime, animation, attention_trace, clipboard_picture, computation_lane,
-    create_leaf_session, diagnostics, earliest_deadline, file_peek, files, files_row_display_name,
-    float, git_panel, handoff_lane, hang_watch, hex_peek, highlight, home_crumb_for, i18n, input,
-    lane, markdown_image_card, markdown_image_extent, markdown_item_runs, markdown_prose_runs,
-    markdown_runs, marks, note_link_sites, note_math_sites, note_text_site, notice, pane_content,
-    path_opens_as_a_page, persisted_preview_row, pins, present_diagnostics, preview, preview_edit,
-    preview_live, preview_open_lane, preview_press, preview_provenance, preview_select,
-    preview_text, preview_trace, preview_viewport, preview_watch, preview_wrap, printable_address,
-    profiles, push_markdown_table, reference_activation, scrollback_quota, seats, settings,
-    tab_owes_frame, table_block, text_field, toast, tooltip, video_seat, webhost, webnav,
+    ScrollThumbState, ShellAddress, SourceBlocks, StagingAnswer, Step, SurfacePixels,
+    SurfaceSubject, TabClick, TabId, TabRename, TabState, TabTriggerHand,
+    UNVERIFIED_REFERENCE_REFUSAL, VideoGlance, VideoPictureClick, VideoPicturePress, VideoShape,
+    WINDOW_RESIZE_QUIET, WebHeadVerb, WindowRuntime, animation, attention_trace, clipboard_picture,
+    computation_lane, create_leaf_session, diagnostics, earliest_deadline, file_peek, files,
+    files_row_display_name, float, git_panel, handoff_lane, hang_watch, hex_peek, highlight,
+    home_crumb_for, i18n, input, lane, markdown_image_card, markdown_image_extent,
+    markdown_item_runs, markdown_prose_runs, markdown_runs, marks, note_link_sites,
+    note_math_sites, note_text_site, notice, pane_content, path_opens_as_a_page,
+    persisted_preview_row, pins, present_diagnostics, preview, preview_edit, preview_live,
+    preview_open_lane, preview_press, preview_provenance, preview_select, preview_text,
+    preview_trace, preview_viewport, preview_watch, preview_wrap, printable_address, profiles,
+    push_markdown_table, reference_activation, scrollback_quota, seats, settings, tab_owes_frame,
+    table_block, text_field, toast, tooltip, video_seat, webhost, webnav,
 };
 use crate::{LeafView, TextScale};
 use anyhow::Context;
@@ -14211,23 +14215,28 @@ impl<B: Backend> Runtime<'_, B> {
     pub(in crate::runtime) fn save_clipboard_picture(
         &mut self,
         target: PasteTarget,
+        sequence: Option<bt_platform::ClipboardSequence>,
         offered: Vec<bt_platform::PictureBytes>,
     ) -> Result<()> {
+        let from = PasteFrom::Picture(sequence);
         // **A place in the queue before a thread is asked for** (review X-3/X-4).
         // Superseding a job does not stop it — it is inside a decode — so a held
         // `Ctrl+V` starts one per press, each entitled to a picture of its own.
         // The guard is what makes the ceiling on one job a ceiling on the
         // process; it is given up when the worker ends, however it ends.
         let Some(place) = ClipboardPictureJob::take() else {
-            crate::diagnostics::stderr_line(
-                "clipboard picture workers are all busy; paste ignored".to_owned(),
-            );
-            return self.refuse_clipboard_picture_on_the_next_turn();
+            self.window
+                .window
+                .note("clipboard picture workers are all busy; paste ignored");
+            return self.refuse_staging_on_the_next_turn(PasteRefusal {
+                kind: RefusedKind::PictureNotSaved(PictureNotSaved::WorkersBusy),
+                from,
+            });
         };
         let generation = self.window.clipboard_picture.withdraw();
         let inbox = self.window.clipboard_picture.inbox();
         let proxy = self.app.event_proxy.clone();
-        let folder = clipboard_picture::directory();
+        let folder = self.window.window.staging_folder();
         let started = bt_platform::spawn_at_priority(
             "clipboard-picture",
             bt_platform::ThreadPriority::Normal,
@@ -14244,7 +14253,7 @@ impl<B: Backend> Runtime<'_, B> {
                     ClipboardPictureAnswer {
                         generation,
                         target,
-                        result,
+                        staged: StagingAnswer::Picture { sequence, result },
                     },
                 );
                 // After the answer is in the slot, never before.
@@ -14255,24 +14264,107 @@ impl<B: Backend> Runtime<'_, B> {
             // A machine that will not start a thread is a machine that cannot do
             // this paste, and saying nothing would look like a key that did not
             // register. The place goes back with the closure that was never run.
-            crate::diagnostics::stderr_line(
-                "clipboard picture worker could not be started; paste ignored".to_owned(),
-            );
-            return self.refuse_clipboard_picture_on_the_next_turn();
+            self.window
+                .window
+                .note("clipboard picture worker could not be started; paste ignored");
+            return self.refuse_staging_on_the_next_turn(PasteRefusal {
+                kind: RefusedKind::PictureNotSaved(PictureNotSaved::NotStarted),
+                from,
+            });
+        }
+        Ok(())
+    }
+
+    /// **Start the worker that has a clipboard promise's files written** (plan row 81) — the
+    /// picture save's shape, its places, its mailbox and its wake: the clipboard lane read the
+    /// promise's descriptor and nothing else, and the source renders the files here, on a
+    /// `clipboard-promise` thread, through this window's clipboard door
+    /// (`ClipboardDoor::render_promised_files`), into a folder of the paste's own in the staging
+    /// folder. [`Self::adopt_clipboard_picture`] pastes the paths it answers, as a copied file
+    /// list is pasted. **The clipboard lane answers in a second or says why; anything that
+    /// renders goes to a worker of its own, as the picture save does.**
+    ///
+    /// No clock is kept on the render: the window does not wait for it, a newer paste supersedes
+    /// it by generation, and a source that never returns holds one of the places.
+    pub(in crate::runtime) fn stage_clipboard_promise(
+        &mut self,
+        target: PasteTarget,
+        sequence: Option<bt_platform::ClipboardSequence>,
+        promise: bt_platform::PromisedFiles,
+    ) -> Result<()> {
+        let from = PasteFrom::Promise(sequence);
+        let picture_passed_over = promise.picture_passed_over;
+        let Some(place) = ClipboardPictureJob::take() else {
+            self.window
+                .window
+                .note("clipboard promise workers are all busy; paste ignored");
+            return self.refuse_staging_on_the_next_turn(PasteRefusal {
+                kind: RefusedKind::Promise {
+                    why: PromiseWhy::WorkersBusy,
+                    picture_passed_over,
+                },
+                from,
+            });
+        };
+        let generation = self.window.clipboard_picture.withdraw();
+        let inbox = self.window.clipboard_picture.inbox();
+        let proxy = self.app.event_proxy.clone();
+        let door = self.window.window.clipboard_door();
+        let folder = self.window.window.staging_folder();
+        let started = bt_platform::spawn_at_priority(
+            "clipboard-promise",
+            bt_platform::ThreadPriority::Normal,
+            move |worker| {
+                let _place = place;
+                let began = Instant::now();
+                let result = clipboard_picture::reserve_staging_folder(&folder, SystemTime::now())
+                    .map_err(bt_platform::clipboard_promise::PromiseRefused::WriteFailed)
+                    .and_then(|into| door.render_promised_files(worker, &promise.entries, &into));
+                if result.is_ok() {
+                    clipboard_picture::sweep_staging(&folder);
+                }
+                deliver_clipboard_picture(
+                    &inbox,
+                    ClipboardPictureAnswer {
+                        generation,
+                        target,
+                        staged: StagingAnswer::Promise {
+                            sequence,
+                            picture_passed_over,
+                            result,
+                            took: began.elapsed(),
+                        },
+                    },
+                );
+                let _ = proxy.send_event(AppEvent::ClipboardPictureReady);
+            },
+        );
+        if started.is_err() {
+            self.window
+                .window
+                .note("clipboard promise worker could not be started; paste ignored");
+            return self.refuse_staging_on_the_next_turn(PasteRefusal {
+                kind: RefusedKind::Promise {
+                    why: PromiseWhy::NotStarted,
+                    picture_passed_over,
+                },
+                from,
+            });
         }
         Ok(())
     }
 
     /// **A save refused at its door, answered on the next turn** (plan row 52, ruling R5): the
-    /// refusal is counted in the picture's own inbox, under the lock the worker's answer is left
-    /// under, and the window is woken as the worker wakes it ([`AppEvent::ClipboardPictureReady`]);
-    /// [`Self::adopt_clipboard_picture`] draws the notice this door used to draw on the gesture's
-    /// own turn. The door's line is said where it always was, in the same words.
+    /// refusal is kept in the picture's own inbox with its reason (plan row 81), under the lock
+    /// the worker's answer is left under, and the window is woken as the worker wakes it
+    /// ([`AppEvent::ClipboardPictureReady`]); [`Self::adopt_clipboard_picture`] says it through
+    /// the door every paste refusal leaves by. The door's own line is said where it always was,
+    /// in the same words.
     ///
     /// **Under no generation**: a refusal answers no question of its own and supersedes none, so a
     /// save still running for an earlier paste lands as it would have.
-    fn refuse_clipboard_picture_on_the_next_turn(&mut self) -> Result<()> {
-        self.window.clipboard_picture.refuse();
+    fn refuse_staging_on_the_next_turn(&mut self, refusal: PasteRefusal) -> Result<()> {
+        self.window.clipboard_picture.refuse(refusal);
         let _ = self
             .app
             .event_proxy
@@ -14281,7 +14373,7 @@ impl<B: Backend> Runtime<'_, B> {
     }
 
     /// **The file the picture worker wrote, pasted as the path it now is**
-    /// (§7.61).
+    /// (§7.61) — **or the files a promise's worker had written** (plan row 81).
     ///
     /// One line of its own and then [`Self::paste_paths_into`], which is the
     /// whole point: by the time a picture has a file it *is* a path in hand, and
@@ -14308,46 +14400,72 @@ impl<B: Backend> Runtime<'_, B> {
     /// answers a gesture that has been superseded, and the file it wrote is
     /// swept by the cap the next paste applies.
     pub(crate) fn adopt_clipboard_picture(&mut self) -> Result<()> {
-        // A save its door refused ([`Self::refuse_clipboard_picture_on_the_next_turn`]) is said
-        // first, once per refusal, in the notice the door drew before plan row 52: it was asked
-        // before any answer still to land.
-        for _ in 0..self.window.clipboard_picture.take_refusals() {
-            self.toast(
-                toast::ToastKind::Error,
-                toast::ToastAnchor::Window,
-                None,
-                i18n::Text::PasteClipboardPicture.text().to_owned(),
-            )?;
+        // A save its door refused ([`Self::refuse_staging_on_the_next_turn`]) is said first, once
+        // per refusal, through the paste refusal door: it was asked before any answer still to
+        // land.
+        for refusal in self.window.clipboard_picture.take_refusals() {
+            self.refuse_paste(refusal)?;
         }
         let Some(landed) = self.window.clipboard_picture.take_current() else {
             return Ok(());
         };
-        let path = match landed.result {
-            Ok(path) => path,
-            Err(reason) => {
-                // `diagnostics::note` and not `eprintln!` (X-7): this is the
-                // window thread, and a resident diagnostic it writes must not be
-                // able to wait behind whoever is reading a trace.
-                diagnostics::note(&format!(
-                    "clipboard picture could not be saved; paste ignored: {reason}"
-                ));
-                return self.toast(
-                    toast::ToastKind::Error,
-                    toast::ToastAnchor::Window,
-                    None,
-                    i18n::Text::PasteClipboardPicture.text().to_owned(),
-                );
+        match landed.staged {
+            StagingAnswer::Picture { sequence, result } => {
+                let from = PasteFrom::Picture(sequence);
+                let path = match result {
+                    Ok(path) => path,
+                    Err(reason) => {
+                        // `diagnostics::note` and not `eprintln!` (X-7): this is the
+                        // window thread, and a resident diagnostic it writes must not be
+                        // able to wait behind whoever is reading a trace.
+                        diagnostics::note(&format!(
+                            "clipboard picture could not be saved; paste ignored: {reason}"
+                        ));
+                        return self.refuse_paste(PasteRefusal {
+                            kind: RefusedKind::PictureNotSaved(PictureNotSaved::SaveFailed),
+                            from,
+                        });
+                    }
+                };
+                // The same as the clipboard's own road above, for the same reason: the
+                // picture was pasted into the pane that had the keyboard, and it still
+                // has it.
+                self.paste_paths_into(landed.target, vec![path], from)
+                    .map(drop)
             }
-        };
-        // The same as the clipboard's own road above, for the same reason: the
-        // picture was pasted into the pane that had the keyboard, and it still
-        // has it.
-        self.paste_paths_into(
-            landed.target,
-            vec![path],
-            "write clipboard picture path to PTY",
-        )
-        .map(drop)
+            StagingAnswer::Promise {
+                sequence,
+                picture_passed_over,
+                result,
+                took,
+            } => {
+                let from = PasteFrom::Promise(sequence);
+                match result {
+                    // Counts, bytes and time — no name (plan row 81, R11).
+                    Ok(rendered) => {
+                        self.window.window.note(&format!(
+                            "clipboard promise saved: {} files, {} bytes, {} ms; sequence={}",
+                            rendered.files,
+                            rendered.bytes,
+                            took.as_millis(),
+                            sequence.map_or_else(
+                                || "none".to_owned(),
+                                |sequence| sequence.0.to_string()
+                            )
+                        ));
+                        self.paste_paths_into(landed.target, rendered.pasted, from)
+                            .map(drop)
+                    }
+                    Err(refused) => self.refuse_paste(PasteRefusal {
+                        kind: RefusedKind::Promise {
+                            why: PromiseWhy::Refused(refused),
+                            picture_passed_over,
+                        },
+                        from,
+                    }),
+                }
+            }
+        }
     }
 
     /// **Take in every picture the shrinker has finished.** Returns whether any

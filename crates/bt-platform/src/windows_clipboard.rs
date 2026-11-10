@@ -1,6 +1,10 @@
 //! The terminal clipboard door holds one OpenClipboard interval, including its survey.
 
-use std::{ffi::OsString, os::windows::ffi::OsStringExt, path::PathBuf};
+use std::{
+    ffi::OsString,
+    os::windows::ffi::OsStringExt,
+    path::{Path, PathBuf},
+};
 
 use windows::{
     Win32::{
@@ -10,22 +14,38 @@ use windows::{
             DeleteObject, GetDC, GetDIBits, GetObjectW, HBITMAP, HGDIOBJ, ReleaseDC,
         },
         System::{
+            Com::{
+                DVASPECT_CONTENT, FORMATETC, IDataObject, IStream, STGM_CREATE, STGM_READWRITE,
+                STGM_SHARE_EXCLUSIVE, STGMEDIUM, StructuredStorage::StgCreateDocfile,
+                TYMED_HGLOBAL, TYMED_ISTORAGE, TYMED_ISTREAM,
+            },
             DataExchange::{
-                CloseClipboard, GetClipboardData, GetClipboardSequenceNumber,
-                IsClipboardFormatAvailable, RegisterClipboardFormatW,
+                CloseClipboard, EnumClipboardFormats, GetClipboardData, GetClipboardFormatNameW,
+                GetClipboardSequenceNumber, IsClipboardFormatAvailable, RegisterClipboardFormatW,
             },
             Memory::{GlobalLock, GlobalSize, GlobalUnlock},
+            Ole::{OleInitialize, OleUninitialize, ReleaseStgMedium},
         },
-        UI::Shell::{DragQueryFileW, HDROP},
+        UI::{
+            Shell::{DragQueryFileW, HDROP},
+            WindowsAndMessaging::{
+                DispatchMessageW, MSG, PM_REMOVE, PeekMessageW, TranslateMessage,
+            },
+        },
     },
-    core::w,
+    core::{HSTRING, w},
 };
 
 use crate::admission::WorkerCtx;
 use crate::clipboard::{
-    Candidate, ClipboardPayload, ClipboardPort, ClipboardTypes, DibHeader, MAX_PICTURE_BYTES,
-    MAX_PICTURE_SIDE, PictureBytes, PictureEncoding, PictureSource, TopDownPixels,
-    WINDOWS_PICTURE_ORDER, dib_is_intact, first_offered_picture, read_payload,
+    Candidate, ClipboardPort, ClipboardRead, ClipboardSequence, ClipboardTypes, DibHeader,
+    MAX_PICTURE_BYTES, MAX_PICTURE_SIDE, PictureBytes, PictureEncoding, PictureSource,
+    PromisedEntry, TopDownPixels, WINDOWS_PICTURE_ORDER, dib_is_intact, first_offered_picture,
+    list_offered, read_payload_offering, standard_format_name,
+};
+use crate::clipboard_promise::{
+    MAX_DESCRIPTOR_BYTES, PASTE_LIMITS, PromiseRefused, PromisedContents, PromisedFile,
+    RenderedPromise, parse_file_group_descriptor, render_promise,
 };
 
 /// WinUser.h standard format identifiers.
@@ -147,6 +167,48 @@ impl ClipboardPort for WindowsClipboard<'_> {
         // identifier; the open interval this object holds covers every read below.
         let png = unsafe { RegisterClipboardFormatW(w!("PNG")) };
         first_offered_picture(&WINDOWS_PICTURE_ORDER, &mut WindowsPictures { png })
+    }
+    /// **The promise's descriptor** (plan row 81): `FileGroupDescriptorW`'s bytes, copied up to
+    /// [`MAX_DESCRIPTOR_BYTES`] and read by [`parse_file_group_descriptor`].
+    fn promised(&mut self) -> Candidate<Vec<PromisedEntry>> {
+        // SAFETY: registering an already registered name answers its identifier; the open
+        // interval this object holds covers the read.
+        let descriptor = unsafe { RegisterClipboardFormatW(w!("FileGroupDescriptorW")) };
+        if descriptor == 0 {
+            return Candidate::Absent;
+        }
+        match bounded_global_bytes(descriptor, MAX_DESCRIPTOR_BYTES) {
+            None => Candidate::Absent,
+            Some(bytes) => match parse_file_group_descriptor(&bytes) {
+                Some(entries) => Candidate::Present(entries),
+                None => Candidate::Unreadable("the file descriptor does not read".to_owned()),
+            },
+        }
+    }
+    /// **The format names on the board**, standard ones by their `CF_` names and registered ones
+    /// by the system's ([`list_offered`] caps the list). Names only, never content.
+    fn offered(&mut self) -> Vec<String> {
+        let mut formats = Vec::new();
+        // SAFETY: enumeration and name queries read no content; the open interval is held.
+        unsafe {
+            let mut format = EnumClipboardFormats(0);
+            while format != 0 {
+                formats.push(format);
+                format = EnumClipboardFormats(format);
+            }
+        }
+        list_offered(formats.into_iter().map(|format| {
+            if format < 0xC000 {
+                return standard_format_name(format);
+            }
+            let mut units = [0_u16; 128];
+            // SAFETY: the buffer is the call's to fill, up to its length.
+            let written = unsafe { GetClipboardFormatNameW(format, &mut units) };
+            match usize::try_from(written) {
+                Ok(length) if length > 0 => String::from_utf16_lossy(&units[..length]),
+                _ => format!("0x{format:04X}"),
+            }
+        }))
     }
     fn finish(&mut self) -> Result<(), String> {
         self.opened = false;
@@ -377,6 +439,11 @@ pub fn pixels_through_gdi(dib: &[u8]) -> Result<Vec<u8>, String> {
 /// was advertised and not rendered, and a file written out of it would be a file
 /// with no picture in it.
 fn global_bytes(format: u32) -> Option<Vec<u8>> {
+    bounded_global_bytes(format, MAX_PICTURE_BYTES)
+}
+
+/// [`global_bytes`] under a ceiling of the caller's.
+fn bounded_global_bytes(format: u32, ceiling: usize) -> Option<Vec<u8>> {
     // SAFETY: the handle stays owned by the clipboard for the whole of this open
     // interval; `GlobalSize` bounds the slice and the owned copy is made before the
     // unlock, so nothing borrowed from the lock outlives it.
@@ -388,7 +455,7 @@ fn global_bytes(format: u32) -> Option<Vec<u8>> {
         // (review X-4): a zero-byte global is a format that was advertised and
         // not rendered, and one past the ceiling is a source this paste will not
         // carry into memory to find out about.
-        if size == 0 || size > MAX_PICTURE_BYTES {
+        if size == 0 || size > ceiling {
             return None;
         }
         let pointer = GlobalLock(global).cast::<u8>();
@@ -411,16 +478,251 @@ impl Drop for WindowsClipboard<'_> {
 }
 
 /// **Whatever the clipboard holds, as a paste reads it** — on the clipboard lane's worker
-/// (`worker`), which holds the one open interval, its survey included.
-pub fn clipboard_payload(worker: &WorkerCtx) -> Result<ClipboardPayload, String> {
+/// (`worker`), which holds the one open interval, its survey included — with the sequence it was
+/// read at and the format names offered when the answer is nothing or a promise; the read line
+/// is the caller's to write (plan row 81).
+pub fn clipboard_payload(worker: &WorkerCtx) -> ClipboardRead {
     // SAFETY: diagnostic context only. Delayed rendering may advance this value successfully;
-    // equality after GetClipboardData would reject that success (design ruling ④).
+    // equality after GetClipboardData would reject that success (design ruling ④). Read before
+    // the open, so a read whose open fails still has one.
     let sequence = unsafe { GetClipboardSequenceNumber() };
-    crate::stderr_road::say(format!("clipboard read: sequence={sequence}"));
-    read_payload(&mut WindowsClipboard {
+    let read = read_payload_offering(&mut WindowsClipboard {
         worker,
         opened: false,
-    })
+    });
+    let (answer, offered) = match read {
+        Ok(read) => (Ok(read.payload), read.offered),
+        Err(reason) => (Err(reason), Vec::new()),
+    };
+    ClipboardRead {
+        sequence: Some(ClipboardSequence(u64::from(sequence))),
+        offered,
+        answer,
+    }
+}
+
+/// **Render a clipboard promise into `into`** (plan row 81) — on a worker of its own
+/// (`worker`), never the window thread and never the clipboard lane's: the OLE clipboard is asked
+/// for its data object through the clipboard's one declared contention wait, and
+/// [`render_promise`] reads the descriptor again, which must be `offer`, and writes each file.
+/// The thread joins a single-threaded apartment for the call and leaves it on every road out;
+/// the data object is let go before it does.
+///
+/// # Errors
+/// Every [`PromiseRefused`]; an apartment or a clipboard that cannot be had is `NotRendered`
+/// with its result code.
+pub fn render_clipboard_promise(
+    worker: &WorkerCtx,
+    offer: &[PromisedEntry],
+    into: &Path,
+) -> Result<RenderedPromise, PromiseRefused> {
+    // SAFETY: a thread of this process's own, joining an apartment it leaves below.
+    unsafe { OleInitialize(None) }.map_err(|error| not_rendered(&error))?;
+    let rendered = (|| {
+        let data = crate::windows_impl::ole_clipboard_with_retry(worker)
+            .map_err(|error| not_rendered(&error))?;
+        let mut contents = OleContents::of(data)?;
+        render_promise(&mut contents, offer, into, PASTE_LIMITS)
+    })();
+    // SAFETY: balances the `OleInitialize` above, on this thread, after the data object went.
+    unsafe { OleUninitialize() };
+    rendered
+}
+
+fn not_rendered(error: &windows::core::Error) -> PromiseRefused {
+    PromiseRefused::NotRendered(Some(error.code().0.cast_unsigned()))
+}
+
+/// **A promise's bytes, asked of a data object** — the OLE clipboard's in the product, an
+/// in-process one under test — by `FileGroupDescriptorW` and `FileContents` with the entry's
+/// index as its `lindex`.
+pub(crate) struct OleContents {
+    data: IDataObject,
+    descriptor: u16,
+    contents: u16,
+}
+
+/// **One medium a data object handed over**, released when it goes.
+struct Medium(STGMEDIUM);
+
+impl Drop for Medium {
+    fn drop(&mut self) {
+        // SAFETY: the medium `GetData` answered, released exactly once.
+        unsafe { ReleaseStgMedium(&raw mut self.0) };
+    }
+}
+
+/// The chunk a promised stream is read in.
+const STREAM_CHUNK: usize = 64 * 1024;
+
+impl OleContents {
+    pub(crate) fn of(data: IDataObject) -> Result<Self, PromiseRefused> {
+        // SAFETY: registering an already registered name answers its identifier.
+        let (descriptor, contents) = unsafe {
+            (
+                RegisterClipboardFormatW(w!("FileGroupDescriptorW")),
+                RegisterClipboardFormatW(w!("FileContents")),
+            )
+        };
+        match (u16::try_from(descriptor), u16::try_from(contents)) {
+            (Ok(descriptor), Ok(contents)) if descriptor != 0 && contents != 0 => Ok(Self {
+                data,
+                descriptor,
+                contents,
+            }),
+            _ => Err(PromiseRefused::NotRendered(None)),
+        }
+    }
+
+    fn get(&self, format: u16, lindex: i32, tymed: u32) -> Result<Medium, PromiseRefused> {
+        let asked = FORMATETC {
+            cfFormat: format,
+            ptd: std::ptr::null_mut(),
+            dwAspect: DVASPECT_CONTENT.0,
+            lindex,
+            tymed,
+        };
+        // SAFETY: `asked` lives across the call; the medium answered is owned by `Medium`.
+        unsafe { self.data.GetData(&raw const asked) }
+            .map(Medium)
+            .map_err(|error| not_rendered(&error))
+    }
+}
+
+/// **Let the thread's own messages through** between two chunks: an apartment that holds OLE's
+/// clipboard window must not keep a broadcast waiting while it writes.
+fn let_messages_through() {
+    let mut message = MSG::default();
+    // SAFETY: `message` is a live local; only this thread's own queue is read.
+    unsafe {
+        while PeekMessageW(&raw mut message, None, 0, 0, PM_REMOVE).as_bool() {
+            let _ = TranslateMessage(&raw const message);
+            DispatchMessageW(&raw const message);
+        }
+    }
+}
+
+/// `TYMED` as `FORMATETC` and `STGMEDIUM` spell it.
+fn tymed(kind: windows::Win32::System::Com::TYMED) -> u32 {
+    kind.0.cast_unsigned()
+}
+
+impl PromisedContents for OleContents {
+    fn descriptor(&mut self) -> Result<Vec<PromisedEntry>, PromiseRefused> {
+        let medium = self.get(self.descriptor, -1, tymed(TYMED_HGLOBAL))?;
+        if medium.0.tymed != tymed(TYMED_HGLOBAL) {
+            return Err(PromiseRefused::NotRendered(None));
+        }
+        // SAFETY: an HGLOBAL medium; `GlobalSize` bounds the slice and the copy is made before
+        // the unlock.
+        let bytes = unsafe {
+            let global = medium.0.u.hGlobal;
+            let size = GlobalSize(global);
+            if size == 0 || size > MAX_DESCRIPTOR_BYTES {
+                return Err(PromiseRefused::NotRendered(None));
+            }
+            let pointer = GlobalLock(global).cast::<u8>();
+            if pointer.is_null() {
+                return Err(PromiseRefused::NotRendered(None));
+            }
+            let bytes = std::slice::from_raw_parts(pointer, size).to_vec();
+            let _ = GlobalUnlock(global);
+            bytes
+        };
+        parse_file_group_descriptor(&bytes).ok_or(PromiseRefused::NotRendered(None))
+    }
+
+    fn write_contents(
+        &mut self,
+        index: usize,
+        file: &mut PromisedFile<'_>,
+    ) -> Result<(), PromiseRefused> {
+        let lindex = i32::try_from(index).map_err(|_| PromiseRefused::NotRendered(None))?;
+        let medium = self.get(
+            self.contents,
+            lindex,
+            tymed(TYMED_ISTREAM) | tymed(TYMED_HGLOBAL) | tymed(TYMED_ISTORAGE),
+        )?;
+        let answered = medium.0.tymed;
+        if answered == tymed(TYMED_ISTREAM) {
+            // SAFETY: an ISTREAM medium carries a stream for as long as the medium is held.
+            let Some(stream) = (unsafe { medium.0.u.pstm.as_ref() }) else {
+                return Err(PromiseRefused::NotRendered(None));
+            };
+            return copy_stream(stream, file);
+        }
+        if answered == tymed(TYMED_HGLOBAL) {
+            // SAFETY: an HGLOBAL medium; the slice is bounded by `GlobalSize` (and by the
+            // declared size, a global being rounded up) and written before the unlock.
+            unsafe {
+                let global = medium.0.u.hGlobal;
+                let size = GlobalSize(global);
+                let length = file
+                    .declared()
+                    .and_then(|declared| usize::try_from(declared).ok())
+                    .map_or(size, |declared| declared.min(size));
+                if length == 0 {
+                    return Ok(());
+                }
+                let pointer = GlobalLock(global).cast::<u8>();
+                if pointer.is_null() {
+                    return Err(PromiseRefused::NotRendered(None));
+                }
+                let written = file.write(std::slice::from_raw_parts(pointer, length));
+                let _ = GlobalUnlock(global);
+                return written;
+            }
+        }
+        if answered == tymed(TYMED_ISTORAGE) {
+            // SAFETY: an ISTORAGE medium carries a storage for as long as the medium is held.
+            let Some(storage) = (unsafe { medium.0.u.pstg.as_ref() }) else {
+                return Err(PromiseRefused::NotRendered(None));
+            };
+            let path = HSTRING::from(file.path().as_os_str());
+            // SAFETY: a new compound file at the paste's own path, written whole by `CopyTo`
+            // and committed before it is let go.
+            unsafe {
+                let copy = StgCreateDocfile(
+                    &path,
+                    STGM_CREATE | STGM_READWRITE | STGM_SHARE_EXCLUSIVE,
+                    None,
+                )
+                .map_err(|error| not_rendered(&error))?;
+                storage
+                    .CopyTo(None, None, &copy)
+                    .map_err(|error| not_rendered(&error))?;
+                copy.Commit(0).map_err(|error| not_rendered(&error))?;
+            }
+            return file.written_by_the_source();
+        }
+        Err(PromiseRefused::NotRendered(None))
+    }
+}
+
+/// **A promised stream, copied chunk by chunk** into its file, the paste's bytes charged as each
+/// chunk lands.
+fn copy_stream(stream: &IStream, file: &mut PromisedFile<'_>) -> Result<(), PromiseRefused> {
+    let mut chunk = vec![0_u8; STREAM_CHUNK];
+    loop {
+        let mut read = 0_u32;
+        // SAFETY: `chunk` is `STREAM_CHUNK` bytes the call may fill; `read` is a live local.
+        let result = unsafe {
+            stream.Read(
+                chunk.as_mut_ptr().cast(),
+                u32::try_from(STREAM_CHUNK).expect("a small chunk"),
+                Some(&raw mut read),
+            )
+        };
+        if result.is_err() {
+            return Err(PromiseRefused::NotRendered(Some(result.0.cast_unsigned())));
+        }
+        let read = usize::try_from(read).expect("at most a chunk");
+        if read == 0 {
+            return Ok(());
+        }
+        file.write(&chunk[..read])?;
+        let_messages_through();
+    }
 }
 
 #[cfg(test)]
@@ -625,5 +927,322 @@ mod tests {
                 "{reason}"
             );
         }
+    }
+}
+
+/// **The promise's OLE adapter, driven by a data object of the test's own** (plan row 81): every
+/// medium a source may hand `FileContents` over in, and a source that fails, through
+/// [`OleContents`] and the platform's renderer — the machine's clipboard is never opened.
+#[cfg(test)]
+mod promise_tests {
+    use std::mem::ManuallyDrop;
+
+    use windows::Win32::Foundation::{E_NOTIMPL, HGLOBAL};
+    use windows::Win32::System::Com::StructuredStorage::{
+        CreateILockBytesOnHGlobal, CreateStreamOnHGlobal, StgCreateDocfileOnILockBytes,
+    };
+    use windows::Win32::System::Com::{
+        IAdviseSink, IDataObject_Impl, IEnumFORMATETC, IEnumSTATDATA, STGM_WRITE, STGMEDIUM_0,
+        STREAM_SEEK_SET, TYMED,
+    };
+    use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc};
+    use windows::core::{BOOL, HRESULT, Ref, implement};
+
+    use super::*;
+    use crate::clipboard_promise::tests::descriptor_bytes;
+    use crate::clipboard_promise::{FILE_DESCRIPTOR_BYTES, render_promise};
+
+    /// How one entry's contents are handed over.
+    #[derive(Clone)]
+    enum Handed {
+        Global(Vec<u8>),
+        Stream(Vec<u8>),
+        /// A structured storage holding one stream of these bytes, as a mail client hands a
+        /// message over.
+        Storage(Vec<u8>),
+        Fails(HRESULT),
+    }
+
+    #[implement(IDataObject)]
+    struct Board {
+        descriptor: Vec<u8>,
+        contents: Vec<Handed>,
+    }
+
+    fn global_of(bytes: &[u8]) -> windows::core::Result<HGLOBAL> {
+        // SAFETY: a fresh global, filled while locked, and handed to the medium that frees it.
+        unsafe {
+            let global = GlobalAlloc(GMEM_MOVEABLE, bytes.len().max(1))?;
+            let pointer = GlobalLock(global).cast::<u8>();
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), pointer, bytes.len());
+            let _ = GlobalUnlock(global);
+            Ok(global)
+        }
+    }
+
+    fn stream_of(bytes: &[u8]) -> windows::core::Result<IStream> {
+        // SAFETY: a stream over a global of its own, written and wound back to its start.
+        unsafe {
+            let stream = CreateStreamOnHGlobal(HGLOBAL::default(), true)?;
+            let mut written = 0_u32;
+            stream
+                .Write(
+                    bytes.as_ptr().cast(),
+                    u32::try_from(bytes.len()).expect("a test's bytes"),
+                    Some(&raw mut written),
+                )
+                .ok()?;
+            stream.Seek(0, STREAM_SEEK_SET, None)?;
+            Ok(stream)
+        }
+    }
+
+    fn medium(tymed: TYMED, u: STGMEDIUM_0) -> STGMEDIUM {
+        STGMEDIUM {
+            tymed: super::tymed(tymed),
+            u,
+            pUnkForRelease: ManuallyDrop::new(None),
+        }
+    }
+
+    impl IDataObject_Impl for Board_Impl {
+        fn GetData(&self, asked: *const FORMATETC) -> windows::core::Result<STGMEDIUM> {
+            // SAFETY: the caller's FORMATETC, read while the call lasts.
+            let asked = unsafe { &*asked };
+            // SAFETY: registering an already registered name answers its identifier.
+            let (descriptor, contents) = unsafe {
+                (
+                    RegisterClipboardFormatW(w!("FileGroupDescriptorW")),
+                    RegisterClipboardFormatW(w!("FileContents")),
+                )
+            };
+            if u32::from(asked.cfFormat) == descriptor {
+                return Ok(medium(
+                    TYMED_HGLOBAL,
+                    STGMEDIUM_0 {
+                        hGlobal: global_of(&self.descriptor)?,
+                    },
+                ));
+            }
+            assert_eq!(
+                u32::from(asked.cfFormat),
+                contents,
+                "only the promise is asked for"
+            );
+            let index = usize::try_from(asked.lindex).expect("an entry's index");
+            match &self.contents[index] {
+                Handed::Global(bytes) => Ok(medium(
+                    TYMED_HGLOBAL,
+                    STGMEDIUM_0 {
+                        hGlobal: global_of(bytes)?,
+                    },
+                )),
+                Handed::Stream(bytes) => Ok(medium(
+                    TYMED_ISTREAM,
+                    STGMEDIUM_0 {
+                        pstm: ManuallyDrop::new(Some(stream_of(bytes)?)),
+                    },
+                )),
+                Handed::Storage(bytes) => {
+                    // SAFETY: a compound file over a global of its own, one stream written into
+                    // it and committed before it is handed over.
+                    let storage = unsafe {
+                        let lock_bytes = CreateILockBytesOnHGlobal(None, true)?;
+                        let storage = StgCreateDocfileOnILockBytes(
+                            &lock_bytes,
+                            STGM_CREATE | STGM_READWRITE | STGM_SHARE_EXCLUSIVE,
+                            0,
+                        )?;
+                        let body = storage.CreateStream(
+                            w!("body"),
+                            STGM_CREATE | STGM_WRITE | STGM_SHARE_EXCLUSIVE,
+                            0,
+                            0,
+                        )?;
+                        body.Write(
+                            bytes.as_ptr().cast(),
+                            u32::try_from(bytes.len()).expect("a test's bytes"),
+                            None,
+                        )
+                        .ok()?;
+                        storage.Commit(0)?;
+                        storage
+                    };
+                    Ok(medium(
+                        TYMED_ISTORAGE,
+                        STGMEDIUM_0 {
+                            pstg: ManuallyDrop::new(Some(storage)),
+                        },
+                    ))
+                }
+                Handed::Fails(code) => Err((*code).into()),
+            }
+        }
+        fn GetDataHere(&self, _: *const FORMATETC, _: *mut STGMEDIUM) -> windows::core::Result<()> {
+            Err(E_NOTIMPL.into())
+        }
+        fn QueryGetData(&self, _: *const FORMATETC) -> HRESULT {
+            E_NOTIMPL
+        }
+        fn GetCanonicalFormatEtc(&self, _: *const FORMATETC, _: *mut FORMATETC) -> HRESULT {
+            E_NOTIMPL
+        }
+        fn SetData(
+            &self,
+            _: *const FORMATETC,
+            _: *const STGMEDIUM,
+            _: BOOL,
+        ) -> windows::core::Result<()> {
+            Err(E_NOTIMPL.into())
+        }
+        fn EnumFormatEtc(&self, _: u32) -> windows::core::Result<IEnumFORMATETC> {
+            Err(E_NOTIMPL.into())
+        }
+        fn DAdvise(
+            &self,
+            _: *const FORMATETC,
+            _: u32,
+            _: Ref<IAdviseSink>,
+        ) -> windows::core::Result<u32> {
+            Err(E_NOTIMPL.into())
+        }
+        fn DUnadvise(&self, _: u32) -> windows::core::Result<()> {
+            Err(E_NOTIMPL.into())
+        }
+        fn EnumDAdvise(&self) -> windows::core::Result<IEnumSTATDATA> {
+            Err(E_NOTIMPL.into())
+        }
+    }
+
+    /// `FD_FILESIZE`, `FD_ATTRIBUTES` and `FILE_ATTRIBUTE_DIRECTORY`.
+    const SIZED: u32 = 0x40;
+    const ATTRIBUTED: u32 = 0x4;
+    const DIRECTORY: u32 = 0x10;
+
+    fn units(name: &str) -> Vec<u16> {
+        name.encode_utf16().collect()
+    }
+
+    /// The data object, as `OleGetClipboard` would answer it, and the offer the lane would have
+    /// read from its descriptor.
+    fn board(
+        entries: &[(u32, u32, u64, &str)],
+        contents: Vec<Handed>,
+    ) -> (OleContents, Vec<PromisedEntry>) {
+        let named: Vec<Vec<u16>> = entries.iter().map(|entry| units(entry.3)).collect();
+        let rows: Vec<(u32, u32, u64, &[u16])> = entries
+            .iter()
+            .zip(&named)
+            .map(|(entry, name)| (entry.0, entry.1, entry.2, name.as_slice()))
+            .collect();
+        let descriptor = descriptor_bytes(&rows);
+        let offer = parse_file_group_descriptor(&descriptor).expect("the descriptor reads");
+        let data: IDataObject = Board {
+            descriptor,
+            contents,
+        }
+        .into();
+        (OleContents::of(data).expect("the formats register"), offer)
+    }
+
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        bt_testpath::temp_path(&format!("bt-platform-ole-promise-{tag}"))
+    }
+
+    /// PIN — **`FILEDESCRIPTORW` is the 592 bytes the descriptor is read at**: the system's own
+    /// layout, so a header that changed would be read wrong rather than quietly.
+    #[test]
+    fn a_file_descriptor_is_the_size_it_is_read_at() {
+        assert_eq!(
+            size_of::<windows::Win32::UI::Shell::FILEDESCRIPTORW>(),
+            FILE_DESCRIPTOR_BYTES
+        );
+    }
+
+    /// RED (plan row 81, R5) — **every medium a source hands a promise over in is written**: a
+    /// global (cut to the declared size, a global being rounded up), a stream longer than one
+    /// chunk, a structured storage (written as a compound file) and a folder that is made and
+    /// never asked for — through `OleContents` and the platform's renderer, and pasted as the
+    /// top-level entries.
+    ///
+    /// MUTATION: ignore `TYMED_ISTREAM` in `OleContents::write_contents` — the stream's entry is
+    /// `not-rendered`.
+    #[test]
+    fn every_medium_a_source_hands_over_is_written() {
+        // SAFETY: this test's own thread joins an apartment and leaves it at the end.
+        unsafe { OleInitialize(None) }.expect("an apartment");
+        let long: Vec<u8> = (0..200_000_u32).map(|n| (n % 251) as u8).collect();
+        let (mut contents, offer) = board(
+            &[
+                (SIZED, 0, 5, "a 文件.txt"),
+                (0, 0, 0, "long.bin"),
+                (0, 0, 0, "mail.msg"),
+                (ATTRIBUTED, DIRECTORY, 0, "photos"),
+                (SIZED, 0, 3, "photos\\b.png"),
+            ],
+            vec![
+                Handed::Global(b"hello and more".to_vec()),
+                Handed::Stream(long.clone()),
+                Handed::Storage(b"message body".to_vec()),
+                Handed::Fails(E_NOTIMPL),
+                Handed::Global(b"png".to_vec()),
+            ],
+        );
+        let into = scratch("media");
+        std::fs::create_dir_all(&into).expect("the paste's folder");
+        let rendered = render_promise(&mut contents, &offer, &into, PASTE_LIMITS);
+        // SAFETY: balances the `OleInitialize` above, on this thread.
+        unsafe { OleUninitialize() };
+        let rendered = rendered.expect("every medium is written");
+        assert_eq!(
+            rendered.pasted,
+            [
+                into.join("a 文件.txt"),
+                into.join("long.bin"),
+                into.join("mail.msg"),
+                into.join("photos"),
+            ]
+        );
+        assert_eq!(rendered.files, 4);
+        assert_eq!(std::fs::read(into.join("a 文件.txt")).unwrap(), b"hello");
+        assert_eq!(std::fs::read(into.join("long.bin")).unwrap(), long);
+        let message = std::fs::read(into.join("mail.msg")).unwrap();
+        assert_eq!(
+            &message[..8],
+            [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1],
+            "a compound file's signature"
+        );
+        assert_eq!(
+            std::fs::read(into.join("photos").join("b.png")).unwrap(),
+            b"png"
+        );
+        let _ = std::fs::remove_dir_all(&into);
+    }
+
+    /// RED (plan row 81) — **a source that fails, or whose board changed, refuses the paste with
+    /// its result code and leaves nothing**: the code the data object answered is what the refusal
+    /// says; a descriptor that is not the offer is `changed` before any content is asked for.
+    #[test]
+    fn a_source_that_fails_or_changed_leaves_nothing() {
+        // SAFETY: this test's own thread joins an apartment and leaves it at the end.
+        unsafe { OleInitialize(None) }.expect("an apartment");
+        let gone = HRESULT(0x8001_0108_u32.cast_signed());
+        let (mut contents, offer) = board(
+            &[(SIZED, 0, 2, "a.txt"), (SIZED, 0, 2, "b.txt")],
+            vec![Handed::Global(b"aa".to_vec()), Handed::Fails(gone)],
+        );
+        let into = scratch("fails");
+        std::fs::create_dir_all(&into).expect("the paste's folder");
+        let failed = render_promise(&mut contents, &offer, &into, PASTE_LIMITS);
+        let (mut changed, _) = board(&[(SIZED, 0, 2, "c.txt")], vec![Handed::Fails(gone)]);
+        let elsewhere = scratch("changed");
+        std::fs::create_dir_all(&elsewhere).expect("the paste's folder");
+        let raced = render_promise(&mut changed, &offer, &elsewhere, PASTE_LIMITS);
+        // SAFETY: balances the `OleInitialize` above, on this thread.
+        unsafe { OleUninitialize() };
+        assert_eq!(failed, Err(PromiseRefused::NotRendered(Some(0x8001_0108))));
+        assert!(!into.exists(), "the first file went with the refusal");
+        assert_eq!(raced, Err(PromiseRefused::Changed));
+        assert!(!elsewhere.exists());
     }
 }

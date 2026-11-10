@@ -20,6 +20,7 @@ All notable changes to Folio are recorded here. The format follows
 - On macOS, a pane where Claude Code or Codex was typed into the shell comes back after Folio restarts with that agent resuming the same conversation in the same folder, started by the pane's own shell; when the session cannot be resumed, the pane opens its shell and says so. Settings > Agents > Resume agents after restart turns this off. <!-- zh: pending T-AGENT-RESUME-ON-MACOS -->
 - Settings > Agents now says why an agent's hooks are not this Folio's: another copy of Folio runs them, shown with its location; Folio cannot read the file; or an entry looks like Folio's in a form Folio did not write. While Resume agents after restart is on, that row names the agents whose hooks it still needs, and on a first run the Claude Code and Codex rows start switched on. <!-- zh: pending -->
 - A resumed Claude Code or Codex pane comes back with the flags its agent was started with, such as `--dangerously-skip-permissions` or `--model`. A flag that belongs to the first start only, such as `-w`, is left out, and the pane names it in one line. <!-- zh: pending -->
+- On Windows, pasting a file copied from inside a program, such as an attachment in a mail or chat app, a photo in Phone Link or a file in a zip folder, now saves it to Folio's clipboard folder and pastes its path, as a pasted screenshot is; before, Folio asked you to copy a saved file instead. <!-- zh: pending -->
 
 ### Fixed
 
@@ -59,6 +60,7 @@ All notable changes to Folio are recorded here. The format follows
 - On Windows, the message boxes Folio shows now carry Folio's icon in Alt+Tab and on the taskbar, and the notice Folio shows as it stops while one of its windows is on the screen belongs to that window instead of appearing as a separate program on the taskbar. <!-- zh: pending -->
 - On Windows, when an uninstall stops because Folio's remover did not start in time, the remover's copy of Folio is now removed right away instead of staying in the Folio-uninstall folder until a later uninstall that removes data. <!-- zh: pending -->
 - While a tab's mark breathes or turns for a running command, Folio now spends less processor time on each step of it: the panes are no longer drawn again when nothing in them has changed. The mark moves as often as before, and Folio wakes as often as before. <!-- zh: pending T-WORKING-MARK-CADENCE -->
+- When Folio refuses a paste, it now writes the reason to its diagnostics log, and each clipboard read records what it found, so a refusal that showed only a short notice can be traced afterwards. <!-- zh: pending -->
 
 ## 0.4.8-preview — 2026-10-23
 

@@ -1111,6 +1111,10 @@ windows = { version = "0.62.2", features = [
     # including when Folio itself exits (T-PROBE-CHILD).
     "Win32_System_JobObjects",
     "Win32_System_Memory",
+    # Plan row 81: `OleInitialize`, `OleGetClipboard`, `ReleaseStgMedium` and `OleUninitialize`
+    # — the OLE clipboard a promised file's contents are asked of, on a worker of its own
+    # (`windows_clipboard::render_clipboard_promise`). A feature, not a package.
+    "Win32_System_Ole",
     # `CreateNamedPipeW` / `ConnectNamedPipe` / `DisconnectNamedPipe` /
     # `WaitNamedPipeW`: the attention endpoint and the `folio attention` verb's
     # two ends.

@@ -24,6 +24,10 @@
 //! module cannot read is left exactly where it is: the sweep is a promise about
 //! what Folio wrote, not a licence to delete what it finds.
 //!
+//! **A promise's files share the folder** (plan row 81): each promise paste writes into a
+//! folder of its own, `<stamp>-<n>`, under the names its source gave them, and the sweep counts
+//! those folders with the pictures — the newest [`KEPT`] entries of either stay.
+//!
 //! # What runs where
 //!
 //! Everything in this file is CPU and disk, and a screenshot's PNG encode is
@@ -157,14 +161,15 @@ pub fn stamp(at: SystemTime) -> String {
     format!("{year:04}{month:02}{day:02}-{hour:02}{minute:02}{second:02}")
 }
 
-/// One of this module's own file names, taken apart — or `None`, which means
-/// the file belongs to somebody else and the sweep must not touch it.
+/// One of this module's own names, taken apart — a picture's `<stamp>-<n>.png` or a promise's
+/// folder `<stamp>-<n>` (plan row 81; [`names_in`] lists a bare name only when it is a folder) —
+/// or `None`, which means the entry belongs to somebody else and the sweep must not touch it.
 ///
 /// The index is required to be digits and nothing else: `u32`'s own parser
 /// accepts a leading `+`, and a name this module never writes is a name it does
 /// not own.
 fn ours(name: &str) -> Option<(&str, u32)> {
-    let body = name.strip_suffix(EXTENSION)?;
+    let body = name.strip_suffix(EXTENSION).unwrap_or(name);
     let (stamp, index) = body.rsplit_once('-')?;
     let (date, time) = stamp.split_once('-')?;
     if date.len() != 8 || time.len() != 6 {
@@ -555,10 +560,50 @@ pub fn save(folder: &Path, offered: &[PictureBytes], at: SystemTime) -> Result<P
     // one is older than this write, and on a machine with two Folios on it the
     // folder has moved since. The name just taken is in this listing, which is
     // what makes it count against the cap.
-    for name in retire(&names_in(folder), KEPT) {
-        let _ = fs::remove_file(folder.join(name));
-    }
+    sweep_staging(folder);
     Ok(path)
+}
+
+/// **Take a folder for one promise paste, by creating it** (plan row 81) — `<stamp>-<n>` in
+/// `folder`, which is made first if it is not there. `create_dir` is [`reserve`]'s
+/// `create_new`: one operation that tests for the name and takes it, so two pastes never write
+/// into one folder. The files go in under their own names.
+///
+/// # Errors
+/// The kind of the error that kept the folder from being made — never its path.
+pub fn reserve_staging_folder(
+    folder: &Path,
+    at: SystemTime,
+) -> Result<PathBuf, std::io::ErrorKind> {
+    fs::create_dir_all(folder).map_err(|error| error.kind())?;
+    let stamp = stamp(at);
+    let mut index = first_free_index(&names_in(folder), &stamp);
+    for _ in 0..NAME_ATTEMPTS {
+        let path = folder.join(format!("{stamp}-{index}"));
+        match fs::create_dir(&path) {
+            Ok(()) => return Ok(path),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                index = index.saturating_add(1);
+            }
+            Err(error) => return Err(error.kind()),
+        }
+    }
+    Err(std::io::ErrorKind::AlreadyExists)
+}
+
+/// **The cap, applied**: of this module's own entries in `folder`, everything but the newest
+/// [`KEPT`] goes — a picture's file removed, a promise's folder removed with what is in it.
+/// Called after a write, so the entry just written counts against the cap. An entry that will
+/// not go is not an error: the next write tries again.
+pub fn sweep_staging(folder: &Path) {
+    for name in retire(&names_in(folder), KEPT) {
+        let entry = folder.join(&name);
+        let _ = if name.ends_with(EXTENSION) {
+            fs::remove_file(entry)
+        } else {
+            fs::remove_dir_all(entry)
+        };
+    }
 }
 
 /// Every name in the folder, as the sweep sees them.
@@ -566,14 +611,23 @@ pub fn save(folder: &Path, offered: &[PictureBytes], at: SystemTime) -> Result<P
 /// A folder that cannot be read is an empty listing and not a refusal: the write
 /// that follows is what decides whether this paste can happen, and it will say
 /// so in its own words. A name that is not UTF-8 is not one of ours, and `ours`
-/// would say so anyway — this drops it one step earlier.
+/// would say so anyway — this drops it one step earlier. **A name without the picture's
+/// extension is listed only when it is a folder** (plan row 81): what a promise paste reserves
+/// is a folder, and a file or a link wearing that shape is not Folio's.
 fn names_in(folder: &Path) -> Vec<String> {
     let Ok(listing) = fs::read_dir(folder) else {
         return Vec::new();
     };
     listing
         .flatten()
-        .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            if name.ends_with(EXTENSION) || entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                Some(name)
+            } else {
+                None
+            }
+        })
         .collect()
 }
 
@@ -711,6 +765,47 @@ mod tests {
         let _ = fs::remove_dir_all(&folder);
         fs::create_dir_all(&folder).expect("a scratch folder");
         folder
+    }
+
+    /// RED (plan row 81) — **a promise's folder is reserved like a picture's name and swept
+    /// with the pictures**: two reservations in one second are two folders; the folders count
+    /// against [`KEPT`] beside the files, and a retired one goes with what is in it; a file
+    /// wearing a folder's name, and a folder that is not Folio's, are never touched.
+    ///
+    /// MUTATION: let `ours` take picture names only (`strip_suffix(EXTENSION)?`) — the folders
+    /// are never retired.
+    #[test]
+    fn promise_folders_are_reserved_counted_and_swept_with_the_pictures() {
+        let folder = scratch("promise-folders");
+        for index in 0..KEPT {
+            fs::write(folder.join(format!("20260916-1430{index:02}-1.png")), b"p").unwrap();
+        }
+        fs::write(folder.join("20260915-000000-1"), b"a file, not a folder").unwrap();
+        fs::create_dir(folder.join("somebody else")).unwrap();
+        // 2026-09-16T15:00:00Z.
+        let first = reserve_staging_folder(&folder, at(1_789_570_800)).unwrap();
+        let second = reserve_staging_folder(&folder, at(1_789_570_800)).unwrap();
+        assert_eq!(first, folder.join("20260916-150000-1"));
+        assert_eq!(second, folder.join("20260916-150000-2"));
+        fs::write(first.join("report.pdf"), b"x").unwrap();
+        sweep_staging(&folder);
+        assert!(!folder.join("20260916-143000-1.png").exists());
+        assert!(!folder.join("20260916-143001-1.png").exists());
+        assert!(folder.join("20260916-143002-1.png").exists());
+        assert!(first.join("report.pdf").exists() && second.is_dir());
+        assert!(
+            folder.join("20260915-000000-1").is_file(),
+            "not a folder, not ours"
+        );
+        assert!(folder.join("somebody else").is_dir());
+        for index in 0..KEPT {
+            fs::write(folder.join(format!("20260917-0000{index:02}-1.png")), b"p").unwrap();
+        }
+        sweep_staging(&folder);
+        assert!(!first.exists(), "a retired folder goes with what is in it");
+        assert!(!second.exists());
+        assert!(folder.join("20260915-000000-1").is_file());
+        let _ = fs::remove_dir_all(&folder);
     }
 
     /// RED GATE (review X-2) — **two writes in one second never take one

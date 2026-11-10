@@ -622,7 +622,13 @@ impl WindowHost for HeadlessWindow {
         lane: &crate::clipboard_lane::ClipboardLane,
         ask: crate::clipboard_lane::Ask,
     ) -> Result<crate::clipboard_lane::ClipboardRequest, crate::clipboard_lane::Declined> {
-        lane.submit(Arc::new(self.clipboard.clone()), ask)
+        lane.submit(self.clipboard_door(), ask)
+    }
+    fn clipboard_door(&self) -> Arc<dyn crate::clipboard_lane::ClipboardDoor> {
+        Arc::new(self.clipboard.clone())
+    }
+    fn staging_folder(&self) -> PathBuf {
+        self.clipboard.staged_here()
     }
     fn hand_off(
         &self,
@@ -659,6 +665,17 @@ pub(crate) struct HeadlessClipboard(Arc<ClipboardScript>);
 #[derive(Default)]
 pub(crate) struct ClipboardScript {
     held: Mutex<Option<String>>,
+    /// **What a terminal paste reads instead of the text**, when a test put it there (plan row
+    /// 81): files, a picture, a promise or a refusal, as the platform's read would answer.
+    payload: Mutex<Option<bt_platform::ClipboardPayload>>,
+    /// Each promised entry's bytes, in the descriptor's order, or the result code its render
+    /// fails with — what the source behind a promise hands over when asked.
+    promised: Mutex<Vec<Result<Vec<u8>, u32>>>,
+    /// The clipboard's own count of its changes: one more for every copy onto it.
+    sequence: Mutex<u64>,
+    /// The folder this window's pictures and promises are staged in, under the test's own
+    /// temporary name — never the machine's staging folder.
+    staging: OnceLock<PathBuf>,
     written: Mutex<Vec<String>>,
     refused_opens: Mutex<usize>,
     hold: crate::lane::Hold,
@@ -672,6 +689,32 @@ impl HeadlessClipboard {
     /// The clipboard now holds `text`, as if another program had copied it.
     pub(crate) fn holds(&self, text: &str) {
         *locked(&self.0.held) = Some(text.to_owned());
+        *locked(&self.0.payload) = None;
+        *locked(&self.0.sequence) += 1;
+    }
+
+    /// The clipboard now holds what a terminal paste reads as `payload` (plan row 81), as if
+    /// another program had copied it; the sequence it is read at is answered.
+    pub(crate) fn holds_payload(&self, payload: bt_platform::ClipboardPayload) -> u64 {
+        *locked(&self.0.payload) = Some(payload);
+        let mut sequence = locked(&self.0.sequence);
+        *sequence += 1;
+        *sequence
+    }
+
+    /// What the source behind a promise hands over for each entry, in order: its bytes, or the
+    /// result code its render fails with.
+    pub(crate) fn promise_renders(&self, contents: Vec<Result<Vec<u8>, u32>>) {
+        *locked(&self.0.promised) = contents;
+    }
+
+    /// The folder this clipboard's pastes are staged in — made on first asking, under a name of
+    /// the test's own.
+    pub(crate) fn staged_here(&self) -> PathBuf {
+        self.0
+            .staging
+            .get_or_init(|| bt_testpath::temp_path("folio-headless-clipboard-staging"))
+            .clone()
     }
 
     /// Everything written to it since the last time this was asked, in order.
@@ -718,15 +761,85 @@ impl crate::clipboard_lane::ClipboardDoor for HeadlessClipboard {
                 .clone()
                 .map(Reply::Text)
                 .ok_or_else(|| "the headless clipboard holds no text".to_owned()),
-            Ask::Payload => locked(&self.0.held)
-                .clone()
-                .map(|text| Reply::Payload(bt_platform::ClipboardPayload::Text(text)))
-                .ok_or_else(|| "the headless clipboard holds nothing".to_owned()),
+            Ask::Payload => {
+                let sequence = Some(bt_platform::ClipboardSequence(*locked(&self.0.sequence)));
+                if let Some(payload) = locked(&self.0.payload).clone() {
+                    return Ok(Reply::Payload { sequence, payload });
+                }
+                locked(&self.0.held)
+                    .clone()
+                    .map(|text| Reply::Payload {
+                        sequence,
+                        payload: bt_platform::ClipboardPayload::Text(text),
+                    })
+                    .ok_or_else(|| "the headless clipboard holds nothing".to_owned())
+            }
             Ask::Write(text) => {
                 *locked(&self.0.held) = Some(text.clone());
+                *locked(&self.0.payload) = None;
+                *locked(&self.0.sequence) += 1;
                 locked(&self.0.written).push(text.clone());
                 Ok(Reply::Written)
             }
+        }
+    }
+
+    /// **The promise rendered from the script**: the descriptor is what the clipboard holds now
+    /// (none when it no longer holds a promise), and each entry's bytes are what
+    /// [`HeadlessClipboard::promise_renders`] scripted — through the platform's own renderer, so the
+    /// judging, the caps and the clean-up are the product's.
+    fn render_promised_files(
+        &self,
+        _worker: &bt_platform::admission::WorkerCtx,
+        offer: &[bt_platform::PromisedEntry],
+        into: &Path,
+    ) -> Result<
+        bt_platform::clipboard_promise::RenderedPromise,
+        bt_platform::clipboard_promise::PromiseRefused,
+    > {
+        let descriptor = match locked(&self.0.payload).as_ref() {
+            Some(bt_platform::ClipboardPayload::Promise(promise)) => promise.entries.clone(),
+            _ => Vec::new(),
+        };
+        let mut source = ScriptedPromise {
+            descriptor,
+            contents: locked(&self.0.promised).clone(),
+        };
+        bt_platform::clipboard_promise::render_promise(
+            &mut source,
+            offer,
+            into,
+            bt_platform::clipboard_promise::PASTE_LIMITS,
+        )
+    }
+}
+
+/// The source behind a headless clipboard's promise: its descriptor and each entry's script.
+struct ScriptedPromise {
+    descriptor: Vec<bt_platform::PromisedEntry>,
+    contents: Vec<Result<Vec<u8>, u32>>,
+}
+
+impl bt_platform::clipboard_promise::PromisedContents for ScriptedPromise {
+    fn descriptor(
+        &mut self,
+    ) -> Result<Vec<bt_platform::PromisedEntry>, bt_platform::clipboard_promise::PromiseRefused>
+    {
+        Ok(self.descriptor.clone())
+    }
+    fn write_contents(
+        &mut self,
+        index: usize,
+        file: &mut bt_platform::clipboard_promise::PromisedFile<'_>,
+    ) -> Result<(), bt_platform::clipboard_promise::PromiseRefused> {
+        match self.contents.get(index) {
+            Some(Ok(bytes)) => file.write(bytes),
+            Some(Err(code)) => Err(bt_platform::clipboard_promise::PromiseRefused::NotRendered(
+                Some(*code),
+            )),
+            None => Err(bt_platform::clipboard_promise::PromiseRefused::NotRendered(
+                None,
+            )),
         }
     }
 }

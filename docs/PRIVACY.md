@@ -144,6 +144,14 @@ shortcut by its name, a profile by the title you gave it, a pin by its target �
 a full path or URL. These lines stay on this computer; review the log before you
 share it.
 
+Each paste into a terminal writes one line about what it read from the
+clipboard: the clipboard's change number, what kind of thing it held (text,
+files and how many, a picture and its format), and — when it held nothing Folio
+pastes, or files another program promised — the names of the formats it offered,
+such as `FileGroupDescriptorW` or `PNG`. A paste Folio refuses writes one more
+line naming the kind of refusal. Neither line contains what was copied, a file
+name or a path.
+
 ### The web preview's profile
 
 A separate place from the directory above, and where it is depends on the
@@ -201,6 +209,12 @@ profile. Do not put a secret in one.
 
 ### Elsewhere
 
+- **Pasted pictures and files**: `folio/clipboard` in the system's temporary
+  directory (`%TEMP%` on Windows). A picture pasted into a terminal is saved
+  there as a PNG, and on Windows a file pasted from inside another program (an
+  attachment, a photo, a file in a zip folder) is saved there under its own
+  name, in a folder of its own, so that what is pasted is a path. The newest 20
+  are kept; older ones are deleted as new ones arrive.
 - `%TEMP%\bt-app-panic.log` — appended to if Folio panics on Windows. On macOS
   the same report goes to the temporary directory of that run as
   `folio-panic.log`, and the failure itself is in `diagnostics.log` above.
@@ -396,6 +410,8 @@ rm -rf ~/Library/Application\ Support/Folio/diagnostics*.log \
 
 在 Folio 之外编辑的设置、快捷键、配置文件或钉住条目文件替换了在 Folio 中设定的值时，`diagnostics.log` 会逐一记下这些值：设置或快捷键记名称，配置文件记你起的标题，钉住条目记目标——完整路径或 URL。这些记录留在本机；分享日志前先看一遍。
 
+每次向终端粘贴，都会记一行它从剪贴板读到了什么：剪贴板的变更序号、内容的类型（文本、文件及其数量、图片及其格式）；剪贴板上没有 Folio 能粘贴的内容，或是另一个程序承诺提供的文件时，还会记下剪贴板提供的格式名称，例如 `FileGroupDescriptorW` 或 `PNG`。Folio 拒绝一次粘贴时，再记一行拒绝的类别。这两行都不含复制的内容、文件名或路径。
+
 ### 网页预览的 profile
 
 跟上面那个目录不是一处，具体在哪里取决于引擎。预览保存的东西和任何浏览器一样——cookie、
@@ -444,6 +460,7 @@ rm -rf ~/Library/WebKit/<Folio 的 bundle identifier> ~/Library/Caches/<Folio �
 
 ### 其它位置
 
+- **粘贴的图片和文件**：系统临时目录下的 `folio/clipboard`（Windows 上即 `%TEMP%`）。粘贴到终端的图片以 PNG 保存在这里；在 Windows 上，从另一个程序内部复制来粘贴的文件（附件、照片、zip 文件夹里的文件）以原名保存在这里各自的文件夹中，粘贴的是它的路径。只保留最新的 20 个，新的到来时删除旧的。
 - `%TEMP%\bt-app-panic.log`——Folio 在 Windows 上发生 panic 时追加写入。macOS 上同样的报告写入当次运行的临时目录，文件名为 `folio-panic.log`，错误本身记录在上文提到的 `diagnostics.log` 中。
 - **macOS：`~/Library/Logs/DiagnosticReports`。** 崩溃退出时系统将崩溃报告写在这里——所有程序都是如此，不只是 Folio。这是 macOS 的文件，Folio 不写入也不复制。下次启动时 Folio 找到属于自己的最新一份，将其路径记入 `diagnostics.log`。
 - **macOS：`$TMPDIR` 下的运行时目录。** 一个锁文件和一个 socket，在 `folio-<你的 uid>/` 下，仅当前用户可读，用于第二个 Folio 将启动参数交给第一个。不含任何内容，下一个取得锁的 Folio 会清除前一个遗留的文件。
