@@ -2530,7 +2530,8 @@ impl Heartbeat {
         self.at_station_ns(station, now_ms.saturating_mul(NS_PER_MS));
     }
 
-    /// [`Self::at_station`] in nanoseconds.
+    /// [`Self::at`] on a nanosecond clock the caller holds: the one body of `at` and of the tests'
+    /// millisecond `at_station`.
     fn at_station_ns(&self, station: Station, now_ns: u64) {
         self.move_to(station, now_ns);
         self.park.store(PARK_RUNNING, Ordering::Relaxed);

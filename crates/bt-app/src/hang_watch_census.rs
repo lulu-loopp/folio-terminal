@@ -33,12 +33,13 @@
 //! time is the accounting's — no lock, and no allocation except **once per `AppEvent` variant per
 //! run**, when a variant is first seen and its name is written down
 //! ([`Census::app_event`]). Each station change adds the time spent in the station it leaves to
-//! that station's counter ([`Census::station`]), on the clock reading the change already took: a
-//! relaxed load and store of the station's entry instant and a load and a store of its counter,
-//! whether or not `BT_PERF_TRACE` is set, and no read-modify-write. The window thread is the one
-//! writer of both, as it is of the station itself (an admitted door is the window thread's
-//! alone). The watchdog reads the counters on its own two-second round and writes the lines only
-//! when `BT_PERF_TRACE` is set; nothing here is on a clock of its own.
+//! that station's counter
+//! ([`Census::station`](crate::hang_watch::census::Census::station)), on the clock reading the
+//! change already took: a relaxed load and store of the station's entry instant and a load and a
+//! store of its counter, whether or not `BT_PERF_TRACE` is set, and no read-modify-write. The
+//! window thread is the one writer of both, as it is of the station itself (an admitted door is
+//! the window thread's alone). The watchdog reads the counters on its own two-second round and
+//! writes the lines only when `BT_PERF_TRACE` is set; nothing here is on a clock of its own.
 
 use std::mem::Discriminant;
 use std::sync::OnceLock;
