@@ -813,6 +813,7 @@ mod tests {
                     package: None,
                     classic,
                     orphans,
+                    profile_lines: None,
                 })
                 .as_deref(),
             Some("BT_CARRY round checks=1 changed=1"),
@@ -1042,7 +1043,8 @@ mod tests {
                  and whether a round is pending",
             );
         assert!(
-            steps[lines..].contains("crate::shell_integration::run_profile_lines_step(ctx,may_start)"),
+            steps[lines..]
+                .contains("crate::shell_integration::run_profile_lines_step(ctx,may_start)"),
             "the member runs the lines' step: {steps}"
         );
         let rounds: Vec<usize> = steps
@@ -1157,7 +1159,7 @@ mod tests {
     fn a_start_with_an_old_profile_carries_it_once_the_walk_answers() {
         use crate::attention_hooks::{AgentHomes, AgentHomesCell};
         use crate::shell_integration::profile_marks::{LEGACY_LINE, MANAGED_LINE};
-        use crate::shell_integration::profile_runtime::{ProfileLinesStep, carry_profile_lines};
+        use crate::shell_integration::{ProfileLinesStep, carry_profile_lines};
         use crate::test_support::{free_fn_body, squeezed};
         let appdata = bt_testpath::link_free_temp_path("folio-carry-start-old-profile");
         let _ = std::fs::remove_dir_all(&appdata);
@@ -1174,20 +1176,31 @@ mod tests {
             let asked = latch.round_begins();
             let hooks_settled = homes.homes_settled();
             profile_lines_member(asked, hooks_settled, latch, |may_start| {
-                step.run_once(may_start, |_| false, || {
-                    carry_profile_lines(
-                        &data,
-                        Some(&appdata),
-                        vec![(std::path::PathBuf::from("pwsh"), Some(profile.clone()))],
-                    )
-                    .into_member_answer(|_| {})
-                })
+                step.run_once(
+                    may_start,
+                    |_| false,
+                    || {
+                        carry_profile_lines(
+                            &data,
+                            Some(&appdata),
+                            vec![(std::path::PathBuf::from("pwsh"), Some(profile.clone()))],
+                        )
+                        .into_member_answer(|_| {})
+                    },
+                )
                 .flatten()
             })
         };
 
-        assert!(latch.ask_for_round(CarryAsk::ALL), "the start begins the pass");
-        assert_eq!(round(&latch), None, "the start's own round, before the walk");
+        assert!(
+            latch.ask_for_round(CarryAsk::ALL),
+            "the start begins the pass"
+        );
+        assert_eq!(
+            round(&latch),
+            None,
+            "the start's own round, before the walk"
+        );
         assert_eq!(std::fs::read_to_string(&profile).unwrap(), before);
         assert!(!latch.round_again(), "and nothing waits for another round");
 
@@ -1223,15 +1236,26 @@ mod tests {
             started.set(may_start);
             None
         });
-        assert!(started.get(), "the lines start on the hooks' answer an earlier round had");
+        assert!(
+            started.get(),
+            "the lines start on the hooks' answer an earlier round had"
+        );
         assert!(!latch.round_again());
 
         let before_walk = CarryLatch::new();
         assert!(before_walk.ask_for_round(CarryAsk::OLD_PROFILE_LINES));
-        profile_lines_member(before_walk.round_begins(), false, &before_walk, |may_start| {
-            assert!(!may_start, "a release before the walk's answer starts no lines");
-            None
-        });
+        profile_lines_member(
+            before_walk.round_begins(),
+            false,
+            &before_walk,
+            |may_start| {
+                assert!(
+                    !may_start,
+                    "a release before the walk's answer starts no lines"
+                );
+                None
+            },
+        );
         assert!(!before_walk.round_again(), "and asks for no round");
         let _ = std::fs::remove_dir_all(&appdata);
 
