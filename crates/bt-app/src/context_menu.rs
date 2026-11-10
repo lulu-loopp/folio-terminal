@@ -482,7 +482,7 @@ pub(crate) fn classic_member_answer(
 /// when the system will not say where this copy's program is: there is no shape
 /// to compare against.
 pub(crate) fn run_classic_step(_ctx: &WorkerCtx) -> Option<MemberAnswer<ClassicAnswer>> {
-    if !cfg!(windows) || cfg!(test) {
+    if bt_platform::host_platform() != bt_platform::HostPlatform::Windows || cfg!(test) {
         return None;
     }
     let (Some(this), Some(desired)) = (executable(), desired()) else {

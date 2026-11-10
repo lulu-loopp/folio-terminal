@@ -2174,7 +2174,7 @@ fn uninstall_update_rows_name_their_writers() {
     };
     assert!(body("arm").contains("arm_with("));
     assert!(body("arm_with").contains("durable_write_with("));
-    assert!(body("sweep").contains("is_ours("));
+    assert!(body("sweep_by").contains("is_ours("));
     assert!(method_body("Home", "for_bundle").contains("MACOS_HOME_SUFFIX"));
     for (remover, writer) in [
         (Remover::UpdateEntrances, "launch_agent.rs:arm"),

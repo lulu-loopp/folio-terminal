@@ -59660,7 +59660,7 @@ mod platform_gate_tests {
 
     /// **The list.** One file per line, in the order `ls` gives them, each with
     /// the reason it is allowed to ask.
-    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 43] = [
+    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 44] = [
         // Windows-only test fixture: the `pi` row, which only the Windows table ships, reopened
         // from a Recent row, beside its every-platform twin on the host's fallback shell.
         "app_files_tests.rs",
@@ -59687,6 +59687,10 @@ mod platform_gate_tests {
         // Windows-only test fixture: GDI's own drawing of a top-down and a 16-bit bitmap,
         // beside the every-platform rows of the layout the Windows arm hands over.
         "clipboard_picture.rs",
+        // Windows-only test fixture (2026-11-09, 0.4.10 plan row 68b): the classic verb's
+        // historical shapes planted with `reg.exe` in an isolated `HKCU\Software\Folio-Test`
+        // subkey, beside the every-platform run of the same shapes over a fake store.
+        "context_menu.rs",
         // The Explorer verb itself, which has no counterpart off Windows.
         "explorer_menu.rs",
         // Drive roots, the recycle bin, and the reveal.
