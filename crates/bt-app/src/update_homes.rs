@@ -327,8 +327,9 @@ fn home_files_between_transactions(home: &Home) -> [PathBuf; 3] {
     [home.admission(), home.lock(), home.recover_log()]
 }
 
-/// **What the home holds**, listed without following a link.
-fn what_the_home_holds(home: &Home) -> io::Result<HomeHolds> {
+/// **What the home holds**, listed without following a link — a worker's read: on the carry
+/// pass's worker, or the uninstall door's.
+fn what_the_home_holds(_worker: &WorkerCtx, home: &Home) -> io::Result<HomeHolds> {
     let ours = home_files_between_transactions(home);
     let journal = home.journal();
     let mut journal_there = false;
@@ -367,7 +368,7 @@ fn fate_of_holds(holds: io::Result<HomeHolds>) -> Option<HomeFate> {
 /// files removed while they are held, the holds let go, then the emptied folder — `remove_dir`,
 /// which takes no tree — and its parent flushed (`install_txn::durable_remove` of what is no
 /// longer there).
-fn retire_home(home: &Home) -> HomeFate {
+fn retire_home(worker: &WorkerCtx, home: &Home) -> HomeFate {
     let hold = |path: &Path| match install_txn::try_hold(path, Hold::Exclusive) {
         Ok(Some(held)) => Ok(held),
         Ok(None) => Err(HomeFate::LeftInUse),
@@ -381,7 +382,8 @@ fn retire_home(home: &Home) -> HomeFate {
         Ok(held) => held,
         Err(fate) => return fate,
     };
-    if let Some(fate) = fate_of_holds(what_the_home_holds(home)) {
+    let holds = what_the_home_holds(worker, home);
+    if let Some(fate) = fate_of_holds(holds) {
         return fate;
     }
     for file in home_files_between_transactions(home) {
@@ -404,11 +406,19 @@ fn retire_home(home: &Home) -> HomeFate {
 
 /// **One recorded entry, judged** — in the order of the module's rule, stopping at the first
 /// answer.
-fn judge_recorded_home<D: FnOnce(Writer) -> bool>(
+///
+/// The gate's bound is a `where` clause: the thread guard reads a function's parameters at the
+/// first parenthesis after `fn` (`window_waits_tests::signature`), which a `FnOnce(Writer)` bound
+/// in the generics would be.
+fn judge_recorded_home<D>(
+    worker: &WorkerCtx,
     entry: &Path,
     look: &(impl Look + ?Sized),
     gate: &mut HomesGate<D>,
-) -> HomeFate {
+) -> HomeFate
+where
+    D: FnOnce(Writer) -> bool,
+{
     let Some(home) = home_of_entry(entry) else {
         return HomeFate::RefusedEntry;
     };
@@ -431,13 +441,14 @@ fn judge_recorded_home<D: FnOnce(Writer) -> bool>(
         Ok(false) => return HomeFate::LeftLive(bundle),
         Err(_) => return HomeFate::LeftOwnerUnknown,
     }
-    if let Some(fate) = fate_of_holds(what_the_home_holds(&home)) {
+    let holds = what_the_home_holds(worker, &home);
+    if let Some(fate) = fate_of_holds(holds) {
         return fate;
     }
     if !gate.may_write() {
         return HomeFate::Held;
     }
-    retire_home(&home)
+    retire_home(worker, &home)
 }
 
 /// **The sweep of the record at `record`**: `seed`, this copy's own home, recorded when it is a
@@ -445,8 +456,9 @@ fn judge_recorded_home<D: FnOnce(Writer) -> bool>(
 /// this copy's own, neither judged nor touched in the record; every other entry judged
 /// ([`judge_recorded_home`]); the record written once when an entry was added or dropped, the
 /// trial's gate allowing. A record this build cannot read is left byte for byte and judges
-/// nothing.
+/// nothing. On a worker: the carry pass's, or the uninstall door's.
 pub(crate) fn sweep_recorded_homes(
+    worker: &WorkerCtx,
     record: &Path,
     seed: Option<&Path>,
     skip: Option<&Path>,
@@ -495,7 +507,7 @@ pub(crate) fn sweep_recorded_homes(
         let fate = if seeded == Some(entry.as_path()) {
             HomeFate::Recorded
         } else {
-            judge_recorded_home(&entry, look, &mut gate)
+            judge_recorded_home(worker, &entry, look, &mut gate)
         };
         if fate.drops_the_entry() {
             changed = true;
@@ -524,7 +536,7 @@ static UPDATE_HOMES_SAID: OrphansSaid = OrphansSaid::new();
 /// Nothing off macOS, where no copy writes a record; nothing in a test process, whose pass must
 /// never read or write the account's record or its homes — the tests drive
 /// [`sweep_recorded_homes`] over folders of their own.
-pub(crate) fn run_update_homes_step(_ctx: &WorkerCtx) -> Option<MemberAnswer<()>> {
+pub(crate) fn run_update_homes_step(ctx: &WorkerCtx) -> Option<MemberAnswer<()>> {
     if cfg!(test) || bt_platform::host_platform() != HostPlatform::MacOs {
         return None;
     }
@@ -537,6 +549,7 @@ pub(crate) fn run_update_homes_step(_ctx: &WorkerCtx) -> Option<MemberAnswer<()>
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         sweep_recorded_homes(
+            ctx,
             &record,
             this_copys.as_ref().map(Home::root),
             None,

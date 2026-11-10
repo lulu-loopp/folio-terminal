@@ -1275,12 +1275,10 @@ fn execute_over<T>(
             }
             Remover::UpdateHome => {
                 entries.push(update_home(&label, scope.update_home.as_deref()));
-                for record in &scope.update_homes_records {
-                    entries.extend(recorded_update_homes(
-                        &label,
-                        record,
-                        scope.update_home.as_deref(),
-                    ));
+                // The recorded homes are read and removed on the door's worker, which the
+                // system's removers are handed (row 68e): none off macOS.
+                if !scope.update_homes_records.is_empty() {
+                    entries.extend(system(Remover::UpdateHome));
                 }
             }
             Remover::TrialFolder => entries.push(trial_folder(&label, scope)),
@@ -1394,10 +1392,30 @@ fn update_home(label: &str, home: Option<&Path>) -> Entry {
 /// this copy's own home — just removed whole by [`update_home`] — neither judged nor touched in
 /// the record. One line per home the sweep found standing; a home whose entry is dropped because
 /// it is not there, or because the entry names no home, has none. A home that is left is never a
-/// refusal, so it does not stop the program's step; a home whose removal failed is.
-fn recorded_update_homes(label: &str, record: &Path, own: Option<&Path>) -> Vec<Entry> {
+/// refusal, so it does not stop the program's step; a home whose removal failed is. Each of
+/// `records` in turn, on the door's worker.
+fn recorded_update_homes(
+    worker: &WorkerCtx,
+    label: &str,
+    records: &[PathBuf],
+    own: Option<&Path>,
+) -> Vec<Entry> {
+    records
+        .iter()
+        .flat_map(|record| recorded_update_homes_of(worker, label, record, own))
+        .collect()
+}
+
+/// [`recorded_update_homes`] of one data root's record.
+fn recorded_update_homes_of(
+    worker: &WorkerCtx,
+    label: &str,
+    record: &Path,
+    own: Option<&Path>,
+) -> Vec<Entry> {
     use crate::update_homes::{HomeFate, RecordState};
     let swept = crate::update_homes::sweep_recorded_homes(
+        worker,
         record,
         None,
         own,
@@ -1837,6 +1855,14 @@ fn run_within(worker: &WorkerCtx, door: crate::cli::UninstallDoor) -> i32 {
             let system = |scope: &Scope, remover| {
                 if scope.sandbox.is_some() {
                     vec![Entry::new(format!("{remover:?} (sandbox)"), Fate::Absent)]
+                } else if remover == Remover::UpdateHome {
+                    // The recorded update homes, beside this copy's own (row 68e).
+                    recorded_update_homes(
+                        worker,
+                        &label(mark_of(Remover::UpdateHome), scope.lang),
+                        &scope.update_homes_records,
+                        scope.update_home.as_deref(),
+                    )
                 } else {
                     system_remove(worker, remover, &scope.exe, scope.lang)
                 }

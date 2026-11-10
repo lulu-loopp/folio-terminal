@@ -261,6 +261,7 @@ bt-app	-	crate::pty_door::wait_for_retirements	bt_pty::wait_for_retirements 1	ow
 bt-app	-	crate::recovered::copies_in	std::fs::read_dir 1	worker-door-body	WorkerCtx	
 bt-app	-	crate::uninstall::names_in	std::fs::read_dir 1	worker-door-body	WorkerCtx	
 bt-app	-	crate::uninstall::tree_items	std::fs::read_dir 1	worker-door-body	WorkerCtx	
+bt-app	-	crate::update_homes::what_the_home_holds	std::fs::read_dir 1	worker-door-body	WorkerCtx	
 bt-app	-	crate::watch_steward::WatchSteward::serve	std::sync::Condvar::wait 1	worker-door-body	WorkerCtx	
 bt-app	-	crate::update_handoff::leave_armed	std::sync::mpsc::Receiver::recv_timeout 1	owner-door-body	WaitToken	UpdateLeave
 bt-app	-	crate::diagnostics::Queue::settle	std::sync::mpsc::Receiver::recv_timeout 1	owner-door-body	WaitToken	DiagnosticsSettle

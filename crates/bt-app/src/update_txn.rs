@@ -8316,6 +8316,16 @@ mod parse_sites {
             Is::NotJournal("a local feed's release list"),
             "crate::update::tests::an_unreadable_or_malformed_feed_is_a_failed_check_not_a_panic",
         ),
+        // The data folder's record of the macOS update homes (0.4.10 plan row 68e): its own
+        // version, read whole and refused when it is not this build's.
+        site(
+            "UpdateHomesRecord::read",
+            "crate::update_homes::UpdateHomesRecord::read",
+            Reads::SerdeJson,
+            1,
+            Is::NotJournal("the record of the update homes"),
+            "crate::update_homes::tests::a_newer_record_is_left_as_it_is",
+        ),
         site(
             "sight_of_read",
             "crate::update_txn::Role::sight_of_read",

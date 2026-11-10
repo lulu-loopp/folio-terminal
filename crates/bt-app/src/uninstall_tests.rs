@@ -1798,6 +1798,29 @@ fn uninstall_purge_reports_the_root_it_found_at_the_deciding_check() {
     fs::remove_dir_all(root).unwrap();
 }
 
+/// The system's removers of a test, with the recorded update homes swept as the door sweeps them,
+/// on a worker of the test's own.
+fn homes_system(scope: &Scope) -> impl FnMut(Remover) -> Vec<Entry> {
+    let (records, own) = (
+        scope.update_homes_records.clone(),
+        scope.update_home.clone(),
+    );
+    move |remover| match remover {
+        Remover::UpdateHome => {
+            let (records, own) = (records.clone(), own.clone());
+            on_a_worker(move |worker| {
+                super::recorded_update_homes(
+                    worker,
+                    &label(mark_of(Remover::UpdateHome), Lang::English),
+                    &records,
+                    own.as_deref(),
+                )
+            })
+        }
+        other => system_absent(other),
+    }
+}
+
 /// A directory link at `link` naming `target`: a symlink on Unix, a junction on Windows (which
 /// needs no developer-mode privilege, as `uninstall_purge_junction_refuses_root_without_touching_target`
 /// already relies on).
@@ -2154,9 +2177,20 @@ fn uninstall_update_rows_remove_only_ours() {
 /// and a second run says nothing of the removed one. (Homebrew's zap is `--uninstall-cleanup`
 /// from the Caskroom's copy: the first case.)
 ///
+/// The door hands the sweep its worker through the system's removers (`run_within`'s `system`,
+/// pinned here by its source); the test hands it a worker of its own.
+///
 /// MUTATION: the row's record sweep dropped (`plant-68e-zap-misses-the-record.py`).
 #[test]
 fn the_cleanup_retires_a_recorded_home_whose_bundle_is_gone() {
+    use crate::test_support::{free_fn_body, squeezed};
+    let door = squeezed(free_fn_body("run_within"));
+    assert!(
+        door.contains(&squeezed(
+            "} else if remover == Remover::UpdateHome { recorded_update_homes(worker,"
+        )),
+        "the door's system sweeps the recorded homes on its worker: {door}"
+    );
     if bt_platform::host_platform() == HostPlatform::OtherUnix {
         // As `uninstall_update_rows_remove_only_ours`: no arm of the update door runs here.
         return;
@@ -2201,7 +2235,7 @@ fn the_cleanup_retires_a_recorded_home_whose_bundle_is_gone() {
         scope.update_home = Some(own.root().to_path_buf());
         scope.update_homes_records = vec![record.clone()];
 
-        let report = execute(&scope, purge, system_absent);
+        let report = execute(&scope, purge, homes_system(&scope));
         let fate_of = |home: &crate::update_txn::Home| {
             let mark = format!("{row}: {}", home.root().display());
             report
@@ -2240,7 +2274,7 @@ fn the_cleanup_retires_a_recorded_home_whose_bundle_is_gone() {
                 serde_json::json!([own.root(), live.root(), in_flight.root()]),
                 "the removed home's entry dropped, this copy's own untouched"
             );
-            let second = execute(&scope, purge, system_absent);
+            let second = execute(&scope, purge, homes_system(&scope));
             assert!(
                 !second.stdout().contains(&gone.root().display().to_string()),
                 "{}",
