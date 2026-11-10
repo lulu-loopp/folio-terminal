@@ -32,8 +32,14 @@
 //! (and one store, for the first), and two relaxed adds at the close. No clock read — the wall
 //! time is the accounting's — no lock, and no allocation except **once per `AppEvent` variant per
 //! run**, when a variant is first seen and its name is written down
-//! ([`Census::app_event`]). The watchdog reads the counters on its own two-second round and writes
-//! the line only when `BT_PERF_TRACE` is set; nothing here is on a clock of its own.
+//! ([`Census::app_event`]). Each station change adds the time spent in the station it leaves to
+//! that station's counter
+//! ([`Census::station`](crate::hang_watch::census::Census::station)), on the clock reading the
+//! change already took: a relaxed load and store of the station's entry instant and a load and a
+//! store of its counter, whether or not `BT_PERF_TRACE` is set, and no read-modify-write. The
+//! window thread is the one writer of both, as it is of the station itself (an admitted door is
+//! the window thread's alone). The watchdog reads the counters on its own two-second round and
+//! writes the lines only when `BT_PERF_TRACE` is set; nothing here is on a clock of its own.
 
 use std::mem::Discriminant;
 use std::sync::OnceLock;
@@ -107,6 +113,11 @@ pub(super) struct Census {
     /// Per source, its turns and their wall time.
     turns: [AtomicU64; SOURCES],
     wall_ns: [AtomicU64; SOURCES],
+    /// **Per station, the window thread's time in it**, in nanoseconds, for the run
+    /// (T-TWO-BARE-TURNS-PER-MARK-STEP): what the turns above were spent on, station by
+    /// station. Charged by the heartbeat's one charge, on the clock reading that charge already
+    /// took; the hold's own ledger counts whole milliseconds, and an empty turn is a third of one.
+    station_ns: [AtomicU64; STATION_COUNT],
 }
 
 impl Census {
@@ -119,7 +130,16 @@ impl Census {
             unkept: AtomicU64::new(0),
             turns: std::array::from_fn(|_| AtomicU64::new(0)),
             wall_ns: std::array::from_fn(|_| AtomicU64::new(0)),
+            station_ns: std::array::from_fn(|_| AtomicU64::new(0)),
         }
+    }
+
+    /// **The window thread spent `ns` in `station`**, just now: a relaxed load and store, because
+    /// the window thread is the counter's one writer (the watchdog only reads it). A plain add: a
+    /// run's nanoseconds reach `u64::MAX` after some 584 years.
+    pub(super) fn station(&self, station: Station, ns: u64) {
+        let counter = &self.station_ns[station.slot()];
+        counter.store(counter.load(Ordering::Relaxed) + ns, Ordering::Relaxed);
     }
 
     /// **A turn opens**, owed the wake whose owner is `owner_byte` (the accounting's packing; zero
@@ -204,6 +224,7 @@ impl Census {
         Reading {
             turns: std::array::from_fn(|index| self.turns[index].load(Ordering::Relaxed)),
             wall_ns: std::array::from_fn(|index| self.wall_ns[index].load(Ordering::Relaxed)),
+            station_ns: std::array::from_fn(|slot| self.station_ns[slot].load(Ordering::Relaxed)),
             unkept: self.unkept.load(Ordering::Relaxed),
         }
     }
@@ -250,6 +271,7 @@ impl Census {
 pub(super) struct Reading {
     turns: [u64; SOURCES],
     wall_ns: [u64; SOURCES],
+    station_ns: [u64; STATION_COUNT],
     unkept: u64,
 }
 
@@ -258,6 +280,7 @@ impl Reading {
         Self {
             turns: [0; SOURCES],
             wall_ns: [0; SOURCES],
+            station_ns: [0; STATION_COUNT],
             unkept: 0,
         }
     }
@@ -300,6 +323,51 @@ pub(super) fn turns_line(
         },
         after.unkept.saturating_sub(before.unkept)
     )
+}
+
+/// **The `stations` line for the window from `before` to `after`**, `window_ms` long
+/// (T-TWO-BARE-TURNS-PER-MARK-STEP):
+/// `BT_PERF_TRACE stations window_ms=… us_total=… by_station=<station>:<us>,…`, every station
+/// the window thread spent a microsecond or more in, the most first. `us_total` is every
+/// station's time, the ones under a microsecond included. It is the `turns` line's time, item by
+/// item, and so the floor of an empty turn's: divided by that line's turns, a station's time is
+/// what one turn spends in it. `None` for a window the thread spent no time in at all: there is
+/// nothing to itemize, and the `turns` line beside it already says so.
+pub(super) fn stations_line(before: &Reading, after: &Reading, window_ms: u64) -> Option<String> {
+    let spent: Vec<(usize, u64)> = (0..STATION_COUNT)
+        .map(|slot| {
+            (
+                slot,
+                after.station_ns[slot].saturating_sub(before.station_ns[slot]),
+            )
+        })
+        .collect();
+    let total_ns: u64 = spent.iter().map(|(_, ns)| ns).sum();
+    if total_ns == 0 {
+        return None;
+    }
+    let mut listed: Vec<(usize, u64)> = spent.into_iter().filter(|(_, ns)| *ns >= 1_000).collect();
+    listed.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    let by_station = listed
+        .iter()
+        .map(|(slot, ns)| {
+            format!(
+                "{:?}:{}",
+                Station::from_byte(u8::try_from(*slot).unwrap_or(0)),
+                ns / 1_000
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    Some(format!(
+        "BT_PERF_TRACE stations window_ms={window_ms} us_total={} by_station={}",
+        total_ns / 1_000,
+        if by_station.is_empty() {
+            "-"
+        } else {
+            &by_station
+        }
+    ))
 }
 
 /// **The `threads` line for one census of this process's threads** (`None` per unnamed thread):
@@ -356,7 +424,8 @@ impl Round {
     /// process's threads are counted (`threads`) and their line goes to `perf` when it differs
     /// from the last one said — the first round's always, and after that a pane opened or closed,
     /// a worker started or ended — and then the `turns` line for the window since the last round
-    /// (since the heartbeat's origin, the first time).
+    /// (since the heartbeat's origin, the first time), and its `stations` line when the window
+    /// thread spent any time at all in that window.
     pub(super) fn tick(
         &mut self,
         now_ms: u64,
@@ -378,12 +447,11 @@ impl Round {
         }
         let after = census.reading();
         let (since_ms, before) = self.last.take().unwrap_or_else(|| (0, Reading::zero()));
-        perf(turns_line(
-            census,
-            &before,
-            &after,
-            now_ms.saturating_sub(since_ms),
-        ));
+        let window_ms = now_ms.saturating_sub(since_ms);
+        perf(turns_line(census, &before, &after, window_ms));
+        if let Some(stations) = stations_line(&before, &after, window_ms) {
+            perf(stations);
+        }
         self.last = Some((now_ms, after));
     }
 }
@@ -392,7 +460,7 @@ impl Round {
 mod tests {
     //! The census on a scripted turn sequence: every source each kind of turn is filed under, and
     //! the two lines' shapes.
-    use super::{Cause, Census, Round, threads_line};
+    use super::{Cause, Census, Reading, Round, threads_line};
     use crate::AppEvent;
     use crate::hang_watch::Station;
     use crate::wake_owner::WakeOwner;
@@ -546,6 +614,68 @@ mod tests {
                 "BT_PERF_TRACE threads total=2 named=[main:1] unnamed=1",
                 "BT_PERF_TRACE turns window_ms=2000 turns=0 us_total=0 by_source=- unkept=0",
             ]
+        );
+    }
+
+    /// RED (mutation: print the run's totals instead of the window's, drop the stations under a
+    /// millisecond, or print the line for a window that spent nothing) — **the `stations` line
+    /// itemizes the window's time by station, to the microsecond, most first**
+    /// (T-TWO-BARE-TURNS-PER-MARK-STEP). The heartbeat's ledger counts whole milliseconds; an
+    /// empty turn is a third of one, so its items are this line's or nobody's.
+    #[test]
+    fn the_stations_line_itemizes_the_window_to_the_microsecond() {
+        let census = Census::new();
+        let mut round = Round::new();
+        let mut said = Vec::new();
+        let one = || Ok(vec![Some(String::from("main"))]);
+        round.tick(2_000, true, &census, one, |line| said.push(line));
+        census.station(Station::Place, 40_000);
+        census.station(Station::Drain, 250_500);
+        census.station(Station::Place, 2_000);
+        census.station(Station::Woken, 700);
+        round.tick(4_000, true, &census, one, |line| said.push(line));
+        census.station(Station::TurnPresent, 3_000_000);
+        round.tick(6_000, true, &census, one, |line| said.push(line));
+        assert_eq!(
+            said,
+            [
+                "BT_PERF_TRACE threads total=1 named=[main:1] unnamed=0",
+                "BT_PERF_TRACE turns window_ms=2000 turns=0 us_total=0 by_source=- unkept=0",
+                "BT_PERF_TRACE turns window_ms=2000 turns=0 us_total=0 by_source=- unkept=0",
+                "BT_PERF_TRACE stations window_ms=2000 us_total=293 by_station=Drain:250,Place:42",
+                "BT_PERF_TRACE turns window_ms=2000 turns=0 us_total=0 by_source=- unkept=0",
+                "BT_PERF_TRACE stations window_ms=2000 us_total=3000 by_station=TurnPresent:3000",
+            ]
+        );
+    }
+
+    /// RED (mutation: charge the census in whole milliseconds as the ledger is, or charge the
+    /// parked stretch) — **the heartbeat's one charge feeds each station's time to the
+    /// nanosecond, and the loop's park is nobody's** (T-TWO-BARE-TURNS-PER-MARK-STEP).
+    #[test]
+    fn the_heartbeats_charge_feeds_each_station_to_the_nanosecond() {
+        use crate::hang_watch::{Heartbeat, Park, set_test_clock_ns};
+        let heart = Heartbeat::on_test_clock();
+        set_test_clock_ns(5_000);
+        heart.woke();
+        set_test_clock_ns(45_000);
+        heart.at(Station::Place);
+        set_test_clock_ns(295_500);
+        heart.at(Station::Drain);
+        set_test_clock_ns(300_000);
+        heart.park(Park::Indefinite);
+        // Parked for 8.7 ms: no station's.
+        set_test_clock_ns(9_000_000);
+        heart.woke();
+        set_test_clock_ns(9_010_000);
+        heart.park(Park::Indefinite);
+        assert_eq!(
+            super::stations_line(&Reading::zero(), &heart.accounts.census.reading(), 2_000)
+                .as_deref(),
+            Some(
+                "BT_PERF_TRACE stations window_ms=2000 us_total=305 \
+                 by_station=Place:250,Woken:50,Drain:4"
+            )
         );
     }
 
