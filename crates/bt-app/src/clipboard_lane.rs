@@ -1309,4 +1309,23 @@ mod tests {
             "clipboard read: sequence=none answered=failed"
         );
     }
+
+    /// PIN — **every read the machine's clipboard answers a terminal paste writes its line, to the
+    /// file** (plan row 81, R10): on the worker, through `diagnostics::note`, so a Console run keeps
+    /// it as a GUI run does, and before the answer leaves for the window.
+    ///
+    /// MUTATION: drop the `note` from `PlatformClipboard::serve`, or write the line to stderr — red.
+    #[test]
+    fn the_machines_clipboard_writes_its_read_line_on_the_worker() {
+        let serve = crate::test_support::squeezed(crate::test_support::method_body(
+            "PlatformClipboard",
+            "serve",
+        ));
+        assert!(
+            serve.contains(
+                "letread=bt_platform::clipboard_payload(worker);crate::diagnostics::note(&clipboard_read_line(&read));"
+            ),
+            "{serve}"
+        );
+    }
 }
