@@ -1891,7 +1891,7 @@ mod tests {
             .find("AppEvent::")
             .map_or(probed.len(), |at| at + 1)];
         assert!(
-            probed.contains("carry_pass::begin_carry_pass()"),
+            probed.contains("carry_pass::begin_carry_pass(CarryAsk::HOOKS)"),
             "the probe's answer no longer asks the pass, which carries the readiness"
         );
         let window_thread = [
@@ -1932,10 +1932,15 @@ mod tests {
                 "scan_resolved(",
                 "Config::resolve(",
                 "hooks_are_switched_off(",
+                // Explorer's registrations (row 68b, G6): read and written on the pass's worker.
+                "context_menu::reassert(",
+                "read_context_menu(",
+                "explorer_menu::begin_probe(",
+                "msix::registered(",
             ] {
                 assert!(
                     !body.contains(read),
-                    "{name} reads an agent's file on the window thread: {read}"
+                    "{name} reads an agent's file or an Explorer registration on the window thread: {read}"
                 );
             }
             // The adoptions take the readiness the snapshot carries, and never ask it.
@@ -1954,10 +1959,12 @@ mod tests {
     #[test]
     fn the_pass_runs_at_the_moments_the_rulings_name() {
         use crate::test_support::{free_fn_body, method_body};
-        let begins = "carry_pass::begin_carry_pass()";
+        // Each moment asks the pass for the agents' member (row 68b, R2).
+        let begins =
+            |body: &str| body.contains("begin_carry_pass(") && body.contains("CarryAsk::HOOKS");
         let walk = free_fn_body("adopt_program_answers");
-        assert!(walk.contains(begins) && walk.contains("AGENT_HOMES.answered()"));
-        assert!(method_body("Runtime", "refresh_agent_rows").contains(begins));
+        assert!(begins(walk) && walk.contains("AGENT_HOMES.answered()"));
+        assert!(begins(method_body("Runtime", "refresh_agent_rows")));
         for press in [
             "apply_claude_hooks",
             "apply_codex_notify",
@@ -1982,12 +1989,13 @@ mod tests {
                 && beside.contains("Text::AgentHooksBeingRepaired"),
             "a press beside a repair does not say so"
         );
-        assert!(free_fn_body("agent_row_asked_again").contains(begins));
+        assert!(begins(free_fn_body("agent_row_asked_again")));
         // A row's refused repair carries the writer's sentence: a new language says it again.
-        assert!(method_body("Runtime", "adopt_new_language").contains(begins));
+        assert!(begins(method_body("Runtime", "adopt_new_language")));
         assert!(
-            free_fn_body("release_trial_writer")
-                .contains("Writer::AgentHooksRepair => carry_pass::begin_carry_pass()")
+            free_fn_body("release_trial_writer").contains(
+                "Writer::AgentHooksRepair => carry_pass::begin_carry_pass(CarryAsk::HOOKS)"
+            )
         );
     }
 
@@ -2359,30 +2367,6 @@ mod tests {
         );
     }
 
-    /// Makes `link` lead to `target`: a directory junction on Windows (no privilege needed), a
-    /// symbolic link elsewhere.
-    fn link_to(link: &Path, target: &Path) {
-        let hygiene = bt_pty::test_shell::Hygiene::new();
-        let mut command = if bt_platform::host_platform() == bt_platform::HostPlatform::Windows {
-            let cmd = PathBuf::from(std::env::var_os("SystemRoot").expect("Windows names it"))
-                .join("System32")
-                .join("cmd.exe");
-            let mut command = hygiene.command(cmd, bt_platform::quiet_command);
-            command.args(["/C", "mklink", "/J"]).arg(link).arg(target);
-            command
-        } else {
-            let mut command = hygiene.command("/bin/ln", bt_platform::quiet_command);
-            command.arg("-s").arg(target).arg(link);
-            command
-        };
-        let made = command.output().expect("the link command runs");
-        assert!(
-            made.status.success(),
-            "the link was not made: {}",
-            String::from_utf8_lossy(&made.stderr)
-        );
-    }
-
     /// N5 — **a missing owner behind a link is judged by the volume the link leads to**: the
     /// owner is spelled under a junction (a symbolic link off Windows) whose own volume is there.
     /// With the link's target there, the copy is gone; with the target gone — the drive it was on
@@ -2398,7 +2382,7 @@ mod tests {
         let target = root.join("elsewhere");
         fs::create_dir_all(&target).unwrap();
         let link = root.join("linked");
-        link_to(&link, &target);
+        crate::test_support::link_folder_to(&link, &target);
         let owner = link.join("Folio").join("folio.exe");
         let scan = DeadWhen::MissingOnAVolumeThatIsThere;
         assert_eq!(

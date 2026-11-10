@@ -11153,7 +11153,7 @@ fn every_request_door_cut_is_a_walked_doors() {
 /// a reviewed diff: a `# request-doors` cell that names an item this list does not is refused, and
 /// so is a line here no cell names. The reason is the item's, whichever door's road meets it: what
 /// its body holds its lock across, and why the window thread waits on no worker for longer.
-const MAILBOX: [(&str, &str); 41] = [
+const MAILBOX: [(&str, &str); 40] = [
     (
         "lane::lock",
         "2026-10-24: the lane's lock helper (`Mutex::lock`, a poison read through); it holds \
@@ -11283,10 +11283,6 @@ const MAILBOX: [(&str, &str); 41] = [
         "2026-10-24: the known package state, held for one clone",
     ),
     (
-        "explorer_menu::remember",
-        "2026-10-24: the known package state, held for one store",
-    ),
-    (
         "shell_integration::page_environment_cell",
         "2026-10-24: the page environment's mailbox (`Mutex::lock`), taken by its door for a read \
          or an update",
@@ -11413,8 +11409,10 @@ fn mailbox_failures(lines: &[Vec<&str>], mailbox: &[(&str, &str)]) -> Vec<String
 /// door out of the walk is ([`NOT_WALKED`]).
 ///
 /// MUTATION: plant `diagnostics::note` in the hand-off's mailbox — refused as unlisted; drop
-/// `explorer_menu::remember` from its one cell — its line is refused as unused; strip a reason's
-/// date — refused as undated.
+/// `explorer_menu::state` from its one cell, the Explorer press's — its line is refused as unused
+/// (re-aimed 2026-11-09, 0.4.10 plan row 68b: the start's probe, whose cell named
+/// `explorer_menu::remember`, is a member of the carry pass now and no request door); strip a
+/// reason's date — refused as undated.
 #[test]
 fn every_mailbox_item_has_its_reason() {
     let lines = section("request-doors", &REQUEST_DOOR_COLUMNS);
@@ -11452,13 +11450,13 @@ fn every_mailbox_item_has_its_reason() {
         }),
         "an unlisted mailbox item is refused"
     );
-    let dropped = edited("explorer_menu::begin_probe", &|cell| {
-        cell.replace(", explorer_menu::remember", "")
+    let dropped = edited("explorer_menu::request", &|cell| {
+        cell.replace(", explorer_menu::state", "")
     });
     assert!(
         failures_of(&dropped)
             .iter()
-            .any(|failure| failure.contains("`explorer_menu::remember` is in no")),
+            .any(|failure| failure.contains("`explorer_menu::state` is in no")),
         "a line no cell names is refused"
     );
     let mut undated = MAILBOX;

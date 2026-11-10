@@ -4011,3 +4011,28 @@ pub(crate) fn fail_awaited(cache: &mut AnimationCache, path: &Path) {
         },
     ));
 }
+
+/// Makes the folder `link` lead to the folder `target`: a directory junction on Windows (no
+/// privilege needed), a symbolic link elsewhere. Shared by the tests that judge a program through a
+/// link (the agent hooks' scan, the classic verb's historical shapes).
+pub(crate) fn link_folder_to(link: &Path, target: &Path) {
+    let hygiene = bt_pty::test_shell::Hygiene::new();
+    let mut command = if bt_platform::host_platform() == bt_platform::HostPlatform::Windows {
+        let cmd = PathBuf::from(std::env::var_os("SystemRoot").expect("Windows names it"))
+            .join("System32")
+            .join("cmd.exe");
+        let mut command = hygiene.command(cmd, bt_platform::quiet_command);
+        command.args(["/C", "mklink", "/J"]).arg(link).arg(target);
+        command
+    } else {
+        let mut command = hygiene.command("/bin/ln", bt_platform::quiet_command);
+        command.arg("-s").arg(target).arg(link);
+        command
+    };
+    let made = command.output().expect("the link command runs");
+    assert!(
+        made.status.success(),
+        "the link was not made: {}",
+        String::from_utf8_lossy(&made.stderr)
+    );
+}

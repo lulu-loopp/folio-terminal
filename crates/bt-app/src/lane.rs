@@ -844,6 +844,18 @@ impl Executor {
         }
     }
 
+    /// **This executor, its workers started at `band`** — for a worker one lane starts on
+    /// another's behalf: the carry pass's end runs a person's Explorer press written down while a
+    /// member held the deployment latch at the press's own band (0.4.10 plan row 68b).
+    pub(crate) fn with_band(&self, band: ThreadPriority) -> Self {
+        Self {
+            band,
+            stack: self.stack,
+            #[cfg(test)]
+            script: self.script.clone(),
+        }
+    }
+
     /// **Start a lane's worker**, `name` its thread's name. When the thread ends — the body
     /// returns, or a panic outside a task unwinds it — `ends` is told how. A thread the door
     /// refuses is reported to `ends` too, and the refusal is answered here. The body is lent the
