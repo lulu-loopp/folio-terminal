@@ -121,6 +121,9 @@ pub(crate) struct Owed {
 pub(crate) struct PassMember {
     pub(crate) call: &'static str,
     pub(crate) retired: &'static [&'static str],
+    /// The test the member landed with — its module and its name, as `Owed::landed_by` named
+    /// it before the part landed — which `bt_source` must find in that module's tests: a check
+    /// moving from `Err(Owed { .. })` to `Ok(PassMember { .. })` carries its `landed_by` here.
     pub(crate) proved_by: (&'static str, &'static str),
 }
 
@@ -275,6 +278,10 @@ fn member_tally<T>(answer: Option<&MemberAnswer<T>>) -> (usize, usize) {
 /// **What a round asks for**: a set of the pass's members (row 68b, R2). A moment asks for the
 /// members its ruling names, so an Agents-page open asks no deployment database and a trial's
 /// release of the Explorer writer runs no agent's scan; the start asks for all of them.
+///
+/// **One bit per member**, four of the eight taken: a part that adds a member adds its bit here,
+/// joins it into [`Self::ALL`], and names it at the asks its ruling gives (row 68c's profile lines
+/// is the next one).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CarryAsk(u8);
 
