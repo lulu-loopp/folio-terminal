@@ -2285,12 +2285,16 @@ fn every_paste_refusal_leaves_by_one_door() {
 /// PIN (plan row 81; review N16) — **the promise is rendered on its own worker and nowhere
 /// else**: `ClipboardDoor::render_promised_files` is called by `clipboard_picture::stage_promise`
 /// alone, which only the `clipboard-promise` worker's body in `Runtime::stage_clipboard_promise`
-/// calls; the clipboard lane's worker (`PlatformClipboard::serve`) names no render. R1's "never
-/// the lane worker" is a guard, not a fact of today's callers.
+/// calls; the clipboard lane's worker (`PlatformClipboard::serve`) names no render; and the
+/// platform's render behind the door, `bt_platform::render_clipboard_promise`, is called by the
+/// door's `render_promised_files` alone (re-review F4), so no other product function renders a
+/// promise on a worker of its own. R1's "never the lane worker" is a guard, not a fact of today's
+/// callers.
 ///
 /// MUTATIONS: call `render_promised_files` from another product function — a second caller;
 /// call `stage_promise` from the window thread's adopt — a second reader; render inside `serve`
-/// — its body names a render.
+/// — its body names a render; call `bt_platform::render_clipboard_promise` from another product
+/// function — a second reader of the platform render.
 #[test]
 fn the_promise_is_rendered_on_its_own_worker_only() {
     use crate::test_support::{found, free_calls_of, item_body, reader_names, source};
@@ -2324,6 +2328,13 @@ fn the_promise_is_rendered_on_its_own_worker_only() {
     assert!(
         !serve.contains("render_"),
         "the clipboard lane's worker renders nothing:\n{serve}"
+    );
+    let platform = free_calls_of("render_clipboard_promise").in_the_product(source());
+    assert_eq!(
+        reader_names(&platform),
+        ["render_promised_files"],
+        "the platform's render is reached through the door alone:\n{}",
+        platform.report(source())
     );
 }
 
