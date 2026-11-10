@@ -78,8 +78,9 @@ fn script_at(data: &Path) -> PathBuf {
 /// does an update's commit, whose trial held it back (`update_trial::Writer::ProfileMigration`,
 /// asked before anything is read); the rounds an Agents-page open, a press or a language change
 /// asks for after that answer `None` here and start no PowerShell. **Never before the hooks' first
-/// real answer** (R8 and the coordinator's ruling on the review's N1): `hooks_settled` is what the
-/// round read as it began (`carry_pass::run_carry_steps`), and a round that began before the program
+/// real answer, nor while another round is asked for** (R8, the coordinator's ruling on the review's
+/// N1, and row 73's review N8): `may_start` is `carry_pass::lines_may_start` — what the round read as
+/// it began, and no round pending as the lines would start — and a round that began before the program
 /// walk answered — the start's own, typically — runs nothing here and leaves the latch open; the
 /// walk's answer, or the lane's word that none will come, begins the round that runs the hooks,
 /// publishes them, and then runs this.
@@ -90,10 +91,10 @@ fn script_at(data: &Path) -> PathBuf {
 /// **In a test build it starts no PowerShell and reads no account file** ([`this_accounts_inputs`]).
 pub(crate) fn run_profile_lines_step(
     ctx: &bt_platform::admission::WorkerCtx,
-    hooks_settled: bool,
+    may_start: bool,
 ) -> Option<crate::carry_pass::MemberAnswer<()>> {
     PROFILE_LINES
-        .run_once(hooks_settled, crate::update_trial::defer, || {
+        .run_once(may_start, crate::update_trial::defer, || {
             let inputs = this_accounts_inputs(ctx);
             carry_profile_lines(&inputs.data, inputs.appdata.as_deref(), inputs.answers)
                 .into_member_answer(crate::diagnostics::stderr_line)
@@ -113,18 +114,18 @@ impl ProfileLinesStep {
         }
     }
 
-    /// `body`'s answer the first time it is asked for, once the hooks have had their first real
-    /// answer and outside an update's trial; `None` otherwise. **The latch is set by a run, not by
-    /// an asking**: a round that began before the hooks' answer (`hooks_settled` `false`) asks
-    /// nothing, not even the trial, and a round the trial holds back (`defer` answering `true`)
-    /// reads nothing; each leaves it open, so a later round runs it.
+    /// `body`'s answer the first time it is asked for when it may start (the hooks have had their
+    /// first real answer and no other round is pending) and outside an update's trial; `None`
+    /// otherwise. **The latch is set by a run, not by an asking**: a round in which it may not start
+    /// (`may_start` `false`) asks nothing, not even the trial, and a round the trial holds back
+    /// (`defer` answering `true`) reads nothing; each leaves it open, so a later round runs it.
     pub(crate) fn run_once<T>(
         &self,
-        hooks_settled: bool,
+        may_start: bool,
         defer: impl FnOnce(crate::update_trial::Writer) -> bool,
         body: impl FnOnce() -> T,
     ) -> Option<T> {
-        if !hooks_settled {
+        if !may_start {
             return None;
         }
         if defer(crate::update_trial::Writer::ProfileMigration) {
@@ -2552,7 +2553,7 @@ mod tests {
         // N6): a member that ran its body directly would run at every round and in every trial.
         assert!(
             squeezed(free_fn_body("run_profile_lines_step"))
-                .contains("PROFILE_LINES.run_once(hooks_settled,crate::update_trial::defer,"),
+                .contains("PROFILE_LINES.run_once(may_start,crate::update_trial::defer,"),
             "the member runs through its latch and the trial's gate"
         );
         let step = ProfileLinesStep::new();

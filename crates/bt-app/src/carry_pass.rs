@@ -29,7 +29,10 @@
 //! review's N1). At a start the order is: the start's own round, before the program walk has
 //! answered, runs neither (the hooks have nothing to read, the lines wait for them); the walk's
 //! answer — or the lane's word that no walk will answer — begins the pass again, and that round
-//! runs the hooks, publishes them, and then runs the lines, published on their own.
+//! runs the hooks, publishes them, and then runs the lines, published on their own. **And the lines
+//! start only in a round for which no further round has been asked** (row 73's review N8): a round
+//! asked while this one ran — a Copilot probe's answer, which the first-run card waits on — runs
+//! next, and the lines yield to it and run in a later round with nothing pending.
 //!
 //! A request while the pass runs is not lost and not doubled: it is written down, and the worker
 //! runs every step once more before it ends ([`begin_carry_pass_with`]).
@@ -289,8 +292,10 @@ pub(crate) fn take_carry_snapshot() -> Option<CarrySnapshot> {
 /// ask where its `$PROFILE` is, and nothing the window adopts waits for that. Whether the agents'
 /// folders are settled is read once, as the round begins and before the hooks run: a walk that
 /// lands while the hooks are answering `None` begins the pass again, and the lines wait for that
-/// round, where the hooks answer first — never for a round whose hooks have not answered. Their
-/// answer is published as the round's second line, at its end. Each member is one run of a
+/// round, where the hooks answer first — never for a round whose hooks have not answered. **Nor
+/// while another round is asked for** ([`lines_may_start`], read just before the lines would start):
+/// they yield to it, so the round somebody waits for never waits for a PowerShell. Their answer is
+/// published as the round's second line, at its end. Each member is one run of a
 /// step on the pass's worker, handed the worker's context — a step may ask a program a question
 /// there, as the agent hooks ask codex its version (0.4.10 plan row 69c) — and asks the trial's
 /// gate for its own writer before it writes.
@@ -308,8 +313,21 @@ pub(crate) fn run_carry_steps(ctx: &WorkerCtx) {
     });
     publish_carry_round(CarryRound {
         hooks: None,
-        profile_lines: crate::shell_integration::run_profile_lines_step(ctx, hooks_settled),
+        profile_lines: crate::shell_integration::run_profile_lines_step(
+            ctx,
+            lines_may_start(hooks_settled, &CARRY_LATCH),
+        ),
     });
+}
+
+/// **Whether Folio's `$PROFILE` lines may start now** (row 68c): the hooks had their first real
+/// answer as the round began (`hooks_settled`, the ruling on the review's N1), and no further round
+/// has been asked since it began (row 73's review N8, the coordinator's rule of 2026-11-09). A round
+/// asked meanwhile — a Copilot probe whose answer the first-run card waits on, an Agents-page open,
+/// a press — is run next by the worker ([`CarryLatch::round_again`]), and the lines yield to it: they
+/// run in a later round with nothing pending, so no round anybody waits for waits for a PowerShell.
+fn lines_may_start(hooks_settled: bool, latch: &CarryLatch) -> bool {
+    hooks_settled && !latch.asked_since_round_began()
 }
 
 /// Publish what a round's members answered, say its line, and wake the window once — when one did.
@@ -662,8 +680,12 @@ mod tests {
             .find("crate::agent_hooks_step::run_agent_hooks_step(ctx)")
             .expect("the hooks are a member");
         let lines = steps
-            .find("crate::shell_integration::run_profile_lines_step(ctx,hooks_settled)")
-            .expect("the $PROFILE lines are a member, told what the round began with");
+            .find(
+                "crate::shell_integration::run_profile_lines_step(ctx,lines_may_start(hooks_settled,\
+                 &CARRY_LATCH),)",
+            )
+            .expect("the $PROFILE lines are a member, told what the round began with and whether \
+                     a round is pending");
         let rounds: Vec<usize> = steps
             .match_indices("publish_carry_round(")
             .map(|(at, _)| at)
@@ -703,5 +725,54 @@ mod tests {
             "the window's part is as the round before left it"
         );
         assert_eq!(published.publish(CarryRound::default()), None);
+    }
+
+    /// RED (0.4.10 plan row 68c; row 73's review N8, the coordinator's rule of 2026-11-09) — **the
+    /// `$PROFILE` lines yield to a round already asked for**: a round whose hooks have answered
+    /// publishes them, and when another round was asked while it ran (a Copilot probe's answer, which
+    /// the first-run card waits on) the lines do not start; the worker goes round again, and that
+    /// round, with nothing pending, starts them. A round with nothing pending starts them at once,
+    /// and a round whose hooks had not answered as it began never does.
+    ///
+    /// MUTATION: the lines ignore a pending round (`plant-68c-lines-ignore-a-pending-round.py`).
+    #[test]
+    fn the_profile_lines_yield_to_a_round_already_asked_for() {
+        use crate::i18n::Text;
+        let latch = CarryLatch::new();
+        let published = CarryPublished::new();
+        let hooks = || CarryRound {
+            hooks: Some(MemberAnswer {
+                part: hooks_part(vec![Text::AgentHooksRepairedClaude]),
+                checks: 3,
+                changed: 1,
+            }),
+            profile_lines: None,
+        };
+        assert!(latch.ask_for_round(), "the walk's answer starts the pass");
+        latch.round_begins();
+        assert!(
+            published.publish(hooks()).is_some(),
+            "the hooks are published"
+        );
+        assert!(
+            !latch.ask_for_round(),
+            "a Copilot answer asks again while it runs"
+        );
+        assert!(
+            !lines_may_start(true, &latch),
+            "the lines yield to the round asked for"
+        );
+        assert!(latch.round_again(), "the worker goes round again");
+        latch.round_begins();
+        assert!(published.publish(hooks()).is_some());
+        assert!(
+            lines_may_start(true, &latch),
+            "nothing pending: the lines start"
+        );
+        assert!(
+            !lines_may_start(false, &latch),
+            "never before the hooks' answer"
+        );
+        assert!(!latch.round_again(), "and the pass ends");
     }
 }

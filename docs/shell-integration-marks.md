@@ -83,7 +83,11 @@ hooks had their answer is read as a round begins, so a walk that lands during a
 round leaves this member to the round it begins. A walk still out has neither an
 answer nor a refusal: the hooks and this member wait for it, as the hooks have
 since row 67b, and its answer is used whenever it lands — the lane has no
-deadline, so there is no timer. During an update's trial it is
+deadline, so there is no timer. Nor does it start while another round is asked
+for (a Copilot probe's answer, which the first-run card waits on; an Agents-page
+open; a press): that round runs next and this member yields to it, starting in a
+later round with nothing pending, so no round anybody waits for waits for a
+PowerShell. During an update's trial it is
 held back (`update_trial::Writer::ProfileMigration`) and runs at the commit. On
 the pass's below-normal worker it observes each installed PowerShell (the
 observation the Profiles page and the launch menu read; `-NoProfile`,
