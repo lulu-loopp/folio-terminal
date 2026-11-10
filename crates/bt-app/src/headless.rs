@@ -22,13 +22,13 @@ use std::time::{Duration, Instant};
 
 use bt_platform::admission::{WaitToken, doors};
 use bt_render::{
-    CellMetrics, ChromeIcon, ChromeLabel, ChromeLabelWeight, ChromeQuad, ChromeTextAdvances,
-    DeviceFreeMeasure, FrameSource, FrameTrigger, GlyphCensus, ImeCursorArea, MathBandFace,
-    MathBandTrace, MathHit, MathToolBoxes, OverlayGroup, OverlayLayer, PeekImageOverlay,
-    PresentConfiguration, PresentOutcome, PresentPhase, PresentReceipt, PresentationGeometry,
-    PreviewBody, PreviewImage, PreviewParagraph, PreviewRun, PreviewRunBox, PreviewTextFrame,
-    PreviewTextRow, RenderError, RendererPresentState, SeatFrame, SeatViewport, TableBlockKey,
-    TableBlockPaint, VideoLayer, WebHole,
+    BodyKey, BodyState, BodyUse, CellMetrics, ChromeIcon, ChromeLabel, ChromeLabelWeight,
+    ChromeQuad, ChromeTextAdvances, DeviceFreeMeasure, FrameSource, FrameTrigger, GlyphCensus,
+    ImeCursorArea, MathBandFace, MathBandTrace, MathHit, MathToolBoxes, OverlayGroup, OverlayLayer,
+    PeekImageOverlay, PresentConfiguration, PresentOutcome, PresentPhase, PresentReceipt,
+    PresentationGeometry, PreviewBody, PreviewImage, PreviewParagraph, PreviewRun, PreviewRunBox,
+    PreviewTextFrame, PreviewTextRow, RenderError, RendererPresentState, SeatFrame, SeatViewport,
+    TableBlockKey, TableBlockPaint, VideoLayer, WebHole,
 };
 use bt_viewport::{MathBlockAnchor, ViewportFrame};
 use winit::dpi::{PhysicalPosition, PhysicalSize, Position, Size};
@@ -115,8 +115,14 @@ pub(crate) enum WindowEffect {
     PageAddressed(bt_platform::PageVisual),
     /// A hand-off to the system: a file opened, a path revealed, an address handed over.
     HandedOff(bt_platform::Handoff),
-    /// A frame presented: how many seats it carried and what asked for it.
-    Presented { seats: usize, source: FrameSource },
+    /// A frame presented: how many seats it carried, what asked for it, and whether its body —
+    /// the clear, the ground and every pane — was drawn or the kept one put back (row 64a),
+    /// decided by the renderer's own [`BodyKey`].
+    Presented {
+        seats: usize,
+        source: FrameSource,
+        body: BodyUse,
+    },
     /// The surface resized to a physical width and height.
     Resized(u32, u32),
     /// The window moved to another display scale.
@@ -787,6 +793,9 @@ pub(crate) struct HeadlessGlass {
     retained_revision: u64,
     font_revision: u64,
     perf_frame: u64,
+    /// What the kept body was drawn from — the renderer's own key, built by the renderer's own
+    /// function from this glass's mirror of the same inputs (row 64a).
+    body: Option<BodyKey>,
     video_layers: Vec<VideoLayer>,
     /// What the last frame was handed, read back by a test.
     pub(crate) preview_bodies: Vec<PreviewBody>,
@@ -821,6 +830,7 @@ impl HeadlessGlass {
             retained_revision: 0,
             font_revision: 0,
             perf_frame: 0,
+            body: None,
             video_layers: Vec::new(),
             preview_bodies: Vec::new(),
             preview_images: Vec::new(),
@@ -1062,16 +1072,38 @@ impl Glass for HeadlessGlass {
     fn present_frame_with_phases(
         &mut self,
         token: WaitToken<'_, doors::PresentFrame>,
-        _gpu: &mut HeadlessDevice,
+        gpu: &mut HeadlessDevice,
         seats: &[SeatFrame<'_>],
         trigger: FrameTrigger,
         _phase: impl FnMut(PresentPhase),
     ) -> Result<PresentOutcome, RenderError> {
         let _ = token;
         self.perf_frame += 1;
+        let state = BodyState {
+            size: self.size,
+            font_revision: self.font_revision,
+            font_environment_epoch: gpu.font_environment_epoch,
+            theme_revision: bt_render::theme_revision(),
+            cursor_style: bt_render::current_cursor_style(),
+            cursor_blink_visible: self.cursor_blink_visible,
+            window_focused: self.window_focused,
+            base_metrics: self.base_metrics,
+            ground_alpha: bt_render::window_ground().alpha.to_bits(),
+        };
+        let body = if self
+            .body
+            .as_ref()
+            .is_some_and(|key| key.matches(&state, seats))
+        {
+            BodyUse::Reused
+        } else {
+            self.body = Some(BodyKey::of(state, seats));
+            BodyUse::Composed
+        };
         self.ledger.record(WindowEffect::Presented {
             seats: seats.len(),
             source: trigger.source,
+            body,
         });
         let now = Instant::now();
         Ok(PresentOutcome::Presented(PresentReceipt {
@@ -2329,6 +2361,7 @@ mod tests {
                 WindowEffect::Presented {
                     seats: 0,
                     source: FrameSource::Expose,
+                    body: BodyUse::Composed,
                 },
                 WindowEffect::Resized(800, 600),
                 WindowEffect::Rescaled(2.0),

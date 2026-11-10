@@ -10843,6 +10843,7 @@ crates/bt-render/src/glyph_census.rs	bt-render crate::glyph_census::GlyphCensus:
 crates/bt-render/src/ground.rs	bt-render crate::ground::set_window_ground	Ambiguous	unwrap_or_else	1	
 crates/bt-render/src/ground.rs	bt-render crate::ground::window_ground	Ambiguous	clone	1	
 crates/bt-render/src/ground.rs	bt-render crate::ground::window_ground	Ambiguous	unwrap_or_else	1	
+crates/bt-render/src/lib.rs	bt-render crate::BodyKey::matches	Ambiguous	all	1	2026-11-09: T-WORKING-MARK-CADENCE (0.4.10 plan row 7, 64a); the kept body's key compared seat by seat with this frame's seats (Iterator::all over a zip of SeatKey and SeatFrame); an in-memory comparison, no wait
 crates/bt-render/src/lib.rs	bt-render crate::CJK_FALLBACK_FAMILIES	Ambiguous	collect	1	
 crates/bt-render/src/lib.rs	bt-render crate::CJK_FALLBACK_FAMILIES	Ambiguous	map	1	
 crates/bt-render/src/lib.rs	bt-render crate::CellMetrics::clamped_hit_test_frame	Ambiguous	saturating_sub	1	
@@ -10901,6 +10902,14 @@ crates/bt-render/src/lib.rs	bt-render crate::NarrowShapingCache::get_or_shape	Am
 crates/bt-render/src/lib.rs	bt-render crate::NarrowShapingCache::get_or_shape	Ambiguous	map_or	1	
 crates/bt-render/src/lib.rs	bt-render crate::NarrowShapingCache::get_or_shape	Ambiguous	next	1	
 crates/bt-render/src/lib.rs	bt-render crate::OverlayLayer::opaque_bounds	Dynamic	take	3	
+crates/bt-render/src/lib.rs	bt-render crate::SeatPainter::float_tag_rects	Ambiguous	collect	1	2026-11-09: T-WORKING-MARK-CADENCE (0.4.10 plan row 7, 64a); a seat fill moved unchanged from WindowRenderer to SeatPainter, which reads the window's facts from the frame's BodyState so the body's key holds every read (Option and iterator adaptors over the seat's own rectangles); an in-memory computation, no wait
+crates/bt-render/src/lib.rs	bt-render crate::SeatPainter::float_tag_rects	Ambiguous	map	1	2026-11-09: T-WORKING-MARK-CADENCE (0.4.10 plan row 7, 64a); a seat fill moved unchanged from WindowRenderer to SeatPainter, which reads the window's facts from the frame's BodyState so the body's key holds every read (Option and iterator adaptors over the seat's own rectangles); an in-memory computation, no wait
+crates/bt-render/src/lib.rs	bt-render crate::SeatPainter::math_overflow_fade_rectangles	Ambiguous	collect	1	2026-11-09: T-WORKING-MARK-CADENCE (0.4.10 plan row 7, 64a); a seat fill moved unchanged from WindowRenderer to SeatPainter, which reads the window's facts from the frame's BodyState so the body's key holds every read (Option and iterator adaptors over the seat's own rectangles); an in-memory computation, no wait
+crates/bt-render/src/lib.rs	bt-render crate::SeatPainter::math_overflow_fade_rectangles	Ambiguous	map	1	2026-11-09: T-WORKING-MARK-CADENCE (0.4.10 plan row 7, 64a); a seat fill moved unchanged from WindowRenderer to SeatPainter, which reads the window's facts from the frame's BodyState so the body's key holds every read (Option and iterator adaptors over the seat's own rectangles); an in-memory computation, no wait
+crates/bt-render/src/lib.rs	bt-render crate::SeatPainter::math_selection_wash_rectangles	Ambiguous	map	1	2026-11-09: T-WORKING-MARK-CADENCE (0.4.10 plan row 7, 64a); a seat fill moved unchanged from WindowRenderer to SeatPainter, which reads the window's facts from the frame's BodyState so the body's key holds every read (Option and iterator adaptors over the seat's own rectangles); an in-memory computation, no wait
+crates/bt-render/src/lib.rs	bt-render crate::SeatPainter::rectangles	Ambiguous	is_some	1	2026-11-09: T-WORKING-MARK-CADENCE (0.4.10 plan row 7, 64a); a seat fill moved unchanged from WindowRenderer to SeatPainter, which reads the window's facts from the frame's BodyState so the body's key holds every read (Option and iterator adaptors over the seat's own rectangles); an in-memory computation, no wait
+crates/bt-render/src/lib.rs	bt-render crate::SeatPainter::rectangles	Ambiguous	map	5	2026-11-09: T-WORKING-MARK-CADENCE (0.4.10 plan row 7, 64a); a seat fill moved unchanged from WindowRenderer to SeatPainter, which reads the window's facts from the frame's BodyState so the body's key holds every read (Option and iterator adaptors over the seat's own rectangles); an in-memory computation, no wait
+crates/bt-render/src/lib.rs	bt-render crate::SeatPainter::rectangles	Ambiguous	next	2	2026-11-09: T-WORKING-MARK-CADENCE (0.4.10 plan row 7, 64a); a seat fill moved unchanged from WindowRenderer to SeatPainter, which reads the window's facts from the frame's BodyState so the body's key holds every read (Option and iterator adaptors over the seat's own rectangles); an in-memory computation, no wait
 crates/bt-render/src/lib.rs	bt-render crate::TextRefusals::names	Ambiguous	collect	1	
 crates/bt-render/src/lib.rs	bt-render crate::TextRefusals::names	Ambiguous	map	1	
 crates/bt-render/src/lib.rs	bt-render crate::WideShapingCache::get_or_shape	Ambiguous	elapsed	1	
@@ -10913,7 +10922,7 @@ crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::assemble	Ambiguous	
 crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::bytes_view	Ambiguous	create_view	1	
 crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::bytes_view	Ambiguous	remove_srgb_suffix	1	
 crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::compose_frame	Ambiguous	and_then	1	
-crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::compose_frame	Ambiguous	as_micros	14	
+crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::compose_frame	Ambiguous	as_micros	16	2026-11-09: T-WORKING-MARK-CADENCE (0.4.10 plan row 7, 64a); the frame line's body_us and body_key_us (review N4), the pane loop and the body's passes, and the key's comparison and copy, in microseconds (Duration::as_micros); a reading of a clock already taken, no wait
 crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::compose_frame	Ambiguous	as_mut	4	
 crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::compose_frame	Ambiguous	as_slice	2	
 crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::compose_frame	Ambiguous	begin_render_pass	1	
@@ -10921,8 +10930,8 @@ crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::compose_frame	Ambig
 crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::compose_frame	Ambiguous	cloned	1	
 crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::compose_frame	Ambiguous	collect	2	
 crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::compose_frame	Ambiguous	create_view	1	
-crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::compose_frame	Ambiguous	draw	16	
-crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::compose_frame	Ambiguous	elapsed	3	
+crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::compose_frame	Ambiguous	draw	10	
+crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::compose_frame	Ambiguous	elapsed	7	2026-11-09: T-WORKING-MARK-CADENCE (0.4.10 plan row 7, 64a); the instants the frame line's body_us and body_key_us are read from: the pane loop's and the body passes', and the key's comparison and filing (review N4) (Instant::elapsed); a reading of the clock, no wait
 crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::compose_frame	Ambiguous	enumerate	1	
 crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::compose_frame	Ambiguous	extend	1	
 crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::compose_frame	Ambiguous	finish	1	
@@ -10931,22 +10940,20 @@ crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::compose_frame	Ambig
 crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::compose_frame	Ambiguous	iter	4	
 crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::compose_frame	Ambiguous	len	8	
 crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::compose_frame	Ambiguous	map	4	
-crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::compose_frame	Ambiguous	map_err	4	
+crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::compose_frame	Ambiguous	map_err	2	
 crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::compose_frame	Ambiguous	partition	1	
 crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::compose_frame	Ambiguous	record	5	
 crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::compose_frame	Ambiguous	rev	1	
-crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::compose_frame	Ambiguous	set_bind_group	7	
-crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::compose_frame	Ambiguous	set_pipeline	16	
-crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::compose_frame	Ambiguous	set_vertex_buffer	16	
+crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::compose_frame	Ambiguous	set_bind_group	5	
+crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::compose_frame	Ambiguous	set_pipeline	10	
+crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::compose_frame	Ambiguous	set_vertex_buffer	10	
 crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::compose_frame	Ambiguous	set_viewport	6	
-crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::compose_frame	Ambiguous	slice	11	
+crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::compose_frame	Ambiguous	slice	10	
 crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::compose_frame	Ambiguous	then	16	
-crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::compose_frame	Ambiguous	to_string	4	
+crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::compose_frame	Ambiguous	to_string	2	
 crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::compose_frame	Ambiguous	unwrap_or_default	1	
 crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::compose_frame	Ambiguous	zip	1	
 crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::compose_frame	Dynamic	phase	19	
-crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::compose_frame	Dynamic	seat_viewport	3	
-crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::compose_frame	Dynamic	whole_surface	2	
 crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::composite_group	Ambiguous	collect	1	
 crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::composite_group	Ambiguous	draw	2	
 crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::composite_group	Ambiguous	filter_map	1	
@@ -10960,15 +10967,14 @@ crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::composite_group	Amb
 crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::configure_surface	Ambiguous	expect	1	
 crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::configure_surface	Ambiguous	remove_srgb_suffix	1	
 crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::configure_surface_if_needed	Dynamic	phase	2	
+crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::draw_body	Ambiguous	map_err	2	2026-11-09: T-WORKING-MARK-CADENCE (0.4.10 plan row 7, 64a); the frame's ground and seat draws moved unchanged out of compose_frame into draw_body, which both the kept body's pass and the direct route call (glyphon render errors mapped to RenderError); encoding into a pass, no wait
+crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::draw_body	Ambiguous	to_string	2	2026-11-09: T-WORKING-MARK-CADENCE (0.4.10 plan row 7, 64a); the frame's ground and seat draws moved unchanged out of compose_frame into draw_body (the glyphon render error's text); encoding into a pass, no wait
+crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::draw_body	Dynamic	seat_viewport	3	2026-11-09: T-WORKING-MARK-CADENCE (0.4.10 plan row 7, 64a); the frame's ground and seat draws moved unchanged out of compose_frame into draw_body (the seat's scissor and viewport set on the pass through its closure); encoding into a pass, no wait
+crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::draw_body	Dynamic	whole_surface	2	2026-11-09: T-WORKING-MARK-CADENCE (0.4.10 plan row 7, 64a); the frame's ground and seat draws moved unchanged out of compose_frame into draw_body (the pass's scissor and viewport put back to the whole surface through its closure); encoding into a pass, no wait
 crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::draw_overlay_layer	Ambiguous	map_err	1	
 crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::draw_overlay_layer	Ambiguous	to_string	1	
-crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::float_tag_rects	Ambiguous	collect	1	
-crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::float_tag_rects	Ambiguous	map	1	
 crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::from_surface	Ambiguous	elapsed	1	
 crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::handle_surface_failure	Dynamic	phase	4	
-crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::math_overflow_fade_rectangles	Ambiguous	collect	1	
-crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::math_overflow_fade_rectangles	Ambiguous	map	1	
-crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::math_selection_wash_rectangles	Ambiguous	map	1	
 crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::peek_box_rects	Ambiguous	collect	1	
 crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::peek_box_rects	Ambiguous	map	1	
 crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::place_preview_image	Ambiguous	expect	1	
@@ -10977,9 +10983,6 @@ crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::prepare_chrome_icon
 crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::prepare_preview_draws	Ambiguous	clone	1	
 crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::prepare_preview_draws	Ambiguous	len	3	
 crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::present_frame_with_phases	Dynamic	phase	2	
-crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::rectangles	Ambiguous	is_some	1	
-crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::rectangles	Ambiguous	map	5	
-crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::rectangles	Ambiguous	next	2	
 crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::resize	Ambiguous	expect	1	
 crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::set_chrome	Ambiguous	expect	1	
 crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::set_modal_overlay	Ambiguous	collect	1	
@@ -11026,7 +11029,7 @@ crates/bt-render/src/lib.rs	bt-render crate::configure_window_surface	Ambiguous	
 crates/bt-render/src/lib.rs	bt-render crate::configure_window_surface	Ambiguous	ok_or_else	2	
 crates/bt-render/src/lib.rs	bt-render crate::configure_window_surface	Ambiguous	remove_srgb_suffix	1	
 crates/bt-render/src/lib.rs	bt-render crate::create_blank_bind_group	Ambiguous	create_view	1	
-crates/bt-render/src/lib.rs	bt-render crate::create_group_pipelines	Dynamic	pipeline	2	
+crates/bt-render/src/lib.rs	bt-render crate::create_group_pipelines	Dynamic	pipeline	3	2026-11-09: T-WORKING-MARK-CADENCE (0.4.10 plan row 7, 64a); the group pipelines gain put_back, the Replace copy of the kept body onto the frame, built through the same pipeline closure as the group's other two; device setup, no wait
 crates/bt-render/src/lib.rs	bt-render crate::create_surface	Ambiguous	map_err	1	
 crates/bt-render/src/lib.rs	bt-render crate::create_surface	Ambiguous	to_string	1	
 crates/bt-render/src/lib.rs	bt-render crate::database_has_family	Ambiguous	any	2	
