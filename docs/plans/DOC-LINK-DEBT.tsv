@@ -1,6 +1,6 @@
 # DOC-LINK-DEBT - every broken intra-doc link in bt-app's documentation, one row per warning
 # (T-DOC-LINK-DEBT, 0.4.9 plan row 78).
-# measured at 80774934
+# measured at b889b118
 #
 # Measured by scripts/ci/measure-doc-links.ps1: `cargo doc -p bt-app --no-deps --locked
 # --message-format=json` on Windows, every warning whose lint code is
@@ -115,7 +115,6 @@ crate::hang_watch (outside any item)	WAIT_ALLOWANCE	unresolved	crate::hang_watch
 crate::hang_watch (outside any item)	WAIT_BUDGET	unresolved	crate::hang_watch	hang_watch.rs
 crate::hang_watch (outside any item)	WAIT_BUDGET	unresolved	crate::hang_watch	hang_watch.rs
 crate::hang_watch (outside any item)	super::Heartbeat::deferrable	unresolved	crate::hang_watch	hang_watch.rs
-crate::hang_watch::Heartbeat::at_station	Self::park_at	unresolved	crate::hang_watch	hang_watch.rs
 crate::hang_watch::Heartbeat::beat_at_ns	Self::beat_at	unresolved	crate::hang_watch	hang_watch.rs
 crate::hang_watch::Heartbeat::deferrable	Self::remaining	unresolved	crate::hang_watch	hang_watch.rs
 crate::hang_watch::Heartbeat::park_at_ns	Self::park_at	unresolved	crate::hang_watch	hang_watch.rs
