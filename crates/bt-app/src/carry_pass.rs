@@ -313,15 +313,30 @@ impl CarryAsk {
 }
 
 /// `member`'s answer when the round asked for it; nothing, and nothing run, when it did not.
+///
+/// **A member's panic withholds only its own answer** (row 68b, review N8): the member runs inside
+/// the one unwind boundary (`contained_panic::contain`), so a panic in it is said once, named by
+/// `name`, and answers nothing, and the round goes on to the members after it and publishes their
+/// answers. A member that holds a latch lets it go as it unwinds (the package member's
+/// `LatchUnwound`).
 fn run_if_asked<T>(
     asked: CarryAsk,
     member: CarryAsk,
+    name: &str,
     run: impl FnOnce() -> Option<MemberAnswer<T>>,
 ) -> Option<MemberAnswer<T>> {
-    if asked.names_member(member) {
-        run()
-    } else {
-        None
+    if !asked.names_member(member) {
+        return None;
+    }
+    match crate::contained_panic::contain(run) {
+        Ok(answer) => answer,
+        Err(panic) => {
+            crate::diagnostics::stderr_line(format!(
+                "BT_CARRY member={name} panicked: {}",
+                crate::pty_door::panic_message(panic.as_ref())
+            ));
+            None
+        }
     }
 }
 
@@ -418,17 +433,23 @@ pub(crate) fn take_carry_snapshot() -> Option<CarrySnapshot> {
 /// A round runs the members `asked` names (row 68b, R2), in this order (R11): the three that need
 /// no program walk first, so the start's own round answers them, then the agents'.
 pub(crate) fn run_carry_steps(ctx: &WorkerCtx, asked: CarryAsk) {
-    let package = run_if_asked(asked, CarryAsk::EXPLORER_PACKAGE, || {
-        crate::explorer_menu::run_package_step(ctx)
-    });
-    let classic = run_if_asked(asked, CarryAsk::EXPLORER_CLASSIC, || {
-        crate::context_menu::run_classic_step(ctx)
-    });
-    let orphans = run_if_asked(asked, CarryAsk::UPDATE_ORPHANS, || {
+    let package = run_if_asked(
+        asked,
+        CarryAsk::EXPLORER_PACKAGE,
+        "explorer-package",
+        || crate::explorer_menu::run_package_step(ctx),
+    );
+    let classic = run_if_asked(
+        asked,
+        CarryAsk::EXPLORER_CLASSIC,
+        "explorer-classic",
+        || crate::context_menu::run_classic_step(ctx),
+    );
+    let orphans = run_if_asked(asked, CarryAsk::UPDATE_ORPHANS, "update-orphans", || {
         crate::update_orphans::run_orphans_step(ctx)
     });
     let round = CarryRound {
-        hooks: run_if_asked(asked, CarryAsk::HOOKS, || {
+        hooks: run_if_asked(asked, CarryAsk::HOOKS, "agent-hooks", || {
             crate::agent_hooks_step::run_agent_hooks_step(ctx)
         }),
         package,
@@ -546,8 +567,9 @@ pub(crate) fn begin_carry_pass(members: CarryAsk) {
 /// again.
 ///
 /// **A start the door refuses is said once** and the latch let go, so the next request starts
-/// one; nothing was asked of the trial's gate, so nothing is pending for a commit either. A step
-/// that panics ends the worker, said once the same way; the steps after it run at the next ask.
+/// one; nothing was asked of the trial's gate, so nothing is pending for a commit either. A member
+/// that panics withholds only its own answer, said once where it runs ([`run_if_asked`]); a panic
+/// outside the members ends the worker, said once the same way, and the next ask starts one.
 /// **A press of the Explorer first page written down behind a member that panicked holding the
 /// deployment latch is run then** (`explorer_menu::run_queued_press`, the probe's own end before
 /// row 68b), by the same executor and voice.
@@ -593,6 +615,55 @@ pub(crate) fn begin_carry_pass_with(
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
+
+    /// RED (0.4.10 plan row 68b, review N8) — **a member's panic withholds only its own answer**:
+    /// the member that panics answers nothing, the members after it still run, and the round
+    /// publishes their answers, so the window adopts them.
+    ///
+    /// MUTATION: run the member bare again (`plant-68b-member-panic-ends-the-round.py`) and the
+    /// panic unwinds out of the round: this test goes red at its first member.
+    #[test]
+    fn a_members_panic_withholds_only_its_own_answer() {
+        let classic = run_if_asked(
+            CarryAsk::ALL,
+            CarryAsk::EXPLORER_CLASSIC,
+            "explorer-classic",
+            || -> Option<MemberAnswer<ClassicAnswer>> { panic!("scripted: a member's fault") },
+        );
+        assert!(
+            classic.is_none(),
+            "the member that panicked answers nothing"
+        );
+        let ran_after = std::cell::Cell::new(false);
+        let orphans = run_if_asked(
+            CarryAsk::ALL,
+            CarryAsk::UPDATE_ORPHANS,
+            "update-orphans",
+            || {
+                ran_after.set(true);
+                Some(MemberAnswer {
+                    part: (),
+                    checks: 1,
+                    changed: 1,
+                })
+            },
+        );
+        assert!(ran_after.get(), "the member after it runs");
+        let published = CarryPublished::new();
+        assert_eq!(
+            published
+                .publish(CarryRound {
+                    hooks: None,
+                    package: None,
+                    classic,
+                    orphans,
+                })
+                .as_deref(),
+            Some("BT_CARRY round checks=1 changed=1"),
+            "and the round publishes its answer"
+        );
+        assert!(published.take().is_some(), "for the window to adopt");
+    }
 
     /// **A request while the pass runs is run once more, not lost and not doubled**: the second ask
     /// starts no worker, and the worker goes round again for it.
@@ -827,9 +898,12 @@ mod tests {
         assert!(!LATCH.round_again(), "after which it ends");
         LATCH.carry_ended();
 
-        let unasked = run_if_asked::<()>(CarryAsk::HOOKS, CarryAsk::EXPLORER_PACKAGE, || {
-            panic!("a member the round did not ask for is run")
-        });
+        let unasked = run_if_asked::<()>(
+            CarryAsk::HOOKS,
+            CarryAsk::EXPLORER_PACKAGE,
+            "explorer-package",
+            || panic!("a member the round did not ask for is run"),
+        );
         assert_eq!(unasked, None);
         for member in [
             CarryAsk::HOOKS,

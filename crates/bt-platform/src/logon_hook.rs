@@ -26,10 +26,11 @@
 //! * **[`disarm`]**: the value is removed and the key flushed. A value that is
 //!   not there is success, so a retirement that is repeated is harmless.
 //! * **[`clean`]**: `--uninstall-cleanup`'s per-copy row (§(b).3): of the
-//!   values whose name begins `FolioUpdate-`, those whose command names this
-//!   copy's installation home, or a program that no longer exists, are removed.
-//!   Every other value — another program's, and another copy's live entrance —
-//!   is left as it is.
+//!   door's own entrances — a name exactly `FolioUpdate-<txn8>` and the command
+//!   exactly `"<rescue>" --update-recover` ([`clean_by`]) — those whose rescue
+//!   lies in this copy's installation home, or no longer exists, are removed.
+//!   Every other value — another program's, one only named like an entrance,
+//!   and another copy's live entrance — is left as it is.
 //!
 //! **These names are the only registry surface the updater writes** (§(b).3):
 //! the key is [`RUN_KEY`] and the values are [`VALUE_PREFIX`] names. The
@@ -81,6 +82,19 @@ pub fn value_name(txn: &[u8; 16]) -> String {
         name.push_str(&format!("{byte:02x}"));
     }
     name
+}
+
+/// **Whether `name` is an entrance's value name, exactly as [`value_name`] spells it**:
+/// [`VALUE_PREFIX`] and eight lowercase hex digits. Any other name, even one that begins with the
+/// prefix, is not this door's (0.4.10 plan row 68b, review N1).
+#[must_use]
+pub fn is_entrance_name(name: &str) -> bool {
+    name.strip_prefix(VALUE_PREFIX).is_some_and(|tag| {
+        tag.len() == 8
+            && tag
+                .bytes()
+                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    })
 }
 
 /// **The entrance's command**: the rescue program quoted, then
@@ -325,8 +339,8 @@ pub enum Cleaned {
     /// copy's home or a program that no longer exists — and it is gone.
     Removed,
     /// Its program is one the judge leaves — for the uninstall's, one that
-    /// exists outside this copy's home, another copy's transaction — or no
-    /// program this door can read; it stays.
+    /// exists outside this copy's home, another copy's transaction — or it is
+    /// not an entrance of the door's own shape ([`clean_by`]); it stays.
     Left(PathBuf),
     /// It was this copy's, and reading or removing it failed.
     Refused(Refusal),
@@ -340,10 +354,11 @@ pub fn clean(home: &Path) -> Result<Vec<(String, Cleaned)>, Refusal> {
     clean_in(&mut CurrentUser, RUN_KEY, home)
 }
 
-/// **The cleanup row over `key`**: each value whose name begins
-/// [`VALUE_PREFIX`] is removed if its command's program lies under `home` or
-/// no longer exists (RULES §41: a mark naming a vanished path is nobody's);
-/// every other value of the key is never read. The key is flushed once if
+/// **The cleanup row over `key`**: each entrance of the door's own shape
+/// ([`clean_by`]) is removed if its rescue program lies under `home` or no
+/// longer exists (RULES §41: a mark naming a vanished path is nobody's); every
+/// other value of the key is left, and a value whose name is not the door's is
+/// never read. The key is flushed once if
 /// anything was removed.
 ///
 /// # Errors
@@ -364,12 +379,15 @@ pub fn clean_in(
 /// walker for [`clean_in`]'s rule and for a start's sweep of entrances whose
 /// rescue program is gone (`bt-app`'s `update_orphans`, 0.4.10 plan row 68b).
 ///
-/// Only values whose name begins [`VALUE_PREFIX`] are read; every other value
-/// of the key is never read and stays byte for byte. A value of another type,
-/// or a command not of [`command`]'s shape, is [`Cleaned::Left`] without
-/// asking the judge. `remove` is handed each readable value's name and the
-/// program its command starts, and answers whether the value goes. The key is
-/// flushed once if anything was removed.
+/// **Only the door's own entrances are judged** (0.4.10 plan row 68b, review N1): a value whose
+/// name is exactly [`value_name`]'s shape ([`is_entrance_name`]) and whose text is a `REG_SZ`
+/// equal, byte for byte, to [`command`] of the program it quotes — `"<rescue>" --update-recover`
+/// and nothing else. A value whose name only begins with [`VALUE_PREFIX`] is [`Cleaned::Left`]
+/// and never read; one of another type, or whose text is any other command, is
+/// [`Cleaned::Left`] without asking the judge, whatever its program's state; a value whose name
+/// does not begin with the prefix is not listed and never read. Every value left stays byte for
+/// byte. `remove` is handed each entrance's name and its rescue program, and answers whether the
+/// value goes. The key is flushed once if anything was removed.
 ///
 /// # Errors
 /// As [`clean_in`].
@@ -388,6 +406,10 @@ pub fn clean_by(
         .into_iter()
         .filter(|name| name.starts_with(VALUE_PREFIX))
     {
+        if !is_entrance_name(&name) {
+            cleaned.push((name, Cleaned::Left(PathBuf::new())));
+            continue;
+        }
         let stored = match registry.get(key, &name) {
             Ok(Some((REG_SZ, data))) => string_text(&data),
             Ok(Some((_, _))) => {
@@ -404,7 +426,7 @@ pub fn clean_by(
                 continue;
             }
         };
-        let Some(program) = program_of(&stored) else {
+        let Some(program) = program_of(&stored).filter(|program| stored == command(program)) else {
             cleaned.push((name, Cleaned::Left(PathBuf::from(stored))));
             continue;
         };

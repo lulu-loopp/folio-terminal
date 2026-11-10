@@ -14,9 +14,14 @@
 //! on a volume that is there (row 67's R4, [`gone_by`]). An entrance whose program is there is a
 //! transaction of a copy that is (this copy's own among them, armed and not yet retired), and is
 //! left; so is one whose program the machine will not say about, a drive that is away among them:
-//! it comes back with the drive. A value of another type, a command or a plist not of the door's
-//! own shape, is never judged and left. Only names of the door's own shape are read; every other
-//! `Run` value and every other plist stays byte for byte.
+//! it comes back with the drive. **Only the door's own entrances are judged** (review N1): on
+//! Windows a value named exactly `FolioUpdate-` and eight lowercase hex digits whose text is
+//! exactly `"<rescue>" --update-recover` (`logon_hook::clean_by`), on macOS a plist named exactly
+//! as the door names it whose bytes are exactly what the door writes
+//! (`launch_agent::rescue_of_plist`). Anything else — another type, another command under an
+//! entrance's name, a name that only begins like one, another program's plist — is never judged,
+//! whatever its program's state, and stays byte for byte; a value or a plist whose name is not
+//! the door's is never read.
 //!
 //! **Held during an update's trial** ([`Writer::OrphanSweep`], asked once per run and only when a
 //! removal is due): the trial's build may be rolled back, and the entrances are the transaction's
@@ -328,14 +333,14 @@ mod tests {
     }
 
     /// The transaction whose first byte is `first`.
-    fn txn(first: u8) -> [u8; 16] {
+    fn orphan_txn(first: u8) -> [u8; 16] {
         let mut txn = [0; 16];
         txn[0] = first;
         txn
     }
 
     /// A scratch folder under the build directory, removed with the test.
-    fn scratch(tag: &str) -> crate::test_support::ScratchFolder {
+    fn orphan_scratch(tag: &str) -> crate::test_support::ScratchFolder {
         crate::test_support::ScratchFolder::create(
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("../../target/tb-tests")
@@ -344,7 +349,7 @@ mod tests {
     }
 
     /// A rescue program at `<root>/<copy>/.folio-update/rescue/folio`, made when `there`.
-    fn rescue(root: &Path, copy: &str, there: bool) -> PathBuf {
+    fn orphan_rescue(root: &Path, copy: &str, there: bool) -> PathBuf {
         let program = root
             .join(copy)
             .join(".folio-update")
@@ -358,30 +363,63 @@ mod tests {
     }
 
     /// A gate that must not be asked: nothing is due.
-    fn never_asked(writer: Writer) -> bool {
+    fn sweep_gate_never_asked(writer: Writer) -> bool {
         panic!("the trial's gate is asked only when a removal is due, not for {writer:?}")
     }
 
+    /// The other tool's command the fixture plants under two `FolioUpdate-` names (review N1).
+    fn tool_command(root: &Path) -> String {
+        format!("\"{}\" /x", root.join("Tools").join("sync.exe").display())
+    }
+
     /// The registry the Windows tests sweep: a dead copy's entrance, this copy's and another live
-    /// copy's armed ones, a value of another type and a command of another shape under the
-    /// door's prefix, and somebody else's value beside them.
+    /// copy's armed ones, a value of another type, an unquoted command and another tool's quoted
+    /// command under the door's names, that tool's command under a name that only begins with
+    /// the door's prefix, and somebody else's value beside them.
     fn run_key(root: &Path) -> (OrphanRunValues, String) {
         let mut registry = OrphanRunValues::default();
         for (first, copy, there) in [(1, "gone", false), (2, "here", true), (3, "other", true)] {
-            let _armed =
-                logon_hook::arm_in(&mut registry, KEY, &txn(first), &rescue(root, copy, there))
-                    .expect("the test's own key takes the entrance");
+            let _armed = logon_hook::arm_in(
+                &mut registry,
+                KEY,
+                &orphan_txn(first),
+                &orphan_rescue(root, copy, there),
+            )
+            .expect("the test's own key takes the entrance");
         }
         registry
             .set(KEY, &format!("{VALUE_PREFIX}0a000000"), 4, &[1, 0, 0, 0])
             .unwrap();
-        let unquoted = format!("{} --update-recover", rescue(root, "gone", false).display());
+        let unquoted = format!(
+            "{} --update-recover",
+            orphan_rescue(root, "gone", false).display()
+        );
         registry
             .set(
                 KEY,
                 &format!("{VALUE_PREFIX}0b000000"),
                 REG_SZ,
                 &reg_sz(&unquoted),
+            )
+            .unwrap();
+        // Two values with a program gone from a volume that is there, neither Folio's (review
+        // N1): another command under an entrance's exact name, and an entrance's prefix on a
+        // name the door never writes.
+        let tool = tool_command(root);
+        registry
+            .set(
+                KEY,
+                &format!("{VALUE_PREFIX}0c000000"),
+                REG_SZ,
+                &reg_sz(&tool),
+            )
+            .unwrap();
+        registry
+            .set(
+                KEY,
+                &format!("{VALUE_PREFIX}helper"),
+                REG_SZ,
+                &reg_sz(&tool),
             )
             .unwrap();
         let foreign = format!(
@@ -402,19 +440,23 @@ mod tests {
     /// Over a registry of the test's own: the entrance whose rescue program is gone from a volume
     /// that is there is removed, and the key flushed once; this copy's armed entrance and another
     /// live copy's are left (their programs are there); a value of another type and a command not
-    /// of the door's shape are never judged and left; somebody else's value is never read and
-    /// stays byte for byte.
+    /// of the door's shape are never judged and left — a quoted foreign command under an
+    /// entrance's exact name among them, its program gone (review N1); a name that only begins
+    /// like an entrance is never read; somebody else's value is never read; each stays byte for
+    /// byte.
     ///
     /// MUTATIONS: remove every entrance of the door's name
     /// (`plant-68b-sweep-takes-a-live-entrance.py`) and the live ones go; read every value of the
     /// key (`plant-68b-sweep-reads-a-foreign-value.py`) and somebody else's value is read — and,
-    /// its program missing, removed.
+    /// its program missing, removed; judge any quoted command
+    /// (`plant-68b-sweep-takes-a-foreign-shaped-command.py`) and the tool's value under an
+    /// entrance's name is removed.
     #[test]
     fn a_dead_update_entrance_is_swept_and_a_live_one_is_left() {
-        let root = scratch("orphans-run");
+        let root = orphan_scratch("orphans-run");
         let (mut registry, foreign) = run_key(&root);
         let fates = sweep_run_values(&mut registry, KEY, &what_stands, |_| false);
-        let name = |first| logon_hook::value_name(&txn(first));
+        let name = |first| logon_hook::value_name(&orphan_txn(first));
         assert_eq!(
             fates,
             [
@@ -423,7 +465,23 @@ mod tests {
                 (name(3), OrphanFate::LeftLive),
                 (format!("{VALUE_PREFIX}0a000000"), OrphanFate::LeftUnread),
                 (format!("{VALUE_PREFIX}0b000000"), OrphanFate::LeftUnread),
+                (format!("{VALUE_PREFIX}0c000000"), OrphanFate::LeftUnread),
+                (format!("{VALUE_PREFIX}helper"), OrphanFate::LeftUnread),
             ]
+        );
+        for name in [
+            format!("{VALUE_PREFIX}0c000000"),
+            format!("{VALUE_PREFIX}helper"),
+        ] {
+            assert_eq!(
+                registry.values.get(&name),
+                Some(&(REG_SZ, reg_sz(&tool_command(&root)))),
+                "{name}: not Folio's, left byte for byte"
+            );
+        }
+        assert!(
+            !registry.read.contains(&format!("{VALUE_PREFIX}helper")),
+            "a name the door never writes is never read"
         );
         assert!(
             !registry.values.contains_key(&name(1)),
@@ -463,7 +521,7 @@ mod tests {
                 .all(|line| !line.contains(&*root.to_string_lossy())),
             "and never by path"
         );
-        let again = sweep_run_values(&mut registry, KEY, &what_stands, never_asked);
+        let again = sweep_run_values(&mut registry, KEY, &what_stands, sweep_gate_never_asked);
         lines.borrow_mut().clear();
         let second = said.orphans_answer(&again, &say);
         assert_eq!(
@@ -499,12 +557,22 @@ mod tests {
     /// entrance is removed.
     #[test]
     fn an_entrance_on_a_volume_that_is_away_is_left_and_said() {
-        let root = scratch("orphans-away");
+        let root = orphan_scratch("orphans-away");
         let mut registry = OrphanRunValues::default();
-        let _armed =
-            logon_hook::arm_in(&mut registry, KEY, &txn(1), &rescue(&root, "gone", false)).unwrap();
-        let fates = sweep_run_values(&mut registry, KEY, &OrphanAwayVolume, never_asked);
-        let name = logon_hook::value_name(&txn(1));
+        let _armed = logon_hook::arm_in(
+            &mut registry,
+            KEY,
+            &orphan_txn(1),
+            &orphan_rescue(&root, "gone", false),
+        )
+        .unwrap();
+        let fates = sweep_run_values(
+            &mut registry,
+            KEY,
+            &OrphanAwayVolume,
+            sweep_gate_never_asked,
+        );
+        let name = logon_hook::value_name(&orphan_txn(1));
         assert_eq!(fates, [(name.clone(), OrphanFate::LeftOwnerUnknown)]);
         assert!(registry.values.contains_key(&name), "left");
         let lines = std::cell::RefCell::new(Vec::new());
@@ -529,46 +597,46 @@ mod tests {
     fn a_dead_launch_agent_is_swept_and_every_other_plist_is_left() {
         use bt_platform::launch_agent::{file_name, plist};
 
-        let root = scratch("orphans-agents");
+        let root = orphan_scratch("orphans-agents");
         let agents = root.join("LaunchAgents");
         std::fs::create_dir_all(&agents).unwrap();
         let home = root.join("home");
-        let gone = rescue(&root, "gone", false);
-        let live = rescue(&root, "here", true);
+        let gone = orphan_rescue(&root, "gone", false);
+        let live = orphan_rescue(&root, "here", true);
         std::fs::write(
-            agents.join(file_name(&txn(1))),
-            plist(&txn(1), &gone, &home).unwrap(),
+            agents.join(file_name(&orphan_txn(1))),
+            plist(&orphan_txn(1), &gone, &home).unwrap(),
         )
         .unwrap();
         std::fs::write(
-            agents.join(file_name(&txn(2))),
-            plist(&txn(2), &live, &home).unwrap(),
+            agents.join(file_name(&orphan_txn(2))),
+            plist(&orphan_txn(2), &live, &home).unwrap(),
         )
         .unwrap();
-        let edited = plist(&txn(3), &gone, &home)
+        let edited = plist(&orphan_txn(3), &gone, &home)
             .unwrap()
             .replace("<true/>", "<false/>");
-        std::fs::write(agents.join(file_name(&txn(3))), &edited).unwrap();
-        let foreign = plist(&txn(4), &gone, &home).unwrap();
+        std::fs::write(agents.join(file_name(&orphan_txn(3))), &edited).unwrap();
+        let foreign = plist(&orphan_txn(4), &gone, &home).unwrap();
         std::fs::write(agents.join("com.example.sync.plist"), &foreign).unwrap();
-        std::fs::create_dir_all(agents.join(file_name(&txn(5)))).unwrap();
+        std::fs::create_dir_all(agents.join(file_name(&orphan_txn(5)))).unwrap();
 
         let fates = sweep_launch_agents(&agents, &what_stands, |_| false);
         assert_eq!(
             fates,
             [
-                (file_name(&txn(1)), OrphanFate::Removed),
-                (file_name(&txn(2)), OrphanFate::LeftLive),
-                (file_name(&txn(3)), OrphanFate::LeftUnread),
+                (file_name(&orphan_txn(1)), OrphanFate::Removed),
+                (file_name(&orphan_txn(2)), OrphanFate::LeftLive),
+                (file_name(&orphan_txn(3)), OrphanFate::LeftUnread),
             ]
         );
         assert!(
-            !agents.join(file_name(&txn(1))).exists(),
+            !agents.join(file_name(&orphan_txn(1))).exists(),
             "the dead one is gone"
         );
-        assert!(agents.join(file_name(&txn(2))).is_file());
+        assert!(agents.join(file_name(&orphan_txn(2))).is_file());
         assert_eq!(
-            std::fs::read_to_string(agents.join(file_name(&txn(3)))).unwrap(),
+            std::fs::read_to_string(agents.join(file_name(&orphan_txn(3)))).unwrap(),
             edited
         );
         assert_eq!(
@@ -577,7 +645,7 @@ mod tests {
             "another program's plist stays byte for byte"
         );
         assert!(
-            agents.join(file_name(&txn(5))).is_dir(),
+            agents.join(file_name(&orphan_txn(5))).is_dir(),
             "and the folder stays"
         );
     }
@@ -590,14 +658,14 @@ mod tests {
     /// round removes the entrance.
     #[test]
     fn the_sweep_waits_for_the_trials_commit() {
-        let root = scratch("orphans-trial");
+        let root = orphan_scratch("orphans-trial");
         let mut registry = OrphanRunValues::default();
         for first in [1, 2] {
             let _armed = logon_hook::arm_in(
                 &mut registry,
                 KEY,
-                &txn(first),
-                &rescue(&root, "gone", false),
+                &orphan_txn(first),
+                &orphan_rescue(&root, "gone", false),
             )
             .unwrap();
         }

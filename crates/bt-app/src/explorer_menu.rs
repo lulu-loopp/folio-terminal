@@ -1776,11 +1776,13 @@ static PACKAGE_SAID: PackageSaid = PackageSaid::new();
 /// never ask the account's deployment database — the tests drive
 /// [`package_step_with`] over a deployment of their own.
 pub(crate) fn run_package_step(_ctx: &WorkerCtx) -> Option<MemberAnswer<()>> {
-    if !supported() {
-        remember(PackageState::Unsupported);
+    // A test process asks nothing and writes no cell: the cells are the suite's to turn
+    // (TEST-GLOBALS' `DEPLOYMENT`; review N6).
+    if cfg!(test) {
         return None;
     }
-    if cfg!(test) {
+    if !supported() {
+        remember(PackageState::Unsupported);
         return None;
     }
     Some(package_step_with(
@@ -4254,12 +4256,13 @@ mod tests {
     /// registration, and the line is said — and on the next round, which finds it current, the
     /// new finding is said once, and a third round that finds the same says nothing. During an
     /// update's trial the registration is read and classified, not written, and `ExplorerRepair`
-    /// is pending for the commit. A press holding the deployment latch wins: nothing is
-    /// registered, and the latch stays the press's.
+    /// is pending for the commit, and the row's cell reads that read. A press holding the
+    /// deployment latch wins: nothing is registered, and the latch stays the press's.
     ///
     /// MUTATION: leave the member out of `run_carry_steps`
     /// (`plant-68b-package-member-skipped.py`) and the inventory's guard goes red; this pins what
-    /// the member does once called.
+    /// the member does once called. Leave the held read out of the cell
+    /// (`plant-68b-held-package-read-unremembered.py`) and the trial's row assertion goes red.
     #[test]
     fn the_carry_pass_probes_the_package_registration() {
         use crate::update_trial::{Gate, Writer};
@@ -4294,6 +4297,9 @@ mod tests {
         );
 
         lines.lock().unwrap().clear();
+        // The cell forgets the renewal, so the trial's own read is what turns it back (review N7).
+        remember(PackageState::Unknown);
+        assert!(!state().registered());
         let gate = Gate::new();
         let trial = FakeDeployment::holding(Some(registration_at(&here, OLDER)));
         let held = package_step_with(
@@ -4305,7 +4311,10 @@ mod tests {
         );
         assert!(trial.calls().is_empty(), "a trial's round writes nothing");
         assert_eq!(gate.pending(), vec![Writer::ExplorerRepair]);
-        assert!(state().registered(), "and the row reads the machine");
+        assert!(
+            state().registered(),
+            "and the row reads the machine, from the trial's own read"
+        );
         assert_eq!((held.checks, held.changed), (1, 1));
         assert_eq!(
             *lines.lock().unwrap(),

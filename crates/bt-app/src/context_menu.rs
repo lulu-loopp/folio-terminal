@@ -172,8 +172,18 @@ pub fn apply(install: bool) -> Result<(), String> {
     let shape = install
         .then(|| desired().ok_or_else(|| Text::ContextMenuNoExecutable.text().to_owned()))
         .transpose()?;
+    apply_shape(shape.as_ref())
+}
+
+/// **Write `shape` into the account's class store, or take the verb out of it,
+/// and tell the shell after the attempt** — [`apply`]'s second half, and the
+/// whole of the start's repair's write ([`AccountClasses`], which hands it the
+/// shape the repair decided on rather than one built again here; 0.4.10 plan
+/// row 68b, review N4). The only product code that writes the two trees, inside
+/// the one wrapper.
+fn apply_shape(shape: Option<&ContextMenuShape>) -> Result<(), String> {
     bt_platform::changing_explorer_menu(
-        || match &shape {
+        || match shape {
             Some(shape) => bt_platform::install_context_menu(CONTEXT_MENU_CLASSES, shape),
             None => bt_platform::remove_context_menu(CONTEXT_MENU_CLASSES),
         },
@@ -185,7 +195,7 @@ pub fn apply(install: bool) -> Result<(), String> {
 /// counted first, so that a start's repair running beside it on the carry pass
 /// yields to it ([`ClassicPresses`]).
 pub fn apply_pressed(install: bool) -> Result<(), String> {
-    PRESSES.note_press(install);
+    CLASSIC_PRESSES.note_press(install);
     apply(install)
 }
 
@@ -233,7 +243,7 @@ impl ClassicPresses {
 }
 
 /// This process's presses.
-static PRESSES: ClassicPresses = ClassicPresses::new();
+pub(crate) static CLASSIC_PRESSES: ClassicPresses = ClassicPresses::new();
 
 /// **What the classic member answers the window**: whether the machine carries
 /// the verb after the round, and how many presses had landed when the round read
@@ -246,9 +256,14 @@ pub(crate) struct ClassicAnswer {
 
 /// **The window takes a round's answer for the row** — unless a press has landed
 /// since the round read the trees: the press read the machine after its own
-/// write, and that read is newer (R4).
-pub(crate) fn adopt_classic_answer(installed: &mut bool, answer: ClassicAnswer) {
-    if answer.presses_seen == PRESSES.presses_counted() {
+/// write, and that read is newer (R4). `presses` is the process's [`CLASSIC_PRESSES`] in
+/// the product, and a test's own in the suite (review N5).
+pub(crate) fn adopt_classic_answer(
+    installed: &mut bool,
+    answer: ClassicAnswer,
+    presses: &ClassicPresses,
+) {
+    if answer.presses_seen == presses.presses_counted() {
         *installed = answer.installed;
     }
 }
@@ -262,8 +277,8 @@ pub(crate) trait ClassicStore {
     fn write_classic_verb(&self, shape: Option<&ContextMenuShape>) -> Result<(), String>;
 }
 
-/// The account's own class store, written through [`apply`], which tells the
-/// shell.
+/// The account's own class store, written through [`apply_shape`], which writes
+/// the shape it is handed and tells the shell.
 struct AccountClasses;
 
 impl ClassicStore for AccountClasses {
@@ -272,7 +287,7 @@ impl ClassicStore for AccountClasses {
     }
 
     fn write_classic_verb(&self, shape: Option<&ContextMenuShape>) -> Result<(), String> {
-        apply(shape.is_some())
+        apply_shape(shape)
     }
 }
 
@@ -286,12 +301,13 @@ pub(crate) enum ClassicFound {
     /// Not what this build would write, and every tree names this copy or no
     /// program at all: an older shape, a label in a language left, a half set.
     OldShape,
-    /// A tree names a program that is gone, and none a program that is there.
+    /// A tree names a program that is gone, in a command a Folio wrote
+    /// ([`written_by_a_folio`]), and none a program that is there.
     Dead,
     /// A tree names another copy that is still there: left.
     AnotherCopy,
     /// A tree names a program the machine will not say about — a drive that is
-    /// away among them: left.
+    /// away among them — or a gone program in a command no Folio wrote: left.
     OwnerUnknown,
 }
 
@@ -325,6 +341,11 @@ impl ClassicFound {
 /// only when nothing is at it on a volume that is there ([`gone_by`]). A program
 /// still there, and one the machine will not say about, are a copy that is
 /// still on the disk, and are left.
+///
+/// **A gone program is a dead owner's only in a command a Folio wrote**
+/// ([`written_by_a_folio`]; review N3): a `shell\Folio` verb somebody pointed at
+/// another program is not this product's to take back, however gone that
+/// program is, and reads as an owner the rule cannot speak for.
 pub(crate) fn classic_found(
     found: &[ContextMenuTree],
     desired: &ContextMenuShape,
@@ -339,9 +360,11 @@ pub(crate) fn classic_found(
     let named: Vec<(RegisteredExe, Result<bool, &'static str>)> = found
         .iter()
         .filter_map(ContextMenuTree::shape)
-        .filter_map(|shape| bt_platform::context_menu_command_exe(&shape.command))
-        .map(Path::new)
-        .map(|exe| {
+        .filter_map(|shape| {
+            let exe = bt_platform::context_menu_command_exe(&shape.command)?;
+            Some((Path::new(exe), written_by_a_folio(&shape.command)))
+        })
+        .map(|(exe, folios)| {
             if same_path(exe, this) {
                 let ours = RegisteredExe {
                     on_disk: true,
@@ -349,7 +372,13 @@ pub(crate) fn classic_found(
                 };
                 return (ours, Ok(false));
             }
-            let gone = gone_by(exe, look);
+            let gone = gone_by(exe, look).and_then(|gone| {
+                if gone && !folios {
+                    Err("a gone program in a command no Folio wrote")
+                } else {
+                    Ok(gone)
+                }
+            });
             let named = RegisteredExe {
                 on_disk: gone != Ok(true),
                 ours: false,
@@ -372,6 +401,22 @@ pub(crate) fn classic_found(
         ClassicFound::OwnerUnknown
     }
 }
+
+/// **Whether `command` is one a Folio wrote**: a quoted program whose file name
+/// is `folio.exe` (any case), then one of the tails in history — `--cwd "%V"`
+/// (0.1.0–0.2.x) or `--from-explorer --cwd "%V"` (0.3.0 on,
+/// [`bt_platform::context_menu_shape`]'s) — and nothing else.
+fn written_by_a_folio(command: &str) -> bool {
+    let Some(exe) = bt_platform::context_menu_command_exe(command) else {
+        return false;
+    };
+    let tail = &command[exe.len() + 2..];
+    let file_name = exe.rsplit(['\\', '/']).next().unwrap_or(exe);
+    file_name.eq_ignore_ascii_case("folio.exe") && COMMAND_TAILS_IN_HISTORY.contains(&tail)
+}
+
+/// What every Folio wrote after the quoted program, oldest first.
+const COMMAND_TAILS_IN_HISTORY: [&str; 2] = [r#" --cwd "%V""#, r#" --from-explorer --cwd "%V""#];
 
 /// **One run of the start's repair**: what it found, what it did, and the
 /// window's answer.
@@ -498,7 +543,7 @@ pub(crate) fn run_classic_step(_ctx: &WorkerCtx) -> Option<MemberAnswer<ClassicA
         &this,
         &what_stands,
         crate::update_trial::defer,
-        &PRESSES,
+        &CLASSIC_PRESSES,
     );
     Some(classic_member_answer(
         &run,
@@ -703,7 +748,8 @@ mod tests {
     ///
     /// Asked of `bt-source` by identity: this module's product code calls the
     /// wrapper once, every call the product makes to the two writers is inside
-    /// the body of [`apply`], and that body is the one that calls the wrapper.
+    /// the body of [`apply_shape`] ([`apply`]'s second half, and the start's
+    /// repair's write), and that body is the one that calls the wrapper.
     /// The suite's own words are test code and are not read.
     ///
     /// MUTATION: call `install_context_menu` or `remove_context_menu` outside
@@ -734,12 +780,12 @@ mod tests {
             "one wrapper, around the one function that writes"
         );
         let apply = index
-            .one(&bt_source::ItemQuery::function("apply").in_module("crate::context_menu"))
+            .one(&bt_source::ItemQuery::function("apply_shape").in_module("crate::context_menu"))
             .unwrap_or_else(|failure| panic!("{failure}"));
-        let body = apply.body().expect("`apply` has a body");
+        let body = apply.body().expect("`apply_shape` has a body");
         assert!(
             wrapped[0].within(body),
-            "the wrapper is called from `apply`"
+            "the wrapper is called from `apply_shape`"
         );
         for writer in [
             "bt_platform::install_context_menu",
@@ -753,7 +799,7 @@ mod tests {
             );
             assert!(
                 calls[0].within(body),
-                "{writer} is called from `apply`, where the wrapper is"
+                "{writer} is called from `apply_shape`, where the wrapper is"
             );
         }
     }
@@ -854,7 +900,7 @@ mod tests {
     const LABEL: &str = "Open Folio here";
 
     /// A scratch folder under the build directory, removed with the test.
-    fn scratch(tag: &str) -> crate::test_support::ScratchFolder {
+    fn classic_scratch(tag: &str) -> crate::test_support::ScratchFolder {
         crate::test_support::ScratchFolder::create(
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("../../target/tb-tests")
@@ -863,7 +909,7 @@ mod tests {
     }
 
     /// A copy of Folio at `<root>/<folder>/folio.exe`.
-    fn copy_at(root: &Path, folder: &str) -> PathBuf {
+    fn classic_copy_at(root: &Path, folder: &str) -> PathBuf {
         let exe = root.join(folder).join("folio.exe");
         std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
         std::fs::write(&exe, folder.as_bytes()).unwrap();
@@ -871,12 +917,12 @@ mod tests {
     }
 
     /// What this build writes for `exe`.
-    fn shape_of(exe: &Path) -> ContextMenuShape {
+    fn classic_shape_of(exe: &Path) -> ContextMenuShape {
         bt_platform::context_menu_shape(exe, LABEL)
     }
 
     /// Both trees carrying `shape`.
-    fn both(shape: &ContextMenuShape) -> Vec<ContextMenuTree> {
+    fn in_both_trees(shape: &ContextMenuShape) -> Vec<ContextMenuTree> {
         vec![ContextMenuTree::Written(shape.clone()); 2]
     }
 
@@ -890,7 +936,7 @@ mod tests {
     }
 
     impl<'a> Trees<'a> {
-        fn holding(trees: Vec<ContextMenuTree>) -> Self {
+        fn classic_trees_holding(trees: Vec<ContextMenuTree>) -> Self {
             Self {
                 trees: RefCell::new(trees),
                 writes: Cell::new(0),
@@ -899,9 +945,9 @@ mod tests {
             }
         }
 
-        fn set(&self, shape: Option<&ContextMenuShape>) {
+        fn set_classic_trees(&self, shape: Option<&ContextMenuShape>) {
             *self.trees.borrow_mut() = match shape {
-                Some(shape) => both(shape),
+                Some(shape) => in_both_trees(shape),
                 None => vec![ContextMenuTree::Absent; 2],
             };
         }
@@ -917,12 +963,12 @@ mod tests {
             if let Some((presses, wish)) = self.press_during_write.take() {
                 // The press records its wish, writes it, and the repair's write lands after.
                 presses.note_press(wish);
-                self.set(if wish { shape } else { None });
+                self.set_classic_trees(if wish { shape } else { None });
             }
             if let Some(refusal) = self.refuse {
                 return Err(refusal.to_owned());
             }
-            self.set(shape);
+            self.set_classic_trees(shape);
             Ok(())
         }
     }
@@ -942,7 +988,7 @@ mod tests {
     }
 
     /// A gate that must not be asked: nothing is due.
-    fn never_asked(writer: Writer) -> bool {
+    fn classic_gate_never_asked(writer: Writer) -> bool {
         panic!("the trial's gate is asked only when a write is due, not for {writer:?}")
     }
 
@@ -954,30 +1000,33 @@ mod tests {
     /// test process, so the account's menu is never read): a verb naming a `folio.exe` that is
     /// gone from a volume that is there is rewritten to this build's, and the row reads `On`; a
     /// verb naming another copy that is still there is left, and so is one naming a program on a
-    /// drive that is away — not gone, only unplugged (R5); a machine with no verb gets none; during
+    /// drive that is away — not gone, only unplugged (R5) — and one naming a gone program in a
+    /// command no Folio wrote, another program's or a `folio.exe` with another tail (review N3); a
+    /// machine with no verb gets none; during
     /// an update's trial the dead owner's verb is classified and held (`ExplorerRepair` asked, the
     /// row still `On`, nothing written — G6); and the line is said when the finding changes and
     /// not on a round that finds the same.
     ///
     /// MUTATION: write without asking the gate (`plant-68b-classic-unheld.py`) and the trial's
     /// case goes red; say the line every round (`plant-68b-classic-line-every-round.py`) and the
-    /// last assertion goes red.
+    /// last assertion goes red; read any gone program as a dead owner's
+    /// (`plant-68b-dead-takes-any-command.py`) and the two commands no Folio wrote are rewritten.
     #[test]
     fn the_carry_pass_reasserts_the_classic_verb() {
-        let root = scratch("classic-carry");
-        let here = copy_at(&root, "here");
-        let other = copy_at(&root, "other");
+        let root = classic_scratch("classic-carry");
+        let here = classic_copy_at(&root, "here");
+        let other = classic_copy_at(&root, "other");
         let gone = root.join("gone").join("folio.exe");
-        let desired = shape_of(&here);
+        let desired = classic_shape_of(&here);
         let presses = ClassicPresses::new();
 
-        let dead = Trees::holding(both(&shape_of(&gone)));
+        let dead = Trees::classic_trees_holding(in_both_trees(&classic_shape_of(&gone)));
         let run = reassert_in(&dead, &desired, &here, &what_stands, |_| false, &presses);
         assert_eq!(run.found, ClassicFound::Dead);
         assert_eq!(run.repaired.as_deref(), Some("written"));
         assert_eq!(
             dead.read_classic_trees(),
-            both(&desired),
+            in_both_trees(&desired),
             "rewritten to this build's"
         );
         assert!(run.answer.installed, "and the row reads On");
@@ -985,14 +1034,29 @@ mod tests {
         for (what, trees, look, expected) in [
             (
                 "another copy that is still there",
-                both(&shape_of(&other)),
+                in_both_trees(&classic_shape_of(&other)),
                 &what_stands as &dyn Look,
                 ClassicFound::AnotherCopy,
             ),
             (
                 "a program on a drive that is away",
-                both(&shape_of(&gone)),
+                in_both_trees(&classic_shape_of(&gone)),
                 &ClassicAwayVolume as &dyn Look,
+                ClassicFound::OwnerUnknown,
+            ),
+            (
+                "a gone program that is not a folio.exe",
+                in_both_trees(&classic_shape_of(&root.join("gone").join("sync.exe"))),
+                &what_stands as &dyn Look,
+                ClassicFound::OwnerUnknown,
+            ),
+            (
+                "a gone folio.exe in a command no Folio wrote",
+                in_both_trees(&ContextMenuShape {
+                    command: format!("\"{}\" --verb %V", gone.display()),
+                    ..classic_shape_of(&gone)
+                }),
+                &what_stands as &dyn Look,
                 ClassicFound::OwnerUnknown,
             ),
             (
@@ -1002,8 +1066,15 @@ mod tests {
                 ClassicFound::Absent,
             ),
         ] {
-            let store = Trees::holding(trees.clone());
-            let run = reassert_in(&store, &desired, &here, look, never_asked, &presses);
+            let store = Trees::classic_trees_holding(trees.clone());
+            let run = reassert_in(
+                &store,
+                &desired,
+                &here,
+                look,
+                classic_gate_never_asked,
+                &presses,
+            );
             assert_eq!(run.found, expected, "{what}");
             assert_eq!(run.repaired, None, "{what}: nothing is due");
             assert_eq!(store.writes.get(), 0, "{what}: nothing written");
@@ -1015,7 +1086,7 @@ mod tests {
             );
         }
 
-        let trial = Trees::holding(both(&shape_of(&gone)));
+        let trial = Trees::classic_trees_holding(in_both_trees(&classic_shape_of(&gone)));
         let asked = Cell::new(None);
         let held = reassert_in(
             &trial,
@@ -1045,7 +1116,7 @@ mod tests {
         let said = LastSaid::new();
         let lines = RefCell::new(Vec::new());
         let say = |line: String| lines.borrow_mut().push(line);
-        let store = Trees::holding(both(&shape_of(&gone)));
+        let store = Trees::classic_trees_holding(in_both_trees(&classic_shape_of(&gone)));
         let rounds = [0, 1, 2].map(|_| {
             let run = reassert_in(&store, &desired, &here, &what_stands, |_| false, &presses);
             classic_member_answer(&run, &said, &say)
@@ -1086,27 +1157,27 @@ mod tests {
     /// left.
     #[test]
     fn every_historical_shape_of_the_classic_verb_is_brought_to_this_builds() {
-        let root = scratch("classic-shapes");
-        let here = copy_at(&root, "here");
+        let root = classic_scratch("classic-shapes");
+        let here = classic_copy_at(&root, "here");
         let link = root.join("alias");
         crate::test_support::link_folder_to(&link, here.parent().unwrap());
         let through_the_link = link.join("folio.exe");
         assert!(through_the_link.is_file(), "the link leads to this copy");
-        let desired = shape_of(&here);
+        let desired = classic_shape_of(&here);
         let first = ContextMenuShape {
             label: LABEL.to_owned(),
             icon: format!("{},0", here.display()),
             command: format!("\"{}\" --cwd \"%V\"", here.display()),
         };
         let shapes = [
-            ("0.1.0's command line", both(&first)),
+            ("0.1.0's command line", in_both_trees(&first)),
             (
                 "0.3.0's, in the other language",
-                both(&bt_platform::context_menu_shape(&here, "在这里打开 Folio")),
+                in_both_trees(&bt_platform::context_menu_shape(&here, "在这里打开 Folio")),
             ),
             (
                 "up to 0.4.7's, through winget's link",
-                both(&shape_of(&through_the_link)),
+                in_both_trees(&classic_shape_of(&through_the_link)),
             ),
             (
                 "a set somebody deleted half of",
@@ -1117,7 +1188,7 @@ mod tests {
             ),
         ];
         for (what, trees) in &shapes {
-            let store = Trees::holding(trees.clone());
+            let store = Trees::classic_trees_holding(trees.clone());
             brought_to_this_builds(&store, &desired, &here, what);
         }
         #[cfg(windows)]
@@ -1125,7 +1196,7 @@ mod tests {
             let hive = Hive::new("classic-shapes");
             let beside = hive.another_programs_verb();
             for (what, trees) in &shapes {
-                hive.plant(trees);
+                hive.plant_classic_trees(trees);
                 brought_to_this_builds(&hive, &desired, &here, what);
                 assert_eq!(
                     hive.another_programs_verb(),
@@ -1175,17 +1246,17 @@ mod tests {
         fn new(tag: &str) -> Self {
             let classes = format!(r"Software\Folio-Test\{}", bt_testpath::unique_name(tag));
             let hive = Self { classes };
-            hive.reg(&[
+            hive.hive_reg(&[
                 "add",
-                &hive.key(r"Directory\shell\Other"),
+                &hive.hive_key(r"Directory\shell\Other"),
                 "/ve",
                 "/d",
                 "Another program here",
                 "/f",
             ]);
-            hive.reg(&[
+            hive.hive_reg(&[
                 "add",
-                &hive.key(r"Directory\shell\Other\command"),
+                &hive.hive_key(r"Directory\shell\Other\command"),
                 "/ve",
                 "/d",
                 r"C:\Other\other.exe %V",
@@ -1194,11 +1265,11 @@ mod tests {
             hive
         }
 
-        fn key(&self, below: &str) -> String {
+        fn hive_key(&self, below: &str) -> String {
             format!(r"HKCU\{}\{below}", self.classes)
         }
 
-        fn run(args: &[&str]) -> std::process::Output {
+        fn run_reg_exe(args: &[&str]) -> std::process::Output {
             let hygiene = bt_pty::test_shell::Hygiene::new();
             let reg = PathBuf::from(std::env::var_os("SystemRoot").expect("Windows names it"))
                 .join("System32")
@@ -1210,8 +1281,8 @@ mod tests {
                 .expect("reg.exe runs")
         }
 
-        fn reg(&self, args: &[&str]) -> String {
-            let ran = Self::run(args);
+        fn hive_reg(&self, args: &[&str]) -> String {
+            let ran = Self::run_reg_exe(args);
             assert!(
                 ran.status.success(),
                 "reg {args:?}: {}",
@@ -1222,12 +1293,12 @@ mod tests {
 
         /// The other program's verb, every value under it, as `reg query` prints it.
         fn another_programs_verb(&self) -> String {
-            self.reg(&["query", &self.key(r"Directory\shell\Other"), "/s"])
+            self.hive_reg(&["query", &self.hive_key(r"Directory\shell\Other"), "/s"])
         }
 
         /// Write `trees` as a Folio once did: a shape into every tree, then the trees that are
         /// absent taken out.
-        fn plant(&self, trees: &[ContextMenuTree]) {
+        fn plant_classic_trees(&self, trees: &[ContextMenuTree]) {
             let shape = trees
                 .iter()
                 .find_map(ContextMenuTree::shape)
@@ -1235,7 +1306,7 @@ mod tests {
             bt_platform::install_context_menu(&self.classes, shape).expect("the test's own store");
             for (tree, held) in bt_platform::CONTEXT_MENU_TREES.iter().zip(trees) {
                 if *held == ContextMenuTree::Absent {
-                    self.reg(&["delete", &self.key(&format!(r"{tree}\Folio")), "/f"]);
+                    self.hive_reg(&["delete", &self.hive_key(&format!(r"{tree}\Folio")), "/f"]);
                 }
             }
             assert_eq!(self.read_classic_trees(), trees, "planted as written");
@@ -1259,7 +1330,7 @@ mod tests {
     #[cfg(windows)]
     impl Drop for Hive {
         fn drop(&mut self) {
-            let _ = Self::run(&["delete", &format!(r"HKCU\{}", self.classes), "/f"]);
+            let _ = Self::run_reg_exe(&["delete", &format!(r"HKCU\{}", self.classes), "/f"]);
         }
     }
 
@@ -1276,13 +1347,13 @@ mod tests {
     /// took out back in their menu.
     #[test]
     fn a_press_during_the_classic_repair_wins() {
-        let root = scratch("classic-press");
-        let here = copy_at(&root, "here");
+        let root = classic_scratch("classic-press");
+        let here = classic_copy_at(&root, "here");
         let gone = root.join("gone").join("folio.exe");
-        let desired = shape_of(&here);
+        let desired = classic_shape_of(&here);
 
         let presses = ClassicPresses::new();
-        let before = Trees::holding(both(&shape_of(&gone)));
+        let before = Trees::classic_trees_holding(in_both_trees(&classic_shape_of(&gone)));
         let run = reassert_in(
             &before,
             &desired,
@@ -1307,7 +1378,7 @@ mod tests {
         );
 
         let presses = ClassicPresses::new();
-        let during = Trees::holding(both(&shape_of(&gone)));
+        let during = Trees::classic_trees_holding(in_both_trees(&classic_shape_of(&gone)));
         during.press_during_write.set(Some((&presses, false)));
         let run = reassert_in(&during, &desired, &here, &what_stands, |_| false, &presses);
         assert_eq!(run.repaired.as_deref(), Some("pressed"));
@@ -1333,7 +1404,8 @@ mod tests {
     /// the verb before the person took it out turns the switch back On.
     #[test]
     fn a_classic_answer_older_than_a_press_is_not_adopted() {
-        let read_now = PRESSES.presses_counted();
+        let presses = ClassicPresses::new();
+        let read_now = presses.presses_counted();
         let mut installed = false;
         adopt_classic_answer(
             &mut installed,
@@ -1341,9 +1413,10 @@ mod tests {
                 installed: true,
                 presses_seen: read_now,
             },
+            &presses,
         );
         assert!(installed, "an answer read after every press is adopted");
-        PRESSES.note_press(false);
+        presses.note_press(false);
         installed = false;
         adopt_classic_answer(
             &mut installed,
@@ -1351,6 +1424,7 @@ mod tests {
                 installed: true,
                 presses_seen: read_now,
             },
+            &presses,
         );
         assert!(
             !installed,

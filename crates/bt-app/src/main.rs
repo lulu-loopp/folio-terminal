@@ -49423,17 +49423,23 @@ impl<B: Backend> FolioApp<B> {
     /// chrome redrawn, because the rows are facts about the machine and any window may be showing
     /// the page. A snapshot no member answered for has nothing to set.
     fn adopt_carry_snapshot(&mut self) -> Result<()> {
-        let Some(carried) = carry_pass::take_carry_snapshot() else {
+        // The app first: a wake handled with no `App` leaves the snapshot for the one that has it
+        // (row 68b, review N8), where taking it first would drop the classic answer for good.
+        let Some(app) = self.app.as_mut() else {
             return Ok(());
         };
-        let Some(app) = self.app.as_mut() else {
+        let Some(carried) = carry_pass::take_carry_snapshot() else {
             return Ok(());
         };
         // The classic verb's answer, unless a press has written since its read (row 68b, R4): the
         // press's own read is the newer one. The package's row reads its module's cells, which
         // the round wrote on the worker; the redraw below is what it is owed.
         if let Some(classic) = carried.explorer {
-            context_menu::adopt_classic_answer(&mut app.context_menu_installed, classic);
+            context_menu::adopt_classic_answer(
+                &mut app.context_menu_installed,
+                classic,
+                &context_menu::CLASSIC_PRESSES,
+            );
         }
         let notices: Vec<i18n::Text> = match carried.hooks {
             Some(snapshot) => {
