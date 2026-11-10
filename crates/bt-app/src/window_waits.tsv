@@ -539,6 +539,7 @@ Runtime::paste_into_field	window	Runtime::ask_for_a_paste	—	lane::lock
 Runtime::paste_into_preview	window	Runtime::ask_for_a_paste	—	lane::lock
 Runtime::paste_from_clipboard_into	window	Runtime::ask_for_a_paste	—	lane::lock
 Runtime::save_clipboard_picture	window	bt_platform::spawn_at_priority@2, bt_platform::spawn_at_priority_with_stack@3	—	lane::lock, ClipboardPictureMailbox::withdraw, ClipboardPictureMailbox::refuse
+Runtime::stage_clipboard_promise	window	bt_platform::spawn_at_priority@2, bt_platform::spawn_at_priority_with_stack@3	—	lane::lock, ClipboardPictureMailbox::withdraw, ClipboardPictureMailbox::refuse
 update::spawn_check	window	bt_platform::spawn_at_priority@2, bt_platform::spawn_at_priority_with_stack@3	—	lane::lock, update_trial::Gate::state
 Job::answer_verb	window	bt_platform::spawn_at_priority@2, bt_platform::spawn_at_priority_with_stack@3	—	lane::lock, update_job::Job::stop_the_driver
 Job::consider	window	bt_platform::spawn_at_priority@2, bt_platform::spawn_at_priority_with_stack@3	—	lane::lock

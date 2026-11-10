@@ -38,6 +38,9 @@ pub(crate) use windows::AfterTheWait;
 // The contrast theme's two readers outside this module: the boot's first reading and the
 // preference notice's (T-HIGH-CONTRAST).
 pub(crate) use diagnostics::{read_high_contrast, theme_in_force};
+// The paste refusal's value and its kind, held by the picture mailbox and the prepared paste
+// at the crate root (plan row 81).
+pub(crate) use clipboard::{PasteRefusal, RefusedKind};
 #[cfg(test)]
 pub(crate) use windows::{
     answer_an_exit_over, broker_verdict, dirty_gate_names, dwm_dark_mode_owed, focus_leaf_index,

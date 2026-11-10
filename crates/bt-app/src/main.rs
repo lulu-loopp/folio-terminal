@@ -1523,7 +1523,7 @@ struct ClipboardPictureInbox {
     /// The saves refused at the door since the window last looked (plan row 52), each with its
     /// reason (plan row 81): each is said on the turn the inbox's wake brings, through the door
     /// every paste refusal leaves by.
-    refused: Vec<runtime::clipboard::PasteRefusal>,
+    refused: Vec<runtime::PasteRefusal>,
 }
 
 impl ClipboardPictureMailbox {
@@ -1551,7 +1551,7 @@ impl ClipboardPictureMailbox {
     /// One save refused at its door, kept with its reason for the next look (plan rows 52, 81):
     /// the generation is left alone, so the paste a running save answers is still the one waited
     /// for.
-    fn refuse(&self, refusal: runtime::clipboard::PasteRefusal) {
+    fn refuse(&self, refusal: runtime::PasteRefusal) {
         self.inbox
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1560,7 +1560,7 @@ impl ClipboardPictureMailbox {
     }
 
     /// The saves refused at the door since the last look, in order, and none from now on.
-    fn take_refusals(&mut self) -> Vec<runtime::clipboard::PasteRefusal> {
+    fn take_refusals(&mut self) -> Vec<runtime::PasteRefusal> {
         std::mem::take(
             &mut self
                 .inbox
@@ -52981,7 +52981,7 @@ struct PreparedClipboardPaste {
     clipboard_text: bool,
     /// **What this paste refused, if anything** (plan row 81): said through
     /// `Runtime::refuse_paste` — one line in the log and the notice — before what is left is sent.
-    refused: Option<runtime::clipboard::RefusedKind>,
+    refused: Option<runtime::RefusedKind>,
     /// **The files a clipboard promise offered** (plan row 81), lifted out as the picture is:
     /// what is pasted is their paths once a worker has had the source write them.
     promise: Option<bt_platform::PromisedFiles>,
