@@ -481,12 +481,14 @@ pub(crate) fn take_carry_snapshot() -> Option<CarrySnapshot> {
 
 /// **One round of the pass: every member, in the order the pass runs them**, then the round
 /// published and the window woken once — when a member answered. **The `$PROFILE` lines run last,
-/// after what the others answered is published, and only in a round whose hooks had their real
-/// answer to give** (row 68c, R8 and the ruling on the review's N1): they may start a PowerShell to
-/// ask where its `$PROFILE` is, and nothing the window adopts waits for that. Whether the agents'
-/// folders are settled is read once, as the round begins and before the hooks run: a walk that
-/// lands while the hooks are answering `None` begins the pass again, and the lines wait for that
-/// round, where the hooks answer first — never for a round whose hooks have not answered. **Nor
+/// after what the others answered is published, and only once the hooks have had their first real
+/// answer — in this round, or an earlier one** (row 68c, R8 and the ruling on the review's N1;
+/// [`profile_lines_member`], the latch's [`CarryLatch::hooks_have_answered`]): they may start a
+/// PowerShell to ask where its `$PROFILE` is, and nothing the window adopts waits for that. Whether
+/// the agents' folders are settled is read once, as the round begins and before the hooks run: a
+/// walk that lands while the hooks are answering `None` begins the pass again, and the lines wait
+/// for that round, where the hooks answer first; a round that asked for the lines alone (a trial's
+/// release) runs them on the answer an earlier round's hooks gave, and on none before it. **Nor
 /// while another round is asked for** ([`lines_may_start`], read just before the lines would start):
 /// they yield to it, so the round somebody waits for never waits for a PowerShell. Their answer is
 /// published as the round's second line, at its end. Each member is one run of a
@@ -1154,7 +1156,8 @@ mod tests {
     /// MUTATIONS: the walk's first answer asks for the hooks alone (`plant-68c-first-answer-asks-
     /// hooks-only.py`); the settled ask leaves the lines out (`plant-68c-settled-ask-without-the-
     /// lines.py`); a round that asked for the lines alone forgets the hooks' earlier answer
-    /// (`plant-68c-lines-alone-forget-the-hooks.py`).
+    /// (`plant-68c-lines-alone-forget-the-hooks.py`); a lines-only round on settled folders counts
+    /// as the hooks' answer (`plant-68c-lines-only-round-counts-as-the-hooks.py`).
     #[test]
     fn a_start_with_an_old_profile_carries_it_once_the_walk_answers() {
         use crate::attention_hooks::{AgentHomes, AgentHomesCell};
@@ -1257,6 +1260,27 @@ mod tests {
             },
         );
         assert!(!before_walk.round_again(), "and asks for no round");
+
+        // The re-review's S1: a lines-only ask the worker took before the hooks were asked, its
+        // round reading folders the walk has just settled — the hooks have not answered on them.
+        let settled_unanswered = CarryLatch::new();
+        assert!(settled_unanswered.ask_for_round(CarryAsk::OLD_PROFILE_LINES));
+        profile_lines_member(
+            settled_unanswered.round_begins(),
+            true,
+            &settled_unanswered,
+            |may_start| {
+                assert!(
+                    !may_start,
+                    "a lines-only round on settled folders whose hooks no round ran starts no lines"
+                );
+                None
+            },
+        );
+        assert!(
+            !settled_unanswered.round_again(),
+            "and asks for no round: the settling's own ask runs the hooks, then the lines"
+        );
         let _ = std::fs::remove_dir_all(&appdata);
 
         let walk = squeezed(free_fn_body("adopt_program_answers"));

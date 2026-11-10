@@ -79,11 +79,12 @@ fn script_at(data: &Path) -> PathBuf {
 /// asked before anything is read); the rounds an Agents-page open, a press or a language change
 /// asks for after that answer `None` here and start no PowerShell. **Never before the hooks' first
 /// real answer, nor while another round is asked for** (R8, the coordinator's ruling on the review's
-/// N1, and row 73's review N8): `may_start` is `carry_pass::lines_may_start` — what the round read as
-/// it began, and no round pending as the lines would start — and a round that began before the program
-/// walk answered — the start's own, typically — runs nothing here and leaves the latch open; the
-/// walk's answer, or the lane's word that none will come, begins the round that runs the hooks,
-/// publishes them, and then runs this.
+/// N1, and row 73's review N8): `may_start` is `carry_pass::lines_may_start` — whether the hooks
+/// have had their first real answer, in this round (what it read as it began) or an earlier one
+/// (the pass latch's fact, `CarryLatch::hooks_have_answered`), and no round pending as the lines
+/// would start — and a round that began before the program walk answered — the start's own,
+/// typically — runs nothing here and leaves the latch open; the walk's answer, or the lane's word
+/// that none will come, begins the round that runs the hooks, publishes them, and then runs this.
 ///
 /// **A start that finds no profile answers `None`** (the review's N8): no round line, no wake — every
 /// Mac's start, and an account with no PowerShell profile.
