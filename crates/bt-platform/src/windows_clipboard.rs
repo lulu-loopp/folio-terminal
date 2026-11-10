@@ -542,8 +542,8 @@ impl Apartment {
 
 impl Drop for Apartment {
     fn drop(&mut self) {
-        // SAFETY: balances `join`'s `OleInitialize`, on the thread that joined (the value is not
-        // `Send`).
+        // SAFETY: balances `single_threaded`'s `OleInitialize`, on the thread that joined (the value
+        // is not `Send`).
         unsafe { OleUninitialize() };
     }
 }
