@@ -6782,6 +6782,10 @@ impl Text {
         Self::LegacyPsReadLineRemovedToast,
         // Only the Windows PowerShell discovery worker can emit this refusal.
         Self::ShellProfileProbeFailed,
+        // Enable's refusal of a data root outside `%APPDATA%` (0.4.10 plan row 68c, R3(b)): it is
+        // asked only after the `$PROFILE` probe answered, which it does on Windows alone; off
+        // Windows the carry may write it only into `diagnostics.log`, which no page shows.
+        Self::ShellProfileOutsideAppData,
         // — the Theme and scheme rows' sentences while a Windows contrast theme is on, which
         //   only the Windows reader of `SPI_GETHIGHCONTRAST` can put in force (T-HIGH-CONTRAST)
         Self::DescThemeHighContrast,

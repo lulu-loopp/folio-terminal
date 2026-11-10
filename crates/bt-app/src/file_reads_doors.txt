@@ -116,6 +116,11 @@ undo_profile_install: ProfileFiles::read
 observe_profile_lines: Marks::read
 observe_profile_lines: ProfileFiles::read
 observe_profile_lines: ProfileRevision::read
+# The carry pass's `$PROFILE` member (0.4.10 plan row 68c, 2026-11-09): the record and the profile
+# list under the marks lock, and the bytes of each profile read by read_profile_for_edit's lane.
+carry_profile_lines: Marks::read
+carry_profile_lines: ProfileFiles::read
+carry_one: Decoded::read
 install_for_program: ProfileRevision::read
 # `Written::publish` is keyed by its file: `publish` is a name several items declare.
 shell_integration/profile_runtime.rs: publish: ProfileRevision::read
