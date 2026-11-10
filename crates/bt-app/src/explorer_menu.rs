@@ -1840,8 +1840,10 @@ pub(crate) fn package_step_with(
 /// **The deployment latch, let go if the thread holding it unwinds** (T-PROFILE-INSTALL-REFUSED-START).
 /// A member that took the latch and then panicked would otherwise hold it for the rest of the run,
 /// and every later press would be written down for a job that never finishes. Dropped on a return,
-/// it does nothing: the holder hands the latch on itself ([`finish_job`]). The carry pass's end
-/// then runs the press written down meanwhile ([`run_queued_press`]; 0.4.10 plan row 68b).
+/// it does nothing: the holder hands the latch on itself ([`finish_job`]). The press written down
+/// meanwhile is then run ([`run_queued_press`]; 0.4.10 plan row 68b): right after the package
+/// member's contained panic (`carry_pass::package_member_with`, re-review R1), or by the pass's end
+/// after a panic outside the members.
 struct LatchUnwound<'a>(&'a AtomicBool);
 
 impl Drop for LatchUnwound<'_> {
@@ -1853,9 +1855,11 @@ impl Drop for LatchUnwound<'_> {
 }
 
 /// **The press written down while a job held the latch, run now** — for a holder that ended
-/// without handing the latch on ([`LatchUnwound`]): the carry pass's end, after a member panicked
-/// ([`crate::carry_pass::begin_carry_pass_with`]). A press taken by a job still running is
-/// written down again, as [`request`] writes any press it cannot start.
+/// without handing the latch on ([`LatchUnwound`]): the carry pass's package member, right after
+/// its contained panic ([`crate::carry_pass::package_member_with`]), and the pass's end after a
+/// panic outside the members ([`crate::carry_pass::begin_carry_pass_with`]). Nothing written down
+/// starts nothing; a press taken by a job still running is written down again, as [`request`]
+/// writes any press it cannot start.
 pub(crate) fn run_queued_press(
     executor: &crate::lane::Executor,
     say: &std::sync::Arc<dyn Fn(&str) + Send + Sync>,
@@ -3621,7 +3625,11 @@ mod tests {
     #[test]
     fn a_refused_pass_holds_the_deployment_latch_nowhere() {
         static LATCH: crate::carry_pass::CarryLatch = crate::carry_pass::CarryLatch::new();
-        fn never_runs(_: &WorkerCtx, _: crate::carry_pass::CarryAsk) {
+        fn refused_carry_round(
+            _: &WorkerCtx,
+            _: crate::carry_pass::CarryAsk,
+            _: &crate::carry_pass::PressBehindTheLatch,
+        ) {
             unreachable!("the door refused the pass's worker")
         }
         let _turn = DEPLOYMENT
@@ -3634,7 +3642,7 @@ mod tests {
                 &executor,
                 say,
                 crate::carry_pass::CarryAsk::EXPLORER,
-                never_runs,
+                refused_carry_round,
             ),
             "the door refused the start"
         );
@@ -4177,9 +4185,31 @@ mod tests {
     );
     static BEHIND: std::sync::Mutex<Option<Behind>> = std::sync::Mutex::new(None);
 
-    /// A carry pass member that takes the deployment latch, has a press written down behind it,
-    /// and panics.
-    fn a_member_that_panics(_: &WorkerCtx, _: crate::carry_pass::CarryAsk) {
+    /// A carry pass round whose package member takes the deployment latch, has a press written
+    /// down behind it, and panics — inside the pass's own member boundary, as the product's member
+    /// runs (`carry_pass::package_member_with`).
+    fn a_package_member_that_panics(
+        _: &WorkerCtx,
+        asked: crate::carry_pass::CarryAsk,
+        behind: &crate::carry_pass::PressBehindTheLatch,
+    ) {
+        let answer =
+            crate::carry_pass::package_member_with(asked, behind, || hold_the_latch_and_panic());
+        assert!(answer.is_none(), "the member that panicked answers nothing");
+    }
+
+    /// A carry pass round that panics outside its members, holding the deployment latch with a
+    /// press written down behind it.
+    fn a_round_that_panics(
+        _: &WorkerCtx,
+        _: crate::carry_pass::CarryAsk,
+        _: &crate::carry_pass::PressBehindTheLatch,
+    ) {
+        hold_the_latch_and_panic()
+    }
+
+    /// Take the deployment latch, have a press written down behind it, and panic.
+    fn hold_the_latch_and_panic() -> ! {
         let (behind, pressed, gate) = BEHIND
             .lock()
             .unwrap()
@@ -4201,17 +4231,48 @@ mod tests {
     }
 
     /// RED (T-PROFILE-INSTALL-REFUSED-START review; moved to the carry pass by 0.4.10 plan row
-    /// 68b) — **a member that panics while it holds the deployment latch runs the press written
-    /// down behind it.** The member takes the latch, a press arrives and is written down, and the
-    /// member panics: the latch is let go as it unwinds, and the pass's end runs the press — here
-    /// refused at the door, so the press is answered with its own failure and the latch is let go
-    /// again. Both ends are said.
+    /// 68b; through the member boundary since its re-review R1) — **a package member that panics
+    /// while it holds the deployment latch runs the press written down behind it.** The member
+    /// takes the latch, a press arrives and is written down, and the member panics inside the
+    /// pass's member boundary: the panic is contained there and the worker goes on, the latch is
+    /// let go as the member unwinds, and the press is run right after it — here refused at the
+    /// door, so the press is answered with its own failure and the latch is let go again. The
+    /// member's panic is said on the diagnostics line, not by the pass's voice, and the worker
+    /// ends without a word, so the voice says only the press's refusal.
     ///
-    /// MUTATION: drop `run_queued_press` from the pass's end
+    /// MUTATION: drop the press's run from `carry_pass::package_member_with`
     /// (`plant-68b-panic-strands-the-press.py`) — the press is never run, no outcome, and it
     /// stays written down.
     #[test]
     fn a_member_that_panics_holding_the_deployment_latch_runs_the_press_behind_it() {
+        let said = a_pass_that_panics_holding_the_latch(a_package_member_that_panics);
+        assert_eq!(said.len(), 1, "the press's refusal alone: {said:?}");
+    }
+
+    /// RED (T-PROFILE-INSTALL-REFUSED-START review; 0.4.10 plan row 68b's re-review R1) — **a
+    /// round that panics outside its members while the deployment latch is held runs the press
+    /// written down behind it at the pass's end.** The worker ends by the panic, which the lane
+    /// executor contains and the pass's voice says; the latch was let go as it unwound, and the
+    /// pass's end runs the press — refused at the door here, and said.
+    ///
+    /// MUTATION: drop `run_queued_press` from the pass's end
+    /// (`plant-68b-round-panic-strands-the-press.py`) — the press is never run.
+    #[test]
+    fn a_round_that_panics_outside_its_members_runs_the_press_behind_it() {
+        let said = a_pass_that_panics_holding_the_latch(a_round_that_panics);
+        assert_eq!(
+            said.len(),
+            2,
+            "the pass's panic and the press's refusal: {said:?}"
+        );
+    }
+
+    /// One pass of `round` over a scripted executor whose door refuses the press's job: the press
+    /// behind the latch ran and was answered, the latch is free and nothing is left written down.
+    /// Answers what the pass's voice said.
+    fn a_pass_that_panics_holding_the_latch(
+        round: fn(&WorkerCtx, crate::carry_pass::CarryAsk, &crate::carry_pass::PressBehindTheLatch),
+    ) -> Vec<String> {
         static LATCH: crate::carry_pass::CarryLatch = crate::carry_pass::CarryLatch::new();
         let _turn = DEPLOYMENT
             .lock()
@@ -4226,7 +4287,7 @@ mod tests {
             &executor,
             move |line| said.send(line.to_owned()).unwrap(),
             crate::carry_pass::CarryAsk::EXPLORER_PACKAGE,
-            a_member_that_panics,
+            round,
         );
         assert!(started, "the pass started");
         let said = lines.iter().collect::<Vec<_>>();
@@ -4242,11 +4303,7 @@ mod tests {
             !QUEUED_SET.load(Ordering::Acquire),
             "nothing is left written down"
         );
-        assert_eq!(
-            said.len(),
-            2,
-            "the pass's panic and the press's refusal: {said:?}"
-        );
+        said
     }
 
     /// RED (0.4.10 plan row 68b, the guard's `landed_by`) — **the carry pass probes the package

@@ -1010,7 +1010,8 @@ mod tests {
     /// MUTATION: write without asking the gate (`plant-68b-classic-unheld.py`) and the trial's
     /// case goes red; say the line every round (`plant-68b-classic-line-every-round.py`) and the
     /// last assertion goes red; read any gone program as a dead owner's
-    /// (`plant-68b-dead-takes-any-command.py`) and the two commands no Folio wrote are rewritten.
+    /// (`plant-68b-dead-takes-any-command.py`) and the two commands no Folio wrote are rewritten;
+    /// forget 0.1.0's tail (`plant-68b-oldest-tail-forgotten.py`) and its gone verb is left.
     #[test]
     fn the_carry_pass_reasserts_the_classic_verb() {
         let root = classic_scratch("classic-carry");
@@ -1030,6 +1031,20 @@ mod tests {
             "rewritten to this build's"
         );
         assert!(run.answer.installed, "and the row reads On");
+
+        // 0.1.0's command (`--cwd "%V"`, no `--from-explorer`) for a build that has since moved is
+        // a dead owner's too (re-review R5).
+        let oldest = Trees::classic_trees_holding(in_both_trees(&ContextMenuShape {
+            command: format!("\"{}\" --cwd \"%V\"", gone.display()),
+            ..classic_shape_of(&gone)
+        }));
+        let run = reassert_in(&oldest, &desired, &here, &what_stands, |_| false, &presses);
+        assert_eq!(run.found, ClassicFound::Dead, "0.1.0's command, gone");
+        assert_eq!(
+            oldest.read_classic_trees(),
+            in_both_trees(&desired),
+            "rewritten to this build's"
+        );
 
         for (what, trees, look, expected) in [
             (

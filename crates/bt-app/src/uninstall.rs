@@ -1632,10 +1632,13 @@ fn system_remove(worker: &WorkerCtx, remover: Remover, exe: &Path, lang: Lang) -
 }
 
 /// **The update entrance's row** (U-22; `docs/plans/design/self-update-2026-09-16.md`
-/// §(b).3): this copy's `FolioUpdate-*` values under the `Run` key — those naming
-/// its installation home `H`, or a program that no longer exists — are removed by
-/// `clean`, the entrance door's own remover; another copy's live entrance is left
-/// and said. Only Windows has this entrance (the macOS LaunchAgent is U-26's).
+/// §(b).3): this copy's entrances under the `Run` key — values of the door's own
+/// shape (`logon_hook::clean_by`: the name `FolioUpdate-<txn8>`, the command
+/// `"<rescue>" --update-recover`) naming its installation home `H`, or a program
+/// that no longer exists — are removed by `clean`, the entrance door's own
+/// remover; another copy's live entrance is left and said, and a value of any
+/// other shape is left unread (0.4.10 plan row 68b, review N1). Only Windows has
+/// this entrance (the macOS LaunchAgent is U-26's).
 fn entrance_entries(
     platform: HostPlatform,
     exe: &Path,

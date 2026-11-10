@@ -312,32 +312,77 @@ impl CarryAsk {
     }
 }
 
-/// `member`'s answer when the round asked for it; nothing, and nothing run, when it did not.
+/// `member`'s answer when the round asked for it; `Ok(None)`, and nothing run, when it did not.
 ///
 /// **A member's panic withholds only its own answer** (row 68b, review N8): the member runs inside
 /// the one unwind boundary (`contained_panic::contain`), so a panic in it is said once, named by
-/// `name`, and answers nothing, and the round goes on to the members after it and publishes their
-/// answers. A member that holds a latch lets it go as it unwinds (the package member's
-/// `LatchUnwound`).
+/// `name`, and answers [`MemberPanicked`], and the round goes on to the members after it and
+/// publishes their answers. A member that holds a latch lets it go as it unwinds (the package
+/// member's `LatchUnwound`); what a latch held behind it is the caller's to run
+/// ([`package_member_with`]).
 fn run_if_asked<T>(
     asked: CarryAsk,
     member: CarryAsk,
     name: &str,
     run: impl FnOnce() -> Option<MemberAnswer<T>>,
-) -> Option<MemberAnswer<T>> {
+) -> Result<Option<MemberAnswer<T>>, MemberPanicked> {
     if !asked.names_member(member) {
-        return None;
+        return Ok(None);
     }
-    match crate::contained_panic::contain(run) {
-        Ok(answer) => answer,
-        Err(panic) => {
-            crate::diagnostics::stderr_line(format!(
-                "BT_CARRY member={name} panicked: {}",
-                crate::pty_door::panic_message(panic.as_ref())
-            ));
-            None
-        }
+    crate::contained_panic::contain(run).map_err(|panic| {
+        crate::diagnostics::stderr_line(format!(
+            "BT_CARRY member={name} panicked: {}",
+            crate::pty_door::panic_message(panic.as_ref())
+        ));
+        MemberPanicked
+    })
+}
+
+/// A member's run that ended in a panic, contained where it ran ([`run_if_asked`]): it answers
+/// nothing this round.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct MemberPanicked;
+
+/// **The press of the Explorer first page a panicking holder of the deployment latch leaves
+/// written down, and how it is run**: the executor the pass was handed, at the press's own band,
+/// and the pass's voice (row 68b, re-review R1).
+pub(crate) struct PressBehindTheLatch {
+    executor: crate::lane::Executor,
+    say: std::sync::Arc<dyn Fn(&str) + Send + Sync>,
+}
+
+impl PressBehindTheLatch {
+    /// Run the press written down while the latch was held, if one was
+    /// (`explorer_menu::run_queued_press`): nothing written down starts nothing, and a press
+    /// taken by a job still running is written down again.
+    pub(crate) fn run_written_down(&self) {
+        crate::explorer_menu::run_queued_press(&self.executor, &self.say);
     }
+}
+
+/// **The package member, run as [`run_if_asked`] runs any member — and, when it panicked, the
+/// press written down behind its deployment latch run at once** (row 68b, re-review R1).
+///
+/// The member's panic is contained where it runs, so the worker does not end and the pass's end
+/// never sees it; the latch let go as the member unwound (`explorer_menu::LatchUnwound`), and a
+/// press of the Explorer first page that arrived while the member held it is otherwise written
+/// down for nobody, until the next press clears it unread. Run here rather than after the round:
+/// the hooks member after it may ask a program its version.
+pub(crate) fn package_member_with(
+    asked: CarryAsk,
+    behind: &PressBehindTheLatch,
+    member: impl FnOnce() -> Option<MemberAnswer<()>>,
+) -> Option<MemberAnswer<()>> {
+    let ran = run_if_asked(
+        asked,
+        CarryAsk::EXPLORER_PACKAGE,
+        "explorer-package",
+        member,
+    );
+    if ran.is_err() {
+        behind.run_written_down();
+    }
+    ran.ok().flatten()
 }
 
 /// **The pass's one published snapshot** (row 68a): written at the end of each round, taken by
@@ -431,27 +476,32 @@ pub(crate) fn take_carry_snapshot() -> Option<CarrySnapshot> {
 /// members (`CarryCheck::in_the_pass`).
 ///
 /// A round runs the members `asked` names (row 68b, R2), in this order (R11): the three that need
-/// no program walk first, so the start's own round answers them, then the agents'.
-pub(crate) fn run_carry_steps(ctx: &WorkerCtx, asked: CarryAsk) {
-    let package = run_if_asked(
-        asked,
-        CarryAsk::EXPLORER_PACKAGE,
-        "explorer-package",
-        || crate::explorer_menu::run_package_step(ctx),
-    );
+/// no program walk first, so the start's own round answers them, then the agents'. A member that
+/// panics answers nothing ([`run_if_asked`]); the package member's panic also runs the press
+/// written down behind its latch (`behind`, [`package_member_with`]).
+pub(crate) fn run_carry_steps(ctx: &WorkerCtx, asked: CarryAsk, behind: &PressBehindTheLatch) {
+    let package = package_member_with(asked, behind, || {
+        crate::explorer_menu::run_package_step(ctx)
+    });
     let classic = run_if_asked(
         asked,
         CarryAsk::EXPLORER_CLASSIC,
         "explorer-classic",
         || crate::context_menu::run_classic_step(ctx),
-    );
+    )
+    .ok()
+    .flatten();
     let orphans = run_if_asked(asked, CarryAsk::UPDATE_ORPHANS, "update-orphans", || {
         crate::update_orphans::run_orphans_step(ctx)
-    });
+    })
+    .ok()
+    .flatten();
     let round = CarryRound {
         hooks: run_if_asked(asked, CarryAsk::HOOKS, "agent-hooks", || {
             crate::agent_hooks_step::run_agent_hooks_step(ctx)
-        }),
+        })
+        .ok()
+        .flatten(),
         package,
         classic,
         orphans,
@@ -568,17 +618,19 @@ pub(crate) fn begin_carry_pass(members: CarryAsk) {
 ///
 /// **A start the door refuses is said once** and the latch let go, so the next request starts
 /// one; nothing was asked of the trial's gate, so nothing is pending for a commit either. A member
-/// that panics withholds only its own answer, said once where it runs ([`run_if_asked`]); a panic
-/// outside the members ends the worker, said once the same way, and the next ask starts one.
-/// **A press of the Explorer first page written down behind a member that panicked holding the
-/// deployment latch is run then** (`explorer_menu::run_queued_press`, the probe's own end before
-/// row 68b), by the same executor and voice.
+/// that panics withholds only its own answer, said once where it runs ([`run_if_asked`]); **a press
+/// of the Explorer first page written down behind the package member that panicked holding the
+/// deployment latch is run right after it** ([`package_member_with`], through the
+/// [`PressBehindTheLatch`] the round is handed: this executor at the press's band, this voice). A
+/// panic outside the members ends the worker, said once the same way, the next ask starts one, and
+/// the pass's end runs a press written down meanwhile (`explorer_menu::run_queued_press`, the
+/// probe's own end before row 68b).
 pub(crate) fn begin_carry_pass_with(
     latch: &'static CarryLatch,
     executor: &crate::lane::Executor,
     say: impl Fn(&str) + Send + Sync + 'static,
     members: CarryAsk,
-    steps: fn(&WorkerCtx, CarryAsk),
+    steps: fn(&WorkerCtx, CarryAsk, &PressBehindTheLatch),
 ) -> bool {
     if !latch.ask_for_round(members) {
         return true;
@@ -587,6 +639,10 @@ pub(crate) fn begin_carry_pass_with(
     let voice = std::sync::Arc::clone(&say);
     // A press the package member's latch held is a person's: run at the press's own band.
     let press = executor.with_band(bt_platform::ThreadPriority::Normal);
+    let behind = PressBehindTheLatch {
+        executor: press.clone(),
+        say: std::sync::Arc::clone(&say),
+    };
     executor
         .start_worker(
             "folio-carry-pass",
@@ -602,7 +658,7 @@ pub(crate) fn begin_carry_pass_with(
             ),
             move |ctx| loop {
                 let asked = latch.round_begins();
-                steps(ctx, asked);
+                steps(ctx, asked, &behind);
                 if !latch.round_again() {
                     break;
                 }
@@ -630,10 +686,12 @@ mod tests {
             "explorer-classic",
             || -> Option<MemberAnswer<ClassicAnswer>> { panic!("scripted: a member's fault") },
         );
-        assert!(
-            classic.is_none(),
+        assert_eq!(
+            classic,
+            Err(MemberPanicked),
             "the member that panicked answers nothing"
         );
+        let classic = classic.ok().flatten();
         let ran_after = std::cell::Cell::new(false);
         let orphans = run_if_asked(
             CarryAsk::ALL,
@@ -649,6 +707,7 @@ mod tests {
             },
         );
         assert!(ran_after.get(), "the member after it runs");
+        let orphans = orphans.expect("it answered");
         let published = CarryPublished::new();
         assert_eq!(
             published
@@ -743,7 +802,7 @@ mod tests {
                 "the second runs after it"
             );
         }
-        fn round(ctx: &WorkerCtx, _: CarryAsk) {
+        fn round(ctx: &WorkerCtx, _: CarryAsk, _: &PressBehindTheLatch) {
             first(ctx);
             second(ctx);
         }
@@ -904,7 +963,7 @@ mod tests {
             "explorer-package",
             || panic!("a member the round did not ask for is run"),
         );
-        assert_eq!(unasked, None);
+        assert_eq!(unasked, Ok(None));
         for member in [
             CarryAsk::HOOKS,
             CarryAsk::EXPLORER_PACKAGE,
