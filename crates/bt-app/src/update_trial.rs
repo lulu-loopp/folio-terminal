@@ -4484,7 +4484,9 @@ mod tests {
         let started = bt_platform::spawn_at_priority(
             "update-trial-test-profile-lines",
             bt_platform::ThreadPriority::BelowNormal,
-            |ctx| crate::shell_integration::run_profile_lines_step(ctx).is_some(),
+            // As the round after the hooks' first answer asks it (row 68c's N1): what is
+            // pinned here is the trial's hold, not that wait.
+            |ctx| crate::shell_integration::run_profile_lines_step(ctx, true).is_some(),
         )
         .ok()
         .and_then(|worker| worker.join().ok())

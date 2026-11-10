@@ -74,29 +74,31 @@ fn script_at(data: &Path) -> PathBuf {
 /// Settings remover has a line to stand for — what `begin_startup_migration` did on a worker of its
 /// own until this row. The carry is made against the same answers, so no second PowerShell starts.
 ///
-/// **Once per process** (R2): a start's round runs it, and so does an update's commit, whose trial
-/// held it back (`update_trial::Writer::ProfileMigration`, asked before anything is read); the
-/// rounds an Agents-page open, a press or a language change asks for answer `None` here and start
-/// no PowerShell. **Run last in the round**, after a publish (R8): nothing the window adopts from the
-/// earlier members waits for a PowerShell this member starts.
+/// **Once per process** (R2): the first round whose hooks had their real answer runs it, and so
+/// does an update's commit, whose trial held it back (`update_trial::Writer::ProfileMigration`,
+/// asked before anything is read); the rounds an Agents-page open, a press or a language change
+/// asks for after that answer `None` here and start no PowerShell. **Never before the hooks' first
+/// real answer** (R8 and the coordinator's ruling on the review's N1): `hooks_settled` is what the
+/// round read as it began (`carry_pass::run_carry_steps`), and a round that began before the program
+/// walk answered — the start's own, typically — runs nothing here and leaves the latch open; the
+/// walk's answer, or the lane's word that none will come, begins the round that runs the hooks,
+/// publishes them, and then runs this.
+///
+/// **A start that finds no profile answers `None`** (the review's N8): no round line, no wake — every
+/// Mac's start, and an account with no PowerShell profile.
 ///
 /// **In a test build it starts no PowerShell and reads no account file** ([`this_accounts_inputs`]).
 pub(crate) fn run_profile_lines_step(
     ctx: &bt_platform::admission::WorkerCtx,
+    hooks_settled: bool,
 ) -> Option<crate::carry_pass::MemberAnswer<()>> {
-    PROFILE_LINES.run_once(crate::update_trial::defer, || {
-        let inputs = this_accounts_inputs(ctx);
-        let carried = carry_profile_lines(&inputs.data, inputs.appdata.as_deref(), inputs.answers);
-        let changed = carried.lines.len();
-        for line in carried.lines {
-            crate::diagnostics::stderr_line(line);
-        }
-        crate::carry_pass::MemberAnswer {
-            part: (),
-            checks: carried.checks,
-            changed,
-        }
-    })
+    PROFILE_LINES
+        .run_once(hooks_settled, crate::update_trial::defer, || {
+            let inputs = this_accounts_inputs(ctx);
+            carry_profile_lines(&inputs.data, inputs.appdata.as_deref(), inputs.answers)
+                .into_member_answer(crate::diagnostics::stderr_line)
+        })
+        .flatten()
 }
 
 /// **Whether the member has run in this process** — the latch [`run_profile_lines_step`] keeps.
@@ -111,14 +113,20 @@ impl ProfileLinesStep {
         }
     }
 
-    /// `body`'s answer the first time it is asked for outside an update's trial, `None` otherwise.
-    /// **The latch is set by a run, not by an asking**: a round the trial holds back (`defer`
-    /// answering `true`) reads nothing and leaves it open, so the commit's round runs it.
+    /// `body`'s answer the first time it is asked for, once the hooks have had their first real
+    /// answer and outside an update's trial; `None` otherwise. **The latch is set by a run, not by
+    /// an asking**: a round that began before the hooks' answer (`hooks_settled` `false`) asks
+    /// nothing, not even the trial, and a round the trial holds back (`defer` answering `true`)
+    /// reads nothing; each leaves it open, so a later round runs it.
     pub(crate) fn run_once<T>(
         &self,
+        hooks_settled: bool,
         defer: impl FnOnce(crate::update_trial::Writer) -> bool,
         body: impl FnOnce() -> T,
     ) -> Option<T> {
+        if !hooks_settled {
+            return None;
+        }
         if defer(crate::update_trial::Writer::ProfileMigration) {
             return None;
         }
@@ -190,7 +198,9 @@ fn account_inputs(ctx: &bt_platform::admission::WorkerCtx) -> ProfileLinesInputs
     }
     ProfileLinesInputs {
         data,
-        appdata: std::env::var_os("APPDATA").map(PathBuf::from),
+        // The account's, from the environment the probe ran in — never this process's own: the
+        // line names `$env:APPDATA` as the account's PowerShell expands it (the review's N2).
+        appdata: environment.account_appdata(),
         answers,
     }
 }
@@ -202,6 +212,29 @@ pub(crate) struct ProfileLinesCarried {
     pub(crate) lines: Vec<String>,
 }
 
+impl ProfileLinesCarried {
+    /// **The member's answer**: every line said through `say`, and the round's counts — or `None`
+    /// for a carry that looked at no profile and said nothing (the review's N8), so a start with no
+    /// profile makes no round line and no wake.
+    pub(crate) fn into_member_answer(
+        self,
+        mut say: impl FnMut(String),
+    ) -> Option<crate::carry_pass::MemberAnswer<()>> {
+        if self.checks == 0 && self.lines.is_empty() {
+            return None;
+        }
+        let changed = self.lines.len();
+        for line in self.lines {
+            say(line);
+        }
+        Some(crate::carry_pass::MemberAnswer {
+            part: (),
+            checks: self.checks,
+            changed,
+        })
+    }
+}
+
 /// **Bring Folio's old lines forward in every profile the record and the answers name**, under
 /// the marks lock: each line in one of Folio's forms ([`LineForm`]) that is not the target —
 /// [`managed_line_for`] the data root — is replaced by it, and nothing else in the file changes
@@ -209,13 +242,16 @@ pub(crate) struct ProfileLinesCarried {
 /// line and the file's encoding, BOM-less ANSI files byte for byte). The profile is remembered in
 /// the record before it is written. A file with nothing to say says nothing.
 ///
-/// **Left, and said once** (report §1.4): a line naming `folio.ps1` in no form of Folio's; a file
+/// **Left, and said once each start** (report §1.4; the member runs once a process): a line naming
+/// `folio.ps1` in no form of Folio's; a file
 /// Folio may not edit (a link, a hard link, read-only, changed between the read and the write) or
 /// cannot read, when it holds one of Folio's lines behind the target; a record Folio cannot read;
 /// an account whose record says the person turned the integration off (R4); a data root no guarded
 /// line names (R3). The record is written only where the lock found a data root and only when a
 /// line is carried (R12): a refusal is said, never recorded, so no record is made for an account
-/// Folio never wrote a line for.
+/// Folio never wrote a line for. **The lock is taken only when a profile is there to look at**
+/// (the review's N11): a start that finds none — every Mac's — makes no `integration-marks.lock`;
+/// what is there is read again under the lock before anything is carried.
 pub(crate) fn carry_profile_lines(
     data: &Path,
     appdata: Option<&Path>,
@@ -227,25 +263,34 @@ pub(crate) fn carry_profile_lines(
         checks: 0,
         lines: vec![say(&record_path, format!("left as it is: {error}"))],
     };
+    let refusals = |report: &Report| -> Vec<String> {
+        report
+            .refusals()
+            .into_iter()
+            .map(|refusal| say(&refusal.path, format!("left as it is: {}", refusal.reason)))
+            .collect()
+    };
+    match profiles_present(data, answers.clone()) {
+        Ok((_, paths, report)) if paths.is_empty() => {
+            return ProfileLinesCarried {
+                checks: 0,
+                lines: refusals(&report),
+            };
+        }
+        Ok(_) => {}
+        Err(error) => return refused_record(error),
+    }
     let lock = match lock_existing(data, Asker::InApp) {
         Ok(lock) => lock,
         Err(error) => return refused_record(error),
     };
     let records = lock.is_some();
-    let (mut marks, files) = match Marks::read(data).and_then(|marks| {
-        let files = ProfileFiles::read(data)?;
-        Ok((marks, files))
-    }) {
+    let (mut marks, paths, report) = match profiles_present(data, answers) {
         Ok(read) => read,
         Err(error) => return refused_record(error),
     };
     let target = managed_line_for(data, appdata);
-    let (paths, report) = candidates(&marks, &files, answers);
-    let mut lines: Vec<String> = report
-        .refusals()
-        .into_iter()
-        .map(|refusal| say(&refusal.path, format!("left as it is: {}", refusal.reason)))
-        .collect();
+    let mut lines = refusals(&report);
     let script = script_at(data);
     let forms = owned_forms(&marks, data);
     let forms = match &target {
@@ -265,6 +310,23 @@ pub(crate) fn carry_profile_lines(
         checks: paths.len(),
         lines,
     }
+}
+
+/// **The record, and every profile a carry looks at**: each [`candidates`] names that is there in
+/// any shape — a file, a link, a folder — read without the lock by the carry's first look and again
+/// under it. One that is not there holds no line to carry.
+fn profiles_present(
+    data: &Path,
+    answers: PathAnswers,
+) -> io::Result<(Marks, Vec<PathBuf>, Report)> {
+    let marks = Marks::read(data)?;
+    let files = ProfileFiles::read(data)?;
+    let (paths, report) = candidates(&marks, &files, answers);
+    let paths = paths
+        .into_iter()
+        .filter(|path| std::fs::symlink_metadata(path).is_ok())
+        .collect();
+    Ok((marks, paths, report))
 }
 
 /// The sentence for a line that names `folio.ps1` in no form of Folio's.
@@ -344,7 +406,8 @@ fn carry_one(
         target_form.said_as()
     ))
 }
-// Refresh the two edition facts when the Profiles page opens. This is an edge
+
+/// Refresh the two edition facts when the Profiles page opens. This is an edge
 /// trigger supplied by Settings, not a polling loop; a second visit asks again —
 /// the observation, a failed `$PROFILE` path, and every parse question that got
 /// no answer (release read m2).
@@ -904,11 +967,10 @@ fn install_for_program(
     }
     let data = persist::storage_dir();
     // The guarded line for this account's own data root, refused where none names its script
-    // (0.4.10 plan row 68c, R3): before 0.4.10 every root was written `MANAGED_LINE`.
-    let line = managed_line_for(
-        &data,
-        std::env::var_os("APPDATA").map(PathBuf::from).as_deref(),
-    )?;
+    // (0.4.10 plan row 68c, R3): before 0.4.10 every root was written `MANAGED_LINE`. The
+    // account's `%APPDATA%` is the probe's environment's, as its PowerShell expands the line —
+    // never this process's own (the review's N2).
+    let line = managed_line_for(&data, environment.account_appdata().as_deref())?;
     let script = install_script_at(&data.join(SCRIPT_DIRECTORY), SCRIPT_FILE_PS1, SCRIPT_PS1)
         .map_err(|_| io::Error::other(Text::ShellProfileRefused.text()))?;
     let wrote = install_recorded(
@@ -2485,10 +2547,19 @@ mod tests {
     /// round (`plant-68c-runs-every-round.py`).
     #[test]
     fn the_profile_lines_wait_for_the_trial_and_run_at_its_commit() {
+        use crate::test_support::{free_fn_body, squeezed};
+        // The member runs through this process's latch, the trial's gate handed in (the review's
+        // N6): a member that ran its body directly would run at every round and in every trial.
+        assert!(
+            squeezed(free_fn_body("run_profile_lines_step"))
+                .contains("PROFILE_LINES.run_once(hooks_settled,crate::update_trial::defer,"),
+            "the member runs through its latch and the trial's gate"
+        );
         let step = ProfileLinesStep::new();
         let mut asked = Vec::new();
         assert_eq!(
             step.run_once(
+                true,
                 |writer| {
                     asked.push(writer);
                     true
@@ -2500,12 +2571,196 @@ mod tests {
         );
         assert_eq!(asked, [crate::update_trial::Writer::ProfileMigration]);
         assert_eq!(
-            step.run_once(|_| false, || "ran"),
+            step.run_once(true, |_| false, || "ran"),
             Some("ran"),
             "the commit's round"
         );
-        assert_eq!(step.run_once(|_| false, || "ran"), None, "once a process");
-        assert_eq!(step.run_once(|_| true, || "ran"), None);
+        assert_eq!(
+            step.run_once(true, |_| false, || "ran"),
+            None,
+            "once a process"
+        );
+        assert_eq!(step.run_once(true, |_| true, || "ran"), None);
+    }
+
+    /// RED (0.4.10 plan row 68c, the coordinator's ruling on the review's N1) — **the `$PROFILE`
+    /// lines never start a probe before the hooks' first real answer**: the start's own round reads
+    /// the agents' folders unsettled as it begins; the program walk lands while that round's hooks
+    /// are answering `None` — the moment the member used to start its PowerShell — and the member
+    /// runs nothing, asks nothing of the trial, and stays owed; the round the walk's answer begins
+    /// (hooks first, published, then this) runs it. And when no walk will answer, the lane's word
+    /// settles the folders and that round runs it — no timer.
+    ///
+    /// MUTATION: the member ignores what the round began with
+    /// (`plant-68c-lines-before-the-hooks.py`).
+    #[test]
+    fn the_profile_lines_wait_for_the_hooks_first_real_answer() {
+        use crate::attention_hooks::{AgentHomes, AgentHomesCell};
+        let homes = AgentHomesCell::new();
+        let step = ProfileLinesStep::new();
+        let began = homes.homes_settled();
+        homes.adopt(1, AgentHomes::default());
+        let mut asked = false;
+        assert_eq!(
+            step.run_once(
+                began,
+                |_| {
+                    asked = true;
+                    false
+                },
+                || "probed"
+            ),
+            None,
+            "the walk landed while this round's hooks answered nothing"
+        );
+        assert!(!asked, "a round that runs nothing asks the trial nothing");
+        assert_eq!(
+            step.run_once(homes.homes_settled(), |_| false, || "probed"),
+            Some("probed"),
+            "the walk's own round, after the hooks' answer"
+        );
+
+        let unwalked = AgentHomesCell::new();
+        let step = ProfileLinesStep::new();
+        assert_eq!(
+            step.run_once(unwalked.homes_settled(), |_| false, || "probed"),
+            None
+        );
+        assert!(unwalked.settle_on_the_launch_homes(), "no walk will answer");
+        assert_eq!(
+            step.run_once(unwalked.homes_settled(), |_| false, || "probed"),
+            Some("probed"),
+            "the round the lane's word begins"
+        );
+    }
+
+    /// RED (0.4.10 plan row 68c, the review's N8) — **a carry that looked at no profile and said
+    /// nothing is no answer**: no round line, no wake; one that looked at a profile is counted
+    /// even when quiet, and every line it has is said.
+    ///
+    /// MUTATION: the member always answers (`plant-68c-empty-member-answers.py`).
+    #[test]
+    fn a_carry_that_found_no_profile_answers_nothing() {
+        let mut said = Vec::new();
+        assert_eq!(
+            ProfileLinesCarried::default().into_member_answer(|line| said.push(line)),
+            None
+        );
+        assert!(said.is_empty());
+        let quiet = ProfileLinesCarried {
+            checks: 2,
+            lines: Vec::new(),
+        };
+        assert_eq!(
+            quiet.into_member_answer(|line| said.push(line)),
+            Some(crate::carry_pass::MemberAnswer {
+                part: (),
+                checks: 2,
+                changed: 0,
+            })
+        );
+        let refused = ProfileLinesCarried {
+            checks: 0,
+            lines: vec!["BT_SHELL_PROFILE x: left as it is".to_owned()],
+        };
+        assert_eq!(
+            refused
+                .into_member_answer(|line| said.push(line))
+                .map(|answer| answer.changed),
+            Some(1)
+        );
+        assert_eq!(said, ["BT_SHELL_PROFILE x: left as it is"]);
+    }
+
+    /// RED (0.4.10 plan row 68c, the review's N11) — **no profile there, no lock**: a carry whose
+    /// candidates are all absent takes no lock and makes no `integration-marks.lock`, no record and
+    /// no line; one whose profile is there looks at it under the lock.
+    ///
+    /// MUTATION: the lock is taken before the look (`plant-68c-lock-before-the-look.py`).
+    #[test]
+    fn a_carry_with_no_profile_there_takes_no_lock() {
+        let appdata = super::super::tests::temp_dir("carry-no-profile");
+        let data = appdata.join(persist::STORAGE_NAME);
+        fs::create_dir_all(&data).unwrap();
+        let profile = appdata.join("Documents").join("profile.ps1");
+        let answers = || vec![(PathBuf::from("pwsh"), Some(profile.clone()))];
+        assert_eq!(
+            carry_profile_lines(&data, Some(&appdata), answers()),
+            ProfileLinesCarried::default()
+        );
+        assert!(!data.join("integration-marks.lock").exists(), "no lock");
+        assert!(!data.join(RECORD_FILE).exists(), "no record");
+        fs::create_dir_all(profile.parent().unwrap()).unwrap();
+        fs::write(&profile, "# mine\r\n").unwrap();
+        assert_eq!(
+            carry_profile_lines(&data, Some(&appdata), answers()),
+            ProfileLinesCarried {
+                checks: 1,
+                lines: Vec::new(),
+            }
+        );
+        assert!(
+            data.join("integration-marks.lock").exists(),
+            "looked at under the lock"
+        );
+        assert_eq!(fs::read(&profile).unwrap(), b"# mine\r\n");
+        let _ = fs::remove_dir_all(appdata);
+    }
+
+    /// RED (0.4.10 plan row 68c, the review's N2) — **the target is named by the account's
+    /// `%APPDATA%`, never by Folio's own**: Folio started with a scratch `APPDATA` (the release
+    /// smoke's seal) has its data root there, while the account's PowerShell expands
+    /// `$env:APPDATA` to the account's own; the environment the probe ran in says which, in any
+    /// case of the name, and a root that is not under it is refused and said — no line written.
+    /// Both readers of the target take it from the probe's environment.
+    ///
+    /// MUTATION: the carry's inputs take this process's `APPDATA`
+    /// (`plant-68c-appdata-of-the-process.py`).
+    #[test]
+    fn the_target_is_named_by_the_accounts_appdata_never_folios_own() {
+        use crate::test_support::{free_fn_body, squeezed};
+        let scratch = super::super::tests::temp_dir("carry-sealed-appdata");
+        let sealed = scratch.join("sealed");
+        let data = sealed.join(persist::STORAGE_NAME);
+        fs::create_dir_all(&data).unwrap();
+        let account = scratch.join("Roaming");
+        let environment = ProbeEnvironment::Logon(vec![(
+            OsString::from("AppData"),
+            account.clone().into_os_string(),
+        )]);
+        assert_eq!(environment.account_appdata(), Some(account.clone()));
+        let profile = scratch.join("profile.ps1");
+        let before = format!("# mine\r\n{LEGACY_LINE}\r\n");
+        fs::write(&profile, &before).unwrap();
+        let carried = carry_profile_lines(
+            &data,
+            environment.account_appdata().as_deref(),
+            vec![(PathBuf::from("pwsh"), Some(profile.clone()))],
+        );
+        assert_eq!(
+            fs::read_to_string(&profile).unwrap(),
+            before,
+            "nothing written"
+        );
+        assert_eq!(carried.lines.len(), 1, "{:?}", carried.lines);
+        assert!(
+            carried.lines[0].contains(Text::ShellProfileOutsideAppData.text()),
+            "{:?}",
+            carried.lines
+        );
+        assert!(
+            !data.join(RECORD_FILE).exists(),
+            "a refusal is never recorded"
+        );
+        for reader in ["account_inputs", "install_for_program"] {
+            let body = squeezed(free_fn_body(reader));
+            assert!(
+                body.contains("environment.account_appdata()")
+                    && !body.contains("var_os(\"APPDATA\")"),
+                "{reader} names the target by this process's APPDATA: {body}"
+            );
+        }
+        let _ = fs::remove_dir_all(scratch);
     }
 
     /// RED (row 68c, R3(b)) — **Enable writes the line for the account's own root**: the guarded

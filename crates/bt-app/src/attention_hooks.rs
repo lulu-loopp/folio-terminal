@@ -39,6 +39,7 @@ pub(crate) use crate::attention_ownership::Outcome;
 use crate::attention_ownership::{self as ownership, Decision, HooksFound};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, PoisonError};
 
 #[cfg(test)]
@@ -124,11 +125,17 @@ impl AgentHomes {
 ///
 /// Until the first walk has answered (milliseconds after launch, the launch's own walk) a reader
 /// is answered from this process's launch environment, which is the reading the launch had.
-pub(crate) struct AgentHomesCell(Mutex<Option<(u64, AgentHomes)>>);
+///
+/// **Settled** ([`Self::homes_settled`]) once a walk has answered, or once the program lane has
+/// said no walk will ([`Self::settle_on_the_launch_homes`]: a walk that failed, a worker that
+/// ended, a request its door refused with no walk standing) — the moment the carry pass's members
+/// that read these folders have their first real answer to give (0.4.10 plan row 68c, the
+/// coordinator's ruling on the review's N1, 2026-11-09). No timer settles it.
+pub(crate) struct AgentHomesCell(Mutex<Option<(u64, AgentHomes)>>, AtomicBool);
 
 impl AgentHomesCell {
     pub(crate) const fn new() -> Self {
-        Self(Mutex::new(None))
+        Self(Mutex::new(None), AtomicBool::new(false))
     }
 
     /// **Adopt walk `generation`'s reading**; an older walk's is refused. Answers whether any of
@@ -159,6 +166,22 @@ impl AgentHomesCell {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .is_some()
+    }
+
+    /// **Whether the folders have their first real answer in this process**: a walk's, or the
+    /// launch environment's once no walk will answer ([`Self::settle_on_the_launch_homes`]).
+    pub(crate) fn homes_settled(&self) -> bool {
+        self.answered() || self.1.load(Ordering::SeqCst)
+    }
+
+    /// **No walk will answer, so the launch environment's reading is the answer** — said by the
+    /// window when the program lane ends a walk with no answer, or refuses a request with no walk
+    /// standing (`programs_lane::Answers::ended_with_no_walk_to_answer`). `true` when this settled
+    /// the folders; `false` when a walk had answered, or they were settled already. A walk that
+    /// answers later is adopted as the first walk's answer is ([`Self::adopt`]; `answered` was
+    /// `false` until then), so the members read the account's folders again.
+    pub(crate) fn settle_on_the_launch_homes(&self) -> bool {
+        !self.answered() && !self.1.swap(true, Ordering::SeqCst)
     }
 
     /// One of [`AGENT_HOME_VARIABLES`] as the newest walk read it.
@@ -2948,6 +2971,33 @@ mod tests {
         assert!(
             cell.adopt(7, reading(r"E:\claude 配置")),
             "and one that read another folder does"
+        );
+    }
+
+    /// RED (0.4.10 plan row 68c, the review's N1) — **the folders are settled by a walk's answer,
+    /// or by the lane's word that no walk will answer, and by nothing else**: a cell no walk has
+    /// answered is not settled; settling it on the launch's reading settles it once; a walk that
+    /// answers afterwards is still the first walk's answer; and a cell a walk answered is settled
+    /// and is not settled again.
+    ///
+    /// MUTATION: `homes_settled` reads the walk's answer alone
+    /// (`plant-68c-give-up-not-settled.py`).
+    #[test]
+    fn the_agent_folders_settle_on_a_walk_or_on_no_walk_to_answer() {
+        let cell = AgentHomesCell::new();
+        assert!(!cell.homes_settled(), "nothing has answered");
+        assert!(cell.settle_on_the_launch_homes(), "no walk will answer");
+        assert!(cell.homes_settled() && !cell.answered());
+        assert!(!cell.settle_on_the_launch_homes(), "settled once");
+        cell.adopt(1, AgentHomes::default());
+        assert!(cell.answered() && cell.homes_settled());
+
+        let walked = AgentHomesCell::new();
+        walked.adopt(1, AgentHomes::default());
+        assert!(walked.homes_settled());
+        assert!(
+            !walked.settle_on_the_launch_homes(),
+            "a walk answered: the launch's reading settles nothing"
         );
     }
     use crate::attention::{MappedAction, Tier, WaitKind};

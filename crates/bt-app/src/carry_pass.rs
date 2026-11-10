@@ -22,10 +22,14 @@
 //! **Its first member is the agent hooks** ([`crate::agent_hooks_step`], row 67b, with row 69c's
 //! codex version). Row 68b (the Explorer registrations, the update entrances' orphans) adds its
 //! members to [`run_carry_steps`] rather than a second worker. **Its last member is Folio's old
-//! `$PROFILE` lines** (`shell_integration::run_profile_lines_step`, row 68c), run once a process
-//! and after the round so far is published: the one member that starts a PowerShell, so nothing
-//! the window adopts — the hooks' answers, and the first-run card that waits on them (row 73) —
-//! waits for one (the coordinator's R8 of 2026-11-09).
+//! `$PROFILE` lines** (`shell_integration::run_profile_lines_step`, row 68c), run once a process,
+//! and never before the hooks have had their first real answer: the one member that starts a
+//! PowerShell, so nothing the window adopts — the hooks' answers, and the first-run card that waits
+//! on them (row 73) — waits for one (the coordinator's R8 of 2026-11-09 and the ruling on the
+//! review's N1). At a start the order is: the start's own round, before the program walk has
+//! answered, runs neither (the hooks have nothing to read, the lines wait for them); the walk's
+//! answer — or the lane's word that no walk will answer — begins the pass again, and that round
+//! runs the hooks, publishes them, and then runs the lines, published on their own.
 //!
 //! A request while the pass runs is not lost and not doubled: it is written down, and the worker
 //! runs every step once more before it ends ([`begin_carry_pass_with`]).
@@ -280,9 +284,13 @@ pub(crate) fn take_carry_snapshot() -> Option<CarrySnapshot> {
 
 /// **One round of the pass: every member, in the order the pass runs them**, then the round
 /// published and the window woken once — when a member answered. **The `$PROFILE` lines run last,
-/// after what the others answered is published** (row 68c, R8): they may start a PowerShell to ask
-/// where its `$PROFILE` is, and nothing the window adopts waits for that; their answer is published
-/// as the round's second line, at its end. Each member is one run of a
+/// after what the others answered is published, and only in a round whose hooks had their real
+/// answer to give** (row 68c, R8 and the ruling on the review's N1): they may start a PowerShell to
+/// ask where its `$PROFILE` is, and nothing the window adopts waits for that. Whether the agents'
+/// folders are settled is read once, as the round begins and before the hooks run: a walk that
+/// lands while the hooks are answering `None` begins the pass again, and the lines wait for that
+/// round, where the hooks answer first — never for a round whose hooks have not answered. Their
+/// answer is published as the round's second line, at its end. Each member is one run of a
 /// step on the pass's worker, handed the worker's context — a step may ask a program a question
 /// there, as the agent hooks ask codex its version (0.4.10 plan row 69c) — and asks the trial's
 /// gate for its own writer before it writes.
@@ -293,13 +301,14 @@ pub(crate) fn take_carry_snapshot() -> Option<CarrySnapshot> {
 /// call through a pointer is one they do not follow. The inventory's guard reads this body for its
 /// members (`CarryCheck::in_the_pass`).
 pub(crate) fn run_carry_steps(ctx: &WorkerCtx) {
+    let hooks_settled = crate::attention_hooks::AGENT_HOMES.homes_settled();
     publish_carry_round(CarryRound {
         hooks: crate::agent_hooks_step::run_agent_hooks_step(ctx),
         profile_lines: None,
     });
     publish_carry_round(CarryRound {
         hooks: None,
-        profile_lines: crate::shell_integration::run_profile_lines_step(ctx),
+        profile_lines: crate::shell_integration::run_profile_lines_step(ctx, hooks_settled),
     });
 }
 
@@ -634,27 +643,36 @@ mod tests {
     /// publishes that member's answer at the end; its round is said with its own counts, leaves
     /// the window's untaken part as it was, and a round no member answered still says nothing.
     ///
+    /// And the round reads whether the hooks have had their first real answer as it begins, before
+    /// they run, and hands that to the `$PROFILE` lines (the ruling on the review's N1): a walk that
+    /// lands while the hooks answer `None` leaves the lines to the round it begins.
+    ///
     /// MUTATIONS: the member is dropped from the pass (`plant-68c-member-not-in-the-pass.py`); a
-    /// round no member answered is said (`plant-68c-empty-round-said.py`).
+    /// round no member answered is said (`plant-68c-empty-round-said.py`); the settling is read
+    /// after the hooks have run (`plant-68c-settled-read-late.py`).
     #[test]
     fn the_profile_lines_are_published_after_the_round_before_them() {
         use crate::i18n::Text;
         let steps =
             crate::test_support::squeezed(crate::test_support::free_fn_body("run_carry_steps"));
+        let settled = steps
+            .find("lethooks_settled=crate::attention_hooks::AGENT_HOMES.homes_settled();")
+            .expect("the round reads whether the hooks have their answer");
         let hooks = steps
             .find("crate::agent_hooks_step::run_agent_hooks_step(ctx)")
             .expect("the hooks are a member");
         let lines = steps
-            .find("crate::shell_integration::run_profile_lines_step(ctx)")
-            .expect("the $PROFILE lines are a member");
+            .find("crate::shell_integration::run_profile_lines_step(ctx,hooks_settled)")
+            .expect("the $PROFILE lines are a member, told what the round began with");
         let rounds: Vec<usize> = steps
             .match_indices("publish_carry_round(")
             .map(|(at, _)| at)
             .collect();
         assert_eq!(rounds.len(), 2, "{steps}");
         assert!(
-            rounds[0] < hooks && hooks < rounds[1] && rounds[1] < lines,
-            "the hooks' round is published before the $PROFILE lines run: {steps}"
+            settled < rounds[0] && rounds[0] < hooks && hooks < rounds[1] && rounds[1] < lines,
+            "the round reads the hooks' settling before they run, and publishes them before \
+             the $PROFILE lines run: {steps}"
         );
 
         let published = CarryPublished::new();

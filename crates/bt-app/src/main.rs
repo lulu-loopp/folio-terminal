@@ -31783,6 +31783,7 @@ fn adopt_program_answers(
     programs: &mut profiles::ProfilePrograms,
     answers: programs_lane::Answers,
 ) -> ProgramNews {
+    let no_walk_answers = answers.ended_with_no_walk_to_answer();
     let copilot_before = programs
         .program(attention_copilot::PROFILE_ID)
         .map(std::ffi::OsStr::to_owned);
@@ -31824,6 +31825,14 @@ fn adopt_program_answers(
             // walk before it has a window to take news to.
             carry_pass::begin_carry_pass();
         }
+    }
+    // **No walk will answer, and none has: the launch's folders are the answer** (0.4.10 plan row
+    // 68c, the coordinator's ruling on the review's N1): a walk that ended with none, or a request
+    // the lane's door refused with no walk standing, settles them once, and the pass runs on them —
+    // the agents' hooks and, after their answer, Folio's `$PROFILE` lines, which wait for that
+    // first real answer. A walk that answers later is adopted as the first answer above.
+    if no_walk_answers && attention_hooks::AGENT_HOMES.settle_on_the_launch_homes() {
+        carry_pass::begin_carry_pass();
     }
     news
 }

@@ -4128,6 +4128,15 @@ impl ProbeEnvironment {
         }
     }
 
+    /// **The account's `%APPDATA%`, as this environment says it**: the logon block's, or this
+    /// process's own where the probe runs in the inherited one — what the account's PowerShell
+    /// expands `$env:APPDATA` to in the line Folio writes, so what names that line's target
+    /// (0.4.10 plan row 68c, the review's N2: never Folio's own, which a sealed run points at a
+    /// scratch folder).
+    pub(crate) fn account_appdata(&self) -> Option<PathBuf> {
+        self.var_os("APPDATA").map(PathBuf::from)
+    }
+
     /// The account's block, when this is one: what [`ordinary_process_scope`] reads (Windows
     /// only, like its reader).
     #[cfg(windows)]

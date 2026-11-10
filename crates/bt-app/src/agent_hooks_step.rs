@@ -392,9 +392,11 @@ pub(crate) static AGENT_HOOKS: AgentHooksStep = AgentHooksStep::new();
 /// **Not before the program walk has answered** (the pane-environment ruling of 2026-10-05: the
 /// folders are the account's current ones, never the launch's): the walk's first answer runs the
 /// pass, so a run asked earlier — the start's own, an Agents page opened in the first second — has
-/// nothing to read yet and answers nothing.
+/// nothing to read yet and answers nothing. **A walk that ends with no answer, or a request no
+/// walk stands for, settles the folders on the launch's** (`AgentHomesCell::homes_settled`, row
+/// 68c's N1): that is a real answer, and this step reads them there until a walk answers.
 pub(crate) fn run_agent_hooks_step(ctx: &WorkerCtx) -> Option<MemberAnswer<HooksSnapshot>> {
-    if !crate::attention_hooks::AGENT_HOMES.answered() {
+    if !crate::attention_hooks::AGENT_HOMES.homes_settled() {
         return None;
     }
     // The one family whose file is named by a question of its agent: codex's version decides
@@ -1852,12 +1854,20 @@ mod tests {
     /// And a press never writes beside the repair (review N2).
     ///
     /// MUTATION: the press ignores the latch's answer (`plant-67b-press-beside-repair.py`).
+    /// MUTATION: a walk with no answer settles nothing (`plant-68c-no-walk-never-settles.py`).
     #[test]
     fn the_pass_runs_at_the_moments_the_rulings_name() {
         use crate::test_support::{free_fn_body, method_body};
         let begins = "carry_pass::begin_carry_pass()";
         let walk = free_fn_body("adopt_program_answers");
         assert!(walk.contains(begins) && walk.contains("AGENT_HOMES.answered()"));
+        // Row 68c's N1: a walk that ends with no answer, or a request no walk stands for, settles
+        // the folders on the launch's and runs the pass — the hooks' first real answer.
+        assert!(
+            walk.contains("answers.ended_with_no_walk_to_answer()")
+                && walk.contains("AGENT_HOMES.settle_on_the_launch_homes()"),
+            "a walk with no answer leaves the pass waiting for one: {walk}"
+        );
         assert!(method_body("Runtime", "refresh_agent_rows").contains(begins));
         for press in [
             "apply_claude_hooks",

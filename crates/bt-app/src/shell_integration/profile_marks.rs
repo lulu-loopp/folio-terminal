@@ -153,7 +153,7 @@ enum Encoding {
     /// each byte is the character of the same number (U+0000–U+00FF), so nothing is decoded, no
     /// code page is guessed, and the bytes come back out exactly. The 0.1.0–0.4.2 appender wrote its
     /// line's UTF-8 bytes into such files, and a line is Folio's when its bytes are those
-    /// ([`Decoded::as_written`]).
+    /// ([`Decoded::line_as_folio_wrote_it`]).
     AnsiBytes,
 }
 
@@ -328,6 +328,7 @@ pub(super) fn rewrite_recorded(
     let output = decoded.encode(&output);
     Ok((output != bytes).then_some(output))
 }
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Refusal {
@@ -1754,7 +1755,12 @@ mod tests {
     /// file that is not UTF-8 (Windows PowerShell's `Set-Content` writes the system code page),
     /// holding the line the 0.1.0-0.4.2 appender wrote into it as UTF-8, is given the guarded line
     /// and every other byte — the code page's own, a line that is not UTF-8 — kept. Every
-    /// NUL-free byte string reads and writes back as itself.
+    /// NUL-free byte string reads and writes back as itself. The remover and Enable read the same
+    /// view (R7; the review's N7): the remover takes the line and its own terminator out of such a
+    /// file and keeps every other byte, Enable appends the line's ASCII and the file's newline and
+    /// changes nothing before them; a GBK file (a double-byte code page, a trail byte that is `\`)
+    /// is carried the same way, and so is a literal line of 0.1.0-0.2.3 whose non-ASCII script path
+    /// the appender wrote as UTF-8 into an ANSI file.
     ///
     /// MUTATION: the carried text written back as UTF-8 whatever the file was read as
     /// (`plant-68c-encoding-dropped.py`).
@@ -1779,6 +1785,62 @@ mod tests {
         assert_eq!(
             rewrite(&every_byte, &Forms::new(&[]), Action::Migrate).unwrap(),
             None
+        );
+
+        // The remover: the line and its own terminator out, every other byte kept.
+        let without = [
+            b"# caf\xe9 \x93quoted\x94\r\n".as_slice(),
+            b"\xff\xfe not UTF-8\r\n# end \xe9".as_slice(),
+        ]
+        .concat();
+        for line in [LEGACY_LINE, MANAGED_LINE] {
+            assert_eq!(
+                rewrite(&around(line), &Forms::new(&[]), Action::Remove).unwrap(),
+                Some(without.clone()),
+                "{line}"
+            );
+        }
+        // Enable: the line's ASCII and the file's newline after the last byte, nothing before
+        // them changed.
+        fs::write(&profile, &without).unwrap();
+        super::super::add_to_profile(&profile, MANAGED_LINE, std::time::SystemTime::now()).unwrap();
+        assert_eq!(
+            fs::read(&profile).unwrap(),
+            [
+                without.as_slice(),
+                b"\r\n\r\n",
+                MANAGED_LINE.as_bytes(),
+                b"\r\n"
+            ]
+            .concat()
+        );
+
+        // GBK: 中文配置 and a character whose trail byte is `\`, around Folio's line.
+        let gbk = |line: &str| {
+            [
+                b"# \xd6\xd0\xce\xc4\xc5\xe4\xd6\xc3 \x81\x5c\r\n".as_slice(),
+                line.as_bytes(),
+                b"\r\n# \xb5\xc4\r\n".as_slice(),
+            ]
+            .concat()
+        };
+        fs::write(&profile, gbk(LEGACY_LINE)).unwrap();
+        let carried = carry_for(&data, Some(&appdata), &profile);
+        assert_eq!(fs::read(&profile).unwrap(), gbk(MANAGED_LINE));
+        assert_eq!(carried.lines.len(), 1, "{carried:?}");
+
+        // A literal line whose script path is not ASCII, in the appender's UTF-8 bytes, inside an
+        // ANSI file.
+        let script = PathBuf::from(r"D:\用户 目录\Folio\shell-integration\folio.ps1");
+        let literal = format!(". \"{}\"", script.display());
+        assert_eq!(
+            rewrite(
+                &around(literal.as_str()),
+                &Forms::new(&[script]),
+                Action::Migrate
+            )
+            .unwrap(),
+            Some(around(MANAGED_LINE))
         );
         let _ = fs::remove_dir_all(appdata);
     }
