@@ -80,7 +80,10 @@ failed, a worker that ended, a request refused with no walk standing; never a
 timer — begins the pass again, and that round runs the hooks, publishes them,
 and then runs this member, whose answer is published on its own. Whether the
 hooks had their answer is read as a round begins, so a walk that lands during a
-round leaves this member to the round it begins. During an update's trial it is
+round leaves this member to the round it begins. A walk still out has neither an
+answer nor a refusal: the hooks and this member wait for it, as the hooks have
+since row 67b, and its answer is used whenever it lands — the lane has no
+deadline, so there is no timer. During an update's trial it is
 held back (`update_trial::Writer::ProfileMigration`) and runs at the commit. On
 the pass's below-normal worker it observes each installed PowerShell (the
 observation the Profiles page and the launch menu read; `-NoProfile`,
@@ -108,18 +111,20 @@ the data root is outside the account's `APPDATA\Folio` and
 `APPDATA\BetterTerminal`. The account's `APPDATA` is the one the PowerShells
 were asked in (the account's current logon environment), never Folio's own: a
 Folio started with another `APPDATA` — the release smoke's sealed run — has a
-data root no line the account's PowerShell expands can name, and is refused. A
-refusal is never recorded, and discovery alone makes no record. Documents paths are never assembled. `BT_POWERSHELL_PROFILE` replaces
-the entire candidate set, including recorded paths, and suppresses real
-PowerShell discovery. A test build's member asks no PowerShell and reads no
+data root no line the account's PowerShell expands can name, and is refused (the
+two roots are compared as one path whatever their case). A refusal is never
+recorded, and discovery alone makes no record. Documents paths are never
+assembled. `BT_POWERSHELL_PROFILE` replaces the entire candidate set, including
+recorded paths, and suppresses real PowerShell discovery. A test build's member asks no PowerShell and reads no
 account file.
 
 Profile edits preserve UTF-8, UTF-8 BOM or UTF-16LE BOM and every existing line's
 terminator. A BOM-less file that is not UTF-8 (a profile in the system's ANSI code
 page, as Windows PowerShell's `Set-Content` writes one) is held byte for byte: no
 code page is guessed, a line is Folio's when its bytes are the UTF-8 of one of its
-forms, and every other byte is written back as it was (row 68c, R7). Removal consumes only owned lines and their own terminators; blank
-lines and empty profile files remain. Changed profiles get a byte-identical
+forms, and every other byte is written back as it was (row 68c, R7). Removal
+consumes only owned lines and their own terminators; blank lines and empty
+profile files remain. Changed profiles get a byte-identical
 dated backup before `bt_persist::atomic_replace_preserving`. Windows uses
 `ReplaceFileW` without ignoring the replacement's own failure, and stages the
 original Hidden/Archive/System flags before and after replacement (ReplaceFileW

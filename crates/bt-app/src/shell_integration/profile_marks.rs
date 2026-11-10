@@ -37,12 +37,18 @@ pub const LEGACY_MANAGED_LINE: &str = managed_line!("BetterTerminal");
 /// refusal for a folder anywhere else, where no guarded line names the script (0.4.3's rule,
 /// `docs/shell-integration-marks.md`; given back to Enable and to the carry by 0.4.10 plan row 68c,
 /// R3). `None` for `appdata` is a process with no `APPDATA`, whose folder is the temp fallback.
+///
+/// **The two roots come from two sources** — the data folder from this process's `APPDATA`, the
+/// account's from the environment the probe ran in (the review's N2) — so they are compared as the
+/// data-root compare of the agents' records compares them (`explorer_menu::same_path`: the resolved
+/// path where both are there, otherwise the spelling with case folded and a trailing separator
+/// dropped), and a root spelled in another case is not refused (the re-review's R4).
 pub fn managed_line_for(data: &Path, appdata: Option<&Path>) -> io::Result<&'static str> {
+    let under =
+        |appdata: &Path, name: &str| crate::explorer_menu::same_path(data, &appdata.join(name));
     match appdata {
-        Some(appdata) if data == appdata.join(persist::STORAGE_NAME) => Ok(MANAGED_LINE),
-        Some(appdata) if data == appdata.join(persist::PREVIOUS_STORAGE_NAME) => {
-            Ok(LEGACY_MANAGED_LINE)
-        }
+        Some(appdata) if under(appdata, persist::STORAGE_NAME) => Ok(MANAGED_LINE),
+        Some(appdata) if under(appdata, persist::PREVIOUS_STORAGE_NAME) => Ok(LEGACY_MANAGED_LINE),
         _ => Err(io::Error::other(Text::ShellProfileOutsideAppData.text())),
     }
 }

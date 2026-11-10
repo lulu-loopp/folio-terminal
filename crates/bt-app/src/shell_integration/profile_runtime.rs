@@ -2769,7 +2769,10 @@ mod tests {
     /// every root as 0.4.7-0.4.9 wrote.
     ///
     /// MUTATION: `managed_line_for` answers `MANAGED_LINE` for every root
-    /// (`plant-68c-target-always-folio.py`).
+    /// (`plant-68c-target-always-folio.py`). And a root spelled in another case is the same root,
+    /// since the two come from two sources (the re-review's R4).
+    ///
+    /// MUTATION: the roots compared by their bytes (`plant-68c-root-compare-case-sensitive.py`).
     #[test]
     fn enable_writes_the_line_for_the_accounts_own_root() {
         let appdata = PathBuf::from(r"X:\Roaming");
@@ -2784,6 +2787,16 @@ mod tests {
             )
             .unwrap(),
             LEGACY_MANAGED_LINE
+        );
+        // The two roots come from two sources: a spelling in another case is the same root
+        // (the re-review's R4).
+        assert_eq!(
+            managed_line_for(
+                &PathBuf::from(r"x:\ROAMING").join(persist::STORAGE_NAME.to_uppercase()),
+                Some(&appdata)
+            )
+            .unwrap(),
+            MANAGED_LINE
         );
         assert_eq!(
             managed_line_for(&PathBuf::from(r"X:\portable\Folio"), Some(&appdata))
