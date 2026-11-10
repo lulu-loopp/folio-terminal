@@ -244,6 +244,9 @@ mod update_prepare_macos;
 // The update job's Windows driver: Prepare, from the press to `Prepared` (0.4.6 ticket U-20).
 mod update_prepare_windows;
 mod update_recover;
+// The update entrances a copy that is gone left behind, swept by the start's carry pass (0.4.10
+// plan row 68b).
+mod update_orphans;
 mod update_startup;
 mod update_trial;
 mod update_txn;
@@ -339,6 +342,7 @@ use runtime::unverified_reference_handoff;
 // K2 batch 22 (T-SPLIT-2B) moved these free functions beside their callers in modules outside
 // `runtime/`; the root names them again for its own callers and, through `use super::*`, its
 // test modules.
+use carry_pass::CarryAsk;
 #[cfg(test)]
 use computation_lane::raster_peek_page;
 use explorer_menu::door_language;
@@ -9251,10 +9255,13 @@ struct App<B: Backend = Native> {
     /// launch, an install and a removal — and at no other, because nothing else
     /// in this process can move it.
     ///
-    /// **Seeded by the launch's own repair**, `context_menu::reassert`: a
+    /// **Seeded by the start's own repair**, the carry pass's classic member
+    /// (`context_menu::run_classic_step`, 0.4.10 plan row 68b), adopted with the
+    /// round's snapshot unless a press landed since the round read the trees: a
     /// `folio.exe` that has been moved since the verb was written leaves a menu
-    /// entry that opens nothing, and the launch is the only moment this product
-    /// has to notice.
+    /// entry that opens nothing, and the start is the only moment this product
+    /// has to notice. `false` until the round answers, as the package row reads
+    /// `Unknown` until its member has.
     context_menu_installed: bool,
     /// **Which window pressed the first-page switch**, until the deployment it
     /// started answers (§7.4a).
@@ -10724,6 +10731,20 @@ struct WindowRuntime<B: Backend = Native> {
     /// captured, projected, decorated and recomposed to say the same thing it
     /// said 16ms ago.
     chrome_present_pending: bool,
+    /// **This window's turn is running, and it pays the present it is asked for at its own end**
+    /// (T-TWO-BARE-TURNS-PER-MARK-STEP).
+    ///
+    /// Raised at the head of [`Runtime::turn`] and lowered where the turn pays
+    /// ([`Runtime::pay_the_turns_present`]). While it stands, [`Runtime::ask_for_present`] writes
+    /// [`Self::turn_owes_a_present`] instead of asking the platform for a paint. A paint asked
+    /// for from inside the turn would cost a whole second turn of the loop: a wake, the
+    /// `RedrawRequested`, and every clock of `about_to_wait` again, to present the debt this turn
+    /// already recorded.
+    turn_pays_presents: bool,
+    /// A present asked for while [`Self::turn_pays_presents`] stood. The debt itself is where it
+    /// always was (a frame in the slot, or [`Self::chrome_present_pending`]); this says that it
+    /// was asked for and is owed the turn's present.
+    turn_owes_a_present: bool,
     /// **How many frames in a row have reached the glass without their
     /// characters** (user report 2026-08-29, `docs/DESIGN.md` §7.1.3l).
     ///
@@ -15190,7 +15211,7 @@ fn release_trial_writer(writer: update_trial::Writer, stores: &mut TrialStores<'
         Writer::Pins => stores.pins.release_trial(),
         Writer::UpdateCheck => update::release_trial(),
         // The carry pass's `$PROFILE` member, which the trial held back (0.4.10 plan row 68c).
-        Writer::ProfileMigration => carry_pass::begin_carry_pass(),
+        Writer::ProfileMigration => carry_pass::begin_carry_pass(CarryAsk::OLD_PROFILE_LINES),
         Writer::BashScript => {
             let _ = shell_integration::script_path();
         }
@@ -15206,7 +15227,8 @@ fn release_trial_writer(writer: update_trial::Writer, stores: &mut TrialStores<'
         Writer::PsReadLineModule => {
             shell_integration::begin_powershell_script_preparation();
         }
-        Writer::ExplorerRepair => explorer_menu::begin_probe(),
+        // Both Explorer registrations, on the pass's worker (0.4.10 plan row 68b).
+        Writer::ExplorerRepair => carry_pass::begin_carry_pass(CarryAsk::EXPLORER),
         Writer::ToastIdentity => {
             if let Err(error) = bt_platform::Notifier::register_identity(APP_NAME) {
                 crate::diagnostics::stderr_line(format!(
@@ -15219,7 +15241,9 @@ fn release_trial_writer(writer: update_trial::Writer, stores: &mut TrialStores<'
         // The trial is committed: it is the person's Folio, and the system may start it again.
         Writer::RestartRegistration => (stores.restart)(),
         // The pass again, on its worker: what it held back, it now writes.
-        Writer::AgentHooksRepair => carry_pass::begin_carry_pass(),
+        Writer::AgentHooksRepair => carry_pass::begin_carry_pass(CarryAsk::HOOKS),
+        // The sweep again: the dead entrances it held back, it now removes (row 68b).
+        Writer::OrphanSweep => carry_pass::begin_carry_pass(CarryAsk::UPDATE_ORPHANS),
     }
 }
 
@@ -31806,7 +31830,7 @@ fn adopt_program_answers(
             .or_else(|| walked.then_some(None)),
     );
     if codex_moved && attention_hooks::AGENT_HOMES.answered() {
-        carry_pass::begin_carry_pass();
+        carry_pass::begin_carry_pass(CarryAsk::HOOKS);
     }
     if let Some(facts) = answers.facts {
         if wsl::adopt(facts.wsl) {
@@ -31822,8 +31846,14 @@ fn adopt_program_answers(
         if news.agent_homes {
             // Where the agents keep their files is the account's own now: the carry pass reads
             // them there, on its worker, wherever this answer was adopted — the launch adopts the
-            // walk before it has a window to take news to.
-            carry_pass::begin_carry_pass();
+            // walk before it has a window to take news to. The first answer is the hooks' first
+            // real one, and Folio's `$PROFILE` lines wait for it (0.4.10 plan row 68c, the
+            // coordinator's ruling at row 68b's merge): it asks for both.
+            carry_pass::begin_carry_pass(if first {
+                CarryAsk::HOMES_SETTLED
+            } else {
+                CarryAsk::HOOKS
+            });
         }
     }
     // **No walk will answer, and none has: the launch's folders are the answer** (0.4.10 plan row
@@ -31832,7 +31862,7 @@ fn adopt_program_answers(
     // the agents' hooks and, after their answer, Folio's `$PROFILE` lines, which wait for that
     // first real answer. A walk that answers later is adopted as the first answer above.
     if no_walk_answers && attention_hooks::AGENT_HOMES.settle_on_the_launch_homes() {
-        carry_pass::begin_carry_pass();
+        carry_pass::begin_carry_pass(CarryAsk::HOMES_SETTLED);
     }
     news
 }
@@ -31875,7 +31905,7 @@ fn adopt_agent_hooks_snapshot<B: Backend>(
 /// `App::agent_hooks_found`.
 fn agent_row_asked_again<B: Backend>(app: &mut App<B>, family: usize) {
     app.agent_hooks_found[family] = None;
-    carry_pass::begin_carry_pass();
+    carry_pass::begin_carry_pass(CarryAsk::HOOKS);
 }
 
 /// **The startup trace's two shell lines, held while a launch tab's shell is being born**.
@@ -34966,6 +34996,8 @@ fn new_window_runtime<B: Backend>(parts: NewWindowParts<B>) -> WindowRuntime<B> 
         terminal_content_revision: 0,
         presented_picture_revision: 0,
         chrome_present_pending: false,
+        turn_pays_presents: false,
+        turn_owes_a_present: false,
         textless_frames: 0,
         unpainted_pane_output: false,
         composed_terminal_frames: 0,
@@ -35534,12 +35566,12 @@ impl Runtime<'_, Native> {
                 let _ = proxy.send_event(AppEvent::UpdateChecked);
             });
         }
-        // **And the fifth's** (§7.4a), which is the only one of them that can
-        // also *write*: the probe repairs a package registration that names a
-        // folder `folio.exe` has since been dragged out of. Its wake is owed for
-        // the update check's reason and the PSReadLine probe's at once — the row
-        // it draws lives behind a modal, and the answer takes long enough that
-        // nothing else is going to ask for a frame by the time it lands.
+        // **And the fifth's** (§7.4a): a press on the Explorer first page is answered by a
+        // deployment seconds later. Its wake is owed for the update check's reason and the
+        // PSReadLine probe's at once — the row it draws lives behind a modal, and the answer
+        // takes long enough that nothing else is going to ask for a frame by the time it lands.
+        // The start's probe is the carry pass's member since 0.4.10 plan row 68b, and wakes by
+        // the pass's own wake below.
         {
             let proxy = proxy.clone();
             explorer_menu::install_wake(move || {
@@ -35594,13 +35626,6 @@ impl Runtime<'_, Native> {
                 let _ = proxy.send_event(AppEvent::WatchStewardAnswered);
             });
         }
-        // **The probe can repair and renew the package registration**, which
-        // is O's until an update's trial is committed (`update_trial`, F-7,
-        // F-18): the probe asks the trial's gate itself
-        // (`explorer_menu::probe_at_start`), a trial runs it at the commit
-        // instead, and the row reads `Unknown` until then, which it already
-        // treats as "not known yet".
-        explorer_menu::begin_probe();
         // **And an update's trial watches its journal** (`update_trial`): a
         // worker reads it until the transaction is decided, and a commit wakes
         // this loop to write what the trial held back. Nothing at all in any
@@ -36457,9 +36482,10 @@ impl Runtime<'_, Native> {
             motion: read_motion_preference(),
             profile_programs,
             startup_shells,
-            // Reads the registry once and, on a machine whose `folio.exe`
-            // has moved since, writes the verb again — see the field.
-            context_menu_installed: context_menu::reassert(),
+            // **Nothing of Explorer's menu is read on this thread at launch** (0.4.10 plan row
+            // 68b, G6): the carry pass reads the verb on its worker, repairs it there, and its
+            // answer sets this. Until then the row reads Off.
+            context_menu_installed: false,
             // **Nothing about the agents' files is read on this thread at launch** (0.4.10 plan
             // row 67b): the carry pass reads them on its worker once the program walk has said
             // where they are, and its answer sets these. Until then each switch reads Off and no
@@ -36704,17 +36730,6 @@ impl<B: Backend> Runtime<'_, B> {
 
     // ── the hover panels' one-at-a-time rule (user report, 2026-08-19) ───────
 
-    /// **The settings sheet closes** — a lifecycle door (T-POINTER-CAPTURE R-9, owner gone):
-    /// a slider or the menu bar held on it is let go of, so a hand that pressed `Esc` mid-drag
-    /// leaves nothing latched behind a sheet that is no longer there. Asked by every road that
-    /// shuts the sheet: the gear's toggle, the sheet's own `Esc` and its own close press, and a
-    /// verb that hands the reader a document instead.
-    fn settings_closed(&mut self) {
-        self.end_capture(runtime::OwnerGone(runtime::Gone::SettingsSheet));
-        // The runs of its fields go with it: there is no field left to press in (row 180).
-        self.window.drawn_fields.settings.clear();
-    }
-
     /// Discharge what the command line is still owed, on the window it opened.
     ///
     /// **The order is deliberate: the document first, the refusals after.** A
@@ -36773,163 +36788,6 @@ impl<B: Backend> Runtime<'_, B> {
         Ok(())
     }
 
-    /// **A colour scheme, changed while the window is up** (§7.1.6c-4a).
-    ///
-    /// One argument per row and both optional, because a press moves exactly one
-    /// of the pair and the other has to keep the name it already had — passing
-    /// both every time would mean the caller reading a value back out of the
-    /// store only to write it in again.
-    ///
-    /// **No restart card.** The whole point of deriving the chrome rather than
-    /// storing it is that a scheme change is the theme-switch path arriving
-    /// through another door: `set_schemes` re-derives both palettes and the ANSI
-    /// sixteen and advances `theme_revision`, which is the revision every
-    /// artefact keyed on a palette is already invalidated by. Nothing here is a
-    /// second invalidation list.
-    fn apply_scheme(&mut self, light: Option<String>, dark: Option<String>) -> Result<bool> {
-        let mut settings = self.app.settings_store.loaded().clone();
-        if let Some(light) = light {
-            settings.light_scheme = light;
-        }
-        if let Some(dark) = dark {
-            settings.dark_scheme = dark;
-        }
-        if &settings == self.app.settings_store.loaded() {
-            return Ok(false);
-        }
-        if !self.app.settings_store.store(settings) {
-            return Ok(false);
-        }
-        // **A row that just changed is coming from a different file**, and what
-        // each row is coming from is the whole of what lets a rename be followed
-        // (§7.1.6c-7). `refresh_scheme_sources` has always named "a row pressed"
-        // among the moments it is owed and was never called at one: the memory
-        // stayed on whatever the row had been wearing when the window opened, so
-        // a scheme chosen and then renamed parted from its file unnoticed.
-        //
-        // Before the early return below, because that return is about the
-        // *palette* not having moved and this is about which file answered.
-        self.refresh_scheme_sources();
-        if adopt_stored_schemes(self.app.settings_store.loaded()) == ThemeChange::Unchanged {
-            return Ok(false);
-        }
-        self.adopt_new_palette()?;
-        Ok(true)
-    }
-
-    /// **Copy the scheme in force into the user's own folder, and open the
-    /// copy** (§7.1.6c-4c, user ruling: route B).
-    ///
-    /// This is the whole of "a scheme editor" in this product, and the reason it
-    /// is not a panel of nineteen colour wells is that the file already is one:
-    /// §7.1.6c-4a made a scheme a Windows Terminal JSON object, so an editor of
-    /// our own would be a worse way to edit a format the ecosystem already
-    /// edits. What was missing was never a picker — it was a *copy to edit* and
-    /// a way to see what you are typing, and those are the two things this verb
-    /// and [`crate::hex_peek`] add.
-    ///
-    /// Five steps, in the order a person would do them by hand:
-    ///
-    /// 1. take the scheme **actually painted** — by the canvas's luma, which is
-    ///    the question the chrome asks, and not by the theme setting, because
-    ///    under a `BT_BG` override those two disagree on purpose;
-    /// 2. write it out under a name nothing else holds;
-    /// 3. tick it in the row for that canvas, so the window is already wearing
-    ///    the copy before it is edited and the first save is visible;
-    /// 4. shut the dialog, because what happens next is not in it;
-    /// 5. open the file in a preview pane with the keyboard in it.
-    ///
-    /// **A failure to write stops at step two** and says so. Everything after it
-    /// is about a file that exists.
-    fn add_scheme(&mut self, light: bool) -> Result<()> {
-        // **The canvas comes from the ROW the verb ends** (user ruling
-        // 2026-08-19) and no longer from the window's own background. The verb
-        // used to stand at the foot of a page and had to guess which of the two
-        // rows it was about; it stands at the foot of one of them now, so a
-        // reader on a Dark window who opens the Light picker and presses
-        // `Add scheme…` gets a light scheme copied — which is the row they were
-        // looking at, and the only reading that is not a guess.
-        //
-        // **It always copies**, unlike the verb it replaces. The 2026-08-18
-        // report was that `Customise scheme…` over a file the reader already
-        // owned made a second copy of it; the answer then was to change the
-        // verb's word, and the answer now is that opening a file you own has a
-        // mark of its own on the row that names it. One verb, one meaning.
-        let settings = self.app.settings_store.loaded();
-        let stored = if light {
-            settings.light_scheme.clone()
-        } else {
-            settings.dark_scheme.clone()
-        };
-        let catalogue = schemes::catalogue();
-        // The name the picker is ticking, which is the name of what is on
-        // screen: a stored name this build does not hold shows the default, and
-        // a copy called `<a name nobody has> (custom)` would be a file named
-        // after a scheme it does not contain.
-        let base = if catalogue.file_of(&stored, light).is_some() {
-            stored
-        } else {
-            catalogue.default_name(light).to_owned()
-        };
-        let scheme = catalogue.resolve(&base, light);
-        drop(catalogue);
-        let (path, name) = match schemes::write_custom_copy(&base, &scheme) {
-            Ok((path, name, _)) => (path, name),
-            Err(error) => {
-                return self.toast(
-                    toast::ToastKind::Error,
-                    toast::ToastAnchor::Window,
-                    Some(i18n::Text::AddScheme.text().to_owned()),
-                    i18n::not_saved(&error.to_string()),
-                );
-            }
-        };
-        // The folder exists now whether or not it did a moment ago, which is one
-        // of the two moments `SchemeWatch` can be armed at.
-        self.app.scheme_watch.arm(&self.app.event_proxy);
-        if light {
-            self.apply_scheme(Some(name), None)?;
-        } else {
-            self.apply_scheme(None, Some(name))?;
-        }
-        self.refresh_scheme_sources();
-        self.open_scheme_for_editing(path)
-    }
-
-    /// Put a scheme file in front of the reader, with the keyboard in it.
-    ///
-    /// The tail both halves of the foot's first verb share: `Customise scheme…`
-    /// writes a copy and comes here, `Edit scheme…` comes straight here. One
-    /// function because everything from this point on is about a file that
-    /// exists, and two copies of it would be two answers to "where does a scheme
-    /// open".
-    fn open_scheme_for_editing(&mut self, path: PathBuf) -> Result<()> {
-        // **The dialog goes.** It is the one verb in it whose answer is a
-        // document, and a modal standing over the document it just handed you is
-        // a modal in the way.
-        self.settings_closed();
-        self.window.settings.close();
-        let Some(surface) = self.preview_landing_surface() else {
-            return Ok(());
-        };
-        self.open_preview_file_on(surface, path.clone())?;
-        // The keyboard goes into the text, so the file is *open for editing* and
-        // not merely open. `preview_edit_focus` is re-validated at every read, so
-        // setting it before the head has landed is safe: it becomes true the
-        // moment there is something to type into.
-        self.preview_edit_focus = Some(surface);
-        let anchor = surface.toast_anchor();
-        let file = path
-            .file_name()
-            .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
-        self.toast(
-            toast::ToastKind::Ok,
-            anchor,
-            None,
-            i18n::scheme_customised(&file),
-        )
-    }
-
     /// Note which file each canvas's scheme is coming from, now.
     ///
     /// Asked after every event that can change the answer — startup, a row
@@ -36947,99 +36805,6 @@ impl<B: Backend> Runtime<'_, B> {
                 .file_of(&names[index], light)
                 .map(|file| (names[index].clone(), file.to_owned()));
         }
-    }
-
-    /// The schemes folder moved and has gone quiet: read it again
-    /// (§7.1.6c-4c).
-    ///
-    /// Called once per turn of the loop beside every other clock in this window.
-    /// It costs one comparison while nothing is happening — the debounce arms
-    /// only after a notification, which is what keeps an always-on watch from
-    /// being the polling R31 forbids.
-    fn advance_scheme_watch(&mut self, now: Instant) -> Result<()> {
-        if !self.app.scheme_watch.due(now) {
-            return Ok(());
-        }
-        self.reread_schemes()
-    }
-
-    /// Read the folder again, and put in force whatever that changed.
-    ///
-    /// Three outcomes, and the interesting one is the middle:
-    ///
-    /// * **the selected scheme changed** — re-derive and hot-apply, through the
-    ///   very door a settings row goes through, so a file saved and a row
-    ///   pressed cannot produce two different windows;
-    /// * **the selected scheme's file stopped parsing** — the colours on screen
-    ///   do not move, and one card says which file and why. Falling back to the
-    ///   default here would be the worst of both: the window would change colour
-    ///   *because* you made a typo, and you would be reading the error against a
-    ///   palette that is not the one you are editing;
-    /// * **the selected scheme's file is gone** — the row falls to the default,
-    ///   which is `Catalogue::resolve`'s standing answer, and one card says so.
-    ///   The stored name is left alone, so putting the file back puts the scheme
-    ///   back.
-    ///
-    /// A scheme nobody has selected can do any of the three and nothing happens,
-    /// which falls out of the arithmetic rather than being checked: what is
-    /// handed to `set_schemes` is derived from the two stored names, so a file
-    /// neither of them resolves to cannot move it.
-    fn reread_schemes(&mut self) -> Result<()> {
-        let source = self.app.scheme_source.clone();
-        let after = schemes::rescan();
-        let settings = self.app.settings_store.loaded().clone();
-        let verdict = schemes::rescan_verdict(
-            &after,
-            [&settings.light_scheme, &settings.dark_scheme],
-            source,
-            bt_render::schemes_in_force(),
-            self.app.scheme_fault.as_deref(),
-        );
-        if bt_render::set_schemes(verdict.schemes.0, verdict.schemes.1)
-            == bt_render::ThemeChange::Changed
-        {
-            self.adopt_new_palette()?;
-        }
-        self.refresh_scheme_sources();
-        self.app.scheme_fault = verdict.fault;
-        if let Some((file, reason)) = verdict.report {
-            self.toast(
-                toast::ToastKind::Error,
-                toast::ToastAnchor::Window,
-                Some(i18n::Text::SchemeInUseBroken.text().to_owned()),
-                i18n::scheme_in_use_broken(&file, &reason),
-            )?;
-        }
-        // **A rename follows the file** (user report 2026-08-18). A scheme's
-        // name lives inside its file and `settings.json` stores the name, so
-        // editing it parts the row from the file it came from: the row stops
-        // resolving, falls to the default, and the reader has to go and pick
-        // their own scheme again — which is the product fighting a change they
-        // made on purpose. The watcher already tracks the *file* each row came
-        // from, so the new name is simply written into the row that was wearing
-        // the old one. Both rows follow when both were pointing at one file.
-        //
-        // No card. The colours did not move (the verdict resolved through the
-        // new name and `set_schemes` above has already put them in force), the
-        // reader is looking at the file they just saved, and a card telling them
-        // what they typed is a card about nothing.
-        for (index, name) in verdict.renamed {
-            if index == 0 {
-                self.apply_scheme(Some(name), None)?;
-            } else {
-                self.apply_scheme(None, Some(name))?;
-            }
-        }
-        self.refresh_scheme_sources();
-        for (name, fallback) in verdict.gone {
-            self.toast(
-                toast::ToastKind::Info,
-                toast::ToastAnchor::Window,
-                Some(i18n::Text::SchemeInUseGone.text().to_owned()),
-                i18n::scheme_in_use_gone(&name, &fallback),
-            )?;
-        }
-        Ok(())
     }
 
     /// [`Self::advance_scheme_watch`]'s twin, called once per turn of the loop
@@ -37169,25 +36934,6 @@ impl<B: Backend> Runtime<'_, B> {
             )?;
         }
         Ok(())
-    }
-
-    /// Take up the stored answer about the Option key, which is the half of
-    /// [`Self::apply_option_sends_alt`] every window has to do for itself.
-    fn adopt_option_as_alt(&mut self) {
-        let option_sends_alt = self.app.settings_store.loaded().option_sends_alt;
-        set_option_as_alt(&self.window.window, option_sends_alt);
-        // **Struck against what is held, not against what was left standing.**
-        // Reading the effective state back through the same door would be a
-        // one-way street: the `Alt` this line takes out while the setting is off
-        // is gone, so switching the setting back on under a hand that is still
-        // holding `Option` could not put it back until the next report. The
-        // reported state is the one thing here that is not a consequence of the
-        // setting, which is what makes it the right thing to recompute from.
-        self.window.modifiers = input::effective_modifiers(
-            self.window.modifiers_held,
-            option_sends_alt,
-            bt_platform::host_platform(),
-        );
     }
 
     // `current_preview_buffer` stood here — the buffer "the" preview seat was
@@ -49707,16 +49453,31 @@ impl<B: Backend> FolioApp<B> {
     /// chrome redrawn, because the rows are facts about the machine and any window may be showing
     /// the page. A snapshot no member answered for has nothing to set.
     fn adopt_carry_snapshot(&mut self) -> Result<()> {
-        let Some(carried) = carry_pass::take_carry_snapshot() else {
-            return Ok(());
-        };
-        let Some(snapshot) = carried.hooks else {
-            return Ok(());
-        };
+        // The app first: a wake handled with no `App` leaves the snapshot for the one that has it
+        // (row 68b, review N8), where taking it first would drop the classic answer for good.
         let Some(app) = self.app.as_mut() else {
             return Ok(());
         };
-        adopt_agent_hooks_snapshot(app, &snapshot);
+        let Some(carried) = carry_pass::take_carry_snapshot() else {
+            return Ok(());
+        };
+        // The classic verb's answer, unless a press has written since its read (row 68b, R4): the
+        // press's own read is the newer one. The package's row reads its module's cells, which
+        // the round wrote on the worker; the redraw below is what it is owed.
+        if let Some(classic) = carried.explorer {
+            context_menu::adopt_classic_answer(
+                &mut app.context_menu_installed,
+                classic,
+                &context_menu::CLASSIC_PRESSES,
+            );
+        }
+        let notices: Vec<i18n::Text> = match carried.hooks {
+            Some(snapshot) => {
+                adopt_agent_hooks_snapshot(app, &snapshot);
+                snapshot.notices
+            }
+            None => Vec::new(),
+        };
         let oldest_standing = |app: &mut Self| {
             (0..app.windows.len()).find_map(|index| {
                 let id = app.windows.key_at(index)?;
@@ -49729,7 +49490,7 @@ impl<B: Backend> FolioApp<B> {
         let told = self.frontmost_window().or_else(|| oldest_standing(self));
         self.for_each_window(|runtime| {
             if Some(runtime.window_id()) == told {
-                for notice in &snapshot.notices {
+                for notice in &notices {
                     runtime.toast(
                         toast::ToastKind::Ok,
                         toast::ToastAnchor::Window,
@@ -51694,6 +51455,11 @@ impl<B: Backend> FolioApp<B> {
                 wake_owner::owned(WakeOwner::ImeReport, ime_deadline),
             ]);
             let turn = runtime.turn(now, application_clocks);
+            // **A turn that left early still hands over what it was asked for**
+            // (T-TWO-BARE-TURNS-PER-MARK-STEP): a turn that returned an error before its own
+            // end has not paid the present it deferred, and the window — kept, after a lost
+            // device — must not keep deferring. On a turn that ran to its end this does nothing.
+            runtime.end_the_turns_presents();
             application_clocks = false;
             match turn {
                 Ok(window_wake) => wake = wake_owner::earliest_wake([wake, window_wake]),
@@ -52869,7 +52635,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 // **The version is the start-time repair's gate for Copilot's hooks** (0.4.10 plan
                 // row 67b, R9): a repair that waited for it runs now, and the scan's snapshot,
                 // which carries readiness too, is read after this answer.
-                carry_pass::begin_carry_pass();
+                carry_pass::begin_carry_pass(CarryAsk::HOOKS);
                 self.for_each_window(|runtime| {
                     if runtime.refresh_chrome() {
                         runtime.present_chrome_change()
@@ -59655,7 +59421,7 @@ mod platform_gate_tests {
 
     /// **The list.** One file per line, in the order `ls` gives them, each with
     /// the reason it is allowed to ask.
-    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 43] = [
+    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 44] = [
         // Windows-only test fixture: the `pi` row, which only the Windows table ships, reopened
         // from a Recent row, beside its every-platform twin on the host's fallback shell.
         "app_files_tests.rs",
@@ -59682,6 +59448,10 @@ mod platform_gate_tests {
         // Windows-only test fixture: GDI's own drawing of a top-down and a 16-bit bitmap,
         // beside the every-platform rows of the layout the Windows arm hands over.
         "clipboard_picture.rs",
+        // Windows-only test fixture (2026-11-09, 0.4.10 plan row 68b): the classic verb's
+        // historical shapes planted with `reg.exe` in an isolated `HKCU\Software\Folio-Test`
+        // subkey, beside the every-platform run of the same shapes over a fake store.
+        "context_menu.rs",
         // The Explorer verb itself, which has no counterpart off Windows.
         "explorer_menu.rs",
         // Drive roots, the recycle bin, and the reveal.

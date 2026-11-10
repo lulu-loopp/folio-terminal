@@ -861,26 +861,29 @@ fn test_found(module: &str, test: &str) -> bool {
 ///    `update_trial::tests::writer_all_names_every_variant` holds `ALL` to the whole enum — is
 ///    named by some row's rule, so a new start writer must say which owned thing it carries;
 /// 3. every owner check a row declares is called by `carry_pass::run_carry_steps` with the worker's
-///    context, and its old sites are gone from `Runtime::create`; or it is owed by a later part,
-///    still runs where it ran when it was owed (`Runtime::create`), and the test that part lands
-///    with is not yet in the program; and every member that body hands the context to is a check
-///    some row declares. So an owed seam ends the day its part lands: the part that moves its check
-///    takes the old call away, the part that lands its test makes `landed_by` found, and the part
-///    that adds its member adds a call; each is red until `in_the_pass` answers `Ok` for it, and
-///    then the old site must be gone. Every statement is read with comments and whitespace
-///    squeezed out, so a comment keeps nothing alive;
+///    context, its old sites are gone from both start-time sites — `Runtime::create` and the trial
+///    commit's `release_trial_writer` (row 68b, R9) — and the test it landed with is still in the
+///    program (`PassMember::proved_by`, R9); and every member that body hands the context to is a
+///    check some row declares. **No check is owed by a later part**: the seam row 68a named for one
+///    (`Owed`) held the Explorer registrations until row 68b and the `$PROFILE` lines until row 68c,
+///    and went with its last entry (the coordinator's ruling at row 68b's merge) — the list is empty
+///    by construction, so a part that declares a check lands its member with it. Every statement
+///    is read with comments and whitespace squeezed out, so a comment keeps nothing alive;
 /// 4. an agent's check is its own row's: `AgentHooks(i)` stands on the row `Remover::Agent(i)`;
 /// 5. every check in the pass names the test that brings its old shape to today's, and `bt_source`
-///    finds that test; only an owed check may name none (the classic verb's, 68b's finding);
+///    finds that test;
 /// 6. every retirement names the dated ruling that keeps it, and every document's reader is the
 ///    item its file names.
 ///
 /// MUTATIONS: the pass stops calling its member (`plant-68a-pass-skips-its-member.py`); a start
 /// writer loses its row (`plant-68a-writer-claimed-by-no-row.py`); the old-shape test is renamed
-/// (`plant-68a-old-shape-test-renamed.py`); an owed check leaves `Runtime::create` while its
-/// declaration still owes it (`plant-68a-owed-check-half-moved.py`); the owed part's test lands
-/// while the check is still owed (`plant-68a-owed-part-landed.py`); two agents' checks swap rows
-/// (`plant-68a-agent-checks-swapped.py`).
+/// (`plant-68a-old-shape-test-renamed.py`); two agents' checks swap rows
+/// (`plant-68a-agent-checks-swapped.py`); the package member is left out of the pass
+/// (`plant-68b-package-member-skipped.py`); the classic verb's reassert is back in
+/// `Runtime::create` (`plant-68b-classic-back-at-create.py`); the trial's release arm calls the
+/// retired probe again (`plant-68b-probe-back-at-the-release.py`); a landed test is renamed
+/// (`plant-68b-landed-test-renamed.py`); the package member is run bare of the boundary that runs
+/// the press behind its latch (`plant-68b-package-member-past-its-boundary.py`).
 #[test]
 fn every_owned_thing_says_how_an_update_carries_it() {
     use crate::carry_pass::{CarryCheck, CarryRule};
@@ -918,7 +921,14 @@ fn every_owned_thing_says_how_an_update_carries_it() {
     }
     let pass = squeezed(crate::test_support::free_fn_body("run_carry_steps"));
     let create = squeezed(crate::test_support::method_body("Runtime", "create"));
+    let release = squeezed(crate::test_support::free_fn_body("release_trial_writer"));
     let handed = calls_handed_the_context(&pass);
+    // The package member runs through the boundary that runs the press a contained panic left
+    // behind its deployment latch (row 68b, second re-review S2).
+    assert!(
+        pass.contains("package_member_with(asked,behind,"),
+        "run_carry_steps runs the package member through package_member_with: {pass}"
+    );
     let checks: Vec<(&Mark, CarryCheck)> = rules()
         .filter_map(|(mark, rule)| match rule {
             CarryRule::OwnerChecked { check, .. } => Some((mark, check)),
@@ -935,50 +945,37 @@ fn every_owned_thing_says_how_an_update_carries_it() {
                 "{name}: {check:?} is another agent's check"
             );
         }
-        match check.in_the_pass() {
-            Ok(member) => {
-                assert!(
-                    handed.iter().any(|called| called == member.call),
-                    "{name}: {check:?} is in the pass by its declaration, and \
-                     `run_carry_steps` does not hand {}(ctx) the worker's context",
-                    member.call
-                );
-                for retired in member.retired {
-                    assert!(
-                        !create.contains(&squeezed(retired)),
-                        "{name}: {check:?} runs in the pass and still by its old site in \
-                         `Runtime::create`: {retired}"
-                    );
-                }
-                members.push(member.call);
-            }
-            Err(owed) => {
-                assert!(
-                    create.contains(&squeezed(owed.runs_today)),
-                    "{name}: {check:?} no longer runs where it was owed ({}): part {} has moved \
-                     it, so `CarryCheck::in_the_pass` answers its call in the pass",
-                    owed.runs_today,
-                    owed.part
-                );
-                let (module, test) = owed.landed_by;
-                assert!(
-                    !test_found(module, test),
-                    "{name}: {check:?} is owed by part {}, whose test {module}::{test} has \
-                     landed: `CarryCheck::in_the_pass` answers its call in the pass",
-                    owed.part
-                );
-            }
+        let member = check.in_the_pass();
+        assert!(
+            handed.iter().any(|called| called == member.call),
+            "{name}: {check:?} is in the pass by its declaration, and \
+             `run_carry_steps` does not hand {}(ctx) the worker's context",
+            member.call
+        );
+        for retired in member.retired {
+            assert!(
+                !create.contains(&squeezed(retired)),
+                "{name}: {check:?} runs in the pass and still by its old site in \
+                 `Runtime::create`: {retired}"
+            );
+            assert!(
+                !release.contains(&squeezed(retired)),
+                "{name}: {check:?} runs in the pass and still by its old site in \
+                 `release_trial_writer`: {retired}"
+            );
         }
-        match check.old_shape_test() {
-            Some((module, test)) => assert!(
-                test_found(module, test),
-                "{name}: {check:?}'s old-shape test {module}::{test} is gone"
-            ),
-            None => assert!(
-                check.in_the_pass().is_err(),
-                "{name}: {check:?} runs in the pass and names no test of its old shape"
-            ),
-        }
+        let (module, test) = member.proved_by;
+        assert!(
+            test_found(module, test),
+            "{name}: {check:?} runs in the pass, and the test it landed with, \
+             {module}::{test}, is gone"
+        );
+        members.push(member.call);
+        let (module, test) = check.old_shape_test();
+        assert!(
+            test_found(module, test),
+            "{name}: {check:?}'s old-shape test {module}::{test} is gone"
+        );
     }
     for called in &handed {
         assert!(
@@ -1156,14 +1153,14 @@ fn uninstall_source_guard_pins_known_writers_and_inventory() {
         (
             Remover::Explorer,
             app,
-            function("crate::context_menu", "reassert"),
-            "context_menu.rs:reassert",
+            function("crate::context_menu", "reassert_in"),
+            "context_menu.rs:reassert_in",
         ),
         (
             Remover::Explorer,
             app,
-            function("crate::explorer_menu", "probe"),
-            "explorer_menu.rs:probe",
+            function("crate::explorer_menu", "probe_at_start"),
+            "explorer_menu.rs:probe_at_start",
         ),
         (
             Remover::OutsideTheDoor,
@@ -2165,7 +2162,7 @@ fn uninstall_update_rows_name_their_writers() {
     };
     assert!(body("arm").contains("arm_with("));
     assert!(body("arm_with").contains("durable_write_with("));
-    assert!(body("sweep").contains("is_ours("));
+    assert!(body("sweep_by").contains("is_ours("));
     assert!(method_body("Home", "for_bundle").contains("MACOS_HOME_SUFFIX"));
     for (remover, writer) in [
         (Remover::UpdateEntrances, "launch_agent.rs:arm"),

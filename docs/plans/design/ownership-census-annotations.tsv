@@ -48,6 +48,7 @@ App.quit	-	LIFE	windows	the 2026-09-25 table
 App.recent	-	DUR	windows	the 2026-09-25 table
 App.recent_folders	-	DUR	files	proposed by census-1
 App.restore_question	-	DUR	windows	the 2026-09-25 table
+App.scheme_watch	-	OBS	settings	K2 batch 27 (2026-11-02, the owner-arrival rule ruled that day under the owner's "keep splitting" ruling): the launch arms the schemes folder's watch (Runtime::create, at the root); the page's verbs in runtime::settings arm it again when Customise scheme writes the folder (add_scheme) and spend its clock each turn (advance_scheme_watch)
 App.session_store	-	DUR	windows	the 2026-09-25 table
 App.settings_store	-	DUR	settings	the 2026-09-25 table; renamed from main[settings] when K2 batch 23 opened runtime/settings.rs (2026-10-27)
 App.shortcuts	-	DUR	keyboard	the 2026-09-25 table
@@ -71,7 +72,6 @@ TabState.git_scroll	-	VIEW	git	the 2026-09-25 table
 TabState.git_trees	-	OBS	git	the 2026-09-25 table
 TabState.pending_keyboard_at	-	PROJ	keyboard	the 2026-09-25 table
 TabState.preview_block_hover	-	VIEW	preview	the 2026-09-25 table
-TabState.preview_edit_focus	-	VIEW	preview	the 2026-09-25 table
 TabState.preview_panes	-	VIEW	preview	the 2026-09-25 table
 TabState.preview_pool	-	DUR	preview	the 2026-09-25 table
 TabState.preview_views	-	VIEW	preview	the 2026-09-25 table
@@ -118,6 +118,7 @@ WindowRuntime.last_presented_frame	-	PROJ	frame	the 2026-09-25 table
 WindowRuntime.layout_peek	-	VIEW	peek	the 2026-09-25 table
 WindowRuntime.local_wheel_subpixel_remainder	-	VIEW	mouse	the 2026-09-25 table
 WindowRuntime.math_tool_pressed	-	VIEW	math	the 2026-09-25 table
+WindowRuntime.modifiers	-	OBS	keyboard	K2 batch 27 (2026-11-02, the owner-arrival rule ruled that day under the owner's "keep splitting" ruling): FolioApp::on_window_event writes it at the root, the ModifiersChanged door; runtime::keyboard's adopt_option_as_alt re-derives it from what the hand holds when the Option row changes
 WindowRuntime.palette	-	VIEW	palette	the 2026-09-25 table
 WindowRuntime.palette_layout	-	PROJ	palette	the 2026-09-25 table
 WindowRuntime.pane_menu	-	VIEW	panes	the 2026-09-25 table

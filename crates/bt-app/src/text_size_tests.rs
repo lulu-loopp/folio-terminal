@@ -679,7 +679,10 @@ fn the_rung_has_one_owner() {
         "WindowRenderer::peek_thumbnail_extent",
         "WindowRenderer::prepare_peek_draws",
         "WindowRenderer::peek_box_rects",
-        "WindowRenderer::float_tag_rects",
+        // the status overlay's tag, drawn by the frame's seat painter from the window's base
+        // that the body's key carries (`BodyState::base_metrics`, row 64a)
+        "SeatPainter::float_tag_rects",
+        "WindowRenderer::body_state",
         // the single-seat door and the replay probe's encoding (`bt_render::probe_surface`;
         // its submit is `bt-render-probe`'s), whose one pane has no rung
         "WindowRenderer::present",

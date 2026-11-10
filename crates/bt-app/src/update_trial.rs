@@ -174,9 +174,12 @@ pub(crate) enum Writer {
     /// under the system temporary directory, and removes nothing; the release
     /// prepares the durable copy on a worker.
     PsReadLineModule,
-    /// The launch probe's repair and renewal of the Explorer package
-    /// registration (`explorer_menu::begin_probe`; the gate is asked in
-    /// `explorer_menu::probe_at_start`, U-25).
+    /// The carry pass's repair and renewal of the Explorer package registration
+    /// (`explorer_menu::run_package_step`; the gate is asked in
+    /// `explorer_menu::probe_at_start`, U-25) and its rewrite of the classic verb
+    /// (`context_menu::run_classic_step`, 0.4.10 plan row 68b, G6): both registrations name
+    /// the old build until the trial is committed. Held back, both are still read and shown;
+    /// the release runs the two Explorer members again.
     ExplorerRepair,
     /// The toast sender's identity in the registry (`NotificationDesk::show` →
     /// `bt_platform::Notifier::register_identity`).
@@ -199,6 +202,11 @@ pub(crate) enum Writer {
     /// shape, rewritten to this one. Held back, the scan still runs and its classification is
     /// shown; the release runs the pass again, which then writes.
     AgentHooksRepair,
+    /// **The carry pass's removal of an update's entrance whose rescue program is gone**
+    /// (`update_orphans::run_orphans_step`, 0.4.10 plan row 68b, R5 of 2026-11-04): a Windows
+    /// `Run\FolioUpdate-*` value or a macOS update LaunchAgent no copy can answer. Held back,
+    /// the entrances are still read and said; the release runs the sweep again.
+    OrphanSweep,
 }
 
 impl Writer {
@@ -223,13 +231,14 @@ impl Writer {
             | Writer::ToastIdentity
             | Writer::RecoveredAnnouncement
             | Writer::RestartRegistration
-            | Writer::AgentHooksRepair => false,
+            | Writer::AgentHooksRepair
+            | Writer::OrphanSweep => false,
         }
     }
 
     /// Every writer, in release order.
     #[cfg(test)]
-    pub(crate) const ALL: [Writer; 19] = [
+    pub(crate) const ALL: [Writer; 20] = [
         Writer::DataFolderMove,
         Writer::DataFolder,
         Writer::RefusedCopies,
@@ -249,6 +258,7 @@ impl Writer {
         Writer::RecoveredAnnouncement,
         Writer::RestartRegistration,
         Writer::AgentHooksRepair,
+        Writer::OrphanSweep,
     ];
 }
 
@@ -4817,6 +4827,7 @@ mod tests {
             Writer::RecoveredAnnouncement => 16,
             Writer::RestartRegistration => 17,
             Writer::AgentHooksRepair => 18,
+            Writer::OrphanSweep => 19,
         };
         for (index, writer) in Writer::ALL.into_iter().enumerate() {
             assert_eq!(

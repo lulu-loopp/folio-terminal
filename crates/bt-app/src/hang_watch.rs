@@ -328,7 +328,7 @@ const NS_PER_MS: u64 = 1_000_000;
 /// Held against [`Station`] by `every_station_has_a_slot_in_the_ledger`: a
 /// further variant added without widening this would have its milliseconds
 /// charged to nobody, and the line would silently stop adding up.
-const STATION_COUNT: usize = 224;
+const STATION_COUNT: usize = 225;
 
 /// How deep the dispatched messages [`Heartbeat::message_began_at`] keeps
 /// apart can nest (ticket 64).
@@ -1077,8 +1077,14 @@ pub enum Station {
     MediaQuiet = 222,
     /// **`diagnostics.log`'s writer settled on the way out** — `diagnostics::settle`, before
     /// the run's footer (§5.3 row 30; door `DiagnosticsSettle`,
-    /// T-DIAGNOSTICS-NOTE-OFF-THE-WINDOW-THREAD). Byte 223, the run's end.
+    /// T-DIAGNOSTICS-NOTE-OFF-THE-WINDOW-THREAD). Byte 223.
     DiagnosticsSettle = 223,
+    /// **The present a window's turn pays at its own end** — `Runtime::pay_the_turns_present`,
+    /// the frame its clocks or its drain asked for, presented on the turn that asked instead of
+    /// on a second one (T-TWO-BARE-TURNS-PER-MARK-STEP). The present's own stations (compose,
+    /// acquire, submit, present, commit) stand inside it, as they stand inside `EventRedraw`
+    /// for a paint the platform sends. Byte 224, the run's end.
+    TurnPresent = 224,
 }
 
 impl Station {
@@ -1310,6 +1316,7 @@ impl Station {
             Self::UpdateLeave => "update_handoff::leave_armed",
             Self::MediaQuiet => "video::shutdown_media_session",
             Self::DiagnosticsSettle => "diagnostics::settle",
+            Self::TurnPresent => "pay_the_turns_present",
         }
     }
 
@@ -1555,6 +1562,7 @@ impl Station {
             221 => Self::UpdateJobProgress,
             222 => Self::MediaQuiet,
             223 => Self::DiagnosticsSettle,
+            224 => Self::TurnPresent,
             _ => Self::Starting,
         }
     }
@@ -1931,6 +1939,10 @@ pub struct Heartbeat {
     accounts: accounting::Accounts,
     /// When the station in progress was entered.
     station_since_ms: AtomicU64,
+    /// The same instant in nanoseconds, for the turn census's per-station time
+    /// (`BT_PERF_TRACE stations`, T-TWO-BARE-TURNS-PER-MARK-STEP): the ledger above charges
+    /// whole milliseconds, and an empty turn is a third of one.
+    station_since_ns: AtomicU64,
     /// The hold in progress, by station. See [`SlowHold::spent_ms`].
     spent_ms: [AtomicU64; STATION_COUNT],
     /// Holds that ran past [`SLOW_HOLD_THRESHOLD`], waiting to be written.
@@ -2024,6 +2036,7 @@ impl Heartbeat {
             held_since_ns: AtomicU64::new(0),
             accounts: accounting::Accounts::new(),
             station_since_ms: AtomicU64::new(0),
+            station_since_ns: AtomicU64::new(0),
             spent_ms: std::array::from_fn(|_| AtomicU64::new(0)),
             slow: Mutex::new(Vec::new()),
             slow_dropped: AtomicU64::new(0),
@@ -2172,7 +2185,7 @@ impl Heartbeat {
         if self.held_since_ns.load(Ordering::Relaxed) == 0 {
             self.open_hold(now_ns);
         }
-        self.move_to(Station::Wait, now_ms);
+        self.move_to(Station::Wait, now_ns);
         self.at_ms.store(now_ms, Ordering::Relaxed);
         self.park.store(PARK_RUNNING, Ordering::Relaxed);
         self.turn.fetch_add(1, Ordering::Release);
@@ -2185,17 +2198,28 @@ impl Heartbeat {
     /// was *in*, which is what makes untagged code between two stations show up
     /// against the last named call rather than vanishing — [`Station`]'s own
     /// rule, now counted instead of merely labelled.
-    fn move_to(&self, station: Station, now_ms: u64) {
-        self.charge(station, now_ms);
+    fn move_to(&self, station: Station, now_ns: u64) {
+        self.charge(station, now_ns);
         self.detail.at(station);
     }
 
-    fn charge(&self, station: Station, now_ms: u64) {
+    /// The charge itself, at `now_ns`: the hold's ledger in whole milliseconds, as it always
+    /// was, and the run's per-station time in nanoseconds for the turn census
+    /// ([`census::Census::station`]). The clock is the caller's one reading; this reads none.
+    /// The census's part is a relaxed load and store of the entry instant and of the station's
+    /// counter: the window thread is the one writer of both, as of the station itself.
+    fn charge(&self, station: Station, now_ns: u64) {
+        let now_ms = now_ns / NS_PER_MS;
         let leaving = Station::from_byte(self.station.load(Ordering::Relaxed));
         let since = self.station_since_ms.load(Ordering::Relaxed);
         self.detail.charge(now_ms.saturating_sub(since));
         self.spent_ms[leaving.slot()].fetch_add(now_ms.saturating_sub(since), Ordering::Relaxed);
         self.station_since_ms.store(now_ms, Ordering::Relaxed);
+        let since_ns = self.station_since_ns.load(Ordering::Relaxed);
+        self.station_since_ns.store(now_ns, Ordering::Relaxed);
+        self.accounts
+            .census
+            .station(leaving, now_ns.saturating_sub(since_ns));
         self.station.store(station as u8, Ordering::Relaxed);
     }
 
@@ -2218,6 +2242,7 @@ impl Heartbeat {
         }
         self.open_footprint(now_ms);
         self.station_since_ms.store(now_ms, Ordering::Relaxed);
+        self.station_since_ns.store(now_ns, Ordering::Relaxed);
         self.held_since_ns
             .store(now_ns.saturating_add(1), Ordering::Relaxed);
     }
@@ -2496,12 +2521,19 @@ impl Heartbeat {
     /// wedge inside that event would be excused by a deadline that had nothing
     /// to do with it.
     pub fn at(&self, station: Station) {
-        self.at_station(station, self.now_ms());
+        self.at_station_ns(station, self.now_ns());
     }
 
     /// [`Self::at`] on a clock the caller holds. See [`Self::park_at`].
+    #[cfg(test)]
     pub fn at_station(&self, station: Station, now_ms: u64) {
-        self.move_to(station, now_ms);
+        self.at_station_ns(station, now_ms.saturating_mul(NS_PER_MS));
+    }
+
+    /// [`Self::at`] on a nanosecond clock the caller holds: the one body of `at` and of the tests'
+    /// millisecond `at_station`.
+    fn at_station_ns(&self, station: Station, now_ns: u64) {
+        self.move_to(station, now_ns);
         self.park.store(PARK_RUNNING, Ordering::Relaxed);
     }
 
@@ -2530,7 +2562,7 @@ impl Heartbeat {
 
     /// [`Self::park_at`] in nanoseconds.
     fn park_at_ns(&self, park: Park, now_ns: u64) {
-        self.move_to(Station::Parked, now_ns / NS_PER_MS);
+        self.move_to(Station::Parked, now_ns);
         self.close_hold(now_ns);
         self.accounts.parked(matches!(park, Park::Until(_)), now_ns);
         self.park.store(park.to_bits(), Ordering::Relaxed);
@@ -2635,7 +2667,7 @@ pub fn at(location: impl Into<Location>) {
             station,
             node,
             scope,
-        } => HEARTBEAT.resume_at(station, node, scope, HEARTBEAT.now_ms()),
+        } => HEARTBEAT.resume_at_ns(station, node, scope, HEARTBEAT.now_ns()),
     }
 }
 
@@ -2657,8 +2689,14 @@ impl From<Station> for Location {
 }
 
 impl Heartbeat {
-    fn enter_at(&self, station: Station, pane: u64, now: u64) -> Location {
-        let (previous, node, scope) = self.enter_saving(station, pane, now);
+    /// [`Self::enter_at_ns`] on a millisecond clock the caller holds. See [`Self::park_at`].
+    #[cfg(test)]
+    fn enter_at(&self, station: Station, pane: u64, now_ms: u64) -> Location {
+        self.enter_at_ns(station, pane, now_ms.saturating_mul(NS_PER_MS))
+    }
+
+    fn enter_at_ns(&self, station: Station, pane: u64, now_ns: u64) -> Location {
+        let (previous, node, scope) = self.enter_saving(station, pane, now_ns);
         Location::Resume {
             station: previous,
             node,
@@ -2668,19 +2706,25 @@ impl Heartbeat {
 
     /// Enter `station` and answer the three things a return must put back: the station being
     /// left, the call-tree node and the scope.
-    fn enter_saving(&self, station: Station, pane: u64, now: u64) -> (Station, usize, usize) {
+    fn enter_saving(&self, station: Station, pane: u64, now_ns: u64) -> (Station, usize, usize) {
         let parent = self.detail.current();
         let scope = self.detail.scope();
         let previous = Station::from_byte(self.station.load(Ordering::Relaxed));
-        self.charge(station, now);
+        self.charge(station, now_ns);
         self.park.store(PARK_RUNNING, Ordering::Relaxed);
         self.detail.enter(station, parent, pane);
         self.detail.set_scope(self.detail.current());
         (previous, parent, scope)
     }
 
-    fn resume_at(&self, station: Station, node: usize, scope: usize, now: u64) {
-        self.charge(station, now);
+    /// [`Self::resume_at_ns`] on a millisecond clock the caller holds. See [`Self::park_at`].
+    #[cfg(test)]
+    fn resume_at(&self, station: Station, node: usize, scope: usize, now_ms: u64) {
+        self.resume_at_ns(station, node, scope, now_ms.saturating_mul(NS_PER_MS));
+    }
+
+    fn resume_at_ns(&self, station: Station, node: usize, scope: usize, now_ns: u64) {
+        self.charge(station, now_ns);
         self.park.store(PARK_RUNNING, Ordering::Relaxed);
         self.detail.restore(node);
         self.detail.set_scope(scope);
@@ -2722,14 +2766,14 @@ pub fn counters(bytes: usize, accepted: usize, count: usize) {
 
 /// A renderer callback changes sibling phases inside one presentation scope.
 pub fn phase(station: Station) {
-    HEARTBEAT.charge(station, HEARTBEAT.now_ms());
+    HEARTBEAT.charge(station, HEARTBEAT.now_ns());
     HEARTBEAT.park.store(PARK_RUNNING, Ordering::Relaxed);
     HEARTBEAT.detail.phase(station);
 }
 
 /// Enter a pane scope; the ID is part of the fixed ledger key.
 pub fn enter_pane(station: Station, pane: u64) -> Location {
-    HEARTBEAT.enter_at(station, pane.saturating_add(1), HEARTBEAT.now_ms())
+    HEARTBEAT.enter_at_ns(station, pane.saturating_add(1), HEARTBEAT.now_ns())
 }
 
 /// **Enter `station`, and answer the one being left** so the caller can put it
@@ -2751,7 +2795,7 @@ pub fn enter_pane(station: Station, pane: u64) -> Location {
 /// in trouble.
 #[must_use]
 pub fn enter(station: Station) -> Location {
-    HEARTBEAT.enter_at(station, 0, HEARTBEAT.now_ms())
+    HEARTBEAT.enter_at_ns(station, 0, HEARTBEAT.now_ns())
 }
 
 /// Run one existing call as an exclusive child station, then resume its parent.
@@ -2797,7 +2841,7 @@ fn admitted_enter(door: DoorKey) -> Cookie {
     #[cfg(test)]
     ADMITTED_HERE.with(|admitted| admitted.borrow_mut().push(door.name()));
     let heart = meter_heart();
-    heart.admitted_enter_at(Station::from_byte(door.station()), heart.now_ms())
+    heart.admitted_enter_at_ns(Station::from_byte(door.station()), heart.now_ns())
 }
 
 fn admitted_leave(door: DoorKey, cookie: Cookie, start: Instant, end: Instant) {
@@ -2920,9 +2964,16 @@ fn decode(cookie: Cookie) -> Option<Saved> {
 }
 
 impl Heartbeat {
-    fn admitted_enter_at(&self, station: Station, now: u64) -> Cookie {
+    /// [`Self::admitted_enter_at_ns`] on a millisecond clock the caller holds. See
+    /// [`Self::park_at`].
+    #[cfg(test)]
+    fn admitted_enter_at(&self, station: Station, now_ms: u64) -> Cookie {
+        self.admitted_enter_at_ns(station, now_ms.saturating_mul(NS_PER_MS))
+    }
+
+    fn admitted_enter_at_ns(&self, station: Station, now_ns: u64) -> Cookie {
         let depth = self.accounts.enter();
-        let (previous, node, scope) = self.enter_saving(station, 0, now);
+        let (previous, node, scope) = self.enter_saving(station, 0, now_ns);
         pack(Saved {
             station: previous,
             node,
@@ -2948,23 +2999,23 @@ impl Heartbeat {
             saved.is_some_and(|saved| saved.depth == 0),
             self.hold_began_ns(),
         );
-        self.give_back(saved, end_ns / NS_PER_MS)
+        self.give_back(saved, end_ns)
     }
 
     /// Put back what the cookie saved, and answer whether it could: a cookie the meter did not
     /// make restores nothing and is counted.
     #[cfg(test)]
-    fn admitted_leave_at(&self, cookie: Cookie, now: u64) -> bool {
-        self.give_back(decode(cookie), now)
+    fn admitted_leave_at(&self, cookie: Cookie, now_ms: u64) -> bool {
+        self.give_back(decode(cookie), now_ms.saturating_mul(NS_PER_MS))
     }
 
-    fn give_back(&self, saved: Option<Saved>, now: u64) -> bool {
+    fn give_back(&self, saved: Option<Saved>, now_ns: u64) -> bool {
         let Some(saved) = saved else {
             INVALID_COOKIES.fetch_add(1, Ordering::Relaxed);
             return false;
         };
         self.accounts.restore_depth(saved.depth);
-        self.resume_at(saved.station, saved.node, saved.scope, now);
+        self.resume_at_ns(saved.station, saved.node, saved.scope, now_ns);
         true
     }
 }

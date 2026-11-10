@@ -75,20 +75,24 @@ and never before the agents' hooks have had their first real answer, so nothing
 the window adopts waits for a PowerShell. The order at a start: the start's own
 round comes before the program walk has answered, so the hooks have nothing to
 read and this member runs nothing (it asks nothing, and stays owed); the walk's
-answer — or the program lane's word that no walk will answer: a walk that
+first answer — or the program lane's word that no walk will answer: a walk that
 failed, a worker that ended, a request refused with no walk standing; never a
-timer — begins the pass again, and that round runs the hooks, publishes them,
-and then runs this member, whose answer is published on its own. Whether the
+timer — begins the pass again asking for the hooks and this member
+(`CarryAsk::HOMES_SETTLED`; every other moment asks for the members its ruling
+names, and an Agents-page open or a press asks for the hooks alone), and that
+round runs the hooks, publishes them, and then runs this member, whose answer is
+published on its own. Whether the
 hooks had their answer is read as a round begins, so a walk that lands during a
 round leaves this member to the round it begins. A walk still out has neither an
 answer nor a refusal: the hooks and this member wait for it, as the hooks have
 since row 67b, and its answer is used whenever it lands — the lane has no
 deadline, so there is no timer. Nor does it start while another round is asked
 for (a Copilot probe's answer, which the first-run card waits on; an Agents-page
-open; a press): that round runs next and this member yields to it, starting in a
-later round with nothing pending, so no round anybody waits for waits for a
-PowerShell. During an update's trial it is
-held back (`update_trial::Writer::ProfileMigration`) and runs at the commit. On
+open; a press): that round runs next and this member yields to it, written into
+that round's ask, and starts there or in a later round with nothing pending, so no
+round anybody waits for waits for a PowerShell. During an update's trial it is
+held back (`update_trial::Writer::ProfileMigration`) and runs at the commit, whose
+round asks for this member alone and starts it on the hooks' earlier answer. On
 the pass's below-normal worker it observes each installed PowerShell (the
 observation the Profiles page and the launch menu read; `-NoProfile`,
 `-NonInteractive`, a hidden console and a five-second timeout, each executable
