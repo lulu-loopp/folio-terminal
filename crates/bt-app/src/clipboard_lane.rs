@@ -1317,9 +1317,8 @@ mod tests {
     /// MUTATION: drop the `note` from `PlatformClipboard::serve`, or write the line to stderr — red.
     #[test]
     fn the_machines_clipboard_writes_its_read_line_on_the_worker() {
-        let serve = crate::test_support::squeezed(crate::test_support::method_body(
-            "PlatformClipboard",
-            "serve",
+        let serve = crate::test_support::squeezed(crate::test_support::item_body(
+            &bt_source::ItemQuery::method("PlatformClipboard", "serve").of_trait("ClipboardDoor"),
         ));
         assert!(
             serve.contains(
