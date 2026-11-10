@@ -506,7 +506,7 @@ pub fn clipboard_payload(worker: &WorkerCtx) -> ClipboardRead {
 /// for its data object through the clipboard's one declared contention wait, and
 /// [`render_promise`] reads the descriptor again, which must be `offer`, and writes each file,
 /// each step advancing `progress`. The thread joins a single-threaded apartment for the call and
-/// leaves it on every road out, a panic's too ([`Apartment`]); the data object is let go before
+/// leaves it on every road out, a panic's too ([`OleApartment`]); the data object is let go before
 /// it does.
 ///
 /// # Errors
@@ -518,7 +518,7 @@ pub fn render_clipboard_promise(
     into: &Path,
     progress: &RenderProgress,
 ) -> Result<RenderedPromise, PromiseRefused> {
-    let _apartment = Apartment::single_threaded().map_err(|error| not_rendered(&error))?;
+    let _apartment = OleApartment::single_threaded().map_err(|error| not_rendered(&error))?;
     let data = crate::windows_impl::ole_clipboard_with_retry(worker)
         .map_err(|error| not_rendered(&error))?;
     // Declared after the apartment, so it is let go first.
@@ -530,9 +530,9 @@ pub fn render_clipboard_promise(
 /// (review N1) — on every road out, a panic's unwinding too, so a render whose source panicked
 /// does not leave its thread inside an apartment OLE set up. Declared before the data object, which
 /// is then let go first. Not `Send`: it is left on the thread that joined.
-pub(crate) struct Apartment(std::marker::PhantomData<*const ()>);
+pub(crate) struct OleApartment(std::marker::PhantomData<*const ()>);
 
-impl Apartment {
+impl OleApartment {
     pub(crate) fn single_threaded() -> windows::core::Result<Self> {
         // SAFETY: a thread of this process's own, joining an apartment this value leaves.
         unsafe { OleInitialize(None) }?;
@@ -540,7 +540,7 @@ impl Apartment {
     }
 }
 
-impl Drop for Apartment {
+impl Drop for OleApartment {
     fn drop(&mut self) {
         // SAFETY: balances `single_threaded`'s `OleInitialize`, on the thread that joined (the value
         // is not `Send`).
@@ -1224,7 +1224,7 @@ mod promise_tests {
     }
 
     /// `render_promise` with a progress of its own.
-    fn rendered(
+    fn render_with_progress(
         worker: &WorkerCtx,
         contents: &mut OleContents,
         offer: &[PromisedEntry],
@@ -1258,7 +1258,7 @@ mod promise_tests {
     /// thread whose source panics inside the render unwinds through the apartment, and the thread
     /// is outside it after — joining one anew is `S_OK`, not the `S_FALSE` of a thread still in.
     ///
-    /// MUTATION: empty `Apartment`'s `Drop` — the panicked thread is still inside its apartment.
+    /// MUTATION: empty `OleApartment`'s `Drop` — the panicked thread is still in its apartment.
     #[test]
     fn the_apartment_is_left_on_every_road_out() {
         use windows::Win32::Foundation::{S_FALSE, S_OK};
@@ -1267,7 +1267,7 @@ mod promise_tests {
         };
         std::thread::spawn(|| {
             let unwound = std::panic::catch_unwind(|| {
-                let _apartment = Apartment::single_threaded().expect("an apartment");
+                let _apartment = OleApartment::single_threaded().expect("an apartment");
                 panic!("the source's code panics inside the render (planted by the test)");
             });
             assert!(unwound.is_err(), "the planted panic unwound");
@@ -1296,7 +1296,7 @@ mod promise_tests {
     #[test]
     fn every_medium_a_source_hands_over_is_written() {
         on_a_worker(|worker| {
-            let apartment = Apartment::single_threaded().expect("an apartment");
+            let apartment = OleApartment::single_threaded().expect("an apartment");
             let long: Vec<u8> = (0..200_000_u32).map(|n| (n % 251) as u8).collect();
             let (mut contents, offer) = board(
                 &[
@@ -1316,7 +1316,7 @@ mod promise_tests {
             );
             let into = scratch("media");
             std::fs::create_dir_all(&into).expect("the paste's folder");
-            let rendered = rendered(worker, &mut contents, &offer, &into);
+            let rendered = render_with_progress(worker, &mut contents, &offer, &into);
             // The data object is let go before the apartment is left (review N8).
             drop(contents);
             drop(apartment);
@@ -1353,7 +1353,7 @@ mod promise_tests {
     #[test]
     fn a_source_that_fails_or_changed_leaves_nothing() {
         on_a_worker(|worker| {
-            let apartment = Apartment::single_threaded().expect("an apartment");
+            let apartment = OleApartment::single_threaded().expect("an apartment");
             let gone = HRESULT(0x8001_0108_u32.cast_signed());
             let (mut contents, offer) = board(
                 &[(SIZED, 0, 2, "a.txt"), (SIZED, 0, 2, "b.txt")],
@@ -1361,15 +1361,15 @@ mod promise_tests {
             );
             let into = scratch("fails");
             std::fs::create_dir_all(&into).expect("the paste's folder");
-            let failed = rendered(worker, &mut contents, &offer, &into);
+            let failed = render_with_progress(worker, &mut contents, &offer, &into);
             let (mut changed, _) = board(&[(SIZED, 0, 2, "c.txt")], vec![Handed::Fails(gone)]);
             let elsewhere = scratch("changed");
             std::fs::create_dir_all(&elsewhere).expect("the paste's folder");
-            let raced = rendered(worker, &mut changed, &offer, &elsewhere);
+            let raced = render_with_progress(worker, &mut changed, &offer, &elsewhere);
             let mut emptied = data_object(Vec::new(), Vec::new(), 0);
             let emptied_into = scratch("emptied");
             std::fs::create_dir_all(&emptied_into).expect("the paste's folder");
-            let no_longer = rendered(worker, &mut emptied, &offer, &emptied_into);
+            let no_longer = render_with_progress(worker, &mut emptied, &offer, &emptied_into);
             // The data objects are let go before the apartment is left (review N8).
             drop((contents, changed, emptied));
             drop(apartment);
@@ -1394,7 +1394,7 @@ mod promise_tests {
     #[test]
     fn a_contended_data_object_is_asked_again_through_the_wait() {
         on_a_worker(|worker| {
-            let apartment = Apartment::single_threaded().expect("an apartment");
+            let apartment = OleApartment::single_threaded().expect("an apartment");
             let entries = [(SIZED, 0, 2, "a.txt")];
             let (_, offer) = board(&entries, vec![Handed::Global(b"aa".to_vec())]);
             let descriptor = descriptor_bytes(&[(SIZED, 0, 2, units("a.txt").as_slice())]);
@@ -1402,11 +1402,11 @@ mod promise_tests {
                 data_object(descriptor.clone(), vec![Handed::Global(b"aa".to_vec())], 4);
             let into = scratch("contended");
             std::fs::create_dir_all(&into).expect("the paste's folder");
-            let written = rendered(worker, &mut patient, &offer, &into);
+            let written = render_with_progress(worker, &mut patient, &offer, &into);
             let mut held = data_object(descriptor, vec![Handed::Global(b"aa".to_vec())], 5);
             let refused_into = scratch("held");
             std::fs::create_dir_all(&refused_into).expect("the paste's folder");
-            let refused = rendered(worker, &mut held, &offer, &refused_into);
+            let refused = render_with_progress(worker, &mut held, &offer, &refused_into);
             drop((patient, held));
             drop(apartment);
             assert_eq!(written.map(|promise| promise.files), Ok(1));
@@ -1433,7 +1433,7 @@ mod promise_tests {
     #[test]
     fn a_storage_never_writes_over_and_a_short_medium_did_not_render() {
         on_a_worker(|worker| {
-            let apartment = Apartment::single_threaded().expect("an apartment");
+            let apartment = OleApartment::single_threaded().expect("an apartment");
             let (mut storage, offer) = board(
                 &[(0, 0, 0, "mail.msg")],
                 vec![Handed::Storage(b"message body".to_vec())],
@@ -1441,14 +1441,14 @@ mod promise_tests {
             let into = scratch("taken");
             std::fs::create_dir_all(&into).expect("the paste's folder");
             std::fs::write(into.join("mail.msg"), b"already here").expect("a file in the way");
-            let over = rendered(worker, &mut storage, &offer, &into);
+            let over = render_with_progress(worker, &mut storage, &offer, &into);
             let mut short = Vec::new();
             for handed in [Handed::Global(Vec::new()), Handed::Stream(b"ab".to_vec())] {
                 let (mut contents, offer) = board(&[(SIZED, 0, 64, "short.bin")], vec![handed]);
                 let short_into = scratch("short");
                 std::fs::create_dir_all(&short_into).expect("the paste's folder");
                 short.push((
-                    rendered(worker, &mut contents, &offer, &short_into),
+                    render_with_progress(worker, &mut contents, &offer, &short_into),
                     short_into.exists(),
                 ));
                 drop(contents);

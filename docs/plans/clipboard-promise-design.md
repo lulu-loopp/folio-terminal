@@ -50,8 +50,9 @@ whose body is `clipboard_picture::stage_promise` — the only caller of the rend
 4. removes the marker, gives its place back, then lays its answer in the mailbox and wakes the
    window (`AppEvent::ClipboardPictureReady`).
 
-`render_clipboard_promise` joins a single-threaded apartment (`Apartment::single_threaded`: `OleInitialize`,
-and `OleUninitialize` when the guard drops, on every road out, after the data object is released),
+`render_clipboard_promise` joins a single-threaded apartment (`OleApartment::single_threaded`:
+`OleInitialize`, and `OleUninitialize` when the guard drops, on every road out, after the data object
+is released),
 asks `OleGetClipboard` through the clipboard's one declared contention wait (5, 10, 20 and 40 ms on
 `CLIPBRD_E_CANT_OPEN`, through `wait::sleep_within`) — and every `GetData` after it through the
 same wait, since another program opening the clipboard refuses those as it refuses the open —

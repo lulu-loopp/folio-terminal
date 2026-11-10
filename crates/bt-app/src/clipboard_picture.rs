@@ -73,7 +73,7 @@ pub const STALL_BOUND: Duration = Duration::from_secs(30);
 
 /// The suffix of a write's marker: `<stamp>-<n>.writing`, beside the entry (`<stamp>-<n>.png` or
 /// the folder `<stamp>-<n>`) it says is still being written.
-const MARKER: &str = ".writing";
+const WRITING_SUFFIX: &str = ".writing";
 
 /// **The widest and tallest picture this paste will decode** (review X-4).
 ///
@@ -208,20 +208,20 @@ fn ours(name: &str) -> Option<(&str, u32)> {
 /// its marker share.
 fn staged_key(name: &str) -> &str {
     name.strip_suffix(EXTENSION)
-        .or_else(|| name.strip_suffix(MARKER))
+        .or_else(|| name.strip_suffix(WRITING_SUFFIX))
         .unwrap_or(name)
 }
 
 /// **One name in the staging folder, as the sweep reads it** — and, for a write's marker, when it
 /// was last refreshed (`None` when that could not be read, which keeps the write taken for live).
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Listed {
+pub struct StagedListing {
     pub name: String,
     pub refreshed: Option<SystemTime>,
 }
 
 /// The names of a listing, for the reservation's first guess.
-fn names(listing: &[Listed]) -> Vec<String> {
+fn staged_names(listing: &[StagedListing]) -> Vec<String> {
     listing.iter().map(|listed| listed.name.clone()).collect()
 }
 
@@ -268,12 +268,17 @@ pub fn first_free_index(existing: &[String], stamp: &str) -> u32 {
 /// * **A marker older than `bound` is an abandoned write** — a worker that died, a process that
 ///   was killed: the marker and its entry both go, whatever the cap.
 #[must_use]
-pub fn retire(listing: &[Listed], kept: usize, now: SystemTime, bound: Duration) -> Vec<String> {
+pub fn retire(
+    listing: &[StagedListing],
+    kept: usize,
+    now: SystemTime,
+    bound: Duration,
+) -> Vec<String> {
     let mut live = std::collections::HashSet::new();
     let mut abandoned = std::collections::HashSet::new();
     let mut markers = Vec::new();
     for listed in listing {
-        if !listed.name.ends_with(MARKER) || ours(&listed.name).is_none() {
+        if !listed.name.ends_with(WRITING_SUFFIX) || ours(&listed.name).is_none() {
             continue;
         }
         let key = staged_key(&listed.name);
@@ -291,7 +296,7 @@ pub fn retire(listing: &[Listed], kept: usize, now: SystemTime, bound: Duration)
     let mut removed = Vec::new();
     let mut mine: Vec<(&str, u32, &String)> = Vec::new();
     for listed in listing {
-        if listed.name.ends_with(MARKER) {
+        if listed.name.ends_with(WRITING_SUFFIX) {
             continue;
         }
         let Some((at, index)) = ours(&listed.name) else {
@@ -407,11 +412,11 @@ fn reserve_marked<T>(
     extension: &str,
     take: impl Fn(&Path) -> std::io::Result<T>,
 ) -> std::io::Result<(Writing, T)> {
-    let mut index = first_free_index(&names(&names_in(folder)), stamp);
+    let mut index = first_free_index(&staged_names(&names_in(folder)), stamp);
     for _ in 0..NAME_ATTEMPTS {
         let key = format!("{stamp}-{index}");
         index = index.saturating_add(1);
-        let marker = folder.join(format!("{key}{MARKER}"));
+        let marker = folder.join(format!("{key}{WRITING_SUFFIX}"));
         let file = match fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -885,7 +890,7 @@ pub fn sweep_staging(_worker: &WorkerCtx, folder: &Path) {
     let mut stuck = std::collections::HashSet::new();
     for name in retire(&names_in(folder), KEPT, SystemTime::now(), STALL_BOUND) {
         let entry = folder.join(&name);
-        if name.ends_with(MARKER) {
+        if name.ends_with(WRITING_SUFFIX) {
             if !stuck.contains(staged_key(&name)) {
                 let _ = fs::remove_file(entry);
             }
@@ -912,7 +917,7 @@ pub fn sweep_staging(_worker: &WorkerCtx, folder: &Path) {
 /// is a folder, and a file or a link wearing that shape is not Folio's. **A write's marker is
 /// listed when it is a file, with when it was last refreshed** (review N12), read from the
 /// listing's own entry.
-fn names_in(folder: &Path) -> Vec<Listed> {
+fn names_in(folder: &Path) -> Vec<StagedListing> {
     let Ok(listing) = fs::read_dir(folder) else {
         return Vec::new();
     };
@@ -921,15 +926,15 @@ fn names_in(folder: &Path) -> Vec<Listed> {
         .filter_map(|entry| {
             let name = entry.file_name().into_string().ok()?;
             let kind = entry.file_type().ok();
-            if name.ends_with(MARKER) && kind.is_some_and(|kind| kind.is_file()) {
+            if name.ends_with(WRITING_SUFFIX) && kind.is_some_and(|kind| kind.is_file()) {
                 let refreshed = entry
                     .metadata()
                     .ok()
                     .and_then(|metadata| metadata.modified().ok());
-                return Some(Listed { name, refreshed });
+                return Some(StagedListing { name, refreshed });
             }
             if name.ends_with(EXTENSION) || kind.is_some_and(|kind| kind.is_dir()) {
-                Some(Listed {
+                Some(StagedListing {
                     name,
                     refreshed: None,
                 })
@@ -989,9 +994,9 @@ mod tests {
 
     /// What the sweep removes from a folder of these names, none of them a write's marker.
     fn swept(names: &[String]) -> Vec<String> {
-        let listing: Vec<Listed> = names
+        let listing: Vec<StagedListing> = names
             .iter()
-            .map(|name| Listed {
+            .map(|name| StagedListing {
                 name: name.clone(),
                 refreshed: None,
             })
@@ -1166,14 +1171,14 @@ mod tests {
     #[test]
     fn an_entry_being_written_is_counted_and_never_swept() {
         let now = at(1_789_570_800);
-        let plain = |name: String| Listed {
+        let plain = |name: String| StagedListing {
             name,
             refreshed: None,
         };
-        let mut listing: Vec<Listed> = (0..=KEPT)
+        let mut listing: Vec<StagedListing> = (0..=KEPT)
             .map(|index| plain(format!("20260916-1430{index:02}-1.png")))
             .collect();
-        listing.push(Listed {
+        listing.push(StagedListing {
             name: "20260916-143000-1.writing".to_owned(),
             refreshed: Some(now - Duration::from_secs(2)),
         });
@@ -1183,7 +1188,7 @@ mod tests {
             "the oldest is being written: the next one goes in its stead"
         );
         listing.push(plain("20260915-000000-1".to_owned()));
-        listing.push(Listed {
+        listing.push(StagedListing {
             name: "20260915-000000-1.writing".to_owned(),
             refreshed: Some(now - STALL_BOUND - Duration::from_secs(1)),
         });
@@ -1199,7 +1204,7 @@ mod tests {
         for refreshed in [Some(now + Duration::from_secs(3_600)), None] {
             let ahead = [
                 plain("20260915-000000-1".to_owned()),
-                Listed {
+                StagedListing {
                     name: "20260915-000000-1.writing".to_owned(),
                     refreshed,
                 },
@@ -1249,7 +1254,7 @@ mod tests {
             sweep_staging(worker, &folder);
             assert!(!into.exists(), "an abandoned write is taken");
             assert!(!folder.join("20260916-150000-1.writing").exists());
-            assert_eq!(names(&names_in(&folder)).len(), KEPT - 1);
+            assert_eq!(staged_names(&names_in(&folder)).len(), KEPT - 1);
             let _ = fs::remove_dir_all(&folder);
         });
     }
@@ -1328,7 +1333,7 @@ mod tests {
                     .collect::<Vec<_>>()
             })
         };
-        let left = names(&names_in(&folder));
+        let left = staged_names(&names_in(&folder));
         assert_eq!(left.len(), KEPT, "the folder settles at the cap");
         assert!(
             !left.contains(&"20260916-143012-1.png".to_owned()),
