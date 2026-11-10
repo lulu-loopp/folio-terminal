@@ -634,7 +634,17 @@ pub(crate) fn config_path() -> Option<PathBuf> {
 /// start-time scan reads.
 #[must_use]
 pub(crate) fn entry_path() -> Option<PathBuf> {
-    if version().runs_hooks() {
+    entry_path_at(&version())
+}
+
+/// **The file Folio's entry goes in at a version the caller holds** (0.4.10 plan row 73, the
+/// re-review's F3): [`entry_path`]'s rule at `settled` rather than at the book's version. The
+/// carry pass's round names codex's file from the version it settled, so a walk adopted in between
+/// (after which the book says [`CodexVersion::Unasked`]) changes neither the file the round scans
+/// nor the one its install refusal is asked of.
+#[must_use]
+pub(crate) fn entry_path_at(settled: &CodexVersion) -> Option<PathBuf> {
+    if settled.runs_hooks() {
         hooks_path()
     } else {
         config_path()
@@ -723,12 +733,13 @@ pub(crate) fn added_toast(file: Option<&Path>) -> crate::i18n::Text {
 
 /// **Whether an install of `exe`'s entry in the file at `path` would be refused** — what the
 /// first-run card asks before it offers the Codex row (row 69's report §1.7, R19; the 69c review's
-/// C3): [`install_refusal_at`], the install's own refusals asked of the same files at the version
-/// held, so the card offers nothing a press would then refuse. Another live copy's entry is not a
-/// refusal: the press asks about it. **Asked on the carry pass's worker** (0.4.10 plan row 73),
-/// of the file the round scanned and at the `version` that round settled — handed in, not read
-/// back out of the book, where a walk adopted in between could already have put another (the
-/// review's N2) — never on the window thread, which reads the answer out of the snapshot.
+/// C3): [`install_refusal_at`], the install's own refusals, so the card offers nothing a press
+/// would then refuse. Another live copy's entry is not a refusal: the press asks about it.
+/// **Asked on the carry pass's worker** (0.4.10 plan row 73), at the `version` that round settled
+/// and of the file the round named from that same answer ([`entry_path_at`]) — both handed in, not
+/// read back out of the book, where a walk adopted in between could already have put another (the
+/// review's N2, the re-review's F3) — never on the window thread, which reads the answer out of
+/// the snapshot.
 #[must_use]
 pub(crate) fn install_refused_at(path: &Path, exe: &Path, version: &CodexVersion) -> bool {
     install_refusal_at(path, exe, version).is_some()

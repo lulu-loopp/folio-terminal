@@ -51,8 +51,11 @@ pub(crate) struct HooksFamily {
     pub(crate) family: &'static str,
     /// The word the diagnostics line names it by.
     pub(crate) tag: &'static str,
-    /// Where its file is on this machine, as the newest program walk read the agent's folders.
-    pub(crate) path: fn() -> Option<PathBuf>,
+    /// Where its file is on this machine, as the newest program walk read the agent's folders, at
+    /// the codex version the round settled: only codex's file depends on it (`hooks.json` or
+    /// `config.toml`, row 69c), and it is handed in so the round names that file from the answer
+    /// it holds (0.4.10 plan row 73, the re-review's F3).
+    pub(crate) path: fn(&crate::attention_codex::CodexVersion) -> Option<PathBuf>,
     /// The family's classification of a resolved file ([`HooksFound`]).
     pub(crate) scan: HooksScanFn,
     /// The switch's own writer.
@@ -71,7 +74,7 @@ pub(crate) static HOOKS_FAMILIES: [HooksFamily; 3] = [
     HooksFamily {
         family: crate::attention_map::CLAUDE_CODE,
         tag: "claude",
-        path: crate::attention_hooks::settings_path,
+        path: claude_path_at,
         scan: crate::attention_hooks::scan_resolved,
         apply: crate::attention_hooks::apply_resolved,
         within_its_gate: no_gate,
@@ -82,7 +85,7 @@ pub(crate) static HOOKS_FAMILIES: [HooksFamily; 3] = [
     HooksFamily {
         family: crate::attention_map::CODEX,
         tag: "codex",
-        path: crate::attention_codex::entry_path,
+        path: crate::attention_codex::entry_path_at,
         scan: crate::attention_codex::scan_resolved,
         apply: crate::attention_codex::apply_resolved,
         within_its_gate: crate::attention_codex::repair_within_the_gate,
@@ -94,7 +97,7 @@ pub(crate) static HOOKS_FAMILIES: [HooksFamily; 3] = [
     HooksFamily {
         family: crate::attention_map::COPILOT,
         tag: "copilot",
-        path: crate::attention_copilot::hooks_path,
+        path: copilot_path_at,
         scan: crate::attention_copilot::scan_resolved,
         apply: crate::attention_copilot::apply_resolved,
         within_its_gate: crate::attention_copilot::repair_within_the_gate,
@@ -105,6 +108,16 @@ pub(crate) static HOOKS_FAMILIES: [HooksFamily; 3] = [
 /// A family whose hooks mean the same to every version of its agent.
 fn no_gate() -> bool {
     true
+}
+
+/// Claude Code's settings file, which no codex version moves.
+fn claude_path_at(_: &crate::attention_codex::CodexVersion) -> Option<PathBuf> {
+    crate::attention_hooks::settings_path()
+}
+
+/// Copilot's hooks file, which no codex version moves.
+fn copilot_path_at(_: &crate::attention_codex::CodexVersion) -> Option<PathBuf> {
+    crate::attention_copilot::hooks_path()
 }
 
 /// The notices of the two families with one file each.
@@ -419,14 +432,17 @@ pub(crate) fn run_agent_hooks_step(ctx: &WorkerCtx) -> Option<MemberAnswer<Hooks
     }
     // The one family whose file is named by a question of its agent: codex's version decides
     // whether Folio's entry is the hook or the `notify` line (row 69c, R17), so it is settled here,
-    // on the pass's worker, before any family's file is named. The first-run card's refusal is
-    // asked at this answer below (the review's N2).
+    // on the pass's worker, before any family's file is named, and codex's file is named from this
+    // answer, not from the book a walk adopted since could have moved (the re-review's F3). The
+    // first-run card's refusal is asked at this answer below (the review's N2).
     let version = crate::attention_codex::settle_version(ctx);
     let Some(exe) = ownership::this_copy() else {
         AGENT_HOOKS.say_unnamed(&crate::diagnostics::stderr_line);
         return None;
     };
-    let paths = HOOKS_FAMILIES.each_ref().map(family_path);
+    let paths = HOOKS_FAMILIES
+        .each_ref()
+        .map(|family| family_path(family, &version));
     let scans = AGENT_HOOKS.scan_and_repair(
         &paths,
         &exe,
@@ -495,14 +511,18 @@ fn codex_install_refused_at(
 /// **A test process's agents keep their files in a scratch folder of its own**, never in the
 /// account's (`persist::storage_dir`'s rule for the data folder): a test that drives a walk's
 /// answer, an Agents-page open or a trial's commit runs the pass, and the pass writes.
-fn family_path(family: &HooksFamily) -> Option<PathBuf> {
+fn family_path(
+    family: &HooksFamily,
+    settled: &crate::attention_codex::CodexVersion,
+) -> Option<PathBuf> {
     #[cfg(test)]
     {
+        let _ = settled;
         Some(test_process_agent_homes().join(family.tag).join("config"))
     }
     #[cfg(not(test))]
     {
-        (family.path)()
+        (family.path)(settled)
     }
 }
 
@@ -2013,14 +2033,15 @@ mod tests {
     /// process's step never does (`family_path`).
     #[test]
     fn a_test_process_never_hands_the_step_an_accounts_own_file() {
+        let unasked = crate::attention_codex::CodexVersion::Unasked;
         assert_eq!(
-            (HOOKS_FAMILIES[0].path)(),
+            (HOOKS_FAMILIES[0].path)(&unasked),
             crate::attention_hooks::settings_path()
         );
         let scratch = test_process_agent_homes();
         assert!(scratch.starts_with(test_scratch_root()));
         for family in &HOOKS_FAMILIES {
-            assert!(family_path(family).is_some_and(|path| path.starts_with(scratch)));
+            assert!(family_path(family, &unasked).is_some_and(|path| path.starts_with(scratch)));
         }
     }
 
@@ -2509,11 +2530,15 @@ mod tests {
 
     /// RED (0.4.10 plan row 73) — **the card's two facts are asked after what they depend on**:
     /// codex's refusal after the round settled codex's version and at that answer, handed in (an
-    /// install's file and its road are the version's; the review's N2), and Copilot's probe state
-    /// before its readiness (a readiness said to follow the probe does).
+    /// install's file and its road are the version's; the review's N2), of the file the round
+    /// named from that same answer, so a walk adopted mid-round does not change the file the round
+    /// scans and asks about (the re-review's F3), and Copilot's probe state before its readiness
+    /// (a readiness said to follow the probe does).
     ///
-    /// MUTATION: the refusal is asked at the version read back out of the book, not the one the
-    /// round settled (`plant-73-refusal-at-a-reread-version.py`).
+    /// MUTATIONS: the refusal is asked at the version read back out of the book, not the one the
+    /// round settled (`plant-73-refusal-at-a-reread-version.py`); the round names codex's file
+    /// from the book (`plant-73-file-at-a-reread-version.py`); codex's file rule reads the book
+    /// (`plant-73-entry-path-reads-the-book.py`).
     #[test]
     fn the_step_asks_the_card_s_facts_after_the_version_and_the_probe() {
         let body = crate::test_support::free_fn_body("run_agent_hooks_step");
@@ -2526,6 +2551,28 @@ mod tests {
                 < at("codex_install_refused_at(")
         );
         assert!(at("let paths =") < at("codex_install_refused_at("));
+        assert!(
+            at("let version = crate::attention_codex::settle_version(ctx);") < at("let paths ="),
+            "a family's file is named before the round settled codex's version"
+        );
+        let paths = &body[at("let paths =")..];
+        let paths =
+            crate::test_support::squeezed(&paths[..paths.find(';').expect("one statement")]);
+        assert!(
+            paths.ends_with(".map(|family|family_path(family,&version))"),
+            "codex's file is not named from the version the round settled: {paths}"
+        );
+        assert!(
+            crate::test_support::squeezed(crate::test_support::free_fn_body("family_path"))
+                .contains("(family.path)(settled)"),
+            "the product's family path is not asked at the version handed in"
+        );
+        let entry =
+            crate::test_support::squeezed(crate::test_support::free_fn_body("entry_path_at"));
+        assert!(
+            entry.contains("settled.runs_hooks()") && !entry.contains("version()"),
+            "codex's file rule reads the book, not the version handed in: {entry}"
+        );
         let call = &body[at("codex_install_refused_at(")..];
         let call = crate::test_support::squeezed(&call[..call.find(';').expect("one statement")]);
         assert!(
