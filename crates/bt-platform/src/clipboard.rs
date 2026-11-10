@@ -26,6 +26,28 @@
 //! );
 //! ```
 //!
+//! A promise is rendered by [`crate::render_clipboard_promise`], which takes the same capability —
+//! a source that writes an attachment may take seconds, and never on the window thread (plan row
+//! 81):
+//!
+//! ```compile_fail
+//! // RED (row 81, B2) — the promise's render is a worker's door too.
+//! fn on_the_window_thread(into: &std::path::Path) {
+//!     let _ = bt_platform::render_clipboard_promise(&[], into);
+//! }
+//! ```
+//!
+//! MUTATION: make `render_clipboard_promise` take no capability and the block above compiles. The
+//! control hands it the lent `ctx`:
+//!
+//! ```no_run
+//! let _ = bt_platform::spawn_at_priority(
+//!     "doc-probe",
+//!     bt_platform::ThreadPriority::BelowNormal,
+//!     |ctx| bt_platform::render_clipboard_promise(ctx, &[], std::path::Path::new("x")).is_ok(),
+//! );
+//! ```
+//!
 //! [`WorkerCtx`]: crate::admission::WorkerCtx
 
 use std::path::PathBuf;
