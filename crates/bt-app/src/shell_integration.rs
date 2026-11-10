@@ -65,14 +65,14 @@ pub use language::{LanguageAsked, begin_language_question};
 mod psreadline_tests;
 /// The carry pass's member for Folio's old `$PROFILE` lines (0.4.10 plan row 68c).
 pub(crate) use profile_runtime::run_profile_lines_step;
-/// The member's once-a-process step and its carry, for the pass's start test (row 68c).
-#[cfg(test)]
-pub(crate) use profile_runtime::{ProfileLinesStep, carry_profile_lines};
 pub use profile_runtime::{
     ProfileInstallOutcome, begin_profile_install, begin_profile_install_undo,
     begin_profile_observation_for, begin_removal, profile_installs_for, remove_shell_integration,
     remove_shell_integration_at, take_profile_installs, take_removal,
 };
+/// The member's once-a-process step and its carry, for the pass's start test (row 68c).
+#[cfg(test)]
+pub(crate) use profile_runtime::{ProfileLinesStep, carry_profile_lines};
 
 /// The script, compiled in.
 ///
