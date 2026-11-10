@@ -10,6 +10,10 @@
 //! when it asked the platform for the paint (delivered here as winit would deliver it).
 //!
 //! The instants are values handed to the turn; nothing here sleeps or reads a duration back.
+//! The one real-clock reading is the stamp `trace_present` puts on a present
+//! (`last_present_at`, `Instant::now()`): the mark test requires it to be no later than the
+//! turn's instant, which the handed instants keep by running ahead of the clock, and the
+//! refused-frame test reads it back as the instant the fold books from.
 
 use std::time::{Duration, Instant};
 
