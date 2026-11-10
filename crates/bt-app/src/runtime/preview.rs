@@ -15480,6 +15480,40 @@ impl<B: Backend> Runtime<'_, B> {
             wrap,
         });
     }
+
+    /// Put a scheme file in front of the reader, with the keyboard in it.
+    ///
+    /// The tail both halves of the foot's first verb share: `Customise scheme…`
+    /// writes a copy and comes here, `Edit scheme…` comes straight here. One
+    /// function because everything from this point on is about a file that
+    /// exists, and two copies of it would be two answers to "where does a scheme
+    /// open".
+    pub(crate) fn open_scheme_for_editing(&mut self, path: PathBuf) -> Result<()> {
+        // **The dialog goes.** It is the one verb in it whose answer is a
+        // document, and a modal standing over the document it just handed you is
+        // a modal in the way.
+        self.settings_closed();
+        self.window.settings.close();
+        let Some(surface) = self.preview_landing_surface() else {
+            return Ok(());
+        };
+        self.open_preview_file_on(surface, path.clone())?;
+        // The keyboard goes into the text, so the file is *open for editing* and
+        // not merely open. `preview_edit_focus` is re-validated at every read, so
+        // setting it before the head has landed is safe: it becomes true the
+        // moment there is something to type into.
+        self.preview_edit_focus = Some(surface);
+        let anchor = surface.toast_anchor();
+        let file = path
+            .file_name()
+            .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
+        self.toast(
+            toast::ToastKind::Ok,
+            anchor,
+            None,
+            i18n::scheme_customised(&file),
+        )
+    }
 }
 
 /// A scale factor as something a key can be compared by.
