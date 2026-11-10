@@ -84,10 +84,13 @@ wraps the data object in `OleContents` and runs the pure renderer,
 ## The stall bound (review N14)
 
 The window keeps no clock on the render and never waits for it; a newer paste supersedes it by
-generation. The `clipboard-promise` worker watches it instead: every entry begun, every folder made
-and every chunk written advances the render's progress (`RenderProgress`), and the worker looks at
-it every eighth of `clipboard_picture::STALL_BOUND` (30 s), refreshing the folder's marker while it
-moves. **A render that has made no step for 30 s is abandoned**: its progress is marked given up,
+generation. The `clipboard-promise` worker watches it instead: every folder made, every chunk
+written and every entry finished advances the render's progress (`RenderProgress`). A stream is
+seen chunk by chunk; a global or a storage is one step, taken when `GetData` or `CopyTo` returns.
+The worker looks at it every eighth of `clipboard_picture::STALL_BOUND` (30 s), at most every
+second (`watch_interval`), and refreshes the folder's marker on every look while the render stands,
+progress or not (re-review F2): the marker says a watcher is here, and the bound says whether the
+render moves. **A render that has made no step for 30 s is abandoned**: its progress is marked given up,
 so the render's next step answers `Stalled` and writes nothing; the worker removes the paste's
 folder and its marker, gives its place back, and the paste is refused `promise (stalled)` — one
 line and the promise's notice. The source may still be inside its own call; that thread ends when
@@ -116,8 +119,10 @@ is never touched.
 **An entry being written is marked** (review N12): `<stamp>-<n>.writing`, made with `create_new`
 before the folder (or the picture's file) and removed when the paste is handed over. The sweep
 (`clipboard_picture::retire`) never takes a marked entry and counts it toward the 20 — the oldest
-unmarked one goes in its stead. A marker the worker has not refreshed for the stall bound belongs
-to a write that was abandoned (a process that ended mid-write, a folder that would not go): the
-sweep takes the entry and then its marker. A marker dated ahead of the clock, or whose date cannot
+unmarked one goes in its stead. A marker nobody has refreshed for the stall bound and one look
+of the watcher (`clipboard_picture::abandoned_after`, 31 s) belongs to a write that was abandoned
+(a process that ended mid-write, a worker gone, a folder that would not go): the sweep takes the
+entry and then its marker. Because a live watcher refreshes its marker every look, no sweep takes a
+render that is still being watched, stalled or not; the stall is the watcher's to judge. A marker dated ahead of the clock, or whose date cannot
 be read, is live. A picture being saved carries the same marker, so a burst of saves in another
 window can no longer sweep a picture before it is pasted.
