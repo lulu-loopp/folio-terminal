@@ -505,7 +505,9 @@ impl<B: Backend> Runtime<'_, B> {
         // row waits for that answer — and, where copilot is on the path, for one whose readiness
         // was read after the probe came back — and is then built in one piece from it: nothing is
         // drawn before, and nothing of it changes after (rulings R3, R6). No timer of its own
-        // (R4): a pass that never answers leaves the card for the next launch.
+        // (R4): a pass that never answers leaves the card for the next launch, and only while this
+        // run writes no `settings.json` (`first_run::due`); a round that hangs is not run again by
+        // a later request, as the latch only marks a round to follow one that ends.
         let platform = bt_platform::host_platform();
         let found = [
             (first_run::RowKind::Claude, "claude"),
@@ -542,42 +544,35 @@ impl<B: Backend> Runtime<'_, B> {
         if !first_run::take_ready_edge(&mut self.app.first_run_attempted, ready) {
             return Ok(());
         }
-        // What a press of each agent row would do, said from the adopted answer (R1).
-        let offers: [first_run::AgentRowOffer; 3] =
-            std::array::from_fn(|index| match &self.app.agent_hooks_found[index] {
-                Some((found, unrepaired)) if copy_named => first_run::agent_row_offer(
-                    found,
-                    *unrepaired,
-                    index == 1 && self.app.codex_install_refused,
+        // What a press of each agent row would do, said from the adopted answer (R1), and every
+        // other field of the card's machine, in one pure function (the review's N3).
+        let machine = first_run::card_machine(
+            first_run::CardBase {
+                // Both halves of the first page: a Windows that shows one, and the
+                // file that can be registered on it shipped beside the executable.
+                // Through `first_page_offered` and not spelled again here, because
+                // the Settings row asks the same question through the same function
+                // and the card's switch has to mean what that row's switch means.
+                explorer_first_page_available: explorer_menu::first_page_offered(
+                    explorer_menu::supported(),
+                    explorer_menu::package_file().is_some(),
                 ),
-                _ => first_run::AgentRowOffer::default(),
-            });
-        let machine = first_run::Machine {
-            // Both halves of the first page: a Windows that shows one, and the
-            // file that can be registered on it shipped beside the executable.
-            // Through `first_page_offered` and not spelled again here, because
-            // the Settings row asks the same question through the same function
-            // and the card's switch has to mean what that row's switch means.
-            explorer_first_page_available: explorer_menu::first_page_offered(
-                explorer_menu::supported(),
-                explorer_menu::package_file().is_some(),
-            ),
-            claude_found: self.agent_is_on_this_machine("claude"),
-            claude_installable: offers[0].offered,
-            // A take-over is never a first-run act (0.4.10 plan row 67b, ruling N3): a row over a
-            // living other copy's hooks, or an owner the machine will not say about, arrives Off.
-            claude_over_another: offers[0].over_another,
-            codex_found: self.agent_is_on_this_machine("codex"),
-            codex_installable: offers[1].offered,
-            codex_over_another: offers[1].over_another,
-            copilot_found: copilot_on_path,
-            copilot_installable: offers[2].offered
-                && self.app.copilot_readiness == attention_copilot::Readiness::Ready,
-            copilot_over_another: offers[2].over_another,
-            install_channel: install_channel::channel()
-                .unwrap_or(install_channel::Channel::Unknown),
-            resume_agents: self.app.settings_store.loaded().resume_agents,
-        };
+                install_channel: install_channel::channel()
+                    .unwrap_or(install_channel::Channel::Unknown),
+                resume_agents: self.app.settings_store.loaded().resume_agents,
+            },
+            first_run::AdoptedAgents {
+                on_path: [
+                    self.agent_is_on_this_machine("claude"),
+                    self.agent_is_on_this_machine("codex"),
+                    copilot_on_path,
+                ],
+                answers: &self.app.agent_hooks_found,
+                codex_install_refused: self.app.codex_install_refused,
+                copilot_readiness: self.app.copilot_readiness,
+                copy_named,
+            },
+        );
         let rows = first_run::rows(&machine);
         let shape = first_run::explorer_shape(&machine);
         // **Written down only if it went up** (macOS plan M3-6). The rows are
@@ -589,6 +584,7 @@ impl<B: Backend> Runtime<'_, B> {
             return Ok(());
         }
         self.record_first_run_card(bt_persist::FirstRunCardV1::Shown);
+        diagnostics::stderr_line(first_run::card_opened_line(self.app.carry_answers_adopted));
         self.rebuild_first_run_tip_anchors();
         if self.refresh_overlay() {
             self.present_chrome_change()?;

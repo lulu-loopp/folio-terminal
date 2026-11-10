@@ -419,8 +419,9 @@ pub(crate) fn run_agent_hooks_step(ctx: &WorkerCtx) -> Option<MemberAnswer<Hooks
     }
     // The one family whose file is named by a question of its agent: codex's version decides
     // whether Folio's entry is the hook or the `notify` line (row 69c, R17), so it is settled here,
-    // on the pass's worker, before any family's file is named.
-    let _ = crate::attention_codex::settle_version(ctx);
+    // on the pass's worker, before any family's file is named. The first-run card's refusal is
+    // asked at this answer below (the review's N2).
+    let version = crate::attention_codex::settle_version(ctx);
     let Some(exe) = ownership::this_copy() else {
         AGENT_HOOKS.say_unnamed(&crate::diagnostics::stderr_line);
         return None;
@@ -438,7 +439,8 @@ pub(crate) fn run_agent_hooks_step(ctx: &WorkerCtx) -> Option<MemberAnswer<Hooks
     // The first-run card's two facts (0.4.10 plan row 73), on this worker. Codex's refusal is asked
     // at the version settled above, of the file just scanned. The probe's state is read before the
     // readiness, so a readiness said to follow the probe does.
-    let codex_install_refused = codex_install_refused_at(&scans[1], paths[1].as_deref(), &exe);
+    let codex_install_refused =
+        codex_install_refused_at(&scans[1], paths[1].as_deref(), &exe, &version);
     let copilot_read_after_probe = crate::attention_copilot::probe_settled();
     let copilot_readiness = crate::attention_copilot::readiness();
     Some(MemberAnswer {
@@ -473,13 +475,19 @@ pub(crate) fn press_would_write(found: &HooksFound, unrepaired: Option<Unrepaire
 }
 
 /// **Whether codex's install would be refused**, asked of the file `path` the round scanned for
-/// `exe` — only where the scan's answer would let a press write; `true` where no file could be
-/// named (the card then offers no row, as a press would have nothing to write).
-fn codex_install_refused_at(scan: &HooksScan, path: Option<&Path>, exe: &Path) -> bool {
+/// `exe` at the `version` the round settled — only where the scan's answer would let a press
+/// write; `true` where no file could be named (the card then offers no row, as a press would have
+/// nothing to write).
+fn codex_install_refused_at(
+    scan: &HooksScan,
+    path: Option<&Path>,
+    exe: &Path,
+    version: &crate::attention_codex::CodexVersion,
+) -> bool {
     if !press_would_write(&scan.found, scan.unrepaired) {
         return false;
     }
-    path.is_none_or(|path| crate::attention_codex::install_refused_at(path, exe))
+    path.is_none_or(|path| crate::attention_codex::install_refused_at(path, exe, version))
 }
 
 /// **Where a family's file is**: the account's own, in the product.
@@ -1837,8 +1845,9 @@ mod tests {
     /// review's N5).
     ///
     /// **And the first-run card reads none either** (0.4.10 plan row 73): its agent rows are said
-    /// from the adopted snapshot by `first_run::agent_row_offer` and it waits for that snapshot by
-    /// `first_run::card_waits_for_the_agents`, so `Runtime::raise_first_run_if_due` and those two
+    /// from the adopted snapshot by `first_run::card_machine` over `first_run::agent_row_offer` and
+    /// it waits for that snapshot by `first_run::card_waits_for_the_agents`, so
+    /// `Runtime::raise_first_run_if_due` and those three
     /// are held here too; so is the version probe's answer (`AppEvent::CopilotProbed`, ruling R9),
     /// whose readiness the pass it starts carries.
     /// MUTATIONS: the step reads a row first (`plant-68a-carry-step-reads-on-the-window-thread.py`);
@@ -1881,6 +1890,7 @@ mod tests {
                 method_body("Runtime", "raise_first_run_if_due"),
             ),
             ("agent_row_offer", free_fn_body("agent_row_offer")),
+            ("card_machine", free_fn_body("card_machine")),
             (
                 "card_waits_for_the_agents",
                 free_fn_body("card_waits_for_the_agents"),
@@ -2441,9 +2451,12 @@ mod tests {
     }
 
     /// RED (0.4.10 plan row 73, rulings R1 and R2) — **the snapshot carries codex's install
-    /// refusal, asked of the file the round scanned**: a clean folder is an install that writes, a
-    /// `config.toml` this build cannot read refuses it, a family with no file named has nothing a
-    /// press could write, and a state no press would write is not asked at all.
+    /// refusal, asked of the file the round scanned at the version the round settled**: a clean
+    /// folder is an install that writes, a `config.toml` this build cannot read refuses it, a family
+    /// with no file named has nothing a press could write, and a state no press would write is not
+    /// asked at all. On a codex below 0.148 the file is `config.toml` and the road the `notify`
+    /// line's (the review's N2): a file with no `notify` key writes, and somebody else's program on
+    /// the key refuses — which the hook road, at a version that runs hooks, does not ask.
     ///
     /// MUTATION: the mapping drops the refusal (`plant-73-codex-refusal-ignored.py`, red in
     /// `first_run::tests::each_found_state_offers_the_row_a_press_would_write`).
@@ -2454,33 +2467,53 @@ mod tests {
         let folder = root.join("config").join("codex");
         fs::create_dir_all(&folder).unwrap();
         let hooks = folder.join("hooks.json");
+        use crate::attention_codex::CodexVersion;
+        let config = folder.join("config.toml");
         let nothing = HooksScan::unrepaired(HooksFound::Nothing, String::new());
+        let current_codex = CodexVersion::of_version_line("codex-cli 0.150.0");
+        let old_codex = CodexVersion::of_version_line("codex-cli 0.147.0");
+        assert!(current_codex.runs_hooks() && !old_codex.runs_hooks());
         assert!(
-            !codex_install_refused_at(&nothing, Some(&hooks), &here),
+            !codex_install_refused_at(&nothing, Some(&hooks), &here, &current_codex),
             "a clean folder: an install writes"
         );
-        fs::write(folder.join("config.toml"), "this is not = = toml [[[").unwrap();
+        fs::write(&config, "this is not = = toml [[[").unwrap();
         assert!(
-            codex_install_refused_at(&nothing, Some(&hooks), &here),
+            codex_install_refused_at(&nothing, Some(&hooks), &here, &current_codex),
             "a config.toml this build cannot read: refused"
         );
         assert!(
-            codex_install_refused_at(&nothing, None, &here),
+            codex_install_refused_at(&nothing, None, &here, &current_codex),
             "no file named: nothing a press could write"
         );
         let current = HooksScan::unrepaired(HooksFound::Current, String::new());
         assert!(
-            !codex_install_refused_at(&current, Some(&hooks), &here),
+            !codex_install_refused_at(&current, Some(&hooks), &here, &current_codex),
             "not asked where no press would write"
+        );
+        fs::remove_file(&config).unwrap();
+        assert!(
+            !codex_install_refused_at(&nothing, Some(&config), &here, &old_codex),
+            "below 0.148, a config.toml with no notify line: the notify line is written"
+        );
+        fs::write(&config, "notify = [\"someone-else\", \"--quiet\"]\n").unwrap();
+        assert!(
+            codex_install_refused_at(&nothing, Some(&config), &here, &old_codex),
+            "below 0.148, somebody else's program on the notify key: refused"
+        );
+        assert!(
+            !codex_install_refused_at(&nothing, Some(&hooks), &here, &current_codex),
+            "at a version that runs hooks, the hook is written beside somebody else's notify line"
         );
     }
 
     /// RED (0.4.10 plan row 73) — **the card's two facts are asked after what they depend on**:
-    /// codex's refusal after the round settled codex's version (an install's file and its road
-    /// are the version's), and Copilot's probe state before its readiness (a readiness said to
-    /// follow the probe does).
+    /// codex's refusal after the round settled codex's version and at that answer, handed in (an
+    /// install's file and its road are the version's; the review's N2), and Copilot's probe state
+    /// before its readiness (a readiness said to follow the probe does).
     ///
-    /// MUTATION: the refusal is asked before the version (`plant-73-refusal-before-the-version.py`).
+    /// MUTATION: the refusal is asked at the version read back out of the book, not the one the
+    /// round settled (`plant-73-refusal-at-a-reread-version.py`).
     #[test]
     fn the_step_asks_the_card_s_facts_after_the_version_and_the_probe() {
         let body = crate::test_support::free_fn_body("run_agent_hooks_step");
@@ -2488,8 +2521,17 @@ mod tests {
             body.find(needle)
                 .unwrap_or_else(|| panic!("`{needle}` is not in the step"))
         };
-        assert!(at("attention_codex::settle_version(ctx)") < at("codex_install_refused_at("));
+        assert!(
+            at("let version = crate::attention_codex::settle_version(ctx);")
+                < at("codex_install_refused_at(")
+        );
         assert!(at("let paths =") < at("codex_install_refused_at("));
+        let call = &body[at("codex_install_refused_at(")..];
+        let call = crate::test_support::squeezed(&call[..call.find(';').expect("one statement")]);
+        assert!(
+            call.ends_with("&version)") || call.ends_with("&version,)"),
+            "the refusal is not asked at the version the round settled: {call}"
+        );
         assert!(
             at("attention_copilot::probe_settled()") < at("attention_copilot::readiness()"),
             "the probe's state is read after the readiness"

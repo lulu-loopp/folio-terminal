@@ -207,6 +207,16 @@ pub(crate) enum CodexVersion {
     Known(CodexRelease),
 }
 
+#[cfg(test)]
+impl CodexVersion {
+    /// **The version `codex --version` printing `stdout` says**, by [`CodexRelease::parse`] — for
+    /// a test outside this module that needs a release in hand (row 73's refusal at a version
+    /// below 0.148).
+    pub(crate) fn of_version_line(stdout: &str) -> Self {
+        CodexRelease::parse(stdout).map_or(Self::Unknown, Self::Known)
+    }
+}
+
 impl CodexVersion {
     /// **Whether Folio's entry is the hook** (R12): on every answer but a release proved older than
     /// [`HOOKS_FLOOR`] — one nobody could learn is the current one (R17).
@@ -716,11 +726,12 @@ pub(crate) fn added_toast(file: Option<&Path>) -> crate::i18n::Text {
 /// C3): [`install_refusal_at`], the install's own refusals asked of the same files at the version
 /// held, so the card offers nothing a press would then refuse. Another live copy's entry is not a
 /// refusal: the press asks about it. **Asked on the carry pass's worker** (0.4.10 plan row 73),
-/// after the round has settled the version and of the file it scanned — never on the window
-/// thread, which reads the answer out of the snapshot.
+/// of the file the round scanned and at the `version` that round settled — handed in, not read
+/// back out of the book, where a walk adopted in between could already have put another (the
+/// review's N2) — never on the window thread, which reads the answer out of the snapshot.
 #[must_use]
-pub(crate) fn install_refused_at(path: &Path, exe: &Path) -> bool {
-    install_refusal_at(path, exe, &version()).is_some()
+pub(crate) fn install_refused_at(path: &Path, exe: &Path, version: &CodexVersion) -> bool {
+    install_refusal_at(path, exe, version).is_some()
 }
 
 /// What the two files say today.

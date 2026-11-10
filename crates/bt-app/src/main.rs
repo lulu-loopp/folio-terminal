@@ -9318,6 +9318,9 @@ struct App<B: Backend = Native> {
     /// Copilot's version probe came back** (`HooksSnapshot::copilot_read_after_probe`): the
     /// first-run card offers Copilot's row only on an answer.
     copilot_read_after_probe: bool,
+    /// **How many of the carry pass's hooks answers this window has adopted** (0.4.10 plan row
+    /// 73, the review's N9): the round the first-run card's opening line names.
+    carry_answers_adopted: u32,
     /// **Why each agent's configuration file will not be edited, when it will not be** — the
     /// `agent_takeovers` order, Claude Code then codex then copilot.
     ///
@@ -9867,6 +9870,7 @@ impl<B: Backend> App<B> {
             agent_rows_known: false,
             codex_install_refused: false,
             copilot_read_after_probe: false,
+            carry_answers_adopted: 0,
             profiles_file_broken: false,
             pins_file_broken: false,
             settings_file_broken: false,
@@ -31864,6 +31868,7 @@ fn adopt_agent_hooks_snapshot<B: Backend>(
         Some((snapshot.found[index].clone(), snapshot.unrepaired[index]))
     });
     app.agent_rows_known = true;
+    app.carry_answers_adopted += 1;
     app.copilot_readiness = snapshot.copilot_readiness;
     app.copilot_read_after_probe = snapshot.copilot_read_after_probe;
     app.codex_install_refused = snapshot.codex_install_refused;
