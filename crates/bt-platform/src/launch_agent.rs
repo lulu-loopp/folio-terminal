@@ -21,7 +21,10 @@
 //!   there is success: retiring an entrance is repeated until it sticks.
 //! * [`sweep`] is `--uninstall-cleanup`'s row: every plist in the folder whose
 //!   name is exactly this door's shape ([`is_ours`]) is removed, and nothing
-//!   else.
+//!   else. [`sweep_by`] is the same walk with a judge for each plist — a
+//!   start's sweep of entrances whose rescue program is gone (`bt-app`'s
+//!   `update_orphans`, 0.4.10 plan row 68b), which reads the program with
+//!   [`rescue_of_plist`].
 //!
 //! **The folder is a parameter** of every call. The product passes
 //! `~/Library/LaunchAgents`; a test passes a temporary folder and never
@@ -284,6 +287,18 @@ pub type Swept = Vec<(PathBuf, Result<(), Refusal>)>;
 /// # Errors
 /// [`Refusal::List`] when the folder exists but cannot be listed.
 pub fn sweep(agents: &Path) -> Result<Swept, Refusal> {
+    sweep_by(agents, |_| true)
+}
+
+/// **[`sweep`], each plist of ours judged first**: `remove` is handed the path
+/// of every plist whose name [`is_ours`] (not a folder of that name) and
+/// answers whether it goes; only those it answers `true` for are removed, and
+/// only they are in the answer. Anything else in the folder is never handed to
+/// it.
+///
+/// # Errors
+/// As [`sweep`].
+pub fn sweep_by(agents: &Path, mut remove: impl FnMut(&Path) -> bool) -> Result<Swept, Refusal> {
     let listed = match std::fs::read_dir(agents) {
         Ok(listed) => listed,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -306,6 +321,7 @@ pub fn sweep(agents: &Path) -> Result<Swept, Refusal> {
         }
     }
     ours.sort();
+    ours.retain(|path| remove(path));
     Ok(ours
         .into_iter()
         .map(|path| {
@@ -313,6 +329,50 @@ pub fn sweep(agents: &Path) -> Result<Swept, Refusal> {
             (path, removed)
         })
         .collect())
+}
+
+/// **The rescue program an entrance starts, read off its plist** — `None` unless
+/// the file's bytes are exactly what [`plist`] writes for its name's
+/// transaction, its program and its home: the first `ProgramArguments` string,
+/// XML-unescaped, of a plist that re-renders byte for byte. A plist somebody
+/// edited, or one this door never wrote, names nothing a sweep may judge.
+///
+/// Read through [`file_reads::read`] on the update's lane; a file that cannot
+/// be read answers `None`.
+#[must_use]
+pub fn rescue_of_plist(path: &Path) -> Option<PathBuf> {
+    let name = path.file_name()?;
+    if !is_ours(name) {
+        return None;
+    }
+    let tag = name
+        .to_str()?
+        .strip_prefix(LABEL_PREFIX)?
+        .strip_suffix(PLIST_SUFFIX)?;
+    let mut txn = [0_u8; 16];
+    for (at, byte) in txn.iter_mut().take(4).enumerate() {
+        *byte = u8::from_str_radix(tag.get(at * 2..at * 2 + 2)?, 16).ok()?;
+    }
+    let bytes = file_reads::read(Lane::Update, path).ok()?;
+    let text = std::str::from_utf8(&bytes).ok()?;
+    let strings = text
+        .split("<string>")
+        .skip(1)
+        .map(|rest| rest.split_once("</string>").map(|(inside, _)| inside))
+        .collect::<Option<Vec<_>>>()?;
+    let [_, program, _, home] = strings.as_slice() else {
+        return None;
+    };
+    let program = PathBuf::from(plist_unescaped(program));
+    let home = PathBuf::from(plist_unescaped(home));
+    (plist(&txn, &program, &home).ok()? == text).then_some(program)
+}
+
+/// A `<string>`'s text as it was before [`plist`] escaped it.
+fn plist_unescaped(text: &str) -> String {
+    text.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
 }
 
 #[cfg(test)]

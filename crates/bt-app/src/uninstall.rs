@@ -197,8 +197,9 @@ const INVENTORY: &[Mark] = &[
         says: Text::CleanupMarkExplorer,
         kind: Kind::PerCopy,
         remover: Remover::Explorer,
-        writer: "context_menu.rs:apply;context_menu.rs:reassert;explorer_menu.rs:request;explorer_menu.rs:probe",
-        // Both owed to 68b (R-C of 2026-11-07), which moves them into the pass together.
+        writer: "context_menu.rs:apply;context_menu.rs:reassert_in;explorer_menu.rs:request;explorer_menu.rs:probe_at_start",
+        // Both moved into the pass together by 68b (R-C of 2026-11-07), held for the trial's
+        // commit by one writer.
         carry: &[
             CarryRule::OwnerChecked {
                 check: CarryCheck::ExplorerPackage,
@@ -226,8 +227,15 @@ const INVENTORY: &[Mark] = &[
         kind: Kind::PerCopy,
         remover: Remover::Entrance,
         writer: "../bt-platform/src/logon_hook.rs:arm_in",
-        // 68b adds the sweep of an entrance whose program is gone (R5).
-        carry: &[CarryRule::Transaction],
+        // Retired with its transaction; one whose rescue program is gone is swept at start (68b,
+        // R5 of 2026-11-04).
+        carry: &[
+            CarryRule::Transaction,
+            CarryRule::OwnerChecked {
+                check: CarryCheck::UpdateOrphans,
+                writer: Writer::OrphanSweep,
+            },
+        ],
     },
     Mark {
         name: "Start-menu shortcut",
@@ -427,8 +435,15 @@ const INVENTORY: &[Mark] = &[
         kind: Kind::PerAccount,
         remover: Remover::UpdateEntrances,
         writer: "../bt-platform/src/launch_agent.rs:arm",
-        // 68b adds the sweep of an entrance whose program is gone (R5).
-        carry: &[CarryRule::Transaction],
+        // Retired with its transaction; one whose rescue program is gone is swept at start (68b,
+        // R5 of 2026-11-04).
+        carry: &[
+            CarryRule::Transaction,
+            CarryRule::OwnerChecked {
+                check: CarryCheck::UpdateOrphans,
+                writer: Writer::OrphanSweep,
+            },
+        ],
     },
     Mark {
         name: "Update home beside the bundle",
@@ -436,7 +451,8 @@ const INVENTORY: &[Mark] = &[
         kind: Kind::PerCopy,
         remover: Remover::UpdateHome,
         writer: "update_txn.rs:Home::for_bundle (made by the macOS Prepare, U-27)",
-        // 68b adds the sweep of a home whose bundle is gone (R5).
+        // A home whose bundle is gone needs a record of the homes no build writes yet: part 68e
+        // (R7 of 2026-11-09).
         carry: &[CarryRule::Transaction],
     },
     Mark {
@@ -1616,10 +1632,14 @@ fn system_remove(worker: &WorkerCtx, remover: Remover, exe: &Path, lang: Lang) -
 }
 
 /// **The update entrance's row** (U-22; `docs/plans/design/self-update-2026-09-16.md`
-/// §(b).3): this copy's `FolioUpdate-*` values under the `Run` key — those naming
-/// its installation home `H`, or a program that no longer exists — are removed by
-/// `clean`, the entrance door's own remover; another copy's live entrance is left
-/// and said. Only Windows has this entrance (the macOS LaunchAgent is U-26's).
+/// §(b).3): this copy's entrances under the `Run` key — values of the door's own
+/// shape (`logon_hook::clean_by`: the name `FolioUpdate-<txn8>`, the command
+/// `"<rescue>" --update-recover`) naming its installation home `H`, or a program
+/// that no longer exists — are removed by `clean`, the entrance door's own
+/// remover; another copy's live entrance is left and said; every other value of
+/// the key is left, and a value whose name is not the door's is never read
+/// (`logon_hook::clean_in`; 0.4.10 plan row 68b, review N1). Only Windows has
+/// this entrance (the macOS LaunchAgent is U-26's).
 fn entrance_entries(
     platform: HostPlatform,
     exe: &Path,
