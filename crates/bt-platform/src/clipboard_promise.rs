@@ -27,6 +27,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use crate::admission::WorkerCtx;
 use crate::clipboard::PromisedEntry;
 
 /// **How many entries one promise may list** — files and folders together. Sixty-four quoted
@@ -113,9 +114,10 @@ impl PromiseRefused {
 pub trait PromisedContents {
     /// The descriptor as the source answers it now.
     fn descriptor(&mut self) -> Result<Vec<PromisedEntry>, PromiseRefused>;
-    /// Entry `index`'s contents, written through `file`.
+    /// Entry `index`'s contents, written through `file`, on the render's worker (`worker`).
     fn write_contents(
         &mut self,
+        worker: &WorkerCtx,
         index: usize,
         file: &mut PromisedFile<'_>,
     ) -> Result<(), PromiseRefused>;
@@ -165,12 +167,13 @@ impl PromisedFile<'_> {
             .map_err(|error| PromiseRefused::WriteFailed(error.kind()))
     }
 
-    /// **The source wrote the whole file at [`Self::path`] itself**: its length is charged now.
+    /// **The source wrote the whole file at [`Self::path`] itself**: its length is charged now,
+    /// read on the render's worker (`worker`).
     ///
     /// # Errors
     /// [`PromiseRefused::TooLarge`] past the paste's bytes; [`PromiseRefused::WriteFailed`] when
     /// the file is not there.
-    pub fn written_by_the_source(&mut self) -> Result<(), PromiseRefused> {
+    pub fn written_by_the_source(&mut self, _worker: &WorkerCtx) -> Result<(), PromiseRefused> {
         let length = fs::metadata(self.path)
             .map_err(|error| PromiseRefused::WriteFailed(error.kind()))?
             .len();
@@ -329,17 +332,19 @@ pub struct RenderedPromise {
 }
 
 /// **Write the promise `offer` into `into`** — a folder the caller reserved for this paste — and
-/// answer what was written ([`RenderedPromise`]). Any refusal removes `into`.
+/// answer what was written ([`RenderedPromise`]). Any refusal removes `into`. A worker's door
+/// (`worker`): every folder, file and stat below is the render's worker's, never the window's.
 ///
 /// # Errors
 /// Every [`PromiseRefused`].
 pub fn render_promise(
+    worker: &WorkerCtx,
     source: &mut impl PromisedContents,
     offer: &[PromisedEntry],
     into: &Path,
     limits: PromiseLimits,
 ) -> Result<RenderedPromise, PromiseRefused> {
-    let rendered = render_into(source, offer, into, limits);
+    let rendered = render_into(worker, source, offer, into, limits);
     if rendered.is_err() {
         let _ = fs::remove_dir_all(into);
     }
@@ -347,6 +352,7 @@ pub fn render_promise(
 }
 
 fn render_into(
+    worker: &WorkerCtx,
     source: &mut impl PromisedContents,
     offer: &[PromisedEntry],
     into: &Path,
@@ -377,7 +383,7 @@ fn render_into(
             file: None,
             stored: false,
         };
-        source.write_contents(index, &mut file)?;
+        source.write_contents(worker, index, &mut file)?;
         file.finish()?;
         files += 1;
     }
@@ -442,6 +448,7 @@ pub(crate) mod tests {
         }
         fn write_contents(
             &mut self,
+            _worker: &WorkerCtx,
             index: usize,
             file: &mut PromisedFile<'_>,
         ) -> Result<(), PromiseRefused> {
@@ -456,6 +463,16 @@ pub(crate) mod tests {
                 Err(code) => Err(PromiseRefused::NotRendered(Some(*code))),
             }
         }
+    }
+
+    /// `body` on a worker the thread door started, as the render's worker is.
+    pub(crate) fn on_a_worker<T: Send + 'static>(
+        body: impl FnOnce(&WorkerCtx) -> T + Send + 'static,
+    ) -> T {
+        crate::spawn_at_priority("bt-promise-test", crate::ThreadPriority::Normal, body)
+            .expect("start a worker for the render")
+            .join()
+            .expect("the worker answered")
     }
 
     fn scratch(tag: &str) -> PathBuf {
@@ -473,46 +490,48 @@ pub(crate) mod tests {
     /// pasted beside its folder.
     #[test]
     fn a_promise_is_written_under_its_own_names_and_pasted_by_its_top_entries() {
-        let into = scratch("written");
-        let offer = [
-            entry("report 报告.pdf", Some(6)),
-            folder("photos"),
-            entry("photos\\a.png", None),
-            entry("notes.txt", Some(0)),
-        ];
-        let mut source = Fake::of(
-            &offer,
-            vec![
-                Ok(b"pdf pdf".to_vec()),
-                Ok(Vec::new()),
-                Ok(b"png".to_vec()),
-                Ok(Vec::new()),
-            ],
-        );
-        let rendered = render_promise(&mut source, &offer, &into, PASTE_LIMITS)
-            .expect("the promise is written");
-        assert_eq!(
-            (rendered.files, rendered.bytes),
-            (3, 10),
-            "three files, ten bytes"
-        );
-        assert_eq!(
-            rendered.pasted,
-            [
-                into.join("report 报告.pdf"),
-                into.join("photos"),
-                into.join("notes.txt")
-            ]
-        );
-        assert_eq!(fs::read(into.join("report 报告.pdf")).unwrap(), b"pdf pdf");
-        assert_eq!(fs::read(into.join("photos").join("a.png")).unwrap(), b"png");
-        assert_eq!(fs::read(into.join("notes.txt")).unwrap(), b"");
-        assert_eq!(
-            source.asked,
-            [0, 2, 3],
-            "a folder entry is made, never read"
-        );
-        let _ = fs::remove_dir_all(&into);
+        on_a_worker(|worker| {
+            let into = scratch("written");
+            let offer = [
+                entry("report 报告.pdf", Some(6)),
+                folder("photos"),
+                entry("photos\\a.png", None),
+                entry("notes.txt", Some(0)),
+            ];
+            let mut source = Fake::of(
+                &offer,
+                vec![
+                    Ok(b"pdf pdf".to_vec()),
+                    Ok(Vec::new()),
+                    Ok(b"png".to_vec()),
+                    Ok(Vec::new()),
+                ],
+            );
+            let rendered = render_promise(worker, &mut source, &offer, &into, PASTE_LIMITS)
+                .expect("the promise is written");
+            assert_eq!(
+                (rendered.files, rendered.bytes),
+                (3, 10),
+                "three files, ten bytes"
+            );
+            assert_eq!(
+                rendered.pasted,
+                [
+                    into.join("report 报告.pdf"),
+                    into.join("photos"),
+                    into.join("notes.txt")
+                ]
+            );
+            assert_eq!(fs::read(into.join("report 报告.pdf")).unwrap(), b"pdf pdf");
+            assert_eq!(fs::read(into.join("photos").join("a.png")).unwrap(), b"png");
+            assert_eq!(fs::read(into.join("notes.txt")).unwrap(), b"");
+            assert_eq!(
+                source.asked,
+                [0, 2, 3],
+                "a folder entry is made, never read"
+            );
+            let _ = fs::remove_dir_all(&into);
+        });
     }
 
     /// RED (plan row 81) — **a name a file may not be given refuses the whole promise before a
@@ -522,59 +541,61 @@ pub(crate) mod tests {
     /// folder.
     #[test]
     fn a_name_a_file_may_not_be_given_refuses_the_whole_promise() {
-        let long = "a".repeat(256);
-        for name in [
-            "",
-            "..",
-            "a\\..\\..\\b",
-            ".",
-            "\\rooted",
-            "c:\\x",
-            "a:b",
-            "stream.txt:hidden",
-            "CON",
-            "con.txt",
-            "Nul .log",
-            "COM1",
-            "lpt9.dat",
-            "COM¹",
-            "CONIN$",
-            "trailing.",
-            "trailing ",
-            "tab\there",
-            "what?",
-            "star*",
-            "pipe|",
-            "quote\"",
-            "<angle>",
-            long.as_str(),
-            "folder\\",
-        ] {
+        on_a_worker(|worker| {
+            let long = "a".repeat(256);
+            for name in [
+                "",
+                "..",
+                "a\\..\\..\\b",
+                ".",
+                "\\rooted",
+                "c:\\x",
+                "a:b",
+                "stream.txt:hidden",
+                "CON",
+                "con.txt",
+                "Nul .log",
+                "COM1",
+                "lpt9.dat",
+                "COM¹",
+                "CONIN$",
+                "trailing.",
+                "trailing ",
+                "tab\there",
+                "what?",
+                "star*",
+                "pipe|",
+                "quote\"",
+                "<angle>",
+                long.as_str(),
+                "folder\\",
+            ] {
+                assert_eq!(
+                    promised_path(name),
+                    None,
+                    "{name:?} is not a name a file may be given"
+                );
+            }
+            for name in [
+                "a.txt",
+                "COM10",
+                "console.log",
+                "a/b.txt",
+                "数据 1.csv",
+                "..a",
+            ] {
+                assert!(promised_path(name).is_some(), "{name:?} is a file name");
+            }
+            let into = scratch("named");
+            let offer = [entry("Same.txt", Some(1)), entry("same.TXT", Some(1))];
+            let mut source = Fake::of(&offer, vec![Ok(b"a".to_vec()), Ok(b"b".to_vec())]);
             assert_eq!(
-                promised_path(name),
-                None,
-                "{name:?} is not a name a file may be given"
+                render_promise(worker, &mut source, &offer, &into, PASTE_LIMITS),
+                Err(PromiseRefused::Name)
             );
-        }
-        for name in [
-            "a.txt",
-            "COM10",
-            "console.log",
-            "a/b.txt",
-            "数据 1.csv",
-            "..a",
-        ] {
-            assert!(promised_path(name).is_some(), "{name:?} is a file name");
-        }
-        let into = scratch("named");
-        let offer = [entry("Same.txt", Some(1)), entry("same.TXT", Some(1))];
-        let mut source = Fake::of(&offer, vec![Ok(b"a".to_vec()), Ok(b"b".to_vec())]);
-        assert_eq!(
-            render_promise(&mut source, &offer, &into, PASTE_LIMITS),
-            Err(PromiseRefused::Name)
-        );
-        assert!(source.asked.is_empty(), "nothing was asked for");
-        assert!(!into.exists(), "the folder went with the refusal");
+            assert!(source.asked.is_empty(), "nothing was asked for");
+            assert!(!into.exists(), "the folder went with the refusal");
+        });
     }
 
     /// RED (plan row 81) — **the caps are judged on the declaration and again on the stream**: a
@@ -586,45 +607,47 @@ pub(crate) mod tests {
     /// lying stream is written whole.
     #[test]
     fn the_caps_are_judged_on_the_declaration_and_on_the_stream() {
-        let limits = PromiseLimits {
-            entries: 3,
-            bytes: 10,
-        };
-        let many: Vec<PromisedEntry> = (0..4)
-            .map(|index| entry(&format!("{index}.txt"), Some(1)))
-            .collect();
-        assert_eq!(
-            judge_promise(&many, limits),
-            Err(PromiseRefused::TooMany { offered: 4, cap: 3 })
-        );
-        assert_eq!(
-            judge_promise(&many[..3], limits).map(|paths| paths.len()),
-            Ok(3)
-        );
-        let heavy = [entry("a.bin", Some(10)), entry("b.bin", Some(1))];
-        assert_eq!(judge_promise(&heavy, limits), Err(PromiseRefused::TooLarge));
-        assert_eq!(
-            judge_promise(
-                &[entry("a.bin", Some(u64::MAX)), entry("b.bin", Some(2))],
-                PASTE_LIMITS
-            ),
-            Err(PromiseRefused::TooLarge),
-            "a sum that overflows is too large"
-        );
-        assert_eq!(
-            (PASTE_LIMITS.entries, PASTE_LIMITS.bytes),
-            (64, 256 * 1024 * 1024),
-            "the product's limits are the ruled ones (R2)"
-        );
-        let into = scratch("lying");
-        let offer = [entry("small.bin", Some(1)), entry("second.bin", Some(1))];
-        let mut source = Fake::of(&offer, vec![Ok(vec![7; 8]), Ok(vec![7; 4])]);
-        assert_eq!(
-            render_promise(&mut source, &offer, &into, limits),
-            Err(PromiseRefused::TooLarge)
-        );
-        assert_eq!(source.asked, [0, 1], "the second stream passed the cap");
-        assert!(!into.exists(), "what was written went with the refusal");
+        on_a_worker(|worker| {
+            let limits = PromiseLimits {
+                entries: 3,
+                bytes: 10,
+            };
+            let many: Vec<PromisedEntry> = (0..4)
+                .map(|index| entry(&format!("{index}.txt"), Some(1)))
+                .collect();
+            assert_eq!(
+                judge_promise(&many, limits),
+                Err(PromiseRefused::TooMany { offered: 4, cap: 3 })
+            );
+            assert_eq!(
+                judge_promise(&many[..3], limits).map(|paths| paths.len()),
+                Ok(3)
+            );
+            let heavy = [entry("a.bin", Some(10)), entry("b.bin", Some(1))];
+            assert_eq!(judge_promise(&heavy, limits), Err(PromiseRefused::TooLarge));
+            assert_eq!(
+                judge_promise(
+                    &[entry("a.bin", Some(u64::MAX)), entry("b.bin", Some(2))],
+                    PASTE_LIMITS
+                ),
+                Err(PromiseRefused::TooLarge),
+                "a sum that overflows is too large"
+            );
+            assert_eq!(
+                (PASTE_LIMITS.entries, PASTE_LIMITS.bytes),
+                (64, 256 * 1024 * 1024),
+                "the product's limits are the ruled ones (R2)"
+            );
+            let into = scratch("lying");
+            let offer = [entry("small.bin", Some(1)), entry("second.bin", Some(1))];
+            let mut source = Fake::of(&offer, vec![Ok(vec![7; 8]), Ok(vec![7; 4])]);
+            assert_eq!(
+                render_promise(worker, &mut source, &offer, &into, limits),
+                Err(PromiseRefused::TooLarge)
+            );
+            assert_eq!(source.asked, [0, 1], "the second stream passed the cap");
+            assert!(!into.exists(), "what was written went with the refusal");
+        });
     }
 
     /// RED (plan row 81) — **the promise on the board must be the one the paste read**, and **a
@@ -635,22 +658,24 @@ pub(crate) mod tests {
     /// on a refusal (`render_promise` without its `remove_dir_all`) — the first file stays.
     #[test]
     fn a_changed_board_or_an_unrendered_entry_refuses_and_leaves_nothing() {
-        let into = scratch("changed");
-        let offer = [entry("a.txt", Some(1))];
-        let mut source = Fake::of(&[entry("b.txt", Some(1))], vec![Ok(b"b".to_vec())]);
-        assert_eq!(
-            render_promise(&mut source, &offer, &into, PASTE_LIMITS),
-            Err(PromiseRefused::Changed)
-        );
-        assert!(source.asked.is_empty());
-        let into = scratch("unrendered");
-        let offer = [entry("a.txt", Some(1)), entry("b.txt", Some(1))];
-        let mut source = Fake::of(&offer, vec![Ok(b"a".to_vec()), Err(0x8001_0108)]);
-        assert_eq!(
-            render_promise(&mut source, &offer, &into, PASTE_LIMITS),
-            Err(PromiseRefused::NotRendered(Some(0x8001_0108)))
-        );
-        assert!(!into.exists(), "the first file went with the refusal");
+        on_a_worker(|worker| {
+            let into = scratch("changed");
+            let offer = [entry("a.txt", Some(1))];
+            let mut source = Fake::of(&[entry("b.txt", Some(1))], vec![Ok(b"b".to_vec())]);
+            assert_eq!(
+                render_promise(worker, &mut source, &offer, &into, PASTE_LIMITS),
+                Err(PromiseRefused::Changed)
+            );
+            assert!(source.asked.is_empty());
+            let into = scratch("unrendered");
+            let offer = [entry("a.txt", Some(1)), entry("b.txt", Some(1))];
+            let mut source = Fake::of(&offer, vec![Ok(b"a".to_vec()), Err(0x8001_0108)]);
+            assert_eq!(
+                render_promise(worker, &mut source, &offer, &into, PASTE_LIMITS),
+                Err(PromiseRefused::NotRendered(Some(0x8001_0108)))
+            );
+            assert!(!into.exists(), "the first file went with the refusal");
+        });
     }
 
     /// PIN (plan row 81) — **a refusal's words carry kinds, counts and codes only.**

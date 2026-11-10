@@ -790,7 +790,7 @@ impl crate::clipboard_lane::ClipboardDoor for HeadlessClipboard {
     /// judging, the caps and the clean-up are the product's.
     fn render_promised_files(
         &self,
-        _worker: &bt_platform::admission::WorkerCtx,
+        worker: &bt_platform::admission::WorkerCtx,
         offer: &[bt_platform::PromisedEntry],
         into: &Path,
     ) -> Result<
@@ -806,6 +806,7 @@ impl crate::clipboard_lane::ClipboardDoor for HeadlessClipboard {
             contents: locked(&self.0.promised).clone(),
         };
         bt_platform::clipboard_promise::render_promise(
+            worker,
             &mut source,
             offer,
             into,
@@ -829,6 +830,7 @@ impl bt_platform::clipboard_promise::PromisedContents for ScriptedPromise {
     }
     fn write_contents(
         &mut self,
+        _worker: &bt_platform::admission::WorkerCtx,
         index: usize,
         file: &mut bt_platform::clipboard_promise::PromisedFile<'_>,
     ) -> Result<(), bt_platform::clipboard_promise::PromiseRefused> {

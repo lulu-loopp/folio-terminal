@@ -567,11 +567,13 @@ pub fn save(folder: &Path, offered: &[PictureBytes], at: SystemTime) -> Result<P
 /// **Take a folder for one promise paste, by creating it** (plan row 81) — `<stamp>-<n>` in
 /// `folder`, which is made first if it is not there. `create_dir` is [`reserve`]'s
 /// `create_new`: one operation that tests for the name and takes it, so two pastes never write
-/// into one folder. The files go in under their own names.
+/// into one folder. The files go in under their own names. A worker's door (`worker`): it is the
+/// promise's worker that reserves, never the window.
 ///
 /// # Errors
 /// The kind of the error that kept the folder from being made — never its path.
 pub fn reserve_staging_folder(
+    _worker: &bt_platform::admission::WorkerCtx,
     folder: &Path,
     at: SystemTime,
 ) -> Result<PathBuf, std::io::ErrorKind> {
@@ -759,6 +761,20 @@ mod tests {
         assert_eq!(ours("20260916-143012-1.png"), Some(("20260916-143012", 1)));
     }
 
+    /// `body` on a worker the thread door started, as the promise's worker is.
+    fn on_a_worker<T: Send + 'static>(
+        body: impl FnOnce(&bt_platform::admission::WorkerCtx) -> T + Send + 'static,
+    ) -> T {
+        bt_platform::spawn_at_priority(
+            "folio-staging-test",
+            bt_platform::ThreadPriority::Normal,
+            body,
+        )
+        .expect("start a worker for the reservation")
+        .join()
+        .expect("the worker answered")
+    }
+
     /// A folder of this test's own, under the machine's temporary directory.
     fn scratch(tag: &str) -> PathBuf {
         let folder = bt_testpath::temp_path(&format!("folio-clipboard-picture-test-{tag}"));
@@ -776,36 +792,38 @@ mod tests {
     /// are never retired.
     #[test]
     fn promise_folders_are_reserved_counted_and_swept_with_the_pictures() {
-        let folder = scratch("promise-folders");
-        for index in 0..KEPT {
-            fs::write(folder.join(format!("20260916-1430{index:02}-1.png")), b"p").unwrap();
-        }
-        fs::write(folder.join("20260915-000000-1"), b"a file, not a folder").unwrap();
-        fs::create_dir(folder.join("somebody else")).unwrap();
-        // 2026-09-16T15:00:00Z.
-        let first = reserve_staging_folder(&folder, at(1_789_570_800)).unwrap();
-        let second = reserve_staging_folder(&folder, at(1_789_570_800)).unwrap();
-        assert_eq!(first, folder.join("20260916-150000-1"));
-        assert_eq!(second, folder.join("20260916-150000-2"));
-        fs::write(first.join("report.pdf"), b"x").unwrap();
-        sweep_staging(&folder);
-        assert!(!folder.join("20260916-143000-1.png").exists());
-        assert!(!folder.join("20260916-143001-1.png").exists());
-        assert!(folder.join("20260916-143002-1.png").exists());
-        assert!(first.join("report.pdf").exists() && second.is_dir());
-        assert!(
-            folder.join("20260915-000000-1").is_file(),
-            "not a folder, not ours"
-        );
-        assert!(folder.join("somebody else").is_dir());
-        for index in 0..KEPT {
-            fs::write(folder.join(format!("20260917-0000{index:02}-1.png")), b"p").unwrap();
-        }
-        sweep_staging(&folder);
-        assert!(!first.exists(), "a retired folder goes with what is in it");
-        assert!(!second.exists());
-        assert!(folder.join("20260915-000000-1").is_file());
-        let _ = fs::remove_dir_all(&folder);
+        on_a_worker(|worker| {
+            let folder = scratch("promise-folders");
+            for index in 0..KEPT {
+                fs::write(folder.join(format!("20260916-1430{index:02}-1.png")), b"p").unwrap();
+            }
+            fs::write(folder.join("20260915-000000-1"), b"a file, not a folder").unwrap();
+            fs::create_dir(folder.join("somebody else")).unwrap();
+            // 2026-09-16T15:00:00Z.
+            let first = reserve_staging_folder(worker, &folder, at(1_789_570_800)).unwrap();
+            let second = reserve_staging_folder(worker, &folder, at(1_789_570_800)).unwrap();
+            assert_eq!(first, folder.join("20260916-150000-1"));
+            assert_eq!(second, folder.join("20260916-150000-2"));
+            fs::write(first.join("report.pdf"), b"x").unwrap();
+            sweep_staging(&folder);
+            assert!(!folder.join("20260916-143000-1.png").exists());
+            assert!(!folder.join("20260916-143001-1.png").exists());
+            assert!(folder.join("20260916-143002-1.png").exists());
+            assert!(first.join("report.pdf").exists() && second.is_dir());
+            assert!(
+                folder.join("20260915-000000-1").is_file(),
+                "not a folder, not ours"
+            );
+            assert!(folder.join("somebody else").is_dir());
+            for index in 0..KEPT {
+                fs::write(folder.join(format!("20260917-0000{index:02}-1.png")), b"p").unwrap();
+            }
+            sweep_staging(&folder);
+            assert!(!first.exists(), "a retired folder goes with what is in it");
+            assert!(!second.exists());
+            assert!(folder.join("20260915-000000-1").is_file());
+            let _ = fs::remove_dir_all(&folder);
+        });
     }
 
     /// RED GATE (review X-2) — **two writes in one second never take one

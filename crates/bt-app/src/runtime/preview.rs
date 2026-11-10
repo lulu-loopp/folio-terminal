@@ -14317,9 +14317,12 @@ impl<B: Backend> Runtime<'_, B> {
             move |worker| {
                 let _place = place;
                 let began = Instant::now();
-                let result = clipboard_picture::reserve_staging_folder(&folder, SystemTime::now())
-                    .map_err(bt_platform::clipboard_promise::PromiseRefused::WriteFailed)
-                    .and_then(|into| door.render_promised_files(worker, &promise.entries, &into));
+                let result =
+                    clipboard_picture::reserve_staging_folder(worker, &folder, SystemTime::now())
+                        .map_err(bt_platform::clipboard_promise::PromiseRefused::WriteFailed)
+                        .and_then(|into| {
+                            door.render_promised_files(worker, &promise.entries, &into)
+                        });
                 if result.is_ok() {
                     clipboard_picture::sweep_staging(&folder);
                 }

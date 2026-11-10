@@ -522,7 +522,7 @@ pub fn render_clipboard_promise(
         let data = crate::windows_impl::ole_clipboard_with_retry(worker)
             .map_err(|error| not_rendered(&error))?;
         let mut contents = OleContents::of(data)?;
-        render_promise(&mut contents, offer, into, PASTE_LIMITS)
+        render_promise(worker, &mut contents, offer, into, PASTE_LIMITS)
     })();
     // SAFETY: balances the `OleInitialize` above, on this thread, after the data object went.
     unsafe { OleUninitialize() };
@@ -634,6 +634,7 @@ impl PromisedContents for OleContents {
 
     fn write_contents(
         &mut self,
+        worker: &WorkerCtx,
         index: usize,
         file: &mut PromisedFile<'_>,
     ) -> Result<(), PromiseRefused> {
@@ -693,7 +694,7 @@ impl PromisedContents for OleContents {
                     .map_err(|error| not_rendered(&error))?;
                 copy.Commit(0).map_err(|error| not_rendered(&error))?;
             }
-            return file.written_by_the_source();
+            return file.written_by_the_source(worker);
         }
         Err(PromiseRefused::NotRendered(None))
     }
@@ -949,7 +950,7 @@ mod promise_tests {
     use windows::core::{BOOL, HRESULT, Ref, implement};
 
     use super::*;
-    use crate::clipboard_promise::tests::descriptor_bytes;
+    use crate::clipboard_promise::tests::{descriptor_bytes, on_a_worker};
     use crate::clipboard_promise::{FILE_DESCRIPTOR_BYTES, render_promise};
 
     /// How one entry's contents are handed over.
@@ -1169,54 +1170,56 @@ mod promise_tests {
     /// `not-rendered`.
     #[test]
     fn every_medium_a_source_hands_over_is_written() {
-        // SAFETY: this test's own thread joins an apartment and leaves it at the end.
-        unsafe { OleInitialize(None) }.expect("an apartment");
-        let long: Vec<u8> = (0..200_000_u32).map(|n| (n % 251) as u8).collect();
-        let (mut contents, offer) = board(
-            &[
-                (SIZED, 0, 5, "a 文件.txt"),
-                (0, 0, 0, "long.bin"),
-                (0, 0, 0, "mail.msg"),
-                (ATTRIBUTED, DIRECTORY, 0, "photos"),
-                (SIZED, 0, 3, "photos\\b.png"),
-            ],
-            vec![
-                Handed::Global(b"hello and more".to_vec()),
-                Handed::Stream(long.clone()),
-                Handed::Storage(b"message body".to_vec()),
-                Handed::Fails(E_NOTIMPL),
-                Handed::Global(b"png".to_vec()),
-            ],
-        );
-        let into = scratch("media");
-        std::fs::create_dir_all(&into).expect("the paste's folder");
-        let rendered = render_promise(&mut contents, &offer, &into, PASTE_LIMITS);
-        // SAFETY: balances the `OleInitialize` above, on this thread.
-        unsafe { OleUninitialize() };
-        let rendered = rendered.expect("every medium is written");
-        assert_eq!(
-            rendered.pasted,
-            [
-                into.join("a 文件.txt"),
-                into.join("long.bin"),
-                into.join("mail.msg"),
-                into.join("photos"),
-            ]
-        );
-        assert_eq!(rendered.files, 4);
-        assert_eq!(std::fs::read(into.join("a 文件.txt")).unwrap(), b"hello");
-        assert_eq!(std::fs::read(into.join("long.bin")).unwrap(), long);
-        let message = std::fs::read(into.join("mail.msg")).unwrap();
-        assert_eq!(
-            &message[..8],
-            [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1],
-            "a compound file's signature"
-        );
-        assert_eq!(
-            std::fs::read(into.join("photos").join("b.png")).unwrap(),
-            b"png"
-        );
-        let _ = std::fs::remove_dir_all(&into);
+        on_a_worker(|worker| {
+            // SAFETY: this test's own thread joins an apartment and leaves it at the end.
+            unsafe { OleInitialize(None) }.expect("an apartment");
+            let long: Vec<u8> = (0..200_000_u32).map(|n| (n % 251) as u8).collect();
+            let (mut contents, offer) = board(
+                &[
+                    (SIZED, 0, 5, "a 文件.txt"),
+                    (0, 0, 0, "long.bin"),
+                    (0, 0, 0, "mail.msg"),
+                    (ATTRIBUTED, DIRECTORY, 0, "photos"),
+                    (SIZED, 0, 3, "photos\\b.png"),
+                ],
+                vec![
+                    Handed::Global(b"hello and more".to_vec()),
+                    Handed::Stream(long.clone()),
+                    Handed::Storage(b"message body".to_vec()),
+                    Handed::Fails(E_NOTIMPL),
+                    Handed::Global(b"png".to_vec()),
+                ],
+            );
+            let into = scratch("media");
+            std::fs::create_dir_all(&into).expect("the paste's folder");
+            let rendered = render_promise(worker, &mut contents, &offer, &into, PASTE_LIMITS);
+            // SAFETY: balances the `OleInitialize` above, on this thread.
+            unsafe { OleUninitialize() };
+            let rendered = rendered.expect("every medium is written");
+            assert_eq!(
+                rendered.pasted,
+                [
+                    into.join("a 文件.txt"),
+                    into.join("long.bin"),
+                    into.join("mail.msg"),
+                    into.join("photos"),
+                ]
+            );
+            assert_eq!(rendered.files, 4);
+            assert_eq!(std::fs::read(into.join("a 文件.txt")).unwrap(), b"hello");
+            assert_eq!(std::fs::read(into.join("long.bin")).unwrap(), long);
+            let message = std::fs::read(into.join("mail.msg")).unwrap();
+            assert_eq!(
+                &message[..8],
+                [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1],
+                "a compound file's signature"
+            );
+            assert_eq!(
+                std::fs::read(into.join("photos").join("b.png")).unwrap(),
+                b"png"
+            );
+            let _ = std::fs::remove_dir_all(&into);
+        });
     }
 
     /// RED (plan row 81) — **a source that fails, or whose board changed, refuses the paste with
@@ -1224,25 +1227,27 @@ mod promise_tests {
     /// says; a descriptor that is not the offer is `changed` before any content is asked for.
     #[test]
     fn a_source_that_fails_or_changed_leaves_nothing() {
-        // SAFETY: this test's own thread joins an apartment and leaves it at the end.
-        unsafe { OleInitialize(None) }.expect("an apartment");
-        let gone = HRESULT(0x8001_0108_u32.cast_signed());
-        let (mut contents, offer) = board(
-            &[(SIZED, 0, 2, "a.txt"), (SIZED, 0, 2, "b.txt")],
-            vec![Handed::Global(b"aa".to_vec()), Handed::Fails(gone)],
-        );
-        let into = scratch("fails");
-        std::fs::create_dir_all(&into).expect("the paste's folder");
-        let failed = render_promise(&mut contents, &offer, &into, PASTE_LIMITS);
-        let (mut changed, _) = board(&[(SIZED, 0, 2, "c.txt")], vec![Handed::Fails(gone)]);
-        let elsewhere = scratch("changed");
-        std::fs::create_dir_all(&elsewhere).expect("the paste's folder");
-        let raced = render_promise(&mut changed, &offer, &elsewhere, PASTE_LIMITS);
-        // SAFETY: balances the `OleInitialize` above, on this thread.
-        unsafe { OleUninitialize() };
-        assert_eq!(failed, Err(PromiseRefused::NotRendered(Some(0x8001_0108))));
-        assert!(!into.exists(), "the first file went with the refusal");
-        assert_eq!(raced, Err(PromiseRefused::Changed));
-        assert!(!elsewhere.exists());
+        on_a_worker(|worker| {
+            // SAFETY: this test's own thread joins an apartment and leaves it at the end.
+            unsafe { OleInitialize(None) }.expect("an apartment");
+            let gone = HRESULT(0x8001_0108_u32.cast_signed());
+            let (mut contents, offer) = board(
+                &[(SIZED, 0, 2, "a.txt"), (SIZED, 0, 2, "b.txt")],
+                vec![Handed::Global(b"aa".to_vec()), Handed::Fails(gone)],
+            );
+            let into = scratch("fails");
+            std::fs::create_dir_all(&into).expect("the paste's folder");
+            let failed = render_promise(worker, &mut contents, &offer, &into, PASTE_LIMITS);
+            let (mut changed, _) = board(&[(SIZED, 0, 2, "c.txt")], vec![Handed::Fails(gone)]);
+            let elsewhere = scratch("changed");
+            std::fs::create_dir_all(&elsewhere).expect("the paste's folder");
+            let raced = render_promise(worker, &mut changed, &offer, &elsewhere, PASTE_LIMITS);
+            // SAFETY: balances the `OleInitialize` above, on this thread.
+            unsafe { OleUninitialize() };
+            assert_eq!(failed, Err(PromiseRefused::NotRendered(Some(0x8001_0108))));
+            assert!(!into.exists(), "the first file went with the refusal");
+            assert_eq!(raced, Err(PromiseRefused::Changed));
+            assert!(!elsewhere.exists());
+        });
     }
 }

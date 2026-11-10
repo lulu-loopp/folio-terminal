@@ -261,6 +261,7 @@ bt-app	-	crate::pty_door::wait_for_retirements	bt_pty::wait_for_retirements 1	ow
 bt-app	-	crate::recovered::copies_in	std::fs::read_dir 1	worker-door-body	WorkerCtx	
 bt-app	-	crate::uninstall::names_in	std::fs::read_dir 1	worker-door-body	WorkerCtx	
 bt-app	-	crate::uninstall::tree_items	std::fs::read_dir 1	worker-door-body	WorkerCtx	
+bt-app	-	crate::clipboard_picture::reserve_staging_folder	std::fs::create_dir_all 1	worker-door-body	WorkerCtx	
 bt-app	-	crate::watch_steward::WatchSteward::serve	std::sync::Condvar::wait 1	worker-door-body	WorkerCtx	
 bt-app	-	crate::update_handoff::leave_armed	std::sync::mpsc::Receiver::recv_timeout 1	owner-door-body	WaitToken	UpdateLeave
 bt-app	-	crate::diagnostics::Queue::settle	std::sync::mpsc::Receiver::recv_timeout 1	owner-door-body	WaitToken	DiagnosticsSettle
@@ -276,6 +277,8 @@ bt-platform	-	crate::deferred_removal::schedule_by	std::fs::create_dir_all 1, st
 bt-platform	[windows]	crate::elevated_pipe::shell_execute_runas	windows::Win32::UI::Shell::ShellExecuteExW 1	worker-door-body	WorkerCtx	
 bt-platform	-	crate::deferred_removal::stop_child	std::process::Child::wait 1	worker-door-body	WorkerCtx	
 bt-platform	-	crate::exchange::flush_directory	std::fs::File::sync_all 1	worker-door-body	WorkerCtx	
+bt-platform	-	crate::clipboard_promise::render_into	std::fs::create_dir_all 2	worker-door-body	WorkerCtx	
+bt-platform	-	crate::clipboard_promise::PromisedFile::written_by_the_source	std::fs::metadata 1	worker-door-body	WorkerCtx	
 bt-platform	-	crate::macos_update::flush_tree_with	std::fs::read_dir 1	worker-door-body	WorkerCtx	
 bt-platform	-	crate::exchange::replace_keeping_displaced	std::fs::File::sync_all 1	worker-door-body	WorkerCtx	
 bt-platform	-	crate::wait::sleep_within	std::thread::sleep 1	worker-door-body	WorkerCtx	
