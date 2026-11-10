@@ -2199,8 +2199,11 @@ impl<W: Copy + Eq> Job<W> {
 
     /// **The reports waiting for the window thread, taken without applying
     /// them** — a test's way to read a driver's last word, which a job that
-    /// has moved on drops as stale ([`Self::apply`] them after).
-    #[cfg(test)]
+    /// has moved on drops as stale ([`Self::apply`] them after). Windows only:
+    /// its one reader is the Windows Prepare's cancel tests
+    /// (`update_prepare_windows_tests`' `last_word`), and the inbox is this
+    /// type's own.
+    #[cfg(all(test, windows))]
     pub(crate) fn take_reports(&mut self) -> Vec<Progress> {
         std::mem::take(
             &mut *self

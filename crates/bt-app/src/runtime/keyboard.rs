@@ -16,8 +16,8 @@ use crate::{
     ImeCaretSource, ImeOwner, KeyboardOwner, LeafId, NewWindowPlan, NoticeHost, PasteAnswer,
     PasteCardKey, Popup, PopupsUp, PreviewSurface, RenameClipboard, RenameExit, RenameVerdict,
     Runtime, Step, TabRename, TextFieldSeat, UserInputKind, git_graph, hang_watch, ime_outbound,
-    ime_report, input, keyhint, marks, menubar, profiles, quit, restore, settings, shortcuts,
-    text_field, toast,
+    ime_report, input, keyhint, marks, menubar, profiles, quit, restore, set_option_as_alt,
+    settings, shortcuts, text_field, toast,
 };
 use anyhow::Result;
 use bt_layout::{Axis, SeatId};
@@ -178,10 +178,11 @@ impl<B: Backend> Runtime<'_, B> {
         // O4, 2026-09-18): the eight hundred milliseconds maturing is state and
         // is never paced, and only the fade that follows it is.
         let promoted = self.window.key_hint.activate_if_due(now);
-        if !promoted && !self.animation_frame_is_due() {
+        // Asked only with work: a card that owes no frame asks the gate nothing.
+        if !self.paced_frame(promoted, |rt| rt.key_hint_owes_frame(now)) {
             return Ok(());
         }
-        if (promoted || self.key_hint_owes_frame(now)) && self.refresh_overlay() {
+        if self.refresh_overlay() {
             self.present_chrome_change()?;
         }
         Ok(())
@@ -3030,6 +3031,25 @@ impl<B: Backend> Runtime<'_, B> {
     pub(crate) fn destroy_ime_caret(&mut self, reason: &'static str) {
         self.trace_ime_line(|| caret_line("destroy", reason, None));
         self.window.ime_system_caret.destroy();
+    }
+
+    /// Take up the stored answer about the Option key, which is the half of
+    /// [`Self::apply_option_sends_alt`] every window has to do for itself.
+    pub(crate) fn adopt_option_as_alt(&mut self) {
+        let option_sends_alt = self.app.settings_store.loaded().option_sends_alt;
+        set_option_as_alt(&self.window.window, option_sends_alt);
+        // **Struck against what is held, not against what was left standing.**
+        // Reading the effective state back through the same door would be a
+        // one-way street: the `Alt` this line takes out while the setting is off
+        // is gone, so switching the setting back on under a hand that is still
+        // holding `Option` could not put it back until the next report. The
+        // reported state is the one thing here that is not a consequence of the
+        // setting, which is what makes it the right thing to recompute from.
+        self.window.modifiers = input::effective_modifiers(
+            self.window.modifiers_held,
+            option_sends_alt,
+            bt_platform::host_platform(),
+        );
     }
 }
 

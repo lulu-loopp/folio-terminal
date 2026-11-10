@@ -2373,7 +2373,7 @@ struct PreparedSeat {
     /// Which entry of `seat_slots` holds this seat's prepared glyph batches.
     slot: usize,
     /// The cell backgrounds a program set, premultiplied by the window's alpha —
-    /// see [`WindowRenderer::rectangles`]. Its own buffer for the reason the
+    /// see [`SeatPainter::rectangles`]. Its own buffer for the reason the
     /// chrome's grounds have one: they are the same surface as the clear and are
     /// drawn with the clear's arithmetic, under everything else in the seat.
     ground_rect_buffer: wgpu::Buffer,
@@ -2389,7 +2389,7 @@ struct PreparedSeat {
     math_overlay_count: usize,
 }
 
-/// One seat's flat fills for a frame, in the two classes [`WindowRenderer::rectangles`]
+/// One seat's flat fills for a frame, in the two classes [`SeatPainter::rectangles`]
 /// tells apart: the window's own surface, and the marks struck on it.
 ///
 /// Two lists rather than one list with a flag, because the two are drawn by two
@@ -5375,6 +5375,114 @@ pub struct RendererPresentState {
     pub seat: SeatViewport,
 }
 
+/// **Everything a seat's drawing reads that is not the seat** (0.4.9 plan row 64a;
+/// `docs/DESIGN.md`, entry of 2026-11-03: the window's body is kept).
+///
+/// The body — the clear, the ground picture and every seat's grid — is kept as pixels between
+/// frames and drawn again only when what it was drawn from moves. That holds only while the key
+/// carries *everything* the drawing reads, so the drawing reads it from here: the seat loop builds
+/// its `SeatPainter` out of this value, and the window fields the fills used to reach for are
+/// fields of this struct. A new read is a new field, and therefore a new term of the key.
+///
+/// Public so that the headless glass in `bt-app` decides with the function the renderer decides
+/// with ([`BodyKey::of`], [`BodyKey::matches`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BodyState {
+    /// The surface the body is drawn at, in physical pixels.
+    pub size: (u32, u32),
+    /// The window's `font_revision`: the terminal face it measures in.
+    pub font_revision: u64,
+    /// The device's `font_environment_epoch`: the fallback families behind that face.
+    pub font_environment_epoch: u64,
+    /// `theme_revision()`: the palette, the contrast floor and the window's ground — its
+    /// picture, fit and opacity — each advance it.
+    pub theme_revision: u64,
+    /// `current_cursor_style()`, a process static that advances no revision.
+    pub cursor_style: CursorStyle,
+    pub cursor_blink_visible: bool,
+    pub window_focused: bool,
+    /// The window's own metrics: its scale factor, and the hairline the status overlay's tag
+    /// is drawn with.
+    pub base_metrics: CellMetrics,
+    /// The ground's alpha as the frame read it, once, as bits.
+    pub ground_alpha: u32,
+}
+
+/// One seat as the body was drawn from it: a [`SeatFrame`] whose frame is owned.
+#[derive(Clone, Debug, PartialEq)]
+struct SeatKey {
+    seat: SeatViewport,
+    clip: SeatViewport,
+    focused: bool,
+    metrics: CellMetrics,
+    frame: ViewportFrame,
+}
+
+/// **What the body on hand was drawn from** (row 64a). The body is clean exactly while this
+/// equals the frame's inputs, and a difference anywhere draws the whole body again (ruling of
+/// 2026-11-02: one layer for the window, not one per pane).
+///
+/// The frames are the renderer's own copies, compared by `ViewportFrame: Eq` — not the app's
+/// picture revision, which an invalidation can move backwards.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BodyKey {
+    state: BodyState,
+    seats: Vec<SeatKey>,
+}
+
+impl BodyKey {
+    /// The key a body drawn from `state` and `seats` is filed under.
+    #[must_use]
+    pub fn of(state: BodyState, seats: &[SeatFrame<'_>]) -> Self {
+        Self {
+            state,
+            seats: seats
+                .iter()
+                .map(|entry| SeatKey {
+                    seat: entry.seat,
+                    clip: entry.clip,
+                    focused: entry.focused,
+                    metrics: entry.metrics,
+                    frame: entry.frame.clone(),
+                })
+                .collect(),
+        }
+    }
+
+    /// Whether the body filed under this key is the body `state` and `seats` would draw.
+    /// Compared in place: nothing is cloned to ask.
+    #[must_use]
+    pub fn matches(&self, state: &BodyState, seats: &[SeatFrame<'_>]) -> bool {
+        self.state == *state
+            && self.seats.len() == seats.len()
+            && self.seats.iter().zip(seats).all(|(key, entry)| {
+                key.seat == entry.seat
+                    && key.clip == entry.clip
+                    && key.focused == entry.focused
+                    && key.metrics == entry.metrics
+                    && key.frame == *entry.frame
+            })
+    }
+}
+
+/// What a present did with the window's body (row 64a): drew it, or put back the one it kept.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BodyUse {
+    Composed,
+    Reused,
+}
+
+impl BodyUse {
+    /// The word `BT_PERF_TRACE` prints for it (`body=`).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Composed => "composed",
+            Self::Reused => "reused",
+        }
+    }
+}
+
 /// One window's half of the renderer: its surface, its resolution, its metrics,
 /// and every cache that is keyed by a pixel font size.
 ///
@@ -5421,6 +5529,13 @@ pub struct WindowRenderer {
     /// How many surfaces the last frame put back through a texture — the
     /// witness that a frame did or did not take the group path.
     groups_composited: u32,
+    /// **The body kept between frames** (row 64a) — see [`BodyLayer`]. `None`
+    /// until the first frame, and again once the device it lived on is gone.
+    body: Option<BodyLayer>,
+    body_route: BodyRoute,
+    /// How many frames of this window drew the body rather than putting back
+    /// the one it kept — see [`WindowRenderer::body_composes`].
+    body_composes: u64,
     /// One text-renderer pair per Terminal seat, grown on demand — the same
     /// shape, and for the same reason, as
     /// [`WindowRenderer::overlay_text_renderers`]: a `TextRenderer` holds
@@ -6631,8 +6746,8 @@ pub struct RenderProbeSample {
 #[doc(hidden)]
 pub mod probe_surface {
     use super::{
-        GpuContext, Instant, RenderError, RenderProbeSample, TextPreparationStats, ViewportFrame,
-        WindowRenderer,
+        BodyRoute, GpuContext, Instant, RenderError, RenderProbeSample, TextPreparationStats,
+        ViewportFrame, WindowRenderer,
     };
 
     /// A read-back's buffer and its geometry, between the encoded copy and the mapped rows.
@@ -6707,6 +6822,15 @@ pub mod probe_surface {
         window.probe_frame_finish(gpu, timings, submitted_at)
     }
 
+    /// **`window` draws its body straight into the frame on every present from now on** — the
+    /// road every frame took before a window kept its body (row 64a), and the oracle the
+    /// byte-for-byte gate holds the kept body to. The drawing is the same function on both
+    /// roads (`WindowRenderer::draw_body`); what this one leaves out is the layer and its copy.
+    pub fn present_direct(window: &mut WindowRenderer) {
+        window.body_route = BodyRoute::Direct;
+        window.body = None;
+    }
+
     /// The device's queue, for the tool that submits what this module encoded.
     #[must_use]
     pub fn queue(gpu: &GpuContext) -> &wgpu::Queue {
@@ -6719,6 +6843,17 @@ pub mod probe_surface {
 /// `bt_render_probe`'s, and these are the same statements in the same order.
 #[cfg(test)]
 impl WindowRenderer {
+    /// The painter the window's own seat is drawn with, for the tests that read one seat's
+    /// fills without composing a frame.
+    fn seat_painter(&self) -> SeatPainter {
+        SeatPainter {
+            seat: self.seat,
+            base_metrics: self.base_metrics,
+            cursor_blink_visible: self.cursor_blink_visible,
+            cursor_style: current_cursor_style(),
+        }
+    }
+
     fn read_back(&self, gpu: &GpuContext) -> Result<Vec<[u8; 4]>, RenderError> {
         let (commands, back) = self.read_back_work(gpu)?;
         gpu.queue.submit([commands]);
@@ -8636,6 +8771,8 @@ impl WindowRenderer {
         // The fading surfaces' textures were the old device's; the next frame
         // that fades makes its own on this one.
         self.group_targets.clear();
+        // And so was the body: the next frame draws it on this one.
+        self.body = None;
         self.max_texture_dimension_2d = gpu.max_texture_dimension_2d;
         Ok(())
     }
@@ -8776,6 +8913,9 @@ impl WindowRenderer {
             overlay_groups: Vec::new(),
             group_targets: Vec::new(),
             groups_composited: 0,
+            body: None,
+            body_route: BodyRoute::Layer,
+            body_composes: 0,
             seat_slots,
             text_viewport,
             chrome_text_renderer,
@@ -9713,6 +9853,28 @@ impl WindowRenderer {
         self.groups_composited
     }
 
+    /// How many frames of this window drew its body rather than putting back the one it kept
+    /// (row 64a). A frame whose panes, theme, fonts, caret, focus and size are all the last
+    /// frame's leaves it where it was, whatever moved in the chrome around them.
+    pub fn body_composes(&self) -> u64 {
+        self.body_composes
+    }
+
+    /// This frame's [`BodyState`], read once, at the ground alpha the frame read once.
+    fn body_state(&self, gpu: &GpuContext, ground_alpha: f32) -> BodyState {
+        BodyState {
+            size: (self.config.width, self.config.height),
+            font_revision: self.font_revision,
+            font_environment_epoch: gpu.font_environment_epoch,
+            theme_revision: theme_revision(),
+            cursor_style: current_cursor_style(),
+            cursor_blink_visible: self.cursor_blink_visible,
+            window_focused: self.window_focused,
+            base_metrics: self.base_metrics,
+            ground_alpha: ground_alpha.to_bits(),
+        }
+    }
+
     /// How wide `text` will be when drawn as a plain [`ChromeLabel`] at
     /// `font_size_px`, in physical pixels.
     ///
@@ -10142,6 +10304,22 @@ impl WindowRenderer {
         // reads of a value a settings write can move between them is how a sheet
         // becomes two.
         let ground_alpha = ground::window_ground().alpha;
+        // **Whether the body on hand is this frame's** (row 64a). Everything the seat loop below
+        // draws reads `body_state` or a seat, and the key holds both; so a key that matches is a
+        // body that would come out the same byte for byte, and the loop is skipped. The window's
+        // furniture — a working mark's step, a menu, the peek, a fade — moves nothing here.
+        // The key's own price is timed (review N4): the comparison walks every cell of every
+        // pane on every frame, kept body or not.
+        let key_compare_started = Instant::now();
+        let body_state = self.body_state(gpu, ground_alpha);
+        let body_clean = if self.body_route == BodyRoute::Layer
+            && let Some(BodyLayer { key: Some(key), .. }) = &self.body
+        {
+            key.matches(&body_state, seats)
+        } else {
+            false
+        };
+        let key_compared = key_compare_started.elapsed();
         let mut prepared: Vec<PreparedSeat> = Vec::with_capacity(seats.len());
         // Every rendered table on screen, from every seat, gathered as this frame's extra preview
         // bodies. They join the list the caller set rather than forming a pass of their own: a
@@ -10156,7 +10334,8 @@ impl WindowRenderer {
         let mut census = self
             .glyph_census_enabled
             .then(|| GlyphCensus::for_device(gpu.max_texture_dimension_2d()));
-        let mut focused_text_stats = None;
+        // A body put back prepared no seat's text, and the trace reads zeros for it.
+        let mut focused_text_stats = body_clean.then(TextPreparationStats::default);
         // Whether every seat's grid text reached the glass. One bit for the
         // window and not one per seat, because what the caller does with it —
         // keep the composed frame on the books and ask for it again — is a
@@ -10171,9 +10350,15 @@ impl WindowRenderer {
         let mut atlas_prepared_at = validated_at;
         let mut math_prepared_at = validated_at;
 
-        for (index, entry) in seats.iter().enumerate() {
+        // A formula the body drew without its picture — refused by the texture budget, or not
+        // resident after its upload — makes a body nobody may keep, and these two counters
+        // moving is the one statement of it.
+        let math_misses_before = (self.math_texture_refusals, self.textureless_math_blocks);
+        let body_started = Instant::now();
+        for (index, entry) in seats.iter().enumerate().filter(|_| !body_clean) {
             let frame = entry.frame;
             self.seat = entry.seat;
+            let painter = SeatPainter::of(&body_state, entry.seat);
             phase(PresentPhase::TextShaping);
             let text_stats = self.prepare_text_rows(gpu, entry.metrics, frame)?;
             rows_prepared_at = Instant::now();
@@ -10291,11 +10476,6 @@ impl WindowRenderer {
             // rasters this frame actually put on screen before it decides to darken anything.
             phase(PresentPhase::Layout);
             let math_batch = self.prepare_math_draws(gpu, entry.metrics, frame);
-            table_block_bodies.extend(self.table_block_bodies(
-                entry.metrics,
-                gpu.font_environment_epoch,
-                frame,
-            ));
             math_prepared_at = Instant::now();
             // **The gate again, where this seat starts asking the device for
             // memory** (§7.1.3m ⑤″). The one at the top of this function
@@ -10313,11 +10493,11 @@ impl WindowRenderer {
             let SeatRects {
                 grounds: ground_rects,
                 ink: rects,
-            } = self.rectangles(
+            } = painter.rectangles(
                 entry.metrics,
                 frame,
                 &math_batch.drawn,
-                self.window_focused && entry.focused,
+                body_state.window_focused && entry.focused,
                 ground_alpha,
             );
             let ground_rect_data = if ground_rects.is_empty() {
@@ -10338,7 +10518,7 @@ impl WindowRenderer {
                 .and_then(|status| {
                     status_overlay_geometry(entry.metrics, frame, status, entry.seat.width as f32)
                 })
-                .map(|geometry| self.float_tag_rects(geometry.rect))
+                .map(|geometry| painter.float_tag_rects(geometry.rect))
                 .unwrap_or_default();
             let status_rect_data = if status_rects.is_empty() {
                 empty_rect.as_slice()
@@ -10348,10 +10528,10 @@ impl WindowRenderer {
             let status_rect_buffer =
                 gpu.vertex_buffer("status overlay rectangle", status_rect_data);
             // The wash first, the block's own chrome after it: see
-            // [`Self::math_selection_wash_rectangles`] for why this buffer's order is the
+            // [`SeatPainter::math_selection_wash_rectangles`] for why this buffer's order is the
             // z-order that matters here.
-            let mut math_overlays = self.math_selection_wash_rectangles(entry.metrics, frame);
-            math_overlays.extend(self.math_overlay_rectangles(entry.metrics, frame));
+            let mut math_overlays = painter.math_selection_wash_rectangles(entry.metrics, frame);
+            math_overlays.extend(painter.math_overlay_rectangles(entry.metrics, frame));
             let overlay_data = if math_overlays.is_empty() {
                 empty_rect.as_slice()
             } else {
@@ -10391,6 +10571,23 @@ impl WindowRenderer {
         // outside this function `self.seat` names the focused seat, and every
         // seat-relative helper reached from elsewhere — the IME cursor area, a
         // band's right edge — means that one by it.
+        self.seat = focused_seat;
+        let body_prepare = body_started.elapsed();
+        // Only a body every seat's text reached, and every visible formula's picture, is kept:
+        // a frame that lost either is owed again, and so is its body.
+        let body_keepable = text_complete
+            && (self.math_texture_refusals, self.textureless_math_blocks) == math_misses_before;
+        // **The rendered tables, on every frame, kept body or not.** They are a seat's content
+        // drawn with the preview bodies above the window's furniture, not into the body, so they
+        // are gathered here and not in the loop a kept body skips.
+        for entry in seats {
+            self.seat = entry.seat;
+            table_block_bodies.extend(self.table_block_bodies(
+                entry.metrics,
+                gpu.font_environment_epoch,
+                entry.frame,
+            ));
+        }
         self.seat = focused_seat;
 
         // Every seat has prepared; the window's own furniture is about to. The
@@ -10945,7 +11142,8 @@ impl WindowRenderer {
             self.group_targets.clear();
         }
         while self.group_targets.len() < plan.groups.len() {
-            let target = GroupTarget::new(gpu, self.config.format, surface);
+            let target =
+                GroupTarget::new(gpu, self.config.format, surface, "overlay group texture");
             self.group_targets.push(target);
         }
         let video = video_vertex_buffer
@@ -11003,6 +11201,61 @@ impl WindowRenderer {
                 }
             }
         }
+        // **The body** (row 64a): drawn into its layer when the layer is not this frame's, then
+        // put back on the frame whole — one quad through both plain views with the blend off, so
+        // every byte under the window's furniture is the byte the layer holds, alpha included.
+        // The frame's own pass then loads it and draws from the seat chrome up, which is where
+        // it always began drawing over the seats. A copy that is a draw and not a
+        // `copy_texture_to_texture`: a Metal drawable is framebuffer-only, and the surface is
+        // configured for render-attachment use and nothing else.
+        let body_encode_started = Instant::now();
+        let layered = self.body_route == BodyRoute::Layer;
+        // One borrow of the ground's quad for whichever route draws the body below.
+        let ground_buffer = ground_quad.as_ref();
+        if layered {
+            if self
+                .body
+                .as_ref()
+                .is_none_or(|body| body.target.size != surface)
+            {
+                self.body = Some(BodyLayer {
+                    target: GroupTarget::new(
+                        gpu,
+                        self.config.format,
+                        surface,
+                        "window body texture",
+                    ),
+                    key: None,
+                });
+            }
+            let body = self.body.as_ref().expect("the body layer was made above");
+            if !body_clean {
+                let mut pass = begin_overlay_pass(
+                    &mut encoder,
+                    &body.target.colour,
+                    wgpu::LoadOp::Clear(theme_clear_color()),
+                    "Folio body pass",
+                    surface,
+                );
+                self.draw_body(&mut pass, gpu, ground_buffer, &prepared)?;
+            }
+            let whole = [[0.0, 0.0, surface.0 as f32, surface.1 as f32]];
+            let instances = group_instances(&whole, [0, 0], 1.0, surface);
+            let quad = gpu.vertex_buffer("window body put back", instances.as_slice());
+            let bytes = self.bytes_view(&acquired);
+            let mut pass = begin_overlay_pass(
+                &mut encoder,
+                &bytes,
+                wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                "Folio body put back",
+                surface,
+            );
+            pass.set_pipeline(&gpu.group_pipelines.put_back);
+            pass.set_bind_group(0, &body.target.raw, &[]);
+            pass.set_vertex_buffer(0, quad.slice(..));
+            pass.draw(0..6, 0..1);
+        }
+        let body_encoded = body_encode_started.elapsed();
         let overlay_items = plan.items(0..overlay_draws.len(), None);
         let frame_layers = overlay_items
             .iter()
@@ -11018,124 +11271,21 @@ impl WindowRenderer {
                     ops: wgpu::Operations {
                         // Theme colors are authored in sRGB. The sRGB surface encodes the linear
                         // clear value exactly once, matching the rectangle upload path below.
-                        load: wgpu::LoadOp::Clear(theme_clear_color()),
+                        //
+                        // A body put back from its layer is already on the frame (row 64a), and
+                        // this pass begins on it; the direct route clears and draws it here.
+                        load: if layered {
+                            wgpu::LoadOp::Load
+                        } else {
+                            wgpu::LoadOp::Clear(theme_clear_color())
+                        },
                         store: wgpu::StoreOp::Store,
                     },
                 })],
                 ..Default::default()
             });
-            // The ground picture, before the first seat and after nothing: one
-            // quad over the whole surface, at the pass's default viewport. Its
-            // blend is `Replace`, so it supersedes the clear rather than sitting
-            // on top of it — the two write the same value for the same ground,
-            // and this one additionally carries the picture.
-            //
-            // Per window and not per pane: a split is two views of one place,
-            // and a picture cut at every divider would move every time one was
-            // dragged.
-            if let Some(buffer) = ground_quad.as_ref()
-                && let Some((_, bind_group)) = gpu.background_texture.as_ref()
-            {
-                pass.set_pipeline(&gpu.background_pipeline);
-                pass.set_bind_group(0, bind_group, &[]);
-                pass.set_vertex_buffer(0, buffer.slice(..));
-                pass.draw(0..6, 0..1);
-            }
-            // Every *rectangle* a terminal draws is in seat-local pixels; the
-            // viewport/scissor pair opening each iteration is the entire
-            // translation, and for a lone leaf the seat *is* the surface, so for
-            // N = 1 these are the two calls that were always here, with the same
-            // values, around the same draws.
-            //
-            // **Its text is not** (§7.36). A glyph's clip space comes from the
-            // resolution in the bound `Viewport`, and this window holds exactly
-            // one of those; so the glyphs arrive already carrying the seat's
-            // corner and are drawn under the surface's own viewport, with this
-            // seat's scissor still standing. `whole_surface` is that switch, and
-            // it is a state change and not a draw — for N = 1 both viewports are
-            // the same rectangle.
-            let whole_surface = |pass: &mut wgpu::RenderPass<'_>| {
-                pass.set_viewport(
-                    0.0,
-                    0.0,
-                    self.config.width as f32,
-                    self.config.height as f32,
-                    0.0,
-                    1.0,
-                );
-            };
-            for seat in &prepared {
-                let seat_viewport = |pass: &mut wgpu::RenderPass<'_>| {
-                    pass.set_viewport(
-                        seat.seat.x as f32,
-                        seat.seat.y as f32,
-                        seat.seat.width as f32,
-                        seat.seat.height as f32,
-                        0.0,
-                        1.0,
-                    );
-                };
-                seat_viewport(&mut pass);
-                // Viewport from `seat`, scissor from `clip`. The two are equal
-                // at rest — for `N = 1` they are both the whole surface — and
-                // differ only while a pane is mid-FLIP, where the difference is
-                // precisely the mock-up's counter-scale (see [`SeatFrame::clip`]).
-                //
-                // Through [`set_scissor`], which is where the surface's extent
-                // is applied: a seat whose box has no pixels on this target
-                // draws none.
-                if !set_scissor(
-                    &mut pass,
-                    seat.clip,
-                    (self.config.width, self.config.height),
-                ) {
-                    continue;
-                }
-                let slot = &self.seat_slots[seat.slot];
-                // The paper a program declared, before the ink printed on it: the
-                // same order the one list had, drawn with the clear's own
-                // arithmetic so a banner is the window wearing another colour
-                // rather than a slab laid on it (§7.1.6c-4f).
-                if seat.ground_rect_count > 0 {
-                    pass.set_pipeline(&gpu.ground_rect_pipeline);
-                    pass.set_vertex_buffer(0, seat.ground_rect_buffer.slice(..));
-                    pass.draw(0..6, 0..seat.ground_rect_count as u32);
-                }
-                if seat.rect_count > 0 {
-                    pass.set_pipeline(&gpu.rect_pipeline);
-                    pass.set_vertex_buffer(0, seat.rect_buffer.slice(..));
-                    pass.draw(0..6, 0..seat.rect_count as u32);
-                }
-                if let Some(vertex_buffer) = seat.math_vertex_buffer.as_ref() {
-                    pass.set_pipeline(&gpu.math_pipeline);
-                    pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-                    for draw in &seat.math_draws {
-                        pass.set_bind_group(0, draw.tile.bind_group(draw.blit), &[]);
-                        pass.draw(draw.first_vertex..draw.first_vertex + 6, 0..1);
-                    }
-                }
-                if seat.text_prepared {
-                    whole_surface(&mut pass);
-                    slot.text_renderer
-                        .render(&gpu.atlas, &self.text_viewport, &mut pass)
-                        .map_err(|error| RenderError::GlyphRender(error.to_string()))?;
-                    seat_viewport(&mut pass);
-                }
-                if seat.text_prepared && seat.status_rect_count > 0 {
-                    pass.set_pipeline(&gpu.rect_pipeline);
-                    pass.set_vertex_buffer(0, seat.status_rect_buffer.slice(..));
-                    pass.draw(0..6, 0..seat.status_rect_count as u32);
-                    whole_surface(&mut pass);
-                    slot.status_text_renderer
-                        .render(&gpu.atlas, &self.text_viewport, &mut pass)
-                        .map_err(|error| RenderError::GlyphRender(error.to_string()))?;
-                    seat_viewport(&mut pass);
-                }
-                if seat.math_overlay_count > 0 {
-                    pass.set_pipeline(&gpu.rect_pipeline);
-                    pass.set_vertex_buffer(0, seat.math_overlay_buffer.slice(..));
-                    pass.draw(0..6, 0..seat.math_overlay_count as u32);
-                }
+            if !layered {
+                self.draw_body(&mut pass, gpu, ground_buffer, &prepared)?;
             }
             // Seat chrome last, with the pass restored to the whole window: it is
             // the one class of draw that legitimately owns the space between
@@ -11454,6 +11604,22 @@ impl WindowRenderer {
         phase(PresentPhase::QueueSubmit);
         gpu.queue.submit([command_buffer]);
         let submitted_at = Instant::now();
+        // The body this frame drew is in its layer now, and only now may the key say so: a frame
+        // that left before its submit changed nothing in the texture, and the key it left behind
+        // still names what is there.
+        // A composed body's key is a copy of every pane's frame; its price is timed with the
+        // comparison's (review N4).
+        let key_file_started = Instant::now();
+        let body_use = if body_clean {
+            BodyUse::Reused
+        } else {
+            self.body_composes = self.body_composes.saturating_add(1);
+            if let Some(body) = self.body.as_mut() {
+                body.key = body_keepable.then(|| BodyKey::of(body_state, seats));
+            }
+            BodyUse::Composed
+        };
+        let key_filed = key_file_started.elapsed();
         phase(PresentPhase::Present);
         match acquired {
             AcquiredFrame::Swapchain(texture) => gpu.queue.present(texture),
@@ -11493,7 +11659,7 @@ impl WindowRenderer {
             // a run with a sink is a `try_send` and nothing else.
             let trace_started = Instant::now();
             bt_viewport::trace::line(format!(
-                "BT_PERF_TRACE frame={} seats={} source={:?} cells={} nonblank_cells={} first_text_row={} last_text_row={} content_fnv={:016x} alt={} digest_us={} validate_us={} viewport_us={} row_compose_us={} rows_reshaped={} row_cache_hits={} row_cache_misses={} row_cache_evictions={} row_cache_resident_bytes={} shape_miss_us={} narrow_hits={} narrow_misses={} narrow_evictions={} narrow_resident_bytes={} wide_hits={} wide_misses={} wide_evictions={} wide_resident_bytes={} atlas_prepare_upload_us={} atlas_hits=unmeasurable_glyphon_0_12 atlas_misses=unmeasurable_glyphon_0_12 atlas_grows=unmeasurable_glyphon_0_12 atlas_evictions=unmeasurable_glyphon_0_12 atlas_upload_bytes=unmeasurable_glyphon_0_12 rectangles_us={} math_prepare_upload_us={} math_blocks={} math_texture_evictions={} math_texture_refusals={} textureless_math_blocks={} math_texture_resident_bytes={} acquire_us={} encode_us={} submit_us={} present_us={} total_us={} trace_us={}",
+                "BT_PERF_TRACE frame={} seats={} source={:?} cells={} nonblank_cells={} first_text_row={} last_text_row={} content_fnv={:016x} alt={} digest_us={} validate_us={} viewport_us={} row_compose_us={} rows_reshaped={} row_cache_hits={} row_cache_misses={} row_cache_evictions={} row_cache_resident_bytes={} shape_miss_us={} narrow_hits={} narrow_misses={} narrow_evictions={} narrow_resident_bytes={} wide_hits={} wide_misses={} wide_evictions={} wide_resident_bytes={} atlas_prepare_upload_us={} atlas_hits=unmeasurable_glyphon_0_12 atlas_misses=unmeasurable_glyphon_0_12 atlas_grows=unmeasurable_glyphon_0_12 atlas_evictions=unmeasurable_glyphon_0_12 atlas_upload_bytes=unmeasurable_glyphon_0_12 rectangles_us={} math_prepare_upload_us={} math_blocks={} math_texture_evictions={} math_texture_refusals={} textureless_math_blocks={} math_texture_resident_bytes={} acquire_us={} encode_us={} submit_us={} present_us={} total_us={} trace_us={} body={} body_us={} body_key_us={}",
                 self.perf_frame,
                 seats.len(),
                 trigger.source,
@@ -11535,10 +11701,136 @@ impl WindowRenderer {
                 (present_called_at - submitted_at).as_micros(),
                 total_elapsed.as_micros(),
                 self.perf_trace_us,
+                body_use.as_str(),
+                (body_prepare + body_encoded).as_micros(),
+                (key_compared + key_filed).as_micros(),
             ));
             self.perf_trace_us = trace_started.elapsed().as_micros();
         }
         Ok(present_outcome(text_complete, receipt))
+    }
+
+    /// **The body's draws**: the window's ground picture, then every seat — its grounds, its ink,
+    /// its formulas, its text, its status tag and its math overlay — exactly as the frame's own
+    /// pass drew them before the body had a layer (row 64a). One function for both routes, so
+    /// the kept body and the probe's direct oracle are the same drawing by construction.
+    fn draw_body(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        gpu: &GpuContext,
+        ground_quad: Option<&wgpu::Buffer>,
+        prepared: &[PreparedSeat],
+    ) -> Result<(), RenderError> {
+        // The ground picture, before the first seat and after nothing: one
+        // quad over the whole surface, at the pass's default viewport. Its
+        // blend is `Replace`, so it supersedes the clear rather than sitting
+        // on top of it — the two write the same value for the same ground,
+        // and this one additionally carries the picture.
+        //
+        // Per window and not per pane: a split is two views of one place,
+        // and a picture cut at every divider would move every time one was
+        // dragged.
+        if let Some(buffer) = ground_quad
+            && let Some((_, bind_group)) = gpu.background_texture.as_ref()
+        {
+            pass.set_pipeline(&gpu.background_pipeline);
+            pass.set_bind_group(0, bind_group, &[]);
+            pass.set_vertex_buffer(0, buffer.slice(..));
+            pass.draw(0..6, 0..1);
+        }
+        // Every *rectangle* a terminal draws is in seat-local pixels; the
+        // viewport/scissor pair opening each iteration is the entire
+        // translation, and for a lone leaf the seat *is* the surface, so for
+        // N = 1 these are the two calls that were always here, with the same
+        // values, around the same draws.
+        //
+        // **Its text is not** (§7.36). A glyph's clip space comes from the
+        // resolution in the bound `Viewport`, and this window holds exactly
+        // one of those; so the glyphs arrive already carrying the seat's
+        // corner and are drawn under the surface's own viewport, with this
+        // seat's scissor still standing. `whole_surface` is that switch, and
+        // it is a state change and not a draw — for N = 1 both viewports are
+        // the same rectangle.
+        let whole_surface = |pass: &mut wgpu::RenderPass<'_>| {
+            pass.set_viewport(
+                0.0,
+                0.0,
+                self.config.width as f32,
+                self.config.height as f32,
+                0.0,
+                1.0,
+            );
+        };
+        for seat in prepared {
+            let seat_viewport = |pass: &mut wgpu::RenderPass<'_>| {
+                pass.set_viewport(
+                    seat.seat.x as f32,
+                    seat.seat.y as f32,
+                    seat.seat.width as f32,
+                    seat.seat.height as f32,
+                    0.0,
+                    1.0,
+                );
+            };
+            seat_viewport(pass);
+            // Viewport from `seat`, scissor from `clip`. The two are equal
+            // at rest — for `N = 1` they are both the whole surface — and
+            // differ only while a pane is mid-FLIP, where the difference is
+            // precisely the mock-up's counter-scale (see [`SeatFrame::clip`]).
+            //
+            // Through [`set_scissor`], which is where the surface's extent
+            // is applied: a seat whose box has no pixels on this target
+            // draws none.
+            if !set_scissor(pass, seat.clip, (self.config.width, self.config.height)) {
+                continue;
+            }
+            let slot = &self.seat_slots[seat.slot];
+            // The paper a program declared, before the ink printed on it: the
+            // same order the one list had, drawn with the clear's own
+            // arithmetic so a banner is the window wearing another colour
+            // rather than a slab laid on it (§7.1.6c-4f).
+            if seat.ground_rect_count > 0 {
+                pass.set_pipeline(&gpu.ground_rect_pipeline);
+                pass.set_vertex_buffer(0, seat.ground_rect_buffer.slice(..));
+                pass.draw(0..6, 0..seat.ground_rect_count as u32);
+            }
+            if seat.rect_count > 0 {
+                pass.set_pipeline(&gpu.rect_pipeline);
+                pass.set_vertex_buffer(0, seat.rect_buffer.slice(..));
+                pass.draw(0..6, 0..seat.rect_count as u32);
+            }
+            if let Some(vertex_buffer) = seat.math_vertex_buffer.as_ref() {
+                pass.set_pipeline(&gpu.math_pipeline);
+                pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+                for draw in &seat.math_draws {
+                    pass.set_bind_group(0, draw.tile.bind_group(draw.blit), &[]);
+                    pass.draw(draw.first_vertex..draw.first_vertex + 6, 0..1);
+                }
+            }
+            if seat.text_prepared {
+                whole_surface(pass);
+                slot.text_renderer
+                    .render(&gpu.atlas, &self.text_viewport, pass)
+                    .map_err(|error| RenderError::GlyphRender(error.to_string()))?;
+                seat_viewport(pass);
+            }
+            if seat.text_prepared && seat.status_rect_count > 0 {
+                pass.set_pipeline(&gpu.rect_pipeline);
+                pass.set_vertex_buffer(0, seat.status_rect_buffer.slice(..));
+                pass.draw(0..6, 0..seat.status_rect_count as u32);
+                whole_surface(pass);
+                slot.status_text_renderer
+                    .render(&gpu.atlas, &self.text_viewport, pass)
+                    .map_err(|error| RenderError::GlyphRender(error.to_string()))?;
+                seat_viewport(pass);
+            }
+            if seat.math_overlay_count > 0 {
+                pass.set_pipeline(&gpu.rect_pipeline);
+                pass.set_vertex_buffer(0, seat.math_overlay_buffer.slice(..));
+                pass.draw(0..6, 0..seat.math_overlay_count as u32);
+            }
+        }
+        Ok(())
     }
 
     fn prepare_text_rows(
@@ -12623,6 +12915,32 @@ impl WindowRenderer {
             pass.draw(0..6, over_count..instances.len() as u32);
         }
     }
+}
+
+/// **What one seat's flat fills read of their window, and nothing else** (row 64a).
+///
+/// These were `&self` methods of [`WindowRenderer`], and a method may read any field of the
+/// window without saying so — which is the one thing the window's kept body cannot afford, since
+/// its key has to hold everything the seat drawing reads. So they are methods of this value,
+/// built from the frame's [`BodyState`] and the seat being drawn, and a fill that wants another
+/// fact about the window has to add a field here, and so to the key.
+#[derive(Clone, Copy, Debug)]
+struct SeatPainter {
+    seat: SeatViewport,
+    base_metrics: CellMetrics,
+    cursor_blink_visible: bool,
+    cursor_style: CursorStyle,
+}
+
+impl SeatPainter {
+    fn of(state: &BodyState, seat: SeatViewport) -> Self {
+        Self {
+            seat,
+            base_metrics: state.base_metrics,
+            cursor_blink_visible: state.cursor_blink_visible,
+            cursor_style: state.cursor_style,
+        }
+    }
 
     /// One seat's flat fills. `seat_focused` is that seat's own caret standing:
     /// the window holds focus *and* this is the pane being typed into. Every other
@@ -12787,8 +13105,7 @@ impl WindowRenderer {
             (PREVIEW_CODE_GROUND_RADIUS_LOGICAL_PX * metrics.scale_factor as f32).max(0.0);
         for (index, placement) in frame.math_blocks.iter().enumerate() {
             if math_block_ground_is_drawn(placement, drawn_math_blocks.contains(&index))
-                && let Some(geometry) =
-                    self.math_block_geometry(metrics, self.seat, frame, placement)
+                && let Some(geometry) = math_block_geometry_px(metrics, self.seat, frame, placement)
             {
                 rects.extend(
                     rounded_rect_coverage(geometry.block, ground_radius)
@@ -12824,7 +13141,7 @@ impl WindowRenderer {
             frame,
             seat_focused,
             self.cursor_blink_visible,
-            current_cursor_style(),
+            self.cursor_style,
         ) {
             rects.extend(caret.bounds.into_iter().map(|[left, top, right, bottom]| {
                 self.pixel_rect(left, top, right, bottom, caret.ink)
@@ -12990,7 +13307,7 @@ impl WindowRenderer {
             if placement.selection_spans.is_empty() {
                 continue;
             }
-            let Some(geometry) = self.math_block_geometry(metrics, self.seat, frame, placement)
+            let Some(geometry) = math_block_geometry_px(metrics, self.seat, frame, placement)
             else {
                 continue;
             };
@@ -13037,7 +13354,7 @@ impl WindowRenderer {
     ) -> Vec<RectInstance> {
         let mut rects = Vec::new();
         for placement in &frame.math_blocks {
-            let Some(geometry) = self.math_block_geometry(metrics, self.seat, frame, placement)
+            let Some(geometry) = math_block_geometry_px(metrics, self.seat, frame, placement)
             else {
                 continue;
             };
@@ -13123,7 +13440,9 @@ impl WindowRenderer {
             color: rect_gpu_color_with_coverage(color, coverage),
         }
     }
+}
 
+impl WindowRenderer {
     /// Prepare and encode one frame's grid text into this window's attachment, and hand
     /// the work back unsubmitted — the `bt-replay` instrumentation path, whose submit and
     /// present are `bt_render_probe::HeadlessRenderProbe::prepare_frame`'s (the thread-door
@@ -13530,7 +13849,7 @@ fn prepare_text_rows(
 /// A chrome rectangle in whole-surface pixels.
 ///
 /// Deliberately a free function rather than a `WindowRenderer` method: the seat-local
-/// [`WindowRenderer::pixel_rect`] and this one differ in exactly which rectangle they
+/// [`SeatPainter::pixel_rect`] and this one differ in exactly which rectangle they
 /// call "the world", and having them side by side as one method with a flag is
 /// how the two would eventually be confused for each other.
 /// Crop a rectangle to a clip, or `None` when nothing of it survives.
@@ -15540,7 +15859,7 @@ pub fn text_row_cells(
 /// The five boxes one floating chip is drawn from — the face, then its four
 /// hairline edges — each paired with the colour it is painted in.
 ///
-/// Split out of [`WindowRenderer::float_tag_rects`] so the claim "a chip wears
+/// Split out of [`SeatPainter::float_tag_rects`] so the claim "a chip wears
 /// nothing but the palette's own three" can be *measured* rather than read: the
 /// normalisation into clip space needs a live seat, and the colours do not.
 fn float_tag_boxes(
@@ -17756,6 +18075,9 @@ struct GroupPipelines {
     /// A ground's pixels: `src + dst·(1 − o)`, with `o` the blend constant — the
     /// lerp [`ground_fade_blend`] is, on encoded bytes.
     cross_fade: wgpu::RenderPipeline,
+    /// The window's kept body (row 64a): the stored bytes written as they are, alpha
+    /// included — `Replace`, so nothing under it is read at all.
+    put_back: wgpu::RenderPipeline,
 }
 
 fn create_group_pipelines(device: &wgpu::Device, format: wgpu::TextureFormat) -> GroupPipelines {
@@ -17835,6 +18157,11 @@ fn create_group_pipelines(device: &wgpu::Device, format: wgpu::TextureFormat) ->
                 color: cross_fade,
                 alpha: cross_fade,
             },
+        ),
+        put_back: pipeline(
+            "window body put back",
+            "put_back",
+            wgpu::BlendState::REPLACE,
         ),
         layout,
     }
@@ -18599,6 +18926,29 @@ fn indexed_color(index: u8) -> [u8; 3] {
 /// The viewport is set to the whole surface every time. A layer's box is already
 /// in the window's own coordinates — the caller may be inside a seat's viewport
 /// or a float's, and neither is the space these quads were computed in.
+/// **The window's body, kept** (row 64a): the clear, the ground picture and every seat, drawn
+/// into a texture of the frame's size and format and put back on every frame by a byte copy.
+///
+/// A [`GroupTarget`] for the reason a fading surface's texture is one: drawn through its sRGB
+/// view by the very pipelines that draw on the frame, and read through its plain view, so the
+/// bytes put back are the bytes those pipelines would have written on the frame itself.
+struct BodyLayer {
+    target: GroupTarget,
+    /// What `target` holds, or `None` when it holds nothing anyone may reuse. Written only
+    /// after the submit that drew it.
+    key: Option<BodyKey>,
+}
+
+/// Where a window draws its body — see [`BodyLayer`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BodyRoute {
+    /// Into the kept layer, and put back from it: every window the product makes.
+    Layer,
+    /// Straight into the frame, as every frame did before the layer: the probe's oracle
+    /// (`probe_surface::present_direct`) and nothing else.
+    Direct,
+}
+
 /// **A texture one fading surface is drawn into** — see [`OverlayGroup`].
 ///
 /// The size of the frame and in the frame's format, so that every overlay
@@ -18619,10 +18969,10 @@ struct GroupTarget {
 }
 
 impl GroupTarget {
-    fn new(gpu: &GpuContext, format: wgpu::TextureFormat, size: (u32, u32)) -> Self {
+    fn new(gpu: &GpuContext, format: wgpu::TextureFormat, size: (u32, u32), label: &str) -> Self {
         let bytes_format = format.remove_srgb_suffix();
         let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("overlay group texture"),
+            label: Some(label),
             size: wgpu::Extent3d {
                 width: size.0,
                 height: size.1,
@@ -30828,7 +31178,7 @@ mod tests {
         // of itself is asking about a place it cannot name.
         let wash = only(
             needle!(Pattern::text(concat!(
-                "self.math_selection_wash_",
+                "painter.math_selection_wash_",
                 "rectangles(entry.metrics, frame);"
             ))),
             View::Raw,
@@ -30836,7 +31186,7 @@ mod tests {
         );
         let chrome = only(
             needle!(Pattern::text(concat!(
-                "math_overlays.extend(self.math_overlay_",
+                "math_overlays.extend(painter.math_overlay_",
                 "rectangles(entry.metrics, frame));"
             ))),
             View::Raw,
@@ -32888,8 +33238,13 @@ mod tests {
             let window = WindowRenderer::offscreen(&mut gpu, 400, 200, 1.0, FORMAT)
                 .expect("an offscreen window");
             let frame = grid();
-            let rects =
-                window.rectangles(window.base_metrics(), &frame, &HashSet::new(), true, ALPHA);
+            let rects = window.seat_painter().rectangles(
+                window.base_metrics(),
+                &frame,
+                &HashSet::new(),
+                true,
+                ALPHA,
+            );
 
             assert_eq!(
                 rects.grounds.len(),
@@ -32937,8 +33292,13 @@ mod tests {
             let window = WindowRenderer::offscreen(&mut gpu, 400, 200, 1.0, FORMAT)
                 .expect("an offscreen window");
             let frame = grid();
-            let opaque =
-                window.rectangles(window.base_metrics(), &frame, &HashSet::new(), true, 1.0);
+            let opaque = window.seat_painter().rectangles(
+                window.base_metrics(),
+                &frame,
+                &HashSet::new(),
+                true,
+                1.0,
+            );
             for ground in &opaque.grounds {
                 assert!(
                     (ground.color[3] - 1.0).abs() < 1e-6,
@@ -32953,8 +33313,13 @@ mod tests {
             );
             // And the ink half is untouched at every alpha: it is the same list,
             // built by the same arithmetic, whatever the window's opacity is.
-            let glass =
-                window.rectangles(window.base_metrics(), &frame, &HashSet::new(), true, 0.3);
+            let glass = window.seat_painter().rectangles(
+                window.base_metrics(),
+                &frame,
+                &HashSet::new(),
+                true,
+                0.3,
+            );
             assert_eq!(opaque.ink, glass.ink);
         }
 
@@ -35921,6 +36286,49 @@ mod tests {
             let drawn = present(&mut window, &mut gpu, &one_bold_han(metrics));
             assert!(matches!(drawn, PresentOutcome::Presented(_)), "{drawn:?}");
             assert!(all_ink(&window.read_back(&gpu).expect("it reads back")) > 0);
+        }
+
+        /// RED (row 64a, review N1) — **a body that lost its text is not kept**: the frame owed
+        /// again is drawn again, not put back.
+        ///
+        /// A refused frame's body is the grid without its text. Kept under the frame's key, the
+        /// same frame asked again would match it, skip the seat loop, report itself complete and
+        /// stop the retry, and the panes would stay blank until one of them changed. The id
+        /// ceiling refuses the frame (the road the test above pins); the same frame is then
+        /// presented with the ceiling lifted.
+        ///
+        /// MUTATION (P6): file every body (`let body_keepable = true || …` in `compose_frame`) —
+        /// the second present puts back the textless body: `Presented`, no new compose, no ink.
+        #[test]
+        fn a_body_that_lost_its_text_is_drawn_again_for_the_same_frame() {
+            let Some(mut gpu) = on_the_software_adapter(FORMAT) else {
+                return;
+            };
+            regular_only_families(&mut gpu, 16.0);
+            let mut window =
+                WindowRenderer::offscreen(&mut gpu, 240, 80, 1.0, FORMAT).expect("a window");
+            let frame = two_synthesized_cells(window.base_metrics());
+            gpu.synthetic_bold.set_ceiling(1);
+
+            let refused = present(&mut window, &mut gpu, &frame);
+            assert!(
+                matches!(refused, PresentOutcome::PresentedWithoutText(_)),
+                "{refused:?}"
+            );
+            assert_eq!(window.body_composes(), 1, "the refused frame drew its body");
+
+            gpu.synthetic_bold.set_ceiling(usize::MAX);
+            let drawn = present(&mut window, &mut gpu, &frame);
+            assert!(matches!(drawn, PresentOutcome::Presented(_)), "{drawn:?}");
+            assert_eq!(
+                window.body_composes(),
+                2,
+                "the same frame, owed again, draws its body again, not the textless one it drew"
+            );
+            assert!(
+                all_ink(&window.read_back(&gpu).expect("it reads back")) > 0,
+                "its text reaches the glass"
+            );
         }
 
         /// RED (38) — **a synthetic bold glyph is drawn again after the atlas is

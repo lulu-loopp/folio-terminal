@@ -13445,11 +13445,11 @@ impl<B: Backend> Runtime<'_, B> {
     /// [`crate::pace`].
     ///
     /// A refusal is recorded rather than dropped: see [`pace::FrameClock::refuse`].
-    /// **Asking costs nothing and marks nothing** (review 2026-09-18 round 2).
-    /// It used to record that an animation was running, on the reasoning that
-    /// only a running one would ask; four advancers ask before they have
-    /// established that they hold anything at all, so a window with an empty tip
-    /// host marked itself running for ever. What is mid-flight is reported once
+    /// **Asking marks nothing** (review 2026-09-18 round 2). It used to record
+    /// that an animation was running, on the reasoning that only a running one
+    /// would ask; four advancers then asked before they had established that
+    /// they held anything at all, so a window with an empty tip host marked
+    /// itself running for ever. What is mid-flight is reported once
     /// a turn from the journeys' own predicates — see [`Self::running_journeys`].
     ///
     /// # What may stand behind this, and what may never (closure review O4)
@@ -13478,12 +13478,42 @@ impl<B: Backend> Runtime<'_, B> {
     /// A fade has no service: it is a number read off a clock, so there is
     /// nothing to bring forward and nothing to lose by a refusal. That is why
     /// eleven of the thirteen advancers are gated whole.
+    ///
+    /// # Ask only with work (T-ADVANCERS-ASK-ONLY-WITH-WORK)
+    ///
+    /// A refusal is a debt, and a debt books a wake: asked by an advancer that
+    /// holds nothing, it buys the window a turn that draws nothing. Row 12's
+    /// idle census found seven advancers asking before they had looked at
+    /// their own work, and one empty `RefusedFrame` wake after every caret
+    /// frame for it. So an advancer asks only once it owes a frame — the
+    /// shape [`Self::paced_frame`] writes down for the seven that have news of
+    /// their own, and the shape four of the other five spell out above their
+    /// ask; the tab strip asks when its own rate tick is due (see
+    /// [`Self::advance_strip_animation`]).
     pub(crate) fn animation_frame_is_due(&mut self) -> bool {
         if self.window.frame_clock.admits() {
             return true;
         }
         self.window.frame_clock.refuse();
         false
+    }
+
+    /// **Whether an advancer draws on this turn**: news goes through, a debt
+    /// asks the frame gate, and nothing asks nothing.
+    ///
+    /// `news` is what the advancer's state clocks changed on this turn — never
+    /// paced (closure review O4), because what it has to say is new. `owes` is
+    /// the advancer's pure frame-debt question (the picture on the glass
+    /// against the one its clock now gives), read only when there is no news,
+    /// and the gate is asked only when it answers yes: a refusal on a turn
+    /// with no debt would book a wake for a frame nobody owes. See
+    /// [`Self::animation_frame_is_due`].
+    pub(in crate::runtime) fn paced_frame(
+        &mut self,
+        news: bool,
+        owes: impl FnOnce(&Self) -> bool,
+    ) -> bool {
+        news || (owes(self) && self.animation_frame_is_due())
     }
 
     pub(in crate::runtime) fn strip_animation_work(&self, now: Instant) -> AnimationWork {
@@ -15449,6 +15479,40 @@ impl<B: Backend> Runtime<'_, B> {
             pictures,
             wrap,
         });
+    }
+
+    /// Put a scheme file in front of the reader, with the keyboard in it.
+    ///
+    /// The tail both halves of the foot's first verb share: `Customise scheme…`
+    /// writes a copy and comes here, `Edit scheme…` comes straight here. One
+    /// function because everything from this point on is about a file that
+    /// exists, and two copies of it would be two answers to "where does a scheme
+    /// open".
+    pub(crate) fn open_scheme_for_editing(&mut self, path: PathBuf) -> Result<()> {
+        // **The dialog goes.** It is the one verb in it whose answer is a
+        // document, and a modal standing over the document it just handed you is
+        // a modal in the way.
+        self.settings_closed();
+        self.window.settings.close();
+        let Some(surface) = self.preview_landing_surface() else {
+            return Ok(());
+        };
+        self.open_preview_file_on(surface, path.clone())?;
+        // The keyboard goes into the text, so the file is *open for editing* and
+        // not merely open. `preview_edit_focus` is re-validated at every read, so
+        // setting it before the head has landed is safe: it becomes true the
+        // moment there is something to type into.
+        self.preview_edit_focus = Some(surface);
+        let anchor = surface.toast_anchor();
+        let file = path
+            .file_name()
+            .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
+        self.toast(
+            toast::ToastKind::Ok,
+            anchor,
+            None,
+            i18n::scheme_customised(&file),
+        )
     }
 }
 

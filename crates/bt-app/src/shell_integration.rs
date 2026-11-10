@@ -3198,6 +3198,19 @@ fn asks_for_no_profile(program: &Path, arguments: &[OsString]) -> bool {
     })
 }
 
+/// Whether a PowerShell argv is a one-shot that runs no profile and no line editor: `-NoProfile`,
+/// `-NonInteractive` and a `-Command`, without `-NoExit` — the shape a test's last-resort retry
+/// is held to (plan row 182, `pty_door::Retry`).
+#[cfg(all(test, windows))]
+pub(crate) fn is_a_profile_free_one_shot(program: &Path, arguments: &[OsString]) -> bool {
+    asks_for_no_profile(program, arguments)
+        && classify_powershell_arguments(program, arguments).is_some_and(|parsed| {
+            parsed.non_interactive
+                && !parsed.no_exit
+                && matches!(parsed.terminal, PowerShellTerminal::Command { .. })
+        })
+}
+
 /// The Profiles page's row model, kept pure apart from reading the latest
 /// worker-published edition fact.
 #[must_use]
