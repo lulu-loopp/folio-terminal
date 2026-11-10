@@ -4,7 +4,7 @@
 # name) with the number of calls behind it. Held equal to the tree by bt-source's call_graph test;
 # shrink-only against the merge base by scripts/ci/check-unfollowed-edges.ps1 - a key added or grown
 # carries a reason 'YYYY-MM-DD: <why>'. Never edit a key or a count by hand.
-# Ambiguous calls with exactly one candidate, not listed by site above or below (bt_source::call_graph::Unresolved::sole_candidate; a guard naming a callee's callers counts each as a call of its one candidate): 1784. A call whose name is renamed to one only one item declares leaves the list and is counted here.
+# Ambiguous calls with exactly one candidate, not listed by site above or below (bt_source::call_graph::Unresolved::sole_candidate; a guard naming a callee's callers counts each as a call of its one candidate): 1787. A call whose name is renamed to one only one item declares leaves the list and is counted here.
 file	item	kind	name	sites	reason
 crates/bt-app/src/agent_hooks_step.rs	bt-app crate::agent_hooks_step::AgentHooksStep::say_changed	Ambiguous	as_deref	1	2026-11-08: T-UPDATE-CARRIES-EVERYTHING-FOLIO-WROTE (0.4.10 plan row 68a, R-D); a family's line compared with the last one said for it in this process, under the memory's lock (Option::as_deref, String::as_str, clone, iter_mut, zip, the lock's unwrap_or_else for a poisoned lock); in-memory, no wait
 crates/bt-app/src/agent_hooks_step.rs	bt-app crate::agent_hooks_step::AgentHooksStep::say_changed	Ambiguous	as_str	1	2026-11-08: T-UPDATE-CARRIES-EVERYTHING-FOLIO-WROTE (0.4.10 plan row 68a, R-D); a family's line compared with the last one said for it in this process, under the memory's lock (Option::as_deref, String::as_str, clone, iter_mut, zip, the lock's unwrap_or_else for a poisoned lock); in-memory, no wait
@@ -819,15 +819,17 @@ crates/bt-app/src/clipboard_lane.rs	bt-app crate::clipboard_lane::PasteHold::que
 crates/bt-app/src/clipboard_lane.rs	bt-app crate::clipboard_lane::run_clipboard_lane	Dynamic	wake	1	
 crates/bt-app/src/clipboard_picture.rs	bt-app crate::clipboard_picture::encode_png	Ambiguous	map_err	1	
 crates/bt-app/src/clipboard_picture.rs	bt-app crate::clipboard_picture::first_free_index	Ambiguous	saturating_add	1	
+crates/bt-app/src/clipboard_picture.rs	bt-app crate::clipboard_picture::names_in	Ambiguous	and_then	1	2026-11-10: T-PASTE-REFUSAL-SAYS-WHY (0.4.10 plan row 81, review fold); the staging folder's listing reads a write's marker with its modified time (std::fs::DirEntry metadata, Result ok/and_then, Option is_some_and, is_file); in-memory over the listing
 crates/bt-app/src/clipboard_picture.rs	bt-app crate::clipboard_picture::names_in	Ambiguous	collect	1	
-crates/bt-app/src/clipboard_picture.rs	bt-app crate::clipboard_picture::names_in	Ambiguous	ends_with	1	2026-11-09: T-PASTE-REFUSAL-SAYS-WHY (0.4.10 plan row 81); the staging folder's listing names a promise paste's folder beside the pictures (std::fs::DirEntry file_type, str ends_with)
+crates/bt-app/src/clipboard_picture.rs	bt-app crate::clipboard_picture::names_in	Ambiguous	ends_with	2	2026-11-09: T-PASTE-REFUSAL-SAYS-WHY (0.4.10 plan row 81); the staging folder's listing names a promise paste's folder beside the pictures (std::fs::DirEntry file_type, str ends_with)
 crates/bt-app/src/clipboard_picture.rs	bt-app crate::clipboard_picture::names_in	Ambiguous	file_name	1	
 crates/bt-app/src/clipboard_picture.rs	bt-app crate::clipboard_picture::names_in	Ambiguous	file_type	1	2026-11-09: T-PASTE-REFUSAL-SAYS-WHY (0.4.10 plan row 81); the staging folder's listing names a promise paste's folder beside the pictures (std::fs::DirEntry file_type, str ends_with)
 crates/bt-app/src/clipboard_picture.rs	bt-app crate::clipboard_picture::names_in	Ambiguous	filter_map	1	
 crates/bt-app/src/clipboard_picture.rs	bt-app crate::clipboard_picture::names_in	Ambiguous	flatten	1	
 crates/bt-app/src/clipboard_picture.rs	bt-app crate::clipboard_picture::names_in	Ambiguous	into_string	1	
-crates/bt-app/src/clipboard_picture.rs	bt-app crate::clipboard_picture::names_in	Ambiguous	is_ok_and	1	2026-11-09: T-PASTE-REFUSAL-SAYS-WHY (0.4.10 plan row 81); the staging folder's listing names a promise paste's folder beside the pictures (std::fs::DirEntry file_type, str ends_with)
-crates/bt-app/src/clipboard_picture.rs	bt-app crate::clipboard_picture::names_in	Ambiguous	ok	1	
+crates/bt-app/src/clipboard_picture.rs	bt-app crate::clipboard_picture::names_in	Ambiguous	is_file	1	2026-11-10: T-PASTE-REFUSAL-SAYS-WHY (0.4.10 plan row 81, review fold); the staging folder's listing reads a write's marker with its modified time (std::fs::DirEntry metadata, Result ok/and_then, Option is_some_and, is_file); in-memory over the listing
+crates/bt-app/src/clipboard_picture.rs	bt-app crate::clipboard_picture::names_in	Ambiguous	is_some_and	2	2026-11-10: T-PASTE-REFUSAL-SAYS-WHY (0.4.10 plan row 81, review fold); the staging folder's listing reads a write's marker with its modified time (std::fs::DirEntry metadata, Result ok/and_then, Option is_some_and, is_file); in-memory over the listing
+crates/bt-app/src/clipboard_picture.rs	bt-app crate::clipboard_picture::names_in	Ambiguous	ok	4	2026-11-10: T-PASTE-REFUSAL-SAYS-WHY (0.4.10 plan row 81, review fold N12); the staging folder's listing reads a write's marker with its modified time (Result ok over DirEntry metadata and modified); in-memory over the listing
 crates/bt-app/src/clipboard_picture.rs	bt-app crate::clipboard_picture::ours	Ambiguous	all	2	
 crates/bt-app/src/clipboard_picture.rs	bt-app crate::clipboard_picture::ours	Ambiguous	bytes	3	
 crates/bt-app/src/clipboard_picture.rs	bt-app crate::clipboard_picture::ours	Ambiguous	is_ascii_digit	2	
@@ -835,9 +837,7 @@ crates/bt-app/src/clipboard_picture.rs	bt-app crate::clipboard_picture::ours	Amb
 crates/bt-app/src/clipboard_picture.rs	bt-app crate::clipboard_picture::ours	Ambiguous	len	2	
 crates/bt-app/src/clipboard_picture.rs	bt-app crate::clipboard_picture::ours	Ambiguous	ok	1	
 crates/bt-app/src/clipboard_picture.rs	bt-app crate::clipboard_picture::ours	Ambiguous	parse	1	
-crates/bt-app/src/clipboard_picture.rs	bt-app crate::clipboard_picture::ours	Ambiguous	rsplit_once	1	
 crates/bt-app/src/clipboard_picture.rs	bt-app crate::clipboard_picture::ours	Ambiguous	split_once	1	
-crates/bt-app/src/clipboard_picture.rs	bt-app crate::clipboard_picture::ours	Ambiguous	unwrap_or	1	2026-11-09: T-PASTE-REFUSAL-SAYS-WHY (0.4.10 plan row 81); a staging name read with or without the picture's extension (Option unwrap_or on a str)
 crates/bt-app/src/clipboard_picture.rs	bt-app crate::clipboard_picture::png_bytes	Ambiguous	unwrap_or_else	1	
 crates/bt-app/src/clipboard_picture.rs	bt-app crate::clipboard_picture::png_from_dib	Ambiguous	as_bytes	2	
 crates/bt-app/src/clipboard_picture.rs	bt-app crate::clipboard_picture::png_from_dib	Ambiguous	get	1	
@@ -851,19 +851,29 @@ crates/bt-app/src/clipboard_picture.rs	bt-app crate::clipboard_picture::png_from
 crates/bt-app/src/clipboard_picture.rs	bt-app crate::clipboard_picture::reserve	Ambiguous	create_new	1	
 crates/bt-app/src/clipboard_picture.rs	bt-app crate::clipboard_picture::reserve	Ambiguous	kind	1	
 crates/bt-app/src/clipboard_picture.rs	bt-app crate::clipboard_picture::reserve	Ambiguous	open	1	
-crates/bt-app/src/clipboard_picture.rs	bt-app crate::clipboard_picture::reserve_staging_folder	Ambiguous	kind	3	2026-11-09: T-PASTE-REFUSAL-SAYS-WHY (0.4.10 plan row 81); a promise paste's folder reserved with create_dir, an existing name tried again (std::io::Error kind, Result map_err)
-crates/bt-app/src/clipboard_picture.rs	bt-app crate::clipboard_picture::reserve_staging_folder	Ambiguous	map_err	1	2026-11-09: T-PASTE-REFUSAL-SAYS-WHY (0.4.10 plan row 81); a promise paste's folder reserved with create_dir, an existing name tried again (std::io::Error kind, Result map_err)
+crates/bt-app/src/clipboard_picture.rs	bt-app crate::clipboard_picture::reserve_marked	Ambiguous	create_new	1	2026-11-10: T-PASTE-REFUSAL-SAYS-WHY (0.4.10 plan row 81, review fold); a staged name reserved by its `.writing` marker (OpenOptions create_new/open, io::Error kind) and then taken by `take`, the caller's maker (fs::create_dir for a promise's folder, File::create_new for a picture), both named in this module
+crates/bt-app/src/clipboard_picture.rs	bt-app crate::clipboard_picture::reserve_marked	Ambiguous	kind	2	2026-11-10: T-PASTE-REFUSAL-SAYS-WHY (0.4.10 plan row 81, review fold); a staged name reserved by its `.writing` marker (OpenOptions create_new/open, io::Error kind) and then taken by `take`, the caller's maker (fs::create_dir for a promise's folder, File::create_new for a picture), both named in this module
+crates/bt-app/src/clipboard_picture.rs	bt-app crate::clipboard_picture::reserve_marked	Ambiguous	open	1	2026-11-10: T-PASTE-REFUSAL-SAYS-WHY (0.4.10 plan row 81, review fold); a staged name reserved by its `.writing` marker (OpenOptions create_new/open, io::Error kind) and then taken by `take`, the caller's maker (fs::create_dir for a promise's folder, File::create_new for a picture), both named in this module
+crates/bt-app/src/clipboard_picture.rs	bt-app crate::clipboard_picture::reserve_marked	Dynamic	take	1	2026-11-10: T-PASTE-REFUSAL-SAYS-WHY (0.4.10 plan row 81, review fold); a staged name reserved by its `.writing` marker (OpenOptions create_new/open, io::Error kind) and then taken by `take`, the caller's maker (fs::create_dir for a promise's folder, File::create_new for a picture), both named in this module
+crates/bt-app/src/clipboard_picture.rs	bt-app crate::clipboard_picture::reserve_staging_folder	Ambiguous	kind	2	2026-11-09: T-PASTE-REFUSAL-SAYS-WHY (0.4.10 plan row 81); a promise paste's folder reserved with create_dir, an existing name tried again (std::io::Error kind, Result map_err)
+crates/bt-app/src/clipboard_picture.rs	bt-app crate::clipboard_picture::reserve_staging_folder	Ambiguous	map_err	2	2026-11-09: T-PASTE-REFUSAL-SAYS-WHY (0.4.10 plan row 81); a promise paste's folder reserved with create_dir, an existing name tried again (std::io::Error kind, Result map_err)
 crates/bt-app/src/clipboard_picture.rs	bt-app crate::clipboard_picture::retire	Ambiguous	clone	1	
-crates/bt-app/src/clipboard_picture.rs	bt-app crate::clipboard_picture::retire	Ambiguous	collect	1	
+crates/bt-app/src/clipboard_picture.rs	bt-app crate::clipboard_picture::retire	Ambiguous	is_ok_and	1	2026-11-10: T-PASTE-REFUSAL-SAYS-WHY (0.4.10 plan row 81, review fold); a marker's age against the stall bound (SystemTime duration_since, Result is_ok_and); pure
 crates/bt-app/src/clipboard_picture.rs	bt-app crate::clipboard_picture::retire	Ambiguous	map	1	
 crates/bt-app/src/clipboard_picture.rs	bt-app crate::clipboard_picture::retire	Ambiguous	saturating_sub	1	
 crates/bt-app/src/clipboard_picture.rs	bt-app crate::clipboard_picture::retire	Ambiguous	take	1	
 crates/bt-app/src/clipboard_picture.rs	bt-app crate::clipboard_picture::retire	Ambiguous	then	1	
-crates/bt-app/src/clipboard_picture.rs	bt-app crate::clipboard_picture::save	Ambiguous	map_err	2	
+crates/bt-app/src/clipboard_picture.rs	bt-app crate::clipboard_picture::save	Ambiguous	map_err	1	
+crates/bt-app/src/clipboard_picture.rs	bt-app crate::clipboard_picture::stage_promise	Ambiguous	kind	1	2026-11-10: T-PASTE-REFUSAL-SAYS-WHY (0.4.10 plan row 81, review fold); the promise's worker body: the render thread's answer sent on its channel (mpsc::Sender send) and a folder that would not go judged by its io::Error kind
+crates/bt-app/src/clipboard_picture.rs	bt-app crate::clipboard_picture::stage_promise	Ambiguous	send	1	2026-11-10: T-PASTE-REFUSAL-SAYS-WHY (0.4.10 plan row 81, review fold); the promise's worker body: the render thread's answer sent on its channel (mpsc::Sender send) and a folder that would not go judged by its io::Error kind
+crates/bt-app/src/clipboard_picture.rs	bt-app crate::clipboard_picture::staged_key	Ambiguous	or_else	1	2026-11-10: T-PASTE-REFUSAL-SAYS-WHY (0.4.10 plan row 81, review fold); a staged name without its picture's extension or its marker's suffix (str strip_suffix, Option or_else/unwrap_or); pure
+crates/bt-app/src/clipboard_picture.rs	bt-app crate::clipboard_picture::staged_key	Ambiguous	unwrap_or	1	2026-11-10: T-PASTE-REFUSAL-SAYS-WHY (0.4.10 plan row 81, review fold); a staged name without its picture's extension or its marker's suffix (str strip_suffix, Option or_else/unwrap_or); pure
 crates/bt-app/src/clipboard_picture.rs	bt-app crate::clipboard_picture::stamp	Ambiguous	as_secs	2	
 crates/bt-app/src/clipboard_picture.rs	bt-app crate::clipboard_picture::stamp	Ambiguous	div_euclid	1	
 crates/bt-app/src/clipboard_picture.rs	bt-app crate::clipboard_picture::stamp	Ambiguous	rem_euclid	1	
 crates/bt-app/src/clipboard_picture.rs	bt-app crate::clipboard_picture::stamp	Ambiguous	unwrap_or	2	
+crates/bt-app/src/clipboard_picture.rs	bt-app crate::clipboard_picture::sweep_staging	Ambiguous	is_err	1	2026-11-10: T-PASTE-REFUSAL-SAYS-WHY (0.4.10 plan row 81, review fold); an abandoned entry that would not go keeps its marker (io::Result is_err)
+crates/bt-app/src/clipboard_picture.rs	bt-app crate::clipboard_picture::watch_the_render	Ambiguous	elapsed	1	2026-11-10: T-PASTE-REFUSAL-SAYS-WHY (0.4.10 plan row 81, review fold); the stall bound's clock, kept by the promise's worker (Instant elapsed)
 crates/bt-app/src/cmdrail.rs	bt-app crate::cmdrail::RailPointer::aim	Ambiguous	collect	2	
 crates/bt-app/src/cmdrail.rs	bt-app crate::cmdrail::RailPointer::aim	Ambiguous	map	2	
 crates/bt-app/src/cmdrail.rs	bt-app crate::cmdrail::VecTween::progress	Ambiguous	as_secs_f32	1	
@@ -4789,6 +4799,8 @@ crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::re
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::reveal_preview_file	Ambiguous	clone	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::reveal_preview_file	Ambiguous	map	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::reveal_preview_file	Ambiguous	or_else	1	
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::save_clipboard_picture	Ambiguous	is_err	1	2026-11-10: T-PASTE-REFUSAL-SAYS-WHY (0.4.10 plan row 81, review fold); the staging start's answer, refused by the thread door or by the suite's seam (Result map_err, is_err)
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::save_clipboard_picture	Ambiguous	map_err	1	2026-11-10: T-PASTE-REFUSAL-SAYS-WHY (0.4.10 plan row 81, review fold); the staging start's answer, refused by the thread door or by the suite's seam (Result map_err, is_err)
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::save_clipboard_picture	Ambiguous	send_event	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::save_preview_on	Ambiguous	map	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::save_preview_on	Ambiguous	or_else	1	
@@ -4801,7 +4813,8 @@ crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::se
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::settle_preview_rails	Ambiguous	collect	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::settle_preview_rails	Ambiguous	filter_map	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::stage_clipboard_promise	Ambiguous	elapsed	1	2026-11-09: T-PASTE-REFUSAL-SAYS-WHY (0.4.10 plan row 81); the promise's worker body times its render and wakes the window (Instant elapsed, Result is_ok, EventLoopProxy send_event)
-crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::stage_clipboard_promise	Ambiguous	is_ok	1	2026-11-09: T-PASTE-REFUSAL-SAYS-WHY (0.4.10 plan row 81); the promise's worker body times its render and wakes the window (Instant elapsed, Result is_ok, EventLoopProxy send_event)
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::stage_clipboard_promise	Ambiguous	is_err	1	2026-11-10: T-PASTE-REFUSAL-SAYS-WHY (0.4.10 plan row 81, review fold); the staging start's answer, refused by the thread door or by the suite's seam (Result map_err, is_err)
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::stage_clipboard_promise	Ambiguous	map_err	1	2026-11-10: T-PASTE-REFUSAL-SAYS-WHY (0.4.10 plan row 81, review fold); the staging start's answer, refused by the thread door or by the suite's seam (Result map_err, is_err)
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::stage_clipboard_promise	Ambiguous	send_event	1	2026-11-09: T-PASTE-REFUSAL-SAYS-WHY (0.4.10 plan row 81); the promise's worker body times its render and wakes the window (Instant elapsed, Result is_ok, EventLoopProxy send_event)
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::strip_animation_work	Ambiguous	flatten	6	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::strip_animation_work	Ambiguous	map	1	
@@ -9348,8 +9361,6 @@ crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::native_present_fa
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::native_present_facts	Ambiguous	map	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::native_present_facts	Ambiguous	ok	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::newest_live_owner	Dynamic	still_ours	1	
-crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::ole_clipboard_with_retry	Ambiguous	code	1	2026-11-09: T-PASTE-REFUSAL-SAYS-WHY (0.4.10 plan row 81); OleGetClipboard asked through the clipboard's one contention wait (windows::core::Error code; the local closure `ask`)
-crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::ole_clipboard_with_retry	Dynamic	ask	2	2026-11-09: T-PASTE-REFUSAL-SAYS-WHY (0.4.10 plan row 81); OleGetClipboard asked through the clipboard's one contention wait (windows::core::Error code; the local closure `ask`)
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::open_clipboard_with_retry	Ambiguous	map_err	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::open_clipboard_with_retry	Ambiguous	to_string	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::open_directory	Ambiguous	as_ptr	1	2026-10-26: T-DIR-WATCH-ONE-THREAD; a standard-library, windows-crate or Core Foundation method (Option, Result, Instant, pointer, atomic, Mutex, Sender, VecDeque, OsStr, HRESULT, CFRunLoop) on a receiver the grammar does not type, which reaches no door
@@ -10727,11 +10738,13 @@ crates/bt-platform/src/webview.rs	bt-platform crate::webview::web_environment_ep
 crates/bt-platform/src/webview.rs	bt-platform crate::webview::web_environment_epoch	Ambiguous	with	1	
 crates/bt-platform/src/webview.rs	bt-platform crate::webview::webview2_runtime_version	Ambiguous	is_null	1	
 crates/bt-platform/src/windows_clipboard.rs	bt-platform crate::windows_clipboard::<OleContents as PromisedContents>::descriptor	Ambiguous	cast	1	2026-11-09: T-PASTE-REFUSAL-SAYS-WHY (0.4.10 plan row 81); the descriptor read again through OLE and copied out of its global (pointer cast, is_null; slice to_vec)
+crates/bt-platform/src/windows_clipboard.rs	bt-platform crate::windows_clipboard::<OleContents as PromisedContents>::descriptor	Ambiguous	cast_unsigned	1	2026-11-10: T-PASTE-REFUSAL-SAYS-WHY (0.4.10 plan row 81, review fold); a gone descriptor's DV_E_FORMATETC compared as a result code (i32 cast_unsigned)
 crates/bt-platform/src/windows_clipboard.rs	bt-platform crate::windows_clipboard::<OleContents as PromisedContents>::descriptor	Ambiguous	is_null	1	2026-11-09: T-PASTE-REFUSAL-SAYS-WHY (0.4.10 plan row 81); the descriptor read again through OLE and copied out of its global (pointer cast, is_null; slice to_vec)
 crates/bt-platform/src/windows_clipboard.rs	bt-platform crate::windows_clipboard::<OleContents as PromisedContents>::descriptor	Ambiguous	to_vec	1	2026-11-09: T-PASTE-REFUSAL-SAYS-WHY (0.4.10 plan row 81); the descriptor read again through OLE and copied out of its global (pointer cast, is_null; slice to_vec)
 crates/bt-platform/src/windows_clipboard.rs	bt-platform crate::windows_clipboard::<OleContents as PromisedContents>::write_contents	Ambiguous	Commit	1	2026-11-09: T-PASTE-REFUSAL-SAYS-WHY (0.4.10 plan row 81); a promised entry's medium written: a global's bytes, a storage's CopyTo and Commit (IStorage CopyTo, Commit; pointer cast, is_null; usize try_from ok, map_or; windows::core::Error map_err)
 crates/bt-platform/src/windows_clipboard.rs	bt-platform crate::windows_clipboard::<OleContents as PromisedContents>::write_contents	Ambiguous	CopyTo	1	2026-11-09: T-PASTE-REFUSAL-SAYS-WHY (0.4.10 plan row 81); a promised entry's medium written: a global's bytes, a storage's CopyTo and Commit (IStorage CopyTo, Commit; pointer cast, is_null; usize try_from ok, map_or; windows::core::Error map_err)
 crates/bt-platform/src/windows_clipboard.rs	bt-platform crate::windows_clipboard::<OleContents as PromisedContents>::write_contents	Ambiguous	cast	1	2026-11-09: T-PASTE-REFUSAL-SAYS-WHY (0.4.10 plan row 81); a promised entry's medium written: a global's bytes, a storage's CopyTo and Commit (IStorage CopyTo, Commit; pointer cast, is_null; usize try_from ok, map_or; windows::core::Error map_err)
+crates/bt-platform/src/windows_clipboard.rs	bt-platform crate::windows_clipboard::<OleContents as PromisedContents>::write_contents	Ambiguous	code	1	2026-11-10: T-PASTE-REFUSAL-SAYS-WHY (0.4.10 plan row 81, review fold); a storage that would write over an existing file judged by its result code (windows::core::Error code)
 crates/bt-platform/src/windows_clipboard.rs	bt-platform crate::windows_clipboard::<OleContents as PromisedContents>::write_contents	Ambiguous	is_null	1	2026-11-09: T-PASTE-REFUSAL-SAYS-WHY (0.4.10 plan row 81); a promised entry's medium written: a global's bytes, a storage's CopyTo and Commit (IStorage CopyTo, Commit; pointer cast, is_null; usize try_from ok, map_or; windows::core::Error map_err)
 crates/bt-platform/src/windows_clipboard.rs	bt-platform crate::windows_clipboard::<OleContents as PromisedContents>::write_contents	Ambiguous	map_err	4	2026-11-09: T-PASTE-REFUSAL-SAYS-WHY (0.4.10 plan row 81); a promised entry's medium written: a global's bytes, a storage's CopyTo and Commit (IStorage CopyTo, Commit; pointer cast, is_null; usize try_from ok, map_or; windows::core::Error map_err)
 crates/bt-platform/src/windows_clipboard.rs	bt-platform crate::windows_clipboard::<OleContents as PromisedContents>::write_contents	Ambiguous	map_or	1	2026-11-09: T-PASTE-REFUSAL-SAYS-WHY (0.4.10 plan row 81); a promised entry's medium written: a global's bytes, a storage's CopyTo and Commit (IStorage CopyTo, Commit; pointer cast, is_null; usize try_from ok, map_or; windows::core::Error map_err)
@@ -10762,7 +10775,6 @@ crates/bt-platform/src/windows_clipboard.rs	bt-platform crate::windows_clipboard
 crates/bt-platform/src/windows_clipboard.rs	bt-platform crate::windows_clipboard::copy_stream	Ambiguous	is_err	1	2026-11-09: T-PASTE-REFUSAL-SAYS-WHY (0.4.10 plan row 81); a promised stream copied in chunks, each charged as it lands (slice as_mut_ptr, pointer cast, i32 cast_unsigned, HRESULT is_err, expect on a chunk's bounded length)
 crates/bt-platform/src/windows_clipboard.rs	bt-platform crate::windows_clipboard::let_messages_through	Ambiguous	as_bool	1	2026-11-09: T-PASTE-REFUSAL-SAYS-WHY (0.4.10 plan row 81); the render's thread lets its own messages through between chunks (BOOL as_bool)
 crates/bt-platform/src/windows_clipboard.rs	bt-platform crate::windows_clipboard::not_rendered	Ambiguous	cast_unsigned	1	2026-11-09: T-PASTE-REFUSAL-SAYS-WHY (0.4.10 plan row 81); a source's failing HRESULT kept as the refusal's code (i32 cast_unsigned)
-crates/bt-platform/src/windows_clipboard.rs	bt-platform crate::windows_clipboard::render_clipboard_promise	Ambiguous	map_err	1	2026-11-09: T-PASTE-REFUSAL-SAYS-WHY (0.4.10 plan row 81); the apartment joined for the render (windows::core::Error map_err)
 crates/bt-platform/src/windows_clipboard.rs	bt-platform crate::windows_clipboard::top_down_pixels	Ambiguous	as_mut_ptr	1	
 crates/bt-platform/src/windows_clipboard.rs	bt-platform crate::windows_clipboard::top_down_pixels	Ambiguous	cast	2	
 crates/bt-platform/src/windows_clipboard.rs	bt-platform crate::windows_clipboard::top_down_pixels	Ambiguous	copy_from_slice	1	
