@@ -1564,7 +1564,7 @@ impl ClipboardPictureMailbox {
     }
 
     /// **Whether the thread door is to refuse this staging start** — the suite's, as a machine
-    /// out of threads would ([`Self::refuse_the_next_start`]); never in the product.
+    /// out of threads would (`refuse_the_next_start`, a test build's); never in the product.
     fn refuses_this_start(&self) -> bool {
         #[cfg(test)]
         {

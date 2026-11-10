@@ -32,8 +32,11 @@
 //!
 //! ```compile_fail
 //! // RED (row 81, B2) — the promise's render is a worker's door too.
-//! fn on_the_window_thread(into: &std::path::Path) {
-//!     let _ = bt_platform::render_clipboard_promise(&[], into);
+//! fn on_the_window_thread(
+//!     into: &std::path::Path,
+//!     progress: &bt_platform::clipboard_promise::RenderProgress,
+//! ) {
+//!     let _ = bt_platform::render_clipboard_promise(&[], into, progress);
 //! }
 //! ```
 //!
@@ -44,7 +47,11 @@
 //! let _ = bt_platform::spawn_at_priority(
 //!     "doc-probe",
 //!     bt_platform::ThreadPriority::BelowNormal,
-//!     |ctx| bt_platform::render_clipboard_promise(ctx, &[], std::path::Path::new("x")).is_ok(),
+//!     |ctx| {
+//!         let progress = bt_platform::clipboard_promise::RenderProgress::default();
+//!         bt_platform::render_clipboard_promise(ctx, &[], std::path::Path::new("x"), &progress)
+//!             .is_ok()
+//!     },
 //! );
 //! ```
 //!

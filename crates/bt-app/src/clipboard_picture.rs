@@ -358,8 +358,8 @@ fn reserve(folder: &Path, stamp: &str) -> Result<(Writing, fs::File), String> {
 }
 
 /// **An entry being written, and the marker that says so** (plan row 81; review N12, ruled
-/// 2026-11-10): `<stamp>-<n>.writing` beside the entry, made before it and taken away when the
-/// write is over ([`Self::done`]) — for a promise, when its worker hands the answer over. No sweep
+/// 2026-11-10): `<stamp>-<n>.writing` beside the entry, made before it and taken away when the write
+/// is over ([`Self::write_handed_over`]) — for a promise, when its worker hands the answer over. No sweep
 /// — this window's, another window's, another Folio's — removes a marked entry, though each counts
 /// it against [`KEPT`]; a marker nobody refreshed for [`STALL_BOUND`] is an abandoned write, which
 /// the sweep takes away with its entry. The marker is held open so the write can say it is still
