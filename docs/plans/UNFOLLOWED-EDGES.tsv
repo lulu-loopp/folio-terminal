@@ -6166,6 +6166,7 @@ crates/bt-app/src/shell_integration/profile_marks.rs	bt-app crate::shell_integra
 crates/bt-app/src/shell_integration/profile_marks.rs	bt-app crate::shell_integration::profile_marks::lock	Ambiguous	try_lock	1	
 crates/bt-app/src/shell_integration/profile_marks.rs	bt-app crate::shell_integration::profile_marks::lock	Ambiguous	write	1	
 crates/bt-app/src/shell_integration/profile_marks.rs	bt-app crate::shell_integration::profile_marks::managed_line_for	Ambiguous	text	1	2026-11-09: T-UPDATE-CARRIES-EVERYTHING-FOLIO-WROTE (0.4.10 plan row 68c, R7): std iterator, str, char and Option adaptors over a profile's text held in memory (the lossless ANSI byte view) and Text::text() of the refusal sentence; nothing behind them reaches a door
+crates/bt-app/src/shell_integration/profile_marks.rs	bt-app crate::shell_integration::profile_marks::managed_line_for	Dynamic	under	2	2026-11-09: T-UPDATE-CARRIES-EVERYTHING-FOLIO-WROTE (0.4.10 plan row 68c, the re-review's R4): the function's own closure comparing the data root with one root under APPDATA through explorer_menu::same_path (followed), once per root name
 crates/bt-app/src/shell_integration/profile_marks.rs	bt-app crate::shell_integration::profile_marks::ours	Ambiguous	unwrap_or_else	1	
 crates/bt-app/src/shell_integration/profile_marks.rs	bt-app crate::shell_integration::profile_marks::plan_recorded	Ambiguous	and_then	1	
 crates/bt-app/src/shell_integration/profile_marks.rs	bt-app crate::shell_integration::profile_marks::plan_recorded	Ambiguous	collect	1	
