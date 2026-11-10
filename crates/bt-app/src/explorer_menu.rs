@@ -1600,7 +1600,7 @@ pub(crate) enum PackageRepair {
 
 impl PackageRepair {
     /// `BT_EXPLORER_PACKAGE repair: <what>`.
-    pub(crate) fn log_line(&self) -> String {
+    pub(crate) fn repair_log_line(&self) -> String {
         let said = match self {
             Self::Written => "written".to_owned(),
             Self::Held => "held for the update's commit".to_owned(),
@@ -1817,7 +1817,7 @@ pub(crate) fn package_step_with(
         .renewal
         .say_if_new(probed.renewal.log_line(start.this_build), say);
     if let Some(repair) = &probed.repair {
-        changed |= said.repair.say_if_new(repair.log_line(), say);
+        changed |= said.repair.say_if_new(repair.repair_log_line(), say);
     }
     remember_renewal_refusal(probed.renewal.refusal().map(str::to_owned));
     remember(probed.state.clone());

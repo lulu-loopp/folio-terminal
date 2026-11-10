@@ -268,7 +268,7 @@ pub(crate) struct CarrySnapshot {
 }
 
 /// One member's part of a round's line: how many checks it ran and how many said something new.
-fn tally<T>(answer: Option<&MemberAnswer<T>>) -> (usize, usize) {
+fn member_tally<T>(answer: Option<&MemberAnswer<T>>) -> (usize, usize) {
     answer.map_or((0, 0), |answer| (answer.checks, answer.changed))
 }
 
@@ -288,28 +288,34 @@ impl CarryAsk {
     /// The update entrances whose rescue program is gone.
     pub(crate) const UPDATE_ORPHANS: Self = Self(1 << 3);
     /// Both Explorer registrations: what a trial's release of `Writer::ExplorerRepair` asks.
-    pub(crate) const EXPLORER: Self = Self::EXPLORER_PACKAGE.and(Self::EXPLORER_CLASSIC);
+    pub(crate) const EXPLORER: Self = Self::EXPLORER_PACKAGE.joined_with(Self::EXPLORER_CLASSIC);
     /// Every member: the start's round.
-    pub(crate) const ALL: Self = Self::HOOKS.and(Self::EXPLORER).and(Self::UPDATE_ORPHANS);
+    pub(crate) const ALL: Self = Self::HOOKS
+        .joined_with(Self::EXPLORER)
+        .joined_with(Self::UPDATE_ORPHANS);
 
     /// Both sets.
-    pub(crate) const fn and(self, other: Self) -> Self {
+    pub(crate) const fn joined_with(self, other: Self) -> Self {
         Self(self.0 | other.0)
     }
 
     /// Whether this set asks for `member`.
-    pub(crate) const fn has(self, member: Self) -> bool {
+    pub(crate) const fn names_member(self, member: Self) -> bool {
         self.0 & member.0 == member.0
     }
 }
 
 /// `member`'s answer when the round asked for it; nothing, and nothing run, when it did not.
-fn asked_for<T>(
+fn run_if_asked<T>(
     asked: CarryAsk,
     member: CarryAsk,
     run: impl FnOnce() -> Option<MemberAnswer<T>>,
 ) -> Option<MemberAnswer<T>> {
-    if asked.has(member) { run() } else { None }
+    if asked.names_member(member) {
+        run()
+    } else {
+        None
+    }
 }
 
 /// **The pass's one published snapshot** (row 68a): written at the end of each round, taken by
@@ -343,10 +349,10 @@ impl CarryPublished {
             orphans,
         } = round;
         let parts = [
-            tally(hooks.as_ref()),
-            tally(package.as_ref()),
-            tally(classic.as_ref()),
-            tally(orphans.as_ref()),
+            member_tally(hooks.as_ref()),
+            member_tally(package.as_ref()),
+            member_tally(classic.as_ref()),
+            member_tally(orphans.as_ref()),
         ];
         if hooks.is_none() && package.is_none() && classic.is_none() && orphans.is_none() {
             return None;
@@ -405,17 +411,17 @@ pub(crate) fn take_carry_snapshot() -> Option<CarrySnapshot> {
 /// A round runs the members `asked` names (row 68b, R2), in this order (R11): the three that need
 /// no program walk first, so the start's own round answers them, then the agents'.
 pub(crate) fn run_carry_steps(ctx: &WorkerCtx, asked: CarryAsk) {
-    let package = asked_for(asked, CarryAsk::EXPLORER_PACKAGE, || {
+    let package = run_if_asked(asked, CarryAsk::EXPLORER_PACKAGE, || {
         crate::explorer_menu::run_package_step(ctx)
     });
-    let classic = asked_for(asked, CarryAsk::EXPLORER_CLASSIC, || {
+    let classic = run_if_asked(asked, CarryAsk::EXPLORER_CLASSIC, || {
         crate::context_menu::run_classic_step(ctx)
     });
-    let orphans = asked_for(asked, CarryAsk::UPDATE_ORPHANS, || {
+    let orphans = run_if_asked(asked, CarryAsk::UPDATE_ORPHANS, || {
         crate::update_orphans::run_orphans_step(ctx)
     });
     let round = CarryRound {
-        hooks: asked_for(asked, CarryAsk::HOOKS, || {
+        hooks: run_if_asked(asked, CarryAsk::HOOKS, || {
             crate::agent_hooks_step::run_agent_hooks_step(ctx)
         }),
         package,
@@ -788,14 +794,14 @@ mod tests {
             "the ask starts the worker"
         );
         let first = LATCH.round_begins();
-        assert!(first.has(CarryAsk::HOOKS));
+        assert!(first.names_member(CarryAsk::HOOKS));
         for member in [
             CarryAsk::EXPLORER_PACKAGE,
             CarryAsk::EXPLORER_CLASSIC,
             CarryAsk::UPDATE_ORPHANS,
         ] {
             assert!(
-                !first.has(member),
+                !first.names_member(member),
                 "an Agents-page ask asks for no other member: {first:?}"
             );
         }
@@ -803,12 +809,18 @@ mod tests {
         assert!(!LATCH.ask_for_round(CarryAsk::UPDATE_ORPHANS));
         assert!(LATCH.round_again(), "the asks are one more round");
         let second = LATCH.round_begins();
-        assert_eq!(second, CarryAsk::EXPLORER.and(CarryAsk::UPDATE_ORPHANS));
-        assert!(!second.has(CarryAsk::HOOKS), "and not the agents' scan");
+        assert_eq!(
+            second,
+            CarryAsk::EXPLORER.joined_with(CarryAsk::UPDATE_ORPHANS)
+        );
+        assert!(
+            !second.names_member(CarryAsk::HOOKS),
+            "and not the agents' scan"
+        );
         assert!(!LATCH.round_again(), "after which it ends");
         LATCH.carry_ended();
 
-        let unasked = asked_for::<()>(CarryAsk::HOOKS, CarryAsk::EXPLORER_PACKAGE, || {
+        let unasked = run_if_asked::<()>(CarryAsk::HOOKS, CarryAsk::EXPLORER_PACKAGE, || {
             panic!("a member the round did not ask for is run")
         });
         assert_eq!(unasked, None);
@@ -818,7 +830,10 @@ mod tests {
             CarryAsk::EXPLORER_CLASSIC,
             CarryAsk::UPDATE_ORPHANS,
         ] {
-            assert!(CarryAsk::ALL.has(member), "the start asks for {member:?}");
+            assert!(
+                CarryAsk::ALL.names_member(member),
+                "the start asks for {member:?}"
+            );
         }
         assert!(
             squeezed(free_fn_body("begin_carry_at_start"))

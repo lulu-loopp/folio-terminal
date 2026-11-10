@@ -59,7 +59,7 @@ pub(crate) enum OrphanFate {
 }
 
 impl OrphanFate {
-    fn said(&self) -> String {
+    fn fate_said(&self) -> String {
         match self {
             Self::Removed => "removed".to_owned(),
             Self::LeftLive => "left (live)".to_owned(),
@@ -207,7 +207,7 @@ impl OrphansSaid {
     }
 
     /// The fates as the pass's part: one check, changed when any line was said.
-    pub(crate) fn answer(
+    pub(crate) fn orphans_answer(
         &self,
         fates: &[(String, OrphanFate)],
         say: &dyn Fn(String),
@@ -217,7 +217,7 @@ impl OrphansSaid {
         } else {
             fates
                 .iter()
-                .map(|(name, fate)| format!("BT_UPDATE_ORPHANS {name} {}", fate.said()))
+                .map(|(name, fate)| format!("BT_UPDATE_ORPHANS {name} {}", fate.fate_said()))
                 .collect()
         };
         let mut last = self.0.lock().unwrap_or_else(PoisonError::into_inner);
@@ -265,7 +265,7 @@ pub(crate) fn run_orphans_step(_ctx: &WorkerCtx) -> Option<MemberAnswer<()>> {
         ),
         bt_platform::HostPlatform::OtherUnix => return None,
     };
-    Some(ORPHANS_SAID.answer(&fates, &crate::diagnostics::stderr_line))
+    Some(ORPHANS_SAID.orphans_answer(&fates, &crate::diagnostics::stderr_line))
 }
 
 #[cfg(test)]
@@ -285,13 +285,13 @@ mod tests {
     /// **A registry held in memory**, recording every value it was asked to read and every
     /// flush.
     #[derive(Default)]
-    struct Values {
+    struct OrphanRunValues {
         values: BTreeMap<String, (u32, Vec<u8>)>,
         read: Vec<String>,
         flushes: usize,
     }
 
-    impl Registry for Values {
+    impl Registry for OrphanRunValues {
         fn set(&mut self, key: &str, name: &str, kind: u32, data: &[u8]) -> io::Result<()> {
             assert_eq!(key, KEY, "only the test's own key");
             self.values.insert(name.to_owned(), (kind, data.to_vec()));
@@ -363,8 +363,8 @@ mod tests {
     /// The registry the Windows tests sweep: a dead copy's entrance, this copy's and another live
     /// copy's armed ones, a value of another type and a command of another shape under the
     /// door's prefix, and somebody else's value beside them.
-    fn run_key(root: &Path) -> (Values, String) {
-        let mut registry = Values::default();
+    fn run_key(root: &Path) -> (OrphanRunValues, String) {
+        let mut registry = OrphanRunValues::default();
         for (first, copy, there) in [(1, "gone", false), (2, "here", true), (3, "other", true)] {
             let _armed =
                 logon_hook::arm_in(&mut registry, KEY, &txn(first), &rescue(root, copy, there))
@@ -445,7 +445,7 @@ mod tests {
         let said = OrphansSaid::new();
         let lines = std::cell::RefCell::new(Vec::new());
         let say = |line: String| lines.borrow_mut().push(line);
-        let first = said.answer(&fates, &say);
+        let first = said.orphans_answer(&fates, &say);
         assert_eq!((first.checks, first.changed), (1, 1));
         assert!(
             lines
@@ -463,7 +463,7 @@ mod tests {
         );
         let again = sweep_run_values(&mut registry, KEY, &what_stands, never_asked);
         lines.borrow_mut().clear();
-        let second = said.answer(&again, &say);
+        let second = said.orphans_answer(&again, &say);
         assert_eq!(
             (second.checks, second.changed),
             (1, 0),
@@ -477,9 +477,9 @@ mod tests {
 
     /// **The machine with the drive a program was on unplugged**: what stands is this machine's,
     /// and the way to a missing program's volume cannot be followed.
-    struct Away;
+    struct OrphanAwayVolume;
 
-    impl Look for Away {
+    impl Look for OrphanAwayVolume {
         fn stands(&self, path: &Path) -> PathStands {
             what_stands(path)
         }
@@ -498,15 +498,15 @@ mod tests {
     #[test]
     fn an_entrance_on_a_volume_that_is_away_is_left_and_said() {
         let root = scratch("orphans-away");
-        let mut registry = Values::default();
+        let mut registry = OrphanRunValues::default();
         let _armed =
             logon_hook::arm_in(&mut registry, KEY, &txn(1), &rescue(&root, "gone", false)).unwrap();
-        let fates = sweep_run_values(&mut registry, KEY, &Away, never_asked);
+        let fates = sweep_run_values(&mut registry, KEY, &OrphanAwayVolume, never_asked);
         let name = logon_hook::value_name(&txn(1));
         assert_eq!(fates, [(name.clone(), OrphanFate::LeftOwnerUnknown)]);
         assert!(registry.values.contains_key(&name), "left");
         let lines = std::cell::RefCell::new(Vec::new());
-        let _ = OrphansSaid::new().answer(&fates, &|line| lines.borrow_mut().push(line));
+        let _ = OrphansSaid::new().orphans_answer(&fates, &|line| lines.borrow_mut().push(line));
         assert_eq!(
             *lines.borrow(),
             [format!("BT_UPDATE_ORPHANS {name} left (owner unknown)")]
@@ -589,7 +589,7 @@ mod tests {
     #[test]
     fn the_sweep_waits_for_the_trials_commit() {
         let root = scratch("orphans-trial");
-        let mut registry = Values::default();
+        let mut registry = OrphanRunValues::default();
         for first in [1, 2] {
             let _armed = logon_hook::arm_in(
                 &mut registry,

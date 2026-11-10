@@ -185,7 +185,7 @@ pub fn apply(install: bool) -> Result<(), String> {
 /// counted first, so that a start's repair running beside it on the carry pass
 /// yields to it ([`ClassicPresses`]).
 pub fn apply_pressed(install: bool) -> Result<(), String> {
-    PRESSES.record(install);
+    PRESSES.note_press(install);
     apply(install)
 }
 
@@ -216,13 +216,13 @@ impl ClassicPresses {
     }
 
     /// A press asking for the verb (`true`) or for its removal.
-    pub(crate) fn record(&self, install: bool) {
+    pub(crate) fn note_press(&self, install: bool) {
         self.wish.store(install, Ordering::SeqCst);
         self.count.fetch_add(1, Ordering::SeqCst);
     }
 
     /// How many presses have landed.
-    pub(crate) fn seen(&self) -> u64 {
+    pub(crate) fn presses_counted(&self) -> u64 {
         self.count.load(Ordering::SeqCst)
     }
 
@@ -248,7 +248,7 @@ pub(crate) struct ClassicAnswer {
 /// since the round read the trees: the press read the machine after its own
 /// write, and that read is newer (R4).
 pub(crate) fn adopt_classic_answer(installed: &mut bool, answer: ClassicAnswer) {
-    if answer.presses_seen == PRESSES.seen() {
+    if answer.presses_seen == PRESSES.presses_counted() {
         *installed = answer.installed;
     }
 }
@@ -257,9 +257,9 @@ pub(crate) fn adopt_classic_answer(installed: &mut bool, answer: ClassicAnswer) 
 /// product ([`AccountClasses`]); a test's own.
 pub(crate) trait ClassicStore {
     /// What each tree holds, in [`bt_platform::CONTEXT_MENU_TREES`]'s order.
-    fn read(&self) -> Vec<ContextMenuTree>;
+    fn read_classic_trees(&self) -> Vec<ContextMenuTree>;
     /// Write `shape` into every tree, or take the verb out of every tree.
-    fn write(&self, shape: Option<&ContextMenuShape>) -> Result<(), String>;
+    fn write_classic_verb(&self, shape: Option<&ContextMenuShape>) -> Result<(), String>;
 }
 
 /// The account's own class store, written through [`apply`], which tells the
@@ -267,11 +267,11 @@ pub(crate) trait ClassicStore {
 struct AccountClasses;
 
 impl ClassicStore for AccountClasses {
-    fn read(&self) -> Vec<ContextMenuTree> {
+    fn read_classic_trees(&self) -> Vec<ContextMenuTree> {
         bt_platform::read_context_menu(CONTEXT_MENU_CLASSES)
     }
 
-    fn write(&self, shape: Option<&ContextMenuShape>) -> Result<(), String> {
+    fn write_classic_verb(&self, shape: Option<&ContextMenuShape>) -> Result<(), String> {
         apply(shape.is_some())
     }
 }
@@ -296,7 +296,7 @@ pub(crate) enum ClassicFound {
 }
 
 impl ClassicFound {
-    const fn word(self) -> &'static str {
+    const fn found_word(self) -> &'static str {
         match self {
             Self::Absent => "absent",
             Self::Current => "current",
@@ -308,7 +308,7 @@ impl ClassicFound {
     }
 
     /// Whether the start rewrites what it found.
-    const fn wanted(self) -> bool {
+    const fn repair_wanted(self) -> bool {
         matches!(self, Self::OldShape | Self::Dead)
     }
 }
@@ -387,13 +387,13 @@ pub(crate) struct ClassicRun {
 impl ClassicRun {
     /// `BT_EXPLORER_CLASSIC <found>[ repaired=<what>]` — no path (the Explorer
     /// modules' rule).
-    pub(crate) fn line(&self) -> String {
+    pub(crate) fn classic_line(&self) -> String {
         match &self.repaired {
             Some(repaired) => format!(
                 "BT_EXPLORER_CLASSIC {} repaired={repaired}",
-                self.found.word()
+                self.found.found_word()
             ),
-            None => format!("BT_EXPLORER_CLASSIC {}", self.found.word()),
+            None => format!("BT_EXPLORER_CLASSIC {}", self.found.found_word()),
         }
     }
 }
@@ -420,8 +420,8 @@ pub(crate) fn reassert_in(
     defer: impl FnOnce(Writer) -> bool,
     presses: &ClassicPresses,
 ) -> ClassicRun {
-    let seen = presses.seen();
-    let found = store.read();
+    let seen = presses.presses_counted();
+    let found = store.read_classic_trees();
     let judged = classic_found(&found, desired, this, look);
     let run = |repaired: Option<String>, trees: &[ContextMenuTree]| ClassicRun {
         found: judged,
@@ -431,27 +431,27 @@ pub(crate) fn reassert_in(
             presses_seen: seen,
         },
     };
-    if !judged.wanted() {
+    if !judged.repair_wanted() {
         return run(None, &found);
     }
     if defer(Writer::ExplorerRepair) {
         return run(Some("held".to_owned()), &found);
     }
-    if presses.seen() != seen {
+    if presses.presses_counted() != seen {
         return run(Some("pressed".to_owned()), &found);
     }
-    let written = store.write(Some(desired));
+    let written = store.write_classic_verb(Some(desired));
     let mut answered = seen;
-    while presses.seen() != answered {
-        answered = presses.seen();
-        let _ = store.write(presses.wish().then_some(desired));
+    while presses.presses_counted() != answered {
+        answered = presses.presses_counted();
+        let _ = store.write_classic_verb(presses.wish().then_some(desired));
     }
     let repaired = match written {
         Ok(()) if answered != seen => "pressed".to_owned(),
         Ok(()) => "written".to_owned(),
         Err(reason) => format!("refused ({reason})"),
     };
-    run(Some(repaired), &store.read())
+    run(Some(repaired), &store.read_classic_trees())
 }
 
 /// The classic member's last line.
@@ -464,7 +464,7 @@ pub(crate) fn classic_member_answer(
     said: &LastSaid,
     say: &dyn Fn(String),
 ) -> MemberAnswer<ClassicAnswer> {
-    let changed = said.say_if_new(run.line(), say);
+    let changed = said.say_if_new(run.classic_line(), say);
     MemberAnswer {
         part: run.answer,
         checks: 1,
@@ -908,15 +908,15 @@ mod tests {
     }
 
     impl ClassicStore for Trees<'_> {
-        fn read(&self) -> Vec<ContextMenuTree> {
+        fn read_classic_trees(&self) -> Vec<ContextMenuTree> {
             self.trees.borrow().clone()
         }
 
-        fn write(&self, shape: Option<&ContextMenuShape>) -> Result<(), String> {
+        fn write_classic_verb(&self, shape: Option<&ContextMenuShape>) -> Result<(), String> {
             self.writes.set(self.writes.get() + 1);
             if let Some((presses, wish)) = self.press_during_write.take() {
                 // The press records its wish, writes it, and the repair's write lands after.
-                presses.record(wish);
+                presses.note_press(wish);
                 self.set(if wish { shape } else { None });
             }
             if let Some(refusal) = self.refuse {
@@ -929,9 +929,9 @@ mod tests {
 
     /// **The machine with the drive a program was on unplugged**: what stands is this
     /// machine's, and the way to a missing program's volume cannot be followed.
-    struct Away;
+    struct ClassicAwayVolume;
 
-    impl Look for Away {
+    impl Look for ClassicAwayVolume {
         fn stands(&self, path: &Path) -> PathStands {
             what_stands(path)
         }
@@ -975,7 +975,11 @@ mod tests {
         let run = reassert_in(&dead, &desired, &here, &what_stands, |_| false, &presses);
         assert_eq!(run.found, ClassicFound::Dead);
         assert_eq!(run.repaired.as_deref(), Some("written"));
-        assert_eq!(dead.read(), both(&desired), "rewritten to this build's");
+        assert_eq!(
+            dead.read_classic_trees(),
+            both(&desired),
+            "rewritten to this build's"
+        );
         assert!(run.answer.installed, "and the row reads On");
 
         for (what, trees, look, expected) in [
@@ -988,7 +992,7 @@ mod tests {
             (
                 "a program on a drive that is away",
                 both(&shape_of(&gone)),
-                &Away as &dyn Look,
+                &ClassicAwayVolume as &dyn Look,
                 ClassicFound::OwnerUnknown,
             ),
             (
@@ -1003,7 +1007,7 @@ mod tests {
             assert_eq!(run.found, expected, "{what}");
             assert_eq!(run.repaired, None, "{what}: nothing is due");
             assert_eq!(store.writes.get(), 0, "{what}: nothing written");
-            assert_eq!(store.read(), trees, "{what}: left as it was");
+            assert_eq!(store.read_classic_trees(), trees, "{what}: left as it was");
             assert_eq!(
                 run.answer.installed,
                 expected != ClassicFound::Absent,
@@ -1033,7 +1037,10 @@ mod tests {
         assert_eq!(held.repaired.as_deref(), Some("held"));
         assert_eq!(trial.writes.get(), 0, "and writes nothing until the commit");
         assert!(held.answer.installed, "the entry that is there is still On");
-        assert_eq!(held.line(), "BT_EXPLORER_CLASSIC dead repaired=held");
+        assert_eq!(
+            held.classic_line(),
+            "BT_EXPLORER_CLASSIC dead repaired=held"
+        );
 
         let said = LastSaid::new();
         let lines = RefCell::new(Vec::new());
@@ -1147,7 +1154,7 @@ mod tests {
         assert_eq!(run.found, ClassicFound::OldShape, "{what}: this copy's");
         assert_eq!(run.repaired.as_deref(), Some("written"), "{what}");
         assert_eq!(
-            bt_platform::context_menu_verdict(&store.read(), desired),
+            bt_platform::context_menu_verdict(&store.read_classic_trees(), desired),
             ContextMenuState::Current,
             "{what}: brought to this build's"
         );
@@ -1231,17 +1238,17 @@ mod tests {
                     self.reg(&["delete", &self.key(&format!(r"{tree}\Folio")), "/f"]);
                 }
             }
-            assert_eq!(self.read(), trees, "planted as written");
+            assert_eq!(self.read_classic_trees(), trees, "planted as written");
         }
     }
 
     #[cfg(windows)]
     impl ClassicStore for Hive {
-        fn read(&self) -> Vec<ContextMenuTree> {
+        fn read_classic_trees(&self) -> Vec<ContextMenuTree> {
             bt_platform::read_context_menu(&self.classes)
         }
 
-        fn write(&self, shape: Option<&ContextMenuShape>) -> Result<(), String> {
+        fn write_classic_verb(&self, shape: Option<&ContextMenuShape>) -> Result<(), String> {
             match shape {
                 Some(shape) => bt_platform::install_context_menu(&self.classes, shape),
                 None => bt_platform::remove_context_menu(&self.classes),
@@ -1283,7 +1290,7 @@ mod tests {
             &what_stands,
             |_| {
                 // The press lands while the gate is asked: after the read, before the write.
-                presses.record(false);
+                presses.note_press(false);
                 false
             },
             &presses,
@@ -1305,7 +1312,7 @@ mod tests {
         let run = reassert_in(&during, &desired, &here, &what_stands, |_| false, &presses);
         assert_eq!(run.repaired.as_deref(), Some("pressed"));
         assert_eq!(
-            during.read(),
+            during.read_classic_trees(),
             vec![ContextMenuTree::Absent; 2],
             "the press's wish is what the store ends with"
         );
@@ -1326,7 +1333,7 @@ mod tests {
     /// the verb before the person took it out turns the switch back On.
     #[test]
     fn a_classic_answer_older_than_a_press_is_not_adopted() {
-        let read_now = PRESSES.seen();
+        let read_now = PRESSES.presses_counted();
         let mut installed = false;
         adopt_classic_answer(
             &mut installed,
@@ -1336,7 +1343,7 @@ mod tests {
             },
         );
         assert!(installed, "an answer read after every press is adopted");
-        PRESSES.record(false);
+        PRESSES.note_press(false);
         installed = false;
         adopt_classic_answer(
             &mut installed,

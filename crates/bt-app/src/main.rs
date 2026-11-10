@@ -342,9 +342,9 @@ use runtime::unverified_reference_handoff;
 // K2 batch 22 (T-SPLIT-2B) moved these free functions beside their callers in modules outside
 // `runtime/`; the root names them again for its own callers and, through `use super::*`, its
 // test modules.
+use carry_pass::CarryAsk;
 #[cfg(test)]
 use computation_lane::raster_peek_page;
-use carry_pass::CarryAsk;
 use explorer_menu::door_language;
 use file_peek::home_shortened_path_on;
 #[cfg(all(test, windows))]
