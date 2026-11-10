@@ -158,16 +158,10 @@ pub(crate) fn sweep_launch_agents(
     look: &(impl Look + ?Sized),
     defer: impl FnOnce(Writer) -> bool,
 ) -> Vec<(String, OrphanFate)> {
-    let name_of = |plist: &Path| {
-        plist
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_default()
-    };
     let mut judge = OrphanJudge::new(look, defer);
     let walked = bt_platform::launch_agent::sweep_by(agents, |plist| {
         let rescue = bt_platform::launch_agent::rescue_of_plist(plist);
-        judge.removes(&name_of(plist), rescue.as_deref())
+        judge.removes(&launch_agent_name(plist), rescue.as_deref())
     });
     let walked = match walked {
         Err(refusal) => vec![(
@@ -181,11 +175,19 @@ pub(crate) fn sweep_launch_agents(
                     Ok(()) => OrphanFate::Removed,
                     Err(refusal) => OrphanFate::Refused(launch_agent_stage(&refusal).to_owned()),
                 };
-                (name_of(&plist), fate)
+                (launch_agent_name(&plist), fate)
             })
             .collect(),
     };
     judge.fates(walked)
+}
+
+/// A plist's file name, as the sweep's line says it.
+fn launch_agent_name(plist: &Path) -> String {
+    plist
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 /// The stage a LaunchAgent refusal stopped at — its own words carry the folder's path.

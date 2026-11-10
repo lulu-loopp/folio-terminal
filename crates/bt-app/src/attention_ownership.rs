@@ -255,17 +255,17 @@ pub(crate) fn other_live_by(
 /// copy to compare against — an update's rescue entrance names a program the update itself wrote,
 /// and an Explorer registration's owner is compared with this copy by its caller.
 pub(crate) fn gone_by(program: &Path, look: &(impl Look + ?Sized)) -> Result<bool, &'static str> {
-    let unknown = || Err(crate::i18n::Text::AgentHooksOwnerUnknown.text());
+    let unknown = Err(crate::i18n::Text::AgentHooksOwnerUnknown.text());
     if literal_absolute_path(program).is_err() {
-        return unknown();
+        return unknown;
     }
     match look.stands(program) {
         PathStands::File => Ok(false),
         PathStands::Missing => match look.volume_of(program) {
             Some(volume) if look.stands(&volume) == PathStands::Folder => Ok(true),
-            _ => unknown(),
+            _ => unknown,
         },
-        PathStands::Folder | PathStands::Other | PathStands::Unknown => unknown(),
+        PathStands::Folder | PathStands::Other | PathStands::Unknown => unknown,
     }
 }
 

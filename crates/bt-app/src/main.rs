@@ -49715,7 +49715,7 @@ impl<B: Backend> FolioApp<B> {
         if let Some(classic) = carried.explorer {
             context_menu::adopt_classic_answer(&mut app.context_menu_installed, classic);
         }
-        let notices = match carried.hooks {
+        let notices: Vec<i18n::Text> = match carried.hooks {
             Some(snapshot) => {
                 adopt_agent_hooks_snapshot(app, &snapshot);
                 snapshot.notices

@@ -363,14 +363,16 @@ pub fn rescue_of_plist(path: &Path) -> Option<PathBuf> {
     let [_, program, _, home] = strings.as_slice() else {
         return None;
     };
-    let unescape = |text: &str| {
-        text.replace("&lt;", "<")
-            .replace("&gt;", ">")
-            .replace("&amp;", "&")
-    };
-    let program = PathBuf::from(unescape(program));
-    let home = PathBuf::from(unescape(home));
+    let program = PathBuf::from(plist_unescaped(program));
+    let home = PathBuf::from(plist_unescaped(home));
     (plist(&txn, &program, &home).ok()? == text).then_some(program)
+}
+
+/// A `<string>`'s text as it was before [`plist`] escaped it.
+fn plist_unescaped(text: &str) -> String {
+    text.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
 }
 
 #[cfg(test)]
