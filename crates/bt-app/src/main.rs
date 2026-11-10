@@ -1282,7 +1282,7 @@ enum StagingAnswer {
         /// What was written, or why nothing was — kinds, counts and codes, never a name.
         result: std::result::Result<
             bt_platform::clipboard_promise::RenderedPromise,
-            bt_platform::clipboard_promise::PromiseRefused,
+            runtime::PromiseWhy,
         >,
         /// How long the render took, for the line a promise saved says.
         took: std::time::Duration,
@@ -1501,6 +1501,10 @@ enum PasteCardKey {
 #[derive(Debug, Default)]
 struct ClipboardPictureMailbox {
     inbox: Arc<std::sync::Mutex<ClipboardPictureInbox>>,
+    /// The suite's: how many of the next staging starts the thread door is to refuse, as a
+    /// machine out of threads would (`lane::Gate::refuse_next_start` is the lanes' own).
+    #[cfg(test)]
+    refused_starts: std::sync::atomic::AtomicUsize,
 }
 
 /// **The generation and the slot behind one lock** (review X-3).
@@ -1557,6 +1561,32 @@ impl ClipboardPictureMailbox {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .refused
             .push(refusal);
+    }
+
+    /// **Whether the thread door is to refuse this staging start** — the suite's, as a machine
+    /// out of threads would ([`Self::refuse_the_next_start`]); never in the product.
+    fn refuses_this_start(&self) -> bool {
+        #[cfg(test)]
+        {
+            self.refused_starts
+                .fetch_update(
+                    std::sync::atomic::Ordering::AcqRel,
+                    std::sync::atomic::Ordering::Acquire,
+                    |left| left.checked_sub(1),
+                )
+                .is_ok()
+        }
+        #[cfg(not(test))]
+        {
+            false
+        }
+    }
+
+    /// The next staging start the thread door is asked for is refused (the suite's).
+    #[cfg(test)]
+    fn refuse_the_next_start(&self) {
+        self.refused_starts
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
     }
 
     /// The saves refused at the door since the last look, in order, and none from now on.

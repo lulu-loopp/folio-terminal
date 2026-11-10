@@ -1679,12 +1679,14 @@ fn sequence(number: u64) -> Option<bt_platform::ClipboardSequence> {
 /// with its kind, its road and the clipboard's sequence, and never the path**: two files copied,
 /// one of them a name no shell can be handed — the other is pasted, the notice names the refused
 /// one, and `diagnostics.log` has `paths (control, 1 of 2 paths); road=clipboard; sequence=<the
-/// read's>`; the same path dropped, dragged, saved from a picture and rendered from a promise
-/// says the same kind on its own road, the last two with the sequence their read carried.
+/// read's>`; the same path dropped, dragged, inserted from a files column (review N7), saved from
+/// a picture and rendered from a promise says the same kind on its own road, the last two with
+/// the sequence their read carried.
 ///
 /// MUTATIONS: drop the `note` in `Runtime::refuse_paste` — no line; format the refused paths into
 /// `PasteRefusal::refusal_words` — the name is in the line; pass `PasteFrom::Clipboard(None)` in
-/// `apply_clipboard_payload` — `sequence=none`.
+/// `apply_clipboard_payload` — `sequence=none`; toast `shell_literal::refusal_notice` in
+/// `insert_path_into_terminal` again — no insert line.
 #[test]
 fn a_refused_path_says_one_line_on_every_road_and_never_the_path() {
     let mut folio = a_window_pasting("paste-refused-paths", "unused 未用");
@@ -1740,6 +1742,14 @@ fn a_refused_path_says_one_line_on_every_road_and_never_the_path() {
             )]
         );
     }
+    folio
+        .runtime()
+        .insert_path_into_terminal(&an_unspellable_path())
+        .expect("the insertion is answered");
+    assert_eq!(
+        refusal_lines(&mut folio),
+        ["paste refused: paths (control, 1 of 1 paths); road=insert; sequence=none"]
+    );
     staged_answer(
         &mut folio,
         target,
@@ -1817,8 +1827,8 @@ fn a_promise_that_is_not_pasted_says_why() {
         crate::StagingAnswer::Promise {
             sequence: sequence(1756),
             picture_passed_over: false,
-            result: Err(bt_platform::clipboard_promise::PromiseRefused::NotRendered(
-                Some(0x8004_01D3),
+            result: Err(crate::runtime::PromiseWhy::Refused(
+                bt_platform::clipboard_promise::PromiseRefused::NotRendered(Some(0x8004_01D3)),
             )),
             took: std::time::Duration::from_millis(5),
         },
@@ -1837,10 +1847,12 @@ fn a_promise_that_is_not_pasted_says_why() {
         crate::StagingAnswer::Promise {
             sequence: sequence(1757),
             picture_passed_over: true,
-            result: Err(bt_platform::clipboard_promise::PromiseRefused::TooMany {
-                offered: 120,
-                cap: 64,
-            }),
+            result: Err(crate::runtime::PromiseWhy::Refused(
+                bt_platform::clipboard_promise::PromiseRefused::TooMany {
+                    offered: 120,
+                    cap: 64,
+                },
+            )),
             took: std::time::Duration::from_millis(5),
         },
     );
@@ -2025,8 +2037,9 @@ fn a_promise_on_the_clipboard_is_written_and_pasted_as_a_copied_file_is() {
 /// process's end**: the worker contains it, removes the paste's folder and answers
 /// `not-rendered`, which is said on the next turn as any refusal is.
 ///
-/// MUTATION: render without `contained_panic::contain` in `Runtime::stage_clipboard_promise` —
-/// the worker dies with its answer owed and the line never comes.
+/// MUTATION: render without `contained_panic::contain` in `clipboard_picture::stage_promise` —
+/// the render thread dies with its answer owed, and the watcher answers `not-rendered` without
+/// removing the folder.
 #[test]
 fn a_promise_whose_render_panics_is_refused_and_leaves_nothing() {
     let _places = staging_places();
@@ -2139,6 +2152,13 @@ fn every_refusal_line_is_spelled_from_its_value() {
             "promise (not-started, picture passed over)",
         ),
         (
+            RefusedKind::Promise {
+                why: PromiseWhy::Refused(PromiseRefused::Stalled),
+                picture_passed_over: false,
+            },
+            "promise (stalled)",
+        ),
+        (
             RefusedKind::ReadFailed { worker_gone: false },
             "read-failed",
         ),
@@ -2182,6 +2202,7 @@ fn every_refusal_line_is_spelled_from_its_value() {
         (PasteFrom::Promise(sequence(4)), "road=promise; sequence=4"),
         (PasteFrom::Drop, "road=drop; sequence=none"),
         (PasteFrom::Drag, "road=drag; sequence=none"),
+        (PasteFrom::Insert, "road=insert; sequence=none"),
     ] {
         assert_eq!(
             line(RefusedKind::ReadFailed { worker_gone: false }, from),
@@ -2191,14 +2212,16 @@ fn every_refusal_line_is_spelled_from_its_value() {
 }
 
 /// PIN (plan row 81) — **every paste refusal leaves by one door**: `Runtime::refuse_paste` is
-/// called from the four places a paste is refused — the delivery of a prepared paste, the spend of
-/// a failed read, the busy notice and the staging worker's answer — and none of them, nor the
-/// staging doors, raises a notice of its own; the paste notices are named by
-/// `RefusedKind::toast_text` alone; and the picture door's lines reach `diagnostics.log`.
+/// called from the five places a paste is refused — the delivery of a prepared paste, the spend
+/// of a failed read, the busy notice, the staging worker's answer and a files column's inserted
+/// path — and none of them, nor the staging doors, raises a notice of its own; the paste notices
+/// are named by `RefusedKind::toast_text` alone, the refused paths' (`refusal_notice`) as well
+/// as the clipboard's (review N7); and the picture door's lines reach `diagnostics.log`.
 ///
 /// MUTATIONS: put `self.toast(.., PasteClipboardRead ..)` back in `spend_paste` — its body raises
 /// a notice; `crate::diagnostics::stderr_line` back in `save_clipboard_picture` — the line is
-/// the console's only.
+/// the console's only; toast `shell_literal::refusal_notice` in `insert_path_into_terminal` —
+/// a second reader of the path notices.
 #[test]
 fn every_paste_refusal_leaves_by_one_door() {
     use crate::test_support::{calls_of, found, method_body, reader_names, source};
@@ -2208,6 +2231,7 @@ fn every_paste_refusal_leaves_by_one_door() {
         [
             "adopt_clipboard_picture",
             "deliver_paste",
+            "insert_path_into_terminal",
             "say_the_clipboard_busy",
             "spend_paste",
         ]
@@ -2219,6 +2243,7 @@ fn every_paste_refusal_leaves_by_one_door() {
         "adopt_clipboard_picture",
         "save_clipboard_picture",
         "stage_clipboard_promise",
+        "insert_path_into_terminal",
     ] {
         let body = method_body("Runtime", road);
         assert!(
@@ -2247,4 +2272,322 @@ fn every_paste_refusal_leaves_by_one_door() {
             named.report(source())
         );
     }
+    let path_notices =
+        crate::test_support::free_calls_of("refusal_notice").in_the_product(source());
+    assert_eq!(
+        reader_names(&path_notices),
+        ["toast_text"],
+        "the refused paths' notice is raised only by the refusal door:\n{}",
+        path_notices.report(source())
+    );
+}
+
+/// PIN (plan row 81; review N16) — **the promise is rendered on its own worker and nowhere
+/// else**: `ClipboardDoor::render_promised_files` is called by `clipboard_picture::stage_promise`
+/// alone, which only the `clipboard-promise` worker's body in `Runtime::stage_clipboard_promise`
+/// calls; the clipboard lane's worker (`PlatformClipboard::serve`) names no render. R1's "never
+/// the lane worker" is a guard, not a fact of today's callers.
+///
+/// MUTATIONS: call `render_promised_files` from another product function — a second caller;
+/// call `stage_promise` from the window thread's adopt — a second reader; render inside `serve`
+/// — its body names a render.
+#[test]
+fn the_promise_is_rendered_on_its_own_worker_only() {
+    use crate::test_support::{found, free_calls_of, item_body, reader_names, source};
+    use bt_source::{ItemQuery, Pattern, View, needle};
+    let rendered = found(
+        needle!(Pattern::call("render_promised_files")),
+        View::Identifiers,
+    )
+    .in_the_product(source());
+    // The trait's own default and its one product implementation declare the name; neither calls
+    // a render of another door.
+    let callers: Vec<String> = reader_names(&rendered)
+        .into_iter()
+        .filter(|name| name != "render_promised_files")
+        .collect();
+    assert_eq!(
+        callers,
+        ["stage_promise"],
+        "the render's callers:\n{}",
+        rendered.report(source())
+    );
+    let staged = free_calls_of("stage_promise").in_the_product(source());
+    assert_eq!(
+        reader_names(&staged),
+        ["stage_clipboard_promise"],
+        "the promise's worker is started from one door:\n{}",
+        staged.report(source())
+    );
+    let serve =
+        item_body(&ItemQuery::method("PlatformClipboard", "serve").of_trait("ClipboardDoor"));
+    assert!(
+        !serve.contains("render_"),
+        "the clipboard lane's worker renders nothing:\n{serve}"
+    );
+}
+
+/// RED (plan row 81; review N15) — **a paste asked of a lane whose worker has ended says
+/// `busy (lane-gone)`**: the lane's worker ends with a paste owed (said `read-failed
+/// (worker-gone)`), and the next `Ctrl+V` is refused at the lane's door, synchronously — one line
+/// and the busy notice, nothing owed, no input held.
+///
+/// MUTATION: map `Declined::LaneGone` to `PasteBusy::LaneFull` in `Runtime::paste_clipboard` —
+/// the line says `lane-full`.
+#[test]
+fn a_paste_after_the_lanes_worker_ended_says_lane_gone() {
+    let mut folio = a_window_pasting("paste-refused-lane-gone", "粘贴 never");
+    let gate = std::sync::Arc::new(crate::lane::Gate::default());
+    let lane = recording_lane(
+        &mut folio,
+        &crate::lane::Executor::scripted(std::sync::Arc::clone(&gate)),
+    );
+    gate.hold();
+    chord(&mut folio, "v", KeyCode::KeyV);
+    assert!(gate.wait_entered(1), "the paste is on the worker");
+    gate.kill();
+    gate.release();
+    crate::lane::wait_for_a_wake(&lane.wakes, "the worker's end");
+    folio.settle_clipboard();
+    assert_eq!(
+        refusal_lines(&mut folio),
+        ["paste refused: read-failed (worker-gone); road=clipboard; sequence=none"]
+    );
+    chord(&mut folio, "v", KeyCode::KeyV);
+    assert!(
+        folio.runtime().window.clipboard.pastes.is_empty(),
+        "refused at the door"
+    );
+    assert_eq!(
+        refusal_lines(&mut folio),
+        ["paste refused: busy (lane-gone); road=clipboard; sequence=none"]
+    );
+    assert_eq!(
+        notices(&mut folio, crate::i18n::Text::PasteClipboardBusy.text()),
+        1
+    );
+    type_key(&mut folio, "y", KeyCode::KeyY);
+    assert_eq!(sent_to_the_shell(&mut folio, 0), "y", "no input is held");
+}
+
+/// RED (plan row 81; review N15) — **a paste whose lane worker would not start says
+/// `busy (not-started)`**: the thread door refuses the lane's first start; the `Ctrl+V` that asked
+/// for it is refused at the lane's door with one line and the busy notice, and the next one starts
+/// the worker again and is read.
+///
+/// MUTATION: map `Declined::NotStarted` to `PasteBusy::LaneGone` in `Runtime::paste_clipboard` —
+/// the line says `lane-gone`.
+#[test]
+fn a_paste_whose_lane_would_not_start_says_not_started() {
+    let mut folio = a_window_pasting("paste-refused-not-started", "粘贴 once");
+    let gate = std::sync::Arc::new(crate::lane::Gate::default());
+    let lane = recording_lane(
+        &mut folio,
+        &crate::lane::Executor::scripted(std::sync::Arc::clone(&gate)),
+    );
+    gate.refuse_next_start();
+    chord(&mut folio, "v", KeyCode::KeyV);
+    assert!(
+        folio.runtime().window.clipboard.pastes.is_empty(),
+        "refused at the door"
+    );
+    assert_eq!(
+        refusal_lines(&mut folio),
+        ["paste refused: busy (not-started); road=clipboard; sequence=none"]
+    );
+    assert_eq!(
+        notices(&mut folio, crate::i18n::Text::PasteClipboardBusy.text()),
+        1
+    );
+    chord(&mut folio, "v", KeyCode::KeyV);
+    crate::lane::wait_for_a_wake(&lane.wakes, "the second paste's answer");
+    folio.settle_clipboard();
+    assert!(
+        sent_to_the_shell(&mut folio, 0).contains("粘贴 once"),
+        "the next paste starts the worker and is read"
+    );
+}
+
+/// RED (plan row 81; review N15) — **a picture or a promise whose worker would not start says
+/// `not-started` on its own road**: the thread door refuses the staging worker's start; the door
+/// says its own line on the paste's turn and the refusal on the next, with the sequence the read
+/// carried, and the place it took is back.
+///
+/// MUTATIONS: answer `PictureNotSaved::WorkersBusy` for the refused start in
+/// `Runtime::save_clipboard_picture` — the picture's line says `workers-busy`; answer
+/// `PromiseWhy::WorkersBusy` in `Runtime::stage_clipboard_promise` — the promise's does.
+#[test]
+fn a_staging_worker_that_would_not_start_says_not_started() {
+    let _places = staging_places();
+    let mut folio = a_window_pasting("paste-refused-staging-start", "unused 未用");
+    let events = crate::headless::LoopEvents::default();
+    folio.app.event_proxy = events.proxy();
+    let target = the_shell(&mut folio);
+    folio.ledger.take();
+    folio
+        .runtime()
+        .window
+        .clipboard_picture
+        .refuse_the_next_start();
+    folio
+        .runtime()
+        .save_clipboard_picture(target, sequence(42), Vec::new())
+        .expect("the door returns");
+    assert_eq!(
+        noted_lines(&mut folio, "clipboard picture worker"),
+        ["clipboard picture worker could not be started; paste ignored"]
+    );
+    folio
+        .runtime()
+        .adopt_clipboard_picture()
+        .expect("the wake's look is answered");
+    assert_eq!(
+        refusal_lines(&mut folio),
+        ["paste refused: picture (not-started); road=picture; sequence=42"]
+    );
+    assert_eq!(
+        notices(&mut folio, crate::i18n::Text::PasteClipboardPicture.text()),
+        1
+    );
+
+    folio
+        .runtime()
+        .window
+        .clipboard_picture
+        .refuse_the_next_start();
+    folio
+        .runtime()
+        .stage_clipboard_promise(
+            target,
+            sequence(43),
+            bt_platform::PromisedFiles {
+                entries: vec![bt_platform::PromisedEntry {
+                    name: "a.txt".to_owned(),
+                    size: Some(1),
+                    folder: false,
+                }],
+                picture_passed_over: true,
+            },
+        )
+        .expect("the door returns");
+    assert_eq!(
+        noted_lines(&mut folio, "clipboard promise worker"),
+        ["clipboard promise worker could not be started; paste ignored"]
+    );
+    folio
+        .runtime()
+        .adopt_clipboard_picture()
+        .expect("the wake's look is answered");
+    assert_eq!(
+        refusal_lines(&mut folio),
+        [
+            "paste refused: promise (not-started, picture passed over); road=promise; \
+             sequence=43"
+        ]
+    );
+    assert_eq!(
+        notices(
+            &mut folio,
+            crate::i18n::Text::PasteClipboardPictureUnread.text()
+        ),
+        1,
+        "beside a picture that did not render, the picture's notice"
+    );
+    let places: Vec<crate::ClipboardPictureJob> =
+        std::iter::from_fn(crate::ClipboardPictureJob::take).collect();
+    assert_eq!(
+        places.len(),
+        crate::CLIPBOARD_PICTURE_JOBS,
+        "every place is back"
+    );
+}
+
+/// RED (plan row 81; review N14, N15) — **a promise whose source stalls is given up, says
+/// `promise (stalled)`, and leaves nothing behind**: `Ctrl+V` over a promise whose source hands
+/// nothing over; once the door's stall bound has passed with no step, the worker abandons the
+/// render, removes the paste's folder and its marker, gives its place back, and the paste is
+/// refused with one line and the promise's notice — while the source is still standing. When it
+/// is let go it writes nothing.
+///
+/// MUTATIONS: never give up in `clipboard_picture::watch_the_render` — no line (the wait runs
+/// out); keep the place until after the answer in `Runtime::stage_clipboard_promise` — a place is
+/// still taken when the line is read; skip the folder's removal on `Stalled` in `stage_promise` —
+/// the folder is left.
+#[test]
+fn a_promise_whose_source_stalls_is_given_up_and_leaves_nothing() {
+    let _places = staging_places();
+    let mut folio = a_window_pasting("paste-promise-stalls", "unused 未用");
+    let events = crate::headless::LoopEvents::default();
+    folio.app.event_proxy = events.proxy();
+    let clipboard = folio.window.window.clipboard.clone();
+    let staging = clipboard.staged_here();
+    let _ = std::fs::remove_dir_all(&staging);
+    let read_at = clipboard.holds_payload(bt_platform::ClipboardPayload::Promise(
+        bt_platform::PromisedFiles {
+            entries: vec![bt_platform::PromisedEntry {
+                name: "slow.bin".to_owned(),
+                size: Some(4),
+                folder: false,
+            }],
+            picture_passed_over: false,
+        },
+    ));
+    clipboard.promise_renders(vec![Ok(b"slow".to_vec())]);
+    let stall = clipboard.promise_render_stalls(std::time::Duration::from_millis(200));
+    folio.ledger.take();
+    chord(&mut folio, "v", KeyCode::KeyV);
+    folio.settle_clipboard();
+    let mut lines = Vec::new();
+    crate::lane::wait_until("the promise's worker gives the render up", || {
+        folio
+            .runtime()
+            .adopt_clipboard_picture()
+            .expect("the wake's look is answered");
+        lines.extend(refusal_lines(&mut folio));
+        !lines.is_empty()
+    });
+    assert_eq!(
+        lines,
+        [format!(
+            "paste refused: promise (stalled); road=promise; sequence={read_at}"
+        )]
+    );
+    assert_eq!(
+        notices(&mut folio, crate::i18n::Text::PasteClipboardPromise.text()),
+        1
+    );
+    let places: Vec<crate::ClipboardPictureJob> =
+        std::iter::from_fn(crate::ClipboardPictureJob::take).collect();
+    assert_eq!(
+        places.len(),
+        crate::CLIPBOARD_PICTURE_JOBS,
+        "the stalled render holds no place"
+    );
+    drop(places);
+    let left = |staging: &std::path::Path| -> Vec<std::path::PathBuf> {
+        std::fs::read_dir(staging)
+            .expect("the staging folder was made")
+            .flatten()
+            .map(|entry| entry.path())
+            .collect()
+    };
+    assert!(
+        left(&staging).is_empty(),
+        "the paste's folder and its marker went: {:?}",
+        left(&staging)
+    );
+    stall.release();
+    crate::lane::wait_until("the let-go source is refused its write", || {
+        clipboard.promise_renders_ended() == 1
+    });
+    assert!(
+        left(&staging).is_empty(),
+        "the source let go writes nothing: {:?}",
+        left(&staging)
+    );
+    assert!(
+        sent_to_the_shell(&mut folio, 0).is_empty(),
+        "nothing was pasted"
+    );
+    let _ = std::fs::remove_dir_all(&staging);
 }

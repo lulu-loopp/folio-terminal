@@ -2059,6 +2059,8 @@ mod tests {
     struct Offering {
         types: ClipboardTypes,
         text: Candidate<String>,
+        /// What the picture rung reads: absent unless a test offers one that renders.
+        picture: Candidate<Vec<PictureBytes>>,
         promised: Candidate<Vec<PromisedEntry>>,
         asked: Vec<&'static str>,
     }
@@ -2073,6 +2075,7 @@ mod tests {
                     promise: true,
                 },
                 text: Candidate::Absent,
+                picture: Candidate::Absent,
                 promised,
                 asked: Vec::new(),
             }
@@ -2097,7 +2100,7 @@ mod tests {
         }
         fn picture(&mut self) -> Candidate<Vec<PictureBytes>> {
             self.asked.push("picture");
-            Candidate::Absent
+            self.picture.clone()
         }
         fn promised(&mut self) -> Candidate<Vec<PromisedEntry>> {
             self.asked.push("promised");
@@ -2130,6 +2133,27 @@ mod tests {
     /// never asked for; ask `offered` for every answer — the text row lists names.
     #[test]
     fn a_promise_is_read_after_the_picture_and_its_names_only_when_it_is_the_answer() {
+        // **A picture that renders wins over a promise** (review N6; the investigation's §4(c)):
+        // the board offers both, the picture is the answer, and the promise is never asked for.
+        let mut board = Offering::promising(true, Candidate::Present(vec![report()]));
+        let shot = PictureBytes {
+            encoding: PictureEncoding::Png,
+            bytes: vec![0x89, b'P', b'N', b'G'],
+        };
+        board.picture = Candidate::Present(vec![shot.clone()]);
+        assert_eq!(
+            read_payload_offering(&mut board),
+            Ok(PayloadRead {
+                payload: ClipboardPayload::Picture(vec![shot]),
+                offered: Vec::new(),
+            })
+        );
+        assert_eq!(
+            board.asked,
+            ["begin", "picture", "finish"],
+            "the promise is not asked for when the picture renders"
+        );
+
         let mut board = Offering::promising(true, Candidate::Present(vec![report()]));
         assert_eq!(
             read_payload_offering(&mut board),

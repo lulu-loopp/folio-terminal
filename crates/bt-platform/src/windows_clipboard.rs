@@ -8,16 +8,16 @@ use std::{
 
 use windows::{
     Win32::{
-        Foundation::HGLOBAL,
+        Foundation::{DV_E_FORMATETC, HGLOBAL, STG_E_FILEALREADYEXISTS},
         Graphics::Gdi::{
             BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, CBM_INIT, CreateDIBitmap, DIB_RGB_COLORS,
             DeleteObject, GetDC, GetDIBits, GetObjectW, HBITMAP, HGDIOBJ, ReleaseDC,
         },
         System::{
             Com::{
-                DVASPECT_CONTENT, FORMATETC, IDataObject, IStream, STGM_CREATE, STGM_READWRITE,
-                STGM_SHARE_EXCLUSIVE, STGMEDIUM, StructuredStorage::StgCreateDocfile,
-                TYMED_HGLOBAL, TYMED_ISTORAGE, TYMED_ISTREAM,
+                DVASPECT_CONTENT, FORMATETC, IDataObject, IStream, STGM_FAILIFTHERE,
+                STGM_READWRITE, STGM_SHARE_EXCLUSIVE, STGMEDIUM,
+                StructuredStorage::StgCreateDocfile, TYMED_HGLOBAL, TYMED_ISTORAGE, TYMED_ISTREAM,
             },
             DataExchange::{
                 CloseClipboard, EnumClipboardFormats, GetClipboardData, GetClipboardFormatNameW,
@@ -45,7 +45,7 @@ use crate::clipboard::{
 };
 use crate::clipboard_promise::{
     MAX_DESCRIPTOR_BYTES, PASTE_LIMITS, PromiseRefused, PromisedContents, PromisedFile,
-    RenderedPromise, parse_file_group_descriptor, render_promise,
+    RenderProgress, RenderedPromise, parse_file_group_descriptor, render_promise,
 };
 
 /// WinUser.h standard format identifiers.
@@ -504,9 +504,10 @@ pub fn clipboard_payload(worker: &WorkerCtx) -> ClipboardRead {
 /// **Render a clipboard promise into `into`** (plan row 81) — on a worker of its own
 /// (`worker`), never the window thread and never the clipboard lane's: the OLE clipboard is asked
 /// for its data object through the clipboard's one declared contention wait, and
-/// [`render_promise`] reads the descriptor again, which must be `offer`, and writes each file.
-/// The thread joins a single-threaded apartment for the call and leaves it on every road out;
-/// the data object is let go before it does.
+/// [`render_promise`] reads the descriptor again, which must be `offer`, and writes each file,
+/// each step advancing `progress`. The thread joins a single-threaded apartment for the call and
+/// leaves it on every road out, a panic's too ([`Apartment`]); the data object is let go before
+/// it does.
 ///
 /// # Errors
 /// Every [`PromiseRefused`]; an apartment or a clipboard that cannot be had is `NotRendered`
@@ -515,18 +516,36 @@ pub fn render_clipboard_promise(
     worker: &WorkerCtx,
     offer: &[PromisedEntry],
     into: &Path,
+    progress: &RenderProgress,
 ) -> Result<RenderedPromise, PromiseRefused> {
-    // SAFETY: a thread of this process's own, joining an apartment it leaves below.
-    unsafe { OleInitialize(None) }.map_err(|error| not_rendered(&error))?;
-    let rendered = (|| {
-        let data = crate::windows_impl::ole_clipboard_with_retry(worker)
-            .map_err(|error| not_rendered(&error))?;
-        let mut contents = OleContents::of(data)?;
-        render_promise(worker, &mut contents, offer, into, PASTE_LIMITS)
-    })();
-    // SAFETY: balances the `OleInitialize` above, on this thread, after the data object went.
-    unsafe { OleUninitialize() };
-    rendered
+    let _apartment = Apartment::single_threaded().map_err(|error| not_rendered(&error))?;
+    let data = crate::windows_impl::ole_clipboard_with_retry(worker)
+        .map_err(|error| not_rendered(&error))?;
+    // Declared after the apartment, so it is let go first.
+    let mut contents = OleContents::of(data)?;
+    render_promise(worker, &mut contents, offer, into, PASTE_LIMITS, progress)
+}
+
+/// **This thread's single-threaded apartment, joined for a render and left when the value goes**
+/// (review N1) — on every road out, a panic's unwinding too, so a render whose source panicked
+/// does not leave its thread inside an apartment OLE set up. Declared before the data object, which
+/// is then let go first. Not `Send`: it is left on the thread that joined.
+pub(crate) struct Apartment(std::marker::PhantomData<*const ()>);
+
+impl Apartment {
+    pub(crate) fn single_threaded() -> windows::core::Result<Self> {
+        // SAFETY: a thread of this process's own, joining an apartment this value leaves.
+        unsafe { OleInitialize(None) }?;
+        Ok(Self(std::marker::PhantomData))
+    }
+}
+
+impl Drop for Apartment {
+    fn drop(&mut self) {
+        // SAFETY: balances `join`'s `OleInitialize`, on the thread that joined (the value is not
+        // `Send`).
+        unsafe { OleUninitialize() };
+    }
 }
 
 fn not_rendered(error: &windows::core::Error) -> PromiseRefused {
@@ -574,7 +593,16 @@ impl OleContents {
         }
     }
 
-    fn get(&self, format: u16, lindex: i32, tymed: u32) -> Result<Medium, PromiseRefused> {
+    /// **One medium asked for**, through the clipboard's contention wait (review N3): the OLE
+    /// clipboard's data object opens the clipboard to answer `GetData`, and answers
+    /// `CLIPBRD_E_CANT_OPEN` while another program holds it, as `OleGetClipboard` does.
+    fn get(
+        &self,
+        worker: &WorkerCtx,
+        format: u16,
+        lindex: i32,
+        tymed: u32,
+    ) -> Result<Medium, PromiseRefused> {
         let asked = FORMATETC {
             cfFormat: format,
             ptd: std::ptr::null_mut(),
@@ -582,10 +610,14 @@ impl OleContents {
             lindex,
             tymed,
         };
-        // SAFETY: `asked` lives across the call; the medium answered is owned by `Medium`.
-        unsafe { self.data.GetData(&raw const asked) }
-            .map(Medium)
-            .map_err(|error| not_rendered(&error))
+        let mut contention = crate::windows_impl::ClipboardContention::new();
+        loop {
+            // SAFETY: `asked` lives across each call; the medium answered is owned by `Medium`.
+            let answer = unsafe { self.data.GetData(&raw const asked) };
+            if !contention.ask_again(worker, &answer) {
+                return answer.map(Medium).map_err(|error| not_rendered(&error));
+            }
+        }
     }
 }
 
@@ -608,8 +640,20 @@ fn tymed(kind: windows::Win32::System::Com::TYMED) -> u32 {
 }
 
 impl PromisedContents for OleContents {
-    fn descriptor(&mut self) -> Result<Vec<PromisedEntry>, PromiseRefused> {
-        let medium = self.get(self.descriptor, -1, tymed(TYMED_HGLOBAL))?;
+    /// The descriptor read again. A board that no longer offers one (`DV_E_FORMATETC`: the
+    /// format is not there) holds something else now: the paste is refused `changed`, as a
+    /// descriptor that differs is (review N9).
+    fn descriptor(&mut self, worker: &WorkerCtx) -> Result<Vec<PromisedEntry>, PromiseRefused> {
+        let medium = self
+            .get(worker, self.descriptor, -1, tymed(TYMED_HGLOBAL))
+            .map_err(|refused| match refused {
+                PromiseRefused::NotRendered(Some(code))
+                    if code == DV_E_FORMATETC.0.cast_unsigned() =>
+                {
+                    PromiseRefused::Changed
+                }
+                other => other,
+            })?;
         if medium.0.tymed != tymed(TYMED_HGLOBAL) {
             return Err(PromiseRefused::NotRendered(None));
         }
@@ -640,6 +684,7 @@ impl PromisedContents for OleContents {
     ) -> Result<(), PromiseRefused> {
         let lindex = i32::try_from(index).map_err(|_| PromiseRefused::NotRendered(None))?;
         let medium = self.get(
+            worker,
             self.contents,
             lindex,
             tymed(TYMED_ISTREAM) | tymed(TYMED_HGLOBAL) | tymed(TYMED_ISTORAGE),
@@ -681,14 +726,22 @@ impl PromisedContents for OleContents {
             };
             let path = HSTRING::from(file.path().as_os_str());
             // SAFETY: a new compound file at the paste's own path, written whole by `CopyTo`
-            // and committed before it is let go.
+            // and committed before it is let go. `STGM_FAILIFTHERE`: a file already at the path
+            // is never written over (review N4), as `PromisedFile`'s own files are made with
+            // `create_new`.
             unsafe {
                 let copy = StgCreateDocfile(
                     &path,
-                    STGM_CREATE | STGM_READWRITE | STGM_SHARE_EXCLUSIVE,
+                    STGM_FAILIFTHERE | STGM_READWRITE | STGM_SHARE_EXCLUSIVE,
                     None,
                 )
-                .map_err(|error| not_rendered(&error))?;
+                .map_err(|error| {
+                    if error.code() == STG_E_FILEALREADYEXISTS {
+                        PromiseRefused::WriteFailed(std::io::ErrorKind::AlreadyExists)
+                    } else {
+                        not_rendered(&error)
+                    }
+                })?;
                 storage
                     .CopyTo(None, None, &copy)
                     .map_err(|error| not_rendered(&error))?;
@@ -938,20 +991,22 @@ mod tests {
 mod promise_tests {
     use std::mem::ManuallyDrop;
 
-    use windows::Win32::Foundation::{E_NOTIMPL, HGLOBAL};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use windows::Win32::Foundation::{CLIPBRD_E_CANT_OPEN, E_NOTIMPL, HGLOBAL};
     use windows::Win32::System::Com::StructuredStorage::{
         CreateILockBytesOnHGlobal, CreateStreamOnHGlobal, StgCreateDocfileOnILockBytes,
     };
     use windows::Win32::System::Com::{
-        IAdviseSink, IDataObject_Impl, IEnumFORMATETC, IEnumSTATDATA, STGM_WRITE, STGMEDIUM_0,
-        STREAM_SEEK_SET, TYMED,
+        IAdviseSink, IDataObject_Impl, IEnumFORMATETC, IEnumSTATDATA, STGM_CREATE, STGM_WRITE,
+        STGMEDIUM_0, STREAM_SEEK_SET, TYMED,
     };
     use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc};
     use windows::core::{BOOL, HRESULT, Ref, implement};
 
     use super::*;
     use crate::clipboard_promise::tests::{descriptor_bytes, on_a_worker};
-    use crate::clipboard_promise::{FILE_DESCRIPTOR_BYTES, render_promise};
+    use crate::clipboard_promise::{FILE_DESCRIPTOR_BYTES, RenderProgress, render_promise};
 
     /// How one entry's contents are handed over.
     #[derive(Clone)]
@@ -964,10 +1019,14 @@ mod promise_tests {
         Fails(HRESULT),
     }
 
+    /// The test's data object. An empty `descriptor` is a board that no longer offers one;
+    /// `contended` asks are answered `CLIPBRD_E_CANT_OPEN` first, as while another program holds
+    /// the clipboard open.
     #[implement(IDataObject)]
     struct Board {
         descriptor: Vec<u8>,
         contents: Vec<Handed>,
+        contended: AtomicUsize,
     }
 
     fn global_of(bytes: &[u8]) -> windows::core::Result<HGLOBAL> {
@@ -1008,6 +1067,15 @@ mod promise_tests {
 
     impl IDataObject_Impl for Board_Impl {
         fn GetData(&self, asked: *const FORMATETC) -> windows::core::Result<STGMEDIUM> {
+            if self
+                .contended
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |left| {
+                    left.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return Err(CLIPBRD_E_CANT_OPEN.into());
+            }
             // SAFETY: the caller's FORMATETC, read while the call lasts.
             let asked = unsafe { &*asked };
             // SAFETY: registering an already registered name answers its identifier.
@@ -1018,6 +1086,9 @@ mod promise_tests {
                 )
             };
             if u32::from(asked.cfFormat) == descriptor {
+                if self.descriptor.is_empty() {
+                    return Err(windows::Win32::Foundation::DV_E_FORMATETC.into());
+                }
                 return Ok(medium(
                     TYMED_HGLOBAL,
                     STGMEDIUM_0 {
@@ -1138,12 +1209,35 @@ mod promise_tests {
             .collect();
         let descriptor = descriptor_bytes(&rows);
         let offer = parse_file_group_descriptor(&descriptor).expect("the descriptor reads");
+        (data_object(descriptor, contents, 0), offer)
+    }
+
+    /// [`OleContents`] over a [`Board`] of these bytes, its first `contended` asks refused.
+    fn data_object(descriptor: Vec<u8>, contents: Vec<Handed>, contended: usize) -> OleContents {
         let data: IDataObject = Board {
             descriptor,
             contents,
+            contended: AtomicUsize::new(contended),
         }
         .into();
-        (OleContents::of(data).expect("the formats register"), offer)
+        OleContents::of(data).expect("the formats register")
+    }
+
+    /// `render_promise` with a progress of its own.
+    fn rendered(
+        worker: &WorkerCtx,
+        contents: &mut OleContents,
+        offer: &[PromisedEntry],
+        into: &std::path::Path,
+    ) -> Result<RenderedPromise, PromiseRefused> {
+        render_promise(
+            worker,
+            contents,
+            offer,
+            into,
+            PASTE_LIMITS,
+            &RenderProgress::default(),
+        )
     }
 
     fn scratch(tag: &str) -> std::path::PathBuf {
@@ -1160,6 +1254,37 @@ mod promise_tests {
         );
     }
 
+    /// RED (review N1) — **the render's apartment is left on every road out, a panic's too**: a
+    /// thread whose source panics inside the render unwinds through the apartment, and the thread
+    /// is outside it after — joining one anew is `S_OK`, not the `S_FALSE` of a thread still in.
+    ///
+    /// MUTATION: empty `Apartment`'s `Drop` — the panicked thread is still inside its apartment.
+    #[test]
+    fn the_apartment_is_left_on_every_road_out() {
+        use windows::Win32::Foundation::{S_FALSE, S_OK};
+        use windows::Win32::System::Com::{
+            COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize,
+        };
+        std::thread::spawn(|| {
+            let unwound = std::panic::catch_unwind(|| {
+                let _apartment = Apartment::single_threaded().expect("an apartment");
+                panic!("the source's code panics inside the render (planted by the test)");
+            });
+            assert!(unwound.is_err(), "the planted panic unwound");
+            // SAFETY: the test's own thread, balanced by the `CoUninitialize` below.
+            let joined = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+            // SAFETY: balances the call above, on this thread, whichever success it answered.
+            unsafe { CoUninitialize() };
+            assert_ne!(
+                joined, S_FALSE,
+                "the thread was still inside the render's apartment"
+            );
+            assert_eq!(joined, S_OK);
+        })
+        .join()
+        .expect("the test's thread ends");
+    }
+
     /// RED (plan row 81, R5) — **every medium a source hands a promise over in is written**: a
     /// global (cut to the declared size, a global being rounded up), a stream longer than one
     /// chunk, a structured storage (written as a compound file) and a folder that is made and
@@ -1171,8 +1296,7 @@ mod promise_tests {
     #[test]
     fn every_medium_a_source_hands_over_is_written() {
         on_a_worker(|worker| {
-            // SAFETY: this test's own thread joins an apartment and leaves it at the end.
-            unsafe { OleInitialize(None) }.expect("an apartment");
+            let apartment = Apartment::single_threaded().expect("an apartment");
             let long: Vec<u8> = (0..200_000_u32).map(|n| (n % 251) as u8).collect();
             let (mut contents, offer) = board(
                 &[
@@ -1192,9 +1316,10 @@ mod promise_tests {
             );
             let into = scratch("media");
             std::fs::create_dir_all(&into).expect("the paste's folder");
-            let rendered = render_promise(worker, &mut contents, &offer, &into, PASTE_LIMITS);
-            // SAFETY: balances the `OleInitialize` above, on this thread.
-            unsafe { OleUninitialize() };
+            let rendered = rendered(worker, &mut contents, &offer, &into);
+            // The data object is let go before the apartment is left (review N8).
+            drop(contents);
+            drop(apartment);
             let rendered = rendered.expect("every medium is written");
             assert_eq!(
                 rendered.pasted,
@@ -1228,8 +1353,7 @@ mod promise_tests {
     #[test]
     fn a_source_that_fails_or_changed_leaves_nothing() {
         on_a_worker(|worker| {
-            // SAFETY: this test's own thread joins an apartment and leaves it at the end.
-            unsafe { OleInitialize(None) }.expect("an apartment");
+            let apartment = Apartment::single_threaded().expect("an apartment");
             let gone = HRESULT(0x8001_0108_u32.cast_signed());
             let (mut contents, offer) = board(
                 &[(SIZED, 0, 2, "a.txt"), (SIZED, 0, 2, "b.txt")],
@@ -1237,17 +1361,113 @@ mod promise_tests {
             );
             let into = scratch("fails");
             std::fs::create_dir_all(&into).expect("the paste's folder");
-            let failed = render_promise(worker, &mut contents, &offer, &into, PASTE_LIMITS);
+            let failed = rendered(worker, &mut contents, &offer, &into);
             let (mut changed, _) = board(&[(SIZED, 0, 2, "c.txt")], vec![Handed::Fails(gone)]);
             let elsewhere = scratch("changed");
             std::fs::create_dir_all(&elsewhere).expect("the paste's folder");
-            let raced = render_promise(worker, &mut changed, &offer, &elsewhere, PASTE_LIMITS);
-            // SAFETY: balances the `OleInitialize` above, on this thread.
-            unsafe { OleUninitialize() };
+            let raced = rendered(worker, &mut changed, &offer, &elsewhere);
+            let mut emptied = data_object(Vec::new(), Vec::new(), 0);
+            let emptied_into = scratch("emptied");
+            std::fs::create_dir_all(&emptied_into).expect("the paste's folder");
+            let no_longer = rendered(worker, &mut emptied, &offer, &emptied_into);
+            // The data objects are let go before the apartment is left (review N8).
+            drop((contents, changed, emptied));
+            drop(apartment);
             assert_eq!(failed, Err(PromiseRefused::NotRendered(Some(0x8001_0108))));
             assert!(!into.exists(), "the first file went with the refusal");
             assert_eq!(raced, Err(PromiseRefused::Changed));
             assert!(!elsewhere.exists());
+            assert_eq!(
+                no_longer,
+                Err(PromiseRefused::Changed),
+                "a board that no longer offers a descriptor holds something else (review N9)"
+            );
+            assert!(!emptied_into.exists());
+        });
+    }
+
+    /// RED (review N3) — **a data object that answers `CLIPBRD_E_CANT_OPEN` is asked again**
+    /// through the clipboard's contention wait, as `OleGetClipboard` is: four refused asks and the
+    /// paste is written; five, and it is refused with the code.
+    ///
+    /// MUTATION: ask `GetData` once in `OleContents::get` — the contended board is `not-rendered`.
+    #[test]
+    fn a_contended_data_object_is_asked_again_through_the_wait() {
+        on_a_worker(|worker| {
+            let apartment = Apartment::single_threaded().expect("an apartment");
+            let entries = [(SIZED, 0, 2, "a.txt")];
+            let (_, offer) = board(&entries, vec![Handed::Global(b"aa".to_vec())]);
+            let descriptor = descriptor_bytes(&[(SIZED, 0, 2, units("a.txt").as_slice())]);
+            let mut patient =
+                data_object(descriptor.clone(), vec![Handed::Global(b"aa".to_vec())], 4);
+            let into = scratch("contended");
+            std::fs::create_dir_all(&into).expect("the paste's folder");
+            let written = rendered(worker, &mut patient, &offer, &into);
+            let mut held = data_object(descriptor, vec![Handed::Global(b"aa".to_vec())], 5);
+            let refused_into = scratch("held");
+            std::fs::create_dir_all(&refused_into).expect("the paste's folder");
+            let refused = rendered(worker, &mut held, &offer, &refused_into);
+            drop((patient, held));
+            drop(apartment);
+            assert_eq!(written.map(|promise| promise.files), Ok(1));
+            assert_eq!(std::fs::read(into.join("a.txt")).unwrap(), b"aa");
+            assert_eq!(
+                refused,
+                Err(PromiseRefused::NotRendered(Some(
+                    CLIPBRD_E_CANT_OPEN.0.cast_unsigned()
+                )))
+            );
+            assert!(!refused_into.exists());
+            let _ = std::fs::remove_dir_all(&into);
+        });
+    }
+
+    /// RED (reviews N4, N5) — **a storage is never written over a file already there, and a byte
+    /// medium shorter than its declaration did not render**: a structured storage whose path is
+    /// taken is refused `write-failed: AlreadyExists`, as a stream or a global is by `create_new`;
+    /// an empty global, or a stream that ends early, under a declared size is `not-rendered`.
+    ///
+    /// MUTATIONS: `STGM_CREATE` back in `OleContents::write_contents` — the storage is written over
+    /// the file (`Ok`); drop the declared-size check in `PromisedFile::finish` — the short entries
+    /// are written.
+    #[test]
+    fn a_storage_never_writes_over_and_a_short_medium_did_not_render() {
+        on_a_worker(|worker| {
+            let apartment = Apartment::single_threaded().expect("an apartment");
+            let (mut storage, offer) = board(
+                &[(0, 0, 0, "mail.msg")],
+                vec![Handed::Storage(b"message body".to_vec())],
+            );
+            let into = scratch("taken");
+            std::fs::create_dir_all(&into).expect("the paste's folder");
+            std::fs::write(into.join("mail.msg"), b"already here").expect("a file in the way");
+            let over = rendered(worker, &mut storage, &offer, &into);
+            let mut short = Vec::new();
+            for handed in [Handed::Global(Vec::new()), Handed::Stream(b"ab".to_vec())] {
+                let (mut contents, offer) = board(&[(SIZED, 0, 64, "short.bin")], vec![handed]);
+                let short_into = scratch("short");
+                std::fs::create_dir_all(&short_into).expect("the paste's folder");
+                short.push((
+                    rendered(worker, &mut contents, &offer, &short_into),
+                    short_into.exists(),
+                ));
+                drop(contents);
+            }
+            drop(storage);
+            drop(apartment);
+            assert_eq!(
+                over,
+                Err(PromiseRefused::WriteFailed(
+                    std::io::ErrorKind::AlreadyExists
+                ))
+            );
+            assert_eq!(
+                short,
+                [
+                    (Err(PromiseRefused::NotRendered(None)), false),
+                    (Err(PromiseRefused::NotRendered(None)), false),
+                ]
+            );
         });
     }
 }

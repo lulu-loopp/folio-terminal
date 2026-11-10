@@ -113,7 +113,7 @@ use std::time::{Duration, Instant};
 use std::path::Path;
 
 use bt_platform::admission::WorkerCtx;
-use bt_platform::clipboard_promise::{PromiseRefused, RenderedPromise};
+use bt_platform::clipboard_promise::{PromiseRefused, RenderProgress, RenderedPromise};
 use bt_platform::{ClipboardPayload, ClipboardRead, ClipboardSequence, PromisedEntry};
 
 use crate::lane::{self, Executor, Ledger, Owed, Queue, Refused, Relation, Saying, Terminal};
@@ -200,18 +200,26 @@ pub(crate) type ClipboardTerminal = Terminal<ClipboardId, Reply, String>;
 /// its own clipboard and never the machine's.
 pub(crate) trait ClipboardDoor: Send + Sync {
     fn serve(&self, worker: &WorkerCtx, ask: &Ask) -> Result<Reply, String>;
-    /// **Render a promise the clipboard offered into `into`** (plan row 81) — on the
-    /// `clipboard-promise` worker (`worker`), never this lane's: the door asks the source for the
-    /// files `offer` lists, the clipboard's own descriptor read again and compared. A door whose
-    /// clipboard answers no promise renders none.
+    /// **Render a promise the clipboard offered into `into`** (plan row 81) — on the promise's
+    /// render thread (`worker`), never this lane's, and called only from
+    /// `clipboard_picture::stage_promise`: the door asks the source for the files `offer` lists,
+    /// the clipboard's own descriptor read again and compared, each step advancing `progress`. A
+    /// door whose clipboard answers no promise renders none.
     fn render_promised_files(
         &self,
         worker: &WorkerCtx,
         offer: &[PromisedEntry],
         into: &Path,
+        progress: &RenderProgress,
     ) -> Result<RenderedPromise, PromiseRefused> {
-        let _ = (worker, offer, into);
+        let _ = (worker, offer, into, progress);
         Err(PromiseRefused::NotRendered(None))
+    }
+
+    /// **How long a render may go without a step before it is given up** (review N14):
+    /// [`crate::clipboard_picture::STALL_BOUND`]; a test's door says a shorter one.
+    fn stall_bound(&self) -> Duration {
+        crate::clipboard_picture::STALL_BOUND
     }
 }
 
@@ -242,8 +250,9 @@ impl ClipboardDoor for PlatformClipboard {
         worker: &WorkerCtx,
         offer: &[PromisedEntry],
         into: &Path,
+        progress: &RenderProgress,
     ) -> Result<RenderedPromise, PromiseRefused> {
-        bt_platform::render_clipboard_promise(worker, offer, into)
+        bt_platform::render_clipboard_promise(worker, offer, into, progress)
     }
 }
 

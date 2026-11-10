@@ -2027,6 +2027,8 @@ pub(crate) enum PasteFrom {
     Drop,
     /// A path dragged out of Folio's own files onto a pane.
     Drag,
+    /// A path a files column's *Insert path into terminal* sent (review N7).
+    Insert,
 }
 
 impl PasteFrom {
@@ -2038,6 +2040,7 @@ impl PasteFrom {
             Self::Promise(_) => "write clipboard promise paths to PTY",
             Self::Drop => "write dropped paths to PTY",
             Self::Drag => "write dragged path to PTY",
+            Self::Insert => "write inserted path to PTY",
         }
     }
 
@@ -2049,6 +2052,7 @@ impl PasteFrom {
             Self::Promise(_) => "promise",
             Self::Drop => "drop",
             Self::Drag => "drag",
+            Self::Insert => "insert",
         }
     }
 
@@ -2059,7 +2063,7 @@ impl PasteFrom {
             Self::Clipboard(sequence) | Self::Picture(sequence) | Self::Promise(sequence) => {
                 sequence.map_or_else(|| "none".to_owned(), |sequence| sequence.0.to_string())
             }
-            Self::Drop | Self::Drag => "none".to_owned(),
+            Self::Drop | Self::Drag | Self::Insert => "none".to_owned(),
         }
     }
 }

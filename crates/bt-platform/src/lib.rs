@@ -13953,18 +13953,53 @@ mod windows_impl {
     pub(super) fn ole_clipboard_with_retry(
         worker: &WorkerCtx,
     ) -> windows::core::Result<windows::Win32::System::Com::IDataObject> {
-        // SAFETY: the calling worker joined an apartment the OLE clipboard accepts; the data
-        // object answered is owned by the caller.
-        let ask = || unsafe { windows::Win32::System::Ole::OleGetClipboard() };
-        for delay in CLIPBOARD_OPEN_RETRY_DELAYS {
-            match ask() {
-                Err(error) if error.code() == windows::Win32::Foundation::CLIPBRD_E_CANT_OPEN => {
-                    crate::wait::sleep_within(worker, delay);
-                }
-                answer => return answer,
+        let mut contention = ClipboardContention::new();
+        loop {
+            // SAFETY: the calling worker joined an apartment the OLE clipboard accepts; the data
+            // object answered is owned by the caller.
+            let answer = unsafe { windows::Win32::System::Ole::OleGetClipboard() };
+            if !contention.ask_again(worker, &answer) {
+                return answer;
             }
         }
-        ask()
+    }
+
+    /// **The clipboard's one declared contention wait, for an OLE ask** (plan row 81; review N3):
+    /// while another program (or the clipboard lane) holds the clipboard open, the clipboard's data
+    /// object answers `CLIPBRD_E_CANT_OPEN` — to `OleGetClipboard` and to each `GetData` it serves
+    /// by opening the clipboard — and the ask is made again with 5, 10, 20 and 40 ms between, each
+    /// pause through [`crate::wait::sleep_within`]: five asks at most. The caller makes its own
+    /// ask in a loop and asks this whether to make it again.
+    pub(super) struct ClipboardContention {
+        pauses: std::slice::Iter<'static, std::time::Duration>,
+    }
+
+    impl ClipboardContention {
+        pub(super) fn new() -> Self {
+            Self {
+                pauses: CLIPBOARD_OPEN_RETRY_DELAYS.iter(),
+            }
+        }
+
+        /// **Whether to ask again**: after a contended answer while a pause is left — taken here,
+        /// on the asking worker (`worker`) — yes; any other answer, or the fifth, is the answer.
+        pub(super) fn ask_again<T>(
+            &mut self,
+            worker: &WorkerCtx,
+            answer: &windows::core::Result<T>,
+        ) -> bool {
+            let contended = matches!(
+                answer,
+                Err(error) if error.code() == windows::Win32::Foundation::CLIPBRD_E_CANT_OPEN
+            );
+            match self.pauses.next() {
+                Some(delay) if contended => {
+                    crate::wait::sleep_within(worker, *delay);
+                    true
+                }
+                _ => false,
+            }
+        }
     }
 
     /// **The clipboard's text**, read on the clipboard lane's worker (`worker`).
@@ -29698,6 +29733,7 @@ pub fn render_clipboard_promise(
     _worker: &admission::WorkerCtx,
     _offer: &[PromisedEntry],
     _into: &std::path::Path,
+    _progress: &clipboard_promise::RenderProgress,
 ) -> Result<clipboard_promise::RenderedPromise, clipboard_promise::PromiseRefused> {
     Err(clipboard_promise::PromiseRefused::NotRendered(None))
 }

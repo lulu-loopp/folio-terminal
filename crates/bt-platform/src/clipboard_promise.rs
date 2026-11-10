@@ -18,7 +18,15 @@
 //! be the one the lane read (the clipboard sequence cannot say so — delayed rendering advances it
 //! on a read that succeeded); then each file is written, the bytes counted as they arrive, because
 //! a descriptor may declare less than its stream holds. Any refusal removes the folder it was
-//! writing into, so a refused paste leaves nothing behind.
+//! writing into, so a refused paste leaves nothing behind. After the last entry the descriptor is
+//! read once more and must still be the one the lane read: a copy made while a slow render ran
+//! would otherwise hand the paste the new promise's bytes under the old one's names.
+//!
+//! **A render is watched, not timed** (review N14): every byte that lands and every entry that is
+//! finished advances its [`RenderProgress`], and the thread that watches it — the caller's —
+//! gives the render up when nothing has advanced for its stall bound ([`RenderProgress::mark_given_up`]).
+//! A render given up stops at its next step ([`PromiseRefused::Stalled`]); a source that never
+//! returns from its call is left where it is, and the watcher has already answered.
 //!
 //! Windows only: macOS has no general-pasteboard promise any source is known to put there, and
 //! its pasteboard is read on the main thread, where nothing may render.
@@ -26,6 +34,7 @@
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::admission::WorkerCtx;
 use crate::clipboard::PromisedEntry;
@@ -84,6 +93,9 @@ pub enum PromiseRefused {
     NotRendered(Option<u32>),
     /// The file or folder could not be made or written, for this reason.
     WriteFailed(std::io::ErrorKind),
+    /// The source handed nothing over for the watcher's stall bound, and the render was given up
+    /// ([`RenderProgress::mark_given_up`]).
+    Stalled,
 }
 
 impl PromiseRefused {
@@ -98,6 +110,7 @@ impl PromiseRefused {
             Self::NotRendered(Some(code)) => format!("not-rendered 0x{code:08X}"),
             Self::NotRendered(None) => "not-rendered".to_owned(),
             Self::WriteFailed(kind) => format!("write-failed: {kind:?}"),
+            Self::Stalled => "stalled".to_owned(),
         }
     }
 
@@ -109,11 +122,47 @@ impl PromiseRefused {
     }
 }
 
+/// **How far a render has come, and whether it was given up** (review N14) — shared by the
+/// thread that renders and the one that watches it. Every byte written and every entry finished
+/// advances [`Self::steps_taken`]; nothing here reads a clock: the watcher keeps the time, and when it
+/// has seen no step for its bound it calls [`Self::mark_given_up`], after which the render's next step
+/// refuses [`PromiseRefused::Stalled`].
+#[derive(Debug, Default)]
+pub struct RenderProgress {
+    steps: AtomicU64,
+    abandoned: AtomicBool,
+}
+
+impl RenderProgress {
+    /// How many steps the render has taken: bytes written, plus one per entry finished.
+    #[must_use]
+    pub fn steps_taken(&self) -> u64 {
+        self.steps.load(Ordering::Acquire)
+    }
+
+    /// The render is given up: its next step refuses [`PromiseRefused::Stalled`].
+    pub fn mark_given_up(&self) {
+        self.abandoned.store(true, Ordering::Release);
+    }
+
+    fn step_forward(&self, by: u64) {
+        self.steps.fetch_add(by, Ordering::AcqRel);
+    }
+
+    /// Whether the render may take its next step.
+    fn still_wanted(&self) -> Result<(), PromiseRefused> {
+        if self.abandoned.load(Ordering::Acquire) {
+            return Err(PromiseRefused::Stalled);
+        }
+        Ok(())
+    }
+}
+
 /// **The source of a promise's bytes** — the OLE clipboard's data object in the product, a
 /// scripted one under test.
 pub trait PromisedContents {
-    /// The descriptor as the source answers it now.
-    fn descriptor(&mut self) -> Result<Vec<PromisedEntry>, PromiseRefused>;
+    /// The descriptor as the source answers it now, asked on the render's worker (`worker`).
+    fn descriptor(&mut self, worker: &WorkerCtx) -> Result<Vec<PromisedEntry>, PromiseRefused>;
     /// Entry `index`'s contents, written through `file`, on the render's worker (`worker`).
     fn write_contents(
         &mut self,
@@ -130,7 +179,10 @@ pub struct PromisedFile<'a> {
     path: &'a Path,
     declared: Option<u64>,
     left: &'a mut u64,
+    progress: &'a RenderProgress,
     file: Option<fs::File>,
+    /// The bytes written into it so far.
+    written: u64,
     stored: bool,
 }
 
@@ -151,9 +203,10 @@ impl PromisedFile<'_> {
     /// refused before a byte of it lands.
     ///
     /// # Errors
-    /// [`PromiseRefused::TooLarge`] past the paste's bytes; [`PromiseRefused::WriteFailed`] when
-    /// the file cannot be made or written.
+    /// [`PromiseRefused::Stalled`] once the render was given up; [`PromiseRefused::TooLarge`] past
+    /// the paste's bytes; [`PromiseRefused::WriteFailed`] when the file cannot be made or written.
     pub fn write(&mut self, bytes: &[u8]) -> Result<(), PromiseRefused> {
+        self.progress.still_wanted()?;
         let length = bytes.len() as u64;
         if length > *self.left {
             return Err(PromiseRefused::TooLarge);
@@ -164,16 +217,20 @@ impl PromisedFile<'_> {
             None => self.file.insert(make(self.path)?),
         };
         file.write_all(bytes)
-            .map_err(|error| PromiseRefused::WriteFailed(error.kind()))
+            .map_err(|error| PromiseRefused::WriteFailed(error.kind()))?;
+        self.written += length;
+        self.progress.step_forward(length);
+        Ok(())
     }
 
     /// **The source wrote the whole file at [`Self::path`] itself**: its length is charged now,
     /// read on the render's worker (`worker`).
     ///
     /// # Errors
-    /// [`PromiseRefused::TooLarge`] past the paste's bytes; [`PromiseRefused::WriteFailed`] when
-    /// the file is not there.
+    /// [`PromiseRefused::Stalled`] once the render was given up; [`PromiseRefused::TooLarge`] past
+    /// the paste's bytes; [`PromiseRefused::WriteFailed`] when the file is not there.
     pub fn written_by_the_source(&mut self, _worker: &WorkerCtx) -> Result<(), PromiseRefused> {
+        self.progress.still_wanted()?;
         let length = fs::metadata(self.path)
             .map_err(|error| PromiseRefused::WriteFailed(error.kind()))?
             .len();
@@ -181,15 +238,29 @@ impl PromisedFile<'_> {
             return Err(PromiseRefused::TooLarge);
         }
         *self.left -= length;
+        self.written = length;
         self.stored = true;
+        self.progress.step_forward(length);
         Ok(())
     }
 
-    /// An empty file is still a file: one whose source wrote nothing is made now.
+    /// **The entry is done**: a source that handed over fewer bytes than its entry declares did
+    /// not render it (review N5 — a zero-length global, a stream that ended early); an empty file
+    /// is still a file, and one whose source wrote nothing (and declared nothing more) is made now.
+    /// A storage the source wrote itself is not measured against the declaration: `CopyTo` lays
+    /// its sectors out afresh, so its length is not the source's.
     fn finish(self) -> Result<(), PromiseRefused> {
+        if !self.stored
+            && self
+                .declared
+                .is_some_and(|declared| self.written < declared)
+        {
+            return Err(PromiseRefused::NotRendered(None));
+        }
         if self.file.is_none() && !self.stored {
             make(self.path)?;
         }
+        self.progress.step_forward(1);
         Ok(())
     }
 }
@@ -334,6 +405,7 @@ pub struct RenderedPromise {
 /// **Write the promise `offer` into `into`** — a folder the caller reserved for this paste — and
 /// answer what was written ([`RenderedPromise`]). Any refusal removes `into`. A worker's door
 /// (`worker`): every folder, file and stat below is the render's worker's, never the window's.
+/// Each step advances `progress`, and a render its watcher gave up stops at the next one.
 ///
 /// # Errors
 /// Every [`PromiseRefused`].
@@ -343,8 +415,9 @@ pub fn render_promise(
     offer: &[PromisedEntry],
     into: &Path,
     limits: PromiseLimits,
+    progress: &RenderProgress,
 ) -> Result<RenderedPromise, PromiseRefused> {
-    let rendered = render_into(worker, source, offer, into, limits);
+    let rendered = render_into(worker, source, offer, into, limits, progress);
     if rendered.is_err() {
         let _ = fs::remove_dir_all(into);
     }
@@ -357,9 +430,10 @@ fn render_into(
     offer: &[PromisedEntry],
     into: &Path,
     limits: PromiseLimits,
+    progress: &RenderProgress,
 ) -> Result<RenderedPromise, PromiseRefused> {
     let places = judge_promise(offer, limits)?;
-    if source.descriptor()? != offer {
+    if source.descriptor(worker)? != offer {
         return Err(PromiseRefused::Changed);
     }
     let made = |result: std::io::Result<()>| {
@@ -368,9 +442,11 @@ fn render_into(
     let mut left = limits.bytes;
     let mut files = 0;
     for (index, (entry, place)) in offer.iter().zip(&places).enumerate() {
+        progress.still_wanted()?;
         let path = into.join(place);
         if entry.folder {
             made(fs::create_dir_all(&path))?;
+            progress.step_forward(1);
             continue;
         }
         if let Some(parent) = path.parent() {
@@ -380,13 +456,22 @@ fn render_into(
             path: &path,
             declared: entry.size,
             left: &mut left,
+            progress,
             file: None,
+            written: 0,
             stored: false,
         };
         source.write_contents(worker, index, &mut file)?;
         file.finish()?;
         files += 1;
     }
+    // **Still the promise the paste read** (review N2): asked once more after the last entry, so a
+    // copy made while the entries were being written refuses the paste rather than handing it
+    // the new promise's bytes under the old one's names.
+    if source.descriptor(worker)? != offer {
+        return Err(PromiseRefused::Changed);
+    }
+    progress.still_wanted()?;
     let mut pasted: Vec<PathBuf> = Vec::new();
     for place in &places {
         let Some(top) = place.components().next() else {
@@ -430,6 +515,9 @@ pub(crate) mod tests {
         descriptor: Vec<PromisedEntry>,
         contents: Vec<Result<Vec<u8>, u32>>,
         asked: Vec<usize>,
+        /// The descriptor the board holds once an entry has been asked for: a copy made while
+        /// the render ran.
+        copied_meanwhile: Option<Vec<PromisedEntry>>,
     }
 
     impl Fake {
@@ -438,13 +526,20 @@ pub(crate) mod tests {
                 descriptor: entries.to_vec(),
                 contents,
                 asked: Vec::new(),
+                copied_meanwhile: None,
             }
         }
     }
 
     impl PromisedContents for Fake {
-        fn descriptor(&mut self) -> Result<Vec<PromisedEntry>, PromiseRefused> {
-            Ok(self.descriptor.clone())
+        fn descriptor(
+            &mut self,
+            _worker: &WorkerCtx,
+        ) -> Result<Vec<PromisedEntry>, PromiseRefused> {
+            match &self.copied_meanwhile {
+                Some(copied) if !self.asked.is_empty() => Ok(copied.clone()),
+                _ => Ok(self.descriptor.clone()),
+            }
         }
         fn write_contents(
             &mut self,
@@ -507,8 +602,15 @@ pub(crate) mod tests {
                     Ok(Vec::new()),
                 ],
             );
-            let rendered = render_promise(worker, &mut source, &offer, &into, PASTE_LIMITS)
-                .expect("the promise is written");
+            let rendered = render_promise(
+                worker,
+                &mut source,
+                &offer,
+                &into,
+                PASTE_LIMITS,
+                &RenderProgress::default(),
+            )
+            .expect("the promise is written");
             assert_eq!(
                 (rendered.files, rendered.bytes),
                 (3, 10),
@@ -590,7 +692,14 @@ pub(crate) mod tests {
             let offer = [entry("Same.txt", Some(1)), entry("same.TXT", Some(1))];
             let mut source = Fake::of(&offer, vec![Ok(b"a".to_vec()), Ok(b"b".to_vec())]);
             assert_eq!(
-                render_promise(worker, &mut source, &offer, &into, PASTE_LIMITS),
+                render_promise(
+                    worker,
+                    &mut source,
+                    &offer,
+                    &into,
+                    PASTE_LIMITS,
+                    &RenderProgress::default(),
+                ),
                 Err(PromiseRefused::Name)
             );
             assert!(source.asked.is_empty(), "nothing was asked for");
@@ -642,7 +751,14 @@ pub(crate) mod tests {
             let offer = [entry("small.bin", Some(1)), entry("second.bin", Some(1))];
             let mut source = Fake::of(&offer, vec![Ok(vec![7; 8]), Ok(vec![7; 4])]);
             assert_eq!(
-                render_promise(worker, &mut source, &offer, &into, limits),
+                render_promise(
+                    worker,
+                    &mut source,
+                    &offer,
+                    &into,
+                    limits,
+                    &RenderProgress::default(),
+                ),
                 Err(PromiseRefused::TooLarge)
             );
             assert_eq!(source.asked, [0, 1], "the second stream passed the cap");
@@ -663,7 +779,14 @@ pub(crate) mod tests {
             let offer = [entry("a.txt", Some(1))];
             let mut source = Fake::of(&[entry("b.txt", Some(1))], vec![Ok(b"b".to_vec())]);
             assert_eq!(
-                render_promise(worker, &mut source, &offer, &into, PASTE_LIMITS),
+                render_promise(
+                    worker,
+                    &mut source,
+                    &offer,
+                    &into,
+                    PASTE_LIMITS,
+                    &RenderProgress::default(),
+                ),
                 Err(PromiseRefused::Changed)
             );
             assert!(source.asked.is_empty());
@@ -671,10 +794,132 @@ pub(crate) mod tests {
             let offer = [entry("a.txt", Some(1)), entry("b.txt", Some(1))];
             let mut source = Fake::of(&offer, vec![Ok(b"a".to_vec()), Err(0x8001_0108)]);
             assert_eq!(
-                render_promise(worker, &mut source, &offer, &into, PASTE_LIMITS),
+                render_promise(
+                    worker,
+                    &mut source,
+                    &offer,
+                    &into,
+                    PASTE_LIMITS,
+                    &RenderProgress::default(),
+                ),
                 Err(PromiseRefused::NotRendered(Some(0x8001_0108)))
             );
             assert!(!into.exists(), "the first file went with the refusal");
+        });
+    }
+
+    /// RED (review N2) — **the board is read again after the last entry**: a copy made while the
+    /// entries were being written refuses the paste as `changed`, and the folder goes with it.
+    ///
+    /// MUTATION: drop the descriptor read after the loop in `render_into` — the paste is written
+    /// from the old promise's names.
+    #[test]
+    fn a_copy_made_while_the_entries_were_written_refuses_the_paste() {
+        on_a_worker(|worker| {
+            let into = scratch("copied-meanwhile");
+            let offer = [entry("a.txt", Some(1)), entry("b.txt", Some(1))];
+            let mut source = Fake::of(&offer, vec![Ok(b"a".to_vec()), Ok(b"b".to_vec())]);
+            source.copied_meanwhile = Some(vec![
+                entry("a.txt", Some(1)),
+                entry("b.txt", Some(1)),
+                entry("c.txt", None),
+            ]);
+            assert_eq!(
+                render_promise(
+                    worker,
+                    &mut source,
+                    &offer,
+                    &into,
+                    PASTE_LIMITS,
+                    &RenderProgress::default(),
+                ),
+                Err(PromiseRefused::Changed)
+            );
+            assert_eq!(source.asked, [0, 1], "both entries were written first");
+            assert!(!into.exists(), "what was written went with the refusal");
+        });
+    }
+
+    /// RED (review N5) — **a source that hands over fewer bytes than its entry declares did not
+    /// render it**: three of five declared bytes, or none of one, is `not-rendered` and leaves
+    /// nothing; an entry that declares nothing, or declares nought, is written as handed over.
+    ///
+    /// MUTATION: drop the declared-size check in `PromisedFile::finish` — the short file is pasted.
+    #[test]
+    fn fewer_bytes_than_declared_is_not_rendered() {
+        on_a_worker(|worker| {
+            for (declared, handed) in [(5, 3), (1, 0)] {
+                let into = scratch("short");
+                let offer = [entry("short.bin", Some(declared))];
+                let mut source = Fake::of(&offer, vec![Ok(vec![7; handed])]);
+                assert_eq!(
+                    render_promise(
+                        worker,
+                        &mut source,
+                        &offer,
+                        &into,
+                        PASTE_LIMITS,
+                        &RenderProgress::default(),
+                    ),
+                    Err(PromiseRefused::NotRendered(None)),
+                    "{handed} of {declared} declared bytes"
+                );
+                assert!(!into.exists(), "the short file went with the refusal");
+            }
+            let into = scratch("undeclared");
+            let offer = [entry("empty.txt", Some(0)), entry("any.bin", None)];
+            let mut source = Fake::of(&offer, vec![Ok(Vec::new()), Ok(Vec::new())]);
+            let rendered = render_promise(
+                worker,
+                &mut source,
+                &offer,
+                &into,
+                PASTE_LIMITS,
+                &RenderProgress::default(),
+            )
+            .expect("nothing declared, nothing owed");
+            assert_eq!((rendered.files, rendered.bytes), (2, 0));
+            let _ = fs::remove_dir_all(&into);
+        });
+    }
+
+    /// RED (review N14) — **a render advances its progress at every step and stops at the next
+    /// one once it is given up**: a written promise counts its bytes and its entries; a render
+    /// whose watcher abandoned it asks the source for nothing more, refuses `stalled` and leaves
+    /// nothing.
+    ///
+    /// MUTATION: drop `progress.still_wanted()` from `render_into`'s loop — the abandoned render asks for
+    /// its entry and is written.
+    #[test]
+    fn a_render_advances_its_progress_and_stops_once_given_up() {
+        on_a_worker(|worker| {
+            let into = scratch("progress");
+            let offer = [folder("d"), entry("d/a.txt", Some(3)), entry("b.txt", None)];
+            let mut source = Fake::of(
+                &offer,
+                vec![Ok(Vec::new()), Ok(b"abc".to_vec()), Ok(b"xy".to_vec())],
+            );
+            let progress = RenderProgress::default();
+            render_promise(worker, &mut source, &offer, &into, PASTE_LIMITS, &progress)
+                .expect("the promise is written");
+            assert_eq!(
+                progress.steps_taken(),
+                5 + 3,
+                "five bytes and three entries"
+            );
+            let _ = fs::remove_dir_all(&into);
+
+            let into = scratch("abandoned");
+            let offer = [entry("a.txt", Some(1))];
+            let mut source = Fake::of(&offer, vec![Ok(b"a".to_vec())]);
+            let progress = RenderProgress::default();
+            progress.mark_given_up();
+            assert_eq!(
+                render_promise(worker, &mut source, &offer, &into, PASTE_LIMITS, &progress),
+                Err(PromiseRefused::Stalled)
+            );
+            assert!(source.asked.is_empty(), "nothing more was asked for");
+            assert!(!into.exists(), "the folder went with the refusal");
         });
     }
 
@@ -697,6 +942,7 @@ pub(crate) mod tests {
                 "not-rendered 0x800401D3",
             ),
             (PromiseRefused::NotRendered(None), "not-rendered"),
+            (PromiseRefused::Stalled, "stalled"),
             (
                 PromiseRefused::WriteFailed(std::io::ErrorKind::StorageFull),
                 "write-failed: StorageFull",

@@ -673,6 +673,13 @@ pub(crate) struct ClipboardScript {
     promised: Mutex<Vec<Result<Vec<u8>, u32>>>,
     /// The source behind the promise panics when its first entry is asked for.
     promise_panics: Mutex<bool>,
+    /// The source behind the promise stands in [`Self::stall`] when its first entry is asked for,
+    /// and the door's stall bound is this (review N14).
+    promise_stalls: Mutex<Option<Duration>>,
+    /// Where a stalling source stands, until the test lets it go.
+    stall: crate::lane::Hold,
+    /// How many renders of the promise have returned, whatever they answered.
+    renders_ended: Mutex<usize>,
     /// The clipboard's own count of its changes: one more for every copy onto it.
     sequence: Mutex<u64>,
     /// The folder this window's pictures and promises are staged in, under the test's own
@@ -713,6 +720,20 @@ impl HeadlessClipboard {
     /// The source behind the promise panics inside its render, as a source's code may.
     pub(crate) fn promise_render_panics(&self) {
         *locked(&self.0.promise_panics) = true;
+    }
+
+    /// **The source behind the promise stalls** — it hands nothing over, standing in the hold this
+    /// answers until the test releases it — and the door gives a render up after `bound` without
+    /// a step, as the product's does after `clipboard_picture::STALL_BOUND`.
+    pub(crate) fn promise_render_stalls(&self, bound: Duration) -> &crate::lane::Hold {
+        *locked(&self.0.promise_stalls) = Some(bound);
+        self.0.stall.hold();
+        &self.0.stall
+    }
+
+    /// How many renders of the promise have returned — a render its watcher gave up included.
+    pub(crate) fn promise_renders_ended(&self) -> usize {
+        *locked(&self.0.renders_ended)
     }
 
     /// The folder this clipboard's pastes are staged in — made on first asking, under a name of
@@ -800,6 +821,7 @@ impl crate::clipboard_lane::ClipboardDoor for HeadlessClipboard {
         worker: &bt_platform::admission::WorkerCtx,
         offer: &[bt_platform::PromisedEntry],
         into: &Path,
+        progress: &bt_platform::clipboard_promise::RenderProgress,
     ) -> Result<
         bt_platform::clipboard_promise::RenderedPromise,
         bt_platform::clipboard_promise::PromiseRefused,
@@ -812,14 +834,25 @@ impl crate::clipboard_lane::ClipboardDoor for HeadlessClipboard {
             descriptor,
             contents: locked(&self.0.promised).clone(),
             panics: *locked(&self.0.promise_panics),
+            stalls: locked(&self.0.promise_stalls)
+                .is_some()
+                .then(|| Arc::clone(&self.0)),
         };
-        bt_platform::clipboard_promise::render_promise(
+        let rendered = bt_platform::clipboard_promise::render_promise(
             worker,
             &mut source,
             offer,
             into,
             bt_platform::clipboard_promise::PASTE_LIMITS,
-        )
+            progress,
+        );
+        *locked(&self.0.renders_ended) += 1;
+        rendered
+    }
+
+    /// The product's bound, or the one a stalling script set.
+    fn stall_bound(&self) -> Duration {
+        locked(&self.0.promise_stalls).unwrap_or(crate::clipboard_picture::STALL_BOUND)
     }
 }
 
@@ -828,11 +861,14 @@ struct ScriptedPromise {
     descriptor: Vec<bt_platform::PromisedEntry>,
     contents: Vec<Result<Vec<u8>, u32>>,
     panics: bool,
+    /// The script whose hold a stalling source stands in.
+    stalls: Option<Arc<ClipboardScript>>,
 }
 
 impl bt_platform::clipboard_promise::PromisedContents for ScriptedPromise {
     fn descriptor(
         &mut self,
+        _worker: &bt_platform::admission::WorkerCtx,
     ) -> Result<Vec<bt_platform::PromisedEntry>, bt_platform::clipboard_promise::PromiseRefused>
     {
         Ok(self.descriptor.clone())
@@ -844,6 +880,9 @@ impl bt_platform::clipboard_promise::PromisedContents for ScriptedPromise {
         file: &mut bt_platform::clipboard_promise::PromisedFile<'_>,
     ) -> Result<(), bt_platform::clipboard_promise::PromiseRefused> {
         assert!(!self.panics, "the scripted source panics inside its render");
+        if let Some(script) = &self.stalls {
+            script.stall.pass();
+        }
         match self.contents.get(index) {
             Some(Ok(bytes)) => file.write(bytes),
             Some(Err(code)) => Err(bt_platform::clipboard_promise::PromiseRefused::NotRendered(

@@ -14237,29 +14237,36 @@ impl<B: Backend> Runtime<'_, B> {
         let inbox = self.window.clipboard_picture.inbox();
         let proxy = self.app.event_proxy.clone();
         let folder = self.window.window.staging_folder();
-        let started = bt_platform::spawn_at_priority(
-            "clipboard-picture",
-            bt_platform::ThreadPriority::Normal,
-            move |_ctx| {
-                // Held for the whole body and dropped with it, on every road out.
-                let _place = place;
-                let result = clipboard_picture::save(&folder, &offered, SystemTime::now());
-                // The generation is compared under the inbox's own lock, so an
-                // answer that has been superseded while it was being made is
-                // dropped rather than laid on top of the answer that supersedes
-                // it (review X-3).
-                deliver_clipboard_picture(
-                    &inbox,
-                    ClipboardPictureAnswer {
-                        generation,
-                        target,
-                        staged: StagingAnswer::Picture { sequence, result },
-                    },
-                );
-                // After the answer is in the slot, never before.
-                let _ = proxy.send_event(AppEvent::ClipboardPictureReady);
-            },
-        );
+        let started = if self.window.clipboard_picture.refuses_this_start() {
+            Err(())
+        } else {
+            bt_platform::spawn_at_priority(
+                "clipboard-picture",
+                bt_platform::ThreadPriority::Normal,
+                move |worker| {
+                    // Held for the whole body and dropped with it, on every road out.
+                    let _place = place;
+                    let result =
+                        clipboard_picture::save(worker, &folder, &offered, SystemTime::now());
+                    // The generation is compared under the inbox's own lock, so an
+                    // answer that has been superseded while it was being made is
+                    // dropped rather than laid on top of the answer that supersedes
+                    // it (review X-3).
+                    deliver_clipboard_picture(
+                        &inbox,
+                        ClipboardPictureAnswer {
+                            generation,
+                            target,
+                            staged: StagingAnswer::Picture { sequence, result },
+                        },
+                    );
+                    // After the answer is in the slot, never before.
+                    let _ = proxy.send_event(AppEvent::ClipboardPictureReady);
+                },
+            )
+            .map(drop)
+            .map_err(drop)
+        };
         if started.is_err() {
             // A machine that will not start a thread is a machine that cannot do
             // this paste, and saying nothing would look like a key that did not
@@ -14277,15 +14284,18 @@ impl<B: Backend> Runtime<'_, B> {
 
     /// **Start the worker that has a clipboard promise's files written** (plan row 81) — the
     /// picture save's shape, its places, its mailbox and its wake: the clipboard lane read the
-    /// promise's descriptor and nothing else, and the source renders the files here, on a
-    /// `clipboard-promise` thread, through this window's clipboard door
-    /// (`ClipboardDoor::render_promised_files`), into a folder of the paste's own in the staging
-    /// folder. [`Self::adopt_clipboard_picture`] pastes the paths it answers, as a copied file
-    /// list is pasted. **The clipboard lane answers in a second or says why; anything that
-    /// renders goes to a worker of its own, as the picture save does.**
+    /// promise's descriptor and nothing else, and the `clipboard-promise` worker
+    /// (`clipboard_picture::stage_promise`) has the source render the files, on a thread of their
+    /// own, through this window's clipboard door (`ClipboardDoor::render_promised_files`), into a
+    /// folder of the paste's own in the staging folder. [`Self::adopt_clipboard_picture`] pastes
+    /// the paths it answers, as a copied file list is pasted. **The clipboard lane answers in a
+    /// second or says why; anything that renders goes to a worker of its own, as the picture save
+    /// does.**
     ///
-    /// No clock is kept on the render: the window does not wait for it, a newer paste supersedes
-    /// it by generation, and a source that never returns holds one of the places.
+    /// The window keeps no clock on the render and never waits for it; a newer paste supersedes
+    /// it by generation. The worker watches it: a render that hands nothing over for
+    /// `clipboard_picture::STALL_BOUND` is given up, its folder removed and its place given back,
+    /// and the paste is refused `promise (stalled)` (review N14).
     pub(in crate::runtime) fn stage_clipboard_promise(
         &mut self,
         target: PasteTarget,
@@ -14311,49 +14321,38 @@ impl<B: Backend> Runtime<'_, B> {
         let proxy = self.app.event_proxy.clone();
         let door = self.window.window.clipboard_door();
         let folder = self.window.window.staging_folder();
-        let started = bt_platform::spawn_at_priority(
-            "clipboard-promise",
-            bt_platform::ThreadPriority::Normal,
-            move |worker| {
-                let _place = place;
-                let began = Instant::now();
-                // **A panic in the render is the paste's failure, not the process's end**
-                // (`contained_panic::contain`, C2): the render writes only the paste's own
-                // folder, which nothing else reads, and that folder goes with the panic as it
-                // goes with any refusal.
-                let result =
-                    clipboard_picture::reserve_staging_folder(worker, &folder, SystemTime::now())
-                        .map_err(bt_platform::clipboard_promise::PromiseRefused::WriteFailed)
-                        .and_then(|into| {
-                            crate::contained_panic::contain(|| {
-                                door.render_promised_files(worker, &promise.entries, &into)
-                            })
-                            .unwrap_or_else(|_| {
-                                let _ = std::fs::remove_dir_all(&into);
-                                Err(bt_platform::clipboard_promise::PromiseRefused::NotRendered(
-                                    None,
-                                ))
-                            })
-                        });
-                if result.is_ok() {
-                    clipboard_picture::sweep_staging(&folder);
-                }
-                deliver_clipboard_picture(
-                    &inbox,
-                    ClipboardPictureAnswer {
-                        generation,
-                        target,
-                        staged: StagingAnswer::Promise {
-                            sequence,
-                            picture_passed_over,
-                            result,
-                            took: began.elapsed(),
+        let started = if self.window.clipboard_picture.refuses_this_start() {
+            Err(())
+        } else {
+            bt_platform::spawn_at_priority(
+                "clipboard-promise",
+                bt_platform::ThreadPriority::Normal,
+                move |worker| {
+                    let began = Instant::now();
+                    let result =
+                        clipboard_picture::stage_promise(worker, door, promise.entries, &folder);
+                    // The place goes back before the answer is laid down: a render given up as
+                    // stalled holds none, and the paste the answer wakes finds every place free.
+                    drop(place);
+                    deliver_clipboard_picture(
+                        &inbox,
+                        ClipboardPictureAnswer {
+                            generation,
+                            target,
+                            staged: StagingAnswer::Promise {
+                                sequence,
+                                picture_passed_over,
+                                result,
+                                took: began.elapsed(),
+                            },
                         },
-                    },
-                );
-                let _ = proxy.send_event(AppEvent::ClipboardPictureReady);
-            },
-        );
+                    );
+                    let _ = proxy.send_event(AppEvent::ClipboardPictureReady);
+                },
+            )
+            .map(drop)
+            .map_err(drop)
+        };
         if started.is_err() {
             self.window
                 .window
@@ -14471,9 +14470,9 @@ impl<B: Backend> Runtime<'_, B> {
                         self.paste_paths_into(landed.target, rendered.pasted, from)
                             .map(drop)
                     }
-                    Err(refused) => self.refuse_paste(PasteRefusal {
+                    Err(why) => self.refuse_paste(PasteRefusal {
                         kind: RefusedKind::Promise {
-                            why: PromiseWhy::Refused(refused),
+                            why,
                             picture_passed_over,
                         },
                         from,

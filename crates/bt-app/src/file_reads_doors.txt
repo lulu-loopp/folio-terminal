@@ -40,6 +40,7 @@ payload_on_stdin: .read_to_end
 lede_in_tail: .read_to_end
 transcript_lede: File::open
 reserve: .open
+clipboard_picture.rs: reserve_marked: .open
 append_note: .open
 drain: .read_to_end
 append_healed: .open

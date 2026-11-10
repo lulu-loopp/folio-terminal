@@ -526,9 +526,13 @@ fn fixture() -> Index {
 /// **What a line says past the fixture's folder**: its file inside the fixture, its position and
 /// its words. The folder is the checkout's, and a checkout's name is anyone's (a worktree named
 /// `paste-…` once put `paste` in every line, 2026-11-09, plan row 81).
+///
+/// A line that does not start with the fixture's folder fails here, naming the line (review N13):
+/// read whole, it would let the folder's own name match a needle again.
 fn said(line: &str) -> &str {
-    line.strip_prefix(fixture_directory().to_string_lossy().as_ref())
-        .unwrap_or(line)
+    let folder = fixture_directory();
+    line.strip_prefix(folder.to_string_lossy().as_ref())
+        .unwrap_or_else(|| panic!("a line that is not the fixture's: {line}"))
 }
 
 fn named(lines: &[String], needle: &str) -> usize {
