@@ -242,12 +242,9 @@ pub(crate) fn carry_profile_lines(
     let target = managed_line_for(data, appdata);
     let (paths, report) = candidates(&marks, &files, answers);
     let mut lines: Vec<String> = report
-        .files
-        .iter()
-        .filter_map(|file| match &file.fate {
-            Fate::Refused(reason) => Some(say(&file.path, format!("left as it is: {reason}"))),
-            _ => None,
-        })
+        .refusals()
+        .into_iter()
+        .map(|refusal| say(&refusal.path, format!("left as it is: {}", refusal.reason)))
         .collect();
     let script = script_at(data);
     let forms = owned_forms(&marks, data);
