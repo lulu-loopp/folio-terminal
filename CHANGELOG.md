@@ -21,6 +21,10 @@ All notable changes to Folio are recorded here. The format follows
 - Settings > Agents now says why an agent's hooks are not this Folio's: another copy of Folio runs them, shown with its location; Folio cannot read the file; or an entry looks like Folio's in a form Folio did not write. While Resume agents after restart is on, that row names the agents whose hooks it still needs, and on a first run the Claude Code and Codex rows start switched on. <!-- zh: pending -->
 - A resumed Claude Code or Codex pane comes back with the flags its agent was started with, such as `--dangerously-skip-permissions` or `--model`. A flag that belongs to the first start only, such as `-w`, is left out, and the pane names it in one line. <!-- zh: pending -->
 
+### Changed
+
+- While a command is running in a tab, a Folio window wakes about half as often as before: each step of the tab's working mark, each blink of the text cursor and most bursts of a pane's output now reach the screen in one pass of the window's loop instead of two. What you see, and when, is unchanged. <!-- zh: pending T-TWO-BARE-TURNS-PER-MARK-STEP -->
+
 ### Fixed
 
 - On Windows, Folio follows a contrast theme (Settings > Accessibility > Contrast themes): while one is on, the terminal and the window use its colours, and turning it off brings back your own scheme. <!-- zh: 在 Windows 上，Folio 跟随对比度主题（设置 > 辅助功能 > 对比度主题）：开启时，终端与窗口使用该主题的颜色；关闭后恢复你自己的配色。 -->
@@ -59,7 +63,7 @@ All notable changes to Folio are recorded here. The format follows
 - A tab's blue dot no longer stands on every tab running Claude Code or Codex that you are not looking at. In a pane whose agent's hooks reach Folio, the dot now appears when the agent finishes a turn while you are elsewhere, goes away while Claude Code or Copilot works on its next turn (a Codex tab's dot waits until you look), and goes out when you look at the pane; an agent started from a shell prompt now gets the dot as well, and another agent's run inside it, such as `codex exec` from Claude Code, does not light it. <!-- zh: pending -->
 - On Windows, the message boxes Folio shows now carry Folio's icon in Alt+Tab and on the taskbar, and the notice Folio shows as it stops while one of its windows is on the screen belongs to that window instead of appearing as a separate program on the taskbar. <!-- zh: pending -->
 - On Windows, when an uninstall stops because Folio's remover did not start in time, the remover's copy of Folio is now removed right away instead of staying in the Folio-uninstall folder until a later uninstall that removes data. <!-- zh: pending -->
-- While a tab's mark breathes or turns for a running command, Folio now spends less processor time on each step of it: the panes are no longer drawn again when nothing in them has changed. The mark moves as often as before, and Folio wakes as often as before. <!-- zh: pending T-WORKING-MARK-CADENCE -->
+- While a tab's mark breathes or turns for a running command, Folio now spends less processor time on each step of it: the panes are no longer drawn again when nothing in them has changed. The mark moves as often as before, and this adds no wakes. <!-- zh: pending T-WORKING-MARK-CADENCE -->
 
 ## 0.4.8-preview — 2026-10-23
 

@@ -1099,7 +1099,7 @@ fn an_engine_page_alone_in_a_tab_reaches_the_glass_through_the_retained_present(
     // The chain: the only path from that present to a page on the glass.
     let publisher = squeezed_body("Runtime", "publish_frame_inner");
     assert!(
-            publisher.contains("ifself.focused().is_none(){self.window.chrome_present_pending=true;hang_watch::during(hang_watch::Station::WindowRedraw,||{self.window.window.request_redraw()});returnOk(false);}"),
+            publisher.contains("ifself.focused().is_none(){self.window.chrome_present_pending=true;self.ask_for_present();returnOk(false);}"),
             "a tab with no shell composes no terminal picture, and what it owes \
              instead is a present:\n{publisher}"
         );
