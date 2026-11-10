@@ -69,6 +69,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -551,8 +552,6 @@ impl Walk {
 struct Mailbox {
     verdicts: BTreeMap<String, RowVerdict>,
     facts: Option<MachineFacts>,
-    /// [`Answers::refused`], until the window drains it.
-    refused: bool,
 }
 
 /// **The lane**: the machine it asks, the requests, the mailbox, the wake.
@@ -563,6 +562,10 @@ pub struct ProgramsLane {
     machine: Box<dyn Machine>,
     asks: Mutex<Asks>,
     mailbox: Mutex<Mailbox>,
+    /// [`Answers::refused`], until the window drains it: a flag and not a mailbox entry, so the
+    /// admission that sets it takes no lock the worker holds (C1, the window thread's request
+    /// returns at once).
+    refused: AtomicBool,
     /// How the lane brings the event loop round once [`Self::install_wake`] has taught it; shared
     /// with the ledger, which wakes it after the worker's end.
     wake: Arc<OnceLock<Box<dyn Fn() + Send + Sync>>>,
@@ -609,6 +612,7 @@ impl ProgramsLane {
             machine: Box::new(machine),
             asks: Mutex::new(Asks::default()),
             mailbox: Mutex::new(Mailbox::default()),
+            refused: AtomicBool::new(false),
             wake,
             note,
             executor,
@@ -651,7 +655,7 @@ impl ProgramsLane {
                 // No walk stands for it: the window is told, as a walk's end tells it, so what
                 // waits for a walk's answer is not left waiting (row 68c's N1).
                 if matches!(refused, Refused::NotStarted(_) | Refused::Faulted(_)) {
-                    self.mailbox().refused = true;
+                    self.refused.store(true, Ordering::SeqCst);
                     self.wake();
                 }
             })
@@ -679,7 +683,7 @@ impl ProgramsLane {
             verdicts: mailbox.verdicts.into_values().collect(),
             facts: mailbox.facts,
             ends,
-            refused: mailbox.refused,
+            refused: self.refused.swap(false, Ordering::SeqCst),
         }
     }
 
@@ -1752,7 +1756,7 @@ pub(crate) mod tests {
     /// lines, observed red at "said once"), and the next request would be refused `Faulted`.
     /// MUTATION: say every refused start (`Ledger::say_not_started` ignoring the streak) — the two
     /// refusals are two lines.
-    /// MUTATION: the refusal is not put in the mailbox and woken for (row 68c's N1;
+    /// MUTATION: the refusal is not told to the window, flagged and woken for (row 68c's N1;
     /// `plant-68c-refusal-not-told.py`) — the window waits for a walk that will not come.
     #[test]
     fn a_refused_spawn_refuses_this_request_and_the_next_request_starts_the_worker() {
