@@ -792,7 +792,7 @@ pub(crate) fn log_file(home: &Home, data: &Path) -> (PathBuf, String) {
     if data.is_dir() {
         (crate::diagnostics::log_path(data), String::new())
     } else {
-        let log = home.root().join("recover.log");
+        let log = home.recover_log();
         let said = format!(
             " (no data directory at {}, so this line is in {})",
             data.display(),

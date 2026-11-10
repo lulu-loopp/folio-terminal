@@ -247,6 +247,9 @@ mod update_recover;
 // The update entrances a copy that is gone left behind, swept by the start's carry pass (0.4.10
 // plan row 68b).
 mod update_orphans;
+// The macOS update homes whose app is gone, recorded by the prepare and swept by the carry pass
+// and the uninstall (0.4.10 plan row 68e).
+mod update_homes;
 mod update_startup;
 mod update_trial;
 mod update_txn;
@@ -15243,8 +15246,9 @@ fn release_trial_writer(writer: update_trial::Writer, stores: &mut TrialStores<'
         Writer::RestartRegistration => (stores.restart)(),
         // The pass again, on its worker: what it held back, it now writes.
         Writer::AgentHooksRepair => carry_pass::begin_carry_pass(CarryAsk::HOOKS),
-        // The sweep again: the dead entrances it held back, it now removes (row 68b).
-        Writer::OrphanSweep => carry_pass::begin_carry_pass(CarryAsk::UPDATE_ORPHANS),
+        // The sweeps again: the dead entrances and the homes they held back, they now remove
+        // (rows 68b, 68e).
+        Writer::OrphanSweep => carry_pass::begin_carry_pass(CarryAsk::UPDATE_LEFTOVERS),
     }
 }
 

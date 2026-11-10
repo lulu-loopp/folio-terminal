@@ -204,7 +204,10 @@ pub(crate) enum Writer {
     /// **The carry pass's removal of an update's entrance whose rescue program is gone**
     /// (`update_orphans::run_orphans_step`, 0.4.10 plan row 68b, R5 of 2026-11-04): a Windows
     /// `Run\FolioUpdate-*` value or a macOS update LaunchAgent no copy can answer. Held back,
-    /// the entrances are still read and said; the release runs the sweep again.
+    /// the entrances are still read and said; the release runs the sweep again. **And the removal
+    /// of a macOS update home whose app is gone** (`update_homes::run_update_homes_step`, row 68e):
+    /// held back, the recorded homes are still judged and said; the same release runs that member
+    /// too.
     OrphanSweep,
 }
 

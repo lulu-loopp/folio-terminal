@@ -24,8 +24,9 @@
 //! ([`crate::explorer_menu::run_package_step`], once a worker of its own), the Explorer classic
 //! verb ([`crate::context_menu::run_classic_step`], once a read and a write on the window thread in
 //! `Runtime::create`) and the update entrances whose rescue program is gone
-//! ([`crate::update_orphans::run_orphans_step`]). Row 68c (Folio's old `$PROFILE` lines) adds its
-//! own to [`run_carry_steps`] rather than a second worker.
+//! ([`crate::update_orphans::run_orphans_step`]); since row 68e the update homes beside a macOS
+//! bundle that is gone ([`crate::update_homes::run_update_homes_step`]). Row 68c (Folio's old
+//! `$PROFILE` lines) adds its own to [`run_carry_steps`] rather than a second worker.
 //!
 //! A request while the pass runs is not lost and not doubled: it is written down, and the worker
 //! runs the members asked for once more before it ends ([`begin_carry_pass_with`]); each moment
@@ -89,6 +90,9 @@ pub(crate) enum CarryCheck {
     /// An update's entrance whose rescue program is gone: the Windows `Run` value, the macOS
     /// LaunchAgent (row 68b, R5 of 2026-11-04).
     UpdateOrphans,
+    /// An update home beside a macOS bundle that is gone, found by the data folder's record of
+    /// them (row 68e, R7 of 2026-11-09).
+    UpdateHomes,
 }
 
 /// **A check the inventory declares and a later part owes the pass** (0.4.10 plan row 68a, the
@@ -174,6 +178,15 @@ impl CarryCheck {
                     "the_sweep_waits_for_the_trials_commit",
                 ),
             }),
+            // Born in the pass (row 68e): nothing ran it before.
+            Self::UpdateHomes => Ok(PassMember {
+                call: "crate::update_homes::run_update_homes_step",
+                retired: &[],
+                proved_by: (
+                    "crate::update_homes::tests",
+                    "a_recorded_home_whose_bundle_is_gone_is_removed_and_every_other_is_left",
+                ),
+            }),
             Self::ProfileLines => Err(Owed {
                 part: "68c",
                 runs_today: "migration: shell_integration::begin_startup_migration,",
@@ -215,6 +228,11 @@ impl CarryCheck {
                 "crate::update_orphans::tests",
                 "a_dead_update_entrance_is_swept_and_a_live_one_is_left",
             )),
+            // The shape it brings forward: a home made before the record existed (E3).
+            Self::UpdateHomes => Some((
+                "crate::update_homes::tests",
+                "a_home_made_before_the_record_is_recorded_by_its_copys_start",
+            )),
         }
     }
 }
@@ -252,14 +270,16 @@ impl LastSaid {
 
 /// **One round's answers, member by member**; `None` for a member that had nothing to look at yet
 /// (the agents' before the program walk has answered).
-/// The package's and the sweep's parts are bare answers (row 68b, R1): the package's facts stay in
-/// `explorer_menu`'s own cells, which its press job writes too, and no row shows an entrance.
+/// The package's and the sweeps' parts are bare answers (row 68b, R1): the package's facts stay in
+/// `explorer_menu`'s own cells, which its press job writes too, and no row shows an entrance or a
+/// home (row 68e).
 #[derive(Debug, Default)]
 pub(crate) struct CarryRound {
     pub(crate) hooks: Option<MemberAnswer<HooksSnapshot>>,
     pub(crate) package: Option<MemberAnswer<()>>,
     pub(crate) classic: Option<MemberAnswer<ClassicAnswer>>,
     pub(crate) orphans: Option<MemberAnswer<()>>,
+    pub(crate) homes: Option<MemberAnswer<()>>,
 }
 
 /// **What the window adopts**: the newest part of every member, kept until the window takes it.
@@ -279,9 +299,10 @@ fn member_tally<T>(answer: Option<&MemberAnswer<T>>) -> (usize, usize) {
 /// members its ruling names, so an Agents-page open asks no deployment database and a trial's
 /// release of the Explorer writer runs no agent's scan; the start asks for all of them.
 ///
-/// **One bit per member**, four of the eight taken: a part that adds a member adds its bit here,
-/// joins it into [`Self::ALL`], and names it at the asks its ruling gives (row 68c's profile lines
-/// is the next one).
+/// **One bit per member**: a part that adds a member adds its bit here, joins it into
+/// [`Self::ALL`], and names it at the asks its ruling gives. The fifth bit (`1 << 4`) is row 68c's
+/// profile lines; row 68e's update homes take the sixth, so the two never collide whichever lands
+/// first (the ruling of 2026-11-10).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CarryAsk(u8);
 
@@ -294,12 +315,17 @@ impl CarryAsk {
     pub(crate) const EXPLORER_CLASSIC: Self = Self(1 << 2);
     /// The update entrances whose rescue program is gone.
     pub(crate) const UPDATE_ORPHANS: Self = Self(1 << 3);
+    /// The update homes beside a macOS bundle that is gone (row 68e).
+    pub(crate) const UPDATE_HOMES: Self = Self(1 << 5);
     /// Both Explorer registrations: what a trial's release of `Writer::ExplorerRepair` asks.
     pub(crate) const EXPLORER: Self = Self::EXPLORER_PACKAGE.joined_with(Self::EXPLORER_CLASSIC);
+    /// Both sweeps of what an update leaves behind: what a trial's release of
+    /// `Writer::OrphanSweep` asks (row 68e, E2).
+    pub(crate) const UPDATE_LEFTOVERS: Self = Self::UPDATE_ORPHANS.joined_with(Self::UPDATE_HOMES);
     /// Every member: the start's round.
     pub(crate) const ALL: Self = Self::HOOKS
         .joined_with(Self::EXPLORER)
-        .joined_with(Self::UPDATE_ORPHANS);
+        .joined_with(Self::UPDATE_LEFTOVERS);
 
     /// Both sets.
     pub(crate) const fn joined_with(self, other: Self) -> Self {
@@ -414,14 +440,21 @@ impl CarryPublished {
             package,
             classic,
             orphans,
+            homes,
         } = round;
         let parts = [
             member_tally(hooks.as_ref()),
             member_tally(package.as_ref()),
             member_tally(classic.as_ref()),
             member_tally(orphans.as_ref()),
+            member_tally(homes.as_ref()),
         ];
-        if hooks.is_none() && package.is_none() && classic.is_none() && orphans.is_none() {
+        if hooks.is_none()
+            && package.is_none()
+            && classic.is_none()
+            && orphans.is_none()
+            && homes.is_none()
+        {
             return None;
         }
         let checks: usize = parts.iter().map(|(checks, _)| checks).sum();
@@ -475,8 +508,10 @@ pub(crate) fn take_carry_snapshot() -> Option<CarrySnapshot> {
 /// call through a pointer is one they do not follow. The inventory's guard reads this body for its
 /// members (`CarryCheck::in_the_pass`).
 ///
-/// A round runs the members `asked` names (row 68b, R2), in this order (R11): the three that need
-/// no program walk first, so the start's own round answers them, then the agents'. A member that
+/// A round runs the members `asked` names (row 68b, R2), in this order (R11): the four that need
+/// no program walk first, so the start's own round answers them — the update homes after the
+/// update entrances, so an entrance whose rescue is gone is retired before its home is judged
+/// (row 68e) — then the agents'. A member that
 /// panics answers nothing ([`run_if_asked`]); the package member's panic also runs the press
 /// written down behind its latch (`behind`, [`package_member_with`]).
 pub(crate) fn run_carry_steps(ctx: &WorkerCtx, asked: CarryAsk, behind: &PressBehindTheLatch) {
@@ -496,6 +531,11 @@ pub(crate) fn run_carry_steps(ctx: &WorkerCtx, asked: CarryAsk, behind: &PressBe
     })
     .ok()
     .flatten();
+    let homes = run_if_asked(asked, CarryAsk::UPDATE_HOMES, "update-homes", || {
+        crate::update_homes::run_update_homes_step(ctx)
+    })
+    .ok()
+    .flatten();
     let round = CarryRound {
         hooks: run_if_asked(asked, CarryAsk::HOOKS, "agent-hooks", || {
             crate::agent_hooks_step::run_agent_hooks_step(ctx)
@@ -505,6 +545,7 @@ pub(crate) fn run_carry_steps(ctx: &WorkerCtx, asked: CarryAsk, behind: &PressBe
         package,
         classic,
         orphans,
+        homes,
     };
     if let Some(line) = CARRY_PUBLISHED.publish(round) {
         crate::diagnostics::stderr_line(line);
@@ -716,6 +757,7 @@ mod tests {
                     package: None,
                     classic,
                     orphans,
+                    homes: None,
                 })
                 .as_deref(),
             Some("BT_CARRY round checks=1 changed=1"),
@@ -877,6 +919,17 @@ mod tests {
             "a round whose members had nothing to look at says nothing"
         );
         assert_eq!(published.take(), None, "and publishes nothing");
+        // The update homes' part alone is a round (row 68e): counted, and published.
+        let line = published.publish(CarryRound {
+            homes: Some(MemberAnswer {
+                part: (),
+                checks: 1,
+                changed: 1,
+            }),
+            ..CarryRound::default()
+        });
+        assert_eq!(line.as_deref(), Some("BT_CARRY round checks=1 changed=1"));
+        assert!(published.take().is_some(), "for the window to adopt");
     }
 
     /// RED (0.4.10 plan row 68a) — **a notice the window has not taken survives the rounds after
@@ -936,6 +989,7 @@ mod tests {
             CarryAsk::EXPLORER_PACKAGE,
             CarryAsk::EXPLORER_CLASSIC,
             CarryAsk::UPDATE_ORPHANS,
+            CarryAsk::UPDATE_HOMES,
         ] {
             assert!(
                 !first.names_member(member),
@@ -969,6 +1023,7 @@ mod tests {
             CarryAsk::EXPLORER_PACKAGE,
             CarryAsk::EXPLORER_CLASSIC,
             CarryAsk::UPDATE_ORPHANS,
+            CarryAsk::UPDATE_HOMES,
         ] {
             assert!(
                 CarryAsk::ALL.names_member(member),
@@ -984,7 +1039,7 @@ mod tests {
         for arm in [
             "Writer::ExplorerRepair => carry_pass::begin_carry_pass(CarryAsk::EXPLORER)",
             "Writer::AgentHooksRepair => carry_pass::begin_carry_pass(CarryAsk::HOOKS)",
-            "Writer::OrphanSweep => carry_pass::begin_carry_pass(CarryAsk::UPDATE_ORPHANS)",
+            "Writer::OrphanSweep => carry_pass::begin_carry_pass(CarryAsk::UPDATE_LEFTOVERS)",
         ] {
             assert!(
                 release.contains(&squeezed(arm)),

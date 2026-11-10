@@ -366,6 +366,11 @@ text_entries! {
     /// Folio's own files went and something it never wrote stood beside them, so
     /// that something is still there (audit 3, E-1).
     CleanupNotOurs,
+    /// A recorded macOS update home beside a gone app, left because it holds an update that is
+    /// not finished (0.4.10 plan row 68e).
+    CleanupUpdateHomeInFlight,
+    /// A recorded macOS update home whose app is on a volume that is not there, left (row 68e).
+    CleanupUpdateHomeAway,
     CleanupRefused,
     CleanupRoot,
     CleanupRunning,
@@ -5601,6 +5606,16 @@ impl Text {
                 "left (not Folio's files):",
                 "已保留（非 Folio 的文件）：",
             ),
+            Self::CleanupUpdateHomeInFlight => pick(
+                lang,
+                "left (an update is unfinished; it finishes or is undone at the next login)",
+                "left (an update is unfinished; it finishes or is undone at the next login)", // zh: pending 68e
+            ),
+            Self::CleanupUpdateHomeAway => pick(
+                lang,
+                "left (its app is on a volume that is not connected)",
+                "left (its app is on a volume that is not connected)", // zh: pending 68e
+            ),
             Self::CleanupRefused => pick(lang, "refused", "未能移除"),
             Self::CleanupRoot => pick(
                 lang,
@@ -6806,7 +6821,14 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[];
+    const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
+        // zh: pending 68e — the two lines the uninstall says of a recorded macOS update home it
+        // leaves (0.4.10 plan row 68e, E9); row 70's Chinese pass takes them.
+        (Self::CleanupUpdateHomeInFlight, HostPlatform::Windows),
+        (Self::CleanupUpdateHomeInFlight, HostPlatform::MacOs),
+        (Self::CleanupUpdateHomeAway, HostPlatform::Windows),
+        (Self::CleanupUpdateHomeAway, HostPlatform::MacOs),
+    ];
 }
 
 // ── the strings that carry a value ─────────────────────────────────────────

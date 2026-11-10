@@ -887,7 +887,8 @@ fn test_found(module: &str, test: &str) -> bool {
 /// `Runtime::create` (`plant-68b-classic-back-at-create.py`); the trial's release arm calls the
 /// retired probe again (`plant-68b-probe-back-at-the-release.py`); a landed test is renamed
 /// (`plant-68b-landed-test-renamed.py`); the package member is run bare of the boundary that runs
-/// the press behind its latch (`plant-68b-package-member-past-its-boundary.py`).
+/// the press behind its latch (`plant-68b-package-member-past-its-boundary.py`); the home sweep is
+/// left out of the pass (`plant-68e-home-sweep-skipped.py`).
 #[test]
 fn every_owned_thing_says_how_an_update_carries_it() {
     use crate::carry_pass::{CarryCheck, CarryRule};
@@ -1267,6 +1268,17 @@ fn uninstall_source_guard_pins_known_writers_and_inventory() {
             app,
             function("crate::webhost", "web_engine_folder"),
             "web_engine_folder",
+        ),
+        // The record of the update homes, in the data folder this row removes (row 68e).
+        (
+            Remover::Data(
+                HostPlatform::MacOs,
+                Base::Library("Application Support"),
+                "Folio",
+            ),
+            app,
+            function("crate::update_homes", "record_update_home"),
+            "update_homes.rs:record_update_home",
         ),
         (
             Remover::Data(HostPlatform::OtherUnix, Base::Xdg, "Folio"),
@@ -1789,7 +1801,7 @@ fn uninstall_purge_reports_the_root_it_found_at_the_deciding_check() {
 /// A directory link at `link` naming `target`: a symlink on Unix, a junction on Windows (which
 /// needs no developer-mode privilege, as `uninstall_purge_junction_refuses_root_without_touching_target`
 /// already relies on).
-fn plant_directory_link(link: &Path, target: &Path) {
+pub(crate) fn plant_directory_link(link: &Path, target: &Path) {
     #[cfg(unix)]
     std::os::unix::fs::symlink(target, link).unwrap();
     #[cfg(windows)]
@@ -1815,7 +1827,7 @@ fn plant_directory_link(link: &Path, target: &Path) {
 }
 
 /// The link itself, never what it names.
-fn remove_directory_link(link: &Path) {
+pub(crate) fn remove_directory_link(link: &Path) {
     #[cfg(unix)]
     fs::remove_file(link).unwrap();
     #[cfg(windows)]
@@ -2132,6 +2144,111 @@ fn uninstall_update_rows_remove_only_ours() {
         "{second}"
     );
     fs::remove_dir_all(root).unwrap();
+}
+
+/// RED (0.4.10 plan row 68e, section 10.4) — **both verbs retire a recorded home whose bundle is
+/// gone, and leave every other**: from the data root's record, a home beside a gone bundle holding
+/// Folio's three files is removed and its entry dropped; a home beside a bundle that is there is
+/// left, naming that bundle; a home holding a journal is left for its rescue; this copy's own home
+/// is removed whole by the row's first line and kept in the record, untouched. None is a refusal,
+/// and a second run says nothing of the removed one. (Homebrew's zap is `--uninstall-cleanup`
+/// from the Caskroom's copy: the first case.)
+///
+/// MUTATION: the row's record sweep dropped (`plant-68e-zap-misses-the-record.py`).
+#[test]
+fn the_cleanup_retires_a_recorded_home_whose_bundle_is_gone() {
+    if bt_platform::host_platform() == HostPlatform::OtherUnix {
+        // As `uninstall_update_rows_remove_only_ours`: no arm of the update door runs here.
+        return;
+    }
+    let row = "Update home beside the bundle (per-copy)";
+    for purge in [false, true] {
+        let (root, mut scope) = sandbox(if purge {
+            "homes-recorded-purge"
+        } else {
+            "homes-recorded"
+        });
+        let applications = root.join("Applications");
+        let home_of = |name: &str| {
+            crate::update_txn::Home::for_bundle(&applications.join(format!("{name}.app"))).unwrap()
+        };
+        let own = home_of("Folio");
+        let gone = home_of("Folio Beta");
+        let live = home_of("Folio Dev");
+        let in_flight = home_of("Folio Old");
+        for (home, files) in [
+            (&own, &["lock"][..]),
+            (&gone, &["admission", "lock", "recover.log"][..]),
+            (&live, &["lock"][..]),
+            (&in_flight, &["lock", "journal.json"][..]),
+        ] {
+            fs::create_dir_all(home.root()).unwrap();
+            for file in files {
+                fs::write(home.root().join(file), file.as_bytes()).unwrap();
+            }
+        }
+        let live_program = live.installed_program().unwrap();
+        fs::create_dir_all(live_program.parent().unwrap()).unwrap();
+        fs::write(&live_program, b"live").unwrap();
+        let record = scope.data[0].join(crate::update_homes::HOMES_RECORD);
+        fs::create_dir_all(&scope.data[0]).unwrap();
+        let entries = [&own, &gone, &live, &in_flight].map(|home| home.root().to_path_buf());
+        fs::write(
+            &record,
+            serde_json::to_vec(&serde_json::json!({ "version": 1, "homes": entries })).unwrap(),
+        )
+        .unwrap();
+        scope.update_home = Some(own.root().to_path_buf());
+        scope.update_homes_records = vec![record.clone()];
+
+        let report = execute(&scope, purge, system_absent);
+        let fate_of = |home: &crate::update_txn::Home| {
+            let mark = format!("{row}: {}", home.root().display());
+            report
+                .entries
+                .iter()
+                .filter(|entry| entry.mark == mark)
+                .map(|entry| entry.fate.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(fate_of(&own), [Fate::Removed], "{}", report.stdout());
+        assert_eq!(fate_of(&gone), [Fate::Removed], "{}", report.stdout());
+        assert_eq!(
+            fate_of(&live),
+            [Fate::Left(vec![live.installed_bundle().unwrap()])]
+        );
+        assert_eq!(
+            fate_of(&in_flight),
+            [Fate::Kept(Text::CleanupUpdateHomeInFlight)]
+        );
+        let refused: Vec<String> = report
+            .entries
+            .iter()
+            .filter(|e| e.mark.starts_with("Update ") && matches!(e.fate, Fate::Refused(_)))
+            .map(|entry| entry.line(Lang::English))
+            .collect();
+        assert!(refused.is_empty(), "{refused:?}");
+        assert!(!own.root().exists() && !gone.root().exists());
+        assert!(live.root().join("lock").is_file());
+        assert!(in_flight.root().join("journal.json").is_file());
+        assert!(purge || record.exists(), "the record is kept with the data");
+        if record.exists() {
+            let left: serde_json::Value =
+                serde_json::from_slice(&fs::read(&record).unwrap()).unwrap();
+            assert_eq!(
+                left["homes"],
+                serde_json::json!([own.root(), live.root(), in_flight.root()]),
+                "the removed home's entry dropped, this copy's own untouched"
+            );
+            let second = execute(&scope, purge, system_absent);
+            assert!(
+                !second.stdout().contains(&gone.root().display().to_string()),
+                "{}",
+                second.stdout()
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
 }
 
 /// RED (U-27) — **the update home's row detaches an image still mounted inside

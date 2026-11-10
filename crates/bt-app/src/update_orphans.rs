@@ -204,8 +204,9 @@ fn launch_agent_stage(refusal: &bt_platform::launch_agent::Refusal) -> &'static 
     }
 }
 
-/// **The sweep's last lines**, each said again only when it differs from every line said last
-/// time (R-D's change rule).
+/// **A sweep's last lines**, each said again only when it differs from every line said last
+/// time (R-D's change rule) — this sweep's, and the update homes' (`update_homes`, row 68e), each
+/// with a book of its own.
 pub(crate) struct OrphansSaid(Mutex<Vec<String>>);
 
 impl OrphansSaid {
@@ -227,6 +228,16 @@ impl OrphansSaid {
                 .map(|(name, fate)| format!("BT_UPDATE_ORPHANS {name} {}", fate.fate_said()))
                 .collect()
         };
+        self.lines_answer(lines, say)
+    }
+
+    /// **A round's `lines` as the pass's part**: each line not said last time said now; one
+    /// check, changed when any line was said.
+    pub(crate) fn lines_answer(
+        &self,
+        lines: Vec<String>,
+        say: &dyn Fn(String),
+    ) -> MemberAnswer<()> {
         let mut last = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         let mut changed = 0;
         for line in &lines {

@@ -315,11 +315,17 @@ const INVENTORY: &[Mark] = &[
             Base::Library("Application Support"),
             "Folio",
         ),
-        writer: "persist.rs:storage_location;webhost.rs:web_engine_folder",
+        writer: "persist.rs:storage_location;webhost.rs:web_engine_folder;update_homes.rs:record_update_home",
         carry: &[
             CarryRule::Document {
                 readers: DATA_FOLDER_READERS,
                 writers: DATA_FOLDER_WRITERS,
+            },
+            // The record of the update homes this account's copies made, read at its version
+            // and rewritten by the carry pass's home sweep, held during a trial (row 68e).
+            CarryRule::Document {
+                readers: &["update_homes.rs:UpdateHomesRecord::read"],
+                writers: &[Writer::OrphanSweep],
             },
             CarryRule::BuildBytes(Writer::PowerShellScript),
             CarryRule::BuildBytes(Writer::BashScript),
@@ -451,9 +457,16 @@ const INVENTORY: &[Mark] = &[
         kind: Kind::PerCopy,
         remover: Remover::UpdateHome,
         writer: "update_txn.rs:Home::for_bundle (made by the macOS Prepare, U-27)",
-        // A home whose bundle is gone needs a record of the homes no build writes yet: part 68e
-        // (R7 of 2026-11-09).
-        carry: &[CarryRule::Transaction],
+        // Its transaction's files are retired by the transaction; the home itself, once its
+        // bundle is gone, by the carry pass's sweep of the data folder's record of homes (68e,
+        // R7 of 2026-11-09), and by both uninstall verbs from the same record.
+        carry: &[
+            CarryRule::Transaction,
+            CarryRule::OwnerChecked {
+                check: CarryCheck::UpdateHomes,
+                writer: Writer::OrphanSweep,
+            },
+        ],
     },
     Mark {
         name: "Unix runtime claims",
@@ -776,6 +789,10 @@ struct Scope {
     launch_agents: Option<PathBuf>,
     /// macOS: this bundle's installation home, `<parent>/.<Bundle>.folio-update`.
     update_home: Option<PathBuf>,
+    /// macOS: each data root's record of the update homes the account's copies made
+    /// (`update_homes::HOMES_RECORD`, 0.4.10 plan row 68e); empty elsewhere, where no copy
+    /// writes one.
+    update_homes_records: Vec<PathBuf>,
     /// This copy's update journal (`update_txn::Home::journal`), where this build
     /// has an updater home.
     journal: Option<PathBuf>,
@@ -904,6 +921,13 @@ impl Scope {
         } else {
             (None, None)
         };
+        let update_homes_records = if platform == HostPlatform::MacOs {
+            data.iter()
+                .map(|data| data.join(crate::update_homes::HOMES_RECORD))
+                .collect()
+        } else {
+            Vec::new()
+        };
         let remover_home = match platform {
             HostPlatform::Windows => named("LOCALAPPDATA")?.join(REMOVER_HOME),
             HostPlatform::MacOs => home.join("Library/Application Support").join(REMOVER_HOME),
@@ -932,6 +956,7 @@ impl Scope {
             purge_roots,
             launch_agents,
             update_home,
+            update_homes_records,
             journal,
             remover_home,
             sandbox: sandbox.then(|| temp.clone()),
@@ -1250,6 +1275,13 @@ fn execute_over<T>(
             }
             Remover::UpdateHome => {
                 entries.push(update_home(&label, scope.update_home.as_deref()));
+                for record in &scope.update_homes_records {
+                    entries.extend(recorded_update_homes(
+                        &label,
+                        record,
+                        scope.update_home.as_deref(),
+                    ));
+                }
             }
             Remover::TrialFolder => entries.push(trial_folder(&label, scope)),
             Remover::Absent => entries.push(Entry::new(label, Fate::Absent)),
@@ -1355,6 +1387,56 @@ fn update_home(label: &str, home: Option<&Path>) -> Entry {
         Ok(()) => Entry::new(label, Fate::Removed),
         Err(e) => Entry::new(label, Fate::Refused(Why::Other(e.to_string()))),
     }
+}
+
+/// **The recorded update homes, on both verbs** (0.4.10 plan row 68e): the carry pass's sweep of
+/// the data root's record ([`crate::update_homes::sweep_recorded_homes`]) with no trial's gate, and
+/// this copy's own home — just removed whole by [`update_home`] — neither judged nor touched in
+/// the record. One line per home the sweep found standing; a home whose entry is dropped because
+/// it is not there, or because the entry names no home, has none. A home that is left is never a
+/// refusal, so it does not stop the program's step; a home whose removal failed is.
+fn recorded_update_homes(label: &str, record: &Path, own: Option<&Path>) -> Vec<Entry> {
+    use crate::update_homes::{HomeFate, RecordState};
+    let swept = crate::update_homes::sweep_recorded_homes(
+        record,
+        None,
+        own,
+        &crate::attention_ownership::what_stands,
+        |_| false,
+    );
+    let mut entries = Vec::new();
+    for (home, fate) in swept.fates {
+        let fate = match fate {
+            HomeFate::Removed => Fate::Removed,
+            HomeFate::LeftLive(bundle) => Fate::Left(vec![bundle]),
+            HomeFate::LeftNotOnlyOurs(standing) => Fate::LeftNotOurs(standing),
+            HomeFate::LeftInFlight => Fate::Kept(Text::CleanupUpdateHomeInFlight),
+            HomeFate::LeftOwnerUnknown => Fate::Kept(Text::CleanupUpdateHomeAway),
+            HomeFate::LeftInUse => Fate::Left(vec![home.clone()]),
+            HomeFate::Refused(reason) => Fate::Refused(Why::Other(reason)),
+            // Nothing stands to be said: the entry was dropped. A seed's and a trial's fates are
+            // the carry pass's, which this sweep has neither of.
+            HomeFate::Gone | HomeFate::RefusedEntry | HomeFate::Recorded | HomeFate::Held => {
+                continue;
+            }
+        };
+        entries.push(Entry::new(format!("{label}: {}", home.display()), fate));
+    }
+    match swept.record {
+        RecordState::Kept => {}
+        RecordState::Unread(reason) => entries.push(Entry::new(
+            format!("{label}: {}", record.display()),
+            Fate::LeftUnread {
+                removed: false,
+                reason: format!("not read: {reason}"),
+            },
+        )),
+        RecordState::NotWritten(reason) => entries.push(Entry::new(
+            format!("{label}: {}", record.display()),
+            Fate::Refused(Why::Other(format!("not written: {reason}"))),
+        )),
+    }
+    entries
 }
 
 /// **The update trial's folder row** (0.4.8 G7): `<temp>/folio-trial-<txn>`, where a
@@ -2434,4 +2516,4 @@ pub(crate) fn leave_armed() {
 
 #[cfg(test)]
 #[path = "uninstall_tests.rs"]
-mod tests;
+pub(crate) mod tests;
