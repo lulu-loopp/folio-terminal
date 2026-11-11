@@ -2258,17 +2258,6 @@ fn the_capsule_opened_on_another_pane_cancels_its_composition() {
     );
 }
 
-/// **The window's first-run card is spent before a test turns several passes over a
-/// composition**, as the paused-bar fixtures spend it (`preview_tests.rs`, `a_paused_recording`).
-/// A headless window is a first launch and `turn(_, true)` runs the application's clocks: on a
-/// Mac, whose profile table has no agent rows for the card to wait on, the card comes up on the
-/// second or third pass, and it is a modal rung, so the composition is cancelled for the card and
-/// not for anything the test is about. On Windows the agent rows' unknown answers hold the card
-/// down for the whole test.
-fn spend_the_first_run_card(folio: &mut HeadlessFolio) {
-    folio.app.first_run_attempted = true;
-}
-
 /// PIN (plan row 118, T10) — **a composition that stays on its field is never cancelled**, however
 /// many passes go by: the origin it recorded is the origin the keyboard is at. A shell, then every
 /// rung whose origin is read from state a pass could disturb where a shell's is fixed: a page and
@@ -2280,7 +2269,6 @@ fn spend_the_first_run_card(folio: &mut HeadlessFolio) {
 #[test]
 fn a_composition_that_stays_on_its_field_survives_every_pass() {
     let (mut folio, [a, _]) = two_tabs_of_shells("ime-origin-stays");
-    spend_the_first_run_card(&mut folio);
     let mut turns = Turns::start();
     folio.runtime().ime_input(Ime::Enabled).expect("a start");
     compose(&mut folio, "ni");
@@ -2305,7 +2293,6 @@ fn a_composition_that_stays_on_its_field_survives_every_pass() {
     assert_eq!(typed_into(&folio, 0, a), "你", "and its commit is its own");
 
     let (mut folio, _, [page, _]) = two_pages("ime-origin-stays-page");
-    spend_the_first_run_card(&mut folio);
     let mut turns = Turns::start();
     let first = page_text(&mut folio, page);
     press_into(&mut folio, page);
@@ -2327,7 +2314,6 @@ fn a_composition_that_stays_on_its_field_survives_every_pass() {
     );
 
     let (mut folio, _, [graph, _]) = two_graphs("ime-origin-stays-graph");
-    spend_the_first_run_card(&mut folio);
     let mut turns = Turns::start();
     folio.runtime().ime_input(Ime::Enabled).expect("a start");
     compose(&mut folio, "ni");
@@ -2351,7 +2337,6 @@ fn a_composition_that_stays_on_its_field_survives_every_pass() {
         vec![tab_holding(leaf_saying("PS> "))],
         0,
     );
-    spend_the_first_run_card(&mut folio);
     let mut turns = Turns::start();
     let tab = folio.window.tabs[0].id;
     folio.window.rename = Some(crate::TabRename::open(tab, None));
@@ -2379,7 +2364,6 @@ fn a_composition_that_stays_on_its_field_survives_every_pass() {
     let tab = crate::test_support::cross_tab(1, &["PS A> ", "PS B> "]);
     let a = tab.seats.terminals()[0];
     let mut folio = HeadlessFolio::with_tabs("ime-origin-stays-capsule", vec![tab], 0);
-    spend_the_first_run_card(&mut folio);
     let mut turns = Turns::start();
     folio
         .runtime()
@@ -2405,7 +2389,6 @@ fn a_composition_that_stays_on_its_field_survives_every_pass() {
     let program =
         crate::settings::SettingsTarget::Field(crate::settings::SettingsRow::ProfileProgram);
     let mut folio = editor_on("ime-origin-stays-settings", program);
-    spend_the_first_run_card(&mut folio);
     let mut turns = Turns::start();
     folio.runtime().ime_input(Ime::Enabled).expect("a start");
     compose(&mut folio, "ni");

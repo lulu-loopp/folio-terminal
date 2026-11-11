@@ -38,17 +38,13 @@ const WORKING: &str = "\x1b]133;A\x07PS> \x1b]133;B\x07cargo build\x1b]133;C\x07
 /// has a resize open, as `every_visible_pane_settles_its_rows_and_schedules_its_own_artifacts`
 /// settles its panes.
 ///
-/// The window's first-run card is spent first, as the composition fixtures spend it
-/// (`keyboard_tests.rs`, `spend_the_first_run_card`) and as the mark-over-a-quiet-pane test does.
-/// A headless window is a first launch, and every turn runs `raise_first_run_if_due`: on a Mac,
-/// whose profile table has no agent rows for the card to wait on, the card comes up on the first
-/// counted turn. It is a modal: it takes the keyboard from the shell, so the caret stops
-/// blinking, and the turn that raises it asks the platform for a paint of the card's own
-/// (`Redraw` on that turn's ledger). On Windows the agent rows' unknown answers hold the card
-/// down.
+/// No first-run card comes up over the counted turns: a headless window is a later launch
+/// (`headless.rs`, `StorageAskers::on`). Over a first launch on a Mac, whose profile table has
+/// no agent rows for the card to wait on, the card would come up on a counted turn: a modal that
+/// takes the keyboard from the shell, so the caret stops blinking, and the turn that raises it
+/// asks the platform for a paint of the card's own (`Redraw` on that turn's ledger).
 fn window_saying(tag: &str, text: &str) -> (HeadlessFolio, Instant) {
     let mut folio = HeadlessFolio::with_tabs(tag, vec![tab_holding(leaf_saying(text))], 0);
-    folio.app.first_run_attempted = true;
     folio.draw();
     let mut now = Instant::now();
     for _ in 0..8 {
