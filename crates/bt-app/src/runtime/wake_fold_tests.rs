@@ -249,15 +249,24 @@ fn a_due_credential_is_spent_on_its_own_turn_whatever_the_strips_gates_say() {
             &bt_workbench::attention::WaitSlot::Level(bt_workbench::attention::WaitKind::Agent),
             armed,
         );
-        // The strip looked a moment ago, so its rate is shut at `due`; and the glass took a
-        // picture a moment ago, so the window's display frame is shut as well.
+        // The strip looked a moment ago, so its rate is shut at `due`, and it saw the tab's claim
+        // as it stands (a clock with no place behind it changes no claim when it runs out, so
+        // nothing brings the look round); and the glass took a picture a moment ago, so the
+        // window's display frame is shut as well.
         runtime.window.strip_animation_ticked_at = Some(due - Duration::from_millis(1));
+        let seen = runtime.window.tabs[0].fleet_claim_for(true);
+        runtime.window.tabs[0].last_looked_claim = Some(seen);
         runtime.window.last_present_at = Some(due - Duration::from_millis(1));
     }
     let wake = turn(&mut folio, due);
     assert!(
         !folio.window.frame_clock.admits(),
         "the fixture's own precondition: the frame gate refused the turn"
+    );
+    assert_eq!(
+        folio.window.strip_animation_ticked_at,
+        Some(due - Duration::from_millis(1)),
+        "the fixture's own precondition: the strip did not look on the turn"
     );
     assert_eq!(
         folio.window.tabs[0]
