@@ -1581,7 +1581,7 @@ fn uninstall_sign_in_row_removes_this_copys_entry_and_leaves_another_copys() {
         let left: Vec<(String, String)> = keys.0.keys().cloned().collect();
         (removal, entries, left)
     };
-    let label = "Autostart / login item (per account)";
+    let label = "Autostart / login item (per-account)";
     let only_somebody = vec![("run".to_owned(), "SomebodyElse".to_owned())];
 
     for (what, program) in [("this copy", &exe), ("a gone copy", &gone)] {
