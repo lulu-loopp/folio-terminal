@@ -1367,33 +1367,33 @@ pub(crate) fn settle_attention(
         }
         let now_claim = tab.fleet_claim_for(tab_is_active);
         claims_changed |= tab.last_looked_claim != Some(now_claim);
-        if let Some(was) = was {
-            if now_claim != was {
-                // §13.2.1: the request this change is about, when it is about one at all. The third
-                // branch is the common one — most claim changes are unread, bell or work in flight,
-                // and none of those belongs to a request.
-                let leader = if now_claim == StatusClaim::Awaiting {
-                    tab_queue_leader(tab)
-                } else {
-                    leader_before
-                };
-                let episode = leader.and_then(|seat| tab.sessions.get(&seat)).and_then(
-                    |TerminalPane { session: leaf, .. }| {
-                        leaf.attention.ledger.claim_episode(
-                            was == StatusClaim::Awaiting,
-                            now_claim == StatusClaim::Awaiting,
-                        )
-                    },
-                );
-                attention_trace::emit(trace, || {
-                    attention::claim_line(
-                        index,
-                        episode,
-                        &format!("{was:?}"),
-                        &format!("{now_claim:?}"),
+        if let Some(was) = was
+            && now_claim != was
+        {
+            // §13.2.1: the request this change is about, when it is about one at all. The third
+            // branch is the common one — most claim changes are unread, bell or work in flight,
+            // and none of those belongs to a request.
+            let leader = if now_claim == StatusClaim::Awaiting {
+                tab_queue_leader(tab)
+            } else {
+                leader_before
+            };
+            let episode = leader.and_then(|seat| tab.sessions.get(&seat)).and_then(
+                |TerminalPane { session: leaf, .. }| {
+                    leaf.attention.ledger.claim_episode(
+                        was == StatusClaim::Awaiting,
+                        now_claim == StatusClaim::Awaiting,
                     )
-                });
-            }
+                },
+            );
+            attention_trace::emit(trace, || {
+                attention::claim_line(
+                    index,
+                    episode,
+                    &format!("{was:?}"),
+                    &format!("{now_claim:?}"),
+                )
+            });
         }
     }
     claims_changed
