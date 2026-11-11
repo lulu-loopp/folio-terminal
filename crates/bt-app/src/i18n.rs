@@ -5332,7 +5332,7 @@ impl Text {
             Self::DescResumeAgents => pick(
                 lang,
                 "When Folio reopens, panes running Claude Code or Codex resume their sessions with their launch arguments.",
-                "Folio 重新打开时，运行过 Claude Code 或 Codex 的窗格以原启动参数恢复各自的会话。",
+                "Folio 重新打开时，运行过 Claude Code 或 Codex 的窗格按原启动参数恢复各自的会话。",
             ),
             Self::ToastTurnFinished => pick(lang, "Turn finished", "回合结束"),
             Self::ToastWaitingForYou => pick(lang, "Waiting for you", "正在等你回答"),
@@ -5632,17 +5632,17 @@ impl Text {
             Self::CleanupUpdateHomeInFlight => pick(
                 lang,
                 "left (an update is unfinished)",
-                "left (an update is unfinished)", // zh: pending 68e
+                "已保留（更新尚未完成）",
             ),
             Self::CleanupUpdateHomeUnchecked => pick(
                 lang,
                 "left (its app could not be checked)",
-                "left (its app could not be checked)", // zh: pending 68e
+                "已保留（无法检查它所属的应用）",
             ),
             Self::CleanupUpdateHomeInUse => pick(
                 lang,
                 "left (another copy is using it)",
-                "left (another copy is using it)", // zh: pending 68e
+                "已保留（另一份 Folio 正在使用）",
             ),
             Self::CleanupRefused => pick(lang, "refused", "未能移除"),
             Self::CleanupRoot => pick(
@@ -6858,16 +6858,7 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
-        // zh: pending 68e — the three lines the uninstall says of a recorded macOS update home it
-        // leaves (0.4.10 plan row 68e, E9 and review N8); row 70's Chinese pass takes them.
-        (Self::CleanupUpdateHomeInFlight, HostPlatform::Windows),
-        (Self::CleanupUpdateHomeInFlight, HostPlatform::MacOs),
-        (Self::CleanupUpdateHomeUnchecked, HostPlatform::Windows),
-        (Self::CleanupUpdateHomeUnchecked, HostPlatform::MacOs),
-        (Self::CleanupUpdateHomeInUse, HostPlatform::Windows),
-        (Self::CleanupUpdateHomeInUse, HostPlatform::MacOs),
-    ];
+    const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[];
 }
 
 // ── the strings that carry a value ─────────────────────────────────────────
