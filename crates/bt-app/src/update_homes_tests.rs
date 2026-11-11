@@ -234,6 +234,31 @@ fn retiring_a_home_never_removes_again_after_its_folder() {
     }
 }
 
+/// PIN (0.4.10 plan row 68e, focused re-review F2 of 2026-11-10) — **the update homes' module names
+/// no whole-tree remover anywhere**: no `remove_dir_all`, `install_txn::durable_remove` or
+/// `remove_entry` in its product code, under any helper or in any caller of `retire_home`, so the
+/// only removals of a recorded home are its three files and the emptied folder. The search is the
+/// module's identifiers, which a renamed import or a local wrapper still has to spell.
+///
+/// MUTATION: a `durable_remove` wrapped in a local helper that `retire_home` calls
+/// (`plant-68e-tree-remover-in-a-helper.py`).
+#[test]
+fn the_update_homes_module_names_no_tree_remover() {
+    use bt_source::{Needle, Pattern, Scope, View};
+    for remover in ["remove_dir_all", "durable_remove", "remove_entry"] {
+        let found = crate::test_support::found_in(
+            Needle::new(Pattern::identifier(remover)),
+            View::Identifiers,
+            Scope::Module("crate::update_homes".to_owned()),
+        )
+        .in_the_product(crate::test_support::source());
+        assert!(
+            found.is_empty(),
+            "`{remover}` would let the sweep take a home whole"
+        );
+    }
+}
+
 /// RED (0.4.10 plan row 68e, E6) — **a home with a journal is left for its rescue**: beside a gone
 /// bundle, a home holding a journal — one this build reads and one of bytes no build reads — is
 /// left whole and its entry kept; nothing is asked of the trial's gate.
