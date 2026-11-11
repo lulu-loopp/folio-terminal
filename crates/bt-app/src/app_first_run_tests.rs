@@ -77,8 +77,10 @@ fn scanned(found: [attention_ownership::HooksFound; 3]) -> agent_hooks_step::Hoo
 /// directly so no other test's pass can take it) and the card opens with every row it will ever
 /// have, once the install channel's one-turn wait — spent only by a card that is otherwise ready —
 /// is over; a later answer — this copy's hooks there now, whose row a fresh card would not list —
-/// leaves the open card's rows as they were. On a platform that offers no agent row (a Mac) the
-/// card does not wait for a scan at all.
+/// leaves the open card's rows as they were, including a switch the person has flipped. On a
+/// platform that offers no agent row (a Mac) the card does not wait for a scan at all, and the
+/// later answer is held to the same claim there: a refill would put the flipped switch back, so
+/// the no-refill half pins on both platforms (row 73's macOS gate, where it had returned early).
 ///
 /// MUTATIONS: the card goes ahead with a found agent unanswered
 /// (`plant-73-card-opens-before-the-answer.py`); a later answer reopens the card with its rows
@@ -93,7 +95,8 @@ fn the_card_opens_on_the_scans_first_answer() {
             crate::test_support::leaf_saying("first run"),
         )],
         0,
-    );
+    )
+    .at_a_first_launch();
     let claude = profiles::position_of("claude");
     folio.app.profile_programs =
         profiles::ProfilePrograms::with_only(&claude.into_iter().collect::<Vec<_>>());
@@ -107,62 +110,66 @@ fn the_card_opens_on_the_scans_first_answer() {
     for _ in 0..4 {
         turn(&mut folio);
     }
-    if claude.is_none() || !RowKind::Claude.offered_on(bt_platform::host_platform()) {
+    let agent_row = claude.is_some() && RowKind::Claude.offered_on(bt_platform::host_platform());
+    if agent_row {
+        assert!(
+            !folio.window.first_run.is_open(),
+            "the card came up before the scan answered"
+        );
+        assert_eq!(
+            folio.app.settings_store.loaded().first_run_card,
+            bt_persist::FirstRunCardV1::NotShown,
+            "a card that is not up is not recorded"
+        );
+        adopt_agent_hooks_snapshot(
+            &mut folio.app,
+            &scanned([
+                HooksFound::Nothing,
+                HooksFound::Nothing,
+                HooksFound::Nothing,
+            ]),
+        );
+        // The install channel's one turn, then the card.
+        turn(&mut folio);
+        turn(&mut folio);
+        assert!(
+            folio.window.first_run.is_open(),
+            "the card did not open on the scan's answer"
+        );
+        let kinds: Vec<RowKind> = folio
+            .window
+            .first_run
+            .rows()
+            .iter()
+            .map(|row| row.kind)
+            .collect();
+        assert_eq!(
+            kinds,
+            [RowKind::Update, RowKind::Explorer, RowKind::Claude],
+            "the first paint holds every row"
+        );
+        let resume = folio.app.settings_store.loaded().resume_agents;
+        assert_eq!(
+            folio.window.first_run.rows()[2].on,
+            first_run::agent_arrives_on(RowKind::Claude, resume)
+        );
+    } else {
         assert!(
             folio.window.first_run.is_open(),
             "a platform that offers no agent row: the card does not wait for the scan"
         );
-        return;
     }
-    assert!(
-        !folio.window.first_run.is_open(),
-        "the card came up before the scan answered"
-    );
-    assert_eq!(
-        folio.app.settings_store.loaded().first_run_card,
-        bt_persist::FirstRunCardV1::NotShown,
-        "a card that is not up is not recorded"
-    );
-    adopt_agent_hooks_snapshot(
-        &mut folio.app,
-        &scanned([
-            HooksFound::Nothing,
-            HooksFound::Nothing,
-            HooksFound::Nothing,
-        ]),
-    );
-    // The install channel's one turn, then the card.
-    turn(&mut folio);
-    turn(&mut folio);
-    assert!(
-        folio.window.first_run.is_open(),
-        "the card did not open on the scan's answer"
-    );
-    let kinds: Vec<RowKind> = folio
-        .window
-        .first_run
-        .rows()
-        .iter()
-        .map(|row| row.kind)
-        .collect();
-    assert_eq!(
-        kinds,
-        [RowKind::Update, RowKind::Explorer, RowKind::Claude],
-        "the first paint holds every row"
-    );
-    let resume = folio.app.settings_store.loaded().resume_agents;
-    assert_eq!(
-        folio.window.first_run.rows()[2].on,
-        first_run::agent_arrives_on(RowKind::Claude, resume)
-    );
     assert_eq!(
         folio.app.settings_store.loaded().first_run_card,
         bt_persist::FirstRunCardV1::Shown
     );
     assert_eq!(
-        folio.app.carry_answers_adopted, 1,
-        "the card's opening line counts the one hooks answer this window adopted (the review's F1)"
+        folio.app.carry_answers_adopted,
+        u32::from(agent_row),
+        "the card's opening line counts the hooks answers this window adopted (the review's F1)"
     );
+    // The person flips the first switch; a card built again would put it back.
+    assert!(folio.window.first_run.flip(0), "the card has a first row");
     let opened = folio.window.first_run.rows().to_vec();
     adopt_agent_hooks_snapshot(
         &mut folio.app,
