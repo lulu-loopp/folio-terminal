@@ -204,6 +204,36 @@ fn a_recorded_home_whose_bundle_is_gone_is_removed_and_every_other_is_left() {
     });
 }
 
+/// PIN (0.4.10 plan row 68e, review N1 of 2026-11-10) — **retiring a home never removes again
+/// after its folder is gone**: the emptied folder goes by `std::fs::remove_dir`, which takes no
+/// tree, and what follows only flushes its parent (`install_txn::flush_directory_on_disk`). A
+/// removal after it — `install_txn::durable_remove`, which is `remove_dir_all` for a folder —
+/// would take whole a home a Prepare made again at the path in between. The window is a few
+/// instructions wide and no test drives it, so the body is pinned by its source.
+///
+/// MUTATION: `install_txn::durable_remove(home.root())` put back in place of the flush
+/// (`plant-68e-retire-removes-again.py`).
+#[test]
+fn retiring_a_home_never_removes_again_after_its_folder() {
+    use crate::test_support::{free_fn_body, squeezed};
+    let body = squeezed(free_fn_body("retire_home"));
+    let (_, after) = body
+        .split_once("std::fs::remove_dir(home.root())")
+        .expect("the emptied folder goes by remove_dir");
+    assert!(
+        after.contains(
+            "install_txn::flush_directory_on_disk(install_txn::directory_of(home.root()))"
+        ),
+        "its parent is flushed: {after}"
+    );
+    for removal in ["remove_", "_remove("] {
+        assert!(
+            !after.contains(removal),
+            "nothing removes after the folder is gone: {after}"
+        );
+    }
+}
+
 /// RED (0.4.10 plan row 68e, E6) — **a home with a journal is left for its rescue**: beside a gone
 /// bundle, a home holding a journal — one this build reads and one of bytes no build reads — is
 /// left whole and its entry kept; nothing is asked of the trial's gate.

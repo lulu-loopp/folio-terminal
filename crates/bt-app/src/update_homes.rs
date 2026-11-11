@@ -366,8 +366,9 @@ fn fate_of_holds(holds: io::Result<HomeHolds>) -> Option<HomeFate> {
 /// **A home whose bundle is gone, retired**: its `lock` and its `admission` taken, never waited
 /// for (`in use` when somebody holds either); what it holds read again under them; its three
 /// files removed while they are held, the holds let go, then the emptied folder — `remove_dir`,
-/// which takes no tree — and its parent flushed (`install_txn::durable_remove` of what is no
-/// longer there).
+/// which takes no tree — and its parent flushed (`install_txn::flush_directory_on_disk`). Nothing
+/// removes again after `remove_dir`: a home made again at the path in between is a new one, and
+/// never a tree this function takes.
 fn retire_home(worker: &WorkerCtx, home: &Home) -> HomeFate {
     let hold = |path: &Path| match install_txn::try_hold(path, Hold::Exclusive) {
         Ok(Some(held)) => Ok(held),
@@ -398,7 +399,7 @@ fn retire_home(worker: &WorkerCtx, home: &Home) -> HomeFate {
     if let Err(error) = std::fs::remove_dir(home.root()) {
         return HomeFate::Refused(format!("remove: {}", error.kind()));
     }
-    match install_txn::durable_remove(home.root()) {
+    match install_txn::flush_directory_on_disk(install_txn::directory_of(home.root())) {
         Ok(()) => HomeFate::Removed,
         Err(failure) => HomeFate::Refused(format!("flush: {}", failure.error.kind())),
     }
