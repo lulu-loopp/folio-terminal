@@ -13411,6 +13411,15 @@ impl<B: Backend> Runtime<'_, B> {
             // The pane debt is kept apart for the reason `tick_owes_a_present`
             // gives it a name of its own below.
             //
+            // What the comparisons record is the picture at this look's `now`,
+            // and the turn that draws it samples the real clock
+            // (`Runtime::refresh_chrome`), less than a frame later when the look
+            // stood on a refused turn (review N4). That is bounded: a tween
+            // sampled later is only further along, so its landing is not lost,
+            // and at worst the next look asks once more for a frame the chrome
+            // then declines; a periodic mark (the breath, the halo) can show a
+            // step a frame old until its next change.
+            //
             // The pictures' and the cards' debts are folded in here, at the look,
             // and not read again at the ask. Both are written by other passes
             // and stand for as long as those passes say so — a card the throttle
