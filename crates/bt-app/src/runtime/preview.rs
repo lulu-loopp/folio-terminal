@@ -13133,7 +13133,7 @@ impl<B: Backend> Runtime<'_, B> {
         let place = self.window.observed_place;
         let mut raised: Vec<AttentionDelivery> = Vec::new();
         let switches = self.notification_switches();
-        settle_attention(
+        let claims_changed = settle_attention(
             &mut self.window.tabs,
             self.window.active_tab,
             place,
@@ -13158,7 +13158,8 @@ impl<B: Backend> Runtime<'_, B> {
         // with nothing moved, and the refusal booked one empty turn more.
         // Behind that gate the look also never ran for the length of a burst.
         //
-        // So the look stands under the rate alone, at most once a frame, and
+        // So the look stands under the strip's own rate, at most once a frame
+        // (and on a turn a claim changed, below), and
         // `strip_animation_ticked_at` is when it last looked. What it finds is
         // written down ([`WindowRuntime::strip_owes_a_frame`]) rather than
         // asked about on the spot, because the comparisons record as they
@@ -13166,11 +13167,23 @@ impl<B: Backend> Runtime<'_, B> {
         // recorded as drawn, and only the written flag still knows it is owed.
         // The ask below reads the flag on every turn while it stands, so the
         // turn the gate admits draws it whether or not the rate is due again.
-        if strip_animation_tick_is_due(
-            self.window.strip_animation_ticked_at,
-            now,
-            self.window.frame_clock.interval(),
-        ) {
+        //
+        // **And it looks on any turn a tab's claim changed, whatever the rate
+        // says** (review N1). A claim is state that changes between looks — a
+        // credential running out in the settle pass above, a place withdrawn by
+        // the drain or the hook pipe — and the look is the only thing that
+        // notices what it changed on the glass. When the tab's mark was moving
+        // only because of that claim (the waiting halo, which pulses for as long
+        // as the place stands), nothing else books the next look once the claim
+        // is gone, and the halo would stand frozen mid-breath. Claims change on
+        // events, not on turns, so this is bounded by them.
+        if claims_changed
+            || strip_animation_tick_is_due(
+                self.window.strip_animation_ticked_at,
+                now,
+                self.window.frame_clock.interval(),
+            )
+        {
             self.window.strip_animation_ticked_at = Some(now);
             let active = self.window.active_tab;
             let motion = self.app.motion;
@@ -13226,6 +13239,9 @@ impl<B: Backend> Runtime<'_, B> {
                     tab.last_drawn_mark = Some(showing);
                     owes_frame = true;
                 }
+                // What the settle pass compares against on every turn, to know
+                // that a claim changed since this look.
+                tab.last_looked_claim = Some(tab.fleet_claim_for(index == active));
             }
             // The `˅` is the strip's own and belongs to no tab, so it settles its
             // debt outside the loop — but on exactly the same terms: the angle that

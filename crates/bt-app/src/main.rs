@@ -8872,6 +8872,14 @@ struct TabState {
     /// channel has *stopped* — a thing no "is it moving?" test can ever see,
     /// because by the time it matters, nothing is.
     last_drawn_mark: Option<seats::TabMarkState>,
+    /// The claim ([`TabState::fleet_claim_for`]) the strip's look last saw for
+    /// this tab; `None` before its first look.
+    ///
+    /// Written by the look and read by
+    /// [`runtime::attention::settle_attention`] on every turn: a claim that
+    /// differs from it changed since the look, and the strip looks again on
+    /// that turn whatever its rate says (T-STRIP-ASKS-ON-ITS-TICK review N1).
+    last_looked_claim: Option<StatusClaim>,
     /// When this tab's mark-slot animations started counting.
     ///
     /// Per tab rather than per window, which is what CSS does: an animation
@@ -34641,6 +34649,7 @@ fn assemble_tab_state(
         ring_tween: None,
         ring_sweep: None,
         last_drawn_mark: None,
+        last_looked_claim: None,
         animation_epoch: Instant::now(),
         flip: FlipTween::default(),
         landing: LandTween::default(),
