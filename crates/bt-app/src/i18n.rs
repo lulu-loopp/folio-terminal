@@ -3724,9 +3724,9 @@ impl Text {
             ),
             Self::DescStartAtSignInElsewhere => pick(
                 lang,
-                "Starts Folio when you sign in. The entry starts the copy in another folder.",
+                "Starts the copy of Folio in another folder when you sign in.",
                 // zh: pending T-START-AT-LOGON-SWITCH
-                "Starts Folio when you sign in. The entry starts the copy in another folder.",
+                "Starts the copy of Folio in another folder when you sign in.",
             ),
             Self::DescStartAtSignInTurnedOff => pick(
                 lang,
