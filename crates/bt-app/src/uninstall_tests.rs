@@ -2172,7 +2172,9 @@ fn uninstall_update_rows_remove_only_ours() {
 /// RED (0.4.10 plan row 68e, section 10.4) — **both verbs retire a recorded home whose bundle is
 /// gone, and leave every other**: from the data root's record, a home beside a gone bundle holding
 /// Folio's three files is removed and its entry dropped; a home beside a bundle that is there is
-/// left, naming that bundle; a home holding a journal is left for its rescue; this copy's own home
+/// left, naming that bundle; a home holding a journal is left for its rescue; a home another copy
+/// holds is left as in use, and one whose app cannot be checked (a folder where its program is) as
+/// unchecked, each in a sentence that says just that (review N8); this copy's own home
 /// is removed whole by the row's first line and kept in the record, untouched. None is a refusal,
 /// and a second run says nothing of the removed one. (Homebrew's zap is `--uninstall-cleanup`
 /// from the Caskroom's copy: the first case.)
@@ -2210,11 +2212,15 @@ fn the_cleanup_retires_a_recorded_home_whose_bundle_is_gone() {
         let gone = home_of("Folio Beta");
         let live = home_of("Folio Dev");
         let in_flight = home_of("Folio Old");
+        let in_use = home_of("Folio Held");
+        let unchecked = home_of("Folio Odd");
         for (home, files) in [
             (&own, &["lock"][..]),
             (&gone, &["admission", "lock", "recover.log"][..]),
             (&live, &["lock"][..]),
             (&in_flight, &["lock", "journal.json"][..]),
+            (&in_use, &["admission", "lock"][..]),
+            (&unchecked, &["lock"][..]),
         ] {
             fs::create_dir_all(home.root()).unwrap();
             for file in files {
@@ -2224,9 +2230,11 @@ fn the_cleanup_retires_a_recorded_home_whose_bundle_is_gone() {
         let live_program = live.installed_program().unwrap();
         fs::create_dir_all(live_program.parent().unwrap()).unwrap();
         fs::write(&live_program, b"live").unwrap();
+        fs::create_dir_all(unchecked.installed_program().unwrap()).unwrap();
         let record = scope.data[0].join(crate::update_homes::HOMES_RECORD);
         fs::create_dir_all(&scope.data[0]).unwrap();
-        let entries = [&own, &gone, &live, &in_flight].map(|home| home.root().to_path_buf());
+        let entries = [&own, &gone, &live, &in_flight, &in_use, &unchecked]
+            .map(|home| home.root().to_path_buf());
         fs::write(
             &record,
             serde_json::to_vec(&serde_json::json!({ "version": 1, "homes": entries })).unwrap(),
@@ -2235,7 +2243,14 @@ fn the_cleanup_retires_a_recorded_home_whose_bundle_is_gone() {
         scope.update_home = Some(own.root().to_path_buf());
         scope.update_homes_records = vec![record.clone()];
 
+        let running = bt_platform::install_txn::try_hold(
+            &in_use.admission(),
+            bt_platform::install_txn::Hold::Shared,
+        )
+        .unwrap()
+        .expect("the test holds the admission first, as a running copy does");
         let report = execute(&scope, purge, homes_system(&scope));
+        drop(running);
         let fate_of = |home: &crate::update_txn::Home| {
             let mark = format!("{row}: {}", home.root().display());
             report
@@ -2255,6 +2270,21 @@ fn the_cleanup_retires_a_recorded_home_whose_bundle_is_gone() {
             fate_of(&in_flight),
             [Fate::Kept(Text::CleanupUpdateHomeInFlight)]
         );
+        assert_eq!(fate_of(&in_use), [Fate::Kept(Text::CleanupUpdateHomeInUse)]);
+        assert_eq!(
+            fate_of(&unchecked),
+            [Fate::Kept(Text::CleanupUpdateHomeUnchecked)]
+        );
+        assert!(
+            report
+                .stdout()
+                .contains(Text::CleanupUpdateHomeInUse.in_lang(Lang::English))
+                && report
+                    .stdout()
+                    .contains(Text::CleanupUpdateHomeUnchecked.in_lang(Lang::English)),
+            "{}",
+            report.stdout()
+        );
         let refused: Vec<String> = report
             .entries
             .iter()
@@ -2265,13 +2295,21 @@ fn the_cleanup_retires_a_recorded_home_whose_bundle_is_gone() {
         assert!(!own.root().exists() && !gone.root().exists());
         assert!(live.root().join("lock").is_file());
         assert!(in_flight.root().join("journal.json").is_file());
+        assert!(in_use.root().join("admission").is_file() && in_use.root().join("lock").is_file());
+        assert!(unchecked.root().join("lock").is_file());
         assert!(purge || record.exists(), "the record is kept with the data");
         if record.exists() {
             let left: serde_json::Value =
                 serde_json::from_slice(&fs::read(&record).unwrap()).unwrap();
             assert_eq!(
                 left["homes"],
-                serde_json::json!([own.root(), live.root(), in_flight.root()]),
+                serde_json::json!([
+                    own.root(),
+                    live.root(),
+                    in_flight.root(),
+                    in_use.root(),
+                    unchecked.root()
+                ]),
                 "the removed home's entry dropped, this copy's own untouched"
             );
             let second = execute(&scope, purge, homes_system(&scope));

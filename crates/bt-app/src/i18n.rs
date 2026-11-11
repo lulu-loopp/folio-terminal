@@ -369,8 +369,12 @@ text_entries! {
     /// A recorded macOS update home beside a gone app, left because it holds an update that is
     /// not finished (0.4.10 plan row 68e).
     CleanupUpdateHomeInFlight,
-    /// A recorded macOS update home whose app is on a volume that is not there, left (row 68e).
-    CleanupUpdateHomeAway,
+    /// A recorded macOS update home whose app could not be checked — on a volume that is not
+    /// there, or a path the system will not say about — left (row 68e, review N8).
+    CleanupUpdateHomeUnchecked,
+    /// A recorded macOS update home whose `lock` or `admission` another copy holds, left (row
+    /// 68e, review N8).
+    CleanupUpdateHomeInUse,
     CleanupRefused,
     CleanupRoot,
     CleanupRunning,
@@ -5611,10 +5615,15 @@ impl Text {
                 "left (an update is unfinished; it finishes or is undone at the next login)",
                 "left (an update is unfinished; it finishes or is undone at the next login)", // zh: pending 68e
             ),
-            Self::CleanupUpdateHomeAway => pick(
+            Self::CleanupUpdateHomeUnchecked => pick(
                 lang,
-                "left (its app is on a volume that is not connected)",
-                "left (its app is on a volume that is not connected)", // zh: pending 68e
+                "left (its app could not be checked)",
+                "left (its app could not be checked)", // zh: pending 68e
+            ),
+            Self::CleanupUpdateHomeInUse => pick(
+                lang,
+                "left (another copy is using it)",
+                "left (another copy is using it)", // zh: pending 68e
             ),
             Self::CleanupRefused => pick(lang, "refused", "未能移除"),
             Self::CleanupRoot => pick(
@@ -6822,12 +6831,14 @@ impl Text {
 
     #[cfg(test)]
     const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
-        // zh: pending 68e — the two lines the uninstall says of a recorded macOS update home it
-        // leaves (0.4.10 plan row 68e, E9); row 70's Chinese pass takes them.
+        // zh: pending 68e — the three lines the uninstall says of a recorded macOS update home it
+        // leaves (0.4.10 plan row 68e, E9 and review N8); row 70's Chinese pass takes them.
         (Self::CleanupUpdateHomeInFlight, HostPlatform::Windows),
         (Self::CleanupUpdateHomeInFlight, HostPlatform::MacOs),
-        (Self::CleanupUpdateHomeAway, HostPlatform::Windows),
-        (Self::CleanupUpdateHomeAway, HostPlatform::MacOs),
+        (Self::CleanupUpdateHomeUnchecked, HostPlatform::Windows),
+        (Self::CleanupUpdateHomeUnchecked, HostPlatform::MacOs),
+        (Self::CleanupUpdateHomeInUse, HostPlatform::Windows),
+        (Self::CleanupUpdateHomeInUse, HostPlatform::MacOs),
     ];
 }
 

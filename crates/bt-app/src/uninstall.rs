@@ -1429,8 +1429,8 @@ fn recorded_update_homes_of(
             HomeFate::LeftLive(bundle) => Fate::Left(vec![bundle]),
             HomeFate::LeftNotOnlyOurs(standing) => Fate::LeftNotOurs(standing),
             HomeFate::LeftInFlight => Fate::Kept(Text::CleanupUpdateHomeInFlight),
-            HomeFate::LeftOwnerUnknown => Fate::Kept(Text::CleanupUpdateHomeAway),
-            HomeFate::LeftInUse => Fate::Left(vec![home.clone()]),
+            HomeFate::LeftOwnerUnknown => Fate::Kept(Text::CleanupUpdateHomeUnchecked),
+            HomeFate::LeftInUse => Fate::Kept(Text::CleanupUpdateHomeInUse),
             HomeFate::Refused(reason) => Fate::Refused(Why::Other(reason)),
             // Nothing stands to be said: the entry was dropped. A seed's and a trial's fates are
             // the carry pass's, which this sweep has neither of.
