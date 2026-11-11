@@ -196,7 +196,7 @@ pub(crate) enum HomeFate {
 }
 
 impl HomeFate {
-    fn fate_said(&self) -> String {
+    fn home_fate_said(&self) -> String {
         match self {
             Self::Removed => "removed".to_owned(),
             Self::Gone => "gone".to_owned(),
@@ -242,7 +242,7 @@ pub(crate) struct HomesSwept {
 impl HomesSwept {
     /// **The sweep's lines** — a home's own name and never its path, the record's state by its
     /// reason alone (whose words carry no path either).
-    pub(crate) fn lines(&self) -> Vec<String> {
+    pub(crate) fn home_lines(&self) -> Vec<String> {
         let mut lines = Vec::new();
         match &self.record {
             RecordState::Kept => {}
@@ -273,7 +273,7 @@ impl HomesSwept {
             } else {
                 name
             };
-            lines.push(format!("BT_UPDATE_HOMES {said} {}", fate.fate_said()));
+            lines.push(format!("BT_UPDATE_HOMES {said} {}", fate.home_fate_said()));
         }
         if lines.is_empty() {
             lines.push("BT_UPDATE_HOMES none".to_owned());
@@ -568,7 +568,7 @@ pub(crate) fn run_update_homes_step(ctx: &WorkerCtx) -> Option<MemberAnswer<()>>
             crate::update_trial::defer,
         )
     };
-    Some(UPDATE_HOMES_SAID.lines_answer(swept.lines(), &crate::diagnostics::stderr_line))
+    Some(UPDATE_HOMES_SAID.lines_answer(swept.home_lines(), &crate::diagnostics::stderr_line))
 }
 
 #[cfg(test)]

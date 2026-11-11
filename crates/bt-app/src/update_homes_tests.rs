@@ -118,7 +118,7 @@ fn homes_gate_never_asked(writer: Writer) -> bool {
 /// The lines one sweep says through a fresh book, and the lines a second sweep's answer adds.
 fn homes_lines_said(book: &OrphansSaid, swept: &HomesSwept) -> Vec<String> {
     let said = std::cell::RefCell::new(Vec::new());
-    let _ = book.lines_answer(swept.lines(), &|line| said.borrow_mut().push(line));
+    let _ = book.lines_answer(swept.home_lines(), &|line| said.borrow_mut().push(line));
     said.into_inner()
 }
 
@@ -732,10 +732,10 @@ fn the_home_sweep_waits_for_the_trials_commit() {
         );
         assert_eq!(trial.pending(), vec![Writer::OrphanSweep]);
         assert!(
-            held.lines()
+            held.home_lines()
                 .contains(&"BT_UPDATE_HOMES record held".to_owned()),
             "{:?}",
-            held.lines()
+            held.home_lines()
         );
         let dropped = sweep_recorded_homes(worker, &only_gone, None, None, &what_stands, |_| false);
         assert_eq!(dropped.record, RecordState::Kept);
@@ -839,7 +839,11 @@ fn the_update_homes_lines_name_no_path() {
         let swept = sweep_recorded_homes(worker, &record, None, None, &what_stands, |_| false);
         std::fs::write(&record, b"\x00not a record").unwrap();
         let unread = sweep_recorded_homes(worker, &record, None, None, &what_stands, |_| false);
-        let lines: Vec<String> = swept.lines().into_iter().chain(unread.lines()).collect();
+        let lines: Vec<String> = swept
+            .home_lines()
+            .into_iter()
+            .chain(unread.home_lines())
+            .collect();
         assert_eq!(lines.len(), 7, "{lines:?}");
         let root_said = root.display().to_string();
         for line in &lines {
@@ -849,7 +853,7 @@ fn the_update_homes_lines_name_no_path() {
                 assert!(!line.contains(part), "{line} names {part}");
             }
         }
-        let body = crate::test_support::method_body("HomesSwept", "lines");
+        let body = crate::test_support::method_body("HomesSwept", "home_lines");
         assert!(
             !body.contains(".display()") && !body.contains("{home"),
             "the lines name no path: {body}"
