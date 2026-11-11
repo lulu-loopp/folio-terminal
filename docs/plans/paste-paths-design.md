@@ -333,6 +333,12 @@ not manage:
 This is what makes §3.4's browser-image case a measured question rather than a
 free success.
 
+> **Superseded by row 81 (owner, 2026-11-09)** for the clipboard on Windows: a
+> promise on the clipboard is now a fourth rung, rendered on a worker of its own
+> and pasted as paths — `docs/plans/clipboard-promise-design.md`. The drag half
+> of this ruling stands (dragging a promise onto a pane is plan row 83), and so
+> does the macOS clipboard's refusal.
+
 **Ruling ⑥: the old door stays.** `clipboard_text()` is not replaced and not
 re-pointed. The Markdown editor's paste (`main.rs:60428`), the palette and
 search fields, the settings text fields (`main.rs:47228`) and the web address

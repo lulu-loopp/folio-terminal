@@ -372,6 +372,13 @@ pub(crate) trait WindowHost {
         lane: &crate::clipboard_lane::ClipboardLane,
         ask: crate::clipboard_lane::Ask,
     ) -> Result<crate::clipboard_lane::ClipboardRequest, crate::clipboard_lane::Declined>;
+    /// **This window's clipboard door itself** (plan row 81): what a promise the clipboard
+    /// offered is rendered through, on the `clipboard-promise` worker — the door
+    /// [`Self::clipboard`]'s requests are served through.
+    fn clipboard_door(&self) -> Arc<dyn crate::clipboard_lane::ClipboardDoor>;
+    /// **The folder a pasted picture or promise is staged in** (plan row 81): the machine's
+    /// (`clipboard_picture::directory`), or a test's own, so no test sweeps the machine's.
+    fn staging_folder(&self) -> std::path::PathBuf;
     /// **One hand-off to the system, put on the OS hand-off lane** for this window — or why the
     /// window could not be named to the lane's door.
     fn hand_off(
@@ -578,7 +585,13 @@ impl WindowHost for Arc<Window> {
         lane: &crate::clipboard_lane::ClipboardLane,
         ask: crate::clipboard_lane::Ask,
     ) -> Result<crate::clipboard_lane::ClipboardRequest, crate::clipboard_lane::Declined> {
-        lane.submit(Arc::new(crate::clipboard_lane::PlatformClipboard), ask)
+        lane.submit(self.clipboard_door(), ask)
+    }
+    fn clipboard_door(&self) -> Arc<dyn crate::clipboard_lane::ClipboardDoor> {
+        Arc::new(crate::clipboard_lane::PlatformClipboard)
+    }
+    fn staging_folder(&self) -> std::path::PathBuf {
+        crate::clipboard_picture::directory()
     }
     fn hand_off(
         &self,

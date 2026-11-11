@@ -565,7 +565,7 @@ impl<B: Backend> Runtime<'_, B> {
                 "the clipboard lane: a paste was refused on the window: {PASTES_OWED} pastes are \
                  already owed"
             ));
-            return self.say_the_clipboard_busy(into);
+            return self.say_the_clipboard_busy(into, PasteBusy::DeskFull);
         }
         let request = match self.ask_the_clipboard(ask) {
             Ok(request) => request,
@@ -574,7 +574,12 @@ impl<B: Backend> Runtime<'_, B> {
                     "the clipboard lane refused a paste at its door: {}",
                     declined.reason()
                 ));
-                return self.say_the_clipboard_busy(into);
+                let why = match declined {
+                    Declined::LaneFull => PasteBusy::LaneFull,
+                    Declined::LaneGone => PasteBusy::LaneGone,
+                    Declined::NotStarted(_) => PasteBusy::NotStarted,
+                };
+                return self.say_the_clipboard_busy(into, why);
             }
         };
         let id = request.id();
@@ -678,12 +683,14 @@ impl<B: Backend> Runtime<'_, B> {
                 "the clipboard lane: a paste was cancelled: {}",
                 why.words()
             ));
-            if why.is_the_clipboard_busy() && busy.is_none() {
-                busy = Some(into);
+            if let Some(busy_why) = why.busy()
+                && busy.is_none()
+            {
+                busy = Some((into, busy_why));
             }
         }
-        if let Some(into) = busy {
-            self.say_the_clipboard_busy(into)?;
+        if let Some((into, why)) = busy {
+            self.say_the_clipboard_busy(into, why)?;
         }
         let mut at = 0;
         while at < self.window.clipboard.pastes.len() {
@@ -847,17 +854,17 @@ impl<B: Backend> Runtime<'_, B> {
     fn spend_paste(&mut self, into: PasteInto, ended: ClipboardTerminal) -> Result<()> {
         match into {
             PasteInto::Terminal(target) => match ended {
-                Terminal::Done(Reply::Payload(payload)) => {
-                    self.apply_clipboard_payload(target, payload)
+                Terminal::Done(Reply::Payload { sequence, payload }) => {
+                    self.apply_clipboard_payload(target, sequence, payload)
                 }
                 Terminal::Failed(_) | Terminal::WorkerGone => {
                     if self.live_paste_target(target).is_some() {
-                        self.toast(
-                            toast::ToastKind::Error,
-                            toast::ToastAnchor::Window,
-                            None,
-                            i18n::Text::PasteClipboardRead.text().to_owned(),
-                        )
+                        self.refuse_paste(PasteRefusal {
+                            kind: RefusedKind::ReadFailed {
+                                worker_gone: matches!(ended, Terminal::WorkerGone),
+                            },
+                            from: PasteFrom::Clipboard(None),
+                        })
                     } else {
                         Ok(())
                     }
@@ -901,25 +908,40 @@ impl<B: Backend> Runtime<'_, B> {
     }
 
     /// **"The clipboard was busy", said once on screen** — for a terminal paste only: a field and
-    /// the quick edit say nothing about a clipboard they could not read, on their own terms.
-    fn say_the_clipboard_busy(&mut self, into: PasteInto) -> Result<()> {
+    /// the quick edit say nothing about a clipboard they could not read, on their own terms. `why`
+    /// is what the refusal line says.
+    fn say_the_clipboard_busy(&mut self, into: PasteInto, why: PasteBusy) -> Result<()> {
         let PasteInto::Terminal(target) = into else {
             return Ok(());
         };
         if self.live_paste_target(target).is_none() {
             return Ok(());
         }
+        self.refuse_paste(PasteRefusal {
+            kind: RefusedKind::Busy(why),
+            from: PasteFrom::Clipboard(None),
+        })
+    }
+
+    /// **The one door a refused paste is said through** (plan row 81): one line in
+    /// `diagnostics.log` — the refusal's kind, its road and the clipboard's sequence, never a path
+    /// or anything pasted ([`PasteRefusal::refusal_words`]) — and the notice on screen
+    /// ([`RefusedKind::toast_text`]). Whether the paste's pane is still there is each caller's
+    /// question, asked before it comes here, as it was before this door.
+    pub(in crate::runtime) fn refuse_paste(&mut self, refusal: PasteRefusal) -> Result<()> {
+        self.window.window.note(&refusal.refusal_words());
         self.toast(
             toast::ToastKind::Error,
             toast::ToastAnchor::Window,
             None,
-            i18n::Text::PasteClipboardBusy.text().to_owned(),
+            refusal.kind.toast_text(),
         )
     }
 
     fn apply_clipboard_payload(
         &mut self,
         target: PasteTarget,
+        sequence: Option<bt_platform::ClipboardSequence>,
         payload: bt_platform::ClipboardPayload,
     ) -> Result<()> {
         let Some(active) = self.live_paste_target(target) else {
@@ -940,15 +962,22 @@ impl<B: Backend> Runtime<'_, B> {
         // refusal notice still leaves by the one door every paste's notices leave by
         // — and the line below is then an ordinary paste with nothing in it.
         let offered = std::mem::take(&mut prepared.picture);
+        // **A promise is lifted out for the picture's reason** (plan row 81): what it pastes is
+        // the paths of files nobody has written yet, and writing them is the source's render,
+        // on a worker of its own.
+        let promise = prepared.promise.take();
         // Whether it reached a shell is not asked here: a clipboard paste goes
         // to the pane that already holds the keyboard, so there is no focus for
         // it to move (owner's ruling 2026-09-17 changed the two *drop* roads and
         // left this one alone).
-        self.deliver_paste(target, prepared, "write clipboard paste to PTY")?;
+        self.deliver_paste(target, prepared, PasteFrom::Clipboard(sequence))?;
+        if let Some(promise) = promise {
+            return self.stage_clipboard_promise(target, sequence, promise);
+        }
         if offered.is_empty() {
             return Ok(());
         }
-        self.save_clipboard_picture(target, offered)
+        self.save_clipboard_picture(target, sequence, offered)
     }
 
     /// **The same paste, with the paths already in hand** — what a drop onto a
@@ -988,12 +1017,13 @@ impl<B: Backend> Runtime<'_, B> {
     /// function's first paragraph makes about a drop, said about a third way of
     /// coming by a path. `context` is all they do not share: it names the write
     /// for a reader of the error, and a picture that could not reach a shell is
-    /// not a drop that could not.
+    /// not a drop that could not. Since plan row 81 it is `from`, which names the write and the
+    /// road a refusal line says: a drop, a drag, a saved picture or a rendered promise.
     pub(in crate::runtime) fn paste_paths_into(
         &mut self,
         target: PasteTarget,
         paths: Vec<PathBuf>,
-        context: &'static str,
+        from: PasteFrom,
     ) -> Result<bool> {
         let Some(index) = self.live_paste_target(target) else {
             return Ok(false);
@@ -1002,7 +1032,7 @@ impl<B: Backend> Runtime<'_, B> {
         let recipient = leaf.launch.paste_recipient.clone();
         let leading_space = input_line_needs_a_space_first(&leaf.session);
         let prepared = prepare_dropped_paste(paths, &recipient, leading_space);
-        self.deliver_paste(target, prepared, context)
+        self.deliver_paste(target, prepared, from)
     }
 
     /// **Name the shell in one of this window's seats**, as a paste's
@@ -1070,8 +1100,9 @@ impl<B: Backend> Runtime<'_, B> {
         &mut self,
         target: PasteTarget,
         prepared: PreparedClipboardPaste,
-        context: &'static str,
+        from: PasteFrom,
     ) -> Result<bool> {
+        let context = from.write_context();
         // **The address is checked before anything is said**, which is why this
         // stands above the notice rather than beside the write (review X-1): a
         // card about a path that could not be spelled for a shell that is no
@@ -1079,13 +1110,8 @@ impl<B: Backend> Runtime<'_, B> {
         let Some(active) = self.live_paste_target(target) else {
             return Ok(false);
         };
-        if let Some(notice) = prepared.notice {
-            self.toast(
-                toast::ToastKind::Error,
-                toast::ToastAnchor::Window,
-                None,
-                notice,
-            )?;
+        if let Some(kind) = prepared.refused {
+            self.refuse_paste(PasteRefusal { kind, from })?;
         }
         let Some(text) = prepared.text else {
             return Ok(false);
@@ -1588,7 +1614,10 @@ pub(crate) fn prepare_clipboard_paste(
             let insertion = shell_literal::paths_text(&paths, recipient, leading_space);
             PreparedClipboardPaste {
                 text: (!insertion.text.is_empty()).then_some(insertion.text),
-                notice: shell_literal::refusal_notice(&insertion.refused),
+                refused: (!insertion.refused.is_empty()).then_some(RefusedKind::Paths {
+                    refused: insertion.refused,
+                    of: paths.len(),
+                }),
                 ..PreparedClipboardPaste::default()
             }
         }
@@ -1606,13 +1635,22 @@ pub(crate) fn prepare_clipboard_paste(
             picture: offered,
             ..PreparedClipboardPaste::default()
         },
+        // **The fourth rung** (plan row 81): files another program promises to write, pasted as
+        // their paths once a worker has had them written — `Runtime::stage_clipboard_promise`.
+        ClipboardPayload::Promise(promise) => PreparedClipboardPaste {
+            promise: Some(promise),
+            ..PreparedClipboardPaste::default()
+        },
         ClipboardPayload::Nothing => PreparedClipboardPaste::default(),
-        ClipboardPayload::Refused(bt_platform::UnsupportedKind::Promise) => {
-            PreparedClipboardPaste {
-                notice: Some(i18n::Text::PasteClipboardPromise.text().to_owned()),
-                ..PreparedClipboardPaste::default()
-            }
-        }
+        ClipboardPayload::Refused(bt_platform::UnsupportedKind::Promise {
+            picture_passed_over,
+        }) => PreparedClipboardPaste {
+            refused: Some(RefusedKind::Promise {
+                why: PromiseWhy::Unsupported,
+                picture_passed_over,
+            }),
+            ..PreparedClipboardPaste::default()
+        },
     }
 }
 
@@ -1890,10 +1928,239 @@ impl Withdrawn {
         }
     }
 
-    /// Whether the person is told on screen that the clipboard was busy: when the clipboard is
-    /// what kept the paste, not the person's own moving on.
-    fn is_the_clipboard_busy(self) -> bool {
-        matches!(self, Self::Deadline | Self::HeldOverTheCap)
+    /// Whether the person is told on screen that the clipboard was busy, and the refusal line's
+    /// word for it: when the clipboard is what kept the paste, not the person's own moving on.
+    fn busy(self) -> Option<PasteBusy> {
+        match self {
+            Self::TargetGone => None,
+            Self::Deadline => Some(PasteBusy::Deadline),
+            Self::HeldOverTheCap => Some(PasteBusy::HeldOverTheCap),
+        }
+    }
+}
+
+/// **One paste refused, as the person is told and as the log says it** (plan row 81,
+/// T-PASTE-REFUSAL-SAYS-WHY): what was refused, and the road it came by. Said through
+/// [`Runtime::refuse_paste`], the one door every paste refusal leaves by.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PasteRefusal {
+    pub(crate) kind: RefusedKind,
+    pub(crate) from: PasteFrom,
+}
+
+/// **What a paste refused**, a value: the notice's words and the log line's are both read off it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum RefusedKind {
+    /// Paths no shell in this pane could be handed, each with its reason, of `of` offered. The
+    /// paths are the notice's (the person's own file names, beside the reason), never the line's.
+    Paths {
+        refused: Vec<(PathBuf, shell_literal::Refusal)>,
+        of: usize,
+    },
+    /// A promise that was not pasted, and whether a picture offered beside it did not render.
+    Promise {
+        why: PromiseWhy,
+        picture_passed_over: bool,
+    },
+    /// The clipboard's read failed, or was lost with the lane's worker.
+    ReadFailed { worker_gone: bool },
+    /// The clipboard was busy.
+    Busy(PasteBusy),
+    /// A picture whose file was not written.
+    PictureNotSaved(PictureNotSaved),
+}
+
+/// **Why a promise was not pasted.**
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PromiseWhy {
+    /// The clipboard offered a promise this platform does not render, or whose descriptor did not
+    /// read.
+    Unsupported,
+    /// Its render refused, for this reason.
+    Refused(bt_platform::clipboard_promise::PromiseRefused),
+    /// Every staging worker's place was taken.
+    WorkersBusy,
+    /// The staging worker could not be started.
+    NotStarted,
+}
+
+/// **Why the clipboard was busy.**
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PasteBusy {
+    /// The window already owed [`PASTES_OWED`] pastes.
+    DeskFull,
+    /// The lane's ledger owed all it may ([`Declined::LaneFull`]).
+    LaneFull,
+    /// The lane's worker had ended ([`Declined::LaneGone`]).
+    LaneGone,
+    /// The thread door would not start the lane's worker ([`Declined::NotStarted`]).
+    NotStarted,
+    /// The clipboard did not answer within [`crate::clipboard_lane::PASTE_DEADLINE`].
+    Deadline,
+    /// What the pane held behind the paste passed what a pane holds.
+    HeldOverTheCap,
+}
+
+/// **Why a picture's file was not written.**
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PictureNotSaved {
+    /// Every staging worker's place was taken.
+    WorkersBusy,
+    /// The staging worker could not be started.
+    NotStarted,
+    /// The encode or the write failed (its reason is the line `adopt_clipboard_picture` says).
+    SaveFailed,
+}
+
+/// **The road a paste came by** (plan row 81) — and, for the clipboard's three, the clipboard's
+/// own count of its changes at the read: what names the write for a reader of an error
+/// ([`Self::write_context`]) and what a refusal line says.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PasteFrom {
+    /// The clipboard's text or files, pasted as read.
+    Clipboard(Option<bt_platform::ClipboardSequence>),
+    /// The file a clipboard picture was saved to.
+    Picture(Option<bt_platform::ClipboardSequence>),
+    /// The files a clipboard promise was rendered into.
+    Promise(Option<bt_platform::ClipboardSequence>),
+    /// Files dropped onto a pane.
+    Drop,
+    /// A path dragged out of Folio's own files onto a pane.
+    Drag,
+    /// A path a files column's *Insert path into terminal* sent (review N7).
+    Insert,
+}
+
+impl PasteFrom {
+    /// The write's name, for a reader of the error a failed write raises.
+    pub(crate) fn write_context(self) -> &'static str {
+        match self {
+            Self::Clipboard(_) => "write clipboard paste to PTY",
+            Self::Picture(_) => "write clipboard picture path to PTY",
+            Self::Promise(_) => "write clipboard promise paths to PTY",
+            Self::Drop => "write dropped paths to PTY",
+            Self::Drag => "write dragged path to PTY",
+            Self::Insert => "write inserted path to PTY",
+        }
+    }
+
+    /// The road's word in a refusal line.
+    fn road_words(self) -> &'static str {
+        match self {
+            Self::Clipboard(_) => "clipboard",
+            Self::Picture(_) => "picture",
+            Self::Promise(_) => "promise",
+            Self::Drop => "drop",
+            Self::Drag => "drag",
+            Self::Insert => "insert",
+        }
+    }
+
+    /// The clipboard's sequence in a refusal line: `none` for a road that read no clipboard, or
+    /// a read that did not say.
+    fn sequence_words(self) -> String {
+        match self {
+            Self::Clipboard(sequence) | Self::Picture(sequence) | Self::Promise(sequence) => {
+                sequence.map_or_else(|| "none".to_owned(), |sequence| sequence.0.to_string())
+            }
+            Self::Drop | Self::Drag | Self::Insert => "none".to_owned(),
+        }
+    }
+}
+
+impl RefusedKind {
+    /// **The notice's words** — the words each refusal said before plan row 81, and the two it
+    /// added: a picture offered beside a promise that did not render, and a promise too large.
+    pub(crate) fn toast_text(&self) -> String {
+        let text = match self {
+            Self::Paths { refused, .. } => {
+                return shell_literal::refusal_notice(refused)
+                    .expect("a paths refusal names at least one path");
+            }
+            Self::Promise {
+                why: PromiseWhy::Refused(refused),
+                ..
+            } if refused.is_too_large() => i18n::Text::PasteClipboardPromiseTooLarge,
+            Self::Promise {
+                picture_passed_over: true,
+                ..
+            } => i18n::Text::PasteClipboardPictureUnread,
+            Self::Promise { .. } => i18n::Text::PasteClipboardPromise,
+            Self::ReadFailed { .. } => i18n::Text::PasteClipboardRead,
+            Self::Busy(_) => i18n::Text::PasteClipboardBusy,
+            Self::PictureNotSaved(_) => i18n::Text::PasteClipboardPicture,
+        };
+        text.text().to_owned()
+    }
+
+    /// The kind and its detail, as the line says them: words and counts only.
+    fn kind_words(&self) -> String {
+        match self {
+            Self::Paths { refused, of } => {
+                let mut kinds: Vec<&'static str> = Vec::new();
+                for (_, reason) in refused {
+                    if !kinds.contains(&reason.log_word()) {
+                        kinds.push(reason.log_word());
+                    }
+                }
+                format!(
+                    "paths ({}, {} of {of} paths)",
+                    kinds.join(", "),
+                    refused.len()
+                )
+            }
+            Self::Promise {
+                why,
+                picture_passed_over,
+            } => {
+                let why = match why {
+                    PromiseWhy::Unsupported => "unsupported".to_owned(),
+                    PromiseWhy::Refused(refused) => refused.words(),
+                    PromiseWhy::WorkersBusy => "workers-busy".to_owned(),
+                    PromiseWhy::NotStarted => "not-started".to_owned(),
+                };
+                if *picture_passed_over {
+                    format!("promise ({why}, picture passed over)")
+                } else {
+                    format!("promise ({why})")
+                }
+            }
+            Self::ReadFailed { worker_gone: false } => "read-failed".to_owned(),
+            Self::ReadFailed { worker_gone: true } => "read-failed (worker-gone)".to_owned(),
+            Self::Busy(why) => format!(
+                "busy ({})",
+                match why {
+                    PasteBusy::DeskFull => "desk-full",
+                    PasteBusy::LaneFull => "lane-full",
+                    PasteBusy::LaneGone => "lane-gone",
+                    PasteBusy::NotStarted => "not-started",
+                    PasteBusy::Deadline => "deadline",
+                    PasteBusy::HeldOverTheCap => "held-over-the-cap",
+                }
+            ),
+            Self::PictureNotSaved(why) => format!(
+                "picture ({})",
+                match why {
+                    PictureNotSaved::WorkersBusy => "workers-busy",
+                    PictureNotSaved::NotStarted => "not-started",
+                    PictureNotSaved::SaveFailed => "not-saved",
+                }
+            ),
+        }
+    }
+}
+
+impl PasteRefusal {
+    /// **The refusal line**:
+    /// `paste refused: <kind>[ (<detail>)]; road=<road>; sequence=<N|none>` — built out of the
+    /// value's names and counts, so no path, no pasted text and no error string can reach it.
+    pub(crate) fn refusal_words(&self) -> String {
+        format!(
+            "paste refused: {}; road={}; sequence={}",
+            self.kind.kind_words(),
+            self.from.road_words(),
+            self.from.sequence_words()
+        )
     }
 }
 

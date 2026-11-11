@@ -453,6 +453,11 @@ text_entries! {
     /// The clipboard held a picture and the file Folio writes for it could not
     /// be written (§7.61).
     PasteClipboardPicture,
+    /// The clipboard offered a picture that did not render beside a promise that could not be
+    /// pasted either (plan row 81).
+    PasteClipboardPictureUnread,
+    /// The files a clipboard promise offered are past what one paste writes (plan row 81).
+    PasteClipboardPromiseTooLarge,
     PasteProfileOverride,
 
     // ── window chrome ──────────────────────────────────────────────────────
@@ -3445,6 +3450,16 @@ impl Text {
                 lang,
                 "The clipboard picture could not be saved. Copy again and retry.",
                 "剪贴板图片无法保存。重新复制后再试。",
+            ),
+            Self::PasteClipboardPictureUnread => pick(
+                lang,
+                "The clipboard picture could not be read. Copy again and retry.",
+                "剪贴板图片无法读取。重新复制后再试。",
+            ),
+            Self::PasteClipboardPromiseTooLarge => pick(
+                lang,
+                "The copied files are too many or too large to paste. Save them first.",
+                "复制的文件太多或太大，无法粘贴。请先保存。",
             ),
             Self::PasteProfileOverride => pick(
                 lang,
@@ -9795,6 +9810,8 @@ mod tests {
             Text::PasteClipboardRead,
             Text::PasteClipboardBusy,
             Text::PasteClipboardPicture,
+            Text::PasteClipboardPictureUnread,
+            Text::PasteClipboardPromiseTooLarge,
             Text::PasteProfileOverride,
         ];
         let width = toast::TOAST_WINDOW_WIDTH_LOGICAL_PX

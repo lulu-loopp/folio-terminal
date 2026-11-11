@@ -110,8 +110,11 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use bt_platform::ClipboardPayload;
+use std::path::Path;
+
 use bt_platform::admission::WorkerCtx;
+use bt_platform::clipboard_promise::{PromiseRefused, RenderProgress, RenderedPromise};
+use bt_platform::{ClipboardPayload, ClipboardRead, ClipboardSequence, PromisedEntry};
 
 use crate::lane::{self, Executor, Ledger, Owed, Queue, Refused, Relation, Saying, Terminal};
 use crate::{ClipboardWriteEffect, PasteTarget, PreviewSurface, TextFieldSeat};
@@ -177,7 +180,13 @@ pub(crate) enum Ask {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Reply {
     Text(String),
-    Payload(ClipboardPayload),
+    /// What a terminal paste reads, and the clipboard's own count of its changes at the read
+    /// (plan row 81): the number the refusal line says, so the read line and the refusal line
+    /// can be matched in `diagnostics.log`.
+    Payload {
+        sequence: Option<ClipboardSequence>,
+        payload: ClipboardPayload,
+    },
     Written,
 }
 
@@ -191,6 +200,27 @@ pub(crate) type ClipboardTerminal = Terminal<ClipboardId, Reply, String>;
 /// its own clipboard and never the machine's.
 pub(crate) trait ClipboardDoor: Send + Sync {
     fn serve(&self, worker: &WorkerCtx, ask: &Ask) -> Result<Reply, String>;
+    /// **Render a promise the clipboard offered into `into`** (plan row 81) — on the promise's
+    /// render thread (`worker`), never this lane's, and called only from
+    /// `clipboard_picture::stage_promise`: the door asks the source for the files `offer` lists,
+    /// the clipboard's own descriptor read again and compared, each step advancing `progress`. A
+    /// door whose clipboard answers no promise renders none.
+    fn render_promised_files(
+        &self,
+        worker: &WorkerCtx,
+        offer: &[PromisedEntry],
+        into: &Path,
+        progress: &RenderProgress,
+    ) -> Result<RenderedPromise, PromiseRefused> {
+        let _ = (worker, offer, into, progress);
+        Err(PromiseRefused::NotRendered(None))
+    }
+
+    /// **How long a render may go without a step before it is given up** (review N14):
+    /// [`crate::clipboard_picture::STALL_BOUND`]; a test's door says a shorter one.
+    fn stall_bound(&self) -> Duration {
+        crate::clipboard_picture::STALL_BOUND
+    }
 }
 
 /// **The machine's clipboard**: `bt_platform`'s three worker-only doors, one per ask.
@@ -202,11 +232,72 @@ impl ClipboardDoor for PlatformClipboard {
     fn serve(&self, worker: &WorkerCtx, ask: &Ask) -> Result<Reply, String> {
         match ask {
             Ask::Text => bt_platform::clipboard_text(worker).map(Reply::Text),
-            Ask::Payload => bt_platform::clipboard_payload(worker).map(Reply::Payload),
+            Ask::Payload => {
+                let read = bt_platform::clipboard_payload(worker);
+                crate::diagnostics::note(&clipboard_read_line(&read));
+                let sequence = read.sequence;
+                read.answer
+                    .map(|payload| Reply::Payload { sequence, payload })
+            }
             Ask::Write(text) => {
                 bt_platform::set_clipboard_text(worker, text).map(|()| Reply::Written)
             }
         }
+    }
+
+    fn render_promised_files(
+        &self,
+        worker: &WorkerCtx,
+        offer: &[PromisedEntry],
+        into: &Path,
+        progress: &RenderProgress,
+    ) -> Result<RenderedPromise, PromiseRefused> {
+        bt_platform::render_clipboard_promise(worker, offer, into, progress)
+    }
+}
+
+/// **The read line** (plan row 81): what one terminal paste's read of the clipboard answered,
+/// written on the worker after the read, whatever it answered —
+/// `clipboard read: sequence=<N|none> answered=<files(k)|text|picture(enc)|promise(k)|
+/// promise(unsupported)|nothing|failed>[; offered: <names>]`. The format names are listed only
+/// when the answer was nothing or a promise; names, never content: no text, no file name, no
+/// reason a failure gave (the lane's ledger says that).
+pub(crate) fn clipboard_read_line(read: &ClipboardRead) -> String {
+    let sequence = read
+        .sequence
+        .map_or_else(|| "none".to_owned(), |sequence| sequence.0.to_string());
+    let answered = match &read.answer {
+        Ok(ClipboardPayload::Files(files)) => format!("files({})", files.len()),
+        Ok(ClipboardPayload::Text(_)) => "text".to_owned(),
+        Ok(ClipboardPayload::Picture(pictures)) => match pictures.first() {
+            Some(picture) => format!("picture({})", picture_word(picture.encoding)),
+            None => "picture".to_owned(),
+        },
+        Ok(ClipboardPayload::Promise(promise)) => format!("promise({})", promise.entries.len()),
+        Ok(ClipboardPayload::Refused(bt_platform::UnsupportedKind::Promise { .. })) => {
+            "promise(unsupported)".to_owned()
+        }
+        Ok(ClipboardPayload::Nothing) => "nothing".to_owned(),
+        Err(_) => "failed".to_owned(),
+    };
+    if read.offered.is_empty() {
+        format!("clipboard read: sequence={sequence} answered={answered}")
+    } else {
+        format!(
+            "clipboard read: sequence={sequence} answered={answered}; offered: {}",
+            read.offered.join(", ")
+        )
+    }
+}
+
+/// A picture encoding's word in the read line.
+fn picture_word(encoding: bt_platform::PictureEncoding) -> &'static str {
+    match encoding {
+        bt_platform::PictureEncoding::Png => "png",
+        bt_platform::PictureEncoding::Tiff => "tiff",
+        bt_platform::PictureEncoding::Bitmap => "bitmap",
+        bt_platform::PictureEncoding::DibV5 => "dibv5",
+        bt_platform::PictureEncoding::Dib => "dib",
     }
 }
 
@@ -1130,5 +1221,119 @@ mod tests {
             "and the next drain the rest, in admission order"
         );
         assert!(a.is_empty() && b.is_empty(), "nothing is left owed");
+    }
+
+    /// PIN (plan row 81, T-PASTE-REFUSAL-SAYS-WHY) — **the read line says what the read answered,
+    /// at which sequence, and the format names only when the answer was nothing or a promise**:
+    /// never the text, a file's name or a failure's words.
+    ///
+    /// MUTATION: write `nothing` for a promise in `clipboard_read_line`, or leave the offered
+    /// names out — the promise's row goes red.
+    #[test]
+    fn the_read_line_says_what_the_read_answered_and_names_only_formats() {
+        use bt_platform::{
+            ClipboardPayload, ClipboardRead, ClipboardSequence, PictureBytes, PictureEncoding,
+            PromisedEntry, PromisedFiles, UnsupportedKind,
+        };
+        let read =
+            |sequence: Option<u64>, offered: &[&str], answer: Result<ClipboardPayload, String>| {
+                super::clipboard_read_line(&ClipboardRead {
+                    sequence: sequence.map(ClipboardSequence),
+                    offered: offered.iter().map(|name| (*name).to_owned()).collect(),
+                    answer,
+                })
+            };
+        let picture = |encoding| {
+            ClipboardPayload::Picture(vec![PictureBytes {
+                encoding,
+                bytes: vec![1, 2, 3],
+            }])
+        };
+        for (encoding, word) in [
+            (PictureEncoding::Png, "png"),
+            (PictureEncoding::Bitmap, "bitmap"),
+            (PictureEncoding::DibV5, "dibv5"),
+            (PictureEncoding::Dib, "dib"),
+            (PictureEncoding::Tiff, "tiff"),
+        ] {
+            assert_eq!(
+                read(Some(1663), &[], Ok(picture(encoding))),
+                format!("clipboard read: sequence=1663 answered=picture({word})")
+            );
+        }
+        assert_eq!(
+            read(
+                Some(1720),
+                &[],
+                Ok(ClipboardPayload::Text("secret 秘密".to_owned()))
+            ),
+            "clipboard read: sequence=1720 answered=text"
+        );
+        assert_eq!(
+            read(
+                Some(1694),
+                &[],
+                Ok(ClipboardPayload::Files(vec![
+                    "a.txt".into(),
+                    "秘密.txt".into()
+                ]))
+            ),
+            "clipboard read: sequence=1694 answered=files(2)"
+        );
+        assert_eq!(
+            read(
+                Some(1756),
+                &["FileGroupDescriptorW", "FileContents", "PNG"],
+                Ok(ClipboardPayload::Promise(PromisedFiles {
+                    entries: vec![PromisedEntry {
+                        name: "report 报告.pdf".to_owned(),
+                        size: Some(9),
+                        folder: false,
+                    }],
+                    picture_passed_over: true,
+                }))
+            ),
+            "clipboard read: sequence=1756 answered=promise(1); offered: FileGroupDescriptorW, FileContents, PNG"
+        );
+        assert_eq!(
+            read(
+                Some(412),
+                &["NSFilesPromisePboardType"],
+                Ok(ClipboardPayload::Refused(UnsupportedKind::Promise {
+                    picture_passed_over: false
+                }))
+            ),
+            "clipboard read: sequence=412 answered=promise(unsupported); offered: NSFilesPromisePboardType"
+        );
+        assert_eq!(
+            read(
+                Some(1801),
+                &["Rich Text Format", "Locale"],
+                Ok(ClipboardPayload::Nothing)
+            ),
+            "clipboard read: sequence=1801 answered=nothing; offered: Rich Text Format, Locale"
+        );
+        assert_eq!(
+            read(None, &[], Err("OpenClipboard failed for 秘密".to_owned())),
+            "clipboard read: sequence=none answered=failed"
+        );
+    }
+
+    /// PIN — **every read the machine's clipboard answers a terminal paste writes its line, to the
+    /// file** (plan row 81, R10): on the worker, through `diagnostics::note`, so a Console run keeps
+    /// it as a GUI run does, and before the answer leaves for the window.
+    ///
+    /// MUTATION: drop the `note` from `PlatformClipboard::serve`, or write the line to stderr — red.
+    #[test]
+    fn the_machines_clipboard_writes_its_read_line_on_the_worker() {
+        let serve = crate::test_support::squeezed(crate::test_support::item_body(
+            &bt_source::ItemQuery::method("PlatformClipboard", "serve").of_trait("ClipboardDoor"),
+        ));
+        assert!(
+            serve.contains(
+                "letread=bt_platform::clipboard_payload(worker);crate::diagnostics::note(&clipboard_read_line(&read));"
+            ),
+            "{serve}"
+        );
     }
 }

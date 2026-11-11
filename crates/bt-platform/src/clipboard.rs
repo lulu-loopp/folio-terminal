@@ -26,6 +26,35 @@
 //! );
 //! ```
 //!
+//! A promise is rendered by [`crate::render_clipboard_promise`], which takes the same capability —
+//! a source that writes an attachment may take seconds, and never on the window thread (plan row
+//! 81):
+//!
+//! ```compile_fail
+//! // RED (row 81, B2) — the promise's render is a worker's door too.
+//! fn on_the_window_thread(
+//!     into: &std::path::Path,
+//!     progress: &bt_platform::clipboard_promise::RenderProgress,
+//! ) {
+//!     let _ = bt_platform::render_clipboard_promise(&[], into, progress);
+//! }
+//! ```
+//!
+//! MUTATION: make `render_clipboard_promise` take no capability and the block above compiles. The
+//! control hands it the lent `ctx`:
+//!
+//! ```no_run
+//! let _ = bt_platform::spawn_at_priority(
+//!     "doc-probe",
+//!     bt_platform::ThreadPriority::BelowNormal,
+//!     |ctx| {
+//!         let progress = bt_platform::clipboard_promise::RenderProgress::default();
+//!         bt_platform::render_clipboard_promise(ctx, &[], std::path::Path::new("x"), &progress)
+//!             .is_ok()
+//!     },
+//! );
+//! ```
+//!
 //! [`WorkerCtx`]: crate::admission::WorkerCtx
 
 use std::path::PathBuf;
@@ -35,13 +64,128 @@ pub enum ClipboardPayload {
     Files(Vec<PathBuf>),
     Text(String),
     Picture(Vec<PictureBytes>),
+    /// **Files another program promises to write when asked** (plan row 81): the clipboard offers
+    /// a file descriptor and the files' contents, and no file list, no text and no picture that
+    /// rendered. Read on Windows only; what it carries is the descriptor, never the bytes, which
+    /// are rendered on a worker of their own (`crate::clipboard_promise`).
+    Promise(PromisedFiles),
     Refused(UnsupportedKind),
     Nothing,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UnsupportedKind {
-    Promise,
+    /// A promise this platform does not render: every promise on macOS, and on Windows one whose
+    /// descriptor is not on the board or does not read. `picture_passed_over` says a picture was
+    /// offered too and did not render, so the refusal can say the picture could not be read.
+    Promise { picture_passed_over: bool },
+}
+
+/// **The clipboard's own count of its changes**, as the read found it: Windows'
+/// `GetClipboardSequenceNumber`, macOS' `changeCount`. A diagnostic, never a check — delayed
+/// rendering advances it on a read that succeeded (design ruling ④).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ClipboardSequence(pub u64);
+
+/// **One gesture's read of the clipboard, as the read line tells it** (plan row 81): the
+/// sequence it read at, the format names the board offered when the answer was nothing or a
+/// promise (names only, never content), and the answer.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClipboardRead {
+    pub sequence: Option<ClipboardSequence>,
+    pub offered: Vec<String>,
+    pub answer: Result<ClipboardPayload, String>,
+}
+
+/// **What [`read_payload_offering`] answers**: the payload, and the format names offered when the
+/// payload is nothing or a promise.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PayloadRead {
+    pub payload: ClipboardPayload,
+    pub offered: Vec<String>,
+}
+
+/// **The most format names a read line lists**, and the most characters of each.
+pub const OFFERED_NAMES: usize = 24;
+pub const OFFERED_NAME_CHARS: usize = 64;
+
+/// **The read line's list of offered format names**: at most [`OFFERED_NAMES`], each cut to
+/// [`OFFERED_NAME_CHARS`] characters with controls dropped, and `+N more` for the rest.
+#[must_use]
+pub fn list_offered(names: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut listed = Vec::new();
+    let mut more = 0_usize;
+    for name in names {
+        if listed.len() == OFFERED_NAMES {
+            more += 1;
+            continue;
+        }
+        listed.push(
+            name.chars()
+                .filter(|c| !c.is_control())
+                .take(OFFERED_NAME_CHARS)
+                .collect(),
+        );
+    }
+    if more > 0 {
+        listed.push(format!("+{more} more"));
+    }
+    listed
+}
+
+/// **A Windows clipboard format's name**: the standard identifiers by their `CF_` names, the
+/// private and GDI ranges by their offsets, and anything else by number. A registered format
+/// (`0xC000` and up) is named by the system, not here.
+#[must_use]
+pub fn standard_format_name(format: u32) -> String {
+    let name = match format {
+        1 => "CF_TEXT",
+        2 => "CF_BITMAP",
+        3 => "CF_METAFILEPICT",
+        4 => "CF_SYLK",
+        5 => "CF_DIF",
+        6 => "CF_TIFF",
+        7 => "CF_OEMTEXT",
+        8 => "CF_DIB",
+        9 => "CF_PALETTE",
+        10 => "CF_PENDATA",
+        11 => "CF_RIFF",
+        12 => "CF_WAVE",
+        13 => "CF_UNICODETEXT",
+        14 => "CF_ENHMETAFILE",
+        15 => "CF_HDROP",
+        16 => "CF_LOCALE",
+        17 => "CF_DIBV5",
+        0x80 => "CF_OWNERDISPLAY",
+        0x81 => "CF_DSPTEXT",
+        0x82 => "CF_DSPBITMAP",
+        0x83 => "CF_DSPMETAFILEPICT",
+        0x8E => "CF_DSPENHMETAFILE",
+        0x200..=0x2FF => return format!("CF_PRIVATEFIRST+{}", format - 0x200),
+        0x300..=0x3FF => return format!("CF_GDIOBJFIRST+{}", format - 0x300),
+        _ => return format!("0x{format:04X}"),
+    };
+    name.to_owned()
+}
+
+/// **The files a promise offers**, as its descriptor (`FileGroupDescriptorW`) lists them, in
+/// order — the index is the `lindex` its contents are asked for by.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PromisedFiles {
+    pub entries: Vec<PromisedEntry>,
+    /// A picture was offered too and did not render (the picture rung answered nothing).
+    pub picture_passed_over: bool,
+}
+
+/// **One entry of a promise's descriptor.** `name` is the descriptor's own, a path relative to
+/// the paste when it holds a separator; an empty name stands for one that was not valid UTF-16.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PromisedEntry {
+    pub name: String,
+    /// The size the descriptor declares (`FD_FILESIZE`), or `None` when it declares none.
+    pub size: Option<u64>,
+    /// A folder entry (`FILE_ATTRIBUTE_DIRECTORY` under `FD_ATTRIBUTES`): made, never read.
+    pub folder: bool,
 }
 
 /// **How many bytes of one picture encoding are worth copying at all**
@@ -151,6 +295,16 @@ pub trait ClipboardPort {
     /// a platform that had two shapes worth carrying at once could say so without
     /// this door changing. No platform does today.
     fn picture(&mut self) -> Candidate<Vec<PictureBytes>>;
+    /// **The promise's descriptor**, read inside the interval (plan row 81). A platform that does
+    /// not render promises answers `Absent`, which refuses the promise.
+    fn promised(&mut self) -> Candidate<Vec<PromisedEntry>> {
+        Candidate::Absent
+    }
+    /// **The format names on the board**, read inside the interval, asked only when the answer
+    /// is nothing or a promise: what the read line lists. Names only, never content.
+    fn offered(&mut self) -> Vec<String> {
+        Vec::new()
+    }
     fn finish(&mut self) -> Result<(), String>;
 }
 
@@ -677,44 +831,79 @@ pub fn picture_paste_enabled(types: Result<ClipboardTypes, String>, save_picture
     save_picture && types.is_ok_and(|types| types.picture)
 }
 
+/// [`read_payload_offering`]'s payload alone.
 pub fn read_payload(port: &mut impl ClipboardPort) -> Result<ClipboardPayload, String> {
+    read_payload_offering(port).map(|read| read.payload)
+}
+
+/// **One open interval's answer, and the names offered when it is nothing or a promise.**
+pub fn read_payload_offering(port: &mut impl ClipboardPort) -> Result<PayloadRead, String> {
     port.begin()?;
     let answer = (|| {
-        let types = port.survey()?;
-        if types.files {
-            match port.files() {
-                Candidate::Present(files) if !files.is_empty() => {
-                    return Ok(ClipboardPayload::Files(files));
-                }
-                Candidate::Unreadable(reason) => return Err(reason),
-                Candidate::Absent | Candidate::Present(_) => {}
-            }
-        }
-        if types.text {
-            match port.text() {
-                Candidate::Present(text) => return Ok(ClipboardPayload::Text(text)),
-                Candidate::Unreadable(reason) => return Err(reason),
-                Candidate::Absent => {}
-            }
-        }
-        if types.picture {
-            match port.picture() {
-                Candidate::Present(pictures) if !pictures.is_empty() => {
-                    return Ok(ClipboardPayload::Picture(pictures));
-                }
-                Candidate::Unreadable(reason) => return Err(reason),
-                Candidate::Absent | Candidate::Present(_) => {}
-            }
-        }
-        // A promise is only an advertised refusal.
-        Ok(if types.promise {
-            ClipboardPayload::Refused(UnsupportedKind::Promise)
-        } else {
+        let payload = walk_the_rungs(port)?;
+        let offered = match payload {
             ClipboardPayload::Nothing
-        })
+            | ClipboardPayload::Promise(_)
+            | ClipboardPayload::Refused(_) => port.offered(),
+            ClipboardPayload::Files(_)
+            | ClipboardPayload::Text(_)
+            | ClipboardPayload::Picture(_) => Vec::new(),
+        };
+        Ok(PayloadRead { payload, offered })
     })();
     let finished = port.finish();
     finished.and(answer)
+}
+
+/// **The rungs, in their one order**, inside the interval [`read_payload_offering`] holds.
+fn walk_the_rungs(port: &mut impl ClipboardPort) -> Result<ClipboardPayload, String> {
+    let types = port.survey()?;
+    if types.files {
+        match port.files() {
+            Candidate::Present(files) if !files.is_empty() => {
+                return Ok(ClipboardPayload::Files(files));
+            }
+            Candidate::Unreadable(reason) => return Err(reason),
+            Candidate::Absent | Candidate::Present(_) => {}
+        }
+    }
+    if types.text {
+        match port.text() {
+            Candidate::Present(text) => return Ok(ClipboardPayload::Text(text)),
+            Candidate::Unreadable(reason) => return Err(reason),
+            Candidate::Absent => {}
+        }
+    }
+    if types.picture {
+        match port.picture() {
+            Candidate::Present(pictures) if !pictures.is_empty() => {
+                return Ok(ClipboardPayload::Picture(pictures));
+            }
+            Candidate::Unreadable(reason) => return Err(reason),
+            Candidate::Absent | Candidate::Present(_) => {}
+        }
+    }
+    // **The fourth rung** (plan row 81): a promise whose descriptor reads is the files it
+    // lists, rendered later on a worker of their own; one whose descriptor does not is
+    // refused. Reached only when no picture rendered, so an offered picture was passed over.
+    Ok(if types.promise {
+        let picture_passed_over = types.picture;
+        match port.promised() {
+            Candidate::Present(entries) if !entries.is_empty() => {
+                ClipboardPayload::Promise(PromisedFiles {
+                    entries,
+                    picture_passed_over,
+                })
+            }
+            Candidate::Absent | Candidate::Present(_) | Candidate::Unreadable(_) => {
+                ClipboardPayload::Refused(UnsupportedKind::Promise {
+                    picture_passed_over,
+                })
+            }
+        }
+    } else {
+        ClipboardPayload::Nothing
+    })
 }
 
 /// Log-free shared file-URL decoder. Native acquisition reports missing absoluteString as None.
@@ -925,7 +1114,9 @@ mod tests {
         fake.types.promise = true;
         assert_eq!(
             read_payload(&mut fake),
-            Ok(ClipboardPayload::Refused(UnsupportedKind::Promise))
+            Ok(ClipboardPayload::Refused(UnsupportedKind::Promise {
+                picture_passed_over: false
+            }))
         );
         assert!(!picture_paste_enabled(Ok(fake.types), true));
         fake.types.picture = true;
@@ -1867,6 +2058,191 @@ mod tests {
                 panic!("byte path lost")
             };
             assert_eq!(paths[0].as_os_str().as_bytes(), b"/bad\xff");
+        }
+    }
+
+    /// **A board for the promise rung** (plan row 81): its survey, a picture that does not
+    /// render, the promise's descriptor as it reads, and what was asked of it.
+    struct Offering {
+        types: ClipboardTypes,
+        text: Candidate<String>,
+        /// What the picture rung reads: absent unless a test offers one that renders.
+        picture: Candidate<Vec<PictureBytes>>,
+        promised: Candidate<Vec<PromisedEntry>>,
+        asked: Vec<&'static str>,
+    }
+
+    impl Offering {
+        fn promising(picture: bool, promised: Candidate<Vec<PromisedEntry>>) -> Self {
+            Self {
+                types: ClipboardTypes {
+                    files: false,
+                    text: false,
+                    picture,
+                    promise: true,
+                },
+                text: Candidate::Absent,
+                picture: Candidate::Absent,
+                promised,
+                asked: Vec::new(),
+            }
+        }
+    }
+
+    impl ClipboardPort for Offering {
+        fn begin(&mut self) -> Result<(), String> {
+            self.asked.push("begin");
+            Ok(())
+        }
+        fn survey(&mut self) -> Result<ClipboardTypes, String> {
+            Ok(self.types)
+        }
+        fn files(&mut self) -> Candidate<Vec<PathBuf>> {
+            self.asked.push("files");
+            Candidate::Absent
+        }
+        fn text(&mut self) -> Candidate<String> {
+            self.asked.push("text");
+            self.text.clone()
+        }
+        fn picture(&mut self) -> Candidate<Vec<PictureBytes>> {
+            self.asked.push("picture");
+            self.picture.clone()
+        }
+        fn promised(&mut self) -> Candidate<Vec<PromisedEntry>> {
+            self.asked.push("promised");
+            self.promised.clone()
+        }
+        fn offered(&mut self) -> Vec<String> {
+            self.asked.push("offered");
+            vec!["FileGroupDescriptorW".to_owned(), "FileContents".to_owned()]
+        }
+        fn finish(&mut self) -> Result<(), String> {
+            self.asked.push("finish");
+            Ok(())
+        }
+    }
+
+    fn report() -> PromisedEntry {
+        PromisedEntry {
+            name: "report.pdf".to_owned(),
+            size: Some(9),
+            folder: false,
+        }
+    }
+
+    /// RED (plan row 81) — **the promise rung comes after the picture, reads the descriptor
+    /// inside the interval, and says when an offered picture was passed over**; a descriptor that
+    /// does not read refuses the promise as before; the format names are asked for, inside the
+    /// interval, only when the answer is nothing or a promise.
+    ///
+    /// MUTATIONS: put the promise rung before the picture in `walk_the_rungs` — the picture is
+    /// never asked for; ask `offered` for every answer — the text row lists names.
+    #[test]
+    fn a_promise_is_read_after_the_picture_and_its_names_only_when_it_is_the_answer() {
+        // **A picture that renders wins over a promise** (review N6; the investigation's §4(c)):
+        // the board offers both, the picture is the answer, and the promise is never asked for.
+        let mut board = Offering::promising(true, Candidate::Present(vec![report()]));
+        let shot = PictureBytes {
+            encoding: PictureEncoding::Png,
+            bytes: vec![0x89, b'P', b'N', b'G'],
+        };
+        board.picture = Candidate::Present(vec![shot.clone()]);
+        assert_eq!(
+            read_payload_offering(&mut board),
+            Ok(PayloadRead {
+                payload: ClipboardPayload::Picture(vec![shot]),
+                offered: Vec::new(),
+            })
+        );
+        assert_eq!(
+            board.asked,
+            ["begin", "picture", "finish"],
+            "the promise is not asked for when the picture renders"
+        );
+
+        let mut board = Offering::promising(true, Candidate::Present(vec![report()]));
+        assert_eq!(
+            read_payload_offering(&mut board),
+            Ok(PayloadRead {
+                payload: ClipboardPayload::Promise(PromisedFiles {
+                    entries: vec![report()],
+                    picture_passed_over: true,
+                }),
+                offered: vec!["FileGroupDescriptorW".to_owned(), "FileContents".to_owned()],
+            })
+        );
+        assert_eq!(
+            board.asked,
+            ["begin", "picture", "promised", "offered", "finish"],
+            "the picture first, then the descriptor and the names, all inside the interval"
+        );
+
+        for promised in [
+            Candidate::Absent,
+            Candidate::Present(Vec::new()),
+            Candidate::Unreadable("the file descriptor does not read".to_owned()),
+        ] {
+            let mut board = Offering::promising(false, promised);
+            assert_eq!(
+                read_payload(&mut board),
+                Ok(ClipboardPayload::Refused(UnsupportedKind::Promise {
+                    picture_passed_over: false
+                }))
+            );
+        }
+
+        let mut board = Offering::promising(false, Candidate::Present(vec![report()]));
+        board.types.text = true;
+        board.text = Candidate::Present("words".to_owned());
+        assert_eq!(
+            read_payload_offering(&mut board),
+            Ok(PayloadRead {
+                payload: ClipboardPayload::Text("words".to_owned()),
+                offered: Vec::new(),
+            })
+        );
+        assert!(
+            !board.asked.contains(&"offered") && !board.asked.contains(&"promised"),
+            "{:?}",
+            board.asked
+        );
+
+        let mut board = Offering::promising(false, Candidate::Absent);
+        board.types.promise = false;
+        assert_eq!(
+            read_payload_offering(&mut board).map(|read| read.offered.len()),
+            Ok(2),
+            "nothing lists what the board held"
+        );
+    }
+
+    /// PIN (plan row 81) — **the read line's format names are capped and cleaned**: at most
+    /// [`OFFERED_NAMES`], each at most [`OFFERED_NAME_CHARS`] characters with controls dropped,
+    /// `+N more` after; the standard formats by their `CF_` names.
+    #[test]
+    fn offered_names_are_capped_and_the_standard_formats_named() {
+        let many: Vec<String> = (0..30).map(|n| format!("Format {n}")).collect();
+        let listed = list_offered(many);
+        assert_eq!(listed.len(), OFFERED_NAMES + 1);
+        assert_eq!(listed[OFFERED_NAMES], "+6 more");
+        let long = list_offered(["x".repeat(100), "bell\u{7}name".to_owned()]);
+        assert_eq!(long[0].chars().count(), OFFERED_NAME_CHARS);
+        assert_eq!(long[1], "bellname");
+        for (format, name) in [
+            (1, "CF_TEXT"),
+            (2, "CF_BITMAP"),
+            (8, "CF_DIB"),
+            (13, "CF_UNICODETEXT"),
+            (15, "CF_HDROP"),
+            (16, "CF_LOCALE"),
+            (17, "CF_DIBV5"),
+            (0x80, "CF_OWNERDISPLAY"),
+            (0x203, "CF_PRIVATEFIRST+3"),
+            (0x301, "CF_GDIOBJFIRST+1"),
+            (0x99, "0x0099"),
+        ] {
+            assert_eq!(standard_format_name(format), name);
         }
     }
 }

@@ -24,6 +24,10 @@
 //! module cannot read is left exactly where it is: the sweep is a promise about
 //! what Folio wrote, not a licence to delete what it finds.
 //!
+//! **A promise's files share the folder** (plan row 81): each promise paste writes into a
+//! folder of its own, `<stamp>-<n>`, under the names its source gave them, and the sweep counts
+//! those folders with the pictures — the newest [`KEPT`] entries of either stay.
+//!
 //! # What runs where
 //!
 //! Everything in this file is CPU and disk, and a screenshot's PNG encode is
@@ -36,9 +40,12 @@ use std::{
     fs,
     io::{Cursor, Write},
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
+    sync::{Arc, mpsc},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use bt_platform::admission::WorkerCtx;
+use bt_platform::clipboard_promise::{PromiseRefused, RenderProgress, RenderedPromise};
 use bt_platform::{
     PictureBytes, PictureEncoding,
     clipboard::{DibHeader, TopDownPixels},
@@ -54,6 +61,37 @@ use image::{ImageDecoder, ImageEncoder};
 /// "how many screenshots do you want to keep in a temporary folder" — is one
 /// nobody has an answer to.
 pub const KEPT: usize = 20;
+
+/// **How long a staged write may go without a step before it is given up** (plan row 81; review
+/// N14, ruled 2026-11-10). A promise whose source hands nothing over for this long is abandoned —
+/// its folder removed, its place given back, `promise (stalled)` said and logged — so four sources
+/// that never return cannot hold every staging place for the rest of the process. A bound on
+/// stalls and not on a paste's length: a render that keeps handing bytes over is never cut short.
+/// A write's marker ([`Writing`]) is abandoned past this bound and one look of its watcher
+/// ([`abandoned_after`]).
+pub const STALL_BOUND: Duration = Duration::from_secs(30);
+
+/// **How often a render's watcher looks** ([`watch_the_render`]) under the stall bound `bound`:
+/// an eighth of it, between ten milliseconds and a second.
+#[must_use]
+pub fn watch_interval(bound: Duration) -> Duration {
+    (bound / 8).clamp(Duration::from_millis(10), Duration::from_secs(1))
+}
+
+/// **How long a write's marker may go unrefreshed before the sweep takes it for an abandoned
+/// write** (re-review F2, ruled 2026-11-10): [`STALL_BOUND`] and one look of the watcher. A live
+/// watcher refreshes its marker on every look, progress or not, so a marker this old has no
+/// watcher left — its worker ended or its process was killed — and the stall itself is the
+/// watcher's to judge, never the sweep's. The slack of one look covers the watcher's last look
+/// before it gives the render up.
+#[must_use]
+pub fn abandoned_after() -> Duration {
+    STALL_BOUND + watch_interval(STALL_BOUND)
+}
+
+/// The suffix of a write's marker: `<stamp>-<n>.writing`, beside the entry (`<stamp>-<n>.png` or
+/// the folder `<stamp>-<n>`) it says is still being written.
+const WRITING_SUFFIX: &str = ".writing";
 
 /// **The widest and tallest picture this paste will decode** (review X-4).
 ///
@@ -157,14 +195,15 @@ pub fn stamp(at: SystemTime) -> String {
     format!("{year:04}{month:02}{day:02}-{hour:02}{minute:02}{second:02}")
 }
 
-/// One of this module's own file names, taken apart — or `None`, which means
-/// the file belongs to somebody else and the sweep must not touch it.
+/// One of this module's own names, taken apart — a picture's `<stamp>-<n>.png` or a promise's
+/// folder `<stamp>-<n>` (plan row 81; [`names_in`] lists a bare name only when it is a folder) —
+/// or `None`, which means the entry belongs to somebody else and the sweep must not touch it.
 ///
 /// The index is required to be digits and nothing else: `u32`'s own parser
 /// accepts a leading `+`, and a name this module never writes is a name it does
 /// not own.
 fn ours(name: &str) -> Option<(&str, u32)> {
-    let body = name.strip_suffix(EXTENSION)?;
+    let body = staged_key(name);
     let (stamp, index) = body.rsplit_once('-')?;
     let (date, time) = stamp.split_once('-')?;
     if date.len() != 8 || time.len() != 6 {
@@ -181,6 +220,27 @@ fn ours(name: &str) -> Option<(&str, u32)> {
         return None;
     }
     Some((stamp, index.parse().ok()?))
+}
+
+/// A staged name without its picture's extension or its marker's suffix: the key an entry and
+/// its marker share.
+fn staged_key(name: &str) -> &str {
+    name.strip_suffix(EXTENSION)
+        .or_else(|| name.strip_suffix(WRITING_SUFFIX))
+        .unwrap_or(name)
+}
+
+/// **One name in the staging folder, as the sweep reads it** — and, for a write's marker, when it
+/// was last refreshed (`None` when that could not be read, which keeps the write taken for live).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StagedListing {
+    pub name: String,
+    pub refreshed: Option<SystemTime>,
+}
+
+/// The names of a listing, for the reservation's first guess.
+fn staged_names(listing: &[StagedListing]) -> Vec<String> {
+    listing.iter().map(|listed| listed.name.clone()).collect()
 }
 
 /// **Where in this second to start looking for a free name.**
@@ -206,8 +266,8 @@ pub fn first_free_index(existing: &[String], stamp: &str) -> u32 {
         .map_or(1, |taken| taken.saturating_add(1))
 }
 
-/// **Which of this module's own files the cap retires**, given everything in
-/// the folder *including* the file just written.
+/// **Which of this module's own entries the sweep removes**, given everything in
+/// the folder *including* the entry just written, at `now`.
 ///
 /// Pure, and that is the point: "the twenty newest survive" is a claim about a
 /// folder, and a claim about a folder that can only be checked by making one is
@@ -216,23 +276,69 @@ pub fn first_free_index(existing: &[String], stamp: &str) -> u32 {
 /// * The **order** is `(stamp, index)` and not the filesystem's: a directory
 ///   listing has no order, and a modification time is a thing anything on the
 ///   machine can change.
-/// * The listing is taken **after** the write, so the new file counts against
-///   the cap and the folder holds `kept` files rather than `kept + 1`.
-/// * A file this module did not write is neither counted nor deleted.
+/// * The listing is taken **after** the write, so the new entry counts against
+///   the cap and the folder holds `kept` entries rather than `kept + 1`.
+/// * An entry this module did not write is neither counted nor deleted.
+/// * **An entry still being written is never removed, and is counted** (review N12): its marker
+///   ([`Writing`]) says so, and the cap is met by the oldest entries that carry none — so a sweep
+///   in another window, or another Folio, never takes the folder a render is writing into, and a
+///   write's own sweep never takes the entry it just wrote, whatever the clock did.
+/// * **A marker older than `bound` is an abandoned write** — a worker that died, a process that
+///   was killed: the marker and its entry both go, whatever the cap.
 #[must_use]
-pub fn retire(existing: &[String], kept: usize) -> Vec<String> {
-    let mut mine: Vec<(&str, u32, &String)> = existing
-        .iter()
-        .filter_map(|name| ours(name).map(|(at, index)| (at, index, name)))
-        .collect();
+pub fn retire(
+    listing: &[StagedListing],
+    kept: usize,
+    now: SystemTime,
+    bound: Duration,
+) -> Vec<String> {
+    let mut live = std::collections::HashSet::new();
+    let mut abandoned = std::collections::HashSet::new();
+    let mut markers = Vec::new();
+    for listed in listing {
+        if !listed.name.ends_with(WRITING_SUFFIX) || ours(&listed.name).is_none() {
+            continue;
+        }
+        let key = staged_key(&listed.name);
+        let stale = listed.refreshed.is_some_and(|at| {
+            now.duration_since(at)
+                .is_ok_and(|unrefreshed| unrefreshed > bound)
+        });
+        if stale {
+            abandoned.insert(key);
+            markers.push(listed.name.clone());
+        } else {
+            live.insert(key);
+        }
+    }
+    let mut removed = Vec::new();
+    let mut mine: Vec<(&str, u32, &String)> = Vec::new();
+    for listed in listing {
+        if listed.name.ends_with(WRITING_SUFFIX) {
+            continue;
+        }
+        let Some((at, index)) = ours(&listed.name) else {
+            continue;
+        };
+        if abandoned.contains(staged_key(&listed.name)) {
+            // Ahead of its marker: the marker goes only once the entry has.
+            removed.push(listed.name.clone());
+        } else {
+            mine.push((at, index, &listed.name));
+        }
+    }
     // Explicit and not `sort_by_key`: the key is borrowed out of the listing, which
     // is a key a sort-by-key closure cannot hand back.
     mine.sort_by(|left, right| left.0.cmp(right.0).then(left.1.cmp(&right.1)));
     let over = mine.len().saturating_sub(kept);
-    mine.into_iter()
-        .take(over)
-        .map(|(_, _, name)| name.clone())
-        .collect()
+    removed.extend(
+        mine.into_iter()
+            .filter(|(_, _, name)| !live.contains(staged_key(name)))
+            .take(over)
+            .map(|(_, _, name)| name.clone()),
+    );
+    removed.extend(markers);
+    removed
 }
 
 /// How many names one write will try before giving up.
@@ -258,23 +364,108 @@ const NAME_ATTEMPTS: u32 = 4_096;
 /// reservation *is* the final path. What can see the empty file in between is
 /// only another Folio's own sweep, and a file stamped now is the newest in the
 /// folder and is never what a cap retires.
-fn reserve(folder: &Path, stamp: &str) -> Result<(PathBuf, fs::File), String> {
-    let mut index = first_free_index(&names_in(folder), stamp);
-    for _ in 0..NAME_ATTEMPTS {
-        let path = folder.join(format!("{stamp}-{index}{EXTENSION}"));
-        match fs::OpenOptions::new()
+fn reserve(folder: &Path, stamp: &str) -> Result<(Writing, fs::File), String> {
+    reserve_marked(folder, stamp, EXTENSION, |path| {
+        fs::OpenOptions::new()
             .write(true)
             .create_new(true)
-            .open(&path)
+            .open(path)
+    })
+    .map_err(|error| {
+        if error.kind() == std::io::ErrorKind::AlreadyExists {
+            "no name in this second was free".to_owned()
+        } else {
+            format!("the file could not be made: {error}")
+        }
+    })
+}
+
+/// **An entry being written, and the marker that says so** (plan row 81; review N12, ruled
+/// 2026-11-10): `<stamp>-<n>.writing` beside the entry, made before it and taken away when the write
+/// is over ([`Self::write_handed_over`]) — for a promise, when its worker hands the answer over. No sweep
+/// — this window's, another window's, another Folio's — removes a marked entry, though each counts
+/// it against [`KEPT`]; a marker nobody refreshed for [`abandoned_after`] is an abandoned write,
+/// which the sweep takes away with its entry. The marker is held open so the write can say it is
+/// still going ([`Self::still_going`]).
+pub struct Writing {
+    entry: PathBuf,
+    marker: PathBuf,
+    file: fs::File,
+}
+
+impl Writing {
+    /// The entry being written.
+    #[must_use]
+    pub fn staged_path(&self) -> &Path {
+        &self.entry
+    }
+
+    /// **Still being written**: the marker is refreshed, so no sweep takes the write for an
+    /// abandoned one. A marker that cannot be refreshed is not an error: the write goes on.
+    pub fn still_going(&self) {
+        let _ = self.file.set_modified(SystemTime::now());
+    }
+
+    /// **The write is over** — handed over, or refused with its entry removed: the marker goes,
+    /// and the entry is one the cap may retire like any other.
+    pub fn write_handed_over(self) {
+        let Self { marker, file, .. } = self;
+        drop(file);
+        let _ = fs::remove_file(marker);
+    }
+
+    /// **Given up with its entry still standing** (a folder a hung source holds open): the marker
+    /// stays, and the sweep takes both once it is older than [`abandoned_after`].
+    pub fn left_for_the_sweep(self) {}
+}
+
+/// **Take a staged name, by creating its marker and then its entry** (review X-2's rule, kept):
+/// the marker is made with `create_new`, so two writes — in this process or another Folio — never
+/// hold one key; the entry is then taken by `take`, which must fail `AlreadyExists` for a name
+/// already standing, and a name standing without a marker (left by an older build, or by hand) is
+/// stepped over, its marker withdrawn.
+fn reserve_marked<T>(
+    folder: &Path,
+    stamp: &str,
+    extension: &str,
+    take: impl Fn(&Path) -> std::io::Result<T>,
+) -> std::io::Result<(Writing, T)> {
+    let mut index = first_free_index(&staged_names(&names_in(folder)), stamp);
+    for _ in 0..NAME_ATTEMPTS {
+        let key = format!("{stamp}-{index}");
+        index = index.saturating_add(1);
+        let marker = folder.join(format!("{key}{WRITING_SUFFIX}"));
+        let file = match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&marker)
         {
-            Ok(file) => return Ok((path, file)),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                index = index.saturating_add(1);
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        };
+        let entry = folder.join(format!("{key}{extension}"));
+        match take(&entry) {
+            Ok(taken) => {
+                return Ok((
+                    Writing {
+                        entry,
+                        marker,
+                        file,
+                    },
+                    taken,
+                ));
             }
-            Err(error) => return Err(format!("the file could not be made: {error}")),
+            Err(error) => {
+                drop(file);
+                let _ = fs::remove_file(&marker);
+                if error.kind() != std::io::ErrorKind::AlreadyExists {
+                    return Err(error);
+                }
+            }
         }
     }
-    Err("no name in this second was free".to_owned())
+    Err(std::io::ErrorKind::AlreadyExists.into())
 }
 
 /// **PNG bytes out of whatever the clipboard offered**, taking the first
@@ -539,26 +730,201 @@ fn encode_png(
 /// A file that will not delete is not an error. On Windows a file another
 /// program has open cannot be removed, and the cap is housekeeping rather than a
 /// promise — the next write tries again.
-pub fn save(folder: &Path, offered: &[PictureBytes], at: SystemTime) -> Result<PathBuf, String> {
+///
+/// **Marked while it is written** (review N12): the picture's name is taken with its marker, so no
+/// other sweep removes the file half-written, and its own sweep — run while the marker stands —
+/// never removes the file it just wrote. A write that fails takes its file and its marker away.
+pub fn save(
+    worker: &WorkerCtx,
+    folder: &Path,
+    offered: &[PictureBytes],
+    at: SystemTime,
+) -> Result<PathBuf, String> {
     let bytes = png_bytes(offered)?;
     // The system's own sentence about the failure and never the path: the folder is
     // Folio's and carries no name of the reader's, but what is written into it is
     // their screenshot, and a diagnostic is not the place for either.
     fs::create_dir_all(folder).map_err(|error| format!("the folder could not be made: {error}"))?;
-    let (path, mut file) = reserve(folder, &stamp(at))?;
-    file.write_all(&bytes)
-        .map_err(|error| format!("the file could not be written: {error}"))?;
+    let (writing, mut file) = reserve(folder, &stamp(at))?;
+    let written = file.write_all(&bytes);
     // Closed before the folder is read again, so the listing the cap is taken over
     // is one this file is finished in.
     drop(file);
+    if let Err(error) = written {
+        let _ = fs::remove_file(writing.staged_path());
+        writing.write_handed_over();
+        return Err(format!("the file could not be written: {error}"));
+    }
     // **Read again rather than reusing the listing `reserve` started from**: that
     // one is older than this write, and on a machine with two Folios on it the
     // folder has moved since. The name just taken is in this listing, which is
     // what makes it count against the cap.
-    for name in retire(&names_in(folder), KEPT) {
-        let _ = fs::remove_file(folder.join(name));
-    }
+    sweep_staging(worker, folder, abandoned_after());
+    let path = writing.staged_path().to_owned();
+    writing.write_handed_over();
     Ok(path)
+}
+
+/// **Take a folder for one promise paste, by creating it** (plan row 81) — `<stamp>-<n>` in
+/// `folder`, which is made first if it is not there, marked as being written ([`Writing`]).
+/// `create_dir` is [`reserve`]'s `create_new`: one operation that tests for the name and takes
+/// it, so two pastes never write into one folder. The files go in under their own names. A
+/// worker's door (`worker`): it is the promise's worker that reserves, never the window.
+///
+/// # Errors
+/// The kind of the error that kept the folder from being made — never its path.
+pub fn reserve_staging_folder(
+    _worker: &WorkerCtx,
+    folder: &Path,
+    at: SystemTime,
+) -> Result<Writing, std::io::ErrorKind> {
+    fs::create_dir_all(folder).map_err(|error| error.kind())?;
+    reserve_marked(folder, &stamp(at), "", |entry| fs::create_dir(entry))
+        .map(|(writing, ())| writing)
+        .map_err(|error| error.kind())
+}
+
+/// **One promise paste staged, on its worker** (plan row 81; review N14) — the body of the
+/// `clipboard-promise` worker: the paste's folder reserved and marked; the render started on a
+/// thread of its own (`clipboard-promise-render`), through the window's clipboard door, and
+/// watched here ([`watch_the_render`]); after a success the staging folder swept, the folder just
+/// written still marked; then the marker taken away and the answer handed back. **The render is
+/// called from nowhere else.**
+///
+/// A render that hands nothing over for the door's stall bound is given up: its folder removed
+/// (or, while the source still holds it open, left marked for the sweep), and the answer is
+/// [`PromiseRefused::Stalled`] — whatever the source goes on doing, it holds no staging place.
+///
+/// # Errors
+/// Why nothing was pasted: a refusal of the render, or a render thread that would not start.
+pub fn stage_promise(
+    worker: &WorkerCtx,
+    door: Arc<dyn crate::clipboard_lane::ClipboardDoor>,
+    offer: Vec<bt_platform::PromisedEntry>,
+    folder: &Path,
+) -> Result<RenderedPromise, crate::runtime::PromiseWhy> {
+    use crate::runtime::PromiseWhy;
+    let writing = reserve_staging_folder(worker, folder, SystemTime::now())
+        .map_err(|kind| PromiseWhy::Refused(PromiseRefused::WriteFailed(kind)))?;
+    let into = writing.staged_path().to_owned();
+    let progress = Arc::new(RenderProgress::default());
+    let bound = door.stall_bound();
+    let (answer, rendered) = mpsc::channel();
+    let render = {
+        let progress = Arc::clone(&progress);
+        let into = into.clone();
+        move |worker: &WorkerCtx| {
+            // **A panic in the render is the paste's failure, not the process's end**
+            // (`contained_panic::contain`, C2): the render writes only the paste's own
+            // folder, which nothing else reads, and that folder goes with the panic as it
+            // goes with any refusal.
+            let result = crate::contained_panic::contain(|| {
+                door.render_promised_files(worker, &offer, &into, &progress)
+            })
+            .unwrap_or_else(|_| {
+                let _ = fs::remove_dir_all(&into);
+                Err(PromiseRefused::NotRendered(None))
+            });
+            // A render its watcher gave up answers no one.
+            let _ = answer.send(result);
+        }
+    };
+    if bt_platform::spawn_at_priority(
+        "clipboard-promise-render",
+        bt_platform::ThreadPriority::Normal,
+        render,
+    )
+    .is_err()
+    {
+        let _ = fs::remove_dir_all(&into);
+        writing.write_handed_over();
+        return Err(PromiseWhy::NotStarted);
+    }
+    let result = watch_the_render(worker, &rendered, &progress, &writing, bound);
+    match &result {
+        // Swept while the folder just written is still marked: it is never what the cap retires.
+        Ok(_) => sweep_staging(worker, folder, abandoned_after()),
+        Err(PromiseRefused::Stalled) => match fs::remove_dir_all(&into) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                writing.left_for_the_sweep();
+                return Err(PromiseWhy::Refused(PromiseRefused::Stalled));
+            }
+            _ => {}
+        },
+        // Every other refusal removed its folder where it was made.
+        Err(_) => {}
+    }
+    writing.write_handed_over();
+    result.map_err(PromiseWhy::Refused)
+}
+
+/// **Wait for a render, giving it up when it stalls** (plan row 81; review N14) — on the promise's
+/// own worker (`worker`): the render's answer is awaited in looks of [`watch_interval`]; every
+/// look while the render stands refreshes the write's marker, progress or not (re-review F2: the
+/// marker says a watcher is here, the bound says whether the render moves), and once nothing has
+/// advanced for `bound` the render is abandoned ([`RenderProgress::mark_given_up`]), the marker
+/// is left unrefreshed, and this answers [`PromiseRefused::Stalled`], whatever the source is still
+/// doing. The clock is this worker's own; the render reads none.
+///
+/// # Errors
+/// The render's refusal; `Stalled`; `NotRendered` for a render thread that ended without an
+/// answer.
+pub fn watch_the_render(
+    _worker: &WorkerCtx,
+    rendered: &mpsc::Receiver<Result<RenderedPromise, PromiseRefused>>,
+    progress: &RenderProgress,
+    writing: &Writing,
+    bound: Duration,
+) -> Result<RenderedPromise, PromiseRefused> {
+    let look = watch_interval(bound);
+    let mut seen = progress.steps_taken();
+    let mut since = Instant::now();
+    loop {
+        match rendered.recv_timeout(look) {
+            Ok(answer) => return answer,
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(PromiseRefused::NotRendered(None));
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
+        let steps = progress.steps_taken();
+        if steps != seen {
+            seen = steps;
+            since = Instant::now();
+        } else if since.elapsed() >= bound {
+            progress.mark_given_up();
+            return Err(PromiseRefused::Stalled);
+        }
+        writing.still_going();
+    }
+}
+
+/// **The cap, applied** ([`retire`]): of this module's own entries in `folder`, everything but
+/// the newest [`KEPT`] goes — a picture's file removed, a promise's folder removed with what is in
+/// it — except an entry still being written; a write whose marker went unrefreshed for
+/// `abandoned` ([`abandoned_after`] in the product) goes with its marker. Called after a write, so
+/// the entry just written counts against the cap. An entry that will not go is not an error: the
+/// next write tries again, and an abandoned entry that will not go keeps its marker. A worker's
+/// (`worker`): the staging folder is never swept on the window thread.
+pub fn sweep_staging(_worker: &WorkerCtx, folder: &Path, abandoned: Duration) {
+    let mut stuck = std::collections::HashSet::new();
+    for name in retire(&names_in(folder), KEPT, SystemTime::now(), abandoned) {
+        let entry = folder.join(&name);
+        if name.ends_with(WRITING_SUFFIX) {
+            if !stuck.contains(staged_key(&name)) {
+                let _ = fs::remove_file(entry);
+            }
+            continue;
+        }
+        let gone = if name.ends_with(EXTENSION) {
+            fs::remove_file(entry)
+        } else {
+            fs::remove_dir_all(entry)
+        };
+        if gone.is_err() {
+            stuck.insert(staged_key(&name).to_owned());
+        }
+    }
 }
 
 /// Every name in the folder, as the sweep sees them.
@@ -566,14 +932,36 @@ pub fn save(folder: &Path, offered: &[PictureBytes], at: SystemTime) -> Result<P
 /// A folder that cannot be read is an empty listing and not a refusal: the write
 /// that follows is what decides whether this paste can happen, and it will say
 /// so in its own words. A name that is not UTF-8 is not one of ours, and `ours`
-/// would say so anyway — this drops it one step earlier.
-fn names_in(folder: &Path) -> Vec<String> {
+/// would say so anyway — this drops it one step earlier. **A name without the picture's
+/// extension is listed only when it is a folder** (plan row 81): what a promise paste reserves
+/// is a folder, and a file or a link wearing that shape is not Folio's. **A write's marker is
+/// listed when it is a file, with when it was last refreshed** (review N12), read from the
+/// listing's own entry.
+fn names_in(folder: &Path) -> Vec<StagedListing> {
     let Ok(listing) = fs::read_dir(folder) else {
         return Vec::new();
     };
     listing
         .flatten()
-        .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            let kind = entry.file_type().ok();
+            if name.ends_with(WRITING_SUFFIX) && kind.is_some_and(|kind| kind.is_file()) {
+                let refreshed = entry
+                    .metadata()
+                    .ok()
+                    .and_then(|metadata| metadata.modified().ok());
+                return Some(StagedListing { name, refreshed });
+            }
+            if name.ends_with(EXTENSION) || kind.is_some_and(|kind| kind.is_dir()) {
+                Some(StagedListing {
+                    name,
+                    refreshed: None,
+                })
+            } else {
+                None
+            }
+        })
         .collect()
 }
 
@@ -624,6 +1012,18 @@ mod tests {
         }
     }
 
+    /// What the sweep removes from a folder of these names, none of them a write's marker.
+    fn swept(names: &[String]) -> Vec<String> {
+        let listing: Vec<StagedListing> = names
+            .iter()
+            .map(|name| StagedListing {
+                name: name.clone(),
+                refreshed: None,
+            })
+            .collect();
+        retire(&listing, KEPT, at(1_789_570_800), STALL_BOUND)
+    }
+
     /// PIN — **twenty files survive a write and the twenty-first pushes the
     /// oldest out**, and the count is taken over this module's own names.
     ///
@@ -639,18 +1039,18 @@ mod tests {
         // the written file is in the listing it is counted in.
         let mut at_the_cap = full.clone();
         at_the_cap.push("20260916-150000-1.png".to_owned());
-        assert_eq!(retire(&at_the_cap, KEPT), ["20260916-143000-1.png"]);
+        assert_eq!(swept(&at_the_cap), ["20260916-143000-1.png"]);
 
         // One short of the cap: the write fits and nothing is retired.
         let mut with_room: Vec<String> = full[1..].to_vec();
         with_room.push("20260916-150000-1.png".to_owned());
-        assert!(retire(&with_room, KEPT).is_empty());
+        assert!(swept(&with_room).is_empty());
 
         // Far over the cap — a folder that was written to by an older build, or
         // by a Folio that was killed between the write and the sweep.
         let mut many = at_the_cap.clone();
         many.extend((0..5).map(|index| format!("20260915-0000{index:02}-1.png")));
-        let over = retire(&many, KEPT);
+        let over = swept(&many);
         assert_eq!(over.len(), 6);
         assert!(over.contains(&"20260915-000004-1.png".to_owned()));
         assert!(over.contains(&"20260916-143000-1.png".to_owned()));
@@ -701,8 +1101,22 @@ mod tests {
         let mut folder: Vec<String> = strangers.iter().map(|name| (*name).to_owned()).collect();
         folder.extend((0..KEPT).map(|index| format!("20260916-1430{index:02}-1.png")));
         folder.push("20260916-150000-1.png".to_owned());
-        assert_eq!(retire(&folder, KEPT), ["20260916-143000-1.png"]);
+        assert_eq!(swept(&folder), ["20260916-143000-1.png"]);
         assert_eq!(ours("20260916-143012-1.png"), Some(("20260916-143012", 1)));
+    }
+
+    /// `body` on a worker the thread door started, as the promise's worker is.
+    fn on_a_worker<T: Send + 'static>(
+        body: impl FnOnce(&bt_platform::admission::WorkerCtx) -> T + Send + 'static,
+    ) -> T {
+        bt_platform::spawn_at_priority(
+            "folio-staging-test",
+            bt_platform::ThreadPriority::Normal,
+            body,
+        )
+        .expect("start a worker for the reservation")
+        .join()
+        .expect("the worker answered")
     }
 
     /// A folder of this test's own, under the machine's temporary directory.
@@ -711,6 +1125,285 @@ mod tests {
         let _ = fs::remove_dir_all(&folder);
         fs::create_dir_all(&folder).expect("a scratch folder");
         folder
+    }
+
+    /// RED (plan row 81) — **a promise's folder is reserved like a picture's name and swept
+    /// with the pictures**: two reservations in one second are two folders; the folders count
+    /// against [`KEPT`] beside the files, and a retired one goes with what is in it; a file
+    /// wearing a folder's name, and a folder that is not Folio's, are never touched.
+    ///
+    /// MUTATION: let `ours` take picture names only (`strip_suffix(EXTENSION)?`) — the folders
+    /// are never retired.
+    #[test]
+    fn promise_folders_are_reserved_counted_and_swept_with_the_pictures() {
+        on_a_worker(|worker| {
+            let folder = scratch("promise-folders");
+            for index in 0..KEPT {
+                fs::write(folder.join(format!("20260916-1430{index:02}-1.png")), b"p").unwrap();
+            }
+            fs::write(folder.join("20260915-000000-1"), b"a file, not a folder").unwrap();
+            fs::create_dir(folder.join("somebody else")).unwrap();
+            // 2026-09-16T15:00:00Z.
+            let first = reserve_staging_folder(worker, &folder, at(1_789_570_800)).unwrap();
+            let second = reserve_staging_folder(worker, &folder, at(1_789_570_800)).unwrap();
+            let (first, second) = {
+                let paths = (
+                    first.staged_path().to_owned(),
+                    second.staged_path().to_owned(),
+                );
+                // Handed over: the folders are entries like any other from here on.
+                first.write_handed_over();
+                second.write_handed_over();
+                paths
+            };
+            assert_eq!(first, folder.join("20260916-150000-1"));
+            assert_eq!(second, folder.join("20260916-150000-2"));
+            fs::write(first.join("report.pdf"), b"x").unwrap();
+            sweep_staging(worker, &folder, abandoned_after());
+            assert!(!folder.join("20260916-143000-1.png").exists());
+            assert!(!folder.join("20260916-143001-1.png").exists());
+            assert!(folder.join("20260916-143002-1.png").exists());
+            assert!(first.join("report.pdf").exists() && second.is_dir());
+            assert!(
+                folder.join("20260915-000000-1").is_file(),
+                "not a folder, not ours"
+            );
+            assert!(folder.join("somebody else").is_dir());
+            for index in 0..KEPT {
+                fs::write(folder.join(format!("20260917-0000{index:02}-1.png")), b"p").unwrap();
+            }
+            sweep_staging(worker, &folder, abandoned_after());
+            assert!(!first.exists(), "a retired folder goes with what is in it");
+            assert!(!second.exists());
+            assert!(folder.join("20260915-000000-1").is_file());
+            let _ = fs::remove_dir_all(&folder);
+        });
+    }
+
+    /// RED (review N12) — **an entry still being written is counted against the cap and never
+    /// swept, and an abandoned write goes with its marker**: twenty-one pictures, the oldest still
+    /// being written — the next oldest goes in its stead; a marker refreshed longer ago than the
+    /// bound is an abandoned write — its entry goes ahead of it, whatever the cap; a marker whose
+    /// time is ahead of the clock (the clock stepped back), or could not be read, is live.
+    ///
+    /// MUTATIONS: let `retire` ignore live markers — the entry being written is removed; never
+    /// take an abandoned marker — the stale write stays.
+    #[test]
+    fn an_entry_being_written_is_counted_and_never_swept() {
+        let now = at(1_789_570_800);
+        let plain = |name: String| StagedListing {
+            name,
+            refreshed: None,
+        };
+        let mut listing: Vec<StagedListing> = (0..=KEPT)
+            .map(|index| plain(format!("20260916-1430{index:02}-1.png")))
+            .collect();
+        listing.push(StagedListing {
+            name: "20260916-143000-1.writing".to_owned(),
+            refreshed: Some(now - Duration::from_secs(2)),
+        });
+        assert_eq!(
+            retire(&listing, KEPT, now, STALL_BOUND),
+            ["20260916-143001-1.png"],
+            "the oldest is being written: the next one goes in its stead"
+        );
+        listing.push(plain("20260915-000000-1".to_owned()));
+        listing.push(StagedListing {
+            name: "20260915-000000-1.writing".to_owned(),
+            refreshed: Some(now - STALL_BOUND - Duration::from_secs(1)),
+        });
+        assert_eq!(
+            retire(&listing, KEPT, now, STALL_BOUND),
+            [
+                "20260915-000000-1",
+                "20260916-143001-1.png",
+                "20260915-000000-1.writing"
+            ],
+            "the abandoned write and its marker go, the entry first"
+        );
+        // Re-review F2: a marker just past the stall bound, inside the watcher's last look, is a
+        // watcher still looking — no sweep takes it until the look's slack is spent too.
+        let looking = [
+            plain("20260915-000000-1".to_owned()),
+            StagedListing {
+                name: "20260915-000000-1.writing".to_owned(),
+                refreshed: Some(now - STALL_BOUND - watch_interval(STALL_BOUND) / 2),
+            },
+        ];
+        assert!(
+            retire(&looking, 0, now, abandoned_after()).is_empty(),
+            "a marker inside the watcher's last look is live"
+        );
+        assert_eq!(
+            retire(&looking, 0, now, STALL_BOUND).len(),
+            2,
+            "the row is past the stall bound itself"
+        );
+        for refreshed in [Some(now + Duration::from_secs(3_600)), None] {
+            let ahead = [
+                plain("20260915-000000-1".to_owned()),
+                StagedListing {
+                    name: "20260915-000000-1.writing".to_owned(),
+                    refreshed,
+                },
+            ];
+            assert!(
+                retire(&ahead, 0, now, STALL_BOUND).is_empty(),
+                "{refreshed:?} is a live write"
+            );
+        }
+    }
+
+    /// RED (review N12) — **a folder being written survives another write's sweep, and is taken
+    /// once its marker is abandoned**: a promise's folder reserved (and marked) before twenty
+    /// pictures are written stays through the sweep that follows them; its marker, unrefreshed
+    /// past the bound, makes the next sweep take the folder and the marker.
+    ///
+    /// MUTATION: reserve the folder without its marker (`reserve_marked` making none) — the sweep
+    /// takes the folder being written.
+    #[test]
+    fn a_folder_being_written_survives_a_sweep_until_it_is_abandoned() {
+        on_a_worker(|worker| {
+            let folder = scratch("marked");
+            let writing = reserve_staging_folder(worker, &folder, at(1_789_570_800)).unwrap();
+            let into = writing.staged_path().to_owned();
+            fs::write(into.join("half.bin"), b"half").unwrap();
+            for index in 0..KEPT {
+                fs::write(folder.join(format!("20260917-0000{index:02}-1.png")), b"p").unwrap();
+            }
+            sweep_staging(worker, &folder, abandoned_after());
+            assert!(
+                into.join("half.bin").exists(),
+                "the folder being written stays"
+            );
+            assert!(
+                !folder.join("20260917-000000-1.png").exists(),
+                "and the cap is met by the oldest unmarked entry"
+            );
+            writing.still_going();
+            fs::OpenOptions::new()
+                .write(true)
+                .open(folder.join("20260916-150000-1.writing"))
+                .and_then(|marker| {
+                    marker.set_modified(SystemTime::now() - STALL_BOUND - Duration::from_secs(5))
+                })
+                .expect("the marker's time is set back");
+            writing.left_for_the_sweep();
+            sweep_staging(worker, &folder, abandoned_after());
+            assert!(!into.exists(), "an abandoned write is taken");
+            assert!(!folder.join("20260916-150000-1.writing").exists());
+            assert_eq!(staged_names(&names_in(&folder)).len(), KEPT - 1);
+            let _ = fs::remove_dir_all(&folder);
+        });
+    }
+
+    /// RED (re-review F2, ruled 2026-11-10) — **a live render that makes no progress keeps its
+    /// folder under a concurrent sweep**: a promise whose source holds its only entry, under a
+    /// stall bound far past the test (its watcher looks every second and does not give up), is
+    /// watched through five looks — about five seconds without a step; each look refreshes the
+    /// marker, progress or not, and the sweep run after it, which takes any marker one look old,
+    /// leaves the folder and its marker standing. Let go, the promise is pasted. The looks are
+    /// seen as the marker's refreshes: the test awaits each one and reads no clock.
+    ///
+    /// MUTATION: refresh the marker only when the render advances (`still_going` inside
+    /// `steps != seen`) — the first look is never seen.
+    #[test]
+    fn a_render_without_progress_keeps_its_folder_while_its_watcher_looks() {
+        let folder = scratch("watched");
+        let door = crate::headless::HeadlessClipboard::default();
+        let offer = vec![bt_platform::PromisedEntry {
+            name: "slow.bin".to_owned(),
+            size: Some(4),
+            folder: false,
+        }];
+        door.holds_payload(bt_platform::ClipboardPayload::Promise(
+            bt_platform::PromisedFiles {
+                entries: offer.clone(),
+                picture_passed_over: false,
+            },
+        ));
+        door.promise_renders(vec![Ok(b"slow".to_vec())]);
+        let bound = Duration::from_secs(60);
+        assert_eq!(watch_interval(bound), Duration::from_secs(1));
+        let stall = door.promise_render_stalls(bound);
+        let staging = {
+            let door: Arc<dyn crate::clipboard_lane::ClipboardDoor> = Arc::new(door.clone());
+            let folder = folder.clone();
+            bt_platform::spawn_at_priority(
+                "folio-staging-test",
+                bt_platform::ThreadPriority::Normal,
+                move |worker| stage_promise(worker, door, offer, &folder),
+            )
+            .expect("start the promise's worker")
+        };
+        let standing = |folder: &Path| -> (usize, usize) {
+            let entries: Vec<_> = fs::read_dir(folder)
+                .expect("the staging folder stands")
+                .flatten()
+                .collect();
+            let folders = entries
+                .iter()
+                .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+                .count();
+            let markers = entries
+                .iter()
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .ends_with(WRITING_SUFFIX)
+                })
+                .count();
+            (folders, markers)
+        };
+        crate::lane::wait_until("the paste's folder is reserved", || {
+            standing(&folder) == (1, 1)
+        });
+        let marker = fs::read_dir(&folder)
+            .expect("the staging folder stands")
+            .flatten()
+            .map(|entry| entry.path())
+            .find(|path| path.to_string_lossy().ends_with(WRITING_SUFFIX))
+            .expect("the paste's marker");
+        let refreshed = |marker: &Path| {
+            fs::metadata(marker)
+                .and_then(|meta| meta.modified())
+                .expect("the marker's time")
+        };
+        let mut last = refreshed(&marker);
+        for look in 1..=5 {
+            crate::lane::wait_until(
+                &format!("the watcher's look {look} refreshes the marker"),
+                || refreshed(&marker) > last,
+            );
+            last = refreshed(&marker);
+            let swept = folder.clone();
+            on_a_worker(move |worker| {
+                sweep_staging(worker, &swept, watch_interval(bound));
+            });
+            assert_eq!(
+                standing(&folder),
+                (1, 1),
+                "after look {look} without a step: the folder and its marker stand"
+            );
+        }
+        assert_eq!(
+            door.promise_renders_ended(),
+            0,
+            "the render was still held at its first entry"
+        );
+        stall.release();
+        let pasted = staging
+            .join()
+            .expect("the promise's worker answered")
+            .expect("let go, the promise is pasted");
+        assert_eq!(pasted.files, 1);
+        assert_eq!(
+            standing(&folder),
+            (1, 0),
+            "the paste's folder stays for the shell; its marker went"
+        );
+        let _ = fs::remove_dir_all(&folder);
     }
 
     /// RED GATE (review X-2) — **two writes in one second never take one
@@ -732,8 +1425,10 @@ mod tests {
         let stamp = "20260916-143012";
         let mut taken = Vec::new();
         for _ in 0..5 {
-            let (path, file) = reserve(&folder, stamp).expect("a free name");
+            let (writing, file) = reserve(&folder, stamp).expect("a free name");
             drop(file);
+            let path = writing.staged_path().to_owned();
+            writing.write_handed_over();
             assert!(path.exists(), "the reservation is the file");
             taken.push(path);
         }
@@ -757,7 +1452,11 @@ mod tests {
         fs::write(&squatter, b"not ours to overwrite").expect("a squatting file");
         let (stepped, file) = reserve(&folder, "20260916-143013").expect("a free name");
         drop(file);
-        assert_ne!(stepped, squatter);
+        assert_ne!(stepped.staged_path(), squatter);
+        assert!(
+            !folder.join("20260916-143013-1.writing").exists(),
+            "the squatter's key holds no marker of ours"
+        );
         assert_eq!(
             fs::read(&squatter).expect("the squatter survives"),
             b"not ours to overwrite"
@@ -770,12 +1469,18 @@ mod tests {
     #[test]
     fn a_saved_picture_lands_under_the_cap_with_its_bytes_in_it() {
         let folder = scratch("save");
-        let mut written = Vec::new();
-        for second in 0..(KEPT + 2) {
-            let at = UNIX_EPOCH + Duration::from_secs(1_789_569_012 + second as u64);
-            written.push(save(&folder, &[a_png()], at).expect("a picture saves"));
-        }
-        let left = names_in(&folder);
+        let written = {
+            let folder = folder.clone();
+            on_a_worker(move |worker| {
+                (0..(KEPT + 2))
+                    .map(|second| {
+                        let at = UNIX_EPOCH + Duration::from_secs(1_789_569_012 + second as u64);
+                        save(worker, &folder, &[a_png()], at).expect("a picture saves")
+                    })
+                    .collect::<Vec<_>>()
+            })
+        };
+        let left = staged_names(&names_in(&folder));
         assert_eq!(left.len(), KEPT, "the folder settles at the cap");
         assert!(
             !left.contains(&"20260916-143012-1.png".to_owned()),
@@ -939,12 +1644,18 @@ mod tests {
     #[test]
     fn a_saved_picture_is_closed_when_its_path_is_answered() {
         let folder = scratch("answered");
-        let saved = save(
-            &folder,
-            &[a_png()],
-            UNIX_EPOCH + Duration::from_secs(1_789_569_012),
-        )
-        .expect("a picture saves");
+        let saved = {
+            let folder = folder.clone();
+            on_a_worker(move |worker| {
+                save(
+                    worker,
+                    &folder,
+                    &[a_png()],
+                    UNIX_EPOCH + Duration::from_secs(1_789_569_012),
+                )
+                .expect("a picture saves")
+            })
+        };
         let free = bt_testpath::nobody_holds(&saved);
         let _ = fs::remove_dir_all(&folder);
         assert!(
