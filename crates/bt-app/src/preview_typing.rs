@@ -552,6 +552,12 @@ fn typing_indexes_match_full_scans_through_edits_undo_and_redo() {
 }
 
 /// Viewport counterpart to the retained eager reference diagnostic.
+///
+/// **And the three Chinese pages, each laid end to end to 64 KiB** — the
+/// reading the Chinese frame-budget test asserted against 16 ms until
+/// 2026-11-11 (0.4.10 plan row 78). Its claim is counted now
+/// (`a_chinese_page_costs_work_in_proportion_to_its_length`); the time is read
+/// here by a person, beside English's, on a machine that is doing nothing else.
 #[test]
 #[ignore = "wall-clock diagnostic; reads docs/DESIGN.md at run time"]
 fn md_typing_path_benchmark() {
@@ -560,7 +566,27 @@ fn md_typing_path_benchmark() {
         std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/DESIGN.md"))
             .unwrap();
     let synthetic: String = (0..12000).map(|i| format!("Paragraph {i}: **bold text** with `inline code` and enough ordinary words to wrap. {}\n\n", "prose ".repeat(32))).collect();
-    for (name, text) in [("DESIGN", real), ("synthetic", synthetic)] {
+    let sixty_four_kib_of = |one: &str| {
+        let mut page = String::new();
+        while page.len() < 64 * 1024 {
+            page.push_str(one);
+            page.push_str("\n\n");
+        }
+        page
+    };
+    for (name, text) in [
+        ("DESIGN", real),
+        ("synthetic", synthetic),
+        ("Chinese", sixty_four_kib_of(preview::CHINESE_PAGE)),
+        (
+            "Chinese, the long half",
+            sixty_four_kib_of(preview::CHINESE_FEATURE_PAGE),
+        ),
+        (
+            "Chinese and English",
+            sixty_four_kib_of(preview::MIXED_SCRIPT_PAGE),
+        ),
+    ] {
         let bytes = text.len();
         TIMES.with_borrow_mut(BTreeMap::clear);
         let accepted = Instant::now();
