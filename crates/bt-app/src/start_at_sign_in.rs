@@ -333,7 +333,7 @@ impl SignInRun {
 
 /// **The carry pass's repair of the entry** — see the module header.
 ///
-/// One reading, classified ([`SignInFound::of`]); the write only when the finding is this copy by
+/// One reading, classified ([`SignInFound::of_reading`]); the write only when the finding is this copy by
 /// another spelling or a program that is gone, and then **only after the trial's gate has said
 /// yes** (`defer` answers `true` to hold it), **only while no press holds the entry's latch**
 /// (`writes`, tried and never waited for), and **only if no press has landed since the reading**.
