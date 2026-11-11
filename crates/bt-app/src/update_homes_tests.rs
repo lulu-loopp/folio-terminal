@@ -775,10 +775,13 @@ fn record_update_home_keeps_one_entry_per_home() {
 /// PIN (0.4.10 plan row 68e; 68b's S2 shape) — **the macOS Prepare records its home before it
 /// makes it**: `prepare_on` calls `record_update_home(` before
 /// `install_txn::durable_create_dir(home.root())`, outside the match on its answer, so both a
-/// new home and one that was there are recorded.
+/// new home and one that was there are recorded; and the product's driver,
+/// `MacPrepare::of_this_copy`, hands it the data folder's record — `record: None` is a test
+/// driver's alone (review N3).
 ///
 /// MUTATION: the entry moved after the home is made
-/// (`plant-68e-prepare-records-after-the-home.py`).
+/// (`plant-68e-prepare-records-after-the-home.py`); the product's driver handed no record
+/// (`plant-68e-prepare-records-nothing.py`).
 #[test]
 fn the_macos_prepare_records_its_home_before_making_it() {
     use crate::test_support::{item_body, squeezed};
@@ -792,6 +795,16 @@ fn the_macos_prepare_records_its_home_before_making_it() {
         .find("matchinstall_txn::durable_create_dir(home.root())")
         .expect("the macOS Prepare makes its home");
     assert!(recorded < made, "recorded before it is made: {body}");
+    let product = squeezed(crate::test_support::method_body(
+        "MacPrepare",
+        "of_this_copy",
+    ));
+    assert!(
+        product.contains(
+            "record:Some(crate::persist::storage_dir().join(crate::update_homes::HOMES_RECORD))"
+        ),
+        "the product's Prepare is handed the data folder's record: {product}"
+    );
 }
 
 /// PIN (0.4.10 plan row 68e, ruling (b) of 2026-11-10) — **a `BT_UPDATE_HOMES` line never carries a
