@@ -385,6 +385,17 @@ fn the_carry_pass_points_the_sign_in_entry_at_this_copy() {
     );
 }
 
+/// One case of [`a_moved_copys_entry_is_pointed_at_this_one`]: what it is, the entry, whether its
+/// volume is away, what the member finds, what it repairs, and the row after.
+type SignInMovedCase<'a> = (
+    &'a str,
+    (u32, Vec<u8>),
+    bool,
+    SignInFound,
+    Option<&'a str>,
+    SignInRow,
+);
+
 /// RED (T-START-AT-LOGON-SWITCH, R7, R8; the check's old-shape test) — **a moved copy's entry is
 /// pointed at this one**: this copy by another spelling and a copy that is gone are rewritten to
 /// this copy exactly; another copy that is there, a copy on a volume that is away and another
@@ -397,14 +408,7 @@ fn the_carry_pass_points_the_sign_in_entry_at_this_copy() {
 fn a_moved_copys_entry_is_pointed_at_this_one() {
     let copies = sign_in_copies("sign-in-moved");
     let tool = (REG_SZ, sz(OsStr::new(r#""C:\Tools\sync.exe""#)));
-    let cases: [(
-        &str,
-        (u32, Vec<u8>),
-        bool,
-        SignInFound,
-        Option<&str>,
-        SignInRow,
-    ); 5] = [
+    let cases: [SignInMovedCase<'_>; 5] = [
         (
             "this copy by another spelling",
             entry_of(&copies.this_spelled_otherwise),
