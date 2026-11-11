@@ -287,9 +287,12 @@ fn a_panes_output_reaches_the_glass_in_the_turn_that_publishes_it() {
 /// fold, the refused frame is booked a frame after the present the turn made; paid after it, the
 /// fold books it from the picture before, which the turn's own present has already replaced.
 ///
-/// The strip has not ticked yet (`strip_animation_ticked_at` is `None`), so its next tick is the
-/// frame deadline itself and the wake is the strip's, at that instant. The instant is read back
-/// from the window: a present is stamped with the clock `trace_present` reads, not with the
+/// The strip's rate is due (it has not looked yet), so it looks on this turn whatever the gate
+/// says, writes the mark's step down as owed and is refused (T-STRIP-ASKS-ON-ITS-TICK). Its own
+/// next look is a frame after this turn's instant, later than a frame after the present, which
+/// is stamped no later than the turn (the mark test's own precondition): so the wake is the
+/// refused frame's own entry, and this pins that entry's instant exactly. The instant is read
+/// back from the window: a present is stamped with the clock `trace_present` reads, not with the
 /// instant handed to the turn.
 ///
 /// MUTATION: move the `pay_the_turns_present` call in `Runtime::turn` below the deadline fold —
@@ -305,8 +308,11 @@ fn a_refused_frame_is_booked_from_the_present_its_turn_paid() {
     output_held_until(&mut folio, b"   Compiling bt-app v0.0.0\r\n", now);
     let (wake, effects) = turn_at(&mut folio, now);
     assert!(
-        folio.window.frame_clock.owes_a_frame() && folio.window.strip_animation_ticked_at.is_none(),
-        "the fixture's own precondition: the gate turned the mark's step away"
+        folio.window.frame_clock.owes_a_frame()
+            && folio.window.strip_animation_ticked_at == Some(now)
+            && folio.window.strip_owes_a_frame,
+        "the fixture's own precondition: the strip looked, wrote the mark's step down, and the \
+         gate turned it away"
     );
     assert_eq!(
         presented_source(&effects),
@@ -324,7 +330,7 @@ fn a_refused_frame_is_booked_from_the_present_its_turn_paid() {
     );
     assert_eq!(
         wake,
-        Some((WakeOwner::StripAnimation, presented + interval)),
+        Some((WakeOwner::RefusedFrame, presented + interval)),
         "the refused step is booked a frame after the present this turn paid"
     );
 }
