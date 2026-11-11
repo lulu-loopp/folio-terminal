@@ -1244,6 +1244,14 @@ fn tab_queue_leader(tab: &TabState) -> Option<SeatId> {
 /// `tab_is_active` squares the tab that arrived and strands the tab that left one revision behind —
 /// a permanent dot on a tab whose shell never spoke. Seeing is painting, and painting is answered
 /// where the painting happens ([`Runtime::redraw`]).
+///
+/// **Once per turn means every turn, whatever the frame gates say** (T-STRIP-ASKS-ON-ITS-TICK,
+/// 2026-11-11). Its one caller in the product is the head of `Runtime::advance_strip_animation`,
+/// beside the taskbar mirror and above the strip's rate and the window's display frame: this
+/// pass is state, and it draws nothing. It used to stand behind both, so it ran only on the
+/// strip's admitted ticks — at most once a frame, and never for the length of a neighbouring
+/// pane's flood, which held back a bell's announcement, a finished turn's, a look's consumption
+/// and a credential's expiry until the flood stopped.
 // Seven, and each is a different question about one pass: where the panes are, which of them the
 // reader is looking at, where this window is with respect to the reader's eyes, what serial to
 // draw a place from, when now is, where the lines go, and where the interruptions the ledger

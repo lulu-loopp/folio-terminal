@@ -13044,15 +13044,16 @@ impl<B: Backend> Runtime<'_, B> {
     /// every frame they are alive, and neither moves at all once its session
     /// stops working.
     ///
-    /// Three steps, and only the last is behind the window's display frame
-    /// (T-STRIP-ASKS-ON-ITS-TICK): the taskbar mirror on every turn; the look,
-    /// at most once a frame on the strip's own rate, which compares what would
-    /// be drawn against what was and writes the difference down; and the ask,
-    /// on any turn while that written debt stands and on no other.
+    /// Four steps, and only the last is behind the window's display frame
+    /// (T-STRIP-ASKS-ON-ITS-TICK): the taskbar mirror and the attention settle
+    /// pass, on every turn, because both are state; the look, at most once a
+    /// frame on the strip's own rate, which compares what would be drawn
+    /// against what was and writes the difference down; and the ask, on any
+    /// turn while that written debt stands and on no other.
     ///
-    /// **The look reads nothing of the window thread's that it did not read
-    /// behind the gate** (the ruling on row 80's class): the tabs, their
-    /// sessions' status snapshots and attention queues, the pointer's hover
+    /// **The settle pass and the look read nothing of the window thread's that
+    /// they did not read behind the gate** (the ruling on row 80's class): the
+    /// tabs, their sessions' status snapshots and attention queues, the pointer's hover
     /// seat and the tab it names, the float that is peeking, the motion
     /// setting, the chrome palette, the renderer's scale factor, the rail's
     /// posture, the chevron, rail, dock, resizing-card, focus-column and
@@ -13061,7 +13062,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// pictures' written debt, the settings' two notification switches and the
     /// turn's own `observed_place`. Every one is a field of this process; none
     /// is a system call. The one desktop reading a turn makes is taken at its
-    /// head (`Self::observe_window_place`), and what the look may *do* to the
+    /// head (`Self::observe_window_place`), and what the settle pass may *do* to the
     /// desktop — the deliveries `Self::raise_attention` makes — is what it did
     /// behind the gate, on the turn it found them.
     pub(in crate::runtime) fn advance_strip_animation(&mut self, now: Instant) -> Result<()> {
@@ -13108,6 +13109,41 @@ impl<B: Backend> Runtime<'_, B> {
         hang_watch::during(hang_watch::Station::TaskbarMirror, || {
             taskbar.show(window, wanted)
         });
+        // Every door of the attention queue, in one pass over one leaf at a time
+        // — see `settle_attention` for why they stopped being two passes whose
+        // order was the mechanism, and for the order the four that are left run in.
+        //
+        // **Above both of the strip's gates, beside the taskbar mirror, and for
+        // the mirror's reason** (T-STRIP-ASKS-ON-ITS-TICK, ruling R3). This pass
+        // is state, not a picture: a credential's time running out, a bell's
+        // announcement, the queue's own settle and the look that consumes a
+        // latch. Behind the display frame it ran only on the strip's admitted
+        // ticks, so for the length of a neighbouring pane's flood a bell or a
+        // finished turn went unannounced, a tab looked at kept its dot, and a
+        // credential's expiry had to be booked no earlier than the strip's next
+        // tick. Under the strip's rate alone it would still wait up to a frame.
+        // It runs before the look so the claims it changes are compared on this
+        // turn, and after the turn's tab switch, as its doc requires.
+        //
+        // **The turn's own reading, not a second one** (ticket 48): the facts that
+        // separate "not in front of you" from "not on any screen" — and from "there
+        // is no taskbar to look at" — are facts about this turn, and its head asked
+        // them once (the one writer, in `frame.rs`), focus included, for the drain
+        // and for this pass.
+        let place = self.window.observed_place;
+        let mut raised: Vec<AttentionDelivery> = Vec::new();
+        let switches = self.notification_switches();
+        settle_attention(
+            &mut self.window.tabs,
+            self.window.active_tab,
+            place,
+            switches,
+            &mut self.window.attention_next_place,
+            now,
+            attention_trace::global(),
+            &mut raised,
+        );
+        self.raise_attention(raised)?;
         // **The strip looks on its own rate, whatever the glass is doing, and
         // asks for a frame only with what it found** (T-STRIP-ASKS-ON-ITS-TICK,
         // 2026-11-11).
@@ -13136,28 +13172,6 @@ impl<B: Backend> Runtime<'_, B> {
             self.window.frame_clock.interval(),
         ) {
             self.window.strip_animation_ticked_at = Some(now);
-            // Every door of the attention queue, in one pass over one leaf at a time
-            // — see `settle_attention` for why they stopped being two passes whose
-            // order was the mechanism, and for the order the four that are left run in.
-            // **The turn's own reading, not a second one** (ticket 48): the facts that
-            // separate "not in front of you" from "not on any screen" — and from "there
-            // is no taskbar to look at" — are facts about this turn, and its head asked
-            // them once (the one writer, in `frame.rs`), focus included, for the drain
-            // and for this pass.
-            let place = self.window.observed_place;
-            let mut raised: Vec<AttentionDelivery> = Vec::new();
-            let switches = self.notification_switches();
-            settle_attention(
-                &mut self.window.tabs,
-                self.window.active_tab,
-                place,
-                switches,
-                &mut self.window.attention_next_place,
-                now,
-                attention_trace::global(),
-                &mut raised,
-            );
-            self.raise_attention(raised)?;
             let active = self.window.active_tab;
             let motion = self.app.motion;
             let palette = bt_render::chrome_palette();

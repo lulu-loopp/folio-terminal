@@ -13,7 +13,7 @@
 use std::time::{Duration, Instant};
 
 use crate::headless::{Headless, HeadlessFolio, WindowEffect};
-use crate::test_support::{card_over, cross_tab, leaf_saying, tab_holding};
+use crate::test_support::{card_over, cross_tab, leaf_saying, ring, tab_holding};
 use crate::wake_owner::WakeOwner;
 use crate::{Motion, PeekClock, RowHost, Runtime, TabId, foreground_program};
 
@@ -214,17 +214,22 @@ fn a_tab_menus_matured_rest_is_spent_with_no_other_window() {
     books_nothing_due(turn(&mut folio, due), due);
 }
 
-/// RED — **a standing credential's ten minutes are booked no earlier than the turn that spends
-/// them.**
+/// RED — **a standing credential's ten minutes are spent on the turn they come due on, whatever
+/// the strip's gates say** (T-STRIP-ASKS-ON-ITS-TICK, ruling R3; T-WINDOW-THREAD-UNDER-LOAD's
+/// `a_due_credential_behind_the_strips_gate_is_booked_for_the_turn_the_gate_admits`, re-purposed).
 ///
-/// `settle_attention` runs behind the strip's tick and the window's frame gate; a credential due
-/// while the gate is shut was booked raw, an instant in the past for as long as the gate stayed
-/// shut.
+/// `settle_attention` stood behind the strip's rate and the window's frame gate, so a credential
+/// due while either was shut stood unspent, and the fold clamped its instant to the strip's next
+/// tick so the loop would not spin on it. The pass is state and runs on every turn now: on a turn
+/// both gates refuse, the credential is spent, and the fold books its instant as it stands —
+/// which is nothing, because nothing stands.
 ///
-/// MUTATION: book `attention_ledger_deadline` raw in `Runtime::turn`'s fold — the turn hands the
-/// loop `AttentionCredential`.
+/// MUTATIONS: move `settle_attention` and `raise_attention` back below the frame gate
+/// (`plant-77-d`) — the credential stands, and the turn hands the loop `AttentionCredential` at
+/// its own instant; book the credential clamped to the strip's next tick again — the credential
+/// is still spent, which is what says the clamp has nothing left to hold back.
 #[test]
-fn a_due_credential_behind_the_strips_gate_is_booked_for_the_turn_the_gate_admits() {
+fn a_due_credential_is_spent_on_its_own_turn_whatever_the_strips_gates_say() {
     let mut folio = HeadlessFolio::with_tabs(
         "wake-fold-credential",
         vec![tab_holding(leaf_saying("plain\r\n"))],
@@ -244,10 +249,92 @@ fn a_due_credential_behind_the_strips_gate_is_booked_for_the_turn_the_gate_admit
             &bt_workbench::attention::WaitSlot::Level(bt_workbench::attention::WaitKind::Agent),
             armed,
         );
-        // The strip ticked a moment ago, so its gate is shut at `due`.
+        // The strip looked a moment ago, so its rate is shut at `due`; and the glass took a
+        // picture a moment ago, so the window's display frame is shut as well.
         runtime.window.strip_animation_ticked_at = Some(due - Duration::from_millis(1));
+        runtime.window.last_present_at = Some(due - Duration::from_millis(1));
     }
-    books_nothing_due(turn(&mut folio, due), due);
+    let wake = turn(&mut folio, due);
+    assert!(
+        !folio.window.frame_clock.admits(),
+        "the fixture's own precondition: the frame gate refused the turn"
+    );
+    assert_eq!(
+        folio.window.tabs[0]
+            .sessions
+            .values()
+            .next()
+            .expect("the one pane")
+            .session
+            .attention
+            .clock
+            .deadline(),
+        None,
+        "the credential is spent on the turn it comes due on"
+    );
+    books_nothing_due(wake, due);
+}
+
+/// RED — **a bell heard on a shut turn is announced on that turn, and a look consumes it there**
+/// (T-STRIP-ASKS-ON-ITS-TICK, claim C3).
+///
+/// The settle pass stood behind the strip's rate and the window's frame gate, and every turn of a
+/// pane's flood is a turn both refuse: a bell or a finished turn in another pane went
+/// unannounced, and a tab looked at kept its dot, until the flood stopped. Two panes ring on a
+/// turn a millisecond inside the frame of the last present, with the strip's rate spent: the
+/// background tab's bell is announced on that turn (the lane's own record of it,
+/// `bell_reported`), and the tab on screen in a focused window has its latch spent by the look.
+///
+/// The reach the announcement is delivered at is not asserted here: for a background tab in a
+/// covered window it turns on the taskbar lane's live answer about the test machine's shell (a
+/// bar that hides itself reaches the desktop instead), and the delivery's own door is
+/// `a_flash_for_attention_goes_through_the_windows_door`'s.
+///
+/// MUTATION: move `settle_attention` and `raise_attention` back below the frame gate
+/// (`plant-77-d`) — neither bell is dealt with on the shut turn.
+#[test]
+fn a_bell_heard_on_a_shut_turn_is_announced_on_that_turn() {
+    let mut background = tab_holding(leaf_saying("背景 background\r\n"));
+    background.id = TabId(2);
+    let mut folio = HeadlessFolio::with_tabs(
+        "wake-fold-bell",
+        vec![tab_holding(leaf_saying("前台 front\r\n")), background],
+        0,
+    );
+    folio.draw();
+    let presented = folio
+        .window
+        .last_present_at
+        .expect("the fixture's draw reached the glass");
+    let inside = presented + Duration::from_millis(1);
+    // The strip looked a moment ago, so its rate is shut as well as the display frame.
+    folio.window.strip_animation_ticked_at = Some(presented);
+    let watched = folio.window.tabs[0].seats.terminals()[0];
+    let heard = folio.window.tabs[1].seats.terminals()[0];
+    ring(&mut folio.window.tabs[0], watched);
+    ring(&mut folio.window.tabs[1], heard);
+    turn(&mut folio, inside);
+    assert!(
+        !folio.window.frame_clock.admits(),
+        "the fixture's own precondition: the frame gate refused the turn"
+    );
+    assert!(
+        folio.window.observed_place.focused,
+        "the fixture's own precondition: the window has the keyboard"
+    );
+    let background = &folio.window.tabs[1].sessions[&heard].session;
+    assert!(
+        background.attention.bell_reported,
+        "the background tab's bell is announced on the turn it was heard"
+    );
+    assert!(
+        !folio.window.tabs[0].sessions[&watched]
+            .session
+            .session
+            .status()
+            .bell_latched(),
+        "and the bell on the tab being looked at is consumed by the look on that turn"
+    );
 }
 
 /// RED — **the session's autosave is not booked while a quit holds the storage worker.**
