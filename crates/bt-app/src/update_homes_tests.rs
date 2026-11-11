@@ -825,7 +825,11 @@ fn the_macos_prepare_records_its_home_before_making_it() {
 /// PIN (0.4.10 plan row 68e, ruling (b) of 2026-11-10) — **a `BT_UPDATE_HOMES` line never carries a
 /// path**: over every fate the sweep answers, in a tree whose every path holds the scratch root,
 /// no line holds the root, a separator, or a part of any recorded path but the home's own name;
-/// and the one function that builds the lines formats no path.
+/// an entry that names no home — a relative one, an absolute folder of somebody's — is said by
+/// its place alone, no component of it (review N7); and the one function that builds the lines
+/// formats no path.
+///
+/// MUTATION: a refused entry said by its last component (`plant-68e-refused-entry-named.py`).
 #[test]
 fn the_update_homes_lines_name_no_path() {
     homes_on_a_worker(|worker| {
@@ -849,6 +853,7 @@ fn the_update_homes_lines_name_no_path() {
                 &more,
                 &gone,
                 Path::new("relative"),
+                &root.join("Somebody"),
             ],
         );
         let swept = sweep_recorded_homes(worker, &record, None, None, &what_stands, |_| false);
@@ -859,12 +864,18 @@ fn the_update_homes_lines_name_no_path() {
             .into_iter()
             .chain(unread.home_lines())
             .collect();
-        assert_eq!(lines.len(), 7, "{lines:?}");
+        assert_eq!(lines.len(), 8, "{lines:?}");
+        for refused in [
+            "BT_UPDATE_HOMES refused entry #6",
+            "BT_UPDATE_HOMES refused entry #7",
+        ] {
+            assert!(lines.contains(&refused.to_owned()), "{lines:?}");
+        }
         let root_said = root.display().to_string();
         for line in &lines {
             assert!(!line.contains(&root_said), "{line}");
             assert!(!line.contains('/') && !line.contains('\\'), "{line}");
-            for part in ["Applications", "Other", "Moved"] {
+            for part in ["Applications", "Other", "Moved", "relative", "Somebody"] {
                 assert!(!line.contains(part), "{line} names {part}");
             }
         }

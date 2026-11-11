@@ -35,9 +35,11 @@
 //!
 //! **One diagnostics line per home when its fate changes**: `BT_UPDATE_HOMES <home name>[ #<n>]
 //! <removed|gone|recorded|left (live)|left (owner unknown)|left (in flight)|left (not only
-//! ours)|left (in use)|held|refused (<stage>)|refused entry>`, `BT_UPDATE_HOMES record <unread|not
-//! written> (<reason>)`, `BT_UPDATE_HOMES record held`, or `BT_UPDATE_HOMES none`. A line names the home's own name, never its
-//! path; `#<n>` is its place in the round when two homes of one name are said.
+//! ours)|left (in use)|held|refused (<stage>)>`, `BT_UPDATE_HOMES refused entry #<n>`,
+//! `BT_UPDATE_HOMES record <unread|not written> (<reason>)`, `BT_UPDATE_HOMES record held`, or
+//! `BT_UPDATE_HOMES none`. A line names the home's own name, never its path; `#<n>` is its place
+//! in the round when two homes of one name are said, and the only thing said of an entry that
+//! names no home, whose path may be one Folio never wrote.
 //!
 //! **macOS only, by the host's answer rather than by `cfg`** (E8, `update_orphans`' shape): the
 //! Windows home is `<install>/.folio-update`, inside the install folder, and goes with that folder
@@ -260,12 +262,22 @@ impl HomesSwept {
                 |name| name.to_string_lossy().into_owned(),
             )
         };
+        // An entry that names no home is said by its place alone: what it names may be a path
+        // Folio never wrote, and no part of a path is ever said (review N7).
         for (place, (home, fate)) in self.fates.iter().enumerate() {
+            if *fate == HomeFate::RefusedEntry {
+                lines.push(format!(
+                    "BT_UPDATE_HOMES {} #{}",
+                    fate.home_fate_said(),
+                    place + 1
+                ));
+                continue;
+            }
             let name = name_of(home);
             let shared = self
                 .fates
                 .iter()
-                .filter(|(other, _)| name_of(other) == name)
+                .filter(|(other, fate)| *fate != HomeFate::RefusedEntry && name_of(other) == name)
                 .count()
                 > 1;
             let said = if shared {
