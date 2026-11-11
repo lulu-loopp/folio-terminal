@@ -635,8 +635,11 @@ pub(crate) enum SignInRemoval {
     Absent,
     /// This copy's, or a gone program's: removed, with the system's switch of the name.
     Removed,
-    /// Another copy's, there or on a volume that is away: left, and said.
+    /// Another copy's that is there: left, and said.
     LeftAnotherCopy(PathBuf),
+    /// A Folio's whose program could not be checked — on a volume that is away, or a path the
+    /// system will not say about: left, and said as unchecked (review N3).
+    LeftUnchecked(PathBuf),
     /// Another program's value under the name: left as it is.
     LeftNotOurs,
     /// The registry refused, in its own words.
@@ -645,7 +648,8 @@ pub(crate) enum SignInRemoval {
 
 /// **Both uninstall verbs' removal of the entry** (`uninstall::sign_in_entries`, on the door's
 /// worker): removed when it names this copy `exe` or a program that is gone, the system's switch
-/// with it; another copy's is left; another program's value is never judged. The system's switch
+/// with it; another copy's is left, and one whose program could not be checked is left as that;
+/// another program's value is never judged. The system's switch
 /// does not decide: an entry turned off in Startup apps is still Folio's to take away.
 pub(crate) fn uninstall_sign_in_in(
     registry: &mut impl Registry,
@@ -660,9 +664,8 @@ pub(crate) fn uninstall_sign_in_in(
     match sign_in_entry_owner(&read.found, exe, look) {
         EntryOwner::Absent => SignInRemoval::Absent,
         EntryOwner::NotOurs => SignInRemoval::LeftNotOurs,
-        EntryOwner::AnotherCopy(program) | EntryOwner::OwnerUnknown(program) => {
-            SignInRemoval::LeftAnotherCopy(program)
-        }
+        EntryOwner::AnotherCopy(program) => SignInRemoval::LeftAnotherCopy(program),
+        EntryOwner::OwnerUnknown(program) => SignInRemoval::LeftUnchecked(program),
         EntryOwner::ThisCopy { .. } | EntryOwner::Dead => match remove_entry_in(registry, keys) {
             Ok(_) => SignInRemoval::Removed,
             Err(refusal) => SignInRemoval::Refused(refusal.to_string()),

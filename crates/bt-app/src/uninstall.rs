@@ -1766,6 +1766,7 @@ fn sign_in_entries(
         SignInRemoval::Absent => Fate::Absent,
         SignInRemoval::Removed => Fate::Removed,
         SignInRemoval::LeftAnotherCopy(program) => Fate::Left(vec![program]),
+        SignInRemoval::LeftUnchecked(_) => Fate::Kept(Text::CleanupSignInUnchecked),
         SignInRemoval::LeftNotOurs => Fate::LeftNotOurs(vec![PathBuf::from(format!(
             r"HKCU\{}\{}",
             bt_platform::logon_hook::RUN_KEY,

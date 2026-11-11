@@ -375,6 +375,10 @@ text_entries! {
     /// A recorded macOS update home whose `lock` or `admission` another copy holds, left (row
     /// 68e, review N8).
     CleanupUpdateHomeInUse,
+    /// The account's sign-in entry naming a Folio whose program could not be checked — on a
+    /// volume that is not there, or a path the system will not say about — left (row 22a, review
+    /// N3: row 68e's rule, a line says only what is known).
+    CleanupSignInUnchecked,
     CleanupRefused,
     CleanupRoot,
     CleanupRunning,
@@ -5712,6 +5716,12 @@ impl Text {
                 "left (another copy is using it)",
                 "left (another copy is using it)", // zh: pending 68e
             ),
+            Self::CleanupSignInUnchecked => pick(
+                lang,
+                "left (its program could not be checked)",
+                // zh: pending T-START-AT-LOGON-SWITCH
+                "left (its program could not be checked)",
+            ),
             Self::CleanupRefused => pick(lang, "refused", "未能移除"),
             Self::CleanupRoot => pick(
                 lang,
@@ -6967,6 +6977,8 @@ impl Text {
         (Self::SignInPathTooLong, HostPlatform::MacOs),
         (Self::SignInEntryNotOurs, HostPlatform::Windows),
         (Self::SignInEntryNotOurs, HostPlatform::MacOs),
+        (Self::CleanupSignInUnchecked, HostPlatform::Windows),
+        (Self::CleanupSignInUnchecked, HostPlatform::MacOs),
     ];
 }
 

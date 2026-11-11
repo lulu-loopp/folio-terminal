@@ -1502,8 +1502,9 @@ fn uninstall_entrance_row_removes_this_copys_values_and_leaves_the_rest() {
 
 /// RED (0.4.10 plan row 22a, T-START-AT-LOGON-SWITCH; R12) — **the uninstall's sign-in row removes
 /// this copy's entry and a gone copy's, with Windows' switch of the name, and leaves another
-/// copy's, a copy's on a volume that is away and another program's value; an account with no
-/// entry, and every platform but Windows, print the row's `not present` line.**
+/// copy's, a copy's on a volume that is away (said as unchecked, review N3) and another program's
+/// value; an account with no entry, and every platform but Windows, print the row's `not present`
+/// line.**
 ///
 /// Over two keys held in memory, never the account's, and real files in the sandbox for "there"
 /// and "gone".
@@ -1512,6 +1513,7 @@ fn uninstall_entrance_row_removes_this_copys_values_and_leaves_the_rest() {
 /// live copy's case is `Removed`.
 #[test]
 fn uninstall_sign_in_row_removes_this_copys_entry_and_leaves_another_copys() {
+    use crate::attention_ownership::{Look, PathStands};
     use crate::start_at_sign_in::{SignInRemoval, uninstall_sign_in_in};
     use bt_platform::logon_hook::{REG_SZ, Registry};
     use bt_platform::sign_in_entry::{ENTRY_NAME, EntryKeys, REG_BINARY, command_for};
@@ -1555,8 +1557,19 @@ fn uninstall_sign_in_row_removes_this_copys_entry_and_leaves_another_copys() {
     fs::create_dir_all(other.parent().unwrap()).unwrap();
     fs::write(&other, b"other").unwrap();
     let gone = root.join("gone").join("folio.exe");
-    let look = |path: &Path| crate::attention_ownership::what_stands(path);
-    let row = |entry: Option<(u32, Vec<u8>)>| {
+    let away = root.join("away").join("folio.exe");
+    /// A machine whose volumes are all away: no missing path can be told gone.
+    struct SignInVolumeAway;
+    impl Look for SignInVolumeAway {
+        fn stands(&self, path: &Path) -> PathStands {
+            crate::attention_ownership::what_stands(path)
+        }
+        fn volume_of(&self, _missing: &Path) -> Option<PathBuf> {
+            None
+        }
+    }
+    let here = |path: &Path| crate::attention_ownership::what_stands(path);
+    let row_over = |entry: Option<(u32, Vec<u8>)>, look: &dyn Look| {
         let mut keys = Keys::default();
         if let Some((kind, data)) = entry {
             keys.set(SIGN_IN_ROW_KEYS.run, ENTRY_NAME, kind, &data)
@@ -1576,11 +1589,12 @@ fn uninstall_sign_in_row_removes_this_copys_entry_and_leaves_another_copys() {
             &sz("x".as_ref()),
         )
         .unwrap();
-        let removal = uninstall_sign_in_in(&mut keys, SIGN_IN_ROW_KEYS, &exe, &look);
+        let removal = uninstall_sign_in_in(&mut keys, SIGN_IN_ROW_KEYS, &exe, look);
         let entries = sign_in_entries(HostPlatform::Windows, Lang::English, || removal.clone());
         let left: Vec<(String, String)> = keys.0.keys().cloned().collect();
         (removal, entries, left)
     };
+    let row = |entry: Option<(u32, Vec<u8>)>| row_over(entry, &here);
     let label = "Autostart / login item (per-account)";
     let only_somebody = vec![("run".to_owned(), "SomebodyElse".to_owned())];
 
@@ -1597,6 +1611,24 @@ fn uninstall_sign_in_row_removes_this_copys_entry_and_leaves_another_copys() {
     assert_eq!(removal, SignInRemoval::LeftAnotherCopy(other.clone()));
     assert_eq!(entries[0].fate, Fate::Left(vec![other.clone()]));
     assert_eq!(left.len(), 3, "another copy's entry stays: {left:?}");
+    let (removal, entries, left) = row_over(
+        Some((REG_SZ, sz(&command_for(&away)))),
+        &SignInVolumeAway,
+    );
+    assert_eq!(removal, SignInRemoval::LeftUnchecked(away.clone()));
+    assert_eq!(
+        entries[0].fate,
+        Fate::Kept(Text::CleanupSignInUnchecked),
+        "a copy on a volume that is away is not said to exist"
+    );
+    assert!(
+        entries[0]
+            .line(Lang::English)
+            .contains("left (its program could not be checked)"),
+        "{}",
+        entries[0].line(Lang::English)
+    );
+    assert_eq!(left.len(), 3, "the unchecked entry stays: {left:?}");
     let (removal, entries, _) = row(Some((2, sz(&command_for(&exe)))));
     assert_eq!(removal, SignInRemoval::LeftNotOurs);
     assert!(matches!(entries[0].fate, Fate::LeftNotOurs(_)));
