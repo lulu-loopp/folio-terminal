@@ -294,7 +294,13 @@ impl TextOrigin {
     /// asks this once for every outer run a copied run crosses, and a paragraph
     /// of many soft-wrapped lines is twice as many outer runs as lines.
     fn run_at(&self, offset: usize) -> Option<&OriginRun> {
-        let index = self.runs.partition_point(|run| run.text.end <= offset);
+        let index = self.runs.partition_point(|run| {
+            // One run looked at, for the test that holds a block's provenance
+            // linear in its length (`a_chinese_page_costs_work_in_proportion_to_its_length`).
+            #[cfg(test)]
+            crate::preview_typing::count("origin runs visited", 1);
+            run.text.end <= offset
+        });
         self.runs
             .get(index)
             .filter(|run| run.text.contains(&offset))
