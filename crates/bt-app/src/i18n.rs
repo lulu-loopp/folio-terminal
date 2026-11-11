@@ -5612,8 +5612,8 @@ impl Text {
             ),
             Self::CleanupUpdateHomeInFlight => pick(
                 lang,
-                "left (an update is unfinished; it finishes or is undone at the next login)",
-                "left (an update is unfinished; it finishes or is undone at the next login)", // zh: pending 68e
+                "left (an update is unfinished)",
+                "left (an update is unfinished)", // zh: pending 68e
             ),
             Self::CleanupUpdateHomeUnchecked => pick(
                 lang,
