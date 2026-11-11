@@ -69,6 +69,7 @@ All notable changes to Folio are recorded here. The format follows
 - While a tab's mark breathes or turns for a running command, Folio now spends less processor time on each step of it: the panes are no longer drawn again when nothing in them has changed. The mark moves as often as before, and this adds no wakes. <!-- zh: pending T-WORKING-MARK-CADENCE -->
 - When Folio refuses a paste, it now writes the reason to its diagnostics log, and each terminal paste's clipboard read records what it found, so a refusal that showed only a short notice can be traced afterwards. <!-- zh: pending -->
 - On Windows, when Folio starts, a line an older Folio wrote into your PowerShell profile is rewritten to the current line, which prints nothing when Folio's script is gone; nothing else in the file changes, a line you edited is left as it is, and nothing is changed while the PowerShell integration is off. Turning the integration on for an account whose data is still in the BetterTerminal folder now writes the line that loads that folder's script, and turning it on for a data folder outside `%APPDATA%` says why it cannot. <!-- zh: pending -->
+- A finished turn or a bell in one pane is announced at once even while another pane in the same window is printing fast; it used to wait for that output to pause. <!-- zh: pending T-STRIP-ASKS-ON-ITS-TICK -->
 
 ## 0.4.8-preview — 2026-10-23
 
