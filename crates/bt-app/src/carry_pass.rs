@@ -1220,44 +1220,41 @@ mod tests {
         );
         assert!(!latch.round_again());
 
+        // A member runs inside the pass's unwind boundary (`run_if_asked`), so what each round
+        // handed the lines is read here, after it, and never asserted inside the member.
+        let handed = |latch: &CarryLatch, hooks_settled: bool| {
+            let may_start = std::cell::Cell::new(None);
+            profile_lines_member(latch.round_begins(), hooks_settled, latch, |started| {
+                may_start.set(Some(started));
+                None
+            });
+            may_start.get()
+        };
+
         let agents_page = CarryLatch::new();
         assert!(agents_page.ask_for_round(CarryAsk::HOOKS));
         assert_eq!(
-            profile_lines_member(agents_page.round_begins(), true, &agents_page, |_| {
-                panic!("an Agents-page round runs the $PROFILE lines")
-            }),
-            None
+            handed(&agents_page, true),
+            None,
+            "an Agents-page round runs no $PROFILE lines"
         );
         assert!(
             latch.ask_for_round(CarryAsk::OLD_PROFILE_LINES),
             "a trial's release asks for the lines alone"
         );
-        let released = latch.round_begins();
-        assert!(!released.names_member(CarryAsk::HOOKS));
-        let started = std::cell::Cell::new(false);
-        profile_lines_member(released, homes.homes_settled(), &latch, |may_start| {
-            started.set(may_start);
-            None
-        });
-        assert!(
-            started.get(),
+        assert_eq!(
+            handed(&latch, homes.homes_settled()),
+            Some(true),
             "the lines start on the hooks' answer an earlier round had"
         );
         assert!(!latch.round_again());
 
         let before_walk = CarryLatch::new();
         assert!(before_walk.ask_for_round(CarryAsk::OLD_PROFILE_LINES));
-        profile_lines_member(
-            before_walk.round_begins(),
-            false,
-            &before_walk,
-            |may_start| {
-                assert!(
-                    !may_start,
-                    "a release before the walk's answer starts no lines"
-                );
-                None
-            },
+        assert_eq!(
+            handed(&before_walk, false),
+            Some(false),
+            "a release before the walk's answer starts no lines"
         );
         assert!(!before_walk.round_again(), "and asks for no round");
 
@@ -1265,17 +1262,10 @@ mod tests {
         // round reading folders the walk has just settled — the hooks have not answered on them.
         let settled_unanswered = CarryLatch::new();
         assert!(settled_unanswered.ask_for_round(CarryAsk::OLD_PROFILE_LINES));
-        profile_lines_member(
-            settled_unanswered.round_begins(),
-            true,
-            &settled_unanswered,
-            |may_start| {
-                assert!(
-                    !may_start,
-                    "a lines-only round on settled folders whose hooks no round ran starts no lines"
-                );
-                None
-            },
+        assert_eq!(
+            handed(&settled_unanswered, true),
+            Some(false),
+            "a lines-only round on settled folders whose hooks no round ran starts no lines"
         );
         assert!(
             !settled_unanswered.round_again(),
