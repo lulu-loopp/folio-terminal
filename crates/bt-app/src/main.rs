@@ -10962,6 +10962,13 @@ struct WindowRuntime<B: Backend = Native> {
     /// "owes a repaint" fold (`Runtime::turn_facts`); cleared by the turn the
     /// gate admits, which is the one that draws it. The pictures' and the
     /// cards' debts reach the ask through this flag, folded in at the look.
+    ///
+    /// **It books no wake of its own** (review N5), and needs none: the ask
+    /// runs on every turn, so a flag that stands after a turn is one that
+    /// turn's ask was refused, and the refusal booked `WakeOwner::RefusedFrame`
+    /// at the frame boundary (a frame after the last present), which is never
+    /// later than the strip's next tick. An entry for the flag in
+    /// `Runtime::strip_animation_work` could never be the earliest wake.
     strip_owes_a_frame: bool,
     /// **The panes' half of the same debt**, kept apart because a pane in
     /// flight owes a present even when the chrome it is drawn under comes out

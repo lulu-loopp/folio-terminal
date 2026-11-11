@@ -13867,20 +13867,12 @@ impl<B: Backend> Runtime<'_, B> {
         // window says when it will pay it — the same shape the pacer's own
         // refusal takes ([`pace::FrameClock::refuse`]).
         //
-        // **And the strip's own written debt is a second one, on the same terms**
-        // (T-STRIP-ASKS-ON-ITS-TICK). Its look stands on turns the gate refuses
-        // and records what it found as drawn, so what is left of the frame it
-        // owes is `strip_owes_a_frame` and `strip_panes_owe_a_frame` and nothing
-        // else. Its refusal books the frame boundary, and every turn the flag
-        // stands on asks again and renews that; this entry is the debt's own
-        // booking all the same, on the rule above — a debt written down says
-        // when it will be paid, rather than leaning on another clock's for it.
-        // Read here and left where it is: the strip's ask is its one taker.
-        let strip_owes = self.window.strip_owes_a_frame || self.window.strip_panes_owe_a_frame;
+        // The strip's own written debt (`strip_owes_a_frame`) books nothing
+        // here, and the field's doc says why: its booking is the refusal's.
         let pictures_owe = self.window.pictures_owe_a_frame;
         let pane_moving = self.window.pane_motion.is_animating(now, motion);
         let next_tick = self.strip_animation_next_tick(self.window.frame_clock.interval());
-        let paced_strip = strip_moving || strip_owes || pictures_owe;
+        let paced_strip = strip_moving || pictures_owe;
         let strip_wake = earliest_deadline([
             paced_strip.then_some(next_tick).flatten(),
             rail_wait_deadline,
@@ -13903,7 +13895,7 @@ impl<B: Backend> Runtime<'_, B> {
         let seat_wait = self.window.video.answer_deadline();
         AnimationWork {
             deadline: [
-                (strip_moving || rail_waiting || strip_owes || pictures_owe)
+                (strip_moving || rail_waiting || pictures_owe)
                     .then_some(strip_wake)
                     .flatten(),
                 (bar_moving || pane_moving).then_some(next_tick).flatten(),
