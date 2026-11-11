@@ -10957,8 +10957,8 @@ struct WindowRuntime<B: Backend = Native> {
     strip_owes_a_frame: bool,
     /// **The panes' half of the same debt**, kept apart because a pane in
     /// flight owes a present even when the chrome it is drawn under comes out
-    /// byte-identical ([`tick_owes_a_present`]). Written, read and cleared
-    /// beside [`Self::strip_owes_a_frame`].
+    /// byte-identical ([`crate::runtime::preview::tick_owes_a_present`]).
+    /// Written, read and cleared beside [`Self::strip_owes_a_frame`].
     strip_panes_owe_a_frame: bool,
     /// **Whether a card on screen is behind the pane it is a picture of**
     /// (§7.1.6b′; ticket T-5).
