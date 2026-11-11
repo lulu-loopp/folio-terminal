@@ -515,7 +515,7 @@ pub enum Station {
     /// `StorageChanged`, `SystemPreferencesChanged`, `NotificationClicked`, `CarryPassAnswered`,
     /// `SignInPressed`.
     ///
-    /// **One station for eleven arms**, because what they have in common is what a
+    /// **One station for twelve arms**, because what they have in common is what a
     /// reader of this line needs: every one of them ends in `refresh_chrome` over
     /// every window, and none of them is on a clock a reader can feel. A stall
     /// here says "something a probe answered", which is as far as this ledger can

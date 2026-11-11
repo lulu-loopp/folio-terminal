@@ -30889,8 +30889,9 @@ mod tests {
         let mut panel = keyboarded_in(windows, SettingsRow::DefaultProfile.category());
         // `End` and then three steps back: `Explorer context menu` closes this
         // page (§7.4), `Start at sign-in` stands above it (0.4.10 plan row 22a),
-        // `Opening Folio again` above that, and `Default profile` above that. The summoned terminal's rows used to stand between
-        // them and moved to a page of their own on 2026-09-05 (§7.54e ⑤), which
+        // `Opening Folio again` above that, and `Default profile` above that.
+        // The summoned terminal's rows used to stand between them and moved to
+        // a page of their own on 2026-09-05 (§7.54e ⑤), which
         // is why this walk is four presses shorter than it was; a second Explorer
         // row arrived the same day and gave one of them back, and 2026-09-07
         // folded it into the row above it and took that press away again (§7.4b).

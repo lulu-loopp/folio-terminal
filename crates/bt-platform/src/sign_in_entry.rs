@@ -341,7 +341,7 @@ mod tests {
     }
 
     /// A `REG_SZ`'s bytes for `text`.
-    fn sz(text: &str) -> Vec<u8> {
+    fn entry_sz(text: &str) -> Vec<u8> {
         string_data(&units(OsStr::new(text)))
     }
 
@@ -362,7 +362,7 @@ mod tests {
         write_entry_in(&mut registry, ENTRY_TEST_KEYS, &entry_exe()).expect("written");
         assert_eq!(
             registry.values[&(ENTRY_TEST_KEYS.run.to_owned(), ENTRY_NAME.to_owned())],
-            (REG_SZ, sz(r#""C:\Tools\Folio\folio.exe""#)),
+            (REG_SZ, entry_sz(r#""C:\Tools\Folio\folio.exe""#)),
             "exactly the quoted path, NUL-terminated UTF-16"
         );
         assert_eq!(
@@ -410,7 +410,7 @@ mod tests {
         assert!(registry.calls.is_empty(), "nothing asked of the registry");
 
         let mut tampered = TwoKeys {
-            tamper: Some(sz(r#""C:\Elsewhere\folio.exe""#)),
+            tamper: Some(entry_sz(r#""C:\Elsewhere\folio.exe""#)),
             ..TwoKeys::default()
         };
         assert!(matches!(
@@ -430,13 +430,13 @@ mod tests {
         let shapes: [(u32, Vec<u8>, EntryFound); 6] = [
             (
                 REG_SZ,
-                sz(r#""C:\T\folio.exe""#),
+                entry_sz(r#""C:\T\folio.exe""#),
                 EntryFound::Command(PathBuf::from(r"C:\T\folio.exe")),
             ),
-            (REG_SZ, sz(r#""C:\T\folio.exe" --x"#), EntryFound::Other),
-            (REG_SZ, sz(r"C:\T\folio.exe"), EntryFound::Other),
-            (REG_SZ, sz(r#""""#), EntryFound::Other),
-            (2, sz(r#""%LOCALAPPDATA%\folio.exe""#), EntryFound::Other),
+            (REG_SZ, entry_sz(r#""C:\T\folio.exe" --x"#), EntryFound::Other),
+            (REG_SZ, entry_sz(r"C:\T\folio.exe"), EntryFound::Other),
+            (REG_SZ, entry_sz(r#""""#), EntryFound::Other),
+            (2, entry_sz(r#""%LOCALAPPDATA%\folio.exe""#), EntryFound::Other),
             (4, vec![1, 0, 0, 0], EntryFound::Other),
         ];
         for (kind, data, found) in shapes {
@@ -462,7 +462,7 @@ mod tests {
             ),
             (Some((REG_BINARY, vec![7])), true),
             (Some((REG_BINARY, vec![])), false),
-            (Some((REG_SZ, sz("3"))), false),
+            (Some((REG_SZ, entry_sz("3"))), false),
         ] {
             let mut registry = TwoKeys::default();
             if let Some(value) = approved {
@@ -586,7 +586,7 @@ mod tests {
         let exe = Path::new(r"C:\Program Files\Folio\folio.exe");
         write_entry_in(&mut CurrentUser, keys, exe).expect("written");
         CurrentUser
-            .set(keys.run, "SomebodyElse", REG_SZ, &sz(r#""C:\x.exe""#))
+            .set(keys.run, "SomebodyElse", REG_SZ, &entry_sz(r#""C:\x.exe""#))
             .unwrap();
         CurrentUser
             .set(keys.approved, ENTRY_NAME, REG_BINARY, &[3, 0, 0, 0])

@@ -27,8 +27,9 @@
 //! ([`crate::update_orphans::run_orphans_step`]); since row 68e the update homes beside a macOS
 //! bundle that is gone ([`crate::update_homes::run_update_homes_step`]); since row 22a the sign-in
 //! entry of a copy that moved ([`crate::start_at_sign_in::run_sign_in_step`]). **Its last member
-//! is Folio's old `$PROFILE` lines** (`shell_integration::run_profile_lines_step`, row 68c), run once a process, and never
-//! before the hooks have had their first real answer: the one member that starts a PowerShell, so
+//! is Folio's old `$PROFILE` lines** (`shell_integration::run_profile_lines_step`, row 68c), run
+//! once a process, and never before the hooks have had their first real answer: the one member
+//! that starts a PowerShell, so
 //! nothing the window adopts — the hooks' answers, and the first-run card that waits on them (row
 //! 73) — waits for one (the coordinator's R8 of 2026-11-09 and the ruling on the review's N1). At a
 //! start the order is: the start's own round, before the program walk has answered, runs the
