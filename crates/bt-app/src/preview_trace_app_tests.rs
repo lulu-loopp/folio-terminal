@@ -50,7 +50,11 @@ fn into_the_first_paragraph_past_the_middle(page: &str) -> usize {
 /// A walk whose work is linear in the text doubles, and one that searches its
 /// runs takes a logarithm more (a little over twice at these sizes); one that walks
 /// from the start for every piece quadruples. Three times is the line between
-/// the two, and no machine's speed is in it.
+/// the two, and no machine's speed is in it. Work of `a·n + b·n²` grows to
+/// `2 + 2s` times itself, `s` the quadratic share of the count at the smaller
+/// size, so three catches a quadratic term once it is about half the count at
+/// 64 KiB: the claim is a shape, and a walk that grows as the square comes to
+/// dominate the count as the text grows.
 fn twice_the_text_is_twice_the_work(what: &str, once: &EditWork, twice: &EditWork) {
     for (walk, once, twice) in [
         ("inline steps", once.inline_steps, twice.inline_steps),

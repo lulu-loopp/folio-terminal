@@ -289,10 +289,11 @@ impl TextOrigin {
     /// The runs are contiguous, in text order and never empty — [`Self::copied`]
     /// and [`Self::drawn`] are the only two places a run is made, and both put
     /// it at the end of the text and refuse a zero length — so the first run
-    /// that ends past `offset` is the only one that can hold it. A walk from the
-    /// first run made [`Self::through`] cost the square of a block's runs: it
-    /// asks this once for every outer run a copied run crosses, and a paragraph
-    /// of many soft-wrapped lines is twice as many outer runs as lines.
+    /// that ends past `offset` holds it, and past the last run there is none
+    /// (`get` answers `None`). A walk from the first run made [`Self::through`]
+    /// cost the square of a block's runs: it asks this once for every outer run
+    /// a copied run crosses, and a paragraph of many soft-wrapped lines is twice
+    /// as many outer runs as lines.
     fn run_at(&self, offset: usize) -> Option<&OriginRun> {
         let index = self.runs.partition_point(|run| {
             // One run looked at, for the test that holds a block's provenance
@@ -301,9 +302,7 @@ impl TextOrigin {
             crate::preview_typing::count("origin runs visited", 1);
             run.text.end <= offset
         });
-        self.runs
-            .get(index)
-            .filter(|run| run.text.contains(&offset))
+        self.runs.get(index)
     }
 
     /// The file byte this **place** in the text resolves to — the rounding rule
