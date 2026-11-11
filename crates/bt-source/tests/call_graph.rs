@@ -1138,7 +1138,7 @@ fn a_static_or_const_initializer_is_walked_from_its_use() {
 /// is to be written where the tree can read it, or the list widened in a change that says why),
 /// and a row whose block is gone is refused as stale. Their methods are reachable only as
 /// `Ambiguous` candidates, never through a typed call.
-const UNPLACED_IMPLS: [&str; 24] = [
+const UNPLACED_IMPLS: [&str; 25] = [
     "alacritty_terminal crate::term TermMode",
     "alacritty_terminal crate::term TermMode",
     "bt-app crate::i18n Text",
@@ -1159,6 +1159,9 @@ const UNPLACED_IMPLS: [&str; 24] = [
     "bt-platform crate::video::engine Notify_Impl",
     "bt-platform crate::video::macos_player EndWatch",
     "bt-platform crate::webview::macos Gate",
+    // 2026-11-09, plan row 81: the in-process data object the promise's OLE tests hand the reader
+    // (`#[implement(IDataObject)]`), so no test opens the machine's clipboard.
+    "bt-platform crate::windows_clipboard::promise_tests Board_Impl",
     "bt-pty crate ConPtySource",
     "mitex-parser crate::syntax SyntaxKind",
     "mitex-parser crate::syntax SyntaxKind",

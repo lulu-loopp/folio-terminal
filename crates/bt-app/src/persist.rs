@@ -3429,6 +3429,15 @@ impl SettingsStore {
         self.missing
     }
 
+    /// **Says whether the launch this store stands for found its file**, the fact
+    /// [`Self::was_missing`] answers, for a harness, whose store is opened without a read
+    /// (0.4.10 plan row 73's macOS gate): a headless window is a later launch, and a test of the
+    /// first-run card asks for a first one.
+    #[cfg(test)]
+    pub(crate) fn launch_found_the_file(&mut self, found: bool) {
+        self.missing = !found;
+    }
+
     /// Record a change and hand it to the storage worker now. Returns whether
     /// anything changed, so a caller can skip the repaint when a user picks the
     /// value already set.

@@ -69,6 +69,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -198,13 +199,37 @@ pub struct Answers {
     /// Every request the application made that has ended since the last drain, by its number, in
     /// the order the requests were made: each one's terminal, taken once.
     pub(crate) ends: Vec<(u64, ProgramsTerminal)>,
+    /// **A request the door refused with no walk standing for it** since the last drain: the
+    /// thread door would not start the worker (`Refused::NotStarted`), or the worker has ended
+    /// (`Refused::Faulted`). A request refused while walks are owed (`Full`, `TwinEnded`) is
+    /// answered by those walks, and is not this.
+    pub(crate) refused: bool,
 }
 
 impl Answers {
     /// Whether the drain found nothing at all.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.verdicts.is_empty() && self.facts.is_none() && self.ends.is_empty()
+        self.verdicts.is_empty() && self.facts.is_none() && self.ends.is_empty() && !self.refused
+    }
+
+    /// **No walk answered since the last drain, and one that was asked for never will**: a request
+    /// ended with no answer (its walk failed, it was cancelled, or the worker ended — through the
+    /// request it joined too), or the door refused one with no walk standing ([`Self::refused`]).
+    /// A request a newer one displaced (`Superseded`) is answered by that one, and is not this.
+    /// What the window settles the agents' folders on (`AgentHomesCell::settle_on_the_launch_homes`,
+    /// 0.4.10 plan row 68c's N1): no timer, the lane's own word.
+    #[must_use]
+    pub fn ended_with_no_walk_to_answer(&self) -> bool {
+        fn unanswered(terminal: &ProgramsTerminal) -> bool {
+            match terminal {
+                Terminal::Done(_) | Terminal::Superseded { .. } => false,
+                Terminal::Failed(_) | Terminal::Cancelled | Terminal::WorkerGone => true,
+                Terminal::Joined { outcome, .. } => unanswered(outcome),
+            }
+        }
+        self.facts.is_none()
+            && (self.refused || self.ends.iter().any(|(_, terminal)| unanswered(terminal)))
     }
 
     /// **The newest walk that ran to its end since the last drain** — the number a request's
@@ -537,6 +562,10 @@ pub struct ProgramsLane {
     machine: Box<dyn Machine>,
     asks: Mutex<Asks>,
     mailbox: Mutex<Mailbox>,
+    /// [`Answers::refused`], until the window drains it: a flag and not a mailbox entry, so the
+    /// admission that sets it takes no lock the worker holds (C1, the window thread's request
+    /// returns at once).
+    refused: AtomicBool,
     /// How the lane brings the event loop round once [`Self::install_wake`] has taught it; shared
     /// with the ledger, which wakes it after the worker's end.
     wake: Arc<OnceLock<Box<dyn Fn() + Send + Sync>>>,
@@ -583,6 +612,7 @@ impl ProgramsLane {
             machine: Box::new(machine),
             asks: Mutex::new(Asks::default()),
             mailbox: Mutex::new(Mailbox::default()),
+            refused: AtomicBool::new(false),
             wake,
             note,
             executor,
@@ -621,6 +651,14 @@ impl ProgramsLane {
                 },
             )
             .map(|admitted| admitted.id.0)
+            .inspect_err(|refused| {
+                // No walk stands for it: the window is told, as a walk's end tells it, so what
+                // waits for a walk's answer is not left waiting (row 68c's N1).
+                if matches!(refused, Refused::NotStarted(_) | Refused::Faulted(_)) {
+                    self.refused.store(true, Ordering::SeqCst);
+                    self.wake();
+                }
+            })
     }
 
     /// **Count a pane in birth until the answer is dropped.** One lock; never waits for the worker.
@@ -645,6 +683,7 @@ impl ProgramsLane {
             verdicts: mailbox.verdicts.into_values().collect(),
             facts: mailbox.facts,
             ends,
+            refused: self.refused.swap(false, Ordering::SeqCst),
         }
     }
 
@@ -1658,6 +1697,53 @@ pub(crate) mod tests {
         );
     }
 
+    /// RED (0.4.10 plan row 68c, the review's N1) — **what tells the window no walk will answer**:
+    /// an end with no answer, through the request it joined too, or a refusal with no walk
+    /// standing; never a walk's answer, or a request a newer one displaced.
+    ///
+    /// MUTATION: a displaced request counts as unanswered (`plant-68c-superseded-gives-up.py`).
+    #[test]
+    fn only_a_request_no_walk_will_answer_is_one_with_no_walk_to_answer() {
+        let ended = |terminal: ProgramsTerminal| Answers {
+            ends: vec![(1, terminal)],
+            ..Answers::default()
+        };
+        let joined = |outcome: ProgramsTerminal| Terminal::Joined {
+            with: ProgramsId(0),
+            outcome: Box::new(outcome),
+        };
+        for answered in [
+            Terminal::Done(1),
+            Terminal::Superseded { by: ProgramsId(2) },
+            joined(Terminal::Done(0)),
+            joined(Terminal::Superseded { by: ProgramsId(2) }),
+        ] {
+            assert!(
+                !ended(answered.clone()).ended_with_no_walk_to_answer(),
+                "{answered:?}"
+            );
+        }
+        for unanswered in [
+            Terminal::Failed(lane::TaskFailure::Panicked("walk".to_owned())),
+            Terminal::Cancelled,
+            Terminal::WorkerGone,
+            joined(Terminal::WorkerGone),
+        ] {
+            assert!(
+                ended(unanswered.clone()).ended_with_no_walk_to_answer(),
+                "{unanswered:?}"
+            );
+        }
+        assert!(
+            Answers {
+                refused: true,
+                ..Answers::default()
+            }
+            .ended_with_no_walk_to_answer()
+        );
+        assert!(!Answers::default().ended_with_no_walk_to_answer());
+    }
+
     /// RED (S-4 round 2) — **A start the thread door refuses refuses that request at the door,
     /// says so once, and the next request starts the worker** (revision (b)5, rule 1: a new
     /// request tries again; the lane is not in fault, because its worker never ran). In round 1
@@ -1670,6 +1756,8 @@ pub(crate) mod tests {
     /// lines, observed red at "said once"), and the next request would be refused `Faulted`.
     /// MUTATION: say every refused start (`Ledger::say_not_started` ignoring the streak) — the two
     /// refusals are two lines.
+    /// MUTATION: the refusal is not told to the window, flagged and woken for (row 68c's N1;
+    /// `plant-68c-refusal-not-told.py`) — the window waits for a walk that will not come.
     #[test]
     fn a_refused_spawn_refuses_this_request_and_the_next_request_starts_the_worker() {
         let gate = Arc::new(Gate::default());
@@ -1694,6 +1782,11 @@ pub(crate) mod tests {
         let said: Vec<String> = notes.try_iter().collect();
         assert_eq!(said.len(), 1, "said once: {said:?}");
         assert!(said[0].contains(crate::lane::REFUSED_START), "{said:?}");
+        // Row 68c's N1: the window is woken and told no walk stands for them, once.
+        wait_for_a_wake(&wakes, "the refusal");
+        let drained = lane.take();
+        assert!(drained.refused && drained.ended_with_no_walk_to_answer());
+        assert!(lane.take().is_empty(), "taken once");
         let next = lane
             .request(request(&rows, Trigger::ProgramMenu))
             .expect("the next request starts the worker");
@@ -1781,8 +1874,13 @@ pub(crate) mod tests {
         gate.kill();
         gate.release();
         wait_for_a_wake(&wakes, "the worker's end");
+        let drained = lane.take();
+        assert!(
+            drained.ended_with_no_walk_to_answer(),
+            "no walk answers them (row 68c's N1)"
+        );
         assert_eq!(
-            lane.take().ends,
+            drained.ends,
             [
                 (out, Terminal::WorkerGone),
                 (waiting, Terminal::WorkerGone),
@@ -1803,6 +1901,10 @@ pub(crate) mod tests {
                 ))
             ),
             "a request after the worker's end is refused at the door, minting nothing"
+        );
+        assert!(
+            lane.take().ended_with_no_walk_to_answer(),
+            "and no walk stands for it (row 68c's N1)"
         );
         let said: Vec<String> = notes.try_iter().collect();
         assert_eq!(said.len(), 1, "the end is said once: {said:?}");

@@ -40,6 +40,7 @@ payload_on_stdin: .read_to_end
 lede_in_tail: .read_to_end
 transcript_lede: File::open
 reserve: .open
+clipboard_picture.rs: reserve_marked: .open
 append_note: .open
 drain: .read_to_end
 append_healed: .open
@@ -116,6 +117,13 @@ undo_profile_install: ProfileFiles::read
 observe_profile_lines: Marks::read
 observe_profile_lines: ProfileFiles::read
 observe_profile_lines: ProfileRevision::read
+# The carry pass's `$PROFILE` member (0.4.10 plan row 68c, 2026-11-09): the record and the profile
+# list, read once without the lock to see whether any profile is there and again under the marks
+# lock (the review's N11, 2026-11-09), and the bytes of each profile read by read_profile_for_edit's
+# lane.
+profiles_present: Marks::read
+profiles_present: ProfileFiles::read
+carry_one: Decoded::read
 install_for_program: ProfileRevision::read
 # `Written::publish` is keyed by its file: `publish` is a name several items declare.
 shell_integration/profile_runtime.rs: publish: ProfileRevision::read

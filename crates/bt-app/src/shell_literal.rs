@@ -90,6 +90,19 @@ impl Refusal {
             Self::NushellUnmeasured => Text::PastePathNushell,
         }
     }
+
+    /// The reason's word in a paste refusal line (plan row 81) — a kind, never the path.
+    pub fn log_word(self) -> &'static str {
+        match self {
+            Self::Encoding => "encoding",
+            Self::Control => "control",
+            Self::PowerShellQuote => "powershell-quote",
+            Self::DoubleQuote => "double-quote",
+            Self::CmdPercent => "cmd-percent",
+            Self::CmdDelayedExpansion => "cmd-delayed-expansion",
+            Self::NushellUnmeasured => "nushell-unmeasured",
+        }
+    }
 }
 
 pub fn representable(path: &Path) -> Result<&str, Refusal> {

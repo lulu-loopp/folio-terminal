@@ -487,13 +487,11 @@ fn bodies_presented(folio: &mut HeadlessFolio) -> Vec<bt_render::BodyUse> {
 /// The caret is held lit through the steps (its blink is a body input of its own, and is a
 /// redraw of the body by design — `docs/DESIGN.md`, entry of 2026-11-03).
 ///
-/// The window's first-run card is spent before the first turn, as the composition fixtures spend
-/// it (`keyboard_tests.rs`, `spend_the_first_run_card`). A headless window is a first launch and
-/// `turn(_, true)` runs `raise_first_run_if_due`: on a Mac, whose profile table has no agent rows
-/// for the card to wait on, the card comes up on the first mark step, and a modal takes the
-/// keyboard from the shell — the focused pane's `SeatFrame::focused` goes false, a body input,
-/// and that step draws the body again for the card and not for the mark. On Windows the agent
-/// rows' unknown answers hold the card down for the whole test.
+/// No first-run card comes up over the steps: a headless window is a later launch
+/// (`headless.rs`, `StorageAskers::on`). Over a first launch on a Mac, whose profile table has
+/// no agent rows for the card to wait on, the card would come up on a mark step, and its modal
+/// would take the keyboard from the shell: the focused pane's `SeatFrame::focused` goes false, a
+/// body input, and that step draws the body again for the card and not for the mark.
 ///
 /// MUTATION (P5): flip the renderer's caret phase on every mark step in
 /// `Runtime::advance_strip_animation` (`self.window.renderer.set_cursor_blink_visible(...)`
@@ -502,7 +500,6 @@ fn bodies_presented(folio: &mut HeadlessFolio) -> Vec<bt_render::BodyUse> {
 #[test]
 fn a_working_mark_steps_over_a_quiet_pane_without_recomposing_it() {
     let (mut folio, beside, _watched) = two_shells("headless-mark-over-a-quiet-pane");
-    folio.app.first_run_attempted = true;
     let mut now = std::time::Instant::now();
     folio.draw();
     for _ in 0..8 {

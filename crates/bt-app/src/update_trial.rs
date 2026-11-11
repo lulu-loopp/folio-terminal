@@ -22,7 +22,7 @@
 //! writers are **released** — the window thread is woken and runs each of them
 //! again ([`take_released`], the application's `release_trial_writes`). What
 //! they write then is what the process holds then: the document as it stands,
-//! the migration as it would run, not a replay of each held-back call.
+//! the `$PROFILE` carry as it would run, not a replay of each held-back call.
 //!
 //! **A person's change held past the trial's end is said, not silently lost**
 //! (0.4.8 E4, the clean VM's R3): a trial that ends before its watch reads
@@ -149,9 +149,10 @@ pub(crate) enum Writer {
     /// `update-check.json` and its claim file: the check (`update::begin`) and
     /// every change to the file (`OfferState::transact`).
     UpdateCheck,
-    /// The integration marks: the startup migration of the PowerShell profiles
-    /// and the marks record it keeps
-    /// (`shell_integration::begin_startup_migration`).
+    /// The integration marks: the carry of Folio's old lines in the PowerShell
+    /// profiles and the marks record it keeps — the carry pass's member
+    /// `shell_integration::run_profile_lines_step` (0.4.10 plan row 68c; the
+    /// startup migration until 0.4.7, the startup's observation until row 68c).
     ProfileMigration,
     /// The bash integration script a starting bash sources, written into the
     /// data folder (`shell_integration::script_path`).
@@ -4235,7 +4236,7 @@ mod tests {
             assert_eq!(update_startup::held(), Some(TXN));
             assert!(
                 !run_the_start_writers(&root),
-                "the marks' migration started (ProfileMigration)"
+                "the carry's $PROFILE member ran (ProfileMigration)"
             );
             assert!(writes_are_deferred());
             assert_eq!(receipt_due(), None, "no receipt");
@@ -4431,14 +4432,15 @@ mod tests {
     /// **A start's durable writers, in `Runtime::create`'s order**, each driven
     /// through its own product entry and each asked to write something: the
     /// data folder, the stores and a change to each, the update check's state,
-    /// the integration marks' migration, the shell scripts and Folio's
+    /// the carry pass's `$PROFILE` member, the shell scripts and Folio's
     /// PSReadLine module (written as a Windows PowerShell birth writes it, with
     /// the launch's removal of other builds' artefacts), and the recovered
     /// folder's record. The registry writers (the
     /// Explorer repair, the toast identity) are not run here: a test that
     /// reached them would change the machine it runs on.
     ///
-    /// Answers whether the marks' migration started (its worker's wake came).
+    /// Answers whether the carry pass's `$PROFILE` member ran — the trial did not hold it back
+    /// (`Writer::ProfileMigration`) — run on a worker of its own, as the pass runs it.
     fn run_the_start_writers(root: &Path) -> bool {
         // Settled as `main`'s claim settles it: this is a start's process of its own, under the
         // private `APPDATA` the harness handed it.
@@ -4492,11 +4494,16 @@ mod tests {
         let offers = crate::update::OfferState::load(&storage, true);
         offers.skip("v9.9.9").unwrap();
 
-        let (migrated, migration) = mpsc::channel();
-        crate::shell_integration::install_wake(move || {
-            let _ = migrated.send(());
-        });
-        crate::shell_integration::begin_startup_migration();
+        let started = bt_platform::spawn_at_priority(
+            "update-trial-test-profile-lines",
+            bt_platform::ThreadPriority::BelowNormal,
+            // As the round after the hooks' first answer asks it (row 68c's N1): what is
+            // pinned here is the trial's hold, not that wait.
+            |ctx| crate::shell_integration::run_profile_lines_step(ctx, true).is_some(),
+        )
+        .ok()
+        .and_then(|worker| worker.join().ok())
+        .unwrap_or(false);
 
         let _ = crate::shell_integration::script_path();
         let _ = crate::shell_integration::zdotdir_path();
@@ -4512,9 +4519,6 @@ mod tests {
         crate::recovered::begin(&storage);
 
         let deadline = std::time::Instant::now() + Duration::from_secs(3);
-        let started = migration
-            .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
-            .is_ok();
         let _ = announcement
             .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()));
         // The session's own writer finishes what it was handed, or nothing.
@@ -4619,11 +4623,11 @@ mod tests {
 
     /// RED (U-13) — **a trial start writes nothing durable before its
     /// transaction is committed**: after the stores are opened and changed,
-    /// the update check's state changed, the marks' migration, the scripts and
+    /// the update check's state changed, the `$PROFILE` carry, the scripts and
     /// the PSReadLine upgrade asked for, every file under the start's private
     /// root is byte for byte what the old build left, and nothing was added —
     /// the data folder is not moved, no refused copy is kept, no sentinel is
-    /// armed, and the migration never starts.
+    /// armed, and the `$PROFILE` carry never runs.
     ///
     /// Run in a process of its own over a private `APPDATA`, local folder and
     /// home, through each writer's product entry. `diagnostics.log` would be
@@ -4645,7 +4649,7 @@ mod tests {
             ));
             assert!(
                 !run_the_start_writers(&root),
-                "the marks' migration started (ProfileMigration)"
+                "the carry's $PROFILE member ran (ProfileMigration)"
             );
             let pending = GATE.pending();
             for writer in [
@@ -4695,7 +4699,7 @@ mod tests {
             assert!(update_startup::become_held(TXN));
             assert!(
                 !run_the_start_writers(&root),
-                "the marks' migration started (ProfileMigration)"
+                "the carry's $PROFILE member ran (ProfileMigration)"
             );
             let pending = GATE.pending();
             for writer in [
@@ -4733,8 +4737,8 @@ mod tests {
     /// PIN (U-13) — **a start that is no trial writes as it always has**: the
     /// same writers over the same folder move the data folder to its new name
     /// (where there was an old one), keep the refused `keybindings.json`, write
-    /// the documents and the update check's state, start
-    /// the marks' migration, write the scripts and Folio's PSReadLine module,
+    /// the documents and the update check's state, run
+    /// the carry's `$PROFILE` member, write the scripts and Folio's PSReadLine module,
     /// and remove the artefact another build left.
     ///
     /// MUTATION: make `Gate::defer` answer `true` whether or not the process
@@ -4744,7 +4748,7 @@ mod tests {
         const SELECTOR: &str =
             "update_trial::tests::a_start_that_is_no_trial_writes_as_it_always_has";
         if let Some(root) = child_root(SELECTOR) {
-            assert!(run_the_start_writers(&root), "the migration starts");
+            assert!(run_the_start_writers(&root), "the $PROFILE member runs");
             return;
         }
         let root = scratch("ordinary-start");

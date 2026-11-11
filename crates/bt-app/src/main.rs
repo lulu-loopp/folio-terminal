@@ -1267,10 +1267,33 @@ impl BackgroundDecodeMailbox {
 struct ClipboardPictureAnswer {
     generation: u64,
     target: PasteTarget,
-    /// The file, or the sentence saying which half of the job refused. A reason
-    /// and never a picture: a diagnostic that carried what was on the clipboard
-    /// would be this process writing the reader's own screenshot into a log.
-    result: std::result::Result<PathBuf, String>,
+    /// What was staged: a picture's file, or a promise's (plan row 81).
+    staged: StagingAnswer,
+}
+
+/// **What one staging worker answered** (§7.61; plan row 81) — the picture's save or the
+/// promise's render, each with the clipboard's sequence at the read, for the line it is said in.
+#[derive(Debug)]
+enum StagingAnswer {
+    Picture {
+        sequence: Option<bt_platform::ClipboardSequence>,
+        /// The file, or the sentence saying which half of the job refused. A reason
+        /// and never a picture: a diagnostic that carried what was on the clipboard
+        /// would be this process writing the reader's own screenshot into a log.
+        result: std::result::Result<PathBuf, String>,
+    },
+    Promise {
+        sequence: Option<bt_platform::ClipboardSequence>,
+        /// A picture offered beside the promise did not render: a refusal says so.
+        picture_passed_over: bool,
+        /// What was written, or why nothing was — kinds, counts and codes, never a name.
+        result: std::result::Result<
+            bt_platform::clipboard_promise::RenderedPromise,
+            runtime::PromiseWhy,
+        >,
+        /// How long the render took, for the line a promise saved says.
+        took: std::time::Duration,
+    },
 }
 
 /// **The next shell's [`ShellSession::incarnation`]**, and the counter behind it.
@@ -1485,6 +1508,10 @@ enum PasteCardKey {
 #[derive(Debug, Default)]
 struct ClipboardPictureMailbox {
     inbox: Arc<std::sync::Mutex<ClipboardPictureInbox>>,
+    /// The suite's: how many of the next staging starts the thread door is to refuse, as a
+    /// machine out of threads would (`lane::Gate::refuse_next_start` is the lanes' own).
+    #[cfg(test)]
+    refused_starts: std::sync::atomic::AtomicUsize,
 }
 
 /// **The generation and the slot behind one lock** (review X-3).
@@ -1504,9 +1531,10 @@ struct ClipboardPictureInbox {
     /// The generation the window is waiting for. Bumped by every new paste.
     wanted: u64,
     landed: Option<ClipboardPictureAnswer>,
-    /// The saves refused at the door since the window last looked (plan row 52): each is said on
-    /// the turn the inbox's wake brings, in the notice the door used to draw itself.
-    refused: usize,
+    /// The saves refused at the door since the window last looked (plan row 52), each with its
+    /// reason (plan row 81): each is said on the turn the inbox's wake brings, through the door
+    /// every paste refusal leaves by.
+    refused: Vec<runtime::PasteRefusal>,
 }
 
 impl ClipboardPictureMailbox {
@@ -1531,17 +1559,45 @@ impl ClipboardPictureMailbox {
         Arc::clone(&self.inbox)
     }
 
-    /// One save refused at its door, counted for the next look (plan row 52): the generation is
-    /// left alone, so the paste a running save answers is still the one waited for.
-    fn refuse(&self) {
+    /// One save refused at its door, kept with its reason for the next look (plan rows 52, 81):
+    /// the generation is left alone, so the paste a running save answers is still the one waited
+    /// for.
+    fn refuse(&self, refusal: runtime::PasteRefusal) {
         self.inbox
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .refused += 1;
+            .refused
+            .push(refusal);
     }
 
-    /// How many saves were refused at the door since the last look, and none from now on.
-    fn take_refusals(&mut self) -> usize {
+    /// **Whether the thread door is to refuse this staging start** — the suite's, as a machine
+    /// out of threads would (`refuse_the_next_start`, a test build's); never in the product.
+    fn refuses_this_start(&self) -> bool {
+        #[cfg(test)]
+        {
+            self.refused_starts
+                .fetch_update(
+                    std::sync::atomic::Ordering::AcqRel,
+                    std::sync::atomic::Ordering::Acquire,
+                    |left| left.checked_sub(1),
+                )
+                .is_ok()
+        }
+        #[cfg(not(test))]
+        {
+            false
+        }
+    }
+
+    /// The next staging start the thread door is asked for is refused (the suite's).
+    #[cfg(test)]
+    fn refuse_the_next_start(&self) {
+        self.refused_starts
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    }
+
+    /// The saves refused at the door since the last look, in order, and none from now on.
+    fn take_refusals(&mut self) -> Vec<runtime::PasteRefusal> {
         std::mem::take(
             &mut self
                 .inbox
@@ -9248,9 +9304,6 @@ struct App<B: Backend = Native> {
     /// copy was installed (U-3). Never rearmed: once spent, a still-missing
     /// answer is read as unknown.
     first_run_waited_for_channel: bool,
-    /// Whether the first-run card has already waited its one turn for the program walk's reading
-    /// of the agent folders (`first_run::agent_folders_settled`).
-    first_run_waited_for_agent_folders: bool,
     /// Whether Explorer's right-click menu carries Folio's verb (§7.4).
     ///
     /// Cached for one reason and no other: the settings dialog asks on every
@@ -9323,6 +9376,19 @@ struct App<B: Backend = Native> {
     /// **Whether a scan has answered at all** in this process: before it, nothing about the agents'
     /// files is known on this thread, and the resume row says nothing about their hooks.
     agent_rows_known: bool,
+    /// **Whether the newest scan found codex's install refused** (0.4.10 plan row 73): codex's own
+    /// install refusals, asked on the carry pass's worker (`HooksSnapshot::codex_install_refused`),
+    /// for the first-run card's Codex row.
+    codex_install_refused: bool,
+    /// **Whether [`Self::copilot_readiness`] as the newest scan carried it was read after
+    /// Copilot's version probe came back** (`HooksSnapshot::copilot_read_after_probe`): the
+    /// first-run card offers Copilot's row only on an answer.
+    copilot_read_after_probe: bool,
+    /// **How many of the carry pass's hooks answers this window has adopted** (0.4.10 plan row
+    /// 73, the review's N9 and F1): the count the first-run card's opening line names. It counts
+    /// adoptions, not the pass's rounds: a window takes only the newest round published since its
+    /// last turn, and a round with no hooks part adopts nothing here.
+    carry_answers_adopted: u32,
     /// **Why each agent's configuration file will not be edited, when it will not be** — the
     /// `agent_takeovers` order, Claude Code then codex then copilot.
     ///
@@ -9864,13 +9930,15 @@ impl<B: Backend> App<B> {
             program_news: window_news::WindowSeats::default(),
             first_run_attempted: false,
             first_run_waited_for_channel: false,
-            first_run_waited_for_agent_folders: false,
             explorer_package_asked_by: None,
             explorer_package_asked_place: explorer_menu::ExplorerPlace::default(),
             explorer_package_announce: Announce::Everything,
             agent_takeovers: Default::default(),
             agent_hooks_found: Default::default(),
             agent_rows_known: false,
+            codex_install_refused: false,
+            copilot_read_after_probe: false,
+            carry_answers_adopted: 0,
             profiles_file_broken: false,
             pins_file_broken: false,
             settings_file_broken: false,
@@ -15213,9 +15281,8 @@ fn release_trial_writer(writer: update_trial::Writer, stores: &mut TrialStores<'
         Writer::Profiles => stores.profiles.release_trial(),
         Writer::Pins => stores.pins.release_trial(),
         Writer::UpdateCheck => update::release_trial(),
-        Writer::ProfileMigration => {
-            shell_integration::begin_startup_migration();
-        }
+        // The carry pass's `$PROFILE` member, which the trial held back (0.4.10 plan row 68c).
+        Writer::ProfileMigration => carry_pass::begin_carry_pass(CarryAsk::OLD_PROFILE_LINES),
         Writer::BashScript => {
             let _ = shell_integration::script_path();
         }
@@ -31812,6 +31879,7 @@ fn adopt_program_answers(
     programs: &mut profiles::ProfilePrograms,
     answers: programs_lane::Answers,
 ) -> ProgramNews {
+    let no_walk_answers = answers.ended_with_no_walk_to_answer();
     let copilot_before = programs
         .program(attention_copilot::PROFILE_ID)
         .map(std::ffi::OsStr::to_owned);
@@ -31850,9 +31918,23 @@ fn adopt_program_answers(
         if news.agent_homes {
             // Where the agents keep their files is the account's own now: the carry pass reads
             // them there, on its worker, wherever this answer was adopted — the launch adopts the
-            // walk before it has a window to take news to.
-            carry_pass::begin_carry_pass(CarryAsk::HOOKS);
+            // walk before it has a window to take news to. The first answer is the hooks' first
+            // real one, and Folio's `$PROFILE` lines wait for it (0.4.10 plan row 68c, the
+            // coordinator's ruling at row 68b's merge): it asks for both.
+            carry_pass::begin_carry_pass(if first {
+                CarryAsk::HOMES_SETTLED
+            } else {
+                CarryAsk::HOOKS
+            });
         }
+    }
+    // **No walk will answer, and none has: the launch's folders are the answer** (0.4.10 plan row
+    // 68c, the coordinator's ruling on the review's N1): a walk that ended with none, or a request
+    // the lane's door refused with no walk standing, settles them once, and the pass runs on them —
+    // the agents' hooks and, after their answer, Folio's `$PROFILE` lines, which wait for that
+    // first real answer. A walk that answers later is adopted as the first answer above.
+    if no_walk_answers && attention_hooks::AGENT_HOMES.settle_on_the_launch_homes() {
+        carry_pass::begin_carry_pass(CarryAsk::HOMES_SETTLED);
     }
     news
 }
@@ -31886,7 +31968,10 @@ fn adopt_agent_hooks_snapshot<B: Backend>(
         Some((snapshot.found[index].clone(), snapshot.unrepaired[index]))
     });
     app.agent_rows_known = true;
+    app.carry_answers_adopted += 1;
     app.copilot_readiness = snapshot.copilot_readiness;
+    app.copilot_read_after_probe = snapshot.copilot_read_after_probe;
+    app.codex_install_refused = snapshot.codex_install_refused;
 }
 
 /// **A press on agent row `family` asks the scan again** (0.4.10 plan row 67b): the row's line and
@@ -35818,8 +35903,9 @@ impl Runtime<'_, Native> {
         // on a worker, whether the Terminal page owes the copy's removal row.
         psreadline::begin_legacy_observation();
         // **The first window, in `startup::resume`'s order**: Windows PowerShell's language
-        // question, the startup migration and the script's preparation, the window, the
-        // PowerShell questions, the first tab. What the
+        // question, the script's preparation and the carry pass (the `$PROFILE`s' observation and
+        // carry among its members, row 68c), the window, the PowerShell questions, the first tab.
+        // What the
         // steps share is the program walk's answers, adopted by the window's title and by the
         // questions, and read by the first tab.
         let (opened, first) = startup::resume(
@@ -35832,7 +35918,6 @@ impl Runtime<'_, Native> {
                         settings_store.loaded().shell_integration,
                     )
                 },
-                migration: shell_integration::begin_startup_migration,
                 script: || {
                     // Folio's own `folio.ps1`, compared and repaired on a worker nobody waits for: the first
                     // PowerShell birth that arrives before it finishes prepares it on its own birth worker.
@@ -52619,12 +52704,11 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 self.for_each_window(|runtime| runtime.replace_contradicted_flash())
             }
             AppEvent::CopilotProbed => {
-                if let Some(app) = self.app.as_mut() {
-                    app.copilot_readiness = attention_copilot::readiness();
-                }
                 // **The version is the start-time repair's gate for Copilot's hooks** (0.4.10 plan
-                // row 67b, R9): a repair that waited for it runs now, and the scan's snapshot,
-                // which carries readiness too, is read after this answer.
+                // row 67b, R9): a repair that waited for it runs now. **Readiness is not read
+                // here** (row 73, its ruling R9): it reads Copilot's settings file, and the round
+                // asked for here reads it on the pass's worker and carries it in its snapshot,
+                // which sets the rows when it lands.
                 carry_pass::begin_carry_pass(CarryAsk::HOOKS);
                 self.for_each_window(|runtime| {
                     if runtime.refresh_chrome() {
@@ -52997,7 +53081,12 @@ struct PreparedClipboardPaste {
     /// **The text is the clipboard's own** (`ClipboardPayload::Text`), as against paths Folio
     /// spelled. The one arm [`runtime::clipboard::paste_road`] may ask about (0.4.4 ticket 02).
     clipboard_text: bool,
-    notice: Option<String>,
+    /// **What this paste refused, if anything** (plan row 81): said through
+    /// `Runtime::refuse_paste` — one line in the log and the notice — before what is left is sent.
+    refused: Option<runtime::RefusedKind>,
+    /// **The files a clipboard promise offered** (plan row 81), lifted out as the picture is:
+    /// what is pasted is their paths once a worker has had the source write them.
+    promise: Option<bt_platform::PromisedFiles>,
     /// **Every encoding a picture-and-nothing-else clipboard offered**, best
     /// first, or empty (§7.61).
     ///
@@ -53007,6 +53096,16 @@ struct PreparedClipboardPaste {
     /// and spells the path it answers with through the very same
     /// `shell_literal::paths_text` a copied *file* goes through.
     picture: Vec<bt_platform::PictureBytes>,
+}
+
+#[cfg(test)]
+impl PreparedClipboardPaste {
+    /// The notice this paste's refusal raises, if it refuses anything — what the tests read.
+    fn said_notice(&self) -> Option<String> {
+        self.refused
+            .as_ref()
+            .map(runtime::clipboard::RefusedKind::toast_text)
+    }
 }
 
 /// **Which shape a recalled command's arrival takes** (DESIGN.md §7.55 ⑨).
@@ -56555,7 +56654,10 @@ mod clipboard_picture_race_tests {
         ClipboardPictureAnswer {
             generation,
             target,
-            result: Ok(std::path::PathBuf::from("/tmp/folio/clipboard/shot.png")),
+            staged: super::StagingAnswer::Picture {
+                sequence: None,
+                result: Ok(std::path::PathBuf::from("/tmp/folio/clipboard/shot.png")),
+            },
         }
     }
 
@@ -63447,7 +63549,7 @@ mod clipboard_path_tests {
                 input_line_needs_a_space_first(&session),
             );
             assert_eq!(clipboard.fetched, ["files"]);
-            assert!(prepared.notice.unwrap().contains("bad\\nname"));
+            assert!(prepared.said_notice().unwrap().contains("bad\\nname"));
             let text = prepared.text.unwrap();
             assert_eq!(text, " '/first' '/second space' '/third' ");
             let mut projection = session.new_projection(session.layout_key());
@@ -63486,7 +63588,7 @@ mod clipboard_path_tests {
                 true,
             );
             assert_eq!(prepared.text.as_deref(), Some(text));
-            assert!(prepared.notice.is_none());
+            assert!(prepared.said_notice().is_none());
             assert_eq!(clipboard.fetched, ["files", "text"]);
         }
     }
@@ -63555,7 +63657,7 @@ mod clipboard_path_tests {
             false,
         );
         assert!(prepared.text.is_none());
-        assert!(prepared.notice.is_none());
+        assert!(prepared.said_notice().is_none());
         assert_eq!(prepared.picture, vec![shot()]);
     }
 
@@ -63610,16 +63712,18 @@ mod clipboard_path_tests {
         ] {
             let prepared = prepare_clipboard_paste(payload, &recipient(), false);
             assert!(prepared.text.is_none());
-            assert!(prepared.notice.is_none());
+            assert!(prepared.said_notice().is_none());
             assert!(prepared.picture.is_empty());
         }
         for payload in [
-            ClipboardPayload::Refused(UnsupportedKind::Promise),
+            ClipboardPayload::Refused(UnsupportedKind::Promise {
+                picture_passed_over: false,
+            }),
             ClipboardPayload::Files(vec!["/bad\tname".into()]),
         ] {
             let prepared = prepare_clipboard_paste(payload, &recipient(), true);
             assert!(prepared.text.is_none());
-            assert!(prepared.notice.is_some());
+            assert!(prepared.said_notice().is_some());
         }
     }
 
@@ -63643,7 +63747,7 @@ mod clipboard_path_tests {
         );
         let spend = method_body("Runtime", "spend_paste");
         assert!(
-            spend.contains("self.apply_clipboard_payload(target, payload)"),
+            spend.contains("self.apply_clipboard_payload(target, sequence, payload)"),
             "the payload the lane answered is applied where the paste is spent:\n{spend}"
         );
         assert!(!paste.contains("paste_recipient") && !paste.contains("deliver_paste("));
@@ -63725,7 +63829,8 @@ mod clipboard_path_tests {
                         "{path} is spelled differently when it is dropped"
                     );
                     assert_eq!(
-                        dropped.notice, copied.notice,
+                        dropped.said_notice(),
+                        copied.said_notice(),
                         "{path} is refused differently when it is dropped"
                     );
                 }
@@ -63747,7 +63852,7 @@ mod clipboard_path_tests {
         let unmeasured =
             prepare_dropped_paste(vec![apostrophe.into()], &powershell_recipient(&[]), false);
         assert!(
-            unmeasured.text.is_none() && unmeasured.notice.is_some(),
+            unmeasured.text.is_none() && unmeasured.said_notice().is_some(),
             "until PROBE 2 an apostrophe is refused with a notice rather than \
              guessed at — for a drop exactly as for a copy"
         );
@@ -63780,7 +63885,7 @@ mod clipboard_path_tests {
              paste again"
         );
         let prepared = prepare_dropped_paste(batch.paths, &recipient(), true);
-        assert!(prepared.notice.is_none());
+        assert!(prepared.said_notice().is_none());
         assert_eq!(
             prepared.text.as_deref(),
             Some(" '/first' '/second file' '/third' "),
@@ -63820,7 +63925,7 @@ mod clipboard_path_tests {
                 "the batch has one reader, and it takes the whole of it",
             ),
             (
-                ".paste_paths_into(target, batch.paths, \"write dropped paths to PTY\")",
+                ".paste_paths_into(target, batch.paths, PasteFrom::Drop)",
                 "a dropped batch reaches a shell through one door, and takes the \
                  whole batch with it — which is what makes the focus and the \
                  raise behind its answer happen once per drop and not once per \
@@ -63980,7 +64085,8 @@ mod clipboard_path_tests {
                     );
                     assert_eq!(dragged.text, copied.text, "{name} is spelled a third way");
                     assert_eq!(
-                        dragged.notice, copied.notice,
+                        dragged.said_notice(),
+                        copied.said_notice(),
                         "{name} is refused differently when it comes off the files column"
                     );
                 }
@@ -64027,7 +64133,7 @@ mod clipboard_path_tests {
                 "a preview's centre opens the file as that pane",
             ),
             (
-                "if self.paste_paths_into(target, vec![path], \"write dragged path to PTY\")? {",
+                "if self.paste_paths_into(target, vec![path], PasteFrom::Drag)? {",
                 "a terminal's centre pastes through the external drop's own door, \
                  and asks that door whether anything was actually written",
             ),

@@ -7,6 +7,7 @@ use crate::runtime::attention::deliver_osc_attention;
 use crate::runtime::clipboard::input_line_needs_a_space_first;
 use crate::runtime::clipboard::offer_pty_input;
 use crate::runtime::clipboard::paste_text;
+use crate::runtime::clipboard::{PasteFrom, PasteRefusal, RefusedKind};
 use crate::runtime::mouse::drain_whole_units;
 use crate::runtime::mouse::link_target_to_ask_about;
 use crate::window_seam::prelude::*;
@@ -17,7 +18,7 @@ use crate::{
     ShellSession, Step, TerminalReference, UserInputKind, apply_stored_terminal_font,
     attention_trace, born_in_tab, cmdrail, coalesce, create_leaf_session, cubic_bezier,
     diagnostics, files, hang_watch, input, marks, mouse_trace, presentation_physical_size, quake,
-    scrollback_quota, seats, shell_literal, termscroll, toast,
+    scrollback_quota, seats, shell_literal, termscroll,
 };
 use crate::{
     ClickIntent, DRAIN_SLICES_PER_TURN, DRAIN_TURN_BUDGET, HyperlinkActivation, LeafSeed, TabState,
@@ -903,13 +904,16 @@ impl<B: Backend> Runtime<'_, B> {
             &leaf.launch.paste_recipient,
             input_line_needs_a_space_first(&leaf.session),
         );
-        if let Some(notice) = shell_literal::refusal_notice(&insertion.refused) {
-            self.toast(
-                toast::ToastKind::Error,
-                toast::ToastAnchor::Window,
-                None,
-                notice,
-            )?;
+        // A path refused leaves by the one door every paste refusal leaves by (review N7): its
+        // line in `diagnostics.log` beside the notice it always raised.
+        if !insertion.refused.is_empty() {
+            self.refuse_paste(PasteRefusal {
+                kind: RefusedKind::Paths {
+                    refused: insertion.refused,
+                    of: 1,
+                },
+                from: PasteFrom::Insert,
+            })?;
         }
         if insertion.text.is_empty() {
             return Ok(());

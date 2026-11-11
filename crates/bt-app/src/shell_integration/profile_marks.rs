@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use std::collections::BTreeMap;
 use std::{
+    borrow::Cow,
     collections::BTreeSet,
     fs, io,
     sync::{Condvar, Mutex, MutexGuard, PoisonError},
@@ -30,37 +31,86 @@ macro_rules! managed_line {
 pub const MANAGED_LINE: &str = managed_line!("Folio");
 pub const LEGACY_MANAGED_LINE: &str = managed_line!("BetterTerminal");
 
-#[cfg(test)]
-pub fn managed_line_for(data: &Path, appdata: &Path) -> io::Result<&'static str> {
-    if data == appdata.join(persist::STORAGE_NAME) {
-        Ok(MANAGED_LINE)
-    } else if data == appdata.join(persist::PREVIOUS_STORAGE_NAME) {
-        Ok(LEGACY_MANAGED_LINE)
-    } else {
-        Err(io::Error::other(
-            "the integration script is outside Folio's data folder",
-        ))
+/// **The line Folio writes for the account whose data folder is `data`**, `appdata` being
+/// `%APPDATA%`: the guarded line naming the script that folder holds — [`MANAGED_LINE`] for
+/// `APPDATA\Folio`, [`LEGACY_MANAGED_LINE`] for an account still on the previous name — and a
+/// refusal for a folder anywhere else, where no guarded line names the script (0.4.3's rule,
+/// `docs/shell-integration-marks.md`; given back to Enable and to the carry by 0.4.10 plan row 68c,
+/// R3). `None` for `appdata` is a process with no `APPDATA`, whose folder is the temp fallback.
+///
+/// **The two roots come from two sources** — the data folder from this process's `APPDATA`, the
+/// account's from the environment the probe ran in (the review's N2) — so they are compared as the
+/// data-root compare of the agents' records compares them (`explorer_menu::same_path`: the resolved
+/// path where both are there, otherwise the spelling with case folded and a trailing separator
+/// dropped), and a root spelled in another case is not refused (the re-review's R4).
+pub fn managed_line_for(data: &Path, appdata: Option<&Path>) -> io::Result<&'static str> {
+    let under =
+        |appdata: &Path, name: &str| crate::explorer_menu::same_path(data, &appdata.join(name));
+    match appdata {
+        Some(appdata) if under(appdata, persist::STORAGE_NAME) => Ok(MANAGED_LINE),
+        Some(appdata) if under(appdata, persist::PREVIOUS_STORAGE_NAME) => Ok(LEGACY_MANAGED_LINE),
+        _ => Err(io::Error::other(Text::ShellProfileOutsideAppData.text())),
+    }
+}
+
+/// **Every line Folio has ever written into a `$PROFILE`**, by the writer and the versions that
+/// wrote it (0.4.10 plan row 68c, report §1.2). Each is one whole line; no version wrote a comment
+/// or a guard line of its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LineForm {
+    /// F1 — `. "$env:APPDATA\Folio\shell-integration\folio.ps1"` ([`LEGACY_LINE`]): the appender
+    /// of 0.1.0–0.4.2 (`integration_line`, `0eaa4753e`).
+    AppData,
+    /// F2 — F1 under the previous name, `$env:APPDATA\BetterTerminal\…`: the same appender, for an
+    /// account whose data stayed there.
+    AppDataPrevious,
+    /// F3 — `. "<script path>"`, the literal path double-quoted: 0.1.0–0.2.3, for a script outside
+    /// `%APPDATA%`.
+    LiteralDoubleQuoted,
+    /// F4 — `. '<script path>'`, each `'` doubled: 0.2.4–0.4.2 (`8c0b7b5d6`).
+    LiteralSingleQuoted,
+    /// F5 — [`MANAGED_LINE`], the guarded line: 0.4.3 on (`aa234cf68`), the current form.
+    Guarded,
+    /// F6 — [`LEGACY_MANAGED_LINE`], the guarded line under the previous name: 0.4.3–0.4.6
+    /// (`b4f8e8ab2`), the current form for an account on that root.
+    GuardedPrevious,
+}
+
+impl LineForm {
+    /// The form's name in a diagnostics line.
+    pub fn said_as(self) -> &'static str {
+        match self {
+            Self::AppData => "the 0.1-0.4.2 $env:APPDATA line",
+            Self::AppDataPrevious => "the 0.1-0.4.2 $env:APPDATA line under the previous name",
+            Self::LiteralDoubleQuoted => "the 0.1-0.2.3 literal line",
+            Self::LiteralSingleQuoted => "the 0.2.4-0.4.2 literal line",
+            Self::Guarded => "the guarded line",
+            Self::GuardedPrevious => "the guarded line under the previous name",
+        }
     }
 }
 
 /// Exact spellings only. Literal legacy forms are generated from known script
 /// locations, never parsed out of arbitrary user code mentioning folio.ps1.
 pub struct Forms {
-    legacy: Vec<String>,
+    legacy: Vec<(LineForm, String)>,
     managed: &'static str,
 }
 
 impl Forms {
     pub fn new(scripts: &[PathBuf]) -> Self {
         let mut legacy = vec![
-            LEGACY_LINE.to_owned(),
-            r#". "$env:APPDATA\BetterTerminal\shell-integration\folio.ps1""#.to_owned(),
+            (LineForm::AppData, LEGACY_LINE.to_owned()),
+            (
+                LineForm::AppDataPrevious,
+                r#". "$env:APPDATA\BetterTerminal\shell-integration\folio.ps1""#.to_owned(),
+            ),
         ];
         for script in scripts {
             let literal = script.display().to_string();
-            legacy.push(format!(". \"{literal}\""));
+            legacy.push((LineForm::LiteralDoubleQuoted, format!(". \"{literal}\"")));
             let quoted = format!("'{}'", literal.replace('\'', "''"));
-            legacy.push(format!(". {quoted}"));
+            legacy.push((LineForm::LiteralSingleQuoted, format!(". {quoted}")));
         }
         Self {
             legacy,
@@ -74,9 +124,22 @@ impl Forms {
     }
 
     pub fn owns(&self, line: &str) -> bool {
+        self.form_of(line).is_some()
+    }
+
+    /// Which of Folio's forms `line` is, exactly, its surrounding whitespace aside.
+    pub fn form_of(&self, line: &str) -> Option<LineForm> {
         let line = line.trim();
-        [MANAGED_LINE, LEGACY_MANAGED_LINE].contains(&line)
-            || self.legacy.iter().any(|known| known == line)
+        if line == MANAGED_LINE {
+            Some(LineForm::Guarded)
+        } else if line == LEGACY_MANAGED_LINE {
+            Some(LineForm::GuardedPrevious)
+        } else {
+            self.legacy
+                .iter()
+                .find(|(_, known)| known == line)
+                .map(|(form, _)| *form)
+        }
     }
 }
 
@@ -91,6 +154,13 @@ enum Encoding {
     Utf8,
     Utf8Bom,
     Utf16Le,
+    /// **A BOM-less file that is not UTF-8** — a profile in the system's ANSI code page, as
+    /// Windows PowerShell's `Set-Content` writes one (0.4.10 plan row 68c, R7). Held byte for byte:
+    /// each byte is the character of the same number (U+0000–U+00FF), so nothing is decoded, no
+    /// code page is guessed, and the bytes come back out exactly. The 0.1.0–0.4.2 appender wrote its
+    /// line's UTF-8 bytes into such files, and a line is Folio's when its bytes are those
+    /// ([`Decoded::line_as_folio_wrote_it`]).
+    AnsiBytes,
 }
 
 pub struct Decoded {
@@ -112,16 +182,24 @@ impl Decoded {
                 String::from_utf16(&units).map_err(|_| invalid_encoding())?,
                 Encoding::Utf16Le,
             )
-        } else {
-            let (body, encoding) = bytes
-                .strip_prefix(&[0xef, 0xbb, 0xbf])
-                .map_or((bytes, Encoding::Utf8), |b| (b, Encoding::Utf8Bom));
+        } else if bytes.starts_with(&[0xfe, 0xff]) {
+            // UTF-16 big-endian: never written as bytes it is not.
+            return Err(invalid_encoding());
+        } else if let Some(body) = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]) {
             (
                 std::str::from_utf8(body)
                     .map_err(|_| invalid_encoding())?
                     .to_owned(),
-                encoding,
+                Encoding::Utf8Bom,
             )
+        } else {
+            match std::str::from_utf8(bytes) {
+                Ok(text) => (text.to_owned(), Encoding::Utf8),
+                Err(_) => (
+                    bytes.iter().copied().map(char::from).collect(),
+                    Encoding::AnsiBytes,
+                ),
+            }
         };
         // NUL in a BOM-less file is usually unmarked UTF-16. Never guess.
         if text.contains('\0') {
@@ -139,8 +217,62 @@ impl Decoded {
                 text.encode_utf16().flat_map(u16::to_le_bytes).collect(),
             ]
             .concat(),
+            Encoding::AnsiBytes => text.chars().map(held_byte).collect(),
         }
     }
+
+    /// **A line of [`Self::text`] as Folio's writers wrote it**: the line itself, or — in a file
+    /// held as bytes — its bytes read as UTF-8, which is what every Folio wrote into such a file.
+    /// `None` for a line of a byte-held file whose bytes are not UTF-8: no line of Folio's.
+    pub fn line_as_folio_wrote_it<'a>(&self, line: &'a str) -> Option<Cow<'a, str>> {
+        match self.encoding {
+            Encoding::AnsiBytes => String::from_utf8(line.chars().map(held_byte).collect())
+                .ok()
+                .map(Cow::Owned),
+            Encoding::Utf8 | Encoding::Utf8Bom | Encoding::Utf16Le => Some(Cow::Borrowed(line)),
+        }
+    }
+
+    /// **Text Folio writes, as [`Self::text`] holds it**: unchanged, or — in a file held as bytes —
+    /// one character per byte of its UTF-8, so [`Self::encode`] writes exactly those bytes.
+    pub fn as_held<'a>(&self, written: &'a str) -> Cow<'a, str> {
+        match self.encoding {
+            Encoding::AnsiBytes => Cow::Owned(written.bytes().map(char::from).collect()),
+            Encoding::Utf8 | Encoding::Utf8Bom | Encoding::Utf16Le => Cow::Borrowed(written),
+        }
+    }
+
+    /// Whether any line is in a form `forms` owns.
+    pub fn holds_an_owned_line(&self, forms: &Forms) -> bool {
+        self.text.lines().any(|line| {
+            self.line_as_folio_wrote_it(line)
+                .is_some_and(|line| forms.owns(&line))
+        })
+    }
+
+    /// The forms of Folio's that the file's lines are in, in the order they stand.
+    pub fn forms_in(&self, forms: &Forms) -> Vec<LineForm> {
+        self.text
+            .lines()
+            .filter_map(|line| forms.form_of(&self.line_as_folio_wrote_it(line)?))
+            .collect()
+    }
+
+    /// Whether a line names `folio.ps1` as code without being in one of `forms` — a Folio line
+    /// somebody edited, or one Folio has no record of writing: the line the carry leaves and says.
+    pub fn names_the_script_otherwise(&self, forms: &Forms) -> bool {
+        self.text.lines().any(|line| {
+            let written = self.line_as_folio_wrote_it(line);
+            let shown = written.as_deref().unwrap_or(line);
+            profile_suppresses_integration_offer(shown) && !forms.owns(shown)
+        })
+    }
+}
+
+/// The byte a character of a byte-held file stands for: every one of them is U+0000–U+00FF
+/// ([`Encoding::AnsiBytes`]), and what Folio adds to one is put there by [`Decoded::as_held`].
+fn held_byte(character: char) -> u8 {
+    character as u8
 }
 
 fn invalid_encoding() -> io::Error {
@@ -157,7 +289,7 @@ pub fn rewrite(bytes: &[u8], forms: &Forms, action: Action) -> io::Result<Option
 }
 
 /// Record an exact owned mark before any replacement, using this same scan.
-fn rewrite_recorded(
+pub(super) fn rewrite_recorded(
     bytes: &[u8],
     forms: &Forms,
     action: Action,
@@ -167,8 +299,12 @@ fn rewrite_recorded(
     let mut owns_mark = false;
     let mut output = String::new();
     for raw in decoded.text.split_inclusive('\n') {
-        let body = raw.strip_suffix('\n').unwrap_or(raw);
-        let body = body.strip_suffix('\r').unwrap_or(body);
+        let held = raw.strip_suffix('\n').unwrap_or(raw);
+        let held = held.strip_suffix('\r').unwrap_or(held);
+        let Some(body) = decoded.line_as_folio_wrote_it(held) else {
+            output.push_str(raw);
+            continue;
+        };
         let trimmed = body.trim();
         if !forms.owns(trimmed) {
             output.push_str(raw);
@@ -183,10 +319,14 @@ fn rewrite_recorded(
             continue;
         }
         let leading = body.len() - body.trim_start().len();
-        output.push_str(&body[..leading]);
-        output.push_str(forms.managed);
-        output.push_str(&body[body.trim_end().len()..]);
-        output.push_str(&raw[body.len()..]);
+        let line = [
+            &body[..leading],
+            forms.managed,
+            &body[body.trim_end().len()..],
+        ]
+        .concat();
+        output.push_str(&decoded.as_held(&line));
+        output.push_str(&raw[held.len()..]);
     }
     if owns_mark {
         record_owned()?;
@@ -848,7 +988,7 @@ impl ProfileFiles {
             let decoded = Decoded::read(bytes).ok();
             if decoded
                 .as_ref()
-                .is_some_and(|decoded| decoded.text.lines().any(|line| forms.owns(line)))
+                .is_some_and(|decoded| decoded.holds_an_owned_line(forms))
             {
                 return Ok(());
             }
@@ -1129,7 +1269,7 @@ mod tests {
             (persist::PREVIOUS_STORAGE_NAME, LEGACY_MANAGED_LINE),
         ] {
             let data = appdata.join(root);
-            let line = managed_line_for(&data, &appdata).unwrap();
+            let line = managed_line_for(&data, Some(&appdata)).unwrap();
             assert_eq!(line, expected);
             let script = data.join("shell-integration").join("folio.ps1");
             let forms = Forms::new(std::slice::from_ref(&script)).targeting(line);
@@ -1160,14 +1300,22 @@ mod tests {
                 Some(vec![])
             );
         }
-        assert!(managed_line_for(&appdata.join("Other"), &appdata).is_err());
-        assert!(managed_line_for(&appdata.join("elsewhere").join("Folio"), &appdata).is_err());
+        assert!(managed_line_for(&appdata.join("Other"), Some(&appdata)).is_err());
+        assert!(
+            managed_line_for(&appdata.join("elsewhere").join("Folio"), Some(&appdata)).is_err()
+        );
+        assert!(managed_line_for(&appdata.join("Folio"), None).is_err());
     }
 
     #[test]
     fn shell_integration_rewrite_table_preserves_every_other_byte() {
         let forms = Forms::new(&[]);
-        for encoding in [Encoding::Utf8, Encoding::Utf8Bom, Encoding::Utf16Le] {
+        for encoding in [
+            Encoding::Utf8,
+            Encoding::Utf8Bom,
+            Encoding::Utf16Le,
+            Encoding::AnsiBytes,
+        ] {
             let codec = Decoded {
                 text: String::new(),
                 encoding,
@@ -1238,7 +1386,8 @@ mod tests {
         assert_eq!(result[1].0.fate, Fate::Refused("locked".into()));
         for bytes in [
             vec![0xfe, 0xff, 0, 65],
-            vec![0xff],
+            vec![0xfe, 0xff, 65, 66],
+            vec![0xef, 0xbb, 0xbf, 0xff],
             vec![0xff, 0xfe, 65],
             vec![0xff, 0xfe, 0, 0xd8],
             vec![65, 0],
@@ -1251,12 +1400,454 @@ mod tests {
     fn shell_integration_all_historical_literal_spellings_are_exact() {
         let path = PathBuf::from(r"D:\old data\Folio\shell-integration\folio.ps1");
         let forms = Forms::new(&[path]);
-        for line in &forms.legacy {
+        for (_, line) in &forms.legacy {
             assert_eq!(
                 rewrite(line.as_bytes(), &forms, Action::Migrate).unwrap(),
                 Some(MANAGED_LINE.as_bytes().to_vec())
             );
         }
         assert!(!forms.owns(r#". "D:\someone else\folio.ps1""#));
+    }
+
+    /// An account's folders for a carry: `%APPDATA%` (the test's own folder), the data root under
+    /// it by `root`'s name, made, and a `$PROFILE` path beside them, not made.
+    fn carry_account(tag: &str, root: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let appdata = super::super::tests::temp_dir(tag);
+        let data = appdata.join(root);
+        fs::create_dir_all(&data).unwrap();
+        let documents = appdata.join("Documents");
+        fs::create_dir_all(&documents).unwrap();
+        (appdata, data, documents.join("profile.ps1"))
+    }
+
+    /// The carry over one account, its one PowerShell having said `profile` is its `$PROFILE`.
+    fn carry_for(
+        data: &Path,
+        appdata: Option<&Path>,
+        profile: &Path,
+    ) -> super::super::profile_runtime::ProfileLinesCarried {
+        super::super::profile_runtime::carry_profile_lines(
+            data,
+            appdata,
+            vec![(PathBuf::from("pwsh"), Some(profile.to_path_buf()))],
+        )
+    }
+
+    /// The script a data root holds: the one a literal line of 0.1.0-0.4.2 named.
+    fn script_in(data: &Path) -> PathBuf {
+        data.join("shell-integration").join("folio.ps1")
+    }
+
+    /// One form carried in a file of its own: the file holds `line` alone, the carry brings it to
+    /// `to`, says so once by both forms' names, and a second carry finds nothing to do.
+    fn carries_alone(tag: &str, root: &str, line: impl Fn(&Path) -> String, from: LineForm) {
+        let (appdata, data, profile) = carry_account(tag, root);
+        let line = line(&data);
+        let to = managed_line_for(&data, Some(&appdata)).unwrap();
+        let to_form = Forms::new(&[]).form_of(to).unwrap();
+        fs::write(&profile, format!("{line}\r\n")).unwrap();
+        let carried = carry_for(&data, Some(&appdata), &profile);
+        assert_eq!(fs::read_to_string(&profile).unwrap(), format!("{to}\r\n"));
+        assert_eq!(
+            carried.lines,
+            [format!(
+                "BT_SHELL_PROFILE {}: brought forward from {} to {}",
+                profile.display(),
+                from.said_as(),
+                to_form.said_as()
+            )]
+        );
+        assert_eq!(
+            carry_for(&data, Some(&appdata), &profile).lines,
+            Vec::<String>::new(),
+            "a carried profile has nothing more to carry"
+        );
+        let _ = fs::remove_dir_all(appdata);
+    }
+
+    /// RED (0.4.10 plan row 68c) — **the carry pass brings Folio's old `$PROFILE` lines forward**:
+    /// a profile holding the line 0.1.0-0.4.2 wrote among the person's own lines is given the
+    /// guarded line for the account's root in its place, the person's lines kept, the run said
+    /// once, the profile remembered in the record (so the uninstall finds it), and a second run
+    /// finds nothing to do and says nothing.
+    ///
+    /// MUTATION: the member is not called in `run_carry_steps`
+    /// (`plant-68c-member-not-in-the-pass.py`, red in the inventory's guard).
+    #[test]
+    fn the_carry_pass_brings_folios_old_profile_lines_forward() {
+        let (appdata, data, profile) = carry_account("carry-forward", persist::STORAGE_NAME);
+        let before = format!("# mine\r\nSet-Alias ll Get-ChildItem\r\n{LEGACY_LINE}\r\n$x = 1\n");
+        fs::write(&profile, &before).unwrap();
+        let carried = carry_for(&data, Some(&appdata), &profile);
+        assert_eq!(
+            fs::read_to_string(&profile).unwrap(),
+            before.replace(LEGACY_LINE, MANAGED_LINE)
+        );
+        assert_eq!(carried.checks, 1);
+        assert_eq!(
+            carried.lines,
+            [format!(
+                "BT_SHELL_PROFILE {}: brought forward from {} to {}",
+                profile.display(),
+                LineForm::AppData.said_as(),
+                LineForm::Guarded.said_as()
+            )]
+        );
+        let marks = Marks::read(&data).unwrap();
+        assert_eq!(marks.powershell_profiles, std::slice::from_ref(&profile));
+        assert_eq!(marks.powershell_scripts, [script_in(&data)]);
+        let after = fs::read(&profile).unwrap();
+        assert_eq!(
+            carry_for(&data, Some(&appdata), &profile),
+            super::super::profile_runtime::ProfileLinesCarried {
+                checks: 1,
+                lines: Vec::new()
+            }
+        );
+        assert_eq!(fs::read(&profile).unwrap(), after);
+        let _ = fs::remove_dir_all(appdata);
+    }
+
+    /// RED (row 68c, F1) — `. "$env:APPDATA\Folio\shell-integration\folio.ps1"`, the appender's
+    /// line of 0.1.0-0.4.2, is brought to the guarded line.
+    #[test]
+    fn the_0_1_appdata_line_is_brought_forward() {
+        carries_alone(
+            "carry-f1",
+            persist::STORAGE_NAME,
+            |_| LEGACY_LINE.to_owned(),
+            LineForm::AppData,
+        );
+    }
+
+    /// RED (row 68c, F2) — the appender's line under the previous name, for an account whose data
+    /// has since moved to `Folio`, is brought to the guarded line.
+    #[test]
+    fn the_previous_root_appdata_line_is_brought_forward() {
+        carries_alone(
+            "carry-f2",
+            persist::STORAGE_NAME,
+            |_| LEGACY_LINE.replace("Folio", "BetterTerminal"),
+            LineForm::AppDataPrevious,
+        );
+    }
+
+    /// RED (row 68c, F3) — the double-quoted literal line of 0.1.0-0.2.3, naming the data root's
+    /// script, is brought to the guarded line.
+    #[test]
+    fn the_0_1_double_quoted_literal_line_is_brought_forward() {
+        carries_alone(
+            "carry-f3",
+            persist::STORAGE_NAME,
+            |data| format!(". \"{}\"", script_in(data).display()),
+            LineForm::LiteralDoubleQuoted,
+        );
+    }
+
+    /// RED (row 68c, F4) — the single-quoted literal line of 0.2.4-0.4.2, each `'` of the path
+    /// doubled, is brought to the guarded line.
+    ///
+    /// MUTATION: the single-quoted form is left out of `Forms::new`
+    /// (`plant-68c-single-quote-form-forgotten.py`).
+    #[test]
+    fn the_0_2_4_single_quoted_literal_line_is_brought_forward() {
+        carries_alone(
+            "carry-f4-o'brien",
+            persist::STORAGE_NAME,
+            |data| {
+                let script = script_in(data).display().to_string();
+                assert!(script.contains('\''), "the path has a quote to double");
+                format!(". '{}'", script.replace('\'', "''"))
+            },
+            LineForm::LiteralSingleQuoted,
+        );
+    }
+
+    /// RED (row 68c, F5, R3) — **the guarded line follows the account's root**: an account still
+    /// on the previous name whose profile holds the line naming `%APPDATA%\Folio` — a script that
+    /// is not there — is given the line naming its own root's script; an account on `Folio`
+    /// keeps the line as it is and is told nothing.
+    ///
+    /// MUTATION: `managed_line_for` answers `MANAGED_LINE` for every root
+    /// (`plant-68c-target-always-folio.py`).
+    #[test]
+    fn the_guarded_line_follows_the_accounts_root() {
+        carries_alone(
+            "carry-f5",
+            persist::PREVIOUS_STORAGE_NAME,
+            |_| MANAGED_LINE.to_owned(),
+            LineForm::Guarded,
+        );
+        let (appdata, data, profile) = carry_account("carry-f5-current", persist::STORAGE_NAME);
+        let before = format!("# mine\n{MANAGED_LINE}\n");
+        fs::write(&profile, &before).unwrap();
+        assert_eq!(
+            carry_for(&data, Some(&appdata), &profile).lines,
+            Vec::<String>::new()
+        );
+        assert_eq!(fs::read_to_string(&profile).unwrap(), before);
+        assert!(
+            !data.join(RECORD_FILE).exists(),
+            "a profile that is current is no reason to make a record"
+        );
+        let _ = fs::remove_dir_all(appdata);
+    }
+
+    /// RED (row 68c, F6) — the guarded line of 0.4.3-0.4.6 under the previous name, for an account
+    /// whose data has since moved to `Folio`, is brought to the guarded line naming it.
+    #[test]
+    fn the_previous_roots_guarded_line_is_brought_forward() {
+        carries_alone(
+            "carry-f6",
+            persist::STORAGE_NAME,
+            |_| LEGACY_MANAGED_LINE.to_owned(),
+            LineForm::GuardedPrevious,
+        );
+    }
+
+    /// RED (row 68c, the owner's rule) — **a carried profile keeps every byte but Folio's line**:
+    /// in every encoding a profile is read in, with a BOM or none, mixed line ends, the line's own
+    /// indentation and trailing whitespace, no terminator on the last line, and the person's own
+    /// lines that mention the script in a comment, the bytes after the carry are the bytes before
+    /// with the one line's text replaced, and nothing else.
+    ///
+    /// MUTATIONS: the carried line's terminator written as `\r\n` whatever it was
+    /// (`plant-68c-line-ends-normalised.py`); the file written back as UTF-8 whatever it was read
+    /// as (`plant-68c-encoding-dropped.py`).
+    #[test]
+    fn a_carried_profile_keeps_every_byte_but_folios_line() {
+        let (appdata, data, profile) = carry_account("carry-every-byte", persist::STORAGE_NAME);
+        for encoding in [
+            Encoding::Utf8,
+            Encoding::Utf8Bom,
+            Encoding::Utf16Le,
+            Encoding::AnsiBytes,
+        ] {
+            let codec = Decoded {
+                text: String::new(),
+                encoding,
+            };
+            for (prefix, suffix) in [
+                ("", ""),
+                ("# folio.ps1 is loaded below\r\n\n", "\n# tail\r\n"),
+                ("\r\n", "\r\n\n# mixed\n"),
+                ("Set-Alias g git\n", "\r\nfunction prompt { 'PS> ' }"),
+            ] {
+                let text = |line: &str| format!("{prefix} \t{line}  {suffix}");
+                fs::write(&profile, codec.encode(&text(LEGACY_LINE))).unwrap();
+                let carried = carry_for(&data, Some(&appdata), &profile);
+                assert_eq!(carried.lines.len(), 1, "{carried:?}");
+                assert_eq!(
+                    fs::read(&profile).unwrap(),
+                    codec.encode(&text(MANAGED_LINE)),
+                    "{prefix:?} {suffix:?}"
+                );
+            }
+        }
+        let _ = fs::remove_dir_all(appdata);
+    }
+
+    /// RED (row 68c, R2, R3, R12) — **a line Folio cannot prove is its own is left, and said once**:
+    /// a line naming the script that is in none of Folio's forms (another folder's script, a line
+    /// with a comment added); a profile Folio may not edit that holds its line; a data root outside
+    /// `%APPDATA%`, where no guarded line names the script. Each file is byte for byte as it was,
+    /// each run says one line for it, and no record is made for any of them; a line Folio does own
+    /// beside an edited one is carried, and the edited one is said and left.
+    ///
+    /// MUTATION: any line naming `folio.ps1` is taken for Folio's
+    /// (`plant-68c-owns-any-folio-line.py`).
+    #[test]
+    fn a_line_folio_cannot_prove_is_its_own_is_left_and_said_once() {
+        let (appdata, data, profile) = carry_account("carry-not-ours", persist::STORAGE_NAME);
+        let left = |what: &str| {
+            format!(
+                "BT_SHELL_PROFILE {}: left as it is: {what}",
+                profile.display()
+            )
+        };
+        let not_folios = "a line naming folio.ps1 is not in one of Folio's forms";
+        let elsewhere = format!(
+            ". \"{}\"",
+            appdata.join("tools").join("folio.ps1").display()
+        );
+        let edited = format!("{LEGACY_LINE} # mine");
+        for text in [format!("{elsewhere}\r\n"), format!("# x\n{edited}\n")] {
+            fs::write(&profile, &text).unwrap();
+            assert_eq!(
+                carry_for(&data, Some(&appdata), &profile).lines,
+                [left(not_folios)]
+            );
+            assert_eq!(fs::read_to_string(&profile).unwrap(), text);
+        }
+        assert!(
+            !data.join(RECORD_FILE).exists(),
+            "a refusal makes no record"
+        );
+
+        let text = format!("{LEGACY_LINE}\n");
+        fs::write(&profile, &text).unwrap();
+        let carried = carry_for(&data, None, &profile);
+        assert_eq!(carried.lines.len(), 1, "{carried:?}");
+        assert!(
+            carried.lines[0].starts_with(&left(LineForm::AppData.said_as())),
+            "{carried:?}"
+        );
+        assert!(
+            carried.lines[0].ends_with(crate::i18n::Text::ShellProfileOutsideAppData.text()),
+            "{carried:?}"
+        );
+        assert_eq!(fs::read_to_string(&profile).unwrap(), text);
+
+        let writable = fs::metadata(&profile).unwrap().permissions();
+        let mut read_only = writable.clone();
+        read_only.set_readonly(true);
+        fs::set_permissions(&profile, read_only).unwrap();
+        let carried = carry_for(&data, Some(&appdata), &profile);
+        fs::set_permissions(&profile, writable).unwrap();
+        assert_eq!(carried.lines.len(), 1, "{carried:?}");
+        assert!(carried.lines[0].starts_with(&left("")), "{carried:?}");
+        assert_eq!(fs::read_to_string(&profile).unwrap(), text);
+        assert!(
+            !data.join(RECORD_FILE).exists(),
+            "a refusal makes no record"
+        );
+
+        fs::write(&profile, format!("{LEGACY_LINE}\n{edited}\n")).unwrap();
+        let carried = carry_for(&data, Some(&appdata), &profile);
+        assert_eq!(
+            fs::read_to_string(&profile).unwrap(),
+            format!("{MANAGED_LINE}\n{edited}\n")
+        );
+        assert_eq!(
+            carried.lines,
+            [format!(
+                "BT_SHELL_PROFILE {}: brought forward from {} to {}; {not_folios}, and it is left as it is",
+                profile.display(),
+                LineForm::AppData.said_as(),
+                LineForm::Guarded.said_as()
+            )]
+        );
+        let _ = fs::remove_dir_all(appdata);
+    }
+
+    /// RED (row 68c, R4) — **an account that turned the integration off keeps its lines**: the
+    /// record's Off is the person's decision, so a profile holding Folio's old line is left as it
+    /// is, said once, and the record is not written.
+    ///
+    /// MUTATION: the carry ignores the record's Off (`plant-68c-off-ignored.py`).
+    #[test]
+    fn an_account_that_turned_the_integration_off_keeps_its_lines() {
+        let (appdata, data, profile) = carry_account("carry-off", persist::STORAGE_NAME);
+        let mut marks = Marks::default();
+        marks.turn_off(std::time::UNIX_EPOCH);
+        marks.write(&data).unwrap();
+        let record = fs::read(data.join(RECORD_FILE)).unwrap();
+        let text = format!("# mine\r\n{LEGACY_LINE}\r\n");
+        fs::write(&profile, &text).unwrap();
+        assert_eq!(
+            carry_for(&data, Some(&appdata), &profile).lines,
+            [format!(
+                "BT_SHELL_PROFILE {}: left as it is: {}: the PowerShell integration is off for this account",
+                profile.display(),
+                LineForm::AppData.said_as()
+            )]
+        );
+        assert_eq!(fs::read_to_string(&profile).unwrap(), text);
+        assert_eq!(fs::read(data.join(RECORD_FILE)).unwrap(), record);
+        let _ = fs::remove_dir_all(appdata);
+    }
+
+    /// RED (row 68c, R7) — **a profile in an ANSI code page is carried byte for byte**: a BOM-less
+    /// file that is not UTF-8 (Windows PowerShell's `Set-Content` writes the system code page),
+    /// holding the line the 0.1.0-0.4.2 appender wrote into it as UTF-8, is given the guarded line
+    /// and every other byte — the code page's own, a line that is not UTF-8 — kept. Every
+    /// NUL-free byte string reads and writes back as itself. The remover and Enable read the same
+    /// view (R7; the review's N7): the remover takes the line and its own terminator out of such a
+    /// file and keeps every other byte, Enable appends the line's ASCII and the file's newline and
+    /// changes nothing before them; a GBK file (a double-byte code page, a trail byte that is `\`)
+    /// is carried the same way, and so is a literal line of 0.1.0-0.2.3 whose non-ASCII script path
+    /// the appender wrote as UTF-8 into an ANSI file.
+    ///
+    /// MUTATION: the carried text written back as UTF-8 whatever the file was read as
+    /// (`plant-68c-encoding-dropped.py`).
+    #[test]
+    fn a_profile_in_an_ansi_code_page_is_carried_byte_for_byte() {
+        let (appdata, data, profile) = carry_account("carry-ansi", persist::STORAGE_NAME);
+        let around = |line: &str| {
+            [
+                b"# caf\xe9 \x93quoted\x94\r\n".as_slice(),
+                line.as_bytes(),
+                b"\r\n\xff\xfe not UTF-8\r\n# end \xe9".as_slice(),
+            ]
+            .concat()
+        };
+        fs::write(&profile, around(LEGACY_LINE)).unwrap();
+        let carried = carry_for(&data, Some(&appdata), &profile);
+        assert_eq!(fs::read(&profile).unwrap(), around(MANAGED_LINE));
+        assert_eq!(carried.lines.len(), 1, "{carried:?}");
+        let every_byte: Vec<u8> = (1..=255).collect();
+        let decoded = Decoded::read(&every_byte).unwrap();
+        assert_eq!(decoded.encode(&decoded.text), every_byte);
+        assert_eq!(
+            rewrite(&every_byte, &Forms::new(&[]), Action::Migrate).unwrap(),
+            None
+        );
+
+        // The remover: the line and its own terminator out, every other byte kept.
+        let without = [
+            b"# caf\xe9 \x93quoted\x94\r\n".as_slice(),
+            b"\xff\xfe not UTF-8\r\n# end \xe9".as_slice(),
+        ]
+        .concat();
+        for line in [LEGACY_LINE, MANAGED_LINE] {
+            assert_eq!(
+                rewrite(&around(line), &Forms::new(&[]), Action::Remove).unwrap(),
+                Some(without.clone()),
+                "{line}"
+            );
+        }
+        // Enable: the line's ASCII and the file's newline after the last byte, nothing before
+        // them changed.
+        fs::write(&profile, &without).unwrap();
+        super::super::add_to_profile(&profile, MANAGED_LINE, std::time::SystemTime::now()).unwrap();
+        assert_eq!(
+            fs::read(&profile).unwrap(),
+            [
+                without.as_slice(),
+                b"\r\n\r\n",
+                MANAGED_LINE.as_bytes(),
+                b"\r\n"
+            ]
+            .concat()
+        );
+
+        // GBK: 中文配置 and a character whose trail byte is `\`, around Folio's line.
+        let gbk = |line: &str| {
+            [
+                b"# \xd6\xd0\xce\xc4\xc5\xe4\xd6\xc3 \x81\x5c\r\n".as_slice(),
+                line.as_bytes(),
+                b"\r\n# \xb5\xc4\r\n".as_slice(),
+            ]
+            .concat()
+        };
+        fs::write(&profile, gbk(LEGACY_LINE)).unwrap();
+        let carried = carry_for(&data, Some(&appdata), &profile);
+        assert_eq!(fs::read(&profile).unwrap(), gbk(MANAGED_LINE));
+        assert_eq!(carried.lines.len(), 1, "{carried:?}");
+
+        // A literal line whose script path is not ASCII, in the appender's UTF-8 bytes, inside an
+        // ANSI file.
+        let script = PathBuf::from(r"D:\用户 目录\Folio\shell-integration\folio.ps1");
+        let literal = format!(". \"{}\"", script.display());
+        assert_eq!(
+            rewrite(
+                &around(literal.as_str()),
+                &Forms::new(&[script]),
+                Action::Migrate
+            )
+            .unwrap(),
+            Some(around(MANAGED_LINE))
+        );
+        let _ = fs::remove_dir_all(appdata);
     }
 }

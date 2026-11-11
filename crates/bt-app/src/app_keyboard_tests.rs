@@ -1417,7 +1417,7 @@ fn with_the_restore_card_up_ctrl_v_pastes_nothing_into_the_shell() {
     );
     assert!(
         squeezed_body("Runtime", "spend_paste")
-            .contains("self.apply_clipboard_payload(target,payload)"),
+            .contains("self.apply_clipboard_payload(target,sequence,payload)"),
         "the lane's answer is applied where the paste is spent"
     );
     let apply = squeezed_body("Runtime", "apply_clipboard_payload");

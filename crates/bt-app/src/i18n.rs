@@ -462,6 +462,11 @@ text_entries! {
     /// The clipboard held a picture and the file Folio writes for it could not
     /// be written (§7.61).
     PasteClipboardPicture,
+    /// The clipboard offered a picture that did not render beside a promise that could not be
+    /// pasted either (plan row 81).
+    PasteClipboardPictureUnread,
+    /// The files a clipboard promise offered are past what one paste writes (plan row 81).
+    PasteClipboardPromiseTooLarge,
     PasteProfileOverride,
 
     // ── window chrome ──────────────────────────────────────────────────────
@@ -3085,6 +3090,10 @@ text_entries! {
     /// A one-click edit of `$PROFILE` refused because the file is not what the check, or the
     /// write being undone, saw (0.4.8 G7).
     ShellProfileChangedElsewhere,
+    /// Enable via `$PROFILE` refused, and the start's carry of an older Folio line left, because
+    /// the data folder is not `%APPDATA%\Folio` (or its previous name): no guarded line names the
+    /// script there (0.4.10 plan row 68c, R3).
+    ShellProfileOutsideAppData,
     ShellProfileNothing,
     /// A change asked of a worker the thread door would not start — `$PROFILE`'s Enable, Undo or
     /// removal, the Explorer first-page switch — so nothing was changed
@@ -3450,6 +3459,16 @@ impl Text {
                 lang,
                 "The clipboard picture could not be saved. Copy again and retry.",
                 "剪贴板图片无法保存。重新复制后再试。",
+            ),
+            Self::PasteClipboardPictureUnread => pick(
+                lang,
+                "The clipboard picture could not be read. Copy again and retry.",
+                "剪贴板图片无法读取。重新复制后再试。",
+            ),
+            Self::PasteClipboardPromiseTooLarge => pick(
+                lang,
+                "The copied files are too many or too large to paste. Save them first.",
+                "复制的文件太多或太大，无法粘贴。请先保存。",
             ),
             Self::PasteProfileOverride => pick(
                 lang,
@@ -6256,6 +6275,11 @@ impl Text {
                 "$PROFILE was changed elsewhere. Reload this page and try again.",
                 "$PROFILE 已在别处被改动。重新加载此页后重试。",
             ),
+            Self::ShellProfileOutsideAppData => pick(
+                lang,
+                "Folio's data folder is not in %APPDATA%\\Folio, so $PROFILE cannot load its script.",
+                "Folio 的数据文件夹不在 %APPDATA%\\Folio 下，$PROFILE 无法加载它的脚本。",
+            ),
             Self::ShellProfileChanged => pick(
                 lang,
                 "The profile changed during the operation; retry when the editor is finished.",
@@ -6797,6 +6821,10 @@ impl Text {
         Self::LegacyPsReadLineRemovedToast,
         // Only the Windows PowerShell discovery worker can emit this refusal.
         Self::ShellProfileProbeFailed,
+        // Enable's refusal of a data root outside `%APPDATA%` (0.4.10 plan row 68c, R3(b)): it is
+        // asked only after the `$PROFILE` probe answered, which it does on Windows alone; off
+        // Windows the carry may write it only into `diagnostics.log`, which no page shows.
+        Self::ShellProfileOutsideAppData,
         // — the Theme and scheme rows' sentences while a Windows contrast theme is on, which
         //   only the Windows reader of `SPI_GETHIGHCONTRAST` can put in force (T-HIGH-CONTRAST)
         Self::DescThemeHighContrast,
@@ -9815,6 +9843,8 @@ mod tests {
             Text::PasteClipboardRead,
             Text::PasteClipboardBusy,
             Text::PasteClipboardPicture,
+            Text::PasteClipboardPictureUnread,
+            Text::PasteClipboardPromiseTooLarge,
             Text::PasteProfileOverride,
         ];
         let width = toast::TOAST_WINDOW_WIDTH_LOGICAL_PX

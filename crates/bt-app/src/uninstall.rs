@@ -138,7 +138,9 @@ const INVENTORY: &[Mark] = &[
         says: Text::CleanupMarkProfiles,
         kind: Kind::PerAccount,
         remover: Remover::Profiles,
-        writer: "shell_integration/profile_runtime.rs:install_recorded",
+        // Enable's line, and the carry pass's member that brings an older Folio's line forward to it
+        // (row 68c).
+        writer: "shell_integration/profile_runtime.rs:install_recorded;shell_integration/profile_runtime.rs:carry_profile_lines",
         // Folio's own old line forms, brought to the guarded one by 68c (R2); the guarded line
         // names the data folder's script, which row "Roaming data" carries.
         carry: &[CarryRule::OwnerChecked {

@@ -13945,6 +13945,63 @@ mod windows_impl {
         )
     }
 
+    /// **The OLE clipboard's data object, asked for on a worker** (plan row 81) — through the
+    /// clipboard's one declared contention wait: while another program (or the clipboard lane)
+    /// holds the clipboard open, `OleGetClipboard` answers `CLIPBRD_E_CANT_OPEN`, and it is asked
+    /// again with 5, 10, 20 and 40 ms between, each pause through [`crate::wait::sleep_within`].
+    /// The caller has joined a single-threaded apartment.
+    pub(super) fn ole_clipboard_with_retry(
+        worker: &WorkerCtx,
+    ) -> windows::core::Result<windows::Win32::System::Com::IDataObject> {
+        let mut contention = ClipboardContention::new();
+        loop {
+            // SAFETY: the calling worker joined an apartment the OLE clipboard accepts; the data
+            // object answered is owned by the caller.
+            let answer = unsafe { windows::Win32::System::Ole::OleGetClipboard() };
+            if !contention.ask_again(worker, &answer) {
+                return answer;
+            }
+        }
+    }
+
+    /// **The clipboard's one declared contention wait, for an OLE ask** (plan row 81; review N3):
+    /// while another program (or the clipboard lane) holds the clipboard open, the clipboard's data
+    /// object answers `CLIPBRD_E_CANT_OPEN` — to `OleGetClipboard` and to each `GetData` it serves
+    /// by opening the clipboard — and the ask is made again with 5, 10, 20 and 40 ms between, each
+    /// pause through [`crate::wait::sleep_within`]: five asks at most. The caller makes its own
+    /// ask in a loop and asks this whether to make it again.
+    pub(super) struct ClipboardContention {
+        pauses: std::slice::Iter<'static, std::time::Duration>,
+    }
+
+    impl ClipboardContention {
+        pub(super) fn new() -> Self {
+            Self {
+                pauses: CLIPBOARD_OPEN_RETRY_DELAYS.iter(),
+            }
+        }
+
+        /// **Whether to ask again**: after a contended answer while a pause is left — taken here,
+        /// on the asking worker (`worker`) — yes; any other answer, or the fifth, is the answer.
+        pub(super) fn ask_again<T>(
+            &mut self,
+            worker: &WorkerCtx,
+            answer: &windows::core::Result<T>,
+        ) -> bool {
+            let contended = matches!(
+                answer,
+                Err(error) if error.code() == windows::Win32::Foundation::CLIPBRD_E_CANT_OPEN
+            );
+            match self.pauses.next() {
+                Some(delay) if contended => {
+                    crate::wait::sleep_within(worker, *delay);
+                    true
+                }
+                _ => false,
+            }
+        }
+    }
+
     /// **The clipboard's text**, read on the clipboard lane's worker (`worker`).
     pub fn clipboard_text(worker: &WorkerCtx) -> Result<String, String> {
         // SAFETY: the calls below run on the worker that opened the clipboard. It remains open
@@ -29645,11 +29702,16 @@ mod macos_player_signature_tests {
 
 /// Gesture-only terminal clipboard acquisition; text fields retain `clipboard_text`.
 pub mod clipboard;
-pub use clipboard::{ClipboardPayload, PictureBytes, PictureEncoding, UnsupportedKind};
+pub use clipboard::{
+    ClipboardPayload, ClipboardRead, ClipboardSequence, PictureBytes, PictureEncoding,
+    PromisedEntry, PromisedFiles, UnsupportedKind,
+};
+/// A clipboard promise, rendered into a folder on a worker (plan row 81).
+pub mod clipboard_promise;
 #[cfg(windows)]
 mod windows_clipboard;
 #[cfg(windows)]
-pub use windows_clipboard::{clipboard_payload, pixels_through_gdi};
+pub use windows_clipboard::{clipboard_payload, pixels_through_gdi, render_clipboard_promise};
 #[cfg(target_os = "macos")]
 mod macos_clipboard_payload;
 #[cfg(target_os = "macos")]
@@ -29657,8 +29719,23 @@ mod macos_file_urls;
 #[cfg(target_os = "macos")]
 pub use macos_clipboard_payload::clipboard_payload;
 #[cfg(not(any(windows, target_os = "macos")))]
-pub fn clipboard_payload(_worker: &admission::WorkerCtx) -> Result<ClipboardPayload, String> {
-    Err("terminal clipboard acquisition is unavailable on this platform".to_owned())
+pub fn clipboard_payload(_worker: &admission::WorkerCtx) -> ClipboardRead {
+    ClipboardRead {
+        sequence: None,
+        offered: Vec::new(),
+        answer: Err("terminal clipboard acquisition is unavailable on this platform".to_owned()),
+    }
+}
+/// **A promise on a platform that never answers one** (macOS reads none; plan row 81): the
+/// clipboard lane cannot hand this door an offer here, so it renders nothing.
+#[cfg(not(windows))]
+pub fn render_clipboard_promise(
+    _worker: &admission::WorkerCtx,
+    _offer: &[PromisedEntry],
+    _into: &std::path::Path,
+    _progress: &clipboard_promise::RenderProgress,
+) -> Result<clipboard_promise::RenderedPromise, clipboard_promise::PromiseRefused> {
+    Err(clipboard_promise::PromiseRefused::NotRendered(None))
 }
 
 /// **The `CF_BITMAP` seam on a machine with no GDI.** `PictureEncoding::Bitmap`

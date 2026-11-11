@@ -63,11 +63,16 @@ pub use language::{LanguageAsked, begin_language_question};
 #[cfg(test)]
 #[path = "shell_integration_psreadline_tests.rs"]
 mod psreadline_tests;
+/// The carry pass's member for Folio's old `$PROFILE` lines (0.4.10 plan row 68c).
+pub(crate) use profile_runtime::run_profile_lines_step;
 pub use profile_runtime::{
-    Migrated, ProfileInstallOutcome, begin_profile_install, begin_profile_install_undo,
-    begin_profile_observation_for, begin_removal, begin_startup_migration, profile_installs_for,
-    remove_shell_integration, remove_shell_integration_at, take_profile_installs, take_removal,
+    ProfileInstallOutcome, begin_profile_install, begin_profile_install_undo,
+    begin_profile_observation_for, begin_removal, profile_installs_for, remove_shell_integration,
+    remove_shell_integration_at, take_profile_installs, take_removal,
 };
+/// The member's once-a-process step and its carry, for the pass's start test (row 68c).
+#[cfg(test)]
+pub(crate) use profile_runtime::{ProfileLinesStep, carry_profile_lines};
 
 /// The script, compiled in.
 ///
@@ -4126,6 +4131,15 @@ impl ProbeEnvironment {
         }
     }
 
+    /// **The account's `%APPDATA%`, as this environment says it**: the logon block's, or this
+    /// process's own where the probe runs in the inherited one — what the account's PowerShell
+    /// expands `$env:APPDATA` to in the line Folio writes, so what names that line's target
+    /// (0.4.10 plan row 68c, the review's N2: never Folio's own, which a sealed run points at a
+    /// scratch folder).
+    pub(crate) fn account_appdata(&self) -> Option<PathBuf> {
+        self.var_os("APPDATA").map(PathBuf::from)
+    }
+
     /// The account's block, when this is one: what [`ordinary_process_scope`] reads (Windows
     /// only, like its reader).
     #[cfg(windows)]
@@ -5516,7 +5530,7 @@ fn add_profile_with_forms(
     let changed = profile_marks::rewrite(original, forms, profile_marks::Action::Migrate)?;
     let bytes = if let Some(bytes) = changed {
         bytes
-    } else if decoded.text.lines().any(|text| forms.owns(text)) {
+    } else if decoded.holds_an_owned_line(forms) {
         return Ok(ProfileWrite {
             profile: profile.to_path_buf(),
             backup: None,
@@ -5539,7 +5553,7 @@ fn add_profile_with_forms(
         } else if !text.is_empty() && !text.ends_with('\n') {
             text.push_str(newline);
         }
-        text.push_str(line);
+        text.push_str(&decoded.as_held(line));
         text.push_str(newline);
         decoded.encode(&text)
     };
@@ -6377,73 +6391,6 @@ mod tests {
     #[test]
     fn a_removal_waits_longer_for_a_quiet_powershell_than_a_probe_does() {
         assert!(REMOVAL_PROBE_PATIENCE.quiet > POWERSHELL_PROBE_PATIENCE.quiet);
-    }
-
-    /// RED (T-HEADLESS-RUNTIME-SEAM round 2) — **a startup observation the thread door refuses is
-    /// said once, and the next asking tries again.** The startup's latch is set by a start, not by
-    /// an attempt: two askings that are both refused are two attempts, each said in the voice the
-    /// startup was handed, and the latch is still open after them. Before, the refusal was thrown
-    /// away (`let _ =`) and the latch taken first, so one refused start meant no startup
-    /// observation until the Profiles page was opened.
-    ///
-    /// MUTATIONS: drop the `latch.store(false, ..)` after a refused start in
-    /// `begin_startup_migration_through` — the second asking returns at the latch and only one
-    /// refusal is said; say nothing in `lane::Answered::worker_ended` — the refusals are thrown
-    /// away again; hand `spawn_profile_observation` a row from the startup (T-OBSERVATION-REFUSAL-
-    /// ON-THE-PAGE review) — its refusal is filed on a page nobody opened.
-    #[test]
-    fn a_refused_startup_observation_is_said_and_asked_again() {
-        // The edition no other test files, and Windows PowerShell's held in turn, so a filing
-        // numbered between `before` and `after` could only be the startup's.
-        let _turn = WINDOWS_POWERSHELL_OBSERVATIONS
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let before = next_observation();
-        let gate = std::sync::Arc::new(crate::lane::Gate::default());
-        let executor = crate::lane::Executor::scripted(std::sync::Arc::clone(&gate));
-        let latch = std::sync::atomic::AtomicBool::new(false);
-        let said = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
-        let data = temp_dir("startup-observation 观察");
-        for _ in 0..2 {
-            gate.refuse_next_start();
-            let lines = std::sync::Arc::clone(&said);
-            profile_runtime::begin_startup_migration_through(
-                &latch,
-                &executor,
-                || data.clone(),
-                move |line| lines.lock().unwrap().push(line.to_owned()),
-            );
-        }
-        let after = next_observation();
-        let filed = PROFILE_OBSERVATIONS
-            .get_or_init(Default::default)
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .iter()
-            .filter(|(_, (number, _))| (before..after).contains(number))
-            .map(|(edition, (number, _))| (*edition, *number))
-            .collect::<Vec<_>>();
-        let said = said.lock().unwrap().clone();
-        let _ = std::fs::remove_dir_all(&data);
-        assert_eq!(
-            filed,
-            Vec::new(),
-            "the startup's asking names no rows, so nothing is filed on the page"
-        );
-        assert_eq!(
-            said.len(),
-            2,
-            "each refused start is said once, and the second asking tries again: {said:?}"
-        );
-        assert!(
-            said.iter()
-                .all(|line| line.contains(crate::lane::REFUSED_START)),
-            "what is said is the door's refusal: {said:?}"
-        );
-        assert!(
-            !latch.load(std::sync::atomic::Ordering::Acquire),
-            "the latch stays open on a refused start"
-        );
     }
 
     /// RED (T-OBSERVATION-REFUSAL-ON-THE-PAGE review) — **a worker that panicked after it started
