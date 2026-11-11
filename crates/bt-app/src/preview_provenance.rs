@@ -284,8 +284,20 @@ impl TextOrigin {
         out
     }
 
+    /// **The run that holds `offset`, found by a search and not a walk.**
+    ///
+    /// The runs are contiguous, in text order and never empty — [`Self::copied`]
+    /// and [`Self::drawn`] are the only two places a run is made, and both put
+    /// it at the end of the text and refuse a zero length — so the first run
+    /// that ends past `offset` is the only one that can hold it. A walk from the
+    /// first run made [`Self::through`] cost the square of a block's runs: it
+    /// asks this once for every outer run a copied run crosses, and a paragraph
+    /// of many soft-wrapped lines is twice as many outer runs as lines.
     fn run_at(&self, offset: usize) -> Option<&OriginRun> {
-        self.runs.iter().find(|run| run.text.contains(&offset))
+        let index = self.runs.partition_point(|run| run.text.end <= offset);
+        self.runs
+            .get(index)
+            .filter(|run| run.text.contains(&offset))
     }
 
     /// The file byte this **place** in the text resolves to — the rounding rule
