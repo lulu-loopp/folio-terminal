@@ -21,7 +21,6 @@ All notable changes to Folio are recorded here. The format follows
 - Settings > Agents now says why an agent's hooks are not this Folio's: another copy of Folio runs them, shown with its location; Folio cannot read the file; or an entry looks like Folio's in a form Folio did not write. While Resume agents after restart is on, that row names the agents whose hooks it still needs, and on a first run the Claude Code and Codex rows start switched on. <!-- zh: pending -->
 - A resumed Claude Code or Codex pane comes back with the flags its agent was started with, such as `--dangerously-skip-permissions` or `--model`. A flag that belongs to the first start only, such as `-w`, is left out, and the pane names it in one line. <!-- zh: pending -->
 - On Windows, pasting a file copied from inside a program, such as an attachment in a mail or chat app, a photo in Phone Link or a file in a zip folder, now saves it to Folio's clipboard folder and pastes its path, as a pasted screenshot is; before, Folio asked you to copy a saved file instead. A program that sends nothing of the file for 30 seconds is given up on, and the paste says so. <!-- zh: pending -->
-
 - On Windows, Settings > General > Start at sign-in starts Folio when you sign in, and is off until you turn it on. It is one entry for your account that starts this copy of Folio: a value named Folio under the Run key. When the copy moves, the next start points the entry at it, and turning the switch off or uninstalling Folio removes it. <!-- zh: pending T-START-AT-LOGON-SWITCH -->
 
 ### Changed
