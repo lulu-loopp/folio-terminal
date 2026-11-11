@@ -250,6 +250,9 @@ mod update_orphans;
 // The macOS update homes whose app is gone, recorded by the prepare and swept by the carry pass
 // and the uninstall (0.4.10 plan row 68e).
 mod update_homes;
+// The sign-in switch's entry: read and repaired by the carry pass, written by the switch's press
+// on its worker, removed by the uninstall (0.4.10 plan row 22a).
+mod start_at_sign_in;
 mod update_startup;
 mod update_trial;
 mod update_txn;
@@ -747,6 +750,12 @@ enum AppEvent {
     /// for [`Self::ExplorerPackageChanged`]'s reason: the scan lands seconds into a launch, or
     /// behind a modal, on a window that may have nothing else coming.
     CarryPassAnswered,
+    /// **A press of the sign-in switch was answered** (0.4.10 plan row 22a): the answer is
+    /// `start_at_sign_in::take_sign_in_press`'s, and the handler sets the row from it, raises its
+    /// card on the window that pressed, and asks the restart registration again when whether the
+    /// entry starts this copy moved. Owed a wake for [`Self::ExplorerPackageChanged`]'s reason:
+    /// the row lives behind a modal, and nothing else asks for the frame that shows the answer.
+    SignInPressed,
     /// **The machine listed its monospaced families** (GitHub issue #3).
     ///
     /// The tenth of the same family, and it is owed a wake for
@@ -1075,6 +1084,7 @@ impl AppEvent {
             | Self::UpdateChecked
             | Self::ExplorerPackageChanged
             | Self::CarryPassAnswered
+            | Self::SignInPressed
             | Self::FontsScanned
             | Self::TaskbarAnswered
             | Self::ProgramsAnswered
@@ -9331,6 +9341,13 @@ struct App<B: Backend = Native> {
     /// closed simply raises no card: the row it would have reported to is not
     /// there any more.
     explorer_package_asked_by: Option<WindowId>,
+    /// **The account's sign-in entry as last read** (0.4.10 plan row 22a): by the carry pass's
+    /// member or by a press's worker, never on this thread. `Unknown` until the first answer,
+    /// drawn Off; the restart registration's flags are read from it (R10).
+    start_at_sign_in: start_at_sign_in::SignInRow,
+    /// **Which window pressed the sign-in switch, and how it asked to be told**, until the
+    /// press's worker answers: [`Self::explorer_package_asked_by`]'s reason.
+    sign_in_asked_by: Option<(WindowId, Announce)>,
     /// **Which place that press asked for**, carried beside the address for the
     /// address's own reason (user ruling 2026-09-07).
     ///
@@ -9931,6 +9948,8 @@ impl<B: Backend> App<B> {
             first_run_attempted: false,
             first_run_waited_for_channel: false,
             explorer_package_asked_by: None,
+            start_at_sign_in: start_at_sign_in::SignInRow::Unknown,
+            sign_in_asked_by: None,
             explorer_package_asked_place: explorer_menu::ExplorerPlace::default(),
             explorer_package_announce: Announce::Everything,
             agent_takeovers: Default::default(),
@@ -15252,11 +15271,16 @@ struct TrialStores<'a> {
 /// **Windows is asked to start this program again after its restart, now**
 /// (T-RESTART-REGISTRATION): after an update's reboot, a sign-in with "Restart apps" on, or the
 /// Restart Manager's close — on [`bt_platform::session_end::RESTART_FLAGS`]' occasions, never after
-/// a crash or a hang. The line is empty: a plain start reopens the saved layout as a click does.
+/// a crash or a hang — and, while this copy's sign-in entry is on, not after the system's reboot
+/// either (0.4.10 plan row 22a, R10: `start_at_sign_in::restart_flags_for` over `sign_in`, the
+/// row as last read). The line is empty: a plain start reopens the saved layout as a click does.
 /// Cheap, and said only when it is refused: nothing a person sees depends on it. Asked by
-/// [`FolioApp::register_for_restart`] at the first window, or by a committed trial's release.
-fn register_restart_now<B: Backend>(event_loop: &B::Loop) {
-    if let Err(refused) = B::register_restart(event_loop, bt_platform::session_end::RESTART_FLAGS) {
+/// [`FolioApp::register_for_restart`] at the first window, by a committed trial's release, and
+/// again when the sign-in row moves across `On` ([`FolioApp::register_restart_after_sign_in_moved`]).
+fn register_restart_now<B: Backend>(event_loop: &B::Loop, sign_in: start_at_sign_in::SignInRow) {
+    if let Err(refused) =
+        B::register_restart(event_loop, start_at_sign_in::restart_flags_for(sign_in))
+    {
         diagnostics::note(&format!(
             "{APP_NAME} will not be started again after the system's restart: {refused}"
         ));
@@ -15316,6 +15340,9 @@ fn release_trial_writer(writer: update_trial::Writer, stores: &mut TrialStores<'
         // The sweeps again: the dead entrances and the homes they held back, they now remove
         // (rows 68b, 68e).
         Writer::OrphanSweep => carry_pass::begin_carry_pass(CarryAsk::UPDATE_LEFTOVERS),
+        // The sign-in entry's repair, which the trial held back (row 22a, R7): the member again,
+        // which now writes.
+        Writer::StartAtSignIn => carry_pass::begin_carry_pass(CarryAsk::START_AT_SIGN_IN),
     }
 }
 
@@ -35663,6 +35690,14 @@ impl Runtime<'_, Native> {
                 let _ = proxy.send_event(AppEvent::CarryPassAnswered);
             });
         }
+        // **And the sign-in switch's** (0.4.10 plan row 22a): its press is answered on a worker of
+        // its own, behind the modal, on the Explorer press's footing.
+        {
+            let proxy = proxy.clone();
+            start_at_sign_in::install_sign_in_wake(move || {
+                let _ = proxy.send_event(AppEvent::SignInPressed);
+            });
+        }
         // **And the sixth's** (GitHub issue #3), which is the only one of them
         // that is started by a *press* rather than by startup or by a pane: the
         // gear asks the machine for its monospaced families, and the picker is
@@ -48974,14 +49009,17 @@ impl<B: Backend> FolioApp<B> {
         event_loop: &B::Loop,
         held: impl FnOnce(update_trial::Writer) -> bool,
     ) {
-        let owner = self
+        let Some(app) = self
             .app
             .as_ref()
-            .is_some_and(|app| app.session_store.is_the_writer_of_record());
-        if !owner || held(update_trial::Writer::RestartRegistration) {
+            .filter(|app| app.session_store.is_the_writer_of_record())
+        else {
+            return;
+        };
+        if held(update_trial::Writer::RestartRegistration) {
             return;
         }
-        register_restart_now::<B>(event_loop);
+        register_restart_now::<B>(event_loop, app.start_at_sign_in);
     }
 
     /// **Windows is asked to end this process before the processes at the default shutdown
@@ -49526,7 +49564,9 @@ impl<B: Backend> FolioApp<B> {
     /// agents' part, and say each repair of a gone copy's hooks once (row 67b, R8): one notice per
     /// family, on the window the keyboard is on, else the oldest standing one; every window's
     /// chrome redrawn, because the rows are facts about the machine and any window may be showing
-    /// the page. A snapshot no member answered for has nothing to set.
+    /// the page. A snapshot no member answered for has nothing to set. The sign-in entry's answer
+    /// is taken on the classic verb's rule (0.4.10 plan row 22a, R6); whether it moved the restart
+    /// registration is the caller's to ask ([`Self::register_restart_after_sign_in_moved`]).
     fn adopt_carry_snapshot(&mut self) -> Result<()> {
         // The app first: a wake handled with no `App` leaves the snapshot for the one that has it
         // (row 68b, review N8), where taking it first would drop the classic answer for good.
@@ -49544,6 +49584,15 @@ impl<B: Backend> FolioApp<B> {
                 &mut app.context_menu_installed,
                 classic,
                 &context_menu::CLASSIC_PRESSES,
+            );
+        }
+        // The sign-in entry's, on the same rule (row 22a): a press since the member's read has
+        // the newer answer, which its own worker brings.
+        if let Some(sign_in) = carried.sign_in {
+            start_at_sign_in::adopt_sign_in_answer(
+                &mut app.start_at_sign_in,
+                sign_in,
+                &start_at_sign_in::SIGN_IN_PRESSES,
             );
         }
         let notices: Vec<i18n::Text> = match carried.hooks {
@@ -49580,6 +49629,81 @@ impl<B: Backend> FolioApp<B> {
                 Ok(())
             }
         })
+    }
+
+    /// **A press of the sign-in switch answered** (0.4.10 plan row 22a, R6): the row set from the
+    /// press's own read, its card raised on the window that pressed, every window redrawn, and
+    /// the restart registration asked again when whether the entry starts this copy moved (R10).
+    /// An answer older than the last press is dropped whole: that press's own answer is coming,
+    /// and it is the one the reader waits for. Reads nothing of the machine: the answer is the
+    /// worker's.
+    fn answer_sign_in_press(&mut self, event_loop: &B::Loop) -> Result<()> {
+        // The app first, for `adopt_carry_snapshot`'s reason: a wake handled with no `App` leaves
+        // the answer for the one that has it.
+        let Some(app) = self.app.as_mut() else {
+            return Ok(());
+        };
+        let Some(pressed) = start_at_sign_in::take_sign_in_press() else {
+            return Ok(());
+        };
+        if pressed.presses_seen != start_at_sign_in::SIGN_IN_PRESSES.sign_in_presses_counted() {
+            return Ok(());
+        }
+        let before = app.start_at_sign_in;
+        if let Some(answer) = pressed.answer {
+            start_at_sign_in::adopt_sign_in_answer(
+                &mut app.start_at_sign_in,
+                answer,
+                &start_at_sign_in::SIGN_IN_PRESSES,
+            );
+        }
+        let asked_by = app.sign_in_asked_by.take();
+        self.register_restart_after_sign_in_moved(event_loop, Some(before));
+        let (done, text) = pressed.press_card();
+        self.for_each_window(|runtime| {
+            if let Some((window, announce)) = asked_by
+                && window == runtime.window_id()
+                && (!done || announce == Announce::Everything)
+            {
+                runtime.toast(
+                    if done {
+                        toast::ToastKind::Ok
+                    } else {
+                        toast::ToastKind::Error
+                    },
+                    toast::ToastAnchor::Window,
+                    None,
+                    text.clone(),
+                )?;
+            }
+            if runtime.refresh_chrome() {
+                runtime.present_chrome_change()
+            } else {
+                Ok(())
+            }
+        })
+    }
+
+    /// **The restart registration asked again when the sign-in row moved across this copy's
+    /// `On`** (0.4.10 plan row 22a, R10): its flags are `start_at_sign_in::restart_flags_for`'s
+    /// at each registration, and the row's first answer lands after the first window's. Through
+    /// the first window's own door ([`Self::register_for_restart_held_by`]): only the data
+    /// directory's owner asks, and an update's trial asks at its commit, with the row it has then.
+    /// `before` is `None` when there was no `App` to read it from.
+    fn register_restart_after_sign_in_moved(
+        &self,
+        event_loop: &B::Loop,
+        before: Option<start_at_sign_in::SignInRow>,
+    ) {
+        let (Some(before), Some(app)) = (before, self.app.as_ref()) else {
+            return;
+        };
+        if start_at_sign_in::restart_flags_for(before)
+            == start_at_sign_in::restart_flags_for(app.start_at_sign_in)
+        {
+            return;
+        }
+        self.register_for_restart_held_by(event_loop, update_trial::defer);
     }
 
     fn announce_recovered_edits(&mut self) -> Result<()> {
@@ -50479,7 +50603,10 @@ impl<B: Backend> FolioApp<B> {
                     // (T-QUIT-DOCUMENTS rounds 3–4): the rest of it released, the session's
                     // half pending through the write's verdict (`Quit::settle_held_release`).
                     if let Some(app) = self.app.as_mut() {
-                        app.settle_the_held_release(&|| register_restart_now::<B>(event_loop));
+                        let sign_in = app.start_at_sign_in;
+                        app.settle_the_held_release(&|| {
+                            register_restart_now::<B>(event_loop, sign_in)
+                        });
                     }
                     self.for_each_window(|runtime| runtime.photograph_for_quit())?;
                     self.report_to_quit(quit::Quit::photographed);
@@ -50561,7 +50688,10 @@ impl<B: Backend> FolioApp<B> {
                     // **The write left: a session release still pending is consumed**
                     // (T-QUIT-DOCUMENTS round 4).
                     if let Some(app) = self.app.as_mut() {
-                        app.settle_the_held_release(&|| register_restart_now::<B>(event_loop));
+                        let sign_in = app.start_at_sign_in;
+                        app.settle_the_held_release(&|| {
+                            register_restart_now::<B>(event_loop, sign_in)
+                        });
                     }
                     // **Not `for_each_window`**, and this is the one place in the
                     // loop where that matters: it stops at the first failure, and
@@ -50676,7 +50806,10 @@ impl<B: Backend> FolioApp<B> {
                         // **A trial release still held runs now** (rounds 3–4): cancelled in the
                         // phases or its final write refused, the window stays, so the backup and
                         // the session go as they would have.
-                        app.settle_the_held_release(&|| register_restart_now::<B>(event_loop));
+                        let sign_in = app.start_at_sign_in;
+                        app.settle_the_held_release(&|| {
+                            register_restart_now::<B>(event_loop, sign_in)
+                        });
                         app.quit = None;
                     }
                     if let Some(cancelled) = cancelled {
@@ -52485,8 +52618,9 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                         Some(quit) => quit.trial_release(released),
                         None => released,
                     };
+                    let sign_in = app.start_at_sign_in;
                     app.release_trial_writes(now, &|| {
-                        register_restart_now::<Native>(event_loop);
+                        register_restart_now::<Native>(event_loop, sign_in);
                     });
                     if app.update_job.after_commit(version::VERSION) {
                         diagnostics::note(
@@ -52659,7 +52793,17 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             }
             // **The carry pass's round**: the agents' rows set from its part, its notices raised
             // once on the focused window, every window redrawn.
-            AppEvent::CarryPassAnswered => self.adopt_carry_snapshot(),
+            // And the restart registration asked again when the round moved whether the sign-in
+            // entry starts this copy (0.4.10 plan row 22a, R10).
+            AppEvent::CarryPassAnswered => {
+                let sign_in = self.app.as_ref().map(|app| app.start_at_sign_in);
+                let adopted = self.adopt_carry_snapshot();
+                self.register_restart_after_sign_in_moved(event_loop, sign_in);
+                adopted
+            }
+            // **A press of the sign-in switch, answered by its worker** (row 22a): the row, the
+            // card on the window that pressed, every window redrawn.
+            AppEvent::SignInPressed => self.answer_sign_in_press(event_loop),
             // **The one place the family list moves onto the screen.** The walk
             // finished on a worker and left its answer in `settings`' mailbox;
             // this is between two frames, which is the whole reason the worker

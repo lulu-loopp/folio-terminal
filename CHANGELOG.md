@@ -22,6 +22,8 @@ All notable changes to Folio are recorded here. The format follows
 - A resumed Claude Code or Codex pane comes back with the flags its agent was started with, such as `--dangerously-skip-permissions` or `--model`. A flag that belongs to the first start only, such as `-w`, is left out, and the pane names it in one line. <!-- zh: pending -->
 - On Windows, pasting a file copied from inside a program, such as an attachment in a mail or chat app, a photo in Phone Link or a file in a zip folder, now saves it to Folio's clipboard folder and pastes its path, as a pasted screenshot is; before, Folio asked you to copy a saved file instead. A program that sends nothing of the file for 30 seconds is given up on, and the paste says so. <!-- zh: pending -->
 
+- On Windows, Settings > General > Start at sign-in starts Folio when you sign in, and is off until you turn it on. It is one entry for your account that starts this copy of Folio: a value named Folio under the Run key. When the copy moves, the next start points the entry at it, and turning the switch off or uninstalling Folio removes it. <!-- zh: pending T-START-AT-LOGON-SWITCH -->
+
 ### Changed
 
 - While a command is running in a tab, a Folio window wakes about half as often as before: each step of the tab's working mark, each blink of the text cursor and most bursts of a pane's output now reach the screen in one pass of the window's loop instead of two. What you see, and when, is unchanged. <!-- zh: pending T-TWO-BARE-TURNS-PER-MARK-STEP -->

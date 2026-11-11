@@ -589,6 +589,9 @@ text_entries! {
     /// 2026-09-07): the row's three answers are three places **in that menu**, so
     /// the surface is still what the title names and the answers name the places.
     RowContextMenu,
+    /// **Whether Folio starts when you sign in** (0.4.10 plan row 22a, R13): the switch whose
+    /// answer is the account's `Run\Folio` entry. On Windows only until row 22b.
+    RowStartAtSignIn,
     /// The daily-check switch directly under About > Version.
     RowAutoCheck,
     RowTabLayout,
@@ -646,6 +649,15 @@ text_entries! {
     /// repairs this on its own; the sentence exists for the seconds before it
     /// has, and for the machine where the repair could not run.
     DescExplorerFirstPageElsewhere,
+    /// **What the sign-in switch does** (row 22a) — its line while the entry is this copy's or
+    /// there is none.
+    DescStartAtSignIn,
+    /// And while the entry starts another copy of Folio, in another folder.
+    DescStartAtSignInElsewhere,
+    /// And while Windows' own Startup-apps switch has the entry off (R13: the fact, no advice).
+    DescStartAtSignInTurnedOff,
+    /// And while another program's startup entry has the name.
+    DescStartAtSignInNotOurs,
     /// **And when this run of Folio has just registered the package** — the one
     /// line of the five that is advice rather than a fact about the machine.
     ///
@@ -730,6 +742,14 @@ text_entries! {
     /// worth making: a path invented here would be a menu entry that launches
     /// whatever happens to be at it.
     ContextMenuNoExecutable,
+    /// The card raised when the sign-in switch's On has written the entry (row 22a).
+    SignInOnToast,
+    /// And when its Off has taken the entry away.
+    SignInOffToast,
+    /// Why On wrote nothing: this copy's path is longer than a `Run` value runs.
+    SignInPathTooLong,
+    /// Why On wrote nothing: another program's startup entry has the name.
+    SignInEntryNotOurs,
 
     // ── the first page of Windows 11's menu (§7.4a) ────────────────────────
     /// **What Explorer draws on the first page**, asked for per call by
@@ -3592,6 +3612,11 @@ impl Text {
             Self::RowRepairRowBreaks => pick(lang, "Repair row breaks", "修复公式换行"),
             Self::RowGitPanel => pick(lang, "Git panel", "Git 面板"),
             Self::RowContextMenu => pick(lang, "Explorer context menu", "资源管理器菜单"),
+            Self::RowStartAtSignIn => pick(
+                lang,
+                "Start at sign-in",
+                "Start at sign-in", // zh: pending T-START-AT-LOGON-SWITCH
+            ),
             Self::RowTabLayout => pick(lang, "Tab layout", "标签页布局"),
             Self::RowSidebar => pick(lang, "Sidebar", "侧栏"),
             Self::RowSplitDirection => pick(lang, "Split direction", "拆分方向"),
@@ -3691,6 +3716,28 @@ impl Text {
                 lang,
                 "That entry points at another folder. Folio takes the entry back next launch.",
                 "该菜单项指向另一个文件夹。Folio 下次启动时将其改回。",
+            ),
+            Self::DescStartAtSignIn => pick(
+                lang,
+                "Starts Folio when you sign in to Windows.",
+                "Starts Folio when you sign in to Windows.", // zh: pending T-START-AT-LOGON-SWITCH
+            ),
+            Self::DescStartAtSignInElsewhere => pick(
+                lang,
+                "Starts Folio when you sign in. The entry starts the copy in another folder.",
+                // zh: pending T-START-AT-LOGON-SWITCH
+                "Starts Folio when you sign in. The entry starts the copy in another folder.",
+            ),
+            Self::DescStartAtSignInTurnedOff => pick(
+                lang,
+                "Turned off in Startup apps.",
+                "Turned off in Startup apps.", // zh: pending T-START-AT-LOGON-SWITCH
+            ),
+            Self::DescStartAtSignInNotOurs => pick(
+                lang,
+                "Another program's startup entry is named Folio, and it is left as it is.",
+                // zh: pending T-START-AT-LOGON-SWITCH
+                "Another program's startup entry is named Folio, and it is left as it is.",
             ),
             // **Advice, and the only line here that is.** Explorer was told the
             // moment the package was registered; what it does with that is not
@@ -3890,6 +3937,27 @@ impl Text {
                 lang,
                 "Folio could not work out where folio.exe is",
                 "Windows 没有说出 folio.exe 的位置",
+            ),
+            Self::SignInOnToast => pick(
+                lang,
+                "Folio starts at sign-in.",
+                "Folio starts at sign-in.", // zh: pending T-START-AT-LOGON-SWITCH
+            ),
+            Self::SignInOffToast => pick(
+                lang,
+                "Folio no longer starts at sign-in.",
+                "Folio no longer starts at sign-in.", // zh: pending T-START-AT-LOGON-SWITCH
+            ),
+            Self::SignInPathTooLong => pick(
+                lang,
+                "the path to folio.exe is longer than a startup entry holds",
+                // zh: pending T-START-AT-LOGON-SWITCH
+                "the path to folio.exe is longer than a startup entry holds",
+            ),
+            Self::SignInEntryNotOurs => pick(
+                lang,
+                "another program's startup entry is named Folio",
+                "another program's startup entry is named Folio", // zh: pending T-START-AT-LOGON-SWITCH
             ),
 
             // ── the first page of Windows 11's menu (§7.4a) ────────────────
@@ -6809,6 +6877,17 @@ impl Text {
         Self::ContextMenuAddedToast,
         Self::ContextMenuRemovedToast,
         Self::ContextMenuNoExecutable,
+        // — the sign-in switch (0.4.10 plan row 22a), which `settings::visible_rows_for` offers on
+        //   Windows only until its macOS half (row 22b), and what its press says
+        Self::RowStartAtSignIn,
+        Self::DescStartAtSignIn,
+        Self::DescStartAtSignInElsewhere,
+        Self::DescStartAtSignInTurnedOff,
+        Self::DescStartAtSignInNotOurs,
+        Self::SignInOnToast,
+        Self::SignInOffToast,
+        Self::SignInPathTooLong,
+        Self::SignInEntryNotOurs,
         Self::ExplorerFirstPageAddedToast,
         Self::ExplorerFirstPageAddedRestartToast,
         Self::ExplorerFirstPageUnreadable,
@@ -6867,6 +6946,27 @@ impl Text {
         (Self::CleanupUpdateHomeUnchecked, HostPlatform::MacOs),
         (Self::CleanupUpdateHomeInUse, HostPlatform::Windows),
         (Self::CleanupUpdateHomeInUse, HostPlatform::MacOs),
+        // zh: pending T-START-AT-LOGON-SWITCH — the sign-in switch's title, its four lines, its
+        // two cards and its two refusals (0.4.10 plan row 22a, R13; the title's draft is 登录时启动);
+        // row 70's Chinese pass takes them.
+        (Self::RowStartAtSignIn, HostPlatform::Windows),
+        (Self::RowStartAtSignIn, HostPlatform::MacOs),
+        (Self::DescStartAtSignIn, HostPlatform::Windows),
+        (Self::DescStartAtSignIn, HostPlatform::MacOs),
+        (Self::DescStartAtSignInElsewhere, HostPlatform::Windows),
+        (Self::DescStartAtSignInElsewhere, HostPlatform::MacOs),
+        (Self::DescStartAtSignInTurnedOff, HostPlatform::Windows),
+        (Self::DescStartAtSignInTurnedOff, HostPlatform::MacOs),
+        (Self::DescStartAtSignInNotOurs, HostPlatform::Windows),
+        (Self::DescStartAtSignInNotOurs, HostPlatform::MacOs),
+        (Self::SignInOnToast, HostPlatform::Windows),
+        (Self::SignInOnToast, HostPlatform::MacOs),
+        (Self::SignInOffToast, HostPlatform::Windows),
+        (Self::SignInOffToast, HostPlatform::MacOs),
+        (Self::SignInPathTooLong, HostPlatform::Windows),
+        (Self::SignInPathTooLong, HostPlatform::MacOs),
+        (Self::SignInEntryNotOurs, HostPlatform::Windows),
+        (Self::SignInEntryNotOurs, HostPlatform::MacOs),
     ];
 }
 
@@ -7293,6 +7393,17 @@ pub fn context_menu_failed(message: &str) -> String {
     match current() {
         Lang::English => format!("Could not change Explorer's menu: {message}"),
         Lang::Chinese => format!("修改资源管理器菜单失败：{message}"),
+    }
+}
+
+/// **The card raised when the sign-in switch's press changed nothing** (0.4.10 plan row 22a),
+/// carrying why: Folio's own sentence, or the registry's in its own words.
+#[must_use]
+pub fn sign_in_not_changed(reason: &str) -> String {
+    match current() {
+        Lang::English => format!("Not changed: {reason}"),
+        // zh: pending T-START-AT-LOGON-SWITCH
+        Lang::Chinese => format!("Not changed: {reason}"),
     }
 }
 

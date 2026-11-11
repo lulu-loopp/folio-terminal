@@ -57,6 +57,9 @@ enum Remover {
     Toast,
     /// The update's entrance at logon (U-22): `HKCU\...\Run\FolioUpdate-*`.
     Entrance,
+    /// The switch's sign-in entry (0.4.10 plan row 22a): `HKCU\...\Run\Folio` and Windows' own
+    /// Startup-apps switch of the same name.
+    StartAtSignIn,
     Absent,
     RecoverySnapshots,
     RuntimeClaims,
@@ -250,11 +253,17 @@ const INVENTORY: &[Mark] = &[
     Mark {
         name: "Autostart / login item",
         says: Text::CleanupMarkAutostart,
+        // One entry per account, naming a copy: on an account that never pressed the switch the
+        // door's line is today's `not present`.
         kind: Kind::PerAccount,
-        remover: Remover::Absent,
-        writer: "none (no persistent writer)",
-        // Row 22 lands as an owner-checked row from its first commit (R11).
-        carry: &[CarryRule::Absent],
+        remover: Remover::StartAtSignIn,
+        writer: "start_at_sign_in.rs:press_sign_in_in;start_at_sign_in.rs:carry_sign_in_in;../bt-platform/src/sign_in_entry.rs:write_entry_in",
+        // The switch's entry (row 22a, R12); a copy that moved is re-pointed by the carry pass,
+        // held for the trial's commit by its own writer (R7).
+        carry: &[CarryRule::OwnerChecked {
+            check: CarryCheck::StartAtSignIn,
+            writer: Writer::StartAtSignIn,
+        }],
     },
     Mark {
         name: "Quake / global hotkeys",
@@ -1269,7 +1278,7 @@ fn execute_over<T>(
                     ));
                 }
             }
-            Remover::Explorer | Remover::Toast | Remover::Entrance => {
+            Remover::Explorer | Remover::Toast | Remover::Entrance | Remover::StartAtSignIn => {
                 entries.extend(system(mark.remover))
             }
             Remover::UpdateEntrances => {
@@ -1730,8 +1739,41 @@ fn system_remove(worker: &WorkerCtx, remover: Remover, exe: &Path, lang: Lang) -
             lang,
             bt_platform::logon_hook::clean,
         ),
+        Remover::StartAtSignIn => sign_in_entries(bt_platform::host_platform(), lang, || {
+            crate::start_at_sign_in::uninstall_sign_in(exe)
+        }),
         _ => Vec::new(),
     }
+}
+
+/// **The sign-in entry's row** (0.4.10 plan row 22a): the switch's `Run\Folio` value, removed with
+/// Windows' own Startup-apps switch of its name when it names this copy or a program that is gone
+/// (`start_at_sign_in::uninstall_sign_in_in`); another copy's is left and said, another program's
+/// value under the name is left as it is. No entry is the row's `not present` line, so the door's
+/// output on an account that never pressed the switch is what it was before the row had a
+/// remover, and off Windows (the macOS half is row 22b) nothing is asked.
+fn sign_in_entries(
+    platform: HostPlatform,
+    lang: Lang,
+    remove: impl FnOnce() -> crate::start_at_sign_in::SignInRemoval,
+) -> Vec<Entry> {
+    use crate::start_at_sign_in::SignInRemoval;
+    let label = label(mark_of(Remover::StartAtSignIn), lang);
+    if platform != HostPlatform::Windows {
+        return vec![Entry::new(label, Fate::Absent)];
+    }
+    let fate = match remove() {
+        SignInRemoval::Absent => Fate::Absent,
+        SignInRemoval::Removed => Fate::Removed,
+        SignInRemoval::LeftAnotherCopy(program) => Fate::Left(vec![program]),
+        SignInRemoval::LeftNotOurs => Fate::LeftNotOurs(vec![PathBuf::from(format!(
+            r"HKCU\{}\{}",
+            bt_platform::logon_hook::RUN_KEY,
+            bt_platform::sign_in_entry::ENTRY_NAME
+        ))]),
+        SignInRemoval::Refused(reason) => Fate::Refused(Why::Other(reason)),
+    };
+    vec![Entry::new(label, fate)]
 }
 
 /// **The update entrance's row** (U-22; `docs/plans/design/self-update-2026-09-16.md`

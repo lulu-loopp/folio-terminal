@@ -25,9 +25,9 @@
 //! verb ([`crate::context_menu::run_classic_step`], once a read and a write on the window thread in
 //! `Runtime::create`) and the update entrances whose rescue program is gone
 //! ([`crate::update_orphans::run_orphans_step`]); since row 68e the update homes beside a macOS
-//! bundle that is gone ([`crate::update_homes::run_update_homes_step`]). **Its last member is
-//! Folio's old `$PROFILE`
-//! lines** (`shell_integration::run_profile_lines_step`, row 68c), run once a process, and never
+//! bundle that is gone ([`crate::update_homes::run_update_homes_step`]); since row 22a the sign-in
+//! entry of a copy that moved ([`crate::start_at_sign_in::run_sign_in_step`]). **Its last member
+//! is Folio's old `$PROFILE` lines** (`shell_integration::run_profile_lines_step`, row 68c), run once a process, and never
 //! before the hooks have had their first real answer: the one member that starts a PowerShell, so
 //! nothing the window adopts — the hooks' answers, and the first-run card that waits on them (row
 //! 73) — waits for one (the coordinator's R8 of 2026-11-09 and the ruling on the review's N1). At a
@@ -52,6 +52,7 @@ use bt_platform::admission::WorkerCtx;
 
 use crate::agent_hooks_step::HooksSnapshot;
 use crate::context_menu::ClassicAnswer;
+use crate::start_at_sign_in::SignInAnswer;
 use crate::update_trial::Writer;
 
 /// **How an update brings one owned thing to this build's form** (0.4.10 plan row 68a, R1) —
@@ -106,6 +107,8 @@ pub(crate) enum CarryCheck {
     /// An update home beside a macOS bundle that is gone, found by the data folder's record of
     /// them (row 68e, R7 of 2026-11-09).
     UpdateHomes,
+    /// The sign-in entry of a copy that moved or is gone (row 22a, R7 of 2026-11-11).
+    StartAtSignIn,
 }
 
 /// **A check that runs in the pass**: its member's call in [`run_carry_steps`], the sites it ran
@@ -184,6 +187,15 @@ impl CarryCheck {
                     "a_recorded_home_whose_bundle_is_gone_is_removed_and_every_other_is_left",
                 ),
             },
+            // Born in the pass (row 22a): no build wrote the entry before.
+            Self::StartAtSignIn => PassMember {
+                call: "crate::start_at_sign_in::run_sign_in_step",
+                retired: &[],
+                proved_by: (
+                    "crate::start_at_sign_in::tests",
+                    "the_carry_pass_points_the_sign_in_entry_at_this_copy",
+                ),
+            },
             // The startup's own migration worker left the start when the pass took the lines
             // (row 68c).
             Self::ProfileLines => PassMember {
@@ -231,6 +243,11 @@ impl CarryCheck {
             Self::UpdateHomes => (
                 "crate::update_homes::tests",
                 "a_home_made_before_the_record_is_recorded_by_its_copys_start",
+            ),
+            // No build wrote an older shape: what it brings forward is a copy's old place.
+            Self::StartAtSignIn => (
+                "crate::start_at_sign_in::tests",
+                "a_moved_copys_entry_is_pointed_at_this_one",
             ),
         }
     }
@@ -282,16 +299,20 @@ pub(crate) struct CarryRound {
     /// The update homes beside a macOS bundle that is gone (row 68e): counted, nothing for the
     /// window.
     pub(crate) homes: Option<MemberAnswer<()>>,
+    /// The sign-in entry (row 22a): the row's answer.
+    pub(crate) sign_in: Option<MemberAnswer<SignInAnswer>>,
     /// Folio's old `$PROFILE` lines (row 68c): counted in the round's line, nothing for the window.
     pub(crate) profile_lines: Option<MemberAnswer<()>>,
 }
 
 /// **What the window adopts**: the newest part of every member, kept until the window takes it.
-/// `explorer` is the Explorer members' part: the classic verb's answer (row 68b).
+/// `explorer` is the Explorer members' part: the classic verb's answer (row 68b); `sign_in` the
+/// sign-in entry's (row 22a).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct CarrySnapshot {
     pub(crate) hooks: Option<HooksSnapshot>,
     pub(crate) explorer: Option<ClassicAnswer>,
+    pub(crate) sign_in: Option<SignInAnswer>,
 }
 
 /// One member's part of a round's line: how many checks it ran and how many said something new.
@@ -303,9 +324,9 @@ fn member_tally<T>(answer: Option<&MemberAnswer<T>>) -> (usize, usize) {
 /// members its ruling names, so an Agents-page open asks no deployment database and a trial's
 /// release of the Explorer writer runs no agent's scan; the start asks for all of them.
 ///
-/// **One bit per member**, six of the eight taken: a part that adds a member adds its bit here,
+/// **One bit per member**, seven of the eight taken: a part that adds a member adds its bit here,
 /// joins it into [`Self::ALL`], and names it at the asks its ruling gives (row 68c's profile lines
-/// were the fifth, row 68e's update homes the sixth).
+/// were the fifth, row 68e's update homes the sixth, row 22a's sign-in entry the seventh).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CarryAsk(u8);
 
@@ -323,6 +344,9 @@ impl CarryAsk {
     pub(crate) const OLD_PROFILE_LINES: Self = Self(1 << 4);
     /// The update homes beside a macOS bundle that is gone (row 68e).
     pub(crate) const UPDATE_HOMES: Self = Self(1 << 5);
+    /// The sign-in entry (row 22a): what a trial's release of `Writer::StartAtSignIn` and an open
+    /// of Settings ▸ General ask (R11).
+    pub(crate) const START_AT_SIGN_IN: Self = Self(1 << 6);
     /// Both Explorer registrations: what a trial's release of `Writer::ExplorerRepair` asks.
     pub(crate) const EXPLORER: Self = Self::EXPLORER_PACKAGE.joined_with(Self::EXPLORER_CLASSIC);
     /// Both sweeps of what an update leaves behind: what a trial's release of
@@ -336,6 +360,7 @@ impl CarryAsk {
     pub(crate) const ALL: Self = Self::HOOKS
         .joined_with(Self::EXPLORER)
         .joined_with(Self::UPDATE_LEFTOVERS)
+        .joined_with(Self::START_AT_SIGN_IN)
         .joined_with(Self::OLD_PROFILE_LINES);
 
     /// Both sets.
@@ -452,6 +477,7 @@ impl CarryPublished {
             classic,
             orphans,
             homes,
+            sign_in,
             profile_lines,
         } = round;
         let parts = [
@@ -460,6 +486,7 @@ impl CarryPublished {
             member_tally(classic.as_ref()),
             member_tally(orphans.as_ref()),
             member_tally(homes.as_ref()),
+            member_tally(sign_in.as_ref()),
             member_tally(profile_lines.as_ref()),
         ];
         if hooks.is_none()
@@ -467,6 +494,7 @@ impl CarryPublished {
             && classic.is_none()
             && orphans.is_none()
             && homes.is_none()
+            && sign_in.is_none()
             && profile_lines.is_none()
         {
             return None;
@@ -479,9 +507,15 @@ impl CarryPublished {
             Some(answer) => Some(answer.part.keeping_untaken(untaken.hooks)),
             None => untaken.hooks,
         };
-        // A newer classic answer replaces an untaken one: it holds no notice.
+        // A newer classic answer replaces an untaken one: it holds no notice. So does a newer
+        // sign-in answer (row 22a).
         let explorer = classic.map(|answer| answer.part).or(untaken.explorer);
-        *published = Some(CarrySnapshot { hooks, explorer });
+        let sign_in = sign_in.map(|answer| answer.part).or(untaken.sign_in);
+        *published = Some(CarrySnapshot {
+            hooks,
+            explorer,
+            sign_in,
+        });
         Some(format!("BT_CARRY round checks={checks} changed={changed}"))
     }
 
@@ -533,10 +567,11 @@ pub(crate) fn take_carry_snapshot() -> Option<CarrySnapshot> {
 /// call through a pointer is one they do not follow. The inventory's guard reads this body for its
 /// members (`CarryCheck::in_the_pass`).
 ///
-/// A round runs the members `asked` names (row 68b, R2), in this order (R11): the four that need
+/// A round runs the members `asked` names (row 68b, R2), in this order (R11): the five that need
 /// no program walk first, so the start's own round answers them — the update homes after the
 /// update entrances, so an entrance whose rescue is gone is retired before its home is judged
-/// (row 68e) — then the agents', the round published, and the `$PROFILE` lines last. A member that panics answers nothing
+/// (row 68e), and the sign-in entry after them (row 22a, R11) — then the agents', the round
+/// published, and the `$PROFILE` lines last. A member that panics answers nothing
 /// ([`run_if_asked`]); the package member's panic also runs the press written down behind its
 /// latch (`behind`, [`package_member_with`]).
 pub(crate) fn run_carry_steps(ctx: &WorkerCtx, asked: CarryAsk, behind: &PressBehindTheLatch) {
@@ -562,6 +597,14 @@ pub(crate) fn run_carry_steps(ctx: &WorkerCtx, asked: CarryAsk, behind: &PressBe
     })
     .ok()
     .flatten();
+    let sign_in = run_if_asked(
+        asked,
+        CarryAsk::START_AT_SIGN_IN,
+        "start-at-sign-in",
+        || crate::start_at_sign_in::run_sign_in_step(ctx),
+    )
+    .ok()
+    .flatten();
     publish_carry_round(CarryRound {
         hooks: run_if_asked(asked, CarryAsk::HOOKS, "agent-hooks", || {
             crate::agent_hooks_step::run_agent_hooks_step(ctx)
@@ -572,6 +615,7 @@ pub(crate) fn run_carry_steps(ctx: &WorkerCtx, asked: CarryAsk, behind: &PressBe
         classic,
         orphans,
         homes,
+        sign_in,
         profile_lines: None,
     });
     publish_carry_round(CarryRound {
@@ -854,6 +898,7 @@ mod tests {
                     classic,
                     orphans,
                     homes: None,
+                    sign_in: None,
                     profile_lines: None,
                 })
                 .as_deref(),
@@ -1029,6 +1074,42 @@ mod tests {
         });
         assert_eq!(line.as_deref(), Some("BT_CARRY round checks=1 changed=1"));
         assert!(published.take().is_some(), "for the window to adopt");
+        // The sign-in entry's part alone is a round (row 22a), handed to the window; a newer one
+        // replaces an untaken one, and a round without one keeps it.
+        let sign_in = |row| crate::start_at_sign_in::SignInAnswer {
+            row,
+            presses_seen: 0,
+        };
+        let line = published.publish(CarryRound {
+            sign_in: Some(MemberAnswer {
+                part: sign_in(crate::start_at_sign_in::SignInRow::Off),
+                checks: 1,
+                changed: 1,
+            }),
+            ..CarryRound::default()
+        });
+        assert_eq!(line.as_deref(), Some("BT_CARRY round checks=1 changed=1"));
+        published.publish(CarryRound {
+            sign_in: Some(MemberAnswer {
+                part: sign_in(crate::start_at_sign_in::SignInRow::On),
+                checks: 1,
+                changed: 1,
+            }),
+            ..CarryRound::default()
+        });
+        published.publish(CarryRound {
+            homes: Some(MemberAnswer {
+                part: (),
+                checks: 1,
+                changed: 0,
+            }),
+            ..CarryRound::default()
+        });
+        assert_eq!(
+            published.take().and_then(|snapshot| snapshot.sign_in),
+            Some(sign_in(crate::start_at_sign_in::SignInRow::On)),
+            "the newest sign-in answer, kept across a round without one"
+        );
     }
 
     /// RED (0.4.10 plan row 68a) — **a notice the window has not taken survives the rounds after
@@ -1368,6 +1449,7 @@ mod tests {
             CarryAsk::UPDATE_ORPHANS,
             CarryAsk::OLD_PROFILE_LINES,
             CarryAsk::UPDATE_HOMES,
+            CarryAsk::START_AT_SIGN_IN,
         ] {
             assert!(
                 !first.names_member(member),
@@ -1403,6 +1485,7 @@ mod tests {
             CarryAsk::UPDATE_ORPHANS,
             CarryAsk::OLD_PROFILE_LINES,
             CarryAsk::UPDATE_HOMES,
+            CarryAsk::START_AT_SIGN_IN,
         ] {
             assert!(
                 CarryAsk::ALL.names_member(member),
@@ -1420,6 +1503,7 @@ mod tests {
             "Writer::AgentHooksRepair => carry_pass::begin_carry_pass(CarryAsk::HOOKS)",
             "Writer::OrphanSweep => carry_pass::begin_carry_pass(CarryAsk::UPDATE_LEFTOVERS)",
             "Writer::ProfileMigration => carry_pass::begin_carry_pass(CarryAsk::OLD_PROFILE_LINES)",
+            "Writer::StartAtSignIn => carry_pass::begin_carry_pass(CarryAsk::START_AT_SIGN_IN)",
         ] {
             assert!(
                 release.contains(&squeezed(arm)),
