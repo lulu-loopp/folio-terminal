@@ -30887,19 +30887,19 @@ mod tests {
         lacking.default_profile = Some(profiles::fallback_profile());
 
         let mut panel = keyboarded_in(windows, SettingsRow::DefaultProfile.category());
-        // `End` and then two steps back: `Explorer context menu` closes this
-        // page (§7.4), `Opening Folio again` stands above it, and `Default
-        // profile` above that. The summoned terminal's rows used to stand between
+        // `End` and then three steps back: `Explorer context menu` closes this
+        // page (§7.4), `Start at sign-in` stands above it (0.4.10 plan row 22a),
+        // `Opening Folio again` above that, and `Default profile` above that. The summoned terminal's rows used to stand between
         // them and moved to a page of their own on 2026-09-05 (§7.54e ⑤), which
         // is why this walk is four presses shorter than it was; a second Explorer
         // row arrived the same day and gave one of them back, and 2026-09-07
         // folded it into the row above it and took that press away again (§7.4b).
         // `Opening Folio again` arrived between them on 2026-09-11 (§7.59) and
-        // put one back. The assertion below is what keeps the presses honest — a
-        // page reordered under this test lands the ring somewhere else and says
-        // so.
+        // put one back, and `Start at sign-in` another on 2026-11-11. The
+        // assertion below is what keeps the presses honest — a page reordered
+        // under this test lands the ring somewhere else and says so.
         panel.key(SettingsKey::End, content(&flat, &lines), &lacking);
-        for _ in 0..2 {
+        for _ in 0..3 {
             panel.key(SettingsKey::Up, content(&flat, &lines), &lacking);
         }
         assert_eq!(
