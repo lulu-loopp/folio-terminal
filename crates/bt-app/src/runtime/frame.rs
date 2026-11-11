@@ -1688,7 +1688,9 @@ impl<B: Backend> Runtime<'_, B> {
 
     /// **Nothing in this window is moving, and nothing is owed to its glass**: no
     /// journey running, no refused animation frame, no frame waiting to be presented,
-    /// no chrome present pending, no picture or card owing a frame.
+    /// no chrome present pending, no picture or card owing a frame, and no debt the
+    /// strip's look wrote down (`strip_owes_a_frame`, `strip_panes_owe_a_frame`;
+    /// T-STRIP-ASKS-ON-ITS-TICK) that no frame has drawn yet.
     ///
     /// The idle test the turn's `BT_PERF_TRACE idle_wake` line was written with, named
     /// so that the web engine's warm-up asks the same question (ticket 54) rather than
@@ -1706,7 +1708,9 @@ impl<B: Backend> Runtime<'_, B> {
                 || self.window.pending_frames.pending_frame().is_some()
                 || self.window.chrome_present_pending
                 || self.window.pictures_owe_a_frame
-                || self.window.cards.owes_frame(),
+                || self.window.cards.owes_frame()
+                || self.window.strip_owes_a_frame
+                || self.window.strip_panes_owe_a_frame,
             resize_owed,
         }
     }

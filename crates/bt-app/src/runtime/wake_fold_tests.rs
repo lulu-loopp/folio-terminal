@@ -371,10 +371,19 @@ fn the_storage_watch_is_not_booked_while_a_quit_holds_the_storage_worker() {
 /// that wake drew nothing — `pace_skipped=7` on every present, a third of an idle window's turns.
 /// A window with nothing moving, turned inside its last present's frame, refuses nothing: no
 /// debt, no refusal counted, no `RefusedFrame` handed to the loop. Every gated advancer runs in
-/// the turn, so a new one that asks before it holds work turns this red as well.
+/// the turn — all thirteen, the tab strip with them — so a new one that asks before it holds
+/// work turns this red as well.
 ///
-/// MUTATION: ask `self.animation_frame_is_due()` at the head of `Runtime::advance_toasts` — the
-/// turn refuses once and hands the loop `RefusedFrame`.
+/// **The strip is held in by its own look** (T-STRIP-ASKS-ON-ITS-TICK, ruling R4). It looked a
+/// frame before the measured turn, so on that turn its rate is due again while the glass is still
+/// showing a present it did not ask for: the state a keystroke's present, a hover's or every
+/// turn of a pane's flood leaves it in. Behind the gate it asked there before it had looked at
+/// anything, and was refused with nothing moved. Holding it out by stamping its rate as spent
+/// would not do: a strip that has never looked has recorded nothing it drew, and owes a frame.
+///
+/// MUTATIONS: ask `self.animation_frame_is_due()` at the head of `Runtime::advance_toasts` — the
+/// turn refuses once and hands the loop `RefusedFrame`; put the strip's ask back above its look
+/// (`plant-77-a`) — the same.
 #[test]
 fn an_idle_turn_inside_the_last_frame_asks_the_gate_nothing() {
     let mut folio = HeadlessFolio::with_tabs(
@@ -383,18 +392,53 @@ fn an_idle_turn_inside_the_last_frame_asks_the_gate_nothing() {
         0,
     );
     folio.draw();
+    let first = folio
+        .window
+        .last_present_at
+        .expect("the fixture's draw reached the glass");
+    let interval = folio.window.frame_clock.interval();
+    // The strip's own look, on a turn the gate admitted, a frame and a millisecond before the
+    // measured turn; and what it drew, on the glass.
+    let look = first
+        .checked_sub(interval)
+        .expect("the process is older than a frame")
+        + Duration::from_millis(1);
+    {
+        let mut runtime = folio.runtime();
+        let before = look
+            .checked_sub(interval)
+            .expect("the process is older than two frames");
+        runtime.window.frame_clock.open(Some(before), look);
+        runtime
+            .advance_strip_animation(look)
+            .expect("the strip's look is answered");
+    }
+    assert_eq!(
+        folio.window.strip_animation_ticked_at,
+        Some(look),
+        "the fixture's own precondition: the strip looked"
+    );
+    folio.draw();
     let presented = folio
         .window
         .last_present_at
         .expect("the fixture's draw reached the glass");
-    // A running window's present is a turn's, and that turn ticked the strip on its way to it:
-    // the strip's own rate is spent until a frame on, as it is after the caret's turn. The
-    // fixture's first paint is an expose with no turn before it, so its strip has never ticked.
-    folio.window.strip_animation_ticked_at = Some(presented);
     let inside = presented + Duration::from_millis(1);
     assert!(
-        inside < presented + folio.window.frame_clock.interval(),
+        inside < presented + interval,
         "the fixture's own precondition: the turn is inside the frame the glass is showing"
+    );
+    assert!(
+        crate::strip_animation_tick_is_due(
+            folio.window.strip_animation_ticked_at,
+            inside,
+            interval
+        ),
+        "the fixture's own precondition: the strip's rate is due again on the measured turn"
+    );
+    assert!(
+        !folio.runtime().strip_animation_work(inside).moving,
+        "the fixture's own precondition: nothing in the strip is moving"
     );
     folio.window.frame_clock.take_skipped();
     let wake = turn(&mut folio, inside);
