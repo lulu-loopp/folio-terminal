@@ -1556,6 +1556,14 @@ impl HeadlessFolio {
         folio
     }
 
+    /// **This window as a machine's first launch**: no settings file found, so the first-run card
+    /// is due, for a test of the card. Every other headless window is a later launch
+    /// (`StorageAskers::on`).
+    pub(crate) fn at_a_first_launch(mut self) -> Self {
+        self.app.settings_store.launch_found_the_file(false);
+        self
+    }
+
     /// One expose frame composed and handed to the glass, as a window's first paint is.
     pub(crate) fn draw(&mut self) {
         let mut runtime = self.runtime();
@@ -1762,10 +1770,18 @@ impl StorageAskers {
     fn on(folder: &Path, lane: &crate::persist::StorageLane) -> Self {
         // In the product's order (`Runtime::create`): settings, profiles, pins, then the
         // keybindings and the shortcut table read from them, then the preview saves.
-        let settings_store = crate::persist::SettingsStore::at_on(
+        let mut settings_store = crate::persist::SettingsStore::at_on(
             folder.join(crate::persist::SETTINGS_FILE_NAME),
             lane.clone(),
         );
+        // **A headless window is a later launch, not a machine's first** (0.4.10 plan row 73's
+        // macOS gate): its settings file counts as found, so the first-run card is never due and
+        // no test is at the mercy of the turn the card would come up on. That turn moves whenever
+        // the card's waits change (row 73 dropped the agent folders' one turn), and on a Mac, whose
+        // profile table offers no agent row for the card to wait on, it fell inside a test's own
+        // passes, where the card's modal took the keyboard or the press. A test of the card asks
+        // for a first launch (`HeadlessFolio::at_a_first_launch`).
+        settings_store.launch_found_the_file(true);
         let profiles_store = crate::persist::ProfilesStore::at_on(
             folder.join(crate::persist::PROFILES_FILE_NAME),
             lane.clone(),
