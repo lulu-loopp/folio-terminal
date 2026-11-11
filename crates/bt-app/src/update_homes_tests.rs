@@ -74,8 +74,8 @@ fn homes_on_a_worker(body: impl FnOnce(&WorkerCtx) + Send + 'static) {
 /// The record at `file`, written as the door writes it, naming `homes`.
 fn homes_record_write(file: &Path, homes: &[&Path]) {
     let record = UpdateHomesRecord {
-        version: HOMES_RECORD_VERSION,
         homes: homes.iter().map(|home| home.to_path_buf()).collect(),
+        ..UpdateHomesRecord::default()
     };
     std::fs::write(file, serde_json::to_vec_pretty(&record).unwrap()).unwrap();
 }
@@ -557,12 +557,27 @@ fn a_newer_record_is_left_as_it_is() {
 
 /// PIN (0.4.10 plan row 68e; 68d's rule, R4/R8 of 2026-11-04) — **the record keeps its keys at
 /// version 1**: a key added or taken away without a new version is red here, so a build that
-/// reads version 1 is never handed a shape it refuses unknowingly.
+/// reads version 1 is never handed a shape it refuses unknowingly. The fields are read from the
+/// struct's own source, not only from a written default (review N5): a key added as
+/// `#[serde(default, skip_serializing_if = …)]` is absent from the default's JSON, yet every
+/// version-1 build, reading with `deny_unknown_fields`, would refuse a record that carries it.
 ///
-/// MUTATION: a key renamed at version 1 (`plant-68e-record-key-renamed.py`).
+/// MUTATION: a key renamed at version 1 (`plant-68e-record-key-renamed.py`); an optional key
+/// added at version 1 (`plant-68e-record-key-added-optional.py`).
 #[test]
 fn the_update_homes_record_keeps_its_keys_at_version_1() {
+    use crate::test_support::{item_body, item_declaration, squeezed};
     assert_eq!(HOMES_RECORD_VERSION, 1);
+    let record = bt_source::ItemQuery::type_item("UpdateHomesRecord");
+    assert_eq!(
+        squeezed(item_body(&record)),
+        "{version:u32,homes:Vec<PathBuf>,}",
+        "version 1's fields, as declared"
+    );
+    assert!(
+        squeezed(item_declaration(&record)).contains("#[serde(deny_unknown_fields)]"),
+        "version 1 refuses a key it does not know"
+    );
     let written = serde_json::to_value(UpdateHomesRecord::default()).unwrap();
     let keys: Vec<&str> = written
         .as_object()
