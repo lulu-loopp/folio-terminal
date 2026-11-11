@@ -484,12 +484,11 @@ fn an_idle_turn_inside_the_last_frame_asks_the_gate_nothing() {
         .last_present_at
         .expect("the fixture's draw reached the glass");
     let interval = folio.window.frame_clock.interval();
-    // The strip's own look, on a turn the gate admitted, a frame and a millisecond before the
-    // measured turn; and what it drew, on the glass.
-    let look = first
-        .checked_sub(interval)
-        .expect("the process is older than a frame")
-        + Duration::from_millis(1);
+    // The strip's own look, on a turn the gate admitted, well past the fades the window's birth
+    // and first paint started (a head run settling in runs for a fraction of a second from the
+    // real instant of the paint): the measured turn is about a window with nothing moving, which
+    // the precondition below asserts.
+    let look = first + Duration::from_secs(2);
     {
         let mut runtime = folio.runtime();
         let before = look
@@ -505,12 +504,15 @@ fn an_idle_turn_inside_the_last_frame_asks_the_gate_nothing() {
         Some(look),
         "the fixture's own precondition: the strip looked"
     );
+    // What the look drew reaches the glass; then the glass takes a present the strip did not ask
+    // for, a frame after its look (a keystroke's caret, a hover), held there as row 8's tests
+    // hold one. The measured turn is a millisecond into that present's frame, with the caret held
+    // lit so no blink lands on it.
     folio.draw();
-    let presented = folio
-        .window
-        .last_present_at
-        .expect("the fixture's draw reached the glass");
+    let presented = look + interval;
+    folio.window.last_present_at = Some(presented);
     let inside = presented + Duration::from_millis(1);
+    folio.window.cursor_blink.reset(inside, folio.app.motion);
     assert!(
         inside < presented + interval,
         "the fixture's own precondition: the turn is inside the frame the glass is showing"
