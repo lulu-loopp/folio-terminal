@@ -285,10 +285,11 @@ fn a_due_credential_is_spent_on_its_own_turn_whatever_the_strips_gates_say() {
 /// background tab's bell is announced on that turn (the lane's own record of it,
 /// `bell_reported`), and the tab on screen in a focused window has its latch spent by the look.
 ///
-/// The reach the announcement is delivered at is not asserted here: for a background tab in a
-/// covered window it turns on the taskbar lane's live answer about the test machine's shell (a
-/// bar that hides itself reaches the desktop instead), and the delivery's own door is
-/// `a_flash_for_attention_goes_through_the_windows_door`'s.
+/// The window's place is asserted (focused, on a screen and not covered), so the background
+/// tab's reach is the marks, a pure function of the place (`notify::desktop_reach`). A covered
+/// window is not this fixture's case: its reach turns on the taskbar lane's live answer about
+/// the test machine's shell (a bar that hides itself reaches the desktop instead), and the
+/// delivery's own door is `a_flash_for_attention_goes_through_the_windows_door`'s.
 ///
 /// MUTATION: move `settle_attention` and `raise_attention` back below the frame gate
 /// (`plant-77-d`) — neither bell is dealt with on the shut turn.
@@ -318,9 +319,18 @@ fn a_bell_heard_on_a_shut_turn_is_announced_on_that_turn() {
         !folio.window.frame_clock.admits(),
         "the fixture's own precondition: the frame gate refused the turn"
     );
+    let place = folio.window.observed_place;
     assert!(
-        folio.window.observed_place.focused,
-        "the fixture's own precondition: the window has the keyboard"
+        place.focused && place.exposed && !place.hidden,
+        "the fixture's own precondition: the window has the keyboard and is on a screen, \
+         uncovered: {place:?}"
+    );
+    assert!(
+        matches!(
+            crate::notify::desktop_reach(false, place),
+            bt_workbench::attention::Reach::Marks
+        ),
+        "the fixture's own precondition: so the background tab's bell reaches the marks"
     );
     let background = &folio.window.tabs[1].sessions[&heard].session;
     assert!(
