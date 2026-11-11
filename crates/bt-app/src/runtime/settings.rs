@@ -680,6 +680,8 @@ impl<B: Backend> Runtime<'_, B> {
             // database, which is not a line in this file and not this verb's to
             // undo. One row asks about both since 2026-09-07.
             | Row::ContextMenu
+            // The sign-in entry (row 22a): an entry for the account, not a line in this file.
+            | Row::StartAtSignIn
             | Row::QuakeHotkey
             | Row::QuakeProfile
             | Row::QuakeCommand
