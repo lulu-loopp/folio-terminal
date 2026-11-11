@@ -335,6 +335,123 @@ fn a_refused_frame_is_booked_from_the_present_its_turn_paid() {
     );
 }
 
+/// RED — **a step of the mark the strip meets on a shut turn is written down, drawn on the turn
+/// the gate admits, and then taken** (T-STRIP-ASKS-ON-ITS-TICK, claim C2).
+///
+/// The strip's look stands on its own rate whatever the window's display frame says, and its
+/// comparisons record as they compare: on a turn inside the frame of a present it did not ask for
+/// (a keystroke's, a hover's, a neighbour's output) the mark's new step is recorded as drawn
+/// before the gate is asked. What is left of the frame it owes is the debt the look writes down
+/// (`strip_owes_a_frame`). The gate refuses, and the refusal books the frame boundary; on that
+/// turn the strip's rate is not due again, so the frame is drawn by the debt alone, and the debt
+/// is gone once it is.
+///
+/// Three turns. An admitted step, so the strip has looked and drawn. A step later, a turn a
+/// millisecond inside the frame of a present held there: the strip looks, writes the step down,
+/// is refused and presents nothing, and the wake is the refused frame's own. At that wake the
+/// rate is a millisecond short of due and the gate admits: one present, and nothing owed after
+/// it. The caret is held lit through all three, so no blink lands on a counted turn.
+///
+/// MUTATIONS: put the strip's ask back above its look (`plant-77-a`) — the shut turn does not
+/// look; ask with this look's findings alone (`plant-77-b`) — the admitted turn presents nothing;
+/// leave the written debt standing after the draw (`plant-77-c`) — the debt is not taken.
+#[test]
+fn a_strip_debt_met_on_a_shut_turn_is_drawn_on_the_turn_the_gate_admits() {
+    let (mut folio, settled) = window_saying("turn-present-strip-debt", WORKING);
+    assert!(
+        folio.window.tabs[0].fleet_working(),
+        "the fixture's own precondition: the shell's command is running, so the mark breathes"
+    );
+    let interval = folio.window.frame_clock.interval();
+
+    // ① An admitted step: the strip looks, and what it found reaches the glass.
+    let looked = settled + STEP;
+    folio.window.cursor_blink.reset(looked, folio.app.motion);
+    let (_, effects) = turn_at(&mut folio, looked);
+    assert_eq!(
+        folio.window.strip_animation_ticked_at,
+        Some(looked),
+        "the fixture's own precondition: the strip looked on the admitted turn"
+    );
+    assert_eq!(
+        presents(&effects),
+        1,
+        "the fixture's own precondition: the step reached the glass: {effects:?}"
+    );
+    assert!(
+        !folio.window.strip_owes_a_frame,
+        "the fixture's own precondition: and the strip owes nothing after drawing it"
+    );
+
+    // ② A step later, a millisecond inside the frame of a present the strip did not ask for.
+    let shut = looked + STEP;
+    let held = shut - Duration::from_millis(1);
+    folio.window.last_present_at = Some(held);
+    folio.window.cursor_blink.reset(shut, folio.app.motion);
+    folio.window.frame_clock.take_skipped();
+    let (wake, effects) = turn_at(&mut folio, shut);
+    assert_eq!(
+        folio.window.strip_animation_ticked_at,
+        Some(shut),
+        "the strip looks on a turn the gate refuses"
+    );
+    assert!(
+        folio.window.strip_owes_a_frame,
+        "and writes the mark's step down as owed"
+    );
+    assert!(
+        folio.window.frame_clock.owes_a_frame(),
+        "and the gate turned its ask away"
+    );
+    assert_eq!(
+        folio.window.frame_clock.take_skipped(),
+        1,
+        "once: the strip asked, and nothing else did"
+    );
+    assert_eq!(
+        presents(&effects),
+        0,
+        "and nothing reached the glass: {effects:?}"
+    );
+    assert_eq!(
+        wake,
+        Some((WakeOwner::RefusedFrame, held + interval)),
+        "the refused frame is booked at the frame boundary; the strip's own next look is a \
+         millisecond after it"
+    );
+
+    // ③ The booked turn: the gate admits, and the strip's rate is not due.
+    let admitted = held + interval;
+    assert!(
+        !crate::strip_animation_tick_is_due(
+            folio.window.strip_animation_ticked_at,
+            admitted,
+            interval
+        ),
+        "the fixture's own precondition: the strip's rate is a millisecond short of due"
+    );
+    folio.window.cursor_blink.reset(admitted, folio.app.motion);
+    let (_, effects) = turn_at(&mut folio, admitted);
+    assert_eq!(
+        folio.window.strip_animation_ticked_at,
+        Some(shut),
+        "the fixture's own precondition: the strip did not look again"
+    );
+    assert_eq!(
+        presents(&effects),
+        1,
+        "the debt is drawn on the turn the gate admits: {effects:?}"
+    );
+    assert!(
+        !folio.window.strip_owes_a_frame && !folio.window.strip_panes_owe_a_frame,
+        "and taken: the strip owes nothing once it is drawn"
+    );
+    assert!(
+        !folio.window.frame_clock.owes_a_frame(),
+        "and nothing is owed to the glass"
+    );
+}
+
 /// RED — **a window on no screen keeps asking the platform** (ruling R2).
 ///
 /// A minimized or cloaked window, or one not shown yet, gets no paint from the platform until it
