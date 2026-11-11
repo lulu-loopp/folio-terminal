@@ -1441,7 +1441,8 @@ fn recorded_update_homes_of(
         entries.push(Entry::new(format!("{label}: {}", home.display()), fate));
     }
     match swept.record {
-        RecordState::Kept => {}
+        // `Held` is a trial's, and this sweep has no trial's gate.
+        RecordState::Kept | RecordState::Held => {}
         RecordState::Unread(reason) => entries.push(Entry::new(
             format!("{label}: {}", record.display()),
             Fate::LeftUnread {

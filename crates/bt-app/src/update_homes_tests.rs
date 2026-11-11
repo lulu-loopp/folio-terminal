@@ -644,9 +644,12 @@ fn a_home_made_before_the_record_is_recorded_by_its_copys_start() {
 /// RED (0.4.10 plan row 68e, E2) — **the home sweep waits for the trial's commit**: during an
 /// update's trial a due removal and a due addition ask the gate once, are held and recorded as
 /// pending ([`Writer::OrphanSweep`]), and nothing is written or removed; the commit's round does
-/// both. A round with nothing due never asks.
+/// both. A round with nothing due never asks. A round whose only due write is the record's own
+/// rewrite — an entry whose home is gone — holds that rewrite as it holds a removal: the record is
+/// left byte for byte, `record held` is said, and the commit's round drops the entry (review N2).
 ///
-/// MUTATION: removed without asking the gate (`plant-68e-home-sweep-unheld.py`).
+/// MUTATION: removed without asking the gate (`plant-68e-home-sweep-unheld.py`); the record's
+/// rewrite made without asking it (`plant-68e-record-rewrite-unheld.py`).
 #[test]
 fn the_home_sweep_waits_for_the_trials_commit() {
     homes_on_a_worker(|worker| {
@@ -701,6 +704,44 @@ fn the_home_sweep_waits_for_the_trials_commit() {
                 mine.clone(),
                 HomeFate::LeftLive(root.join("Elsewhere").join("Folio.app"))
             )]
+        );
+
+        let moved = Home::for_bundle(&root.join("Moved").join("Folio.app"))
+            .unwrap()
+            .root()
+            .to_path_buf();
+        std::fs::create_dir_all(root.join("Moved")).unwrap();
+        let only_gone = root.join("only-gone.json");
+        homes_record_write(&only_gone, &[&moved]);
+        let before = std::fs::read(&only_gone).unwrap();
+        let trial = crate::update_trial::Gate::new();
+        let held = sweep_recorded_homes(worker, &only_gone, None, None, &what_stands, |writer| {
+            trial.defer(true, writer)
+        });
+        assert_eq!(
+            held,
+            HomesSwept {
+                fates: vec![(moved.clone(), HomeFate::Gone)],
+                record: RecordState::Held,
+            }
+        );
+        assert_eq!(
+            std::fs::read(&only_gone).unwrap(),
+            before,
+            "the record's rewrite is held: left byte for byte"
+        );
+        assert_eq!(trial.pending(), vec![Writer::OrphanSweep]);
+        assert!(
+            held.lines()
+                .contains(&"BT_UPDATE_HOMES record held".to_owned()),
+            "{:?}",
+            held.lines()
+        );
+        let dropped = sweep_recorded_homes(worker, &only_gone, None, None, &what_stands, |_| false);
+        assert_eq!(dropped.record, RecordState::Kept);
+        assert!(
+            homes_record_entries(&only_gone).is_empty(),
+            "the commit's round drops it"
         );
     });
 }

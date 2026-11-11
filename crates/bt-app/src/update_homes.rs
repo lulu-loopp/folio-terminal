@@ -36,7 +36,7 @@
 //! **One diagnostics line per home when its fate changes**: `BT_UPDATE_HOMES <home name>[ #<n>]
 //! <removed|gone|recorded|left (live)|left (owner unknown)|left (in flight)|left (not only
 //! ours)|left (in use)|held|refused (<stage>)|refused entry>`, `BT_UPDATE_HOMES record <unread|not
-//! written> (<reason>)`, or `BT_UPDATE_HOMES none`. A line names the home's own name, never its
+//! written> (<reason>)`, `BT_UPDATE_HOMES record held`, or `BT_UPDATE_HOMES none`. A line names the home's own name, never its
 //! path; `#<n>` is its place in the round when two homes of one name are said.
 //!
 //! **macOS only, by the host's answer rather than by `cfg`** (E8, `update_orphans`' shape): the
@@ -225,6 +225,9 @@ pub(crate) enum RecordState {
     Kept,
     /// There, and this build cannot read it: left byte for byte.
     Unread(String),
+    /// Changed, and its rewrite held for the update's commit, as a removal is: left byte for byte,
+    /// and the commit's round drops the same entries again.
+    Held,
     /// Changed, and the write failed: the next round finds the same homes again.
     NotWritten(String),
 }
@@ -249,6 +252,7 @@ impl HomesSwept {
             RecordState::NotWritten(reason) => {
                 lines.push(format!("BT_UPDATE_HOMES record not written ({reason})"));
             }
+            RecordState::Held => lines.push("BT_UPDATE_HOMES record held".to_owned()),
         }
         let name_of = |home: &Path| {
             home.file_name().map_or_else(
@@ -520,9 +524,15 @@ pub(crate) fn sweep_recorded_homes(
     read.homes = kept;
     // The record's own rewrite is a write of the member too: held during a trial like a removal,
     // the dropped entries are dropped again by the commit's round.
-    let record = match (changed && gate.may_write()).then(|| read.write(record)) {
-        Some(Err(reason)) => RecordState::NotWritten(reason),
-        _ => RecordState::Kept,
+    let record = if !changed {
+        RecordState::Kept
+    } else if !gate.may_write() {
+        RecordState::Held
+    } else {
+        match read.write(record) {
+            Ok(()) => RecordState::Kept,
+            Err(reason) => RecordState::NotWritten(reason),
+        }
     };
     HomesSwept { fates, record }
 }
