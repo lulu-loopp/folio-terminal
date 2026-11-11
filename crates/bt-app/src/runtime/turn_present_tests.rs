@@ -290,8 +290,8 @@ fn a_panes_output_reaches_the_glass_in_the_turn_that_publishes_it() {
 /// The strip's rate is due (it has not looked yet), so it looks on this turn whatever the gate
 /// says, writes the mark's step down as owed and is refused (T-STRIP-ASKS-ON-ITS-TICK). Its own
 /// next look is a frame after this turn's instant, later than a frame after the present, which
-/// is stamped no later than the turn (the mark test's own precondition): so the wake is the
-/// refused frame's own entry, and this pins that entry's instant exactly. The instant is read
+/// is stamped no later than the turn (asserted here as the mark test asserts it): so the wake is
+/// the refused frame's own entry, and this pins that entry's instant exactly. The instant is read
 /// back from the window: a present is stamped with the clock `trace_present` reads, not with the
 /// instant handed to the turn.
 ///
@@ -327,6 +327,11 @@ fn a_refused_frame_is_booked_from_the_present_its_turn_paid() {
     assert_ne!(
         presented, held,
         "the fixture's own precondition: the turn's present replaced the held one"
+    );
+    assert!(
+        presented <= now,
+        "the fixture's own precondition: the turn's present is stamped no later than the turn's \
+         instant, as on the loop, so the strip's next look is not the earlier wake"
     );
     assert_eq!(
         wake,
