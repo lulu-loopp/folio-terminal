@@ -452,9 +452,11 @@ impl<B: Backend> Runtime<'_, B> {
     /// (§7.56).
     ///
     /// Polled from the event loop — raising a modal is a change to the window
-    /// and the window is this thread's — and for one more reason of its own: the copilot row cannot be offered
-    /// until the version question has been answered, and that answer arrives on
-    /// another thread.
+    /// and the window is this thread's — and for two more reasons of its own: the
+    /// copilot row cannot be offered until the version question has been
+    /// answered, and the agent rows are said from the carry pass's answer about
+    /// the agents' files (0.4.10 plan row 73); both arrive from other threads.
+    /// **Nothing here reads a file**: every question below is of memory.
     ///
     /// **`Shown` is written the moment it goes up, not when it is answered.** A
     /// crash, an `Alt+F4`, or a process killed while the card is on screen must
@@ -485,16 +487,6 @@ impl<B: Backend> Runtime<'_, B> {
         {
             return Ok(());
         }
-        // Nor, for one turn, where they keep their configuration (T-FRESH-FACTS): the rows it
-        // offers write hooks into the folders the walk read out of the account's environment,
-        // which arrive with the walk's end, after the rows. After that turn the card reads the
-        // folders it has — the launch environment's, when no walk has answered.
-        if !first_run::agent_folders_settled(
-            &mut self.app.first_run_waited_for_agent_folders,
-            attention_hooks::AGENT_HOMES.answered(),
-        ) {
-            return Ok(());
-        }
         // The one row whose offer depends on a version, and the version comes
         // off another process. Starting the probe here rather than waiting for
         // the Agents page is what makes the wait finite; the card holds until it
@@ -506,14 +498,41 @@ impl<B: Backend> Runtime<'_, B> {
             attention_copilot::begin_probe();
         }
         let copilot_ready = !copilot_on_path || attention_copilot::probe_settled();
+        // **The agent rows are the carry pass's answer, never a read here** (0.4.10 plan row 73).
+        // The pass reads the agents' files on its worker once the walk has named the folders the
+        // account keeps them in (T-FRESH-FACTS), with codex's version settled, and the window
+        // adopts what it found (`adopt_agent_hooks_snapshot`). So a card that could offer an agent
+        // row waits for that answer — and, where copilot is on the path, for one whose readiness
+        // was read after the probe came back — and is then built in one piece from it: nothing is
+        // drawn before, and nothing of it changes after (rulings R3, R6). No timer of its own
+        // (R4): a pass that never answers leaves the card for the next launch, and only while this
+        // run writes no `settings.json` (`first_run::due`); a round that hangs is not run again by
+        // a later request, as the latch only marks a round to follow one that ends.
+        let platform = bt_platform::host_platform();
+        let found = [
+            (first_run::RowKind::Claude, "claude"),
+            (first_run::RowKind::Codex, "codex"),
+            (first_run::RowKind::Copilot, "copilot"),
+        ]
+        .map(|(kind, id)| kind.offered_on(platform) && self.agent_is_on_this_machine(id));
+        // A copy whose program cannot be named is scanned by no pass, and every agent row's press
+        // would be refused: the card offers none and waits for nothing (R5).
+        let copy_named = attention_ownership::this_copy().is_some();
+        let agents_answered = !first_run::card_waits_for_the_agents(
+            found,
+            std::array::from_fn(|index| self.app.agent_hooks_found[index].is_some()),
+            self.app.copilot_read_after_probe,
+            copy_named,
+        );
+        let ready = copilot_ready && agents_answered;
         // **How this copy was installed decides whether the Explorer row
         // arrives on** (U-3), and it lands on its own worker. Read at start and
         // in milliseconds, so it is almost always here; when it is not, the card
         // waits one turn for it — the worker's wake brings that turn round — and
-        // then reads a still-missing answer as unknown. Only once the copilot
-        // wait is over, so the one turn is not spent while something else is
+        // then reads a still-missing answer as unknown. Only once the agents'
+        // waits are over, so the one turn is not spent while something else is
         // holding the card anyway.
-        if copilot_ready
+        if ready
             && !first_run::install_channel_settled(
                 &mut self.app.first_run_waited_for_channel,
                 install_channel::channel().is_some(),
@@ -521,37 +540,39 @@ impl<B: Backend> Runtime<'_, B> {
         {
             return Ok(());
         }
-        // The machine questions below include file reads. Consume readiness
-        // once, before asking them, even if this platform offers no card rows.
-        if !first_run::take_ready_edge(&mut self.app.first_run_attempted, copilot_ready) {
+        // One attempt per readiness, even on a platform that offers no card rows.
+        if !first_run::take_ready_edge(&mut self.app.first_run_attempted, ready) {
             return Ok(());
         }
-        let machine = first_run::Machine {
-            // Both halves of the first page: a Windows that shows one, and the
-            // file that can be registered on it shipped beside the executable.
-            // Through `first_page_offered` and not spelled again here, because
-            // the Settings row asks the same question through the same function
-            // and the card's switch has to mean what that row's switch means.
-            explorer_first_page_available: explorer_menu::first_page_offered(
-                explorer_menu::supported(),
-                explorer_menu::package_file().is_some(),
-            ),
-            claude_found: self.agent_is_on_this_machine("claude"),
-            claude_installable: attention_hooks::state() == attention_hooks::State::Absent,
-            // A take-over is never a first-run act (0.4.10 plan row 67b, ruling N3): `Absent` is
-            // also a file another living copy's hooks are in, and the row over it arrives Off.
-            claude_over_another: agent_hooks_step::held_by_another(0),
-            codex_found: self.agent_is_on_this_machine("codex"),
-            codex_installable: attention_codex::first_run_installable(),
-            codex_over_another: agent_hooks_step::held_by_another(1),
-            copilot_found: copilot_on_path,
-            copilot_installable: attention_copilot::state() == attention_copilot::State::Absent
-                && attention_copilot::readiness() == attention_copilot::Readiness::Ready,
-            copilot_over_another: agent_hooks_step::held_by_another(2),
-            install_channel: install_channel::channel()
-                .unwrap_or(install_channel::Channel::Unknown),
-            resume_agents: self.app.settings_store.loaded().resume_agents,
-        };
+        // What a press of each agent row would do, said from the adopted answer (R1), and every
+        // other field of the card's machine, in one pure function (the review's N3).
+        let machine = first_run::card_machine(
+            first_run::CardBase {
+                // Both halves of the first page: a Windows that shows one, and the
+                // file that can be registered on it shipped beside the executable.
+                // Through `first_page_offered` and not spelled again here, because
+                // the Settings row asks the same question through the same function
+                // and the card's switch has to mean what that row's switch means.
+                explorer_first_page_available: explorer_menu::first_page_offered(
+                    explorer_menu::supported(),
+                    explorer_menu::package_file().is_some(),
+                ),
+                install_channel: install_channel::channel()
+                    .unwrap_or(install_channel::Channel::Unknown),
+                resume_agents: self.app.settings_store.loaded().resume_agents,
+            },
+            first_run::AdoptedAgents {
+                on_path: [
+                    self.agent_is_on_this_machine("claude"),
+                    self.agent_is_on_this_machine("codex"),
+                    copilot_on_path,
+                ],
+                answers: &self.app.agent_hooks_found,
+                codex_install_refused: self.app.codex_install_refused,
+                copilot_readiness: self.app.copilot_readiness,
+                copy_named,
+            },
+        );
         let rows = first_run::rows(&machine);
         let shape = first_run::explorer_shape(&machine);
         // **Written down only if it went up** (macOS plan M3-6). The rows are
@@ -563,6 +584,7 @@ impl<B: Backend> Runtime<'_, B> {
             return Ok(());
         }
         self.record_first_run_card(bt_persist::FirstRunCardV1::Shown);
+        diagnostics::stderr_line(first_run::card_opened_line(self.app.carry_answers_adopted));
         self.rebuild_first_run_tip_anchors();
         if self.refresh_overlay() {
             self.present_chrome_change()?;
