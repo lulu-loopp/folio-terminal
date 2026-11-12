@@ -140,13 +140,14 @@ impl Children {
 
     /// Start `bundle`'s executable with `words`.
     fn start_with(&self, bundle: &Path, words: &[&OsStr]) -> u32 {
-        let mut child: Child = bt_platform::quiet_command(bundle.join(EXE))
-            .args(words)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("the synthetic executable starts");
+        let mut child: Child = crate::test_support::start_a_fixture(
+            bt_platform::quiet_command(bundle.join(EXE))
+                .args(words)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )
+        .expect("the synthetic executable starts");
         let pid = child.id();
         self.started.lock().unwrap().push(pid);
         let ended = self.ended.clone();
@@ -191,10 +192,12 @@ impl Children {
     /// End `pid`, one this test started and has not reaped yet.
     fn end(&self, pid: u32) {
         if self.status(pid).is_none() {
-            let _ = bt_platform::quiet_command("/bin/kill")
-                .arg("-9")
-                .arg(pid.to_string())
-                .status();
+            let _ = crate::test_support::start_a_fixture(
+                bt_platform::quiet_command("/bin/kill")
+                    .arg("-9")
+                    .arg(pid.to_string()),
+            )
+            .and_then(|mut kill| kill.wait());
         }
     }
 
@@ -241,9 +244,10 @@ impl Drop for Children {
         for pid in self.pids.lock().unwrap().iter() {
             // A process this test started through `open`, by the pid the
             // journal recorded for it.
-            let _ = bt_platform::quiet_command("/bin/kill")
-                .arg(pid.to_string())
-                .status();
+            let _ = crate::test_support::start_a_fixture(
+                bt_platform::quiet_command("/bin/kill").arg(pid.to_string()),
+            )
+            .and_then(|mut kill| kill.wait());
         }
     }
 }
@@ -887,12 +891,13 @@ fn journal_reaches<T>(
 fn swap_leaves_no_instant_without_a_bundle() {
     let install = Install::new("swap");
     let (installed, stage) = (install.installed.clone(), install.stage());
-    let mut old = bt_platform::quiet_command(installed.join(EXE))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+    let mut old = crate::test_support::start_a_fixture(
+        bt_platform::quiet_command(installed.join(EXE))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
     let mut answers = BufReader::new(old.stdout.take().unwrap());
     let mut ask = |old: &mut Child, word: &str| {
         writeln!(old.stdin.as_mut().unwrap(), "{word}").unwrap();
@@ -4094,11 +4099,12 @@ fn a_trial_that_ends_before_it_is_seen_ends_the_wait_at_once() {
     let handed = Arc::clone(&pipes);
     let world = Fake {
         on_launch_held: Some(Box::new(move |_, _| {
-            let mut child = bt_platform::quiet_command("/bin/cat")
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null())
-                .spawn()?;
+            let mut child = crate::test_support::start_a_fixture(
+                bt_platform::quiet_command("/bin/cat")
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null()),
+            )?;
             let (Some(input), Some(output)) = (child.stdin.take(), child.stdout.take()) else {
                 panic!("the stand-in's pipes");
             };
@@ -4420,9 +4426,9 @@ fn a_trial_hands_back_only_to_a_rescue_build_that_knows_the_word() {
 #[cfg(target_os = "macos")]
 #[test]
 fn a_launch_ended_by_a_signal_is_unknown_not_over() {
-    let exited = bt_platform::quiet_command("/usr/bin/false")
-        .spawn()
-        .unwrap();
+    let exited =
+        crate::test_support::start_a_fixture(&mut bt_platform::quiet_command("/usr/bin/false"))
+            .unwrap();
     let mut launch = Launch::of(exited);
     let give_up = Instant::now() + Duration::from_secs(10);
     while !launch.over() {
@@ -4430,17 +4436,18 @@ fn a_launch_ended_by_a_signal_is_unknown_not_over() {
         std::thread::sleep(Duration::from_millis(10));
     }
 
-    let helper = bt_platform::quiet_command("/bin/sleep")
-        .arg("30")
-        .spawn()
-        .unwrap();
+    let helper =
+        crate::test_support::start_a_fixture(bt_platform::quiet_command("/bin/sleep").arg("30"))
+            .unwrap();
     let pid = helper.id();
     let mut launch = Launch::of(helper);
     assert!(!launch.over(), "still running");
-    let _ = bt_platform::quiet_command("/bin/kill")
-        .arg("-9")
-        .arg(pid.to_string())
-        .status();
+    let _ = crate::test_support::start_a_fixture(
+        bt_platform::quiet_command("/bin/kill")
+            .arg("-9")
+            .arg(pid.to_string()),
+    )
+    .and_then(|mut kill| kill.wait());
     std::thread::sleep(Duration::from_millis(300));
     for _ in 0..5 {
         assert!(!launch.over(), "a signal is unknown");

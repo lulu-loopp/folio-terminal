@@ -3686,6 +3686,97 @@ pub(crate) fn a_process_of_its_own(selector: &str, stdin: &[u8]) -> Option<std::
     })
 }
 
+// ── the applier tests' fixture programs, started a few at a time (0.4.10 plan row 78)
+
+/// **How many fixture programs the applier tests start at once.**
+///
+/// Each fixture is a program written moments before it starts, a signed `folio.exe` or a copy of
+/// this test binary, and a scanner may hold each one's first start for about a second (0.86 to
+/// 1.37 s each in a Defender recording on the build box, 2026-11-11, in a folder the scanner
+/// excludes). The starts queue behind each other, so with the suite's threads all starting at
+/// once a start waited 9 to 24 s at the median and up to 44 s, past the lane patience a road's
+/// commit is awaited with (`update_apply_windows::tests::p_waits_for_o_and_releases_the_claim`
+/// red 30 of 30 runs of its module). Run on four test threads, a start took 2.9 s at the median
+/// and the module was green; on one, 0.67 s.
+///
+/// This is a bound on a resource, not a retry: no start is tried twice and no patience is
+/// raised. A start past the bound waits for one in flight to return, not for any process to end.
+const FIXTURE_STARTS_AT_ONCE: usize = 4;
+
+/// **How many fixture starts are in flight**: taken by [`start_a_fixture`] before `spawn`, given
+/// back when `spawn` returns. It counts turns and holds no test's value.
+static FIXTURE_STARTS_IN_FLIGHT: std::sync::Mutex<usize> = std::sync::Mutex::new(0);
+
+/// Told each time a fixture start returns, so one waiting for a turn looks again.
+static FIXTURE_START_RETURNED: std::sync::Condvar = std::sync::Condvar::new();
+
+/// **`command` started as one of at most [`FIXTURE_STARTS_AT_ONCE`] fixture starts in flight.**
+/// The one door through which the applier tests (`update_apply_windows::tests` and
+/// `update_apply_macos::tests`) start a process, whatever the program: a fixture they wrote, a
+/// copy of this binary, or a system program they end a fixture with. A start takes a turn when
+/// fewer than the bound are in flight and otherwise waits until one returns; it gives the turn
+/// back when `spawn` returns, whether it started the program or not, so a long-lived child holds
+/// no turn.
+///
+/// [`the_applier_tests_start_every_process_through_the_fixture_door`] holds the two modules to
+/// it.
+pub(crate) fn start_a_fixture(
+    command: &mut std::process::Command,
+) -> std::io::Result<std::process::Child> {
+    {
+        let in_flight = FIXTURE_STARTS_IN_FLIGHT.lock().unwrap();
+        let mut in_flight = FIXTURE_START_RETURNED
+            .wait_while(in_flight, |in_flight| *in_flight == FIXTURE_STARTS_AT_ONCE)
+            .unwrap();
+        *in_flight += 1;
+    }
+    let started = command.spawn();
+    *FIXTURE_STARTS_IN_FLIGHT.lock().unwrap() -= 1;
+    FIXTURE_START_RETURNED.notify_one();
+    started
+}
+
+/// RED (0.4.10 plan row 78) — **the applier tests start every process through
+/// [`start_a_fixture`]**, so no fixture start goes past [`FIXTURE_STARTS_AT_ONCE`].
+///
+/// Read in the code of the two test modules, comments out and literals kept: a `Command` is
+/// started by `spawn`, `status` or `output`, each called with no argument, and none of the
+/// three is written there. Each module calls the door at least once, so the pin does not hold
+/// over a module that moved. A start through a helper written in another module is not seen
+/// here, and nothing else in those modules starts one today.
+///
+/// MUTATION: in `update_apply_windows::tests`' `Children::start`, start the program with
+/// `.spawn()` instead of through the door, and this names that module's `.spawn()`.
+#[test]
+fn the_applier_tests_start_every_process_through_the_fixture_door() {
+    let found = |module: &str, spelling: &str| {
+        found_in(
+            Needle::new(Pattern::text(spelling)),
+            View::CodeKeepingLiterals,
+            Scope::Module(module.to_owned()),
+        )
+        .len()
+    };
+    for module in [
+        "crate::update_apply_windows::tests",
+        "crate::update_apply_macos::tests",
+    ] {
+        for start in [".spawn()", ".status()", ".output()"] {
+            assert_eq!(
+                found(module, start),
+                0,
+                "{module} starts a process with `{start}`, past the fixture door: start it with \
+                 `crate::test_support::start_a_fixture`, which holds the starts in flight to \
+                 {FIXTURE_STARTS_AT_ONCE}"
+            );
+        }
+        assert!(
+            found(module, "start_a_fixture(") > 0,
+            "{module} starts no process through the fixture door: the pin reads nothing there"
+        );
+    }
+}
+
 // ── the storage pass's window, over the four real stores (T-STORE-NOTICE)
 
 /// **A window for the storage pass, with the four real stores on one scripted
