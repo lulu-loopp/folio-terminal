@@ -498,7 +498,7 @@ pub(crate) struct SignInPressed {
 
 /// What a refusal of the door's says without the door's name: the system's own words for a step
 /// the registry refused, Folio's for the other two.
-fn refusal_words(refusal: &EntryRefusal) -> String {
+fn sign_in_refusal_words(refusal: &EntryRefusal) -> String {
     match refusal {
         EntryRefusal::TooLong { .. } => Text::SignInPathTooLong.text().to_owned(),
         EntryRefusal::Failed { error, .. } => error.to_string(),
@@ -509,17 +509,17 @@ fn refusal_words(refusal: &EntryRefusal) -> String {
 /// **A refusal of the door's, as the press's card says it** (review N2): a path too long changed
 /// nothing; a step the registry refused, or a read-back that differs, is the step the entry could
 /// not take, in the system's words.
-fn refusal_sentence(refusal: &EntryRefusal) -> String {
+fn sign_in_refusal_sentence(refusal: &EntryRefusal) -> String {
     match refusal {
         EntryRefusal::TooLong { .. } => {
             crate::i18n::sign_in_not_changed(Text::SignInPathTooLong.text())
         }
         EntryRefusal::Failed { stage, .. } => {
-            crate::i18n::sign_in_entry_failed(*stage, &refusal_words(refusal))
+            crate::i18n::sign_in_entry_failed(*stage, &sign_in_refusal_words(refusal))
         }
         EntryRefusal::ReadBackDiffers => crate::i18n::sign_in_entry_failed(
             bt_platform::sign_in_entry::EntryStage::ReadBack,
-            &refusal_words(refusal),
+            &sign_in_refusal_words(refusal),
         ),
     }
 }
@@ -527,14 +527,21 @@ fn refusal_sentence(refusal: &EntryRefusal) -> String {
 /// **The switch's press, on its worker, under the entry's latch** (R6, R8, R9).
 ///
 /// The press taken is the last one counted when the latch is held ([`SignInPresses`]'s wish), so a
-/// burst of presses ends where the last one asked. **On** refuses over another program's value under
-/// the name and writes nothing; otherwise it points the entry at this copy — over any Folio's entry,
-/// another live copy's too (R8: the press is the account's) — reads it back, and takes the system's
-/// switch off the name (R9); a switch that would not come off is said, the entry being written.
+/// burst of presses ends where the last one asked.
+///
+/// **On** refuses over another program's value under the name and writes nothing. Otherwise it
+/// points the entry at this copy — over any Folio's entry, another live copy's too (R8: the press
+/// is the account's) — reads it back, and takes the system's switch off the name (R9); a switch
+/// that would not come off is said, the entry being written.
+///
 /// A program the press cannot name as one an entry may start (`this` refused) changes nothing, in
-/// the switch's own sentence. **Off** removes the entry when it is Folio's, whichever copy it names,
-/// with the system's switch of the name; another program's value is left. Not held during an
-/// update's trial: it is a person's, as the hooks' presses are. The row comes off a reading after.
+/// the switch's own sentence.
+///
+/// **Off** removes the entry when it is Folio's, whichever copy it names, with the system's switch
+/// of the name; another program's value is left.
+///
+/// Not held during an update's trial: it is a person's, as the hooks' presses are. The row comes
+/// off a reading after.
 pub(crate) fn press_sign_in_in(
     registry: &mut impl Registry,
     keys: EntryKeys<'_>,
@@ -563,7 +570,7 @@ pub(crate) fn press_sign_in_in(
         }
     };
     let outcome = match read_entry_in(registry, keys) {
-        Err(refusal) => SignInPressDid::Refused(refusal_sentence(&refusal)),
+        Err(refusal) => SignInPressDid::Refused(sign_in_refusal_sentence(&refusal)),
         Ok(read) => {
             let owner = sign_in_entry_owner(&read.found, this, look);
             let folios = !matches!(owner, EntryOwner::Absent | EntryOwner::NotOurs);
@@ -578,19 +585,19 @@ pub(crate) fn press_sign_in_in(
                 ))
             } else if on {
                 match write_entry_in(registry, keys, this) {
-                    Err(refusal) => SignInPressDid::Refused(refusal_sentence(&refusal)),
+                    Err(refusal) => SignInPressDid::Refused(sign_in_refusal_sentence(&refusal)),
                     Ok(()) => match enable_entry_in(registry, keys) {
                         Ok(_) if another_copys => SignInPressDid::TookOver,
                         Ok(_) => SignInPressDid::Done,
                         Err(refusal) => {
-                            SignInPressDid::WrittenStillTurnedOff(refusal_words(&refusal))
+                            SignInPressDid::WrittenStillTurnedOff(sign_in_refusal_words(&refusal))
                         }
                     },
                 }
             } else if folios {
                 match remove_entry_in(registry, keys) {
                     Ok(_) => SignInPressDid::Done,
-                    Err(refusal) => SignInPressDid::Refused(refusal_sentence(&refusal)),
+                    Err(refusal) => SignInPressDid::Refused(sign_in_refusal_sentence(&refusal)),
                 }
             } else {
                 SignInPressDid::Done

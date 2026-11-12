@@ -810,7 +810,8 @@ fn a_sign_in_answer_older_than_a_press_is_not_adopted() {
 /// counted but not yet answered is not adopted**: the press is counted on the window thread and
 /// written on its worker, so a member that reads in between describes the machine before the
 /// press; its answer carries the presses answered when it read, and the window drops it whichever
-/// of the two lands last. A reading taken after the press's worker answered is adopted.
+/// of the two lands last — before the press's worker has run, after it, and in either order with
+/// the press's answer. A reading taken after the press's worker answered is adopted.
 ///
 /// MUTATION (`plant-22-member-answer-carries-the-noted-count.py`): the member's answer carries the
 /// presses counted, and the stale reading is taken over the press's answer.
@@ -838,6 +839,15 @@ fn a_member_reading_taken_before_a_press_was_answered_is_not_adopted() {
     presses.note_sign_in_press(false);
     let stale = carried(&mut registry);
     assert_eq!(stale.answer.row, SignInRow::On, "read before the removal");
+
+    // The stale reading lands while the press's worker has not run: dropped.
+    let mut row = SignInRow::Unknown;
+    assert!(
+        !adopt_sign_in_answer(&mut row, stale.answer, &presses),
+        "a reading taken while the press is unanswered, landing before the press's answer"
+    );
+    assert_eq!(row, SignInRow::Unknown);
+
     let off = press_sign_in_in(
         &mut registry,
         SIGN_IN_TEST_KEYS,
@@ -860,6 +870,21 @@ fn a_member_reading_taken_before_a_press_was_answered_is_not_adopted() {
         !adopt_sign_in_answer(&mut row, stale.answer, &presses),
         "a reading taken before the press was answered is older than the press"
     );
+    assert_eq!(row, SignInRow::Off);
+
+    // The stale reading lands first, then the press's answer: the stale one is dropped and the
+    // press's taken.
+    let mut row = SignInRow::Unknown;
+    assert!(
+        !adopt_sign_in_answer(&mut row, stale.answer, &presses),
+        "the stale reading landing first is dropped as well"
+    );
+    assert_eq!(row, SignInRow::Unknown);
+    assert!(adopt_sign_in_answer(
+        &mut row,
+        off.answer.unwrap(),
+        &presses
+    ));
     assert_eq!(row, SignInRow::Off);
 
     // A reading taken after the press answered is the machine's word.
