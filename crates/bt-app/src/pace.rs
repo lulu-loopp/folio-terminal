@@ -299,8 +299,9 @@ impl FrameClock {
     /// they had established they had anything at all, so a window with an empty
     /// tip host and an empty float host marked itself running on every turn for
     /// ever, and every ordinary keystroke then rebuilt the whole interface. A
-    /// question is not evidence. This is. (Since T-ADVANCERS-ASK-ONLY-WITH-WORK
-    /// every advancer asks only with work, but the rule stands: the answer here
+    /// question is not evidence. This is. (Since T-ADVANCERS-ASK-ONLY-WITH-WORK,
+    /// and since T-STRIP-ASKS-ON-ITS-TICK for the tab strip too, every advancer
+    /// asks only with work, but the rule stands: the answer here
     /// is the journeys' own predicates, never who asked.)
     pub fn note_running(&mut self, lanes: Lanes) {
         self.running = lanes;

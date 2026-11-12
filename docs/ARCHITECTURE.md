@@ -2181,8 +2181,8 @@ must not re-derive:
   through `send_line` from a process of its own, so nothing about it is a third
   ingress into the window process.
 - **A level becomes an edge once.** Both readers of the level —
-  `deliver_osc_attention` in the drain and `settle_attention` on the animation
-  tick — go through `AttentionLedger::weak_edge`, which remembers the last
+  `deliver_osc_attention` in the drain and `settle_attention` at the head of the strip's
+  clock, on every turn — go through `AttentionLedger::weak_edge`, which remembers the last
   generation it saw, so the second reading of one level mints nothing.
 - **Off the window thread, the endpoint only parks and wakes.** The listener
   thread pushes the line into `attention_wire`'s bounded inbox and sends

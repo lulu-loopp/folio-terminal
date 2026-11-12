@@ -8872,6 +8872,14 @@ struct TabState {
     /// channel has *stopped* — a thing no "is it moving?" test can ever see,
     /// because by the time it matters, nothing is.
     last_drawn_mark: Option<seats::TabMarkState>,
+    /// The claim ([`TabState::fleet_claim_for`]) the strip's look last saw for
+    /// this tab; `None` before its first look.
+    ///
+    /// Written by the look and read by
+    /// [`runtime::attention::settle_attention`] on every turn: a claim that
+    /// differs from it changed since the look, and the strip looks again on
+    /// that turn whatever its rate says (T-STRIP-ASKS-ON-ITS-TICK review N1).
+    last_looked_claim: Option<StatusClaim>,
     /// When this tab's mark-slot animations started counting.
     ///
     /// Per tab rather than per window, which is what CSS does: an animation
@@ -10935,10 +10943,38 @@ struct WindowRuntime<B: Backend = Native> {
     /// synchronous `eprintln!` this replaced it was, four times in one hour,
     /// seconds.
     perf_trace_us: u128,
-    /// When [`Self::advance_strip_animation`] last ran, so
+    /// When [`Self::advance_strip_animation`] last *looked* — compared what the
+    /// strip would draw against what it drew, on a turn the window's display
+    /// frame admitted or not (T-STRIP-ASKS-ON-ITS-TICK) — so
     /// [`pace::DEFAULT_FRAME_INTERVAL`] can be the rate it claims to be rather than a
-    /// floor nothing stands on. `None` until the first tick.
+    /// floor nothing stands on. `None` until the first look.
     strip_animation_ticked_at: Option<Instant>,
+    /// **The strip's look found a frame owed and no frame has drawn it yet**
+    /// (T-STRIP-ASKS-ON-ITS-TICK, 2026-11-11).
+    ///
+    /// [`Runtime::advance_strip_animation`] looks on its own rate whatever the
+    /// window's display frame says, and its comparisons record as they compare
+    /// (`tab_owes_frame`, `PaneMotion::settle_frame_debt`): a look on a turn
+    /// the gate refuses has already written its new readings down as drawn.
+    /// This is the one place that still knows the frame is owed. Set by the
+    /// look, OR-ed so a later look that finds nothing does not forget it; read
+    /// by the strip's ask on every turn while it stands, and by the turn's
+    /// "owes a repaint" fold (`Runtime::turn_facts`); cleared by the turn the
+    /// gate admits, which is the one that draws it. The pictures' and the
+    /// cards' debts reach the ask through this flag, folded in at the look.
+    ///
+    /// **It books no wake of its own** (review N5), and needs none: the ask
+    /// runs on every turn, so a flag that stands after a turn is one that
+    /// turn's ask was refused, and the refusal booked `WakeOwner::RefusedFrame`
+    /// at the frame boundary (a frame after the last present), which is never
+    /// later than the strip's next tick. An entry for the flag in
+    /// `Runtime::strip_animation_work` could never be the earliest wake.
+    strip_owes_a_frame: bool,
+    /// **The panes' half of the same debt**, kept apart because a pane in
+    /// flight owes a present even when the chrome it is drawn under comes out
+    /// byte-identical ([`crate::runtime::preview::tick_owes_a_present`]).
+    /// Written, read and cleared beside [`Self::strip_owes_a_frame`].
+    strip_panes_owe_a_frame: bool,
     /// **Whether a card on screen is behind the pane it is a picture of**
     /// (§7.1.6b′; ticket T-5).
     ///
@@ -34620,6 +34656,7 @@ fn assemble_tab_state(
         ring_tween: None,
         ring_sweep: None,
         last_drawn_mark: None,
+        last_looked_claim: None,
         animation_epoch: Instant::now(),
         flip: FlipTween::default(),
         landing: LandTween::default(),
@@ -35089,6 +35126,8 @@ fn new_window_runtime<B: Backend>(parts: NewWindowParts<B>) -> WindowRuntime<B> 
         pty_coalesce: coalesce::Pending::default(),
         perf_trace_us: 0,
         strip_animation_ticked_at: None,
+        strip_owes_a_frame: false,
+        strip_panes_owe_a_frame: false,
         cards: focus_thumb::CardClock::default(),
         preedit: None,
         composing: None,
@@ -45633,6 +45672,11 @@ mod pty_drain_budget_tests {
     /// early return, never settled the debt and never redrew the card — a spin
     /// and a frozen card at once.
     ///
+    /// Since T-STRIP-ASKS-ON-ITS-TICK the fold is the debt the strip's look writes
+    /// down, and the gate is the ask that reads it: the card's debt is folded in
+    /// at the look, so it asks at most once a frame however long the throttle
+    /// keeps it standing.
+    ///
     /// Mutation: drop `cards_owe` from the fold and the card stops tracking any
     /// shell that does not report; drop `cards_behind` from the deadline and
     /// nothing wakes the loop to spend it.
@@ -45643,10 +45687,13 @@ mod pty_drain_budget_tests {
             .find("let cards_owe = self.window.cards.owes_frame();")
             .expect("the tick asks whether a card is behind its pane");
         let folded = advance
-            .find("let owes_frame = owes_frame || pictures_owe || cards_owe || bars_owe;")
+            .find(
+                "self.window.strip_owes_a_frame |= owes_frame || pictures_owed || cards_owe || \
+                 bars_owe;",
+            )
             .expect("and folds it in beside the animations' own debts");
         let gate = advance
-            .find("if !owes_frame && !panes_owe {")
+            .find("if !self.paced_frame(false, |_| owes_frame || panes_owe) {")
             .expect("which is the gate that decides whether this tick does anything");
         let door = advance
             .find("self.refresh_chrome()")

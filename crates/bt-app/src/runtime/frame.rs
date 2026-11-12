@@ -1688,7 +1688,9 @@ impl<B: Backend> Runtime<'_, B> {
 
     /// **Nothing in this window is moving, and nothing is owed to its glass**: no
     /// journey running, no refused animation frame, no frame waiting to be presented,
-    /// no chrome present pending, no picture or card owing a frame.
+    /// no chrome present pending, no picture or card owing a frame, and no debt the
+    /// strip's look wrote down (`strip_owes_a_frame`, `strip_panes_owe_a_frame`;
+    /// T-STRIP-ASKS-ON-ITS-TICK) that no frame has drawn yet.
     ///
     /// The idle test the turn's `BT_PERF_TRACE idle_wake` line was written with, named
     /// so that the web engine's warm-up asks the same question (ticket 54) rather than
@@ -1706,7 +1708,9 @@ impl<B: Backend> Runtime<'_, B> {
                 || self.window.pending_frames.pending_frame().is_some()
                 || self.window.chrome_present_pending
                 || self.window.pictures_owe_a_frame
-                || self.window.cards.owes_frame(),
+                || self.window.cards.owes_frame()
+                || self.window.strip_owes_a_frame
+                || self.window.strip_panes_owe_a_frame,
             resize_owed,
         }
     }
@@ -2387,14 +2391,13 @@ impl<B: Backend> Runtime<'_, B> {
             // A standing credential's ten minutes, and only while one is standing. A window whose
             // panes are asking for nothing reports nothing and costs no wake-ups at all — which is
             // every window, almost always.
-            // Spent by `settle_attention`, which runs behind the strip's tick and the window's frame
-            // gate (`advance_strip_animation`), so it is booked no earlier than the turn that gate
-            // admits (T-WINDOW-THREAD-UNDER-LOAD): a due credential refused by the gate is an
-            // instant the loop would otherwise spin on until the gate opens.
-            attention_ledger_deadline(&self.window.tabs).map(|due| {
-                self.strip_animation_next_tick(self.window.frame_clock.interval())
-                    .map_or(due, |tick| due.max(tick))
-            }),
+            // Spent by `settle_attention`, which runs on every turn, above both of the strip's
+            // gates (`advance_strip_animation`; T-STRIP-ASKS-ON-ITS-TICK, ruling R3), so it is
+            // booked as it stands: the turn it comes due on spends it. It was clamped to the
+            // strip's next tick while the pass stood behind those gates
+            // (T-WINDOW-THREAD-UNDER-LOAD), when a due credential refused by them was an instant
+            // the loop would otherwise have spun on until they opened.
+            attention_ledger_deadline(&self.window.tabs),
             // The tip's 380ms while one is settling, and the fade's own frames
             // until it lands. A window with no tip under the pointer reports
             // nothing and costs no wake-ups at all.
