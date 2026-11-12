@@ -405,7 +405,7 @@ fn a_fresh_account_has_no_entry_until_the_switch_is_pressed() {
 /// first assertion names it.
 #[test]
 fn the_entry_names_the_running_copy() {
-    for door in ["begin_sign_in_press", "run_sign_in_step"] {
+    for door in ["begin_sign_in_press_with", "run_sign_in_step"] {
         let body = squeezed(free_fn_body(door));
         assert!(
             body.contains("crate::attention_ownership::this_copy()")
@@ -992,6 +992,126 @@ fn a_press_over_another_copys_entry_says_it_took_it_over() {
         own.press_card(),
         (true, Text::SignInOnToast.text().to_owned())
     );
+}
+
+/// RED (T-START-AT-LOGON-SWITCH, focused re-review F1) — **a press that ends without an answer
+/// marks the presses answered only when no other press's worker is in flight**. A start the thread
+/// door refuses (the suite's gate refuses it here) is counted down like a worker that answered, and
+/// the last one down marks every press counted before it as answered, so a refused press does not
+/// keep member readings from being adopted until the next press; its answer is the press's
+/// failure, with the presses counted. While an earlier press's worker is still to write, nothing is
+/// marked: a member reading taken then describes the machine before that write and is dropped. A
+/// worker that answered and is the last one down marks the presses refused since its answer; a
+/// worker that runs counts itself down. Both ends go through the count and neither marks it
+/// itself. (A panicking worker takes the same end as a refused start; the press's body has no
+/// task for the suite's gate to make panic.)
+///
+/// MUTATION (`plant-22a-f1.py`): the end marks the count whatever is in flight.
+#[test]
+fn a_refused_press_marks_the_presses_answered_only_when_no_worker_is_left() {
+    static SIGN_IN_ALONE_REFUSED: SignInPresses = SignInPresses::new();
+    static SIGN_IN_REFUSED_BEHIND: SignInPresses = SignInPresses::new();
+    static SIGN_IN_WORKER_RAN: SignInPresses = SignInPresses::new();
+    let refusing = || {
+        let gate = std::sync::Arc::new(crate::lane::Gate::default());
+        gate.refuse_next_start();
+        crate::lane::Executor::scripted(gate)
+    };
+    let body = squeezed(free_fn_body("begin_sign_in_press_with"));
+    assert_eq!(
+        body.matches("presses.sign_in_press_ended()").count(),
+        2,
+        "the worker and the end both count the press down: {body}"
+    );
+    assert!(!body.contains("note_sign_in_answered"), "{body}");
+
+    // One press, its start refused: no worker is left, and member readings are the machine's word.
+    let presses = &SIGN_IN_ALONE_REFUSED;
+    begin_sign_in_press_with(&refusing(), presses, true);
+    assert_eq!(presses.sign_in_presses_answered(), 1);
+    let refused = take_sign_in_press().expect("the refused press is answered");
+    assert_eq!(refused.presses_seen, 1);
+    assert!(matches!(refused.outcome, SignInPressDid::Refused(_)));
+    let mut row = SignInRow::Unknown;
+    let read_now = SignInAnswer {
+        row: SignInRow::Off,
+        presses_seen: presses.sign_in_presses_answered(),
+    };
+    assert!(adopt_sign_in_answer(&mut row, read_now, presses));
+
+    // Press 1 is counted and its worker is still to write when press 2's start is refused: nothing
+    // is marked, and a member reading taken now is dropped once press 1's worker has answered both
+    // presses.
+    let copies = sign_in_copies("sign-in-in-flight");
+    let mut registry = SignInFake::default();
+    let writes = Mutex::new(());
+    let presses = &SIGN_IN_REFUSED_BEHIND;
+    presses.note_sign_in_press(true);
+    begin_sign_in_press_with(&refusing(), presses, true);
+    assert_eq!(
+        presses.sign_in_presses_answered(),
+        0,
+        "press 1's worker is in flight: its write is still to come"
+    );
+    let refused = take_sign_in_press().expect("the refused press is answered");
+    assert_eq!(refused.presses_seen, 2);
+    let stale = carry_sign_in_in(
+        &mut registry,
+        SIGN_IN_TEST_KEYS,
+        &copies.this,
+        &what_stands,
+        sign_in_gate_never_asked,
+        presses,
+        &writes,
+    );
+    assert_eq!(
+        stale.answer.row,
+        SignInRow::Off,
+        "read before press 1's write"
+    );
+    let on = press_sign_in_in(
+        &mut registry,
+        SIGN_IN_TEST_KEYS,
+        Ok(&copies.this),
+        &what_stands,
+        presses,
+        &writes,
+    );
+    presses.sign_in_press_ended();
+    assert_eq!(on.presses_seen, 2, "press 1's worker answers both presses");
+    assert_eq!(presses.sign_in_presses_answered(), 2);
+    let mut row = SignInRow::Unknown;
+    assert!(adopt_sign_in_answer(&mut row, on.answer.unwrap(), presses));
+    assert_eq!(row, SignInRow::On);
+    assert!(
+        !adopt_sign_in_answer(&mut row, stale.answer, presses),
+        "a reading taken while press 1's worker was in flight is older than its write"
+    );
+    assert_eq!(row, SignInRow::On);
+
+    // Press 1's worker has answered press 1 alone and not yet ended when press 2 is counted and
+    // its start refused: the end leaves the mark to the worker, and the worker, last down, makes
+    // it.
+    let presses = SignInPresses::new();
+    presses.note_sign_in_press(true);
+    presses.note_sign_in_answered(1);
+    presses.note_sign_in_press(false);
+    presses.sign_in_press_ended();
+    assert_eq!(presses.sign_in_presses_answered(), 1);
+    presses.sign_in_press_ended();
+    assert_eq!(
+        presses.sign_in_presses_answered(),
+        2,
+        "no worker is left: press 2 is marked"
+    );
+
+    // A worker that runs counts itself down (in a test process it touches no registry).
+    let presses = &SIGN_IN_WORKER_RAN;
+    let gate = std::sync::Arc::new(crate::lane::Gate::default());
+    begin_sign_in_press_with(&crate::lane::Executor::scripted(gate), presses, true);
+    crate::lane::wait_until("the press's worker counted itself down", || {
+        presses.sign_in_presses_answered() == 1
+    });
 }
 
 /// RED (T-START-AT-LOGON-SWITCH, R10) — **while this copy's entry is on, the restart registration

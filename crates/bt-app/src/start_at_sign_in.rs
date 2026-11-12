@@ -257,13 +257,22 @@ fn row_now(
 /// stored before the count moves, so whoever sees the count move reads that press's wish.
 ///
 /// **And the presses answered** (review N1): the press's worker records the count it acted on,
-/// under the entry's latch, after its read-back — or the press's end, when the worker never ran or
-/// stopped. The member's answer carries the presses answered when it read, so a reading taken
-/// while a press is counted but not yet written is older than that press and is not adopted.
+/// under the entry's latch, after its read-back. The member's answer carries the presses answered
+/// when it read, so a reading taken while a press is counted but not yet written is older than that
+/// press and is not adopted.
+///
+/// **And the press workers in flight** (focused re-review F1): counted up with the press, before
+/// the count moves, and down when the worker has answered or ended without an answer (a start the
+/// thread door refused, a panic). Whoever takes the last one down marks every press counted before
+/// it as answered ([`SignInPresses::sign_in_press_ended`]): no worker is left to change the entry,
+/// so a member reading taken from then on is the machine's word — and a refused press does not
+/// stop member answers from being adopted until the next press. While another worker is in flight
+/// nothing is marked: its write is still to come.
 pub(crate) struct SignInPresses {
     count: AtomicU64,
     wish: AtomicBool,
     answered: AtomicU64,
+    presses_in_flight: AtomicU64,
 }
 
 impl SignInPresses {
@@ -272,11 +281,14 @@ impl SignInPresses {
             count: AtomicU64::new(0),
             wish: AtomicBool::new(false),
             answered: AtomicU64::new(0),
+            presses_in_flight: AtomicU64::new(0),
         }
     }
 
-    /// A press asking for the entry (`true`) or for its removal.
+    /// A press asking for the entry (`true`) or for its removal: its worker is in flight before the
+    /// count moves, so whoever sees the count move also sees a worker that has not ended.
     pub(crate) fn note_sign_in_press(&self, on: bool) {
+        self.presses_in_flight.fetch_add(1, Ordering::SeqCst);
         self.wish.store(on, Ordering::SeqCst);
         self.count.fetch_add(1, Ordering::SeqCst);
     }
@@ -299,6 +311,18 @@ impl SignInPresses {
     /// How many presses have been answered.
     pub(crate) fn sign_in_presses_answered(&self) -> u64 {
         self.answered.load(Ordering::SeqCst)
+    }
+
+    /// **A press's worker is done** — answered, or ended without an answer. The last one in flight
+    /// marks the presses counted before it as answered; any other leaves the mark to the worker
+    /// still to come. The count is read before the worker is taken down: a press counted after
+    /// that is in flight before its count moves, so it either keeps this one from being the last
+    /// or is not in the count marked.
+    pub(crate) fn sign_in_press_ended(&self) {
+        let counted = self.count.load(Ordering::SeqCst);
+        if self.presses_in_flight.fetch_sub(1, Ordering::SeqCst) == 1 {
+            self.note_sign_in_answered(counted);
+        }
     }
 }
 
@@ -684,19 +708,36 @@ pub(crate) fn take_sign_in_press() -> Option<SignInPressed> {
 /// **Press the switch** (`Settings ▸ General ▸ Start at sign-in`): counted here, on the window
 /// thread, then done on a worker of its own, `folio-sign-in-press` (R6) — the window thread makes no
 /// registry call. Its answer comes back through [`take_sign_in_press`] and the wake.
+pub(crate) fn begin_sign_in_press(on: bool) {
+    begin_sign_in_press_with(
+        &crate::lane::Executor::thread_door(bt_platform::ThreadPriority::Normal),
+        &SIGN_IN_PRESSES,
+        on,
+    );
+}
+
+/// [`begin_sign_in_press`] with the executor and the presses handed in — the seam the tests press
+/// with a thread door that refuses.
 ///
 /// A start the thread door refuses, and a worker that panics, are answered as the press's failure
-/// in [`crate::i18n::unfinished_change`]'s words. In a test process the worker touches nothing: a
-/// test's press never reads or writes the account's sign-in entry; the tests drive
-/// [`press_sign_in_in`] over a registry of their own.
-pub(crate) fn begin_sign_in_press(on: bool) {
-    SIGN_IN_PRESSES.note_sign_in_press(on);
-    let _ = crate::lane::Executor::thread_door(bt_platform::ThreadPriority::Normal).start_worker(
+/// in [`crate::i18n::unfinished_change`]'s words. Either way the worker is taken out of the presses
+/// in flight once ([`SignInPresses::sign_in_press_ended`]): by the worker as its last step, after
+/// its answer is out, or else by the end, so a panic before that step is counted down only once.
+///
+/// In a test process the worker only counts itself down: a test's press never reads or writes the
+/// account's sign-in entry; the tests drive [`press_sign_in_in`] over a registry of their own.
+fn begin_sign_in_press_with(
+    executor: &crate::lane::Executor,
+    presses: &'static SignInPresses,
+    on: bool,
+) {
+    presses.note_sign_in_press(on);
+    let _ = executor.start_worker(
         "folio-sign-in-press",
         crate::lane::Answered::new("the sign-in entry's press", crate::diagnostics::note, {
             move |end: &crate::lane::WorkerEnd| {
-                let seen = SIGN_IN_PRESSES.sign_in_presses_counted();
-                SIGN_IN_PRESSES.note_sign_in_answered(seen);
+                let seen = presses.sign_in_presses_counted();
+                presses.sign_in_press_ended();
                 publish_sign_in_press(SignInPressed {
                     on,
                     outcome: SignInPressDid::Refused(
@@ -710,19 +751,19 @@ pub(crate) fn begin_sign_in_press(on: bool) {
             }
         }),
         move |_ctx| {
-            if cfg!(test) {
-                return;
+            if !cfg!(test) {
+                let this = crate::attention_ownership::this_copy();
+                let pressed = press_sign_in_in(
+                    &mut CurrentUser,
+                    ACCOUNT_KEYS,
+                    crate::attention_ownership::stable_executable(this.as_deref()),
+                    &what_stands,
+                    presses,
+                    &SIGN_IN_WRITES,
+                );
+                publish_sign_in_press(pressed);
             }
-            let this = crate::attention_ownership::this_copy();
-            let pressed = press_sign_in_in(
-                &mut CurrentUser,
-                ACCOUNT_KEYS,
-                crate::attention_ownership::stable_executable(this.as_deref()),
-                &what_stands,
-                &SIGN_IN_PRESSES,
-                &SIGN_IN_WRITES,
-            );
-            publish_sign_in_press(pressed);
+            presses.sign_in_press_ended();
         },
     );
 }
