@@ -3703,36 +3703,49 @@ pub(crate) fn a_process_of_its_own(selector: &str, stdin: &[u8]) -> Option<std::
 /// raised. A start past the bound waits for one in flight to return, not for any process to end.
 const FIXTURE_STARTS_AT_ONCE: usize = 4;
 
-/// **How many fixture starts are in flight**: taken by [`start_a_fixture`] before `spawn`, given
-/// back when `spawn` returns. It counts turns and holds no test's value.
-static FIXTURE_STARTS_IN_FLIGHT: std::sync::Mutex<usize> = std::sync::Mutex::new(0);
+/// **The places a fixture start holds while `spawn` runs**, one unit lock each: holding one is
+/// being one of the starts in flight. They hold no value, so no test reads anything another
+/// wrote: what is shared is the turn, as with every unit lock of the tests.
+static FIXTURE_START_PLACES: [std::sync::Mutex<()>; FIXTURE_STARTS_AT_ONCE] =
+    [const { std::sync::Mutex::new(()) }; FIXTURE_STARTS_AT_ONCE];
 
-/// Told each time a fixture start returns, so one waiting for a turn looks again.
-static FIXTURE_START_RETURNED: std::sync::Condvar = std::sync::Condvar::new();
+/// **Held while a start looks for a free place or begins to wait for one**, and while a start
+/// that let its place go tells a waiting one; it holds no value. Holding it across the look and
+/// the wait is what keeps a place let go in between from going unnoticed.
+static FIXTURE_START_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// **`command` started as one of at most [`FIXTURE_STARTS_AT_ONCE`] fixture starts in flight.**
-/// The one door through which the applier tests (`update_apply_windows::tests` and
-/// `update_apply_macos::tests`) start a process, whatever the program: a fixture they wrote, a
-/// copy of this binary, or a system program they end a fixture with. A start takes a turn when
-/// fewer than the bound are in flight and otherwise waits until one returns; it gives the turn
-/// back when `spawn` returns, whether it started the program or not, so a long-lived child holds
-/// no turn.
+/// Told each time a fixture start lets its place go, so a start waiting for one looks again.
+static FIXTURE_PLACE_FREED: std::sync::Condvar = std::sync::Condvar::new();
+
+/// **`command` started while this thread holds one of the [`FIXTURE_START_PLACES`]**, so no
+/// more than [`FIXTURE_STARTS_AT_ONCE`] fixture starts are in flight. The one door through which
+/// the applier tests (`update_apply_windows::tests` and `update_apply_macos::tests`) start a
+/// process, whatever the program: a fixture they wrote, a copy of this binary, or a system
+/// program they end a fixture with. A free place is taken if there is one; when all are held,
+/// the start waits until one is let go, and never while one is free. The place is let go when
+/// `spawn` returns, whether it started the program or not, so a long-lived child holds none.
 ///
 /// [`the_applier_tests_start_every_process_through_the_fixture_door`] holds the two modules to
 /// it.
 pub(crate) fn start_a_fixture(
     command: &mut std::process::Command,
 ) -> std::io::Result<std::process::Child> {
-    {
-        let in_flight = FIXTURE_STARTS_IN_FLIGHT.lock().unwrap();
-        let mut in_flight = FIXTURE_START_RETURNED
-            .wait_while(in_flight, |in_flight| *in_flight == FIXTURE_STARTS_AT_ONCE)
-            .unwrap();
-        *in_flight += 1;
-    }
+    let place = {
+        let mut gate = FIXTURE_START_GATE.lock().unwrap();
+        loop {
+            if let Some(place) = FIXTURE_START_PLACES
+                .iter()
+                .find_map(|place| place.try_lock().ok())
+            {
+                break place;
+            }
+            gate = FIXTURE_PLACE_FREED.wait(gate).unwrap();
+        }
+    };
     let started = command.spawn();
-    *FIXTURE_STARTS_IN_FLIGHT.lock().unwrap() -= 1;
-    FIXTURE_START_RETURNED.notify_one();
+    drop(place);
+    drop(FIXTURE_START_GATE.lock().unwrap());
+    FIXTURE_PLACE_FREED.notify_one();
     started
 }
 
