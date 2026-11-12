@@ -113,6 +113,9 @@ pub enum EntryStage {
     ReadBack,
     /// Removing a value.
     Remove,
+    /// Removing the system's switch of the name ([`enable_entry_in`]): the `Run` value, when
+    /// [`remove_entry_in`] got this far, is already gone.
+    SwitchRemove,
 }
 
 impl EntryStage {
@@ -124,6 +127,7 @@ impl EntryStage {
             Self::Write => "write",
             Self::ReadBack => "read-back",
             Self::Remove => "remove",
+            Self::SwitchRemove => "startup-apps remove",
         }
     }
 }
@@ -239,21 +243,22 @@ pub fn write_entry_in(
 /// [`EntryKeys::approved`] removed, which is the system's default (on). `false` when there was none.
 ///
 /// # Errors
-/// [`EntryRefusal::Failed`] at [`EntryStage::Remove`].
+/// [`EntryRefusal::Failed`] at [`EntryStage::SwitchRemove`].
 pub fn enable_entry_in(
     registry: &mut impl Registry,
     keys: EntryKeys<'_>,
 ) -> Result<bool, EntryRefusal> {
     registry
         .delete(keys.approved, ENTRY_NAME)
-        .map_err(entry_failed(EntryStage::Remove))
+        .map_err(entry_failed(EntryStage::SwitchRemove))
 }
 
 /// **Remove the entry**: the `Run` value and the system's switch of the same name. `false` when
 /// there was no `Run` value. The caller has judged the value Folio's; this door removes by name.
 ///
 /// # Errors
-/// [`EntryRefusal::Failed`] at [`EntryStage::Remove`]; the switch is not removed when the value was not.
+/// [`EntryRefusal::Failed`] at [`EntryStage::Remove`] when the `Run` value stays, and the switch is
+/// not tried; at [`EntryStage::SwitchRemove`] when the `Run` value is gone and its switch stays.
 pub fn remove_entry_in(
     registry: &mut impl Registry,
     keys: EntryKeys<'_>,
@@ -286,6 +291,8 @@ mod tests {
         calls: Vec<(&'static str, String, String)>,
         /// What a read of the `Run` value answers instead of the stored bytes.
         tamper: Option<Vec<u8>>,
+        /// The key every removal under is refused (focused re-review F3).
+        refused_delete_key: Option<&'static str>,
     }
 
     impl TwoKeys {
@@ -323,6 +330,9 @@ mod tests {
 
         fn delete(&mut self, key: &str, name: &str) -> io::Result<bool> {
             self.record_call("delete", key, name);
+            if self.refused_delete_key == Some(key) {
+                return Err(io::Error::other("access is denied"));
+            }
             Ok(self
                 .values
                 .remove(&(key.to_owned(), name.to_owned()))
@@ -526,6 +536,56 @@ mod tests {
             !remove_entry_in(&mut registry, ENTRY_TEST_KEYS).unwrap(),
             "absent"
         );
+    }
+
+    /// RED (T-START-AT-LOGON-SWITCH, focused re-review F3) — **a removal's refusal says which
+    /// value stayed**: a `Run` value the registry would not remove is [`EntryStage::Remove`] and
+    /// its switch is not tried; a `Run` value removed whose switch would not come off is
+    /// [`EntryStage::SwitchRemove`], the stage the press reads as the entry gone.
+    /// [`enable_entry_in`] refused is that stage too.
+    #[test]
+    fn a_removal_says_which_value_stayed() {
+        let stage_of = |refusal: EntryRefusal| match refusal {
+            EntryRefusal::Failed { stage, .. } => stage,
+            other => panic!("a removal refused by the registry, not {other:?}"),
+        };
+        let both = |refused: &'static str| {
+            let mut registry = TwoKeys {
+                refused_delete_key: Some(refused),
+                ..TwoKeys::default()
+            };
+            registry
+                .set(ENTRY_TEST_KEYS.run, ENTRY_NAME, REG_SZ, &entry_sz("x"))
+                .unwrap();
+            registry
+                .set(ENTRY_TEST_KEYS.approved, ENTRY_NAME, REG_BINARY, &[3])
+                .unwrap();
+            registry
+        };
+
+        let mut registry = both(ENTRY_TEST_KEYS.run);
+        let refusal = remove_entry_in(&mut registry, ENTRY_TEST_KEYS).unwrap_err();
+        assert_eq!(stage_of(refusal), EntryStage::Remove);
+        assert_eq!(registry.values.len(), 2, "both values stay");
+        assert!(
+            !registry
+                .calls
+                .iter()
+                .any(|(verb, key, _)| *verb == "delete" && key == ENTRY_TEST_KEYS.approved),
+            "the switch is not tried"
+        );
+
+        let mut registry = both(ENTRY_TEST_KEYS.approved);
+        let refusal = remove_entry_in(&mut registry, ENTRY_TEST_KEYS).unwrap_err();
+        assert_eq!(stage_of(refusal), EntryStage::SwitchRemove);
+        assert_eq!(
+            registry.values.keys().cloned().collect::<Vec<_>>(),
+            [(ENTRY_TEST_KEYS.approved.to_owned(), ENTRY_NAME.to_owned())],
+            "the Run value is gone, its switch stays"
+        );
+        let refusal = enable_entry_in(&mut registry, ENTRY_TEST_KEYS).unwrap_err();
+        assert_eq!(stage_of(refusal), EntryStage::SwitchRemove);
+        assert_eq!(EntryStage::SwitchRemove.stage_word(), "startup-apps remove");
     }
 
     /// Keys of this test's own under `HKCU\Software\Folio-Test\<tag>-<pid>-<ordinal>`, deleted

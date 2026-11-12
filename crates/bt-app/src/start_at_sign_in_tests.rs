@@ -1114,6 +1114,111 @@ fn a_refused_press_marks_the_presses_answered_only_when_no_worker_is_left() {
     });
 }
 
+/// RED (T-START-AT-LOGON-SWITCH, focused re-review F3) — **On whose Startup-apps value did not say
+/// off, and would not come off, starts at sign-in and says so**: the value left does not turn the
+/// entry off, so the card is On's (or the takeover's, over another copy's entry) and the row reads
+/// On — never "Startup apps still shows it turned off".
+///
+/// MUTATION (`plant-22a-f3-on.py`): every refused removal of the switch is said as turned off.
+#[test]
+fn an_on_whose_startup_apps_value_was_on_says_it_starts_at_sign_in() {
+    let copies = sign_in_copies("sign-in-switch-on-left");
+    for (what, program, outcome, card) in [
+        ("no entry", None, SignInPressDid::Done, Text::SignInOnToast),
+        (
+            "another copy's entry",
+            Some(&copies.other),
+            SignInPressDid::TookOver,
+            Text::SignInTookOverToast,
+        ),
+    ] {
+        let mut registry = SignInFake {
+            refuse_delete_under: Some(SIGN_IN_TEST_KEYS.approved),
+            ..SignInFake::default()
+        };
+        if let Some(program) = program {
+            let (kind, data) = entry_of(program);
+            registry.put_value(SIGN_IN_TEST_KEYS.run, ENTRY_NAME, kind, data);
+        }
+        registry.put_value(
+            SIGN_IN_TEST_KEYS.approved,
+            ENTRY_NAME,
+            REG_BINARY,
+            vec![2, 0, 0, 0],
+        );
+        let on = pressed(&mut registry, &copies.this, true);
+        assert_eq!(on.outcome, outcome, "{what}");
+        assert_eq!(
+            on.answer.map(|answer| answer.row),
+            Some(SignInRow::On),
+            "{what}"
+        );
+        assert_eq!(on.press_card(), (true, card.text().to_owned()), "{what}");
+        assert_ne!(on.press_line(), "BT_SIGN_IN press on written still-off");
+        assert_eq!(
+            registry.sign_in_entry_value(),
+            Some(&entry_of(&copies.this)),
+            "{what}"
+        );
+        assert_eq!(
+            registry.value_under(SIGN_IN_TEST_KEYS.approved, ENTRY_NAME),
+            Some(&(REG_BINARY, vec![2, 0, 0, 0])),
+            "{what}: the value that did not say off is left"
+        );
+    }
+}
+
+/// RED (T-START-AT-LOGON-SWITCH, focused re-review F3) — **Off whose `Run` value went and whose
+/// Startup-apps value would not come off removed the entry**: the card is Off's, the row reads
+/// Off, and the line names the value left behind; a `Run` value that would not go is still the
+/// refusal's sentence.
+///
+/// MUTATION (`plant-22a-f3-off.py`): the switch's refusal after the `Run` value went is said as
+/// "Could not remove the startup entry".
+#[test]
+fn an_off_whose_startup_apps_value_stays_says_it_removed_the_entry() {
+    let copies = sign_in_copies("sign-in-switch-off-left");
+    let mut registry = SignInFake {
+        refuse_delete_under: Some(SIGN_IN_TEST_KEYS.approved),
+        ..SignInFake::default()
+    };
+    let (kind, data) = entry_of(&copies.this);
+    registry.put_value(SIGN_IN_TEST_KEYS.run, ENTRY_NAME, kind, data);
+    registry.put_value(
+        SIGN_IN_TEST_KEYS.approved,
+        ENTRY_NAME,
+        REG_BINARY,
+        vec![3, 0, 0, 0],
+    );
+    let off = pressed(&mut registry, &copies.this, false);
+    assert_eq!(off.outcome, SignInPressDid::RemovedStartupAppsLeft);
+    assert_eq!(registry.sign_in_entry_value(), None, "the Run value went");
+    assert_eq!(
+        registry.value_under(SIGN_IN_TEST_KEYS.approved, ENTRY_NAME),
+        Some(&(REG_BINARY, vec![3, 0, 0, 0])),
+        "the Startup-apps value stayed"
+    );
+    assert_eq!(off.answer.map(|answer| answer.row), Some(SignInRow::Off));
+    assert_eq!(
+        off.press_card(),
+        (true, Text::SignInOffToast.text().to_owned())
+    );
+    assert_eq!(
+        off.press_line(),
+        "BT_SIGN_IN press off removed, its StartupApproved value left"
+    );
+
+    let mut registry = SignInFake {
+        refuse_delete_under: Some(SIGN_IN_TEST_KEYS.run),
+        ..SignInFake::default()
+    };
+    let (kind, data) = entry_of(&copies.this);
+    registry.put_value(SIGN_IN_TEST_KEYS.run, ENTRY_NAME, kind, data);
+    let off = pressed(&mut registry, &copies.this, false);
+    assert!(matches!(off.outcome, SignInPressDid::Refused(_)));
+    assert_eq!(off.press_line(), "BT_SIGN_IN press off refused");
+}
+
 /// RED (T-START-AT-LOGON-SWITCH, R10) — **while this copy's entry is on, the restart registration
 /// leaves the reboot's restart to it**, and keeps the ruled flags in every other state.
 ///

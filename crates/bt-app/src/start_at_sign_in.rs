@@ -36,7 +36,8 @@
 //!
 //! **One line per finding, said once** (`BT_SIGN_IN …`, never a path): the member's
 //! `BT_SIGN_IN <found>[ repaired=<written|held|pressed|refused (<stage>)>]`, and the press's
-//! `BT_SIGN_IN press <on|off> <written|taken over|written still-off|removed|unchanged|refused>`.
+//! `BT_SIGN_IN press <on|off> <written|taken over|written still-off|removed|removed, its
+//! StartupApproved value left|unchanged|refused>`.
 //!
 //! **The press's card is the sign-in switch's own** (review N2): Folio's sentences for what it
 //! refused — never another feature's, never a module's name — and the system's words for what the
@@ -55,8 +56,8 @@ use std::sync::{Mutex, OnceLock, PoisonError, TryLockError};
 use bt_platform::admission::WorkerCtx;
 use bt_platform::logon_hook::Registry;
 use bt_platform::sign_in_entry::{
-    ACCOUNT_KEYS, CurrentUser, EntryFound, EntryKeys, EntryRead, EntryRefusal, enable_entry_in,
-    read_entry_in, remove_entry_in, write_entry_in,
+    ACCOUNT_KEYS, CurrentUser, EntryFound, EntryKeys, EntryRead, EntryRefusal, EntryStage,
+    enable_entry_in, read_entry_in, remove_entry_in, write_entry_in,
 };
 
 use crate::attention_ownership::{Look, folio_operand, gone_by, what_stands};
@@ -502,9 +503,14 @@ pub(crate) enum SignInPressDid {
     /// On pointed at this copy an entry that started another copy of Folio — one that is there,
     /// or one on a volume that is away (review N9: the card says so, R8's no-consent press).
     TookOver,
-    /// On wrote the entry, and the Startup-apps value of the name could not be removed: the
-    /// system's words. Windows' Startup apps still shows the entry turned off.
+    /// On wrote the entry over one Startup apps had turned off, and the Startup-apps value of the
+    /// name could not be removed: the system's words. Windows' Startup apps still shows the entry
+    /// turned off (focused re-review F3: a value that did not say off, left, is no such fact).
     WrittenStillTurnedOff(String),
+    /// Off removed Folio's `Run` value, and the Startup-apps value of the name could not be
+    /// removed (focused re-review F3): the entry is gone, so the card is Off's; the line names the
+    /// value left behind.
+    RemovedStartupAppsLeft,
     /// Nothing was changed: the card's whole sentence.
     Refused(String),
 }
@@ -541,10 +547,9 @@ fn sign_in_refusal_sentence(refusal: &EntryRefusal) -> String {
         EntryRefusal::Failed { stage, .. } => {
             crate::i18n::sign_in_entry_failed(*stage, &sign_in_refusal_words(refusal))
         }
-        EntryRefusal::ReadBackDiffers => crate::i18n::sign_in_entry_failed(
-            bt_platform::sign_in_entry::EntryStage::ReadBack,
-            &sign_in_refusal_words(refusal),
-        ),
+        EntryRefusal::ReadBackDiffers => {
+            crate::i18n::sign_in_entry_failed(EntryStage::ReadBack, &sign_in_refusal_words(refusal))
+        }
     }
 }
 
@@ -555,14 +560,16 @@ fn sign_in_refusal_sentence(refusal: &EntryRefusal) -> String {
 ///
 /// **On** refuses over another program's value under the name and writes nothing. Otherwise it
 /// points the entry at this copy — over any Folio's entry, another live copy's too (R8: the press
-/// is the account's) — reads it back, and takes the system's switch off the name (R9); a switch
-/// that would not come off is said, the entry being written.
+/// is the account's) — reads it back, and takes the system's switch off the name (R9). A switch
+/// that had the entry off and would not come off is said, the entry being written; one that did
+/// not say off is no change to say (focused re-review F3).
 ///
 /// A program the press cannot name as one an entry may start (`this` refused) changes nothing, in
 /// the switch's own sentence.
 ///
 /// **Off** removes the entry when it is Folio's, whichever copy it names, with the system's switch
-/// of the name; another program's value is left.
+/// of the name; another program's value is left. A `Run` value removed whose switch would not come
+/// off is the entry gone, said with the value left in the line (F3).
 ///
 /// Not held during an update's trial: it is a person's, as the hooks' presses are. The row comes
 /// off a reading after.
@@ -611,16 +618,20 @@ pub(crate) fn press_sign_in_in(
                 match write_entry_in(registry, keys, this) {
                     Err(refusal) => SignInPressDid::Refused(sign_in_refusal_sentence(&refusal)),
                     Ok(()) => match enable_entry_in(registry, keys) {
-                        Ok(_) if another_copys => SignInPressDid::TookOver,
-                        Ok(_) => SignInPressDid::Done,
-                        Err(refusal) => {
+                        Err(refusal) if read.turned_off => {
                             SignInPressDid::WrittenStillTurnedOff(sign_in_refusal_words(&refusal))
                         }
+                        _ if another_copys => SignInPressDid::TookOver,
+                        _ => SignInPressDid::Done,
                     },
                 }
             } else if folios {
                 match remove_entry_in(registry, keys) {
                     Ok(_) => SignInPressDid::Done,
+                    Err(EntryRefusal::Failed {
+                        stage: EntryStage::SwitchRemove,
+                        ..
+                    }) => SignInPressDid::RemovedStartupAppsLeft,
                     Err(refusal) => SignInPressDid::Refused(sign_in_refusal_sentence(&refusal)),
                 }
             } else {
@@ -636,13 +647,16 @@ pub(crate) fn press_sign_in_in(
 }
 
 impl SignInPressed {
-    /// `BT_SIGN_IN press <on|off> <written|taken over|written still-off|removed|unchanged|refused>`
-    /// — no path, no sentence.
+    /// `BT_SIGN_IN press <on|off> <written|taken over|written still-off|removed|removed, its
+    /// StartupApproved value left|unchanged|refused>` — no path, no sentence.
     pub(crate) fn press_line(&self) -> String {
         let asked = if self.on { "on" } else { "off" };
         let did = match (&self.outcome, self.answer.map(|answer| answer.row)) {
             (SignInPressDid::Refused(_), _) => "refused",
             (SignInPressDid::WrittenStillTurnedOff(_), _) => "written still-off",
+            (SignInPressDid::RemovedStartupAppsLeft, _) => {
+                "removed, its StartupApproved value left"
+            }
             (SignInPressDid::TookOver, _) => "taken over",
             (SignInPressDid::Done, Some(SignInRow::On)) if self.on => "written",
             (SignInPressDid::Done, Some(SignInRow::Off)) if !self.on => "removed",
@@ -656,7 +670,9 @@ impl SignInPressed {
     pub(crate) fn press_card(&self) -> (bool, String) {
         match &self.outcome {
             SignInPressDid::Done if self.on => (true, Text::SignInOnToast.text().to_owned()),
-            SignInPressDid::Done => (true, Text::SignInOffToast.text().to_owned()),
+            SignInPressDid::Done | SignInPressDid::RemovedStartupAppsLeft => {
+                (true, Text::SignInOffToast.text().to_owned())
+            }
             SignInPressDid::TookOver => (true, Text::SignInTookOverToast.text().to_owned()),
             SignInPressDid::WrittenStillTurnedOff(words) => {
                 (false, crate::i18n::sign_in_still_turned_off(words))

@@ -7454,7 +7454,7 @@ pub fn sign_in_entry_failed(stage: bt_platform::sign_in_entry::EntryStage, words
     let english = match stage {
         EntryStage::Read => "Could not read the startup entry",
         EntryStage::Write | EntryStage::ReadBack => "Could not write the startup entry",
-        EntryStage::Remove => "Could not remove the startup entry",
+        EntryStage::Remove | EntryStage::SwitchRemove => "Could not remove the startup entry",
     };
     match current() {
         Lang::English => format!("{english}: {words}"),
