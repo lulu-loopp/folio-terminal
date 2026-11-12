@@ -433,10 +433,18 @@ mod tests {
                 entry_sz(r#""C:\T\folio.exe""#),
                 EntryFound::Command(PathBuf::from(r"C:\T\folio.exe")),
             ),
-            (REG_SZ, entry_sz(r#""C:\T\folio.exe" --x"#), EntryFound::Other),
+            (
+                REG_SZ,
+                entry_sz(r#""C:\T\folio.exe" --x"#),
+                EntryFound::Other,
+            ),
             (REG_SZ, entry_sz(r"C:\T\folio.exe"), EntryFound::Other),
             (REG_SZ, entry_sz(r#""""#), EntryFound::Other),
-            (2, entry_sz(r#""%LOCALAPPDATA%\folio.exe""#), EntryFound::Other),
+            (
+                2,
+                entry_sz(r#""%LOCALAPPDATA%\folio.exe""#),
+                EntryFound::Other,
+            ),
             (4, vec![1, 0, 0, 0], EntryFound::Other),
         ];
         for (kind, data, found) in shapes {

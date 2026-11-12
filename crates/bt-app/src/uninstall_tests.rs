@@ -1611,10 +1611,8 @@ fn uninstall_sign_in_row_removes_this_copys_entry_and_leaves_another_copys() {
     assert_eq!(removal, SignInRemoval::LeftAnotherCopy(other.clone()));
     assert_eq!(entries[0].fate, Fate::Left(vec![other.clone()]));
     assert_eq!(left.len(), 3, "another copy's entry stays: {left:?}");
-    let (removal, entries, left) = row_over(
-        Some((REG_SZ, sz(&command_for(&away)))),
-        &SignInVolumeAway,
-    );
+    let (removal, entries, left) =
+        row_over(Some((REG_SZ, sz(&command_for(&away)))), &SignInVolumeAway);
     assert_eq!(removal, SignInRemoval::LeftUnchecked(away.clone()));
     assert_eq!(
         entries[0].fate,

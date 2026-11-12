@@ -647,7 +647,11 @@ fn no_other_value_of_the_run_key_is_read_or_touched() {
             "{what}"
         );
         assert_eq!(registry.values, before, "{what}: every value byte for byte");
-        assert!(registry.written.is_empty(), "{what}: {:?}", registry.written);
+        assert!(
+            registry.written.is_empty(),
+            "{what}: {:?}",
+            registry.written
+        );
         assert!(
             registry.read.iter().all(|name| name == ENTRY_NAME),
             "{what}: only the entry's own name is read: {:?}",
@@ -846,7 +850,11 @@ fn a_member_reading_taken_before_a_press_was_answered_is_not_adopted() {
 
     // The press's answer lands first, then the stale reading: the row stays Off.
     let mut row = SignInRow::Unknown;
-    assert!(adopt_sign_in_answer(&mut row, off.answer.unwrap(), &presses));
+    assert!(adopt_sign_in_answer(
+        &mut row,
+        off.answer.unwrap(),
+        &presses
+    ));
     assert_eq!(row, SignInRow::Off);
     assert!(
         !adopt_sign_in_answer(&mut row, stale.answer, &presses),
@@ -937,7 +945,11 @@ fn a_press_over_another_copys_entry_says_it_took_it_over() {
         on
     };
     for (what, program, look) in [
-        ("another copy that is there", &copies.other, &what_stands as &dyn Look),
+        (
+            "another copy that is there",
+            &copies.other,
+            &what_stands as &dyn Look,
+        ),
         ("a copy on a volume that is away", &away, &SignInAwayVolume),
     ] {
         let on = press_over(program, look);

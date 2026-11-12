@@ -1514,15 +1514,17 @@ mod tests {
         // Review N5 (row 22a): the General page asks for the sign-in member alone, once a visit,
         // and only where the page has the row.
         assert!(
-            squeezed(crate::test_support::method_body("Runtime", "settings_layout")).contains(
-                &squeezed(
-                    "let general_opened = self.window.settings.take_general_open_edge( \
+            squeezed(crate::test_support::method_body(
+                "Runtime",
+                "settings_layout"
+            ))
+            .contains(&squeezed(
+                "let general_opened = self.window.settings.take_general_open_edge( \
                      self.window.settings.category() == settings::SettingsCategory::General \
                      && rows.contains(&settings::SettingsRow::StartAtSignIn), ); \
                      if general_opened { \
                      carry_pass::begin_carry_pass(carry_pass::CarryAsk::START_AT_SIGN_IN); }"
-                )
-            ),
+            )),
             "the General page's visit asks for the sign-in member"
         );
     }
