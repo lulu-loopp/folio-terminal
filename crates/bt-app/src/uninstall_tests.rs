@@ -1629,9 +1629,36 @@ fn uninstall_sign_in_row_removes_this_copys_entry_and_leaves_another_copys() {
         entries[0].line(Lang::English)
     );
     assert_eq!(left.len(), 3, "the unchecked entry stays: {left:?}");
-    let (removal, entries, _) = row(Some((2, sz(&command_for(&exe)))));
-    assert_eq!(removal, SignInRemoval::LeftNotOurs);
-    assert!(matches!(entries[0].fate, Fate::LeftNotOurs(_)));
+    // Another program's value under the name — this copy's text as `REG_EXPAND_SZ`, and a plain
+    // `REG_SZ` quoting another program, the shape a real one has (review N4): both left, and
+    // with them the Startup-apps value of the name, byte for byte.
+    for (what, foreign) in [
+        ("an expandable string", (2, sz(&command_for(&exe)))),
+        (
+            "another program's command",
+            (REG_SZ, sz(r#""C:\Tools\sync.exe""#.as_ref())),
+        ),
+    ] {
+        let mut keys = Keys::default();
+        keys.set(SIGN_IN_ROW_KEYS.run, ENTRY_NAME, foreign.0, &foreign.1)
+            .unwrap();
+        keys.set(
+            SIGN_IN_ROW_KEYS.approved,
+            ENTRY_NAME,
+            REG_BINARY,
+            &[3, 0, 0, 0],
+        )
+        .unwrap();
+        let before = keys.0.clone();
+        let removal = uninstall_sign_in_in(&mut keys, SIGN_IN_ROW_KEYS, &exe, &here);
+        assert_eq!(removal, SignInRemoval::LeftNotOurs, "{what}");
+        let entries = sign_in_entries(HostPlatform::Windows, Lang::English, || removal.clone());
+        assert!(matches!(entries[0].fate, Fate::LeftNotOurs(_)), "{what}");
+        assert_eq!(
+            keys.0, before,
+            "{what}: the value and its Startup-apps value stay byte for byte"
+        );
+    }
 
     let (removal, entries, left) = row(None);
     assert_eq!(removal, SignInRemoval::Absent);

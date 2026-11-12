@@ -481,52 +481,71 @@ fn a_moved_copys_entry_is_pointed_at_this_one() {
 
 /// RED (T-START-AT-LOGON-SWITCH, R2) — **no other value of the `Run` key is read or touched, and a
 /// value under the name that is not of Folio's shape is never judged**: the member, both presses
-/// and the uninstall ask only for the entry's own name; a `REG_EXPAND_SZ` under it is another
-/// program's, the member says so and writes nothing, On refuses with its sentence, Off and the
-/// uninstall leave it.
+/// and the uninstall ask only for the entry's own name; another program's value under it — a
+/// `REG_EXPAND_SZ`, or a plain `REG_SZ` quoting another program, the shape a real one has
+/// (review N4) — is never judged: the member says so and writes nothing, On refuses with its
+/// sentence, Off and the uninstall leave it and the Startup-apps value of the name.
 ///
 /// MUTATION (`plant-22-foreign-value-overwritten.py`): On writes over any value under the name;
 /// (`plant-22-reads-every-value.py`): the door judges any text quoted at its start.
 #[test]
 fn no_other_value_of_the_run_key_is_read_or_touched() {
     let copies = sign_in_copies("sign-in-foreign");
-    let mut registry = SignInFake::default();
     let mut expanded = command_for(&copies.gone);
     expanded.push(" --background");
-    let foreign = (2, sz(&command_for(&copies.gone)));
-    registry.put_value(
-        SIGN_IN_TEST_KEYS.run,
-        ENTRY_NAME,
-        foreign.0,
-        foreign.1.clone(),
-    );
-    registry.put_value(
-        SIGN_IN_TEST_KEYS.run,
-        "FolioUpdate-abcd0123",
-        REG_SZ,
-        sz(OsStr::new("x")),
-    );
-    registry.put_value(SIGN_IN_TEST_KEYS.run, "SomebodyElse", REG_SZ, sz(&expanded));
-    let before = registry.values.clone();
+    for (what, foreign) in [
+        ("an expandable string", (2, sz(&command_for(&copies.gone)))),
+        (
+            "another program's command",
+            (REG_SZ, sz(OsStr::new(r#""C:\Tools\sync.exe""#))),
+        ),
+    ] {
+        let mut registry = SignInFake::default();
+        registry.put_value(
+            SIGN_IN_TEST_KEYS.run,
+            ENTRY_NAME,
+            foreign.0,
+            foreign.1.clone(),
+        );
+        registry.put_value(
+            SIGN_IN_TEST_KEYS.approved,
+            ENTRY_NAME,
+            REG_BINARY,
+            vec![3, 0, 0, 0],
+        );
+        registry.put_value(
+            SIGN_IN_TEST_KEYS.run,
+            "FolioUpdate-abcd0123",
+            REG_SZ,
+            sz(OsStr::new("x")),
+        );
+        registry.put_value(SIGN_IN_TEST_KEYS.run, "SomebodyElse", REG_SZ, sz(&expanded));
+        let before = registry.values.clone();
 
-    let run = sign_in_carried(&mut registry, &copies.this);
-    assert_eq!(run.found, SignInFound::NotOurs);
-    assert_eq!(run.answer.row, SignInRow::NotOurs);
-    let on = pressed(&mut registry, &copies.this, true);
-    assert_eq!(on.outcome, Err(Text::SignInEntryNotOurs.text().to_owned()));
-    let off = pressed(&mut registry, &copies.this, false);
-    assert_eq!(off.outcome, Ok(()));
-    assert_eq!(
-        uninstall_sign_in_in(&mut registry, SIGN_IN_TEST_KEYS, &copies.this, &what_stands),
-        SignInRemoval::LeftNotOurs
-    );
-    assert_eq!(registry.values, before, "every value byte for byte");
-    assert!(registry.written.is_empty(), "{:?}", registry.written);
-    assert!(
-        registry.read.iter().all(|name| name == ENTRY_NAME),
-        "only the entry's own name is read: {:?}",
-        registry.read
-    );
+        let run = sign_in_carried(&mut registry, &copies.this);
+        assert_eq!(run.found, SignInFound::NotOurs, "{what}");
+        assert_eq!(run.answer.row, SignInRow::NotOurs, "{what}");
+        let on = pressed(&mut registry, &copies.this, true);
+        assert_eq!(
+            on.outcome,
+            Err(Text::SignInEntryNotOurs.text().to_owned()),
+            "{what}"
+        );
+        let off = pressed(&mut registry, &copies.this, false);
+        assert_eq!(off.outcome, Ok(()), "{what}");
+        assert_eq!(
+            uninstall_sign_in_in(&mut registry, SIGN_IN_TEST_KEYS, &copies.this, &what_stands),
+            SignInRemoval::LeftNotOurs,
+            "{what}"
+        );
+        assert_eq!(registry.values, before, "{what}: every value byte for byte");
+        assert!(registry.written.is_empty(), "{what}: {:?}", registry.written);
+        assert!(
+            registry.read.iter().all(|name| name == ENTRY_NAME),
+            "{what}: only the entry's own name is read: {:?}",
+            registry.read
+        );
+    }
 
     // A quoted command with anything after it is not of the shape either.
     let mut registry = SignInFake::default();
