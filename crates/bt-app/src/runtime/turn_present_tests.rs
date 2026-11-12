@@ -287,9 +287,12 @@ fn a_panes_output_reaches_the_glass_in_the_turn_that_publishes_it() {
 /// fold, the refused frame is booked a frame after the present the turn made; paid after it, the
 /// fold books it from the picture before, which the turn's own present has already replaced.
 ///
-/// The strip has not ticked yet (`strip_animation_ticked_at` is `None`), so its next tick is the
-/// frame deadline itself and the wake is the strip's, at that instant. The instant is read back
-/// from the window: a present is stamped with the clock `trace_present` reads, not with the
+/// The strip's rate is due (it has not looked yet), so it looks on this turn whatever the gate
+/// says, writes the mark's step down as owed and is refused (T-STRIP-ASKS-ON-ITS-TICK). Its own
+/// next look is a frame after this turn's instant, later than a frame after the present, which
+/// is stamped no later than the turn (asserted here as the mark test asserts it): so the wake is
+/// the refused frame's own entry, and this pins that entry's instant exactly. The instant is read
+/// back from the window: a present is stamped with the clock `trace_present` reads, not with the
 /// instant handed to the turn.
 ///
 /// MUTATION: move the `pay_the_turns_present` call in `Runtime::turn` below the deadline fold —
@@ -305,8 +308,11 @@ fn a_refused_frame_is_booked_from_the_present_its_turn_paid() {
     output_held_until(&mut folio, b"   Compiling bt-app v0.0.0\r\n", now);
     let (wake, effects) = turn_at(&mut folio, now);
     assert!(
-        folio.window.frame_clock.owes_a_frame() && folio.window.strip_animation_ticked_at.is_none(),
-        "the fixture's own precondition: the gate turned the mark's step away"
+        folio.window.frame_clock.owes_a_frame()
+            && folio.window.strip_animation_ticked_at == Some(now)
+            && folio.window.strip_owes_a_frame,
+        "the fixture's own precondition: the strip looked, wrote the mark's step down, and the \
+         gate turned it away"
     );
     assert_eq!(
         presented_source(&effects),
@@ -322,10 +328,262 @@ fn a_refused_frame_is_booked_from_the_present_its_turn_paid() {
         presented, held,
         "the fixture's own precondition: the turn's present replaced the held one"
     );
+    assert!(
+        presented <= now,
+        "the fixture's own precondition: the turn's present is stamped no later than the turn's \
+         instant, as on the loop, so the strip's next look is not the earlier wake"
+    );
     assert_eq!(
         wake,
-        Some((WakeOwner::StripAnimation, presented + interval)),
+        Some((WakeOwner::RefusedFrame, presented + interval)),
         "the refused step is booked a frame after the present this turn paid"
+    );
+}
+
+/// RED — **a step of the mark the strip meets on a shut turn is written down, drawn on the turn
+/// the gate admits, and then taken** (T-STRIP-ASKS-ON-ITS-TICK, claim C2).
+///
+/// The strip's look stands on its own rate whatever the window's display frame says, and its
+/// comparisons record as they compare: on a turn inside the frame of a present it did not ask for
+/// (a keystroke's, a hover's, a neighbour's output) the mark's new step is recorded as drawn
+/// before the gate is asked. What is left of the frame it owes is the debt the look writes down
+/// (`strip_owes_a_frame`). The gate refuses, and the refusal books the frame boundary; on that
+/// turn the strip's rate is not due again, so the frame is drawn by the debt alone, and the debt
+/// is gone once it is.
+///
+/// Three turns. An admitted step, so the strip has looked and drawn. A step later, a turn a
+/// millisecond inside the frame of a present held there: the strip looks, writes the step down,
+/// is refused and presents nothing, and the wake is the refused frame's own. At that wake the
+/// rate is a millisecond short of due and the gate admits: one present, and nothing owed after
+/// it. The caret is held lit through all three, so no blink lands on a counted turn.
+///
+/// MUTATIONS: put the strip's ask back above its look (`plant-77-a`) — the shut turn does not
+/// look; ask with this look's findings alone (`plant-77-b`) — the admitted turn presents nothing;
+/// leave the written debt standing after the draw (`plant-77-c`) — the debt is not taken.
+#[test]
+fn a_strip_debt_met_on_a_shut_turn_is_drawn_on_the_turn_the_gate_admits() {
+    let (mut folio, settled) = window_saying("turn-present-strip-debt", WORKING);
+    assert!(
+        folio.window.tabs[0].fleet_working(),
+        "the fixture's own precondition: the shell's command is running, so the mark breathes"
+    );
+    let interval = folio.window.frame_clock.interval();
+
+    // ① An admitted step: the strip looks, and what it found reaches the glass.
+    let looked = settled + STEP;
+    folio.window.cursor_blink.reset(looked, folio.app.motion);
+    let (_, effects) = turn_at(&mut folio, looked);
+    assert_eq!(
+        folio.window.strip_animation_ticked_at,
+        Some(looked),
+        "the fixture's own precondition: the strip looked on the admitted turn"
+    );
+    assert_eq!(
+        presents(&effects),
+        1,
+        "the fixture's own precondition: the step reached the glass: {effects:?}"
+    );
+    assert!(
+        !folio.window.strip_owes_a_frame,
+        "the fixture's own precondition: and the strip owes nothing after drawing it"
+    );
+
+    // ② A step later, a millisecond inside the frame of a present the strip did not ask for.
+    let shut = looked + STEP;
+    let held = shut - Duration::from_millis(1);
+    folio.window.last_present_at = Some(held);
+    folio.window.cursor_blink.reset(shut, folio.app.motion);
+    folio.window.frame_clock.take_skipped();
+    let (wake, effects) = turn_at(&mut folio, shut);
+    assert_eq!(
+        folio.window.strip_animation_ticked_at,
+        Some(shut),
+        "the strip looks on a turn the gate refuses"
+    );
+    assert!(
+        folio.window.strip_owes_a_frame,
+        "and writes the mark's step down as owed"
+    );
+    assert!(
+        folio.window.frame_clock.owes_a_frame(),
+        "and the gate turned its ask away"
+    );
+    assert_eq!(
+        folio.window.frame_clock.take_skipped(),
+        1,
+        "once: the strip asked, and nothing else did"
+    );
+    assert_eq!(
+        presents(&effects),
+        0,
+        "and nothing reached the glass: {effects:?}"
+    );
+    assert_eq!(
+        wake,
+        Some((WakeOwner::RefusedFrame, held + interval)),
+        "the refused frame is booked at the frame boundary; the strip's own next look is a \
+         millisecond after it"
+    );
+
+    // ③ The booked turn: the gate admits, and the strip's rate is not due.
+    let admitted = held + interval;
+    assert!(
+        !crate::strip_animation_tick_is_due(
+            folio.window.strip_animation_ticked_at,
+            admitted,
+            interval
+        ),
+        "the fixture's own precondition: the strip's rate is a millisecond short of due"
+    );
+    folio.window.cursor_blink.reset(admitted, folio.app.motion);
+    let (_, effects) = turn_at(&mut folio, admitted);
+    assert_eq!(
+        folio.window.strip_animation_ticked_at,
+        Some(shut),
+        "the fixture's own precondition: the strip did not look again"
+    );
+    assert_eq!(
+        presents(&effects),
+        1,
+        "the debt is drawn on the turn the gate admits: {effects:?}"
+    );
+    assert!(
+        !folio.window.strip_owes_a_frame && !folio.window.strip_panes_owe_a_frame,
+        "and taken: the strip owes nothing once it is drawn"
+    );
+    assert!(
+        !folio.window.frame_clock.owes_a_frame(),
+        "and nothing is owed to the glass"
+    );
+}
+
+/// RED — **a waiting halo whose credential runs out between two looks goes out on that turn**
+/// (T-STRIP-ASKS-ON-ITS-TICK review N1).
+///
+/// A place in the attention queue is the tab's waiting halo, and the halo breathes for exactly as
+/// long as the place stands: while it does, the strip looks every frame. The credential that holds
+/// the place runs out in the settle pass, which runs on every turn, and the loop wakes for it at
+/// its own instant — which falls between two of the strip's looks far more often than on one. On
+/// that turn the strip's rate is not due. The settle pass answers that a claim changed since the
+/// look, so the strip looks anyway, finds the halo gone, and the turn the gate admits draws that.
+/// Without the answer nothing looks: the place is gone, so nothing in the tab moves any more and
+/// nothing books the look, and the halo stands frozen mid-breath on a shell that does not breathe
+/// of its own (no `OSC 133`).
+///
+/// A background tab holds the place (a tab on screen in a focused window is looked at, and a
+/// request there is refused one), its pane's shell is plain, and its credential is armed. An
+/// admitted turn a millisecond before the credential's instant: the strip looks and draws the
+/// halo. The turn at the instant, with the gate open and the strip's rate a millisecond short:
+/// the credential is spent, the strip looks, and the halo's going reaches the glass on that turn.
+/// The caret is held lit on both, so no blink lands on a counted turn.
+///
+/// MUTATION: ignore the settle pass's answer (`plant-77-e`) — the strip does not look on the
+/// credential's turn, and its record still carries the halo.
+#[test]
+fn a_halo_whose_credential_runs_out_between_two_looks_goes_out_on_that_turn() {
+    let mut background = tab_holding(leaf_saying("背景 background\r\n"));
+    background.id = crate::TabId(2);
+    let mut folio = HeadlessFolio::with_tabs(
+        "turn-present-halo",
+        vec![tab_holding(leaf_saying("前台 front\r\n")), background],
+        0,
+    );
+    folio.draw();
+    let mut settled = Instant::now();
+    for _ in 0..8 {
+        if !a_resize_is_open(&mut folio) {
+            break;
+        }
+        settled += STEP;
+        turn_at(&mut folio, settled);
+    }
+    assert!(
+        !a_resize_is_open(&mut folio),
+        "the fixture's own precondition: the shell has settled its first size"
+    );
+    assert_eq!(
+        folio.app.motion,
+        crate::Motion::Full,
+        "the fixture's own precondition: the halo breathes"
+    );
+    let interval = folio.window.frame_clock.interval();
+    let waiting = folio.window.tabs[1].seats.terminals()[0];
+    let armed = settled + STEP;
+    let slot = bt_workbench::attention::WaitSlot::Level(bt_workbench::attention::WaitKind::Agent);
+    {
+        let runtime = folio.runtime();
+        let reach = crate::notify::desktop_reach(false, runtime.window.observed_place);
+        let places = &mut runtime.window.attention_next_place;
+        let leaf = &mut runtime.window.tabs[1]
+            .sessions
+            .get_mut(&waiting)
+            .expect("the background tab's pane")
+            .session;
+        leaf.attention.clock.arm(&slot, armed);
+        let _ = leaf.attention.ledger.apply(
+            bt_workbench::attention::Site {
+                tab: 1,
+                seat: waiting,
+            },
+            reach,
+            bt_workbench::attention::Event::StrongWait(slot),
+            places,
+            armed,
+        );
+    }
+    let due = armed + bt_workbench::attention::expiry::WAIT_TTL;
+
+    // A millisecond before the credential's instant, an admitted turn: the place is taken, and
+    // the strip looks and draws the halo.
+    let looked = due - Duration::from_millis(1);
+    folio.window.cursor_blink.reset(looked, folio.app.motion);
+    turn_at(&mut folio, looked);
+    assert!(
+        folio.window.tabs[1].fleet_awaiting(),
+        "the fixture's own precondition: the background tab holds a place"
+    );
+    assert!(
+        !folio.window.tabs[1].fleet_working(),
+        "the fixture's own precondition: the shell does not breathe of its own"
+    );
+    assert_eq!(
+        folio.window.strip_animation_ticked_at,
+        Some(looked),
+        "the fixture's own precondition: the strip looked"
+    );
+    assert!(
+        folio.window.tabs[1]
+            .last_drawn_mark
+            .is_some_and(|mark| mark.pulse.is_some()),
+        "the fixture's own precondition: and drew the halo"
+    );
+
+    // The credential's instant: the gate is open, and the strip's rate is a millisecond short.
+    folio.window.last_present_at = Some(looked - interval);
+    assert!(
+        !crate::strip_animation_tick_is_due(folio.window.strip_animation_ticked_at, due, interval),
+        "the fixture's own precondition: the strip's rate is not due on the credential's turn"
+    );
+    folio.window.cursor_blink.reset(due, folio.app.motion);
+    let (_, effects) = turn_at(&mut folio, due);
+    assert!(
+        !folio.window.tabs[1].fleet_awaiting(),
+        "the fixture's own precondition: the credential ran out and took the place with it"
+    );
+    assert!(
+        folio.window.tabs[1]
+            .last_drawn_mark
+            .is_some_and(|mark| mark.pulse.is_none()),
+        "the strip looks on the turn the claim changed, and finds the halo gone"
+    );
+    assert_eq!(
+        presents(&effects),
+        1,
+        "and the halo's going reaches the glass on that turn: {effects:?}"
+    );
+    assert!(
+        !folio.window.strip_owes_a_frame && !folio.window.strip_panes_owe_a_frame,
+        "and the strip owes nothing once it is drawn"
     );
 }
 

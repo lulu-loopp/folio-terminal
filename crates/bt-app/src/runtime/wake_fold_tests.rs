@@ -13,7 +13,7 @@
 use std::time::{Duration, Instant};
 
 use crate::headless::{Headless, HeadlessFolio, WindowEffect};
-use crate::test_support::{card_over, cross_tab, leaf_saying, tab_holding};
+use crate::test_support::{card_over, cross_tab, leaf_saying, ring, tab_holding};
 use crate::wake_owner::WakeOwner;
 use crate::{Motion, PeekClock, RowHost, Runtime, TabId, foreground_program};
 
@@ -214,17 +214,22 @@ fn a_tab_menus_matured_rest_is_spent_with_no_other_window() {
     books_nothing_due(turn(&mut folio, due), due);
 }
 
-/// RED — **a standing credential's ten minutes are booked no earlier than the turn that spends
-/// them.**
+/// RED — **a standing credential's ten minutes are spent on the turn they come due on, whatever
+/// the strip's gates say** (T-STRIP-ASKS-ON-ITS-TICK, ruling R3; T-WINDOW-THREAD-UNDER-LOAD's
+/// `a_due_credential_behind_the_strips_gate_is_booked_for_the_turn_the_gate_admits`, re-purposed).
 ///
-/// `settle_attention` runs behind the strip's tick and the window's frame gate; a credential due
-/// while the gate is shut was booked raw, an instant in the past for as long as the gate stayed
-/// shut.
+/// `settle_attention` stood behind the strip's rate and the window's frame gate, so a credential
+/// due while either was shut stood unspent, and the fold clamped its instant to the strip's next
+/// tick so the loop would not spin on it. The pass is state and runs on every turn now: on a turn
+/// both gates refuse, the credential is spent, and the fold books its instant as it stands —
+/// which is nothing, because nothing stands.
 ///
-/// MUTATION: book `attention_ledger_deadline` raw in `Runtime::turn`'s fold — the turn hands the
-/// loop `AttentionCredential`.
+/// MUTATIONS: move `settle_attention` and `raise_attention` back below the frame gate
+/// (`plant-77-d`) — the credential stands, and the turn hands the loop `AttentionCredential` at
+/// its own instant; book the credential clamped to the strip's next tick again — the credential
+/// is still spent, which is what says the clamp has nothing left to hold back.
 #[test]
-fn a_due_credential_behind_the_strips_gate_is_booked_for_the_turn_the_gate_admits() {
+fn a_due_credential_is_spent_on_its_own_turn_whatever_the_strips_gates_say() {
     let mut folio = HeadlessFolio::with_tabs(
         "wake-fold-credential",
         vec![tab_holding(leaf_saying("plain\r\n"))],
@@ -244,10 +249,111 @@ fn a_due_credential_behind_the_strips_gate_is_booked_for_the_turn_the_gate_admit
             &bt_workbench::attention::WaitSlot::Level(bt_workbench::attention::WaitKind::Agent),
             armed,
         );
-        // The strip ticked a moment ago, so its gate is shut at `due`.
+        // The strip looked a moment ago, so its rate is shut at `due`, and it saw the tab's claim
+        // as it stands (a clock with no place behind it changes no claim when it runs out, so
+        // nothing brings the look round); and the glass took a picture a moment ago, so the
+        // window's display frame is shut as well.
         runtime.window.strip_animation_ticked_at = Some(due - Duration::from_millis(1));
+        let seen = runtime.window.tabs[0].fleet_claim_for(true);
+        runtime.window.tabs[0].last_looked_claim = Some(seen);
+        runtime.window.last_present_at = Some(due - Duration::from_millis(1));
     }
-    books_nothing_due(turn(&mut folio, due), due);
+    let wake = turn(&mut folio, due);
+    assert!(
+        !folio.window.frame_clock.admits(),
+        "the fixture's own precondition: the frame gate refused the turn"
+    );
+    assert_eq!(
+        folio.window.strip_animation_ticked_at,
+        Some(due - Duration::from_millis(1)),
+        "the fixture's own precondition: the strip did not look on the turn"
+    );
+    assert_eq!(
+        folio.window.tabs[0]
+            .sessions
+            .values()
+            .next()
+            .expect("the one pane")
+            .session
+            .attention
+            .clock
+            .deadline(),
+        None,
+        "the credential is spent on the turn it comes due on"
+    );
+    books_nothing_due(wake, due);
+}
+
+/// RED — **a bell heard on a shut turn is announced on that turn, and a look consumes it there**
+/// (T-STRIP-ASKS-ON-ITS-TICK, claim C3).
+///
+/// The settle pass stood behind the strip's rate and the window's frame gate, and every turn of a
+/// pane's flood is a turn both refuse: a bell or a finished turn in another pane went
+/// unannounced, and a tab looked at kept its dot, until the flood stopped. Two panes ring on a
+/// turn a millisecond inside the frame of the last present, with the strip's rate spent: the
+/// background tab's bell is announced on that turn (the lane's own record of it,
+/// `bell_reported`), and the tab on screen in a focused window has its latch spent by the look.
+///
+/// The window's place is asserted (focused, on a screen and not covered), so the background
+/// tab's reach is the marks, a pure function of the place (`notify::desktop_reach`). A covered
+/// window is not this fixture's case: its reach turns on the taskbar lane's live answer about
+/// the test machine's shell (a bar that hides itself reaches the desktop instead), and the
+/// delivery's own door is `a_flash_for_attention_goes_through_the_windows_door`'s.
+///
+/// MUTATION: move `settle_attention` and `raise_attention` back below the frame gate
+/// (`plant-77-d`) — neither bell is dealt with on the shut turn.
+#[test]
+fn a_bell_heard_on_a_shut_turn_is_announced_on_that_turn() {
+    let mut background = tab_holding(leaf_saying("背景 background\r\n"));
+    background.id = TabId(2);
+    let mut folio = HeadlessFolio::with_tabs(
+        "wake-fold-bell",
+        vec![tab_holding(leaf_saying("前台 front\r\n")), background],
+        0,
+    );
+    folio.draw();
+    let presented = folio
+        .window
+        .last_present_at
+        .expect("the fixture's draw reached the glass");
+    let inside = presented + Duration::from_millis(1);
+    // The strip looked a moment ago, so its rate is shut as well as the display frame.
+    folio.window.strip_animation_ticked_at = Some(presented);
+    let watched = folio.window.tabs[0].seats.terminals()[0];
+    let heard = folio.window.tabs[1].seats.terminals()[0];
+    ring(&mut folio.window.tabs[0], watched);
+    ring(&mut folio.window.tabs[1], heard);
+    turn(&mut folio, inside);
+    assert!(
+        !folio.window.frame_clock.admits(),
+        "the fixture's own precondition: the frame gate refused the turn"
+    );
+    let place = folio.window.observed_place;
+    assert!(
+        place.focused && place.exposed && !place.hidden,
+        "the fixture's own precondition: the window has the keyboard and is on a screen, \
+         uncovered: {place:?}"
+    );
+    assert!(
+        matches!(
+            crate::notify::desktop_reach(false, place),
+            bt_workbench::attention::Reach::Marks
+        ),
+        "the fixture's own precondition: so the background tab's bell reaches the marks"
+    );
+    let background = &folio.window.tabs[1].sessions[&heard].session;
+    assert!(
+        background.attention.bell_reported,
+        "the background tab's bell is announced on the turn it was heard"
+    );
+    assert!(
+        !folio.window.tabs[0].sessions[&watched]
+            .session
+            .session
+            .status()
+            .bell_latched(),
+        "and the bell on the tab being looked at is consumed by the look on that turn"
+    );
 }
 
 /// RED — **the session's autosave is not booked while a quit holds the storage worker.**
@@ -371,10 +477,19 @@ fn the_storage_watch_is_not_booked_while_a_quit_holds_the_storage_worker() {
 /// that wake drew nothing — `pace_skipped=7` on every present, a third of an idle window's turns.
 /// A window with nothing moving, turned inside its last present's frame, refuses nothing: no
 /// debt, no refusal counted, no `RefusedFrame` handed to the loop. Every gated advancer runs in
-/// the turn, so a new one that asks before it holds work turns this red as well.
+/// the turn — all thirteen, the tab strip with them — so a new one that asks before it holds
+/// work turns this red as well.
 ///
-/// MUTATION: ask `self.animation_frame_is_due()` at the head of `Runtime::advance_toasts` — the
-/// turn refuses once and hands the loop `RefusedFrame`.
+/// **The strip is held in by its own look** (T-STRIP-ASKS-ON-ITS-TICK, ruling R4). It looked a
+/// frame before the measured turn, so on that turn its rate is due again while the glass is still
+/// showing a present it did not ask for: the state a keystroke's present, a hover's or every
+/// turn of a pane's flood leaves it in. Behind the gate it asked there before it had looked at
+/// anything, and was refused with nothing moved. Holding it out by stamping its rate as spent
+/// would not do: a strip that has never looked has recorded nothing it drew, and owes a frame.
+///
+/// MUTATIONS: ask `self.animation_frame_is_due()` at the head of `Runtime::advance_toasts` — the
+/// turn refuses once and hands the loop `RefusedFrame`; put the strip's ask back above its look
+/// (`plant-77-a`) — the same.
 #[test]
 fn an_idle_turn_inside_the_last_frame_asks_the_gate_nothing() {
     let mut folio = HeadlessFolio::with_tabs(
@@ -383,18 +498,55 @@ fn an_idle_turn_inside_the_last_frame_asks_the_gate_nothing() {
         0,
     );
     folio.draw();
-    let presented = folio
+    let first = folio
         .window
         .last_present_at
         .expect("the fixture's draw reached the glass");
-    // A running window's present is a turn's, and that turn ticked the strip on its way to it:
-    // the strip's own rate is spent until a frame on, as it is after the caret's turn. The
-    // fixture's first paint is an expose with no turn before it, so its strip has never ticked.
-    folio.window.strip_animation_ticked_at = Some(presented);
+    let interval = folio.window.frame_clock.interval();
+    // The strip's own look, on a turn the gate admitted, well past the fades the window's birth
+    // and first paint started (a head run settling in runs for a fraction of a second from the
+    // real instant of the paint): the measured turn is about a window with nothing moving, which
+    // the precondition below asserts.
+    let look = first + Duration::from_secs(2);
+    {
+        let mut runtime = folio.runtime();
+        let before = look
+            .checked_sub(interval)
+            .expect("the process is older than two frames");
+        runtime.window.frame_clock.open(Some(before), look);
+        runtime
+            .advance_strip_animation(look)
+            .expect("the strip's look is answered");
+    }
+    assert_eq!(
+        folio.window.strip_animation_ticked_at,
+        Some(look),
+        "the fixture's own precondition: the strip looked"
+    );
+    // What the look drew reaches the glass; then the glass takes a present the strip did not ask
+    // for, a frame after its look (a keystroke's caret, a hover), held there as row 8's tests
+    // hold one. The measured turn is a millisecond into that present's frame, with the caret held
+    // lit so no blink lands on it.
+    folio.draw();
+    let presented = look + interval;
+    folio.window.last_present_at = Some(presented);
     let inside = presented + Duration::from_millis(1);
+    folio.window.cursor_blink.reset(inside, folio.app.motion);
     assert!(
-        inside < presented + folio.window.frame_clock.interval(),
+        inside < presented + interval,
         "the fixture's own precondition: the turn is inside the frame the glass is showing"
+    );
+    assert!(
+        crate::strip_animation_tick_is_due(
+            folio.window.strip_animation_ticked_at,
+            inside,
+            interval
+        ),
+        "the fixture's own precondition: the strip's rate is due again on the measured turn"
+    );
+    assert!(
+        !folio.runtime().strip_animation_work(inside).moving,
+        "the fixture's own precondition: nothing in the strip is moving"
     );
     folio.window.frame_clock.take_skipped();
     let wake = turn(&mut folio, inside);
