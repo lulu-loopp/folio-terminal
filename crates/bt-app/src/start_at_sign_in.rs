@@ -34,7 +34,7 @@
 //!
 //! **One line per finding, said once** (`BT_SIGN_IN …`, never a path): the member's
 //! `BT_SIGN_IN <found>[ repaired=<written|held|pressed|refused (<stage>)>]`, and the press's
-//! `BT_SIGN_IN press <on|off> <written|written still-off|removed|unchanged|refused>`.
+//! `BT_SIGN_IN press <on|off> <written|taken over|written still-off|removed|unchanged|refused>`.
 //!
 //! **The press's card is the sign-in switch's own** (review N2): Folio's sentences for what it
 //! refused — never another feature's, never a module's name — and the system's words for what the
@@ -454,6 +454,9 @@ pub(crate) fn run_sign_in_step(_ctx: &WorkerCtx) -> Option<MemberAnswer<SignInAn
 pub(crate) enum SignInPressDid {
     /// On wrote the entry naming this copy; Off took Folio's entry away, or found none.
     Done,
+    /// On pointed at this copy an entry that started another copy of Folio — one that is there,
+    /// or one on a volume that is away (review N9: the card says so, R8's no-consent press).
+    TookOver,
     /// On wrote the entry, and the Startup-apps value of the name could not be removed: the
     /// system's words. Windows' Startup apps still shows the entry turned off.
     WrittenStillTurnedOff(String),
@@ -538,11 +541,13 @@ pub(crate) fn press_sign_in_in(
     let outcome = match read_entry_in(registry, keys) {
         Err(refusal) => SignInPressDid::Refused(refusal_sentence(&refusal)),
         Ok(read) => {
-            let folios = !matches!(
-                sign_in_entry_owner(&read.found, this, look),
-                EntryOwner::Absent | EntryOwner::NotOurs
-            );
+            let owner = sign_in_entry_owner(&read.found, this, look);
+            let folios = !matches!(owner, EntryOwner::Absent | EntryOwner::NotOurs);
             let foreign = !folios && read.found != EntryFound::Absent;
+            let another_copys = matches!(
+                owner,
+                EntryOwner::AnotherCopy(_) | EntryOwner::OwnerUnknown(_)
+            );
             if on && foreign {
                 SignInPressDid::Refused(crate::i18n::sign_in_not_changed(
                     Text::SignInEntryNotOurs.text(),
@@ -551,6 +556,7 @@ pub(crate) fn press_sign_in_in(
                 match write_entry_in(registry, keys, this) {
                     Err(refusal) => SignInPressDid::Refused(refusal_sentence(&refusal)),
                     Ok(()) => match enable_entry_in(registry, keys) {
+                        Ok(_) if another_copys => SignInPressDid::TookOver,
                         Ok(_) => SignInPressDid::Done,
                         Err(refusal) => {
                             SignInPressDid::WrittenStillTurnedOff(refusal_words(&refusal))
@@ -575,13 +581,14 @@ pub(crate) fn press_sign_in_in(
 }
 
 impl SignInPressed {
-    /// `BT_SIGN_IN press <on|off> <written|written still-off|removed|unchanged|refused>` — no
-    /// path, no sentence.
+    /// `BT_SIGN_IN press <on|off> <written|taken over|written still-off|removed|unchanged|refused>`
+    /// — no path, no sentence.
     pub(crate) fn press_line(&self) -> String {
         let asked = if self.on { "on" } else { "off" };
         let did = match (&self.outcome, self.answer.map(|answer| answer.row)) {
             (SignInPressDid::Refused(_), _) => "refused",
             (SignInPressDid::WrittenStillTurnedOff(_), _) => "written still-off",
+            (SignInPressDid::TookOver, _) => "taken over",
             (SignInPressDid::Done, Some(SignInRow::On)) if self.on => "written",
             (SignInPressDid::Done, Some(SignInRow::Off)) if !self.on => "removed",
             (SignInPressDid::Done, _) => "unchanged",
@@ -595,6 +602,7 @@ impl SignInPressed {
         match &self.outcome {
             SignInPressDid::Done if self.on => (true, Text::SignInOnToast.text().to_owned()),
             SignInPressDid::Done => (true, Text::SignInOffToast.text().to_owned()),
+            SignInPressDid::TookOver => (true, Text::SignInTookOverToast.text().to_owned()),
             SignInPressDid::WrittenStillTurnedOff(words) => {
                 (false, crate::i18n::sign_in_still_turned_off(words))
             }

@@ -750,6 +750,8 @@ text_entries! {
     SignInOnToast,
     /// And when its Off has taken the entry away.
     SignInOffToast,
+    /// And when its On pointed another copy's entry at this copy (review N9).
+    SignInTookOverToast,
     /// Why On wrote nothing: this copy's path is longer than a `Run` value runs.
     SignInPathTooLong,
     /// Why On wrote nothing: another program's startup entry has the name.
@@ -3958,6 +3960,12 @@ impl Text {
                 "Folio no longer starts at sign-in.",
                 "Folio no longer starts at sign-in.", // zh: pending T-START-AT-LOGON-SWITCH
             ),
+            Self::SignInTookOverToast => pick(
+                lang,
+                "Folio now starts this copy at sign-in instead of the copy in another folder.",
+                // zh: pending T-START-AT-LOGON-SWITCH
+                "Folio now starts this copy at sign-in instead of the copy in another folder.",
+            ),
             Self::SignInPathTooLong => pick(
                 lang,
                 "the path to folio.exe is longer than a startup entry holds",
@@ -6913,6 +6921,7 @@ impl Text {
         Self::DescStartAtSignInNotOurs,
         Self::SignInOnToast,
         Self::SignInOffToast,
+        Self::SignInTookOverToast,
         Self::SignInPathTooLong,
         Self::SignInEntryNotOurs,
         Self::SignInProgramNotStartable,
@@ -6992,6 +7001,8 @@ impl Text {
         (Self::SignInOnToast, HostPlatform::MacOs),
         (Self::SignInOffToast, HostPlatform::Windows),
         (Self::SignInOffToast, HostPlatform::MacOs),
+        (Self::SignInTookOverToast, HostPlatform::Windows),
+        (Self::SignInTookOverToast, HostPlatform::MacOs),
         (Self::SignInPathTooLong, HostPlatform::Windows),
         (Self::SignInPathTooLong, HostPlatform::MacOs),
         (Self::SignInEntryNotOurs, HostPlatform::Windows),

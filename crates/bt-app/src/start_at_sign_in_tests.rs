@@ -848,6 +848,56 @@ fn an_entry_turned_off_in_startup_apps_reads_off_and_on_turns_it_back_on() {
     );
 }
 
+/// RED (T-START-AT-LOGON-SWITCH, R8, review N9) — **On over another copy's entry says it took it
+/// over**: the entry of another copy that is there, or of one on a volume that is away, is pointed
+/// at this copy without asking (R8), and the card states that this copy now starts at sign-in
+/// instead of the other; over this copy's own entry, or none, the card is the plain one.
+#[test]
+fn a_press_over_another_copys_entry_says_it_took_it_over() {
+    let copies = sign_in_copies("sign-in-took-over");
+    let away = copies.gone.with_file_name("away").join("folio.exe");
+    let press_over = |program: &Path, look: &dyn Look| {
+        let mut registry = SignInFake::default();
+        let (kind, data) = entry_of(program);
+        registry.put_value(SIGN_IN_TEST_KEYS.run, ENTRY_NAME, kind, data);
+        let presses = SignInPresses::new();
+        presses.note_sign_in_press(true);
+        let on = press_sign_in_in(
+            &mut registry,
+            SIGN_IN_TEST_KEYS,
+            Ok(&copies.this),
+            look,
+            &presses,
+            &Mutex::new(()),
+        );
+        assert_eq!(
+            registry.sign_in_entry_value(),
+            Some(&entry_of(&copies.this)),
+            "the entry names this copy"
+        );
+        on
+    };
+    for (what, program, look) in [
+        ("another copy that is there", &copies.other, &what_stands as &dyn Look),
+        ("a copy on a volume that is away", &away, &SignInAwayVolume),
+    ] {
+        let on = press_over(program, look);
+        assert_eq!(on.outcome, SignInPressDid::TookOver, "{what}");
+        assert_eq!(on.press_line(), "BT_SIGN_IN press on taken over", "{what}");
+        assert_eq!(
+            on.press_card(),
+            (true, Text::SignInTookOverToast.text().to_owned()),
+            "{what}"
+        );
+    }
+    let own = press_over(&copies.this, &what_stands);
+    assert_eq!(own.outcome, SignInPressDid::Done);
+    assert_eq!(
+        own.press_card(),
+        (true, Text::SignInOnToast.text().to_owned())
+    );
+}
+
 /// RED (T-START-AT-LOGON-SWITCH, R10) — **while this copy's entry is on, the restart registration
 /// leaves the reboot's restart to it**, and keeps the ruled flags in every other state.
 ///
