@@ -1219,6 +1219,63 @@ fn an_off_whose_startup_apps_value_stays_says_it_removed_the_entry() {
     assert_eq!(off.press_line(), "BT_SIGN_IN press off refused");
 }
 
+/// RED (T-START-AT-LOGON-SWITCH, focused re-review F4) — **On over another copy's entry that
+/// Startup apps had turned off says the plain sentence**: that entry started no copy, so the card
+/// is "Folio starts at sign-in." and the line `written`, not the takeover's; the entry names this
+/// copy and its Startup-apps value is gone.
+///
+/// MUTATION (`plant-22a-f4.py`): the takeover is chosen whatever Startup apps said.
+#[test]
+fn a_takeover_of_an_entry_turned_off_in_startup_apps_says_the_plain_sentence() {
+    let copies = sign_in_copies("sign-in-took-over-off");
+    let away = copies.gone.with_file_name("away").join("folio.exe");
+    for (what, program, look) in [
+        (
+            "another copy that is there",
+            &copies.other,
+            &what_stands as &dyn Look,
+        ),
+        ("a copy on a volume that is away", &away, &SignInAwayVolume),
+    ] {
+        let mut registry = SignInFake::default();
+        let (kind, data) = entry_of(program);
+        registry.put_value(SIGN_IN_TEST_KEYS.run, ENTRY_NAME, kind, data);
+        registry.put_value(
+            SIGN_IN_TEST_KEYS.approved,
+            ENTRY_NAME,
+            REG_BINARY,
+            vec![3, 0, 0, 0],
+        );
+        let presses = SignInPresses::new();
+        presses.note_sign_in_press(true);
+        let on = press_sign_in_in(
+            &mut registry,
+            SIGN_IN_TEST_KEYS,
+            Ok(&copies.this),
+            look,
+            &presses,
+            &Mutex::new(()),
+        );
+        assert_eq!(on.outcome, SignInPressDid::Done, "{what}");
+        assert_eq!(on.press_line(), "BT_SIGN_IN press on written", "{what}");
+        assert_eq!(
+            on.press_card(),
+            (true, Text::SignInOnToast.text().to_owned()),
+            "{what}"
+        );
+        assert_eq!(
+            registry.sign_in_entry_value(),
+            Some(&entry_of(&copies.this)),
+            "{what}"
+        );
+        assert_eq!(
+            registry.value_under(SIGN_IN_TEST_KEYS.approved, ENTRY_NAME),
+            None,
+            "{what}"
+        );
+    }
+}
+
 /// RED (T-START-AT-LOGON-SWITCH, R10) — **while this copy's entry is on, the restart registration
 /// leaves the reboot's restart to it**, and keeps the ruled flags in every other state.
 ///

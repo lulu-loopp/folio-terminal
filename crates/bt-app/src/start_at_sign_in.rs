@@ -501,7 +501,9 @@ pub(crate) enum SignInPressDid {
     /// On wrote the entry naming this copy; Off took Folio's entry away, or found none.
     Done,
     /// On pointed at this copy an entry that started another copy of Folio — one that is there,
-    /// or one on a volume that is away (review N9: the card says so, R8's no-consent press).
+    /// or one on a volume that is away — and that Startup apps did not have off (review N9: the
+    /// card says so, R8's no-consent press; focused re-review F4: an entry turned off started no
+    /// copy, and taking it is [`SignInPressDid::Done`]).
     TookOver,
     /// On wrote the entry over one Startup apps had turned off, and the Startup-apps value of the
     /// name could not be removed: the system's words. Windows' Startup apps still shows the entry
@@ -562,7 +564,8 @@ fn sign_in_refusal_sentence(refusal: &EntryRefusal) -> String {
 /// points the entry at this copy — over any Folio's entry, another live copy's too (R8: the press
 /// is the account's) — reads it back, and takes the system's switch off the name (R9). A switch
 /// that had the entry off and would not come off is said, the entry being written; one that did
-/// not say off is no change to say (focused re-review F3).
+/// not say off is no change to say (focused re-review F3). Taking over another copy's entry is
+/// said only when that entry was not turned off — one turned off started no copy (F4).
 ///
 /// A program the press cannot name as one an entry may start (`this` refused) changes nothing, in
 /// the switch's own sentence.
@@ -606,10 +609,11 @@ pub(crate) fn press_sign_in_in(
             let owner = sign_in_entry_owner(&read.found, this, look);
             let folios = !matches!(owner, EntryOwner::Absent | EntryOwner::NotOurs);
             let foreign = !folios && read.found != EntryFound::Absent;
-            let another_copys = matches!(
-                owner,
-                EntryOwner::AnotherCopy(_) | EntryOwner::OwnerUnknown(_)
-            );
+            let took_over = !read.turned_off
+                && matches!(
+                    owner,
+                    EntryOwner::AnotherCopy(_) | EntryOwner::OwnerUnknown(_)
+                );
             if on && foreign {
                 SignInPressDid::Refused(crate::i18n::sign_in_not_changed(
                     Text::SignInEntryNotOurs.text(),
@@ -621,7 +625,7 @@ pub(crate) fn press_sign_in_in(
                         Err(refusal) if read.turned_off => {
                             SignInPressDid::WrittenStillTurnedOff(sign_in_refusal_words(&refusal))
                         }
-                        _ if another_copys => SignInPressDid::TookOver,
+                        _ if took_over => SignInPressDid::TookOver,
                         _ => SignInPressDid::Done,
                     },
                 }
