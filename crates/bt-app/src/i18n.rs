@@ -754,6 +754,12 @@ text_entries! {
     SignInPathTooLong,
     /// Why On wrote nothing: another program's startup entry has the name.
     SignInEntryNotOurs,
+    /// Why a press changed nothing: this copy's program is not one an entry may start — a path
+    /// the system would not name, or one macOS has put in quarantine (review N2: the switch's own
+    /// sentence, never the hooks').
+    SignInProgramNotStartable,
+    /// What a write said when the entry read back is not the one written.
+    SignInReadBackDiffers,
 
     // ── the first page of Windows 11's menu (§7.4a) ────────────────────────
     /// **What Explorer draws on the first page**, asked for per call by
@@ -3963,6 +3969,17 @@ impl Text {
                 "another program's startup entry is named Folio",
                 "another program's startup entry is named Folio", // zh: pending T-START-AT-LOGON-SWITCH
             ),
+            Self::SignInProgramNotStartable => pick(
+                lang,
+                "this copy of Folio is not in a place that can be started at sign-in",
+                // zh: pending T-START-AT-LOGON-SWITCH
+                "this copy of Folio is not in a place that can be started at sign-in",
+            ),
+            Self::SignInReadBackDiffers => pick(
+                lang,
+                "the entry read back is not the one written",
+                "the entry read back is not the one written", // zh: pending T-START-AT-LOGON-SWITCH
+            ),
 
             // ── the first page of Windows 11's menu (§7.4a) ────────────────
             //
@@ -6898,6 +6915,8 @@ impl Text {
         Self::SignInOffToast,
         Self::SignInPathTooLong,
         Self::SignInEntryNotOurs,
+        Self::SignInProgramNotStartable,
+        Self::SignInReadBackDiffers,
         Self::ExplorerFirstPageAddedToast,
         Self::ExplorerFirstPageAddedRestartToast,
         Self::ExplorerFirstPageUnreadable,
@@ -6957,8 +6976,8 @@ impl Text {
         (Self::CleanupUpdateHomeInUse, HostPlatform::Windows),
         (Self::CleanupUpdateHomeInUse, HostPlatform::MacOs),
         // zh: pending T-START-AT-LOGON-SWITCH — the sign-in switch's title, its four lines, its
-        // two cards and its two refusals (0.4.10 plan row 22a, R13; the title's draft is 登录时启动);
-        // row 70's Chinese pass takes them.
+        // cards and its refusals, and the uninstall's unchecked line (0.4.10 plan row 22a, R13 and
+        // the review's N2, N3; the title's draft is 登录时启动); a later Chinese pass takes them.
         (Self::RowStartAtSignIn, HostPlatform::Windows),
         (Self::RowStartAtSignIn, HostPlatform::MacOs),
         (Self::DescStartAtSignIn, HostPlatform::Windows),
@@ -6977,6 +6996,10 @@ impl Text {
         (Self::SignInPathTooLong, HostPlatform::MacOs),
         (Self::SignInEntryNotOurs, HostPlatform::Windows),
         (Self::SignInEntryNotOurs, HostPlatform::MacOs),
+        (Self::SignInProgramNotStartable, HostPlatform::Windows),
+        (Self::SignInProgramNotStartable, HostPlatform::MacOs),
+        (Self::SignInReadBackDiffers, HostPlatform::Windows),
+        (Self::SignInReadBackDiffers, HostPlatform::MacOs),
         (Self::CleanupSignInUnchecked, HostPlatform::Windows),
         (Self::CleanupSignInUnchecked, HostPlatform::MacOs),
     ];
@@ -7416,6 +7439,40 @@ pub fn sign_in_not_changed(reason: &str) -> String {
         Lang::English => format!("Not changed: {reason}"),
         // zh: pending T-START-AT-LOGON-SWITCH
         Lang::Chinese => format!("Not changed: {reason}"),
+    }
+}
+
+/// **The card raised when the registry refused a step of the sign-in switch's press** (0.4.10
+/// plan row 22a, review N2): the step the entry could not take, and the system's words — never
+/// the door's module name.
+#[must_use]
+pub fn sign_in_entry_failed(stage: bt_platform::sign_in_entry::EntryStage, words: &str) -> String {
+    use bt_platform::sign_in_entry::EntryStage;
+    let english = match stage {
+        EntryStage::Read => "Could not read the startup entry",
+        EntryStage::Write | EntryStage::ReadBack => "Could not write the startup entry",
+        EntryStage::Remove => "Could not remove the startup entry",
+    };
+    match current() {
+        Lang::English => format!("{english}: {words}"),
+        // zh: pending T-START-AT-LOGON-SWITCH
+        Lang::Chinese => format!("{english}: {words}"),
+    }
+}
+
+/// **The card raised when the sign-in switch's On wrote the entry and the Startup-apps value of
+/// its name could not be removed** (0.4.10 plan row 22a, review N2): a fact, with the system's
+/// words — the entry is there, and Windows' Startup apps still shows it turned off.
+#[must_use]
+pub fn sign_in_still_turned_off(words: &str) -> String {
+    match current() {
+        Lang::English => format!(
+            "Folio's startup entry is written, but Startup apps still shows it turned off: {words}"
+        ),
+        // zh: pending T-START-AT-LOGON-SWITCH
+        Lang::Chinese => format!(
+            "Folio's startup entry is written, but Startup apps still shows it turned off: {words}"
+        ),
     }
 }
 

@@ -28,7 +28,14 @@ struct SignInFake {
     values: BTreeMap<(String, String), (u32, Vec<u8>)>,
     read: Vec<String>,
     written: Vec<String>,
+    /// Every write refused, in the system's words (review N2).
+    refuse_set: bool,
+    /// Every removal under this key refused (review N2).
+    refuse_delete_under: Option<&'static str>,
 }
+
+/// The system's words a refusing fake answers with.
+const SIGN_IN_DENIED: &str = "access is denied";
 
 impl SignInFake {
     fn put_value(&mut self, key: &str, name: &str, kind: u32, data: Vec<u8>) {
@@ -52,6 +59,9 @@ impl Registry for SignInFake {
             key == SIGN_IN_TEST_KEYS.run || key == SIGN_IN_TEST_KEYS.approved,
             "only the suite's keys"
         );
+        if self.refuse_set {
+            return Err(io::Error::other(SIGN_IN_DENIED));
+        }
         self.written.push(format!("{key}|{name}"));
         self.put_value(key, name, kind, data.to_vec());
         Ok(())
@@ -71,6 +81,9 @@ impl Registry for SignInFake {
     }
 
     fn delete(&mut self, key: &str, name: &str) -> io::Result<bool> {
+        if self.refuse_delete_under == Some(key) {
+            return Err(io::Error::other(SIGN_IN_DENIED));
+        }
         self.written.push(format!("{key}|{name}"));
         Ok(self
             .values
@@ -224,7 +237,7 @@ fn the_switch_writes_the_entry_and_off_removes_it() {
     let before = others(&registry);
 
     let on = pressed(&mut registry, &copies.this, true);
-    assert_eq!(on.outcome, Ok(()));
+    assert_eq!(on.outcome, SignInPressDid::Done);
     assert_eq!(on.answer.map(|answer| answer.row), Some(SignInRow::On));
     assert_eq!(on.press_line(), "BT_SIGN_IN press on written");
     assert_eq!(
@@ -239,7 +252,7 @@ fn the_switch_writes_the_entry_and_off_removes_it() {
     assert_eq!(others(&registry), before);
 
     let off = pressed(&mut registry, &copies.this, false);
-    assert_eq!(off.outcome, Ok(()));
+    assert_eq!(off.outcome, SignInPressDid::Done);
     assert_eq!(off.answer.map(|answer| answer.row), Some(SignInRow::Off));
     assert_eq!(off.press_line(), "BT_SIGN_IN press off removed");
     assert_eq!(
@@ -253,6 +266,97 @@ fn the_switch_writes_the_entry_and_off_removes_it() {
         (true, Text::SignInOffToast.text().to_owned()),
         "the press is answered with its card"
     );
+}
+
+/// RED (T-START-AT-LOGON-SWITCH, review N2) — **the press's card is the sign-in switch's own**: a
+/// program the press cannot name changes nothing in the switch's sentence, never the hooks'; a
+/// step the registry refused is the step the entry could not take, in the system's words and
+/// without the door's module name; and an On whose entry is written while its Startup-apps value
+/// would not come off says that fact — not "Not changed".
+#[test]
+fn the_press_card_says_the_sign_in_switchs_own_sentences() {
+    let copies = sign_in_copies("sign-in-cards");
+    let presses = SignInPresses::new();
+    presses.note_sign_in_press(true);
+    let mut registry = SignInFake::default();
+    let unnamed = press_sign_in_in(
+        &mut registry,
+        SIGN_IN_TEST_KEYS,
+        Err(Text::AgentHooksExeUnknown.text()),
+        &what_stands,
+        &presses,
+        &Mutex::new(()),
+    );
+    let (done, card) = unnamed.press_card();
+    assert!(!done);
+    assert_eq!(
+        card,
+        crate::i18n::sign_in_not_changed(Text::SignInProgramNotStartable.text())
+    );
+    assert!(registry.read.is_empty() && registry.written.is_empty());
+
+    let mut registry = SignInFake {
+        refuse_set: true,
+        ..SignInFake::default()
+    };
+    let refused = pressed(&mut registry, &copies.this, true);
+    let (done, card) = refused.press_card();
+    assert!(!done);
+    assert_eq!(
+        card,
+        crate::i18n::sign_in_entry_failed(
+            bt_platform::sign_in_entry::EntryStage::Write,
+            SIGN_IN_DENIED
+        )
+    );
+    assert!(!card.contains("sign_in_entry"), "{card}");
+    assert_eq!(refused.press_line(), "BT_SIGN_IN press on refused");
+
+    let mut registry = SignInFake {
+        refuse_delete_under: Some(SIGN_IN_TEST_KEYS.run),
+        ..SignInFake::default()
+    };
+    let (kind, data) = entry_of(&copies.this);
+    registry.put_value(SIGN_IN_TEST_KEYS.run, ENTRY_NAME, kind, data);
+    let (done, card) = pressed(&mut registry, &copies.this, false).press_card();
+    assert!(!done);
+    assert_eq!(
+        card,
+        crate::i18n::sign_in_entry_failed(
+            bt_platform::sign_in_entry::EntryStage::Remove,
+            SIGN_IN_DENIED
+        )
+    );
+
+    let mut registry = SignInFake {
+        refuse_delete_under: Some(SIGN_IN_TEST_KEYS.approved),
+        ..SignInFake::default()
+    };
+    registry.put_value(
+        SIGN_IN_TEST_KEYS.approved,
+        ENTRY_NAME,
+        REG_BINARY,
+        vec![3, 0, 0, 0],
+    );
+    let on = pressed(&mut registry, &copies.this, true);
+    assert_eq!(
+        on.outcome,
+        SignInPressDid::WrittenStillTurnedOff(SIGN_IN_DENIED.to_owned())
+    );
+    assert_eq!(
+        registry.sign_in_entry_value(),
+        Some(&entry_of(&copies.this)),
+        "the entry is written"
+    );
+    assert_eq!(
+        on.answer.map(|answer| answer.row),
+        Some(SignInRow::TurnedOffBySystem)
+    );
+    assert_eq!(on.press_line(), "BT_SIGN_IN press on written still-off");
+    let (done, card) = on.press_card();
+    assert!(!done);
+    assert_eq!(card, crate::i18n::sign_in_still_turned_off(SIGN_IN_DENIED));
+    assert!(!card.starts_with("Not changed"), "{card}");
 }
 
 /// RED (T-START-AT-LOGON-SWITCH, R5, R7) — **off by default: an account that never pressed the
@@ -328,7 +432,9 @@ fn the_entry_names_the_running_copy() {
     let refused = pressed(&mut registry, &long, true);
     assert_eq!(
         refused.outcome,
-        Err(Text::SignInPathTooLong.text().to_owned())
+        SignInPressDid::Refused(crate::i18n::sign_in_not_changed(
+            Text::SignInPathTooLong.text()
+        ))
     );
     assert_eq!(refused.press_line(), "BT_SIGN_IN press on refused");
     assert!(registry.written.is_empty(), "nothing written");
@@ -528,11 +634,13 @@ fn no_other_value_of_the_run_key_is_read_or_touched() {
         let on = pressed(&mut registry, &copies.this, true);
         assert_eq!(
             on.outcome,
-            Err(Text::SignInEntryNotOurs.text().to_owned()),
+            SignInPressDid::Refused(crate::i18n::sign_in_not_changed(
+                Text::SignInEntryNotOurs.text()
+            )),
             "{what}"
         );
         let off = pressed(&mut registry, &copies.this, false);
-        assert_eq!(off.outcome, Ok(()), "{what}");
+        assert_eq!(off.outcome, SignInPressDid::Done, "{what}");
         assert_eq!(
             uninstall_sign_in_in(&mut registry, SIGN_IN_TEST_KEYS, &copies.this, &what_stands),
             SignInRemoval::LeftNotOurs,

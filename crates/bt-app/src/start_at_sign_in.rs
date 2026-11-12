@@ -34,7 +34,12 @@
 //!
 //! **One line per finding, said once** (`BT_SIGN_IN …`, never a path): the member's
 //! `BT_SIGN_IN <found>[ repaired=<written|held|pressed|refused (<stage>)>]`, and the press's
-//! `BT_SIGN_IN press <on|off> <written|removed|unchanged|refused (<stage>)>`.
+//! `BT_SIGN_IN press <on|off> <written|written still-off|removed|unchanged|refused>`.
+//!
+//! **The press's card is the sign-in switch's own** (review N2): Folio's sentences for what it
+//! refused — never another feature's, never a module's name — and the system's words for what the
+//! registry refused; an entry written whose Startup-apps value could not be cleared is said as that
+//! fact, not as a change that did not happen.
 //!
 //! **While this copy's entry is on, the restart registration leaves sign-in to it** (R10): Windows'
 //! restart after an update's reboot or at a sign-in with "Restart apps" on would otherwise start a
@@ -444,23 +449,54 @@ pub(crate) fn run_sign_in_step(_ctx: &WorkerCtx) -> Option<MemberAnswer<SignInAn
     ))
 }
 
+/// **What a press did**, as its card and its line say it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SignInPressDid {
+    /// On wrote the entry naming this copy; Off took Folio's entry away, or found none.
+    Done,
+    /// On wrote the entry, and the Startup-apps value of the name could not be removed: the
+    /// system's words. Windows' Startup apps still shows the entry turned off.
+    WrittenStillTurnedOff(String),
+    /// Nothing was changed: the card's whole sentence.
+    Refused(String),
+}
+
 /// **A press's answer**: what it was asked (the last press's wish when its worker took the latch),
-/// whether it did it or the sentence it refused with, the row after it, and how many presses had
-/// landed when it took the latch.
+/// what it did, the row after it, and how many presses had landed when it took the latch.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct SignInPressed {
     pub(crate) on: bool,
-    pub(crate) outcome: Result<(), String>,
+    pub(crate) outcome: SignInPressDid,
     /// `None` when the entry was not read: the row keeps what it said.
     pub(crate) answer: Option<SignInAnswer>,
     pub(crate) presses_seen: u64,
 }
 
-/// A refusal of the door's, as the press's card says it.
-fn refusal_reason(refusal: &EntryRefusal) -> String {
+/// What a refusal of the door's says without the door's name: the system's own words for a step
+/// the registry refused, Folio's for the other two.
+fn refusal_words(refusal: &EntryRefusal) -> String {
     match refusal {
         EntryRefusal::TooLong { .. } => Text::SignInPathTooLong.text().to_owned(),
-        EntryRefusal::Failed { .. } | EntryRefusal::ReadBackDiffers => refusal.to_string(),
+        EntryRefusal::Failed { error, .. } => error.to_string(),
+        EntryRefusal::ReadBackDiffers => Text::SignInReadBackDiffers.text().to_owned(),
+    }
+}
+
+/// **A refusal of the door's, as the press's card says it** (review N2): a path too long changed
+/// nothing; a step the registry refused, or a read-back that differs, is the step the entry could
+/// not take, in the system's words.
+fn refusal_sentence(refusal: &EntryRefusal) -> String {
+    match refusal {
+        EntryRefusal::TooLong { .. } => {
+            crate::i18n::sign_in_not_changed(Text::SignInPathTooLong.text())
+        }
+        EntryRefusal::Failed { stage, .. } => {
+            crate::i18n::sign_in_entry_failed(*stage, &refusal_words(refusal))
+        }
+        EntryRefusal::ReadBackDiffers => crate::i18n::sign_in_entry_failed(
+            bt_platform::sign_in_entry::EntryStage::ReadBack,
+            &refusal_words(refusal),
+        ),
     }
 }
 
@@ -470,7 +506,9 @@ fn refusal_reason(refusal: &EntryRefusal) -> String {
 /// burst of presses ends where the last one asked. **On** refuses over another program's value under
 /// the name and writes nothing; otherwise it points the entry at this copy — over any Folio's entry,
 /// another live copy's too (R8: the press is the account's) — reads it back, and takes the system's
-/// switch off the name (R9). **Off** removes the entry when it is Folio's, whichever copy it names,
+/// switch off the name (R9); a switch that would not come off is said, the entry being written.
+/// A program the press cannot name as one an entry may start (`this` refused) changes nothing, in
+/// the switch's own sentence. **Off** removes the entry when it is Folio's, whichever copy it names,
 /// with the system's switch of the name; another program's value is left. Not held during an
 /// update's trial: it is a person's, as the hooks' presses are. The row comes off a reading after.
 pub(crate) fn press_sign_in_in(
@@ -484,7 +522,7 @@ pub(crate) fn press_sign_in_in(
     let _latch = writes.lock().unwrap_or_else(PoisonError::into_inner);
     let seen = presses.sign_in_presses_counted();
     let on = presses.sign_in_wish();
-    let pressed = |outcome: Result<(), String>, answer: Option<SignInAnswer>| SignInPressed {
+    let pressed = |outcome: SignInPressDid, answer: Option<SignInAnswer>| SignInPressed {
         on,
         outcome,
         answer,
@@ -492,10 +530,13 @@ pub(crate) fn press_sign_in_in(
     };
     let this = match this {
         Ok(this) => this,
-        Err(reason) => return pressed(Err(reason.to_owned()), None),
+        Err(_) => {
+            let sentence = crate::i18n::sign_in_not_changed(Text::SignInProgramNotStartable.text());
+            return pressed(SignInPressDid::Refused(sentence), None);
+        }
     };
     let outcome = match read_entry_in(registry, keys) {
-        Err(refusal) => Err(refusal_reason(&refusal)),
+        Err(refusal) => SignInPressDid::Refused(refusal_sentence(&refusal)),
         Ok(read) => {
             let folios = !matches!(
                 sign_in_entry_owner(&read.found, this, look),
@@ -503,17 +544,26 @@ pub(crate) fn press_sign_in_in(
             );
             let foreign = !folios && read.found != EntryFound::Absent;
             if on && foreign {
-                Err(Text::SignInEntryNotOurs.text().to_owned())
+                SignInPressDid::Refused(crate::i18n::sign_in_not_changed(
+                    Text::SignInEntryNotOurs.text(),
+                ))
             } else if on {
-                write_entry_in(registry, keys, this)
-                    .and_then(|()| enable_entry_in(registry, keys).map(|_| ()))
-                    .map_err(|refusal| refusal_reason(&refusal))
+                match write_entry_in(registry, keys, this) {
+                    Err(refusal) => SignInPressDid::Refused(refusal_sentence(&refusal)),
+                    Ok(()) => match enable_entry_in(registry, keys) {
+                        Ok(_) => SignInPressDid::Done,
+                        Err(refusal) => {
+                            SignInPressDid::WrittenStillTurnedOff(refusal_words(&refusal))
+                        }
+                    },
+                }
             } else if folios {
-                remove_entry_in(registry, keys)
-                    .map(|_| ())
-                    .map_err(|refusal| refusal_reason(&refusal))
+                match remove_entry_in(registry, keys) {
+                    Ok(_) => SignInPressDid::Done,
+                    Err(refusal) => SignInPressDid::Refused(refusal_sentence(&refusal)),
+                }
             } else {
-                Ok(())
+                SignInPressDid::Done
             }
         }
     };
@@ -525,24 +575,30 @@ pub(crate) fn press_sign_in_in(
 }
 
 impl SignInPressed {
-    /// `BT_SIGN_IN press <on|off> <written|removed|unchanged|refused>` — no path, no sentence.
+    /// `BT_SIGN_IN press <on|off> <written|written still-off|removed|unchanged|refused>` — no
+    /// path, no sentence.
     pub(crate) fn press_line(&self) -> String {
         let asked = if self.on { "on" } else { "off" };
         let did = match (&self.outcome, self.answer.map(|answer| answer.row)) {
-            (Err(_), _) => "refused",
-            (Ok(()), Some(SignInRow::On)) if self.on => "written",
-            (Ok(()), Some(SignInRow::Off)) if !self.on => "removed",
-            (Ok(()), _) => "unchanged",
+            (SignInPressDid::Refused(_), _) => "refused",
+            (SignInPressDid::WrittenStillTurnedOff(_), _) => "written still-off",
+            (SignInPressDid::Done, Some(SignInRow::On)) if self.on => "written",
+            (SignInPressDid::Done, Some(SignInRow::Off)) if !self.on => "removed",
+            (SignInPressDid::Done, _) => "unchanged",
         };
         format!("BT_SIGN_IN press {asked} {did}")
     }
 
-    /// The card the press is answered with: a short line, or the refusal's sentence.
+    /// The card the press is answered with, and whether it is a success: a short line, the
+    /// written entry that Startup apps still has off, or the refusal's sentence.
     pub(crate) fn press_card(&self) -> (bool, String) {
         match &self.outcome {
-            Ok(()) if self.on => (true, Text::SignInOnToast.text().to_owned()),
-            Ok(()) => (true, Text::SignInOffToast.text().to_owned()),
-            Err(reason) => (false, crate::i18n::sign_in_not_changed(reason)),
+            SignInPressDid::Done if self.on => (true, Text::SignInOnToast.text().to_owned()),
+            SignInPressDid::Done => (true, Text::SignInOffToast.text().to_owned()),
+            SignInPressDid::WrittenStillTurnedOff(words) => {
+                (false, crate::i18n::sign_in_still_turned_off(words))
+            }
+            SignInPressDid::Refused(sentence) => (false, sentence.clone()),
         }
     }
 }
@@ -602,9 +658,11 @@ pub(crate) fn begin_sign_in_press(on: bool) {
             move |end: &crate::lane::WorkerEnd| {
                 publish_sign_in_press(SignInPressed {
                     on,
-                    outcome: Err(crate::i18n::unfinished_change(end.started())
-                        .text()
-                        .to_owned()),
+                    outcome: SignInPressDid::Refused(
+                        crate::i18n::unfinished_change(end.started())
+                            .text()
+                            .to_owned(),
+                    ),
                     answer: None,
                     presses_seen: SIGN_IN_PRESSES.sign_in_presses_counted(),
                 });
