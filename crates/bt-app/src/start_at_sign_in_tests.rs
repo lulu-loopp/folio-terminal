@@ -802,6 +802,65 @@ fn a_sign_in_answer_older_than_a_press_is_not_adopted() {
     assert_eq!(row, SignInRow::On);
 }
 
+/// RED (T-START-AT-LOGON-SWITCH, R6, review N1) — **a member's reading taken while a press is
+/// counted but not yet answered is not adopted**: the press is counted on the window thread and
+/// written on its worker, so a member that reads in between describes the machine before the
+/// press; its answer carries the presses answered when it read, and the window drops it whichever
+/// of the two lands last. A reading taken after the press's worker answered is adopted.
+///
+/// MUTATION (`plant-22-member-answer-carries-the-noted-count.py`): the member's answer carries the
+/// presses counted, and the stale reading is taken over the press's answer.
+#[test]
+fn a_member_reading_taken_before_a_press_was_answered_is_not_adopted() {
+    let copies = sign_in_copies("sign-in-unanswered");
+    let mut registry = SignInFake::default();
+    let (kind, data) = entry_of(&copies.this);
+    registry.put_value(SIGN_IN_TEST_KEYS.run, ENTRY_NAME, kind, data);
+    let presses = SignInPresses::new();
+    let writes = Mutex::new(());
+    let carried = |registry: &mut SignInFake| {
+        carry_sign_in_in(
+            registry,
+            SIGN_IN_TEST_KEYS,
+            &copies.this,
+            &what_stands,
+            sign_in_gate_never_asked,
+            &presses,
+            &writes,
+        )
+    };
+
+    // Off is pressed; the member reads before the press's worker has run.
+    presses.note_sign_in_press(false);
+    let stale = carried(&mut registry);
+    assert_eq!(stale.answer.row, SignInRow::On, "read before the removal");
+    let off = press_sign_in_in(
+        &mut registry,
+        SIGN_IN_TEST_KEYS,
+        Ok(&copies.this),
+        &what_stands,
+        &presses,
+        &writes,
+    );
+    assert_eq!(registry.sign_in_entry_value(), None, "the press removed it");
+
+    // The press's answer lands first, then the stale reading: the row stays Off.
+    let mut row = SignInRow::Unknown;
+    assert!(adopt_sign_in_answer(&mut row, off.answer.unwrap(), &presses));
+    assert_eq!(row, SignInRow::Off);
+    assert!(
+        !adopt_sign_in_answer(&mut row, stale.answer, &presses),
+        "a reading taken before the press was answered is older than the press"
+    );
+    assert_eq!(row, SignInRow::Off);
+
+    // A reading taken after the press answered is the machine's word.
+    let fresh = carried(&mut registry);
+    let mut row = SignInRow::Unknown;
+    assert!(adopt_sign_in_answer(&mut row, fresh.answer, &presses));
+    assert_eq!(row, SignInRow::Off);
+}
+
 /// RED (T-START-AT-LOGON-SWITCH, R9) — **an entry turned off in Startup apps reads so, and the
 /// member writes nothing over it** (the person's choice); a press On takes the system's switch off
 /// the entry's name and leaves the switch of every other name.

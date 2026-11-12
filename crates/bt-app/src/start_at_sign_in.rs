@@ -30,7 +30,9 @@
 //! trial ([`Writer::StartAtSignIn`], released by the commit's round), never over the system's own
 //! switch turned off ([`SignInFound::TurnedOffBySystem`]: the person's choice in Task Manager), and
 //! never over a press (R6): the press takes the entry's one latch on its worker and the member only
-//! tries it, and an answer read before the last press is not adopted ([`adopt_sign_in_answer`]).
+//! tries it, and an answer read before the last press was answered is not adopted
+//! ([`adopt_sign_in_answer`]; review N1: a press is counted on the window thread and written on its
+//! worker, so the member's answer carries the presses *answered* when it read).
 //!
 //! **One line per finding, said once** (`BT_SIGN_IN …`, never a path): the member's
 //! `BT_SIGN_IN <found>[ repaired=<written|held|pressed|refused (<stage>)>]`, and the press's
@@ -251,12 +253,17 @@ fn row_now(
 
 /// **The presses of the switch, as the member asks about them** (R6, the classic verb's
 /// `ClassicPresses` shape): the press records its wish and counts itself on the window thread
-/// before its worker starts; the member writes only if no press landed since its read, and an
-/// answer read before the last press is not adopted. The wish is stored before the count moves,
-/// so whoever sees the count move reads that press's wish.
+/// before its worker starts; the member writes only if no press landed since its read. The wish is
+/// stored before the count moves, so whoever sees the count move reads that press's wish.
+///
+/// **And the presses answered** (review N1): the press's worker records the count it acted on,
+/// under the entry's latch, after its read-back — or the press's end, when the worker never ran or
+/// stopped. The member's answer carries the presses answered when it read, so a reading taken
+/// while a press is counted but not yet written is older than that press and is not adopted.
 pub(crate) struct SignInPresses {
     count: AtomicU64,
     wish: AtomicBool,
+    answered: AtomicU64,
 }
 
 impl SignInPresses {
@@ -264,6 +271,7 @@ impl SignInPresses {
         Self {
             count: AtomicU64::new(0),
             wish: AtomicBool::new(false),
+            answered: AtomicU64::new(0),
         }
     }
 
@@ -282,6 +290,16 @@ impl SignInPresses {
     fn sign_in_wish(&self) -> bool {
         self.wish.load(Ordering::SeqCst)
     }
+
+    /// The presses up to `seen` are answered: the entry holds what the last of them asked for.
+    pub(crate) fn note_sign_in_answered(&self, seen: u64) {
+        self.answered.fetch_max(seen, Ordering::SeqCst);
+    }
+
+    /// How many presses have been answered.
+    pub(crate) fn sign_in_presses_answered(&self) -> u64 {
+        self.answered.load(Ordering::SeqCst)
+    }
 }
 
 /// This process's presses.
@@ -290,16 +308,16 @@ pub(crate) static SIGN_IN_PRESSES: SignInPresses = SignInPresses::new();
 /// **The entry's one write latch** (R6): a press's worker waits for it, the member only tries it.
 pub(crate) static SIGN_IN_WRITES: Mutex<()> = Mutex::new(());
 
-/// **What the window takes for the row**: the row after the reading, and how many presses had
-/// landed when it was read.
+/// **What the window takes for the row**: the row after the reading, and how many presses had been
+/// answered when it was read — a press's own answer counts itself.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct SignInAnswer {
     pub(crate) row: SignInRow,
     pub(crate) presses_seen: u64,
 }
 
-/// **The window takes an answer for the row** — unless a press has landed since it was read: the
-/// press's own answer is newer (68b's R4 rule). `presses` is the process's [`SIGN_IN_PRESSES`] in
+/// **The window takes an answer for the row** — unless a press has landed that was not answered
+/// when it was read: the press's own answer is newer (68b's R4 rule, review N1). `presses` is the process's [`SIGN_IN_PRESSES`] in
 /// the product, and a test's own in the suite. Whether the row changed.
 pub(crate) fn adopt_sign_in_answer(
     row: &mut SignInRow,
@@ -338,11 +356,12 @@ impl SignInRun {
 
 /// **The carry pass's repair of the entry** — see the module header.
 ///
-/// One reading, classified ([`SignInFound::of_reading`]); the write only when the finding is this copy by
-/// another spelling or a program that is gone, and then **only after the trial's gate has said
-/// yes** (`defer` answers `true` to hold it), **only while no press holds the entry's latch**
+/// One reading, classified ([`SignInFound::of_reading`]); the write only when the finding is this
+/// copy by another spelling or a program that is gone, and then **only after the trial's gate has
+/// said yes** (`defer` answers `true` to hold it), **only while no press holds the entry's latch**
 /// (`writes`, tried and never waited for), and **only if no press has landed since the reading**.
-/// The answer's row comes off a reading after the write. A refused write is said and left.
+/// The answer's row comes off a reading after the write, and it carries the presses answered
+/// before the first reading (review N1). A refused write is said and left.
 pub(crate) fn carry_sign_in_in(
     registry: &mut impl Registry,
     keys: EntryKeys<'_>,
@@ -352,13 +371,14 @@ pub(crate) fn carry_sign_in_in(
     presses: &SignInPresses,
     writes: &Mutex<()>,
 ) -> SignInRun {
+    let answered = presses.sign_in_presses_answered();
     let seen = presses.sign_in_presses_counted();
     let run = |found: SignInFound, repaired: Option<String>, row: SignInRow| SignInRun {
         found,
         repaired,
         answer: SignInAnswer {
             row,
-            presses_seen: seen,
+            presses_seen: answered,
         },
     };
     let read = match read_entry_in(registry, keys) {
@@ -525,11 +545,14 @@ pub(crate) fn press_sign_in_in(
     let _latch = writes.lock().unwrap_or_else(PoisonError::into_inner);
     let seen = presses.sign_in_presses_counted();
     let on = presses.sign_in_wish();
-    let pressed = |outcome: SignInPressDid, answer: Option<SignInAnswer>| SignInPressed {
-        on,
-        outcome,
-        answer,
-        presses_seen: seen,
+    let pressed = |outcome: SignInPressDid, answer: Option<SignInAnswer>| {
+        presses.note_sign_in_answered(seen);
+        SignInPressed {
+            on,
+            outcome,
+            answer,
+            presses_seen: seen,
+        }
     };
     let this = match this {
         Ok(this) => this,
@@ -664,6 +687,8 @@ pub(crate) fn begin_sign_in_press(on: bool) {
         "folio-sign-in-press",
         crate::lane::Answered::new("the sign-in entry's press", crate::diagnostics::note, {
             move |end: &crate::lane::WorkerEnd| {
+                let seen = SIGN_IN_PRESSES.sign_in_presses_counted();
+                SIGN_IN_PRESSES.note_sign_in_answered(seen);
                 publish_sign_in_press(SignInPressed {
                     on,
                     outcome: SignInPressDid::Refused(
@@ -672,7 +697,7 @@ pub(crate) fn begin_sign_in_press(on: bool) {
                             .to_owned(),
                     ),
                     answer: None,
-                    presses_seen: SIGN_IN_PRESSES.sign_in_presses_counted(),
+                    presses_seen: seen,
                 });
             }
         }),
