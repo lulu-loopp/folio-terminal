@@ -317,8 +317,9 @@ pub(crate) struct SignInAnswer {
 }
 
 /// **The window takes an answer for the row** — unless a press has landed that was not answered
-/// when it was read: the press's own answer is newer (68b's R4 rule, review N1). `presses` is the process's [`SIGN_IN_PRESSES`] in
-/// the product, and a test's own in the suite. Whether the row changed.
+/// when it was read: the press's own answer is newer (68b's R4 rule, review N1). `presses` is the
+/// process's [`SIGN_IN_PRESSES`] in the product, and a test's own in the suite. Whether the row
+/// changed.
 pub(crate) fn adopt_sign_in_answer(
     row: &mut SignInRow,
     answer: SignInAnswer,
