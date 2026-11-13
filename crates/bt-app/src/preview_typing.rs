@@ -354,13 +354,52 @@ pub(super) fn assert_one_character_edit_reuses_work() {
         .map(|i| format!("Paragraph {i} **bold** with `code` and ordinary prose.\n\n"))
         .collect();
     let text = text + "```rust\nfn main() {}\n```\n\n| name | value |\n| --- | --- |\n| x | y |\n";
+    let at = text.find("Paragraph 512").unwrap() + 2;
+    let work = one_character_edit_work(text, at);
+    assert!(work.cold_widths > 0);
+    assert_eq!(work.cold_shaped, 1024);
+    assert_eq!(work.shaped, 1, "only the edited prose block is re-measured");
+}
+
+/// **What one keystroke's rebuild did, counted** — the reading
+/// [`one_character_edit_work`] hands back once it has asserted the reuse every
+/// keystroke owes.
+pub(super) struct EditWork {
+    /// The shaper's calls in the cold rebuild before the keystroke.
+    pub(super) cold_shaped: usize,
+    /// The intrinsic measurements of the cold rebuild (fence and table cells).
+    pub(super) cold_widths: usize,
+    /// The shaper's calls in the keystroke's rebuild.
+    pub(super) shaped: usize,
+    /// The steps the inline walks took in the keystroke's parse: the scanner's
+    /// bytes and claim lookups, the delimiter pass's bytes
+    /// (`preview::scan_line_marked`, `preview::push_delimiter_runs`).
+    pub(super) inline_steps: usize,
+    /// The runs [`crate::preview_provenance::TextOrigin`]'s lookups looked at in
+    /// the keystroke's parse, composing each piece through its block's join.
+    pub(super) origin_runs: usize,
+}
+
+/// **One character typed at `at` into `text`, rebuilt cold and then warm**
+/// through the production parse, intrinsic and cached layout paths, with the
+/// reuse every keystroke owes asserted on the way: no fence or table cell
+/// measured again, one prose block wrapped again, at most one mapped parse,
+/// and the parse the same as a fresh one. `at` must fall inside a prose block,
+/// on a character boundary, where one more character changes no block's kind.
+pub(super) fn one_character_edit_work(text: String, at: usize) -> EditWork {
     let mut buffer = buffer(text);
     let mut cache = MarkdownIntrinsicCache::default();
     let wraps = preview_wrap::WindowCache::default();
     let mut doc = PreviewDocument::default();
-    let at = buffer.text().unwrap().find("Paragraph 512").unwrap() + 2;
     let mut caret = preview_edit::EditCaret::default();
     caret.place(buffer.text().unwrap(), at, false);
+    let mut counted = EditWork {
+        cold_shaped: 0,
+        cold_widths: 0,
+        shaped: 0,
+        inline_steps: 0,
+        origin_runs: 0,
+    };
     for edit in [false, true] {
         if edit {
             buffer.edit_by_caret(&mut caret, |text, caret| {
@@ -372,6 +411,7 @@ pub(super) fn assert_one_character_edit_reuses_work() {
         WORK.with_borrow_mut(BTreeMap::clear);
         let (blocks, ranges, maps) = preview::parse_markdown_mapped(content);
         let parsed_bytes = work("parsed bytes");
+        let (inline_steps, origin_runs) = (work("inline steps"), work("origin runs visited"));
         let source = SourceBlocks::from(source_at(content, &blocks, &ranges, caret.caret));
         let math = DocumentMath::default();
         let pictures = DocumentPictures::default();
@@ -419,16 +459,22 @@ pub(super) fn assert_one_character_edit_reuses_work() {
                 widths, 0,
                 "unchanged fences and table cells retain intrinsics"
             );
-            assert_eq!(shaped, 1, "only the edited prose block is re-measured");
-            assert_eq!(work("wrapped blocks"), 1);
+            assert_eq!(
+                work("wrapped blocks"),
+                1,
+                "only the edited prose block is wrapped again"
+            );
             assert!(parsed_bytes <= content.len(), "at most one mapped parse");
+            counted.shaped = shaped;
+            counted.inline_steps = inline_steps;
+            counted.origin_runs = origin_runs;
             let expected = preview::parse_markdown_mapped(content);
             assert_eq!(blocks, expected.0);
             assert_eq!(ranges, expected.1);
             assert_eq!(maps, expected.2);
         } else {
-            assert!(widths > 0);
-            assert_eq!(shaped, 1024);
+            counted.cold_shaped = shaped;
+            counted.cold_widths = widths;
         }
         doc = PreviewDocument::Markdown {
             blocks,
@@ -442,6 +488,7 @@ pub(super) fn assert_one_character_edit_reuses_work() {
             wrap: pass.document(),
         };
     }
+    counted
 }
 
 /// Mutation: rescan the document on movement, miss a split/join boundary, or
@@ -505,6 +552,12 @@ fn typing_indexes_match_full_scans_through_edits_undo_and_redo() {
 }
 
 /// Viewport counterpart to the retained eager reference diagnostic.
+///
+/// **And the three Chinese pages, each laid end to end to 64 KiB** — the
+/// reading the Chinese frame-budget test asserted against 16 ms until
+/// 2026-11-11 (0.4.10 plan row 78). Its claim is counted now
+/// (`a_chinese_page_costs_work_in_proportion_to_its_length`); the time is read
+/// here by a person, beside English's, on a machine that is doing nothing else.
 #[test]
 #[ignore = "wall-clock diagnostic; reads docs/DESIGN.md at run time"]
 fn md_typing_path_benchmark() {
@@ -513,7 +566,27 @@ fn md_typing_path_benchmark() {
         std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/DESIGN.md"))
             .unwrap();
     let synthetic: String = (0..12000).map(|i| format!("Paragraph {i}: **bold text** with `inline code` and enough ordinary words to wrap. {}\n\n", "prose ".repeat(32))).collect();
-    for (name, text) in [("DESIGN", real), ("synthetic", synthetic)] {
+    let sixty_four_kib_of = |one: &str| {
+        let mut page = String::new();
+        while page.len() < 64 * 1024 {
+            page.push_str(one);
+            page.push_str("\n\n");
+        }
+        page
+    };
+    for (name, text) in [
+        ("DESIGN", real),
+        ("synthetic", synthetic),
+        ("Chinese", sixty_four_kib_of(preview::CHINESE_PAGE)),
+        (
+            "Chinese, the long half",
+            sixty_four_kib_of(preview::CHINESE_FEATURE_PAGE),
+        ),
+        (
+            "Chinese and English",
+            sixty_four_kib_of(preview::MIXED_SCRIPT_PAGE),
+        ),
+    ] {
         let bytes = text.len();
         TIMES.with_borrow_mut(BTreeMap::clear);
         let accepted = Instant::now();

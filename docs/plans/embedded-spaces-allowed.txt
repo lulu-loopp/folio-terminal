@@ -60,14 +60,14 @@ crates/bt-app/src/main.rs:46427 code sample: the indentation after an escaped li
 crates/bt-app/src/main.rs:60741 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-app/src/preview_live.rs:1686 table fixture: each cell padded to its column
 crates/bt-app/src/preview_select.rs:777 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-app/src/preview.rs:11865 a diff line sample: the code's indentation after the `+`/`-` sign is the input
-crates/bt-app/src/preview.rs:11869 a diff line sample: the code's indentation after the `+`/`-` sign is the input
-crates/bt-app/src/preview.rs:11866 a diff line sample: the code's indentation after the `+`/`-` sign is the input
-crates/bt-app/src/preview.rs:11870 a diff line sample: the code's indentation after the `+`/`-` sign is the input
-crates/bt-app/src/preview.rs:13187 tab expansion's expected columns
-crates/bt-app/src/preview.rs:13184 tab expansion's expected columns
-crates/bt-app/src/preview.rs:18855 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-app/src/preview.rs:18882 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-app/src/preview.rs:11877 a diff line sample: the code's indentation after the `+`/`-` sign is the input
+crates/bt-app/src/preview.rs:11881 a diff line sample: the code's indentation after the `+`/`-` sign is the input
+crates/bt-app/src/preview.rs:11878 a diff line sample: the code's indentation after the `+`/`-` sign is the input
+crates/bt-app/src/preview.rs:11882 a diff line sample: the code's indentation after the `+`/`-` sign is the input
+crates/bt-app/src/preview.rs:13199 tab expansion's expected columns
+crates/bt-app/src/preview.rs:13196 tab expansion's expected columns
+crates/bt-app/src/preview.rs:18867 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-app/src/preview.rs:18894 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-app/src/profiles.rs:27300 the spacing between the arguments is the input under test
 crates/bt-app/src/runtime/floats.rs:4098 the chrome dump's tag column: `quad` padded to the width of the other tags
 crates/bt-detect/src/frame.rs:1564 terminal screen fixture: the columns are where the terminal draws them

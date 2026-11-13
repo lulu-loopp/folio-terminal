@@ -109,13 +109,14 @@ struct Children(Arc<Mutex<Vec<Child>>>);
 impl Children {
     /// Start the synthetic program at `program`: it stays up.
     fn start(&self, program: &Path, args: &[OsString]) -> u32 {
-        let child = bt_platform::quiet_command(program)
-            .args(args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("the synthetic program starts");
+        let child = crate::test_support::start_a_fixture(
+            bt_platform::quiet_command(program)
+                .args(args)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )
+        .expect("the synthetic program starts");
         let pid = child.id();
         self.0.lock().unwrap().push(child);
         pid
@@ -481,11 +482,15 @@ struct Install {
     old: Files,
     new: Files,
     registry: Memory,
+    /// This test's turn among the fixture tests (`test_support::a_fixture_turn`), let go last,
+    /// after its programs have ended and its folder is gone.
+    _turn: crate::test_support::FixtureTurn,
 }
 
 impl Install {
     /// The installation, or `None` off Windows, where no test root signs.
     fn new(tag: &str) -> Option<Self> {
+        let turn = crate::test_support::a_fixture_turn();
         let ca = TestCa::new().ok()?;
         let root = bt_testpath::temp_path(&format!("bt-u24-{tag}"));
         let scratch = Scratch(root.clone());
@@ -551,6 +556,7 @@ impl Install {
             old,
             new,
             registry: Memory::default(),
+            _turn: turn,
         };
         install.write(Phase::Handoff {
             applier: install.applier,
@@ -6688,16 +6694,17 @@ fn trial_part(root: &Path) {
                 said.push('\n');
                 said.push_str(&word.to_string_lossy());
             }
-            bt_platform::quiet_command(&self.runner)
-                .args(["--exact", ROAD_TEST, "--nocapture"])
-                .env(ROAD_CHILD, "rescue")
-                .env(ROAD_ROOT, &self.root)
-                .env(ROAD_LINE, said)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .map(|child| child.id())
+            crate::test_support::start_a_fixture(
+                bt_platform::quiet_command(&self.runner)
+                    .args(["--exact", ROAD_TEST, "--nocapture"])
+                    .env(ROAD_CHILD, "rescue")
+                    .env(ROAD_ROOT, &self.root)
+                    .env(ROAD_LINE, said)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null()),
+            )
+            .map(|child| child.id())
         }
     }
     let every = Duration::from_millis(plan.every_ms);
@@ -6934,17 +6941,18 @@ fn a_trial_hands_back_to_a_real_recovery_which_adopts_ends_or_defers() {
             every_ms,
         }
         .write(&root);
-        let child = bt_platform::quiet_command(&install.installed)
-            .args(["--exact", ROAD_TEST, "--nocapture"])
-            .env(ROAD_CHILD, "trial")
-            .env(ROAD_ROOT, &root)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            // The watch's own lines: each due time's hand-back or skip, and
-            // the end of its schedule.
-            .stderr(std::fs::File::create(root.join("trial.err")).unwrap())
-            .spawn()
-            .unwrap();
+        let child = crate::test_support::start_a_fixture(
+            bt_platform::quiet_command(&install.installed)
+                .args(["--exact", ROAD_TEST, "--nocapture"])
+                .env(ROAD_CHILD, "trial")
+                .env(ROAD_ROOT, &root)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                // The watch's own lines: each due time's hand-back or skip, and
+                // the end of its schedule.
+                .stderr(std::fs::File::create(root.join("trial.err")).unwrap()),
+        )
+        .unwrap();
         /// Ends the trial child by its own handle whatever this test does.
         struct Owned(std::process::Child);
         impl Drop for Owned {
@@ -7072,14 +7080,16 @@ pub(crate) fn said_by_a_child_whose_stderr_is_the_log(
         .append(true)
         .open(&log)
         .unwrap();
-    let status = bt_platform::quiet_command(std::env::current_exe().expect("this test binary"))
-        .args(["--exact", name, "--test-threads=1"])
-        .env(child, &log)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::from(stream))
-        .status()
-        .expect("the child runs");
+    let status = crate::test_support::start_a_fixture(
+        bt_platform::quiet_command(std::env::current_exe().expect("this test binary"))
+            .args(["--exact", name, "--test-threads=1"])
+            .env(child, &log)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(stream)),
+    )
+    .and_then(|mut started| started.wait())
+    .expect("the child runs");
     let text = std::fs::read_to_string(&log).unwrap_or_default();
     let _ = std::fs::remove_dir_all(&folder);
     assert!(status.success(), "the child failed: {text}");
