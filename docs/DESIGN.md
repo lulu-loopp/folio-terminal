@@ -16821,3 +16821,30 @@ The flags are a debt and never a liveness: `Runtime::turn_facts` counts them as 
 **The uninstall (R12).** Inventory row 10, `Autostart / login item`, is an owner-checked row now (`Remover::StartAtSignIn`, `CarryCheck::StartAtSignIn` with `Writer::StartAtSignIn`; `Kind::PerAccount` kept, so an account with no entry prints today's `not present`). The row removes this copy's entry and a gone program's, with Windows' switch of the name, and leaves another copy's (said with its location), one whose program could not be checked (`left (its program could not be checked)`, row 68e's rule: a line says only what is known; review N3) and another program's value. The update sweep never lists the name: it takes only `FolioUpdate-` names.
 
 **Proof.** `bt_platform::sign_in_entry::tests::{the_entry_is_the_quoted_path_and_nothing_after_it, a_long_path_is_refused_before_any_registry_call, the_entry_and_the_systems_switch_are_read_by_their_one_name, the_sign_in_entry_round_trips_through_the_real_registry, a_removal_says_which_value_stayed}`, `start_at_sign_in::tests::{the_switch_writes_the_entry_and_off_removes_it, a_fresh_account_has_no_entry_until_the_switch_is_pressed, the_entry_names_the_running_copy, the_carry_pass_points_the_sign_in_entry_at_this_copy, a_moved_copys_entry_is_pointed_at_this_one, no_other_value_of_the_run_key_is_read_or_touched, the_sign_in_entry_waits_for_the_trials_commit, a_press_during_the_carry_wins, a_sign_in_answer_older_than_a_press_is_not_adopted, a_member_reading_taken_before_a_press_was_answered_is_not_adopted, an_entry_turned_off_in_startup_apps_reads_off_and_on_turns_it_back_on, the_press_card_says_the_sign_in_switchs_own_sentences, a_press_over_another_copys_entry_says_it_took_it_over, a_refused_press_marks_the_presses_answered_only_when_no_worker_is_left, an_on_whose_startup_apps_value_was_on_says_it_starts_at_sign_in, an_off_whose_startup_apps_value_stays_says_it_removed_the_entry, a_takeover_of_an_entry_turned_off_in_startup_apps_says_the_plain_sentence, the_restart_flags_leave_sign_in_to_the_entry_while_it_is_on}`, `app_launch_tests::the_restart_registration_leaves_the_reboot_to_this_copys_sign_in_entry`, `settings::tests::{the_sign_in_row_stands_above_the_explorer_row_and_not_off_windows, the_sign_in_row_is_read_once_per_visit_to_general}`, `carry_pass::tests::an_ask_runs_only_the_members_it_names` (the General page's ask, review N5), `update_orphans::tests::the_update_sweep_never_reads_the_sign_in_entry`, `uninstall_tests::{uninstall_sign_in_row_removes_this_copys_entry_and_leaves_another_copys, every_owned_thing_says_how_an_update_carries_it}`, `agent_hooks_step::tests::the_window_thread_reads_no_agent_file_at_start`, and the plants `plant-22-*.py` and `plant-22a-f*.py` in the row's report.
+
+### 2026-11-13 — A test does not end passed before it asserts anything: what a host leaves out is a `#[cfg]`, and the early returns that remain stand in a register (T-INSTALL-TESTS-SILENT-PASS-OFF-WINDOWS, 0.4.10 plan row 12; 049 row 190; the coordinator's rulings R1–R11 of 2026-11-12 and N1–N11 of 2026-11-13)
+
+**What it met.** 84 tests of `update_apply_windows::tests` opened with `let Some(install) = Install::new(tag) else { return; };` (or reached that return later), over a test root only Windows signs with. On the Mac each returned before its first assertion and libtest counted it passed: the Windows applier's suite was green on macOS while asserting nothing there. The guard this row added found the same class in four more tests: one PSReadLine test, and three manifest tests whose only assertion before their road was "this is not Windows".
+
+**The rule, now.** What a host leaves out is said by `#[cfg]` (CONVENTIONS H1 rule 2), never by a return:
+- 64 of the 84 are `#[cfg(windows)]`, each with what ties it to Windows: a signed set, a started program, a held file, a PE version resource.
+- 20 run on every host over `Install::unsigned`. That installation has the signed one's layout in plain bytes, under the system's policy. Its tests reach no signature, start nothing and hold nothing.
+- The four found by the guard are `#[cfg(windows)]`.
+- `Install` keeps its fixture turn as its last field. Both constructors take the turn first (row 78's pin).
+
+**The guard.** `bt-source/tests/early_returns.rs` reads every test's own body in every first-party package (`docs/ARCHITECTURE-GUARDS.md` has the paragraph).
+- A road written after the test's first assertion is dropped (R). The row's report names each dropped road with that assertion.
+- Every other road stands in a shape: G1 the else of a `let`, G2 an `if` with no `else`, G3 a `match` arm, G4 a child half over a variable its file sets on a command. A road in no shape is refused.
+- Each G1–G3 site is a row of `docs/plans/EARLY-RETURN-FIXTURES.tsv`. The row is keyed file-wide for a function named by its path, and on its one test otherwise (a method read on no call, a variable, a condition, a read of the environment G4 does not hold). Its hosts are spelled so that no row can name Windows or macOS.
+
+**What the register says that the spelling cannot.** The renderer's pixel tests ask `on_the_software_adapter`, which answers `None` in every macOS run (Metal has no fallback adapter). Their row stays, under an `environment:` spelling, with that fact in its reason. Plan row 94 decides between a gate and a fixture that answers there.
+
+**Not seen** (plan row 96):
+- a road inside a helper the test calls (four of the 84 were that shape);
+- a `continue`/`break` past every assertion.
+
+**Pinned by**
+- `early_returns::{no_test_returns_before_it_asserts_but_at_a_registered_fixture, the_grammar_reads_each_shape_and_refuses_a_road_in_none, a_row_naming_no_road_is_stale_and_an_unnamed_road_is_unlisted, a_row_naming_a_suite_host_is_refused}` in `bt-source`'s `real_tree`;
+- `platform_gate_tests::only_the_named_files_decide_what_platform_this_is`, which holds the gated files to the platform list;
+- the Mac list `row12-mac-list.txt`;
+- the plants `plant-12-*.py` in the row's report.
