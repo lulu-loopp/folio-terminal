@@ -984,9 +984,8 @@ impl FormulaEngine {
                 #[cfg(test)]
                 self.waits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 settled(
-                    // Called by its path: the handle is bound by a pattern, whose type the effect
-                    // reader does not follow, and the path names the wait it is.
-                    std::thread::JoinHandle::join(thread)
+                    thread
+                        .join()
                         .expect("the scan's panic is contained on its own thread"),
                 )
             }
