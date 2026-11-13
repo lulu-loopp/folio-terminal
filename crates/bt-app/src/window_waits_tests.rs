@@ -8598,7 +8598,7 @@ impl<'r> Scope<'r> {
                 && !NOT_A_BINDING.contains(name)
                 && !name.starts_with(|c: char| c.is_ascii_uppercase())
             {
-                self.add(*name, value, within);
+                self.add(name, value, within);
             }
             return;
         }
