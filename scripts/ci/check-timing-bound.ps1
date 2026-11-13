@@ -5,7 +5,9 @@
 # `wait_timeout`, `park_timeout` and their variants), a kernel wait (a Win32 object,
 # pipe, port or sleep wait, WinHTTP's or a socket's timeout, a `libc` wait by path;
 # plan row 163) -- the lists are in bt-source's `timing` test, which also refuses a
-# workspace function by one of those names -- or measures it (`elapsed`). Existing rows are migration work; a new row is a new
+# workspace function by one of those names -- or measures it (`elapsed`), or does either
+# in a test-only helper it reaches (T-TIMING-GUARD-FOLLOWS-WAITING-HELPERS: a helper that is
+# itself a row is a door, where the scan's walk stops). Existing rows are migration work; a new row is a new
 # flaky-test liability. This script is the history half: it compares with the
 # merge base, whole rows and multiplicity included, so the list can only
 # shrink. The discovery half is bt-source's `timing` test
@@ -18,7 +20,7 @@
 #
 # **A widening admits exactly its rows** (T-TIMING-BOUND-STRAYS, 2026-10-24).
 # When the scan's grammar is widened (clock arithmetic in a test's own body, a
-# budget measured in a test-only helper), the tests it newly sees are rows the
+# budget measured in a test-only helper, a wait in one), the tests it newly sees are rows the
 # tree already had, not new liabilities. A comment line
 # `# widened <yyyy-mm-dd> by <ticket> (+<n> rows): <what>` that is new against
 # the merge base admits exactly <n> added rows; more than one new widening line,
