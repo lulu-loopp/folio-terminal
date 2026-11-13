@@ -106,12 +106,12 @@ crates/bt-detect/tests/strand_lines.rs:28 terminal screen fixture: the columns a
 crates/bt-detect/tests/strand_lines.rs:44 terminal screen fixture: the columns are where the terminal draws them
 crates/bt-detect/tests/strand_lines.rs:49 terminal screen fixture: the columns are where the terminal draws them
 crates/bt-detect/tests/strand_lines.rs:54 terminal screen fixture: the columns are where the terminal draws them
-crates/bt-platform/src/lib.rs:22530 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-platform/src/lib.rs:22582 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-platform/src/lib.rs:22985 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-platform/src/lib.rs:23301 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-platform/src/lib.rs:23685 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-platform/src/lib.rs:23891 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-platform/src/lib.rs:22534 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-platform/src/lib.rs:22586 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-platform/src/lib.rs:22989 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-platform/src/lib.rs:23305 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-platform/src/lib.rs:23689 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-platform/src/lib.rs:23895 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-platform/src/macos_update_mount_tests.rs:13 recorded `hdiutil` output: its columns as the tool prints them
 crates/bt-platform/src/macos_update_mount_tests.rs:26 recorded `hdiutil` output: its columns as the tool prints them
 crates/bt-platform/src/macos_update_mount_tests.rs:139 recorded `hdiutil` output: its columns as the tool prints them
