@@ -7251,12 +7251,16 @@ fn every_door_is_where_the_registry_says() {
 // through `let` and `let … else`, `if let`, `while let`, `for`, `match` arms, a parameter's pattern
 // and the parameters of a closure handed to a method of the value. A pattern gives each name it
 // binds the type of the part it binds, by a closed grammar (`Scope::bind_by_pattern`, row 19): a
-// name, `name @ sub`, a tuple, a slice, a reference, parentheses and each case of an or-pattern
-// over the value's types; `Some`, `Ok` and `Err` over the value's types; a first-party struct,
-// tuple struct or enum variant over the declared type of each member it binds; and a pattern it
-// cannot place (a foreign struct or variant, a member nothing declares) with no type, never the
-// outer value's. A binding is read only where it is in scope (`Scope::bound_at`): two match arms
-// that bind one name to two types are two bindings. Where no type is written anywhere on that
+// name (`mut`, `ref`, `box`), `name @ sub`, a tuple, a slice, a reference, parentheses and each
+// case of an or-pattern over the value's types; `Some`, `Ok` and `Err` (also through `Option::`
+// and `Result::`) over the value's types; a first-party struct, tuple struct or enum variant over
+// the declared type of each member it binds; a path alone, a literal, a range and `_` binding
+// nothing; and a pattern it cannot place (a foreign struct or variant, a member nothing declares,
+// a macro's pattern, a qualified-self path) with no type for each name it may bind, never the
+// outer value's, and never letting an outer binding of the name show through. A binding is read
+// only where it is in scope (`Scope::bound_at`): two match arms that bind one name to two types
+// are two bindings, a `let` holds from its statement's end to its block's, and a conditional
+// `let` from the end of its scrutinee over its condition and block. Where no type is written anywhere on that
 // road the receiver is untyped and the call is not a site: this is a reading of what the source
 // says, not the compiler's resolution.
 // What it cannot read is listed, not passed over: a method call whose name and argument count are a
@@ -8519,7 +8523,7 @@ impl<'r> Scope<'r> {
     /// let-chains, `for`, a `match` arm, a closure's parameter. The shapes it reads, and nothing
     /// else:
     ///
-    /// * **a name** (`h`, `mut h`, `ref h`; `name @ sub`, then `sub`): `value`'s types;
+    /// * **a name** (`h`, `mut h`, `ref h`, `box h`; `name @ sub`, then `sub`): `value`'s types;
     /// * **a tuple, a slice, a reference, parentheses, each case of an or-pattern, and
     ///   `Some`/`Ok`/`Err` (also as `Option::Some`, `Result::Ok`, `Result::Err`)**: each part over
     ///   `value`'s types — a [`Ty`] holds every type written inside the value's type, so the
@@ -8531,11 +8535,34 @@ impl<'r> Scope<'r> {
     /// * a path alone, a literal, a range, `_`: nothing.
     ///
     /// **A pattern it cannot place** — a foreign struct or variant other than those three, a
-    /// member no declaration has, a macro's pattern — binds its names with **no type**, never with
-    /// the outer value's: a vocabulary call on such a name is then an unread receiver, which the
+    /// member no declaration has, a macro's pattern, a qualified-self path
+    /// ([`Scope::bind_unplaced_names`]) — binds its names with **no type**, never with the outer
+    /// value's: a vocabulary call on such a name is then an unread receiver, which the
     /// inventory lists ([`Reader::read`]) instead of passing over it. Until row 19 every name of a
     /// pattern took the outer value's types, so `Self::HooksMayOutlive(child) => child.wait()`
     /// read `child` as the enum and the wait was no site.
+    /// **A pattern whose shape [`Scope::bind_by_pattern`] cannot read** — a macro's (`m!(h)`), a
+    /// qualified-self path's (`<T as Tr>::V(h)`), an unclosed turbofish: any lowercase name in it
+    /// may be one it binds, so each is bound over `within` with **no type**, and an outer binding
+    /// of that name does not show through (bt-source's call graph binds a macro's pattern the same
+    /// way). A path segment (a name before `::`), a macro's name (before `!`), `as` and the words
+    /// of [`NOT_A_BINDING`] bind nothing.
+    fn bind_unplaced_names(&mut self, toks: &[Tok], within: (usize, usize)) {
+        let s = self.s();
+        for (index, tok) in toks.iter().enumerate() {
+            let name = s.text(*tok);
+            if tok.kind == Kind::Ident
+                && name != "as"
+                && !NOT_A_BINDING.contains(&name)
+                && !name.starts_with(|c: char| c.is_ascii_uppercase())
+                && !s.is(toks.get(index + 1), "::")
+                && !s.is(toks.get(index + 1), "!")
+            {
+                self.add(name, &Ty::new(), within);
+            }
+        }
+    }
+
     fn bind_by_pattern(&mut self, toks: &[Tok], value: &Ty, within: (usize, usize)) {
         let s = self.s();
         let cases = split_at_depth_zero(s, toks, "|");
@@ -8581,7 +8608,7 @@ impl<'r> Scope<'r> {
             if s.is(toks.get(at), "::") && s.is(toks.get(at + 1), "<") {
                 match closing_angle(s, toks, at + 1) {
                     Some(close) => at = close + 1,
-                    None => return,
+                    None => return self.bind_unplaced_names(toks, within),
                 }
             }
             if s.is(toks.get(at), "::") && toks.get(at + 1).is_some_and(|t| t.kind == Kind::Ident) {
@@ -8591,7 +8618,7 @@ impl<'r> Scope<'r> {
             break;
         }
         if path.is_empty() {
-            return;
+            return self.bind_unplaced_names(toks, within);
         }
         if at == toks.len() {
             if let [name] = path.as_slice()
@@ -8604,7 +8631,7 @@ impl<'r> Scope<'r> {
         }
         let braces = s.is(toks.get(at), "{");
         if !(braces || s.is(toks.get(at), "(")) || closing(s, toks, at) != Some(last) {
-            return;
+            return self.bind_unplaced_names(toks, within);
         }
         let placed = self.place_pattern(&path);
         let member_types = |member: &str| -> Ty {
@@ -8751,14 +8778,20 @@ impl<'r> Scope<'r> {
                     types = self.written(&toks[at + 1..end]);
                     at = end;
                 }
-                if s.is(toks.get(at), "=") && types.is_empty() {
+                // Where the scrutinee ends: a conditional `let`'s names are in scope only after it
+                // (Rust reads `if let Ok(child) = child.wait()`'s second `child` in the outer
+                // scope; review N2), a plain `let`'s from its statement's end.
+                let mut scrutinee_end = at;
+                if s.is(toks.get(at), "=") {
                     let stops: &[&str] = if conditional {
-                        &["{", "&&", "||"]
+                        &["{", "&&", "||", "=>"]
                     } else {
                         &[";", "else"]
                     };
-                    let end = depth_zero(s, toks, at + 1, stops);
-                    types = self.expression(&toks[at + 1..end]);
+                    scrutinee_end = depth_zero(s, toks, at + 1, stops);
+                    if types.is_empty() {
+                        types = self.expression(&toks[at + 1..scrutinee_end]);
+                    }
                 }
                 let within = if conditional {
                     // Over the rest of the condition and the block it opens: the first `{` past
@@ -8776,7 +8809,8 @@ impl<'r> Scope<'r> {
                     } else {
                         enclosing_group_end(s, toks, index)
                     };
-                    (tok.start, to)
+                    let from = toks.get(scrutinee_end).map_or(to, |t| t.start);
+                    (from, to)
                 } else {
                     // From the end of its statement (`;`, past a `let … else` block) to its block's.
                     let statement_end = depth_zero(s, toks, index + 1, &[";"]);
@@ -10788,6 +10822,11 @@ pub fn by_replace(slot: &mut Held) { match std::mem::replace(slot, Held::Gone) {
 pub fn by_take(slot: &mut Option<Wrapped>) { if let Some(Wrapped(mut child)) = std::mem::take(slot) { let _ = child.wait(); } }
 pub fn generic_payload(slot: Slot<std::thread::JoinHandle<()>>) { if let Slot::Full(thread) = slot { let _ = thread.join(); } }
 pub fn a_label(named: Named, _kid: std::process::Child) { if let Named::Label(label) = named { label.wait(); } }
+pub fn a_block_let_does_not_leak(mut h: std::process::Child) { { let h = Label; h.wait(); } let _ = h.wait(); }
+pub fn a_let_shadows_from_its_end(h: Label, kid: std::process::Child) { h.wait(); let mut h = kid; let _ = h.wait(); }
+pub fn a_let_shadows_a_handle(mut h: std::process::Child) { let _ = h.wait(); let h = Label; h.wait(); }
+pub fn a_conditional_scrutinee_reads_the_outer_name(mut child: std::process::Child) { if let Ok(child) = child.wait() { let _ = child; } }
+pub fn a_conditional_let_ends_with_its_block(mut child: std::process::Child, named: Named) { if let Named::Label(child) = named { child.wait(); } let _ = child.wait(); }
 ";
 
 /// RED (T-WINDOW-WAITS-READER-SEES-MATCH-BOUND-HANDLES, 0.4.10 plan row 19, ruling R1) — **a wait
@@ -10809,9 +10848,19 @@ pub fn a_label(named: Named, _kid: std::process::Child) { if let Named::Label(la
 /// (`GitChild::wait`'s own shape): one site, the `Child` arm's, because each arm's binding is in
 /// scope over its own arm only ([`Scope::bound_at`]).
 ///
+/// The other scoping rules (review N2, N6), each one site of `Child::wait` beside a `Label`'s
+/// `wait` under the same name: a `let` in an inner block does not leak past its block
+/// (`a_block_let_does_not_leak`); a `let` shadows from its statement's end on, not before
+/// (`a_let_shadows_from_its_end`, `a_let_shadows_a_handle`); a conditional `let`'s scrutinee reads
+/// the outer name (`if let Ok(child) = child.wait()`, `a_conditional_scrutinee_reads_the_outer_name`)
+/// and its names end with its block (`a_conditional_let_ends_with_its_block`).
+///
 /// MUTATION: make [`Scope::bind_by_pattern`] bind every name over `value` (the old
 /// `pattern_names` reading) and every function but `generic_payload` (whose value's written type
-/// holds the `JoinHandle` itself) loses its site.
+/// holds the `JoinHandle` itself) loses its site. Run every `let` to the end of the body and
+/// `a_block_let_does_not_leak` loses its site; start a `let` at its body's start and
+/// `a_let_shadows_from_its_end` gains one; start a conditional `let` at its keyword and
+/// `a_conditional_scrutinee_reads_the_outer_name` loses its site.
 #[test]
 fn a_wait_on_a_handle_bound_by_a_payload_pattern_is_a_site_in_every_binding_form() {
     let world = planted_world("ww-payload-bindings", PLANTED_PAYLOAD_BINDINGS);
@@ -10843,6 +10892,11 @@ fn a_wait_on_a_handle_bound_by_a_payload_pattern_is_a_site_in_every_binding_form
         ("crate::by_replace", join),
         ("crate::by_take", wait),
         ("crate::generic_payload", join),
+        ("crate::a_block_let_does_not_leak", wait),
+        ("crate::a_let_shadows_from_its_end", wait),
+        ("crate::a_let_shadows_a_handle", wait),
+        ("crate::a_conditional_scrutinee_reads_the_outer_name", wait),
+        ("crate::a_conditional_let_ends_with_its_block", wait),
     ]
     .into_iter()
     .map(|(item, entry)| {
@@ -10876,8 +10930,9 @@ fn a_wait_on_a_handle_bound_by_a_payload_pattern_is_a_site_in_every_binding_form
 }
 
 /// A planted crate binding a name out of `std::num::Wrapping`, a foreign tuple struct whose member
-/// the reader has no declaration for, over a value whose types hold a `JoinHandle`; and a handle a
-/// macro makes, whose type nothing writes.
+/// the reader has no declaration for, over a value whose types hold a `JoinHandle`; a handle a
+/// macro makes, whose type nothing writes; and a name a macro's pattern and a qualified-self path's
+/// pattern bind, under an outer `JoinHandle` of the same name.
 const PLANTED_UNPLACED_PATTERN: &str = "
 pub fn unplaced(value: std::num::Wrapping<std::thread::JoinHandle<()>>) {
 let std::num::Wrapping(inner) = value;
@@ -10888,6 +10943,10 @@ pub fn macro_made() {
 let handle = spawned!();
 let _ = handle.join();
 }
+macro_rules! some_of { ($n:ident) => { Some($n) } }
+pub fn macro_pattern(child: std::thread::JoinHandle<()>, held: Option<u8>) { let _ = &child; if let some_of!(child) = held { let _ = child.join(); } }
+pub trait Holds { type Held; }
+pub fn qualified_self<T: Holds>(child: std::thread::JoinHandle<()>, held: T::Held) { let _ = &child; if let <T as Holds>::Held(child) = held { let _ = child.join(); } }
 ";
 
 /// RED (row 19, rulings R1 and R4) — **a name bound by a pattern the reader cannot place is read
@@ -10899,7 +10958,10 @@ let _ = handle.join();
 /// it does not know, so `inner.join()` is no site and is an [`UnreadCall`] of
 /// `std::thread::JoinHandle::join` (its count, zero, is the entry's — [`METHOD_ARITIES`]; and
 /// `ScopedJoinHandle::join`'s, so the row names both). `macro_made`'s handle is made by a macro the
-/// reader does not expand: its `.join()` is unread the same way.
+/// reader does not expand: its `.join()` is unread the same way. `macro_pattern` and
+/// `qualified_self` bind `child` by a pattern the reader cannot read (`some_of!(child)`,
+/// `<T as Holds>::Held(child)`): the inner `child` is untyped, so the outer `JoinHandle` of that
+/// name does not show through, and the `.join()` is unread, not a site (review N3).
 ///
 /// MUTATION: bind [`PatternPlace::Nowhere`]'s parts over `value` and `unplaced`'s site comes back
 /// and its unread call goes; drop the `unread.push` of [`Reader::read`]'s method branch and both
@@ -10917,7 +10979,12 @@ fn a_name_the_reader_cannot_place_is_read_as_unread_not_as_the_outer_type() {
         "`inner` is bound by a pattern the reader cannot place; sites {planted:?}"
     );
     let unread = unread_calls_observed(&world);
-    for item in ["crate::unplaced", "crate::macro_made"] {
+    for item in [
+        "crate::unplaced",
+        "crate::macro_made",
+        "crate::macro_pattern",
+        "crate::qualified_self",
+    ] {
         let rows: Vec<(&BareKey, &usize)> = unread
             .iter()
             .filter(|((package, arm, at, _), _)| package == "planted" && arm == "-" && at == item)
