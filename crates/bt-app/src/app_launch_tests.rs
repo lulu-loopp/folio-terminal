@@ -665,6 +665,88 @@ fn the_shutdown_level_is_asked_from_the_first_window_alone() {
     );
 }
 
+/// The flags of each registration the headless loop recorded since it was last read.
+fn registered_flags(application: &crate::headless::HeadlessApplication) -> Vec<u32> {
+    application
+        .event_loop
+        .ledger
+        .take()
+        .into_iter()
+        .filter_map(|effect| match effect {
+            crate::headless::WindowEffect::RestartRegistered { flags } => Some(flags),
+            _ => None,
+        })
+        .collect()
+}
+
+/// RED (0.4.10 plan row 22a, T-START-AT-LOGON-SWITCH; R10) — **while this copy's sign-in entry is
+/// on, the registration leaves the reboot's restart to it**: the entry starts Folio at that
+/// sign-in, and Windows' restart beside it would be a second plain start, which opens a window.
+/// The row lands after the first window's registration, so a round or a press that moves it
+/// across `On` asks again, and one that leaves the flags as they were asks nothing.
+///
+/// MUTATION (`plant-22-restart-flags-unchanged.py`): the flags ignore the row
+/// (`start_at_sign_in::restart_flags_for`) — the reboot's restart stays beside the entry.
+#[test]
+fn the_restart_registration_leaves_the_reboot_to_this_copys_sign_in_entry() {
+    use crate::start_at_sign_in::SignInRow;
+    use bt_platform::session_end::{RESTART_FLAGS, RESTART_NO_PATCH, RESTART_NO_REBOOT};
+    let mut application = restart_application("restart-sign-in");
+    let app = application.folio.app.as_mut().expect("the application");
+    app.start_at_sign_in = SignInRow::On;
+    application
+        .folio
+        .register_for_restart_held_by(&application.event_loop, |_| false);
+    let registered = registered_flags(&application);
+    let [flags] = registered[..] else {
+        panic!("one registration: {registered:?}")
+    };
+    assert_eq!(
+        flags,
+        RESTART_FLAGS | RESTART_NO_REBOOT,
+        "no restart after the reboot beside the entry: {flags:#x}"
+    );
+    assert_eq!(
+        flags & RESTART_NO_PATCH,
+        0,
+        "the installer's close still restarts it"
+    );
+
+    // The row moved from what the first window registered with: asked again, once.
+    application
+        .folio
+        .register_restart_after_sign_in_moved(&application.event_loop, Some(SignInRow::Unknown));
+    assert_eq!(
+        registered_flags(&application),
+        [RESTART_FLAGS | RESTART_NO_REBOOT]
+    );
+    // Another copy's entry, Off, turned off in Startup apps: the ruled flags, asked again.
+    for row in [
+        SignInRow::OnElsewhere,
+        SignInRow::Off,
+        SignInRow::TurnedOffBySystem,
+    ] {
+        application
+            .folio
+            .app
+            .as_mut()
+            .expect("the application")
+            .start_at_sign_in = row;
+        application
+            .folio
+            .register_restart_after_sign_in_moved(&application.event_loop, Some(SignInRow::On));
+        assert_eq!(registered_flags(&application), [RESTART_FLAGS], "{row:?}");
+    }
+    // A move that leaves the flags as they were, and a wake with no `App` before it: nothing.
+    application
+        .folio
+        .register_restart_after_sign_in_moved(&application.event_loop, Some(SignInRow::NotOurs));
+    application
+        .folio
+        .register_restart_after_sign_in_moved(&application.event_loop, None);
+    assert_eq!(registered_flags(&application), Vec::<u32>::new());
+}
+
 /// A headless application over one tab, its ledger emptied, for the restart's tests.
 fn restart_application(tag: &str) -> crate::headless::HeadlessApplication {
     crate::test_support::on_the_window_thread();
@@ -732,7 +814,10 @@ fn a_trial_asks_for_the_restart_only_once_committed() {
         .as_mut()
         .expect("the application")
         .release_trial_writes(vec![Writer::RestartRegistration], &|| {
-            crate::register_restart_now::<crate::headless::Headless>(event_loop);
+            crate::register_restart_now::<crate::headless::Headless>(
+                event_loop,
+                crate::start_at_sign_in::SignInRow::Unknown,
+            );
         });
     assert_eq!(registrations(&application), 1, "the commit asks, once");
 }
