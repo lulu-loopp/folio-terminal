@@ -80,6 +80,19 @@ mod tests {
         let _ = quiet_for_a_second(Instant::now());
     }
 
+    /// H5′: an `elapsed` only printed, once handed and once captured — no clock: not found
+    /// (row 20 review N2).
+    fn shows_how_long(since: Instant) {
+        eprintln!("took {:?}", since.elapsed());
+        let took = since.elapsed();
+        eprintln!("took {took:?} in all");
+    }
+
+    #[test]
+    fn a_printed_elapsed_in_a_helper_is_no_clock() {
+        shows_how_long(Instant::now());
+    }
+
     /// H6: a drop that waits, and no door: refused, because no edge leads into it.
     struct Ends;
 
@@ -92,6 +105,25 @@ mod tests {
     #[test]
     fn a_drop_that_waits() {
         let _ends = Ends;
+    }
+
+    /// H6′: a drop that waits through a helper, and no door: refused as H6 is (row 20 review
+    /// N1).
+    struct Settles;
+
+    impl Drop for Settles {
+        fn drop(&mut self) {
+            settle_down();
+        }
+    }
+
+    fn settle_down() {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+
+    #[test]
+    fn a_drop_that_waits_through_a_helper() {
+        let _settles = Settles;
     }
 
     /// H7: a door. The list names it, so the walk stops there; neither test is found, and the
@@ -158,6 +190,30 @@ mod tests {
     #[test]
     fn a_wait_behind_an_untyped_receiver_at_a_door() {
         let ask = |patient| patient.bide();
+        let _ = ask;
+    }
+
+    /// H8″: refused — an untyped receiver whose candidates are a door and a waiter that is
+    /// none: the door answers no, and the waiter is still asked (row 20 review N9).
+    pub struct Calm;
+
+    impl Calm {
+        pub fn settle_in(&self) {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    pub struct Restless;
+
+    impl Restless {
+        pub fn settle_in(&self) {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn a_door_beside_a_waiter_behind_an_untyped_receiver() {
+        let ask = |either| either.settle_in();
         let _ = ask;
     }
 

@@ -63,7 +63,10 @@
 //!    or formatting it is a **measuring** helper, and its row says "measures in
 //!    its helper"; every other one — a wait, a stall timer that only asks "has
 //!    it been too long", a remaining patience handed to a wait — is a
-//!    **waiting** helper, and its row says "waits in its helper". So the list
+//!    **waiting** helper, and its row says "waits in its helper". An `elapsed`
+//!    a helper only prints or formats (the arguments of `format!`, `print!`,
+//!    `write!`, `panic!` and their kin, inline captures `{took:?}` included)
+//!    decides nothing and is no clock there (row 20 review N2). So the list
 //!    depends on what a test does, not on whether its wait is written in its own
 //!    body or one call away.
 //!
@@ -104,8 +107,9 @@
 //!   package names `elapsed`, `Instant` or a wait.
 //! * A test-only impl that only an implicit call runs (`call_graph`'s
 //!   `Resolver::implicit`: a `Drop` at the end of a scope, `for`'s `next`, an
-//!   operator) whose body waits or measures, unless it is a door: no edge leads
-//!   into it, so no test that runs it could be seen (plan row 208).
+//!   operator) whose body waits or measures, or reaches a test-only helper that
+//!   does, unless it is a door: no edge leads into it, so no test that runs it
+//!   could be seen (plan row 208).
 //! * Anywhere in a first-party package, product code included (a test module's
 //!   `use super::*` brings its parent's imports): a [`KERNEL_WAIT_PATHS`] wait
 //!   named by its path and not called right there (`use libc::poll;`,
@@ -155,6 +159,11 @@
 //!   them is not seen (0.4.10 plan row 95 follows them).
 //! * **A std wait taken as a value** ([`REAL_WAITS`]) is not seen; a kernel wait
 //!   taken that way is refused.
+//! * **A wait in a `static`'s or `const`'s initializer.** A `LazyLock` or a
+//!   `const` in test code is reached by its use (`call_graph`'s
+//!   `Target::Value`), and shape 3's walk follows items only: a wait or a
+//!   measurement in such an initializer is neither followed nor refused (row 20
+//!   review N1). Review owns it.
 //! * **A wait taken as a value under a name that is also a type**
 //!   ([`KERNEL_WAIT_TYPES`]): `let f = libc::kevent;` or
 //!   `register(libc::kevent)` is neither found nor refused, because a token
@@ -455,19 +464,51 @@ struct Found {
     waiting: BTreeSet<String>,
     /// A door (plan row 208): a test-only helper that waits, which is itself a row; the walk
     /// stops there, and the tests that reach it are not rows through it.
-    door: bool,
+    door: Option<DoorKind>,
+}
+
+/// What a door row says it is (row 20 review N4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DoorKind {
+    /// A helper within whose wait the tests that reach it await their event.
+    Waits,
+    /// A helper that keeps a measurement of the operation the tests that reach it run.
+    Measures,
+    /// An impl only an implicit call runs, in a test target that declares no `#[test]` (built
+    /// without the test harness): the target's own run is the test.
+    OwnRun,
+    /// An impl only an implicit call runs, in an example: no test runs it.
+    Example,
 }
 
 impl Found {
     /// The row this test would have if it were listed today.
     fn row(&self, identity: &str) -> String {
-        if self.door {
-            return format!(
-                "{identity}\t{}\tthe tests that reach it await their event within its wait (a door: \
-                 waits or measures in its own body; its callers are not rows)\tcompletion signal, \
-                 controlled receiver or controlled sleeper",
-                self.package
-            );
+        if let Some(kind) = self.door {
+            let (assumption, seam) = match kind {
+                DoorKind::Waits => (
+                    "the tests that reach it await their event within its wait (a door: waits in its \
+                     own body; its callers are not rows)",
+                    "completion signal, controlled receiver or controlled sleeper",
+                ),
+                DoorKind::Measures => (
+                    "the tests that reach it finish their operation within the real time it measures \
+                     (a door: measures in its own body; its callers are not rows)",
+                    "operation counter or controlled clock",
+                ),
+                DoorKind::OwnRun => (
+                    "the target's own run awaits its event within this wait (a test target without \
+                     the test harness: no #[test] can name it, so the impl that waits, or the \
+                     helper only such an impl reaches, is the row)",
+                    "completion signal, controlled receiver or controlled sleeper",
+                ),
+                DoorKind::Example => (
+                    "no test runs it: an example's own run waits or measures within it (a row because \
+                     only an implicit call runs or reaches it)",
+                    "none while no test runs the example",
+                ),
+            };
+            return format!("{identity}\t{}\t{assumption}\t{seam}", self.package);
         }
         if !self.waits.is_empty() || self.measures {
             let calls: Vec<&str> = self
@@ -597,20 +638,19 @@ impl Sites {
         Self { hits }
     }
 
-    /// The waits called inside `body`, and whether a measurement is.
-    fn within(&self, body: Span) -> (BTreeSet<&'static str>, bool) {
+    /// The waits called inside `body`, and how many measurements are.
+    fn called_inside(&self, body: Span) -> (BTreeSet<&'static str>, usize) {
         let mut waits = BTreeSet::new();
-        let mut measured = false;
-        for (name, measures, sites) in &self.hits {
-            if inside(sites, body).next().is_some() {
-                if *measures {
-                    measured = true;
-                } else {
-                    waits.insert(*name);
-                }
+        let mut measures = 0;
+        for (name, measuring, sites) in &self.hits {
+            let called = inside(sites, body).count();
+            if *measuring {
+                measures += called;
+            } else if called > 0 {
+                waits.insert(*name);
             }
         }
-        (waits, measured)
+        (waits, measures)
     }
 }
 
@@ -630,7 +670,8 @@ fn scan_index_reading(
         if !is_test(&attributes, item) {
             continue;
         }
-        let (waits, measured) = sites.within(body);
+        let (waits, measures) = sites.called_inside(body);
+        let measured = measures > 0;
         let arithmetic = match read_callable(index, item) {
             Ok(read) => {
                 let base = item.whole().start();
@@ -780,7 +821,7 @@ impl<'r, 'i> Helpers<'r, 'i> {
     }
 
     /// `id`'s package's shape-1 sites.
-    fn sites_of(&self, id: ItemId) -> Arc<Sites> {
+    fn shape_one_sites_of(&self, id: ItemId) -> Arc<Sites> {
         let package = self.resolver.package(id);
         if let Some(known) = self.sites.borrow().get(package) {
             return Arc::clone(known);
@@ -794,23 +835,28 @@ impl<'r, 'i> Helpers<'r, 'i> {
 
     /// What test-only `id`'s own body holds of the real clock, or why it cannot be told. A
     /// wait or a measurement written in it decides the answer whatever its reading refuses;
-    /// what the reading alone could say (a kept measurement, clock arithmetic) is asked of it
-    /// only when it reads.
-    fn holds(&self, id: ItemId) -> Result<Holds, String> {
+    /// what the reading alone could say (a kept measurement, clock arithmetic, a measurement
+    /// only printed) is asked of it only when it reads. An `elapsed` whose every value is only
+    /// printed or formatted decides nothing, so it is no clock (row 20 review N2); one the
+    /// reading does not follow to such a use still counts.
+    fn clock_in_body(&self, id: ItemId) -> Result<Holds, String> {
         if let Some(known) = self.readings.borrow().get(&id) {
             return known.clone();
         }
         let index = self.resolver.index_of(id);
         let record = self.resolver.record(id);
-        let (waits, measured) = record
+        let (waits, measures) = record
             .body()
-            .map(|body| self.sites_of(id).within(body))
+            .map(|body| self.shape_one_sites_of(id).called_inside(body))
             .unwrap_or_default();
-        let written = !waits.is_empty() || measured;
+        let written = !waits.is_empty() || measures > 0;
         let answer = match read_callable(index, record) {
             Ok(read) if read.refusals.is_empty() => Ok(if !read.kept.is_empty() {
                 Holds::Measurement
-            } else if written || !read.arithmetic.is_empty() {
+            } else if !waits.is_empty()
+                || !read.arithmetic.is_empty()
+                || measures > read.only_printed()
+            {
                 Holds::Wait
             } else {
                 Holds::Nothing
@@ -872,7 +918,7 @@ impl<'r, 'i> Helpers<'r, 'i> {
         }
         let outer = self.leaned_on_open.replace(false);
         self.asking.borrow_mut().push(id);
-        let answer = match self.holds(id) {
+        let answer = match self.clock_in_body(id) {
             Ok(Holds::Measurement | Holds::Wait) => Reach::Yes,
             Err(refusal) => Reach::CannotTell(vec![refusal]),
             Ok(Holds::Nothing) => {
@@ -959,7 +1005,7 @@ impl<'r, 'i> Helpers<'r, 'i> {
                             self.met.borrow_mut().insert(*to);
                             continue;
                         }
-                        match self.holds(*to) {
+                        match self.clock_in_body(*to) {
                             Ok(Holds::Measurement) => {
                                 walked.measuring.insert(*to);
                             }
@@ -1071,7 +1117,7 @@ fn scan_helpers(
     doors: &BTreeSet<String>,
     found: &mut BTreeMap<String, Found>,
     refusals: &mut Vec<String>,
-) -> BTreeMap<String, Reached> {
+) -> BTreeMap<String, HelperUse> {
     let packages: Vec<(&str, &Index)> = indices
         .iter()
         .map(|(name, index)| (name.as_str(), &**index))
@@ -1079,7 +1125,9 @@ fn scan_helpers(
     let resolver = Resolver::new(&packages, Arms::filtered(|_| true))
         .unwrap_or_else(|refused| panic!("{refused:?}"));
     let helpers = Helpers::new(&resolver, &KERNEL, doors);
-    let mut reached: BTreeMap<String, Reached> = BTreeMap::new();
+    let mut reached: BTreeMap<String, HelperUse> = BTreeMap::new();
+    // The targets that declare a `#[test]`: an implicit door elsewhere is no test's door.
+    let mut tested: BTreeSet<String> = BTreeSet::new();
     for (package, index) in indices {
         let attributes = test_attributes(index);
         for record in index.items() {
@@ -1090,6 +1138,7 @@ fn scan_helpers(
                 continue;
             };
             let within = targets(index, record);
+            tested.extend(within.iter().cloned());
             let walked = helpers.walk(id, &within);
             refusals.extend(walked.refusals);
             let tests = identities(index, record).len();
@@ -1133,19 +1182,24 @@ fn scan_helpers(
             continue;
         }
         let index = resolver.index_of(*id);
-        let at = place(index, resolver.record(*id).whole().start());
-        match helpers.holds(*id) {
-            Ok(Holds::Measurement | Holds::Wait) => refusals.push(format!(
+        let record = resolver.record(*id);
+        let at = place(index, record.whole().start());
+        // Its own body or any test-only helper it reaches (row 20 review N1): the walk is
+        // transitive here as it is from a test.
+        match helpers.reach(*id, &targets(index, record)) {
+            Reach::Yes => refusals.push(format!(
                 "{at}: `{}` is a test-only impl of `{path}` that only an implicit call runs, and \
-                 it waits on or measures real time; no call-graph edge leads into it, so no test \
-                 that runs it is seen — make it a door row, or move the wait out of it",
+                 it waits on or measures real time, or reaches a test-only helper that does; no \
+                 call-graph edge leads into it, so no test that runs it is seen — make it a door \
+                 row, or move the wait out of it",
                 helpers.name(*id)
             )),
-            Ok(Holds::Nothing) => {}
-            Err(why) => refusals.push(format!(
+            Reach::No => {}
+            Reach::CannotTell(why) => refusals.push(format!(
                 "{at}: `{}` is a test-only impl of `{path}` that only an implicit call runs, and \
-                 whether it waits cannot be told ({why})",
-                helpers.name(*id)
+                 whether it waits cannot be told ({})",
+                helpers.name(*id),
+                why.join("; ")
             )),
         }
     }
@@ -1153,17 +1207,38 @@ fn scan_helpers(
         for id in helpers.test_callables(package) {
             if !helpers.door(id)
                 || !(helpers.met.borrow().contains(&id) || implicit.contains_key(&id))
-                || !matches!(helpers.holds(id), Ok(Holds::Measurement | Holds::Wait))
             {
                 continue;
             }
-            for identity in callable_identities(resolver.index_of(id), resolver.record(id)) {
+            let measures = match helpers.clock_in_body(id) {
+                Ok(Holds::Measurement) => true,
+                Ok(Holds::Wait) => false,
+                _ => continue,
+            };
+            let index = resolver.index_of(id);
+            let record = resolver.record(id);
+            let compiled_by = targets(index, record);
+            let kind = if !compiled_by.is_disjoint(&tested) {
+                if measures {
+                    DoorKind::Measures
+                } else {
+                    DoorKind::Waits
+                }
+            } else if compiled_by
+                .iter()
+                .all(|target| target.contains(":example:"))
+            {
+                DoorKind::Example
+            } else {
+                DoorKind::OwnRun
+            };
+            for identity in callable_identities(index, record) {
                 if !doors.contains(&identity) {
                     continue;
                 }
                 let entry = found.entry(identity).or_default();
                 entry.package = package.clone();
-                entry.door = true;
+                entry.door = Some(kind);
             }
         }
     }
@@ -1172,7 +1247,7 @@ fn scan_helpers(
 
 /// A helper the walk reached that waits or measures, or a door.
 #[derive(Default)]
-struct Reached {
+struct HelperUse {
     door: bool,
     /// The tests that reach it (one per identity).
     tests: usize,
@@ -1442,7 +1517,7 @@ fn committed() -> BTreeMap<String, String> {
 }
 
 /// Leave the list this scan expects where a ticket can copy rows from it.
-fn leave_rendering(found: &BTreeMap<String, Found>, reached: &BTreeMap<String, Reached>) {
+fn leave_rendering(found: &BTreeMap<String, Found>, reached: &BTreeMap<String, HelperUse>) {
     let out = workspace_root().join("target").join("timing-bound-tests");
     std::fs::create_dir_all(&out).expect("target/ is writable");
     let mut text = String::from(HEADER);
@@ -1842,11 +1917,13 @@ fn a_budget_measured_in_a_helper_is_found_through_the_call_graph() {
 /// a row of the list is a door, where the walk stops, and is found as a door; a product wait ends
 /// the walk; a drop that waits and is no door, an untyped receiver whose candidate waits and a
 /// macro that waits are refused by file and line; a door met only as an untyped receiver's
-/// candidate answers that call and is found; a door that waits on nothing is not one.**
+/// candidate answers that call and is found, but does not hide a waiting candidate beside it;
+/// a drop that waits through a helper is refused as one that waits itself; an `elapsed` a
+/// helper only prints is no clock; a door that waits on nothing is not one.**
 ///
 /// The list's own rows are the doors: here `tests::door_wait`, `tests::Cleans::drop`,
-/// `tests::Patient::bide` and `tests::quiet` (which waits on nothing, so it is no door and its
-/// row would be stale).
+/// `tests::Patient::bide`, `tests::Calm::settle_in` and `tests::quiet` (which waits on nothing,
+/// so it is no door and its row would be stale).
 ///
 /// MUTATIONS: in `Helpers::holds`, answer `Nothing` for a body whose only clock is a wait or an
 /// `elapsed` it does not keep — every waiting test leaves the found set; in `Helpers::walk`, do
@@ -1854,7 +1931,11 @@ fn a_budget_measured_in_a_helper_is_found_through_the_call_graph() {
 /// are found; skip the implicit impls — the `Ends::drop` refusal is gone and `Cleans::drop` is
 /// no longer found as a door; in `names_a_clock_or_a_wait`, read only `elapsed` and `Instant` —
 /// the `settle!` refusal is gone; in `Helpers::reach`, do not record a door met as a candidate —
-/// `Patient::bide` is no longer found.
+/// `Patient::bide` is no longer found; in `scan_helpers`' implicit loop, ask
+/// `Helpers::clock_in_body` instead of `Helpers::reach` — the `Settles::drop` refusal is gone
+/// (row 20 review N1); in `Helpers::refuse_candidates`, answer `None` once a candidate is a
+/// door — the `Restless::settle_in` refusal is gone (N9); in `Helpers::clock_in_body`, count an
+/// only-printed `elapsed` — `a_printed_elapsed_in_a_helper_is_no_clock` is found (N2).
 #[test]
 fn a_wait_in_a_helper_is_found_through_the_call_graph() {
     let index = fixture_named("timing_waiting_helpers", "waiting");
@@ -1863,6 +1944,7 @@ fn a_wait_in_a_helper_is_found_through_the_call_graph() {
         "tests::door_wait",
         "tests::Cleans::drop",
         "tests::Patient::bide",
+        "tests::Calm::settle_in",
         "tests::quiet",
     ]
     .iter()
@@ -1880,7 +1962,7 @@ fn a_wait_in_a_helper_is_found_through_the_call_graph() {
                     .unwrap_or(identity),
                 test.waiting.iter().map(String::as_str).collect(),
                 test.helpers.iter().map(String::as_str).collect(),
-                test.door,
+                test.door.is_some(),
             )
         })
         .collect();
@@ -1888,6 +1970,7 @@ fn a_wait_in_a_helper_is_found_through_the_call_graph() {
     assert_eq!(
         read,
         [
+            ("tests::Calm::settle_in", none(), none(), true),
             ("tests::Cleans::drop", none(), none(), true),
             ("tests::Patient::bide", none(), none(), true),
             (
@@ -1935,9 +2018,10 @@ fn a_wait_in_a_helper_is_found_through_the_call_graph() {
             ("tests::door_wait", none(), none(), true),
         ],
         "H1-H5 and H12 wait through a helper; the door, the drop behind a door and the door met as a candidate are doors; \
-         the tests through the door, the product wait and the control are not found"
+         the tests through the door, the product wait, the printed elapsed and the control are not \
+         found"
     );
-    assert_eq!(refusals.len(), 3, "{refusals:#?}");
+    assert_eq!(refusals.len(), 5, "{refusals:#?}");
     let file = "crates/bt-source/tests/fixtures/timing_waiting_helpers/lib.rs:";
     for says in [
         &["`Ends::drop`", "implicit call", "make it a door row"][..],
@@ -1947,6 +2031,16 @@ fn a_wait_in_a_helper_is_found_through_the_call_graph() {
             "Waiter::hold_on",
         ],
         &["the macro `settle!`", "names a clock or a wait"],
+        &[
+            "`Settles::drop`",
+            "implicit call",
+            "reaches a test-only helper that does",
+        ],
+        &[
+            "a call to `settle_in`",
+            "a candidate measures real time or waits on it",
+            "Restless::settle_in",
+        ],
     ] {
         assert!(
             refusals.iter().any(|refusal| refusal.starts_with(file)
@@ -1954,6 +2048,12 @@ fn a_wait_in_a_helper_is_found_through_the_call_graph() {
             "{says:?} in {refusals:#?}"
         );
     }
+    assert!(
+        refusals
+            .iter()
+            .all(|refusal| !refusal.contains("Calm::settle_in")),
+        "the door candidate answers no beside the waiter it does not hide: {refusals:#?}"
+    );
 }
 
 /// RED (T-GATES-047 round 4) — **nothing in the workspace declares a function
@@ -3184,6 +3284,26 @@ mod reading {
         "debug_assert_matches",
     ];
 
+    /// The macros of [`CONSUMING`] that only print or format what they are handed (row 20
+    /// review N2): a measurement handed only to one of them is shown, and decides nothing.
+    const PRINTING: [&str; 15] = [
+        "format",
+        "format_args",
+        "print",
+        "println",
+        "eprint",
+        "eprintln",
+        "write",
+        "writeln",
+        "panic",
+        "unreachable",
+        "todo",
+        "unimplemented",
+        "dbg",
+        "trace",
+        "debug",
+    ];
+
     /// What one body says.
     #[derive(Debug, Default)]
     pub struct Reading {
@@ -3191,8 +3311,46 @@ mod reading {
         pub arithmetic: Vec<Offset>,
         /// Measurements whose value is kept (shape 3).
         pub kept: Vec<Offset>,
+        /// Measurements printed or formatted ([`PRINTING`]), by where they are measured.
+        pub printed: BTreeSet<Offset>,
+        /// Measurements compared or discarded, by where they are measured.
+        pub consumed: BTreeSet<Offset>,
         /// What this reading cannot decide, and why.
         pub refusals: Vec<(Offset, String)>,
+    }
+
+    impl Reading {
+        /// How many measurements are printed and put to no other use: none of them decides
+        /// anything (row 20 review N2).
+        pub fn only_printed(&self) -> usize {
+            self.printed
+                .iter()
+                .filter(|at| !self.consumed.contains(at) && !self.kept.contains(at))
+                .count()
+        }
+    }
+
+    /// The names a format string captures inline (`{took:?}`, `{took}`), in order; `{{` is
+    /// a literal brace, and a position or an empty `{}` captures nothing.
+    fn captured_names(text: &str) -> Vec<String> {
+        let mut names = Vec::new();
+        let mut rest = text;
+        while let Some(open) = rest.find('{') {
+            rest = &rest[open + 1..];
+            if let Some(after) = rest.strip_prefix('{') {
+                rest = after;
+                continue;
+            }
+            let Some(close) = rest.find('}') else { break };
+            let name = rest[..close].split(':').next().unwrap_or_default().trim();
+            if name.starts_with(|c: char| c.is_alphabetic() || c == '_')
+                && name.chars().all(|c| c.is_alphanumeric() || c == '_')
+            {
+                names.push(name.to_owned());
+            }
+            rest = &rest[close + 1..];
+        }
+        names
     }
 
     /// The signature and body of a callable's whole text, parsed as the item it
@@ -3375,8 +3533,10 @@ mod reading {
     enum Use {
         /// Returned, stored, handed on: a measurement here is kept.
         Kept,
-        /// Compared, formatted, discarded: a measurement here is not.
+        /// Compared, asserted on, discarded: a measurement here is not.
         Consumed,
+        /// Printed or formatted only ([`PRINTING`]): a measurement here decides nothing.
+        OnlyPrinted,
         /// Bound to these names, whose own uses decide.
         Bind(Vec<String>),
     }
@@ -3469,7 +3629,8 @@ mod reading {
             }
             match how {
                 Use::Kept => self.out.kept.extend_from_slice(measured),
-                Use::Consumed => {}
+                Use::Consumed => self.out.consumed.extend(measured.iter().copied()),
+                Use::OnlyPrinted => self.out.printed.extend(measured.iter().copied()),
                 Use::Bind(names) => {
                     for name in names {
                         if let Some(pending) = self.pending.get_mut(name) {
@@ -3512,7 +3673,10 @@ mod reading {
                 .unwrap_or_default();
             match arguments(mac) {
                 Some(args) => {
-                    let each = if CONSUMING.contains(&name.as_str()) {
+                    let each = if PRINTING.contains(&name.as_str()) {
+                        self.captured(&args);
+                        Use::OnlyPrinted
+                    } else if CONSUMING.contains(&name.as_str()) {
                         Use::Consumed
                     } else {
                         Use::Kept
@@ -3533,6 +3697,27 @@ mod reading {
                         ));
                     }
                 }
+            }
+        }
+
+        /// A format string's inline captures (`{elapsed:?}`): each a use of the name it
+        /// captures, printed (row 20 review N2).
+        fn captured(&mut self, args: &[Expr]) {
+            let Some(text) = args.iter().find_map(|arg| match arg {
+                Expr::Lit(syn::ExprLit {
+                    lit: syn::Lit::Str(text),
+                    ..
+                }) => Some(text.value()),
+                _ => None,
+            }) else {
+                return;
+            };
+            for name in captured_names(&text) {
+                let measured = self
+                    .lookup(&name)
+                    .map(|binding| binding.measured.clone())
+                    .unwrap_or_default();
+                self.spend(&measured, &Use::OnlyPrinted);
             }
         }
 
