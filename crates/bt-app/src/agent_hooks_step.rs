@@ -1872,8 +1872,14 @@ mod tests {
     /// `Runtime::raise_first_run_if_due` and those three
     /// are held here too; so is the version probe's answer (`AppEvent::CopilotProbed`, ruling R9),
     /// whose readiness the pass it starts carries.
+    ///
+    /// **Nor the sign-in entry** (0.4.10 plan row 22a, R6): the round's adoption, the press's
+    /// answer (`FolioApp::answer_sign_in_press`) and the press itself
+    /// (`Runtime::apply_start_at_sign_in`) take what the pass's worker or the press's read.
+    ///
     /// MUTATIONS: the step reads a row first (`plant-68a-carry-step-reads-on-the-window-thread.py`);
-    /// the card asks Claude Code's state again (`plant-73-card-reads-claude-state.py`).
+    /// the card asks Claude Code's state again (`plant-73-card-reads-claude-state.py`); the press's
+    /// answer reads the entry again (`plant-22-read-on-the-window-thread.py`).
     #[test]
     fn the_window_thread_reads_no_agent_file_at_start() {
         use crate::test_support::{free_fn_body, item_body, method_body, squeezed};
@@ -1919,6 +1925,14 @@ mod tests {
             ),
             ("press_would_write", free_fn_body("press_would_write")),
             ("AppEvent::CopilotProbed", probed),
+            (
+                "FolioApp::answer_sign_in_press",
+                method_body("FolioApp", "answer_sign_in_press"),
+            ),
+            (
+                "Runtime::apply_start_at_sign_in",
+                method_body("Runtime", "apply_start_at_sign_in"),
+            ),
         ];
         for (name, body) in window_thread {
             let body = squeezed(body);
@@ -1939,10 +1953,18 @@ mod tests {
                 "read_context_menu(",
                 "explorer_menu::begin_probe(",
                 "msix::registered(",
+                // The sign-in entry (row 22a): read and written on the pass's worker and on the
+                // press's own.
+                "read_entry_in(",
+                "write_entry_in(",
+                "carry_sign_in_in(",
+                "press_sign_in_in(",
+                "CurrentUser",
             ] {
                 assert!(
                     !body.contains(read),
-                    "{name} reads an agent's file or an Explorer registration on the window thread: {read}"
+                    "{name} reads an agent's file, an Explorer registration or the sign-in entry \
+                     on the window thread: {read}"
                 );
             }
             // The adoptions take the readiness the snapshot carries, and never ask it.

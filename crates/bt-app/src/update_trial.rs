@@ -210,6 +210,11 @@ pub(crate) enum Writer {
     /// held back, the recorded homes are still judged and said; the same release runs that member
     /// too.
     OrphanSweep,
+    /// **The carry pass's re-pointing of the sign-in entry** (`start_at_sign_in::run_sign_in_step`,
+    /// 0.4.10 plan row 22a, R7): the `Run\Folio` value of a copy that moved or is gone, rewritten
+    /// to name this one. Held back, the entry is still read and the row shows it; the release runs
+    /// the member again, which then writes. The switch's press is a person's and is not held.
+    StartAtSignIn,
 }
 
 impl Writer {
@@ -235,13 +240,14 @@ impl Writer {
             | Writer::RecoveredAnnouncement
             | Writer::RestartRegistration
             | Writer::AgentHooksRepair
-            | Writer::OrphanSweep => false,
+            | Writer::OrphanSweep
+            | Writer::StartAtSignIn => false,
         }
     }
 
     /// Every writer, in release order.
     #[cfg(test)]
-    pub(crate) const ALL: [Writer; 20] = [
+    pub(crate) const ALL: [Writer; 21] = [
         Writer::DataFolderMove,
         Writer::DataFolder,
         Writer::RefusedCopies,
@@ -262,6 +268,7 @@ impl Writer {
         Writer::RestartRegistration,
         Writer::AgentHooksRepair,
         Writer::OrphanSweep,
+        Writer::StartAtSignIn,
     ];
 }
 
@@ -4831,6 +4838,7 @@ mod tests {
             Writer::RestartRegistration => 17,
             Writer::AgentHooksRepair => 18,
             Writer::OrphanSweep => 19,
+            Writer::StartAtSignIn => 20,
         };
         for (index, writer) in Writer::ALL.into_iter().enumerate() {
             assert_eq!(

@@ -14,9 +14,10 @@ use crate::window_seam::prelude::*;
 use crate::{
     Announce, ApplicationChange, FilePick, RAIL_TRANSITION, RevealTween, Runtime,
     adopt_stored_schemes, agent_hooks_step, attention_copilot, attention_wire, block_max_height_px,
-    cardhint, context_menu, explorer_menu, handoff_lane, hang_watch, i18n,
+    cardhint, carry_pass, context_menu, explorer_menu, handoff_lane, hang_watch, i18n,
     install_minimum_contrast, marks, preview, profiles, programs_lane, psreadline, rail_state_for,
-    schemes, seats, settings, shell_integration, shortcuts, text_field, toast, update, update_card,
+    schemes, seats, settings, shell_integration, shortcuts, start_at_sign_in, text_field, toast,
+    update, update_card,
 };
 use anyhow::Result;
 use bt_persist::ThemeModeV1;
@@ -299,6 +300,9 @@ impl<B: Backend> Runtime<'_, B> {
             ),
         ) {
             self.apply_explorer_place(place, announce)?;
+        }
+        if let Some(on) = settings::start_at_sign_in_requested(target) {
+            self.apply_start_at_sign_in(on, announce);
         }
         if let Some(install) = settings::claude_hooks_requested(target) {
             self.apply_claude_hooks(install, announce)?;
@@ -676,6 +680,8 @@ impl<B: Backend> Runtime<'_, B> {
             // database, which is not a line in this file and not this verb's to
             // undo. One row asks about both since 2026-09-07.
             | Row::ContextMenu
+            // The sign-in entry (row 22a): an entry for the account, not a line in this file.
+            | Row::StartAtSignIn
             | Row::QuakeHotkey
             | Row::QuakeProfile
             | Row::QuakeCommand
@@ -1781,6 +1787,16 @@ impl<B: Backend> Runtime<'_, B> {
         }
     }
 
+    /// **Press the sign-in switch** (0.4.10 plan row 22a, R6): the wish handed to its worker,
+    /// `start_at_sign_in::begin_sign_in_press`, which reads, writes and reads back the entry off
+    /// this thread and answers on `AppEvent::SignInPressed`. The row keeps what it said until
+    /// then, because it is drawn from the machine and never from the press; the window that
+    /// pressed is where the card goes, and `announce` says whether a success is said there.
+    fn apply_start_at_sign_in(&mut self, on: bool, announce: Announce) {
+        self.app.sign_in_asked_by = Some((self.window_id(), announce));
+        start_at_sign_in::begin_sign_in_press(on);
+    }
+
     /// Store the reader's answer about the update check (§7.51).
     ///
     /// **Nothing is started or stopped directly here.** The application clock
@@ -2260,6 +2276,16 @@ impl<B: Backend> Runtime<'_, B> {
             // Every row's program, and WSL's distributions, asked again as the page opens.
             self.ask_the_program_walk(programs_lane::Trigger::ProfilesPage);
         }
+        // **The sign-in row's own edge** (0.4.10 plan row 22a, R11): an entry removed or turned
+        // off in Task Manager while Folio runs is read when the reader looks at General, once per
+        // visit, by the carry pass's member on its worker; the round's answer redraws the page.
+        let general_opened = self.window.settings.take_general_open_edge(
+            self.window.settings.category() == settings::SettingsCategory::General
+                && rows.contains(&settings::SettingsRow::StartAtSignIn),
+        );
+        if general_opened {
+            carry_pass::begin_carry_pass(carry_pass::CarryAsk::START_AT_SIGN_IN);
+        }
         // The second probe on the same door and for the same argument: the page that prints which
         // copilot this machine has is the page that asks. Idempotent, and an atomic load after the
         // first call — see `attention_copilot::begin_probe`.
@@ -2649,6 +2675,7 @@ impl<B: Backend> Runtime<'_, B> {
             // The machine's own answer, cached at the three moments it can
             // change — see `App::context_menu_installed`.
             context_menu: self.app.context_menu_installed,
+            start_at_sign_in: self.app.start_at_sign_in,
             // **Not cached on `App`**, unlike the row above, and the difference
             // is which thread writes it: this answer is produced on a worker and
             // already lives behind one lock in `explorer_menu`, so a second copy
