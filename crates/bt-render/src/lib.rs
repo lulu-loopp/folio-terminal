@@ -6740,9 +6740,10 @@ pub struct RenderProbeSample {
 
 /// **What a tool needs from the product library to probe a frame or read one back, and no
 /// more** (the thread-door note's revision (l)4, A2p). Every function here prepares, encodes or
-/// reads; **none submits and none presents** — the submit and the present are
-/// `bt_render_probe`'s, a tool crate outside `folio.exe`, so the product library holds no probe
-/// effect (`window_waits_tests::the_product_library_holds_no_probe_effect`).
+/// reads; **none submits, none presents and none waits** — the submit, the present and the
+/// read-back's wait on the device are `bt_render_probe`'s, a tool crate outside `folio.exe`, so
+/// the product library holds no probe effect
+/// (`window_waits_tests::the_product_library_holds_no_probe_effect`).
 #[doc(hidden)]
 pub mod probe_surface {
     use super::{
@@ -6790,13 +6791,21 @@ pub mod probe_surface {
         window.read_back_work(gpu)
     }
 
-    /// The rows of a read-back whose copy was submitted.
+    /// Ask for the mapping of a read-back whose copy was submitted
+    /// ([`WindowRenderer::read_back_mapping`]). It does not wait: the tool waits on
+    /// [`read_back_device`] before it takes the rows.
+    pub fn read_back_mapping(back: &ReadBack) {
+        WindowRenderer::read_back_mapping(back);
+    }
+
+    /// The rows of a read-back whose mapping the device was waited on for
+    /// ([`WindowRenderer::read_back_rows`]).
     ///
     /// # Errors
     ///
     /// The mapping's or the device's failure.
-    pub fn read_back_pixels(gpu: &GpuContext, back: ReadBack) -> Result<Vec<[u8; 4]>, RenderError> {
-        WindowRenderer::read_back_pixels(gpu, back)
+    pub fn read_back_rows(gpu: &GpuContext, back: ReadBack) -> Result<Vec<[u8; 4]>, RenderError> {
+        WindowRenderer::read_back_rows(gpu, back)
     }
 
     /// Prepare and encode one probe frame ([`WindowRenderer::probe_frame_work`]), unsubmitted.
@@ -6836,6 +6845,14 @@ pub mod probe_surface {
     pub fn queue(gpu: &GpuContext) -> &wgpu::Queue {
         &gpu.queue
     }
+
+    /// The device, for the tool that waits on it between a read-back's mapping and its rows
+    /// ([`read_back_mapping`], [`read_back_rows`]): the wait is the tool's, as the submit is
+    /// (T-WGPU-DEVICE-POLL-WAIT-IN-NEITHER-LIST, 0.4.10 plan row 11, ruling R1).
+    #[must_use]
+    pub fn read_back_device(gpu: &GpuContext) -> &wgpu::Device {
+        &gpu.device
+    }
 }
 
 /// The two compositions this crate's own tests read frames through. Test code is outside the
@@ -6857,7 +6874,14 @@ impl WindowRenderer {
     fn read_back(&self, gpu: &GpuContext) -> Result<Vec<[u8; 4]>, RenderError> {
         let (commands, back) = self.read_back_work(gpu)?;
         gpu.queue.submit([commands]);
-        Self::read_back_pixels(gpu, back)
+        Self::read_back_mapping(&back);
+        gpu.device
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            })
+            .map_err(|error| RenderError::Wgpu(error.to_string()))?;
+        Self::read_back_rows(gpu, back)
     }
 
     fn probe_frame(
@@ -9623,8 +9647,9 @@ impl WindowRenderer {
     /// **Encode the read-back of this window's last frame** — an offscreen target only — and
     /// hand the work back unsubmitted: [`probe_surface::read_back_work`], whose submit is
     /// `bt_render_probe::read_back`'s (the thread-door note (l)4: the probe's GPU submissions
-    /// are a tool's, not the product library's). The rows come back as `[b, g, r, a]`, of
-    /// `config.width` pixels, from [`probe_surface::read_back_pixels`].
+    /// are a tool's, not the product library's), as is its wait on the device between
+    /// [`probe_surface::read_back_mapping`] and [`probe_surface::read_back_rows`]. The rows come
+    /// back as `[b, g, r, a]`, of `config.width` pixels, from the second.
     ///
     /// The one way a test can ask *where a glyph landed* rather than where it
     /// was told to land, which is the whole difference §7.36 turns on: the
@@ -9711,9 +9736,18 @@ impl WindowRenderer {
         ))
     }
 
-    /// **The read-back's second half**, after its work was submitted: wait for the mapping,
-    /// ask after the device once more, and unpad the rows.
-    fn read_back_pixels(
+    /// **The read-back's second step**, after its work was submitted: ask for the buffer's
+    /// mapping. It does not wait. The wait for the mapping, `wgpu::Device::poll`, is the
+    /// tool's (`bt_render_probe::read_back`, through [`probe_surface::read_back_device`]), as
+    /// the submit is, so the product library holds no vocabulary site
+    /// (T-WGPU-DEVICE-POLL-WAIT-IN-NEITHER-LIST, 0.4.10 plan row 11, ruling R1).
+    fn read_back_mapping(back: &probe_surface::ReadBack) {
+        back.buffer.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+    }
+
+    /// **The read-back's last step**, after the device was waited on for the mapping: ask after
+    /// the device once more, and unpad the rows.
+    fn read_back_rows(
         gpu: &GpuContext,
         back: probe_surface::ReadBack,
     ) -> Result<Vec<[u8; 4]>, RenderError> {
@@ -9723,13 +9757,6 @@ impl WindowRenderer {
             width,
             height,
         } = back;
-        buffer.slice(..).map_async(wgpu::MapMode::Read, |_| {});
-        gpu.device
-            .poll(wgpu::PollType::Wait {
-                submission_index: None,
-                timeout: None,
-            })
-            .map_err(|error| RenderError::Wgpu(error.to_string()))?;
         // And once more, because the copy itself is work the device had to
         // survive: a mapping that never happened is not a readback of black
         // pixels, it is a device that is gone.
