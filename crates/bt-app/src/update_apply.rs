@@ -1524,47 +1524,6 @@ pub(crate) fn commit_steps_left(phase: Option<PhaseKind>, folder: &Path) -> usiz
 #[cfg(test)]
 pub(crate) const COMMIT_STEPS: usize = 6;
 
-/// **A test's [`WaitClock`] that is the wall clock, watched**
-/// (T-UPDATE-APPLIER-LOCK-WAITS): [`WallClock`]'s readings and pauses, with
-/// `at_pause` run before each pause, with its number from one. A road's wait
-/// for something the test holds pauses only after an ask was refused, so the
-/// test lets go of its hold in the pause of its choosing — once the road has
-/// been seen waiting — never after a sleep of its own; the deadline stays the
-/// wall clock's, so a hold kept to the end still meets it.
-#[cfg(test)]
-pub(crate) struct WatchedWallClock {
-    /// The pauses so far, for each one's number.
-    pauses: std::sync::Mutex<usize>,
-    at_pause: std::sync::Mutex<Box<dyn FnMut(usize) + Send>>,
-}
-
-#[cfg(test)]
-impl WatchedWallClock {
-    pub(crate) fn new(at_pause: impl FnMut(usize) + Send + 'static) -> Self {
-        Self {
-            pauses: std::sync::Mutex::new(0),
-            at_pause: std::sync::Mutex::new(Box::new(at_pause)),
-        }
-    }
-}
-
-#[cfg(test)]
-impl WaitClock for WatchedWallClock {
-    fn now(&self) -> Instant {
-        WaitClock::now(&WallClock)
-    }
-
-    fn pause(&self, worker: &WorkerCtx, pause: Duration) {
-        let number = {
-            let mut pauses = self.pauses.lock().unwrap();
-            *pauses += 1;
-            *pauses
-        };
-        (self.at_pause.lock().unwrap())(number);
-        WaitClock::pause(&WallClock, worker, pause);
-    }
-}
-
 /// **What a trial's watch is over**: the home, who records, the trial this
 /// holder just launched if the journal records none yet, and the clock.
 pub(crate) struct Watch<'a> {

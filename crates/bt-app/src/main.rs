@@ -59649,8 +59649,8 @@ mod platform_gate_tests {
         // macOS-only test fixtures: the applier's road over real bundles, exchanges, trials and
         // LaunchServices launches; the road's platform-free points run everywhere.
         "update_apply_macos_tests.rs",
-        // Only the held-journal fixtures: a hold that refuses a replacing rename is a
-        // Windows fact; their platform-free halves run beside the door everywhere.
+        // Windows-only test fixtures: the applier's road over a signed set, real programs, held
+        // files and a squatted claim; its road over a set of plain bytes runs everywhere.
         "update_apply_windows_tests.rs",
         // One test accessor, `Job::take_reports`: the job's inbox read without applying it,
         // whose one reader is the Windows Prepare's cancel tests; the job itself is portable.
