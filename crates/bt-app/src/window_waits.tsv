@@ -196,6 +196,7 @@ portable_pty::Child::try_wait	all	counted by call site, does not wait
 pollster::block_on	all	an executor entry: waits for a future
 wgpu::Queue::submit	all	the GPU driver
 wgpu::Queue::present	all	the GPU driver and the compositor
+wgpu::Device::poll	all	waits for the GPU's submitted work when its poll type is Wait, with no bound when the timeout is None; counted at every call, whatever the poll type (as row 181's R1 counts GetOverlappedResult)
 bt_render::GpuContext::open	all	a cross-crate entrance that waits inside
 bt_pty::PtySession::spawn_shell_in	all	a cross-crate entrance that waits inside
 bt_pty::PtySession::spawn_refreshed	all	a cross-crate entrance that waits inside after composing the fresh Windows block

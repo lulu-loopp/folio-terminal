@@ -161,6 +161,7 @@ const BLOCKING: &[&str] = &[
     "std::thread::sleep",
     "std::sync::Once::call_once",
     "std::sync::Once::call_once_force",
+    "wgpu::Device::poll",
     "windows::Win32::System::Threading::WaitForSingleObject",
     "windows::Win32::System::Threading::WaitForSingleObjectEx",
     "windows::Win32::System::Threading::WaitForMultipleObjects",
