@@ -505,19 +505,12 @@ struct Install {
     old: Files,
     new: Files,
     registry: Memory,
-    /// What only the signed installation holds, let go last; `None` for the
-    /// unsigned one.
+    /// The test root that signed the signed installation's files; `None` for
+    /// the unsigned one.
     #[cfg(windows)]
-    _signed: Option<SignedOnly>,
-}
-
-/// **What the signed installation holds beside its files** (Windows): the
-/// test root that signed them, and this test's turn among the fixture tests
-/// (`test_support::a_fixture_turn`), let go after its programs have ended and
-/// its folder is gone.
-#[cfg(windows)]
-struct SignedOnly {
-    _root: TestCa,
+    _root: Option<TestCa>,
+    /// This test's turn among the fixture tests (`test_support::a_fixture_turn`), let go last,
+    /// after its programs have ended and its folder is gone.
     _turn: crate::test_support::FixtureTurn,
 }
 
@@ -532,59 +525,30 @@ const PLAIN_MEMBERS: [&str; 6] = [
     "LICENSE-MIT",
 ];
 
-impl Install {
-    /// **The signed installation** (Windows): both builds written by U-20's
-    /// release writer and signed by U-15's test root, their `folio.exe` a
-    /// program that stays up once started.
-    #[cfg(windows)]
-    fn new(tag: &str) -> Self {
-        let turn = crate::test_support::a_fixture_turn();
-        let ca = TestCa::new().expect("Windows has a test root");
-        let install = Self::of_builds(tag, ca.policy(), |folder, (version, spelled, says)| {
-            build_that(
-                &ca,
-                folder,
-                version,
-                spelled,
-                IDENTITY,
-                says,
-                Behaviour::StaysUp,
-            )
-        });
-        Self {
-            _signed: Some(SignedOnly {
-                _root: ca,
-                _turn: turn,
-            }),
-            ..install
-        }
-    }
+/// The applier's nonce the journal at `Handoff` names.
+const HANDOFF_APPLIER: Nonce = Nonce::new([0x44; 32]);
 
-    /// **The same installation of plain bytes** (every host; 0.4.10 plan row
-    /// 12): each of [`PLAIN_MEMBERS`] holds a line naming itself and its
-    /// build, and the road checks the set under the system's policy. Nothing
-    /// in it can be started, so it takes no fixture turn, and a test over it
-    /// starts none of its programs.
-    fn unsigned(tag: &str) -> Self {
-        Self::of_builds(tag, Policy::System, |folder, (_, spelled, says)| {
-            PLAIN_MEMBERS
-                .iter()
-                .map(|name| {
-                    let bytes = format!("{name}: {says}, {spelled}\n").into_bytes();
-                    std::fs::write(folder.join(name), &bytes).unwrap();
-                    ((*name).to_owned(), bytes)
-                })
-                .collect()
-        })
-    }
+/// **What both installations lay out on disk**, under the test's own folder,
+/// before the installation keeps it.
+struct LaidOut {
+    scratch: Scratch,
+    installed: PathBuf,
+    rescue: PathBuf,
+    home: Home,
+    txn: TxnId,
+    data: PathBuf,
+    inventories: Inventories,
+    old: Files,
+    new: Files,
+}
 
-    /// **The layout both installations share**, under the test's own folder:
-    /// `write` writes one build's files into a folder and answers each with
-    /// its bytes, `folio.exe` first — the running build into `install`, the
-    /// offered one into the home's `set\`. The journal is at `Handoff`.
-    fn of_builds(
+impl LaidOut {
+    /// **The layout**: `write` writes one build's files into a folder and
+    /// answers each with its bytes, `folio.exe` first — the running build into
+    /// `install`, the offered one into the home's `set\` — and the rescue copy
+    /// is the running `folio.exe`'s.
+    fn by_writing(
         tag: &str,
-        policy: Policy,
         mut write: impl FnMut(&Path, (FileVersion, &str, &str)) -> Files,
     ) -> Self {
         let root = bt_testpath::temp_path(&format!("bt-u24-{tag}"));
@@ -621,27 +585,105 @@ impl Install {
             old_present: old.iter().map(member).collect(),
             new: new.iter().map(member).collect(),
         };
-        let install = Self {
-            children: Children::default(),
-            _scratch: scratch,
-            policy,
+        Self {
+            scratch,
             installed,
             rescue,
             home,
             txn,
-            applier: Nonce::new([0x44; 32]),
             data,
             inventories,
             old,
             new,
+        }
+    }
+}
+
+impl Install {
+    /// **The signed installation** (Windows): both builds written by U-20's
+    /// release writer and signed by U-15's test root, their `folio.exe` a
+    /// program that stays up once started.
+    #[cfg(windows)]
+    fn new(tag: &str) -> Self {
+        let turn = crate::test_support::a_fixture_turn();
+        let ca = TestCa::new().expect("Windows has a test root");
+        let laid = LaidOut::by_writing(tag, |folder, (version, spelled, says)| {
+            build_that(
+                &ca,
+                folder,
+                version,
+                spelled,
+                IDENTITY,
+                says,
+                Behaviour::StaysUp,
+            )
+        });
+        Self {
+            children: Children::default(),
+            _scratch: laid.scratch,
+            policy: ca.policy(),
+            installed: laid.installed,
+            rescue: laid.rescue,
+            home: laid.home,
+            txn: laid.txn,
+            applier: HANDOFF_APPLIER,
+            data: laid.data,
+            inventories: laid.inventories,
+            old: laid.old,
+            new: laid.new,
+            registry: Memory::default(),
+            _root: Some(ca),
+            _turn: turn,
+        }
+        .journalled_at_handoff()
+    }
+
+    /// **The same installation of plain bytes** (every host; 0.4.10 plan row
+    /// 12): each of [`PLAIN_MEMBERS`] holds a line naming itself and its
+    /// build, and the road checks the set under the system's policy. Nothing
+    /// in it can be started, so a test over it starts none of its programs.
+    /// It takes its fixture turn first, as the signed one does: every test of
+    /// the module waits for one of the same turns, whatever its installation
+    /// is made of.
+    fn unsigned(tag: &str) -> Self {
+        let turn = crate::test_support::a_fixture_turn();
+        let laid = LaidOut::by_writing(tag, |folder, (_, spelled, says)| {
+            PLAIN_MEMBERS
+                .iter()
+                .map(|name| {
+                    let bytes = format!("{name}: {says}, {spelled}\n").into_bytes();
+                    std::fs::write(folder.join(name), &bytes).unwrap();
+                    ((*name).to_owned(), bytes)
+                })
+                .collect()
+        });
+        Self {
+            children: Children::default(),
+            _scratch: laid.scratch,
+            policy: Policy::System,
+            installed: laid.installed,
+            rescue: laid.rescue,
+            home: laid.home,
+            txn: laid.txn,
+            applier: HANDOFF_APPLIER,
+            data: laid.data,
+            inventories: laid.inventories,
+            old: laid.old,
+            new: laid.new,
             registry: Memory::default(),
             #[cfg(windows)]
-            _signed: None,
-        };
-        install.write(Phase::Handoff {
-            applier: install.applier,
+            _root: None,
+            _turn: turn,
+        }
+        .journalled_at_handoff()
+    }
+
+    /// This installation with its journal written at `Handoff`.
+    fn journalled_at_handoff(self) -> Self {
+        self.write(Phase::Handoff {
+            applier: self.applier,
         });
-        install
+        self
     }
 
     /// The journal, durably at `phase`, with the inventories.
