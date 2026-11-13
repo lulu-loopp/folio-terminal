@@ -22,48 +22,71 @@
 //! a `return` inside a closure, an `async` block or a nested item ends that, not the test, and
 //! is not read. A helper the test calls is judged on nothing here (below).
 //!
-//! **A road out** is a `return` that ends the test as passed — `return;`, `return ();` or
-//! `return Ok(…);` — written before any assertion of the test's own body: a macro or a call
-//! named `assert…` (`assert!`, `assert_eq!`, a helper `assert_window_spent_by`), `panic!`,
-//! `unreachable!`, `expect_err` or `unwrap_err`. A `return` after one of those ends a test that
-//! has checked something on the way (`if host != Windows { assert!(files.is_empty()); return; }`
-//! asserts the other host's half). Any other `return` hands back a value whose own verdict the
-//! test is — `return Err(…)` ends red — and is not a road out.
+//! **A road out** is a `return` that ends the test as passed: `return;`, `return ();` or
+//! `return Ok(…);`. Any other `return` hands back a value whose own verdict the test is —
+//! `return Err(…)` ends red — and is not a road out.
 //!
-//! # The grammar: every road out stands in one of four shapes, or it is refused
+//! **An assertion** is a macro or a call named `assert…` (`assert!`, `assert_eq!`, a helper
+//! `assert_window_spent_by`), `panic!`, `unreachable!`, or a method `expect_err` or
+//! `unwrap_err`, written anywhere in the test's own body.
 //!
+//! # The grammar: every road out is dropped (R), stands in one of four shapes, or is refused
+//!
+//! * **R — a road after an assertion is not this class, and is dropped.** A road out written
+//!   after the test's first assertion (by its place in the text) ends a test that has checked
+//!   something on the way: a case table's later row after the first held, the child half after
+//!   the child's own assertions, the other host's half that asserts its refusal
+//!   (`if host != Windows { assert!(files.is_empty()); return; }`). The assertion counts
+//!   wherever it stands before the road, inside the road's own `else` block too, and what it
+//!   checks is not judged here (below). The dropped roads are measured, not registered: the
+//!   row's report names each one with the assertion before it, and review reads them; a test
+//!   whose only assertion before its road is the host itself is this guard's class and is gated
+//!   with `#[cfg]` (0.4.10 plan row 12 gated three).
 //! * **G1 — the else of a `let`.** `let PAT = EXPR else { …; return; };`, the else block
 //!   ending in the road out. Judged by `EXPR`'s callee.
 //! * **G2 — an `if` with no `else`.** `if COND { …; return; }`, the block ending in the road
-//!   out; `if let PAT = EXPR` is judged by `EXPR`. Judged by `COND`'s callee.
+//!   out; `if let PAT = EXPR` is judged by `EXPR`. Judged by `COND`'s callee. The last arm of an
+//!   `else if` chain is such an `if` (the inner `if` has no `else`), so a road there is held as
+//!   G2; a road in a branch that has an `else` after it is refused.
 //! * **G3 — a `match` arm.** `match EXPR { … ARM => return, … }`, the arm a road out or a
 //!   block ending in one. Judged by `EXPR`'s callee.
-//! * **G4 — the child half of a test.** A G1 or G2 whose `EXPR` or `COND` calls `env::var` or
-//!   `env::var_os`: the test is a copy of its own binary, started by its parent half with that
-//!   variable, and the parent asserts. Accepted, with no row.
+//! * **G4 — the child half of a test.** A G1, G2 or G3 whose `EXPR` or `COND` reads one or more
+//!   variables with `env::var` or `env::var_os`, **each of them a variable the same file sets on
+//!   a started command** — `.env(NAME, …)`, its first argument spelled as the read's (whitespace
+//!   out) — is the child half: the test is a copy of its own binary, started by its parent half
+//!   with that variable, and the parent asserts. Accepted, with no row. A read of a variable
+//!   the file never sets on a command (an opt-in, a variable the person sets) is no child half:
+//!   the road is a G1–G3 site judged by its callee and keyed on its test (`env::var_os` names
+//!   the variable, not a fixture), and needs a row (`child-half` when another file's command
+//!   starts the child, otherwise where it is taken).
 //!
 //! **The callee** of an expression is the path of the call it is, by its last two segments
 //! (`Install::new`, `launch_pipe::endpoint_for`), read through `&`, `!`, `*`, parentheses, `?`,
 //! `.await`, a field and a method's receiver (`TestCa::new().ok()` is `TestCa::new`); a method
 //! called on no call is its name (`install.home.journal().exists()` is `journal`). An
-//! expression that is no call in that reading — a comparison, a `cfg!`, a `&&` chain — is
-//! judged by its whole text with the whitespace out
+//! expression that is no call in that reading — a variable, a comparison, a `cfg!`, a `&&`
+//! chain — is judged by its whole text with the whitespace out
 //! (`crate::host_platform()==crate::HostPlatform::OtherUnix`, `cfg!(not(any(windows,unix)))`).
 //!
 //! **Every other road out is refused, never silent**: a `return;` at the end of a loop's body,
-//! after a statement in the test's own block, in an `if` that has an `else`. A macro's
+//! after a statement in the test's own block, in a branch with an `else` after it. A macro's
 //! arguments are the test's own code when they parse as comma-separated expressions
 //! (`assert!`, `format!`); a `return` among the tokens of any other macro is refused, since what
-//! it ends is the macro's to say. A refusal is named with its place, and rewritten into one of
-//! the shapes or gated.
+//! it ends is the macro's to say. A refusal is named with its place, and rewritten into
+//! one of the shapes or gated.
 //!
 //! # The register
 //!
-//! A G1–G3 site stands only as a row of `docs/plans/EARLY-RETURN-FIXTURES.tsv` — file, callee,
-//! hosts, reason — keyed by (file, callee), so a fixture called by many tests of one file is one
-//! row. The rows are an equality with the sites: a site no row names is red, and a row that names
-//! no site is stale and red. The hosts column says where the road is taken, in exactly one of
-//! five spellings:
+//! A G1–G3 site stands only as a row of `docs/plans/EARLY-RETURN-FIXTURES.tsv` — file, test,
+//! callee, hosts, reason. **A callee that is a function named by its path** (`Install::new`,
+//! `on_the_software_adapter`) keys the row on (file, callee), the test column `*`, so a fixture
+//! called by many tests of one file is one row. **Any other key** — a method read on no call
+//! (`iter`), a variable (`powershell`), a whole condition (`cfg!(not(any(windows,unix)))`), a
+//! read of the environment G4 does not hold —
+//! keys it on (file, test, callee), the test by its function's name: a name that common would
+//! otherwise cover another test's road it has nothing to do with. The rows are an equality with
+//! the sites: a site no row names is red, and a row that names no site is stale and red. The
+//! hosts column says where the road is taken, in exactly one of five spellings:
 //!
 //! * `other-unix`: a Unix that is not macOS;
 //! * `other-platform`: a host that is neither Windows nor a Unix;
@@ -73,22 +96,33 @@
 //!   half: the call it hangs on started the test again alone in a child process and asserted
 //!   that child's verdict, and the child takes the other branch;
 //! * `child-half`: every host, in the suite's own run, where the test is the entry of a child
-//!   another test starts (its mode read from the environment, the arguments or standard input
-//!   before the road, which G4 does not see), and the starting test asserts what the child did.
+//!   another test starts (its mode read from the arguments or standard input, or from a
+//!   variable its own file never sets, before the road: what G4 does not hold), and the
+//!   starting test asserts what the child did.
 //!
 //! None names Windows or macOS, the hosts every suite of the workspace runs on: a road taken
-//! there is this guard's defect, never a row.
+//! there is this guard's defect, never a row. The reason column is free, and says the whole
+//! fact where the spelling cannot (a fixture that answers nothing on a whole platform the
+//! suite runs on stands in the reason, with the plan row that decides it).
 //!
 //! # What it does not see
 //!
 //! * **A road out inside a helper.** `fn armed(tag) -> Option<Install>` returns `None`, and its
 //!   caller's G1 is judged by `armed`; but a helper that itself returns early and silently from
 //!   a test's work (`fn cell(…) { let Some(x) = … else { return; }; … }`, the test only calling
-//!   it) is no test's own body.
-//! * **What an assertion before the road checks.** Any one written before it accepts the road,
-//!   even one in a branch the host where the road is taken never runs, and whether what it
-//!   checks is enough is review's. An assertion is known by its name only: a helper that
-//!   asserts under another name (`nothing_moved(&install)`) is no assertion here.
+//!   it) is no test's own body. Four of row 12's 84 were this shape (the
+//!   `mark_unwritable_*_has_one_opener` tests, through `mark_unwritable_cell`): this guard could
+//!   not have named them. Following a test's helpers one level is 0.4.10 plan row 96
+//!   (T-EARLY-RETURN-GUARD-FOLLOWS-HELPERS).
+//! * **A `continue` or `break` past every assertion.** `for name in names { let Some(p) =
+//!   find(name) else { continue; }; assert!(…); }` asserts nothing when every name answers
+//!   `None`, and a labelled block's `break` can do the same; neither ends the test, so neither
+//!   is read here (row 96 too).
+//! * **What an assertion before the road checks** (R). Any one written before it drops the
+//!   road, even one in a branch the host where the road is taken never runs, or one that only
+//!   names the host, and whether what it checks is enough is review's. An assertion is known by
+//!   its name only: a helper that asserts under another name (`nothing_moved(&install)`) is no
+//!   assertion here.
 //! * **A road's polarity.** A row names the fixture a road hangs on, not which answer takes it:
 //!   `if !ready() { return; }` and `if ready() { return; }` in one file are one row, judged by
 //!   `ready`, whose hosts column says where the one the file has is taken.
@@ -112,7 +146,10 @@ use syn::{Block, Expr, Stmt, Token};
 const LIST: &str = "docs/plans/EARLY-RETURN-FIXTURES.tsv";
 
 /// The register's column header.
-const HEADER: &str = "file\tcallee\thosts\treason";
+const HEADER: &str = "file\ttest\tcallee\thosts\treason";
+
+/// The test column of a row keyed on its file alone: a function named by its path.
+const FILE_WIDE: &str = "*";
 
 /// The hosts every suite of the workspace runs on: a register row may not name them.
 const SUITE_HOSTS: [&str; 2] = ["windows", "macos"];
@@ -142,23 +179,38 @@ pub(crate) fn workspace_indices() -> Vec<Arc<Index>> {
 }
 
 /// One road out in a shape the grammar reads and the register must name: the file it stands in,
-/// what it is judged by, and where.
+/// the test column of its row (`*`, or the test function's name), what it is judged by, and
+/// where.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct Site {
     file: String,
+    key_test: String,
     callee: String,
     line: usize,
     test: String,
     shape: &'static str,
 }
 
-/// What a scan found: the sites the register must name, the accepted child halves (G4), and
-/// the roads out in no shape, each as `file:line test`.
+impl Site {
+    /// The register row's key this site needs: (file, test column, callee).
+    fn key(&self) -> (String, String, String) {
+        (
+            self.file.clone(),
+            self.key_test.clone(),
+            self.callee.clone(),
+        )
+    }
+}
+
+/// What a scan found: the sites the register must name, the accepted child halves (G4), the
+/// roads out in no shape, each as `file:line test`, and the roads R dropped, each with the
+/// assertion written before it.
 #[derive(Debug, Default)]
 struct Found {
     sites: BTreeSet<Site>,
     children: BTreeSet<String>,
     refused: BTreeSet<String>,
+    dropped: BTreeSet<String>,
     /// How many tests were read.
     tests: usize,
 }
@@ -202,14 +254,18 @@ fn last_two(path: &syn::Path) -> String {
     segments[segments.len().saturating_sub(2)..].join("::")
 }
 
-/// The callee of `expr`, as the module header defines it; `None` where it makes no call.
-fn callee(expr: &Expr) -> Option<String> {
+/// The callee of `expr`, as the module header defines it, and whether it is a function named
+/// by its path (`true`, a row keyed file-wide) or a method read on no call (`false`, a row
+/// keyed on its test); `None` where it makes no call.
+fn callee(expr: &Expr) -> Option<(String, bool)> {
     match expr {
         Expr::Call(call) => match &*call.func {
-            Expr::Path(path) => Some(last_two(&path.path)),
+            Expr::Path(path) => Some((last_two(&path.path), true)),
             other => callee(other),
         },
-        Expr::MethodCall(call) => callee(&call.receiver).or_else(|| Some(call.method.to_string())),
+        Expr::MethodCall(call) => {
+            callee(&call.receiver).or_else(|| Some((call.method.to_string(), false)))
+        }
         Expr::Reference(inner) => callee(&inner.expr),
         Expr::Unary(inner) => callee(&inner.expr),
         Expr::Paren(inner) => callee(&inner.expr),
@@ -221,10 +277,19 @@ fn callee(expr: &Expr) -> Option<String> {
     }
 }
 
-/// Whether `expr` calls `env::var` or `env::var_os` anywhere in it.
-fn reads_the_environment(expr: &Expr) -> bool {
-    struct Reads(bool);
-    impl<'ast> Visit<'ast> for Reads {
+/// `text` with its whitespace out.
+fn squeezed(text: &str) -> String {
+    text.split_whitespace().collect()
+}
+
+/// The variables `expr` reads with `env::var` or `env::var_os`, each as its first argument's
+/// text in `text` with the whitespace out; empty where it reads none.
+fn environment_reads(expr: &Expr, text: &str) -> Vec<String> {
+    struct Reads<'t> {
+        text: &'t str,
+        names: Vec<String>,
+    }
+    impl<'ast> Visit<'ast> for Reads<'_> {
         fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
             if let Expr::Path(path) = &*call.func {
                 let segments: Vec<String> = path
@@ -236,22 +301,29 @@ fn reads_the_environment(expr: &Expr) -> bool {
                 if segments.ends_with(&["env".to_owned(), "var".to_owned()])
                     || segments.ends_with(&["env".to_owned(), "var_os".to_owned()])
                 {
-                    self.0 = true;
+                    let name = call.args.first().map_or_else(String::new, |name| {
+                        squeezed(&self.text[name.span().byte_range()])
+                    });
+                    self.names.push(name);
                 }
             }
             visit::visit_expr_call(self, call);
         }
     }
-    let mut reads = Reads(false);
+    let mut reads = Reads {
+        text,
+        names: Vec::new(),
+    };
     reads.visit_expr(expr);
-    reads.0
+    reads.names
 }
 
-/// What a road a shape holds is judged by: the child half's dispatch (G4), or a callee.
+/// What a road a shape holds is judged by: the child half's dispatch (G4), or a callee or a
+/// condition with whether its row is keyed file-wide.
 #[derive(Debug)]
 enum Judged {
     Child,
-    By(String),
+    By { key: String, file_wide: bool },
 }
 
 /// Where a road out stands in one test's own body: every road out by its offset in the test's
@@ -259,10 +331,12 @@ enum Judged {
 struct Roads<'t> {
     /// The test's whole text, which every offset is into.
     text: &'t str,
+    /// The test's file with its whitespace out, where G4 looks for `.env(NAME,`.
+    file: &'t str,
     out: Vec<usize>,
     held: Vec<(usize, &'static str, Judged)>,
-    /// Where an assertion is written in the body, by its offset.
-    asserts: Vec<usize>,
+    /// Where an assertion is written in the body, by its offset, with its name.
+    asserts: Vec<(usize, String)>,
 }
 
 /// Whether a macro or a call by this name is an assertion: `assert…` (`assert!`,
@@ -278,16 +352,28 @@ fn offset(spanned: &impl Spanned) -> usize {
 }
 
 impl Roads<'_> {
-    /// The road at `ret`, held by `shape` and judged by `expr`.
+    /// The road at `ret`, held by `shape` and judged by `expr`: the child half (G4) when every
+    /// variable it reads is one this file sets on a started command, else its callee, else its
+    /// whole text; keyed on its test where it reads the environment, since `env::var_os` names
+    /// the variable, not a fixture.
     fn hold(&mut self, ret: &syn::ExprReturn, shape: &'static str, expr: &Expr) {
-        let judged = if reads_the_environment(expr) {
+        let reads = environment_reads(expr, self.text);
+        let judged = if !reads.is_empty()
+            && reads
+                .iter()
+                .all(|name| self.file.contains(&format!(".env({name},")))
+        {
             Judged::Child
+        } else if let Some((key, file_wide)) = callee(expr) {
+            Judged::By {
+                key,
+                file_wide: file_wide && reads.is_empty(),
+            }
         } else {
-            Judged::By(callee(expr).unwrap_or_else(|| {
-                self.text[expr.span().byte_range()]
-                    .split_whitespace()
-                    .collect()
-            }))
+            Judged::By {
+                key: squeezed(&self.text[expr.span().byte_range()]),
+                file_wide: false,
+            }
         };
         self.held.push((offset(ret), shape, judged));
     }
@@ -340,32 +426,28 @@ impl<'ast> Visit<'ast> for Roads<'_> {
     /// in no shape, since what it ends is the macro's to say.
     fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
         if let Expr::Path(path) = &*call.func
-            && path
-                .path
-                .segments
-                .last()
-                .is_some_and(|segment| asserts(&segment.ident.to_string()))
+            && let Some(segment) = path.path.segments.last()
+            && asserts(&segment.ident.to_string())
         {
-            self.asserts.push(offset(call));
+            self.asserts.push((offset(call), segment.ident.to_string()));
         }
         visit::visit_expr_call(self, call);
     }
 
     fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
         if asserts(&call.method.to_string()) {
-            self.asserts.push(offset(&call.method));
+            self.asserts
+                .push((offset(&call.method), call.method.to_string()));
         }
         visit::visit_expr_method_call(self, call);
     }
 
     fn visit_macro(&mut self, mac: &'ast syn::Macro) {
-        if mac
-            .path
-            .segments
-            .last()
-            .is_some_and(|segment| asserts(&segment.ident.to_string()))
+        if let Some(segment) = mac.path.segments.last()
+            && asserts(&segment.ident.to_string())
         {
-            self.asserts.push(offset(&mac.path));
+            self.asserts
+                .push((offset(&mac.path), format!("{}!", segment.ident)));
         }
         match mac.parse_body_with(Punctuated::<Expr, Token![,]>::parse_terminated) {
             Ok(arguments) => {
@@ -426,11 +508,16 @@ fn is_test(attributes: &[Span], item: &ItemRecord) -> bool {
 /// Every road out of every test of `index`, judged; file paths relative to `root`.
 fn scan(index: &Index, root: &Path, found: &mut Found) {
     let attributes = test_attributes(index);
+    let mut files: std::collections::BTreeMap<PathBuf, String> = std::collections::BTreeMap::new();
     for item in index.items() {
         if !is_test(&attributes, item) {
             continue;
         }
         found.tests += 1;
+        let record = index.file_of(item);
+        let file: &str = files
+            .entry(record.path().to_path_buf())
+            .or_insert_with(|| squeezed(index.text(record.span())));
         let whole = item.whole();
         let text = index.text(whole);
         let names: Vec<String> = item
@@ -444,29 +531,29 @@ fn scan(index: &Index, root: &Path, found: &mut Found) {
                 .expect("an offset of a test stands in one of the index's files");
             (relative(location.file, root), location.line)
         };
-        let parsed = match syn::parse_str::<syn::ItemFn>(text) {
-            Ok(parsed) => parsed,
-            Err(error) => {
-                let (file, line) = place(0);
-                found.refused.insert(format!(
-                    "{file}:{line} {test}: its text does not parse ({error}), so its roads out \
-                     cannot be read"
-                ));
-                continue;
-            }
-        };
+        let parsed = syn::parse_str::<syn::ItemFn>(text)
+            .expect("the index parsed this function's file, so its own text parses");
         let mut roads = Roads {
             text,
+            file,
             out: Vec::new(),
             held: Vec::new(),
             asserts: Vec::new(),
         };
         roads.visit_block(&parsed.block);
-        // A road with an assertion written before it is no road of this class: the test has
-        // checked something on the way.
-        let first_assert = roads.asserts.iter().copied().min().unwrap_or(usize::MAX);
-        roads.out.retain(|at| *at < first_assert);
-        roads.held.retain(|(at, _, _)| *at < first_assert);
+        // R: a road with an assertion written before it is no road of this class (the test has
+        // checked something on the way); it is dropped, and named with that assertion.
+        if let Some((first_assert, name)) = roads.asserts.iter().min().cloned() {
+            let (_, assert_line) = place(first_assert);
+            for at in roads.out.iter().filter(|at| **at > first_assert) {
+                let (file, line) = place(*at);
+                found.dropped.insert(format!(
+                    "{file}:{line} {test} (after `{name}` at line {assert_line})"
+                ));
+            }
+            roads.out.retain(|at| *at < first_assert);
+            roads.held.retain(|(at, _, _)| *at < first_assert);
+        }
         let held: Vec<usize> = roads.held.iter().map(|(at, _, _)| *at).collect();
         for (at, shape, judged) in roads.held.drain(..) {
             let (file, line) = place(at);
@@ -474,10 +561,15 @@ fn scan(index: &Index, root: &Path, found: &mut Found) {
                 Judged::Child => {
                     found.children.insert(format!("{file}:{line} {test}"));
                 }
-                Judged::By(callee) => {
+                Judged::By { key, file_wide } => {
                     found.sites.insert(Site {
                         file,
-                        callee,
+                        key_test: if file_wide {
+                            FILE_WIDE.to_owned()
+                        } else {
+                            parsed.sig.ident.to_string()
+                        },
+                        callee: key,
                         line,
                         test: test.clone(),
                         shape,
@@ -502,8 +594,8 @@ fn workspace_found() -> Found {
     found
 }
 
-/// The register's rows, as (file, callee).
-fn register() -> BTreeSet<(String, String)> {
+/// The register's rows, as (file, test column, callee).
+fn register() -> BTreeSet<(String, String, String)> {
     rows_of(&std::fs::read_to_string(workspace_root().join(LIST)).expect("the register"))
 }
 
@@ -523,7 +615,7 @@ fn hosts_are_spelled(hosts: &str) -> bool {
 
 /// The rows of a register's text, refusing a malformed line, a hosts field in no spelling (or
 /// naming a host the suites run on), and a row listed twice, by number.
-fn rows_of(text: &str) -> BTreeSet<(String, String)> {
+fn rows_of(text: &str) -> BTreeSet<(String, String, String)> {
     let mut rows = BTreeSet::new();
     let mut header = false;
     for (number, line) in text.lines().enumerate() {
@@ -536,8 +628,8 @@ fn rows_of(text: &str) -> BTreeSet<(String, String)> {
             continue;
         }
         let fields: Vec<&str> = line.split('\t').collect();
-        let [file, callee, hosts, reason] = fields[..] else {
-            panic!("{LIST}:{}: four tab-separated fields: {line}", number + 1);
+        let [file, test, callee, hosts, reason] = fields[..] else {
+            panic!("{LIST}:{}: five tab-separated fields: {line}", number + 1);
         };
         assert!(
             hosts_are_spelled(hosts),
@@ -552,32 +644,39 @@ fn rows_of(text: &str) -> BTreeSet<(String, String)> {
             "{LIST}:{}: a row says why",
             number + 1
         );
-        let fresh = rows.insert((file.to_owned(), callee.to_owned()));
+        let fresh = rows.insert((file.to_owned(), test.to_owned(), callee.to_owned()));
         assert!(fresh, "{LIST}:{}: listed twice: {line}", number + 1);
     }
     assert!(header, "{LIST} has its header");
     rows
 }
 
-/// The sites no row names, and the rows that name no site.
-fn judged(sites: &BTreeSet<Site>, rows: &BTreeSet<(String, String)>) -> (Vec<String>, Vec<String>) {
-    let keys: BTreeSet<(String, String)> = sites
-        .iter()
-        .map(|site| (site.file.clone(), site.callee.clone()))
-        .collect();
+/// The sites no row names, each with the key its row needs, and the rows that name no site.
+fn judged(
+    sites: &BTreeSet<Site>,
+    rows: &BTreeSet<(String, String, String)>,
+) -> (Vec<String>, Vec<String>) {
+    let keys: BTreeSet<(String, String, String)> = sites.iter().map(Site::key).collect();
     let unlisted = sites
         .iter()
-        .filter(|site| !rows.contains(&(site.file.clone(), site.callee.clone())))
+        .filter(|site| !rows.contains(&site.key()))
         .map(|site| {
             format!(
-                "{}:{} {} ({}, `{}`)",
-                site.file, site.line, site.test, site.shape, site.callee
+                "{}:{} {} ({}, `{}`; row key `{}\t{}\t{}`)",
+                site.file,
+                site.line,
+                site.test,
+                site.shape,
+                site.callee,
+                site.file,
+                site.key_test,
+                site.callee
             )
         })
         .collect();
     let stale = rows
         .difference(&keys)
-        .map(|(file, callee)| format!("{file}\t{callee}"))
+        .map(|(file, test, callee)| format!("{file}\t{test}\t{callee}"))
         .collect();
     (unlisted, stale)
 }
@@ -649,20 +748,27 @@ fn fixture() -> (Index, PathBuf) {
 }
 
 /// RED (0.4.10 plan row 12) — **each shape is read and judged by its callee, the child half
-/// is accepted, a road out in no shape is refused, and what is not the test's own road is not
-/// read.**
+/// is accepted only over a variable its file sets on a command, a road out in no shape is
+/// refused, a road after an assertion is dropped and named, and what is not the test's own road
+/// is not read.**
 ///
-/// The fixture holds G1 over a fixture answering `Option` (and one in a test returning
-/// `Result`), G2 over a `cfg!`, G3 over a call, the child half (G4), a road out at the end of a
-/// loop, one in an `if` with an `else` and one among a macro's tokens (refused), and a `return`
-/// in a closure (in a body and in an `assert!`'s argument), in a nested function, after an
-/// assertion, a `return Err(…)` and a helper's own `return` (none read).
+/// The fixture holds, for each line of the module doc: G1 over a fixture answering `Option`
+/// (with `return;`, `return ();` and, in a test returning `Result`, `return Ok(())`), G2 over a
+/// `cfg!`, an `if let` and the last arm of an `else if` chain, G3 over a call; the callee read
+/// through `!`, `&`, `?` and a field, a method on no call and a variable (both keyed on their
+/// test), the child half by an `if`, a `let` and a `match` (G4) and an opt-in read no command of
+/// the file sets (a site); a road out at the end of a loop, after a statement, in a branch with
+/// an `else` and among a macro's tokens (refused); a road after `assert!`, `panic!`,
+/// `expect_err` and an `assert…` helper (dropped); and a `return` in a closure (in a body and in
+/// an `assert!`'s argument), in an `async` block, in a nested function, a `return Err(…)` and a
+/// helper's own `return` (none read).
 ///
 /// MUTATION: descend into closures in `Roads` and `a_return_in_a_closure_is_not_the_tests` is
 /// refused; keep the roads after the first assertion and
-/// `a_road_after_an_assertion_has_checked_something` is a site; drop G4's check and
-/// `a_child_half_reads_its_part` is a site; drop the `else_branch` check from G2 and
-/// `an_if_with_an_else` is a site instead of refused.
+/// `a_road_after_an_assertion_has_checked_something` is a site; accept any read of the
+/// environment in `hold` and `an_opt_in_is_no_child_half` is a child half; drop the
+/// `else_branch` check from G2 and `an_if_with_an_else` is a site instead of refused; key every
+/// callee file-wide and the two bare-name sites name `*`.
 #[test]
 fn the_grammar_reads_each_shape_and_refuses_a_road_in_none() {
     let (index, directory) = fixture();
@@ -671,15 +777,31 @@ fn the_grammar_reads_each_shape_and_refuses_a_road_in_none() {
     let sites: Vec<String> = found
         .sites
         .iter()
-        .map(|site| format!("{} {} {}", site.test, site.shape, site.callee))
+        .map(|site| {
+            format!(
+                "{} {} {} [{}]",
+                site.test, site.shape, site.callee, site.key_test
+            )
+        })
         .collect();
     assert_eq!(
         sites,
         [
-            "crate::tests::a_fixture_answering_none G1 TestRoot::new",
-            "crate::tests::a_fixture_answering_none_in_a_result_test G1 TestRoot::new",
-            "crate::tests::a_host_by_its_cfg G2 cfg!(not(windows))",
-            "crate::tests::an_endpoint_by_a_match G3 endpoint",
+            "crate::tests::a_callee_through_a_field G1 Settings::load [*]",
+            "crate::tests::an_if_let_is_judged_by_its_expression G2 TestRoot::new [*]",
+            "crate::tests::a_callee_through_a_question_mark G1 TestRoot::new [*]",
+            "crate::tests::a_fixture_answering_none G1 TestRoot::new [*]",
+            "crate::tests::a_fixture_answering_none_in_a_result_test G1 TestRoot::new [*]",
+            "crate::tests::a_unit_return_is_a_road G1 endpoint [*]",
+            "crate::tests::a_callee_through_a_reference G1 endpoint [*]",
+            "crate::tests::an_endpoint_by_a_match G3 endpoint [*]",
+            "crate::tests::a_callee_through_a_not G2 ready [*]",
+            "crate::tests::an_else_if_last_arm_is_held_as_g2 G2 ready [*]",
+            "crate::tests::a_bare_name_in_another_test G1 iter [a_bare_name_in_another_test]",
+            "crate::tests::a_bare_name_in_one_test G1 iter [a_bare_name_in_one_test]",
+            "crate::tests::a_host_by_its_cfg G2 cfg!(not(windows)) [a_host_by_its_cfg]",
+            "crate::tests::a_variable_is_judged_by_its_name G1 found [a_variable_is_judged_by_its_name]",
+            "crate::tests::an_opt_in_is_no_child_half G2 env::var_os [an_opt_in_is_no_child_half]",
         ],
         "{found:#?}"
     );
@@ -697,25 +819,43 @@ fn the_grammar_reads_each_shape_and_refuses_a_road_in_none() {
     };
     assert_eq!(
         strip(&found.children),
-        ["crate::tests::a_child_half_reads_its_part"],
+        [
+            "crate::tests::a_child_half_by_a_let",
+            "crate::tests::a_child_half_by_a_match",
+            "crate::tests::a_child_half_reads_its_part",
+        ],
         "{found:#?}"
     );
     assert_eq!(
         strip(&found.refused),
         [
+            "crate::tests::a_road_after_a_statement",
             "crate::tests::a_road_among_a_macros_tokens",
             "crate::tests::a_road_at_the_end_of_a_loop",
             "crate::tests::an_if_with_an_else",
         ],
         "{found:#?}"
     );
-    assert_eq!(found.tests, 12, "{found:#?}");
+    assert_eq!(
+        strip(&found.dropped),
+        [
+            "crate::tests::a_panic_first_drops_the_road (after `panic!` at line 160)",
+            "crate::tests::a_road_after_an_assertion_has_checked_something (after `assert!` at line 310)",
+            "crate::tests::an_assert_helper_first_drops_the_road (after `assert_nothing_moved` at line 177)",
+            "crate::tests::an_expect_err_first_drops_the_road (after `expect_err` at line 169)",
+        ],
+        "{found:#?}"
+    );
+    assert_eq!(found.tests, 30, "{found:#?}");
 }
 
 /// RED (0.4.10 plan row 12) — **the register is an equality with the sites**: a site no row
-/// names is unlisted, and a row naming no site is stale.
+/// names is unlisted, and a row naming no site is stale; **a row keyed on one test covers that
+/// test's road only** (review N5): a bare name's row for one test leaves the same name in
+/// another test unlisted, and a bare name cannot be registered file-wide.
 ///
-/// MUTATION: answer no stale rows from `judged` and the stale row is not named.
+/// MUTATION: answer no stale rows from `judged` and the stale rows are not named; key a bare
+/// name file-wide in `scan` and `a_bare_name_in_another_test` is covered by the other test's row.
 #[test]
 fn a_row_naming_no_road_is_stale_and_an_unnamed_road_is_unlisted() {
     let (index, directory) = fixture();
@@ -723,22 +863,26 @@ fn a_row_naming_no_road_is_stale_and_an_unnamed_road_is_unlisted() {
     scan(&index, &directory, &mut found);
     let rows = rows_of(&format!(
         "# a register\n{HEADER}\n\
-         lib.rs\tTestRoot::new\tenvironment: no test root\tthe fixture's root\n\
-         lib.rs\tcfg!(not(windows))\tother-platform\tthe host check\n\
-         lib.rs\tgone::away\tother-unix\ta fixture no test calls any more\n"
+         lib.rs\t*\tTestRoot::new\tenvironment: no test root\tthe fixture's root\n\
+         lib.rs\ta_host_by_its_cfg\tcfg!(not(windows))\tother-platform\tthe host check\n\
+         lib.rs\ta_bare_name_in_one_test\titer\tenvironment: no names\tone test's names\n\
+         lib.rs\t*\titer\tenvironment: no names\tevery test's names, which no row may say\n\
+         lib.rs\t*\tgone::away\tother-unix\ta fixture no test calls any more\n"
     ));
     let (unlisted, stale) = judged(&found.sites, &rows);
-    assert_eq!(
-        unlisted
-            .iter()
-            .map(|entry| entry
-                .rsplit_once(" (")
-                .map_or(entry.as_str(), |(_, shape)| shape))
-            .collect::<Vec<_>>(),
-        ["G3, `endpoint`)"],
+    let unlisted_tests: Vec<&str> = unlisted
+        .iter()
+        .filter_map(|entry| entry.split(' ').nth(1))
+        .collect();
+    assert!(
+        unlisted_tests.contains(&"crate::tests::a_bare_name_in_another_test")
+            && !unlisted_tests.contains(&"crate::tests::a_bare_name_in_one_test")
+            && !unlisted_tests.contains(&"crate::tests::a_fixture_answering_none")
+            && !unlisted_tests.contains(&"crate::tests::a_host_by_its_cfg")
+            && unlisted_tests.contains(&"crate::tests::an_endpoint_by_a_match"),
         "{unlisted:#?}"
     );
-    assert_eq!(stale, ["lib.rs\tgone::away"]);
+    assert_eq!(stale, ["lib.rs\t*\tgone::away", "lib.rs\t*\titer"]);
 }
 
 /// RED (0.4.10 plan row 12) — **a row may not name a host every suite runs on**: a road taken
@@ -751,7 +895,7 @@ fn a_row_naming_no_road_is_stale_and_an_unnamed_road_is_unlisted() {
 fn a_row_naming_a_suite_host_is_refused() {
     let _ = rows_of(&format!(
         "{HEADER}\n\
-         a.rs\tf\tother-unix\tone reason\n\
-         a.rs\tg\tenvironment: macos without a root\tanother\n"
+         a.rs\t*\tf\tother-unix\tone reason\n\
+         a.rs\t*\tg\tenvironment: macos without a root\tanother\n"
     ));
 }

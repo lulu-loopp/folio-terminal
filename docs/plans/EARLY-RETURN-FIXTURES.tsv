@@ -2,13 +2,20 @@
 # and where that road is taken (0.4.10 plan row 12, T-INSTALL-TESTS-SILENT-PASS-OFF-WINDOWS).
 #
 # crates/bt-source/tests/early_returns.rs reads every #[test] function's own body for a road
-# out (`return;`, `return ();`, `return Ok(..);` written before any assertion of that body) in
-# one of its shapes: G1 the else of a `let`, G2 an `if` with no `else`, G3 a `match` arm, each
-# judged by the callee of the expression it hangs on (or that expression's whole text,
-# whitespace out, when it is no call). G4, the child half of a test that reads its part from
-# `env::var` / `env::var_os` in that expression, needs no row. A road out in no shape is
-# refused outright. The guard holds this list to the sites both ways: a site no row names is
-# red, and a row that names no site is stale and red. One row per (file, callee).
+# out (`return;`, `return ();`, `return Ok(..);`). R: a road written after the test's first
+# assertion is dropped, not registered (the row's report names each one). Every other road
+# stands in one of the shapes G1 the else of a `let`, G2 an `if` with no `else` (the last arm
+# of an `else if` chain included), G3 a `match` arm, each judged by the callee of the
+# expression it hangs on (or that expression's whole text, whitespace out, when it is no
+# call). G4, the child half of a test whose expression reads only variables its own file sets
+# on a started command (`.env(NAME, ..)`), needs no row. A road out in no shape is refused
+# outright. The guard holds this list to the sites both ways: a site no row names is red, and
+# a row that names no site is stale and red.
+#
+# test: `*` when the callee is a function named by its path (the row is keyed on the file and
+# the callee, and covers every test of the file that calls it); otherwise - a method read on no
+# call, a variable, a whole condition, a read of the environment G4 does not hold - the name of
+# the one test function the row covers.
 #
 # hosts: exactly `other-unix` (a Unix that is not macOS), `other-platform` (neither Windows nor
 # a Unix), `environment: <fact>` (a machine of any platform that lacks something),
@@ -16,38 +23,46 @@
 # `child-half` (the test is a child another test starts, and in the suite's own run is not that
 # child). Never Windows or macOS: every suite of the workspace runs there, and a test that
 # returns early there for a platform fact is gated with #[cfg] instead (CONVENTIONS H1 rule 2).
-file	callee	hosts	reason
-crates/bt-app/src/app_diagnostics_tests.rs	test_support::alone_in_a_process	parent-half	the test runs again alone in a child process (one standalone WorkerCtx per process); alone_in_a_process answers false in the parent only once that child's summary said it ran and passed
-crates/bt-app/src/attention_wire.rs	test_support::alone_in_a_process	parent-half	the attention verb's worker test runs again alone in a child process; alone_in_a_process answers false in the parent only once that child passed
-crates/bt-app/src/explorer_menu.rs	test_support::alone_in_a_process	parent-half	the menu processes' worker tests run again alone in a child process; alone_in_a_process answers false in the parent only once that child passed
-crates/bt-app/src/launch_wire.rs	LaunchPipe::start	environment: no launch endpoint for this data directory	a process that cannot name its logon session (Windows) or a runtime directory a socket cannot name (Unix) has no launch endpoint, and a launch that finds none opens its own window; the endpoint's own tests hold that refusal
-crates/bt-app/src/launch_wire.rs	copy_half	child-half	the D3 copies' child halves: copy_half answers true in a copy started with its mode, which says what it did on standard output for the parent to assert
-crates/bt-app/src/launch_wire.rs	launch_pipe::endpoint_for	environment: no launch endpoint for this data directory	as LaunchPipe::start: endpoint_for answers None where no endpoint can be named, the launch then opens its own window
-crates/bt-app/src/launch_wire.rs	run	environment: no launch endpoint for this data directory	the two copies' run is None where the holding copy could not listen (no endpoint), after the copies were stopped and the folder removed
-crates/bt-app/src/packaged_turns_tests.rs	store_alias	environment: no Microsoft Store PowerShell installed	a Windows machine without the Store's PowerShell has no app execution alias or package to start; the test says it was skipped
-crates/bt-app/src/palette_index.rs	letErr(error)=made	environment: no directory symlink can be created	Windows needs SeCreateSymbolicLinkPrivilege or Developer Mode for the link the cycle is made of; the cycle guard's arithmetic is held by the_cycle_guard_answers_before_any_directory_is_read
-crates/bt-app/src/settings.rs	test_support::alone_in_a_process	parent-half	the pointer-budget test runs again alone in a child process; alone_in_a_process answers false in the parent only once that child passed
-crates/bt-app/src/shell_integration.rs	bt_platform::program_on_path	environment: no powershell.exe on PATH	a Windows test (#[cfg(windows)]) over a real Windows PowerShell session; a machine without it on PATH has no session to run, and the test says so
-crates/bt-app/src/shell_integration_psreadline_tests.rs	bt_platform::program_on_path	environment: no pwsh.exe on PATH	a Windows test (mod real_shell is #[cfg(windows)]) over a nested PowerShell 7; a machine without it has none to nest, and the test says so
-crates/bt-app/src/tests.rs	powershell	environment: no PowerShell 7 on PATH	on a Unix the real-PowerShell input test needs pwsh, which a machine may not have; Windows falls back to Windows PowerShell and never takes the road
-crates/bt-app/src/uninstall_tests.rs	bt_platform::host_platform()==HostPlatform::OtherUnix	other-unix	no arm of the update door removes anything on a Unix that is not macOS, so no row runs there
-crates/bt-app/src/update_handoff.rs	env::args_os	child-half	detached_handoff_helper_waits is the helper a detached hand-off test starts with --exact; in the suite's own run it is not that child
-crates/bt-app/src/update_handoff.rs	trust_harness::squat_the_claim	environment: the claim's squatting object cannot be made	squat_the_claim answers Ok on Windows (a named object) and on a Unix (a directory); the road is the machine refusing to make it
-crates/bt-app/src/update_startup.rs	Scene::new	other-unix	the scene answers None on a Unix that is not macOS, where no update home exists; it is Some on Windows and macOS
-crates/bt-math/src/lib.rs	BUILT_AT_OPT_LEVEL=="0"	environment: an opt-level 0 build	an unoptimised build needs more than a quarter of the worker's stack, and the whole stack is held by every_recursive_shape_renders_at_the_limit_on_the_whole_worker_stack
-crates/bt-platform/src/deferred_removal.rs	cfg!(not(any(windows,unix)))	other-platform	no native remover copy exists on a host that is neither Windows nor a Unix
-crates/bt-platform/src/handoff.rs	desk_consent	environment: no consent to open a window on the desk (BT_MAC_GUI unset)	these macOS cases open a Finder window and an editor; without the person's consent each prints one line, and the door's answers are still held by the refusal cases
-crates/bt-platform/src/launch_agent.rs	removal_works_here	other-unix	no launch agent can be removed on a Unix that is not macOS
-crates/bt-platform/src/lib.rs	!matches!(mode.as_deref(),Ok("child"|"child-exits"))	child-half	helper_child_starts_a_grandchild is the child the probe-tree tests start with HELPER_MODE, read before the road; in the suite's own run it is not that child
-crates/bt-platform/src/lib.rs	linked_executable	environment: no link to an executable can be made	a machine that will not make the link (no symlink privilege) has no linked program to start; the test says it was skipped
-crates/bt-platform/src/lib.rs	mode.as_deref()!=Ok("grandchild")	child-half	helper_grandchild_waits is the grandchild the probe-tree tests start with HELPER_MODE, read before the road; in the suite's own run it is not that child
-crates/bt-platform/src/lib.rs	std::io::stdin().read_line(&mutgo).expect("startsignal")==0	child-half	helper_owner_holds_a_probe_and_a_later_child waits for its start signal on standard input; end of input means no test started it, so it starts nothing
-crates/bt-platform/src/packaged_program_tests_windows.rs	store_pwsh	environment: no Microsoft Store PowerShell installed	a Windows machine without the Store's PowerShell has no alias or package path to read; the tests say they were skipped
-crates/bt-platform/src/video/engine.rs	create_device	environment: no D3D11 device	a Windows test (#[cfg(target_os = "windows")]) over the immediate context of a real device; a machine that cannot make one has no context to read
-crates/bt-pty/src/shell.rs	store_pwsh_alias	environment: no Microsoft Store PowerShell installed	a machine without the Store's PowerShell has no app execution link to probe; the tests say they were skipped
-crates/bt-render/src/lib.rs	font_family_supports_text	environment: the CJK fallback family is not installed	the grid's Han fallback tests need the family they name to cover the fixture; a machine without it says it was skipped
-crates/bt-render/src/lib.rs	into_iter	environment: the CJK fallback family is not installed	the chosen-family test needs DengXian or SimSun to cover the fixture; a machine without either says it was skipped
-crates/bt-render/src/lib.rs	iter	environment: the CJK fallback family is not installed	the same test's automatic family needs one of GRID_CJK_FALLBACK_FAMILIES to cover the fixture; a machine without one says it was skipped
-crates/bt-render/src/lib.rs	on_the_software_adapter	environment: no software adapter	the renderer's pixel tests draw on the software adapter (WARP, llvmpipe); a machine without one has none to draw on (0.4.10 plan row 94 decides whether these become required-adapter tests)
-crates/bt-term/src/session.rs	make_directory_link	environment: no directory symlink can be created	Windows needs SeCreateSymbolicLinkPrivilege or Developer Mode for the link to a share; without it there is no link for the rule to refuse, and the test says so
-crates/bt-transcript/src/paths.rs	eight_dot_three_form_of	environment: the volume mints no 8.3 short names	the rejoin test needs a short name of its scratch folder (fsutil 8dot3name query); a volume that mints none has none to test with, and the test says so
+# Where a fixture answers nothing on a whole platform all the same, the reason says so, with
+# the plan row that decides it.
+file	test	callee	hosts	reason
+crates/bt-app/src/app_diagnostics_tests.rs	*	test_support::alone_in_a_process	parent-half	the test runs again alone in a child process (one standalone WorkerCtx per process); alone_in_a_process answers false in the parent only once that child's summary said it ran and passed
+crates/bt-app/src/attention_wire.rs	*	test_support::alone_in_a_process	parent-half	the attention verb's worker test runs again alone in a child process; alone_in_a_process answers false in the parent only once that child passed
+crates/bt-app/src/explorer_menu.rs	*	test_support::alone_in_a_process	parent-half	the menu processes' worker tests run again alone in a child process; alone_in_a_process answers false in the parent only once that child passed
+crates/bt-app/src/launch_wire.rs	*	LaunchPipe::start	environment: no launch endpoint for this data directory	a process that cannot name its logon session (Windows) or a runtime directory a socket cannot name (Unix) has no launch endpoint, and a launch that finds none opens its own window; the endpoint's own tests hold that refusal
+crates/bt-app/src/launch_wire.rs	*	copy_half	child-half	the D3 copies' child halves: copy_half answers true in a copy started with its mode, which says what it did on standard output for the parent to assert
+crates/bt-app/src/launch_wire.rs	*	launch_pipe::endpoint_for	environment: no launch endpoint for this data directory	as LaunchPipe::start: endpoint_for answers None where no endpoint can be named, the launch then opens its own window
+crates/bt-app/src/launch_wire.rs	a_second_copys_restored_start_after_a_failed_update_hands_over_with_its_report	run	environment: no launch endpoint for this data directory	the two copies' run is None where the holding copy could not listen (no endpoint), after the copies were stopped and the folder removed
+crates/bt-app/src/launch_wire.rs	a_second_installed_copy_hands_its_launch_to_the_copy_that_holds_the_data_directory	run	environment: no launch endpoint for this data directory	the two copies' run is None where the holding copy could not listen (no endpoint), after the copies were stopped and the folder removed
+crates/bt-app/src/launch_wire.rs	a_server_that_refuses_is_heard_as_a_refusal_even_if_it_closes_first	run	environment: no launch endpoint for this data directory	the two copies' run is None where the holding copy could not listen (no endpoint), after the copies were stopped and the folder removed
+crates/bt-app/src/packaged_turns_tests.rs	*	store_alias	environment: no Microsoft Store PowerShell installed	a Windows machine without the Store's PowerShell has no app execution alias or package to start; the test says it was skipped
+crates/bt-app/src/palette_index.rs	a_directory_link_back_to_an_ancestor_does_not_repeat_a_file	letErr(error)=made	environment: no directory symlink can be created	Windows needs SeCreateSymbolicLinkPrivilege or Developer Mode for the link the cycle is made of; the cycle guard's arithmetic is held by the_cycle_guard_answers_before_any_directory_is_read
+crates/bt-app/src/settings.rs	*	test_support::alone_in_a_process	parent-half	the pointer-budget test runs again alone in a child process; alone_in_a_process answers false in the parent only once that child passed
+crates/bt-app/src/shell_integration.rs	*	bt_platform::program_on_path	environment: no powershell.exe on PATH	a Windows test (#[cfg(windows)]) over a real Windows PowerShell session; a machine without it on PATH has no session to run, and the test says so
+crates/bt-app/src/shell_integration_psreadline_tests.rs	*	bt_platform::program_on_path	environment: no pwsh.exe on PATH	a Windows test (mod real_shell is #[cfg(windows)]) over a nested PowerShell 7; a machine without it has none to nest, and the test says so
+crates/bt-app/src/tests.rs	real_powershell_input_reaches_a_viewport_owned_frame	powershell	environment: no PowerShell 7 on PATH	on a Unix the real-PowerShell input test needs pwsh, which a machine may not have; Windows falls back to Windows PowerShell and never takes the road
+crates/bt-app/src/uninstall_tests.rs	uninstall_update_rows_remove_only_ours	bt_platform::host_platform()==HostPlatform::OtherUnix	other-unix	no arm of the update door removes anything on a Unix that is not macOS, so no row runs there
+crates/bt-app/src/update_apply_macos_tests.rs	a_road_line_reaches_the_log_once_when_standard_error_is_that_log	env::var_os	child-half	the test is the child its own parent half starts through said_by_a_child_whose_stderr_is_the_log, which sets BT_U42D_MACOS_SAY on the command under a parameter name (review N2: no .env(BT_U42D_MACOS_SAY, ..) is spelled in this file), so G4 does not hold it; in the suite's own run it is the parent, which asserts the log has the line once
+crates/bt-app/src/update_apply_windows_tests.rs	a_road_line_reaches_the_log_once_when_standard_error_is_that_log	env::var_os	child-half	the test is the child its own parent half starts through said_by_a_child_whose_stderr_is_the_log, which sets BT_U42D_WINDOWS_SAY on the command under a parameter name (review N2: no .env(BT_U42D_WINDOWS_SAY, ..) is spelled in this file), so G4 does not hold it; in the suite's own run it is the parent, which asserts the log has the line once
+crates/bt-app/src/update_handoff.rs	*	env::args_os	child-half	detached_handoff_helper_waits is the helper a detached hand-off test starts with --exact; in the suite's own run it is not that child
+crates/bt-app/src/update_handoff.rs	*	trust_harness::squat_the_claim	environment: the claim's squatting object cannot be made	squat_the_claim answers Ok on Windows (a named object) and on a Unix (a directory); the road is the machine refusing to make it
+crates/bt-app/src/update_recover.rs	a_recovery_line_reaches_the_log_once_whatever_standard_error_is	env::var_os	child-half	the test is the child its own parent half starts through said_by_a_child_whose_stderr_is_the_log, which sets the variable on the command under a parameter name (review N2: not spelled as this read in the file), so G4 does not hold it; in the suite's own run it is the parent, which asserts the log has the line once
+crates/bt-app/src/update_recover.rs	a_symlinked_log_path_is_the_same_standard_error_target	env::var_os	child-half	the test is the child its own parent half starts through said_by_a_child_whose_stderr_is_the_symlinked_log, which sets the variable on the command under a parameter name (review N2: not spelled as this read in the file), so G4 does not hold it; in the suite's own run it is the parent, which asserts the log has the line once
+crates/bt-app/src/update_startup.rs	*	Scene::new	other-unix	the scene answers None on a Unix that is not macOS, where no update home exists; it is Some on Windows and macOS
+crates/bt-math/src/lib.rs	every_recursive_shape_renders_at_the_limit_on_a_quarter_of_the_worker_stack	BUILT_AT_OPT_LEVEL=="0"	environment: an opt-level 0 build	an unoptimised build needs more than a quarter of the worker's stack, and the whole stack is held by every_recursive_shape_renders_at_the_limit_on_the_whole_worker_stack
+crates/bt-platform/src/deferred_removal.rs	a_native_remover_copy_runs_the_plan	cfg!(not(any(windows,unix)))	other-platform	no native remover copy exists on a host that is neither Windows nor a Unix
+crates/bt-platform/src/handoff.rs	*	desk_consent	environment: no consent to open a window on the desk (BT_MAC_GUI unset)	these macOS cases open a Finder window and an editor; without the person's consent each prints one line, and the door's answers are still held by the refusal cases
+crates/bt-platform/src/launch_agent.rs	*	removal_works_here	other-unix	no launch agent can be removed on a Unix that is not macOS
+crates/bt-platform/src/lib.rs	helper_child_starts_a_grandchild	!matches!(mode.as_deref(),Ok("child"|"child-exits"))	child-half	helper_child_starts_a_grandchild is the child the probe-tree tests start with HELPER_MODE, read before the road; in the suite's own run it is not that child
+crates/bt-platform/src/lib.rs	*	linked_executable	environment: no link to an executable can be made	a machine that will not make the link (no symlink privilege) has no linked program to start; the test says it was skipped
+crates/bt-platform/src/lib.rs	helper_grandchild_waits	mode.as_deref()!=Ok("grandchild")	child-half	helper_grandchild_waits is the grandchild the probe-tree tests start with HELPER_MODE, read before the road; in the suite's own run it is not that child
+crates/bt-platform/src/lib.rs	helper_owner_holds_a_probe_and_a_later_child	std::io::stdin().read_line(&mutgo).expect("startsignal")==0	child-half	helper_owner_holds_a_probe_and_a_later_child waits for its start signal on standard input; end of input means no test started it, so it starts nothing
+crates/bt-platform/src/packaged_program_tests_windows.rs	*	store_pwsh	environment: no Microsoft Store PowerShell installed	a Windows machine without the Store's PowerShell has no alias or package path to read; the tests say they were skipped
+crates/bt-platform/src/video/engine.rs	*	create_device	environment: no D3D11 device	a Windows test (#[cfg(target_os = "windows")]) over the immediate context of a real device; a machine that cannot make one has no context to read
+crates/bt-pty/src/shell.rs	*	store_pwsh_alias	environment: no Microsoft Store PowerShell installed	a machine without the Store's PowerShell has no app execution link to probe; the tests say they were skipped
+crates/bt-render/src/lib.rs	*	font_family_supports_text	environment: the CJK fallback family is not installed	the grid's Han fallback tests need the family they name to cover the fixture; a machine without it says it was skipped
+crates/bt-render/src/lib.rs	chosen_cjk_family_isolated_from_ascii_and_clears_to_automatic	into_iter	environment: the CJK fallback family is not installed	the chosen-family test needs DengXian or SimSun to cover the fixture; a machine without either says it was skipped
+crates/bt-render/src/lib.rs	chosen_cjk_family_isolated_from_ascii_and_clears_to_automatic	iter	environment: the CJK fallback family is not installed	the same test's automatic family needs one of GRID_CJK_FALLBACK_FAMILIES to cover the fixture; a machine without one says it was skipped
+crates/bt-render/src/lib.rs	*	on_the_software_adapter	environment: no software adapter	a platform fact as much as a machine's (review N4, R8 re-ruled 2026-11-13): on_the_software_adapter answers None in every macOS run - wgpu's Metal backend offers no fallback adapter, as the helper's own doc says - and on a Windows machine without WARP; so on macOS the renderer's pixel tests that are not #[cfg(target_os = "windows")] return before they assert anything in every core-macos run of bt-render. The row stands with this reason; 0.4.10 plan row 94 decides between a gate and a fixture that answers there
+crates/bt-term/src/session.rs	*	make_directory_link	environment: no directory symlink can be created	Windows needs SeCreateSymbolicLinkPrivilege or Developer Mode for the link to a share; without it there is no link for the rule to refuse, and the test says so
+crates/bt-transcript/src/paths.rs	*	eight_dot_three_form_of	environment: the volume mints no 8.3 short names	the rejoin test needs a short name of its scratch folder (fsutil 8dot3name query); a volume that mints none has none to test with, and the test says so
