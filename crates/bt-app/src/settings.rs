@@ -3468,6 +3468,21 @@ pub enum SettingsRow {
     /// so: those two mean "a terminal standing here", which is a different
     /// sentence from "Folio".
     LaunchOpens,
+    /// **Whether Folio starts when you sign in** (0.4.10 plan row 22a,
+    /// T-START-AT-LOGON-SWITCH): a switch whose answer is the account's sign-in
+    /// entry, `Run\Folio` — **read off the machine, not out of `settings.json`**
+    /// (R5), on [`Self::ContextMenu`]'s reasoning exactly. The row shows what the
+    /// carry pass or the press's worker last read (`App::start_at_sign_in`), and
+    /// its line says which of four facts holds (`start_at_sign_in::SignInRow`).
+    ///
+    /// **On `General`, directly above `Explorer context menu`**: the page ends
+    /// with what Folio does with the machine, and of those two rows this one
+    /// reaches the account's sign-in while the next reaches another program's
+    /// menu. Windows only until its macOS half (row 22b,
+    /// [`Capability::SignInStart`]). Not an Advanced row, on the Explorer row's
+    /// test: a reader looking for it has no reason to guess it is behind a
+    /// disclosure.
+    StartAtSignIn,
     /// On `General` and not on `Appearance`: what it changes is not this window
     /// at all, it is another program's menu. `General` is where the rows about
     /// what this product *is on this machine* already are.
@@ -4046,6 +4061,7 @@ impl SettingsRow {
             | Self::OptionSendsAlt
             | Self::SearchEngine
             | Self::LaunchOpens
+            | Self::StartAtSignIn
             | Self::ContextMenu => SettingsCategory::General,
             // Version owns the updater, with its automatic-check switch
             // immediately below it (T-UPDATE-ON-ABOUT).
@@ -4152,6 +4168,7 @@ impl SettingsRow {
     pub const fn needs(self) -> Option<Capability> {
         match self {
             Self::ContextMenu => Some(Capability::ExplorerMenu),
+            Self::StartAtSignIn => Some(Capability::SignInStart),
             Self::ShellIntegration => None,
             Self::PowerShellProfileLine => None,
             Self::LegacyPsReadLine => None,
@@ -4189,6 +4206,7 @@ impl SettingsRow {
             Self::KeyHints => Text::RowKeyHints.text(),
             Self::OptionSendsAlt => Text::RowOptionSendsAlt.text(),
             Self::ContextMenu => Text::RowContextMenu.text(),
+            Self::StartAtSignIn => Text::RowStartAtSignIn.text(),
             Self::AutoCheck => Text::RowAutoCheck.text(),
             // Mock-up 2360.
             Self::TabLayout => Text::RowTabLayout.text(),
@@ -4425,6 +4443,9 @@ impl SettingsRow {
             // both places and what the first page registers. The module that
             // owns the world is asked.
             Self::ContextMenu => crate::explorer_menu::row_description(),
+            // **Which of four facts holds** (row 22a, R13): the entry as last read off the
+            // machine, never a stored answer.
+            Self::StartAtSignIn => values.start_at_sign_in.sign_in_description().text(),
             Self::AutoCheck => Text::DescAutoCheck.text(),
             // Mock-up 2361.
             Self::TabLayout => Text::DescTabLayout.text(),
@@ -4761,6 +4782,8 @@ impl SettingsRow {
             // reader who wants Folio in their right-click menu has no reason to
             // guess that the answer is behind a disclosure.
             | Self::ContextMenu
+            // The same test (row 22a): a reader who wants Folio at sign-in looks on the page.
+            | Self::StartAtSignIn
             // A reader who wants to know what this product talks to must not
             // have to open a disclosure to find the row that answers it.
             | Self::AutoCheck
@@ -4928,6 +4951,7 @@ impl SettingsRow {
             // about the machine and is said in the row's line, not in a third
             // item nobody could press.
             | Self::ContextMenu
+            | Self::StartAtSignIn
             | Self::ProfileLogin
             | Self::UninstallData
             | Self::LineWrapping => FORMULA_OPTIONS.len(),
@@ -5029,6 +5053,7 @@ impl SettingsRow {
             | Self::CopilotHooks
             | Self::AutoCheck
             | Self::ContextMenu
+            | Self::StartAtSignIn
             | Self::ProfileLogin
             | Self::UninstallData
             | Self::LineWrapping => FORMULA_OPTIONS.get(index).copied().map(on_off_label),
@@ -5517,6 +5542,11 @@ impl SettingsRow {
                 *it == crate::explorer_menu::place(values.context_menu, values.explorer_first_page)
                     .on()
             }),
+            // The machine's answer as last read (row 22a): `On` while the account's sign-in starts
+            // a Folio, this copy or another.
+            Self::StartAtSignIn => FORMULA_OPTIONS
+                .iter()
+                .position(|it| *it == values.start_at_sign_in.switch_on()),
             Self::TabLayout => TAB_LAYOUT_OPTIONS
                 .iter()
                 .position(|it| *it == values.tab_layout),
@@ -6185,6 +6215,11 @@ fn every_row_of_the_dialog(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
     // screen. Above the two rows that reach out of this window, which is where
     // the page's own order already puts everything about Folio itself.
     rows.push(SettingsRow::LaunchOpens);
+    // **Directly above the Explorer row** (0.4.10 plan row 22a): the rows that
+    // reach out of this window end the page, and this one reaches the account's
+    // sign-in where the next reaches another program's menu. Windows only until
+    // row 22b, through `visible_rows_for`'s one filter.
+    rows.push(SettingsRow::StartAtSignIn);
     // Second from last on its page, because it is the only row here that changes
     // something **outside this window**: the three above it say how Folio
     // behaves, and this one says what another program's menu contains.
@@ -6687,6 +6722,10 @@ pub struct SettingsValues {
     /// uninstalled from another folder or a restored backup all move this row
     /// rather than leaving it claiming something that is no longer true.
     pub context_menu: bool,
+    /// **The account's sign-in entry as last read** (0.4.10 plan row 22a) — off the machine,
+    /// for [`Self::context_menu`]'s reason: a person who removed it in Task Manager is shown
+    /// that, not a stored `On`.
+    pub start_at_sign_in: crate::start_at_sign_in::SignInRow,
     /// Whether Folio's package is registered for this user, which is what puts
     /// the verb on the page Windows 11 opens first (§7.4a).
     ///
@@ -6957,6 +6996,8 @@ impl SettingsValues {
             // A machine that never installed the verb, which is what a fresh
             // one is.
             context_menu: false,
+            // And an account that never pressed the sign-in switch.
+            start_at_sign_in: crate::start_at_sign_in::SignInRow::Off,
             explorer_first_page: false,
             // **Offered by default**, which is what this constructor is for: it
             // stands for the ordinary machine, and the ordinary machine this
@@ -7136,6 +7177,9 @@ pub struct SettingsPanel {
     agents_visit_read: bool,
     /// The Profiles page's external `$PROFILE`/policy refresh edge.
     profiles_visit_read: bool,
+    /// **The General page's sign-in entry edge** (0.4.10 plan row 22a, R11): a change made in
+    /// Task Manager while Folio runs is read when the reader looks, once per visit.
+    general_visit_read: bool,
     /// **The Profiles rows whose button the latest layout placed** ([`Self::note_placed`]) —
     /// what the keyboard walk is handed, so a button the layout did not place is not a stop.
     placed_buttons: Vec<usize>,
@@ -7526,6 +7570,15 @@ impl SettingsPanel {
         !std::mem::replace(&mut self.profiles_visit_read, true)
     }
 
+    /// Consume the first showing of the sign-in row on this visit to General (row 22a, R11) —
+    /// [`Self::take_agents_open_edge`]'s edge, reset by the same roads off the page.
+    pub fn take_general_open_edge(&mut self, showing: bool) -> bool {
+        if !self.open || !showing {
+            return false;
+        }
+        !std::mem::replace(&mut self.general_visit_read, true)
+    }
+
     /// **The update row is being shown while the gear is `lit`** (0.4.6
     /// T-GEAR-MARK-LANDS): keep the mark on the row for the rest of this visit
     /// to `About`. Called on the door that answers the mark, just before it
@@ -7583,6 +7636,7 @@ impl SettingsPanel {
         self.category = category;
         self.agents_visit_read = false;
         self.profiles_visit_read = false;
+        self.general_visit_read = false;
         self.update_mark_carried = false;
         self.menu = None;
         self.menu_scroll = 0.0;
@@ -7617,6 +7671,7 @@ impl SettingsPanel {
         self.uninstall_card = None;
         self.agents_visit_read = false;
         self.profiles_visit_read = false;
+        self.general_visit_read = false;
         self.update_mark_carried = false;
         self.menu = None;
         self.menu_scroll = 0.0;
@@ -7697,6 +7752,7 @@ impl SettingsPanel {
         self.uninstall_card = None;
         self.agents_visit_read = false;
         self.profiles_visit_read = false;
+        self.general_visit_read = false;
         self.update_mark_carried = false;
         self.menu = None;
         self.menu_scroll = 0.0;
@@ -8031,6 +8087,7 @@ impl SettingsPanel {
             self.category = content.first_category();
             self.agents_visit_read = false;
             self.profiles_visit_read = false;
+            self.general_visit_read = false;
             self.update_mark_carried = false;
             self.menu = None;
             self.recording = None;
@@ -11172,6 +11229,19 @@ pub fn explorer_place_requested(
                     ExplorerPlace::Off
                 }
             })
+        }
+        _ => None,
+    }
+}
+
+/// Whether Folio starts at sign-in, as a press on its switch (0.4.10 plan row
+/// 22a): the wish, which `start_at_sign_in::begin_sign_in_press` carries to the
+/// machine on its worker.
+#[must_use]
+pub fn start_at_sign_in_requested(target: SettingsTarget) -> Option<bool> {
+    match target {
+        SettingsTarget::Choice(SettingsRow::StartAtSignIn, index) => {
+            FORMULA_OPTIONS.get(index).copied()
         }
         _ => None,
     }
@@ -17278,6 +17348,38 @@ mod tests {
         assert!(panel.take_profiles_open_edge(true));
     }
 
+    /// RED (0.4.10 plan row 22a, R11) — **the sign-in row is read again once per visit to
+    /// General, never once per frame**: an entry removed or turned off in Task Manager while
+    /// Folio runs shows when the reader looks, and two hundred layouts of the open page ask the
+    /// carry pass nothing.
+    ///
+    /// MUTATION: return `self.open && showing` instead of consuming the visit latch.
+    #[test]
+    fn the_sign_in_row_is_read_once_per_visit_to_general() {
+        let mut panel = SettingsPanel::default();
+        assert!(
+            !panel.take_general_open_edge(true),
+            "a shut dialog is no visit"
+        );
+        panel.toggle(content(&[], &[]));
+        panel.select_category(SettingsCategory::General);
+        assert!(panel.take_general_open_edge(true));
+        for _ in 0..200 {
+            assert!(!panel.take_general_open_edge(true));
+        }
+        panel.select_category(SettingsCategory::Terminal);
+        assert!(!panel.take_general_open_edge(false));
+        panel.select_category(SettingsCategory::General);
+        assert!(panel.take_general_open_edge(true));
+        panel.close();
+        panel.toggle(content(&[], &[]));
+        panel.select_category(SettingsCategory::General);
+        assert!(
+            panel.take_general_open_edge(true),
+            "close and reopen is a new visit"
+        );
+    }
+
     /// **A refused agent row looks again when its page is opened, and only then.**
     ///
     /// The switch takes no press while the file it names is one this build will not edit, so the
@@ -20336,7 +20438,7 @@ mod tests {
     /// string read off this machine, so its length is a fact about the machine
     /// rather than about the copy. What is held here instead is the entry it
     /// falls back to when there is no version to name.
-    const OTHERWISE: [(SettingsRow, Text, bt_platform::HostPlatform); 31] = {
+    const OTHERWISE: [(SettingsRow, Text, bt_platform::HostPlatform); 34] = {
         use bt_platform::HostPlatform::{MacOs, Windows};
         [
             // The other end of a value the fixture had to pick one end of.
@@ -20407,6 +20509,23 @@ mod tests {
             (
                 SettingsRow::ContextMenu,
                 Text::DescExplorerFirstPageAwaitingShell,
+                Windows,
+            ),
+            // The sign-in row's three lines other than the fixture's Off (0.4.10 plan row 22a):
+            // which one stands is a fact about this account's entry.
+            (
+                SettingsRow::StartAtSignIn,
+                Text::DescStartAtSignInElsewhere,
+                Windows,
+            ),
+            (
+                SettingsRow::StartAtSignIn,
+                Text::DescStartAtSignInTurnedOff,
+                Windows,
+            ),
+            (
+                SettingsRow::StartAtSignIn,
+                Text::DescStartAtSignInNotOurs,
                 Windows,
             ),
             // The sentence with no version in it, for this constant's own note.
@@ -28891,7 +29010,13 @@ mod tests {
     fn a_mac_is_not_offered_a_row_about_a_facility_it_has_not_got() {
         use bt_platform::HostPlatform::{MacOs, Windows};
 
-        const NOT_ON_A_MAC: [SettingsRow; 2] = [SettingsRow::ContextMenu, SettingsRow::Acrylic];
+        // `StartAtSignIn` is on it until its macOS half (0.4.10 plan row 22b): the Mac's login
+        // item is not built, and a row whose switch reached nothing would be a lie on the page.
+        const NOT_ON_A_MAC: [SettingsRow; 3] = [
+            SettingsRow::ContextMenu,
+            SettingsRow::Acrylic,
+            SettingsRow::StartAtSignIn,
+        ];
         for layout in [TabLayoutMode::Horizontal, TabLayoutMode::Vertical] {
             let mac = visible_rows_for(MacOs, layout);
             let windows = visible_rows_for(Windows, layout);
@@ -29183,10 +29308,12 @@ mod tests {
                     .all(|row| *row != SettingsRow::AutoCheck)
             );
             // `Opening Folio again` stands between them since 2026-09-11
-            // (§7.59): the last row about Folio itself, above the two that
-            // reach out of this window.
-            assert_eq!(rows[at - 1], SettingsRow::LaunchOpens);
-            assert_eq!(rows[at - 2], SettingsRow::DefaultProfile);
+            // (§7.59): the last row about Folio itself, above the rows that
+            // reach out of this window — the sign-in switch first since 0.4.10
+            // plan row 22a.
+            assert_eq!(rows[at - 1], SettingsRow::StartAtSignIn);
+            assert_eq!(rows[at - 2], SettingsRow::LaunchOpens);
+            assert_eq!(rows[at - 3], SettingsRow::DefaultProfile);
             assert_eq!(
                 SettingsRow::ContextMenu.category(),
                 SettingsCategory::General
@@ -29231,6 +29358,79 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// RED (0.4.10 plan row 22a, T-START-AT-LOGON-SWITCH; R5, R13) — **the sign-in row is a
+    /// switch drawn from the machine's answer, on General directly above Explorer's row, and on
+    /// no page off Windows** until its macOS half (row 22b): `On` while the account's sign-in
+    /// starts a Folio, this copy or another; `Off` otherwise and before the first answer; one
+    /// line per fact; and its press is the wish, nothing else.
+    ///
+    /// MUTATION: draw `OnElsewhere` as Off — the switch denies an entry that starts Folio.
+    #[test]
+    fn the_sign_in_row_stands_above_the_explorer_row_and_not_off_windows() {
+        use crate::start_at_sign_in::SignInRow;
+        use bt_platform::HostPlatform::{MacOs, OtherUnix, Windows};
+        for layout in [TabLayoutMode::Horizontal, TabLayoutMode::Vertical] {
+            let windows = visible_rows_for(Windows, layout);
+            let at = windows
+                .iter()
+                .position(|row| *row == SettingsRow::StartAtSignIn)
+                .expect("the sign-in row is on the Windows page");
+            assert_eq!(windows[at + 1], SettingsRow::ContextMenu, "{layout:?}");
+            for platform in [MacOs, OtherUnix] {
+                assert!(
+                    !visible_rows_for(platform, layout).contains(&SettingsRow::StartAtSignIn),
+                    "{platform:?}/{layout:?}: a switch that reaches nothing there"
+                );
+            }
+        }
+        assert_eq!(
+            SettingsRow::StartAtSignIn.category(),
+            SettingsCategory::General
+        );
+        assert!(!SettingsRow::StartAtSignIn.advanced());
+        assert_eq!(SettingsRow::StartAtSignIn.option_count(), 2);
+        let mut values = SettingsValues::sample();
+        for (row, on, line) in [
+            (SignInRow::Unknown, false, Text::DescStartAtSignIn),
+            (SignInRow::Off, false, Text::DescStartAtSignIn),
+            (SignInRow::On, true, Text::DescStartAtSignIn),
+            (
+                SignInRow::OnElsewhere,
+                true,
+                Text::DescStartAtSignInElsewhere,
+            ),
+            (
+                SignInRow::TurnedOffBySystem,
+                false,
+                Text::DescStartAtSignInTurnedOff,
+            ),
+            (SignInRow::NotOurs, false, Text::DescStartAtSignInNotOurs),
+        ] {
+            values.start_at_sign_in = row;
+            let index = SettingsRow::StartAtSignIn
+                .selected_index(&values)
+                .expect("a switch always has an answer");
+            assert_eq!(FORMULA_OPTIONS[index], on, "{row:?}");
+            assert_eq!(
+                SettingsRow::StartAtSignIn.description(&values),
+                line.text(),
+                "{row:?}"
+            );
+            assert_eq!(
+                start_at_sign_in_requested(SettingsTarget::Choice(
+                    SettingsRow::StartAtSignIn,
+                    index
+                )),
+                Some(on),
+                "{row:?}"
+            );
+        }
+        assert_eq!(
+            start_at_sign_in_requested(SettingsTarget::Choice(SettingsRow::ContextMenu, 0)),
+            None
+        );
     }
 
     /// RED (§7.4b, user ruling 2026-09-07 second) — **the switch is on wherever
@@ -29530,6 +29730,9 @@ mod tests {
                 SettingsRow::DefaultProfile,
                 // What a second start of Folio opens, since 2026-09-11 (§7.59).
                 SettingsRow::LaunchOpens,
+                // Whether Folio starts at sign-in, since 0.4.10 plan row 22a:
+                // directly above Explorer's row, Windows only until row 22b.
+                SettingsRow::StartAtSignIn,
                 // One row about Explorer's menu since 2026-09-07, with three
                 // answers where two switches stood (§7.4b).
                 SettingsRow::ContextMenu,
@@ -29605,6 +29808,9 @@ mod tests {
                 SettingsRow::DefaultProfile,
                 // What a second start of Folio opens, since 2026-09-11 (§7.59).
                 SettingsRow::LaunchOpens,
+                // Whether Folio starts at sign-in, since 0.4.10 plan row 22a:
+                // directly above Explorer's row, Windows only until row 22b.
+                SettingsRow::StartAtSignIn,
                 // One row about Explorer's menu since 2026-09-07, with three
                 // answers where two switches stood (§7.4b).
                 SettingsRow::ContextMenu,
@@ -30681,19 +30887,20 @@ mod tests {
         lacking.default_profile = Some(profiles::fallback_profile());
 
         let mut panel = keyboarded_in(windows, SettingsRow::DefaultProfile.category());
-        // `End` and then two steps back: `Explorer context menu` closes this
-        // page (§7.4), `Opening Folio again` stands above it, and `Default
-        // profile` above that. The summoned terminal's rows used to stand between
-        // them and moved to a page of their own on 2026-09-05 (§7.54e ⑤), which
+        // `End` and then three steps back: `Explorer context menu` closes this
+        // page (§7.4), `Start at sign-in` stands above it (0.4.10 plan row 22a),
+        // `Opening Folio again` above that, and `Default profile` above that.
+        // The summoned terminal's rows used to stand between them and moved to
+        // a page of their own on 2026-09-05 (§7.54e ⑤), which
         // is why this walk is four presses shorter than it was; a second Explorer
         // row arrived the same day and gave one of them back, and 2026-09-07
         // folded it into the row above it and took that press away again (§7.4b).
         // `Opening Folio again` arrived between them on 2026-09-11 (§7.59) and
-        // put one back. The assertion below is what keeps the presses honest — a
-        // page reordered under this test lands the ring somewhere else and says
-        // so.
+        // put one back, and `Start at sign-in` another on 2026-11-11. The
+        // assertion below is what keeps the presses honest — a page reordered
+        // under this test lands the ring somewhere else and says so.
         panel.key(SettingsKey::End, content(&flat, &lines), &lacking);
-        for _ in 0..2 {
+        for _ in 0..3 {
             panel.key(SettingsKey::Up, content(&flat, &lines), &lacking);
         }
         assert_eq!(

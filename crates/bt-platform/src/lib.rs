@@ -9599,6 +9599,11 @@ pub mod logon_hook;
 /// the two. Children through [`quiet_command`], bounded; worker only; refused
 /// by name off macOS.
 pub mod macos_identity;
+/// **The sign-in entry** — one value, `Folio`, under the same `Run` key: the quoted path of a
+/// copy's `folio.exe` and nothing after it, read, written and read back, removed, and Windows' own
+/// Startup-apps switch for it read beside it (0.4.10 plan row 22a, T-START-AT-LOGON-SWITCH). Only
+/// the one name is ever read. Windows is real; every other platform refuses by name.
+pub mod sign_in_entry;
 
 /// **The macOS entrance of an update transaction** — a LaunchAgent plist in a
 /// folder the caller names, written through `install_txn`'s durable write,
