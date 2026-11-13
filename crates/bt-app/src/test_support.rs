@@ -3895,7 +3895,7 @@ fn the_applier_fixture_tests_take_a_turn_before_they_write_a_fixture() {
         assert!(
             new.starts_with("{letturn=crate::test_support::a_fixture_turn();"),
             "{module}'s Install::new does not take a fixture turn as its first statement, so its \
-             test starts its fixtures beside more than {FIXTURE_TESTS_AT_ONCE} others: {new:.120}"
+             test starts its fixtures past the {FIXTURE_TESTS_AT_ONCE} at once: {new:.120}"
         );
         assert!(
             new.contains("_turn:turn,"),
