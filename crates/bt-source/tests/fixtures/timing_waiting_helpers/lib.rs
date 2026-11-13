@@ -93,6 +93,20 @@ mod tests {
         shows_how_long(Instant::now());
     }
 
+    /// H5″: an `elapsed` printed inside a macro beside one compared outside it, and a binding
+    /// captured inline and compared too — a stall timer: found (row 20 re-review F3).
+    fn took_too_long(since: Instant) -> bool {
+        eprintln!("so far {:?}", since.elapsed());
+        let took = since.elapsed();
+        eprintln!("took {took:?}");
+        took > Duration::from_secs(1)
+    }
+
+    #[test]
+    fn a_printed_and_compared_elapsed_in_a_helper_is_a_clock() {
+        let _ = took_too_long(Instant::now());
+    }
+
     /// H6: a drop that waits, and no door: refused, because no edge leads into it.
     struct Ends;
 

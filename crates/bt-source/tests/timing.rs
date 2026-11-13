@@ -1919,7 +1919,8 @@ fn a_budget_measured_in_a_helper_is_found_through_the_call_graph() {
 /// macro that waits are refused by file and line; a door met only as an untyped receiver's
 /// candidate answers that call and is found, but does not hide a waiting candidate beside it;
 /// a drop that waits through a helper is refused as one that waits itself; an `elapsed` a
-/// helper only prints is no clock; a door that waits on nothing is not one.**
+/// helper only prints is no clock, and one it prints and compares is; a door that waits on
+/// nothing is not one.**
 ///
 /// The list's own rows are the doors: here `tests::door_wait`, `tests::Cleans::drop`,
 /// `tests::Patient::bide`, `tests::Calm::settle_in` and `tests::quiet` (which waits on nothing,
@@ -1936,7 +1937,10 @@ fn a_budget_measured_in_a_helper_is_found_through_the_call_graph() {
 /// `Helpers::clock_in_body` instead of `Helpers::reach` — the `Settles::drop` refusal is gone
 /// (row 20 review N1); in `Helpers::refuse_candidates`, answer `None` once a candidate is a
 /// door — the `Restless::settle_in` refusal is gone (N9); in `Helpers::clock_in_body`, count an
-/// only-printed `elapsed` — `a_printed_elapsed_in_a_helper_is_no_clock` is found (N2).
+/// only-printed `elapsed` — `a_printed_elapsed_in_a_helper_is_no_clock` is found (N2); in
+/// `Reading::only_printed`, do not exclude `consumed` — H5″'s
+/// `a_printed_and_compared_elapsed_in_a_helper_is_a_clock` leaves the found set; count only the
+/// measurements outside macros — H5″ leaves (re-review F3).
 #[test]
 fn a_wait_in_a_helper_is_found_through_the_call_graph() {
     let index = fixture_named("timing_waiting_helpers", "waiting");
@@ -1993,6 +1997,12 @@ fn a_wait_in_a_helper_is_found_through_the_call_graph() {
                 false
             ),
             (
+                "tests::a_printed_and_compared_elapsed_in_a_helper_is_a_clock",
+                vec!["took_too_long"],
+                none(),
+                false
+            ),
+            (
                 "tests::a_stall_timer_in_a_helper",
                 vec!["quiet_for_a_second"],
                 none(),
@@ -2018,7 +2028,7 @@ fn a_wait_in_a_helper_is_found_through_the_call_graph() {
             ),
             ("tests::door_wait", none(), none(), true),
         ],
-        "H1-H5 and H12 wait through a helper; the door, the drop behind a door and the door met as a candidate are doors; \
+        "H1-H5, H5″ and H12 wait through a helper; the door, the drop behind a door and the door met as a candidate are doors; \
          the tests through the door, the product wait, the printed elapsed and the control are not \
          found"
     );
@@ -3287,7 +3297,8 @@ mod reading {
 
     /// The macros of [`CONSUMING`] that only print or format what they are handed (row 20
     /// review N2): a measurement handed only to one of them is shown, and decides nothing.
-    const PRINTING: [&str; 15] = [
+    /// `dbg!` is not one: it returns its argument, so what it is handed can still be compared.
+    const PRINTING: [&str; 14] = [
         "format",
         "format_args",
         "print",
@@ -3300,7 +3311,6 @@ mod reading {
         "unreachable",
         "todo",
         "unimplemented",
-        "dbg",
         "trace",
         "debug",
     ];
