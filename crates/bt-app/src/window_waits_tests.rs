@@ -10858,8 +10858,9 @@ pub fn a_conditional_let_ends_with_its_block(mut child: std::process::Child, nam
 /// MUTATION: make [`Scope::bind_by_pattern`] bind every name over `value` (the old
 /// `pattern_names` reading) and every function but `generic_payload` (whose value's written type
 /// holds the `JoinHandle` itself) loses its site. Run every `let` to the end of the body and
-/// `a_block_let_does_not_leak` loses its site; start a `let` at its body's start and
-/// `a_let_shadows_from_its_end` gains one; start a conditional `let` at its keyword and
+/// `a_block_let_does_not_leak` loses its site; start a `let` at its body's start and the shadows
+/// misread (`a_let_shadows_from_its_end` loses its site, `a_let_shadows_a_handle` and
+/// `a_block_let_does_not_leak` count two); start a conditional `let` at its keyword and
 /// `a_conditional_scrutinee_reads_the_outer_name` loses its site.
 #[test]
 fn a_wait_on_a_handle_bound_by_a_payload_pattern_is_a_site_in_every_binding_form() {
