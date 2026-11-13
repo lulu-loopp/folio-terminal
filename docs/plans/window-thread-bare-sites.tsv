@@ -54,7 +54,7 @@
 ##   bt-platform | [windows] | crate::launch_pipe::read_reply | windows::Win32::System::IO::GetOverlappedResult
 ##   bt-platform | [windows] | crate::windows_impl::set_loop | windows::Win32::System::IO::GetOverlappedResult
 ##   bt-platform | [windows] | crate::windows_impl::set_loop | windows::Win32::System::IO::GetQueuedCompletionStatus
-## Revealed 2026-11-13 by T-WINDOW-WAITS-READER-SEES-MATCH-BOUND-HANDLES (reader; ruling T-WINDOW-WAITS-READER-SEES-MATCH-BOUND-HANDLES 2026-11-13): the inventory's reader types a name a pattern binds out of a first-party struct or enum by the member it binds, and reads it only in its own arm (0.4.10 plan row 19, rulings R1 and R2); a site that was there before the reader read it.
+## Revealed 2026-11-13 by T-WINDOW-WAITS-READER-SEES-MATCH-BOUND-HANDLES (reader; ruling T-WINDOW-WAITS-READER-SEES-MATCH-BOUND-HANDLES 2026-11-12): the inventory's reader types a name a pattern binds out of a first-party struct or enum by the member it binds, and reads it only in its own arm (0.4.10 plan row 19, rulings R1 and R2); a site that was there before the reader read it.
 ##   bt-app | - | crate::git::GitChild::wait | std::process::Child::wait
 crate	arm	item	entry	count
 bt-app	-	crate::FolioApp::recovered_from_a_lost_device	std::thread::sleep	1
