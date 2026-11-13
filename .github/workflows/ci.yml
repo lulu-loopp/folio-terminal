@@ -829,6 +829,75 @@ jobs:
           }
           exit 0
 
+      # A key of a verb the vocabulary already has grows only by the rows a
+      # reader block lists with its ruling (0.4.10 plan row 19, R2): the reader
+      # learned to read sites that were there. Plant a row of an existing verb:
+      # unlisted, under a reader block naming no ruling, and beside a reader
+      # block that lists a row the inventory lacks, the gate refuses it; listed
+      # under a ruled reader block it passes (the control).
+      - name: the bare-site reader block can actually fail
+        shell: pwsh
+        run: |
+          $file = "docs/plans/window-thread-bare-sites.tsv"
+          $original = [IO.File]::ReadAllText($file)
+          $row = "bt-app`t-`tcrate::planted`tstd::thread::JoinHandle::join`t1`n"
+          $line = "##   bt-app | - | crate::planted | std::thread::JoinHandle::join`n"
+          $ruled = "## Revealed 2026-11-13 by T-GATES-CAN-FAIL (reader; ruling T-GATES-CAN-FAIL 2026-11-13): a planted reading`n"
+          $plants = @(
+            @{ text = $row; want = "only shrinks"; what = "an unlisted row of an existing verb" },
+            @{ text = $row + "## Revealed 2026-11-13 by T-GATES-CAN-FAIL (reader): a planted reading`n" + $line; want = "names no ruling"; what = "a reader block with no ruling" },
+            @{ text = $row + $ruled + "##   bt-app | - | crate::planted_elsewhere | std::thread::JoinHandle::join`n"; want = "no row of the inventory"; what = "a reader block listing another row" }
+          )
+          try {
+            foreach ($plant in $plants) {
+              [IO.File]::WriteAllText($file, $original + $plant.text)
+              $verdict = $null
+              try { & ./scripts/ci/check-window-waits.ps1 | Out-Null } catch { $verdict = $_.Exception.Message }
+              if (-not $verdict -or -not $verdict.Contains($plant.want)) {
+                throw "the bare-site inventory took $($plant.what): $verdict"
+              }
+            }
+            [IO.File]::WriteAllText($file, $original + $row + $ruled + $line)
+            & ./scripts/ci/check-window-waits.ps1
+          } finally {
+            [IO.File]::WriteAllText($file, $original)
+          }
+          exit 0
+
+      # The reader's unread calls grow only with a reason of their own (row 19,
+      # R4). Against a baseline holding a planted row, the working tree's list
+      # grows it under the baseline's reason, and adds a row with no dated
+      # reason: each is refused; grown under a dated reason of its own it passes
+      # (the control).
+      - name: the reader's unread-call list can actually fail
+        shell: pwsh
+        run: |
+          $file = "docs/plans/WINDOW-WAITS-UNREAD-RECEIVERS.tsv"
+          $original = [IO.File]::ReadAllText($file)
+          $baseline = Join-Path ([IO.Path]::GetTempPath()) "unread-baseline-$PID.tsv"
+          $key = "bt-app`t-`tcrate::planted`tstd::thread::JoinHandle::join"
+          [IO.File]::WriteAllText($baseline, $original + "$key`t1`t2026-11-13: the plant's baseline reason`n")
+          $plants = @(
+            @{ text = "$key`t2`t2026-11-13: the plant's baseline reason`n"; want = "a reason the merge base's list already gives"; what = "a row grown under the baseline's reason" },
+            @{ text = "$key`t1`t2026-11-13: the plant's baseline reason`nbt-app`t-`tcrate::planted_too`tstd::thread::JoinHandle::join`t1`tno date`n"; want = "with no dated reason"; what = "a row added with no dated reason" }
+          )
+          try {
+            foreach ($plant in $plants) {
+              [IO.File]::WriteAllText($file, $original + $plant.text)
+              $verdict = $null
+              try { & ./scripts/ci/check-window-waits.ps1 -UnreadBaselinePath $baseline | Out-Null } catch { $verdict = $_.Exception.Message }
+              if (-not $verdict -or -not $verdict.Contains($plant.want)) {
+                throw "the unread-call list took $($plant.what): $verdict"
+              }
+            }
+            [IO.File]::WriteAllText($file, $original + "$key`t2`t2026-11-13: the plant grows under a reason of its own`n")
+            & ./scripts/ci/check-window-waits.ps1 -UnreadBaselinePath $baseline
+          } finally {
+            [IO.File]::WriteAllText($file, $original)
+            Remove-Item -LiteralPath $baseline -ErrorAction SilentlyContinue
+          }
+          exit 0
+
       # A merge keeps both sides' removals (A2s). Three plants, each two sides
       # committed from HEAD and their merge: both sides dropping one row passes
       # (the control); one side dropping a row and the other its twin of the
