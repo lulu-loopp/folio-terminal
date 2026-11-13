@@ -8755,13 +8755,7 @@ impl Reader<'_> {
     /// this reading cannot type — no type written anywhere on its road, a receiver that is not one
     /// chain, or a call outside every callable — at its offset, with the callable it stands in.
     /// Each such call would be no site at all, and silently ([`untyped_poll_failures`]).
-    fn sites_and_untyped_polls(
-        &self,
-        src: usize,
-    ) -> (
-        Vec<(BareSite, Option<&'static ItemRecord>)>,
-        Vec<(usize, Option<&'static ItemRecord>)>,
-    ) {
+    fn sites_and_untyped_polls(&self, src: usize) -> SitesAndUntypedPolls {
         let s = &self.world.srcs[src];
         let mut out = Vec::new();
         let mut untyped = Vec::new();
@@ -8949,6 +8943,13 @@ impl Reader<'_> {
         (out, untyped)
     }
 }
+
+/// [`Reader::sites_and_untyped_polls`]'s answer: every site with the callable it stands in, and
+/// every untyped call of a [`TYPED_RECEIVERS_ONLY`] name at its offset, with its callable.
+type SitesAndUntypedPolls = (
+    Vec<(BareSite, Option<&'static ItemRecord>)>,
+    Vec<(usize, Option<&'static ItemRecord>)>,
+);
 
 /// One inventory row's key: crate, arm, item, entry.
 type BareKey = (String, String, String, String);
