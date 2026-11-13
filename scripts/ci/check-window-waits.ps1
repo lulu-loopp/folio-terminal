@@ -71,9 +71,12 @@
 #     wait with it; a listed one is what the dated block asks a reviewer to
 #     check.
 #   * Except, too, what a better reading reveals: a key of a verb the vocabulary
-#     already had, added or grown, whose rows past the baseline's count are
-#     listed in a reader block, `## Revealed <YYYY-MM-DD> by <ticket> (reader;
-#     ruling <ticket> <YYYY-MM-DD>): ...`, the merge base does not list them in.
+#     already had, added or grown, every one of whose rows added or grown
+#     against the merge base (row by row, not the key's total) is listed in a
+#     reader block, `## Revealed <YYYY-MM-DD> by <ticket> (reader; ruling
+#     <ticket> <YYYY-MM-DD>): ...`, the merge base does not list it in. One
+#     unlisted added or grown row of the key refuses the key, whatever the
+#     block lists beside it (row 19's review N1).
 #     The reader (the inventory's test) that learned to type a receiver it read
 #     wrong or not at all counts sites that were always there; the block names
 #     each row and the ruling that let it in (the `# counted-only` rule: grow
@@ -705,6 +708,13 @@ $verbsThen = @((Read-VocabularyPaths ($then -split "`r?`n")) | ForEach-Object { 
 $verbsNow = @((Read-VocabularyPaths ([IO.File]::ReadAllLines((Join-Path $repo $registry)))) | ForEach-Object { Get-WaitVerb $_ })
 $inventoryLines = [IO.File]::ReadAllLines($inventory)
 $inventoryRowsNow = Read-InventoryRows $inventoryLines "the working tree's $relative"
+$inventoryRowsThen = Read-InventoryRows $inventoryLinesThen "$relative at $against"
+# What a refusal adds when a reader block lists some of a key's added or grown rows and not all:
+# the rows it does not list, by name.
+function Get-UnlistedNote([object[]]$unlisted, [object[]]$grownRows) {
+    if ($unlisted.Count -eq 0 -or $unlisted.Count -eq $grownRows.Count) { return "" }
+    return "; a reader block lists some of its added or grown rows, not $(($unlisted | ForEach-Object { $_ -replace "`t", ' | ' }) -join '; ')"
+}
 $revealedRows = Read-RevealedRows $inventoryLines
 # The rows reader blocks list now and did not at the merge base: what a better reading revealed
 # since (row 19, R2). Each is a row of the inventory, and every reader block names its ruling.
@@ -736,22 +746,25 @@ foreach ($key in $now.Keys) {
             $cells = $_ -split "`t"
             $cells[0] -ceq $crate -and $cells[3] -ceq $entry -and -not $revealedRows.Contains($_)
         })
-    $byReader = @($readerRevealedRows.Keys | Where-Object {
+    # The key's rows added or grown against the merge base, row by row: a reader block admits the
+    # key's growth only when it lists every one of them (review N1: a listed row's whole count is
+    # not its growth, and an unlisted new row beside it is not admitted by it).
+    $grownRows = @($inventoryRowsNow.Keys | Where-Object {
             $cells = $_ -split "`t"
-            $cells[0] -ceq $crate -and $cells[3] -ceq $entry
+            $wasRow = if ($inventoryRowsThen.Contains($_)) { $inventoryRowsThen[$_] } else { 0 }
+            $cells[0] -ceq $crate -and $cells[3] -ceq $entry -and $inventoryRowsNow[$_] -gt $wasRow
         })
-    $readerCount = 0
-    foreach ($row in $byReader) { $readerCount += $inventoryRowsNow[$row] }
+    $unlistedGrown = @($grownRows | Where-Object { -not $readerRevealedRows.Contains($_) })
     if ($newEntry -and $undated.Count -eq 0) {
         $revealed += "    $($key -replace "`t", ' | ') ($($now[$key]))"
     } elseif ($newEntry) {
         $added += "    $($key -replace "`t", ' | ') ($($now[$key])): a new vocabulary entry, and no dated '## Revealed' block lists $(($undated | ForEach-Object { $_ -replace "`t", ' | ' }) -join '; ')"
-    } elseif ($now[$key] -gt $held -and $readerCount -gt 0 -and $now[$key] - $readerCount -le $held) {
-        $readerRevealed += "    $($key -replace "`t", ' | '): $held -> $($now[$key]), $(($byReader | ForEach-Object { "$(($_ -split "`t")[2]) ($($inventoryRowsNow[$_]); ruling $($readerRevealedRows[$_]))" }) -join '; ')"
+    } elseif ($now[$key] -gt $held -and $grownRows.Count -gt 0 -and $unlistedGrown.Count -eq 0) {
+        $readerRevealed += "    $($key -replace "`t", ' | '): $held -> $($now[$key]), $(($grownRows | ForEach-Object { $wasRow = if ($inventoryRowsThen.Contains($_)) { $inventoryRowsThen[$_] } else { 0 }; "$(($_ -split "`t")[2]) ($wasRow -> $($inventoryRowsNow[$_]); ruling $($readerRevealedRows[$_]))" }) -join '; ')"
     } elseif ($held -eq 0) {
-        $added += "    $($key -replace "`t", ' | ') ($($now[$key]))"
+        $added += "    $($key -replace "`t", ' | ') ($($now[$key]))$(Get-UnlistedNote $unlistedGrown $grownRows)"
     } elseif ($now[$key] -gt $held) {
-        $grown += "    $($key -replace "`t", ' | '): $held -> $($now[$key])"
+        $grown += "    $($key -replace "`t", ' | '): $held -> $($now[$key])$(Get-UnlistedNote $unlistedGrown $grownRows)"
     } elseif ($now[$key] -lt $held) {
         $shrunk += $held - $now[$key]
     }
