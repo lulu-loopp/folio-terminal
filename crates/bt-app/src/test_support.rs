@@ -3742,8 +3742,8 @@ pub(crate) struct FixtureTurn {
 /// when this thread already holds a turn. A place a red test let go while panicking is a free
 /// place, so a red does not take a turn from the rest of the module.
 ///
-/// [`the_applier_tests_start_every_process_through_the_fixture_door`] holds both modules'
-/// `Install::new` to take it first.
+/// [`the_applier_fixture_tests_take_a_turn_before_they_write_a_fixture`] holds both
+/// modules' `Install::new` to take it first.
 pub(crate) fn a_fixture_turn() -> FixtureTurn {
     let held_here = FIXTURE_TURNS_HELD_HERE.with(|held| held.replace(held.get() + 1));
     if held_here > 0 {
