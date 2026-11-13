@@ -1925,9 +1925,10 @@ fn a_budget_measured_in_a_helper_is_found_through_the_call_graph() {
 /// `tests::Patient::bide`, `tests::Calm::settle_in` and `tests::quiet` (which waits on nothing,
 /// so it is no door and its row would be stale).
 ///
-/// MUTATIONS: in `Helpers::holds`, answer `Nothing` for a body whose only clock is a wait or an
-/// `elapsed` it does not keep — every waiting test leaves the found set; in `Helpers::walk`, do
-/// not stop at a door — `a_wait_through_a_door` and `a_wait_through_a_helper_that_calls_a_door`
+/// MUTATIONS: in `Helpers::clock_in_body`, answer `Nothing` for a body whose only clock is a
+/// wait or an `elapsed` it does not keep — every waiting test leaves the found set; in
+/// `Helpers::walk`, do not stop at a door — `a_wait_through_a_door` and
+/// `a_wait_through_a_helper_that_calls_a_door`
 /// are found; skip the implicit impls — the `Ends::drop` refusal is gone and `Cleans::drop` is
 /// no longer found as a door; in `names_a_clock_or_a_wait`, read only `elapsed` and `Instant` —
 /// the `settle!` refusal is gone; in `Helpers::reach`, do not record a door met as a candidate —
