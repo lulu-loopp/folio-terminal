@@ -2026,7 +2026,15 @@ error, not a baseline.
 **The count is a reading of the source, not the compiler's** (note (j)12): a
 method call counts when its receiver's type is written somewhere on its road,
 so a receiver typed nowhere is not seen, and A2e's lint may find sites the file
-never listed. Beside it: the registry's `# effects` section (§5.3), whose seven
+never listed. What it cannot read is listed, not passed over (0.4.10 plan row
+19, 2026-11-13): a call of a vocabulary method's name and argument count on a
+receiver it gives no type is a row of
+`docs/plans/WINDOW-WAITS-UNREAD-RECEIVERS.tsv`, which grows only with a dated
+reason. A name a pattern binds out of a first-party struct or enum takes the
+type its member declares, never the whole value's (which had read such a
+receiver wrong rather than not at all), `std::mem::replace`/`take` carry their
+place's type, and every binding holds only over its own scope, so one arm's
+`child` is not another's. Beside it: the registry's `# effects` section (§5.3), whose seven
 kinds each have a closed rule (an owner door's or an interim door's body takes
 its token; a worker's takes its context; a **shared operation**'s functions will
 take `admission::Leg<'_, doors::D>`, but `shared-body` admits no row and
