@@ -69,6 +69,12 @@ fn a_typeset_formula(tag: &str) -> (HeadlessFolio, PasteTarget, MathBlockAnchor)
     );
     let answer =
         computation_lane::fixtures::answer(terminal).expect("the lane typesets the formula");
+    assert_eq!(
+        watched.lane.engines_made(),
+        1,
+        "the fixture's own precondition: the formula was typeset by an engine the lane's factory \
+             made, from the faces Folio ships, and the machine's fonts were never scanned"
+    );
     let crate::DecorationWorkerCompletion::Math { task, result } = answer.completion else {
         panic!("the lane's answer is a formula's");
     };
@@ -101,6 +107,36 @@ fn a_typeset_formula(tag: &str) -> (HeadlessFolio, PasteTarget, MathBlockAnchor)
         .clone();
     let target = runtime.paste_target(seat).expect("the shell");
     (folio, target, anchor)
+}
+
+/// PIN (T-FORMULA-TESTS-TYPESET-WITHOUT-THE-REAL-FONT-SCAN) — **a headless window's own lane
+/// makes its formula engine from the faces Folio ships**, as the lanes the suite builds do: the
+/// engine its decoration worker would make refuses an ideograph by name, which the desktop engine
+/// draws wherever the machine has a CJK face. So a headless test that typesets through the
+/// window's own lane waits for no scan of the machine's fonts.
+///
+/// MUTATION: build the headless app's `math_worker` with `ComputationLane::new` — the engine is
+/// the desktop's, and the ideograph is drawn.
+#[test]
+fn a_headless_windows_own_lane_makes_the_suites_formula_engine() {
+    let folio = HeadlessFolio::with_tabs(
+        "headless-own-lane-engine",
+        vec![tab_holding(leaf_saying("公式 formula"))],
+        0,
+    );
+    let engine = folio.app.math_worker.make_an_engine();
+    assert_eq!(
+        engine
+            .render(
+                r"\text{中文}",
+                bt_math::key_for_em_px(16.0, [220, 220, 220], bt_math::MathMode::Display)
+                    .expect("a drawable size"),
+            )
+            .map(|raster| raster.width_px),
+        Err(bt_math::MathRenderError::MissingCjkGlyph),
+        "the headless lane's engine holds no face of the machine's"
+    );
+    assert_eq!(folio.app.math_worker.engines_made(), 1);
 }
 
 /// The flight of `anchor` towards its source, begun at `started`.

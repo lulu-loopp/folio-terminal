@@ -449,6 +449,13 @@ impl ComputationLane {
         })
     }
 
+    /// **The engine this lane's decoration worker would make**, made here, on the caller's thread,
+    /// and counted.
+    #[cfg(test)]
+    pub(crate) fn make_an_engine(&self) -> MathEngine {
+        (self.engine_factory())()
+    }
+
     /// **How many formula engines this lane's factory has made.** Exact once a formula has been
     /// answered: the arm that answered it waited for the making.
     #[cfg(test)]
@@ -1886,6 +1893,12 @@ mod tests {
         );
         assert!(render("x+1").is_ok(), "the engine goes on");
         assert_eq!(lane.said(), Vec::<String>::new(), "no failure was said");
+        assert_eq!(
+            lane.lane.engines_made(),
+            1,
+            "the fixture's own precondition: the formula was typeset by an engine the lane's factory \
+             made, from the faces Folio ships, and the machine's fonts were never scanned"
+        );
     }
 
     /// RED (S-8; was the scale worker's drag storm) — **A drag runs the size it ends at; every
@@ -2132,6 +2145,94 @@ mod tests {
                 DecorationWorkerCompletion::Math { result: Ok(_), .. }
             ),
             "the formula asked again is typeset"
+        );
+        assert_eq!(
+            lane.lane.engines_made(),
+            1,
+            "the fixture's own precondition: the formula was typeset by an engine the lane's factory \
+             made, from the faces Folio ships, and the machine's fonts were never scanned"
+        );
+    }
+
+    /// PIN (T-FORMULA-TESTS-TYPESET-WITHOUT-THE-REAL-FONT-SCAN) — **a lane the suite builds
+    /// typesets with the faces Folio ships, and scans no font folder of the machine's.**
+    ///
+    /// A terminal formula is typeset through the lane's own door, and the lane's factory has made
+    /// one engine: the one that set it. An ideograph is then refused by name
+    /// (`MathRenderError::MissingCjkGlyph`), because no face Folio ships draws one and the
+    /// engine's book holds none of the machine's; the desktop engine, which scans them, draws it
+    /// on every machine with a CJK face installed. So every formula test on a suite lane pins the
+    /// typesetting, not the fonts this machine, the Mac or a runner has, and no lane-suite
+    /// patience holds a scan of them.
+    ///
+    /// MUTATIONS: hand the door the desktop engine in `ComputationLane::decorate` instead of the
+    /// lane's factory (`Box::new(MathEngine::new)`) — the formula is typeset by an engine the
+    /// lane never made, and the count is 0 (here and in the seven formula tests' preconditions);
+    /// make `fixtures::engine_without_the_machine` answer `MathEngine::new()` — the ideograph is
+    /// drawn.
+    #[test]
+    fn a_suite_lane_typesets_with_the_faces_folio_ships_and_scans_no_font_folder() {
+        let (mut lane, _gate) = gated();
+        let mut session = a_pane_with_a_formula();
+        hand_out(&mut session, &lane.lane);
+        let (_, _, typeset, _) = lane.next_ended(Share::Decoration, nobody);
+        assert!(
+            matches!(
+                answer(typeset).map(|result| result.completion),
+                Some(DecorationWorkerCompletion::Math { result: Ok(_), .. })
+            ),
+            "the formula is typeset"
+        );
+        assert_eq!(
+            lane.lane.engines_made(),
+            1,
+            "the lane's factory made the engine that set it"
+        );
+        let ideograph = lane
+            .lane
+            .decorate(MathWorkerRequest::PreviewMath {
+                leaf: probe_leaf(),
+                key: Box::new(crate::PreviewMathKey {
+                    source: r"\text{中文}".to_owned(),
+                    mode: crate::MathMode::Display,
+                    em_milli_px: 16_000,
+                    foreground_rgb: [220, 220, 220],
+                }),
+            })
+            .ok()
+            .expect("admitted");
+        let refused = answer(lane.terminal(Share::Decoration, ideograph, nobody))
+            .expect("the formula is answered")
+            .completion;
+        assert!(
+            matches!(
+                refused,
+                DecorationWorkerCompletion::PreviewMath {
+                    result: Err(MathRenderError::MissingCjkGlyph),
+                    ..
+                }
+            ),
+            "no face Folio ships draws an ideograph, and the book holds none of the machine's"
+        );
+        assert_eq!(lane.lane.engines_made(), 1, "and the engine is kept");
+    }
+
+    /// PIN (T-FORMULA-TESTS-TYPESET-WITHOUT-THE-REAL-FONT-SCAN) — **the product's lane makes the
+    /// desktop formula engine**, which scans the machine's fonts behind the faces Folio ships: a
+    /// formula with an ideograph in it is drawn in the faces the reader has. The suite's lanes
+    /// make theirs without the machine (`fixtures::engine_without_the_machine`), so this is the
+    /// one place the product's choice is held; bt-math's own tests hold what the scan finds.
+    ///
+    /// MUTATION: build the product lane in `ComputationLane::new` with
+    /// `fixtures::engine_without_the_machine`'s faces — the source reads no `MathEngine::new`.
+    #[test]
+    fn the_product_lane_makes_the_desktop_formula_engine() {
+        let lane = crate::test_support::squeezed_body("ComputationLane", "new");
+        assert_eq!(
+            lane.matches("Self::making_engines_with(MathEngine::new,wake)")
+                .count(),
+            1,
+            "the product's lane hands its decoration worker the desktop engine:\n{lane}"
         );
     }
 
