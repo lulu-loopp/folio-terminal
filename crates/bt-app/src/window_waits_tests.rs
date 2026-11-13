@@ -7247,12 +7247,24 @@ fn every_door_is_where_the_registry_says() {
 // site when it names the entry. A method call `receiver.name(…)` is a site of `Type::name` when the
 // receiver's **written type** includes `Type`: the type written on `self`, on a parameter, a field,
 // a `static`, a `let` annotation, or on the declared return of the first-party function or method
-// the receiver was made by, carried through `let`, `if let`, `while let`, `for`, `match` arms and
-// the parameters of a closure handed to a method of the value. Where no type is written anywhere on
-// that road the receiver is untyped and the call is not a site: this is a reading of what the
-// source says, not the compiler's resolution, and what it cannot see (an untyped receiver) is the
-// gap A2e's lint closes. `write!`/`writeln!` are `std::io::Write::write_fmt` when their first
-// argument is an `io` writer by the same reading.
+// the receiver was made by (or, for `std::mem::replace`/`take`, on their first argument), carried
+// through `let` and `let … else`, `if let`, `while let`, `for`, `match` arms, a parameter's pattern
+// and the parameters of a closure handed to a method of the value. A pattern gives each name it
+// binds the type of the part it binds, by a closed grammar (`Scope::bind_by_pattern`, row 19): a
+// name, `name @ sub`, a tuple, a slice, a reference, parentheses and each case of an or-pattern
+// over the value's types; `Some`, `Ok` and `Err` over the value's types; a first-party struct,
+// tuple struct or enum variant over the declared type of each member it binds; and a pattern it
+// cannot place (a foreign struct or variant, a member nothing declares) with no type, never the
+// outer value's. A binding is read only where it is in scope (`Scope::bound_at`): two match arms
+// that bind one name to two types are two bindings. Where no type is written anywhere on that
+// road the receiver is untyped and the call is not a site: this is a reading of what the source
+// says, not the compiler's resolution.
+// What it cannot read is listed, not passed over: a method call whose name and argument count are a
+// vocabulary entry's (`METHOD_ARITIES`) on an untyped receiver, or on one that is not one chain, is a
+// row of `docs/plans/WINDOW-WAITS-UNREAD-RECEIVERS.tsv` (`Reader::read`, `UnreadCall`), which grows
+// only with a dated reason, until A2e's lint closes the gap. `write!`/`writeln!` are
+// `std::io::Write::write_fmt` when their first argument is an `io` writer by the same reading, and
+// a row of that list when it has no type.
 //
 // The few standard-library signatures the vocabulary's receivers are made through are written out
 // below (`FOREIGN_FUNCTIONS`, `FOREIGN_METHODS`, `BUILDERS`, `PASSING_THROUGH`, `WRAPPERS`,
@@ -7403,6 +7415,84 @@ const IO_WRITERS: [&str; 10] = [
 ];
 
 const WRITE_FMT: &str = "std::io::Write::write_fmt";
+
+/// **How many arguments each method-shaped vocabulary entry takes when it is called as a method**
+/// (`receiver.name(…)`, the receiver not counted), from its signature — `std`'s, a foreign crate's,
+/// or the first-party declaration's — or `None` when it takes no receiver and is never written as a
+/// method call (an associated function, a system call whose module path is capitalised). A call of
+/// another count cannot be that method, so the inventory's diagnostic ([`Reader::read`]) asks only
+/// about a call of the entry's own count. Held to the vocabulary, and the first-party lines to their
+/// declarations, by `every_method_shaped_vocabulary_entry_states_how_many_arguments_it_takes`
+/// (T-WINDOW-WAITS-READER-SEES-MATCH-BOUND-HANDLES, 0.4.10 plan row 19, ruling R6).
+const METHOD_ARITIES: &[(&str, Option<usize>)] = &[
+    ("std::thread::JoinHandle::join", Some(0)),
+    ("std::sync::mpsc::Receiver::recv", Some(0)),
+    ("std::sync::mpsc::Receiver::recv_timeout", Some(1)),
+    ("std::sync::Condvar::wait", Some(1)),
+    ("std::sync::Condvar::wait_timeout", Some(2)),
+    ("std::sync::Condvar::wait_while", Some(2)),
+    ("std::sync::Condvar::wait_timeout_while", Some(3)),
+    ("std::sync::mpsc::SyncSender::send", Some(1)),
+    ("std::sync::Barrier::wait", Some(0)),
+    ("std::thread::ScopedJoinHandle::join", Some(0)),
+    ("std::sync::Once::call_once", Some(1)),
+    ("std::sync::Once::call_once_force", Some(1)),
+    ("std::fs::File::create", None),
+    ("std::fs::File::sync_data", Some(0)),
+    ("std::fs::File::sync_all", Some(0)),
+    ("std::io::Write::write_fmt", Some(1)),
+    ("std::process::Command::output", Some(0)),
+    ("std::process::Command::status", Some(0)),
+    ("std::process::Child::wait", Some(0)),
+    ("portable_pty::Child::try_wait", Some(0)),
+    ("wgpu::Queue::submit", Some(1)),
+    ("wgpu::Queue::present", Some(0)),
+    ("bt_render::GpuContext::open", None),
+    ("bt_pty::PtySession::spawn_shell_in", None),
+    ("bt_pty::PtySession::spawn_refreshed", None),
+    ("bt_pty::PtySession::resize", Some(1)),
+    ("windows::Win32::UI::Shell::ShellExecuteW", None),
+    ("windows::Win32::UI::Shell::ShellExecuteExW", None),
+    (
+        "windows::Win32::System::Threading::WaitForSingleObject",
+        None,
+    ),
+    (
+        "windows::Win32::System::Threading::WaitForSingleObjectEx",
+        None,
+    ),
+    (
+        "windows::Win32::System::Threading::WaitForMultipleObjects",
+        None,
+    ),
+    (
+        "windows::Win32::System::Threading::WaitForMultipleObjectsEx",
+        None,
+    ),
+    (
+        "windows::Win32::System::Threading::SignalObjectAndWait",
+        None,
+    ),
+    ("windows::Win32::System::Threading::SleepEx", None),
+    (
+        "windows::Win32::UI::WindowsAndMessaging::MsgWaitForMultipleObjectsEx",
+        None,
+    ),
+    ("windows::Win32::System::IO::GetOverlappedResult", None),
+    (
+        "windows::Win32::System::IO::GetQueuedCompletionStatus",
+        None,
+    ),
+    ("windows::Win32::System::Pipes::WaitNamedPipeW", None),
+    ("windows::Win32::System::Threading::SetEvent", None),
+    ("windows::Win32::Foundation::CloseHandle", None),
+    ("windows::Win32::Storage::FileSystem::GetDriveTypeW", None),
+];
+
+/// `std` functions whose result is their first argument's value, so a binding of the result takes
+/// that argument's types: `fn replace<T>(dest: &mut T, src: T) -> T` and `fn take<T: Default>(dest:
+/// &mut T) -> T` (row 19, §2.2: `match std::mem::replace(&mut self.making, …)`).
+const CARRYING_FUNCTIONS: [&str; 2] = ["std::mem::replace", "std::mem::take"];
 
 /// Names a pattern holds that bind nothing.
 const NOT_A_BINDING: [&str; 14] = [
@@ -7752,6 +7842,12 @@ struct Reader<'w> {
     names: Vec<Names>,
     entries: Vec<Entry>,
     io_writers: BTreeSet<String>,
+    /// The product's enum variants, by `(enum, variant)`: where each is declared. A variant's
+    /// record spans its own fields (`( … )` or `{ … }`), which [`Reader::payload_types`] reads.
+    variants: HashMap<(String, String), Vec<(usize, &'static ItemRecord)>>,
+    /// The product's structs, enums and unions, by name: where each is declared, for the generic
+    /// parameters a member's written type may name ([`Reader::type_generics`]).
+    types: HashMap<String, Vec<(usize, &'static ItemRecord)>>,
 }
 
 impl<'w> Reader<'w> {
@@ -7806,11 +7902,36 @@ impl<'w> Reader<'w> {
                 }
             }
         }
+        let mut variants: HashMap<(String, String), Vec<(usize, &'static ItemRecord)>> =
+            HashMap::new();
+        let mut types: HashMap<String, Vec<(usize, &'static ItemRecord)>> = HashMap::new();
+        for (at, src) in world.srcs.iter().enumerate() {
+            for record in src.index.items() {
+                if !src.product_item(record) {
+                    continue;
+                }
+                if record.kind() == ItemKind::Variant
+                    && let Some(owner) = record.type_owner()
+                {
+                    variants
+                        .entry((owner.to_owned(), record.name().to_owned()))
+                        .or_default()
+                        .push((at, record));
+                } else if record.kind().is_type() {
+                    types
+                        .entry(record.name().to_owned())
+                        .or_default()
+                        .push((at, record));
+                }
+            }
+        }
         Self {
             world,
             names,
             entries,
             io_writers,
+            variants,
+            types,
         }
     }
 
@@ -8023,10 +8144,264 @@ impl<'w> Reader<'w> {
         }
         out
     }
+
+    /// **The types a pattern binds to member `member` of the first-party struct `owner`, or of its
+    /// variant `variant`** (T-WINDOW-WAITS-READER-SEES-MATCH-BOUND-HANDLES, 0.4.10 plan row 19):
+    /// what the member's declaration writes, with each generic parameter of the declaring type
+    /// standing for `value`, the whole value's types (a [`Ty`] already holds what is inside a
+    /// wrapper). `member` is a field's name or a tuple member's position (`0`, `1`). `None` when
+    /// `owner` is not first-party or declares no such member: the pattern is then not placed.
+    fn payload_types(
+        &self,
+        owner: &str,
+        variant: Option<&str>,
+        member: &str,
+        value: &Ty,
+    ) -> Option<Ty> {
+        let (package, type_name) = self.first_party(owner)?;
+        let mut declared: Vec<(usize, &'static ItemRecord, Vec<Tok>)> = Vec::new();
+        match variant {
+            None => {
+                let fields = self
+                    .world
+                    .fields
+                    .get(&(type_name.to_owned(), member.to_owned()));
+                for (src, record) in fields.into_iter().flatten() {
+                    if self.names[*src].crate_ident != package {
+                        continue;
+                    }
+                    let s = &self.world.srcs[*src];
+                    let toks =
+                        without_attributes(s, &s.lex(record.whole().start(), record.whole().end()));
+                    let written = if member.parse::<usize>().is_ok() {
+                        // A tuple field is its visibility and its type: `pub(crate) Child`.
+                        let mut at = 0;
+                        if s.is(toks.first(), "pub") {
+                            at = 1;
+                            if s.is(toks.get(1), "(") {
+                                at = closing(s, &toks, 1).map_or(1, |close| close + 1);
+                            }
+                        }
+                        toks[at.min(toks.len())..].to_vec()
+                    } else {
+                        match toks.iter().position(|t| s.is(Some(t), ":")) {
+                            Some(colon) => toks[colon + 1..].to_vec(),
+                            None => continue,
+                        }
+                    };
+                    declared.push((*src, record, written));
+                }
+            }
+            Some(variant) => {
+                let records = self
+                    .variants
+                    .get(&(type_name.to_owned(), variant.to_owned()));
+                for (src, record) in records.into_iter().flatten() {
+                    if self.names[*src].crate_ident != package {
+                        continue;
+                    }
+                    let Some(body) = record.body() else {
+                        continue;
+                    };
+                    let s = &self.world.srcs[*src];
+                    let toks = s.lex(body.start(), body.end());
+                    if toks.len() < 2 {
+                        continue;
+                    }
+                    let parts = split_commas(s, &toks[1..toks.len() - 1]);
+                    if s.is(toks.first(), "(") {
+                        if let Ok(position) = member.parse::<usize>()
+                            && let Some(part) = parts.get(position)
+                        {
+                            declared.push((*src, record, without_attributes(s, part)));
+                        }
+                    } else if s.is(toks.first(), "{") {
+                        for part in &parts {
+                            let part = without_attributes(s, part);
+                            if let Some(colon) = top_level_token(s, &part, ":")
+                                && part[..colon]
+                                    .last()
+                                    .is_some_and(|name| s.text(*name) == member)
+                            {
+                                declared.push((*src, record, part[colon + 1..].to_vec()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if declared.is_empty() {
+            return None;
+        }
+        let mut out = Ty::new();
+        for (src, record, written) in declared {
+            let generics: HashMap<&'static str, Ty> = self
+                .type_generics(src, type_name, record)
+                .into_iter()
+                .map(|name| (name, value.clone()))
+                .collect();
+            out.extend(self.types_written(
+                src,
+                record.whole().start(),
+                record.module_paths()[0],
+                Some(owner),
+                &generics,
+                &written,
+            ));
+        }
+        Some(out)
+    }
+
+    /// How many members the first-party tuple struct `owner`, or its tuple variant `variant`,
+    /// declares — for the parts of a pattern written after `..`, which count from the end; `None`
+    /// when no declaration says, or the declarations differ.
+    fn tuple_members(&self, owner: &str, variant: Option<&str>) -> Option<usize> {
+        let (package, type_name) = self.first_party(owner)?;
+        let mut counts: BTreeSet<usize> = BTreeSet::new();
+        match variant {
+            None => {
+                // Each declaration of the name, with the positional fields inside its span.
+                for (src, declaration) in self.types.get(type_name).into_iter().flatten() {
+                    if self.names[*src].crate_ident != package {
+                        continue;
+                    }
+                    let members = self
+                        .world
+                        .fields
+                        .iter()
+                        .filter(|((ty, field), _)| {
+                            ty == type_name && field.bytes().all(|b| b.is_ascii_digit())
+                        })
+                        .flat_map(|(_, found)| found)
+                        .filter(|(at, record)| {
+                            at == src && record.whole().within(declaration.whole())
+                        })
+                        .count();
+                    counts.insert(members);
+                }
+            }
+            Some(variant) => {
+                let records = self
+                    .variants
+                    .get(&(type_name.to_owned(), variant.to_owned()));
+                for (src, record) in records.into_iter().flatten() {
+                    if self.names[*src].crate_ident != package {
+                        continue;
+                    }
+                    let s = &self.world.srcs[*src];
+                    let Some(body) = record.body() else {
+                        continue;
+                    };
+                    let toks = s.lex(body.start(), body.end());
+                    if s.is(toks.first(), "(") && toks.len() >= 2 {
+                        counts.insert(split_commas(s, &toks[1..toks.len() - 1]).len());
+                    }
+                }
+            }
+        }
+        match counts.len() {
+            1 => counts.pop_first(),
+            _ => None,
+        }
+    }
+
+    /// The generic type and `const` parameters of the type `type_name` that declares `member` (a
+    /// field or a variant of it), by name; lifetimes are no types and are left out.
+    fn type_generics(&self, src: usize, type_name: &str, member: &ItemRecord) -> Vec<&'static str> {
+        let s = &self.world.srcs[src];
+        let Some((_, declaration)) = self
+            .types
+            .get(type_name)
+            .into_iter()
+            .flatten()
+            .filter(|(at, record)| *at == src && record.whole().holds(member.whole().start()))
+            .min_by_key(|(_, record)| record.whole().len())
+        else {
+            return Vec::new();
+        };
+        let end = declaration
+            .body()
+            .map_or(declaration.whole().end(), |body| body.start());
+        let toks = s.lex(declaration.whole().start(), end);
+        let Some(name) = toks.iter().position(|tok| {
+            tok.kind == Kind::Ident
+                && s.text(*tok) == type_name
+                && toks.iter().any(|keyword| {
+                    keyword.start < tok.start
+                        && ["struct", "enum", "union"].contains(&s.text(*keyword))
+                })
+        }) else {
+            return Vec::new();
+        };
+        if !s.is(toks.get(name + 1), "<") {
+            return Vec::new();
+        }
+        let Some(close) = closing_angle(s, &toks, name + 1) else {
+            return Vec::new();
+        };
+        split_commas(s, &toks[name + 2..close])
+            .iter()
+            .filter_map(|part| {
+                let first = part.first()?;
+                let named = if s.is(Some(first), "const") {
+                    part.get(1)?
+                } else {
+                    first
+                };
+                (named.kind == Kind::Ident).then(|| s.text(*named))
+            })
+            .collect()
+    }
+}
+
+/// `toks` without the outer attributes written in front of it (`#[cfg(windows)] Child`).
+fn without_attributes(s: &Src, toks: &[Tok]) -> Vec<Tok> {
+    let mut at = 0;
+    while s.is(toks.get(at), "#") && s.is(toks.get(at + 1), "[") {
+        match closing(s, toks, at + 1) {
+            Some(close) => at = close + 1,
+            None => break,
+        }
+    }
+    toks[at.min(toks.len())..].to_vec()
+}
+
+/// What a struct or variant pattern's path names ([`Scope::place_pattern`]).
+enum PatternPlace {
+    /// `Some`, `Ok`, `Err`: the parts are the value's own contents.
+    Contents,
+    /// The first-party types it can be, each with the variant it names (`None` for a struct).
+    Members(BTreeSet<(String, Option<String>)>),
+    /// Nothing the reader can place: the parts are bound with no type.
+    Nowhere,
+}
+
+/// `toks` cut at every `separator` outside brackets, the empty pieces (a leading `|`) dropped.
+fn split_at_depth_zero<'t>(s: &Src, toks: &'t [Tok], separator: &str) -> Vec<&'t [Tok]> {
+    let mut pieces = Vec::new();
+    let mut depth = 0usize;
+    let mut from = 0;
+    for (at, tok) in toks.iter().enumerate() {
+        if tok.kind != Kind::Punct {
+            continue;
+        }
+        match s.text(*tok) {
+            "(" | "[" | "{" => depth += 1,
+            ")" | "]" | "}" => depth = depth.saturating_sub(1),
+            text if depth == 0 && text == separator => {
+                pieces.push(&toks[from..at]);
+                from = at + 1;
+            }
+            _ => {}
+        }
+    }
+    pieces.push(&toks[from..]);
+    pieces.retain(|piece| !piece.is_empty());
+    pieces
 }
 
 /// One body's types: its parameters, its generics' bounds, and its bindings, each name with the
-/// union of every type written on it in the body.
+/// types written on it where it is in scope.
 struct Scope<'r> {
     reader: &'r Reader<'r>,
     src: usize,
@@ -8034,7 +8409,12 @@ struct Scope<'r> {
     at: usize,
     own: Option<String>,
     generics: HashMap<&'static str, Ty>,
-    bindings: HashMap<&'static str, Ty>,
+    /// Each name's bindings, each with the `[from, to)` union offsets it is in scope over and its
+    /// types (row 19): a parameter over the body, a `let` from its statement's end to its block's,
+    /// an `if let`/`while let` pattern over its condition and block, a `for` pattern over the loop
+    /// body, a match arm's pattern over the arm, a closure's parameters over the closure. Two arms
+    /// that bind one name to two types are two bindings, so neither arm's call reads the other's.
+    bindings: HashMap<&'static str, Vec<(usize, usize, Ty)>>,
 }
 
 impl<'r> Scope<'r> {
@@ -8055,17 +8435,14 @@ impl<'r> Scope<'r> {
         let declaration = s.lex(record.declaration().start(), record.declaration().end());
         if let Some((_, open, close)) = signature(s, &declaration) {
             for param in split_commas(s, &declaration[open + 1..close]) {
-                let Some(colon) = param.iter().position(|t| s.is(Some(t), ":")) else {
+                let Some(colon) = top_level_token(s, &param, ":") else {
                     continue;
                 };
                 let types = scope.written(&param[colon + 1..]);
-                for name in pattern_names(s, &param[..colon]) {
-                    scope
-                        .bindings
-                        .entry(name)
-                        .or_default()
-                        .extend(types.iter().cloned());
-                }
+                let body = record
+                    .body()
+                    .map_or((0, 0), |body| (body.start(), body.end()));
+                scope.bind_by_pattern(&param[..colon], &types, body);
             }
         }
         if let Some(body) = record.body() {
@@ -8090,12 +8467,267 @@ impl<'r> Scope<'r> {
         )
     }
 
-    fn add(&mut self, names: Vec<&'static str>, types: &Ty) {
-        for name in names {
-            self.bindings
-                .entry(name)
-                .or_default()
-                .extend(types.iter().cloned());
+    /// Binds `name` to `types` over the union offsets `[within.0, within.1)`.
+    fn add(&mut self, name: &'static str, types: &Ty, within: (usize, usize)) {
+        self.bindings
+            .entry(name)
+            .or_default()
+            .push((within.0, within.1, types.clone()));
+    }
+
+    /// The types of the binding of `name` in scope at union offset `at` — of those whose scope
+    /// holds `at`, the one that begins last, which shadows the others (the cases of an
+    /// or-pattern begin together, and are one binding) — or `None` when no binding of it is.
+    fn bound_at(&self, name: &str, at: usize) -> Option<Ty> {
+        let holding: Vec<&(usize, usize, Ty)> = self
+            .bindings
+            .get(name)
+            .into_iter()
+            .flatten()
+            .filter(|(from, to, _)| *from <= at && at < *to)
+            .collect();
+        let latest = holding.iter().map(|(from, ..)| *from).max()?;
+        Some(
+            holding
+                .iter()
+                .filter(|(from, ..)| *from == latest)
+                .flat_map(|(.., types)| types.iter().cloned())
+                .collect(),
+        )
+    }
+
+    /// Adds `types` to the binding of `name` in scope at `at` (an assignment to it there).
+    fn assign(&mut self, name: &str, at: usize, types: &Ty) {
+        let Some(bindings) = self.bindings.get_mut(name) else {
+            return;
+        };
+        let latest = bindings
+            .iter()
+            .filter(|(from, to, _)| *from <= at && at < *to)
+            .map(|(from, ..)| *from)
+            .max();
+        for (from, to, held) in bindings.iter_mut() {
+            if Some(*from) == latest && at < *to {
+                held.extend(types.iter().cloned());
+            }
+        }
+    }
+
+    /// **The names the pattern `toks` binds, each typed by the part of `value` it binds**
+    /// (T-WINDOW-WAITS-READER-SEES-MATCH-BOUND-HANDLES, 0.4.10 plan row 19). Every place a pattern
+    /// binds goes through here: a parameter, `let` and `let … else`, `if let`, `while let` and
+    /// let-chains, `for`, a `match` arm, a closure's parameter. The shapes it reads, and nothing
+    /// else:
+    ///
+    /// * **a name** (`h`, `mut h`, `ref h`; `name @ sub`, then `sub`): `value`'s types;
+    /// * **a tuple, a slice, a reference, parentheses, each case of an or-pattern, and
+    ///   `Some`/`Ok`/`Err` (also as `Option::Some`, `Result::Ok`, `Result::Err`)**: each part over
+    ///   `value`'s types — a [`Ty`] holds every type written inside the value's type, so the
+    ///   part's is among them;
+    /// * **a first-party struct, tuple struct or enum variant** (`S { h, .. }`, `S { f: h }`,
+    ///   `S(h)`, `E::V(h)`, `Self::V { h }`, `V(h)` through a `use`): each part over the declared
+    ///   type of the member it binds ([`Reader::payload_types`]) — by name in braces, the shorthand
+    ///   `{ h }` binding the member `h`, by position in parentheses; `..` binds nothing;
+    /// * a path alone, a literal, a range, `_`: nothing.
+    ///
+    /// **A pattern it cannot place** — a foreign struct or variant other than those three, a
+    /// member no declaration has, a macro's pattern — binds its names with **no type**, never with
+    /// the outer value's: a vocabulary call on such a name is then an unread receiver, which the
+    /// inventory lists ([`Reader::read`]) instead of passing over it. Until row 19 every name of a
+    /// pattern took the outer value's types, so `Self::HooksMayOutlive(child) => child.wait()`
+    /// read `child` as the enum and the wait was no site.
+    fn bind_by_pattern(&mut self, toks: &[Tok], value: &Ty, within: (usize, usize)) {
+        let s = self.s();
+        let cases = split_at_depth_zero(s, toks, "|");
+        if cases.len() > 1 {
+            for case in cases {
+                self.bind_by_pattern(case, value, within);
+            }
+            return;
+        }
+        let mut from = 0;
+        while from < toks.len()
+            && ["&", "&&", "mut", "ref", "box"]
+                .iter()
+                .any(|word| s.is(toks.get(from), word))
+        {
+            from += 1;
+        }
+        let toks = &toks[from..];
+        let Some(first) = toks.first() else {
+            return;
+        };
+        let last = toks.len() - 1;
+        if first.kind == Kind::Ident && s.is(toks.get(1), "@") {
+            self.add(s.text(*first), value, within);
+            self.bind_by_pattern(&toks[2..], value, within);
+            return;
+        }
+        if (s.is(Some(first), "(") || s.is(Some(first), "[")) && closing(s, toks, 0) == Some(last) {
+            for part in split_commas(s, &toks[1..last]) {
+                self.bind_by_pattern(&part, value, within);
+            }
+            return;
+        }
+        // A path: names joined by `::`, a leading `::` and turbofishes allowed.
+        let mut path: Vec<&'static str> = Vec::new();
+        let mut at = usize::from(s.is(Some(first), "::"));
+        while let Some(tok) = toks.get(at) {
+            if tok.kind != Kind::Ident {
+                break;
+            }
+            path.push(s.text(*tok));
+            at += 1;
+            if s.is(toks.get(at), "::") && s.is(toks.get(at + 1), "<") {
+                match closing_angle(s, toks, at + 1) {
+                    Some(close) => at = close + 1,
+                    None => return,
+                }
+            }
+            if s.is(toks.get(at), "::") && toks.get(at + 1).is_some_and(|t| t.kind == Kind::Ident) {
+                at += 1;
+                continue;
+            }
+            break;
+        }
+        if path.is_empty() {
+            return;
+        }
+        if at == toks.len() {
+            if let [name] = path.as_slice()
+                && !NOT_A_BINDING.contains(name)
+                && !name.starts_with(|c: char| c.is_ascii_uppercase())
+            {
+                self.add(*name, value, within);
+            }
+            return;
+        }
+        let braces = s.is(toks.get(at), "{");
+        if !(braces || s.is(toks.get(at), "(")) || closing(s, toks, at) != Some(last) {
+            return;
+        }
+        let placed = self.place_pattern(&path);
+        let member_types = |member: &str| -> Ty {
+            match &placed {
+                PatternPlace::Contents => value.clone(),
+                PatternPlace::Members(owners) => owners
+                    .iter()
+                    .filter_map(|(owner, variant)| {
+                        self.reader
+                            .payload_types(owner, variant.as_deref(), member, value)
+                    })
+                    .flatten()
+                    .collect(),
+                PatternPlace::Nowhere => Ty::new(),
+            }
+        };
+        let parts = split_commas(s, &toks[at + 1..last]);
+        // In parentheses, a `..` binds nothing and the parts after it count from the end.
+        let rest = (!braces)
+            .then(|| parts.iter().position(|part| s.is(part.first(), "..")))
+            .flatten();
+        let count = parts.len();
+        let mut bound: Vec<(Vec<Tok>, Ty)> = Vec::new();
+        for (position, part) in parts.into_iter().enumerate() {
+            if !braces {
+                let types = match rest {
+                    Some(rest) if position == rest => continue,
+                    Some(rest) if position > rest => {
+                        let from_end = count - position;
+                        match &placed {
+                            PatternPlace::Contents => value.clone(),
+                            PatternPlace::Members(owners) => owners
+                                .iter()
+                                .filter_map(|(owner, variant)| {
+                                    let members =
+                                        self.reader.tuple_members(owner, variant.as_deref())?;
+                                    let at = members.checked_sub(from_end)?;
+                                    self.reader.payload_types(
+                                        owner,
+                                        variant.as_deref(),
+                                        &at.to_string(),
+                                        value,
+                                    )
+                                })
+                                .flatten()
+                                .collect(),
+                            PatternPlace::Nowhere => Ty::new(),
+                        }
+                    }
+                    _ => member_types(&position.to_string()),
+                };
+                bound.push((part, types));
+            } else if s.is(part.first(), "..") {
+                // The rest of the members: nothing bound.
+                continue;
+            } else if let Some(colon) = top_level_token(s, &part, ":") {
+                let member = part[..colon].last().map_or("", |name| s.text(*name));
+                bound.push((part[colon + 1..].to_vec(), member_types(member)));
+            } else {
+                // The shorthand: `{ ref mut h }` binds the member `h`.
+                let member = part.last().map_or("", |name| s.text(*name));
+                let types = member_types(member);
+                bound.push((part, types));
+            }
+        }
+        for (part, types) in bound {
+            self.bind_by_pattern(&part, &types, within);
+        }
+    }
+
+    /// **What a struct or variant pattern's path names** ([`Scope::bind_by_pattern`]): `Some`, `Ok`
+    /// or `Err`, whose contents are the value's own types; the first-party structs and variants it
+    /// can be, through the body's own type (`Self`), its module's types and its `use`s; or nothing
+    /// the reader can place.
+    fn place_pattern(&self, path: &[&'static str]) -> PatternPlace {
+        let reader = self.reader;
+        let last = path[path.len() - 1];
+        if ["Some", "Ok", "Err"].contains(&last)
+            && (path.len() == 1 || ["Option", "Result"].contains(&path[path.len() - 2]))
+        {
+            return PatternPlace::Contents;
+        }
+        let declares = |owner: &str, variant: &str| {
+            reader
+                .first_party(owner)
+                .is_some_and(|(package, type_name)| {
+                    reader
+                        .variants
+                        .get(&(type_name.to_owned(), variant.to_owned()))
+                        .is_some_and(|found| {
+                            found
+                                .iter()
+                                .any(|(src, _)| reader.names[*src].crate_ident == package)
+                        })
+                })
+        };
+        let mut owners: BTreeSet<(String, Option<String>)> = BTreeSet::new();
+        if path.len() >= 2 {
+            for owner in self.path_type(&path[..path.len() - 1]) {
+                if declares(&owner, last) {
+                    owners.insert((owner, Some(last.to_owned())));
+                }
+            }
+        }
+        for owner in self.path_type(path) {
+            if reader.first_party(&owner).is_some() {
+                owners.insert((owner, None));
+            }
+        }
+        if path.len() == 1 {
+            // A variant a `use` brought in (`use Making::*;`, `use Making::Beside;`).
+            for canonical in reader.names[self.src].resolve(path, self.at, self.module) {
+                if let Some((owner, variant)) = canonical.rsplit_once("::")
+                    && declares(owner, variant)
+                {
+                    owners.insert((owner.to_owned(), Some(variant.to_owned())));
+                }
+            }
+        }
+        if owners.is_empty() {
+            PatternPlace::Nowhere
+        } else {
+            PatternPlace::Members(owners)
         }
     }
 
@@ -8128,13 +8760,40 @@ impl<'r> Scope<'r> {
                     let end = depth_zero(s, toks, at + 1, stops);
                     types = self.expression(&toks[at + 1..end]);
                 }
-                self.add(pattern_names(s, pattern), &types);
+                let within = if conditional {
+                    // Over the rest of the condition and the block it opens: the first `{` past
+                    // this `=`, stepping over the patterns of the chain's later `let`s (a struct
+                    // pattern's braces are no block). A guard's `let` meets its arm's `=>` first,
+                    // and is read over the whole `match`.
+                    let mut open = depth_zero(s, toks, at + 1, &["{", "let", "=>"]);
+                    while s.is(toks.get(open), "let") {
+                        let equals = depth_zero(s, toks, open + 1, &["="]);
+                        open = depth_zero(s, toks, equals + 1, &["{", "let", "=>"]);
+                    }
+                    let to = if s.is(toks.get(open), "{") {
+                        closing(s, toks, open)
+                            .map_or_else(|| enclosing_group_end(s, toks, index), |c| toks[c].end)
+                    } else {
+                        enclosing_group_end(s, toks, index)
+                    };
+                    (tok.start, to)
+                } else {
+                    // From the end of its statement (`;`, past a `let … else` block) to its block's.
+                    let statement_end = depth_zero(s, toks, index + 1, &[";"]);
+                    let from = toks.get(statement_end).map_or(tok.end, |t| t.start);
+                    (from, enclosing_group_end(s, toks, index))
+                };
+                self.bind_by_pattern(pattern, &types, within);
             } else if tok.kind == Kind::Ident && text == "for" && !s.is(toks.get(index + 1), "<") {
                 let in_at = depth_zero(s, toks, index + 1, &["in", "{", ";"]);
                 if s.is(toks.get(in_at), "in") {
                     let end = depth_zero(s, toks, in_at + 1, &["{"]);
                     let types = self.expression(&toks[in_at + 1..end]);
-                    self.add(pattern_names(s, &toks[index + 1..in_at]), &types);
+                    let within = match closing(s, toks, end).filter(|_| s.is(toks.get(end), "{")) {
+                        Some(close) => (toks[end].start, toks[close].end),
+                        None => (tok.start, enclosing_group_end(s, toks, index)),
+                    };
+                    self.bind_by_pattern(&toks[index + 1..in_at], &types, within);
                 }
             } else if tok.kind == Kind::Ident && text == "match" {
                 let open = depth_zero(s, toks, index + 1, &["{"]);
@@ -8153,7 +8812,7 @@ impl<'r> Scope<'r> {
                         .iter()
                         .any(|w| s.is(toks.get(p), w))
                 })
-                && self.bindings.contains_key(text)
+                && self.bound_at(text, tok.start).is_some()
             {
                 // **An assignment to a binding already in scope** — `worker = spawn(…).ok();`
                 // after `let mut worker = None;`, possibly inside a closure — adds what is
@@ -8161,12 +8820,12 @@ impl<'r> Scope<'r> {
                 // filled later is untyped, and a wait on it (`worker.join()`) is no site at all.
                 let end = depth_zero(s, toks, index + 2, &[";", ","]);
                 let types = self.expression(&toks[index + 2..end]);
-                self.add(vec![text], &types);
+                self.assign(text, tok.start, &types);
             }
         }
     }
 
-    /// A `match`'s arms: each pattern's names take the scrutinee's types.
+    /// A `match`'s arms: each pattern bound over the scrutinee's types ([`Scope::bind_by_pattern`]).
     fn arms(&mut self, toks: &[Tok], types: &Ty) {
         let s = self.s();
         let mut at = 0;
@@ -8180,9 +8839,8 @@ impl<'r> Scope<'r> {
                 .iter()
                 .position(|t| s.is(Some(t), "if"))
                 .unwrap_or(pattern.len());
-            self.add(pattern_names(s, &pattern[..guard]), types);
             let body = arrow + 1;
-            at = if s.is(toks.get(body), "{") {
+            let next = if s.is(toks.get(body), "{") {
                 let close = closing(s, toks, body).unwrap_or(toks.len() - 1);
                 if s.is(toks.get(close + 1), ",") {
                     close + 2
@@ -8192,6 +8850,10 @@ impl<'r> Scope<'r> {
             } else {
                 depth_zero(s, toks, body, &[","]) + 1
             };
+            // Over the arm: its pattern, its guard and its body.
+            let last = next.min(toks.len()) - 1;
+            self.bind_by_pattern(&pattern[..guard], types, (toks[at].start, toks[last].end));
+            at = next;
         }
     }
 
@@ -8226,15 +8888,22 @@ impl<'r> Scope<'r> {
         {
             given = self.chain(toks, start, open - 3).unwrap_or_default();
         }
+        // Over the closure: a block body, or else the group the closure is written in.
+        let after = bar + 1 + end + 1;
+        let to = match closing(s, toks, after).filter(|_| s.is(toks.get(after), "{")) {
+            Some(close) => toks[close].end,
+            None => enclosing_group_end(s, toks, bar),
+        };
         for param in split_commas(s, params) {
-            let colon = param.iter().position(|t| s.is(Some(t), ":"));
+            let colon = top_level_token(s, &param, ":");
             let types = match colon {
                 Some(colon) => self.written(&param[colon + 1..]),
                 None => given.clone(),
             };
-            self.add(
-                pattern_names(s, &param[..colon.unwrap_or(param.len())]),
+            self.bind_by_pattern(
+                &param[..colon.unwrap_or(param.len())],
                 &types,
+                (toks[bar].start, to),
             );
         }
     }
@@ -8327,7 +8996,7 @@ impl<'r> Scope<'r> {
                 ty = Ty::new();
             } else if s.is(toks.get(at), "(") {
                 let close = closing(s, toks, at)?;
-                ty = self.call(&path, &toks[at + 1..close]);
+                ty = self.call(&path, &toks[at + 1..close], first.start);
                 at = close + 1;
             } else if s.is(toks.get(at), "{")
                 && path
@@ -8337,7 +9006,7 @@ impl<'r> Scope<'r> {
                 at = closing(s, toks, at)? + 1;
                 ty = self.path_type(&path);
             } else if path.len() == 1 {
-                ty = self.value(path[0]);
+                ty = self.value(path[0], first.start);
             } else {
                 ty = self.path_type(&path[..path.len() - 1]);
             }
@@ -8386,9 +9055,9 @@ impl<'r> Scope<'r> {
     }
 
     /// A name standing alone: a binding, a parameter, a `static`, or a unit value of a type.
-    fn value(&self, name: &str) -> Ty {
-        if let Some(types) = self.bindings.get(name) {
-            return types.clone();
+    fn value(&self, name: &str, at: usize) -> Ty {
+        if let Some(types) = self.bound_at(name, at) {
+            return types;
         }
         if let Some(statics) = self.reader.names[self.src].statics.get(name) {
             let s = self.s();
@@ -8422,15 +9091,16 @@ impl<'r> Scope<'r> {
     }
 
     /// A call's result: a first-party function's or associated function's declared return, a
-    /// wrapper's contents, a variant's payload, or what `std` returns by the table.
-    fn call(&self, path: &[&str], args: &[Tok]) -> Ty {
+    /// wrapper's contents, a variant's payload, what `std` returns by the table, or — for
+    /// [`CARRYING_FUNCTIONS`] — the first argument's types.
+    fn call(&self, path: &[&str], args: &[Tok], at: usize) -> Ty {
         let s = self.s();
         let reader = self.reader;
         let last = *path.last().unwrap_or(&"");
         if path.len() == 1 && ["Some", "Ok", "Err"].contains(&last) {
             return self.expression(args);
         }
-        if path.len() == 1 && self.bindings.contains_key(last) {
+        if path.len() == 1 && self.bound_at(last, at).is_some() {
             return Ty::new();
         }
         let qualifier = (path.len() >= 2).then(|| path[path.len() - 2]);
@@ -8459,6 +9129,10 @@ impl<'r> Scope<'r> {
             if let Some((package, name)) = reader.first_party(&canonical) {
                 for (src, record) in reader.callables(package, None, name) {
                     out.extend(reader.returns(src, record, None));
+                }
+            } else if CARRYING_FUNCTIONS.contains(&canonical.as_str()) {
+                if let Some(first) = split_commas(s, args).first() {
+                    out.extend(self.expression(first));
                 }
             } else if let Some((_, made)) = FOREIGN_FUNCTIONS
                 .iter()
@@ -8541,6 +9215,16 @@ fn closing_angle(s: &Src, toks: &[Tok], open: usize) -> Option<usize> {
         }
     }
     None
+}
+
+/// The union offset where the bracket `toks[at]` stands inside closes: the end of the block a
+/// statement is in, of the argument list a closure is written in. The end of `toks` when `toks[at]`
+/// stands inside none, or it does not close in `toks`.
+fn enclosing_group_end(s: &Src, toks: &[Tok], at: usize) -> usize {
+    unmatched_open(s, toks, at)
+        .and_then(|open| closing(s, toks, open))
+        .or_else(|| toks.len().checked_sub(1))
+        .map_or(0, |close| toks[close].end)
 }
 
 /// The bracket `toks[at]` stands inside.
@@ -8645,10 +9329,51 @@ fn chain_start(s: &Src, toks: &[Tok], end: usize) -> Option<usize> {
     }
 }
 
+/// The number of arguments written in the call whose name is `toks[name]` (past a turbofish), or
+/// `None` when no parenthesised argument list follows it.
+fn arguments_written(s: &Src, toks: &[Tok], name: usize) -> Option<usize> {
+    let mut open = name + 1;
+    if s.is(toks.get(open), "::") && s.is(toks.get(open + 1), "<") {
+        open = closing_angle(s, toks, open + 1)? + 1;
+    }
+    if !s.is(toks.get(open), "(") {
+        return None;
+    }
+    let close = closing(s, toks, open)?;
+    Some(split_commas(s, &toks[open + 1..close]).len())
+}
+
+/// The number of arguments the method-shaped vocabulary entry `path` takes as a method call
+/// ([`METHOD_ARITIES`]); `None` for one never called as a method, or a path the table lacks.
+fn method_arity(path: &str) -> Option<usize> {
+    METHOD_ARITIES
+        .iter()
+        .find(|(entry, _)| *entry == path)
+        .and_then(|(_, arity)| *arity)
+}
+
 /// One site: its package, its offset, its entry.
 struct BareSite {
     at: usize,
     entry: usize,
+}
+
+/// **A call the inventory's reader could not read** ([`Reader::read`]): a method call whose name
+/// and argument count are a method-shaped vocabulary entry's ([`METHOD_ARITIES`]) and whose
+/// receiver is not one chain or has no written type, or a `write!`/`writeln!` whose first argument
+/// has none. It may be a site; the reading cannot say, so it is listed, not dropped.
+struct UnreadCall {
+    at: usize,
+    owner: &'static ItemRecord,
+    /// The vocabulary entries the call could be, by index.
+    entries: Vec<usize>,
+}
+
+/// [`Reader::read`]'s answer for one package: its sites, each with the callable it stands in, and
+/// the calls it could not read.
+struct PackageReading {
+    sites: Vec<(BareSite, Option<&'static ItemRecord>)>,
+    unread: Vec<UnreadCall>,
 }
 
 impl Reader<'_> {
@@ -8722,10 +9447,12 @@ impl Reader<'_> {
         (found, used)
     }
 
-    /// Every site in one package's product files, with the callable each stands in.
-    fn sites(&self, src: usize) -> Vec<(BareSite, Option<&'static ItemRecord>)> {
+    /// Every site in one package's product files, with the callable each stands in, and every call
+    /// there it could not read ([`UnreadCall`]): never a silent skip (row 19, ruling R4).
+    fn read(&self, src: usize) -> PackageReading {
         let s = &self.world.srcs[src];
         let mut out = Vec::new();
+        let mut unread = Vec::new();
         let callables: Vec<&'static ItemRecord> = s
             .index
             .items()
@@ -8874,9 +9601,38 @@ impl Reader<'_> {
                                 },
                                 owner,
                             ));
+                        } else if let Some(entry) = write_fmt.filter(|_| types.is_empty()) {
+                            unread.push(UnreadCall {
+                                at: tok.start,
+                                owner: record,
+                                entries: vec![entry],
+                            });
                         }
-                    } else if let Some(start) = chain_start(s, &toks, index - 2) {
-                        let receiver = scope.chain(&toks, start, index - 2).unwrap_or_default();
+                    } else {
+                        let receiver = chain_start(s, &toks, index - 2)
+                            .and_then(|start| scope.chain(&toks, start, index - 2))
+                            .unwrap_or_default();
+                        if receiver.is_empty() {
+                            let written = arguments_written(s, &toks, index);
+                            let entries: Vec<usize> = self
+                                .entries
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, entry)| {
+                                    entry.method.as_ref().is_some_and(|(_, name)| name == text)
+                                        && written.is_some()
+                                        && method_arity(&entry.path) == written
+                                })
+                                .map(|(at, _)| at)
+                                .collect();
+                            if !entries.is_empty() {
+                                unread.push(UnreadCall {
+                                    at: tok.start,
+                                    owner: record,
+                                    entries,
+                                });
+                            }
+                        }
                         for (at, entry) in self.entries.iter().enumerate() {
                             let Some((ty, name)) = &entry.method else {
                                 continue;
@@ -8898,7 +9654,7 @@ impl Reader<'_> {
                 index += 1;
             }
         }
-        out
+        PackageReading { sites: out, unread }
     }
 }
 
@@ -9056,7 +9812,7 @@ fn vocabulary_sites_in(world: &World, effects: &[Vec<&str>]) -> SitesSplit {
     let mut in_doors: DoorEffects = BTreeMap::new();
     let mut registered = BTreeMap::new();
     for (src, s) in world.srcs.iter().enumerate() {
-        for (site, owner) in reader.sites(src) {
+        for (site, owner) in reader.read(src).sites {
             if !s.in_product(site.at) {
                 continue;
             }
@@ -9988,6 +10744,197 @@ fn a_wait_through_a_verb_from_blocking_outside_a_door_is_a_bare_site() {
     );
 }
 
+/// A planted crate whose functions each wait once on a handle a pattern binds out of a first-party
+/// struct or enum, one function per binding form [`Scope::bind_by_pattern`] reads (row 19), and
+/// one (`a_label`) that calls a vocabulary method's name on a payload member of another type.
+const PLANTED_PAYLOAD_BINDINGS: &str = "
+pub enum Held {
+    Thread(std::thread::JoinHandle<()>),
+    Kid { child: std::process::Child, label: String },
+    Gone,
+}
+pub struct Holder { pub child: std::process::Child }
+pub struct Wrapped(pub std::process::Child);
+pub struct Rx { pub rx: std::sync::mpsc::Receiver<()>, pub tag: u8 }
+pub struct Trio(pub u8, pub String, pub std::process::Child);
+pub enum Kids { One(std::process::Child), Two(std::process::Child, std::process::Child) }
+pub enum Slot<T> { Full(T), Empty }
+pub struct Label;
+impl Label { pub fn wait(&self) {} }
+pub enum Named { Label(Label), Other }
+pub enum Either { Other(Label), Kid(std::process::Child) }
+impl Either {
+    pub fn wait_either(&mut self) { match self { Self::Other(child) => { child.wait(); } Self::Kid(child) => { let _ = child.wait(); } } }
+}
+pub fn next_held() -> Held { Held::Gone }
+pub fn in_a_match_arm(held: Held) { match held { Held::Thread(thread) => { let _ = thread.join(); } _ => {} } }
+impl Held {
+    pub fn through_self(&mut self) { match self { Self::Kid { child, .. } => { let _ = child.wait(); } _ => {} } }
+}
+pub fn by_shorthand(held: Held) { if let Held::Kid { mut child, .. } = held { let _ = child.wait(); } }
+pub fn by_renamed_field(held: Held) { if let Held::Kid { child: mut kid, label: _ } = held { let _ = kid.wait(); } }
+pub fn nested(held: Option<Held>) { if let Some(Held::Thread(thread)) = held { let _ = thread.join(); } }
+pub fn either_case(kids: Kids) { match kids { Kids::One(mut child) | Kids::Two(_, mut child) => { let _ = child.wait(); } } }
+pub fn after_the_rest(kids: Kids) { if let Kids::Two(.., mut child) = kids { let _ = child.wait(); } }
+pub fn after_the_rest_of_a_tuple_struct(trio: Trio) { let Trio(.., mut last) = trio; let _ = last.wait(); }
+pub fn at_binding(held: Held) { match held { Held::Thread(thread @ _) => { let _ = thread.join(); } _ => {} } }
+pub fn while_let() { while let Held::Thread(thread) = next_held() { let _ = thread.join(); } }
+pub fn let_else(held: Held) { let Held::Thread(thread) = held else { return; }; let _ = thread.join(); }
+pub fn let_struct(holder: Holder) { let Holder { mut child } = holder; let _ = child.wait(); }
+pub fn let_tuple_struct(wrapped: Wrapped) { let Wrapped(mut child) = wrapped; let _ = child.wait(); }
+pub fn in_a_for(all: Vec<Wrapped>) { for Wrapped(mut child) in all { let _ = child.wait(); } }
+pub fn for_a_tuple(pairs: Vec<(u8, Wrapped)>) { for (_, Wrapped(mut child)) in pairs { let _ = child.wait(); } }
+pub fn by_parameter(Wrapped(mut child): Wrapped) { let _ = child.wait(); }
+pub fn by_struct_parameter(Rx { rx, .. }: Rx) { let _ = rx.recv(); }
+pub fn by_closure(wrapped: Wrapped) { let wait = |Wrapped(mut child): Wrapped| { let _ = child.wait(); }; wait(wrapped); }
+pub fn by_method_closure(held: Option<Rx>) { let _ = held.map(|Rx { rx, .. }| rx.recv()); }
+pub fn by_replace(slot: &mut Held) { match std::mem::replace(slot, Held::Gone) { Held::Thread(thread) => { let _ = thread.join(); } _ => {} } }
+pub fn by_take(slot: &mut Option<Wrapped>) { if let Some(Wrapped(mut child)) = std::mem::take(slot) { let _ = child.wait(); } }
+pub fn generic_payload(slot: Slot<std::thread::JoinHandle<()>>) { if let Slot::Full(thread) = slot { let _ = thread.join(); } }
+pub fn a_label(named: Named, _kid: std::process::Child) { if let Named::Label(label) = named { label.wait(); } }
+";
+
+/// RED (T-WINDOW-WAITS-READER-SEES-MATCH-BOUND-HANDLES, 0.4.10 plan row 19, ruling R1) — **a wait
+/// on a handle a pattern binds out of a first-party struct or enum is a bare site, in every binding
+/// form.** `GitChild::wait`'s `Self::HooksMayOutlive(child) => child.wait()` was no site: every
+/// name of a pattern took the outer value's types, so `child` read as `GitChild`, and
+/// `FormulaEngine::engine` called its join by path to be counted.
+///
+/// Against the planted crate ([`PLANTED_PAYLOAD_BINDINGS`]): each function holds one site, the
+/// handle bound by a match arm, `Self::V { .. }`, a struct variant's shorthand and a renamed field,
+/// a variant inside `Some`, an or-pattern, `name @ _`, members after `..` (counted from the end),
+/// `while let`, `let … else`, a struct and a
+/// tuple struct `let`, `for` (alone and inside a tuple), a parameter's pattern (a tuple struct's and
+/// a struct's), a closure parameter's pattern (written, and handed to a method of an `Option`), the scrutinee
+/// `std::mem::replace(…)` and `std::mem::take(…)`, and a generic payload `Slot<T>`. `a_label`
+/// binds a `Label` out of `Named::Label` beside a `Child` parameter; its `label.wait()` is no
+/// site (the control: the name takes its member's type, not every type in reach). And
+/// `Either::wait_either` binds `child` in two arms, a `Label` in one and a `Child` in the other
+/// (`GitChild::wait`'s own shape): one site, the `Child` arm's, because each arm's binding is in
+/// scope over its own arm only ([`Scope::bound_at`]).
+///
+/// MUTATION: make [`Scope::bind_by_pattern`] bind every name over `value` (the old
+/// `pattern_names` reading) and every function but `generic_payload` (whose value's written type
+/// holds the `JoinHandle` itself) loses its site.
+#[test]
+fn a_wait_on_a_handle_bound_by_a_payload_pattern_is_a_site_in_every_binding_form() {
+    let world = planted_world("ww-payload-bindings", PLANTED_PAYLOAD_BINDINGS);
+    let (bare, _, _) = vocabulary_sites_in(&world, &[]);
+    let join = "std::thread::JoinHandle::join";
+    let wait = "std::process::Child::wait";
+    let recv = "std::sync::mpsc::Receiver::recv";
+    let wanted: BTreeMap<BareKey, usize> = [
+        ("crate::in_a_match_arm", join),
+        ("crate::Held::through_self", wait),
+        ("crate::Either::wait_either", wait),
+        ("crate::by_shorthand", wait),
+        ("crate::by_renamed_field", wait),
+        ("crate::nested", join),
+        ("crate::either_case", wait),
+        ("crate::at_binding", join),
+        ("crate::after_the_rest", wait),
+        ("crate::after_the_rest_of_a_tuple_struct", wait),
+        ("crate::while_let", join),
+        ("crate::let_else", join),
+        ("crate::let_struct", wait),
+        ("crate::let_tuple_struct", wait),
+        ("crate::in_a_for", wait),
+        ("crate::for_a_tuple", wait),
+        ("crate::by_parameter", wait),
+        ("crate::by_struct_parameter", recv),
+        ("crate::by_closure", wait),
+        ("crate::by_method_closure", recv),
+        ("crate::by_replace", join),
+        ("crate::by_take", wait),
+        ("crate::generic_payload", join),
+    ]
+    .into_iter()
+    .map(|(item, entry)| {
+        (
+            (
+                "planted".to_owned(),
+                "-".to_owned(),
+                item.to_owned(),
+                entry.to_owned(),
+            ),
+            1,
+        )
+    })
+    .collect();
+    let mine: BTreeMap<BareKey, usize> = bare
+        .into_iter()
+        .filter(|((package, ..), _)| package == "planted")
+        .collect();
+    let missing: Vec<&BareKey> = wanted
+        .keys()
+        .filter(|key| !mine.contains_key(*key))
+        .collect();
+    let extra: Vec<(&BareKey, &usize)> = mine
+        .iter()
+        .filter(|(key, count)| wanted.get(*key) != Some(*count))
+        .collect();
+    assert!(
+        missing.is_empty() && extra.is_empty(),
+        "the waits on pattern-bound handles: missing {missing:#?}; other or miscounted {extra:#?}"
+    );
+}
+
+/// A planted crate binding a name out of `std::num::Wrapping`, a foreign tuple struct whose member
+/// the reader has no declaration for, over a value whose types hold a `JoinHandle`; and a handle a
+/// macro makes, whose type nothing writes.
+const PLANTED_UNPLACED_PATTERN: &str = "
+pub fn unplaced(value: std::num::Wrapping<std::thread::JoinHandle<()>>) {
+    let std::num::Wrapping(inner) = value;
+    let _ = inner.join();
+}
+macro_rules! spawned { () => { std::thread::spawn(|| ()) } }
+pub fn macro_made() {
+    let handle = spawned!();
+    let _ = handle.join();
+}
+";
+
+/// RED (row 19, rulings R1 and R4) — **a name bound by a pattern the reader cannot place is read
+/// with no type, and its vocabulary call is listed as unread, never read as the outer value.**
+///
+/// `std::num::Wrapping(inner)` is foreign: no declaration in the world says what its member holds.
+/// The old reading gave `inner` the value's types (`Wrapping`, `JoinHandle`), a reading that
+/// happens to be right here and is wrong for `Self::HooksMayOutlive(child)`; the reading now says
+/// it does not know, so `inner.join()` is no site and is an [`UnreadCall`] of
+/// `std::thread::JoinHandle::join` (its count, zero, is the entry's — [`METHOD_ARITIES`]; and
+/// `ScopedJoinHandle::join`'s, so the row names both). `macro_made`'s handle is made by a macro the
+/// reader does not expand: its `.join()` is unread the same way.
+///
+/// MUTATION: bind [`PatternPlace::Nowhere`]'s parts over `value` and `unplaced`'s site comes back
+/// and its unread call goes; drop the `unread.push` of [`Reader::read`]'s method branch and both
+/// unread calls go.
+#[test]
+fn a_name_the_reader_cannot_place_is_read_as_unread_not_as_the_outer_type() {
+    let world = planted_world("ww-unplaced-pattern", PLANTED_UNPLACED_PATTERN);
+    let (bare, _, _) = vocabulary_sites_in(&world, &[]);
+    let planted: Vec<&BareKey> = bare
+        .keys()
+        .filter(|(package, ..)| package == "planted")
+        .collect();
+    assert!(
+        planted.is_empty(),
+        "`inner` is bound by a pattern the reader cannot place; sites {planted:?}"
+    );
+    let unread = unread_calls_observed(&world);
+    for item in ["crate::unplaced", "crate::macro_made"] {
+        let rows: Vec<(&BareKey, &usize)> = unread
+            .iter()
+            .filter(|((package, arm, at, _), _)| package == "planted" && arm == "-" && at == item)
+            .collect();
+        assert!(
+            matches!(rows.as_slice(), [((.., entries), 1)]
+                if entries.split(" | ").any(|entry| entry == "std::thread::JoinHandle::join")),
+            "`{item}`'s `.join()` is one unread call that may be `JoinHandle::join`; the unread \
+             calls {unread:?}"
+        );
+    }
+}
+
 /// A planted crate with a site of every wait plan row 181 added to the vocabulary:
 /// `GetOverlappedResult` imported and called bare, and called by its whole path, each with its wait
 /// flag `true`, `false` and a variable; `MsgWaitForMultipleObjectsEx`, `GetQueuedCompletionStatus`
@@ -10463,7 +11410,15 @@ fn a_binding_filled_by_assignment_takes_the_assigned_types() {
         .map(|(at, _, record)| (at, record))
         .expect("the leaf constructor");
     let scope = Scope::of(&reader, src, record);
-    let types = scope.value("resolved_program");
+    // Read where the body last names it, after the assignment.
+    let s = &world.srcs[src];
+    let body = record.body().expect("the leaf constructor has a body");
+    let last_use = s
+        .lex(body.start(), body.end())
+        .into_iter()
+        .rfind(|tok| s.text(*tok) == "resolved_program")
+        .expect("the body names `resolved_program`");
+    let types = scope.value("resolved_program", last_use.start);
     assert!(
         types.iter().any(|ty| ty.ends_with("PathBuf")),
         "`resolved_program` is assigned `Some(PathBuf::from(…))`; the scope says {types:?}"
@@ -10533,6 +11488,284 @@ fn every_bare_site_is_a_row_and_every_row_a_site() {
         failures.is_empty(),
         "the bare-site inventory and the code differ ({total} observed; the observed file is \
          target/window-thread-bare-sites.tsv):\n  {}",
+        failures.join("\n  ")
+    );
+}
+
+/// **The calls the inventory's reader could not read** (T-WINDOW-WAITS-READER-SEES-MATCH-BOUND-
+/// HANDLES, 0.4.10 plan row 19, rulings R4 and R6): `docs/plans/WINDOW-WAITS-UNREAD-RECEIVERS.tsv`.
+const UNREAD_RECEIVERS: &str =
+    include_str!("../../../docs/plans/WINDOW-WAITS-UNREAD-RECEIVERS.tsv");
+const UNREAD_COLUMNS: [&str; 6] = ["crate", "arm", "item", "entries", "calls", "reason"];
+
+/// Every product call the reader could not read ([`UnreadCall`]), by `(crate, arm, item, the
+/// entries it could be joined by " | ")`, counted — in a door function's body as outside one, since
+/// a call there may be an effect the `# effects` row does not count.
+fn unread_calls_observed(world: &World) -> BTreeMap<BareKey, usize> {
+    let reader = Reader::new(world);
+    let mut out = BTreeMap::new();
+    for (src, s) in world.srcs.iter().enumerate() {
+        for call in reader.read(src).unread {
+            if !s.in_product(call.at) {
+                continue;
+            }
+            let (item, arm) = item_and_arm(call.owner);
+            let entries = call
+                .entries
+                .iter()
+                .map(|entry| reader.entries[*entry].path.as_str())
+                .collect::<Vec<_>>()
+                .join(" | ");
+            *out.entry((s.package.to_owned(), arm, item, entries))
+                .or_insert(0) += 1;
+        }
+    }
+    out
+}
+
+/// The committed list's rows, keyed, each with its count (a positive integer) and its reason, each
+/// key once.
+fn unread_calls_committed() -> Result<BTreeMap<BareKey, (usize, String)>, Vec<String>> {
+    let mut rows = BTreeMap::new();
+    let mut failures = Vec::new();
+    let mut lines = UNREAD_RECEIVERS
+        .lines()
+        .filter(|line| !line.is_empty() && !line.starts_with('#'));
+    let header: Vec<&str> = lines.next().unwrap_or_default().split('\t').collect();
+    if header != UNREAD_COLUMNS {
+        failures.push(format!(
+            "the list's columns are {header:?}, not {UNREAD_COLUMNS:?}"
+        ));
+        return Err(failures);
+    }
+    for line in lines {
+        let cells: Vec<&str> = line.split('\t').collect();
+        if cells.len() != UNREAD_COLUMNS.len() {
+            failures.push(format!("not six cells: {line}"));
+            continue;
+        }
+        let count = match cells[4].parse::<usize>() {
+            Ok(count) if count > 0 && cells[4] == count.to_string() => count,
+            _ => {
+                failures.push(format!("the count is not a positive integer: {line}"));
+                continue;
+            }
+        };
+        let key = (
+            cells[0].to_owned(),
+            cells[1].to_owned(),
+            cells[2].to_owned(),
+            cells[3].to_owned(),
+        );
+        if rows.insert(key, (count, cells[5].to_owned())).is_some() {
+            failures.push(format!("a key written twice: {line}"));
+        }
+    }
+    if failures.is_empty() {
+        Ok(rows)
+    } else {
+        Err(failures)
+    }
+}
+
+/// `YYYY-MM-DD: why`, the `why` not empty.
+fn reason_is_dated(reason: &str) -> bool {
+    reason.split_once(": ").is_some_and(|(date, why)| {
+        let parts: Vec<&str> = date.split('-').collect();
+        parts.len() == 3
+            && [4, 2, 2]
+                .iter()
+                .zip(&parts)
+                .all(|(len, part)| part.len() == *len && part.bytes().all(|b| b.is_ascii_digit()))
+            && !why.trim().is_empty()
+    })
+}
+
+/// The list's header and the rows `observed`, each with the reason the committed list gives its
+/// key (empty for a key it lacks), as the file holds them.
+fn unread_calls_rendered(
+    observed: &BTreeMap<BareKey, usize>,
+    committed: &BTreeMap<BareKey, (usize, String)>,
+) -> String {
+    let mut out = String::new();
+    for line in UNREAD_RECEIVERS
+        .lines()
+        .take_while(|line| line.starts_with('#'))
+    {
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.push_str(&UNREAD_COLUMNS.join("\t"));
+    out.push('\n');
+    for (key, count) in observed {
+        let (package, arm, item, entries) = key;
+        let reason = committed.get(key).map_or("", |(_, reason)| reason.as_str());
+        out.push_str(&format!(
+            "{package}\t{arm}\t{item}\t{entries}\t{count}\t{reason}\n"
+        ));
+    }
+    out
+}
+
+/// RED (T-WINDOW-WAITS-READER-SEES-MATCH-BOUND-HANDLES, 0.4.10 plan row 19, ruling R4) — **every
+/// product call the inventory's reader could not read is a row of
+/// `docs/plans/WINDOW-WAITS-UNREAD-RECEIVERS.tsv`, with its count and a dated reason, and every row
+/// is such a call.**
+///
+/// A method call whose name and argument count are a method-shaped vocabulary entry's
+/// ([`METHOD_ARITIES`]) on a receiver the reading gives no type, or that is not one chain, or a
+/// `write!`/`writeln!` whose first argument has none, may be a site the inventory does not count;
+/// until row 19 such a call was passed over in silence. It is listed instead, keyed `(crate, arm,
+/// item, the entries it could be)`, so a new one is a row the file does not have and needs a
+/// reason; `scripts/ci/check-window-waits.ps1` refuses a row added or grown against the merge base
+/// unless its reason is dated and is not a reason the merge base's list already gives. The
+/// observed list is left in `target/WINDOW-WAITS-UNREAD-RECEIVERS.tsv`, carrying the committed
+/// reasons.
+///
+/// MUTATION: add `let _ = std::thread::spawn(|| ()).join();` with the handle passed through an
+/// untyped closure parameter to any product function and it goes red with that row.
+#[test]
+fn every_unread_vocabulary_call_is_a_row_and_every_row_a_call() {
+    let world = World::new();
+    let observed = unread_calls_observed(&world);
+    let committed = match unread_calls_committed() {
+        Ok(rows) => rows,
+        Err(failures) => panic!(
+            "docs/plans/WINDOW-WAITS-UNREAD-RECEIVERS.tsv is not well formed:\n  {}",
+            failures.join("\n  ")
+        ),
+    };
+    let generated = repository_root()
+        .join("target")
+        .join("WINDOW-WAITS-UNREAD-RECEIVERS.tsv");
+    if let Some(parent) = generated.parent() {
+        std::fs::create_dir_all(parent).expect("the workspace has a target directory");
+    }
+    std::fs::write(&generated, unread_calls_rendered(&observed, &committed))
+        .expect("target/ is writable");
+    let mut failures = Vec::new();
+    for (key, count) in &observed {
+        match committed.get(key) {
+            Some((held, _)) if held == count => {}
+            Some((held, _)) => failures.push(format!(
+                "{} {} {} {}: {count} unread call(s) in the code, {held} in the file",
+                key.0, key.1, key.2, key.3
+            )),
+            None => failures.push(format!(
+                "{} {} {} {}: {count} unread call(s) in the code, and no row — type the receiver \
+                 (the reading's grammar, above `BARE_SITES`) or list it with a dated reason",
+                key.0, key.1, key.2, key.3
+            )),
+        }
+    }
+    for (key, (held, reason)) in &committed {
+        if !observed.contains_key(key) {
+            failures.push(format!(
+                "{} {} {} {}: a row of {held} the code no longer has — delete it",
+                key.0, key.1, key.2, key.3
+            ));
+        }
+        if !reason_is_dated(reason) {
+            failures.push(format!(
+                "{} {} {} {}: the reason is not dated `YYYY-MM-DD: why`: '{reason}'",
+                key.0, key.1, key.2, key.3
+            ));
+        }
+    }
+    let total: usize = observed.values().sum();
+    println!(
+        "the reader's unread calls: {total} call(s) in {} row(s)",
+        observed.len()
+    );
+    assert!(
+        failures.is_empty(),
+        "the unread-receiver list and the code differ ({total} observed; the observed file is \
+         target/WINDOW-WAITS-UNREAD-RECEIVERS.tsv):\n  {}",
+        failures.join("\n  ")
+    );
+}
+
+/// RED (row 19, ruling R6) — **every method-shaped vocabulary entry states how many arguments it
+/// takes as a method call, once, and a first-party entry's count is its declaration's.**
+///
+/// [`METHOD_ARITIES`] decides which unread calls can be a vocabulary method: a count written wrong
+/// drops a candidate from the diagnostic silently. So the table holds exactly the vocabulary's
+/// method-shaped entries (`Type::name`, and the system calls whose capitalised module reads as
+/// one; a free function's path is matched as a path, never as a method), and for an entry declared
+/// in the product (`bt_pty::PtySession::resize`) the count is
+/// read from its signature: its parameters past `self`, or `None` for one that takes no `self`. A
+/// `std` or foreign signature has no source in the world; its line is the signature's count as
+/// documented.
+///
+/// MUTATION: write `("bt_pty::PtySession::resize", Some(2))` and it goes red; add a method-shaped
+/// vocabulary line without a line here and it goes red.
+#[test]
+fn every_method_shaped_vocabulary_entry_states_how_many_arguments_it_takes() {
+    let world = World::new();
+    let reader = Reader::new(&world);
+    let mut failures = Vec::new();
+    let mut stated: BTreeMap<&str, usize> = BTreeMap::new();
+    for (path, _) in METHOD_ARITIES {
+        *stated.entry(path).or_default() += 1;
+    }
+    for (path, times) in &stated {
+        if *times > 1 {
+            failures.push(format!("`{path}` is stated {times} times"));
+        }
+        if !reader
+            .entries
+            .iter()
+            .any(|entry| entry.path == *path && entry.method.is_some())
+        {
+            failures.push(format!(
+                "`{path}` is no method-shaped vocabulary entry: delete its line"
+            ));
+        }
+    }
+    for entry in &reader.entries {
+        // A free function's path (`std::thread::sleep`) is matched as a path, never as a method.
+        let Some((ty, name)) = &entry.method else {
+            continue;
+        };
+        if !stated.contains_key(entry.path.as_str()) {
+            failures.push(format!(
+                "the method-shaped vocabulary entry `{}` states no argument count: add its line",
+                entry.path
+            ));
+        }
+        let Some((package, type_name)) = reader.first_party(ty) else {
+            continue;
+        };
+        let declared: BTreeSet<Option<usize>> = reader
+            .callables(package, Some(type_name), name)
+            .into_iter()
+            .filter_map(|(src, record)| {
+                let s = &world.srcs[src];
+                let toks = s.lex(record.declaration().start(), record.declaration().end());
+                let (_, open, close) = signature(s, &toks)?;
+                let params = split_commas(s, &toks[open + 1..close]);
+                let takes_self = params
+                    .first()
+                    .is_some_and(|first| first.iter().any(|t| s.text(*t) == "self"));
+                Some(takes_self.then(|| params.len() - 1))
+            })
+            .collect();
+        let written = method_arity(&entry.path);
+        if declared.is_empty() {
+            failures.push(format!(
+                "`{}` is first-party and no declaration of it is found",
+                entry.path
+            ));
+        } else if declared != BTreeSet::from([written]) {
+            failures.push(format!(
+                "`{}`: the table says {written:?}, its declarations {declared:?}",
+                entry.path
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "the vocabulary's argument counts are not its signatures':\n  {}",
         failures.join("\n  ")
     );
 }
