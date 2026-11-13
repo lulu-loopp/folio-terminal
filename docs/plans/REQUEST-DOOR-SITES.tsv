@@ -9,7 +9,7 @@
 # or violation or away from violation, or a follows row re-pointed, carries a new reason
 # 'YYYY-MM-DD: <why>'. An unread row's reason is the one Q8 (B) gives the seed.
 # 2026-11-02 (plan row 52): a door of `# request-door-cuts` is walked to its boundary from its
-# enqueue; its `beside` side keeps a breach and a read row here, and 6852 unread keys met only
+# enqueue; its `beside` side keeps a breach and a read row here, and 6848 unread keys met only
 # beside a cut are not listed (target/request-door-sites/beside.tsv names them).
 file	item	kind	name	sites	verdict	reason
 crates/bt-app/src/animation.rs	bt-app crate::animation::<FileAnimationSource as AnimationSource>::restart	Effect	std::fs::File::seek	1	violation	2026-10-24: (c) the gesture doors answer and draw inline: this site is on the synchronous answer road of Runtime::ask_for_a_paste, Runtime::close_pane, Runtime::hand_off, Runtime::reap_exited_tabs, Runtime::save_clipboard_picture, Runtime::submit_clipboard_write
