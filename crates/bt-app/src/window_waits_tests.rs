@@ -10748,11 +10748,7 @@ fn a_wait_through_a_verb_from_blocking_outside_a_door_is_a_bare_site() {
 /// struct or enum, one function per binding form [`Scope::bind_by_pattern`] reads (row 19), and
 /// one (`a_label`) that calls a vocabulary method's name on a payload member of another type.
 const PLANTED_PAYLOAD_BINDINGS: &str = "
-pub enum Held {
-    Thread(std::thread::JoinHandle<()>),
-    Kid { child: std::process::Child, label: String },
-    Gone,
-}
+pub enum Held { Thread(std::thread::JoinHandle<()>), Kid { child: std::process::Child, label: String }, Gone }
 pub struct Holder { pub child: std::process::Child }
 pub struct Wrapped(pub std::process::Child);
 pub struct Rx { pub rx: std::sync::mpsc::Receiver<()>, pub tag: u8 }
@@ -10764,12 +10760,12 @@ impl Label { pub fn wait(&self) {} }
 pub enum Named { Label(Label), Other }
 pub enum Either { Other(Label), Kid(std::process::Child) }
 impl Either {
-    pub fn wait_either(&mut self) { match self { Self::Other(child) => { child.wait(); } Self::Kid(child) => { let _ = child.wait(); } } }
+pub fn wait_either(&mut self) { match self { Self::Other(child) => { child.wait(); } Self::Kid(child) => { let _ = child.wait(); } } }
 }
 pub fn next_held() -> Held { Held::Gone }
 pub fn in_a_match_arm(held: Held) { match held { Held::Thread(thread) => { let _ = thread.join(); } _ => {} } }
 impl Held {
-    pub fn through_self(&mut self) { match self { Self::Kid { child, .. } => { let _ = child.wait(); } _ => {} } }
+pub fn through_self(&mut self) { match self { Self::Kid { child, .. } => { let _ = child.wait(); } _ => {} } }
 }
 pub fn by_shorthand(held: Held) { if let Held::Kid { mut child, .. } = held { let _ = child.wait(); } }
 pub fn by_renamed_field(held: Held) { if let Held::Kid { child: mut kid, label: _ } = held { let _ = kid.wait(); } }
@@ -10884,13 +10880,13 @@ fn a_wait_on_a_handle_bound_by_a_payload_pattern_is_a_site_in_every_binding_form
 /// macro makes, whose type nothing writes.
 const PLANTED_UNPLACED_PATTERN: &str = "
 pub fn unplaced(value: std::num::Wrapping<std::thread::JoinHandle<()>>) {
-    let std::num::Wrapping(inner) = value;
-    let _ = inner.join();
+let std::num::Wrapping(inner) = value;
+let _ = inner.join();
 }
 macro_rules! spawned { () => { std::thread::spawn(|| ()) } }
 pub fn macro_made() {
-    let handle = spawned!();
-    let _ = handle.join();
+let handle = spawned!();
+let _ = handle.join();
 }
 ";
 
