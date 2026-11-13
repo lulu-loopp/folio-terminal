@@ -3876,9 +3876,10 @@ fn the_applier_tests_start_every_process_through_the_fixture_door() {
 /// fixtures' starts at once.
 ///
 /// A fixture test is one that builds an `Install`, whose `new` writes the programs that test
-/// starts; read in each module's `Install::new`, comments and whitespace out, its first
-/// statement takes the turn and the installation keeps it in a field, so it is let go only
-/// when the installation is dropped. A test of those modules that starts a program without an
+/// starts; read in each module's `Install::new` and in the macOS `shape_install`, comments
+/// and whitespace out, its first statement takes the turn and the installation keeps it in
+/// `_turn`, the struct's last field, so it is let go only when the installation is dropped and
+/// after its programs have ended and its folder is gone. A test of those modules that starts a program without an
 /// `Install` is not held to the turn here; it is still held to the start bound by
 /// [`the_applier_tests_start_every_process_through_the_fixture_door`].
 ///
@@ -3894,17 +3895,36 @@ fn the_applier_fixture_tests_take_a_turn_before_they_write_a_fixture() {
         let new = squeezed(item_body(
             &ItemQuery::method("Install", "new").in_module(module),
         ));
+        holds_a_turn_first(&format!("{module}'s Install::new"), &new);
+        let install = squeezed(item_body(
+            &ItemQuery::type_item("Install").in_module(module),
+        ));
         assert!(
-            new.starts_with("{letturn=crate::test_support::a_fixture_turn();"),
-            "{module}'s Install::new does not take a fixture turn as its first statement, so its \
-             test starts its fixtures past the {FIXTURE_TESTS_AT_ONCE} at once: {new:.120}"
-        );
-        assert!(
-            new.contains("_turn:turn,"),
-            "{module}'s Install::new does not keep its fixture turn in the installation, so the \
-             turn is let go before the test's fixtures start"
+            install.ends_with("_turn:crate::test_support::FixtureTurn,}"),
+            "{module}'s Install does not keep its fixture turn as its last field, so the turn \
+             is let go before the installation's programs have ended and its folder is gone"
         );
     }
+    let shape = squeezed(item_body(
+        &ItemQuery::function("shape_install").in_module("crate::update_apply_macos::tests"),
+    ));
+    holds_a_turn_first("crate::update_apply_macos::tests's shape_install", &shape);
+}
+
+/// The two halves of [`the_applier_fixture_tests_take_a_turn_before_they_write_a_fixture`]
+/// for one constructor's squeezed body, `what`: its first statement takes the turn, and the
+/// installation it builds keeps it.
+fn holds_a_turn_first(what: &str, body: &str) {
+    assert!(
+        body.starts_with("{letturn=crate::test_support::a_fixture_turn();"),
+        "{what} does not take a fixture turn as its first statement, so its test starts its \
+         fixtures past the {FIXTURE_TESTS_AT_ONCE} at once: {body:.120}"
+    );
+    assert!(
+        body.contains("_turn:turn,"),
+        "{what} does not keep its fixture turn in the installation, so the turn is let go \
+         before the test's fixtures start"
+    );
 }
 
 // ── the storage pass's window, over the four real stores (T-STORE-NOTICE)
