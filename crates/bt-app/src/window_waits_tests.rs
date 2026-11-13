@@ -3503,6 +3503,30 @@ fn a_site_matching_several_vocabulary_lines_answers_all_of_them_in_any_order() {
     );
 }
 
+/// RED (T-WGPU-DEVICE-POLL-WAIT-IN-NEITHER-LIST, 0.4.10 plan row 11, ruling R5) — **`effect_of`
+/// reads a `.poll()` untyped, as the GPU wait**: against the live vocabulary a method `poll`, on
+/// any receiver, is `Device::poll` and waits, so a first-party `.poll()` in a product `Drop`, a
+/// counted-only `Drop` or an exported macro (`HangWatch::poll` written in one) would be red there,
+/// loudly — row 185's rule, kept; telling it apart there would be typed matching in `effect_of`,
+/// which this row does not do. No such body holds a `.poll(` today: the `Drop`, counted-only and
+/// owners guards are green with the entry.
+///
+/// MUTATION: delete the registry's `wgpu::Device::poll` line and the method `poll` matches no
+/// line.
+#[test]
+fn a_poll_reads_untyped_as_the_gpu_wait() {
+    let words = vocabulary();
+    let site = Site {
+        at: 0,
+        name: "poll",
+        form: Form::Method(Some(vec!["watch"])),
+    };
+    assert_eq!(
+        effect_of(&words, &site),
+        Some(("Device::poll".to_owned(), true))
+    );
+}
+
 // ── assertion 0: the declared universe ──────────────────────────────────────────────────────
 
 /// **Every first-party package outside `vendor/` is the product or a declared tool.** The
@@ -8724,8 +8748,23 @@ impl Reader<'_> {
 
     /// Every site in one package's product files, with the callable each stands in.
     fn sites(&self, src: usize) -> Vec<(BareSite, Option<&'static ItemRecord>)> {
+        self.sites_and_untyped_polls(src).0
+    }
+
+    /// [`Reader::sites`], and every method call of a [`TYPED_RECEIVERS_ONLY`] name whose receiver
+    /// this reading cannot type — no type written anywhere on its road, a receiver that is not one
+    /// chain, or a call outside every callable — at its offset, with the callable it stands in.
+    /// Each such call would be no site at all, and silently ([`untyped_poll_failures`]).
+    fn sites_and_untyped_polls(
+        &self,
+        src: usize,
+    ) -> (
+        Vec<(BareSite, Option<&'static ItemRecord>)>,
+        Vec<(usize, Option<&'static ItemRecord>)>,
+    ) {
         let s = &self.world.srcs[src];
         let mut out = Vec::new();
+        let mut untyped = Vec::new();
         let callables: Vec<&'static ItemRecord> = s
             .index
             .items()
@@ -8844,17 +8883,21 @@ impl Reader<'_> {
                         continue;
                     }
                 }
-                let method_call = tok.kind == Kind::Ident
+                let called = tok.kind == Kind::Ident
                     && index >= 2
                     && previous.is_some_and(|p| s.is(Some(&p), "."))
-                    && method_names.contains(text)
                     && (s.is(toks.get(index + 1), "(")
                         || (s.is(toks.get(index + 1), "::") && s.is(toks.get(index + 2), "<")));
+                let method_call = called && method_names.contains(text);
+                let typed_only = called && TYPED_RECEIVERS_ONLY.contains(&text);
                 let writes = tok.kind == Kind::Ident
                     && (text == "write" || text == "writeln")
                     && s.is(toks.get(index + 1), "!")
                     && s.is(toks.get(index + 2), "(");
-                if (method_call || writes)
+                if typed_only && owner.is_none() {
+                    untyped.push((tok.start, None));
+                }
+                if (method_call || writes || typed_only)
                     && let Some(record) = owner
                 {
                     let scope = scopes
@@ -8877,6 +8920,9 @@ impl Reader<'_> {
                         }
                     } else if let Some(start) = chain_start(s, &toks, index - 2) {
                         let receiver = scope.chain(&toks, start, index - 2).unwrap_or_default();
+                        if typed_only && receiver.is_empty() {
+                            untyped.push((tok.start, owner));
+                        }
                         for (at, entry) in self.entries.iter().enumerate() {
                             let Some((ty, name)) = &entry.method else {
                                 continue;
@@ -8893,12 +8939,14 @@ impl Reader<'_> {
                                 ));
                             }
                         }
+                    } else if typed_only {
+                        untyped.push((tok.start, owner));
                     }
                 }
                 index += 1;
             }
         }
-        out
+        (out, untyped)
     }
 }
 
@@ -10090,6 +10138,97 @@ fn a_wait_neither_list_named_is_a_bare_site_whatever_its_flag() {
     );
 }
 
+/// A planted crate with a `wgpu::Device::poll` written on every receiver shape the inventory
+/// types: a field of a parameter (once with `PollType::Poll`, once with a handed poll type), a
+/// parameter (`PollType::Wait`), a parameter whose type an import names, a first-party function's
+/// declared return, and a field holding the device in an `Arc`; and two that it does not count:
+/// `its_own_poll`, a first-party `Watch::poll` on a receiver typed `Watch` (`HangWatch::poll`'s
+/// shape, the control), and `untyped`, a `.poll(` on a binding a foreign call made, which no type
+/// on its road names.
+const PLANTED_DEVICE_POLL: &str = "
+use wgpu::Device;
+pub struct Gpu { device: wgpu::Device, shared: std::sync::Arc<wgpu::Device> }
+pub struct Watch;
+impl Watch {
+pub fn new() -> Self { Watch }
+pub fn poll(&mut self, _now: u64) {}
+}
+fn device_of(gpu: &Gpu) -> &wgpu::Device { &gpu.device }
+pub fn through_a_field(gpu: &Gpu, p: wgpu::PollType) {
+let _ = gpu.device.poll(wgpu::PollType::Poll);
+let _ = gpu.device.poll(p);
+}
+pub fn through_a_parameter(d: &wgpu::Device) {
+let _ = d.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+}
+pub fn through_an_import(d: &Device, p: wgpu::PollType) {
+let _ = d.poll(p);
+}
+pub fn through_a_return(gpu: &Gpu, p: wgpu::PollType) {
+let _ = device_of(gpu).poll(p);
+}
+pub fn through_a_wrapper(gpu: &Gpu, p: wgpu::PollType) {
+let _ = gpu.shared.poll(p);
+}
+pub fn its_own_poll() {
+let mut watch = Watch::new();
+watch.poll(1);
+}
+pub fn untyped(p: wgpu::PollType) {
+let device = foreign::make();
+let _ = device.poll(p);
+}
+";
+
+/// RED (T-WGPU-DEVICE-POLL-WAIT-IN-NEITHER-LIST, 0.4.10 plan row 11) — **`wgpu::Device::poll` is a
+/// bare site on every receiver the inventory types as a `wgpu::Device`, whatever the poll type
+/// (ruling R2), and on no other**: a first-party `poll` on a receiver typed as its own type is no
+/// site (`HangWatch::poll`'s shape), and a `.poll(` on a receiver no type names is no site either,
+/// but it is named ([`untyped_poll_failures`], ruling R4) — never dropped without a word.
+///
+/// Against the planted crate ([`PLANTED_DEVICE_POLL`]): `through_a_field` holds two sites, each
+/// other `through_…` one; `its_own_poll` and `untyped` hold none; `untyped` is the one call named.
+///
+/// MUTATION: delete the registry's `wgpu::Device::poll` line and every planted site leaves the
+/// inventory; match a method entry by its name alone (drop `&& typed` in `Reader::sites`) and
+/// `its_own_poll` and `untyped` hold one each; leave an untyped `poll` out of
+/// `Reader::sites_and_untyped_polls` and `untyped` is named by no line.
+#[test]
+fn a_gpu_wait_is_a_site_only_on_a_receiver_typed_wgpu_device() {
+    let world = planted_world("ww-device-poll", PLANTED_DEVICE_POLL);
+    let (bare, _, _) = vocabulary_sites_in(&world, &[]);
+    let mine: BTreeMap<(&str, &str), usize> = bare
+        .iter()
+        .filter(|((package, _, _, _), _)| package == "planted")
+        .map(|((_, _, item, entry), count)| ((item.as_str(), entry.as_str()), *count))
+        .collect();
+    let poll = "wgpu::Device::poll";
+    let wanted: BTreeMap<(&str, &str), usize> = [
+        (("crate::through_a_field", poll), 2),
+        (("crate::through_a_parameter", poll), 1),
+        (("crate::through_an_import", poll), 1),
+        (("crate::through_a_return", poll), 1),
+        (("crate::through_a_wrapper", poll), 1),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(
+        mine, wanted,
+        "the planted GPU waits are not the bare sites they are (and `its_own_poll` and `untyped` \
+         hold none)"
+    );
+    let named = untyped_poll_failures(&world);
+    assert_eq!(
+        named.len(),
+        1,
+        "one planted `.poll(` has an untyped receiver: {named:?}"
+    );
+    assert!(
+        named[0].starts_with("planted - crate::untyped:"),
+        "the untyped `.poll(` is `untyped`'s: {named:?}"
+    );
+}
+
 /// A planted crate with a wait in a function gated on a feature no product build sets, the same
 /// wait in one gated on a feature the product build sets, and in an ungated one (the control).
 const PLANTED_TEST_ONLY_FEATURE_SITE: &str = "
@@ -10341,11 +10480,12 @@ fn probe_effect_failures(
 /// effect**: `bt-render` has no bare site, and every function of its product that holds a
 /// vocabulary effect stands under [`RENDER_EFFECT_DOOR`], as every `bt-render` row of the
 /// registry's `# effects` says. The headless probe's submit and present and the read-back's submit
-/// are `bt-render-probe`'s, a tool crate; `bt_render::probe_surface` prepares, encodes and reads
-/// and hands the work over.
+/// and its wait on the device (`wgpu::Device::poll`, 0.4.10 plan row 11) are `bt-render-probe`'s,
+/// a tool crate; `bt_render::probe_surface` prepares, encodes and reads and hands the work over.
 ///
 /// MUTATION: put `gpu.queue.submit(std::iter::empty());` back into
-/// `WindowRenderer::read_back_work` and this names it as a bare site of `bt-render`; give a
+/// `WindowRenderer::read_back_work`, or the device's `poll(wgpu::PollType::Wait { .. })` into
+/// `WindowRenderer::read_back_rows`, and this names it as a bare site of `bt-render`; give a
 /// `bt-render` row of `# effects` another door and this names the row's line.
 #[test]
 fn the_product_library_holds_no_probe_effect() {
@@ -10375,6 +10515,62 @@ fn the_probe_crate_is_outside_the_product_closure() {
         !candidates.contains_key("bt-render-probe"),
         "a product manifest's dependency table names bt-render-probe: {:?}",
         candidates.keys().collect::<Vec<_>>()
+    );
+}
+
+/// **The method names whose every call in the product has a receiver the inventory types**
+/// (T-WGPU-DEVICE-POLL-WAIT-IN-NEITHER-LIST, 0.4.10 plan row 11, ruling R4). A vocabulary method
+/// is a site only on a typed receiver, and a call on an untyped one is no site at all: the gap
+/// A2e's lint closes, which the comment above [`BARE_SITES`] states. `poll` is the vocabulary
+/// method name a first-party type shares in the product (`HangWatch::poll`), so
+/// `wgpu::Device::poll` can only be told by its receiver, and a `.poll(` whose receiver the
+/// reading cannot type would leave the inventory without a word; each one is named instead. The
+/// same rule over every vocabulary method name is the K-series row
+/// T-VOCABULARY-RECEIVERS-ALL-TYPED, measured first.
+const TYPED_RECEIVERS_ONLY: [&str; 1] = ["poll"];
+
+/// Every call of a [`TYPED_RECEIVERS_ONLY`] name in the product whose receiver [`Reader`] cannot
+/// type, one line each: the crate, the arm, the item and where.
+fn untyped_poll_failures(world: &World) -> Vec<String> {
+    let reader = Reader::new(world);
+    let mut failures = Vec::new();
+    for (src, s) in world.srcs.iter().enumerate() {
+        for (at, owner) in reader.sites_and_untyped_polls(src).1 {
+            if !s.in_product(at) {
+                continue;
+            }
+            let (item, arm) = owner.map_or_else(
+                || (s.module_at(at).to_owned(), "-".to_owned()),
+                item_and_arm,
+            );
+            failures.push(format!(
+                "{} {arm} {item}: a `.poll(` at {} on a receiver the inventory cannot type, so \
+                 a `wgpu::Device::poll` there would be no site; write its type where the reading \
+                 sees it (a parameter, a field, a `let` annotation, a first-party return)",
+                s.package,
+                s.location(at)
+            ));
+        }
+    }
+    failures
+}
+
+/// RED (T-WGPU-DEVICE-POLL-WAIT-IN-NEITHER-LIST, 0.4.10 plan row 11, ruling R4) — **every `.poll(`
+/// in the product has a receiver the inventory types**, so `wgpu::Device::poll` is a bare site
+/// wherever it is written and `HangWatch::poll` is told apart by its type, never by its name. An
+/// untyped receiver is named, not read as no site.
+///
+/// MUTATION: write `let _ = device.poll(wgpu::PollType::Poll);` after the `request_device` in
+/// bt-render's `GpuContext::bootstrap_for_surface` (whose `device` a foreign call made) and this
+/// names it, where `the_product_library_holds_no_probe_effect` stays green.
+#[test]
+fn every_product_poll_has_a_typed_receiver() {
+    let world = World::new();
+    let failures = untyped_poll_failures(&world);
+    assert!(
+        failures.is_empty(),
+        "a `.poll(` in the product has a receiver the inventory cannot type:\n  {}",
+        failures.join("\n  ")
     );
 }
 
