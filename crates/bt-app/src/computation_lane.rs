@@ -436,24 +436,23 @@ impl ComputationLane {
         }
     }
 
-    /// **The factory the decoration worker's door is handed**: the lane's `make_engine`, counted
-    /// under test.
-    fn engine_factory(&self) -> EngineFactory {
-        let make_engine = self.make_engine;
-        #[cfg(test)]
-        let made = Arc::clone(&self.engines_made);
-        Box::new(move || {
+    /// **What the decoration worker makes its engine factory from**: the lane's `make_engine` (a
+    /// `fn`, copied) and, under test, the lane's count. Taken only when a request starts the
+    /// worker; the factory itself is boxed on the worker's thread ([`EngineMaker::into_factory`]),
+    /// so a request on the window thread allocates nothing for it.
+    fn engine_maker(&self) -> EngineMaker {
+        EngineMaker {
+            make_engine: self.make_engine,
             #[cfg(test)]
-            made.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            make_engine()
-        })
+            engines_made: Arc::clone(&self.engines_made),
+        }
     }
 
     /// **The engine this lane's decoration worker would make**, made here, on the caller's thread,
     /// and counted.
     #[cfg(test)]
     pub(crate) fn make_an_engine(&self) -> MathEngine {
-        (self.engine_factory())()
+        (self.engine_maker().into_factory())()
     }
 
     /// **How many formula engines this lane's factory has made.** Exact once a formula has been
@@ -487,7 +486,6 @@ impl ComputationLane {
         let asked = request.asked();
         let queue = Arc::clone(&self.decoration.queue);
         let wake = Arc::clone(&self.wake);
-        let make_engine = self.engine_factory();
         self.decoration.ask(
             request,
             owner,
@@ -502,9 +500,11 @@ impl ComputationLane {
                 // overflow is not a panic and would take the window with it, so the depth that is
                 // refused and the stack it is refused against are chosen together, in `bt-math`,
                 // and this is where the second half of that pair is spent.
+                let maker = self.engine_maker();
                 self.executor
                     .with_stack(bt_math::MATH_WORKER_STACK_BYTES)
                     .start_worker("bt-math-worker", ran, move |ctx| {
+                        let make_engine = maker.into_factory();
                         ShareOf::serve(&queue, ctx, make(ctx, make_engine), &*wake);
                     })
             },
@@ -939,6 +939,28 @@ pub(crate) fn run_decoration_worker_with(
 
 /// The factory a [`FormulaEngine`] makes its engine with.
 pub(crate) type EngineFactory = Box<dyn FnOnce() -> MathEngine + Send>;
+
+/// **A lane's formula engine maker, on its way to the decoration worker**: the `fn` the lane was
+/// built with ([`MathEngine::new`] in the product) and, under test, the lane's count of engines
+/// made. [`ComputationLane::engine_maker`] takes it when a request starts the worker; the worker
+/// boxes it into its [`EngineFactory`] on its own thread.
+struct EngineMaker {
+    make_engine: fn() -> MathEngine,
+    #[cfg(test)]
+    engines_made: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl EngineMaker {
+    /// **The factory the decoration worker's door is handed**: `make_engine`, counted under test.
+    fn into_factory(self) -> EngineFactory {
+        Box::new(move || {
+            #[cfg(test)]
+            self.engines_made
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            (self.make_engine)()
+        })
+    }
+}
 
 /// **The decoration door's formula engine, made beside the worker.**
 ///
