@@ -1163,6 +1163,26 @@ fn uninstall_source_guard_pins_known_writers_and_inventory() {
             function("crate::explorer_menu", "probe_at_start"),
             "explorer_menu.rs:probe_at_start",
         ),
+        // The sign-in entry's three writers (row 22a): the press, the carry pass's repair, and
+        // the platform door both reach.
+        (
+            Remover::StartAtSignIn,
+            app,
+            function("crate::start_at_sign_in", "press_sign_in_in"),
+            "start_at_sign_in.rs:press_sign_in_in",
+        ),
+        (
+            Remover::StartAtSignIn,
+            app,
+            function("crate::start_at_sign_in", "carry_sign_in_in"),
+            "start_at_sign_in.rs:carry_sign_in_in",
+        ),
+        (
+            Remover::StartAtSignIn,
+            platform,
+            function("crate::sign_in_entry", "write_entry_in"),
+            "sign_in_entry.rs:write_entry_in",
+        ),
         (
             Remover::OutsideTheDoor,
             app,
@@ -1321,15 +1341,33 @@ fn uninstall_source_guard_pins_known_writers_and_inventory() {
         Path::new("local/Folio")
     );
     assert_eq!(INVENTORY.len(), 33);
-    // The update entrance's writer is in `bt-platform` and is asked for by its
-    // identity through `bt-source`, not by a file (U-22): `logon_hook::arm_in`
-    // is the one function that writes a `Run` value, and the row names it.
+    // The two `Run` writers are in `bt-platform` and are asked for by their
+    // identities through `bt-source`, not by a file (U-22, row 22a), each pinned
+    // to its own value name: `logon_hook::arm_in` writes the update entrance
+    // (`value_name(txn)`), `sign_in_entry::write_entry_in` the switch's entry
+    // (`ENTRY_NAME`), and each row names its writer.
     let entrance_writer = bt_source::Index::of_package("bt-platform")
         .body_of(&bt_source::ItemQuery::function("arm_in"))
         .unwrap_or_else(|failure| panic!("{failure}"));
     assert!(
-        entrance_writer.contains(".set(key, &name, REG_SZ, &data)"),
-        "`logon_hook::arm_in` no longer writes the entrance"
+        entrance_writer.contains(".set(key, &name, REG_SZ, &data)")
+            && entrance_writer.contains("let name = value_name(txn);"),
+        "`logon_hook::arm_in` no longer writes the entrance under its own name"
+    );
+    let sign_in_writer = bt_source::Index::of_package("bt-platform")
+        .body_of(&bt_source::ItemQuery::function("write_entry_in"))
+        .unwrap_or_else(|failure| panic!("{failure}"));
+    assert!(
+        sign_in_writer.contains(".set(keys.run, ENTRY_NAME, REG_SZ, &data)"),
+        "`sign_in_entry::write_entry_in` no longer writes the entry under its own name"
+    );
+    assert!(
+        INVENTORY
+            .iter()
+            .any(|mark| mark.remover == Remover::StartAtSignIn
+                && mark.kind == Kind::PerAccount
+                && mark.writer.ends_with("sign_in_entry.rs:write_entry_in")),
+        "the sign-in entry has no undo"
     );
     assert!(
         INVENTORY
@@ -1459,6 +1497,185 @@ fn uninstall_entrance_row_removes_this_copys_values_and_leaves_the_rest() {
         panic!("no entrance off Windows")
     });
     assert_eq!(elsewhere[0].fate, Fate::Absent);
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// RED (0.4.10 plan row 22a, T-START-AT-LOGON-SWITCH; R12) — **the uninstall's sign-in row removes
+/// this copy's entry and a gone copy's, with Windows' switch of the name, and leaves another
+/// copy's, a copy's on a volume that is away (said as unchecked, review N3) and another program's
+/// value; an account with no entry, and every platform but Windows, print the row's `not present`
+/// line.**
+///
+/// Over two keys held in memory, never the account's, and real files in the sandbox for "there"
+/// and "gone".
+///
+/// MUTATION (`plant-22-uninstall-takes-a-live-copy.py`): remove another copy's entry too, and the
+/// live copy's case is `Removed`.
+#[test]
+fn uninstall_sign_in_row_removes_this_copys_entry_and_leaves_another_copys() {
+    use crate::attention_ownership::{Look, PathStands};
+    use crate::start_at_sign_in::{SignInRemoval, uninstall_sign_in_in};
+    use bt_platform::logon_hook::{REG_SZ, Registry};
+    use bt_platform::sign_in_entry::{ENTRY_NAME, EntryKeys, REG_BINARY, command_for};
+    const SIGN_IN_ROW_KEYS: EntryKeys<'static> = EntryKeys {
+        run: "run",
+        approved: "approved",
+    };
+    #[derive(Default)]
+    struct Keys(std::collections::BTreeMap<(String, String), (u32, Vec<u8>)>);
+    impl Registry for Keys {
+        fn set(&mut self, key: &str, name: &str, kind: u32, data: &[u8]) -> io::Result<()> {
+            self.0
+                .insert((key.to_owned(), name.to_owned()), (kind, data.to_vec()));
+            Ok(())
+        }
+        fn flush(&mut self, _: &str) -> io::Result<()> {
+            Ok(())
+        }
+        fn get(&mut self, key: &str, name: &str) -> io::Result<Option<(u32, Vec<u8>)>> {
+            Ok(self.0.get(&(key.to_owned(), name.to_owned())).cloned())
+        }
+        fn delete(&mut self, key: &str, name: &str) -> io::Result<bool> {
+            Ok(self.0.remove(&(key.to_owned(), name.to_owned())).is_some())
+        }
+        fn names(&mut self, _: &str) -> io::Result<Vec<String>> {
+            panic!("the sign-in row never lists a key")
+        }
+    }
+    let sz = |text: &std::ffi::OsStr| -> Vec<u8> {
+        text.to_string_lossy()
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .flat_map(u16::to_le_bytes)
+            .collect()
+    };
+    let (root, scope) = sandbox("sign-in");
+    let exe = scope.exe.clone();
+    fs::create_dir_all(exe.parent().unwrap()).unwrap();
+    fs::write(&exe, b"folio").unwrap();
+    let other = root.join("other").join("folio.exe");
+    fs::create_dir_all(other.parent().unwrap()).unwrap();
+    fs::write(&other, b"other").unwrap();
+    let gone = root.join("gone").join("folio.exe");
+    let away = root.join("away").join("folio.exe");
+    /// A machine whose volumes are all away: no missing path can be told gone.
+    struct SignInVolumeAway;
+    impl Look for SignInVolumeAway {
+        fn stands(&self, path: &Path) -> PathStands {
+            crate::attention_ownership::what_stands(path)
+        }
+        fn volume_of(&self, _missing: &Path) -> Option<PathBuf> {
+            None
+        }
+    }
+    let here = |path: &Path| crate::attention_ownership::what_stands(path);
+    let row_over = |entry: Option<(u32, Vec<u8>)>, look: &dyn Look| {
+        let mut keys = Keys::default();
+        if let Some((kind, data)) = entry {
+            keys.set(SIGN_IN_ROW_KEYS.run, ENTRY_NAME, kind, &data)
+                .unwrap();
+            keys.set(
+                SIGN_IN_ROW_KEYS.approved,
+                ENTRY_NAME,
+                REG_BINARY,
+                &[3, 0, 0, 0],
+            )
+            .unwrap();
+        }
+        keys.set(
+            SIGN_IN_ROW_KEYS.run,
+            "SomebodyElse",
+            REG_SZ,
+            &sz("x".as_ref()),
+        )
+        .unwrap();
+        let removal = uninstall_sign_in_in(&mut keys, SIGN_IN_ROW_KEYS, &exe, look);
+        let entries = sign_in_entries(HostPlatform::Windows, Lang::English, || removal.clone());
+        let left: Vec<(String, String)> = keys.0.keys().cloned().collect();
+        (removal, entries, left)
+    };
+    let row = |entry: Option<(u32, Vec<u8>)>| row_over(entry, &here);
+    let label = "Autostart / login item (per-account)";
+    let only_somebody = vec![("run".to_owned(), "SomebodyElse".to_owned())];
+
+    for (what, program) in [("this copy", &exe), ("a gone copy", &gone)] {
+        let (removal, entries, left) = row(Some((REG_SZ, sz(&command_for(program)))));
+        assert_eq!(removal, SignInRemoval::Removed, "{what}");
+        assert_eq!(entries[0].fate, Fate::Removed, "{what}");
+        assert_eq!(
+            left, only_somebody,
+            "{what}: the entry and its switch go, nothing else"
+        );
+    }
+    let (removal, entries, left) = row(Some((REG_SZ, sz(&command_for(&other)))));
+    assert_eq!(removal, SignInRemoval::LeftAnotherCopy(other.clone()));
+    assert_eq!(entries[0].fate, Fate::Left(vec![other.clone()]));
+    assert_eq!(left.len(), 3, "another copy's entry stays: {left:?}");
+    let (removal, entries, left) =
+        row_over(Some((REG_SZ, sz(&command_for(&away)))), &SignInVolumeAway);
+    assert_eq!(removal, SignInRemoval::LeftUnchecked(away.clone()));
+    assert_eq!(
+        entries[0].fate,
+        Fate::Kept(Text::CleanupSignInUnchecked),
+        "a copy on a volume that is away is not said to exist"
+    );
+    assert!(
+        entries[0]
+            .line(Lang::English)
+            .contains("left (its program could not be checked)"),
+        "{}",
+        entries[0].line(Lang::English)
+    );
+    assert_eq!(left.len(), 3, "the unchecked entry stays: {left:?}");
+    // Another program's value under the name — this copy's text as `REG_EXPAND_SZ`, and a plain
+    // `REG_SZ` quoting another program, the shape a real one has (review N4): both left, and
+    // with them the Startup-apps value of the name, byte for byte.
+    for (what, foreign) in [
+        ("an expandable string", (2, sz(&command_for(&exe)))),
+        (
+            "another program's command",
+            (REG_SZ, sz(r#""C:\Tools\sync.exe""#.as_ref())),
+        ),
+    ] {
+        let mut keys = Keys::default();
+        keys.set(SIGN_IN_ROW_KEYS.run, ENTRY_NAME, foreign.0, &foreign.1)
+            .unwrap();
+        keys.set(
+            SIGN_IN_ROW_KEYS.approved,
+            ENTRY_NAME,
+            REG_BINARY,
+            &[3, 0, 0, 0],
+        )
+        .unwrap();
+        let before = keys.0.clone();
+        let removal = uninstall_sign_in_in(&mut keys, SIGN_IN_ROW_KEYS, &exe, &here);
+        assert_eq!(removal, SignInRemoval::LeftNotOurs, "{what}");
+        let entries = sign_in_entries(HostPlatform::Windows, Lang::English, || removal.clone());
+        assert!(matches!(entries[0].fate, Fate::LeftNotOurs(_)), "{what}");
+        assert_eq!(
+            keys.0, before,
+            "{what}: the value and its Startup-apps value stay byte for byte"
+        );
+    }
+
+    let (removal, entries, left) = row(None);
+    assert_eq!(removal, SignInRemoval::Absent);
+    assert_eq!(left, only_somebody);
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| (entry.mark.clone(), entry.fate.clone()))
+            .collect::<Vec<_>>(),
+        vec![(label.to_owned(), Fate::Absent)],
+        "today's line"
+    );
+    for platform in [HostPlatform::MacOs, HostPlatform::OtherUnix] {
+        let elsewhere = sign_in_entries(platform, Lang::English, || {
+            panic!("no sign-in entry is read off Windows")
+        });
+        assert_eq!(elsewhere[0].mark, label);
+        assert_eq!(elsewhere[0].fate, Fate::Absent);
+    }
     fs::remove_dir_all(root).unwrap();
 }
 

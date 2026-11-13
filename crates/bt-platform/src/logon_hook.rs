@@ -213,8 +213,8 @@ pub trait Registry {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CurrentUser;
 
-/// A command's UTF-16 units, without a terminator.
-fn units(text: &OsStr) -> Vec<u16> {
+/// A command's UTF-16 units, without a terminator; `crate::sign_in_entry`'s too.
+pub(crate) fn units(text: &OsStr) -> Vec<u16> {
     #[cfg(windows)]
     {
         use std::os::windows::ffi::OsStrExt;
@@ -227,7 +227,7 @@ fn units(text: &OsStr) -> Vec<u16> {
 }
 
 /// A `REG_SZ`'s bytes: the units, a terminating NUL, little-endian.
-fn string_data(units: &[u16]) -> Vec<u8> {
+pub(crate) fn string_data(units: &[u16]) -> Vec<u8> {
     units
         .iter()
         .chain(std::iter::once(&0))
@@ -236,7 +236,7 @@ fn string_data(units: &[u16]) -> Vec<u8> {
 }
 
 /// A `REG_SZ`'s text: its units up to the first NUL.
-fn string_text(data: &[u8]) -> OsString {
+pub(crate) fn string_text(data: &[u8]) -> OsString {
     let units: Vec<u16> = data
         .chunks_exact(2)
         .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
