@@ -3732,7 +3732,9 @@ std::thread_local! {
 
 /// **One fixture test's turn**: held by an `Install` of `update_apply_windows::tests` or
 /// `update_apply_macos::tests` from its first statement until it is dropped. The place is
-/// `None` for a thread's second installation, which rides on the first's.
+/// `None` for a thread's second installation, which rides on the first's. An `Install` built on
+/// a thread the test spawned takes a place of its own, so a test must not join such a thread
+/// while it holds a turn: three that did would wait on each other for ever.
 pub(crate) struct FixtureTurn {
     place: Option<std::sync::MutexGuard<'static, ()>>,
 }
