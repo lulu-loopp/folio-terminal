@@ -16836,7 +16836,7 @@ The flags are a debt and never a liveness: `Runtime::turn_facts` counts them as 
 
 **What the inventory gains** (ruling R2). One row, `bt-app | - | crate::git::GitChild::wait | std::process::Child::wait`, under the file's first reader block: `## Revealed 2026-11-13 by T-WINDOW-WAITS-READER-SEES-MATCH-BOUND-HANDLES (reader; ruling …)`. A reader block names the ruling that admits it; the check admits a key's growth against the merge base only by the rows a reader block lists that the merge base's does not, and refuses an unruled block or a listing that is not a row. `FormulaEngine::engine` calls `thread.join()` again (ruling R5); the call is inside its worker door's body, as before.
 
-**What it does not do** (ruling R3). The call graph (`bt_source`) already resolves `git.rs`'s second `child.wait()` to `std::process::Child::wait` (step 0's datum); rebasing this reader on the call graph is 0.4.10 plan row 93.
+**What it does not do** (ruling R3). The call graph (`bt_source`) already resolves `git.rs`'s second `child.wait()` to `std::process::Child::wait` (step 0's datum); cross-checking this reader's receiver types against the call graph is 0.4.10 plan row 93 (rebasing the reader on the call graph, R1's option (ii), was declined).
 
 **Pinned by**
 - `hang_watch::window_waits_tests::a_wait_on_a_handle_bound_by_a_payload_pattern_is_a_site_in_every_binding_form` (23 planted functions, one per binding form, with a two-arm control) and `a_name_the_reader_cannot_place_is_read_as_unread_not_as_the_outer_type`, both red on the base reader;
