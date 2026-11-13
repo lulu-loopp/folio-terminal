@@ -445,6 +445,35 @@ mod tests {
         (registry, foreign)
     }
 
+    /// RED (0.4.10 plan row 22a, T-START-AT-LOGON-SWITCH; R12) — **the update sweep never lists,
+    /// reads or removes the sign-in entry**: the switch's `Folio` value names a quoted program as
+    /// an entrance does and, after a move, one that is gone; it is the switch's all the same, and
+    /// only its own door, its carry member and the uninstall's row touch it.
+    ///
+    /// MUTATION (`plant-22-sweep-prefix-loosened.py`): the walker lists every name that begins
+    /// `Folio` — the entry is listed beside the entrances and said.
+    #[test]
+    fn the_update_sweep_never_reads_the_sign_in_entry() {
+        use bt_platform::sign_in_entry::{ENTRY_NAME, command_for};
+        let root = orphan_scratch("orphans-sign-in");
+        let (mut registry, _) = run_key(&root);
+        let gone = root.join("gone").join("folio.exe");
+        let entry = reg_sz(&command_for(&gone).to_string_lossy());
+        registry.set(KEY, ENTRY_NAME, REG_SZ, &entry).unwrap();
+        registry.read.clear();
+        let fates = sweep_run_values(&mut registry, KEY, &what_stands, |_| false);
+        assert!(
+            !fates.iter().any(|(name, _)| name == ENTRY_NAME),
+            "{fates:?}"
+        );
+        assert!(
+            !registry.read.iter().any(|name| name == ENTRY_NAME),
+            "{:?}",
+            registry.read
+        );
+        assert_eq!(registry.values.get(ENTRY_NAME), Some(&(REG_SZ, entry)));
+    }
+
     /// RED (0.4.10 plan row 68b; R-C's old-shape test for the update entrance, one shape since
     /// 0.4.6) — **a dead update entrance is swept, and a live one is left.**
     ///
