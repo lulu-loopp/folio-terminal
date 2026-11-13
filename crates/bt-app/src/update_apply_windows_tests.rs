@@ -482,11 +482,15 @@ struct Install {
     old: Files,
     new: Files,
     registry: Memory,
+    /// This test's turn among the fixture tests (`test_support::a_fixture_turn`), let go last,
+    /// after its programs have ended and its folder is gone.
+    _turn: crate::test_support::FixtureTurn,
 }
 
 impl Install {
     /// The installation, or `None` off Windows, where no test root signs.
     fn new(tag: &str) -> Option<Self> {
+        let turn = crate::test_support::a_fixture_turn();
         let ca = TestCa::new().ok()?;
         let root = bt_testpath::temp_path(&format!("bt-u24-{tag}"));
         let scratch = Scratch(root.clone());
@@ -552,6 +556,7 @@ impl Install {
             old,
             new,
             registry: Memory::default(),
+            _turn: turn,
         };
         install.write(Phase::Handoff {
             applier: install.applier,

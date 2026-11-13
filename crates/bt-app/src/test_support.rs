@@ -3688,19 +3688,98 @@ pub(crate) fn a_process_of_its_own(selector: &str, stdin: &[u8]) -> Option<std::
 
 // ── the applier tests' fixture programs, started a few at a time (0.4.10 plan row 78)
 
-/// **How many fixture programs the applier tests start at once.**
+/// **How many applier tests with a fixture installation run at once** - the bound that keeps
+/// `update_apply_windows::tests::p_waits_for_o_and_releases_the_claim` inside the lane patience.
 ///
 /// Each fixture is a program written moments before it starts, a signed `folio.exe` or a copy of
 /// this test binary, and a scanner may hold each one's first start for about a second (0.86 to
 /// 1.37 s each in a Defender recording on the build box, 2026-11-11, in a folder the scanner
-/// excludes). The starts queue behind each other, so with the suite's threads all starting at
-/// once a start waited 9 to 24 s at the median and up to 44 s, past the lane patience a road's
-/// commit is awaited with (`update_apply_windows::tests::p_waits_for_o_and_releases_the_claim`
-/// red 30 of 30 runs of its module). Run on four test threads, a start took 2.9 s at the median
-/// and the module was green; on one, 0.67 s.
+/// excludes). The scans of one module run, 76 starts, take about a second each one after the
+/// other, so a start made while the module's tests all run at once waits for the queue in front
+/// of it: 9 to 24 s at the median, past the patience a road's commit is awaited with (`p_waits`
+/// red 30 of 30 runs of its module, 2026-11-11). Bounding only the starts in flight
+/// ([`FIXTURE_STARTS_AT_ONCE`]) moves that wait in front of `spawn` and leaves it inside the
+/// test: `p_waits`' trial start waited 12 to 27 s for its place (red 30 of 30, 2026-11-12).
+///
+/// So the turn is the test's: [`a_fixture_turn`], taken by `Install::new` in both applier test
+/// modules before anything is written and held until the installation is dropped, so a test
+/// waits for its turn before its clock starts. With four turns the module was green 10 of 10 and
+/// a single start still reached 11.8 s; three leave that start more headroom.
 ///
 /// This is a bound on a resource, not a retry: no start is tried twice and no patience is
-/// raised. A start past the bound waits for one in flight to return, not for any process to end.
+/// raised.
+const FIXTURE_TESTS_AT_ONCE: usize = 3;
+
+/// **The turns a fixture installation holds while it lives**, one unit lock each. They hold no
+/// value, so no test reads anything another wrote: what is shared is the turn.
+static FIXTURE_TEST_PLACES: [std::sync::Mutex<()>; FIXTURE_TESTS_AT_ONCE] =
+    [const { std::sync::Mutex::new(()) }; FIXTURE_TESTS_AT_ONCE];
+
+/// **Held while a test looks for a free turn or begins to wait for one**, and while a test that
+/// let its turn go tells a waiting one; it holds no value, as [`FIXTURE_START_GATE`] does for
+/// the starts.
+static FIXTURE_TEST_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Told each time a fixture installation lets its turn go, so a test waiting for one looks again.
+static FIXTURE_TURN_FREED: std::sync::Condvar = std::sync::Condvar::new();
+
+std::thread_local! {
+    /// **How many [`FixtureTurn`]s this thread holds.** A test that builds a second installation
+    /// while it holds the first takes no second place, so three tests that each want two cannot
+    /// wait on each other for ever.
+    static FIXTURE_TURNS_HELD_HERE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// **One fixture test's turn**: held by an `Install` of `update_apply_windows::tests` or
+/// `update_apply_macos::tests` from its first statement until it is dropped. The place is
+/// `None` for a thread's second installation, which rides on the first's.
+pub(crate) struct FixtureTurn {
+    place: Option<std::sync::MutexGuard<'static, ()>>,
+}
+
+/// **A turn among [`FIXTURE_TESTS_AT_ONCE`]** for the installation this thread is about to
+/// build: a free place if there is one, otherwise a wait until one is let go; no place at all
+/// when this thread already holds a turn. A place a red test let go while panicking is a free
+/// place, so a red does not take a turn from the rest of the module.
+///
+/// [`the_applier_tests_start_every_process_through_the_fixture_door`] holds both modules'
+/// `Install::new` to take it first.
+pub(crate) fn a_fixture_turn() -> FixtureTurn {
+    let held_here = FIXTURE_TURNS_HELD_HERE.with(|held| held.replace(held.get() + 1));
+    if held_here > 0 {
+        return FixtureTurn { place: None };
+    }
+    let mut gate = FIXTURE_TEST_GATE.lock().unwrap();
+    loop {
+        if let Some(place) = FIXTURE_TEST_PLACES
+            .iter()
+            .find_map(|place| match place.try_lock() {
+                Ok(place) => Some(place),
+                Err(std::sync::TryLockError::Poisoned(place)) => Some(place.into_inner()),
+                Err(std::sync::TryLockError::WouldBlock) => None,
+            })
+        {
+            return FixtureTurn { place: Some(place) };
+        }
+        gate = FIXTURE_TURN_FREED.wait(gate).unwrap();
+    }
+}
+
+impl Drop for FixtureTurn {
+    fn drop(&mut self) {
+        FIXTURE_TURNS_HELD_HERE.with(|held| held.set(held.get() - 1));
+        if let Some(place) = self.place.take() {
+            drop(place);
+            drop(FIXTURE_TEST_GATE.lock().unwrap());
+            FIXTURE_TURN_FREED.notify_one();
+        }
+    }
+}
+
+/// **How many fixture programs the applier tests start at once**, under the test turn
+/// ([`FIXTURE_TESTS_AT_ONCE`]): a test that starts many fixtures still cannot put more than
+/// these in front of the scanner at once. A start past the bound waits for one in flight to
+/// return, not for any process to end.
 const FIXTURE_STARTS_AT_ONCE: usize = 4;
 
 /// **The places a fixture start holds while `spawn` runs**, one unit lock each: holding one is
@@ -3786,6 +3865,42 @@ fn the_applier_tests_start_every_process_through_the_fixture_door() {
         assert!(
             found(module, "start_a_fixture(") > 0,
             "{module} starts no process through the fixture door: the pin reads nothing there"
+        );
+    }
+}
+
+/// RED (0.4.10 plan row 78) — **every applier test with a fixture installation takes a
+/// [`a_fixture_turn`] first**, so no more than [`FIXTURE_TESTS_AT_ONCE`] of them queue their
+/// fixtures' starts at once.
+///
+/// A fixture test is one that builds an `Install`, whose `new` writes the programs that test
+/// starts; read in each module's `Install::new`, comments and whitespace out, its first
+/// statement takes the turn and the installation keeps it in a field, so it is let go only
+/// when the installation is dropped. A test of those modules that starts a program without an
+/// `Install` is not held to the turn here; it is still held to the start bound by
+/// [`the_applier_tests_start_every_process_through_the_fixture_door`].
+///
+/// MUTATION: in `update_apply_windows::tests`, take the `let turn` statement out of
+/// `Install::new` and the `_turn` field out of `Install`, and this names that module's
+/// `Install::new`.
+#[test]
+fn the_applier_fixture_tests_take_a_turn_before_they_write_a_fixture() {
+    for module in [
+        "crate::update_apply_windows::tests",
+        "crate::update_apply_macos::tests",
+    ] {
+        let new = squeezed(item_body(
+            &ItemQuery::method("Install", "new").in_module(module),
+        ));
+        assert!(
+            new.starts_with("{letturn=crate::test_support::a_fixture_turn();"),
+            "{module}'s Install::new does not take a fixture turn as its first statement, so its \
+             test starts its fixtures beside more than {FIXTURE_TESTS_AT_ONCE} others: {new:.120}"
+        );
+        assert!(
+            new.contains("_turn:turn,"),
+            "{module}'s Install::new does not keep its fixture turn in the installation, so the \
+             turn is let go before the test's fixtures start"
         );
     }
 }

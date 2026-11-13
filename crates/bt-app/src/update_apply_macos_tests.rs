@@ -412,11 +412,15 @@ struct Install {
     agents: PathBuf,
     /// What the journal records was carried (a Homebrew copy's marks, D1), or nothing.
     carried: Option<Carried>,
+    /// This test's turn among the fixture tests (`test_support::a_fixture_turn`), let go last,
+    /// after its folder is gone.
+    _turn: crate::test_support::FixtureTurn,
 }
 
 impl Install {
     #[cfg(target_os = "macos")]
     fn new(tag: &str) -> Self {
+        let turn = crate::test_support::a_fixture_turn();
         let scratch = Scratch::new(&format!("u28-{tag}"));
         let root = scratch.root.clone();
         let apps = root.join("Applications");
@@ -455,6 +459,7 @@ impl Install {
             data,
             agents,
             carried: None,
+            _turn: turn,
         };
         install.write(Phase::Handoff {
             applier: install.applier,
@@ -605,6 +610,7 @@ impl Install {
 /// is scripted, so these shape tests run on every host without asking macOS to
 /// compile, sign, inspect or exchange a bundle.
 fn shape_install(tag: &str) -> Install {
+    let turn = crate::test_support::a_fixture_turn();
     let scratch = Scratch::new(&format!("u41a1-shape-{tag}"));
     let root = scratch.root.clone();
     let installed = root.join("Applications").join("Folio.app");
@@ -644,6 +650,7 @@ fn shape_install(tag: &str) -> Install {
         data,
         agents,
         carried: None,
+        _turn: turn,
     };
     install.write(Phase::Handoff {
         applier: install.applier,
