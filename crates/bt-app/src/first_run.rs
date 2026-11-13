@@ -380,6 +380,13 @@ pub enum Capability {
     /// Mac the pane's own shell starts it. Another Unix has no build, and so no road anybody has
     /// tried.
     AgentResume,
+    /// Starting Folio when the person signs in (0.4.10 plan row 22a, T-START-AT-LOGON-SWITCH).
+    ///
+    /// **Windows only until its macOS half** (row 22b, which waits for the owner): on Windows it
+    /// is one value for the account under the `Run` key (`bt_platform::sign_in_entry`); a Mac's
+    /// login item is a different mechanism with its own consent, and until it is built the
+    /// General page has no row for it there. Another Unix has no build.
+    SignInStart,
 }
 
 impl Capability {
@@ -395,9 +402,10 @@ impl Capability {
     pub const fn on(self, platform: HostPlatform) -> bool {
         match self {
             Self::UpdateCheck => true,
-            Self::ExplorerMenu | Self::AgentDiscovery | Self::WindowBackdrop => {
-                matches!(platform, HostPlatform::Windows)
-            }
+            Self::ExplorerMenu
+            | Self::AgentDiscovery
+            | Self::WindowBackdrop
+            | Self::SignInStart => matches!(platform, HostPlatform::Windows),
             Self::AgentResume => matches!(platform, HostPlatform::Windows | HostPlatform::MacOs),
             Self::OptionKey => matches!(platform, HostPlatform::MacOs),
         }
