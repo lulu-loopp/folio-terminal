@@ -59704,7 +59704,7 @@ mod platform_gate_tests {
 
     /// **The list.** One file per line, in the order `ls` gives them, each with
     /// the reason it is allowed to ask.
-    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 44] = [
+    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 46] = [
         // Windows-only test fixture: the `pi` row, which only the Windows table ships, reopened
         // from a Recent row, beside its every-platform twin on the host's fallback shell.
         "app_files_tests.rs",
@@ -59796,6 +59796,9 @@ mod platform_gate_tests {
         // Windows-only test fixtures: the applier's road over a signed set, real programs, held
         // files and a squatted claim; its road over a set of plain bytes runs everywhere.
         "update_apply_windows_tests.rs",
+        // Windows-only test fixtures: the release manifest a Windows build embeds, held to the
+        // product's cap and read through its door; the archive's reading is portable.
+        "update_archive_tests.rs",
         // One test accessor, `Job::take_reports`: the job's inbox read without applying it,
         // whose one reader is the Windows Prepare's cancel tests; the job itself is portable.
         "update_job.rs",
@@ -59820,6 +59823,9 @@ mod platform_gate_tests {
         "update_recover.rs",
         // Only the real detached-handoff regression fixture; the handoff API is portable.
         "update_handoff.rs",
+        // Windows-only test fixture: the embedded release manifest held to the packaging list;
+        // the version itself is portable.
+        "version.rs",
         // Windows-only test fixtures: the UNC spelling of a share in a document.
         "web_trace_app_tests.rs",
         // Windows-only test fixtures: WebView2's favicon fetch, beside the macOS twin.
