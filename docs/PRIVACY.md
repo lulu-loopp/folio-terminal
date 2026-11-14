@@ -250,6 +250,14 @@ profile. Do not put a secret in one.
   account — that is a Windows package registration, not a file of ours, and it is
   what `Settings > Apps > Installed apps` then lists. Both are per-user, need no
   elevation, and are undone by switching the row off.
+- The Start at sign-in row (Settings > General, on Windows), when you switch it
+  on. It writes one value named `Folio` under your account's `Run` key
+  (`HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run`), holding
+  the quoted path of this copy's `folio.exe` and nothing else, and Windows starts
+  that program when you sign in. When the copy moves, its next start points the
+  value at the new place. Switching the row off, or uninstalling, removes the
+  value, and the mark Windows keeps for it when it is turned off in Startup apps.
+  Per-user, no elevation.
 - The three agent installers, when you switch them on, write one file each into
   Claude Code's, Codex's and Copilot CLI's own configuration directories. A dated
   copy of the file as it stood is kept beside it first. `SECURITY.md` has the
@@ -474,6 +482,7 @@ rm -rf ~/Library/WebKit/<Folio 的 bundle identifier> ~/Library/Caches/<Folio �
   Windows 11 的文件夹里有 `folio.msix`，则注册该包到当前账户（这是 Windows 包注册，不是
   Folio 的文件；该注册会出现在「设置 > 应用 > 已安装的应用」中）。这些都只针对当前账户，
   无需管理员，关闭时移除。
+- 打开「登录时启动」行（设置 > 常规，仅 Windows）时，在当前账户的 `Run` 键（`HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run`）下写入一个名为 `Folio` 的值，内容只有这份 Folio 的 `folio.exe` 加引号的路径；登录时 Windows 启动该程序。这份 Folio 换了位置后，下次启动时把该值改为指向新位置。关闭该行或卸载 Folio 时，移除该值，以及在「启动应用」中关闭它时 Windows 为它留下的标记。只针对当前账户，无需管理员。
 - 三个 agent 安装行打开时，各写一个文件到 Claude Code、Codex、Copilot CLI 自己的配置
   目录里；写之前先在旁边留一份带日期的原件副本。细节见 `SECURITY.md`。
 - **更新进行中（Windows）**：在当前账户的 `Run` 键下写入一个 `FolioUpdate-<id>` 值，更新
