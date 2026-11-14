@@ -664,6 +664,428 @@ fn uninstall_door_precedes_every_startup_effect() {
     }
 }
 
+/// The calls a squeezed function body (`test_support::squeezed`: no comments, no whitespace) makes
+/// with the carry worker's context as an argument, by their paths as written with any turbofish
+/// left out (the review's N2 and N3, the re-review's R3).
+///
+/// The context is `ctx` or `&ctx` standing as a whole argument, in any position: after the call's
+/// `(` or a `,`, before a `,` or the `)`. The call is the innermost `(` left open in front of it,
+/// over balanced brackets; its path is read back from that `(` over identifiers, `::` and a
+/// turbofish's `::<…>`, and a lone `:` (a field's `hooks:`) or any other character ends it. A
+/// context in brackets that are not a call's, or whose call has no path the reader can name (a
+/// closure called in place, a parenthesised expression), fails here, loudly, rather than being
+/// left out.
+fn calls_handed_the_context(squeezed_body: &str) -> Vec<String> {
+    let bytes = squeezed_body.as_bytes();
+    let identifier = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
+    fn unnamed(squeezed_body: &str, at: usize) -> ! {
+        let boundary = |mut index: usize| {
+            while !squeezed_body.is_char_boundary(index) {
+                index -= 1;
+            }
+            index
+        };
+        let around = &squeezed_body
+            [boundary(at.saturating_sub(40))..boundary((at + 40).min(squeezed_body.len()))];
+        panic!("a context call the reader cannot name, at byte {at}: {around}")
+    }
+    let mut calls = Vec::new();
+    let mut from = 0;
+    while let Some(found) = squeezed_body[from..].find("ctx") {
+        let at = from + found;
+        from = at + "ctx".len();
+        let argument = if at > 0 && bytes[at - 1] == b'&' {
+            at - 1
+        } else {
+            at
+        };
+        let opened_by = argument.checked_sub(1).map(|before| bytes[before]);
+        if !matches!(opened_by, Some(b'(' | b',')) || !matches!(bytes.get(from), Some(b')' | b','))
+        {
+            continue;
+        }
+        let mut open = argument - 1;
+        let mut depth = 0usize;
+        loop {
+            match bytes[open] {
+                b')' | b']' | b'}' => depth += 1,
+                b'(' | b'[' | b'{' if depth > 0 => depth -= 1,
+                b'(' => break,
+                b'[' | b'{' => unnamed(squeezed_body, at),
+                _ => {}
+            }
+            open = open
+                .checked_sub(1)
+                .unwrap_or_else(|| unnamed(squeezed_body, at));
+        }
+        let mut start = open;
+        let mut generics = Vec::new();
+        loop {
+            if start > 0 && bytes[start - 1] == b'>' {
+                let close = start;
+                let mut angle = 0usize;
+                loop {
+                    start = start
+                        .checked_sub(1)
+                        .unwrap_or_else(|| unnamed(squeezed_body, at));
+                    match bytes[start] {
+                        b'>' => angle += 1,
+                        b'<' => {
+                            angle -= 1;
+                            if angle == 0 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if start < 2 || &bytes[start - 2..start] != b"::" {
+                    unnamed(squeezed_body, at);
+                }
+                start -= 2;
+                generics.push(start..close);
+            } else if start > 0 && identifier(bytes[start - 1]) {
+                start -= 1;
+            } else if start >= 2 && bytes[start - 1] == b':' && bytes[start - 2] == b':' {
+                start -= 2;
+            } else {
+                break;
+            }
+        }
+        let mut path = String::new();
+        let mut cursor = start;
+        for generic in generics.iter().rev() {
+            path.push_str(&squeezed_body[cursor..generic.start]);
+            cursor = generic.end;
+        }
+        path.push_str(&squeezed_body[cursor..open]);
+        let named = path.trim_start_matches("::");
+        let segments_named = named.split("::").all(|segment| {
+            segment
+                .bytes()
+                .next()
+                .is_some_and(|first| identifier(first) && !first.is_ascii_digit())
+        });
+        if named.is_empty() || !segments_named {
+            unnamed(squeezed_body, at);
+        }
+        calls.push(path);
+    }
+    calls
+}
+
+/// The member reader reads what the pass hands its context to, in any argument position, and
+/// nothing it does not.
+#[test]
+fn the_carry_members_are_read_by_their_context_argument() {
+    use crate::test_support::squeezed;
+    let body = squeezed(concat!(
+        "{\n",
+        "let round = CarryRound {\n",
+        "hooks: crate::a::first(ctx),\n",
+        "other: crate::b::second(ctx, &mut kept),\n",
+        "};\n",
+        "// crate::c::commented(ctx),\n",
+        "let _ = ctx_free(ctxs, ctx.depth(), the.ctx);\n",
+        "let _ = crate::d::third( ctx );\n",
+        "let _ = crate::e::fourth(&ctx);\n",
+        "let _ = crate::f::fifth(&mut kept, [1, 2], ctx);\n",
+        "let _ = crate::g::sixth::<Vec<u8>>(ctx);\n",
+        "let _ = Some(crate::h::seventh(kept(1), ctx));\n",
+        "}",
+    ));
+    assert_eq!(
+        calls_handed_the_context(&body),
+        [
+            "crate::a::first",
+            "crate::b::second",
+            "crate::d::third",
+            "crate::e::fourth",
+            "crate::f::fifth",
+            "crate::g::sixth",
+            "crate::h::seventh",
+        ]
+    );
+}
+
+/// The member reader fails, loudly, on a context handed to a call it cannot name.
+#[test]
+fn a_context_call_the_member_reader_cannot_name_fails_it() {
+    use crate::test_support::squeezed;
+    for unnamed in [
+        "let _ = (|context| context)(ctx);",
+        "let _ = (ctx);",
+        "let _ = [kept, ctx, kept];",
+        "let _ = 1::<u8>(ctx);",
+    ] {
+        let read = std::panic::catch_unwind(|| calls_handed_the_context(&squeezed(unnamed)));
+        let failure = read.expect_err(unnamed);
+        let message = failure
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .unwrap_or_default();
+        assert!(
+            message.starts_with("a context call the reader cannot name"),
+            "{unnamed}: {message}"
+        );
+    }
+}
+
+/// Whether `text` names a date, `YYYY-MM-DD`.
+fn names_a_date(text: &str) -> bool {
+    text.as_bytes().windows(10).any(|window| {
+        window.iter().enumerate().all(|(index, byte)| match index {
+            4 | 7 => *byte == b'-',
+            _ => byte.is_ascii_digit(),
+        })
+    })
+}
+
+/// Whether `bt_source` finds the function `test` in `module` of this package.
+fn test_found(module: &str, test: &str) -> bool {
+    source()
+        .find(
+            &bt_source::ItemQuery::function(test)
+                .in_module(module)
+                .one_per_variant(),
+        )
+        .is_ok_and(|found| !found.is_empty())
+}
+
+/// RED (0.4.10 plan row 68a, R1; rulings R-A, R-C, R-E of 2026-11-07; the review's N2–N4 and N6)
+/// — **every owned thing says how an update carries it, and the start writers and the carry pass
+/// agree with what is said**:
+///
+/// 1. every row of the inventory declares at least one [`CarryRule`];
+/// 2. every member of `update_trial::Writer::ALL` — every durable writer a start makes, and
+///    `update_trial::tests::writer_all_names_every_variant` holds `ALL` to the whole enum — is
+///    named by some row's rule, so a new start writer must say which owned thing it carries;
+/// 3. every owner check a row declares is called by `carry_pass::run_carry_steps` with the worker's
+///    context, its old sites are gone from both start-time sites — `Runtime::create` and the trial
+///    commit's `release_trial_writer` (row 68b, R9) — and the test it landed with is still in the
+///    program (`PassMember::proved_by`, R9); and every member that body hands the context to is a
+///    check some row declares. **No check is owed by a later part**: the seam row 68a named for one
+///    (`Owed`) held the Explorer registrations until row 68b and the `$PROFILE` lines until row 68c,
+///    and went with its last entry (the coordinator's ruling at row 68b's merge) — the list is empty
+///    by construction, so a part that declares a check lands its member with it. Every statement
+///    is read with comments and whitespace squeezed out, so a comment keeps nothing alive;
+/// 4. an agent's check is its own row's: `AgentHooks(i)` stands on the row `Remover::Agent(i)`;
+/// 5. every check in the pass names the test that brings its old shape to today's, and `bt_source`
+///    finds that test;
+/// 6. every retirement names the dated ruling that keeps it, and every document's reader is the
+///    item its file names.
+///
+/// MUTATIONS: the pass stops calling its member (`plant-68a-pass-skips-its-member.py`); a start
+/// writer loses its row (`plant-68a-writer-claimed-by-no-row.py`); the old-shape test is renamed
+/// (`plant-68a-old-shape-test-renamed.py`); two agents' checks swap rows
+/// (`plant-68a-agent-checks-swapped.py`); the package member is left out of the pass
+/// (`plant-68b-package-member-skipped.py`); the classic verb's reassert is back in
+/// `Runtime::create` (`plant-68b-classic-back-at-create.py`); the trial's release arm calls the
+/// retired probe again (`plant-68b-probe-back-at-the-release.py`); a landed test is renamed
+/// (`plant-68b-landed-test-renamed.py`); the package member is run bare of the boundary that runs
+/// the press behind its latch (`plant-68b-package-member-past-its-boundary.py`); the home sweep is
+/// left out of the pass (`plant-68e-home-sweep-skipped.py`).
+#[test]
+fn every_owned_thing_says_how_an_update_carries_it() {
+    use crate::carry_pass::{CarryCheck, CarryRule};
+    use crate::test_support::squeezed;
+    use crate::update_trial::Writer;
+    let rules = || {
+        INVENTORY
+            .iter()
+            .flat_map(|mark| mark.carry.iter().map(move |rule| (mark, *rule)))
+    };
+    for mark in INVENTORY {
+        assert!(
+            !mark.carry.is_empty(),
+            "{} says nothing of how an update carries it",
+            mark.name
+        );
+    }
+    let claimed: Vec<Writer> = rules()
+        .flat_map(|(_, rule)| match rule {
+            CarryRule::Document { writers, .. } => writers.to_vec(),
+            CarryRule::BuildBytes(writer) | CarryRule::OwnerChecked { writer, .. } => {
+                vec![writer]
+            }
+            CarryRule::Process { held } | CarryRule::Identity { held } => {
+                held.into_iter().collect()
+            }
+            CarryRule::Transaction | CarryRule::Retired { .. } | CarryRule::Absent => Vec::new(),
+        })
+        .collect();
+    for writer in Writer::ALL {
+        assert!(
+            claimed.contains(&writer),
+            "{writer:?} is a start writer no owned thing's carry rule names"
+        );
+    }
+    let pass = squeezed(crate::test_support::free_fn_body("run_carry_steps"));
+    let create = squeezed(crate::test_support::method_body("Runtime", "create"));
+    let release = squeezed(crate::test_support::free_fn_body("release_trial_writer"));
+    let handed = calls_handed_the_context(&pass);
+    // The package member runs through the boundary that runs the press a contained panic left
+    // behind its deployment latch (row 68b, second re-review S2).
+    assert!(
+        pass.contains("package_member_with(asked,behind,"),
+        "run_carry_steps runs the package member through package_member_with: {pass}"
+    );
+    let checks: Vec<(&Mark, CarryCheck)> = rules()
+        .filter_map(|(mark, rule)| match rule {
+            CarryRule::OwnerChecked { check, .. } => Some((mark, check)),
+            _ => None,
+        })
+        .collect();
+    let mut members = Vec::new();
+    for (mark, check) in &checks {
+        let name = mark.name;
+        if let CarryCheck::AgentHooks(index) = check {
+            assert_eq!(
+                mark.remover,
+                Remover::Agent(*index),
+                "{name}: {check:?} is another agent's check"
+            );
+        }
+        let member = check.in_the_pass();
+        assert!(
+            handed.iter().any(|called| called == member.call),
+            "{name}: {check:?} is in the pass by its declaration, and \
+             `run_carry_steps` does not hand {}(ctx) the worker's context",
+            member.call
+        );
+        for retired in member.retired {
+            assert!(
+                !create.contains(&squeezed(retired)),
+                "{name}: {check:?} runs in the pass and still by its old site in \
+                 `Runtime::create`: {retired}"
+            );
+            assert!(
+                !release.contains(&squeezed(retired)),
+                "{name}: {check:?} runs in the pass and still by its old site in \
+                 `release_trial_writer`: {retired}"
+            );
+        }
+        let (module, test) = member.proved_by;
+        assert!(
+            test_found(module, test),
+            "{name}: {check:?} runs in the pass, and the test it landed with, \
+             {module}::{test}, is gone"
+        );
+        members.push(member.call);
+        let (module, test) = check.old_shape_test();
+        assert!(
+            test_found(module, test),
+            "{name}: {check:?}'s old-shape test {module}::{test} is gone"
+        );
+    }
+    for called in &handed {
+        assert!(
+            members.contains(&called.as_str()),
+            "the pass hands {called} the worker's context, and no owned thing declares it as its \
+             check"
+        );
+    }
+    for (mark, rule) in rules() {
+        match rule {
+            CarryRule::Retired { ruling } => assert!(
+                names_a_date(ruling),
+                "{}: the ruling that retires it has no date: {ruling}",
+                mark.name
+            ),
+            CarryRule::Document { readers, .. } => {
+                for reader in readers {
+                    assert!(
+                        reader_found(reader),
+                        "{}: the reader {reader} is not in the file it names",
+                        mark.name
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The module a source file declares, by the file's path below its package's `src/`:
+/// `shell_integration/profile_marks.rs` is `crate::shell_integration::profile_marks`, a `mod.rs`
+/// is its folder's module, and `lib.rs` and `main.rs` are `crate`.
+fn module_of_reader_file(file: &str) -> String {
+    let path = file.strip_suffix(".rs").unwrap_or(file);
+    let path = path.strip_suffix("/mod").unwrap_or(path);
+    if path == "lib" || path == "main" {
+        "crate".to_owned()
+    } else {
+        format!("crate::{}", path.replace('/', "::"))
+    }
+}
+
+/// Whether a reader a `CarryRule::Document` names — `file.rs:function` or `file.rs:Type::method`,
+/// in this package or, by a `../<package>/src/` path, in another — is an item of the module that
+/// file declares (the review's N6).
+fn reader_found(reader: &str) -> bool {
+    let (file, item) = reader
+        .split_once(".rs:")
+        .map(|(file, item)| (format!("{file}.rs"), item))
+        .unwrap_or_else(|| panic!("a reader is `file.rs:item`: {reader}"));
+    let (index, file) = match file.strip_prefix("../") {
+        Some(other) => {
+            let (package, below) = other.split_once("/src/").unwrap_or_else(|| {
+                panic!("another package's reader is `../<package>/src/…`: {reader}")
+            });
+            (bt_source::Index::of_package(package), below.to_owned())
+        }
+        None => (source(), file),
+    };
+    let query = match item.split_once("::") {
+        Some((owner, name)) => bt_source::ItemQuery::method(owner, name),
+        None => bt_source::ItemQuery::function(item),
+    };
+    index
+        .find(
+            &query
+                .in_module(&module_of_reader_file(&file))
+                .one_per_variant(),
+        )
+        .is_ok_and(|found| !found.is_empty())
+}
+
+/// RED (0.4.10 plan row 68a, R-B of 2026-11-07) — **the rows this door does not remove add
+/// nothing to its output**: over the same state, both verbs' transcripts with the rows that
+/// `Remover::OutsideTheDoor` holds are byte for byte the transcripts without them, which is the
+/// inventory as it stood before row 68a listed them.
+#[test]
+fn the_rows_outside_the_door_add_nothing_to_its_output() {
+    let before: Vec<Mark> = INVENTORY
+        .iter()
+        .copied()
+        .filter(|mark| mark.remover != Remover::OutsideTheDoor)
+        .collect();
+    assert_eq!(before.len(), 29, "the inventory as row 68a found it");
+    for purge in [false, true] {
+        let transcript = |tag: String, inventory: &[Mark]| {
+            let (root, scope) = sandbox(&tag);
+            let legacy = seed(&scope, &scope.exe);
+            let report =
+                super::execute_over(inventory, &scope, purge, system_absent, |_| Some(()), None);
+            drop(legacy);
+            let said = format!(
+                "{}--\n{}exit={}",
+                report.stdout(),
+                report.stderr(),
+                report.code
+            )
+            .replace(&root.display().to_string(), "<root>");
+            let _ = fs::remove_dir_all(&root);
+            said
+        };
+        assert_eq!(
+            transcript(format!("outside-the-door-{purge}"), INVENTORY),
+            transcript(format!("before-68a-{purge}"), &before),
+            "purge={purge}"
+        );
+    }
+}
+
 #[test]
 fn uninstall_source_guard_pins_known_writers_and_inventory() {
     use bt_source::{Index, ItemQuery};
@@ -684,8 +1106,20 @@ fn uninstall_source_guard_pins_known_writers_and_inventory() {
         (
             Remover::Profiles,
             app,
-            function("crate::shell_integration", "add_to_profile"),
-            "add_to_profile",
+            function(
+                "crate::shell_integration::profile_runtime",
+                "install_recorded",
+            ),
+            "profile_runtime.rs:install_recorded",
+        ),
+        (
+            Remover::Profiles,
+            app,
+            function(
+                "crate::shell_integration::profile_runtime",
+                "carry_profile_lines",
+            ),
+            "profile_runtime.rs:carry_profile_lines",
         ),
         (
             Remover::Agent(0),
@@ -716,6 +1150,56 @@ fn uninstall_source_guard_pins_known_writers_and_inventory() {
             app,
             function("crate::explorer_menu", "request"),
             "request",
+        ),
+        (
+            Remover::Explorer,
+            app,
+            function("crate::context_menu", "reassert_in"),
+            "context_menu.rs:reassert_in",
+        ),
+        (
+            Remover::Explorer,
+            app,
+            function("crate::explorer_menu", "probe_at_start"),
+            "explorer_menu.rs:probe_at_start",
+        ),
+        // The sign-in entry's three writers (row 22a): the press, the carry pass's repair, and
+        // the platform door both reach.
+        (
+            Remover::StartAtSignIn,
+            app,
+            function("crate::start_at_sign_in", "press_sign_in_in"),
+            "start_at_sign_in.rs:press_sign_in_in",
+        ),
+        (
+            Remover::StartAtSignIn,
+            app,
+            function("crate::start_at_sign_in", "carry_sign_in_in"),
+            "start_at_sign_in.rs:carry_sign_in_in",
+        ),
+        (
+            Remover::StartAtSignIn,
+            platform,
+            function("crate::sign_in_entry", "write_entry_in"),
+            "sign_in_entry.rs:write_entry_in",
+        ),
+        (
+            Remover::OutsideTheDoor,
+            app,
+            ItemQuery::method("FolioApp", "register_for_restart").one_per_variant(),
+            "FolioApp::register_for_restart",
+        ),
+        (
+            Remover::OutsideTheDoor,
+            platform,
+            function("crate::macos_services", "install"),
+            "macos_services.rs:install",
+        ),
+        (
+            Remover::OutsideTheDoor,
+            app,
+            function("crate::update_apply", "write_journal"),
+            "update_apply.rs:write_journal",
         ),
         (
             Remover::Toast,
@@ -786,6 +1270,17 @@ fn uninstall_source_guard_pins_known_writers_and_inventory() {
             function("crate::webhost", "web_engine_folder"),
             "web_engine_folder",
         ),
+        // The record of the update homes, in the data folder this row removes (row 68e).
+        (
+            Remover::Data(
+                HostPlatform::MacOs,
+                Base::Library("Application Support"),
+                "Folio",
+            ),
+            app,
+            function("crate::update_homes", "record_update_home"),
+            "update_homes.rs:record_update_home",
+        ),
         (
             Remover::Data(HostPlatform::OtherUnix, Base::Xdg, "Folio"),
             app,
@@ -807,8 +1302,8 @@ fn uninstall_source_guard_pins_known_writers_and_inventory() {
         (
             Remover::Staging,
             platform,
-            function("crate::deferred_removal", "schedule"),
-            "schedule",
+            function("crate::deferred_removal", "schedule_by"),
+            "schedule_by",
         ),
     ] {
         let found = index
@@ -845,16 +1340,34 @@ fn uninstall_source_guard_pins_known_writers_and_inventory() {
             .unwrap(),
         Path::new("local/Folio")
     );
-    assert_eq!(INVENTORY.len(), 29);
-    // The update entrance's writer is in `bt-platform` and is asked for by its
-    // identity through `bt-source`, not by a file (U-22): `logon_hook::arm_in`
-    // is the one function that writes a `Run` value, and the row names it.
+    assert_eq!(INVENTORY.len(), 33);
+    // The two `Run` writers are in `bt-platform` and are asked for by their
+    // identities through `bt-source`, not by a file (U-22, row 22a), each pinned
+    // to its own value name: `logon_hook::arm_in` writes the update entrance
+    // (`value_name(txn)`), `sign_in_entry::write_entry_in` the switch's entry
+    // (`ENTRY_NAME`), and each row names its writer.
     let entrance_writer = bt_source::Index::of_package("bt-platform")
         .body_of(&bt_source::ItemQuery::function("arm_in"))
         .unwrap_or_else(|failure| panic!("{failure}"));
     assert!(
-        entrance_writer.contains(".set(key, &name, REG_SZ, &data)"),
-        "`logon_hook::arm_in` no longer writes the entrance"
+        entrance_writer.contains(".set(key, &name, REG_SZ, &data)")
+            && entrance_writer.contains("let name = value_name(txn);"),
+        "`logon_hook::arm_in` no longer writes the entrance under its own name"
+    );
+    let sign_in_writer = bt_source::Index::of_package("bt-platform")
+        .body_of(&bt_source::ItemQuery::function("write_entry_in"))
+        .unwrap_or_else(|failure| panic!("{failure}"));
+    assert!(
+        sign_in_writer.contains(".set(keys.run, ENTRY_NAME, REG_SZ, &data)"),
+        "`sign_in_entry::write_entry_in` no longer writes the entry under its own name"
+    );
+    assert!(
+        INVENTORY
+            .iter()
+            .any(|mark| mark.remover == Remover::StartAtSignIn
+                && mark.kind == Kind::PerAccount
+                && mark.writer.ends_with("sign_in_entry.rs:write_entry_in")),
+        "the sign-in entry has no undo"
     );
     assert!(
         INVENTORY
@@ -984,6 +1497,185 @@ fn uninstall_entrance_row_removes_this_copys_values_and_leaves_the_rest() {
         panic!("no entrance off Windows")
     });
     assert_eq!(elsewhere[0].fate, Fate::Absent);
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// RED (0.4.10 plan row 22a, T-START-AT-LOGON-SWITCH; R12) — **the uninstall's sign-in row removes
+/// this copy's entry and a gone copy's, with Windows' switch of the name, and leaves another
+/// copy's, a copy's on a volume that is away (said as unchecked, review N3) and another program's
+/// value; an account with no entry, and every platform but Windows, print the row's `not present`
+/// line.**
+///
+/// Over two keys held in memory, never the account's, and real files in the sandbox for "there"
+/// and "gone".
+///
+/// MUTATION (`plant-22-uninstall-takes-a-live-copy.py`): remove another copy's entry too, and the
+/// live copy's case is `Removed`.
+#[test]
+fn uninstall_sign_in_row_removes_this_copys_entry_and_leaves_another_copys() {
+    use crate::attention_ownership::{Look, PathStands};
+    use crate::start_at_sign_in::{SignInRemoval, uninstall_sign_in_in};
+    use bt_platform::logon_hook::{REG_SZ, Registry};
+    use bt_platform::sign_in_entry::{ENTRY_NAME, EntryKeys, REG_BINARY, command_for};
+    const SIGN_IN_ROW_KEYS: EntryKeys<'static> = EntryKeys {
+        run: "run",
+        approved: "approved",
+    };
+    #[derive(Default)]
+    struct Keys(std::collections::BTreeMap<(String, String), (u32, Vec<u8>)>);
+    impl Registry for Keys {
+        fn set(&mut self, key: &str, name: &str, kind: u32, data: &[u8]) -> io::Result<()> {
+            self.0
+                .insert((key.to_owned(), name.to_owned()), (kind, data.to_vec()));
+            Ok(())
+        }
+        fn flush(&mut self, _: &str) -> io::Result<()> {
+            Ok(())
+        }
+        fn get(&mut self, key: &str, name: &str) -> io::Result<Option<(u32, Vec<u8>)>> {
+            Ok(self.0.get(&(key.to_owned(), name.to_owned())).cloned())
+        }
+        fn delete(&mut self, key: &str, name: &str) -> io::Result<bool> {
+            Ok(self.0.remove(&(key.to_owned(), name.to_owned())).is_some())
+        }
+        fn names(&mut self, _: &str) -> io::Result<Vec<String>> {
+            panic!("the sign-in row never lists a key")
+        }
+    }
+    let sz = |text: &std::ffi::OsStr| -> Vec<u8> {
+        text.to_string_lossy()
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .flat_map(u16::to_le_bytes)
+            .collect()
+    };
+    let (root, scope) = sandbox("sign-in");
+    let exe = scope.exe.clone();
+    fs::create_dir_all(exe.parent().unwrap()).unwrap();
+    fs::write(&exe, b"folio").unwrap();
+    let other = root.join("other").join("folio.exe");
+    fs::create_dir_all(other.parent().unwrap()).unwrap();
+    fs::write(&other, b"other").unwrap();
+    let gone = root.join("gone").join("folio.exe");
+    let away = root.join("away").join("folio.exe");
+    /// A machine whose volumes are all away: no missing path can be told gone.
+    struct SignInVolumeAway;
+    impl Look for SignInVolumeAway {
+        fn stands(&self, path: &Path) -> PathStands {
+            crate::attention_ownership::what_stands(path)
+        }
+        fn volume_of(&self, _missing: &Path) -> Option<PathBuf> {
+            None
+        }
+    }
+    let here = |path: &Path| crate::attention_ownership::what_stands(path);
+    let row_over = |entry: Option<(u32, Vec<u8>)>, look: &dyn Look| {
+        let mut keys = Keys::default();
+        if let Some((kind, data)) = entry {
+            keys.set(SIGN_IN_ROW_KEYS.run, ENTRY_NAME, kind, &data)
+                .unwrap();
+            keys.set(
+                SIGN_IN_ROW_KEYS.approved,
+                ENTRY_NAME,
+                REG_BINARY,
+                &[3, 0, 0, 0],
+            )
+            .unwrap();
+        }
+        keys.set(
+            SIGN_IN_ROW_KEYS.run,
+            "SomebodyElse",
+            REG_SZ,
+            &sz("x".as_ref()),
+        )
+        .unwrap();
+        let removal = uninstall_sign_in_in(&mut keys, SIGN_IN_ROW_KEYS, &exe, look);
+        let entries = sign_in_entries(HostPlatform::Windows, Lang::English, || removal.clone());
+        let left: Vec<(String, String)> = keys.0.keys().cloned().collect();
+        (removal, entries, left)
+    };
+    let row = |entry: Option<(u32, Vec<u8>)>| row_over(entry, &here);
+    let label = "Autostart / login item (per-account)";
+    let only_somebody = vec![("run".to_owned(), "SomebodyElse".to_owned())];
+
+    for (what, program) in [("this copy", &exe), ("a gone copy", &gone)] {
+        let (removal, entries, left) = row(Some((REG_SZ, sz(&command_for(program)))));
+        assert_eq!(removal, SignInRemoval::Removed, "{what}");
+        assert_eq!(entries[0].fate, Fate::Removed, "{what}");
+        assert_eq!(
+            left, only_somebody,
+            "{what}: the entry and its switch go, nothing else"
+        );
+    }
+    let (removal, entries, left) = row(Some((REG_SZ, sz(&command_for(&other)))));
+    assert_eq!(removal, SignInRemoval::LeftAnotherCopy(other.clone()));
+    assert_eq!(entries[0].fate, Fate::Left(vec![other.clone()]));
+    assert_eq!(left.len(), 3, "another copy's entry stays: {left:?}");
+    let (removal, entries, left) =
+        row_over(Some((REG_SZ, sz(&command_for(&away)))), &SignInVolumeAway);
+    assert_eq!(removal, SignInRemoval::LeftUnchecked(away.clone()));
+    assert_eq!(
+        entries[0].fate,
+        Fate::Kept(Text::CleanupSignInUnchecked),
+        "a copy on a volume that is away is not said to exist"
+    );
+    assert!(
+        entries[0]
+            .line(Lang::English)
+            .contains("left (its program could not be checked)"),
+        "{}",
+        entries[0].line(Lang::English)
+    );
+    assert_eq!(left.len(), 3, "the unchecked entry stays: {left:?}");
+    // Another program's value under the name — this copy's text as `REG_EXPAND_SZ`, and a plain
+    // `REG_SZ` quoting another program, the shape a real one has (review N4): both left, and
+    // with them the Startup-apps value of the name, byte for byte.
+    for (what, foreign) in [
+        ("an expandable string", (2, sz(&command_for(&exe)))),
+        (
+            "another program's command",
+            (REG_SZ, sz(r#""C:\Tools\sync.exe""#.as_ref())),
+        ),
+    ] {
+        let mut keys = Keys::default();
+        keys.set(SIGN_IN_ROW_KEYS.run, ENTRY_NAME, foreign.0, &foreign.1)
+            .unwrap();
+        keys.set(
+            SIGN_IN_ROW_KEYS.approved,
+            ENTRY_NAME,
+            REG_BINARY,
+            &[3, 0, 0, 0],
+        )
+        .unwrap();
+        let before = keys.0.clone();
+        let removal = uninstall_sign_in_in(&mut keys, SIGN_IN_ROW_KEYS, &exe, &here);
+        assert_eq!(removal, SignInRemoval::LeftNotOurs, "{what}");
+        let entries = sign_in_entries(HostPlatform::Windows, Lang::English, || removal.clone());
+        assert!(matches!(entries[0].fate, Fate::LeftNotOurs(_)), "{what}");
+        assert_eq!(
+            keys.0, before,
+            "{what}: the value and its Startup-apps value stay byte for byte"
+        );
+    }
+
+    let (removal, entries, left) = row(None);
+    assert_eq!(removal, SignInRemoval::Absent);
+    assert_eq!(left, only_somebody);
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| (entry.mark.clone(), entry.fate.clone()))
+            .collect::<Vec<_>>(),
+        vec![(label.to_owned(), Fate::Absent)],
+        "today's line"
+    );
+    for platform in [HostPlatform::MacOs, HostPlatform::OtherUnix] {
+        let elsewhere = sign_in_entries(platform, Lang::English, || {
+            panic!("no sign-in entry is read off Windows")
+        });
+        assert_eq!(elsewhere[0].mark, label);
+        assert_eq!(elsewhere[0].fate, Fate::Absent);
+    }
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -1304,10 +1996,33 @@ fn uninstall_purge_reports_the_root_it_found_at_the_deciding_check() {
     fs::remove_dir_all(root).unwrap();
 }
 
+/// The system's removers of a test, with the recorded update homes swept as the door sweeps them,
+/// on a worker of the test's own.
+fn homes_system(scope: &Scope) -> impl FnMut(Remover) -> Vec<Entry> {
+    let (records, own) = (
+        scope.update_homes_records.clone(),
+        scope.update_home.clone(),
+    );
+    move |remover| match remover {
+        Remover::UpdateHome => {
+            let (records, own) = (records.clone(), own.clone());
+            on_a_worker(move |worker| {
+                super::recorded_update_homes(
+                    worker,
+                    &label(mark_of(Remover::UpdateHome), Lang::English),
+                    &records,
+                    own.as_deref(),
+                )
+            })
+        }
+        other => system_absent(other),
+    }
+}
+
 /// A directory link at `link` naming `target`: a symlink on Unix, a junction on Windows (which
 /// needs no developer-mode privilege, as `uninstall_purge_junction_refuses_root_without_touching_target`
 /// already relies on).
-fn plant_directory_link(link: &Path, target: &Path) {
+pub(crate) fn plant_directory_link(link: &Path, target: &Path) {
     #[cfg(unix)]
     std::os::unix::fs::symlink(target, link).unwrap();
     #[cfg(windows)]
@@ -1333,7 +2048,7 @@ fn plant_directory_link(link: &Path, target: &Path) {
 }
 
 /// The link itself, never what it names.
-fn remove_directory_link(link: &Path) {
+pub(crate) fn remove_directory_link(link: &Path) {
     #[cfg(unix)]
     fs::remove_file(link).unwrap();
     #[cfg(windows)]
@@ -1652,6 +2367,160 @@ fn uninstall_update_rows_remove_only_ours() {
     fs::remove_dir_all(root).unwrap();
 }
 
+/// RED (0.4.10 plan row 68e, section 10.4) — **both verbs retire a recorded home whose bundle is
+/// gone, and leave every other**: from the data root's record, a home beside a gone bundle holding
+/// Folio's three files is removed and its entry dropped; a home beside a bundle that is there is
+/// left, naming that bundle; a home holding a journal is left for its rescue; a home another copy
+/// holds is left as in use, and one whose app cannot be checked (a folder where its program is) as
+/// unchecked, each in a sentence that says just that (review N8); this copy's own home
+/// is removed whole by the row's first line and kept in the record, untouched. None is a refusal,
+/// and a second run says nothing of the removed one. (Homebrew's zap is `--uninstall-cleanup`
+/// from the Caskroom's copy: the first case.)
+///
+/// The door hands the sweep its worker through the system's removers (`run_within`'s `system`,
+/// pinned here by its source); the test hands it a worker of its own.
+///
+/// MUTATION: the row's record sweep dropped (`plant-68e-zap-misses-the-record.py`).
+#[test]
+fn the_cleanup_retires_a_recorded_home_whose_bundle_is_gone() {
+    use crate::test_support::{free_fn_body, squeezed};
+    let door = squeezed(free_fn_body("run_within"));
+    assert!(
+        door.contains(&squeezed(
+            "} else if remover == Remover::UpdateHome { recorded_update_homes(worker,"
+        )),
+        "the door's system sweeps the recorded homes on its worker: {door}"
+    );
+    if bt_platform::host_platform() == HostPlatform::OtherUnix {
+        // As `uninstall_update_rows_remove_only_ours`: no arm of the update door runs here.
+        return;
+    }
+    let row = "Update home beside the bundle (per-copy)";
+    for purge in [false, true] {
+        let (root, mut scope) = sandbox(if purge {
+            "homes-recorded-purge"
+        } else {
+            "homes-recorded"
+        });
+        let applications = root.join("Applications");
+        let home_of = |name: &str| {
+            crate::update_txn::Home::for_bundle(&applications.join(format!("{name}.app"))).unwrap()
+        };
+        let own = home_of("Folio");
+        let gone = home_of("Folio Beta");
+        let live = home_of("Folio Dev");
+        let in_flight = home_of("Folio Old");
+        let in_use = home_of("Folio Held");
+        let unchecked = home_of("Folio Odd");
+        for (home, files) in [
+            (&own, &["lock"][..]),
+            (&gone, &["admission", "lock", "recover.log"][..]),
+            (&live, &["lock"][..]),
+            (&in_flight, &["lock", "journal.json"][..]),
+            (&in_use, &["admission", "lock"][..]),
+            (&unchecked, &["lock"][..]),
+        ] {
+            fs::create_dir_all(home.root()).unwrap();
+            for file in files {
+                fs::write(home.root().join(file), file.as_bytes()).unwrap();
+            }
+        }
+        let live_program = live.installed_program().unwrap();
+        fs::create_dir_all(live_program.parent().unwrap()).unwrap();
+        fs::write(&live_program, b"live").unwrap();
+        fs::create_dir_all(unchecked.installed_program().unwrap()).unwrap();
+        let record = scope.data[0].join(crate::update_homes::HOMES_RECORD);
+        fs::create_dir_all(&scope.data[0]).unwrap();
+        let entries = [&own, &gone, &live, &in_flight, &in_use, &unchecked]
+            .map(|home| home.root().to_path_buf());
+        fs::write(
+            &record,
+            serde_json::to_vec(&serde_json::json!({ "version": 1, "homes": entries })).unwrap(),
+        )
+        .unwrap();
+        scope.update_home = Some(own.root().to_path_buf());
+        scope.update_homes_records = vec![record.clone()];
+
+        let running = bt_platform::install_txn::try_hold(
+            &in_use.admission(),
+            bt_platform::install_txn::Hold::Shared,
+        )
+        .unwrap()
+        .expect("the test holds the admission first, as a running copy does");
+        let report = execute(&scope, purge, homes_system(&scope));
+        drop(running);
+        let fate_of = |home: &crate::update_txn::Home| {
+            let mark = format!("{row}: {}", home.root().display());
+            report
+                .entries
+                .iter()
+                .filter(|entry| entry.mark == mark)
+                .map(|entry| entry.fate.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(fate_of(&own), [Fate::Removed], "{}", report.stdout());
+        assert_eq!(fate_of(&gone), [Fate::Removed], "{}", report.stdout());
+        assert_eq!(
+            fate_of(&live),
+            [Fate::Left(vec![live.installed_bundle().unwrap()])]
+        );
+        assert_eq!(
+            fate_of(&in_flight),
+            [Fate::Kept(Text::CleanupUpdateHomeInFlight)]
+        );
+        assert_eq!(fate_of(&in_use), [Fate::Kept(Text::CleanupUpdateHomeInUse)]);
+        assert_eq!(
+            fate_of(&unchecked),
+            [Fate::Kept(Text::CleanupUpdateHomeUnchecked)]
+        );
+        assert!(
+            report
+                .stdout()
+                .contains(Text::CleanupUpdateHomeInUse.in_lang(Lang::English))
+                && report
+                    .stdout()
+                    .contains(Text::CleanupUpdateHomeUnchecked.in_lang(Lang::English)),
+            "{}",
+            report.stdout()
+        );
+        let refused: Vec<String> = report
+            .entries
+            .iter()
+            .filter(|e| e.mark.starts_with("Update ") && matches!(e.fate, Fate::Refused(_)))
+            .map(|entry| entry.line(Lang::English))
+            .collect();
+        assert!(refused.is_empty(), "{refused:?}");
+        assert!(!own.root().exists() && !gone.root().exists());
+        assert!(live.root().join("lock").is_file());
+        assert!(in_flight.root().join("journal.json").is_file());
+        assert!(in_use.root().join("admission").is_file() && in_use.root().join("lock").is_file());
+        assert!(unchecked.root().join("lock").is_file());
+        assert!(purge || record.exists(), "the record is kept with the data");
+        if record.exists() {
+            let left: serde_json::Value =
+                serde_json::from_slice(&fs::read(&record).unwrap()).unwrap();
+            assert_eq!(
+                left["homes"],
+                serde_json::json!([
+                    own.root(),
+                    live.root(),
+                    in_flight.root(),
+                    in_use.root(),
+                    unchecked.root()
+                ]),
+                "the removed home's entry dropped, this copy's own untouched"
+            );
+            let second = execute(&scope, purge, homes_system(&scope));
+            assert!(
+                !second.stdout().contains(&gone.root().display().to_string()),
+                "{}",
+                second.stdout()
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
 /// RED (U-27) — **the update home's row detaches an image still mounted inside
 /// the home before it removes the home**, so a leftover mount no longer leaves
 /// the home behind (macOS: the only platform that mounts an update's image).
@@ -1699,7 +2568,7 @@ fn uninstall_update_rows_name_their_writers() {
     };
     assert!(body("arm").contains("arm_with("));
     assert!(body("arm_with").contains("durable_write_with("));
-    assert!(body("sweep").contains("is_ours("));
+    assert!(body("sweep_by").contains("is_ours("));
     assert!(method_body("Home", "for_bundle").contains("MACOS_HOME_SUFFIX"));
     for (remover, writer) in [
         (Remover::UpdateEntrances, "launch_agent.rs:arm"),

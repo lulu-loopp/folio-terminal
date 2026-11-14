@@ -3194,6 +3194,11 @@ impl Home {
     /// runs this bundle finds the same home, and the home sits outside both
     /// bundles an exchange swaps, on the bundle's own volume. Pure: nothing is
     /// read, and nothing need exist.
+    ///
+    /// Because nothing but the bundle's path names it, a home whose bundle has
+    /// moved or gone is found only through the data folder's record of homes
+    /// (`update_homes`, 0.4.10 plan row 68e). macOS only: the Windows home is
+    /// inside the install folder and goes with it.
     pub(crate) fn for_bundle(bundle: &Path) -> Option<Self> {
         if bundle.extension()? != "app" {
             return None;
@@ -3249,6 +3254,13 @@ impl Home {
     /// `H\journal.json`.
     pub(crate) fn journal(&self) -> PathBuf {
         self.root.join("journal.json")
+    }
+
+    /// `H\recover.log`: where the rescue's recovery door appends its lines when the data
+    /// directory is not there (`update_recover`); kept between transactions, with `admission` and
+    /// `lock` (`update_homes`, 0.4.10 plan row 68e).
+    pub(crate) fn recover_log(&self) -> PathBuf {
+        self.root.join("recover.log")
     }
 
     /// `H\<txn>`: everything one transaction owns.
@@ -8303,6 +8315,16 @@ mod parse_sites {
             1,
             Is::NotJournal("a local feed's release list"),
             "crate::update::tests::an_unreadable_or_malformed_feed_is_a_failed_check_not_a_panic",
+        ),
+        // The data folder's record of the macOS update homes (0.4.10 plan row 68e): its own
+        // version, read whole and refused when it is not this build's.
+        site(
+            "UpdateHomesRecord::read",
+            "crate::update_homes::UpdateHomesRecord::read",
+            Reads::SerdeJson,
+            1,
+            Is::NotJournal("the record of the update homes"),
+            "crate::update_homes::tests::a_newer_record_is_left_as_it_is",
         ),
         site(
             "sight_of_read",

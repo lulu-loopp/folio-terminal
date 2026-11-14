@@ -6393,3 +6393,12 @@ reads, `NOT_THE_PRODUCT` and the crate's layer-6 row (`scripts/ci/crate-layers.t
 function wider than (l)4's "returns work, does not submit"**: `queue(gpu)` hands the tool the device's queue to
 submit through; it submits nothing itself, and a product crate that submitted through it would be a new bare site
 of its own crate, which the inventory refuses.
+
+**2026-11-13, 0.4.10 plan row 11 (T-WGPU-DEVICE-POLL-WAIT-IN-NEITHER-LIST, ruling R1): two functions wider, and the
+read-back's wait is the tool's too.** `wgpu::Device::poll` joined the vocabulary, and the read-back's wait for its
+mapping (`PollType::Wait`, no timeout) stood in `probe_surface`'s road, the one site that made "holds no vocabulary
+site" true only while the vocabulary did not name it. The read-back is now three steps of `probe_surface`
+(`read_back_work`, `read_back_mapping`, `read_back_rows`) and `read_back_device(gpu)`, which hands the tool the device
+to wait on as `queue(gpu)` hands it the queue; `bt_render_probe::read_back` submits and waits between them, and the
+`#[cfg(test)]` composition does the same in the same order. It waits on nothing itself, and a product crate that
+polled through it would be a new bare site of its own crate.

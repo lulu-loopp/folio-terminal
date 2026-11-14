@@ -72,7 +72,7 @@
 //! the classic verb's version of the same failure, because it is a page Windows
 //! itself curates.
 //!
-//! So the launch repairs it, `context_menu::reassert`'s rule carried onto a
+//! So the launch repairs it, `context_menu::reassert_in`'s rule carried onto a
 //! heavier mechanism: a registration that points at another folder is
 //! re-registered at this one, silently, because it is this user's own
 //! registration being made to say what they already asked it to say. Nothing is
@@ -86,7 +86,7 @@
 //! "Points at another folder" is also true of a folder another **live** copy of
 //! Folio is running out of, and re-registering that one is not a repair: it is
 //! this process taking the first page's item off a program that is answering it.
-//! The rule is [`reassert_wanted`]'s, which is `context_menu::reassert`'s own —
+//! The rule is [`reassert_wanted`]'s, which is `context_menu::reassert_in`'s own —
 //! `bt_platform::explorer_reassert_wanted`, shared by the two — and it turns on
 //! the `folio.exe` the other folder holds: gone, or this very file, and the
 //! launch registers; a live stranger, and it does not, leaving the row to say
@@ -124,6 +124,7 @@ use std::{
 use bt_platform::admission::WorkerCtx;
 use bt_platform::msix::{self, PACKAGE_FILE_NAME};
 
+use crate::carry_pass::{LastSaid, MemberAnswer};
 use crate::i18n::Text;
 use crate::startup::{Settled, SettledOnce};
 use crate::{i18n, persist, resolved_language};
@@ -546,7 +547,8 @@ pub fn shell_refresh_pending() -> bool {
     REGISTERED_HERE.load(Ordering::Acquire)
 }
 
-/// How a finished job asks for a frame — [`install_wake`].
+/// How a finished press job asks for a frame — [`install_wake`]. The start's probe answers
+/// through the carry pass's one wake instead (0.4.10 plan row 68b).
 static WAKE: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
 
 /// Install the wake, once, at startup.
@@ -742,7 +744,7 @@ fn state_of(
 /// it is ours when that folder is this one and somebody else's copy's when it
 /// is not. **A registration with no external location at all counts as ours**,
 /// which is the conservative direction: the only thing this state buys is the
-/// silent re-registration in [`begin_probe`], and re-registering over an answer
+/// silent re-registration in [`run_package_step`], and re-registering over an answer
 /// Windows would not give is a three-second deployment at every launch.
 ///
 /// **The folder is not the whole question** (review row R4-13). A registration
@@ -1466,6 +1468,10 @@ pub enum Renewal {
     /// outcome when a press held the latch: the reader is saying what the
     /// machine should be, and the next start asks again.
     Wanted { registered: msix::PackageVersion },
+    /// Wanted, and held for an update's trial: the registration is the old
+    /// build's until the trial is committed, and the commit's round renews it
+    /// (0.4.10 plan row 68b, R3).
+    Held { registered: msix::PackageVersion },
     /// Wanted, but no `folio.msix` is beside the executable.
     NoPackageFile { registered: msix::PackageVersion },
     /// Registered again, from `registered` to this build's version.
@@ -1505,6 +1511,10 @@ impl Renewal {
             ),
             Self::Wanted { registered } => format!(
                 "left to the press in flight ({} registered, this build {build})",
+                dotted(*registered)
+            ),
+            Self::Held { registered } => format!(
+                "held for the update's commit ({} registered, this build {build})",
                 dotted(*registered)
             ),
             Self::NoPackageFile { registered } => format!(
@@ -1566,38 +1576,69 @@ pub(crate) struct Probed {
     pub(crate) state: PackageState,
     /// Whether it took the latch, which [`finish_job`] then owes.
     pub(crate) latched: bool,
-    /// Whether the move repair registered this folder ([`REGISTERED_HERE`]).
-    pub(crate) repaired: bool,
+    /// What the move repair did, when one was due.
+    pub(crate) repair: Option<PackageRepair>,
     /// What it did about the registration's version.
     pub(crate) renewal: Renewal,
 }
 
-/// **One start's probe, unless an update's trial holds it back** (F-7, F-18).
+/// **What the move repair did** — a registration serving another folder, whose
+/// `folio.exe` is gone, registered again at this one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum PackageRepair {
+    /// Registered at this folder ([`REGISTERED_HERE`]).
+    Written,
+    /// Held for an update's trial (R3).
+    Held,
+    /// A press held the latch: the reader is saying what the machine should be.
+    Pressed,
+    /// No `folio.msix` beside the executable to register.
+    NoPackageFile,
+    /// Windows refused; its own sentence, which goes to the local log only.
+    Refused(String),
+}
+
+impl PackageRepair {
+    /// `BT_EXPLORER_PACKAGE repair: <what>`.
+    pub(crate) fn repair_log_line(&self) -> String {
+        let said = match self {
+            Self::Written => "written".to_owned(),
+            Self::Held => "held for the update's commit".to_owned(),
+            Self::Pressed => "left to the press in flight".to_owned(),
+            Self::NoPackageFile => {
+                format!("wanted, but {PACKAGE_FILE_NAME} is not beside the executable")
+            }
+            Self::Refused(error) => format!("refused — {error}"),
+        };
+        format!("BT_EXPLORER_PACKAGE repair: {said}")
+    }
+}
+
+/// **Read the registration once, then repair a moved one or renew an old one**
+/// — at most one registration, under the latch a press takes, and only once an
+/// update's trial lets it (F-7, F-18; 0.4.10 plan row 68b, R3).
 ///
-/// `defer` is the trial gate's question ([`crate::update_trial::defer`]): the
-/// probe can write the registration, which is the old build's until the trial
-/// is committed, so during a trial this answers `None`, the gate records the
-/// writer as pending, and the commit runs the probe again
-/// ([`crate::update_trial::Writer::ExplorerRepair`]). Asked here rather than by
-/// the caller, so there is no road to the renewal that does not ask it.
+/// The two never both apply: the repair is for a registration serving another
+/// folder, the renewal for one serving this folder.
+///
+/// `defer` is the trial gate's question ([`crate::update_trial::defer`]): a
+/// registration is the old build's until the trial is committed, so a write due
+/// during a trial is held — the gate records
+/// [`crate::update_trial::Writer::ExplorerRepair`] as pending, and the commit's
+/// round of the carry pass runs this again. **Asked only when a write is due**,
+/// after the read: during a trial the row reads the machine as it is, and a
+/// start with nothing to write asks the gate nothing. Asked here rather than by
+/// the caller, so there is no road to a registration that does not ask it.
+///
+/// "Gone", for the move repair, is the start-time scan's (R5): nothing at the
+/// other folder's `folio.exe` on a volume that is there — a copy on a drive that
+/// is away is not gone, and its registration is left.
 pub(crate) fn probe_at_start(
     defer: impl FnOnce(crate::update_trial::Writer) -> bool,
     deployment: &impl Deployment,
     start: &Start<'_>,
     latch: &AtomicBool,
-) -> Option<Probed> {
-    if defer(crate::update_trial::Writer::ExplorerRepair) {
-        return None;
-    }
-    Some(probe(deployment, start, latch))
-}
-
-/// **Read the registration once, then repair a moved one or renew an old one**
-/// — at most one registration, under the latch a press takes.
-///
-/// The two never both apply: the repair is for a registration serving another
-/// folder, the renewal for one serving this folder.
-fn probe(deployment: &impl Deployment, start: &Start<'_>, latch: &AtomicBool) -> Probed {
+) -> Probed {
     let answer = deployment.registered();
     let state = state_of(answer.clone(), start.here.as_deref(), start.ours);
     // Whether registering this folder would put this executable behind the
@@ -1605,7 +1646,10 @@ fn probe(deployment: &impl Deployment, start: &Start<'_>, latch: &AtomicBool) ->
     let repair = reassert_wanted(
         &state,
         start.here_serves_us,
-        |exe| exe.is_file(),
+        |exe| {
+            crate::attention_ownership::gone_by(exe, &crate::attention_ownership::what_stands)
+                != Ok(true)
+        },
         start.ours,
     );
     let renewal = match (&answer, start.here.as_deref()) {
@@ -1626,6 +1670,18 @@ fn probe(deployment: &impl Deployment, start: &Start<'_>, latch: &AtomicBool) ->
         (Ok(Some(_)), _) => Renewal::AnotherFolder,
     };
     let renewing = matches!(renewal, Renewal::Wanted { .. });
+    let due = repair || renewing;
+    if due && defer(crate::update_trial::Writer::ExplorerRepair) {
+        return Probed {
+            state,
+            latched: false,
+            repair: repair.then_some(PackageRepair::Held),
+            renewal: match renewal {
+                Renewal::Wanted { registered } => Renewal::Held { registered },
+                other => other,
+            },
+        };
+    }
     // **The repair and the renewal take the same latch a press does** (R2-20,
     // F-18). Each is a deployment exactly like the one behind the switch, and
     // until the latch existed the two could run at once: a reader who pressed
@@ -1635,15 +1691,15 @@ fn probe(deployment: &impl Deployment, start: &Start<'_>, latch: &AtomicBool) ->
     // drawn from whichever read happened to run after that.
     //
     // The press wins ties by construction: it takes the latch on the window
-    // thread the instant it is pressed, and this runs seconds later on a thread
-    // of its own. A probe that finds the latch taken registers nothing, which is
+    // thread the instant it is pressed, and this runs on the carry pass's
+    // worker. A probe that finds the latch taken registers nothing, which is
     // right — the reader is in the middle of saying what they want the machine
     // to be, and a launch does not argue with that.
-    let latched = (repair || renewing) && !latch.swap(true, Ordering::AcqRel);
+    let latched = due && !latch.swap(true, Ordering::AcqRel);
     let mut probed = Probed {
         state,
         latched,
-        repaired: false,
+        repair: (repair && !latched).then_some(PackageRepair::Pressed),
         renewal,
     };
     if !latched {
@@ -1660,20 +1716,19 @@ fn probe(deployment: &impl Deployment, start: &Start<'_>, latch: &AtomicBool) ->
         probed.state = state_of(deployment.registered(), start.here.as_deref(), start.ours);
     };
     if repair {
-        if let Some((package, here)) = target {
-            match deployment.register(package, here) {
+        probed.repair = Some(match target {
+            None => PackageRepair::NoPackageFile,
+            Some((package, here)) => match deployment.register(package, here) {
                 Ok(()) => {
-                    probed.repaired = true;
                     read_again(&mut probed);
+                    PackageRepair::Written
                 }
-                // Silent to the user, on `reassert`'s footing: the entry that
-                // is there goes on being whatever it was, the next launch
-                // tries again, and there is no window yet to put a card on.
-                Err(error) => crate::diagnostics::stderr_line(format!(
-                    "BT_EXPLORER_PACKAGE repair refused — {error}"
-                )),
-            }
-        }
+                // Silent to the user, on the classic verb's footing: the entry
+                // that is there goes on being whatever it was, the next start
+                // tries again, and the log says so.
+                Err(error) => PackageRepair::Refused(error),
+            },
+        });
         return probed;
     }
     let Renewal::Wanted { registered } = probed.renewal else {
@@ -1692,99 +1747,103 @@ fn probe(deployment: &impl Deployment, start: &Start<'_>, latch: &AtomicBool) ->
     probed
 }
 
-/// Ask the machine, repair a registration that names another folder, and renew
-/// this folder's when an update left it older than this build (U-25).
+/// **The package member's last lines**, each said again only when it differs.
+pub(crate) struct PackageSaid {
+    renewal: LastSaid,
+    repair: LastSaid,
+}
+
+impl PackageSaid {
+    pub(crate) const fn new() -> Self {
+        Self {
+            renewal: LastSaid::new(),
+            repair: LastSaid::new(),
+        }
+    }
+}
+
+/// This process's.
+static PACKAGE_SAID: PackageSaid = PackageSaid::new();
+
+/// **The package registration, as a member of the start's carry pass** (0.4.10
+/// plan row 68b; [`crate::carry_pass::run_carry_steps`]): ask the machine,
+/// repair a registration that names another folder, and renew this folder's
+/// when an update left it older than this build (U-25) — at the start, on the
+/// pass's worker, and again in the round an update's commit asks for.
 ///
-/// Started at launch, on a thread of its own, and again when an update's trial
-/// is committed — [`probe_at_start`] asks the trial's gate. Nothing on the path
-/// to the first frame waits for it.
-pub fn begin_probe() {
+/// Nothing on a Windows with no first page, where the row reads
+/// [`PackageState::Unsupported`]; nothing in a test process, whose pass must
+/// never ask the account's deployment database — the tests drive
+/// [`package_step_with`] over a deployment of their own.
+pub(crate) fn run_package_step(_ctx: &WorkerCtx) -> Option<MemberAnswer<()>> {
+    // A test process asks nothing and writes no cell: the cells are the suite's to turn
+    // (TEST-GLOBALS' `DEPLOYMENT`; review N6).
+    if cfg!(test) {
+        return None;
+    }
     if !supported() {
         remember(PackageState::Unsupported);
-        return;
+        return None;
     }
-    start_probe(
-        &crate::lane::Executor::thread_door(bt_platform::ThreadPriority::Normal),
-        crate::diagnostics::note,
-    );
+    Some(package_step_with(
+        &ThisMachine,
+        &Start::this_process(),
+        crate::update_trial::defer,
+        &PACKAGE_SAID,
+        &crate::diagnostics::stderr_line,
+    ))
 }
 
-/// [`begin_probe`]'s worker, with the executor it is started by and the voice its end is said in
-/// handed in; `true` when it started.
+/// [`run_package_step`] with the machine, the start's facts, the trial's gate and
+/// the lines handed in: one probe ([`probe_at_start`]) under the deployment latch
+/// [`BUSY`], its facts written into this module's cells — which the press's job
+/// writes too, so the row has one source (R1) — and the latch handed to a press
+/// written down meanwhile ([`finish_job`]). The round's one wake redraws the row.
 ///
-/// **A start the door refuses is said once and answered as the probe's own "not known"**
-/// (T-PROFILE-INSTALL-REFUSED-START; before, it panicked the window thread that asked): the row
-/// stays [`PackageState::Unknown`], which is true — nothing was asked — and which a press already
-/// treats as not known, so the press runs its job and reads the machine itself. No repair or
-/// renewal ran, and none was held back for an update's commit (the trial's gate is asked on the
-/// worker); the next launch probes again. Nothing changed, so nothing is woken.
-///
-/// A probe that panics is said once the same way. If it held the deployment latch, the latch is
-/// let go as the thread unwinds ([`LatchUnwound`]), and a press written down meanwhile is run
-/// ([`run_queued_press`]): before, the panic ended the process.
-fn start_probe(
-    executor: &crate::lane::Executor,
-    say: impl Fn(&str) + Send + Sync + 'static,
-) -> bool {
-    start_probe_with(executor, say, |_ctx| {
-        let start = Start::this_process();
-        let Some(probed) = probe_at_start(crate::update_trial::defer, &ThisMachine, &start, &BUSY)
-        else {
-            return;
-        };
-        let unwound = probed.latched.then(|| LatchUnwound(&BUSY));
-        if probed.repaired {
-            REGISTERED_HERE.store(true, Ordering::Release);
-        }
-        // Once per start, whatever it came to: the renewal is re-evaluated
-        // at every start, so the log is where a reader sees which way this
-        // one went.
-        crate::diagnostics::stderr_line(probed.renewal.log_line(start.this_build));
-        remember_renewal_refusal(probed.renewal.refusal().map(str::to_owned));
-        remember(probed.state.clone());
-        // Let go before `finish_job`, which may hand the latch to a press written down
-        // meanwhile: the guard is this probe's, and a panic after the hand-over must not
-        // take the latch from that press's job.
-        drop(unwound);
-        if probed.latched {
-            finish_job(&probed.state);
-        }
-        wake();
-    })
-}
-
-/// [`start_probe`] with the probe's body handed in — the real one there, and in a test one that
-/// takes the latch and panics. A probe that panics is said once and runs the press written down
-/// while it held the latch ([`run_queued_press`]), by the same executor and voice.
-fn start_probe_with(
-    executor: &crate::lane::Executor,
-    say: impl Fn(&str) + Send + Sync + 'static,
-    body: impl FnOnce(&WorkerCtx) + Send + 'static,
-) -> bool {
-    let say: std::sync::Arc<dyn Fn(&str) + Send + Sync> = std::sync::Arc::new(say);
-    let voice = std::sync::Arc::clone(&say);
-    let press = executor.clone();
-    executor
-        .start_worker(
-            "folio-explorer-probe",
-            crate::lane::Answered::new(
-                "the Explorer package probe",
-                move |line| voice(line),
-                move |end| {
-                    if end.started() {
-                        run_queued_press(&press, &say);
-                    }
-                },
-            ),
-            body,
-        )
-        .is_ok()
+/// One check; changed when a line differs from the last said in this process:
+/// the renewal's outcome, and the move repair's when one was due. Versions and
+/// words only, no path.
+pub(crate) fn package_step_with(
+    deployment: &impl Deployment,
+    start: &Start<'_>,
+    defer: impl FnOnce(crate::update_trial::Writer) -> bool,
+    said: &PackageSaid,
+    say: &dyn Fn(String),
+) -> MemberAnswer<()> {
+    let probed = probe_at_start(defer, deployment, start, &BUSY);
+    let unwound = probed.latched.then(|| LatchUnwound(&BUSY));
+    if probed.repair == Some(PackageRepair::Written) {
+        REGISTERED_HERE.store(true, Ordering::Release);
+    }
+    let mut changed = said
+        .renewal
+        .say_if_new(probed.renewal.log_line(start.this_build), say);
+    if let Some(repair) = &probed.repair {
+        changed |= said.repair.say_if_new(repair.repair_log_line(), say);
+    }
+    remember_renewal_refusal(probed.renewal.refusal().map(str::to_owned));
+    remember(probed.state.clone());
+    // Let go before `finish_job`, which may hand the latch to a press written down
+    // meanwhile: the guard is this probe's, and a panic after the hand-over must not
+    // take the latch from that press's job.
+    drop(unwound);
+    if probed.latched {
+        finish_job(&probed.state);
+    }
+    MemberAnswer {
+        part: (),
+        checks: 1,
+        changed: usize::from(changed),
+    }
 }
 
 /// **The deployment latch, let go if the thread holding it unwinds** (T-PROFILE-INSTALL-REFUSED-START).
-/// A probe that took the latch and then panicked would otherwise hold it for the rest of the run,
+/// A member that took the latch and then panicked would otherwise hold it for the rest of the run,
 /// and every later press would be written down for a job that never finishes. Dropped on a return,
-/// it does nothing: the holder hands the latch on itself ([`finish_job`]).
+/// it does nothing: the holder hands the latch on itself ([`finish_job`]). The press written down
+/// meanwhile is then run ([`run_queued_press`]; 0.4.10 plan row 68b): right after the package
+/// member's contained panic (`carry_pass::package_member_with`, re-review R1), or by the pass's end
+/// after a panic outside the members.
 struct LatchUnwound<'a>(&'a AtomicBool);
 
 impl Drop for LatchUnwound<'_> {
@@ -1796,9 +1855,12 @@ impl Drop for LatchUnwound<'_> {
 }
 
 /// **The press written down while a job held the latch, run now** — for a holder that ended
-/// without handing the latch on ([`LatchUnwound`]). A press taken by a job still running is
-/// written down again, as [`request`] writes any press it cannot start.
-fn run_queued_press(
+/// without handing the latch on ([`LatchUnwound`]): the carry pass's package member, right after
+/// its contained panic ([`crate::carry_pass::package_member_with`]), and the pass's end after a
+/// panic outside the members ([`crate::carry_pass::begin_carry_pass_with`]). Nothing written down
+/// starts nothing; a press taken by a job still running is written down again, as [`request`]
+/// writes any press it cannot start.
+pub(crate) fn run_queued_press(
     executor: &crate::lane::Executor,
     say: &std::sync::Arc<dyn Fn(&str) + Send + Sync>,
 ) {
@@ -3204,7 +3266,7 @@ mod tests {
 
         let deployment = FakeDeployment::holding(Some(registration_at(&other, OLDER)));
         let latch = AtomicBool::new(false);
-        let probed = probe(&deployment, &start, &latch);
+        let probed = probe_at_start(|_| false, &deployment, &start, &latch);
         assert_eq!(probed.renewal, Renewal::AnotherFolder);
         assert!(deployment.calls().is_empty(), "nothing is registered");
         assert!(!latch.load(Ordering::Acquire), "and the latch is not taken");
@@ -3220,7 +3282,7 @@ mod tests {
             ..registration_at(&here, OLDER)
         };
         let deployment = FakeDeployment::holding(Some(nowhere));
-        let probed = probe(&deployment, &start, &AtomicBool::new(false));
+        let probed = probe_at_start(|_| false, &deployment, &start, &AtomicBool::new(false));
         assert_eq!(probed.renewal, Renewal::AnotherFolder);
         assert!(
             deployment.calls().is_empty(),
@@ -3228,7 +3290,7 @@ mod tests {
         );
 
         let deployment = FakeDeployment::holding(None);
-        let probed = probe(&deployment, &start, &AtomicBool::new(false));
+        let probed = probe_at_start(|_| false, &deployment, &start, &AtomicBool::new(false));
         assert_eq!(probed.renewal, Renewal::NothingRegistered);
         assert!(deployment.calls().is_empty(), "nothing registered stays so");
         assert_eq!(probed.state, PackageState::Absent);
@@ -3258,7 +3320,7 @@ mod tests {
             .refusing(&["the deployment service is busy"]);
 
         let pressed = AtomicBool::new(true);
-        let probed = probe(&deployment, &start, &pressed);
+        let probed = probe_at_start(|_| false, &deployment, &start, &pressed);
         assert_eq!(probed.renewal, Renewal::Wanted { registered: OLDER });
         assert!(!probed.latched, "a press holds the latch");
         assert!(
@@ -3266,7 +3328,7 @@ mod tests {
             "and the start does not argue"
         );
 
-        let first = probe(&deployment, &start, &AtomicBool::new(false));
+        let first = probe_at_start(|_| false, &deployment, &start, &AtomicBool::new(false));
         assert_eq!(
             first.renewal,
             Renewal::Refused {
@@ -3279,7 +3341,7 @@ mod tests {
             "the refusal still owes the latch its release"
         );
 
-        let second = probe(&deployment, &start, &AtomicBool::new(false));
+        let second = probe_at_start(|_| false, &deployment, &start, &AtomicBool::new(false));
         assert_eq!(second.renewal, Renewal::Renewed { registered: OLDER });
         let calls = deployment.calls();
         assert_eq!(calls.len(), 2, "one call per start that wanted it");
@@ -3299,7 +3361,7 @@ mod tests {
             "the row is read again after a renewal that worked"
         );
 
-        let third = probe(&deployment, &start, &AtomicBool::new(false));
+        let third = probe_at_start(|_| false, &deployment, &start, &AtomicBool::new(false));
         assert_eq!(
             third.renewal,
             Renewal::Current {
@@ -3318,13 +3380,18 @@ mod tests {
     /// commit, and runs when the commit releases the probe.**
     ///
     /// The registration is the old build's until the trial is committed (F-7):
-    /// a trial's start asks a real gate, which holds the probe back and records
-    /// its writer; a real watch then reads `Committed` from a journal on disk,
-    /// the gate releases `ExplorerRepair`, and the probe that release runs
+    /// a trial's start reads the machine and classifies what it finds — the row
+    /// is drawn from it during the trial (0.4.10 plan row 68b, R3) — and asks a
+    /// real gate only for the write, which the gate holds and records
+    /// (`Renewal::Held`); a real watch then reads `Committed` from a journal on
+    /// disk, the gate releases `ExplorerRepair`, and the probe that release runs
     /// renews.
     ///
-    /// MUTATION: drop the `defer(…)` question from `probe_at_start` and the
-    /// trial's start registers before anything was committed.
+    /// MUTATIONS: drop the `defer(…)` question from `probe_at_start` and the
+    /// trial's start registers before anything was committed; ask it before the
+    /// read, as before row 68b (`plant-68b-package-reads-nothing-in-a-trial.py`),
+    /// and the trial's start reads nothing and the row is not drawn from the
+    /// machine.
     #[test]
     fn an_older_registration_is_renewed_only_after_the_trial_commits() {
         use crate::update_trial::{Gate, Writer, watch};
@@ -3342,7 +3409,14 @@ mod tests {
             &start,
             &AtomicBool::new(false),
         );
-        assert!(held.is_none(), "a trial's start holds the probe back");
+        assert_eq!(
+            held.state,
+            state_of(Ok(Some(registration_at(&here, OLDER))), Some(&here), &ours),
+            "a trial's start reads the machine and classifies it"
+        );
+        assert!(held.state.registered(), "the row reads it registered");
+        assert_eq!(held.renewal, Renewal::Held { registered: OLDER });
+        assert!(!held.latched, "and takes no latch");
         assert!(deployment.calls().is_empty(), "nothing registered yet");
         assert_eq!(gate.pending(), vec![Writer::ExplorerRepair]);
 
@@ -3381,8 +3455,7 @@ mod tests {
             &deployment,
             &start,
             &AtomicBool::new(false),
-        )
-        .expect("a committed trial probes");
+        );
         assert_eq!(released.renewal, Renewal::Renewed { registered: OLDER });
         assert_eq!(deployment.calls().len(), 1);
         let _ = std::fs::remove_dir_all(&here);
@@ -3415,7 +3488,7 @@ mod tests {
         ] {
             let deployment = FakeDeployment::holding(Some(registration_at(at, version)));
             let latch = AtomicBool::new(false);
-            let probed = probe(&deployment, &start, &latch);
+            let probed = probe_at_start(|_| false, &deployment, &start, &latch);
             assert_eq!(
                 probed.renewal,
                 Renewal::Current {
@@ -3464,7 +3537,7 @@ mod tests {
         let deployment =
             FakeDeployment::holding(Some(registration_at(&here, OLDER))).refusing(&[reason]);
 
-        let probed = probe(&deployment, &start, &AtomicBool::new(false));
+        let probed = probe_at_start(|_| false, &deployment, &start, &AtomicBool::new(false));
         assert_eq!(probed.renewal.refusal(), Some(reason));
 
         let failed = crate::i18n::explorer_first_page_failed(reason);
@@ -3542,20 +3615,37 @@ mod tests {
         );
     }
 
-    /// RED (T-PROFILE-INSTALL-REFUSED-START) — **a launch probe the thread door refused is said
-    /// once and holds nothing**: the window thread that asked goes on, the row stays "not known",
-    /// and the deployment latch is free for a press. Before, the refusal panicked the window
-    /// thread (an `expect` on the thread door's answer).
+    /// RED (T-PROFILE-INSTALL-REFUSED-START; moved to the carry pass by 0.4.10 plan row 68b) —
+    /// **a carry pass the thread door refused is said once and holds the deployment latch
+    /// nowhere**: the window thread that asked goes on, no member ran, so the row stays "not
+    /// known" and the latch is free for a press — and the refused start runs no press of its own.
     ///
-    /// MUTATIONS: put the `expect` back on the start — the test panics; the probe's `Answered`
+    /// MUTATIONS: put the `expect` back on the start — the test panics; the pass's `Answered`
     /// not saying — no line.
     #[test]
-    fn a_refused_probe_is_said_and_holds_nothing() {
+    fn a_refused_pass_holds_the_deployment_latch_nowhere() {
+        static LATCH: crate::carry_pass::CarryLatch = crate::carry_pass::CarryLatch::new();
+        fn refused_carry_round(
+            _: &WorkerCtx,
+            _: crate::carry_pass::CarryAsk,
+            _: &crate::carry_pass::PressBehindTheLatch,
+        ) {
+            unreachable!("the door refused the pass's worker")
+        }
         let _turn = DEPLOYMENT
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (executor, say, said) = refusing();
-        assert!(!start_probe(&executor, say), "the door refused the start");
+        assert!(
+            !crate::carry_pass::begin_carry_pass_with(
+                &LATCH,
+                &executor,
+                say,
+                crate::carry_pass::CarryAsk::EXPLORER,
+                refused_carry_round,
+            ),
+            "the door refused the start"
+        );
         said_once(&said);
         assert!(!job_in_flight(), "the deployment latch is free for a press");
     }
@@ -4085,62 +4175,218 @@ mod tests {
         );
     }
 
-    /// RED (T-PROFILE-INSTALL-REFUSED-START review) — **a probe that panics while it holds the
-    /// latch runs the press written down behind it.** The probe takes the latch, a press arrives
-    /// and is written down, and the probe panics: the latch is let go as it unwinds, and the
-    /// probe's end runs the press — here refused at the door, so the press is answered with its
-    /// own failure and the latch is let go again. Both ends are said.
+    /// What the panicking member is handed: a `fn` member captures nothing, so the executor the
+    /// press behind it starts on, that press's voice and the gate that refuses its job are here,
+    /// taken once by the member.
+    type Behind = (
+        crate::lane::Executor,
+        std::sync::mpsc::Sender<String>,
+        std::sync::Arc<crate::lane::Gate>,
+    );
+    static BEHIND: std::sync::Mutex<Option<Behind>> = std::sync::Mutex::new(None);
+
+    /// A carry pass round whose package member takes the deployment latch, has a press written
+    /// down behind it, and panics — inside the pass's own member boundary, as the product's member
+    /// runs (`carry_pass::package_member_with`).
+    fn a_package_member_that_panics(
+        _: &WorkerCtx,
+        asked: crate::carry_pass::CarryAsk,
+        behind: &crate::carry_pass::PressBehindTheLatch,
+    ) {
+        let answer =
+            crate::carry_pass::package_member_with(asked, behind, || hold_the_latch_and_panic());
+        assert!(answer.is_none(), "the member that panicked answers nothing");
+    }
+
+    /// A carry pass round that panics outside its members, holding the deployment latch with a
+    /// press written down behind it.
+    fn a_round_that_panics(
+        _: &WorkerCtx,
+        _: crate::carry_pass::CarryAsk,
+        _: &crate::carry_pass::PressBehindTheLatch,
+    ) {
+        hold_the_latch_and_panic()
+    }
+
+    /// Take the deployment latch, have a press written down behind it, and panic.
+    fn hold_the_latch_and_panic() -> ! {
+        let (behind, pressed, gate) = BEHIND
+            .lock()
+            .unwrap()
+            .take()
+            .expect("the test hands the member its press");
+        assert!(
+            !BUSY.swap(true, Ordering::AcqRel),
+            "the member takes the latch"
+        );
+        let _unwound = LatchUnwound(&BUSY);
+        ask_for(
+            &behind,
+            move |line| pressed.send(line.to_owned()).unwrap(),
+            true,
+        );
+        // The press's job is refused at the door, so no deployment runs in the suite.
+        gate.refuse_next_start();
+        panic!("the explorer suite fails this member on purpose");
+    }
+
+    /// RED (T-PROFILE-INSTALL-REFUSED-START review; moved to the carry pass by 0.4.10 plan row
+    /// 68b; through the member boundary since its re-review R1) — **a package member that panics
+    /// while it holds the deployment latch runs the press written down behind it.** The member
+    /// takes the latch, a press arrives and is written down, and the member panics inside the
+    /// pass's member boundary: the panic is contained there and the worker goes on, the latch is
+    /// let go as the member unwinds, and the press is run right after it — here refused at the
+    /// door, so the press is answered with its own failure and the latch is let go again. The
+    /// member's panic is said on the diagnostics line, not by the pass's voice, and the worker
+    /// ends without a word, so the voice says only the press's refusal.
     ///
-    /// MUTATION: drop `run_queued_press` from the probe's end — the press is never run, no
-    /// outcome, and it stays written down.
+    /// MUTATION: drop the press's run from `carry_pass::package_member_with`
+    /// (`plant-68b-panic-strands-the-press.py`) — the press is never run, no outcome, and it
+    /// stays written down.
     #[test]
-    fn a_probe_that_panicked_runs_the_press_behind_it() {
+    fn a_member_that_panics_holding_the_deployment_latch_runs_the_press_behind_it() {
+        let said = a_pass_that_panics_holding_the_latch(a_package_member_that_panics);
+        assert_eq!(said.len(), 1, "the press's refusal alone: {said:?}");
+    }
+
+    /// RED (T-PROFILE-INSTALL-REFUSED-START review; 0.4.10 plan row 68b's re-review R1) — **a
+    /// round that panics outside its members while the deployment latch is held runs the press
+    /// written down behind it at the pass's end.** The worker ends by the panic, which the lane
+    /// executor contains and the pass's voice says; the latch was let go as it unwound, and the
+    /// pass's end runs the press — refused at the door here, and said.
+    ///
+    /// MUTATION: drop `run_queued_press` from the pass's end
+    /// (`plant-68b-round-panic-strands-the-press.py`) — the press is never run.
+    #[test]
+    fn a_round_that_panics_outside_its_members_runs_the_press_behind_it() {
+        let said = a_pass_that_panics_holding_the_latch(a_round_that_panics);
+        assert_eq!(
+            said.len(),
+            2,
+            "the pass's panic and the press's refusal: {said:?}"
+        );
+    }
+
+    /// One pass of `round` over a scripted executor whose door refuses the press's job: the press
+    /// behind the latch ran and was answered, the latch is free and nothing is left written down.
+    /// Answers what the pass's voice said.
+    fn a_pass_that_panics_holding_the_latch(
+        round: fn(&WorkerCtx, crate::carry_pass::CarryAsk, &crate::carry_pass::PressBehindTheLatch),
+    ) -> Vec<String> {
+        static LATCH: crate::carry_pass::CarryLatch = crate::carry_pass::CarryLatch::new();
         let _turn = DEPLOYMENT
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _forget = ForgetTheJob;
         let gate = std::sync::Arc::new(crate::lane::Gate::default());
         let executor = crate::lane::Executor::scripted(std::sync::Arc::clone(&gate));
         let (said, lines) = std::sync::mpsc::channel::<String>();
-        let pressed = said.clone();
-        let behind = executor.clone();
-        let started = start_probe_with(
+        *BEHIND.lock().unwrap() = Some((executor.clone(), said.clone(), gate));
+        let started = crate::carry_pass::begin_carry_pass_with(
+            &LATCH,
             &executor,
             move |line| said.send(line.to_owned()).unwrap(),
-            move |_ctx| {
-                assert!(
-                    !BUSY.swap(true, Ordering::AcqRel),
-                    "the probe takes the latch"
-                );
-                let _unwound = LatchUnwound(&BUSY);
-                ask_for(
-                    &behind,
-                    move |line| pressed.send(line.to_owned()).unwrap(),
-                    true,
-                );
-                // The press's job is refused at the door, so no deployment runs in the suite.
-                gate.refuse_next_start();
-                panic!("the explorer suite fails this probe on purpose");
-            },
+            crate::carry_pass::CarryAsk::EXPLORER_PACKAGE,
+            round,
         );
-        assert!(started, "the probe started");
+        assert!(started, "the pass started");
         let said = lines.iter().collect::<Vec<_>>();
         assert_eq!(
             take_outcome(),
             Some(Err(PressFailure::Folio(
                 Text::ChangeNotStarted.text().to_owned()
             ))),
-            "the press behind the probe ran, and was answered"
+            "the press behind the member ran, and was answered"
         );
         assert!(!job_in_flight(), "and the latch is free");
         assert!(
             !QUEUED_SET.load(Ordering::Acquire),
             "nothing is left written down"
         );
+        said
+    }
+
+    /// RED (0.4.10 plan row 68b, the guard's `landed_by`) — **the carry pass probes the package
+    /// registration**: [`run_package_step`]'s body over a deployment of the test's own.
+    ///
+    /// An older registration of this folder is renewed, the row's cell reads the renewed
+    /// registration, and the line is said — and on the next round, which finds it current, the
+    /// new finding is said once, and a third round that finds the same says nothing. During an
+    /// update's trial the registration is read and classified, not written, and `ExplorerRepair`
+    /// is pending for the commit, and the row's cell reads that read. A press holding the
+    /// deployment latch wins: nothing is registered, and the latch stays the press's.
+    ///
+    /// MUTATION: leave the member out of `run_carry_steps`
+    /// (`plant-68b-package-member-skipped.py`) and the inventory's guard goes red; this pins what
+    /// the member does once called. Leave the held read out of the cell
+    /// (`plant-68b-held-package-read-unremembered.py`) and the trial's row assertion goes red.
+    #[test]
+    fn the_carry_pass_probes_the_package_registration() {
+        use crate::update_trial::{Gate, Writer};
+
+        let _turn = DEPLOYMENT
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _forget = ForgetTheJob;
+        let here = install_folder("carry");
+        let ours = |path: &Path| path.starts_with(&here);
+        let start = start_in(&here, &ours);
+        let lines = std::sync::Mutex::new(Vec::<String>::new());
+        let say = |line: String| lines.lock().unwrap().push(line);
+
+        let said = PackageSaid::new();
+        let deployment = FakeDeployment::holding(Some(registration_at(&here, OLDER)));
+        let rounds = [0, 1, 2]
+            .map(|_| package_step_with(&deployment, &start, |_| false, &said, &say).changed);
+        assert_eq!(deployment.calls().len(), 1, "renewed once");
+        assert!(state().registered(), "the row's cell reads it");
+        assert!(!job_in_flight(), "the latch was let go");
+        assert_eq!(rounds, [1, 1, 0], "said when the finding changed");
         assert_eq!(
-            said.len(),
-            2,
-            "the probe's panic and the press's refusal: {said:?}"
+            *lines.lock().unwrap(),
+            [
+                Renewal::Renewed { registered: OLDER }.log_line(THIS_BUILD),
+                Renewal::Current {
+                    registered: THIS_BUILD
+                }
+                .log_line(THIS_BUILD),
+            ]
         );
+
+        lines.lock().unwrap().clear();
+        // The cell forgets the renewal, so the trial's own read is what turns it back (review N7).
+        remember(PackageState::Unknown);
+        assert!(!state().registered());
+        let gate = Gate::new();
+        let trial = FakeDeployment::holding(Some(registration_at(&here, OLDER)));
+        let held = package_step_with(
+            &trial,
+            &start,
+            |writer| gate.defer(true, writer),
+            &PackageSaid::new(),
+            &say,
+        );
+        assert!(trial.calls().is_empty(), "a trial's round writes nothing");
+        assert_eq!(gate.pending(), vec![Writer::ExplorerRepair]);
+        assert!(
+            state().registered(),
+            "and the row reads the machine, from the trial's own read"
+        );
+        assert_eq!((held.checks, held.changed), (1, 1));
+        assert_eq!(
+            *lines.lock().unwrap(),
+            [Renewal::Held { registered: OLDER }.log_line(THIS_BUILD)]
+        );
+
+        let pressed = FakeDeployment::holding(Some(registration_at(&here, OLDER)));
+        assert!(
+            !BUSY.swap(true, Ordering::AcqRel),
+            "a press holds the latch"
+        );
+        let _ = package_step_with(&pressed, &start, |_| false, &PackageSaid::new(), &say);
+        assert!(pressed.calls().is_empty(), "the press wins");
+        assert!(job_in_flight(), "and the latch is still the press's");
+        let _ = std::fs::remove_dir_all(&here);
     }
 
     /// RED (T-PROFILE-INSTALL-REFUSED-START review) — **a press's card names Windows only for

@@ -235,12 +235,51 @@ pub(crate) fn other_live_by(
         PathStands::File => Ok(true),
         PathStands::Missing => match dead_when {
             DeadWhen::Missing => Ok(false),
-            DeadWhen::MissingOnAVolumeThatIsThere => match look.volume_of(owner) {
-                Some(volume) if look.stands(&volume) == PathStands::Folder => Ok(false),
+            DeadWhen::MissingOnAVolumeThatIsThere => match after_its_volume(owner, look) {
+                Some(PathStands::Missing) => Ok(false),
+                Some(PathStands::File) => Ok(true),
                 _ => unknown(),
             },
         },
         _ => unknown(),
+    }
+}
+
+/// **Whether a program a mark names is gone, under the start-time scan's rule** (0.4.10 plan row
+/// 67, R4; row 68b, R5): `Ok(true)` when nothing stands at it, by the system's own `NotFound`, on a
+/// volume that is there; `Ok(false)` when a file stands there; "unknown" for an operand that names
+/// no file to ask about, something there that is not a file, a system that will not say, and a
+/// volume that is away or whose way cannot be followed — which writes nothing and is said, as
+/// [`other_live_by`] answers each of them.
+///
+/// [`other_live_by`] asks it of an owner that is not this copy; this asks it of a program with no
+/// copy to compare against — an update's rescue entrance names a program the update itself wrote,
+/// and an Explorer registration's owner is compared with this copy by its caller.
+pub(crate) fn gone_by(program: &Path, look: &(impl Look + ?Sized)) -> Result<bool, &'static str> {
+    let unknown = Err(crate::i18n::Text::AgentHooksOwnerUnknown.text());
+    if literal_absolute_path(program).is_err() {
+        return unknown;
+    }
+    match look.stands(program) {
+        PathStands::File => Ok(false),
+        PathStands::Missing => match after_its_volume(program, look) {
+            Some(PathStands::Missing) => Ok(true),
+            Some(PathStands::File) => Ok(false),
+            _ => unknown,
+        },
+        PathStands::Folder | PathStands::Other | PathStands::Unknown => unknown,
+    }
+}
+
+/// **What stands at a missing `path` once its volume has answered** (0.4.10 plan row 68b, review
+/// N2): `None` when the volume it leads to is not a folder, or its way cannot be followed; else
+/// the path asked again. A drive that arrives between the first question and the volume's answer
+/// makes a program that was missing a file by then, so "gone" is said only of a path that is still
+/// missing after its volume was found there.
+fn after_its_volume(path: &Path, look: &(impl Look + ?Sized)) -> Option<PathStands> {
+    match look.volume_of(path) {
+        Some(volume) if look.stands(&volume) == PathStands::Folder => Some(look.stands(path)),
+        _ => None,
     }
 }
 
@@ -720,6 +759,69 @@ mod tests {
     use super::*;
     use bt_source::{Index, ItemQuery, Needle, Pattern, Search, View};
     use std::fs;
+
+    /// A drive that arrives while it is being asked about: its program reads missing until the
+    /// volume has been asked for, and a file after (review N2).
+    struct ArrivingDrive {
+        volume_asked: std::cell::Cell<bool>,
+    }
+
+    impl Look for ArrivingDrive {
+        fn stands(&self, path: &Path) -> PathStands {
+            if path == Path::new(ARRIVING_ROOT) {
+                PathStands::Folder
+            } else if self.volume_asked.get() {
+                PathStands::File
+            } else {
+                PathStands::Missing
+            }
+        }
+
+        fn volume_of(&self, _: &Path) -> Option<PathBuf> {
+            self.volume_asked.set(true);
+            Some(PathBuf::from(ARRIVING_ROOT))
+        }
+    }
+
+    /// The arriving drive's root, as its volume walk answers it.
+    const ARRIVING_ROOT: &str = if cfg!(windows) {
+        r"E:\"
+    } else {
+        "/Volumes/Arriving"
+    };
+
+    /// RED (0.4.10 plan row 68b, review N2) — **a program that arrives with its volume is not
+    /// gone**: a path that read missing and is a file once its volume has answered is live under
+    /// both rules that walk the volume — the start's scan and the carry pass's members.
+    ///
+    /// MUTATION: answer "gone" from the volume alone, without asking the path again
+    /// (`plant-68b-gone-before-the-drive-arrived.py`), and both are dead.
+    #[test]
+    fn a_program_that_arrives_with_its_volume_is_not_gone() {
+        let program = Path::new(ARRIVING_ROOT).join("Folio").join("folio.exe");
+        let drive = ArrivingDrive {
+            volume_asked: std::cell::Cell::new(false),
+        };
+        assert_eq!(
+            gone_by(&program, &drive),
+            Ok(false),
+            "the carry pass's rule"
+        );
+        let drive = ArrivingDrive {
+            volume_asked: std::cell::Cell::new(false),
+        };
+        let this = Path::new(ARRIVING_ROOT).join("Other").join("folio.exe");
+        assert_eq!(
+            other_live_by(
+                &program,
+                &this,
+                &drive,
+                DeadWhen::MissingOnAVolumeThatIsThere
+            ),
+            Ok(true),
+            "the scan's rule: another copy that is there is live"
+        );
+    }
 
     type Apply = fn(&Path, Decision, &Path, &Path) -> Outcome;
     fn adapters() -> [(&'static str, &'static str, Apply); 3] {

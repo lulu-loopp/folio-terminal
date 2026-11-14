@@ -148,8 +148,12 @@ exact count of what it does see.
   `PreviewPane`, `DocumentView`, `PictureView` and `TerminalPane` have none: O-7
   and O-8 put their writes inside their own types, and the pane's writes are its
   own methods (O-5b).
-- **unclassified.tsv**: **263 items, 231 free functions and 32 `Runtime`
-  methods**, still in `main.rs` (at plan row 102's head, whose alert state splits
+- **unclassified.tsv**: **269 items, 244 free functions and 25 `Runtime`
+  methods**, still in `main.rs` (at K2 batch 27's head, which moved seven methods; 276, 244 and 32
+  before it, at main `27575f724`, where the rows landed since `f641b0064` added fifteen root free
+  functions (the agent resume road, the agent hooks' snapshot, the message box's icon) and took out two
+  (`read_the_agent_rows_again`, and `revive_plan`, now `revive_plan_with`);
+  263, 231 and 32 at plan row 102's head, whose alert state splits
   `claim_the_alert` into `the_alert_on_a_watching_console` and adds `a_panics_turn`,
   `a_stops_claim`, `a_stops_alert_said`, their three steps, `the_panic_hooks_end` and
   `leave_by_the_panic_road`; 255, 223 and 32 before it, at plan row 105's head, which made the free function
@@ -236,6 +240,7 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
    | — | `runtime/settings.rs` and `runtime/mouse.rs` (the settings topic's rest) | moved by batch 24 (ruled 2026-10-27: 10 `Runtime` methods out of `main.rs`; `Runtime::settings_layout`, `Runtime::drag_settings_menu_bar` and `Runtime::apply_slider`, with the six tails `Runtime::settings_content`, `Runtime::settings_dialog`, `Runtime::settings_values`, `Runtime::editor_subject`, `Runtime::advanced_open` and `Runtime::scheme_in_force` (the last at the review fold), into `runtime/settings.rs`; `Runtime::send_user_input` into `runtime/mouse.rs` by the multi-owner rule, below; `rail_state_for` and `Runtime::return_to_live_for_input` held, below) | — |
    | — | `runtime/panes.rs`, `runtime/tabs.rs`, `runtime/attention.rs`, `runtime/terminal.rs`, `runtime/clipboard.rs` and `runtime/frame.rs` (the K2 tail's first batch) | moved by batch 25 (ruled 2026-10-28: the fifteen free functions O-4b and O-5a released, out of `main.rs` to the owners their release lines name, below; the input door's pair split by first caller, `write_pty_input` to terminal and `offer_pty_input` to clipboard) | — |
    | — | `runtime/tabs.rs` and `runtime/terminal.rs` (the K2 tail's second batch) | moved by batch 26 (ruled 2026-10-29: G5's six free functions and G15's `Runtime::toggle_pin` into `runtime/tabs.rs`, which replaces the root as a writer of the ten `TabState` facts G5 alone wrote at the root (the "replace, not split" rule, below); `Runtime::return_to_live_for_input` into `runtime/terminal.rs` by the owner tie-break; G3's seven held for plan row 105, which closed them the same day, below) | — |
+   | — | `runtime/settings.rs`, `runtime/preview.rs` and `runtime/keyboard.rs` (the settings group's rest, re-sort D5) | moved by batch 27 (ruled 2026-11-02, under the owner's "keep splitting" ruling of that day: 7 `Runtime` methods out of `main.rs`; `Runtime::settings_closed`, `Runtime::apply_scheme`, `Runtime::add_scheme`, `Runtime::advance_scheme_watch` and `Runtime::reread_schemes` into `runtime/settings.rs` by the owner-arrival rule, below; `Runtime::open_scheme_for_editing` into `runtime/preview.rs` by the multi-owner rule; `Runtime::adopt_option_as_alt` into `runtime/keyboard.rs` by the owner-arrival rule; `Runtime::advance_storage_watch` held, below) | — |
 
    **From batch 14 on, the order is the live map's** (ruled at batch 14). The smallest-sum-first rule above is
    applied to the map regenerated at each batch's base, not to this table's numbers, which were read at batch 1's
@@ -323,6 +328,18 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
    setter `set_math_layout_options`), and `WindowRuntime.focus_mode` and `WindowRuntime.focus_reveal` ({root,
    windows} → {root, settings, windows}; `set_focus_mode`, the Appearance page's toggle). A fact going from one
    writer module to two still holds the item.
+
+   **Except when the module it gains is the fact's census owner** (the owner-arrival rule, ruled 2026-11-02 at
+   K2 batch 27, under the owner's ruling of that day to keep splitting `main.rs`). A fact may go from one writer
+   module to two when three things hold: the module it gains is the fact's census owner, the root writers it
+   keeps are anchored at the root (they move by no K2 rule), and an annotation row names that owner. The move
+   carries the fact's writers toward its owner and leaves the root only the writes it cannot give up;
+   `App.git_watch`'s annotation is the nearest shape (the application arms a watch and a topic module's turn spends it;
+   there the owner is the application's `git_watch`, here the module gained is the owner).
+   Batch 27's two: `App.scheme_watch` ({root} → {root, settings}; `Runtime::create` arms it at launch and stays,
+   `add_scheme` and `advance_scheme_watch` moved) and `WindowRuntime.modifiers` ({root} → {root, keyboard};
+   `FolioApp::on_window_event`, the ModifiersChanged door, stays, `adopt_option_as_alt` moved). A fact with no
+   census owner gets no such exception: `App.storage_watch` keeps `Runtime::advance_storage_watch` held.
 
    **When the ownership census names an owner for a field an item writes, the owner column wins over the first
    caller** (a judged exception, batch 6). `deliver_osc_attention` is called only from `Runtime::drain_pty` in
@@ -457,6 +474,17 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
    order in the list (batch 23's review, finding 1).
 
    **Held items** (each row's generated `called_from` home is not where it goes):
+   - **Batch 27 (2026-11-02) moved seven of the settings group's eight rows** (the batch 27 rulings 1, 3 and
+     4, under the owner's ruling of that day to keep splitting), and their entries leave this list:
+     `Runtime::add_scheme` and `Runtime::advance_scheme_watch`, by the owner-arrival rule (above), and with
+     them the three that waited with their callers (D2), `Runtime::settings_closed`, `Runtime::apply_scheme` and
+     `Runtime::reread_schemes`, into `runtime/settings.rs`; `Runtime::open_scheme_for_editing`, the fourth, into
+     `runtime/preview.rs` by the multi-owner rule (preview already wrote both its facts), so
+     `TabState.preview_edit_focus` went from {root, preview} to {preview} and its annotation row left;
+     `Runtime::adopt_option_as_alt` into `runtime/keyboard.rs` by the owner-arrival rule. `App.scheme_fault`
+     moved whole with its one writer, `reread_schemes`. One stays held: `Runtime::advance_storage_watch`
+     (below). The `//` header above `settings_closed` ("the hover panels' one-at-a-time rule") is
+     blank-separated from it and stays in `main.rs`, for 0.4.9 plan row 78 (T-DOC-LINK-DEBT, 0.4.10 row 4).
    - **Batch 26 (2026-10-29) moved eight of the fifteen rows batch 25 left** (the batch 26 rulings 1–3), and
      their entries leave this list: G5's `pane_into_tab`, `pane_into_new_tab`, `absorb_tab_sessions`,
      `move_seat_content`, `forget_work_in_flight_for_seat` and `closing_this_pane_closes_the_tab`, with G15's
@@ -480,7 +508,8 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
      `runtime/frame.rs`. `drain_leaf_pty`'s doc, which stood above `synchronized_update_committed`, now stands
      above it. Fifteen stay held: `Runtime::return_to_live_for_input`, G3's seven, G5's six and G15's one.
      The `//` note that stood above `tab_queue_leader` ("`attention_is_asked` and `attention_ticket` stood here
-     until A2…") is blank-separated from it and stays in `main.rs`, for row 78 (ruling R6).
+     until A2…") is blank-separated from it and stays in `main.rs`, for 0.4.9 plan row 78 (T-DOC-LINK-DEBT,
+     0.4.10 row 4) (ruling R6).
    - `release_due_leaf_resize` — stayed in `main.rs` (the census rule above). Re-cited 2026-10-29 (K2 batch 26,
      ruling 4): absorbed by plan row 105 (`T-SHELL-SESSION-RELEASE-DUE-SIZE`). **Closed 2026-10-29 by row 105**:
      the release is `ShellSession::release_due_size`, a door beside `ShellSession::propose_size` in `main.rs`'s
@@ -541,15 +570,22 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
      also writes facts of several census owners. At batch 23 the first two still hold in the settings topic's
      rest: `App.scheme_watch` and `App.storage_watch` would go from the root alone to the root and
      `runtime/settings.rs` (`Runtime::create` keeps writing both), and `Runtime::add_scheme`, the other writer of
-     `App.scheme_watch`, holds with them.
+     `App.scheme_watch`, holds with them. Batch 27 (2026-11-02) moved `advance_scheme_watch` and `add_scheme` to
+     `runtime/settings.rs` by the owner-arrival rule (above). Re-cited 2026-11-02 (batch 27 ruling 5):
+     `advance_storage_watch` stays held, twice over. `App.storage_watch` has no census owner, so the
+     owner-arrival rule does not reach it, and `Runtime::create` keeps arming it, so its writers cannot all move;
+     and it writes six facts of five owners, of which no module writes all (`runtime/storage.rs` writes the
+     four document stores but neither `App.session_store` nor `App.storage_watch`).
    - `Runtime::adopt_option_as_alt` (batch 23) — in the settings group, but it writes `WindowRuntime.modifiers`
      (owner keyboard), which `FolioApp::on_window_event` writes at the root, so `runtime/settings.rs` would make it a
-     two-module fact (the census rule above).
+     two-module fact (the census rule above). Batch 27 (2026-11-02) moved it to `runtime/keyboard.rs`, the fact's
+     owner, by the owner-arrival rule (above).
    - `Runtime::reread_schemes`, `Runtime::apply_scheme`, `Runtime::open_scheme_for_editing` and
      `Runtime::settings_closed` (batch 23) — in the settings group and blocked by none of their own facts, but each
      has a root product caller that holds (`advance_scheme_watch`; `add_scheme` and `reread_schemes`; `add_scheme`;
      `open_scheme_for_editing`), so they stay with their callers (ruled 2026-10-26, D2) and move when the scheme
-     watch does.
+     watch does. Batch 27 (2026-11-02) moved them with it: `reread_schemes`, `apply_scheme` and `settings_closed`
+     to `runtime/settings.rs`, `open_scheme_for_editing` to `runtime/preview.rs` (above).
    - `Runtime::settings_values`, `Runtime::settings_layout`, `Runtime::drag_settings_menu_bar` and `rail_state_for`
      (after batch 23; batch 23's review, finding 6) — not judged in batch 23. Their generated `called_from` home is now
      `runtime/settings.rs`, because their callers moved there. Batch 24 (2026-10-27) judged them: the three methods

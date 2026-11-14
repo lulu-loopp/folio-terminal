@@ -22,7 +22,7 @@
 //! writers are **released** — the window thread is woken and runs each of them
 //! again ([`take_released`], the application's `release_trial_writes`). What
 //! they write then is what the process holds then: the document as it stands,
-//! the migration as it would run, not a replay of each held-back call.
+//! the `$PROFILE` carry as it would run, not a replay of each held-back call.
 //!
 //! **A person's change held past the trial's end is said, not silently lost**
 //! (0.4.8 E4, the clean VM's R3): a trial that ends before its watch reads
@@ -149,9 +149,10 @@ pub(crate) enum Writer {
     /// `update-check.json` and its claim file: the check (`update::begin`) and
     /// every change to the file (`OfferState::transact`).
     UpdateCheck,
-    /// The integration marks: the startup migration of the PowerShell profiles
-    /// and the marks record it keeps
-    /// (`shell_integration::begin_startup_migration`).
+    /// The integration marks: the carry of Folio's old lines in the PowerShell
+    /// profiles and the marks record it keeps — the carry pass's member
+    /// `shell_integration::run_profile_lines_step` (0.4.10 plan row 68c; the
+    /// startup migration until 0.4.7, the startup's observation until row 68c).
     ProfileMigration,
     /// The bash integration script a starting bash sources, written into the
     /// data folder (`shell_integration::script_path`).
@@ -173,9 +174,12 @@ pub(crate) enum Writer {
     /// under the system temporary directory, and removes nothing; the release
     /// prepares the durable copy on a worker.
     PsReadLineModule,
-    /// The launch probe's repair and renewal of the Explorer package
-    /// registration (`explorer_menu::begin_probe`; the gate is asked in
-    /// `explorer_menu::probe_at_start`, U-25).
+    /// The carry pass's repair and renewal of the Explorer package registration
+    /// (`explorer_menu::run_package_step`; the gate is asked in
+    /// `explorer_menu::probe_at_start`, U-25) and its rewrite of the classic verb
+    /// (`context_menu::run_classic_step`, 0.4.10 plan row 68b, G6): both registrations name
+    /// the old build until the trial is committed. Held back, both are still read and shown;
+    /// the release runs the two Explorer members again.
     ExplorerRepair,
     /// The toast sender's identity in the registry (`NotificationDesk::show` →
     /// `bt_platform::Notifier::register_identity`).
@@ -198,6 +202,19 @@ pub(crate) enum Writer {
     /// shape, rewritten to this one. Held back, the scan still runs and its classification is
     /// shown; the release runs the pass again, which then writes.
     AgentHooksRepair,
+    /// **The carry pass's removal of an update's entrance whose rescue program is gone**
+    /// (`update_orphans::run_orphans_step`, 0.4.10 plan row 68b, R5 of 2026-11-04): a Windows
+    /// `Run\FolioUpdate-*` value or a macOS update LaunchAgent no copy can answer. Held back,
+    /// the entrances are still read and said; the release runs the sweep again. **And the removal
+    /// of a macOS update home whose app is gone** (`update_homes::run_update_homes_step`, row 68e):
+    /// held back, the recorded homes are still judged and said; the same release runs that member
+    /// too.
+    OrphanSweep,
+    /// **The carry pass's re-pointing of the sign-in entry** (`start_at_sign_in::run_sign_in_step`,
+    /// 0.4.10 plan row 22a, R7): the `Run\Folio` value of a copy that moved or is gone, rewritten
+    /// to name this one. Held back, the entry is still read and the row shows it; the release runs
+    /// the member again, which then writes. The switch's press is a person's and is not held.
+    StartAtSignIn,
 }
 
 impl Writer {
@@ -222,13 +239,15 @@ impl Writer {
             | Writer::ToastIdentity
             | Writer::RecoveredAnnouncement
             | Writer::RestartRegistration
-            | Writer::AgentHooksRepair => false,
+            | Writer::AgentHooksRepair
+            | Writer::OrphanSweep
+            | Writer::StartAtSignIn => false,
         }
     }
 
     /// Every writer, in release order.
     #[cfg(test)]
-    pub(crate) const ALL: [Writer; 19] = [
+    pub(crate) const ALL: [Writer; 21] = [
         Writer::DataFolderMove,
         Writer::DataFolder,
         Writer::RefusedCopies,
@@ -248,6 +267,8 @@ impl Writer {
         Writer::RecoveredAnnouncement,
         Writer::RestartRegistration,
         Writer::AgentHooksRepair,
+        Writer::OrphanSweep,
+        Writer::StartAtSignIn,
     ];
 }
 
@@ -4222,7 +4243,7 @@ mod tests {
             assert_eq!(update_startup::held(), Some(TXN));
             assert!(
                 !run_the_start_writers(&root),
-                "the marks' migration started (ProfileMigration)"
+                "the carry's $PROFILE member ran (ProfileMigration)"
             );
             assert!(writes_are_deferred());
             assert_eq!(receipt_due(), None, "no receipt");
@@ -4418,14 +4439,15 @@ mod tests {
     /// **A start's durable writers, in `Runtime::create`'s order**, each driven
     /// through its own product entry and each asked to write something: the
     /// data folder, the stores and a change to each, the update check's state,
-    /// the integration marks' migration, the shell scripts and Folio's
+    /// the carry pass's `$PROFILE` member, the shell scripts and Folio's
     /// PSReadLine module (written as a Windows PowerShell birth writes it, with
     /// the launch's removal of other builds' artefacts), and the recovered
     /// folder's record. The registry writers (the
     /// Explorer repair, the toast identity) are not run here: a test that
     /// reached them would change the machine it runs on.
     ///
-    /// Answers whether the marks' migration started (its worker's wake came).
+    /// Answers whether the carry pass's `$PROFILE` member ran — the trial did not hold it back
+    /// (`Writer::ProfileMigration`) — run on a worker of its own, as the pass runs it.
     fn run_the_start_writers(root: &Path) -> bool {
         // Settled as `main`'s claim settles it: this is a start's process of its own, under the
         // private `APPDATA` the harness handed it.
@@ -4479,11 +4501,16 @@ mod tests {
         let offers = crate::update::OfferState::load(&storage, true);
         offers.skip("v9.9.9").unwrap();
 
-        let (migrated, migration) = mpsc::channel();
-        crate::shell_integration::install_wake(move || {
-            let _ = migrated.send(());
-        });
-        crate::shell_integration::begin_startup_migration();
+        let started = bt_platform::spawn_at_priority(
+            "update-trial-test-profile-lines",
+            bt_platform::ThreadPriority::BelowNormal,
+            // As the round after the hooks' first answer asks it (row 68c's N1): what is
+            // pinned here is the trial's hold, not that wait.
+            |ctx| crate::shell_integration::run_profile_lines_step(ctx, true).is_some(),
+        )
+        .ok()
+        .and_then(|worker| worker.join().ok())
+        .unwrap_or(false);
 
         let _ = crate::shell_integration::script_path();
         let _ = crate::shell_integration::zdotdir_path();
@@ -4499,9 +4526,6 @@ mod tests {
         crate::recovered::begin(&storage);
 
         let deadline = std::time::Instant::now() + Duration::from_secs(3);
-        let started = migration
-            .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
-            .is_ok();
         let _ = announcement
             .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()));
         // The session's own writer finishes what it was handed, or nothing.
@@ -4606,11 +4630,11 @@ mod tests {
 
     /// RED (U-13) — **a trial start writes nothing durable before its
     /// transaction is committed**: after the stores are opened and changed,
-    /// the update check's state changed, the marks' migration, the scripts and
+    /// the update check's state changed, the `$PROFILE` carry, the scripts and
     /// the PSReadLine upgrade asked for, every file under the start's private
     /// root is byte for byte what the old build left, and nothing was added —
     /// the data folder is not moved, no refused copy is kept, no sentinel is
-    /// armed, and the migration never starts.
+    /// armed, and the `$PROFILE` carry never runs.
     ///
     /// Run in a process of its own over a private `APPDATA`, local folder and
     /// home, through each writer's product entry. `diagnostics.log` would be
@@ -4632,7 +4656,7 @@ mod tests {
             ));
             assert!(
                 !run_the_start_writers(&root),
-                "the marks' migration started (ProfileMigration)"
+                "the carry's $PROFILE member ran (ProfileMigration)"
             );
             let pending = GATE.pending();
             for writer in [
@@ -4682,7 +4706,7 @@ mod tests {
             assert!(update_startup::become_held(TXN));
             assert!(
                 !run_the_start_writers(&root),
-                "the marks' migration started (ProfileMigration)"
+                "the carry's $PROFILE member ran (ProfileMigration)"
             );
             let pending = GATE.pending();
             for writer in [
@@ -4720,8 +4744,8 @@ mod tests {
     /// PIN (U-13) — **a start that is no trial writes as it always has**: the
     /// same writers over the same folder move the data folder to its new name
     /// (where there was an old one), keep the refused `keybindings.json`, write
-    /// the documents and the update check's state, start
-    /// the marks' migration, write the scripts and Folio's PSReadLine module,
+    /// the documents and the update check's state, run
+    /// the carry's `$PROFILE` member, write the scripts and Folio's PSReadLine module,
     /// and remove the artefact another build left.
     ///
     /// MUTATION: make `Gate::defer` answer `true` whether or not the process
@@ -4731,7 +4755,7 @@ mod tests {
         const SELECTOR: &str =
             "update_trial::tests::a_start_that_is_no_trial_writes_as_it_always_has";
         if let Some(root) = child_root(SELECTOR) {
-            assert!(run_the_start_writers(&root), "the migration starts");
+            assert!(run_the_start_writers(&root), "the $PROFILE member runs");
             return;
         }
         let root = scratch("ordinary-start");
@@ -4782,5 +4806,71 @@ mod tests {
             );
         }
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (0.4.10 plan row 68a, the review's N4 and the re-review's R1) — **`Writer::ALL` names
+    /// every writer**: the inventory's guard holds every member of `ALL` to a row's carry rule, so
+    /// a writer missing from `ALL` would land without saying what it carries. Membership is read
+    /// from `Writer::is_a_persons_change`, the product's match over every writer, which has no
+    /// wildcard arm, so a new variant does not compile until it has an arm there: the writers
+    /// its arms name are the writers `ALL` lists, each once. The order is held by the match below,
+    /// which has no wildcard arm either: a writer's place is its index in `ALL`.
+    #[test]
+    fn writer_all_names_every_variant() {
+        let place = |writer: Writer| match writer {
+            Writer::DataFolderMove => 0,
+            Writer::DataFolder => 1,
+            Writer::RefusedCopies => 2,
+            Writer::Session => 3,
+            Writer::Settings => 4,
+            Writer::Keybindings => 5,
+            Writer::Profiles => 6,
+            Writer::Pins => 7,
+            Writer::UpdateCheck => 8,
+            Writer::ProfileMigration => 9,
+            Writer::BashScript => 10,
+            Writer::ZshScripts => 11,
+            Writer::PowerShellScript => 12,
+            Writer::PsReadLineModule => 13,
+            Writer::ExplorerRepair => 14,
+            Writer::ToastIdentity => 15,
+            Writer::RecoveredAnnouncement => 16,
+            Writer::RestartRegistration => 17,
+            Writer::AgentHooksRepair => 18,
+            Writer::OrphanSweep => 19,
+            Writer::StartAtSignIn => 20,
+        };
+        for (index, writer) in Writer::ALL.into_iter().enumerate() {
+            assert_eq!(
+                place(writer),
+                index,
+                "{writer:?} is not at its place in Writer::ALL"
+            );
+        }
+        let arms_body = crate::test_support::squeezed_body("Writer", "is_a_persons_change");
+        assert!(
+            !arms_body.contains("_=>"),
+            "Writer::is_a_persons_change names every writer, with no wildcard arm: {arms_body}"
+        );
+        let mut armed: Vec<&str> = arms_body
+            .split("Writer::")
+            .skip(1)
+            .map(|rest| {
+                let end = rest
+                    .find(|character: char| !character.is_alphanumeric() && character != '_')
+                    .unwrap_or(rest.len());
+                &rest[..end]
+            })
+            .collect();
+        armed.sort_unstable();
+        let mut listed: Vec<String> = Writer::ALL
+            .into_iter()
+            .map(|writer| format!("{writer:?}"))
+            .collect();
+        listed.sort_unstable();
+        assert_eq!(
+            armed, listed,
+            "Writer::is_a_persons_change's arms and Writer::ALL name the same writers, once each"
+        );
     }
 }

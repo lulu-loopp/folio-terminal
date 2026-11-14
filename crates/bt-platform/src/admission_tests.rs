@@ -68,7 +68,7 @@ fn the_attention_endpoint_delivers_on_a_worker_the_door_started() {
     let (sender, heard) = std::sync::mpsc::channel();
     let endpoint = crate::attention_pipe::AttentionPipe::start_on(
         &directory,
-        std::sync::Arc::new(crate::launch_conversation::CountedClock::answering()),
+        std::sync::Arc::new(crate::launch_clock::CountedClock::answering()),
         move |line| {
             let _ = sender.send((line, role()));
         },

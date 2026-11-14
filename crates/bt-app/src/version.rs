@@ -332,11 +332,13 @@ mod tests {
     /// every file the checkout provides hashed as it is on disk now. The
     /// ConPTY sidecar's bytes are held to their pins by `bt-pty`.
     ///
-    /// Only a Windows build carries the manifest — the archive is Windows' —
-    /// so elsewhere the check is that there is none.
+    /// Windows only (0.4.10 plan row 12, review N1): only a Windows build
+    /// carries the manifest — the archive is Windows' — so elsewhere there is
+    /// none to hold to the list, and the test returned asserting only the host.
     ///
     /// MUTATION: make `build.rs`'s `release_manifest` skip `Source::Packaging`
     /// members and the two name lists differ at `folio-here.cmd`.
+    #[cfg(windows)]
     #[test]
     fn the_embedded_manifest_is_the_packaging_list_but_the_two_signed_ones() {
         use bt_winres::digest::{hex, sha256};
@@ -345,14 +347,7 @@ mod tests {
             parse_member_list,
         };
 
-        let Some(path) = option_env!("FOLIO_RELEASE_MANIFEST") else {
-            assert_ne!(
-                bt_platform::host_platform(),
-                bt_platform::HostPlatform::Windows,
-                "a Windows build always embeds the release manifest"
-            );
-            return;
-        };
+        let path = env!("FOLIO_RELEASE_MANIFEST");
         let text = std::fs::read_to_string(path).expect("build.rs wrote the manifest it embedded");
         let manifest = Manifest::parse(&text).expect("the embedded manifest parses");
 

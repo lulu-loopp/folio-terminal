@@ -2,6 +2,7 @@
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
 use crate::input::Keystroke;
+use crate::runtime::clipboard::PasteFrom;
 use crate::runtime::floats::float_dock_label;
 use crate::runtime::handoff::reveal_ask;
 use crate::runtime::math::answers_for;
@@ -3050,7 +3051,7 @@ impl<B: Backend> Runtime<'_, B> {
         let target = batch.target.filter(|_| !self.a_modal_holds_the_window());
         let pasted = match target {
             Some(target) => self
-                .paste_paths_into(target, batch.paths, "write dropped paths to PTY")
+                .paste_paths_into(target, batch.paths, PasteFrom::Drop)
                 .and_then(|written| {
                     // **The keyboard follows the path, and the window comes to
                     // the front with it** (owner's ruling 2026-09-17) — once for

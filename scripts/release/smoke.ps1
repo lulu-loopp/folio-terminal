@@ -47,8 +47,9 @@
     reproduce.
 
     **The run is sealed off from the machine's own Folio**: `APPDATA` and `TEMP`
-    are pointed at a scratch directory, so this reads no settings, restores no
-    session and leaves nothing behind.
+    are pointed at a scratch directory, and `BT_POWERSHELL_PROFILE` at a scratch
+    profile, so this reads no settings, restores no session, touches none of the
+    account's PowerShell profiles and leaves nothing behind.
 
 .PARAMETER Exe
     The `folio.exe` to run. Defaults to `target/release/folio.exe`.
@@ -766,6 +767,13 @@ $environment = @{
     APPDATA         = $home_
     TEMP            = (Join-Path $home_ 'temp')
     TMP             = (Join-Path $home_ 'temp')
+    # **The account's PowerShell profiles are sealed off too** (0.4.10 plan row
+    # 68c): a start brings Folio's old lines in the account's `$PROFILE`s forward,
+    # and finds those profiles by asking each installed PowerShell, whatever
+    # `APPDATA` this run was handed. This names one scratch file as the only
+    # profile there is, so the run never reads or writes the machine's own. The
+    # file is not made: a profile that is not there is not looked at.
+    BT_POWERSHELL_PROFILE = (Join-Path $home_ 'profile.ps1')
     BT_STARTUP_TRACE = '1'
     # The project's own test windows always carry this, and here it is also the
     # artefact: what the shell actually said, for a failure that has to be

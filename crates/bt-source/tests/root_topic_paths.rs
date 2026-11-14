@@ -39,7 +39,7 @@
 //! `bt-app` itself.
 
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use bt_source::{
     Certainty, DiskScope, Index, Occurrence, Pattern, Search, Span, TargetId, TargetKind,
@@ -495,12 +495,17 @@ fn read(index: &Index) -> Reading {
     reading
 }
 
-/// The fixture crate.
-fn fixture() -> Index {
-    let directory = Path::new(env!("CARGO_MANIFEST_DIR"))
+/// The fixture crate's folder.
+fn fixture_directory() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
         .join("fixtures")
-        .join("root_topic_paths");
+        .join("root_topic_paths")
+}
+
+/// The fixture crate.
+fn fixture() -> Index {
+    let directory = fixture_directory();
     let universe = Universe::declare(
         "the root-topic-paths fixture",
         vec![TargetRoot {
@@ -518,8 +523,23 @@ fn fixture() -> Index {
     Index::build(&universe).unwrap_or_else(|rejections| panic!("{}", report(&rejections)))
 }
 
+/// **What a line says past the fixture's folder**: its file inside the fixture, its position and
+/// its words. The folder is the checkout's, and a checkout's name is anyone's (a worktree named
+/// `paste-…` once put `paste` in every line, 2026-11-09, plan row 81).
+///
+/// A line that does not start with the fixture's folder fails here, naming the line (review N13):
+/// read whole, it would let the folder's own name match a needle again.
+fn said(line: &str) -> &str {
+    let folder = fixture_directory();
+    line.strip_prefix(folder.to_string_lossy().as_ref())
+        .unwrap_or_else(|| panic!("a line that is not the fixture's: {line}"))
+}
+
 fn named(lines: &[String], needle: &str) -> usize {
-    lines.iter().filter(|line| line.contains(needle)).count()
+    lines
+        .iter()
+        .filter(|line| said(line).contains(needle))
+        .count()
 }
 
 /// RED (planted, T1–T12, the review's F1–F4) — **every path into a topic module written outside
@@ -638,6 +658,7 @@ fn every_path_into_a_runtime_topic_from_outside_is_named() {
         }
     }
     if reading.findings.iter().chain(&reading.refused).any(|line| {
+        let line = said(line);
         line.contains("t.rs:")
             || line.contains("clipboard.rs:")
             || line.contains("pointer.rs:")

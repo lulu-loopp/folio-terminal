@@ -6495,11 +6495,15 @@ mod probe_child_tests {
             (unsafe { WaitForSingleObject(self.0, 0) }) == WAIT_TIMEOUT
         }
 
+        /// The helper's end, within the door suites' patience: a failure ceiling, not a timing
+        /// assertion (the kernel signals the exit). A door row of the timing-bound list, so its
+        /// callers are not rows through it.
         fn wait_gone(&self) {
-            // SAFETY: the handle is live and owned by this witness. This is a
-            // failure ceiling, not a timing assertion; the kernel signals exit.
+            let patience = u32::try_from(crate::door_skipped::PATIENCE.as_millis())
+                .expect("the patience fits a wait's milliseconds");
+            // SAFETY: the handle is live and owned by this witness.
             assert_eq!(
-                unsafe { WaitForSingleObject(self.0, 10_000) },
+                unsafe { WaitForSingleObject(self.0, patience) },
                 WAIT_OBJECT_0,
                 "the owned helper process did not end"
             );
@@ -9356,6 +9360,11 @@ pub(crate) mod peer;
 #[cfg(any(windows, unix))]
 mod launch_conversation;
 
+/// **The clock a wait for the other end is read on** — `LaunchClock`, the
+/// product's `RealClock` and a test's `CountedClock` — on every target, apart from the launch
+/// wire's gate (0.4.10 plan row 66): the deferred remover's readiness wait builds everywhere.
+mod launch_clock;
+
 /// **The second launch's door into the first** — one well-known named pipe per data directory
 /// (`docs/DESIGN.md` §7.59).
 ///
@@ -9590,6 +9599,11 @@ pub mod logon_hook;
 /// the two. Children through [`quiet_command`], bounded; worker only; refused
 /// by name off macOS.
 pub mod macos_identity;
+/// **The sign-in entry** — one value, `Folio`, under the same `Run` key: the quoted path of a
+/// copy's `folio.exe` and nothing after it, read, written and read back, removed, and Windows' own
+/// Startup-apps switch for it read beside it (0.4.10 plan row 22a, T-START-AT-LOGON-SWITCH). Only
+/// the one name is ever read. Windows is real; every other platform refuses by name.
+pub mod sign_in_entry;
 
 /// **The macOS entrance of an update transaction** — a LaunchAgent plist in a
 /// folder the caller names, written through `install_txn`'s durable write,
@@ -9639,7 +9653,7 @@ pub(crate) fn listener_says_within<T>(
 /// awaits the word within its patience, or spends the bound without listening.
 #[cfg(windows)]
 pub(crate) fn first_word_on<T>(
-    clock: &dyn launch_conversation::LaunchClock,
+    clock: &dyn launch_clock::LaunchClock,
     said: &std::sync::mpsc::Receiver<T>,
     bound: std::time::Duration,
 ) -> Result<T, std::sync::mpsc::RecvTimeoutError> {
@@ -13938,6 +13952,63 @@ mod windows_impl {
             },
             |delay| crate::wait::sleep_within(worker, delay),
         )
+    }
+
+    /// **The OLE clipboard's data object, asked for on a worker** (plan row 81) — through the
+    /// clipboard's one declared contention wait: while another program (or the clipboard lane)
+    /// holds the clipboard open, `OleGetClipboard` answers `CLIPBRD_E_CANT_OPEN`, and it is asked
+    /// again with 5, 10, 20 and 40 ms between, each pause through [`crate::wait::sleep_within`].
+    /// The caller has joined a single-threaded apartment.
+    pub(super) fn ole_clipboard_with_retry(
+        worker: &WorkerCtx,
+    ) -> windows::core::Result<windows::Win32::System::Com::IDataObject> {
+        let mut contention = ClipboardContention::new();
+        loop {
+            // SAFETY: the calling worker joined an apartment the OLE clipboard accepts; the data
+            // object answered is owned by the caller.
+            let answer = unsafe { windows::Win32::System::Ole::OleGetClipboard() };
+            if !contention.ask_again(worker, &answer) {
+                return answer;
+            }
+        }
+    }
+
+    /// **The clipboard's one declared contention wait, for an OLE ask** (plan row 81; review N3):
+    /// while another program (or the clipboard lane) holds the clipboard open, the clipboard's data
+    /// object answers `CLIPBRD_E_CANT_OPEN` — to `OleGetClipboard` and to each `GetData` it serves
+    /// by opening the clipboard — and the ask is made again with 5, 10, 20 and 40 ms between, each
+    /// pause through [`crate::wait::sleep_within`]: five asks at most. The caller makes its own
+    /// ask in a loop and asks this whether to make it again.
+    pub(super) struct ClipboardContention {
+        pauses: std::slice::Iter<'static, std::time::Duration>,
+    }
+
+    impl ClipboardContention {
+        pub(super) fn new() -> Self {
+            Self {
+                pauses: CLIPBOARD_OPEN_RETRY_DELAYS.iter(),
+            }
+        }
+
+        /// **Whether to ask again**: after a contended answer while a pause is left — taken here,
+        /// on the asking worker (`worker`) — yes; any other answer, or the fifth, is the answer.
+        pub(super) fn ask_again<T>(
+            &mut self,
+            worker: &WorkerCtx,
+            answer: &windows::core::Result<T>,
+        ) -> bool {
+            let contended = matches!(
+                answer,
+                Err(error) if error.code() == windows::Win32::Foundation::CLIPBRD_E_CANT_OPEN
+            );
+            match self.pauses.next() {
+                Some(delay) if contended => {
+                    crate::wait::sleep_within(worker, *delay);
+                    true
+                }
+                _ => false,
+            }
+        }
     }
 
     /// **The clipboard's text**, read on the clipboard lane's worker (`worker`).
@@ -29640,11 +29711,16 @@ mod macos_player_signature_tests {
 
 /// Gesture-only terminal clipboard acquisition; text fields retain `clipboard_text`.
 pub mod clipboard;
-pub use clipboard::{ClipboardPayload, PictureBytes, PictureEncoding, UnsupportedKind};
+pub use clipboard::{
+    ClipboardPayload, ClipboardRead, ClipboardSequence, PictureBytes, PictureEncoding,
+    PromisedEntry, PromisedFiles, UnsupportedKind,
+};
+/// A clipboard promise, rendered into a folder on a worker (plan row 81).
+pub mod clipboard_promise;
 #[cfg(windows)]
 mod windows_clipboard;
 #[cfg(windows)]
-pub use windows_clipboard::{clipboard_payload, pixels_through_gdi};
+pub use windows_clipboard::{clipboard_payload, pixels_through_gdi, render_clipboard_promise};
 #[cfg(target_os = "macos")]
 mod macos_clipboard_payload;
 #[cfg(target_os = "macos")]
@@ -29652,8 +29728,23 @@ mod macos_file_urls;
 #[cfg(target_os = "macos")]
 pub use macos_clipboard_payload::clipboard_payload;
 #[cfg(not(any(windows, target_os = "macos")))]
-pub fn clipboard_payload(_worker: &admission::WorkerCtx) -> Result<ClipboardPayload, String> {
-    Err("terminal clipboard acquisition is unavailable on this platform".to_owned())
+pub fn clipboard_payload(_worker: &admission::WorkerCtx) -> ClipboardRead {
+    ClipboardRead {
+        sequence: None,
+        offered: Vec::new(),
+        answer: Err("terminal clipboard acquisition is unavailable on this platform".to_owned()),
+    }
+}
+/// **A promise on a platform that never answers one** (macOS reads none; plan row 81): the
+/// clipboard lane cannot hand this door an offer here, so it renders nothing.
+#[cfg(not(windows))]
+pub fn render_clipboard_promise(
+    _worker: &admission::WorkerCtx,
+    _offer: &[PromisedEntry],
+    _into: &std::path::Path,
+    _progress: &clipboard_promise::RenderProgress,
+) -> Result<clipboard_promise::RenderedPromise, clipboard_promise::PromiseRefused> {
+    Err(clipboard_promise::PromiseRefused::NotRendered(None))
 }
 
 /// **The `CF_BITMAP` seam on a machine with no GDI.** `PictureEncoding::Bitmap`

@@ -3,6 +3,7 @@
 
 use super::pointer::{Ending, Gone, Leaving, OwnerGone};
 use crate::runtime::attention::expire_leaf_attention;
+use crate::runtime::clipboard::PasteFrom;
 use crate::runtime::floats::{file_menu_powers, float_dock_label};
 use crate::runtime::frame::trace_unchanged_present;
 use crate::runtime::preview::picture_channel_owner;
@@ -4556,7 +4557,7 @@ impl<B: Backend> Runtime<'_, B> {
                     // the seat of the `PasteTarget` the two readings agreed on
                     // — never the hover-time seat, and never whichever pane
                     // happens to be holding the keyboard.
-                    if self.paste_paths_into(target, vec![path], "write dragged path to PTY")? {
+                    if self.paste_paths_into(target, vec![path], PasteFrom::Drag)? {
                         self.focus_the_pane_a_path_landed_in(target.seat)?;
                     }
                     return Ok(true);

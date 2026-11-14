@@ -327,10 +327,11 @@ impl<B: Backend> Runtime<'_, B> {
         // on it, and the refusal books the turn that has. A turn on which the
         // service changed something is not that turn — what it has to say is new
         // — so it goes through.
-        if !moved && !self.animation_frame_is_due() {
+        // And a turn with neither news nor a debt asks the gate nothing.
+        if !self.paced_frame(moved, |rt| rt.toasts_owe_frame(now)) {
             return Ok(());
         }
-        if (moved || self.toasts_owe_frame(now)) && self.refresh_overlay() {
+        if self.refresh_overlay() {
             self.present_chrome_change()?;
         }
         Ok(())
@@ -720,7 +721,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// so this is the only way a machine that has been put right becomes a machine Folio will act
     /// on again without a relaunch.
     pub(crate) fn refresh_agent_rows(&mut self) {
-        crate::carry_pass::begin_carry_pass();
+        crate::carry_pass::begin_carry_pass(crate::carry_pass::CarryAsk::HOOKS);
     }
 
     /// Whether one of the built-in agent profiles has its program on this
@@ -1243,6 +1244,25 @@ fn tab_queue_leader(tab: &TabState) -> Option<SeatId> {
 /// `tab_is_active` squares the tab that arrived and strands the tab that left one revision behind —
 /// a permanent dot on a tab whose shell never spoke. Seeing is painting, and painting is answered
 /// where the painting happens ([`Runtime::redraw`]).
+///
+/// **Once per turn means every turn, whatever the frame gates say** (T-STRIP-ASKS-ON-ITS-TICK,
+/// 2026-11-11). Its one caller in the product is the head of `Runtime::advance_strip_animation`,
+/// beside the taskbar mirror and above the strip's rate and the window's display frame: this
+/// pass is state, and it draws nothing. It used to stand behind both, so it ran only on the
+/// strip's admitted ticks — at most once a frame, and never for the length of a neighbouring
+/// pane's flood, which held back a bell's announcement, a finished turn's, a look's consumption
+/// and a credential's expiry until the flood stopped.
+///
+/// **It answers whether any tab's claim now differs from the one the strip last looked at**
+/// ([`TabState::last_looked_claim`]), and the strip looks on that turn whatever its rate says
+/// (T-STRIP-ASKS-ON-ITS-TICK review N1). The strip looks at most once a frame, so a claim this
+/// pass changes between two looks — a credential that runs out, a place the look retires — would
+/// otherwise wait for the next look, and when the tab's mark was moving only because of that
+/// claim (the waiting halo) nothing books one: the halo stood frozen on the glass. The comparison
+/// is against the look's record rather than against this pass's own before-and-after, so a claim
+/// withdrawn by the drain (`OSC` attention) or by the hook pipe on this turn or since the last look
+/// is answered the same way. It is one fold over each tab's fleet per turn, beside the walk over
+/// its leaves this pass already makes.
 // Seven, and each is a different question about one pass: where the panes are, which of them the
 // reader is looking at, where this window is with respect to the reader's eyes, what serial to
 // draw a place from, when now is, where the lines go, and where the interruptions the ledger
@@ -1258,16 +1278,18 @@ pub(crate) fn settle_attention(
     now: Instant,
     trace: Option<&attention_trace::Trace>,
     raised: &mut Vec<AttentionDelivery>,
-) {
+) -> bool {
     let traced = trace.is_some();
+    let mut claims_changed = false;
     for (index, tab) in tabs.iter_mut().enumerate() {
         let tab_is_active = index == active_tab;
         let consumed = attention_is_consumed(tab_is_active, place.focused);
         let reach = notify::desktop_reach(tab_is_active, place);
         let tab_id = tab.id;
-        // Only computed when someone is reading: the claim is a fold over every shell in the tab,
-        // and this pass runs on every turn of the event loop. The leader is sampled beside it,
-        // because a dot that goes *out* this turn is reported by the pane that was holding it.
+        // The claim before the pass is only computed when someone is reading: it is a fold over
+        // every shell in the tab, and the strip's question below needs only the claim after it.
+        // The leader is sampled beside it, because a dot that goes *out* this turn is reported by
+        // the pane that was holding it.
         let was = traced.then(|| tab.fleet_claim_for(tab_is_active));
         let leader_before = traced.then(|| tab_queue_leader(tab)).flatten();
         // Collected while the tab is held mutably and turned into deliveries below, because the
@@ -1343,36 +1365,38 @@ pub(crate) fn settle_attention(
         for (seat, one) in allowed {
             raised.push(attention_delivery(tab, tab_id, seat, None, one));
         }
-        if let Some(was) = was {
-            let now_claim = tab.fleet_claim_for(tab_is_active);
-            if now_claim != was {
-                // §13.2.1: the request this change is about, when it is about one at all. The third
-                // branch is the common one — most claim changes are unread, bell or work in flight,
-                // and none of those belongs to a request.
-                let leader = if now_claim == StatusClaim::Awaiting {
-                    tab_queue_leader(tab)
-                } else {
-                    leader_before
-                };
-                let episode = leader.and_then(|seat| tab.sessions.get(&seat)).and_then(
-                    |TerminalPane { session: leaf, .. }| {
-                        leaf.attention.ledger.claim_episode(
-                            was == StatusClaim::Awaiting,
-                            now_claim == StatusClaim::Awaiting,
-                        )
-                    },
-                );
-                attention_trace::emit(trace, || {
-                    attention::claim_line(
-                        index,
-                        episode,
-                        &format!("{was:?}"),
-                        &format!("{now_claim:?}"),
+        let now_claim = tab.fleet_claim_for(tab_is_active);
+        claims_changed |= tab.last_looked_claim != Some(now_claim);
+        if let Some(was) = was
+            && now_claim != was
+        {
+            // §13.2.1: the request this change is about, when it is about one at all. The third
+            // branch is the common one — most claim changes are unread, bell or work in flight,
+            // and none of those belongs to a request.
+            let leader = if now_claim == StatusClaim::Awaiting {
+                tab_queue_leader(tab)
+            } else {
+                leader_before
+            };
+            let episode = leader.and_then(|seat| tab.sessions.get(&seat)).and_then(
+                |TerminalPane { session: leaf, .. }| {
+                    leaf.attention.ledger.claim_episode(
+                        was == StatusClaim::Awaiting,
+                        now_claim == StatusClaim::Awaiting,
                     )
-                });
-            }
+                },
+            );
+            attention_trace::emit(trace, || {
+                attention::claim_line(
+                    index,
+                    episode,
+                    &format!("{was:?}"),
+                    &format!("{now_claim:?}"),
+                )
+            });
         }
     }
+    claims_changed
 }
 
 /// **A pane is going away, so the place it held goes with it** (`attention` plan §4 B4).

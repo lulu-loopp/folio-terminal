@@ -40,11 +40,11 @@
 //! after launch). The parent's waits also end when the launched host process
 //! ends, so a host that dies before it connects fails the attempt at once.
 //!
-//! The deadline is read on a `launch_conversation::LaunchClock`, and each
+//! The deadline is read on a `launch_clock::LaunchClock`, and each
 //! operation's one kernel wait is made through it
 //! (T-ELEVATED-HANDSHAKE-FINISH-DEADLINE-ON-A-CLOCK): the product's doors,
 //! [`ElevatedEndpoint::accept`] and [`connect_to_parent`], read it on
-//! `launch_conversation::RealClock`; a test hands a counted clock, so "the other end
+//! `launch_clock::RealClock`; a test hands a counted clock, so "the other end
 //! acted in time" and "the attempt ran out" are facts of the test, never a race
 //! between the real 15 s and a thread or child of the test. The host's open of the
 //! parent's pipe makes its one wait past a busy endpoint on the attempt's clock too
@@ -93,7 +93,7 @@ use crate::elevated_protocol::{
     PaneFailure, ParentEvent, ParentStartId, ParentState, ReaderRole, decode,
     elevated_endpoint_name, encode, transition_host, transition_parent,
 };
-use crate::launch_conversation::{LaunchClock, RealClock};
+use crate::launch_clock::{LaunchClock, RealClock};
 
 /// Each direction's pipe buffer, the largest output frame plus its header.
 const PIPE_BUFFER_BYTES: u32 = 64 * 1024 + 32;
@@ -788,7 +788,7 @@ mod tests {
     use super::*;
     use crate::door_skipped;
     use crate::elevated_protocol::{LAUNCH_TIMEOUT, Message, PaneFailure, ParentStartId};
-    use crate::launch_conversation::{CountedClock, Turn};
+    use crate::launch_clock::{CountedClock, Turn};
     use std::path::PathBuf;
     use std::process::Child;
     use std::sync::{Arc, mpsc};

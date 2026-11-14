@@ -2696,11 +2696,9 @@ fn labels_over_the_bar(
 /// case — with the bar up and drawn. Returns the bar's layout.
 fn a_paused_recording(tag: &str) -> (HeadlessFolio, PreviewSurface, crate::video_seat::BarLayout) {
     let (mut folio, surface) = a_recording_beside_a_shell(tag);
-    // This window's launch has had its first-run card already. The loop the tests below run
-    // turns the application's clocks, and a headless window is a first launch: on a machine
-    // whose agent folders and install channel settle within the test, the card would come up
-    // over the pane and take the wheel's notch and the overlay's labels.
-    folio.app.first_run_attempted = true;
+    // No first-run card comes up over the loop the tests below run: a headless window is a
+    // later launch (`headless.rs`, `StorageAskers::on`). Over a first launch the card would come
+    // up over the pane and take the wheel's notch and the overlay's labels.
     let stage = stage_of(&mut folio, surface);
     click(&mut folio, on_the_picture(stage, 20.0));
     loaded(&folio, surface);

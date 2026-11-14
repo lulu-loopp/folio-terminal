@@ -30,8 +30,11 @@
     `Remove-ItemProperty` removes it.
 
     The script starts one Folio and ends it by the process id it recorded. It
-    changes `%APPDATA%\Folio` as any Folio run does, and runs the real cleanup,
-    which removes what Folio set up outside its folder on this account.
+    changes `%APPDATA%\Folio` as any Folio run does — from 0.4.10 that includes
+    bringing an older Folio's line in this account's PowerShell profiles to the
+    current form (the start's carry, plan row 68c), which is wanted on the VM
+    this check is for — and runs the real cleanup, which removes what Folio set
+    up outside its folder on this account.
 
 .PARAMETER Archive
     The release archive, `folio-<version>-windows-x64.zip`, as `package.ps1`

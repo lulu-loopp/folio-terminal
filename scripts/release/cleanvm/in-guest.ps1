@@ -232,7 +232,11 @@ function Close-Window {
 }
 
 # A run of Folio that reads none of this machine's settings and leaves nothing
-# behind — the same seal `smoke.ps1` puts on its own launches.
+# behind — the same seal `smoke.ps1` puts on its own launches, the guest
+# account's PowerShell profiles included (0.4.10 plan row 68c: a start carries
+# Folio's old lines in them). The phases that want a start's carry on the guest's
+# own profile — an update row, the scoop check — start Folio unsealed, on a guest
+# whose profile is nobody's.
 function Set-SealedEnvironment {
     param([string] $Under)
     $temp = Join-Path $Under 'temp'
@@ -240,6 +244,7 @@ function Set-SealedEnvironment {
     $env:APPDATA = $Under
     $env:TEMP = $temp
     $env:TMP = $temp
+    $env:BT_POWERSHELL_PROFILE = Join-Path $Under 'profile.ps1'
 }
 
 switch ($Phase) {

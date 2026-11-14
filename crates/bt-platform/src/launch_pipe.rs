@@ -95,7 +95,7 @@ use crate::attention_pipe::{
     Overlapped, OwnedHandle, SecurityDescriptor, SendHandle, cancel, logon_sid, open_client,
     security_descriptor_sddl, session_tag, wide, win32_io_error, win32_of, write_bounded,
 };
-use crate::launch_conversation::{LaunchClock, RealClock};
+use crate::launch_clock::{LaunchClock, RealClock};
 
 /// **The most bytes one frame on this endpoint may carry** — 256 KiB (F-SWEEP-2-048).
 ///
@@ -993,7 +993,7 @@ fn signalled_within(event: HANDLE, bound: Duration) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::launch_conversation::{CountedClock, Turn};
+    use crate::launch_clock::{CountedClock, Turn};
 
     /// **The two names one directory produces are folded the same way.**
     ///

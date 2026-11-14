@@ -48,6 +48,7 @@ impl MacPrepare {
             tools,
             channel,
             layouts: own_layouts(),
+            record: None,
         }
     }
 

@@ -8,6 +8,9 @@ use crate::preview_viewport::{
     Build, GeometryCost, Layout, Realize, Reconcile, RuntimeMeasure, State, View, capture,
 };
 use crate::runtime::attention::settle_attention;
+use crate::runtime::clipboard::{
+    PasteFrom, PasteRefusal, PictureNotSaved, PromiseWhy, RefusedKind,
+};
 use crate::runtime::floats::float_dock_label;
 use crate::runtime::git::graph_key_of;
 use crate::runtime::handoff::{open_local_path_ask, reveal_ask};
@@ -44,19 +47,20 @@ use crate::{
     PreviewPreedit, PreviewRailFrame, PreviewSurface, PreviewTextBox, PreviewTextDrag,
     PreviewTextPiece, PreviewTextSite, PreviewTextWhere, ProseParagraph, ReferenceRow,
     RenameSubject, Reparse, RevealTween, RevealedFoot, RowActivation, Runtime, ScaleWorkerRequest,
-    ScrollThumbState, ShellAddress, SourceBlocks, Step, SurfacePixels, SurfaceSubject, TabClick,
-    TabId, TabRename, TabState, TabTriggerHand, UNVERIFIED_REFERENCE_REFUSAL, VideoGlance,
-    VideoPictureClick, VideoPicturePress, VideoShape, WINDOW_RESIZE_QUIET, WebHeadVerb,
-    WindowRuntime, animation, attention_trace, clipboard_picture, computation_lane,
-    create_leaf_session, diagnostics, earliest_deadline, file_peek, files, files_row_display_name,
-    float, git_panel, handoff_lane, hang_watch, hex_peek, highlight, home_crumb_for, i18n, input,
-    lane, markdown_image_card, markdown_image_extent, markdown_item_runs, markdown_prose_runs,
-    markdown_runs, marks, note_link_sites, note_math_sites, note_text_site, notice, pane_content,
-    path_opens_as_a_page, persisted_preview_row, pins, present_diagnostics, preview, preview_edit,
-    preview_live, preview_open_lane, preview_press, preview_provenance, preview_select,
-    preview_text, preview_trace, preview_viewport, preview_watch, preview_wrap, printable_address,
-    profiles, push_markdown_table, reference_activation, scrollback_quota, seats, settings,
-    tab_owes_frame, table_block, text_field, toast, tooltip, video_seat, webhost, webnav,
+    ScrollThumbState, ShellAddress, SourceBlocks, StagingAnswer, Step, SurfacePixels,
+    SurfaceSubject, TabClick, TabId, TabRename, TabState, TabTriggerHand,
+    UNVERIFIED_REFERENCE_REFUSAL, VideoGlance, VideoPictureClick, VideoPicturePress, VideoShape,
+    WINDOW_RESIZE_QUIET, WebHeadVerb, WindowRuntime, animation, attention_trace, clipboard_picture,
+    computation_lane, create_leaf_session, diagnostics, earliest_deadline, file_peek, files,
+    files_row_display_name, float, git_panel, handoff_lane, hang_watch, hex_peek, highlight,
+    home_crumb_for, i18n, input, lane, markdown_image_card, markdown_image_extent,
+    markdown_item_runs, markdown_prose_runs, markdown_runs, marks, note_link_sites,
+    note_math_sites, note_text_site, notice, pane_content, path_opens_as_a_page,
+    persisted_preview_row, pins, present_diagnostics, preview, preview_edit, preview_live,
+    preview_open_lane, preview_press, preview_provenance, preview_select, preview_text,
+    preview_trace, preview_viewport, preview_watch, preview_wrap, printable_address, profiles,
+    push_markdown_table, reference_activation, scrollback_quota, seats, settings, tab_owes_frame,
+    table_block, text_field, toast, tooltip, video_seat, webhost, webnav,
 };
 use crate::{LeafView, TextScale};
 use anyhow::Context;
@@ -13039,6 +13043,28 @@ impl<B: Backend> Runtime<'_, B> {
     /// "changed" here is the animation itself — a breath and a spin move on
     /// every frame they are alive, and neither moves at all once its session
     /// stops working.
+    ///
+    /// Four steps, and only the last is behind the window's display frame
+    /// (T-STRIP-ASKS-ON-ITS-TICK): the taskbar mirror and the attention settle
+    /// pass, on every turn, because both are state; the look, at most once a
+    /// frame on the strip's own rate, which compares what would be drawn
+    /// against what was and writes the difference down; and the ask, on any
+    /// turn while that written debt stands and on no other.
+    ///
+    /// **The settle pass and the look read nothing of the window thread's that
+    /// they did not read behind the gate** (the ruling on row 80's class): the
+    /// tabs, their sessions' status snapshots and attention queues, the pointer's hover
+    /// seat and the tab it names, the float that is peeking, the motion
+    /// setting, the chrome palette, the renderer's scale factor, the rail's
+    /// posture, the chevron, rail, dock, resizing-card, focus-column and
+    /// Advanced-group tweens, the popup, fade and foot registers, the seat
+    /// layout's pane rectangles, the video seats' bars, the card clock, the
+    /// pictures' written debt, the settings' two notification switches and the
+    /// turn's own `observed_place`. Every one is a field of this process; none
+    /// is a system call. The one desktop reading a turn makes is taken at its
+    /// head (`Self::observe_window_place`), and what the settle pass may *do* to the
+    /// desktop — the deliveries `Self::raise_attention` makes — is what it did
+    /// behind the gate, on the turn it found them.
     pub(in crate::runtime) fn advance_strip_animation(&mut self, now: Instant) -> Result<()> {
         // **[`pace::DEFAULT_FRAME_INTERVAL`] is a rate, and a rate nothing enforces is
         // not a rate.** `about_to_wait` runs after *every* event, not only when
@@ -13083,36 +13109,31 @@ impl<B: Backend> Runtime<'_, B> {
         hang_watch::during(hang_watch::Station::TaskbarMirror, || {
             taskbar.show(window, wanted)
         });
-        if !strip_animation_tick_is_due(
-            self.window.strip_animation_ticked_at,
-            now,
-            self.window.frame_clock.interval(),
-        ) {
-            return Ok(());
-        }
-        // **And the window's own display frame, above the strip's own rate**
-        // (owner's report 2026-09-18). The gate above this one is the ring's
-        // measured rate and this one is the glass's: a turn the loop was
-        // not woken for — a shell speaking, a pointer moving — can be far enough
-        // past the ring's sixteen milliseconds to pass it while the picture that
-        // frame would replace has not reached the display yet. See
-        // [`Self::animation_frame_is_due`], which is this gate generalised out of
-        // this method to every animation this window runs.
-        if !self.animation_frame_is_due() {
-            return Ok(());
-        }
-        self.window.strip_animation_ticked_at = Some(now);
         // Every door of the attention queue, in one pass over one leaf at a time
         // — see `settle_attention` for why they stopped being two passes whose
         // order was the mechanism, and for the order the four that are left run in.
-        // **The turn's own reading, not a second one** (ticket 48): the facts that separate "not
-        // in front of you" from "not on any screen" — and from "there is no taskbar to look at" —
-        // are facts about this turn, and its head asked them once
-        // (the one writer, in `frame.rs`), focus included, for the drain and for this pass.
+        //
+        // **Above both of the strip's gates, beside the taskbar mirror, and for
+        // the mirror's reason** (T-STRIP-ASKS-ON-ITS-TICK, ruling R3). This pass
+        // is state, not a picture: a credential's time running out, a bell's
+        // announcement, the queue's own settle and the look that consumes a
+        // latch. Behind the display frame it ran only on the strip's admitted
+        // ticks, so for the length of a neighbouring pane's flood a bell or a
+        // finished turn went unannounced, a tab looked at kept its dot, and a
+        // credential's expiry had to be booked no earlier than the strip's next
+        // tick. Under the strip's rate alone it would still wait up to a frame.
+        // It runs before the look so the claims it changes are compared on this
+        // turn, and after the turn's tab switch, as its doc requires.
+        //
+        // **The turn's own reading, not a second one** (ticket 48): the facts that
+        // separate "not in front of you" from "not on any screen" — and from "there
+        // is no taskbar to look at" — are facts about this turn, and its head asked
+        // them once (the one writer, in `frame.rs`), focus included, for the drain
+        // and for this pass.
         let place = self.window.observed_place;
         let mut raised: Vec<AttentionDelivery> = Vec::new();
         let switches = self.notification_switches();
-        settle_attention(
+        let claims_changed = settle_attention(
             &mut self.window.tabs,
             self.window.active_tab,
             place,
@@ -13123,223 +13144,314 @@ impl<B: Backend> Runtime<'_, B> {
             &mut raised,
         );
         self.raise_attention(raised)?;
-        let active = self.window.active_tab;
-        let motion = self.app.motion;
-        let palette = bt_render::chrome_palette();
-        let hovered = self.hovered_tab();
-        let trigger_hovered = match self.window.seat_pointer.hover {
-            Some(seats::ChromeTarget::TabFiles(index)) => Some(index),
-            _ => None,
-        };
-        let peeking = self.peeking_tab();
-        let mut owes_frame = false;
-        for (index, tab) in self.window.tabs.iter_mut().enumerate() {
-            // A new progress reading starts the arc easing toward it. This runs
-            // for every tab, active or not: a background download's ring has to
-            // keep reporting, and its tab is exactly the one the user cannot
-            // otherwise see.
-            tab.sync_ring(now);
-            let (run, lit) = tab_trailing_targets(TabTriggerHand {
-                pinned: tab.pinned,
-                hovered: hovered == Some(index),
-                on_trigger: trigger_hovered == Some(index),
-                peeking: peeking == Some(index),
-            });
-            tab.pin_reveal.retarget(run, now, motion);
-            // The reveal has to be *compared*, not merely sampled: `tab_owes_frame`
-            // asks what would be drawn against what was drawn, and a width that
-            // nothing compares would animate without ever scheduling a present.
-            // Quantised to the 1/255 the sprite's own opacity resolves to, so a
-            // tween settling in the last thousandth does not owe a frame forever.
-            let drawn = tab.drawn_pin_reveal(now, motion);
-            if tab.last_drawn_pin_reveal != Some(drawn) {
-                tab.last_drawn_pin_reveal = Some(drawn);
+        // **The strip looks on its own rate, whatever the glass is doing, and
+        // asks for a frame only with what it found** (T-STRIP-ASKS-ON-ITS-TICK,
+        // 2026-11-11).
+        //
+        // The look is everything below up to the debt written down: the rings
+        // synced, the reveals retargeted, and every compare-and-record this
+        // strip keeps against what it last drew. It used to stand behind the
+        // window's display frame as well, and so asked that gate on every turn
+        // its rate tick was due — before it had looked at anything. A turn
+        // inside the frame of a present the strip did not ask for (a key that
+        // relit the caret, a hover, every turn of a pane's flood) was refused
+        // with nothing moved, and the refusal booked one empty turn more.
+        // Behind that gate the look also never ran for the length of a burst.
+        //
+        // So the look stands under the strip's own rate, at most once a frame
+        // (and on a turn a claim changed, below), and
+        // `strip_animation_ticked_at` is when it last looked. What it finds is
+        // written down ([`WindowRuntime::strip_owes_a_frame`]) rather than
+        // asked about on the spot, because the comparisons record as they
+        // compare: a debt met on a turn the gate refuses has already been
+        // recorded as drawn, and only the written flag still knows it is owed.
+        // The ask below reads the flag on every turn while it stands, so the
+        // turn the gate admits draws it whether or not the rate is due again.
+        //
+        // **And it looks on any turn a tab's claim changed, whatever the rate
+        // says** (review N1). A claim is state that changes between looks — a
+        // credential running out in the settle pass above, a place withdrawn by
+        // the drain or the hook pipe — and the look is the only thing that
+        // notices what it changed on the glass. When the tab's mark was moving
+        // only because of that claim (the waiting halo, which pulses for as long
+        // as the place stands), nothing else books the next look once the claim
+        // is gone, and the halo would stand frozen mid-breath. Claims change on
+        // events, not on turns, so this is bounded by them.
+        if claims_changed
+            || strip_animation_tick_is_due(
+                self.window.strip_animation_ticked_at,
+                now,
+                self.window.frame_clock.interval(),
+            )
+        {
+            self.window.strip_animation_ticked_at = Some(now);
+            let active = self.window.active_tab;
+            let motion = self.app.motion;
+            let palette = bt_render::chrome_palette();
+            let hovered = self.hovered_tab();
+            let trigger_hovered = match self.window.seat_pointer.hover {
+                Some(seats::ChromeTarget::TabFiles(index)) => Some(index),
+                _ => None,
+            };
+            let peeking = self.peeking_tab();
+            let mut owes_frame = false;
+            for (index, tab) in self.window.tabs.iter_mut().enumerate() {
+                // A new progress reading starts the arc easing toward it. This runs
+                // for every tab, active or not: a background download's ring has to
+                // keep reporting, and its tab is exactly the one the user cannot
+                // otherwise see.
+                tab.sync_ring(now);
+                let (run, lit) = tab_trailing_targets(TabTriggerHand {
+                    pinned: tab.pinned,
+                    hovered: hovered == Some(index),
+                    on_trigger: trigger_hovered == Some(index),
+                    peeking: peeking == Some(index),
+                });
+                tab.pin_reveal.retarget(run, now, motion);
+                // The reveal has to be *compared*, not merely sampled: `tab_owes_frame`
+                // asks what would be drawn against what was drawn, and a width that
+                // nothing compares would animate without ever scheduling a present.
+                // Quantised to the 1/255 the sprite's own opacity resolves to, so a
+                // tween settling in the last thousandth does not owe a frame forever.
+                let drawn = tab.drawn_pin_reveal(now, motion);
+                if tab.last_drawn_pin_reveal != Some(drawn) {
+                    tab.last_drawn_pin_reveal = Some(drawn);
+                    owes_frame = true;
+                }
+                tab.files_lit.retarget(lit, now, motion);
+                let drawn = tab.drawn_files_lit(now, motion);
+                if tab.last_drawn_files_lit != Some(drawn) {
+                    tab.last_drawn_files_lit = Some(drawn);
+                    owes_frame = true;
+                }
+                // The tab in hand is driven by the pointer and never by this clock,
+                // so it is deliberately not passed here: a settle or a FLIP is the
+                // only thing on this axis that moves on its own.
+                let offset = tab.drawn_offset(now, motion, None).round() as i32;
+                let landed = (tab.landing.sample(now, motion).0 * 255.0).round() as u8;
+                if tab.last_drawn_offset != Some(offset) || tab.last_drawn_landing != Some(landed) {
+                    tab.last_drawn_offset = Some(offset);
+                    tab.last_drawn_landing = Some(landed);
+                    owes_frame = true;
+                }
+                let showing = tab.mark_state(index == active, now, motion, &palette);
+                if tab_owes_frame(tab.last_drawn_mark, showing) {
+                    tab.last_drawn_mark = Some(showing);
+                    owes_frame = true;
+                }
+                // What the settle pass compares against on every turn, to know
+                // that a claim changed since this look.
+                tab.last_looked_claim = Some(tab.fleet_claim_for(index == active));
+            }
+            // The `˅` is the strip's own and belongs to no tab, so it settles its
+            // debt outside the loop — but on exactly the same terms: the angle that
+            // would be *drawn*, which is the quantized one, against the angle that
+            // was. Comparing the raw fraction instead would owe a frame on every
+            // wake-up of the 140ms, including the long tail where the mark does not
+            // change at all.
+            let turning =
+                marks::ChromeMark::chevron(self.window.chevron_turn.sample(now, motion).0);
+            if tab_owes_frame(self.window.last_drawn_chevron, turning) {
+                self.window.last_drawn_chevron = Some(turning);
                 owes_frame = true;
             }
-            tab.files_lit.retarget(lit, now, motion);
-            let drawn = tab.drawn_files_lit(now, motion);
-            if tab.last_drawn_files_lit != Some(drawn) {
-                tab.last_drawn_files_lit = Some(drawn);
+            // R1/P168 — the rail's own debt, on the chevron's exact terms: what would
+            // be *drawn*, not what the tweens hold. The width in whole physical pixels
+            // and the fade in the 1/255 a sprite's alpha resolves to, because those are
+            // the finest differences either can put on the glass, and a tween settling
+            // through the long tail of its ease would otherwise owe a frame for the
+            // whole of it.
+            let drawn_rail = self.drawn_rail(now);
+            if self.window.last_drawn_rail != Some(drawn_rail) {
+                self.window.last_drawn_rail = Some(drawn_rail);
                 owes_frame = true;
             }
-            // The tab in hand is driven by the pointer and never by this clock,
-            // so it is deliberately not passed here: a settle or a FLIP is the
-            // only thing on this axis that moves on its own.
-            let offset = tab.drawn_offset(now, motion, None).round() as i32;
-            let landed = (tab.landing.sample(now, motion).0 * 255.0).round() as u8;
-            if tab.last_drawn_offset != Some(offset) || tab.last_drawn_landing != Some(landed) {
-                tab.last_drawn_offset = Some(offset);
-                tab.last_drawn_landing = Some(landed);
+            // The dock box's fade settles its debt on the same terms as the pin's:
+            // the opacity that would be *drawn*, quantised to the 1/255 a layer's
+            // alpha resolves to, against the one that was. It is read here rather
+            // than inside the overlay build because a debt has to be noticed by the
+            // thing that decides whether to build at all.
+            let faded = self.drawn_dock_reveal(now, motion);
+            if self.window.last_drawn_dock_reveal != faded {
+                self.window.last_drawn_dock_reveal = faded;
                 owes_frame = true;
             }
-            let showing = tab.mark_state(index == active, now, motion, &palette);
-            if tab_owes_frame(tab.last_drawn_mark, showing) {
-                tab.last_drawn_mark = Some(showing);
+            // **B22 — the resizing cards' own debt**, on the same terms as the dock
+            // box's: the inset that would be *drawn*, in whole physical pixels,
+            // against the one that was. It is settled here rather than inside the
+            // chrome build because a card running down after the button came up is
+            // the one case where nothing else is asking for the frame — the pointer
+            // has stopped, the layout has stopped, and only this transition is left.
+            let carded = self.drawn_resizing_card(now);
+            if self.window.last_drawn_resizing_card != carded {
+                self.window.last_drawn_resizing_card = carded;
                 owes_frame = true;
             }
+            // **The popups' own debt** (the animation slice, 2026-08-26), on exactly
+            // the resizing cards' terms and for a sharper version of their reason:
+            // the last frame of a *departure* is the one nothing else in this window
+            // asks for. The menu's state is already gone, the press that dismissed it
+            // is long over and the pointer has stopped — what is left is a picture
+            // fading in the arrival register, and only this reading knows it is
+            // there. `drawn` is empty under reduced motion, so a window that asked
+            // for stillness settles this debt once and never again.
+            let scale = self.window.renderer.scale_factor() as f32;
+            let passing = self.window.passages.drawn(now, motion, scale);
+            if self.window.passages_drawn != passing {
+                self.window.passages_drawn = passing;
+                owes_frame = true;
+            }
+            // **The fades' own debt** (the animation slice's second half), on exactly
+            // the same terms as the register above and with the same sharp case: a
+            // pane the hand has *left* is a run fading out with nothing else in the
+            // window moving — the pointer has already stopped, the layout has not
+            // changed, and the only thing still happening is ninety milliseconds of
+            // ink. Empty under reduced motion, so a window that asked for stillness
+            // settles this once and never again.
+            let settling = self.window.settling.drawn(now, motion);
+            if self.window.settling_drawn != settling {
+                self.window.settling_drawn = settling;
+                owes_frame = true;
+            }
+            // And the feet's, on the same terms and with the same sharp case: a
+            // receipt that has just run out is a strip dissolving with the pointer
+            // long since still and nothing else in the window moving.
+            let phrases = self.window.foot_phrases.drawn(now, motion);
+            if self.window.foot_phrases_drawn != phrases {
+                self.window.foot_phrases_drawn = phrases;
+                owes_frame = true;
+            }
+            // **§7.1.6b′ F3 — the card column's entrance, settled on the same
+            // terms.** Quantised to the whole physical pixel the slide can actually
+            // move a rectangle by, for `drawn_rail`'s reason one paragraph up: a
+            // tween settling through the long tail of an ease would otherwise owe a
+            // frame for every one of the sixty in it while nothing on the glass
+            // changed. Read here and not inside the chrome build because the last
+            // frame of the entrance is the one nothing else asks for — the chord is
+            // long over and the pointer never moved.
+            let arriving = self.drawn_focus_reveal(now);
+            if self.window.last_drawn_focus_reveal != Some(arriving) {
+                self.window.last_drawn_focus_reveal = Some(arriving);
+                owes_frame = true;
+            }
+            // The settings page's Advanced group, on the same terms: the frame its
+            // height last drew at, against the one it would draw at now. Quantised
+            // to a thousandth of the group's own height, which is finer than the
+            // pixel it can move a row by — `settling`'s own argument about which
+            // side of the glass to be wrong on.
+            let disclosed = self.drawn_advanced_reveal(now);
+            if self.window.advanced_reveal_sample != disclosed {
+                self.window.advanced_reveal_sample = disclosed;
+                owes_frame = true;
+            }
+            // **U8 — the panes' own debt, settled as it is asked.**
+            //
+            // Asked separately from "is anything moving?" for the reason
+            // [`tab_owes_frame`] exists: the two part company on exactly the frame
+            // the flight *ends*, where the FLIP has reached identity and reports
+            // itself finished. A draw gated on movement would return before
+            // rebuilding and leave every pane one eased step short of the box the
+            // solver actually gave it — a permanent misalignment, because nothing
+            // else is coming to correct it. `retire` afterwards, so a landed pane
+            // stops carrying a rect from a layout two splits ago.
+            // The live solve, and not a copy the tween took when it started: see
+            // [`PaneMotion::settle_frame_debt`]. A window resized mid-flight moves
+            // every pane, and the debt is about what is *drawn*.
+            let pane_rects = self.pane_rects();
+            let panes_owe = self
+                .window
+                .pane_motion
+                .settle_frame_debt(&pane_rects, now, motion);
+            self.window.pane_motion.retire(now, motion);
+            // **The pictures' own debt, kept as a name of its own.** It has to
+            // survive the chrome's question below, which is why the turn that
+            // draws takes it under its own name rather than leaving it folded
+            // into the strip's and forgotten — see [`tick_owes_a_present`].
+            //
+            // **Read rather than computed** (closure review O4, 2026-09-18): the
+            // pictures are serviced above every gate now, so what reaches this line
+            // is what [`Self::service_pictures`] found since the last frame that
+            // took it — a frame that arrived during a refused turn is still owed
+            // when one is finally allowed. **Read here and taken below**, by the
+            // turn that draws it: the look can stand on a turn the gate refuses,
+            // and a debt taken there would be gone before the frame that pays it.
+            let pictures_owed = self.window.pictures_owe_a_frame;
+            // **§7.1.6b′ T-5 — and the card column's debt is a fourth, kept beside
+            // them for the same reason.**
+            //
+            // This gate is where a card's refresh clock actually was. Everything
+            // above it asks whether some *animation* moved, and a card is not an
+            // animation: it is a picture of a pane, and the pane moves when the child
+            // writes. So on a tick where nothing was easing, this line returned
+            // before [`Self::refresh_chrome`] — which is the only door
+            // `refresh_focus_thumbnails` is behind — and the column stood still.
+            //
+            // What made that survivable, and what made it look like a shell defect,
+            // is the tab-mark breath: `tab_owes_frame(tab.last_drawn_mark, …)` a few
+            // dozen lines up sets `owes_frame` on every frame of a mark that is
+            // breathing, and only `OSC 133;C` starts one. So a PowerShell or Git Bash
+            // card was carried through this gate by its own shell's marker for the
+            // whole of every command, and a Command Prompt or WSL card was carried
+            // through only by whatever else happened to be moving.
+            //
+            // The debt is **not** folded into the present's question below: whether
+            // this tick owes the glass a picture is still `chrome_moved`'s to answer,
+            // and a re-projection that drew the same rows draws nothing.
+            let cards_owe = self.window.cards.owes_frame();
+            // **A recording's bar, changed by its own clocks** (T-VIDEO-POINTER-AND-KEYS
+            // review round 1, 2026-10-23): its fade, and the volume's flash going out.
+            // `strip_animation_work` wakes the window for both through
+            // `VideoSeats::bar_deadline` and `bar_is_moving`; this is what the woken
+            // tick finds owed. While a recording plays its decoded pictures carry the
+            // bar anyway; paused, nothing else would, and the flash stood.
+            let bars_owe = self.window.video.bars_owe_a_frame(now, motion);
+            // **What the look found, written down until a frame draws it.** OR-ed
+            // in rather than assigned: a look that finds nothing new on a turn
+            // the gate refused must not forget what the look before it found.
+            // The pane debt is kept apart for the reason `tick_owes_a_present`
+            // gives it a name of its own below.
+            //
+            // What the comparisons record is the picture at this look's `now`,
+            // and the turn that draws it samples the real clock
+            // (`Runtime::refresh_chrome`), less than a frame later when the look
+            // stood on a refused turn (review N4). That is bounded: a tween
+            // sampled later is only further along, so its landing is not lost,
+            // and at worst the next look asks once more for a frame the chrome
+            // then declines; a periodic mark (the breath, the halo) can show a
+            // step a frame old until its next change.
+            //
+            // The pictures' and the cards' debts are folded in here, at the look,
+            // and not read again at the ask. Both are written by other passes
+            // and stand for as long as those passes say so — a card the throttle
+            // refused keeps its debt (`focus_thumb::CardClock::settled`) — so an
+            // ask that read them live would rebuild the chrome on every turn the
+            // gate admits. Folded at the look, they ask at most once a frame,
+            // which is what the strip's rate is.
+            self.window.strip_owes_a_frame |= owes_frame || pictures_owed || cards_owe || bars_owe;
+            self.window.strip_panes_owe_a_frame |= panes_owe;
         }
-        // The `˅` is the strip's own and belongs to no tab, so it settles its
-        // debt outside the loop — but on exactly the same terms: the angle that
-        // would be *drawn*, which is the quantized one, against the angle that
-        // was. Comparing the raw fraction instead would owe a frame on every
-        // wake-up of the 140ms, including the long tail where the mark does not
-        // change at all.
-        let turning = marks::ChromeMark::chevron(self.window.chevron_turn.sample(now, motion).0);
-        if tab_owes_frame(self.window.last_drawn_chevron, turning) {
-            self.window.last_drawn_chevron = Some(turning);
-            owes_frame = true;
-        }
-        // R1/P168 — the rail's own debt, on the chevron's exact terms: what would
-        // be *drawn*, not what the tweens hold. The width in whole physical pixels
-        // and the fade in the 1/255 a sprite's alpha resolves to, because those are
-        // the finest differences either can put on the glass, and a tween settling
-        // through the long tail of its ease would otherwise owe a frame for the
-        // whole of it.
-        let drawn_rail = self.drawn_rail(now);
-        if self.window.last_drawn_rail != Some(drawn_rail) {
-            self.window.last_drawn_rail = Some(drawn_rail);
-            owes_frame = true;
-        }
-        // The dock box's fade settles its debt on the same terms as the pin's:
-        // the opacity that would be *drawn*, quantised to the 1/255 a layer's
-        // alpha resolves to, against the one that was. It is read here rather
-        // than inside the overlay build because a debt has to be noticed by the
-        // thing that decides whether to build at all.
-        let faded = self.drawn_dock_reveal(now, motion);
-        if self.window.last_drawn_dock_reveal != faded {
-            self.window.last_drawn_dock_reveal = faded;
-            owes_frame = true;
-        }
-        // **B22 — the resizing cards' own debt**, on the same terms as the dock
-        // box's: the inset that would be *drawn*, in whole physical pixels,
-        // against the one that was. It is settled here rather than inside the
-        // chrome build because a card running down after the button came up is
-        // the one case where nothing else is asking for the frame — the pointer
-        // has stopped, the layout has stopped, and only this transition is left.
-        let carded = self.drawn_resizing_card(now);
-        if self.window.last_drawn_resizing_card != carded {
-            self.window.last_drawn_resizing_card = carded;
-            owes_frame = true;
-        }
-        // **The popups' own debt** (the animation slice, 2026-08-26), on exactly
-        // the resizing cards' terms and for a sharper version of their reason:
-        // the last frame of a *departure* is the one nothing else in this window
-        // asks for. The menu's state is already gone, the press that dismissed it
-        // is long over and the pointer has stopped — what is left is a picture
-        // fading in the arrival register, and only this reading knows it is
-        // there. `drawn` is empty under reduced motion, so a window that asked
-        // for stillness settles this debt once and never again.
-        let scale = self.window.renderer.scale_factor() as f32;
-        let passing = self.window.passages.drawn(now, motion, scale);
-        if self.window.passages_drawn != passing {
-            self.window.passages_drawn = passing;
-            owes_frame = true;
-        }
-        // **The fades' own debt** (the animation slice's second half), on exactly
-        // the same terms as the register above and with the same sharp case: a
-        // pane the hand has *left* is a run fading out with nothing else in the
-        // window moving — the pointer has already stopped, the layout has not
-        // changed, and the only thing still happening is ninety milliseconds of
-        // ink. Empty under reduced motion, so a window that asked for stillness
-        // settles this once and never again.
-        let settling = self.window.settling.drawn(now, motion);
-        if self.window.settling_drawn != settling {
-            self.window.settling_drawn = settling;
-            owes_frame = true;
-        }
-        // And the feet's, on the same terms and with the same sharp case: a
-        // receipt that has just run out is a strip dissolving with the pointer
-        // long since still and nothing else in the window moving.
-        let phrases = self.window.foot_phrases.drawn(now, motion);
-        if self.window.foot_phrases_drawn != phrases {
-            self.window.foot_phrases_drawn = phrases;
-            owes_frame = true;
-        }
-        // **§7.1.6b′ F3 — the card column's entrance, settled on the same
-        // terms.** Quantised to the whole physical pixel the slide can actually
-        // move a rectangle by, for `drawn_rail`'s reason one paragraph up: a
-        // tween settling through the long tail of an ease would otherwise owe a
-        // frame for every one of the sixty in it while nothing on the glass
-        // changed. Read here and not inside the chrome build because the last
-        // frame of the entrance is the one nothing else asks for — the chord is
-        // long over and the pointer never moved.
-        let arriving = self.drawn_focus_reveal(now);
-        if self.window.last_drawn_focus_reveal != Some(arriving) {
-            self.window.last_drawn_focus_reveal = Some(arriving);
-            owes_frame = true;
-        }
-        // The settings page's Advanced group, on the same terms: the frame its
-        // height last drew at, against the one it would draw at now. Quantised
-        // to a thousandth of the group's own height, which is finer than the
-        // pixel it can move a row by — `settling`'s own argument about which
-        // side of the glass to be wrong on.
-        let disclosed = self.drawn_advanced_reveal(now);
-        if self.window.advanced_reveal_sample != disclosed {
-            self.window.advanced_reveal_sample = disclosed;
-            owes_frame = true;
-        }
-        // **U8 — the panes' own debt, settled as it is asked.**
+        // **The ask, and only with a debt** (T-ADVANCERS-ASK-ONLY-WITH-WORK's
+        // shape): no news of its own — what the strip found is all debt, met
+        // by the compare-and-records above — so the gate is asked only while a
+        // written debt stands, and a turn with nothing owed asks nothing. A
+        // refusal books the frame boundary (`WakeOwner::RefusedFrame`), and the
+        // turn it books is admitted and draws the debt, rate tick due or not.
         //
-        // Asked separately from "is anything moving?" for the reason
-        // [`tab_owes_frame`] exists: the two part company on exactly the frame
-        // the flight *ends*, where the FLIP has reached identity and reports
-        // itself finished. A draw gated on movement would return before
-        // rebuilding and leave every pane one eased step short of the box the
-        // solver actually gave it — a permanent misalignment, because nothing
-        // else is coming to correct it. `retire` afterwards, so a landed pane
-        // stops carrying a rect from a layout two splits ago.
-        // The live solve, and not a copy the tween took when it started: see
-        // [`PaneMotion::settle_frame_debt`]. A window resized mid-flight moves
-        // every pane, and the debt is about what is *drawn*.
-        let pane_rects = self.pane_rects();
-        let panes_owe = self
-            .window
-            .pane_motion
-            .settle_frame_debt(&pane_rects, now, motion);
-        self.window.pane_motion.retire(now, motion);
-        // **The pictures' own debt, kept as a name of its own.** It has to
-        // survive the chrome's question below, which is why it is not folded
-        // into `owes_frame` and forgotten — see [`tick_owes_a_present`].
-        //
-        // **Taken rather than computed** (closure review O4, 2026-09-18): the
-        // pictures are serviced above every gate now, so what reaches this line
-        // is what [`Self::service_pictures`] found since the last tick that was
-        // admitted — a frame that arrived during a refused turn is still owed
-        // when one is finally allowed.
-        let pictures_owe = std::mem::take(&mut self.window.pictures_owe_a_frame);
-        // **§7.1.6b′ T-5 — and the card column's debt is a fourth, kept beside
-        // them for the same reason.**
-        //
-        // This gate is where a card's refresh clock actually was. Everything
-        // above it asks whether some *animation* moved, and a card is not an
-        // animation: it is a picture of a pane, and the pane moves when the child
-        // writes. So on a tick where nothing was easing, this line returned
-        // before [`Self::refresh_chrome`] — which is the only door
-        // `refresh_focus_thumbnails` is behind — and the column stood still.
-        //
-        // What made that survivable, and what made it look like a shell defect,
-        // is the tab-mark breath: `tab_owes_frame(tab.last_drawn_mark, …)` a few
-        // dozen lines up sets `owes_frame` on every frame of a mark that is
-        // breathing, and only `OSC 133;C` starts one. So a PowerShell or Git Bash
-        // card was carried through this gate by its own shell's marker for the
-        // whole of every command, and a Command Prompt or WSL card was carried
-        // through only by whatever else happened to be moving.
-        //
-        // The debt is **not** folded into the present's question below: whether
-        // this tick owes the glass a picture is still `chrome_moved`'s to answer,
-        // and a re-projection that drew the same rows draws nothing.
-        let cards_owe = self.window.cards.owes_frame();
-        // **A recording's bar, changed by its own clocks** (T-VIDEO-POINTER-AND-KEYS
-        // review round 1, 2026-10-23): its fade, and the volume's flash going out.
-        // `strip_animation_work` wakes the window for both through
-        // `VideoSeats::bar_deadline` and `bar_is_moving`; this is what the woken
-        // tick finds owed. While a recording plays its decoded pictures carry the
-        // bar anyway; paused, nothing else would, and the flash stood.
-        let bars_owe = self.window.video.bars_owe_a_frame(now, motion);
-        let owes_frame = owes_frame || pictures_owe || cards_owe || bars_owe;
-        if !owes_frame && !panes_owe {
+        // **The gate is the window's own display frame, and the draw still
+        // stands behind it** (owner's report 2026-09-18): a turn the loop was
+        // not woken for — a shell speaking, a pointer moving — can be far
+        // enough past the strip's own rate to pass it while the picture that
+        // frame would replace has not reached the display yet. See
+        // [`Self::animation_frame_is_due`], which is that gate generalised out
+        // of this method to every animation this window runs.
+        let owes_frame = self.window.strip_owes_a_frame;
+        let panes_owe = self.window.strip_panes_owe_a_frame;
+        if !self.paced_frame(false, |_| owes_frame || panes_owe) {
             return Ok(());
         }
+        self.window.strip_owes_a_frame = false;
+        self.window.strip_panes_owe_a_frame = false;
+        let pictures_owe = std::mem::take(&mut self.window.pictures_owe_a_frame);
         // The strip decides for itself whether anything visibly moved. An
         // animation that is running but landed on the same pixels this frame —
         // a tween rounding to the same thousandth, a breath at the flat top of
@@ -13445,11 +13557,11 @@ impl<B: Backend> Runtime<'_, B> {
     /// [`crate::pace`].
     ///
     /// A refusal is recorded rather than dropped: see [`pace::FrameClock::refuse`].
-    /// **Asking costs nothing and marks nothing** (review 2026-09-18 round 2).
-    /// It used to record that an animation was running, on the reasoning that
-    /// only a running one would ask; four advancers ask before they have
-    /// established that they hold anything at all, so a window with an empty tip
-    /// host marked itself running for ever. What is mid-flight is reported once
+    /// **Asking marks nothing** (review 2026-09-18 round 2). It used to record
+    /// that an animation was running, on the reasoning that only a running one
+    /// would ask; four advancers then asked before they had established that
+    /// they held anything at all, so a window with an empty tip host marked
+    /// itself running for ever. What is mid-flight is reported once
     /// a turn from the journeys' own predicates — see [`Self::running_journeys`].
     ///
     /// # What may stand behind this, and what may never (closure review O4)
@@ -13478,12 +13590,43 @@ impl<B: Backend> Runtime<'_, B> {
     /// A fade has no service: it is a number read off a clock, so there is
     /// nothing to bring forward and nothing to lose by a refusal. That is why
     /// eleven of the thirteen advancers are gated whole.
+    ///
+    /// # Ask only with work (T-ADVANCERS-ASK-ONLY-WITH-WORK)
+    ///
+    /// A refusal is a debt, and a debt books a wake: asked by an advancer that
+    /// holds nothing, it buys the window a turn that draws nothing. Row 12's
+    /// idle census found seven advancers asking before they had looked at
+    /// their own work, and one empty `RefusedFrame` wake after every caret
+    /// frame for it. So an advancer asks only once it owes a frame — the
+    /// shape [`Self::paced_frame`] writes down for the seven that have news of
+    /// their own and for the tab strip, which has none and asks with the debt
+    /// its look wrote down (T-STRIP-ASKS-ON-ITS-TICK; see
+    /// [`Self::advance_strip_animation`]), and the shape the other four spell
+    /// out above their ask.
     pub(crate) fn animation_frame_is_due(&mut self) -> bool {
         if self.window.frame_clock.admits() {
             return true;
         }
         self.window.frame_clock.refuse();
         false
+    }
+
+    /// **Whether an advancer draws on this turn**: news goes through, a debt
+    /// asks the frame gate, and nothing asks nothing.
+    ///
+    /// `news` is what the advancer's state clocks changed on this turn — never
+    /// paced (closure review O4), because what it has to say is new. `owes` is
+    /// the advancer's pure frame-debt question (the picture on the glass
+    /// against the one its clock now gives), read only when there is no news,
+    /// and the gate is asked only when it answers yes: a refusal on a turn
+    /// with no debt would book a wake for a frame nobody owes. See
+    /// [`Self::animation_frame_is_due`].
+    pub(in crate::runtime) fn paced_frame(
+        &mut self,
+        news: bool,
+        owes: impl FnOnce(&Self) -> bool,
+    ) -> bool {
+        news || (owes(self) && self.animation_frame_is_due())
     }
 
     pub(in crate::runtime) fn strip_animation_work(&self, now: Instant) -> AnimationWork {
@@ -13723,6 +13866,9 @@ impl<B: Backend> Runtime<'_, B> {
         // liveness: nothing is moving, one frame is owed, and this is where the
         // window says when it will pay it — the same shape the pacer's own
         // refusal takes ([`pace::FrameClock::refuse`]).
+        //
+        // The strip's own written debt (`strip_owes_a_frame`) books nothing
+        // here, and the field's doc says why: its booking is the refusal's.
         let pictures_owe = self.window.pictures_owe_a_frame;
         let pane_moving = self.window.pane_motion.is_animating(now, motion);
         let next_tick = self.strip_animation_next_tick(self.window.frame_clock.interval());
@@ -14181,68 +14327,170 @@ impl<B: Backend> Runtime<'_, B> {
     pub(in crate::runtime) fn save_clipboard_picture(
         &mut self,
         target: PasteTarget,
+        sequence: Option<bt_platform::ClipboardSequence>,
         offered: Vec<bt_platform::PictureBytes>,
     ) -> Result<()> {
+        let from = PasteFrom::Picture(sequence);
         // **A place in the queue before a thread is asked for** (review X-3/X-4).
         // Superseding a job does not stop it — it is inside a decode — so a held
         // `Ctrl+V` starts one per press, each entitled to a picture of its own.
         // The guard is what makes the ceiling on one job a ceiling on the
         // process; it is given up when the worker ends, however it ends.
         let Some(place) = ClipboardPictureJob::take() else {
-            crate::diagnostics::stderr_line(
-                "clipboard picture workers are all busy; paste ignored".to_owned(),
-            );
-            return self.refuse_clipboard_picture_on_the_next_turn();
+            self.window
+                .window
+                .note("clipboard picture workers are all busy; paste ignored");
+            return self.refuse_staging_on_the_next_turn(PasteRefusal {
+                kind: RefusedKind::PictureNotSaved(PictureNotSaved::WorkersBusy),
+                from,
+            });
         };
         let generation = self.window.clipboard_picture.withdraw();
         let inbox = self.window.clipboard_picture.inbox();
         let proxy = self.app.event_proxy.clone();
-        let folder = clipboard_picture::directory();
-        let started = bt_platform::spawn_at_priority(
-            "clipboard-picture",
-            bt_platform::ThreadPriority::Normal,
-            move |_ctx| {
-                // Held for the whole body and dropped with it, on every road out.
-                let _place = place;
-                let result = clipboard_picture::save(&folder, &offered, SystemTime::now());
-                // The generation is compared under the inbox's own lock, so an
-                // answer that has been superseded while it was being made is
-                // dropped rather than laid on top of the answer that supersedes
-                // it (review X-3).
-                deliver_clipboard_picture(
-                    &inbox,
-                    ClipboardPictureAnswer {
-                        generation,
-                        target,
-                        result,
-                    },
-                );
-                // After the answer is in the slot, never before.
-                let _ = proxy.send_event(AppEvent::ClipboardPictureReady);
-            },
-        );
+        let folder = self.window.window.staging_folder();
+        let started = if self.window.clipboard_picture.refuses_this_start() {
+            Err(())
+        } else {
+            bt_platform::spawn_at_priority(
+                "clipboard-picture",
+                bt_platform::ThreadPriority::Normal,
+                move |worker| {
+                    // Held for the whole body and dropped with it, on every road out.
+                    let _place = place;
+                    let result =
+                        clipboard_picture::save(worker, &folder, &offered, SystemTime::now());
+                    // The generation is compared under the inbox's own lock, so an
+                    // answer that has been superseded while it was being made is
+                    // dropped rather than laid on top of the answer that supersedes
+                    // it (review X-3).
+                    deliver_clipboard_picture(
+                        &inbox,
+                        ClipboardPictureAnswer {
+                            generation,
+                            target,
+                            staged: StagingAnswer::Picture { sequence, result },
+                        },
+                    );
+                    // After the answer is in the slot, never before.
+                    let _ = proxy.send_event(AppEvent::ClipboardPictureReady);
+                },
+            )
+            .map(drop)
+            .map_err(drop)
+        };
         if started.is_err() {
             // A machine that will not start a thread is a machine that cannot do
             // this paste, and saying nothing would look like a key that did not
             // register. The place goes back with the closure that was never run.
-            crate::diagnostics::stderr_line(
-                "clipboard picture worker could not be started; paste ignored".to_owned(),
-            );
-            return self.refuse_clipboard_picture_on_the_next_turn();
+            self.window
+                .window
+                .note("clipboard picture worker could not be started; paste ignored");
+            return self.refuse_staging_on_the_next_turn(PasteRefusal {
+                kind: RefusedKind::PictureNotSaved(PictureNotSaved::NotStarted),
+                from,
+            });
+        }
+        Ok(())
+    }
+
+    /// **Start the worker that has a clipboard promise's files written** (plan row 81) — the
+    /// picture save's shape, its places, its mailbox and its wake: the clipboard lane read the
+    /// promise's descriptor and nothing else, and the `clipboard-promise` worker
+    /// (`clipboard_picture::stage_promise`) has the source render the files, on a thread of their
+    /// own, through this window's clipboard door (`ClipboardDoor::render_promised_files`), into a
+    /// folder of the paste's own in the staging folder. [`Self::adopt_clipboard_picture`] pastes
+    /// the paths it answers, as a copied file list is pasted. **The clipboard lane answers in a
+    /// second or says why; anything that renders goes to a worker of its own, as the picture save
+    /// does.**
+    ///
+    /// The window keeps no clock on the render and never waits for it; a newer paste supersedes
+    /// it by generation. The worker watches it: a render that hands nothing over for
+    /// `clipboard_picture::STALL_BOUND` is given up, its folder removed and its place given back,
+    /// and the paste is refused `promise (stalled)` (review N14).
+    pub(in crate::runtime) fn stage_clipboard_promise(
+        &mut self,
+        target: PasteTarget,
+        sequence: Option<bt_platform::ClipboardSequence>,
+        promise: bt_platform::PromisedFiles,
+    ) -> Result<()> {
+        let from = PasteFrom::Promise(sequence);
+        let picture_passed_over = promise.picture_passed_over;
+        let Some(place) = ClipboardPictureJob::take() else {
+            self.window
+                .window
+                .note("clipboard promise workers are all busy; paste ignored");
+            return self.refuse_staging_on_the_next_turn(PasteRefusal {
+                kind: RefusedKind::Promise {
+                    why: PromiseWhy::WorkersBusy,
+                    picture_passed_over,
+                },
+                from,
+            });
+        };
+        let generation = self.window.clipboard_picture.withdraw();
+        let inbox = self.window.clipboard_picture.inbox();
+        let proxy = self.app.event_proxy.clone();
+        let door = self.window.window.clipboard_door();
+        let folder = self.window.window.staging_folder();
+        let started = if self.window.clipboard_picture.refuses_this_start() {
+            Err(())
+        } else {
+            bt_platform::spawn_at_priority(
+                "clipboard-promise",
+                bt_platform::ThreadPriority::Normal,
+                move |worker| {
+                    let began = Instant::now();
+                    let result =
+                        clipboard_picture::stage_promise(worker, door, promise.entries, &folder);
+                    // The place goes back before the answer is laid down: a render given up as
+                    // stalled holds none, and the paste the answer wakes finds every place free.
+                    drop(place);
+                    deliver_clipboard_picture(
+                        &inbox,
+                        ClipboardPictureAnswer {
+                            generation,
+                            target,
+                            staged: StagingAnswer::Promise {
+                                sequence,
+                                picture_passed_over,
+                                result,
+                                took: began.elapsed(),
+                            },
+                        },
+                    );
+                    let _ = proxy.send_event(AppEvent::ClipboardPictureReady);
+                },
+            )
+            .map(drop)
+            .map_err(drop)
+        };
+        if started.is_err() {
+            self.window
+                .window
+                .note("clipboard promise worker could not be started; paste ignored");
+            return self.refuse_staging_on_the_next_turn(PasteRefusal {
+                kind: RefusedKind::Promise {
+                    why: PromiseWhy::NotStarted,
+                    picture_passed_over,
+                },
+                from,
+            });
         }
         Ok(())
     }
 
     /// **A save refused at its door, answered on the next turn** (plan row 52, ruling R5): the
-    /// refusal is counted in the picture's own inbox, under the lock the worker's answer is left
-    /// under, and the window is woken as the worker wakes it ([`AppEvent::ClipboardPictureReady`]);
-    /// [`Self::adopt_clipboard_picture`] draws the notice this door used to draw on the gesture's
-    /// own turn. The door's line is said where it always was, in the same words.
+    /// refusal is kept in the picture's own inbox with its reason (plan row 81), under the lock
+    /// the worker's answer is left under, and the window is woken as the worker wakes it
+    /// ([`AppEvent::ClipboardPictureReady`]); [`Self::adopt_clipboard_picture`] says it through
+    /// the door every paste refusal leaves by. The door's own line is said where it always was,
+    /// in the same words.
     ///
     /// **Under no generation**: a refusal answers no question of its own and supersedes none, so a
     /// save still running for an earlier paste lands as it would have.
-    fn refuse_clipboard_picture_on_the_next_turn(&mut self) -> Result<()> {
-        self.window.clipboard_picture.refuse();
+    fn refuse_staging_on_the_next_turn(&mut self, refusal: PasteRefusal) -> Result<()> {
+        self.window.clipboard_picture.refuse(refusal);
         let _ = self
             .app
             .event_proxy
@@ -14251,7 +14499,7 @@ impl<B: Backend> Runtime<'_, B> {
     }
 
     /// **The file the picture worker wrote, pasted as the path it now is**
-    /// (§7.61).
+    /// (§7.61) — **or the files a promise's worker had written** (plan row 81).
     ///
     /// One line of its own and then [`Self::paste_paths_into`], which is the
     /// whole point: by the time a picture has a file it *is* a path in hand, and
@@ -14278,46 +14526,72 @@ impl<B: Backend> Runtime<'_, B> {
     /// answers a gesture that has been superseded, and the file it wrote is
     /// swept by the cap the next paste applies.
     pub(crate) fn adopt_clipboard_picture(&mut self) -> Result<()> {
-        // A save its door refused ([`Self::refuse_clipboard_picture_on_the_next_turn`]) is said
-        // first, once per refusal, in the notice the door drew before plan row 52: it was asked
-        // before any answer still to land.
-        for _ in 0..self.window.clipboard_picture.take_refusals() {
-            self.toast(
-                toast::ToastKind::Error,
-                toast::ToastAnchor::Window,
-                None,
-                i18n::Text::PasteClipboardPicture.text().to_owned(),
-            )?;
+        // A save its door refused ([`Self::refuse_staging_on_the_next_turn`]) is said first, once
+        // per refusal, through the paste refusal door: it was asked before any answer still to
+        // land.
+        for refusal in self.window.clipboard_picture.take_refusals() {
+            self.refuse_paste(refusal)?;
         }
         let Some(landed) = self.window.clipboard_picture.take_current() else {
             return Ok(());
         };
-        let path = match landed.result {
-            Ok(path) => path,
-            Err(reason) => {
-                // `diagnostics::note` and not `eprintln!` (X-7): this is the
-                // window thread, and a resident diagnostic it writes must not be
-                // able to wait behind whoever is reading a trace.
-                diagnostics::note(&format!(
-                    "clipboard picture could not be saved; paste ignored: {reason}"
-                ));
-                return self.toast(
-                    toast::ToastKind::Error,
-                    toast::ToastAnchor::Window,
-                    None,
-                    i18n::Text::PasteClipboardPicture.text().to_owned(),
-                );
+        match landed.staged {
+            StagingAnswer::Picture { sequence, result } => {
+                let from = PasteFrom::Picture(sequence);
+                let path = match result {
+                    Ok(path) => path,
+                    Err(reason) => {
+                        // `diagnostics::note` and not `eprintln!` (X-7): this is the
+                        // window thread, and a resident diagnostic it writes must not be
+                        // able to wait behind whoever is reading a trace.
+                        diagnostics::note(&format!(
+                            "clipboard picture could not be saved; paste ignored: {reason}"
+                        ));
+                        return self.refuse_paste(PasteRefusal {
+                            kind: RefusedKind::PictureNotSaved(PictureNotSaved::SaveFailed),
+                            from,
+                        });
+                    }
+                };
+                // The same as the clipboard's own road above, for the same reason: the
+                // picture was pasted into the pane that had the keyboard, and it still
+                // has it.
+                self.paste_paths_into(landed.target, vec![path], from)
+                    .map(drop)
             }
-        };
-        // The same as the clipboard's own road above, for the same reason: the
-        // picture was pasted into the pane that had the keyboard, and it still
-        // has it.
-        self.paste_paths_into(
-            landed.target,
-            vec![path],
-            "write clipboard picture path to PTY",
-        )
-        .map(drop)
+            StagingAnswer::Promise {
+                sequence,
+                picture_passed_over,
+                result,
+                took,
+            } => {
+                let from = PasteFrom::Promise(sequence);
+                match result {
+                    // Counts, bytes and time — no name (plan row 81, R11).
+                    Ok(rendered) => {
+                        self.window.window.note(&format!(
+                            "clipboard promise saved: {} files, {} bytes, {} ms; sequence={}",
+                            rendered.files,
+                            rendered.bytes,
+                            took.as_millis(),
+                            sequence.map_or_else(
+                                || "none".to_owned(),
+                                |sequence| sequence.0.to_string()
+                            )
+                        ));
+                        self.paste_paths_into(landed.target, rendered.pasted, from)
+                            .map(drop)
+                    }
+                    Err(why) => self.refuse_paste(PasteRefusal {
+                        kind: RefusedKind::Promise {
+                            why,
+                            picture_passed_over,
+                        },
+                        from,
+                    }),
+                }
+            }
+        }
     }
 
     /// **Take in every picture the shrinker has finished.** Returns whether any
@@ -15449,6 +15723,40 @@ impl<B: Backend> Runtime<'_, B> {
             pictures,
             wrap,
         });
+    }
+
+    /// Put a scheme file in front of the reader, with the keyboard in it.
+    ///
+    /// The tail both halves of the foot's first verb share: `Customise scheme…`
+    /// writes a copy and comes here, `Edit scheme…` comes straight here. One
+    /// function because everything from this point on is about a file that
+    /// exists, and two copies of it would be two answers to "where does a scheme
+    /// open".
+    pub(crate) fn open_scheme_for_editing(&mut self, path: PathBuf) -> Result<()> {
+        // **The dialog goes.** It is the one verb in it whose answer is a
+        // document, and a modal standing over the document it just handed you is
+        // a modal in the way.
+        self.settings_closed();
+        self.window.settings.close();
+        let Some(surface) = self.preview_landing_surface() else {
+            return Ok(());
+        };
+        self.open_preview_file_on(surface, path.clone())?;
+        // The keyboard goes into the text, so the file is *open for editing* and
+        // not merely open. `preview_edit_focus` is re-validated at every read, so
+        // setting it before the head has landed is safe: it becomes true the
+        // moment there is something to type into.
+        self.preview_edit_focus = Some(surface);
+        let anchor = surface.toast_anchor();
+        let file = path
+            .file_name()
+            .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
+        self.toast(
+            toast::ToastKind::Ok,
+            anchor,
+            None,
+            i18n::scheme_customised(&file),
+        )
     }
 }
 

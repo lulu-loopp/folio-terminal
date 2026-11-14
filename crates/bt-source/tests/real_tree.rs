@@ -39,6 +39,8 @@ mod clock_guard;
 mod contained_panic;
 #[path = "contract.rs"]
 mod contract;
+#[path = "early_returns.rs"]
+mod early_returns;
 #[path = "env_doors.rs"]
 mod env_doors;
 #[path = "hardcode_owners.rs"]
@@ -100,6 +102,7 @@ fn the_whole_package_guards_share_one_index_per_package() {
         let declared = universes::first_party_whole(package, Vendor::Excluded)
             .expect("a package of this workspace");
         let declarations = [
+            ("early_returns", early_returns::universe_for(package)),
             ("env_doors", env_doors::universe_for(package)),
             ("temp_paths", temp_paths::universe_for(package)),
             ("test_globals", test_globals::universe_for(package)),
@@ -118,7 +121,12 @@ fn the_whole_package_guards_share_one_index_per_package() {
         }
     }
 
-    let readers: [(&str, Vec<Arc<Index>>, usize); 7] = [
+    let readers: [(&str, Vec<Arc<Index>>, usize); 8] = [
+        (
+            "early_returns",
+            early_returns::workspace_indices(),
+            first_party.len(),
+        ),
         (
             "env_doors",
             env_doors::workspace_indices(),

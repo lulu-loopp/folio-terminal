@@ -117,15 +117,79 @@ impl<B: Backend> Runtime<'_, B> {
                 return Ok(());
             }
             self.window.chrome_present_pending = true;
-            hang_watch::during(hang_watch::Station::WindowRedraw, || {
-                self.window.window.request_redraw()
-            });
+            self.ask_for_present();
             return Ok(());
         }
         self.publish_frame(FrameTrigger {
             occurred_at: now,
             source: FrameSource::Expose,
         })
+    }
+
+    /// **Ask for the present this window now owes** (T-TWO-BARE-TURNS-PER-MARK-STEP).
+    ///
+    /// The caller has already filed the debt: a frame in the slot, or
+    /// `chrome_present_pending`. What is left is who pays it.
+    ///
+    /// - **Inside this window's turn**, the turn pays it at its own end
+    ///   ([`Self::pay_the_turns_present`]), after every clock that could add to it. One step of
+    ///   the working mark, one caret blink, one drained burst of output is then one turn of the
+    ///   loop. A paint asked of the platform from here would come back as a second turn: a wake,
+    ///   the `RedrawRequested`, and every clock of `about_to_wait` run again. On the VM that
+    ///   second turn cost 515 µs of a 3774 µs mark step with three panes.
+    /// - **Anywhere else** (an event handler, Windows' modal size loop), the platform is asked
+    ///   for a paint, as it always was: no turn end is coming that would pay it.
+    pub(in crate::runtime) fn ask_for_present(&mut self) {
+        if self.window.turn_pays_presents {
+            self.window.turn_owes_a_present = true;
+            return;
+        }
+        hang_watch::during(hang_watch::Station::WindowRedraw, || {
+            self.window.window.request_redraw()
+        });
+    }
+
+    /// **The turn pays the present it was asked for**, once, after its last clock and before
+    /// its deadline fold (T-TWO-BARE-TURNS-PER-MARK-STEP).
+    ///
+    /// It pays through [`Self::redraw`], the same function `RedrawRequested` runs, so the frame
+    /// is the one the paint would have drawn. Only the turn that pays it is different. Before
+    /// the fold, because the fold books every frame-clamped deadline (a refused frame's, the
+    /// strip's and the clocks clamped to the frame) from `last_present_at`, which this present
+    /// moves: paid after it, they would be booked from the picture it replaces, up to a frame
+    /// early.
+    ///
+    /// **A window on no screen is asked for the paint instead** (ruling R2): a minimized or
+    /// cloaked window, or one not shown yet, is a window the platform sends no paint until it
+    /// can be seen, and that stays exactly as it was.
+    ///
+    /// The flag is lowered first, so an ask that reaches [`Self::ask_for_present`] while this
+    /// present runs goes to the platform: no later turn end would pay it. (The presenter's own
+    /// retry and the skirt ask the platform directly and never come through here.)
+    fn pay_the_turns_present(&mut self) -> Result<()> {
+        self.window.turn_pays_presents = false;
+        if !std::mem::take(&mut self.window.turn_owes_a_present) {
+            return Ok(());
+        }
+        if self.window.window_shown && !self.window.window_hidden {
+            return hang_watch::during(hang_watch::Station::TurnPresent, || self.redraw());
+        }
+        hang_watch::during(hang_watch::Station::WindowRedraw, || {
+            self.window.window.request_redraw()
+        });
+        Ok(())
+    }
+
+    /// **After a turn, whatever it left**: the window stops deferring, and a present the turn
+    /// was asked for but did not pay (it returned an error before its end) is asked of the
+    /// platform. After a turn that ran to its end this does nothing: its end has already paid.
+    pub(crate) fn end_the_turns_presents(&mut self) {
+        self.window.turn_pays_presents = false;
+        if std::mem::take(&mut self.window.turn_owes_a_present) {
+            hang_watch::during(hang_watch::Station::WindowRedraw, || {
+                self.window.window.request_redraw()
+            });
+        }
     }
 
     pub(in crate::runtime) fn publish_frame_inner(
@@ -176,9 +240,7 @@ impl<B: Backend> Runtime<'_, B> {
             // Answering `false` is then literally true: no picture entered the slot.
             if self.focused().is_none() {
                 self.window.chrome_present_pending = true;
-                hang_watch::during(hang_watch::Station::WindowRedraw, || {
-                    self.window.window.request_redraw()
-                });
+                self.ask_for_present();
                 return Ok(false);
             }
             // Real-machine decoration-state trace (`BT_DECOR_TRACE=<path>`). Runs on every frame trigger
@@ -462,9 +524,7 @@ impl<B: Backend> Runtime<'_, B> {
                 .pending_frames
                 .publish(composed.frame, trigger)
                 .context("reject non-rectangular frame at publish boundary")?;
-            hang_watch::during(hang_watch::Station::WindowRedraw, || {
-                self.window.window.request_redraw()
-            });
+            self.ask_for_present();
             Ok(true)
         })
     }
@@ -1628,7 +1688,9 @@ impl<B: Backend> Runtime<'_, B> {
 
     /// **Nothing in this window is moving, and nothing is owed to its glass**: no
     /// journey running, no refused animation frame, no frame waiting to be presented,
-    /// no chrome present pending, no picture or card owing a frame.
+    /// no chrome present pending, no picture or card owing a frame, and no debt the
+    /// strip's look wrote down (`strip_owes_a_frame`, `strip_panes_owe_a_frame`;
+    /// T-STRIP-ASKS-ON-ITS-TICK) that no frame has drawn yet.
     ///
     /// The idle test the turn's `BT_PERF_TRACE idle_wake` line was written with, named
     /// so that the web engine's warm-up asks the same question (ticket 54) rather than
@@ -1646,7 +1708,9 @@ impl<B: Backend> Runtime<'_, B> {
                 || self.window.pending_frames.pending_frame().is_some()
                 || self.window.chrome_present_pending
                 || self.window.pictures_owe_a_frame
-                || self.window.cards.owes_frame(),
+                || self.window.cards.owes_frame()
+                || self.window.strip_owes_a_frame
+                || self.window.strip_panes_owe_a_frame,
             resize_owed,
         }
     }
@@ -1656,6 +1720,10 @@ impl<B: Backend> Runtime<'_, B> {
         now: Instant,
         application_clocks: bool,
     ) -> Result<Option<(WakeOwner, Instant)>> {
+        // **From here to the turn's own end, a present asked for is this turn's to pay**
+        // (T-TWO-BARE-TURNS-PER-MARK-STEP): see [`Self::ask_for_present`] and, at the foot of
+        // the clock run, [`Self::pay_the_turns_present`].
+        self.window.turn_pays_presents = true;
         self.check_picture_freshness(now, false);
         // **The frame debt belongs to the turn that incurs it** (owner's report
         // 2026-09-18). Opened here rather than cleared wherever it is paid,
@@ -2113,6 +2181,13 @@ impl<B: Backend> Runtime<'_, B> {
         // Service the PTY gate after every other due task that can mutate session state, then carry
         // the deadline derived from that exact sample into the control-flow decision below.
         let pty_resize_deadline = self.flush_pending_pty_resize(now)?;
+        // **The present this turn was asked for, paid by this turn** (T-TWO-BARE-TURNS-PER-
+        // MARK-STEP). After every clock above and the PTY gate, because each of them can publish
+        // the frame it pays; and before the fold below, because the fold books every
+        // frame-clamped deadline (a refused frame's, the strip's and the clocks clamped to the
+        // frame) from `last_present_at`, which this present moves: paid after it, they would be
+        // booked from the picture it replaces, up to a frame early.
+        self.pay_the_turns_present()?;
         // **And the input method's caret area, on the same terms** (ticket 63). Every
         // road above — the drain's frames, the IME events' frames, a preview repainted,
         // the caret offer at the head of the clock run, and the frame a resize the PTY
@@ -2316,14 +2391,13 @@ impl<B: Backend> Runtime<'_, B> {
             // A standing credential's ten minutes, and only while one is standing. A window whose
             // panes are asking for nothing reports nothing and costs no wake-ups at all — which is
             // every window, almost always.
-            // Spent by `settle_attention`, which runs behind the strip's tick and the window's frame
-            // gate (`advance_strip_animation`), so it is booked no earlier than the turn that gate
-            // admits (T-WINDOW-THREAD-UNDER-LOAD): a due credential refused by the gate is an
-            // instant the loop would otherwise spin on until the gate opens.
-            attention_ledger_deadline(&self.window.tabs).map(|due| {
-                self.strip_animation_next_tick(self.window.frame_clock.interval())
-                    .map_or(due, |tick| due.max(tick))
-            }),
+            // Spent by `settle_attention`, which runs on every turn, above both of the strip's
+            // gates (`advance_strip_animation`; T-STRIP-ASKS-ON-ITS-TICK, ruling R3), so it is
+            // booked as it stands: the turn it comes due on spends it. It was clamped to the
+            // strip's next tick while the pass stood behind those gates
+            // (T-WINDOW-THREAD-UNDER-LOAD), when a due credential refused by them was an instant
+            // the loop would otherwise have spun on until they opened.
+            attention_ledger_deadline(&self.window.tabs),
             // The tip's 380ms while one is settling, and the fade's own frames
             // until it lands. A window with no tip under the pointer reports
             // nothing and costs no wake-ups at all.
@@ -3652,3 +3726,7 @@ mod tests;
 #[cfg(test)]
 #[path = "wake_fold_tests.rs"]
 mod wake_fold_tests;
+
+#[cfg(test)]
+#[path = "turn_present_tests.rs"]
+mod turn_present_tests;

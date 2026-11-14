@@ -366,6 +366,19 @@ text_entries! {
     /// Folio's own files went and something it never wrote stood beside them, so
     /// that something is still there (audit 3, E-1).
     CleanupNotOurs,
+    /// A recorded macOS update home beside a gone app, left because it holds an update that is
+    /// not finished (0.4.10 plan row 68e).
+    CleanupUpdateHomeInFlight,
+    /// A recorded macOS update home whose app could not be checked — on a volume that is not
+    /// there, or a path the system will not say about — left (row 68e, review N8).
+    CleanupUpdateHomeUnchecked,
+    /// A recorded macOS update home whose `lock` or `admission` another copy holds, left (row
+    /// 68e, review N8).
+    CleanupUpdateHomeInUse,
+    /// The account's sign-in entry naming a Folio whose program could not be checked — on a
+    /// volume that is not there, or a path the system will not say about — left (row 22a, review
+    /// N3: row 68e's rule, a line says only what is known).
+    CleanupSignInUnchecked,
     CleanupRefused,
     CleanupRoot,
     CleanupRunning,
@@ -410,6 +423,10 @@ text_entries! {
     CleanupMarkClipboard,
     CleanupMarkPanicLog,
     CleanupMarkRemoverHome,
+    CleanupMarkRestartRegistration,
+    CleanupMarkServicesEntry,
+    CleanupMarkNotificationPermission,
+    CleanupMarkUpdateJournal,
     CleanupKindPerCopy,
     CleanupKindPerAccount,
     CleanupKindData,
@@ -449,6 +466,11 @@ text_entries! {
     /// The clipboard held a picture and the file Folio writes for it could not
     /// be written (§7.61).
     PasteClipboardPicture,
+    /// The clipboard offered a picture that did not render beside a promise that could not be
+    /// pasted either (plan row 81).
+    PasteClipboardPictureUnread,
+    /// The files a clipboard promise offered are past what one paste writes (plan row 81).
+    PasteClipboardPromiseTooLarge,
     PasteProfileOverride,
 
     // ── window chrome ──────────────────────────────────────────────────────
@@ -571,6 +593,9 @@ text_entries! {
     /// 2026-09-07): the row's three answers are three places **in that menu**, so
     /// the surface is still what the title names and the answers name the places.
     RowContextMenu,
+    /// **Whether Folio starts when you sign in** (0.4.10 plan row 22a, R13): the switch whose
+    /// answer is the account's `Run\Folio` entry. On Windows only until row 22b.
+    RowStartAtSignIn,
     /// The daily-check switch directly under About > Version.
     RowAutoCheck,
     RowTabLayout,
@@ -628,6 +653,15 @@ text_entries! {
     /// repairs this on its own; the sentence exists for the seconds before it
     /// has, and for the machine where the repair could not run.
     DescExplorerFirstPageElsewhere,
+    /// **What the sign-in switch does** (row 22a) — its line while the entry is this copy's or
+    /// there is none.
+    DescStartAtSignIn,
+    /// And while the entry starts another copy of Folio, in another folder.
+    DescStartAtSignInElsewhere,
+    /// And while Windows' own Startup-apps switch has the entry off (R13: the fact, no advice).
+    DescStartAtSignInTurnedOff,
+    /// And while another program's startup entry has the name.
+    DescStartAtSignInNotOurs,
     /// **And when this run of Folio has just registered the package** — the one
     /// line of the five that is advice rather than a fact about the machine.
     ///
@@ -712,6 +746,22 @@ text_entries! {
     /// worth making: a path invented here would be a menu entry that launches
     /// whatever happens to be at it.
     ContextMenuNoExecutable,
+    /// The card raised when the sign-in switch's On has written the entry (row 22a).
+    SignInOnToast,
+    /// And when its Off has taken the entry away.
+    SignInOffToast,
+    /// And when its On pointed another copy's entry at this copy (review N9).
+    SignInTookOverToast,
+    /// Why On wrote nothing: this copy's path is longer than a `Run` value runs.
+    SignInPathTooLong,
+    /// Why On wrote nothing: another program's startup entry has the name.
+    SignInEntryNotOurs,
+    /// Why a press changed nothing: this copy's program is not one an entry may start — a path
+    /// the system would not name, or one macOS has put in quarantine (review N2: the switch's own
+    /// sentence, never the hooks').
+    SignInProgramNotStartable,
+    /// What a write said when the entry read back is not the one written.
+    SignInReadBackDiffers,
 
     // ── the first page of Windows 11's menu (§7.4a) ────────────────────────
     /// **What Explorer draws on the first page**, asked for per call by
@@ -3072,6 +3122,10 @@ text_entries! {
     /// A one-click edit of `$PROFILE` refused because the file is not what the check, or the
     /// write being undone, saw (0.4.8 G7).
     ShellProfileChangedElsewhere,
+    /// Enable via `$PROFILE` refused, and the start's carry of an older Folio line left, because
+    /// the data folder is not `%APPDATA%\Folio` (or its previous name): no guarded line names the
+    /// script there (0.4.10 plan row 68c, R3).
+    ShellProfileOutsideAppData,
     ShellProfileNothing,
     /// A change asked of a worker the thread door would not start — `$PROFILE`'s Enable, Undo or
     /// removal, the Explorer first-page switch — so nothing was changed
@@ -3438,6 +3492,16 @@ impl Text {
                 "The clipboard picture could not be saved. Copy again and retry.",
                 "剪贴板图片无法保存。重新复制后再试。",
             ),
+            Self::PasteClipboardPictureUnread => pick(
+                lang,
+                "The clipboard picture could not be read. Copy again and retry.",
+                "剪贴板图片无法读取。重新复制后再试。",
+            ),
+            Self::PasteClipboardPromiseTooLarge => pick(
+                lang,
+                "The copied files are too many or too large to paste. Save them first.",
+                "复制的文件太多或太大，无法粘贴。请先保存。",
+            ),
             Self::PasteProfileOverride => pick(
                 lang,
                 "profiles.json: {id}: {key} is unsupported; the default was kept.",
@@ -3560,6 +3624,11 @@ impl Text {
             Self::RowRepairRowBreaks => pick(lang, "Repair row breaks", "修复公式换行"),
             Self::RowGitPanel => pick(lang, "Git panel", "Git 面板"),
             Self::RowContextMenu => pick(lang, "Explorer context menu", "资源管理器菜单"),
+            Self::RowStartAtSignIn => pick(
+                lang,
+                "Start at sign-in",
+                "Start at sign-in", // zh: pending T-START-AT-LOGON-SWITCH
+            ),
             Self::RowTabLayout => pick(lang, "Tab layout", "标签页布局"),
             Self::RowSidebar => pick(lang, "Sidebar", "侧栏"),
             Self::RowSplitDirection => pick(lang, "Split direction", "拆分方向"),
@@ -3659,6 +3728,28 @@ impl Text {
                 lang,
                 "That entry points at another folder. Folio takes the entry back next launch.",
                 "该菜单项指向另一个文件夹。Folio 下次启动时将其改回。",
+            ),
+            Self::DescStartAtSignIn => pick(
+                lang,
+                "Starts Folio when you sign in to Windows.",
+                "Starts Folio when you sign in to Windows.", // zh: pending T-START-AT-LOGON-SWITCH
+            ),
+            Self::DescStartAtSignInElsewhere => pick(
+                lang,
+                "Starts the copy of Folio in another folder when you sign in.",
+                // zh: pending T-START-AT-LOGON-SWITCH
+                "Starts the copy of Folio in another folder when you sign in.",
+            ),
+            Self::DescStartAtSignInTurnedOff => pick(
+                lang,
+                "Turned off in Startup apps.",
+                "Turned off in Startup apps.", // zh: pending T-START-AT-LOGON-SWITCH
+            ),
+            Self::DescStartAtSignInNotOurs => pick(
+                lang,
+                "Another program's startup entry is named Folio, and it is left as it is.",
+                // zh: pending T-START-AT-LOGON-SWITCH
+                "Another program's startup entry is named Folio, and it is left as it is.",
             ),
             // **Advice, and the only line here that is.** Explorer was told the
             // moment the package was registered; what it does with that is not
@@ -3858,6 +3949,44 @@ impl Text {
                 lang,
                 "Folio could not work out where folio.exe is",
                 "Windows 没有说出 folio.exe 的位置",
+            ),
+            Self::SignInOnToast => pick(
+                lang,
+                "Folio starts at sign-in.",
+                "Folio starts at sign-in.", // zh: pending T-START-AT-LOGON-SWITCH
+            ),
+            Self::SignInOffToast => pick(
+                lang,
+                "Folio no longer starts at sign-in.",
+                "Folio no longer starts at sign-in.", // zh: pending T-START-AT-LOGON-SWITCH
+            ),
+            Self::SignInTookOverToast => pick(
+                lang,
+                "Folio now starts this copy at sign-in instead of the copy in another folder.",
+                // zh: pending T-START-AT-LOGON-SWITCH
+                "Folio now starts this copy at sign-in instead of the copy in another folder.",
+            ),
+            Self::SignInPathTooLong => pick(
+                lang,
+                "the path to folio.exe is longer than a startup entry holds",
+                // zh: pending T-START-AT-LOGON-SWITCH
+                "the path to folio.exe is longer than a startup entry holds",
+            ),
+            Self::SignInEntryNotOurs => pick(
+                lang,
+                "another program's startup entry is named Folio",
+                "another program's startup entry is named Folio", // zh: pending T-START-AT-LOGON-SWITCH
+            ),
+            Self::SignInProgramNotStartable => pick(
+                lang,
+                "this copy of Folio is not in a place that can be started at sign-in",
+                // zh: pending T-START-AT-LOGON-SWITCH
+                "this copy of Folio is not in a place that can be started at sign-in",
+            ),
+            Self::SignInReadBackDiffers => pick(
+                lang,
+                "the entry read back is not the one written",
+                "the entry read back is not the one written", // zh: pending T-START-AT-LOGON-SWITCH
             ),
 
             // ── the first page of Windows 11's menu (§7.4a) ────────────────
@@ -5300,7 +5429,7 @@ impl Text {
             Self::DescResumeAgents => pick(
                 lang,
                 "When Folio reopens, panes running Claude Code or Codex resume their sessions with their launch arguments.",
-                "Folio 重新打开时，运行过 Claude Code 或 Codex 的窗格以原启动参数恢复各自的会话。",
+                "Folio 重新打开时，运行过 Claude Code 或 Codex 的窗格按原启动参数恢复各自的会话。",
             ),
             Self::ToastTurnFinished => pick(lang, "Turn finished", "回合结束"),
             Self::ToastWaitingForYou => pick(lang, "Waiting for you", "正在等你回答"),
@@ -5527,6 +5656,12 @@ impl Text {
             Self::CleanupMarkClipboard => pick(lang, "Clipboard staging", "剪贴板暂存"),
             Self::CleanupMarkPanicLog => pick(lang, "Panic log", "崩溃日志"),
             Self::CleanupMarkRemoverHome => pick(lang, "Uninstaller staging", "卸载程序暂存"),
+            Self::CleanupMarkRestartRegistration => pick(lang, "Restart registration", "重启注册"),
+            Self::CleanupMarkServicesEntry => pick(lang, "Services menu entry", "服务菜单项"),
+            Self::CleanupMarkNotificationPermission => {
+                pick(lang, "Notification permission", "通知权限")
+            }
+            Self::CleanupMarkUpdateJournal => pick(lang, "Update journal", "更新事务记录"),
             Self::CleanupKindPerCopy => pick(lang, "per-copy", "按副本"),
             Self::CleanupKindPerAccount => pick(lang, "per-account", "按账户"),
             Self::CleanupKindData => pick(lang, "data", "数据"),
@@ -5590,6 +5725,27 @@ impl Text {
                 lang,
                 "left (not Folio's files):",
                 "已保留（非 Folio 的文件）：",
+            ),
+            Self::CleanupUpdateHomeInFlight => pick(
+                lang,
+                "left (an update is unfinished)",
+                "已保留（更新尚未完成）",
+            ),
+            Self::CleanupUpdateHomeUnchecked => pick(
+                lang,
+                "left (its app could not be checked)",
+                "已保留（无法检查它所属的应用）",
+            ),
+            Self::CleanupUpdateHomeInUse => pick(
+                lang,
+                "left (another copy is using it)",
+                "已保留（另一份 Folio 正在使用）",
+            ),
+            Self::CleanupSignInUnchecked => pick(
+                lang,
+                "left (its program could not be checked)",
+                // zh: pending T-START-AT-LOGON-SWITCH
+                "left (its program could not be checked)",
             ),
             Self::CleanupRefused => pick(lang, "refused", "未能移除"),
             Self::CleanupRoot => pick(
@@ -6129,7 +6285,7 @@ impl Text {
             Self::FirstRunRowExplorer10 => pick(
                 lang,
                 "Open any folder in Folio under Show more options",
-                "在 Show more options 中用 Folio 打开文件夹",
+                "在「显示更多选项」中用 Folio 打开文件夹",
             ),
             // 「整合」 and not 「集成」, on `CapNone`'s ruling above and for its
             // reason: one object may only have one name.
@@ -6221,6 +6377,11 @@ impl Text {
                 lang,
                 "$PROFILE was changed elsewhere. Reload this page and try again.",
                 "$PROFILE 已在别处被改动。重新加载此页后重试。",
+            ),
+            Self::ShellProfileOutsideAppData => pick(
+                lang,
+                "Folio's data folder is not in %APPDATA%\\Folio, so $PROFILE cannot load its script.",
+                "Folio 的数据文件夹不在 %APPDATA%\\Folio 下，$PROFILE 无法加载它的脚本。",
             ),
             Self::ShellProfileChanged => pick(
                 lang,
@@ -6751,6 +6912,20 @@ impl Text {
         Self::ContextMenuAddedToast,
         Self::ContextMenuRemovedToast,
         Self::ContextMenuNoExecutable,
+        // — the sign-in switch (0.4.10 plan row 22a), which `settings::visible_rows_for` offers on
+        //   Windows only until its macOS half (row 22b), and what its press says
+        Self::RowStartAtSignIn,
+        Self::DescStartAtSignIn,
+        Self::DescStartAtSignInElsewhere,
+        Self::DescStartAtSignInTurnedOff,
+        Self::DescStartAtSignInNotOurs,
+        Self::SignInOnToast,
+        Self::SignInOffToast,
+        Self::SignInTookOverToast,
+        Self::SignInPathTooLong,
+        Self::SignInEntryNotOurs,
+        Self::SignInProgramNotStartable,
+        Self::SignInReadBackDiffers,
         Self::ExplorerFirstPageAddedToast,
         Self::ExplorerFirstPageAddedRestartToast,
         Self::ExplorerFirstPageUnreadable,
@@ -6763,6 +6938,10 @@ impl Text {
         Self::LegacyPsReadLineRemovedToast,
         // Only the Windows PowerShell discovery worker can emit this refusal.
         Self::ShellProfileProbeFailed,
+        // Enable's refusal of a data root outside `%APPDATA%` (0.4.10 plan row 68c, R3(b)): it is
+        // asked only after the `$PROFILE` probe answered, which it does on Windows alone; off
+        // Windows the carry may write it only into `diagnostics.log`, which no page shows.
+        Self::ShellProfileOutsideAppData,
         // — the Theme and scheme rows' sentences while a Windows contrast theme is on, which
         //   only the Windows reader of `SPI_GETHIGHCONTRAST` can put in force (T-HIGH-CONTRAST)
         Self::DescThemeHighContrast,
@@ -6796,7 +6975,37 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[];
+    const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
+        // zh: pending T-START-AT-LOGON-SWITCH — the sign-in switch's title, its four lines, its
+        // cards and its refusals, and the uninstall's unchecked line (0.4.10 plan row 22a, R13 and
+        // the review's N2, N3; the title's draft is 登录时启动); a later Chinese pass takes them.
+        (Self::RowStartAtSignIn, HostPlatform::Windows),
+        (Self::RowStartAtSignIn, HostPlatform::MacOs),
+        (Self::DescStartAtSignIn, HostPlatform::Windows),
+        (Self::DescStartAtSignIn, HostPlatform::MacOs),
+        (Self::DescStartAtSignInElsewhere, HostPlatform::Windows),
+        (Self::DescStartAtSignInElsewhere, HostPlatform::MacOs),
+        (Self::DescStartAtSignInTurnedOff, HostPlatform::Windows),
+        (Self::DescStartAtSignInTurnedOff, HostPlatform::MacOs),
+        (Self::DescStartAtSignInNotOurs, HostPlatform::Windows),
+        (Self::DescStartAtSignInNotOurs, HostPlatform::MacOs),
+        (Self::SignInOnToast, HostPlatform::Windows),
+        (Self::SignInOnToast, HostPlatform::MacOs),
+        (Self::SignInOffToast, HostPlatform::Windows),
+        (Self::SignInOffToast, HostPlatform::MacOs),
+        (Self::SignInTookOverToast, HostPlatform::Windows),
+        (Self::SignInTookOverToast, HostPlatform::MacOs),
+        (Self::SignInPathTooLong, HostPlatform::Windows),
+        (Self::SignInPathTooLong, HostPlatform::MacOs),
+        (Self::SignInEntryNotOurs, HostPlatform::Windows),
+        (Self::SignInEntryNotOurs, HostPlatform::MacOs),
+        (Self::SignInProgramNotStartable, HostPlatform::Windows),
+        (Self::SignInProgramNotStartable, HostPlatform::MacOs),
+        (Self::SignInReadBackDiffers, HostPlatform::Windows),
+        (Self::SignInReadBackDiffers, HostPlatform::MacOs),
+        (Self::CleanupSignInUnchecked, HostPlatform::Windows),
+        (Self::CleanupSignInUnchecked, HostPlatform::MacOs),
+    ];
 }
 
 // ── the strings that carry a value ─────────────────────────────────────────
@@ -7222,6 +7431,51 @@ pub fn context_menu_failed(message: &str) -> String {
     match current() {
         Lang::English => format!("Could not change Explorer's menu: {message}"),
         Lang::Chinese => format!("修改资源管理器菜单失败：{message}"),
+    }
+}
+
+/// **The card raised when the sign-in switch's press changed nothing** (0.4.10 plan row 22a),
+/// carrying why: Folio's own sentence, or the registry's in its own words.
+#[must_use]
+pub fn sign_in_not_changed(reason: &str) -> String {
+    match current() {
+        Lang::English => format!("Not changed: {reason}"),
+        // zh: pending T-START-AT-LOGON-SWITCH
+        Lang::Chinese => format!("Not changed: {reason}"),
+    }
+}
+
+/// **The card raised when the registry refused a step of the sign-in switch's press** (0.4.10
+/// plan row 22a, review N2): the step the entry could not take, and the system's words — never
+/// the door's module name.
+#[must_use]
+pub fn sign_in_entry_failed(stage: bt_platform::sign_in_entry::EntryStage, words: &str) -> String {
+    use bt_platform::sign_in_entry::EntryStage;
+    let english = match stage {
+        EntryStage::Read => "Could not read the startup entry",
+        EntryStage::Write | EntryStage::ReadBack => "Could not write the startup entry",
+        EntryStage::Remove | EntryStage::SwitchRemove => "Could not remove the startup entry",
+    };
+    match current() {
+        Lang::English => format!("{english}: {words}"),
+        // zh: pending T-START-AT-LOGON-SWITCH
+        Lang::Chinese => format!("{english}: {words}"),
+    }
+}
+
+/// **The card raised when the sign-in switch's On wrote the entry and the Startup-apps value of
+/// its name could not be removed** (0.4.10 plan row 22a, review N2): a fact, with the system's
+/// words — the entry is there, and Windows' Startup apps still shows it turned off.
+#[must_use]
+pub fn sign_in_still_turned_off(words: &str) -> String {
+    match current() {
+        Lang::English => format!(
+            "Folio's startup entry is written, but Startup apps still shows it turned off: {words}"
+        ),
+        // zh: pending T-START-AT-LOGON-SWITCH
+        Lang::Chinese => format!(
+            "Folio's startup entry is written, but Startup apps still shows it turned off: {words}"
+        ),
     }
 }
 
@@ -9772,6 +10026,8 @@ mod tests {
             Text::PasteClipboardRead,
             Text::PasteClipboardBusy,
             Text::PasteClipboardPicture,
+            Text::PasteClipboardPictureUnread,
+            Text::PasteClipboardPromiseTooLarge,
             Text::PasteProfileOverride,
         ];
         let width = toast::TOAST_WINDOW_WIDTH_LOGICAL_PX

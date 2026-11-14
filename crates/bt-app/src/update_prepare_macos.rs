@@ -191,6 +191,11 @@ pub(crate) struct MacPrepare {
     /// The layouts this road's Prepare is called through, by the adapter
     /// the press names ([`PreparePoint`]).
     layouts: Layouts<dyn PreparePoint>,
+    /// The data folder's record of the update homes this account's copies made
+    /// (`update_homes::HOMES_RECORD`, 0.4.10 plan row 68e): the home is written into it before
+    /// it is made, so a home whose app is later removed is found and retired. `None` under a
+    /// test's driver, which has no data folder of its own.
+    record: Option<PathBuf>,
 }
 
 impl MacPrepare {
@@ -208,6 +213,7 @@ impl MacPrepare {
                 tools: Arc::new(System),
                 channel: crate::install_channel::channel(),
                 layouts: own_layouts(),
+                record: Some(crate::persist::storage_dir().join(crate::update_homes::HOMES_RECORD)),
             }),
             None => Box::new(Unsupported),
         }
@@ -227,11 +233,12 @@ impl Driver for MacPrepare {
         transport: &SharedTransport,
         post: &Poster,
     ) -> Result<(), Refused> {
-        let (bundle, tools, transport, layouts) = (
+        let (bundle, tools, transport, layouts, record) = (
             self.bundle.clone(),
             Arc::clone(&self.tools),
             Arc::clone(transport),
             self.layouts.clone(),
+            self.record.clone(),
         );
         let (offer, post, channel) = (offer.clone(), post.clone(), self.channel);
         bt_platform::spawn_at_priority(
@@ -246,6 +253,7 @@ impl Driver for MacPrepare {
                     tools: tools.as_ref(),
                     channel,
                     layouts: &layouts,
+                    record: record.as_deref(),
                 };
                 finish(worker, &post, prepare_on(worker, &road));
             },
@@ -264,6 +272,8 @@ pub(crate) struct Road<'a> {
     tools: &'a dyn Tools,
     channel: Option<Channel>,
     layouts: &'a Layouts<dyn PreparePoint>,
+    /// Where the home is recorded before it is made ([`MacPrepare`]'s `record`).
+    record: Option<&'a Path>,
 }
 
 /// **A layout's `Prepare` on the macOS road** (0.4.7 ticket U-41a1;
@@ -522,6 +532,13 @@ fn prepare_on(worker: &WorkerCtx, road: &Road<'_>) -> Result<Staged, Stop> {
         return Err(journal_stop("the rescue copy's path is not Unicode"));
     };
     let rescue_text = rescue_text.to_owned();
+    // The home is recorded before it is made: a home that exists is one the record names, so the
+    // carry pass and the uninstall can retire it once its app is gone (row 68e). A record that
+    // cannot be written is said and the update goes on (E4): the updated copy's first start
+    // records the same home (`update_homes::run_update_homes_step`).
+    if let Some(record) = road.record {
+        crate::update_homes::record_update_home(record, &home);
+    }
     match install_txn::durable_create_dir(home.root()) {
         Ok(()) => {}
         Err(failure) if failure.error.kind() == std::io::ErrorKind::AlreadyExists => {}

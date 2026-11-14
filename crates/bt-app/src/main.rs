@@ -244,6 +244,15 @@ mod update_prepare_macos;
 // The update job's Windows driver: Prepare, from the press to `Prepared` (0.4.6 ticket U-20).
 mod update_prepare_windows;
 mod update_recover;
+// The update entrances a copy that is gone left behind, swept by the start's carry pass (0.4.10
+// plan row 68b).
+mod update_orphans;
+// The macOS update homes whose app is gone, recorded by the prepare and swept by the carry pass
+// and the uninstall (0.4.10 plan row 68e).
+mod update_homes;
+// The sign-in switch's entry: read and repaired by the carry pass, written by the switch's press
+// on its worker, removed by the uninstall (0.4.10 plan row 22a).
+mod start_at_sign_in;
 mod update_startup;
 mod update_trial;
 mod update_txn;
@@ -339,6 +348,7 @@ use runtime::unverified_reference_handoff;
 // K2 batch 22 (T-SPLIT-2B) moved these free functions beside their callers in modules outside
 // `runtime/`; the root names them again for its own callers and, through `use super::*`, its
 // test modules.
+use carry_pass::CarryAsk;
 #[cfg(test)]
 use computation_lane::raster_peek_page;
 use explorer_menu::door_language;
@@ -734,12 +744,18 @@ enum AppEvent {
     /// `explorer_menu::state()` and `explorer_menu::take_outcome()` by the time
     /// this is sent, and this says only that something did.
     ExplorerPackageChanged,
-    /// **The carry pass's agent-hooks step published what it found** (0.4.10 plan row 67b): the
-    /// answer is in `agent_hooks_step::AGENT_HOOKS`, and the handler sets the Agents rows from it
-    /// and raises the notice of each repair of a gone copy's hooks. Owed a wake for
-    /// [`Self::ExplorerPackageChanged`]'s reason: the scan lands seconds into a launch, or behind a
-    /// modal, on a window that may have nothing else coming.
-    AgentHooksScanned,
+    /// **A round of the carry pass published what its members found** (0.4.10 plan rows 67b, 68a):
+    /// the answer is `carry_pass::take_carry_snapshot`'s, and the handler sets the Agents rows from
+    /// its agents' part and raises the notice of each repair of a gone copy's hooks. Owed a wake
+    /// for [`Self::ExplorerPackageChanged`]'s reason: the scan lands seconds into a launch, or
+    /// behind a modal, on a window that may have nothing else coming.
+    CarryPassAnswered,
+    /// **A press of the sign-in switch was answered** (0.4.10 plan row 22a): the answer is
+    /// `start_at_sign_in::take_sign_in_press`'s, and the handler sets the row from it, raises its
+    /// card on the window that pressed, and asks the restart registration again when whether the
+    /// entry starts this copy moved. Owed a wake for [`Self::ExplorerPackageChanged`]'s reason:
+    /// the row lives behind a modal, and nothing else asks for the frame that shows the answer.
+    SignInPressed,
     /// **The machine listed its monospaced families** (GitHub issue #3).
     ///
     /// The tenth of the same family, and it is owed a wake for
@@ -1067,7 +1083,8 @@ impl AppEvent {
             | Self::CopilotProbed
             | Self::UpdateChecked
             | Self::ExplorerPackageChanged
-            | Self::AgentHooksScanned
+            | Self::CarryPassAnswered
+            | Self::SignInPressed
             | Self::FontsScanned
             | Self::TaskbarAnswered
             | Self::ProgramsAnswered
@@ -1260,10 +1277,33 @@ impl BackgroundDecodeMailbox {
 struct ClipboardPictureAnswer {
     generation: u64,
     target: PasteTarget,
-    /// The file, or the sentence saying which half of the job refused. A reason
-    /// and never a picture: a diagnostic that carried what was on the clipboard
-    /// would be this process writing the reader's own screenshot into a log.
-    result: std::result::Result<PathBuf, String>,
+    /// What was staged: a picture's file, or a promise's (plan row 81).
+    staged: StagingAnswer,
+}
+
+/// **What one staging worker answered** (§7.61; plan row 81) — the picture's save or the
+/// promise's render, each with the clipboard's sequence at the read, for the line it is said in.
+#[derive(Debug)]
+enum StagingAnswer {
+    Picture {
+        sequence: Option<bt_platform::ClipboardSequence>,
+        /// The file, or the sentence saying which half of the job refused. A reason
+        /// and never a picture: a diagnostic that carried what was on the clipboard
+        /// would be this process writing the reader's own screenshot into a log.
+        result: std::result::Result<PathBuf, String>,
+    },
+    Promise {
+        sequence: Option<bt_platform::ClipboardSequence>,
+        /// A picture offered beside the promise did not render: a refusal says so.
+        picture_passed_over: bool,
+        /// What was written, or why nothing was — kinds, counts and codes, never a name.
+        result: std::result::Result<
+            bt_platform::clipboard_promise::RenderedPromise,
+            runtime::PromiseWhy,
+        >,
+        /// How long the render took, for the line a promise saved says.
+        took: std::time::Duration,
+    },
 }
 
 /// **The next shell's [`ShellSession::incarnation`]**, and the counter behind it.
@@ -1478,6 +1518,10 @@ enum PasteCardKey {
 #[derive(Debug, Default)]
 struct ClipboardPictureMailbox {
     inbox: Arc<std::sync::Mutex<ClipboardPictureInbox>>,
+    /// The suite's: how many of the next staging starts the thread door is to refuse, as a
+    /// machine out of threads would (`lane::Gate::refuse_next_start` is the lanes' own).
+    #[cfg(test)]
+    refused_starts: std::sync::atomic::AtomicUsize,
 }
 
 /// **The generation and the slot behind one lock** (review X-3).
@@ -1497,9 +1541,10 @@ struct ClipboardPictureInbox {
     /// The generation the window is waiting for. Bumped by every new paste.
     wanted: u64,
     landed: Option<ClipboardPictureAnswer>,
-    /// The saves refused at the door since the window last looked (plan row 52): each is said on
-    /// the turn the inbox's wake brings, in the notice the door used to draw itself.
-    refused: usize,
+    /// The saves refused at the door since the window last looked (plan row 52), each with its
+    /// reason (plan row 81): each is said on the turn the inbox's wake brings, through the door
+    /// every paste refusal leaves by.
+    refused: Vec<runtime::PasteRefusal>,
 }
 
 impl ClipboardPictureMailbox {
@@ -1524,17 +1569,45 @@ impl ClipboardPictureMailbox {
         Arc::clone(&self.inbox)
     }
 
-    /// One save refused at its door, counted for the next look (plan row 52): the generation is
-    /// left alone, so the paste a running save answers is still the one waited for.
-    fn refuse(&self) {
+    /// One save refused at its door, kept with its reason for the next look (plan rows 52, 81):
+    /// the generation is left alone, so the paste a running save answers is still the one waited
+    /// for.
+    fn refuse(&self, refusal: runtime::PasteRefusal) {
         self.inbox
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .refused += 1;
+            .refused
+            .push(refusal);
     }
 
-    /// How many saves were refused at the door since the last look, and none from now on.
-    fn take_refusals(&mut self) -> usize {
+    /// **Whether the thread door is to refuse this staging start** — the suite's, as a machine
+    /// out of threads would (`refuse_the_next_start`, a test build's); never in the product.
+    fn refuses_this_start(&self) -> bool {
+        #[cfg(test)]
+        {
+            self.refused_starts
+                .fetch_update(
+                    std::sync::atomic::Ordering::AcqRel,
+                    std::sync::atomic::Ordering::Acquire,
+                    |left| left.checked_sub(1),
+                )
+                .is_ok()
+        }
+        #[cfg(not(test))]
+        {
+            false
+        }
+    }
+
+    /// The next staging start the thread door is asked for is refused (the suite's).
+    #[cfg(test)]
+    fn refuse_the_next_start(&self) {
+        self.refused_starts
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    }
+
+    /// The saves refused at the door since the last look, in order, and none from now on.
+    fn take_refusals(&mut self) -> Vec<runtime::PasteRefusal> {
         std::mem::take(
             &mut self
                 .inbox
@@ -8809,6 +8882,14 @@ struct TabState {
     /// channel has *stopped* — a thing no "is it moving?" test can ever see,
     /// because by the time it matters, nothing is.
     last_drawn_mark: Option<seats::TabMarkState>,
+    /// The claim ([`TabState::fleet_claim_for`]) the strip's look last saw for
+    /// this tab; `None` before its first look.
+    ///
+    /// Written by the look and read by
+    /// [`runtime::attention::settle_attention`] on every turn: a claim that
+    /// differs from it changed since the look, and the strip looks again on
+    /// that turn whatever its rate says (T-STRIP-ASKS-ON-ITS-TICK review N1).
+    last_looked_claim: Option<StatusClaim>,
     /// When this tab's mark-slot animations started counting.
     ///
     /// Per tab rather than per window, which is what CSS does: an animation
@@ -9241,9 +9322,6 @@ struct App<B: Backend = Native> {
     /// copy was installed (U-3). Never rearmed: once spent, a still-missing
     /// answer is read as unknown.
     first_run_waited_for_channel: bool,
-    /// Whether the first-run card has already waited its one turn for the program walk's reading
-    /// of the agent folders (`first_run::agent_folders_settled`).
-    first_run_waited_for_agent_folders: bool,
     /// Whether Explorer's right-click menu carries Folio's verb (§7.4).
     ///
     /// Cached for one reason and no other: the settings dialog asks on every
@@ -9251,10 +9329,13 @@ struct App<B: Backend = Native> {
     /// launch, an install and a removal — and at no other, because nothing else
     /// in this process can move it.
     ///
-    /// **Seeded by the launch's own repair**, `context_menu::reassert`: a
+    /// **Seeded by the start's own repair**, the carry pass's classic member
+    /// (`context_menu::run_classic_step`, 0.4.10 plan row 68b), adopted with the
+    /// round's snapshot unless a press landed since the round read the trees: a
     /// `folio.exe` that has been moved since the verb was written leaves a menu
-    /// entry that opens nothing, and the launch is the only moment this product
-    /// has to notice.
+    /// entry that opens nothing, and the start is the only moment this product
+    /// has to notice. `false` until the round answers, as the package row reads
+    /// `Unknown` until its member has.
     context_menu_installed: bool,
     /// **Which window pressed the first-page switch**, until the deployment it
     /// started answers (§7.4a).
@@ -9268,6 +9349,13 @@ struct App<B: Backend = Native> {
     /// closed simply raises no card: the row it would have reported to is not
     /// there any more.
     explorer_package_asked_by: Option<WindowId>,
+    /// **The account's sign-in entry as last read** (0.4.10 plan row 22a): by the carry pass's
+    /// member or by a press's worker, never on this thread. `Unknown` until the first answer,
+    /// drawn Off; the restart registration's flags are read from it (R10).
+    start_at_sign_in: start_at_sign_in::SignInRow,
+    /// **Which window pressed the sign-in switch, and how it asked to be told**, until the
+    /// press's worker answers: [`Self::explorer_package_asked_by`]'s reason.
+    sign_in_asked_by: Option<(WindowId, Announce)>,
     /// **Which place that press asked for**, carried beside the address for the
     /// address's own reason (user ruling 2026-09-07).
     ///
@@ -9313,6 +9401,19 @@ struct App<B: Backend = Native> {
     /// **Whether a scan has answered at all** in this process: before it, nothing about the agents'
     /// files is known on this thread, and the resume row says nothing about their hooks.
     agent_rows_known: bool,
+    /// **Whether the newest scan found codex's install refused** (0.4.10 plan row 73): codex's own
+    /// install refusals, asked on the carry pass's worker (`HooksSnapshot::codex_install_refused`),
+    /// for the first-run card's Codex row.
+    codex_install_refused: bool,
+    /// **Whether [`Self::copilot_readiness`] as the newest scan carried it was read after
+    /// Copilot's version probe came back** (`HooksSnapshot::copilot_read_after_probe`): the
+    /// first-run card offers Copilot's row only on an answer.
+    copilot_read_after_probe: bool,
+    /// **How many of the carry pass's hooks answers this window has adopted** (0.4.10 plan row
+    /// 73, the review's N9 and F1): the count the first-run card's opening line names. It counts
+    /// adoptions, not the pass's rounds: a window takes only the newest round published since its
+    /// last turn, and a round with no hooks part adopts nothing here.
+    carry_answers_adopted: u32,
     /// **Why each agent's configuration file will not be edited, when it will not be** — the
     /// `agent_takeovers` order, Claude Code then codex then copilot.
     ///
@@ -9854,13 +9955,17 @@ impl<B: Backend> App<B> {
             program_news: window_news::WindowSeats::default(),
             first_run_attempted: false,
             first_run_waited_for_channel: false,
-            first_run_waited_for_agent_folders: false,
             explorer_package_asked_by: None,
+            start_at_sign_in: start_at_sign_in::SignInRow::Unknown,
+            sign_in_asked_by: None,
             explorer_package_asked_place: explorer_menu::ExplorerPlace::default(),
             explorer_package_announce: Announce::Everything,
             agent_takeovers: Default::default(),
             agent_hooks_found: Default::default(),
             agent_rows_known: false,
+            codex_install_refused: false,
+            copilot_read_after_probe: false,
+            carry_answers_adopted: 0,
             profiles_file_broken: false,
             pins_file_broken: false,
             settings_file_broken: false,
@@ -10724,6 +10829,20 @@ struct WindowRuntime<B: Backend = Native> {
     /// captured, projected, decorated and recomposed to say the same thing it
     /// said 16ms ago.
     chrome_present_pending: bool,
+    /// **This window's turn is running, and it pays the present it is asked for at its own end**
+    /// (T-TWO-BARE-TURNS-PER-MARK-STEP).
+    ///
+    /// Raised at the head of [`Runtime::turn`] and lowered where the turn pays
+    /// ([`Runtime::pay_the_turns_present`]). While it stands, [`Runtime::ask_for_present`] writes
+    /// [`Self::turn_owes_a_present`] instead of asking the platform for a paint. A paint asked
+    /// for from inside the turn would cost a whole second turn of the loop: a wake, the
+    /// `RedrawRequested`, and every clock of `about_to_wait` again, to present the debt this turn
+    /// already recorded.
+    turn_pays_presents: bool,
+    /// A present asked for while [`Self::turn_pays_presents`] stood. The debt itself is where it
+    /// always was (a frame in the slot, or [`Self::chrome_present_pending`]); this says that it
+    /// was asked for and is owed the turn's present.
+    turn_owes_a_present: bool,
     /// **How many frames in a row have reached the glass without their
     /// characters** (user report 2026-08-29, `docs/DESIGN.md` §7.1.3l).
     ///
@@ -10843,10 +10962,38 @@ struct WindowRuntime<B: Backend = Native> {
     /// synchronous `eprintln!` this replaced it was, four times in one hour,
     /// seconds.
     perf_trace_us: u128,
-    /// When [`Self::advance_strip_animation`] last ran, so
+    /// When [`Self::advance_strip_animation`] last *looked* — compared what the
+    /// strip would draw against what it drew, on a turn the window's display
+    /// frame admitted or not (T-STRIP-ASKS-ON-ITS-TICK) — so
     /// [`pace::DEFAULT_FRAME_INTERVAL`] can be the rate it claims to be rather than a
-    /// floor nothing stands on. `None` until the first tick.
+    /// floor nothing stands on. `None` until the first look.
     strip_animation_ticked_at: Option<Instant>,
+    /// **The strip's look found a frame owed and no frame has drawn it yet**
+    /// (T-STRIP-ASKS-ON-ITS-TICK, 2026-11-11).
+    ///
+    /// [`Runtime::advance_strip_animation`] looks on its own rate whatever the
+    /// window's display frame says, and its comparisons record as they compare
+    /// (`tab_owes_frame`, `PaneMotion::settle_frame_debt`): a look on a turn
+    /// the gate refuses has already written its new readings down as drawn.
+    /// This is the one place that still knows the frame is owed. Set by the
+    /// look, OR-ed so a later look that finds nothing does not forget it; read
+    /// by the strip's ask on every turn while it stands, and by the turn's
+    /// "owes a repaint" fold (`Runtime::turn_facts`); cleared by the turn the
+    /// gate admits, which is the one that draws it. The pictures' and the
+    /// cards' debts reach the ask through this flag, folded in at the look.
+    ///
+    /// **It books no wake of its own** (review N5), and needs none: the ask
+    /// runs on every turn, so a flag that stands after a turn is one that
+    /// turn's ask was refused, and the refusal booked `WakeOwner::RefusedFrame`
+    /// at the frame boundary (a frame after the last present), which is never
+    /// later than the strip's next tick. An entry for the flag in
+    /// `Runtime::strip_animation_work` could never be the earliest wake.
+    strip_owes_a_frame: bool,
+    /// **The panes' half of the same debt**, kept apart because a pane in
+    /// flight owes a present even when the chrome it is drawn under comes out
+    /// byte-identical ([`crate::runtime::preview::tick_owes_a_present`]).
+    /// Written, read and cleared beside [`Self::strip_owes_a_frame`].
+    strip_panes_owe_a_frame: bool,
     /// **Whether a card on screen is behind the pane it is a picture of**
     /// (§7.1.6b′; ticket T-5).
     ///
@@ -15160,11 +15307,16 @@ struct TrialStores<'a> {
 /// **Windows is asked to start this program again after its restart, now**
 /// (T-RESTART-REGISTRATION): after an update's reboot, a sign-in with "Restart apps" on, or the
 /// Restart Manager's close — on [`bt_platform::session_end::RESTART_FLAGS`]' occasions, never after
-/// a crash or a hang. The line is empty: a plain start reopens the saved layout as a click does.
+/// a crash or a hang — and, while this copy's sign-in entry is on, not after the system's reboot
+/// either (0.4.10 plan row 22a, R10: `start_at_sign_in::restart_flags_for` over `sign_in`, the
+/// row as last read). The line is empty: a plain start reopens the saved layout as a click does.
 /// Cheap, and said only when it is refused: nothing a person sees depends on it. Asked by
-/// [`FolioApp::register_for_restart`] at the first window, or by a committed trial's release.
-fn register_restart_now<B: Backend>(event_loop: &B::Loop) {
-    if let Err(refused) = B::register_restart(event_loop, bt_platform::session_end::RESTART_FLAGS) {
+/// [`FolioApp::register_for_restart`] at the first window, by a committed trial's release, and
+/// again when the sign-in row moves across `On` ([`FolioApp::register_restart_after_sign_in_moved`]).
+fn register_restart_now<B: Backend>(event_loop: &B::Loop, sign_in: start_at_sign_in::SignInRow) {
+    if let Err(refused) =
+        B::register_restart(event_loop, start_at_sign_in::restart_flags_for(sign_in))
+    {
         diagnostics::note(&format!(
             "{APP_NAME} will not be started again after the system's restart: {refused}"
         ));
@@ -15189,9 +15341,8 @@ fn release_trial_writer(writer: update_trial::Writer, stores: &mut TrialStores<'
         Writer::Profiles => stores.profiles.release_trial(),
         Writer::Pins => stores.pins.release_trial(),
         Writer::UpdateCheck => update::release_trial(),
-        Writer::ProfileMigration => {
-            shell_integration::begin_startup_migration();
-        }
+        // The carry pass's `$PROFILE` member, which the trial held back (0.4.10 plan row 68c).
+        Writer::ProfileMigration => carry_pass::begin_carry_pass(CarryAsk::OLD_PROFILE_LINES),
         Writer::BashScript => {
             let _ = shell_integration::script_path();
         }
@@ -15207,7 +15358,8 @@ fn release_trial_writer(writer: update_trial::Writer, stores: &mut TrialStores<'
         Writer::PsReadLineModule => {
             shell_integration::begin_powershell_script_preparation();
         }
-        Writer::ExplorerRepair => explorer_menu::begin_probe(),
+        // Both Explorer registrations, on the pass's worker (0.4.10 plan row 68b).
+        Writer::ExplorerRepair => carry_pass::begin_carry_pass(CarryAsk::EXPLORER),
         Writer::ToastIdentity => {
             if let Err(error) = bt_platform::Notifier::register_identity(APP_NAME) {
                 crate::diagnostics::stderr_line(format!(
@@ -15220,7 +15372,13 @@ fn release_trial_writer(writer: update_trial::Writer, stores: &mut TrialStores<'
         // The trial is committed: it is the person's Folio, and the system may start it again.
         Writer::RestartRegistration => (stores.restart)(),
         // The pass again, on its worker: what it held back, it now writes.
-        Writer::AgentHooksRepair => carry_pass::begin_carry_pass(),
+        Writer::AgentHooksRepair => carry_pass::begin_carry_pass(CarryAsk::HOOKS),
+        // The sweeps again: the dead entrances and the homes they held back, they now remove
+        // (rows 68b, 68e).
+        Writer::OrphanSweep => carry_pass::begin_carry_pass(CarryAsk::UPDATE_LEFTOVERS),
+        // The sign-in entry's repair, which the trial held back (row 22a, R7): the member again,
+        // which now writes.
+        Writer::StartAtSignIn => carry_pass::begin_carry_pass(CarryAsk::START_AT_SIGN_IN),
     }
 }
 
@@ -31784,6 +31942,7 @@ fn adopt_program_answers(
     programs: &mut profiles::ProfilePrograms,
     answers: programs_lane::Answers,
 ) -> ProgramNews {
+    let no_walk_answers = answers.ended_with_no_walk_to_answer();
     let copilot_before = programs
         .program(attention_copilot::PROFILE_ID)
         .map(std::ffi::OsStr::to_owned);
@@ -31806,7 +31965,7 @@ fn adopt_program_answers(
             .or_else(|| walked.then_some(None)),
     );
     if codex_moved && attention_hooks::AGENT_HOMES.answered() {
-        carry_pass::begin_carry_pass();
+        carry_pass::begin_carry_pass(CarryAsk::HOOKS);
     }
     if let Some(facts) = answers.facts {
         if wsl::adopt(facts.wsl) {
@@ -31822,9 +31981,23 @@ fn adopt_program_answers(
         if news.agent_homes {
             // Where the agents keep their files is the account's own now: the carry pass reads
             // them there, on its worker, wherever this answer was adopted — the launch adopts the
-            // walk before it has a window to take news to.
-            carry_pass::begin_carry_pass();
+            // walk before it has a window to take news to. The first answer is the hooks' first
+            // real one, and Folio's `$PROFILE` lines wait for it (0.4.10 plan row 68c, the
+            // coordinator's ruling at row 68b's merge): it asks for both.
+            carry_pass::begin_carry_pass(if first {
+                CarryAsk::HOMES_SETTLED
+            } else {
+                CarryAsk::HOOKS
+            });
         }
+    }
+    // **No walk will answer, and none has: the launch's folders are the answer** (0.4.10 plan row
+    // 68c, the coordinator's ruling on the review's N1): a walk that ended with none, or a request
+    // the lane's door refused with no walk standing, settles them once, and the pass runs on them —
+    // the agents' hooks and, after their answer, Folio's `$PROFILE` lines, which wait for that
+    // first real answer. A walk that answers later is adopted as the first answer above.
+    if no_walk_answers && attention_hooks::AGENT_HOMES.settle_on_the_launch_homes() {
+        carry_pass::begin_carry_pass(CarryAsk::HOMES_SETTLED);
     }
     news
 }
@@ -31858,7 +32031,10 @@ fn adopt_agent_hooks_snapshot<B: Backend>(
         Some((snapshot.found[index].clone(), snapshot.unrepaired[index]))
     });
     app.agent_rows_known = true;
+    app.carry_answers_adopted += 1;
     app.copilot_readiness = snapshot.copilot_readiness;
+    app.copilot_read_after_probe = snapshot.copilot_read_after_probe;
+    app.codex_install_refused = snapshot.codex_install_refused;
 }
 
 /// **A press on agent row `family` asks the scan again** (0.4.10 plan row 67b): the row's line and
@@ -31867,7 +32043,7 @@ fn adopt_agent_hooks_snapshot<B: Backend>(
 /// `App::agent_hooks_found`.
 fn agent_row_asked_again<B: Backend>(app: &mut App<B>, family: usize) {
     app.agent_hooks_found[family] = None;
-    carry_pass::begin_carry_pass();
+    carry_pass::begin_carry_pass(CarryAsk::HOOKS);
 }
 
 /// **The startup trace's two shell lines, held while a launch tab's shell is being born**.
@@ -34507,6 +34683,7 @@ fn assemble_tab_state(
         ring_tween: None,
         ring_sweep: None,
         last_drawn_mark: None,
+        last_looked_claim: None,
         animation_epoch: Instant::now(),
         flip: FlipTween::default(),
         landing: LandTween::default(),
@@ -34958,6 +35135,8 @@ fn new_window_runtime<B: Backend>(parts: NewWindowParts<B>) -> WindowRuntime<B> 
         terminal_content_revision: 0,
         presented_picture_revision: 0,
         chrome_present_pending: false,
+        turn_pays_presents: false,
+        turn_owes_a_present: false,
         textless_frames: 0,
         unpainted_pane_output: false,
         composed_terminal_frames: 0,
@@ -34974,6 +35153,8 @@ fn new_window_runtime<B: Backend>(parts: NewWindowParts<B>) -> WindowRuntime<B> 
         pty_coalesce: coalesce::Pending::default(),
         perf_trace_us: 0,
         strip_animation_ticked_at: None,
+        strip_owes_a_frame: false,
+        strip_panes_owe_a_frame: false,
         cards: focus_thumb::CardClock::default(),
         preedit: None,
         composing: None,
@@ -35526,25 +35707,34 @@ impl Runtime<'_, Native> {
                 let _ = proxy.send_event(AppEvent::UpdateChecked);
             });
         }
-        // **And the fifth's** (§7.4a), which is the only one of them that can
-        // also *write*: the probe repairs a package registration that names a
-        // folder `folio.exe` has since been dragged out of. Its wake is owed for
-        // the update check's reason and the PSReadLine probe's at once — the row
-        // it draws lives behind a modal, and the answer takes long enough that
-        // nothing else is going to ask for a frame by the time it lands.
+        // **And the fifth's** (§7.4a): a press on the Explorer first page is answered by a
+        // deployment seconds later. Its wake is owed for the update check's reason and the
+        // PSReadLine probe's at once — the row it draws lives behind a modal, and the answer
+        // takes long enough that nothing else is going to ask for a frame by the time it lands.
+        // The start's probe is the carry pass's member since 0.4.10 plan row 68b, and wakes by
+        // the pass's own wake below.
         {
             let proxy = proxy.clone();
             explorer_menu::install_wake(move || {
                 let _ = proxy.send_event(AppEvent::ExplorerPackageChanged);
             });
         }
-        // **And the carry pass's** (0.4.10 plan row 67b): it can write too — an agent's hooks that
-        // name a copy that is gone — and lands after the program walk, which is after the first
-        // frame on most launches. Installed before the walk can answer, so before the pass runs.
+        // **And the carry pass's** (0.4.10 plan rows 67b, 68a): it can write too — an agent's hooks
+        // that name a copy that is gone — and its members land after the program walk, which is
+        // after the first frame on most launches. One wake per round. Installed before the start's
+        // carry step begins the pass, so before any round ends.
         {
             let proxy = proxy.clone();
-            agent_hooks_step::install_hooks_wake(move || {
-                let _ = proxy.send_event(AppEvent::AgentHooksScanned);
+            carry_pass::install_carry_wake(move || {
+                let _ = proxy.send_event(AppEvent::CarryPassAnswered);
+            });
+        }
+        // **And the sign-in switch's** (0.4.10 plan row 22a): its press is answered on a worker of
+        // its own, behind the modal, on the Explorer press's footing.
+        {
+            let proxy = proxy.clone();
+            start_at_sign_in::install_sign_in_wake(move || {
+                let _ = proxy.send_event(AppEvent::SignInPressed);
             });
         }
         // **And the sixth's** (GitHub issue #3), which is the only one of them
@@ -35585,13 +35775,6 @@ impl Runtime<'_, Native> {
                 let _ = proxy.send_event(AppEvent::WatchStewardAnswered);
             });
         }
-        // **The probe can repair and renew the package registration**, which
-        // is O's until an update's trial is committed (`update_trial`, F-7,
-        // F-18): the probe asks the trial's gate itself
-        // (`explorer_menu::probe_at_start`), a trial runs it at the commit
-        // instead, and the row reads `Unknown` until then, which it already
-        // treats as "not known yet".
-        explorer_menu::begin_probe();
         // **And an update's trial watches its journal** (`update_trial`): a
         // worker reads it until the transaction is decided, and a commit wakes
         // this loop to write what the trial held back. Nothing at all in any
@@ -35794,8 +35977,9 @@ impl Runtime<'_, Native> {
         // on a worker, whether the Terminal page owes the copy's removal row.
         psreadline::begin_legacy_observation();
         // **The first window, in `startup::resume`'s order**: Windows PowerShell's language
-        // question, the startup migration and the script's preparation, the window, the
-        // PowerShell questions, the first tab. What the
+        // question, the script's preparation and the carry pass (the `$PROFILE`s' observation and
+        // carry among its members, row 68c), the window, the PowerShell questions, the first tab.
+        // What the
         // steps share is the program walk's answers, adopted by the window's title and by the
         // questions, and read by the first tab.
         let (opened, first) = startup::resume(
@@ -35808,13 +35992,16 @@ impl Runtime<'_, Native> {
                         settings_store.loaded().shell_integration,
                     )
                 },
-                migration: shell_integration::begin_startup_migration,
                 script: || {
                     // Folio's own `folio.ps1`, compared and repaired on a worker nobody waits for: the first
                     // PowerShell birth that arrives before it finishes prepares it on its own birth worker.
                     // The parser questions about the PowerShell rows follow when the walk has answered them.
                     shell_integration::begin_powershell_script_preparation()
                 },
+                // **The carry pass, begun by every start** (0.4.10 plan row 68a): what an older
+                // Folio wrote is brought to this build's form on its worker, which nobody waits
+                // for; a member with nothing to look at yet answers when it can.
+                carry: carry_pass::begin_carry_at_start,
                 window: |profile_programs: &mut profiles::ProfilePrograms| -> Result<OpenedWindow> {
                     // **The canvas, settled before there is a window to paint one in**
                     // (§7.46 ②). Everything below this point — the first frame, the first
@@ -36444,9 +36631,10 @@ impl Runtime<'_, Native> {
             motion: read_motion_preference(),
             profile_programs,
             startup_shells,
-            // Reads the registry once and, on a machine whose `folio.exe`
-            // has moved since, writes the verb again — see the field.
-            context_menu_installed: context_menu::reassert(),
+            // **Nothing of Explorer's menu is read on this thread at launch** (0.4.10 plan row
+            // 68b, G6): the carry pass reads the verb on its worker, repairs it there, and its
+            // answer sets this. Until then the row reads Off.
+            context_menu_installed: false,
             // **Nothing about the agents' files is read on this thread at launch** (0.4.10 plan
             // row 67b): the carry pass reads them on its worker once the program walk has said
             // where they are, and its answer sets these. Until then each switch reads Off and no
@@ -36691,17 +36879,6 @@ impl<B: Backend> Runtime<'_, B> {
 
     // ── the hover panels' one-at-a-time rule (user report, 2026-08-19) ───────
 
-    /// **The settings sheet closes** — a lifecycle door (T-POINTER-CAPTURE R-9, owner gone):
-    /// a slider or the menu bar held on it is let go of, so a hand that pressed `Esc` mid-drag
-    /// leaves nothing latched behind a sheet that is no longer there. Asked by every road that
-    /// shuts the sheet: the gear's toggle, the sheet's own `Esc` and its own close press, and a
-    /// verb that hands the reader a document instead.
-    fn settings_closed(&mut self) {
-        self.end_capture(runtime::OwnerGone(runtime::Gone::SettingsSheet));
-        // The runs of its fields go with it: there is no field left to press in (row 180).
-        self.window.drawn_fields.settings.clear();
-    }
-
     /// Discharge what the command line is still owed, on the window it opened.
     ///
     /// **The order is deliberate: the document first, the refusals after.** A
@@ -36760,163 +36937,6 @@ impl<B: Backend> Runtime<'_, B> {
         Ok(())
     }
 
-    /// **A colour scheme, changed while the window is up** (§7.1.6c-4a).
-    ///
-    /// One argument per row and both optional, because a press moves exactly one
-    /// of the pair and the other has to keep the name it already had — passing
-    /// both every time would mean the caller reading a value back out of the
-    /// store only to write it in again.
-    ///
-    /// **No restart card.** The whole point of deriving the chrome rather than
-    /// storing it is that a scheme change is the theme-switch path arriving
-    /// through another door: `set_schemes` re-derives both palettes and the ANSI
-    /// sixteen and advances `theme_revision`, which is the revision every
-    /// artefact keyed on a palette is already invalidated by. Nothing here is a
-    /// second invalidation list.
-    fn apply_scheme(&mut self, light: Option<String>, dark: Option<String>) -> Result<bool> {
-        let mut settings = self.app.settings_store.loaded().clone();
-        if let Some(light) = light {
-            settings.light_scheme = light;
-        }
-        if let Some(dark) = dark {
-            settings.dark_scheme = dark;
-        }
-        if &settings == self.app.settings_store.loaded() {
-            return Ok(false);
-        }
-        if !self.app.settings_store.store(settings) {
-            return Ok(false);
-        }
-        // **A row that just changed is coming from a different file**, and what
-        // each row is coming from is the whole of what lets a rename be followed
-        // (§7.1.6c-7). `refresh_scheme_sources` has always named "a row pressed"
-        // among the moments it is owed and was never called at one: the memory
-        // stayed on whatever the row had been wearing when the window opened, so
-        // a scheme chosen and then renamed parted from its file unnoticed.
-        //
-        // Before the early return below, because that return is about the
-        // *palette* not having moved and this is about which file answered.
-        self.refresh_scheme_sources();
-        if adopt_stored_schemes(self.app.settings_store.loaded()) == ThemeChange::Unchanged {
-            return Ok(false);
-        }
-        self.adopt_new_palette()?;
-        Ok(true)
-    }
-
-    /// **Copy the scheme in force into the user's own folder, and open the
-    /// copy** (§7.1.6c-4c, user ruling: route B).
-    ///
-    /// This is the whole of "a scheme editor" in this product, and the reason it
-    /// is not a panel of nineteen colour wells is that the file already is one:
-    /// §7.1.6c-4a made a scheme a Windows Terminal JSON object, so an editor of
-    /// our own would be a worse way to edit a format the ecosystem already
-    /// edits. What was missing was never a picker — it was a *copy to edit* and
-    /// a way to see what you are typing, and those are the two things this verb
-    /// and [`crate::hex_peek`] add.
-    ///
-    /// Five steps, in the order a person would do them by hand:
-    ///
-    /// 1. take the scheme **actually painted** — by the canvas's luma, which is
-    ///    the question the chrome asks, and not by the theme setting, because
-    ///    under a `BT_BG` override those two disagree on purpose;
-    /// 2. write it out under a name nothing else holds;
-    /// 3. tick it in the row for that canvas, so the window is already wearing
-    ///    the copy before it is edited and the first save is visible;
-    /// 4. shut the dialog, because what happens next is not in it;
-    /// 5. open the file in a preview pane with the keyboard in it.
-    ///
-    /// **A failure to write stops at step two** and says so. Everything after it
-    /// is about a file that exists.
-    fn add_scheme(&mut self, light: bool) -> Result<()> {
-        // **The canvas comes from the ROW the verb ends** (user ruling
-        // 2026-08-19) and no longer from the window's own background. The verb
-        // used to stand at the foot of a page and had to guess which of the two
-        // rows it was about; it stands at the foot of one of them now, so a
-        // reader on a Dark window who opens the Light picker and presses
-        // `Add scheme…` gets a light scheme copied — which is the row they were
-        // looking at, and the only reading that is not a guess.
-        //
-        // **It always copies**, unlike the verb it replaces. The 2026-08-18
-        // report was that `Customise scheme…` over a file the reader already
-        // owned made a second copy of it; the answer then was to change the
-        // verb's word, and the answer now is that opening a file you own has a
-        // mark of its own on the row that names it. One verb, one meaning.
-        let settings = self.app.settings_store.loaded();
-        let stored = if light {
-            settings.light_scheme.clone()
-        } else {
-            settings.dark_scheme.clone()
-        };
-        let catalogue = schemes::catalogue();
-        // The name the picker is ticking, which is the name of what is on
-        // screen: a stored name this build does not hold shows the default, and
-        // a copy called `<a name nobody has> (custom)` would be a file named
-        // after a scheme it does not contain.
-        let base = if catalogue.file_of(&stored, light).is_some() {
-            stored
-        } else {
-            catalogue.default_name(light).to_owned()
-        };
-        let scheme = catalogue.resolve(&base, light);
-        drop(catalogue);
-        let (path, name) = match schemes::write_custom_copy(&base, &scheme) {
-            Ok((path, name, _)) => (path, name),
-            Err(error) => {
-                return self.toast(
-                    toast::ToastKind::Error,
-                    toast::ToastAnchor::Window,
-                    Some(i18n::Text::AddScheme.text().to_owned()),
-                    i18n::not_saved(&error.to_string()),
-                );
-            }
-        };
-        // The folder exists now whether or not it did a moment ago, which is one
-        // of the two moments `SchemeWatch` can be armed at.
-        self.app.scheme_watch.arm(&self.app.event_proxy);
-        if light {
-            self.apply_scheme(Some(name), None)?;
-        } else {
-            self.apply_scheme(None, Some(name))?;
-        }
-        self.refresh_scheme_sources();
-        self.open_scheme_for_editing(path)
-    }
-
-    /// Put a scheme file in front of the reader, with the keyboard in it.
-    ///
-    /// The tail both halves of the foot's first verb share: `Customise scheme…`
-    /// writes a copy and comes here, `Edit scheme…` comes straight here. One
-    /// function because everything from this point on is about a file that
-    /// exists, and two copies of it would be two answers to "where does a scheme
-    /// open".
-    fn open_scheme_for_editing(&mut self, path: PathBuf) -> Result<()> {
-        // **The dialog goes.** It is the one verb in it whose answer is a
-        // document, and a modal standing over the document it just handed you is
-        // a modal in the way.
-        self.settings_closed();
-        self.window.settings.close();
-        let Some(surface) = self.preview_landing_surface() else {
-            return Ok(());
-        };
-        self.open_preview_file_on(surface, path.clone())?;
-        // The keyboard goes into the text, so the file is *open for editing* and
-        // not merely open. `preview_edit_focus` is re-validated at every read, so
-        // setting it before the head has landed is safe: it becomes true the
-        // moment there is something to type into.
-        self.preview_edit_focus = Some(surface);
-        let anchor = surface.toast_anchor();
-        let file = path
-            .file_name()
-            .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
-        self.toast(
-            toast::ToastKind::Ok,
-            anchor,
-            None,
-            i18n::scheme_customised(&file),
-        )
-    }
-
     /// Note which file each canvas's scheme is coming from, now.
     ///
     /// Asked after every event that can change the answer — startup, a row
@@ -36934,99 +36954,6 @@ impl<B: Backend> Runtime<'_, B> {
                 .file_of(&names[index], light)
                 .map(|file| (names[index].clone(), file.to_owned()));
         }
-    }
-
-    /// The schemes folder moved and has gone quiet: read it again
-    /// (§7.1.6c-4c).
-    ///
-    /// Called once per turn of the loop beside every other clock in this window.
-    /// It costs one comparison while nothing is happening — the debounce arms
-    /// only after a notification, which is what keeps an always-on watch from
-    /// being the polling R31 forbids.
-    fn advance_scheme_watch(&mut self, now: Instant) -> Result<()> {
-        if !self.app.scheme_watch.due(now) {
-            return Ok(());
-        }
-        self.reread_schemes()
-    }
-
-    /// Read the folder again, and put in force whatever that changed.
-    ///
-    /// Three outcomes, and the interesting one is the middle:
-    ///
-    /// * **the selected scheme changed** — re-derive and hot-apply, through the
-    ///   very door a settings row goes through, so a file saved and a row
-    ///   pressed cannot produce two different windows;
-    /// * **the selected scheme's file stopped parsing** — the colours on screen
-    ///   do not move, and one card says which file and why. Falling back to the
-    ///   default here would be the worst of both: the window would change colour
-    ///   *because* you made a typo, and you would be reading the error against a
-    ///   palette that is not the one you are editing;
-    /// * **the selected scheme's file is gone** — the row falls to the default,
-    ///   which is `Catalogue::resolve`'s standing answer, and one card says so.
-    ///   The stored name is left alone, so putting the file back puts the scheme
-    ///   back.
-    ///
-    /// A scheme nobody has selected can do any of the three and nothing happens,
-    /// which falls out of the arithmetic rather than being checked: what is
-    /// handed to `set_schemes` is derived from the two stored names, so a file
-    /// neither of them resolves to cannot move it.
-    fn reread_schemes(&mut self) -> Result<()> {
-        let source = self.app.scheme_source.clone();
-        let after = schemes::rescan();
-        let settings = self.app.settings_store.loaded().clone();
-        let verdict = schemes::rescan_verdict(
-            &after,
-            [&settings.light_scheme, &settings.dark_scheme],
-            source,
-            bt_render::schemes_in_force(),
-            self.app.scheme_fault.as_deref(),
-        );
-        if bt_render::set_schemes(verdict.schemes.0, verdict.schemes.1)
-            == bt_render::ThemeChange::Changed
-        {
-            self.adopt_new_palette()?;
-        }
-        self.refresh_scheme_sources();
-        self.app.scheme_fault = verdict.fault;
-        if let Some((file, reason)) = verdict.report {
-            self.toast(
-                toast::ToastKind::Error,
-                toast::ToastAnchor::Window,
-                Some(i18n::Text::SchemeInUseBroken.text().to_owned()),
-                i18n::scheme_in_use_broken(&file, &reason),
-            )?;
-        }
-        // **A rename follows the file** (user report 2026-08-18). A scheme's
-        // name lives inside its file and `settings.json` stores the name, so
-        // editing it parts the row from the file it came from: the row stops
-        // resolving, falls to the default, and the reader has to go and pick
-        // their own scheme again — which is the product fighting a change they
-        // made on purpose. The watcher already tracks the *file* each row came
-        // from, so the new name is simply written into the row that was wearing
-        // the old one. Both rows follow when both were pointing at one file.
-        //
-        // No card. The colours did not move (the verdict resolved through the
-        // new name and `set_schemes` above has already put them in force), the
-        // reader is looking at the file they just saved, and a card telling them
-        // what they typed is a card about nothing.
-        for (index, name) in verdict.renamed {
-            if index == 0 {
-                self.apply_scheme(Some(name), None)?;
-            } else {
-                self.apply_scheme(None, Some(name))?;
-            }
-        }
-        self.refresh_scheme_sources();
-        for (name, fallback) in verdict.gone {
-            self.toast(
-                toast::ToastKind::Info,
-                toast::ToastAnchor::Window,
-                Some(i18n::Text::SchemeInUseGone.text().to_owned()),
-                i18n::scheme_in_use_gone(&name, &fallback),
-            )?;
-        }
-        Ok(())
     }
 
     /// [`Self::advance_scheme_watch`]'s twin, called once per turn of the loop
@@ -37156,25 +37083,6 @@ impl<B: Backend> Runtime<'_, B> {
             )?;
         }
         Ok(())
-    }
-
-    /// Take up the stored answer about the Option key, which is the half of
-    /// [`Self::apply_option_sends_alt`] every window has to do for itself.
-    fn adopt_option_as_alt(&mut self) {
-        let option_sends_alt = self.app.settings_store.loaded().option_sends_alt;
-        set_option_as_alt(&self.window.window, option_sends_alt);
-        // **Struck against what is held, not against what was left standing.**
-        // Reading the effective state back through the same door would be a
-        // one-way street: the `Alt` this line takes out while the setting is off
-        // is gone, so switching the setting back on under a hand that is still
-        // holding `Option` could not put it back until the next report. The
-        // reported state is the one thing here that is not a consequence of the
-        // setting, which is what makes it the right thing to recompute from.
-        self.window.modifiers = input::effective_modifiers(
-            self.window.modifiers_held,
-            option_sends_alt,
-            bt_platform::host_platform(),
-        );
     }
 
     // `current_preview_buffer` stood here — the buffer "the" preview seat was
@@ -41531,7 +41439,7 @@ mod file_peek_fade_tests {
         );
 
         assert!(
-            method_body("Runtime", "advance_file_peek").contains("self.file_peek_owes_frame(now)"),
+            method_body("Runtime", "advance_file_peek").contains("rt.file_peek_owes_frame(now)"),
             "and the card's own turn is what wakes the loop while it climbs"
         );
     }
@@ -45799,6 +45707,11 @@ mod pty_drain_budget_tests {
     /// early return, never settled the debt and never redrew the card — a spin
     /// and a frozen card at once.
     ///
+    /// Since T-STRIP-ASKS-ON-ITS-TICK the fold is the debt the strip's look writes
+    /// down, and the gate is the ask that reads it: the card's debt is folded in
+    /// at the look, so it asks at most once a frame however long the throttle
+    /// keeps it standing.
+    ///
     /// Mutation: drop `cards_owe` from the fold and the card stops tracking any
     /// shell that does not report; drop `cards_behind` from the deadline and
     /// nothing wakes the loop to spend it.
@@ -45809,10 +45722,13 @@ mod pty_drain_budget_tests {
             .find("let cards_owe = self.window.cards.owes_frame();")
             .expect("the tick asks whether a card is behind its pane");
         let folded = advance
-            .find("let owes_frame = owes_frame || pictures_owe || cards_owe || bars_owe;")
+            .find(
+                "self.window.strip_owes_a_frame |= owes_frame || pictures_owed || cards_owe || \
+                 bars_owe;",
+            )
             .expect("and folds it in beside the animations' own debts");
         let gate = advance
-            .find("if !owes_frame && !panes_owe {")
+            .find("if !self.paced_frame(false, |_| owes_frame || panes_owe) {")
             .expect("which is the gate that decides whether this tick does anything");
         let door = advance
             .find("self.refresh_chrome()")
@@ -49140,14 +49056,17 @@ impl<B: Backend> FolioApp<B> {
         event_loop: &B::Loop,
         held: impl FnOnce(update_trial::Writer) -> bool,
     ) {
-        let owner = self
+        let Some(app) = self
             .app
             .as_ref()
-            .is_some_and(|app| app.session_store.is_the_writer_of_record());
-        if !owner || held(update_trial::Writer::RestartRegistration) {
+            .filter(|app| app.session_store.is_the_writer_of_record())
+        else {
+            return;
+        };
+        if held(update_trial::Writer::RestartRegistration) {
             return;
         }
-        register_restart_now::<B>(event_loop);
+        register_restart_now::<B>(event_loop, app.start_at_sign_in);
     }
 
     /// **Windows is asked to end this process before the processes at the default shutdown
@@ -49688,18 +49607,48 @@ impl<B: Backend> FolioApp<B> {
         Ok(())
     }
 
-    /// **Set the Agents rows from the scan, and say each repair of a gone copy's hooks once**
-    /// (0.4.10 plan row 67b, R8): one notice per family, on the window the keyboard is on, else the
-    /// oldest standing one; every window's chrome redrawn, because the rows are facts about the
-    /// machine and any window may be showing the page.
-    fn adopt_agent_hooks_scan(&mut self) -> Result<()> {
-        let Some(snapshot) = agent_hooks_step::AGENT_HOOKS.take_snapshot() else {
-            return Ok(());
-        };
+    /// **Adopt the carry pass's snapshot** (0.4.10 plan row 68a): set the Agents rows from its
+    /// agents' part, and say each repair of a gone copy's hooks once (row 67b, R8): one notice per
+    /// family, on the window the keyboard is on, else the oldest standing one; every window's
+    /// chrome redrawn, because the rows are facts about the machine and any window may be showing
+    /// the page. A snapshot no member answered for has nothing to set. The sign-in entry's answer
+    /// is taken on the classic verb's rule (0.4.10 plan row 22a, R6); whether it moved the restart
+    /// registration is the caller's to ask ([`Self::register_restart_after_sign_in_moved`]).
+    fn adopt_carry_snapshot(&mut self) -> Result<()> {
+        // The app first: a wake handled with no `App` leaves the snapshot for the one that has it
+        // (row 68b, review N8), where taking it first would drop the classic answer for good.
         let Some(app) = self.app.as_mut() else {
             return Ok(());
         };
-        adopt_agent_hooks_snapshot(app, &snapshot);
+        let Some(carried) = carry_pass::take_carry_snapshot() else {
+            return Ok(());
+        };
+        // The classic verb's answer, unless a press has written since its read (row 68b, R4): the
+        // press's own read is the newer one. The package's row reads its module's cells, which
+        // the round wrote on the worker; the redraw below is what it is owed.
+        if let Some(classic) = carried.explorer {
+            context_menu::adopt_classic_answer(
+                &mut app.context_menu_installed,
+                classic,
+                &context_menu::CLASSIC_PRESSES,
+            );
+        }
+        // The sign-in entry's, on the same rule (row 22a): a press since the member's read has
+        // the newer answer, which its own worker brings.
+        if let Some(sign_in) = carried.sign_in {
+            start_at_sign_in::adopt_sign_in_answer(
+                &mut app.start_at_sign_in,
+                sign_in,
+                &start_at_sign_in::SIGN_IN_PRESSES,
+            );
+        }
+        let notices: Vec<i18n::Text> = match carried.hooks {
+            Some(snapshot) => {
+                adopt_agent_hooks_snapshot(app, &snapshot);
+                snapshot.notices
+            }
+            None => Vec::new(),
+        };
         let oldest_standing = |app: &mut Self| {
             (0..app.windows.len()).find_map(|index| {
                 let id = app.windows.key_at(index)?;
@@ -49712,7 +49661,7 @@ impl<B: Backend> FolioApp<B> {
         let told = self.frontmost_window().or_else(|| oldest_standing(self));
         self.for_each_window(|runtime| {
             if Some(runtime.window_id()) == told {
-                for notice in &snapshot.notices {
+                for notice in &notices {
                     runtime.toast(
                         toast::ToastKind::Ok,
                         toast::ToastAnchor::Window,
@@ -49727,6 +49676,81 @@ impl<B: Backend> FolioApp<B> {
                 Ok(())
             }
         })
+    }
+
+    /// **A press of the sign-in switch answered** (0.4.10 plan row 22a, R6): the row set from the
+    /// press's own read, its card raised on the window that pressed, every window redrawn, and
+    /// the restart registration asked again when whether the entry starts this copy moved (R10).
+    /// An answer older than the last press is dropped whole: that press's own answer is coming,
+    /// and it is the one the reader waits for. Reads nothing of the machine: the answer is the
+    /// worker's.
+    fn answer_sign_in_press(&mut self, event_loop: &B::Loop) -> Result<()> {
+        // The app first, for `adopt_carry_snapshot`'s reason: a wake handled with no `App` leaves
+        // the answer for the one that has it.
+        let Some(app) = self.app.as_mut() else {
+            return Ok(());
+        };
+        let Some(pressed) = start_at_sign_in::take_sign_in_press() else {
+            return Ok(());
+        };
+        if pressed.presses_seen != start_at_sign_in::SIGN_IN_PRESSES.sign_in_presses_counted() {
+            return Ok(());
+        }
+        let before = app.start_at_sign_in;
+        if let Some(answer) = pressed.answer {
+            start_at_sign_in::adopt_sign_in_answer(
+                &mut app.start_at_sign_in,
+                answer,
+                &start_at_sign_in::SIGN_IN_PRESSES,
+            );
+        }
+        let asked_by = app.sign_in_asked_by.take();
+        self.register_restart_after_sign_in_moved(event_loop, Some(before));
+        let (done, text) = pressed.press_card();
+        self.for_each_window(|runtime| {
+            if let Some((window, announce)) = asked_by
+                && window == runtime.window_id()
+                && (!done || announce == Announce::Everything)
+            {
+                runtime.toast(
+                    if done {
+                        toast::ToastKind::Ok
+                    } else {
+                        toast::ToastKind::Error
+                    },
+                    toast::ToastAnchor::Window,
+                    None,
+                    text.clone(),
+                )?;
+            }
+            if runtime.refresh_chrome() {
+                runtime.present_chrome_change()
+            } else {
+                Ok(())
+            }
+        })
+    }
+
+    /// **The restart registration asked again when the sign-in row moved across this copy's
+    /// `On`** (0.4.10 plan row 22a, R10): its flags are `start_at_sign_in::restart_flags_for`'s
+    /// at each registration, and the row's first answer lands after the first window's. Through
+    /// the first window's own door ([`Self::register_for_restart_held_by`]): only the data
+    /// directory's owner asks, and an update's trial asks at its commit, with the row it has then.
+    /// `before` is `None` when there was no `App` to read it from.
+    fn register_restart_after_sign_in_moved(
+        &self,
+        event_loop: &B::Loop,
+        before: Option<start_at_sign_in::SignInRow>,
+    ) {
+        let (Some(before), Some(app)) = (before, self.app.as_ref()) else {
+            return;
+        };
+        if start_at_sign_in::restart_flags_for(before)
+            == start_at_sign_in::restart_flags_for(app.start_at_sign_in)
+        {
+            return;
+        }
+        self.register_for_restart_held_by(event_loop, update_trial::defer);
     }
 
     fn announce_recovered_edits(&mut self) -> Result<()> {
@@ -50626,7 +50650,10 @@ impl<B: Backend> FolioApp<B> {
                     // (T-QUIT-DOCUMENTS rounds 3–4): the rest of it released, the session's
                     // half pending through the write's verdict (`Quit::settle_held_release`).
                     if let Some(app) = self.app.as_mut() {
-                        app.settle_the_held_release(&|| register_restart_now::<B>(event_loop));
+                        let sign_in = app.start_at_sign_in;
+                        app.settle_the_held_release(&|| {
+                            register_restart_now::<B>(event_loop, sign_in)
+                        });
                     }
                     self.for_each_window(|runtime| runtime.photograph_for_quit())?;
                     self.report_to_quit(quit::Quit::photographed);
@@ -50708,7 +50735,10 @@ impl<B: Backend> FolioApp<B> {
                     // **The write left: a session release still pending is consumed**
                     // (T-QUIT-DOCUMENTS round 4).
                     if let Some(app) = self.app.as_mut() {
-                        app.settle_the_held_release(&|| register_restart_now::<B>(event_loop));
+                        let sign_in = app.start_at_sign_in;
+                        app.settle_the_held_release(&|| {
+                            register_restart_now::<B>(event_loop, sign_in)
+                        });
                     }
                     // **Not `for_each_window`**, and this is the one place in the
                     // loop where that matters: it stops at the first failure, and
@@ -50823,7 +50853,10 @@ impl<B: Backend> FolioApp<B> {
                         // **A trial release still held runs now** (rounds 3–4): cancelled in the
                         // phases or its final write refused, the window stays, so the backup and
                         // the session go as they would have.
-                        app.settle_the_held_release(&|| register_restart_now::<B>(event_loop));
+                        let sign_in = app.start_at_sign_in;
+                        app.settle_the_held_release(&|| {
+                            register_restart_now::<B>(event_loop, sign_in)
+                        });
                         app.quit = None;
                     }
                     if let Some(cancelled) = cancelled {
@@ -51677,6 +51710,11 @@ impl<B: Backend> FolioApp<B> {
                 wake_owner::owned(WakeOwner::ImeReport, ime_deadline),
             ]);
             let turn = runtime.turn(now, application_clocks);
+            // **A turn that left early still hands over what it was asked for**
+            // (T-TWO-BARE-TURNS-PER-MARK-STEP): a turn that returned an error before its own
+            // end has not paid the present it deferred, and the window — kept, after a lost
+            // device — must not keep deferring. On a turn that ran to its end this does nothing.
+            runtime.end_the_turns_presents();
             application_clocks = false;
             match turn {
                 Ok(window_wake) => wake = wake_owner::earliest_wake([wake, window_wake]),
@@ -52627,8 +52665,9 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                         Some(quit) => quit.trial_release(released),
                         None => released,
                     };
+                    let sign_in = app.start_at_sign_in;
                     app.release_trial_writes(now, &|| {
-                        register_restart_now::<Native>(event_loop);
+                        register_restart_now::<Native>(event_loop, sign_in);
                     });
                     if app.update_job.after_commit(version::VERSION) {
                         diagnostics::note(
@@ -52799,9 +52838,19 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                     }
                 })
             }
-            // **The carry pass's answer about the agents' hooks**: the rows set from it, its
-            // notices raised once on the focused window, every window redrawn.
-            AppEvent::AgentHooksScanned => self.adopt_agent_hooks_scan(),
+            // **The carry pass's round**: the agents' rows set from its part, its notices raised
+            // once on the focused window, every window redrawn.
+            // And the restart registration asked again when the round moved whether the sign-in
+            // entry starts this copy (0.4.10 plan row 22a, R10).
+            AppEvent::CarryPassAnswered => {
+                let sign_in = self.app.as_ref().map(|app| app.start_at_sign_in);
+                let adopted = self.adopt_carry_snapshot();
+                self.register_restart_after_sign_in_moved(event_loop, sign_in);
+                adopted
+            }
+            // **A press of the sign-in switch, answered by its worker** (row 22a): the row, the
+            // card on the window that pressed, every window redrawn.
+            AppEvent::SignInPressed => self.answer_sign_in_press(event_loop),
             // **The one place the family list moves onto the screen.** The walk
             // finished on a worker and left its answer in `settings`' mailbox;
             // this is between two frames, which is the whole reason the worker
@@ -52846,13 +52895,12 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 self.for_each_window(|runtime| runtime.replace_contradicted_flash())
             }
             AppEvent::CopilotProbed => {
-                if let Some(app) = self.app.as_mut() {
-                    app.copilot_readiness = attention_copilot::readiness();
-                }
                 // **The version is the start-time repair's gate for Copilot's hooks** (0.4.10 plan
-                // row 67b, R9): a repair that waited for it runs now, and the scan's snapshot,
-                // which carries readiness too, is read after this answer.
-                carry_pass::begin_carry_pass();
+                // row 67b, R9): a repair that waited for it runs now. **Readiness is not read
+                // here** (row 73, its ruling R9): it reads Copilot's settings file, and the round
+                // asked for here reads it on the pass's worker and carries it in its snapshot,
+                // which sets the rows when it lands.
+                carry_pass::begin_carry_pass(CarryAsk::HOOKS);
                 self.for_each_window(|runtime| {
                     if runtime.refresh_chrome() {
                         runtime.present_chrome_change()
@@ -53224,7 +53272,12 @@ struct PreparedClipboardPaste {
     /// **The text is the clipboard's own** (`ClipboardPayload::Text`), as against paths Folio
     /// spelled. The one arm [`runtime::clipboard::paste_road`] may ask about (0.4.4 ticket 02).
     clipboard_text: bool,
-    notice: Option<String>,
+    /// **What this paste refused, if anything** (plan row 81): said through
+    /// `Runtime::refuse_paste` — one line in the log and the notice — before what is left is sent.
+    refused: Option<runtime::RefusedKind>,
+    /// **The files a clipboard promise offered** (plan row 81), lifted out as the picture is:
+    /// what is pasted is their paths once a worker has had the source write them.
+    promise: Option<bt_platform::PromisedFiles>,
     /// **Every encoding a picture-and-nothing-else clipboard offered**, best
     /// first, or empty (§7.61).
     ///
@@ -53234,6 +53287,16 @@ struct PreparedClipboardPaste {
     /// and spells the path it answers with through the very same
     /// `shell_literal::paths_text` a copied *file* goes through.
     picture: Vec<bt_platform::PictureBytes>,
+}
+
+#[cfg(test)]
+impl PreparedClipboardPaste {
+    /// The notice this paste's refusal raises, if it refuses anything — what the tests read.
+    fn said_notice(&self) -> Option<String> {
+        self.refused
+            .as_ref()
+            .map(runtime::clipboard::RefusedKind::toast_text)
+    }
 }
 
 /// **Which shape a recalled command's arrival takes** (DESIGN.md §7.55 ⑨).
@@ -56782,7 +56845,10 @@ mod clipboard_picture_race_tests {
         ClipboardPictureAnswer {
             generation,
             target,
-            result: Ok(std::path::PathBuf::from("/tmp/folio/clipboard/shot.png")),
+            staged: super::StagingAnswer::Picture {
+                sequence: None,
+                result: Ok(std::path::PathBuf::from("/tmp/folio/clipboard/shot.png")),
+            },
         }
     }
 
@@ -59638,7 +59704,7 @@ mod platform_gate_tests {
 
     /// **The list.** One file per line, in the order `ls` gives them, each with
     /// the reason it is allowed to ask.
-    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 41] = [
+    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 46] = [
         // Windows-only test fixture: the `pi` row, which only the Windows table ships, reopened
         // from a Recent row, beside its every-platform twin on the host's fallback shell.
         "app_files_tests.rs",
@@ -59665,6 +59731,10 @@ mod platform_gate_tests {
         // Windows-only test fixture: GDI's own drawing of a top-down and a 16-bit bitmap,
         // beside the every-platform rows of the layout the Windows arm hands over.
         "clipboard_picture.rs",
+        // Windows-only test fixture (2026-11-09, 0.4.10 plan row 68b): the classic verb's
+        // historical shapes planted with `reg.exe` in an isolated `HKCU\Software\Folio-Test`
+        // subkey, beside the every-platform run of the same shapes over a fake store.
+        "context_menu.rs",
         // The Explorer verb itself, which has no counterpart off Windows.
         "explorer_menu.rs",
         // Drive roots, the recycle bin, and the reveal.
@@ -59697,6 +59767,10 @@ mod platform_gate_tests {
         "profiles_app_tests.rs",
         // A PowerShell module, which is a Windows fact end to end.
         "psreadline.rs",
+        // Only the Windows Store test's birth door and its retry (plan row 182): a test's
+        // last-resort retry is a Windows PowerShell one-shot without the profile; the person's
+        // birth door and its retry are portable.
+        "pty_door.rs",
         // Windows-only test fixtures: the hidden Win32 system caret every layout keeps
         // (T-CARET-EVERY-LAYOUT), beside the every-platform test that the Mac feeds none.
         "runtime/keyboard_tests.rs",
@@ -59719,15 +59793,21 @@ mod platform_gate_tests {
         // macOS-only test fixtures: the applier's road over real bundles, exchanges, trials and
         // LaunchServices launches; the road's platform-free points run everywhere.
         "update_apply_macos_tests.rs",
-        // Only the held-journal fixtures: a hold that refuses a replacing rename is a
-        // Windows fact; their platform-free halves run beside the door everywhere.
+        // Windows-only test fixtures: the applier's road over a signed set, real programs, held
+        // files and a squatted claim; its road over a set of plain bytes runs everywhere.
         "update_apply_windows_tests.rs",
+        // Windows-only test fixtures: the release manifest a Windows build embeds, held to the
+        // product's cap and read through its door; the archive's reading is portable.
+        "update_archive_tests.rs",
+        // One test accessor, `Job::take_reports`: the job's inbox read without applying it,
+        // whose one reader is the Windows Prepare's cancel tests; the job itself is portable.
+        "update_job.rs",
         // macOS-only test fixtures: the Prepare over real disk images, signed bundles and
         // Homebrew records, and the guard that detaches an image mounted under a test's folder
         // (`hdiutil`); the Prepare's pure parts run everywhere.
         "update_prepare_macos_tests.rs",
-        // Windows-only test fixtures: a journal another program holds open (`ScannerHold`, shared
-        // with `update_startup`'s retirement tests); the Prepare's refusal elsewhere is portable.
+        // Windows-only test fixtures: the Prepare over a release a test root signed, a journal held
+        // open (`ScannerHold`, shared with `update_startup`); one test pins its refusal elsewhere.
         "update_prepare_windows_tests.rs",
         // Only test fixtures: the rescue build running from `H\<txn>` and the scanner holds
         // its retirement's worker waits out (Windows), and the mounted image a retirement
@@ -59743,6 +59823,9 @@ mod platform_gate_tests {
         "update_recover.rs",
         // Only the real detached-handoff regression fixture; the handoff API is portable.
         "update_handoff.rs",
+        // Windows-only test fixture: the embedded release manifest held to the packaging list;
+        // the version itself is portable.
+        "version.rs",
         // Windows-only test fixtures: the UNC spelling of a share in a document.
         "web_trace_app_tests.rs",
         // Windows-only test fixtures: WebView2's favicon fetch, beside the macOS twin.
@@ -63663,7 +63746,7 @@ mod clipboard_path_tests {
                 input_line_needs_a_space_first(&session),
             );
             assert_eq!(clipboard.fetched, ["files"]);
-            assert!(prepared.notice.unwrap().contains("bad\\nname"));
+            assert!(prepared.said_notice().unwrap().contains("bad\\nname"));
             let text = prepared.text.unwrap();
             assert_eq!(text, " '/first' '/second space' '/third' ");
             let mut projection = session.new_projection(session.layout_key());
@@ -63702,7 +63785,7 @@ mod clipboard_path_tests {
                 true,
             );
             assert_eq!(prepared.text.as_deref(), Some(text));
-            assert!(prepared.notice.is_none());
+            assert!(prepared.said_notice().is_none());
             assert_eq!(clipboard.fetched, ["files", "text"]);
         }
     }
@@ -63771,7 +63854,7 @@ mod clipboard_path_tests {
             false,
         );
         assert!(prepared.text.is_none());
-        assert!(prepared.notice.is_none());
+        assert!(prepared.said_notice().is_none());
         assert_eq!(prepared.picture, vec![shot()]);
     }
 
@@ -63826,16 +63909,18 @@ mod clipboard_path_tests {
         ] {
             let prepared = prepare_clipboard_paste(payload, &recipient(), false);
             assert!(prepared.text.is_none());
-            assert!(prepared.notice.is_none());
+            assert!(prepared.said_notice().is_none());
             assert!(prepared.picture.is_empty());
         }
         for payload in [
-            ClipboardPayload::Refused(UnsupportedKind::Promise),
+            ClipboardPayload::Refused(UnsupportedKind::Promise {
+                picture_passed_over: false,
+            }),
             ClipboardPayload::Files(vec!["/bad\tname".into()]),
         ] {
             let prepared = prepare_clipboard_paste(payload, &recipient(), true);
             assert!(prepared.text.is_none());
-            assert!(prepared.notice.is_some());
+            assert!(prepared.said_notice().is_some());
         }
     }
 
@@ -63859,7 +63944,7 @@ mod clipboard_path_tests {
         );
         let spend = method_body("Runtime", "spend_paste");
         assert!(
-            spend.contains("self.apply_clipboard_payload(target, payload)"),
+            spend.contains("self.apply_clipboard_payload(target, sequence, payload)"),
             "the payload the lane answered is applied where the paste is spent:\n{spend}"
         );
         assert!(!paste.contains("paste_recipient") && !paste.contains("deliver_paste("));
@@ -63941,7 +64026,8 @@ mod clipboard_path_tests {
                         "{path} is spelled differently when it is dropped"
                     );
                     assert_eq!(
-                        dropped.notice, copied.notice,
+                        dropped.said_notice(),
+                        copied.said_notice(),
                         "{path} is refused differently when it is dropped"
                     );
                 }
@@ -63963,7 +64049,7 @@ mod clipboard_path_tests {
         let unmeasured =
             prepare_dropped_paste(vec![apostrophe.into()], &powershell_recipient(&[]), false);
         assert!(
-            unmeasured.text.is_none() && unmeasured.notice.is_some(),
+            unmeasured.text.is_none() && unmeasured.said_notice().is_some(),
             "until PROBE 2 an apostrophe is refused with a notice rather than \
              guessed at — for a drop exactly as for a copy"
         );
@@ -63996,7 +64082,7 @@ mod clipboard_path_tests {
              paste again"
         );
         let prepared = prepare_dropped_paste(batch.paths, &recipient(), true);
-        assert!(prepared.notice.is_none());
+        assert!(prepared.said_notice().is_none());
         assert_eq!(
             prepared.text.as_deref(),
             Some(" '/first' '/second file' '/third' "),
@@ -64036,7 +64122,7 @@ mod clipboard_path_tests {
                 "the batch has one reader, and it takes the whole of it",
             ),
             (
-                ".paste_paths_into(target, batch.paths, \"write dropped paths to PTY\")",
+                ".paste_paths_into(target, batch.paths, PasteFrom::Drop)",
                 "a dropped batch reaches a shell through one door, and takes the \
                  whole batch with it — which is what makes the focus and the \
                  raise behind its answer happen once per drop and not once per \
@@ -64196,7 +64282,8 @@ mod clipboard_path_tests {
                     );
                     assert_eq!(dragged.text, copied.text, "{name} is spelled a third way");
                     assert_eq!(
-                        dragged.notice, copied.notice,
+                        dragged.said_notice(),
+                        copied.said_notice(),
                         "{name} is refused differently when it comes off the files column"
                     );
                 }
@@ -64243,7 +64330,7 @@ mod clipboard_path_tests {
                 "a preview's centre opens the file as that pane",
             ),
             (
-                "if self.paste_paths_into(target, vec![path], \"write dragged path to PTY\")? {",
+                "if self.paste_paths_into(target, vec![path], PasteFrom::Drag)? {",
                 "a terminal's centre pastes through the external drop's own door, \
                  and asks that door whether anything was actually written",
             ),

@@ -372,7 +372,10 @@ Since 2026-10-29 (T-GENERATED-STAMP-REFUSES-DIRTY-TREES, plan row 99)
 test skips and refuses a file without exactly one, a line off the grammar, the
 ` with uncommitted changes` suffix, a sha that is no commit or not an ancestor
 of HEAD, and four files naming different commits; a shallow clone exits 2.
-When red: commit everything, run the generator, commit its output.
+When red: commit everything, run the generator, commit its output. Since
+2026-11-02 (T-DOC-LINK-DEBT, plan row 78) it reads `docs/plans/DOC-LINK-DEBT.tsv`'s
+stamp by the same rules, as a set of its own: it may name another commit than
+the map's.
 
 ## Call graph
 
@@ -1281,6 +1284,37 @@ buffering decides, not the endpoint; and bt-app's
 real endpoint from another crate and cannot be handed the crate-private clock without a product knob. Both
 are noted in TIMING-BOUND.
 
+2026-11-07 (T-LAUNCHCLOCK-OUT-OF-THE-PLATFORM-GATED-MODULE, 0.4.10 plan row 66): `LaunchClock`, `RealClock`
+and the test's `Turn` and `CountedClock` moved from `launch_conversation`, which is compiled only on Windows
+and Unix, to `launch_clock`, which has no gate; they are unchanged but for the trait doc's sixth-user
+paragraph, and the paragraphs above name the old path. That sixth user is the deferred remover's readiness
+wait (`deferred_removal::schedule_by`, every target), which row 14 had made on a closure of its own because
+the clock's module was gated.
+
+2026-11-12 (T-TIMING-GUARD-FOLLOWS-WAITING-HELPERS, 0.4.10 plan row 20): the third shape follows a wait as
+well as a measurement. A test is listed when it reaches, through resolved call-graph edges and at any depth,
+a test-only helper of its target whose own body waits as the first shape lists (a std, kernel or `libc`
+wait, a zero bound included), reads `elapsed()` (a stall timer that only compares included; an `elapsed()`
+the helper only prints, in a `println!` or a panic message, is no timer) or does clock
+arithmetic; its row says "waits in its helper" or, for a kept measurement, "measures in its helper". So
+moving a wait into a helper keeps its test listed. **A helper that is itself a row is a door**: the walk
+stops there and the tests that reach it are not rows through it. The suites' patience helpers and holds
+(`lane::receive`, `within_patience`, `while_progressing`, `Hold::pass`, `Gate::wait_for`,
+`door_skipped::received`, `persist`'s `on_a_worker`, the watch fakes' `FakeDoor::pass` and the rest, 37 in
+all) are doors, each row's text saying which kind it is (it waits, it measures, a harness-less test target's
+own run, or an example's run that no test makes), so a new test that awaits its event through one adds no row, while a new waiting helper
+makes every test that reaches it a row, refused by the ratchet unless it is a door the list admits. A door
+must still wait or measure and be reached from a test (through an edge, or as a candidate of a call the
+graph does not resolve) or run only by an implicit call, or its row is stale; a test-only impl that only an
+implicit call runs (a `Drop`, winit's `about_to_wait`) and that waits, or reaches a test-only helper that
+waits, is refused unless it or that helper is a door; a door among the candidates of a call the graph does
+not resolve does not excuse a candidate beside it that waits. An
+inline wait moved into a door call is a shrink, recorded on a `# shrunk` line naming the door. Not seen:
+test support another package compiles under a test feature (`bt_pty::test_shell`,
+`bt_platform::trust_harness`; 0.4.10 plan row 95 follows them), and a wait in a `static` or `const`
+initializer a test reads. 0.4.9 plan row 70 closes with this
+paragraph.
+
 ## Suite watchdog
 
 The rule: a test that hangs ends its run red within 300 s of its start, and is named, wherever a
@@ -1400,6 +1434,29 @@ reaches it, or add the row. **Not seen:** a global a test reaches only through p
 functions; the walk ends there, as `timing.rs`'s does. The CJK probe's `i18n` switch is
 one. `the_product_reach_of_the_tests_is_measured` prints `TEST_GLOBALS_PRODUCT_REACH` as
 a measure, not a gate.
+
+**A test does not end passed before it asserts anything** (T-INSTALL-TESTS-SILENT-PASS-OFF-WINDOWS,
+0.4.10 plan row 12, 2026-11-13). On the Mac, 84 of the Windows applier's tests opened with
+`let Some(install) = Install::new(tag) else { return; };` over a test root only Windows has, and
+libtest counted them passed. `crates/bt-source/tests/early_returns.rs` is the gate and
+`docs/plans/EARLY-RETURN-FIXTURES.tsv` its register. It reads every `#[test]` function's own body
+in every first-party package for a road out (`return;`, `return ();`, `return Ok(…);`). A road
+written after the test's first assertion is dropped (R: the test has checked something), and
+stands as a row of `docs/plans/EARLY-RETURN-DROPPED.tsv` with that assertion and a reason that
+opens with its date, so a new one lands in a diff where review reads what the assertion checks
+(one that checks only the host is the class, gated). Every other road stands in one of four
+shapes or is refused by name: G1 the else of a `let`, G2 an `if` with no `else`, G3 a `match` arm,
+each judged by the callee of its expression (or the expression's whole text), and G4 the child
+half, whose expression reads only variables its own file sets on a started command. A G1–G3
+site needs a row: file, test (`*` for a function named by its path, else the one test function,
+as for a read of the environment G4 does not hold), callee, hosts in one of five spellings
+(`other-unix`, `other-platform`, `environment: <fact>`, `parent-half`, `child-half`; never
+Windows or macOS, where every suite runs) and a reason. The rows equal the sites both ways. When
+red, gate the test with `#[cfg]` on the hosts it needs (CONVENTIONS H1 rule 2), make the fixture
+answer on every host the suite runs on, rewrite a refused road into a shape, or add the row with
+where the road is taken and why. **Not seen:** a road inside a helper the test calls (four of
+the 84 were that shape; plan row 96), a `continue`/`break` past every assertion, and, but for
+the dropped list's reasons, whether the assertion before a dropped road checks enough.
 
 ## Raw-effect and thread-door exceptions
 
@@ -1537,8 +1594,7 @@ documented stand-in answer in `headless::PlatformAnswers`) in the headless one.
 
 **The startup order is a shared function, not native code** (T-STARTUP-ORDER-SHARED):
 `crate::startup::begin` (the removal verbs, the command line, the hand-over) and
-`crate::startup::resume` (the startup migration, the script's
-preparation, the window, the PowerShell questions, the first tab) are generic
+`crate::startup::resume` (the script's preparation, the carry pass, the window, the PowerShell questions, the first tab) are generic
 over the steps they are handed, and name no holder. `main` and `Runtime::create`
 hand them their steps as closures written in their own bodies, which is why the
 order needed no native-list row; the headless start hands them recording
@@ -1788,6 +1844,44 @@ expansion of a macro on `MACROS`, an item a derive or an attribute macro generat
 blanket impl (`impl<T: Bound> Trait for T`, whose self type no body names, so an
 implicit call running one is never taken in), and
 what a foreign function or a foreign macro's expansion does with the words.
+
+## Doc-link debt
+
+The rule: no broken intra-doc link is added to bt-app's documentation, and the
+ones that predate the rule only go (T-DOC-LINK-DEBT, 0.4.9 plan row 78, from
+row 59's judgement). `docs/plans/DOC-LINK-DEBT.tsv` holds each, one row per
+rustdoc warning: `owner`, `target`, `shape`, then `module` (where the owner is
+written, for the move rule) and `file` (where it is written today: the `docs`
+job compares it, the shrink check does not). No line numbers.
+
+Two halves. The `docs` CI job runs `scripts/ci/measure-doc-links.ps1`:
+`cargo doc -p bt-app --no-deps --locked --message-format=json` on Windows,
+keeping the warnings whose lint code is `rustdoc::broken_intra_doc_links`, then
+bt-source's `doc_link_debt` target (`test = false`, run by name), which keys
+each to the item whose documentation holds it through the index and fails on a
+broken link the list does not hold and on a row no broken link is. Its module
+doc is the grammar: three message forms (`unresolved`, `ambiguous`,
+`incompatible`), the positions it reads (an item, field, variant, `const`,
+`static`, alias, `impl` or trait declaration; the variant for a doc inside a
+struct-like variant's braces, whose fields the index does not record;
+`<module> (outside any item)` for a doc in no record), and the positions it
+refuses by name (a macro's tokens, a function body, a tuple variant's
+parentheses, a type's, `impl`'s or trait's braces outside any recorded member,
+a byte in no doc comment, a file reached twice or not at all). The other rustdoc
+lints are counted and printed, not gated. `scripts/ci/check-doc-link-debt.ps1`
+(CI `logic`; its cases in `check-doc-link-debt-tests.ps1`; a planted row in
+`gates-can-fail`) refuses a row the merge base did not have, with
+`moved-rows.ps1`'s rule for an owner moved to another module and no rename arm.
+
+When red in `docs`: a new broken link is fixed (a path that resolves where the
+doc is, a code span for a name that is no item, or words), never listed; a
+fixed link's row leaves the list; an owner that moved module is regenerated
+with `scripts/dev/generate-doc-link-debt.ps1` (a lane only; commit first, it
+stamps the commit), and a renamed owner's links are fixed in the renaming
+commit. A `(outside any item)` row is never moved: when its module moves, or
+its doc changes from an outer doc to a `//!`, the moving commit fixes that
+link, as a renaming one does. When the list is empty, `[workspace.lints.rustdoc]
+broken_intra_doc_links = "deny"` replaces both halves (a later row).
 
 ## Machine-independent paths
 

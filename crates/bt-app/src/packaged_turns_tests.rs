@@ -389,6 +389,11 @@ fn a_store_powershell_check_takes_its_turn_with_a_birth_of_its_package() {
 /// **SKIPPED — passes without asserting — on a machine with no Store PowerShell 7** (every CI
 /// runner): it says `packaged turns test skipped=… reason=no-store-powershell` on stderr.
 ///
+/// **Its birth's retry is a test's** (plan row 182): `request_shell_in` gives the last-resort
+/// retry `pty_door::Retry::OneShotForATest`, a one-shot without the profile, so an alias that
+/// will not start never starts the account's interactive PowerShell here; and a pane born on
+/// that retry fails this test instead of passing it.
+///
 /// MUTATION: in `pty_door::bear`, call the spawn without `born_in_turn` (the door bypassed) — the
 /// shell is born while the check is held, and no birth is seen waiting.
 #[cfg(windows)]
@@ -435,8 +440,11 @@ fn a_store_powershell_pane_takes_its_turn_with_a_check_of_its_package() {
     hold.release();
     wait_until("the shell born once the check settled", || shell.answered());
     let born = shell.take().expect("the answer");
+    let Some(Ok(mut session)) = born.session else {
+        panic!("the shell was not started");
+    };
     assert!(
-        born.session.is_some_and(|session| session.is_ok()),
-        "the shell was not started"
+        session.take_shell_fallback().is_none(),
+        "the Store alias did not start: its pane was born on the last-resort retry"
     );
 }

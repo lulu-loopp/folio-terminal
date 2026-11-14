@@ -40,6 +40,7 @@ payload_on_stdin: .read_to_end
 lede_in_tail: .read_to_end
 transcript_lede: File::open
 reserve: .open
+clipboard_picture.rs: reserve_marked: .open
 append_note: .open
 drain: .read_to_end
 append_healed: .open
@@ -116,6 +117,13 @@ undo_profile_install: ProfileFiles::read
 observe_profile_lines: Marks::read
 observe_profile_lines: ProfileFiles::read
 observe_profile_lines: ProfileRevision::read
+# The carry pass's `$PROFILE` member (0.4.10 plan row 68c, 2026-11-09): the record and the profile
+# list, read once without the lock to see whether any profile is there and again under the marks
+# lock (the review's N11, 2026-11-09), and the bytes of each profile read by read_profile_for_edit's
+# lane.
+profiles_present: Marks::read
+profiles_present: ProfileFiles::read
+carry_one: Decoded::read
 install_for_program: ProfileRevision::read
 # `Written::publish` is keyed by its file: `publish` is a name several items declare.
 shell_integration/profile_runtime.rs: publish: ProfileRevision::read
@@ -130,7 +138,7 @@ trace_sink.rs: start: open
 Claim::take: .open
 VideoSeat::open: Engine::open
 VideoSeats::open: VideoSeat::open
-execute_with_claim: Marks::read
+execute_over: Marks::read
 # The install channel (U-1): the marker and scoop's receipt on Lane::Install, each
 # capped; the derivation's one call of the folder read.
 capped: .read_to_end
@@ -148,6 +156,13 @@ digest_of: .read
 # (`file_reads::open`) and read by the durable-copy door through
 # `update_job::FeedBytes` (`feed_chunk`), in place of the download door.
 feed_chunk: .read
+# The data folder's record of the macOS update homes (0.4.10 plan row 68e): read whole on
+# Lane::Update by `update_homes::UpdateHomesRecord::read` (`file_reads::read`), a record this
+# build cannot read refused and never written over. Its two callers are the Prepare's entry
+# (`add_home_to_record`) and the carry pass's and the uninstall's sweep. The file keys are the
+# census's own spelling of the two callers.
+update_homes.rs: add_home_to_record: UpdateHomesRecord::read
+update_homes.rs: sweep_recorded_homes: UpdateHomesRecord::read
 # The Windows Prepare's expansion folder (U-20): held open by handle
 # (`exclusive_create::Directory::open`) for the archive reader to create each
 # member in — a write-only open of a folder, not a content read.

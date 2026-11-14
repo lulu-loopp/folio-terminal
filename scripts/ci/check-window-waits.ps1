@@ -1,9 +1,9 @@
 # the_window_threads_checks_that_are_not_rust
 #
-# Seven checks — five the thread-door note 2026-09-26 gives A2a and A2s (revisions (j)1,
-# (j)3, (j)11.4-(j)11.6; budget note C-2) and two the side-effects contract
-# 2026-10-11 gives S-1 — each reported under its own name, all run before the
-# script answers:
+# Eight checks — five the thread-door note 2026-09-26 gives A2a and A2s (revisions (j)1,
+# (j)3, (j)11.4-(j)11.6; budget note C-2), two the side-effects contract
+# 2026-10-11 gives S-1, and one 0.4.10 plan row 19 gives the inventory's reader —
+# each reported under its own name, all run before the script answers:
 #
 #   1. the bare-site inventory only shrinks (below);
 #   2. the configuration fence: the five clippy.toml locations;
@@ -24,6 +24,9 @@
 #      only shrink (S-1).
 #   7. the two closed exception lists of the registry, `# counted-only` and
 #      `# emergency`, grow only by a row that names its ruling (A2s).
+#   8. the calls the inventory's reader cannot read
+#      (`docs/plans/WINDOW-WAITS-UNREAD-RECEIVERS.tsv`) grow only with a dated
+#      reason of their own (row 19, ruling R4).
 #
 # ── 1. the_bare_site_inventory_only_shrinks
 #
@@ -67,6 +70,20 @@
 #     added: a change that widens the vocabulary cannot carry an unlisted new
 #     wait with it; a listed one is what the dated block asks a reviewer to
 #     check.
+#   * Except, too, what a better reading reveals: a key of a verb the vocabulary
+#     already had, added or grown, every one of whose rows added or grown
+#     against the merge base (row by row, not the key's total) is listed in a
+#     reader block, `## Revealed <YYYY-MM-DD> by <ticket> (reader; ruling
+#     <ticket> <YYYY-MM-DD>): ...`, the merge base does not list it in. One
+#     unlisted added or grown row of the key refuses the key, whatever the
+#     block lists beside it (row 19's review N1).
+#     The reader (the inventory's test) that learned to type a receiver it read
+#     wrong or not at all counts sites that were always there; the block names
+#     each row and the ruling that let it in (the `# counted-only` rule: grow
+#     only by a row that names its ruling; 0.4.10 plan row 19, ruling R2). A row
+#     a reader block lists must be a row of the inventory, and a reader block
+#     that names no ruling is refused. From the next merge base on the block's
+#     rows are listed there too and admit nothing: they only shrink.
 #
 # No merge base at all (no origin/main in the clone) is not a pass either: the
 # comparison did not happen. CI checks out with full history on both jobs that
@@ -83,6 +100,9 @@
 #     per (crate, entry) b lacks
 #       whose verb b's vocabulary
 #       lacks too:                  merged <= max(p1, p2)   (a family one side revealed)
+#     per (crate, entry) with a row
+#       a reader block of the merge
+#       lists and b's does not:     merged <= max(p1, p2)   (rows one side's reader revealed)
 #     per row, a row b has:         merged <= min(p1, p2)   (the resurrection check)
 #     per row, a row b lacks:       merged <= max(p1, p2)   (a rename on one side)
 #
@@ -92,7 +112,10 @@
 # A family of a verb b's vocabulary did not name cannot have been removed by a
 # side since b: the side that has it widened the vocabulary and its own gate held
 # the family (refused, or revealed through a dated block; plan row 176, review F1),
-# and the side without it never had it. A family b had keeps the min bound.
+# and the side without it never had it. A family b had keeps the min bound, unless
+# a reader block in the merge lists one of its rows that b's reader blocks do not:
+# that side's reader counted sites b's did not see, and its own gate held them
+# (row 19, R2); the per-row bound still holds every row b had to min(p1, p2).
 #
 # Prove it fires before trusting it: `gates-can-fail` adds a bare site with its
 # row and requires this to go red, and builds a merge that resurrects a row the
@@ -103,7 +126,10 @@ param(
     # until A2e writes `deny` in both (budget note C-2 item 1, as revision (i)5 narrows it). The
     # one place these values are said.
     [string]$WorkspaceLintLevel = "",
-    [string]$PlatformLintLevel = ""
+    [string]$PlatformLintLevel = "",
+    # Check 8 against this file instead of the merge base's list: for the gates-can-fail plant
+    # only, which must be able to fail on the change that introduces the list.
+    [string]$UnreadBaselinePath = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -333,6 +359,39 @@ function Get-WaitVerb([string]$path) {
     return $parent + "::" + $last
 }
 
+# A reader block's header: `## Revealed <date> by <ticket> (reader; ruling <ticket> <date>): ...`
+# (row 19, R2). `## Revealed <date> by <ticket> (reader` with anything else is a reader block that
+# names no ruling, and is refused.
+$readerBlock = '^## Revealed 20[0-9][0-9]-[0-9][0-9]-[0-9][0-9] by T-[A-Z0-9-]+ [(]reader; ruling (?<ruling>T-[A-Z0-9-]+ [0-9]{4}-[0-9]{2}-[0-9]{2})[)]: [^ ]'
+$readerBlockStart = '^## Revealed 20[0-9][0-9]-[0-9][0-9]-[0-9][0-9] by T-[A-Z0-9-]+ [(]reader'
+
+# The rows a text of the inventory lists in its reader blocks, keyed as Read-InventoryRows keys a
+# row, each with the ruling its block names; and the reader block headers that name none.
+function Read-ReaderRevealedRows([string[]]$lines) {
+    $rows = New-OrdinalMap
+    $unruled = @()
+    $ruling = $null
+    foreach ($line in $lines) {
+        if ($line -cmatch $readerBlockStart) {
+            if ($line -cmatch $readerBlock) {
+                $ruling = $Matches['ruling']
+            } else {
+                $unruled += $line
+                $ruling = $null
+            }
+            continue
+        }
+        if ($null -ne $ruling -and $line.StartsWith("##   ")) {
+            $cells = $line.Substring(5) -split ' \| '
+            if ($cells.Count -ne 4) { throw "$relative`: a revealed line is not four cells: $line" }
+            $rows[($cells -join "`t")] = $ruling
+            continue
+        }
+        $ruling = $null
+    }
+    return @{ rows = $rows; unruled = $unruled }
+}
+
 # One merge, held to the three-way bound at both keys. Returns the failures, named.
 function Test-Merge([string]$what, [string[]]$merged, [string]$p1, [string]$p2) {
     $out = @()
@@ -343,6 +402,14 @@ function Test-Merge([string]$what, [string[]]$merged, [string]$p1, [string]$p2) 
     $registryAtB = (& git show "${b}:crates/bt-app/src/window_waits.tsv" 2>$null) | Out-String
     if ($LASTEXITCODE -ne 0) { return @("[merge] $what`: the registry is not at its parents' merge base $b") }
     $verbsAtB = @((Read-VocabularyPaths ($registryAtB -split "`r?`n")) | ForEach-Object { Get-WaitVerb $_ })
+    # The families with a row a reader block of the merge lists and b's reader blocks do not.
+    $readerAtB = (Read-ReaderRevealedRows $versions.b).rows
+    $readerFamilies = New-OrdinalMap
+    foreach ($row in (Read-ReaderRevealedRows $merged).rows.Keys) {
+        if ($readerAtB.Contains($row)) { continue }
+        $cells = $row -split "`t"
+        $readerFamilies["$($cells[0])`t$($cells[3])"] = $true
+    }
     foreach ($keying in @("family", "row")) {
         $read = if ($keying -eq "row") { ${function:Read-InventoryRows} } else { ${function:Read-Inventory} }
         $m = & $read $merged "$relative at $what"
@@ -352,8 +419,9 @@ function Test-Merge([string]$what, [string[]]$merged, [string]$p1, [string]$p2) 
         foreach ($key in $m.Keys) {
             $first = if ($one.Contains($key)) { $one[$key] } else { 0 }
             $second = if ($two.Contains($key)) { $two[$key] } else { 0 }
-            $revealedSinceB = $keying -eq "family" -and -not $base.Contains($key) -and
-                ($verbsAtB -cnotcontains (Get-WaitVerb ($key -split "`t")[1]))
+            $revealedSinceB = $keying -eq "family" -and (
+                (-not $base.Contains($key) -and ($verbsAtB -cnotcontains (Get-WaitVerb ($key -split "`t")[1]))) -or
+                $readerFamilies.Contains($key))
             $held = if (($keying -eq "row" -and -not $base.Contains($key)) -or $revealedSinceB) {
                 [Math]::Max($first, $second)
             } else {
@@ -395,7 +463,8 @@ try {
         throw "$relative is not at the merge base $base; this inventory now needs a real merge-base baseline"
     }
     $against = "the merge base $($base.Substring(0, 12))"
-    $before = Read-Inventory ($text -split "`r?`n") "$relative at $against"
+    $inventoryLinesThen = $text -split "`r?`n"
+    $before = Read-Inventory $inventoryLinesThen "$relative at $against"
 
     # ── 1b. every merge keeps both sides' removals ──────────────────────────────────────────
     $merges = @(& git rev-list --merges "$base..HEAD" 2>$null | Where-Object { $_ })
@@ -430,6 +499,8 @@ function Read-RevealedRows([string[]]$lines) {
     $rows = New-OrdinalMap
     $inside = $false
     foreach ($line in $lines) {
+        # A reader block is not a vocabulary block: its rows are read by Read-ReaderRevealedRows.
+        if ($line -cmatch $readerBlockStart) { $inside = $false; continue }
         if ($line -cmatch '^## Revealed 20[0-9][0-9]-[0-9][0-9]-[0-9][0-9] ') { $inside = $true; continue }
         if ($inside -and $line.StartsWith("##   ")) {
             $cells = $line.Substring(5) -split ' \| '
@@ -637,10 +708,34 @@ $verbsThen = @((Read-VocabularyPaths ($then -split "`r?`n")) | ForEach-Object { 
 $verbsNow = @((Read-VocabularyPaths ([IO.File]::ReadAllLines((Join-Path $repo $registry)))) | ForEach-Object { Get-WaitVerb $_ })
 $inventoryLines = [IO.File]::ReadAllLines($inventory)
 $inventoryRowsNow = Read-InventoryRows $inventoryLines "the working tree's $relative"
+$inventoryRowsThen = Read-InventoryRows $inventoryLinesThen "$relative at $against"
+# What a refusal adds when a reader block lists some of a key's added or grown rows and not all:
+# the rows it does not list, by name.
+function Get-UnlistedNote([object[]]$unlisted, [object[]]$grownRows) {
+    if ($unlisted.Count -eq 0 -or $unlisted.Count -eq $grownRows.Count) { return "" }
+    return "; a reader block lists some of its added or grown rows, not $(($unlisted | ForEach-Object { $_ -replace "`t", ' | ' }) -join '; ')"
+}
 $revealedRows = Read-RevealedRows $inventoryLines
+# The rows reader blocks list now and did not at the merge base: what a better reading revealed
+# since (row 19, R2). Each is a row of the inventory, and every reader block names its ruling.
+$readerNow = Read-ReaderRevealedRows $inventoryLines
+$readerThen = (Read-ReaderRevealedRows $inventoryLinesThen).rows
+foreach ($header in $readerNow.unruled) {
+    $failures += "[inventory] a reader block names no ruling: '$header' (write '## Revealed <YYYY-MM-DD> by <ticket> (reader; ruling <ticket> <YYYY-MM-DD>): <what the reader learned>')"
+}
+$readerRevealedRows = New-OrdinalMap
+foreach ($row in $readerNow.rows.Keys) {
+    if ($readerThen.Contains($row)) { continue }
+    if (-not $inventoryRowsNow.Contains($row)) {
+        $failures += "[inventory] a reader block lists '$($row -replace "`t", ' | ')', which is no row of the inventory"
+        continue
+    }
+    $readerRevealedRows[$row] = $readerNow.rows[$row]
+}
 $added = @()
 $grown = @()
 $revealed = @()
+$readerRevealed = @()
 $shrunk = 0
 foreach ($key in $now.Keys) {
     $held = if ($before.Contains($key)) { $before[$key] } else { 0 }
@@ -651,14 +746,25 @@ foreach ($key in $now.Keys) {
             $cells = $_ -split "`t"
             $cells[0] -ceq $crate -and $cells[3] -ceq $entry -and -not $revealedRows.Contains($_)
         })
+    # The key's rows added or grown against the merge base, row by row: a reader block admits the
+    # key's growth only when it lists every one of them (review N1: a listed row's whole count is
+    # not its growth, and an unlisted new row beside it is not admitted by it).
+    $grownRows = @($inventoryRowsNow.Keys | Where-Object {
+            $cells = $_ -split "`t"
+            $wasRow = if ($inventoryRowsThen.Contains($_)) { $inventoryRowsThen[$_] } else { 0 }
+            $cells[0] -ceq $crate -and $cells[3] -ceq $entry -and $inventoryRowsNow[$_] -gt $wasRow
+        })
+    $unlistedGrown = @($grownRows | Where-Object { -not $readerRevealedRows.Contains($_) })
     if ($newEntry -and $undated.Count -eq 0) {
         $revealed += "    $($key -replace "`t", ' | ') ($($now[$key]))"
     } elseif ($newEntry) {
         $added += "    $($key -replace "`t", ' | ') ($($now[$key])): a new vocabulary entry, and no dated '## Revealed' block lists $(($undated | ForEach-Object { $_ -replace "`t", ' | ' }) -join '; ')"
+    } elseif ($now[$key] -gt $held -and $grownRows.Count -gt 0 -and $unlistedGrown.Count -eq 0) {
+        $readerRevealed += "    $($key -replace "`t", ' | '): $held -> $($now[$key]), $(($grownRows | ForEach-Object { $wasRow = if ($inventoryRowsThen.Contains($_)) { $inventoryRowsThen[$_] } else { 0 }; "$(($_ -split "`t")[2]) ($wasRow -> $($inventoryRowsNow[$_]); ruling $($readerRevealedRows[$_]))" }) -join '; ')"
     } elseif ($held -eq 0) {
-        $added += "    $($key -replace "`t", ' | ') ($($now[$key]))"
+        $added += "    $($key -replace "`t", ' | ') ($($now[$key]))$(Get-UnlistedNote $unlistedGrown $grownRows)"
     } elseif ($now[$key] -gt $held) {
-        $grown += "    $($key -replace "`t", ' | '): $held -> $($now[$key])"
+        $grown += "    $($key -replace "`t", ' | '): $held -> $($now[$key])$(Get-UnlistedNote $unlistedGrown $grownRows)"
     } elseif ($now[$key] -lt $held) {
         $shrunk += $held - $now[$key]
     }
@@ -675,6 +781,92 @@ Write-Host "$relative against $against`: $was sites -> $total, $($added.Count) k
 if ($revealed.Count -gt 0) {
     Write-Host "revealed by a vocabulary entry the merge base's registry does not name (sites already there, none added):"
     $revealed | ForEach-Object { Write-Host $_ }
+}
+if ($readerRevealed.Count -gt 0) {
+    Write-Host "revealed by the reader, listed in a reader block the merge base does not have (sites already there, none added):"
+    $readerRevealed | ForEach-Object { Write-Host $_ }
+}
+
+# ── 8. the reader's unread calls grow only with a dated reason (row 19, R4) ──────────────────
+# `docs/plans/WINDOW-WAITS-UNREAD-RECEIVERS.tsv` (crate, arm, item, entries, calls, reason) lists the
+# product calls the inventory's reader cannot read: a vocabulary method's name and argument count
+# on a receiver the reading gives no type, or a `write!` into an untyped writer. The equality half
+# is `hang_watch::window_waits_tests::every_unread_vocabulary_call_is_a_row_and_every_row_a_call`,
+# which also holds every reason to `YYYY-MM-DD: why`. Against the merge base a row added, or grown
+# past its count there, needs a reason of its own: dated, and not a reason the merge base's list
+# already gives (the seed's one reason covers the seed, not a later row). A row removed or shrunk
+# is always allowed. A merge base without the file is the change that introduces it.
+$unreadRelative = "docs/plans/WINDOW-WAITS-UNREAD-RECEIVERS.tsv"
+$unreadColumns = "crate`tarm`titem`tentries`tcalls`treason"
+function Read-UnreadCalls([string[]]$lines, [string]$where) {
+    $rows = New-OrdinalMap
+    $header = $false
+    foreach ($line in $lines) {
+        if ($line.Length -eq 0 -or $line.StartsWith("#")) { continue }
+        if (-not $header) {
+            if ($line -cne $unreadColumns) { throw "$where`: the columns are '$line', not '$unreadColumns'" }
+            $header = $true
+            continue
+        }
+        $cells = $line -split "`t"
+        if ($cells.Count -ne 6) { throw "$where`: not six cells: $line" }
+        $count = 0
+        if (-not [int]::TryParse($cells[4], [ref]$count) -or $count -lt 1 -or "$count" -ne $cells[4]) {
+            throw "$where`: the count is not a positive integer: $line"
+        }
+        $rows["$($cells[0])`t$($cells[1])`t$($cells[2])`t$($cells[3])"] = @{ calls = $count; reason = $cells[5] }
+    }
+    if (-not $header) { throw "$where has no column header" }
+    return $rows
+}
+function Test-DatedReason([string]$reason) {
+    if ($reason -cnotmatch '^(?<date>[0-9]{4}-[0-9]{2}-[0-9]{2}): [^ ]') { return $false }
+    $parsed = [DateTime]::MinValue
+    return [DateTime]::TryParseExact($Matches['date'], 'yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture,
+        [Globalization.DateTimeStyles]::None, [ref]$parsed)
+}
+$unreadNow = Read-UnreadCalls ([IO.File]::ReadAllLines((Join-Path $repo $unreadRelative))) "the working tree's $unreadRelative"
+$unreadAgainst = $against
+if ($UnreadBaselinePath) {
+    $unreadText = [IO.File]::ReadAllText($UnreadBaselinePath)
+    $unreadAtBase = $true
+    $unreadAgainst = "the baseline $UnreadBaselinePath"
+} else {
+    Push-Location $repo
+    try {
+        $unreadText = (& git show "${base}:${unreadRelative}" 2>$null) | Out-String
+        $unreadAtBase = $LASTEXITCODE -eq 0
+        # A file missing at the merge base is the change that introduces it, not a failure: the
+        # probe's status must not become the script's.
+        $global:LASTEXITCODE = 0
+    } finally {
+        Pop-Location
+    }
+}
+$unreadTotal = 0
+foreach ($row in $unreadNow.Values) { $unreadTotal += $row.calls }
+if (-not $unreadAtBase) {
+    Write-Host "the merge base has no $unreadRelative`: this change introduces it ($($unreadNow.Count) rows, $unreadTotal calls), and there is nothing to compare."
+} else {
+    $unreadBefore = Read-UnreadCalls ($unreadText -split "`r?`n") "$unreadRelative at $unreadAgainst"
+    $reasonsBefore = @($unreadBefore.Values | ForEach-Object { $_.reason })
+    $unreadAdmitted = 0
+    foreach ($key in $unreadNow.Keys) {
+        $row = $unreadNow[$key]
+        $heldThen = if ($unreadBefore.Contains($key)) { $unreadBefore[$key].calls } else { 0 }
+        if ($row.calls -le $heldThen) { continue }
+        $change = if ($heldThen -eq 0) { "added ($($row.calls))" } else { "grown $heldThen -> $($row.calls)" }
+        if (-not (Test-DatedReason $row.reason)) {
+            $failures += "[unread] $unreadRelative`: $($key -replace "`t", ' | ') is $change with no dated reason ('$($row.reason)'): type the receiver, or write 'YYYY-MM-DD: <why>' in its reason cell"
+        } elseif ($reasonsBefore -ccontains $row.reason) {
+            $failures += "[unread] $unreadRelative`: $($key -replace "`t", ' | ') is $change under a reason the merge base's list already gives: a row added or grown carries a reason of its own"
+        } else {
+            $unreadAdmitted += 1
+        }
+    }
+    $unreadWas = 0
+    foreach ($row in $unreadBefore.Values) { $unreadWas += $row.calls }
+    Write-Host "$unreadRelative against $unreadAgainst`: $unreadWas unread calls -> $unreadTotal, $unreadAdmitted row(s) added or grown with a reason of their own."
 }
 
 if ($added.Count -gt 0 -or $grown.Count -gt 0) {

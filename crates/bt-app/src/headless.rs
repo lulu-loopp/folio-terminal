@@ -22,13 +22,13 @@ use std::time::{Duration, Instant};
 
 use bt_platform::admission::{WaitToken, doors};
 use bt_render::{
-    CellMetrics, ChromeIcon, ChromeLabel, ChromeLabelWeight, ChromeQuad, ChromeTextAdvances,
-    DeviceFreeMeasure, FrameSource, FrameTrigger, GlyphCensus, ImeCursorArea, MathBandFace,
-    MathBandTrace, MathHit, MathToolBoxes, OverlayGroup, OverlayLayer, PeekImageOverlay,
-    PresentConfiguration, PresentOutcome, PresentPhase, PresentReceipt, PresentationGeometry,
-    PreviewBody, PreviewImage, PreviewParagraph, PreviewRun, PreviewRunBox, PreviewTextFrame,
-    PreviewTextRow, RenderError, RendererPresentState, SeatFrame, SeatViewport, TableBlockKey,
-    TableBlockPaint, VideoLayer, WebHole,
+    BodyKey, BodyState, BodyUse, CellMetrics, ChromeIcon, ChromeLabel, ChromeLabelWeight,
+    ChromeQuad, ChromeTextAdvances, DeviceFreeMeasure, FrameSource, FrameTrigger, GlyphCensus,
+    ImeCursorArea, MathBandFace, MathBandTrace, MathHit, MathToolBoxes, OverlayGroup, OverlayLayer,
+    PeekImageOverlay, PresentConfiguration, PresentOutcome, PresentPhase, PresentReceipt,
+    PresentationGeometry, PreviewBody, PreviewImage, PreviewParagraph, PreviewRun, PreviewRunBox,
+    PreviewTextFrame, PreviewTextRow, RenderError, RendererPresentState, SeatFrame, SeatViewport,
+    TableBlockKey, TableBlockPaint, VideoLayer, WebHole,
 };
 use bt_viewport::{MathBlockAnchor, ViewportFrame};
 use winit::dpi::{PhysicalPosition, PhysicalSize, Position, Size};
@@ -115,8 +115,14 @@ pub(crate) enum WindowEffect {
     PageAddressed(bt_platform::PageVisual),
     /// A hand-off to the system: a file opened, a path revealed, an address handed over.
     HandedOff(bt_platform::Handoff),
-    /// A frame presented: how many seats it carried and what asked for it.
-    Presented { seats: usize, source: FrameSource },
+    /// A frame presented: how many seats it carried, what asked for it, and whether its body —
+    /// the clear, the ground and every pane — was drawn or the kept one put back (row 64a),
+    /// decided by the renderer's own [`BodyKey`].
+    Presented {
+        seats: usize,
+        source: FrameSource,
+        body: BodyUse,
+    },
     /// The surface resized to a physical width and height.
     Resized(u32, u32),
     /// The window moved to another display scale.
@@ -616,7 +622,13 @@ impl WindowHost for HeadlessWindow {
         lane: &crate::clipboard_lane::ClipboardLane,
         ask: crate::clipboard_lane::Ask,
     ) -> Result<crate::clipboard_lane::ClipboardRequest, crate::clipboard_lane::Declined> {
-        lane.submit(Arc::new(self.clipboard.clone()), ask)
+        lane.submit(self.clipboard_door(), ask)
+    }
+    fn clipboard_door(&self) -> Arc<dyn crate::clipboard_lane::ClipboardDoor> {
+        Arc::new(self.clipboard.clone())
+    }
+    fn staging_folder(&self) -> PathBuf {
+        self.clipboard.staged_here()
     }
     fn hand_off(
         &self,
@@ -653,6 +665,26 @@ pub(crate) struct HeadlessClipboard(Arc<ClipboardScript>);
 #[derive(Default)]
 pub(crate) struct ClipboardScript {
     held: Mutex<Option<String>>,
+    /// **What a terminal paste reads instead of the text**, when a test put it there (plan row
+    /// 81): files, a picture, a promise or a refusal, as the platform's read would answer.
+    payload: Mutex<Option<bt_platform::ClipboardPayload>>,
+    /// Each promised entry's bytes, in the descriptor's order, or the result code its render
+    /// fails with — what the source behind a promise hands over when asked.
+    promised: Mutex<Vec<Result<Vec<u8>, u32>>>,
+    /// The source behind the promise panics when its first entry is asked for.
+    promise_panics: Mutex<bool>,
+    /// The source behind the promise stands in [`Self::stall`] when its first entry is asked for,
+    /// and the door's stall bound is this (review N14).
+    promise_stalls: Mutex<Option<Duration>>,
+    /// Where a stalling source stands, until the test lets it go.
+    stall: crate::lane::Hold,
+    /// How many renders of the promise have returned, whatever they answered.
+    renders_ended: Mutex<usize>,
+    /// The clipboard's own count of its changes: one more for every copy onto it.
+    sequence: Mutex<u64>,
+    /// The folder this window's pictures and promises are staged in, under the test's own
+    /// temporary name — never the machine's staging folder.
+    staging: OnceLock<PathBuf>,
     written: Mutex<Vec<String>>,
     refused_opens: Mutex<usize>,
     hold: crate::lane::Hold,
@@ -666,6 +698,51 @@ impl HeadlessClipboard {
     /// The clipboard now holds `text`, as if another program had copied it.
     pub(crate) fn holds(&self, text: &str) {
         *locked(&self.0.held) = Some(text.to_owned());
+        *locked(&self.0.payload) = None;
+        *locked(&self.0.sequence) += 1;
+    }
+
+    /// The clipboard now holds what a terminal paste reads as `payload` (plan row 81), as if
+    /// another program had copied it; the sequence it is read at is answered.
+    pub(crate) fn holds_payload(&self, payload: bt_platform::ClipboardPayload) -> u64 {
+        *locked(&self.0.payload) = Some(payload);
+        let mut sequence = locked(&self.0.sequence);
+        *sequence += 1;
+        *sequence
+    }
+
+    /// What the source behind a promise hands over for each entry, in order: its bytes, or the
+    /// result code its render fails with.
+    pub(crate) fn promise_renders(&self, contents: Vec<Result<Vec<u8>, u32>>) {
+        *locked(&self.0.promised) = contents;
+    }
+
+    /// The source behind the promise panics inside its render, as a source's code may.
+    pub(crate) fn promise_render_panics(&self) {
+        *locked(&self.0.promise_panics) = true;
+    }
+
+    /// **The source behind the promise stalls** — it hands nothing over, standing in the hold this
+    /// answers until the test releases it — and the door gives a render up after `bound` without
+    /// a step, as the product's does after `clipboard_picture::STALL_BOUND`.
+    pub(crate) fn promise_render_stalls(&self, bound: Duration) -> &crate::lane::Hold {
+        *locked(&self.0.promise_stalls) = Some(bound);
+        self.0.stall.hold();
+        &self.0.stall
+    }
+
+    /// How many renders of the promise have returned — a render its watcher gave up included.
+    pub(crate) fn promise_renders_ended(&self) -> usize {
+        *locked(&self.0.renders_ended)
+    }
+
+    /// The folder this clipboard's pastes are staged in — made on first asking, under a name of
+    /// the test's own.
+    pub(crate) fn staged_here(&self) -> PathBuf {
+        self.0
+            .staging
+            .get_or_init(|| bt_testpath::temp_path("folio-headless-clipboard-staging"))
+            .clone()
     }
 
     /// Everything written to it since the last time this was asked, in order.
@@ -712,15 +789,108 @@ impl crate::clipboard_lane::ClipboardDoor for HeadlessClipboard {
                 .clone()
                 .map(Reply::Text)
                 .ok_or_else(|| "the headless clipboard holds no text".to_owned()),
-            Ask::Payload => locked(&self.0.held)
-                .clone()
-                .map(|text| Reply::Payload(bt_platform::ClipboardPayload::Text(text)))
-                .ok_or_else(|| "the headless clipboard holds nothing".to_owned()),
+            Ask::Payload => {
+                let sequence = Some(bt_platform::ClipboardSequence(*locked(&self.0.sequence)));
+                if let Some(payload) = locked(&self.0.payload).clone() {
+                    return Ok(Reply::Payload { sequence, payload });
+                }
+                locked(&self.0.held)
+                    .clone()
+                    .map(|text| Reply::Payload {
+                        sequence,
+                        payload: bt_platform::ClipboardPayload::Text(text),
+                    })
+                    .ok_or_else(|| "the headless clipboard holds nothing".to_owned())
+            }
             Ask::Write(text) => {
                 *locked(&self.0.held) = Some(text.clone());
+                *locked(&self.0.payload) = None;
+                *locked(&self.0.sequence) += 1;
                 locked(&self.0.written).push(text.clone());
                 Ok(Reply::Written)
             }
+        }
+    }
+
+    /// **The promise rendered from the script**: the descriptor is what the clipboard holds now
+    /// (none when it no longer holds a promise), and each entry's bytes are what
+    /// [`HeadlessClipboard::promise_renders`] scripted — through the platform's own renderer, so the
+    /// judging, the caps and the clean-up are the product's.
+    fn render_promised_files(
+        &self,
+        worker: &bt_platform::admission::WorkerCtx,
+        offer: &[bt_platform::PromisedEntry],
+        into: &Path,
+        progress: &bt_platform::clipboard_promise::RenderProgress,
+    ) -> Result<
+        bt_platform::clipboard_promise::RenderedPromise,
+        bt_platform::clipboard_promise::PromiseRefused,
+    > {
+        let descriptor = match locked(&self.0.payload).as_ref() {
+            Some(bt_platform::ClipboardPayload::Promise(promise)) => promise.entries.clone(),
+            _ => Vec::new(),
+        };
+        let mut source = ScriptedPromise {
+            descriptor,
+            contents: locked(&self.0.promised).clone(),
+            panics: *locked(&self.0.promise_panics),
+            stalls: locked(&self.0.promise_stalls)
+                .is_some()
+                .then(|| Arc::clone(&self.0)),
+        };
+        let rendered = bt_platform::clipboard_promise::render_promise(
+            worker,
+            &mut source,
+            offer,
+            into,
+            bt_platform::clipboard_promise::PASTE_LIMITS,
+            progress,
+        );
+        *locked(&self.0.renders_ended) += 1;
+        rendered
+    }
+
+    /// The product's bound, or the one a stalling script set.
+    fn stall_bound(&self) -> Duration {
+        locked(&self.0.promise_stalls).unwrap_or(crate::clipboard_picture::STALL_BOUND)
+    }
+}
+
+/// The source behind a headless clipboard's promise: its descriptor and each entry's script.
+struct ScriptedPromise {
+    descriptor: Vec<bt_platform::PromisedEntry>,
+    contents: Vec<Result<Vec<u8>, u32>>,
+    panics: bool,
+    /// The script whose hold a stalling source stands in.
+    stalls: Option<Arc<ClipboardScript>>,
+}
+
+impl bt_platform::clipboard_promise::PromisedContents for ScriptedPromise {
+    fn descriptor(
+        &mut self,
+        _worker: &bt_platform::admission::WorkerCtx,
+    ) -> Result<Vec<bt_platform::PromisedEntry>, bt_platform::clipboard_promise::PromiseRefused>
+    {
+        Ok(self.descriptor.clone())
+    }
+    fn write_contents(
+        &mut self,
+        _worker: &bt_platform::admission::WorkerCtx,
+        index: usize,
+        file: &mut bt_platform::clipboard_promise::PromisedFile<'_>,
+    ) -> Result<(), bt_platform::clipboard_promise::PromiseRefused> {
+        assert!(!self.panics, "the scripted source panics inside its render");
+        if let Some(script) = &self.stalls {
+            script.stall.pass();
+        }
+        match self.contents.get(index) {
+            Some(Ok(bytes)) => file.write(bytes),
+            Some(Err(code)) => Err(bt_platform::clipboard_promise::PromiseRefused::NotRendered(
+                Some(*code),
+            )),
+            None => Err(bt_platform::clipboard_promise::PromiseRefused::NotRendered(
+                None,
+            )),
         }
     }
 }
@@ -787,6 +957,9 @@ pub(crate) struct HeadlessGlass {
     retained_revision: u64,
     font_revision: u64,
     perf_frame: u64,
+    /// What the kept body was drawn from — the renderer's own key, built by the renderer's own
+    /// function from this glass's mirror of the same inputs (row 64a).
+    body: Option<BodyKey>,
     video_layers: Vec<VideoLayer>,
     /// What the last frame was handed, read back by a test.
     pub(crate) preview_bodies: Vec<PreviewBody>,
@@ -821,6 +994,7 @@ impl HeadlessGlass {
             retained_revision: 0,
             font_revision: 0,
             perf_frame: 0,
+            body: None,
             video_layers: Vec::new(),
             preview_bodies: Vec::new(),
             preview_images: Vec::new(),
@@ -1062,16 +1236,38 @@ impl Glass for HeadlessGlass {
     fn present_frame_with_phases(
         &mut self,
         token: WaitToken<'_, doors::PresentFrame>,
-        _gpu: &mut HeadlessDevice,
+        gpu: &mut HeadlessDevice,
         seats: &[SeatFrame<'_>],
         trigger: FrameTrigger,
         _phase: impl FnMut(PresentPhase),
     ) -> Result<PresentOutcome, RenderError> {
         let _ = token;
         self.perf_frame += 1;
+        let state = BodyState {
+            size: self.size,
+            font_revision: self.font_revision,
+            font_environment_epoch: gpu.font_environment_epoch,
+            theme_revision: bt_render::theme_revision(),
+            cursor_style: bt_render::current_cursor_style(),
+            cursor_blink_visible: self.cursor_blink_visible,
+            window_focused: self.window_focused,
+            base_metrics: self.base_metrics,
+            ground_alpha: bt_render::window_ground().alpha.to_bits(),
+        };
+        let body = if self
+            .body
+            .as_ref()
+            .is_some_and(|key| key.matches(&state, seats))
+        {
+            BodyUse::Reused
+        } else {
+            self.body = Some(BodyKey::of(state, seats));
+            BodyUse::Composed
+        };
         self.ledger.record(WindowEffect::Presented {
             seats: seats.len(),
             source: trigger.source,
+            body,
         });
         let now = Instant::now();
         Ok(PresentOutcome::Presented(PresentReceipt {
@@ -1524,6 +1720,14 @@ impl HeadlessFolio {
         folio
     }
 
+    /// **This window as a machine's first launch**: no settings file found, so the first-run card
+    /// is due, for a test of the card. Every other headless window is a later launch
+    /// (`StorageAskers::on`).
+    pub(crate) fn at_a_first_launch(mut self) -> Self {
+        self.app.settings_store.launch_found_the_file(false);
+        self
+    }
+
     /// One expose frame composed and handed to the glass, as a window's first paint is.
     pub(crate) fn draw(&mut self) {
         let mut runtime = self.runtime();
@@ -1730,10 +1934,18 @@ impl StorageAskers {
     fn on(folder: &Path, lane: &crate::persist::StorageLane) -> Self {
         // In the product's order (`Runtime::create`): settings, profiles, pins, then the
         // keybindings and the shortcut table read from them, then the preview saves.
-        let settings_store = crate::persist::SettingsStore::at_on(
+        let mut settings_store = crate::persist::SettingsStore::at_on(
             folder.join(crate::persist::SETTINGS_FILE_NAME),
             lane.clone(),
         );
+        // **A headless window is a later launch, not a machine's first** (0.4.10 plan row 73's
+        // macOS gate): its settings file counts as found, so the first-run card is never due and
+        // no test is at the mercy of the turn the card would come up on. That turn moves whenever
+        // the card's waits change (row 73 dropped the agent folders' one turn), and on a Mac, whose
+        // profile table offers no agent row for the card to wait on, it fell inside a test's own
+        // passes, where the card's modal took the keyboard or the press. A test of the card asks
+        // for a first launch (`HeadlessFolio::at_a_first_launch`).
+        settings_store.launch_found_the_file(true);
         let profiles_store = crate::persist::ProfilesStore::at_on(
             folder.join(crate::persist::PROFILES_FILE_NAME),
             lane.clone(),
@@ -1826,9 +2038,12 @@ pub(crate) fn headless_app(gpu: HeadlessDevice, proxy: LoopProxy, root: &Path) -
         clipboard_lane: clipboard_lane::ClipboardLane::spawn(wake(|| AppEvent::ClipboardAnswered)),
         layout_tables: layout_tables::LayoutTables::spawn(proxy.clone(), Vec::new())
             .expect("the layout tables start"),
-        math_worker: Arc::new(computation_lane::ComputationLane::new(wake(|| {
-            AppEvent::MathReady
-        }))),
+        // The product's lane, its formula engine the suite's: the faces Folio ships, no scan of
+        // the machine's fonts (T-FORMULA-TESTS-TYPESET-WITHOUT-THE-REAL-FONT-SCAN).
+        math_worker: Arc::new(computation_lane::ComputationLane::making_engines_with(
+            computation_lane::fixtures::engine_without_the_machine,
+            wake(|| AppEvent::MathReady),
+        )),
         preview_saves,
         git_mutations,
         foreground_program_worker: foreground_program::Worker::spawn(wake(|| AppEvent::MathReady))
@@ -1961,10 +2176,11 @@ pub(crate) enum StartupStep {
     HandOver,
     /// Windows PowerShell's language-mode question started.
     LanguageQuestion,
-    /// The startup's `$PROFILE` observation started.
-    StartupMigration,
     /// Folio's own script's preparation started.
     ScriptPreparation,
+    /// The carry pass begun (0.4.10 plan row 68a), which observes and carries the `$PROFILE`s
+    /// since row 68c.
+    CarryPass,
     /// The first window opened, through the backend's door.
     WindowOpened,
     /// The parser questions about the PowerShell rows put to the probe.
@@ -2018,13 +2234,13 @@ pub(crate) fn start(argv: &str, walk: Vec<Vec<String>>) -> HeadlessStart {
                 step(StartupStep::LanguageQuestion);
                 crate::shell_integration::LanguageAsked::stand_in()
             },
-            migration: || {
-                step(StartupStep::StartupMigration);
-                crate::shell_integration::Migrated::stand_in()
-            },
             script: || {
                 step(StartupStep::ScriptPreparation);
                 crate::shell_integration::ScriptPrepared::stand_in()
+            },
+            carry: || {
+                step(StartupStep::CarryPass);
+                crate::carry_pass::CarryBegun::stand_in()
             },
             // Handed the request the run carries, as `Runtime::create` is handed the parsed one.
             window: |answers: &mut Vec<String>| {
@@ -2323,6 +2539,7 @@ mod tests {
                 WindowEffect::Presented {
                     seats: 0,
                     source: FrameSource::Expose,
+                    body: BodyUse::Composed,
                 },
                 WindowEffect::Resized(800, 600),
                 WindowEffect::Rescaled(2.0),
