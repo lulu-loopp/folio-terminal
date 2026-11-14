@@ -9846,7 +9846,7 @@ crates/bt-platform/src/macos_identity.rs	bt-platform crate::macos_identity::pars
 crates/bt-platform/src/macos_identity.rs	bt-platform crate::macos_identity::parse_designated	Ambiguous	strip_prefix	1	
 crates/bt-platform/src/macos_identity.rs	bt-platform crate::macos_identity::parse_designated	Ambiguous	to_owned	1	
 crates/bt-platform/src/macos_identity.rs	bt-platform crate::macos_identity::parse_designated	Ambiguous	unwrap_or	1	
-crates/bt-platform/src/macos_identity.rs	bt-platform crate::macos_identity::running_requirement	Ambiguous	to_string	1	
+crates/bt-platform/src/macos_identity.rs	bt-platform crate::macos_identity::running_requirement_on	Ambiguous	to_string	1	2026-11-14: T-CODESIGN-CHILD-BOUND-ON-A-CLOCK (0.4.10 plan row 1); the running process id's decimal (std::process::id().to_string()), moved with the codesign -d call from running_requirement, whose row it was at the base, into its clock twin running_requirement_on; the same call, the public door now hands the product's clock
 crates/bt-platform/src/macos_identity.rs	bt-platform crate::macos_identity::verify_against	Ambiguous	push	3	
 crates/bt-platform/src/macos_impl.rs	bt-platform crate::macos_impl::NotificationRegistrations::register	Ambiguous	addObserver_selector_name_object	2	
 crates/bt-platform/src/macos_impl.rs	bt-platform crate::macos_impl::NotificationRegistrations::register	Ambiguous	notificationCenter	1	
