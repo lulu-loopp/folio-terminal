@@ -1897,7 +1897,7 @@ fn keep_oversized(path: &Path) -> Option<PathBuf> {
 fn rejected_sibling(path: &Path, at: SystemTime) -> Option<PathBuf> {
     let file_name = path.file_name()?;
     let stamp = utc_stamp(at);
-    for attempt in 0..64u32 {
+    for attempt in 0..REJECTED_SIBLINGS_PER_SECOND {
         let mut name = file_name.to_os_string();
         if attempt == 0 {
             name.push(format!(".rejected-{stamp}"));
@@ -1910,6 +1910,91 @@ fn rejected_sibling(path: &Path, at: SystemTime) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// **How many copies of one document [`rejected_sibling`] names within one second**: the first,
+/// then `-1` to `-63`.
+const REJECTED_SIBLINGS_PER_SECOND: u32 = 64;
+
+/// **Where a kept copy stands among its document's copies** (0.4.10 plan row 68f): the UTC
+/// second [`rejected_sibling`] named it by, then the count a later copy of the same second took
+/// (`0` for the first). Ordered oldest first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RejectedStamp {
+    /// `YYYYMMDDHHMMSS` read as one number, which orders as the time it names.
+    pub second: u64,
+    /// The `-<n>` after the second, or `0`.
+    pub count: u32,
+}
+
+/// **Whether `file_name` is a copy this crate keeps of `document`, and where it stands**
+/// (0.4.10 plan row 68f): exactly `<document>.rejected-<YYYYMMDD-HHMMSS>` or `…-<n>`, `n` from 1
+/// to 63 written with no leading zero, as [`rejected_sibling`] names it, the stamp a real date and
+/// time. `None` for every other name, however close: the namer and this reading of its names are
+/// one rule, in one place, so a copy is counted only when this crate could have made it.
+#[must_use]
+pub fn rejected_stamp_of(file_name: &str, document: &str) -> Option<RejectedStamp> {
+    let rest = file_name
+        .strip_prefix(document)?
+        .strip_prefix(".rejected-")?
+        .as_bytes();
+    if rest.len() < 15 || rest[8] != b'-' {
+        return None;
+    }
+    let digits = |from: usize, to: usize| {
+        rest[from..to].iter().try_fold(0u64, |number, byte| {
+            byte.is_ascii_digit()
+                .then(|| number * 10 + u64::from(byte - b'0'))
+        })
+    };
+    let (date, time) = (digits(0, 8)?, digits(9, 15)?);
+    let (year, month, day) = (date / 10_000, date / 100 % 100, date % 100);
+    let (hour, minute, second) = (time / 10_000, time / 100 % 100, time % 100);
+    let leap = year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400));
+    let days_in_month = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return None,
+    };
+    if day == 0 || day > days_in_month || hour > 23 || minute > 59 || second > 59 {
+        return None;
+    }
+    let count = match &rest[15..] {
+        [] => 0,
+        [b'-', b'1'..=b'9', tail @ ..] if tail.len() <= 1 => {
+            let count = u32::try_from(digits(16, rest.len())?).ok()?;
+            if count >= REJECTED_SIBLINGS_PER_SECOND {
+                return None;
+            }
+            count
+        }
+        _ => return None,
+    };
+    Some(RejectedStamp {
+        second: date * 1_000_000 + time,
+        count,
+    })
+}
+
+/// **The `schema_version` a document's bytes claim**, read from the version envelope alone
+/// (0.4.10 plan row 68f): `None` when the bytes are not a JSON object with one. Nothing else in
+/// them is read, so the answer is the same for a version this build cannot parse.
+#[must_use]
+pub fn schema_version_of(bytes: &[u8]) -> Option<u32> {
+    serde_json::from_slice::<VersionEnvelope>(bytes)
+        .ok()
+        .map(|envelope| envelope.schema_version)
+}
+
+/// **A kept copy's bytes, read as this crate reads a document** — through the one bounded read
+/// ([`read_bounded`], at [`MAX_DOCUMENT_BYTES`]) — or `None` when they were not obtained: the
+/// file is gone, will not open, or is over the ceiling (an oversized document's copy is the file
+/// itself, renamed, [`keep_oversized`]).
+#[must_use]
+pub fn read_kept_copy(path: &Path) -> Option<Vec<u8>> {
+    read_bounded(path, MAX_DOCUMENT_BYTES).ok()
 }
 
 /// `YYYYMMDD-HHMMSS` in UTC, from a wall clock.
@@ -3965,5 +4050,86 @@ mod tests {
         assert_eq!(utc_stamp(at), "20260908-010203");
         assert_eq!(civil_from_days(0), (1970, 1, 1));
         assert_eq!(civil_from_days(-1), (1969, 12, 31));
+    }
+
+    /// RED (0.4.10 plan row 68f) — **a kept copy's name is read exactly as the namer writes it**:
+    /// every name [`rejected_sibling`] gives within one second is read back, in the order it gave
+    /// them, and every name it could not have given is not a copy — another document's, a
+    /// missing or extra field, a count past the namer's or with a leading zero, a date or a time
+    /// that does not exist.
+    ///
+    /// MUTATION: the stamp's date and time are not checked
+    /// (`plant-68f-any-name-counted.py`, with the bt-app half).
+    #[test]
+    fn a_kept_copys_name_is_read_exactly_as_the_namer_writes_it() {
+        let dir = unique_dir("kept-copy-names");
+        let path = dir.join("settings.json");
+        // 2026-09-08T01:02:03Z.
+        let at = UNIX_EPOCH + std::time::Duration::from_secs(1_788_829_323);
+        let mut stamps = Vec::new();
+        for _ in 0..REJECTED_SIBLINGS_PER_SECOND {
+            let named = rejected_sibling(&path, at).expect("a name is free");
+            std::fs::write(&named, b"{}").unwrap();
+            let name = named.file_name().unwrap().to_str().unwrap().to_owned();
+            stamps.push(rejected_stamp_of(&name, "settings.json").expect(&name));
+        }
+        assert_eq!(rejected_sibling(&path, at), None, "the namer's last name");
+        assert!(
+            stamps.windows(2).all(|pair| pair[0] < pair[1]),
+            "{stamps:?}"
+        );
+        assert_eq!(
+            stamps[0],
+            RejectedStamp {
+                second: 20_260_908_010_203,
+                count: 0
+            }
+        );
+        assert_eq!(stamps[63].count, 63);
+        let later = rejected_stamp_of("settings.json.rejected-20260908-010204", "settings.json");
+        assert!(
+            later > Some(stamps[63]),
+            "a later second is newer than any count"
+        );
+        assert_eq!(
+            rejected_stamp_of("settings.json.rejected-20240229-235959", "settings.json"),
+            Some(RejectedStamp {
+                second: 20_240_229_235_959,
+                count: 0
+            }),
+            "a leap day"
+        );
+        for name in [
+            "settings.json",
+            "settings.json.rejected-",
+            "session.json.rejected-20260908-010203",
+            "my-settings.json.rejected-20260908-010203",
+            "settings.json.displaced-20260908-010203",
+            "settings.json.rejected-20260908-01020",
+            "settings.json.rejected-2026090-8010203",
+            "settings.json.rejected-20260908_010203",
+            "settings.json.rejected-20260908-010203-",
+            "settings.json.rejected-20260908-010203-0",
+            "settings.json.rejected-20260908-010203-01",
+            "settings.json.rejected-20260908-010203-64",
+            "settings.json.rejected-20260908-010203-100",
+            "settings.json.rejected-20260908-010203.bak",
+            "settings.json.rejected-20260908-010203-mine",
+            "settings.json.rejected-20251301-010203",
+            "settings.json.rejected-20260931-010203",
+            "settings.json.rejected-20250229-010203",
+            "settings.json.rejected-20260900-010203",
+            "settings.json.rejected-20260908-240000",
+            "settings.json.rejected-20260908-016003",
+            "settings.json.rejected-20260908-010260",
+            "settings.json.rejected-2026090８-010203",
+        ] {
+            assert_eq!(
+                rejected_stamp_of(name, "settings.json"),
+                None,
+                "{name} is not a copy of settings.json the namer made"
+            );
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

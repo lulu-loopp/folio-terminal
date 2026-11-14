@@ -82,8 +82,9 @@ pub use layout::{
 };
 pub use migrate::{
     DocumentBytes, FallbackReason, KEYBINDINGS_MIGRATIONS, Keeping, MAX_DOCUMENT_BYTES,
-    MigrationStep, PINS_MIGRATIONS, PROFILES_MIGRATIONS, ReadReport, SESSION_MIGRATIONS,
-    SETTINGS_MIGRATIONS, StableRead, UPDATE_CHECK_MIGRATIONS, read_stable, read_stable_between,
+    MigrationStep, PINS_MIGRATIONS, PROFILES_MIGRATIONS, ReadReport, RejectedStamp,
+    SESSION_MIGRATIONS, SETTINGS_MIGRATIONS, StableRead, UPDATE_CHECK_MIGRATIONS, read_kept_copy,
+    read_stable, read_stable_between, rejected_stamp_of, schema_version_of,
 };
 pub use pins::{PINS_SCHEMA_VERSION, PinEntryV1, PinKind, PinsV1};
 pub use profiles::{
@@ -176,6 +177,14 @@ pub fn read_session_keeping_bytes(
     );
     let degradation = session.degrade_in_place();
     (session, report, degradation, loaded_bytes)
+}
+
+/// `bytes` read as `session.json` is read — the version envelope, the migrations, the typed
+/// parse — without a disk ([`parse_settings`]'s rule). The per-leaf degradation pass of
+/// [`read_session`] is not run: what is asked is whether this build reads the document at all
+/// (0.4.10 plan row 68f).
+pub fn parse_session(bytes: &[u8]) -> Result<SessionV1, FallbackReason> {
+    migrate::parse_document(bytes, SESSION_SCHEMA_VERSION, SESSION_MIGRATIONS)
 }
 
 /// Serializes `settings` and writes it to `path` via [`atomic_write`], and
