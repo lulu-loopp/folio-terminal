@@ -4621,9 +4621,10 @@ mod tests {
 
     /// **A test's [`PollClock`] whose deadline never comes**
     /// (T-GIT-CHILD-DEADLINE-ON-A-CLOCK-SEAM): its reading stays where it was first taken, and
-    /// each pause is slept whole so the child has the time to run. A real git a test starts is awaited until it exits: the answer is the
-    /// child's own, never a race between [`GIT_COMMAND_TIMEOUT`] and a loaded machine. A git
-    /// that never exits is the suite watchdog's to name.
+    /// each pause is slept whole so the child has the time to run. A real git a test starts is
+    /// awaited until it exits: the answer is the child's own, never a race between
+    /// [`GIT_COMMAND_TIMEOUT`] and a loaded machine. A git that never exits is the suite
+    /// watchdog's to name.
     struct Awaited;
 
     impl PollClock for Awaited {

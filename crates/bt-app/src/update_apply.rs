@@ -2598,8 +2598,8 @@ impl MarkWriteFailure {
 
 struct ElectionOps<Clock, AfterLock, ReadOwner, ReadPhase, Write, Wait> {
     /// The clock the election lock's wait is read and paused on
-    /// (`install_txn::hold_by`): `WallPollClock` in the
-    /// product, so the wait is `install_txn::hold_within`'s.
+    /// (`install_txn::hold_by`): [`WallPollClock`] in the product, so the wait is
+    /// `install_txn::hold_within`'s.
     lock_clock: Clock,
     after_lock: AfterLock,
     read_owner: ReadOwner,

@@ -1,9 +1,12 @@
 //! **The clock a polled wait reads its deadline on, and the rest between two looks**
 //! (0.4.10 plan row 76, T-ONE-POLL-CLOCK-SHAPE): [`PollClock`] and the product's
-//! [`WallPollClock`]. One shape for every wait that asks, rests and asks again until a deadline
-//! read on a clock of the caller's; it has no platform gate, so a door that builds on every target
-//! takes it from here. Not `launch_clock::LaunchClock`, whose wait is the transport's
-//! own wait for the other end, handed to the clock: a poll has no such wait, only a rest.
+//! [`WallPollClock`]. One shape for the waits listed under [`PollClock`], each of which asks,
+//! rests and asks again until a deadline read on a clock of the caller's; it has no platform gate,
+//! so a door that builds on every target takes it from here. Not `launch_clock::LaunchClock`,
+//! whose wait is the transport's own wait for the other end, handed to the clock: a poll has no
+//! such wait, only a rest. Not the clocks whose rest takes the worker's `WorkerCtx` either
+//! (`ProbeClock`, and bt-app's `update_apply::WaitClock` and `TrialClock`): their rest goes
+//! through the worker's wait door, another shape (0.4.10 plan row 76, ruling R4).
 
 use std::time::{Duration, Instant};
 
@@ -31,8 +34,9 @@ use std::time::{Duration, Instant};
 ///   read after every look, with a pause between two looks; [`WallPollClock`] through `ask_git`.
 ///
 /// No `Send` or `Sync` bound: every user reads its clock on the thread that waits, and an
-/// implementor may hold what cannot cross a thread (the lock wait's adapter holds the worker's
-/// `WorkerCtx`, which is `!Sync`). A user that shares a clock across threads says so where it does.
+/// implementor may hold what cannot cross a thread: the lock wait's adapter holds a `&WorkerCtx`,
+/// and that borrow of a `!Sync` type is why the adapter is neither `Send` nor `Sync`. A user that
+/// shares a clock across threads says so where it does.
 pub trait PollClock {
     /// The monotonic reading the deadline is set and read on.
     fn now(&self) -> Instant;
