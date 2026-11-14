@@ -45,7 +45,7 @@
 //!   `RegFlushKey` on a key under `HKEY_CURRENT_USER`, for the entrance value a
 //!   later ticket writes (U-22).
 //! * **The two locks** ([`try_hold`], [`hold_within`], and [`hold_by`], whose
-//!   wait is read and paused on the caller's [`LockClock`]): a byte-range lock
+//!   wait is read and paused on the caller's [`PollClock`]): a byte-range lock
 //!   (`LockFileEx`) on Windows, `flock` on macOS, held by a [`Held`] whose drop
 //!   releases it. The admission file `H\admission` is held [`Hold::Shared`] by
 //!   every running copy of the install (many holders; the file is opened for
@@ -78,6 +78,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
+
+use crate::poll_clock::{PollClock, WallPollClock};
 
 /// Each arm's real surface, for the doors built on this one's durable write.
 pub(crate) use arm::Os;
@@ -824,70 +826,37 @@ pub const LOCK_POLL: Duration = Duration::from_millis(25);
 /// file is `NotFound`) or at [`Stage::Lock`]; on a platform with no arm, one at
 /// [`Stage::OpenLockFile`] whose error is `Unsupported` and names this door.
 pub fn try_hold(path: &Path, hold: Hold) -> Result<Option<Held>, Failure> {
-    hold_until::<WallLockClock>(path, hold, None)
+    hold_until::<WallPollClock>(path, hold, None)
 }
 
 /// **The same, asking again every [`LOCK_POLL`] until `wait` has passed** —
 /// the applier's bounded wait for the running copies to quit. `Ok(None)` means
 /// the lock was still held by somebody else at the deadline. It is
-/// [`hold_by`] on [`WallLockClock`], `wait` past the wall clock's reading.
+/// [`hold_by`] on [`WallPollClock`], `wait` past the wall clock's reading.
 ///
 /// # Errors
 /// As [`try_hold`].
 pub fn hold_within(path: &Path, hold: Hold, wait: Duration) -> Result<Option<Held>, Failure> {
-    hold_by(path, hold, Instant::now() + wait, &WallLockClock)
-}
-
-/// **The clock a bounded lock wait reads its deadline on, and the pause
-/// between two asks** (T-STALE-MARK-RACE-ON-A-COUNTED-CLOCK): what a caller
-/// hands [`hold_by`], the one door through which a lock wait is read and
-/// paused on a clock of the caller's. [`WallLockClock`] is [`hold_within`]'s;
-/// a caller whose road already reads its waits on a clock of its own (bt-app's
-/// `update_apply::WaitClock`, through a small adapter that carries the
-/// worker its pause needs) passes that clock here instead of writing a lock
-/// loop beside this one.
-///
-/// Its second user is the macOS identity door's child poll
-/// (`macos_identity`, T-CODESIGN-CHILD-BOUND-ON-A-CLOCK, 0.4.9 plan row 151):
-/// every `codesign` and `spctl` run's bound is set on [`LockClock::now`] when
-/// the child has started and read on it after every look, and the rest
-/// between two looks is [`LockClock::pause`]; [`WallLockClock`] in the
-/// product, through that module's public doors; in its tests, a counted
-/// clock where the bound's end is the subject and a pinned clock (one whose
-/// deadline never comes) where a real tool's answer is, so "the bound is
-/// spent" is a count of the test's and "the child answered" is the child's
-/// own exit, never a race between a real tool and a real bound.
-pub trait LockClock {
-    /// The monotonic reading the deadline is set and read on.
-    fn now(&self) -> Instant;
-    /// One pause between two asks of a lock somebody else holds, or between
-    /// two looks at a running child.
-    fn pause(&self, pause: Duration);
-}
-
-/// **The wall clock as a [`LockClock`]**: `Instant::now` and
-/// `std::thread::sleep`.
-pub struct WallLockClock;
-
-impl LockClock for WallLockClock {
-    fn now(&self) -> Instant {
-        Instant::now()
-    }
-
-    fn pause(&self, pause: Duration) {
-        std::thread::sleep(pause);
-    }
+    hold_by(path, hold, Instant::now() + wait, &WallPollClock)
 }
 
 /// **Take the lock on `path`, asking again after each pause of [`LOCK_POLL`]
 /// (the last one cut to what is left) until `clock` reads `until`**: the
 /// bounded wait with its deadline read, and every pause taken, on the
-/// caller's clock. `until` is a reading of that same clock. `Ok(None)` means
-/// the lock was still held by somebody else at that deadline.
+/// caller's clock (T-STALE-MARK-RACE-ON-A-COUNTED-CLOCK). `until` is a reading
+/// of that same clock. `Ok(None)` means the lock was still held by somebody
+/// else at that deadline.
+///
+/// The one door through which a lock wait is read and paused on a clock of the
+/// caller's ([`PollClock`]): [`WallPollClock`] is [`hold_within`]'s; a caller
+/// whose road already reads its waits on a clock of its own (bt-app's
+/// `update_apply::WaitClock`, through a small adapter that carries the
+/// worker its pause needs) passes that clock here instead of writing a lock
+/// loop beside this one.
 ///
 /// # Errors
 /// As [`try_hold`].
-pub fn hold_by<C: LockClock + ?Sized>(
+pub fn hold_by<C: PollClock + ?Sized>(
     path: &Path,
     hold: Hold,
     until: Instant,
@@ -896,7 +865,7 @@ pub fn hold_by<C: LockClock + ?Sized>(
     hold_until(path, hold, Some((clock, until)))
 }
 
-fn hold_until<C: LockClock + ?Sized>(
+fn hold_until<C: PollClock + ?Sized>(
     path: &Path,
     hold: Hold,
     deadline: Option<(&C, Instant)>,
@@ -2560,7 +2529,7 @@ mod tests {
     /// one that ignored its deadline would hang the job. How far the wait asks
     /// — to its deadline and not past it — is counted on a clock of the
     /// caller's in `a_lock_wait_on_a_clock_of_the_callers_reads_and_pauses_on_it`
-    /// ([`hold_by`]; [`hold_within`] is it on [`WallLockClock`]), never measured
+    /// ([`hold_by`]; [`hold_within`] is it on [`WallPollClock`]), never measured
     /// here (T-WINDOWS-HANDOVER-ORDER-A-HELD-LOCK-WAIT).
     ///
     /// MUTATION: in `hold_until`, read the deadline before the first ask (a
@@ -2603,7 +2572,7 @@ mod tests {
             pauses: std::cell::RefCell<Vec<Duration>>,
             at_pause: std::cell::RefCell<Box<dyn FnMut(usize)>>,
         }
-        impl LockClock for Counted {
+        impl PollClock for Counted {
             fn now(&self) -> Instant {
                 self.began + self.pauses.borrow().iter().sum::<Duration>()
             }

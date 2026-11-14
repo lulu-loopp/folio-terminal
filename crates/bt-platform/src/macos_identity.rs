@@ -58,7 +58,7 @@
 //! **Off macOS** every call is refused with [`Why::NotMacOs`], naming this
 //! door; the parsers and the decision are pure and compile everywhere.
 
-use crate::install_txn::{LockClock, WallLockClock};
+use crate::poll_clock::{PollClock, WallPollClock};
 use std::path::Path;
 use std::time::Duration;
 
@@ -277,18 +277,18 @@ fn first_line(output: &str) -> Option<String> {
 /// fails), or its answer is not one designated requirement; [`Why::NotMacOs`]
 /// off macOS.
 pub fn running_requirement() -> Result<Requirement, Refusal> {
-    running_requirement_on(&WallLockClock)
+    running_requirement_on(&WallPollClock)
 }
 
 /// [`running_requirement`] with its child's bound read on `clock`.
-fn running_requirement_on(clock: &dyn LockClock) -> Result<Requirement, Refusal> {
+fn running_requirement_on(clock: &dyn PollClock) -> Result<Requirement, Refusal> {
     designated_requirement_of(&std::process::id().to_string(), clock)
         .map(Requirement::of_designated)
 }
 
 /// The designated requirement `codesign` prints for `code` — a path, or a
 /// process id in decimal — with the child's bound read on `clock`.
-fn designated_requirement_of(code: &str, clock: &dyn LockClock) -> Result<String, Refusal> {
+fn designated_requirement_of(code: &str, clock: &dyn PollClock) -> Result<String, Refusal> {
     let stage = Stage::RunningRequirement;
     let answer = arm::run(stage, CODESIGN, &["-d", "-r-", code], DISPLAY_BOUND, clock)?;
     if answer.status != Some(0) {
@@ -341,14 +341,14 @@ pub fn parse_designated(stdout: &str) -> Option<String> {
 /// A [`Refusal`] at [`Stage::Validity`] or [`Stage::Requirement`];
 /// [`Why::NotMacOs`] off macOS.
 pub fn verify_bundle(path: &Path, requirement: &Requirement) -> Result<Verified, Refusal> {
-    verify_bundle_on(path, requirement, &WallLockClock)
+    verify_bundle_on(path, requirement, &WallPollClock)
 }
 
 /// [`verify_bundle`] with both children's bounds read on `clock`.
 fn verify_bundle_on(
     path: &Path,
     requirement: &Requirement,
-    clock: &dyn LockClock,
+    clock: &dyn PollClock,
 ) -> Result<Verified, Refusal> {
     verify_against(path, &requirement.text(), clock)
 }
@@ -356,7 +356,7 @@ fn verify_bundle_on(
 fn verify_against(
     path: &Path,
     requirement: &str,
-    clock: &dyn LockClock,
+    clock: &dyn PollClock,
 ) -> Result<Verified, Refusal> {
     const STRICT: [&str; 4] = ["--verify", "--strict", "--deep", "--all-architectures"];
     let target = path.to_string_lossy();
@@ -401,11 +401,11 @@ fn verify_against(
 /// [`Stage::GatekeeperAssessment`] when a tool did not start, ran past its
 /// bound, or answered outside its grammar; [`Why::NotMacOs`] off macOS.
 pub fn assess(path: &Path) -> Result<Assessment, Refusal> {
-    assess_on(path, &WallLockClock)
+    assess_on(path, &WallPollClock)
 }
 
 /// [`assess`] with both children's bounds read on `clock`.
-fn assess_on(path: &Path, clock: &dyn LockClock) -> Result<Assessment, Refusal> {
+fn assess_on(path: &Path, clock: &dyn PollClock) -> Result<Assessment, Refusal> {
     let stage = Stage::GatekeeperStatus;
     let status = arm::run(stage, SPCTL, &["--status"], DISPLAY_BOUND, clock)?;
     let enabled = if status.status == Some(0) {
@@ -544,7 +544,7 @@ struct Answer {
 
 #[cfg(target_os = "macos")]
 mod arm {
-    use super::{Answer, LockClock, OUTPUT_BOUND, Refusal, Stage, Why};
+    use super::{Answer, OUTPUT_BOUND, PollClock, Refusal, Stage, Why};
     use std::io::{self, Read};
     use std::os::fd::AsRawFd;
     use std::time::Duration;
@@ -591,8 +591,8 @@ mod arm {
     /// door; a child past its bound, or past [`OUTPUT_BOUND`] on a stream, is
     /// ended by its own handle and the call refused at `stage` — one past its
     /// bound quoting the first line of what it had said by then. The bound is
-    /// set and read on `clock` ([`crate::install_txn::LockClock`]: the public
-    /// doors hand [`crate::install_txn::WallLockClock`]; the tests hand a
+    /// set and read on `clock` ([`crate::poll_clock::PollClock`]: the public
+    /// doors hand [`crate::poll_clock::WallPollClock`]; the tests hand a
     /// pinned clock, whose deadline never comes, where a real tool's answer is
     /// the subject, and a counted clock where the bound's end is), which also
     /// rests [`POLL`] between two looks.
@@ -601,7 +601,7 @@ mod arm {
         program: &str,
         arguments: &[&str],
         bound: Duration,
-        clock: &dyn LockClock,
+        clock: &dyn PollClock,
     ) -> Result<Answer, Refusal> {
         let refuse = |why| Refusal::at(stage, why);
         let mut command = crate::quiet_command(program);
@@ -662,7 +662,7 @@ mod arm {
 
 #[cfg(not(target_os = "macos"))]
 mod arm {
-    use super::{Answer, LockClock, Refusal, Stage, Why};
+    use super::{Answer, PollClock, Refusal, Stage, Why};
     use std::time::Duration;
 
     /// Refused by name: this door has no arm off macOS, and its clock is never
@@ -672,7 +672,7 @@ mod arm {
         _program: &str,
         _arguments: &[&str],
         _bound: Duration,
-        _clock: &dyn LockClock,
+        _clock: &dyn PollClock,
     ) -> Result<Answer, Refusal> {
         Err(Refusal::at(stage, Why::NotMacOs))
     }

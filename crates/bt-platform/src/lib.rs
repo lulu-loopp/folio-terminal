@@ -9365,6 +9365,11 @@ mod launch_conversation;
 /// wire's gate (0.4.10 plan row 66): the deferred remover's readiness wait builds everywhere.
 mod launch_clock;
 
+/// **The clock a polled wait reads its deadline on, and the rest between two looks** —
+/// `PollClock` and the product's `WallPollClock` (0.4.10 plan row 76), on every target: the lock
+/// wait (`install_txn::hold_by`), the macOS identity door's child poll and bt-app's git child.
+pub mod poll_clock;
+
 /// **The second launch's door into the first** — one well-known named pipe per data directory
 /// (`docs/DESIGN.md` §7.59).
 ///

@@ -321,7 +321,7 @@ mod on_macos {
 
     /// **A clock whose deadline never comes** (T-CODESIGN-CHILD-BOUND-ON-A-CLOCK): its reading is
     /// pinned where it was made, so the deadline a call sets on it is never reached, and its rest
-    /// is the product's own ([`WallLockClock`]'s), so the child runs. A real `codesign` or
+    /// is the product's own ([`WallPollClock`]'s), so the child runs. A real `codesign` or
     /// `spctl` handed it is answered by its own exit, awaited as state, never raced by its bound;
     /// one that never exits is the suite watchdog's to name. Each call is handed a clock of its
     /// own, so no reading is shared between tests.
@@ -337,13 +337,13 @@ mod on_macos {
         }
     }
 
-    impl LockClock for ExitAwaited {
+    impl PollClock for ExitAwaited {
         fn now(&self) -> Instant {
             self.pinned
         }
 
         fn pause(&self, pause: Duration) {
-            WallLockClock.pause(pause);
+            WallPollClock.pause(pause);
         }
     }
 
@@ -361,7 +361,7 @@ mod on_macos {
     const PATIENT_LOOKS: u32 =
         (crate::door_skipped::PATIENCE.as_millis() / arm::POLL.as_millis()) as u32;
 
-    /// **A test's [`LockClock`]**: its reading moves only by what `turn` spends, so a child's
+    /// **A test's [`PollClock`]**: its reading moves only by what `turn` spends, so a child's
     /// bound ends at a count of the test's and never on real time. An awaited rest is a real
     /// rest with the reading unmoved; past the suite's patience of them the clock gives up — it
     /// spends a whole hour, so the call ends — and the test fails by name (`gave_up`), never
@@ -388,7 +388,7 @@ mod on_macos {
         }
     }
 
-    impl LockClock for CountedRests {
+    impl PollClock for CountedRests {
         fn now(&self) -> Instant {
             self.began + self.moved.get()
         }
@@ -402,7 +402,7 @@ mod on_macos {
                 }
                 RestTurn::Await if self.awaited.get() < PATIENT_LOOKS => {
                     self.awaited.set(self.awaited.get() + 1);
-                    WallLockClock.pause(pause);
+                    WallPollClock.pause(pause);
                 }
                 RestTurn::Await => {
                     self.gave_up.set(true);
@@ -583,7 +583,7 @@ mod on_macos {
     /// delete the check, or set the deadline at twice the bound — each lets the late answer in,
     /// and the call answers `Ok` (plants real-clock, deadline-removed, double-bound). Rest
     /// between two looks off the clock (`clock.pause(POLL)` becomes
-    /// `crate::install_txn::WallLockClock.pause(POLL)`, plant rest-off-the-clock): the clock is
+    /// `crate::poll_clock::WallPollClock.pause(POLL)`, plant rest-off-the-clock): the clock is
     /// never asked, so its reading never moves and the deadline never comes; the child gives up
     /// on its own and answers, and the call answers `Ok("standinglate")`.
     #[test]

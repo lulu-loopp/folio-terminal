@@ -79,7 +79,6 @@ bt-app	-	crate::files::canonical_path	std::fs::canonicalize	1
 bt-app	-	crate::files::read_directory	std::fs::metadata	1
 bt-app	-	crate::files::read_directory	std::fs::read_dir	1
 bt-app	-	crate::files::run_dir_worker	std::sync::mpsc::Receiver::recv	1
-bt-app	-	crate::git::<WallClock as GitClock>::pause	std::thread::sleep	1
 bt-app	-	crate::git::GitChild::wait	std::process::Child::wait	1
 bt-app	-	crate::git::run_git_with_input	std::thread::JoinHandle::join	2
 bt-app	-	crate::git::run_git_worker	std::sync::mpsc::Receiver::recv	1
@@ -148,7 +147,6 @@ bt-platform	-	crate::hotkey::SummonTrace::opened	std::io::Write::write_fmt	1
 bt-platform	-	crate::hotkey::SummonTrace::write	std::io::Write::write_fmt	1
 bt-platform	-	crate::https_download::<File as Store>::seal	std::fs::File::sync_all	1
 bt-platform	-	crate::https_download::Partial::finish	std::fs::rename	1
-bt-platform	-	crate::install_txn::<WallLockClock as LockClock>::pause	std::thread::sleep	1
 bt-platform	-	crate::instance::canonical_path	std::fs::canonicalize	1
 bt-platform	-	crate::launch_agent::sweep_by	std::fs::read_dir	1
 bt-platform	-	crate::macos_update::attach_with	std::fs::canonicalize	3
@@ -156,6 +154,7 @@ bt-platform	-	crate::macos_update::detach_point	std::thread::sleep	1
 bt-platform	-	crate::macos_update::points_under	std::fs::canonicalize	1
 bt-platform	-	crate::macos_update::run_at	std::thread::sleep	1
 bt-platform	-	crate::macos_update::verify_clone	std::fs::canonicalize	1
+bt-platform	-	crate::poll_clock::<WallPollClock as PollClock>::pause	std::thread::sleep	1
 bt-platform	[all(windows, target_arch = "x86_64")]	crate::hang::capture_thread_stack	windows::Win32::Foundation::CloseHandle	1
 bt-platform	[any(windows, unix)]	crate::listener_says_within	std::sync::mpsc::Receiver::recv_timeout	1
 bt-platform	[not(windows)]	crate::file_replace::replace_file_preserving	std::fs::File::sync_all	1

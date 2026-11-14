@@ -80,6 +80,7 @@ use bt_platform::admission::WorkerCtx;
 use bt_platform::file_reads::{self, Lane};
 use bt_platform::install_flip::{self, Ask, Running};
 use bt_platform::install_txn::{self, Hold};
+use bt_platform::poll_clock::{PollClock, WallPollClock};
 
 use crate::cli;
 use crate::update_txn::{
@@ -2528,7 +2529,7 @@ pub(crate) fn take_the_window_within<C: Contender>(
         within,
         contender,
         ElectionOps {
-            lock_clock: install_txn::WallLockClock,
+            lock_clock: WallPollClock,
             after_lock: || {},
             read_owner: || read_window_owner(home, txn),
             read_phase: || read_window_phase(home, txn),
@@ -2597,7 +2598,7 @@ impl MarkWriteFailure {
 
 struct ElectionOps<Clock, AfterLock, ReadOwner, ReadPhase, Write, Wait> {
     /// The clock the election lock's wait is read and paused on
-    /// (`install_txn::hold_by`): `install_txn::WallLockClock` in the
+    /// (`install_txn::hold_by`): `WallPollClock` in the
     /// product, so the wait is `install_txn::hold_within`'s.
     lock_clock: Clock,
     after_lock: AfterLock,
@@ -2741,7 +2742,7 @@ fn take_the_window_within_using<C, Clock, AfterLock, ReadOwner, ReadPhase, Write
 ) -> Window<C>
 where
     C: Contender,
-    Clock: install_txn::LockClock,
+    Clock: PollClock,
     AfterLock: FnOnce(),
     ReadOwner: FnMut() -> io::Result<Option<Running>>,
     ReadPhase: FnMut() -> Result<PhaseKind, PhaseRead>,
@@ -2849,7 +2850,7 @@ pub(crate) fn take_the_window_within_at(
         within,
         Applier,
         ElectionOps {
-            lock_clock: install_txn::WallLockClock,
+            lock_clock: WallPollClock,
             after_lock,
             read_owner: || read_window_owner(home, txn),
             read_phase: || read_window_phase(home, txn),
@@ -2877,7 +2878,7 @@ pub(crate) fn take_the_window_within_writes_at<C: Contender>(
         within,
         contender,
         ElectionOps {
-            lock_clock: install_txn::WallLockClock,
+            lock_clock: WallPollClock,
             after_lock: || {},
             read_owner: || read_window_owner(home, txn),
             read_phase: || read_window_phase(home, txn),
@@ -2912,7 +2913,7 @@ pub(crate) fn take_the_window_within_reads_at(
         within,
         Applier,
         ElectionOps {
-            lock_clock: install_txn::WallLockClock,
+            lock_clock: WallPollClock,
             after_lock: || {},
             read_owner: read,
             read_phase,
@@ -2926,7 +2927,7 @@ pub(crate) fn take_the_window_within_reads_at(
 }
 
 /// **A road's [`WaitClock`], on `worker`, as a lock wait's clock**
-/// (`install_txn::LockClock`, T-STALE-MARK-RACE-ON-A-COUNTED-CLOCK): its
+/// (`PollClock`, T-STALE-MARK-RACE-ON-A-COUNTED-CLOCK): its
 /// readings are the clock's, and each pause is the clock's pause through
 /// `worker`'s wait door. The one adapter by which a wait for a lock
 /// (`install_txn::hold_by`) reads a road's clock: the applier's and recovery's
@@ -2936,7 +2937,7 @@ pub(crate) struct LockWaitOn<'a> {
     pub(crate) worker: &'a WorkerCtx,
 }
 
-impl install_txn::LockClock for LockWaitOn<'_> {
+impl PollClock for LockWaitOn<'_> {
     fn now(&self) -> Instant {
         self.clock.now()
     }
@@ -3090,12 +3091,12 @@ pub(crate) fn window_holder(
     txn: TxnId,
     me: Running,
 ) -> Result<Option<WindowHolder>, String> {
-    window_holder_using(home, txn, me, &install_txn::WallLockClock, || {})
+    window_holder_using(home, txn, me, &WallPollClock, || {})
 }
 
 /// [`window_holder_on`], with the wait on `clock` and `in_flight` run once
 /// when the first ask finds an election in flight, before the wait for it.
-fn window_holder_using<Clock: install_txn::LockClock + ?Sized>(
+fn window_holder_using<Clock: PollClock + ?Sized>(
     home: &Home,
     txn: TxnId,
     me: Running,
@@ -3131,7 +3132,7 @@ pub(crate) fn window_holder_at(
     me: Running,
     in_flight: impl FnOnce(),
 ) -> Result<Option<WindowHolder>, String> {
-    window_holder_using(home, txn, me, &install_txn::WallLockClock, in_flight)
+    window_holder_using(home, txn, me, &WallPollClock, in_flight)
 }
 
 /// **What a road process's exit guard asks of the platform it runs on**

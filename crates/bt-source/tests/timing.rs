@@ -2101,7 +2101,7 @@ const READ_AGAIN: [(&str, usize, &str); 2] = [
     (
         "bt-app crate::update_apply::take_the_window_within_using",
         3,
-        "only the election lock's wait is read on the handed `LockClock`; `until`, `read_until` \
+        "only the election lock's wait is read on the handed `PollClock`; `until`, `read_until` \
          and `write_until` stay on the real clock by row 137's ruling R5 - their retries are \
          spent only when `wait` answers true, and the counted-clock racers hand a `wait` that \
          never does",
@@ -2870,7 +2870,7 @@ fn leave_handed(handed: &BTreeMap<String, (String, &'static str, usize)>) {
 ///   `(Instant, u64)`, `[SystemTime]`).
 /// * **A clock trait**: a first-party trait, resolved in the writer's module
 ///   by [`TraitResolver`], one of whose methods takes its receiver and nothing
-///   else and answers a type holding an instant (`GitClock::now`,
+///   else and answers a type holding an instant (`PollClock::now`,
 ///   `Media::load_clock`), or one with such a supertrait, to any depth. A
 ///   getter of a stored instant (`web_spare::SpareSeat::next_deadline`) reads
 ///   the same, so its trait is a clock here too: the text cannot tell a

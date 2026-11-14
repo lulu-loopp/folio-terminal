@@ -58,10 +58,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Condvar, Mutex, mpsc};
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::window_seam::LoopProxy;
 use anyhow::{Context, Result};
+use bt_platform::poll_clock::{PollClock, WallPollClock};
 use winit::window::WindowId;
 
 use crate::{AppEvent, LeafId};
@@ -110,37 +111,6 @@ pub const GIT_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 /// answer is at most one of those ticks — against a subprocess that cost tens of
 /// milliseconds to start.
 const GIT_POLL_INTERVAL: Duration = Duration::from_millis(2);
-
-/// **The clock a git child's deadline is read on, and the pause between two looks at the
-/// child** (T-GIT-CHILD-DEADLINE-ON-A-CLOCK-SEAM): [`run_git_with_input`] sets its deadline on
-/// [`GitClock::now`], reads it there after every look, and pauses through [`GitClock::pause`].
-/// [`WallClock`] in the product, which [`ask_git`] passes with [`GIT_COMMAND_TIMEOUT`]; a test
-/// hands a clock whose deadline never comes, so a real git it starts is awaited until it exits,
-/// or a counted one, so "the budget ran out" is a count of pauses rather than a race between a
-/// wall reading and a real child.
-///
-/// Not `crate::update_apply::WaitClock`: that clock's pause goes through a worker's wait door
-/// and takes the `&WorkerCtx` the thread door lent it, which [`answer`] does not have — a test
-/// asks it bare, with no worker between them.
-pub(crate) trait GitClock: Send + Sync {
-    /// The monotonic reading the deadline is set and read on.
-    fn now(&self) -> Instant;
-    /// One pause between two looks at the child.
-    fn pause(&self, pause: Duration);
-}
-
-/// **The product's [`GitClock`]**: the monotonic clock, and each pause slept whole.
-pub(crate) struct WallClock;
-
-impl GitClock for WallClock {
-    fn now(&self) -> Instant {
-        Instant::now()
-    }
-
-    fn pause(&self, pause: Duration) {
-        thread::sleep(pause);
-    }
-}
 
 /// The notice shown once when the git worker has stopped.
 ///
@@ -2573,14 +2543,14 @@ fn program_name(command: &Command) -> String {
 /// Run one `git`, and never wait for it longer than `timeout`.
 fn run_product_git(
     command: Command,
-    clock: &dyn GitClock,
+    clock: &dyn PollClock,
     timeout: Duration,
 ) -> GitOutcome<GitRun> {
     run_product_git_with_input(command, clock, timeout, Vec::new())
 }
 
 #[cfg(test)]
-fn run_git(command: Command, clock: &dyn GitClock, timeout: Duration) -> GitOutcome<GitRun> {
+fn run_git(command: Command, clock: &dyn PollClock, timeout: Duration) -> GitOutcome<GitRun> {
     run_git_with_input(command, clock, timeout, Vec::new(), true)
 }
 
@@ -2602,16 +2572,27 @@ fn run_git(command: Command, clock: &dyn GitClock, timeout: Duration) -> GitOutc
 /// write while the child was blocked waiting for the rest of it.
 fn run_product_git_with_input(
     command: Command,
-    clock: &dyn GitClock,
+    clock: &dyn PollClock,
     timeout: Duration,
     input: Vec<u8>,
 ) -> GitOutcome<GitRun> {
     run_git_with_input(command, clock, timeout, input, false)
 }
 
+/// **The one road every git child takes, its deadline on `clock`**
+/// (T-GIT-CHILD-DEADLINE-ON-A-CLOCK-SEAM): the deadline is set on [`PollClock::now`] once the
+/// child has started, read there after every look, and the rest between two looks is
+/// [`PollClock::pause`] of [`GIT_POLL_INTERVAL`]. [`WallPollClock`] in the product, which
+/// [`ask_git`] passes with [`GIT_COMMAND_TIMEOUT`]; a test hands a clock whose deadline never
+/// comes, so a real git it starts is awaited until it exits, or a counted one, so "the budget ran
+/// out" is a count of pauses rather than a race between a wall reading and a real child.
+///
+/// A [`PollClock`], not `crate::update_apply::WaitClock`: that clock's pause goes through a
+/// worker's wait door and takes the `&WorkerCtx` the thread door lent it, which [`answer`] does
+/// not have — a test asks it bare, with no worker between them.
 fn run_git_with_input(
     mut command: Command,
-    clock: &dyn GitClock,
+    clock: &dyn PollClock,
     timeout: Duration,
     input: Vec<u8>,
     fixture: bool,
@@ -2815,7 +2796,7 @@ fn repo_root(text: &str) -> PathBuf {
 pub fn answer(
     program: &Path,
     question: &GitQuestion,
-    clock: &dyn GitClock,
+    clock: &dyn PollClock,
     timeout: Duration,
     now_unix: i64,
 ) -> GitAnswer {
@@ -4502,7 +4483,7 @@ pub(crate) fn ask_git(
         Some(program) => answer(
             program,
             question,
-            &WallClock,
+            &WallPollClock,
             GIT_COMMAND_TIMEOUT,
             now_unix(),
         ),
@@ -4630,6 +4611,7 @@ pub fn take_git_worker_notice(notice_pending: &mut bool) -> Option<&'static str>
 mod tests {
     use super::*;
     use crate::test_support::host_path;
+    use std::time::Instant;
 
     thread_local! {
         /// Where the pipes of a child this thread starts say they were let go, when a test asks.
@@ -4637,14 +4619,14 @@ mod tests {
             const { std::cell::RefCell::new(None) };
     }
 
-    /// **A test's [`GitClock`] whose deadline never comes** (T-GIT-CHILD-DEADLINE-ON-A-CLOCK-SEAM):
-    /// its reading stays where it was first taken, and each pause is slept whole so the child has
-    /// the time to run. A real git a test starts is awaited until it exits: the answer is the
+    /// **A test's [`PollClock`] whose deadline never comes**
+    /// (T-GIT-CHILD-DEADLINE-ON-A-CLOCK-SEAM): its reading stays where it was first taken, and
+    /// each pause is slept whole so the child has the time to run. A real git a test starts is awaited until it exits: the answer is the
     /// child's own, never a race between [`GIT_COMMAND_TIMEOUT`] and a loaded machine. A git
     /// that never exits is the suite watchdog's to name.
     struct Awaited;
 
-    impl GitClock for Awaited {
+    impl PollClock for Awaited {
         fn now(&self) -> Instant {
             static STILL: std::sync::LazyLock<Instant> = std::sync::LazyLock::new(Instant::now);
             *STILL
@@ -4655,7 +4637,7 @@ mod tests {
         }
     }
 
-    /// **A test's counted [`GitClock`]** (T-GIT-CHILD-DEADLINE-ON-A-CLOCK-SEAM): its reading
+    /// **A test's counted [`PollClock`]** (T-GIT-CHILD-DEADLINE-ON-A-CLOCK-SEAM): its reading
     /// moves only by the pauses it is asked for, and it never sleeps; it counts them. "The
     /// budget ran out" is then the number of looks the budget allows, whatever the load.
     struct Counted {
@@ -4678,7 +4660,7 @@ mod tests {
         }
     }
 
-    impl GitClock for Counted {
+    impl PollClock for Counted {
         fn now(&self) -> Instant {
             self.began + self.moved.lock().unwrap().0
         }
