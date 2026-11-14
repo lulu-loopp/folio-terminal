@@ -73,6 +73,7 @@ fn an_unchanged_frame_builds_nothing_and_new_text_is_paced() {
             .get_mut(&seat)
             .expect("the pane")
             .session
+            .session
             .feed(bytes)
             .expect("feed the shell");
         folio.draw();

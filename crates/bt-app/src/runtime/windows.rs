@@ -3215,7 +3215,7 @@ pub(crate) fn recent_term_leaf_seed(profile_id: &str, cwd: String) -> LeafSeed {
 /// what [`crate::uia_report::UiaReport::due`] compares with the last publication. Read from the
 /// active tab's shells alone, so the window's report can be written beside it.
 fn uia_frames<'a>(
-    sessions: &'a BTreeMap<SeatId, crate::LeafSession>,
+    sessions: &'a BTreeMap<SeatId, crate::TerminalPane>,
     keys: &[crate::uia_report::PaneKey],
 ) -> Vec<(&'a bt_viewport::ViewportFrame, bt_render::CellMetrics)> {
     keys.iter()
