@@ -131,6 +131,14 @@ struct Children {
     pids: Arc<Mutex<Vec<u32>>>,
 }
 
+/// How long [`Children::ended`] waits for a process to be reaped before it answers `None`: a
+/// failure ceiling, not a timing claim. Every caller has ended the process, or awaits one that
+/// ends by itself, and asserts the answer is `Some`, so the ceiling bounds only how long a red
+/// takes. It stays the 20 s its literal was: a lower one could turn a slow reap on a loaded Mac
+/// into a red. `Children::ended` is a door of the timing-bound list (0.4.10 plan row 20).
+#[cfg(target_os = "macos")]
+const REAP_CEILING: Duration = Duration::from_secs(20);
+
 #[cfg(target_os = "macos")]
 impl Children {
     /// Start `bundle`'s executable with one argument: it stays up.
@@ -177,9 +185,9 @@ impl Children {
             .map(|(_, status)| *status)
     }
 
-    /// How `pid` ended, waiting up to 20 s for it.
+    /// How `pid` ended, waiting up to [`REAP_CEILING`] for it.
     fn ended(&self, pid: u32) -> Option<ExitStatus> {
-        let give_up = Instant::now() + Duration::from_secs(20);
+        let give_up = Instant::now() + REAP_CEILING;
         while Instant::now() < give_up {
             if let Some(status) = self.status(pid) {
                 return Some(status);

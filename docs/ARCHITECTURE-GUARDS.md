@@ -1291,6 +1291,30 @@ paragraph, and the paragraphs above name the old path. That sixth user is the de
 wait (`deferred_removal::schedule_by`, every target), which row 14 had made on a closure of its own because
 the clock's module was gated.
 
+2026-11-12 (T-TIMING-GUARD-FOLLOWS-WAITING-HELPERS, 0.4.10 plan row 20): the third shape follows a wait as
+well as a measurement. A test is listed when it reaches, through resolved call-graph edges and at any depth,
+a test-only helper of its target whose own body waits as the first shape lists (a std, kernel or `libc`
+wait, a zero bound included), reads `elapsed()` (a stall timer that only compares included; an `elapsed()`
+the helper only prints, in a `println!` or a panic message, is no timer) or does clock
+arithmetic; its row says "waits in its helper" or, for a kept measurement, "measures in its helper". So
+moving a wait into a helper keeps its test listed. **A helper that is itself a row is a door**: the walk
+stops there and the tests that reach it are not rows through it. The suites' patience helpers and holds
+(`lane::receive`, `within_patience`, `while_progressing`, `Hold::pass`, `Gate::wait_for`,
+`door_skipped::received`, `persist`'s `on_a_worker`, the watch fakes' `FakeDoor::pass` and the rest, 37 in
+all) are doors, each row's text saying which kind it is (it waits, it measures, a harness-less test target's
+own run, or an example's run that no test makes), so a new test that awaits its event through one adds no row, while a new waiting helper
+makes every test that reaches it a row, refused by the ratchet unless it is a door the list admits. A door
+must still wait or measure and be reached from a test (through an edge, or as a candidate of a call the
+graph does not resolve) or run only by an implicit call, or its row is stale; a test-only impl that only an
+implicit call runs (a `Drop`, winit's `about_to_wait`) and that waits, or reaches a test-only helper that
+waits, is refused unless it or that helper is a door; a door among the candidates of a call the graph does
+not resolve does not excuse a candidate beside it that waits. An
+inline wait moved into a door call is a shrink, recorded on a `# shrunk` line naming the door. Not seen:
+test support another package compiles under a test feature (`bt_pty::test_shell`,
+`bt_platform::trust_harness`; 0.4.10 plan row 95 follows them), and a wait in a `static` or `const`
+initializer a test reads. 0.4.9 plan row 70 closes with this
+paragraph.
+
 ## Suite watchdog
 
 The rule: a test that hangs ends its run red within 300 s of its start, and is named, wherever a
