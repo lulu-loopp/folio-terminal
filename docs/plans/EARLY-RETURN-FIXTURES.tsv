@@ -3,9 +3,10 @@
 #
 # crates/bt-source/tests/early_returns.rs reads every #[test] function's own body for a road
 # out (`return;`, `return ();`, `return Ok(..);`). R: a road written after the test's first
-# assertion is dropped, not registered (the row's report names each one). Every other road
-# stands in one of the shapes G1 the else of a `let`, G2 an `if` with no `else` (the last arm
-# of an `else if` chain included), G3 a `match` arm, each judged by the callee of the
+# assertion is dropped, not registered here: each stands in EARLY-RETURN-DROPPED.tsv, with
+# the assertion before it and a dated reason. Every other road stands in one of the shapes
+# G1 the else of a `let`, G2 an `if` with no `else` (the last arm of an `else if` chain
+# included), G3 a `match` arm, each judged by the callee of the
 # expression it hangs on (or that expression's whole text, whitespace out, when it is no
 # call). G4, the child half of a test whose expression reads only variables its own file sets
 # on a started command (`.env(NAME, ..)`), needs no row. A road out in no shape is refused
@@ -20,8 +21,9 @@
 # hosts: exactly `other-unix` (a Unix that is not macOS), `other-platform` (neither Windows nor
 # a Unix), `environment: <fact>` (a machine of any platform that lacks something),
 # `parent-half` (the road is the parent's, once the test's own child process passed) or
-# `child-half` (the test is a child another test starts, and in the suite's own run is not that
-# child). Never Windows or macOS: every suite of the workspace runs there, and a test that
+# `child-half` (the test is a child another test starts - its mode read from the arguments,
+# standard input, or a variable set under a spelling G4 cannot match: another file's command, or
+# a helper's parameter as in `.env(child, ..)` - and in the suite's own run is not that child). Never Windows or macOS: every suite of the workspace runs there, and a test that
 # returns early there for a platform fact is gated with #[cfg] instead (CONVENTIONS H1 rule 2).
 # Where a fixture answers nothing on a whole platform all the same, the reason says so, with
 # the plan row that decides it.
@@ -63,6 +65,6 @@ crates/bt-pty/src/shell.rs	*	store_pwsh_alias	environment: no Microsoft Store Po
 crates/bt-render/src/lib.rs	*	font_family_supports_text	environment: the CJK fallback family is not installed	the grid's Han fallback tests need the family they name to cover the fixture; a machine without it says it was skipped
 crates/bt-render/src/lib.rs	chosen_cjk_family_isolated_from_ascii_and_clears_to_automatic	into_iter	environment: the CJK fallback family is not installed	the chosen-family test needs DengXian or SimSun to cover the fixture; a machine without either says it was skipped
 crates/bt-render/src/lib.rs	chosen_cjk_family_isolated_from_ascii_and_clears_to_automatic	iter	environment: the CJK fallback family is not installed	the same test's automatic family needs one of GRID_CJK_FALLBACK_FAMILIES to cover the fixture; a machine without one says it was skipped
-crates/bt-render/src/lib.rs	*	on_the_software_adapter	environment: no software adapter	a platform fact as much as a machine's (review N4, R8 re-ruled 2026-11-13): on_the_software_adapter answers None in every macOS run - wgpu's Metal backend offers no fallback adapter, as the helper's own doc says - and on a Windows machine without WARP; so on macOS the renderer's pixel tests that are not #[cfg(target_os = "windows")] return before they assert anything in every core-macos run of bt-render. The row stands with this reason; 0.4.10 plan row 94 decides between a gate and a fixture that answers there
+crates/bt-render/src/lib.rs	*	on_the_software_adapter	environment: no software adapter	a platform fact as much as a machine's (review N4, R8 re-ruled 2026-11-13): on_the_software_adapter answers None in every macOS run - wgpu's Metal backend offers no fallback adapter - and on a Windows machine without WARP; so on macOS the renderer's pixel tests that are not #[cfg(target_os = "windows")] return before they assert anything in every core-macos run of bt-render. The row stands with this reason; 0.4.10 plan row 94 decides between a gate and a fixture that answers there
 crates/bt-term/src/session.rs	*	make_directory_link	environment: no directory symlink can be created	Windows needs SeCreateSymbolicLinkPrivilege or Developer Mode for the link to a share; without it there is no link for the rule to refuse, and the test says so
 crates/bt-transcript/src/paths.rs	*	eight_dot_three_form_of	environment: the volume mints no 8.3 short names	the rejoin test needs a short name of its scratch folder (fsutil 8dot3name query); a volume that mints none has none to test with, and the test says so

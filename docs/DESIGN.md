@@ -16833,7 +16833,7 @@ The flags are a debt and never a liveness: `Runtime::turn_facts` counts them as 
 - `Install` keeps its fixture turn as its last field. Both constructors take the turn first (row 78's pin).
 
 **The guard.** `bt-source/tests/early_returns.rs` reads every test's own body in every first-party package (`docs/ARCHITECTURE-GUARDS.md` has the paragraph).
-- A road written after the test's first assertion is dropped (R). The row's report names each dropped road with that assertion.
+- A road written after the test's first assertion is dropped (R). Each dropped road is a row of `docs/plans/EARLY-RETURN-DROPPED.tsv` with that assertion and a reason opening with its date (re-review F3), so a new one shows in a diff.
 - Every other road stands in a shape: G1 the else of a `let`, G2 an `if` with no `else`, G3 a `match` arm, G4 a child half over a variable its file sets on a command. A road in no shape is refused.
 - Each G1–G3 site is a row of `docs/plans/EARLY-RETURN-FIXTURES.tsv`. The row is keyed file-wide for a function named by its path, and on its one test otherwise (a method read on no call, a variable, a condition, a read of the environment G4 does not hold). Its hosts are spelled so that no row can name Windows or macOS.
 

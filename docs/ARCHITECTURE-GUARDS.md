@@ -1417,8 +1417,10 @@ a measure, not a gate.
 libtest counted them passed. `crates/bt-source/tests/early_returns.rs` is the gate and
 `docs/plans/EARLY-RETURN-FIXTURES.tsv` its register. It reads every `#[test]` function's own body
 in every first-party package for a road out (`return;`, `return ();`, `return Ok(…);`). A road
-written after the test's first assertion is dropped (R: the test has checked something; the
-row's report lists every dropped road with its assertion). Every other road stands in one of four
+written after the test's first assertion is dropped (R: the test has checked something), and
+stands as a row of `docs/plans/EARLY-RETURN-DROPPED.tsv` with that assertion and a reason that
+opens with its date, so a new one lands in a diff where review reads what the assertion checks
+(one that checks only the host is the class, gated). Every other road stands in one of four
 shapes or is refused by name: G1 the else of a `let`, G2 an `if` with no `else`, G3 a `match` arm,
 each judged by the callee of its expression (or the expression's whole text), and G4 the child
 half, whose expression reads only variables its own file sets on a started command. A G1–G3
@@ -1428,9 +1430,9 @@ as for a read of the environment G4 does not hold), callee, hosts in one of five
 Windows or macOS, where every suite runs) and a reason. The rows equal the sites both ways. When
 red, gate the test with `#[cfg]` on the hosts it needs (CONVENTIONS H1 rule 2), make the fixture
 answer on every host the suite runs on, rewrite a refused road into a shape, or add the row with
-where the road is taken and why. **Not seen:** a road inside a helper the test calls (four of the 84 were that shape; plan
-row 96), a `continue`/`break` past every assertion, and whether the assertion before a dropped
-road checks enough.
+where the road is taken and why. **Not seen:** a road inside a helper the test calls (four of
+the 84 were that shape; plan row 96), a `continue`/`break` past every assertion, and, but for
+the dropped list's reasons, whether the assertion before a dropped road checks enough.
 
 ## Raw-effect and thread-door exceptions
 
