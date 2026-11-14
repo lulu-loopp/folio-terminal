@@ -2026,12 +2026,17 @@ Since T-GATES-047 there is no seed: a merge base without the inventory is an
 error, not a baseline.
 **The count is a reading of the source, not the compiler's** (note (j)12): a
 method call counts when its receiver's type is written somewhere on its road,
-so a receiver typed nowhere is not seen, and A2e's lint may find sites the file
-never listed. What it cannot read is listed, not passed over (0.4.10 plan row
-19, 2026-11-13): a call of a vocabulary method's name and argument count on a
-receiver it gives no type is a row of
+so a receiver typed nowhere is not counted, and A2e's lint may find sites the
+file never listed. What it cannot read is listed, not passed over (0.4.10 plan
+row 19, 2026-11-13): a call of a vocabulary method's name and argument count on
+a receiver it gives no type is a row of
 `docs/plans/WINDOW-WAITS-UNREAD-RECEIVERS.tsv`, which grows only with a dated
-reason. A name a pattern binds out of a first-party struct or enum takes the
+reason. A `.poll(` is held further (0.4.10 plan row 11, 2026-11-13), since
+`HangWatch` shares the name with `wgpu::Device::poll`: one whose receiver's
+types hold neither `wgpu::Device` nor a first-party type with a `poll` of its
+own (a closure parameter read as the method's receiver, a field of a generic
+struct) is a row of that list too. A name a pattern binds out of a first-party
+struct or enum takes the
 type its member declares, never the whole value's (which had read such a
 receiver wrong rather than not at all), `std::mem::replace`/`take` carry their
 place's type, and every binding holds only over its own scope, so one arm's
