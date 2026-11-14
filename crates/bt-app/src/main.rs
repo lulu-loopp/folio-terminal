@@ -177,6 +177,7 @@ mod quake;
 mod quit;
 mod recent_folders;
 mod recovered;
+mod rejected_copies;
 mod restore;
 mod runtime;
 mod scheme_watch;
@@ -15334,7 +15335,12 @@ fn release_trial_writer(writer: update_trial::Writer, stores: &mut TrialStores<'
         Writer::DataFolder => {
             let _ = std::fs::create_dir_all(persist::storage_dir());
         }
-        Writer::RefusedCopies => update_trial::keep_owed_copies(),
+        // The copies the trial owed are kept first; then the pass retires the old ones it held
+        // back (0.4.10 plan row 68f).
+        Writer::RefusedCopies => {
+            update_trial::keep_owed_copies();
+            carry_pass::begin_carry_pass(CarryAsk::REJECTED_COPIES);
+        }
         Writer::Session => stores.session.release_trial(),
         Writer::Settings => stores.settings.release_trial(),
         Writer::Keybindings => stores.keybindings.release_trial(),

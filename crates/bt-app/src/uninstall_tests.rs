@@ -873,7 +873,9 @@ fn test_found(module: &str, test: &str) -> bool {
 /// 5. every check in the pass names the test that brings its old shape to today's, and `bt_source`
 ///    finds that test;
 /// 6. every retirement names the dated ruling that keeps it, and every document's reader is the
-///    item its file names.
+///    item its file names;
+/// 7. a row that keeps the newest copies (`CarryRule::KeptNewest`, row 68f) is checked as an owner
+///    check is, by its member in the pass, and keeps the number its member keeps.
 ///
 /// MUTATIONS: the pass stops calling its member (`plant-68a-pass-skips-its-member.py`); a start
 /// writer loses its row (`plant-68a-writer-claimed-by-no-row.py`); the old-shape test is renamed
@@ -884,7 +886,8 @@ fn test_found(module: &str, test: &str) -> bool {
 /// retired probe again (`plant-68b-probe-back-at-the-release.py`); a landed test is renamed
 /// (`plant-68b-landed-test-renamed.py`); the package member is run bare of the boundary that runs
 /// the press behind its latch (`plant-68b-package-member-past-its-boundary.py`); the home sweep is
-/// left out of the pass (`plant-68e-home-sweep-skipped.py`).
+/// left out of the pass (`plant-68e-home-sweep-skipped.py`); the refused copies' member is left
+/// out of the pass (`plant-68f-member-skipped.py`).
 #[test]
 fn every_owned_thing_says_how_an_update_carries_it() {
     use crate::carry_pass::{CarryCheck, CarryRule};
@@ -905,7 +908,9 @@ fn every_owned_thing_says_how_an_update_carries_it() {
     let claimed: Vec<Writer> = rules()
         .flat_map(|(_, rule)| match rule {
             CarryRule::Document { writers, .. } => writers.to_vec(),
-            CarryRule::BuildBytes(writer) | CarryRule::OwnerChecked { writer, .. } => {
+            CarryRule::BuildBytes(writer)
+            | CarryRule::OwnerChecked { writer, .. }
+            | CarryRule::KeptNewest { writer, .. } => {
                 vec![writer]
             }
             CarryRule::Process { held } | CarryRule::Identity { held } => {
@@ -932,10 +937,23 @@ fn every_owned_thing_says_how_an_update_carries_it() {
     );
     let checks: Vec<(&Mark, CarryCheck)> = rules()
         .filter_map(|(mark, rule)| match rule {
-            CarryRule::OwnerChecked { check, .. } => Some((mark, check)),
+            CarryRule::OwnerChecked { check, .. } | CarryRule::KeptNewest { check, .. } => {
+                Some((mark, check))
+            }
             _ => None,
         })
         .collect();
+    // What a row says it keeps is what the member keeps (row 68f).
+    for (mark, rule) in rules() {
+        if let CarryRule::KeptNewest { keep, .. } = rule {
+            assert_eq!(
+                keep,
+                crate::rejected_copies::KEPT_COPIES,
+                "{}: the row keeps {keep} copies and the member another number",
+                mark.name
+            );
+        }
+    }
     let mut members = Vec::new();
     for (mark, check) in &checks {
         let name = mark.name;

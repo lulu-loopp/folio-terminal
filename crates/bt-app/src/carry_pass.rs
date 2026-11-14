@@ -26,7 +26,9 @@
 //! `Runtime::create`) and the update entrances whose rescue program is gone
 //! ([`crate::update_orphans::run_orphans_step`]); since row 68e the update homes beside a macOS
 //! bundle that is gone ([`crate::update_homes::run_update_homes_step`]); since row 22a the sign-in
-//! entry of a copy that moved ([`crate::start_at_sign_in::run_sign_in_step`]). **Its last member
+//! entry of a copy that moved ([`crate::start_at_sign_in::run_sign_in_step`]); since row 68f the
+//! data folder's refused copies beyond the newest three of each document
+//! ([`crate::rejected_copies::run_rejected_copies_step`]). **Its last member
 //! is Folio's old `$PROFILE` lines** (`shell_integration::run_profile_lines_step`, row 68c), run
 //! once a process, and never before the hooks have had their first real answer: the one member
 //! that starts a PowerShell, so
@@ -87,6 +89,14 @@ pub(crate) enum CarryRule {
     Identity { held: Option<Writer> },
     /// Written only by older Folios, kept or offered by the dated ruling named.
     Retired { ruling: &'static str },
+    /// Copies the folder gathers one at a time, the newest `keep` of each kept and the older ones
+    /// retired by the pass's `check`, held during a trial by `writer` (row 68f, R1 of 2026-11-14):
+    /// the data folder's refused documents.
+    KeptNewest {
+        check: CarryCheck,
+        writer: Writer,
+        keep: usize,
+    },
     /// Nothing writes it.
     Absent,
 }
@@ -110,6 +120,9 @@ pub(crate) enum CarryCheck {
     UpdateHomes,
     /// The sign-in entry of a copy that moved or is gone (row 22a, R7 of 2026-11-11).
     StartAtSignIn,
+    /// The data folder's refused copies beyond the newest of each document (row 68f, R9 of
+    /// 2026-11-04 as the owner ruled it on 2026-11-14) — a [`CarryRule::KeptNewest`] check.
+    RejectedCopies,
 }
 
 /// **A check that runs in the pass**: its member's call in [`run_carry_steps`], the sites it ran
@@ -197,6 +210,15 @@ impl CarryCheck {
                     "the_carry_pass_points_the_sign_in_entry_at_this_copy",
                 ),
             },
+            // Born in the pass (row 68f): nothing retired a copy before.
+            Self::RejectedCopies => PassMember {
+                call: "crate::rejected_copies::run_rejected_copies_step",
+                retired: &[],
+                proved_by: (
+                    "crate::rejected_copies::tests",
+                    "copies_beyond_the_newest_three_are_removed_oldest_first",
+                ),
+            },
             // The startup's own migration worker left the start when the pass took the lines
             // (row 68c).
             Self::ProfileLines => PassMember {
@@ -250,6 +272,11 @@ impl CarryCheck {
                 "crate::start_at_sign_in::tests",
                 "a_moved_copys_entry_is_pointed_at_this_one",
             ),
+            // The old shape is every earlier build's: more copies than three, never retired.
+            Self::RejectedCopies => (
+                "crate::rejected_copies::tests",
+                "copies_beyond_the_newest_three_are_removed_oldest_first",
+            ),
         }
     }
 }
@@ -302,6 +329,8 @@ pub(crate) struct CarryRound {
     pub(crate) homes: Option<MemberAnswer<()>>,
     /// The sign-in entry (row 22a): the row's answer.
     pub(crate) sign_in: Option<MemberAnswer<SignInAnswer>>,
+    /// The data folder's refused copies (row 68f): counted, nothing for the window.
+    pub(crate) rejected_copies: Option<MemberAnswer<()>>,
     /// Folio's old `$PROFILE` lines (row 68c): counted in the round's line, nothing for the window.
     pub(crate) profile_lines: Option<MemberAnswer<()>>,
 }
@@ -325,9 +354,10 @@ fn member_tally<T>(answer: Option<&MemberAnswer<T>>) -> (usize, usize) {
 /// members its ruling names, so an Agents-page open asks no deployment database and a trial's
 /// release of the Explorer writer runs no agent's scan; the start asks for all of them.
 ///
-/// **One bit per member**, seven of the eight taken: a part that adds a member adds its bit here,
-/// joins it into [`Self::ALL`], and names it at the asks its ruling gives (row 68c's profile lines
-/// were the fifth, row 68e's update homes the sixth, row 22a's sign-in entry the seventh).
+/// **One bit per member**, all eight taken: a part that adds a member widens the set to a `u16`,
+/// adds its bit here, joins it into [`Self::ALL`], and names it at the asks its ruling gives (row
+/// 68c's profile lines were the fifth, row 68e's update homes the sixth, row 22a's sign-in entry
+/// the seventh, row 68f's refused copies the eighth).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CarryAsk(u8);
 
@@ -348,6 +378,9 @@ impl CarryAsk {
     /// The sign-in entry (row 22a): what a trial's release of `Writer::StartAtSignIn` and an open
     /// of Settings ▸ General ask (R11).
     pub(crate) const START_AT_SIGN_IN: Self = Self(1 << 6);
+    /// The data folder's refused copies (row 68f): what a trial's release of
+    /// `Writer::RefusedCopies` asks, after it has kept the copies the trial owed.
+    pub(crate) const REJECTED_COPIES: Self = Self(1 << 7);
     /// Both Explorer registrations: what a trial's release of `Writer::ExplorerRepair` asks.
     pub(crate) const EXPLORER: Self = Self::EXPLORER_PACKAGE.joined_with(Self::EXPLORER_CLASSIC);
     /// Both sweeps of what an update leaves behind: what a trial's release of
@@ -362,6 +395,7 @@ impl CarryAsk {
         .joined_with(Self::EXPLORER)
         .joined_with(Self::UPDATE_LEFTOVERS)
         .joined_with(Self::START_AT_SIGN_IN)
+        .joined_with(Self::REJECTED_COPIES)
         .joined_with(Self::OLD_PROFILE_LINES);
 
     /// Both sets.
@@ -479,6 +513,7 @@ impl CarryPublished {
             orphans,
             homes,
             sign_in,
+            rejected_copies,
             profile_lines,
         } = round;
         let parts = [
@@ -488,6 +523,7 @@ impl CarryPublished {
             member_tally(orphans.as_ref()),
             member_tally(homes.as_ref()),
             member_tally(sign_in.as_ref()),
+            member_tally(rejected_copies.as_ref()),
             member_tally(profile_lines.as_ref()),
         ];
         if hooks.is_none()
@@ -496,6 +532,7 @@ impl CarryPublished {
             && orphans.is_none()
             && homes.is_none()
             && sign_in.is_none()
+            && rejected_copies.is_none()
             && profile_lines.is_none()
         {
             return None;
@@ -568,13 +605,13 @@ pub(crate) fn take_carry_snapshot() -> Option<CarrySnapshot> {
 /// call through a pointer is one they do not follow. The inventory's guard reads this body for its
 /// members (`CarryCheck::in_the_pass`).
 ///
-/// A round runs the members `asked` names (row 68b, R2), in this order (R11): the five that need
+/// A round runs the members `asked` names (row 68b, R2), in this order (R11): the six that need
 /// no program walk first, so the start's own round answers them — the update homes after the
 /// update entrances, so an entrance whose rescue is gone is retired before its home is judged
-/// (row 68e), and the sign-in entry after them (row 22a, R11) — then the agents', the round
-/// published, and the `$PROFILE` lines last. A member that panics answers nothing
-/// ([`run_if_asked`]); the package member's panic also runs the press written down behind its
-/// latch (`behind`, [`package_member_with`]).
+/// (row 68e), the sign-in entry after them (row 22a, R11), and the data folder's refused copies
+/// after it (row 68f) — then the agents', the round published, and the `$PROFILE` lines last. A
+/// member that panics answers nothing ([`run_if_asked`]); the package member's panic also runs
+/// the press written down behind its latch (`behind`, [`package_member_with`]).
 pub(crate) fn run_carry_steps(ctx: &WorkerCtx, asked: CarryAsk, behind: &PressBehindTheLatch) {
     let hooks_settled = crate::attention_hooks::AGENT_HOMES.homes_settled();
     let package = package_member_with(asked, behind, || {
@@ -606,6 +643,11 @@ pub(crate) fn run_carry_steps(ctx: &WorkerCtx, asked: CarryAsk, behind: &PressBe
     )
     .ok()
     .flatten();
+    let rejected_copies = run_if_asked(asked, CarryAsk::REJECTED_COPIES, "rejected-copies", || {
+        crate::rejected_copies::run_rejected_copies_step(ctx)
+    })
+    .ok()
+    .flatten();
     publish_carry_round(CarryRound {
         hooks: run_if_asked(asked, CarryAsk::HOOKS, "agent-hooks", || {
             crate::agent_hooks_step::run_agent_hooks_step(ctx)
@@ -617,6 +659,7 @@ pub(crate) fn run_carry_steps(ctx: &WorkerCtx, asked: CarryAsk, behind: &PressBe
         orphans,
         homes,
         sign_in,
+        rejected_copies,
         profile_lines: None,
     });
     publish_carry_round(CarryRound {
@@ -900,6 +943,7 @@ mod tests {
                     orphans,
                     homes: None,
                     sign_in: None,
+                    rejected_copies: None,
                     profile_lines: None,
                 })
                 .as_deref(),
@@ -1111,6 +1155,17 @@ mod tests {
             Some(sign_in(crate::start_at_sign_in::SignInRow::On)),
             "the newest sign-in answer, kept across a round without one"
         );
+        // The refused copies' part alone is a round (row 68f): counted, and published.
+        let line = published.publish(CarryRound {
+            rejected_copies: Some(MemberAnswer {
+                part: (),
+                checks: 1,
+                changed: 1,
+            }),
+            ..CarryRound::default()
+        });
+        assert_eq!(line.as_deref(), Some("BT_CARRY round checks=1 changed=1"));
+        assert!(published.take().is_some(), "for the window to adopt");
     }
 
     /// RED (0.4.10 plan row 68a) — **a notice the window has not taken survives the rounds after
@@ -1451,6 +1506,7 @@ mod tests {
             CarryAsk::OLD_PROFILE_LINES,
             CarryAsk::UPDATE_HOMES,
             CarryAsk::START_AT_SIGN_IN,
+            CarryAsk::REJECTED_COPIES,
         ] {
             assert!(
                 !first.names_member(member),
@@ -1487,6 +1543,7 @@ mod tests {
             CarryAsk::OLD_PROFILE_LINES,
             CarryAsk::UPDATE_HOMES,
             CarryAsk::START_AT_SIGN_IN,
+            CarryAsk::REJECTED_COPIES,
         ] {
             assert!(
                 CarryAsk::ALL.names_member(member),
@@ -1505,6 +1562,9 @@ mod tests {
             "Writer::OrphanSweep => carry_pass::begin_carry_pass(CarryAsk::UPDATE_LEFTOVERS)",
             "Writer::ProfileMigration => carry_pass::begin_carry_pass(CarryAsk::OLD_PROFILE_LINES)",
             "Writer::StartAtSignIn => carry_pass::begin_carry_pass(CarryAsk::START_AT_SIGN_IN)",
+            // Row 68f: the copies the trial owed are kept, then the old ones retired.
+            "Writer::RefusedCopies => { update_trial::keep_owed_copies(); \
+             carry_pass::begin_carry_pass(CarryAsk::REJECTED_COPIES); }",
         ] {
             assert!(
                 release.contains(&squeezed(arm)),

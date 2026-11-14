@@ -1524,8 +1524,8 @@ impl<T: StoredDocument> DocumentState<T> {
         &self.desired
     }
 
-    /// What the file is known to hold.
-    #[cfg(test)]
+    /// What the file is known to hold — at a store's open, what the start read (the carry pass's
+    /// refused copies are judged against it, 0.4.10 plan row 68f).
     pub(crate) fn revision(&self) -> &Revision<T> {
         &self.revision
     }

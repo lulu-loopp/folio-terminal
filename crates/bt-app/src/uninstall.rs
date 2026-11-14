@@ -120,6 +120,15 @@ const DATA_FOLDER_READERS: &[&str] = &[
     "shell_integration/profile_marks.rs:ProfileFiles::read",
 ];
 
+/// **A data folder's refused copies, the newest three of each document kept** (0.4.10 plan row
+/// 68f, R1 of 2026-11-14): retired by the carry pass, held during a trial with the copies
+/// themselves.
+const DATA_FOLDER_REFUSED_COPIES: CarryRule = CarryRule::KeptNewest {
+    check: CarryCheck::RejectedCopies,
+    writer: Writer::RefusedCopies,
+    keep: 3,
+};
+
 /// **The update trial's writers that hold a data folder's writes** (0.4.10 plan row 68a).
 const DATA_FOLDER_WRITERS: &[Writer] = &[
     Writer::DataFolder,
@@ -284,6 +293,7 @@ const INVENTORY: &[Mark] = &[
                 readers: DATA_FOLDER_READERS,
                 writers: DATA_FOLDER_WRITERS,
             },
+            DATA_FOLDER_REFUSED_COPIES,
             CarryRule::BuildBytes(Writer::PowerShellScript),
             CarryRule::BuildBytes(Writer::BashScript),
             CarryRule::BuildBytes(Writer::ZshScripts),
@@ -332,6 +342,7 @@ const INVENTORY: &[Mark] = &[
                 readers: DATA_FOLDER_READERS,
                 writers: DATA_FOLDER_WRITERS,
             },
+            DATA_FOLDER_REFUSED_COPIES,
             // The record of the update homes this account's copies made, read at its version
             // and rewritten by the carry pass's home sweep, held during a trial (row 68e).
             CarryRule::Document {
@@ -414,6 +425,7 @@ const INVENTORY: &[Mark] = &[
                 readers: DATA_FOLDER_READERS,
                 writers: DATA_FOLDER_WRITERS,
             },
+            DATA_FOLDER_REFUSED_COPIES,
             CarryRule::BuildBytes(Writer::PowerShellScript),
             CarryRule::BuildBytes(Writer::BashScript),
             CarryRule::BuildBytes(Writer::ZshScripts),

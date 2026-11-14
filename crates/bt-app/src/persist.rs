@@ -2179,6 +2179,11 @@ impl SessionStore {
         crate::update_trial::owe_copy(&report, &session_path, |path| {
             let _ = read_session(path);
         });
+        // What this start read, for the carry pass's refused copies (row 68f).
+        crate::rejected_copies::note_opened_document(
+            crate::rejected_copies::KeptDocument::Session,
+            read_bytes.clone().into_bytes(),
+        );
         // §5.4 case 1 — no file yet — is the normal first run and must not
         // alert; every other non-`Loaded` outcome must (§5.3: "explicit alert,
         // never pretend it succeeded").
@@ -3291,7 +3296,13 @@ impl SettingsStore {
         let dir = storage_dir();
         let path = settings_write_path(&dir, SETTINGS_FILE_NAME);
         make_data_folder(path.parent().unwrap_or(&dir));
-        Self::read_at(path, is_writer_of(&dir), lane)
+        let store = Self::read_at(path, is_writer_of(&dir), lane);
+        // What this start read, for the carry pass's refused copies (row 68f).
+        crate::rejected_copies::note_opened_document(
+            crate::rejected_copies::KeptDocument::Settings,
+            store.document.revision().bytes.clone(),
+        );
+        store
     }
 
     /// Read the file at `path` into a store — [`Self::open`] once the path and
@@ -3757,7 +3768,13 @@ impl KeybindingsStore {
         let dir = storage_dir();
         let path = settings_write_path(&dir, KEYBINDINGS_FILE_NAME);
         make_data_folder(path.parent().unwrap_or(&dir));
-        Self::read_at(path, is_writer_of(&dir), lane)
+        let store = Self::read_at(path, is_writer_of(&dir), lane);
+        // What this start read, for the carry pass's refused copies (row 68f).
+        crate::rejected_copies::note_opened_document(
+            crate::rejected_copies::KeptDocument::Keybindings,
+            store.document.revision().bytes.clone(),
+        );
+        store
     }
 
     /// Read the file at `path` into a store — [`Self::open`] once the path and
@@ -4121,7 +4138,13 @@ impl ProfilesStore {
     pub(crate) fn open(lane: StorageLane) -> Self {
         let dir = storage_dir();
         make_data_folder(&dir);
-        Self::at_on(dir.join(PROFILES_FILE_NAME), lane)
+        let store = Self::at_on(dir.join(PROFILES_FILE_NAME), lane);
+        // What this start read, for the carry pass's refused copies (row 68f).
+        crate::rejected_copies::note_opened_document(
+            crate::rejected_copies::KeptDocument::Profiles,
+            store.document.revision().bytes.clone(),
+        );
+        store
     }
 
     /// The same store over a named file, which is what makes the re-read

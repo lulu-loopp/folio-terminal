@@ -195,7 +195,13 @@ impl PinsStore {
     pub(crate) fn open(lane: StorageLane) -> Self {
         let dir = crate::persist::storage_dir();
         crate::persist::make_data_folder(&dir);
-        Self::at_on(dir.join(PINS_FILE_NAME), lane)
+        let store = Self::at_on(dir.join(PINS_FILE_NAME), lane);
+        // What this start read, for the carry pass's refused copies (row 68f).
+        crate::rejected_copies::note_opened_document(
+            crate::rejected_copies::KeptDocument::Pins,
+            store.document.revision().bytes.clone(),
+        );
+        store
     }
 
     /// The same store over a named file, which is what makes every rule below
