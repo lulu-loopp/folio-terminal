@@ -1466,9 +1466,15 @@ fn scan_line_marked(line: &str, images: &mut Vec<ImageMark>) -> Vec<Piece> {
     let mut plain = 0usize;
     let mut at = 0usize;
     while at < bytes.len() {
+        // One step of the walk, for the test that holds its work linear in the
+        // line's length (`a_chinese_page_costs_work_in_proportion_to_its_length`).
+        #[cfg(test)]
+        crate::preview_typing::count("inline steps", 1);
         // A claim inside a link's destination is a claim the walk never reaches,
         // because the destination was read off the line in one piece.
         while claims.get(claim).is_some_and(|run| run.start < at) {
+            #[cfg(test)]
+            crate::preview_typing::count("inline steps", 1);
             claim += 1;
         }
         if let Some(run) = claims.get(claim).filter(|run| run.start == at) {
@@ -1958,6 +1964,9 @@ fn push_delimiter_runs(text: &str, at: usize, line: &str, pieces: &mut Vec<Piece
     let mut plain = 0usize;
     let mut index = 0usize;
     while index < bytes.len() {
+        // The same count [`scan_line_marked`] keeps of its own steps.
+        #[cfg(test)]
+        crate::preview_typing::count("inline steps", 1);
         let marker = bytes[index];
         // A `*` or a `_` is one byte and is never a continuation byte, so
         // stepping by bytes reads the same positions stepping by characters
@@ -1968,6 +1977,8 @@ fn push_delimiter_runs(text: &str, at: usize, line: &str, pieces: &mut Vec<Piece
         }
         let mut end = index;
         while end < bytes.len() && bytes[end] == marker {
+            #[cfg(test)]
+            crate::preview_typing::count("inline steps", 1);
             end += 1;
         }
         push_piece_text(&text[plain..index], at + plain, pieces);
@@ -10120,8 +10131,9 @@ pub fn scroll_dragged_to(bar: &ScrollBar, along: f32, grab: f32) -> f32 {
 /// prose allows one. Chinese is three bytes a character and has no spaces at
 /// all, so a walk that counts bytes where it meant characters, or that looks for
 /// a word boundary to cut at, comes apart on it and on nothing else. It is held
-/// by the provenance round trip and by the frame budget, which are the two tests
-/// that ask a whole document a question rather than a phrase.
+/// by the provenance round trip and by the counted cost of a keystroke into it
+/// (`a_chinese_page_costs_work_in_proportion_to_its_length`), which are the two
+/// tests that ask a whole document a question rather than a phrase.
 #[cfg(test)]
 pub const CHINESE_PAGE: &str = include_str!("../../../README.zh-CN.md");
 

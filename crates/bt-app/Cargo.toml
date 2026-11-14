@@ -165,6 +165,12 @@ bt-render-probe = { path = "../bt-render-probe" }
 bt-source = { path = "../bt-source" }
 # Parse shipped source for the content-read guard; already in Cargo.lock.
 syn = { version = "2", features = ["full", "visit"] }
+# **The suite's formula engine** (T-FORMULA-TESTS-TYPESET-WITHOUT-THE-REAL-FONT-SCAN): the faces
+# `computation_lane::fixtures::engine_without_the_machine` hands `bt_math::MathEngine::with_faces`,
+# read from the very crate the desktop build embeds them from (bt-math's `typst-kit-embed-fonts`),
+# so no lane-suite patience holds a scan of the machine's fonts. Already in the lock file at this
+# version through typst, and in THIRD-PARTY-NOTICES.md through bt-math, so no new package.
+typst-assets = { version = "=0.15.1", features = ["fonts"] }
 # POSIX path literals are checked by an independent lexer already present in Cargo.lock.
 shlex = "=2.0.1"
 serde_json.workspace = true

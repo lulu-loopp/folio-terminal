@@ -2038,9 +2038,12 @@ pub(crate) fn headless_app(gpu: HeadlessDevice, proxy: LoopProxy, root: &Path) -
         clipboard_lane: clipboard_lane::ClipboardLane::spawn(wake(|| AppEvent::ClipboardAnswered)),
         layout_tables: layout_tables::LayoutTables::spawn(proxy.clone(), Vec::new())
             .expect("the layout tables start"),
-        math_worker: Arc::new(computation_lane::ComputationLane::new(wake(|| {
-            AppEvent::MathReady
-        }))),
+        // The product's lane, its formula engine the suite's: the faces Folio ships, no scan of
+        // the machine's fonts (T-FORMULA-TESTS-TYPESET-WITHOUT-THE-REAL-FONT-SCAN).
+        math_worker: Arc::new(computation_lane::ComputationLane::making_engines_with(
+            computation_lane::fixtures::engine_without_the_machine,
+            wake(|| AppEvent::MathReady),
+        )),
         preview_saves,
         git_mutations,
         foreground_program_worker: foreground_program::Worker::spawn(wake(|| AppEvent::MathReady))

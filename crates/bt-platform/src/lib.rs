@@ -6495,11 +6495,15 @@ mod probe_child_tests {
             (unsafe { WaitForSingleObject(self.0, 0) }) == WAIT_TIMEOUT
         }
 
+        /// The helper's end, within the door suites' patience: a failure ceiling, not a timing
+        /// assertion (the kernel signals the exit). A door row of the timing-bound list, so its
+        /// callers are not rows through it.
         fn wait_gone(&self) {
-            // SAFETY: the handle is live and owned by this witness. This is a
-            // failure ceiling, not a timing assertion; the kernel signals exit.
+            let patience = u32::try_from(crate::door_skipped::PATIENCE.as_millis())
+                .expect("the patience fits a wait's milliseconds");
+            // SAFETY: the handle is live and owned by this witness.
             assert_eq!(
-                unsafe { WaitForSingleObject(self.0, 10_000) },
+                unsafe { WaitForSingleObject(self.0, patience) },
                 WAIT_OBJECT_0,
                 "the owned helper process did not end"
             );

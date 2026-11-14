@@ -1291,6 +1291,30 @@ paragraph, and the paragraphs above name the old path. That sixth user is the de
 wait (`deferred_removal::schedule_by`, every target), which row 14 had made on a closure of its own because
 the clock's module was gated.
 
+2026-11-12 (T-TIMING-GUARD-FOLLOWS-WAITING-HELPERS, 0.4.10 plan row 20): the third shape follows a wait as
+well as a measurement. A test is listed when it reaches, through resolved call-graph edges and at any depth,
+a test-only helper of its target whose own body waits as the first shape lists (a std, kernel or `libc`
+wait, a zero bound included), reads `elapsed()` (a stall timer that only compares included; an `elapsed()`
+the helper only prints, in a `println!` or a panic message, is no timer) or does clock
+arithmetic; its row says "waits in its helper" or, for a kept measurement, "measures in its helper". So
+moving a wait into a helper keeps its test listed. **A helper that is itself a row is a door**: the walk
+stops there and the tests that reach it are not rows through it. The suites' patience helpers and holds
+(`lane::receive`, `within_patience`, `while_progressing`, `Hold::pass`, `Gate::wait_for`,
+`door_skipped::received`, `persist`'s `on_a_worker`, the watch fakes' `FakeDoor::pass` and the rest, 37 in
+all) are doors, each row's text saying which kind it is (it waits, it measures, a harness-less test target's
+own run, or an example's run that no test makes), so a new test that awaits its event through one adds no row, while a new waiting helper
+makes every test that reaches it a row, refused by the ratchet unless it is a door the list admits. A door
+must still wait or measure and be reached from a test (through an edge, or as a candidate of a call the
+graph does not resolve) or run only by an implicit call, or its row is stale; a test-only impl that only an
+implicit call runs (a `Drop`, winit's `about_to_wait`) and that waits, or reaches a test-only helper that
+waits, is refused unless it or that helper is a door; a door among the candidates of a call the graph does
+not resolve does not excuse a candidate beside it that waits. An
+inline wait moved into a door call is a shrink, recorded on a `# shrunk` line naming the door. Not seen:
+test support another package compiles under a test feature (`bt_pty::test_shell`,
+`bt_platform::trust_harness`; 0.4.10 plan row 95 follows them), and a wait in a `static` or `const`
+initializer a test reads. 0.4.9 plan row 70 closes with this
+paragraph.
+
 ## Suite watchdog
 
 The rule: a test that hangs ends its run red within 300 s of its start, and is named, wherever a
@@ -1410,6 +1434,29 @@ reaches it, or add the row. **Not seen:** a global a test reaches only through p
 functions; the walk ends there, as `timing.rs`'s does. The CJK probe's `i18n` switch is
 one. `the_product_reach_of_the_tests_is_measured` prints `TEST_GLOBALS_PRODUCT_REACH` as
 a measure, not a gate.
+
+**A test does not end passed before it asserts anything** (T-INSTALL-TESTS-SILENT-PASS-OFF-WINDOWS,
+0.4.10 plan row 12, 2026-11-13). On the Mac, 84 of the Windows applier's tests opened with
+`let Some(install) = Install::new(tag) else { return; };` over a test root only Windows has, and
+libtest counted them passed. `crates/bt-source/tests/early_returns.rs` is the gate and
+`docs/plans/EARLY-RETURN-FIXTURES.tsv` its register. It reads every `#[test]` function's own body
+in every first-party package for a road out (`return;`, `return ();`, `return Ok(…);`). A road
+written after the test's first assertion is dropped (R: the test has checked something), and
+stands as a row of `docs/plans/EARLY-RETURN-DROPPED.tsv` with that assertion and a reason that
+opens with its date, so a new one lands in a diff where review reads what the assertion checks
+(one that checks only the host is the class, gated). Every other road stands in one of four
+shapes or is refused by name: G1 the else of a `let`, G2 an `if` with no `else`, G3 a `match` arm,
+each judged by the callee of its expression (or the expression's whole text), and G4 the child
+half, whose expression reads only variables its own file sets on a started command. A G1–G3
+site needs a row: file, test (`*` for a function named by its path, else the one test function,
+as for a read of the environment G4 does not hold), callee, hosts in one of five spellings
+(`other-unix`, `other-platform`, `environment: <fact>`, `parent-half`, `child-half`; never
+Windows or macOS, where every suite runs) and a reason. The rows equal the sites both ways. When
+red, gate the test with `#[cfg]` on the hosts it needs (CONVENTIONS H1 rule 2), make the fixture
+answer on every host the suite runs on, rewrite a refused road into a shape, or add the row with
+where the road is taken and why. **Not seen:** a road inside a helper the test calls (four of
+the 84 were that shape; plan row 96), a `continue`/`break` past every assertion, and, but for
+the dropped list's reasons, whether the assertion before a dropped road checks enough.
 
 ## Raw-effect and thread-door exceptions
 

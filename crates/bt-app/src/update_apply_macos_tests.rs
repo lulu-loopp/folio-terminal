@@ -131,6 +131,14 @@ struct Children {
     pids: Arc<Mutex<Vec<u32>>>,
 }
 
+/// How long [`Children::ended`] waits for a process to be reaped before it answers `None`: a
+/// failure ceiling, not a timing claim. Every caller has ended the process, or awaits one that
+/// ends by itself, and asserts the answer is `Some`, so the ceiling bounds only how long a red
+/// takes. It stays the 20 s its literal was: a lower one could turn a slow reap on a loaded Mac
+/// into a red. `Children::ended` is a door of the timing-bound list (0.4.10 plan row 20).
+#[cfg(target_os = "macos")]
+const REAP_CEILING: Duration = Duration::from_secs(20);
+
 #[cfg(target_os = "macos")]
 impl Children {
     /// Start `bundle`'s executable with one argument: it stays up.
@@ -140,13 +148,14 @@ impl Children {
 
     /// Start `bundle`'s executable with `words`.
     fn start_with(&self, bundle: &Path, words: &[&OsStr]) -> u32 {
-        let mut child: Child = bt_platform::quiet_command(bundle.join(EXE))
-            .args(words)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("the synthetic executable starts");
+        let mut child: Child = crate::test_support::start_a_fixture(
+            bt_platform::quiet_command(bundle.join(EXE))
+                .args(words)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )
+        .expect("the synthetic executable starts");
         let pid = child.id();
         self.started.lock().unwrap().push(pid);
         let ended = self.ended.clone();
@@ -176,9 +185,9 @@ impl Children {
             .map(|(_, status)| *status)
     }
 
-    /// How `pid` ended, waiting up to 20 s for it.
+    /// How `pid` ended, waiting up to [`REAP_CEILING`] for it.
     fn ended(&self, pid: u32) -> Option<ExitStatus> {
-        let give_up = Instant::now() + Duration::from_secs(20);
+        let give_up = Instant::now() + REAP_CEILING;
         while Instant::now() < give_up {
             if let Some(status) = self.status(pid) {
                 return Some(status);
@@ -191,10 +200,12 @@ impl Children {
     /// End `pid`, one this test started and has not reaped yet.
     fn end(&self, pid: u32) {
         if self.status(pid).is_none() {
-            let _ = bt_platform::quiet_command("/bin/kill")
-                .arg("-9")
-                .arg(pid.to_string())
-                .status();
+            let _ = crate::test_support::start_a_fixture(
+                bt_platform::quiet_command("/bin/kill")
+                    .arg("-9")
+                    .arg(pid.to_string()),
+            )
+            .and_then(|mut kill| kill.wait());
         }
     }
 
@@ -241,9 +252,10 @@ impl Drop for Children {
         for pid in self.pids.lock().unwrap().iter() {
             // A process this test started through `open`, by the pid the
             // journal recorded for it.
-            let _ = bt_platform::quiet_command("/bin/kill")
-                .arg(pid.to_string())
-                .status();
+            let _ = crate::test_support::start_a_fixture(
+                bt_platform::quiet_command("/bin/kill").arg(pid.to_string()),
+            )
+            .and_then(|mut kill| kill.wait());
         }
     }
 }
@@ -408,11 +420,15 @@ struct Install {
     agents: PathBuf,
     /// What the journal records was carried (a Homebrew copy's marks, D1), or nothing.
     carried: Option<Carried>,
+    /// This test's turn among the fixture tests (`test_support::a_fixture_turn`), let go last,
+    /// after its folder is gone.
+    _turn: crate::test_support::FixtureTurn,
 }
 
 impl Install {
     #[cfg(target_os = "macos")]
     fn new(tag: &str) -> Self {
+        let turn = crate::test_support::a_fixture_turn();
         let scratch = Scratch::new(&format!("u28-{tag}"));
         let root = scratch.root.clone();
         let apps = root.join("Applications");
@@ -451,6 +467,7 @@ impl Install {
             data,
             agents,
             carried: None,
+            _turn: turn,
         };
         install.write(Phase::Handoff {
             applier: install.applier,
@@ -601,6 +618,7 @@ impl Install {
 /// is scripted, so these shape tests run on every host without asking macOS to
 /// compile, sign, inspect or exchange a bundle.
 fn shape_install(tag: &str) -> Install {
+    let turn = crate::test_support::a_fixture_turn();
     let scratch = Scratch::new(&format!("u41a1-shape-{tag}"));
     let root = scratch.root.clone();
     let installed = root.join("Applications").join("Folio.app");
@@ -640,6 +658,7 @@ fn shape_install(tag: &str) -> Install {
         data,
         agents,
         carried: None,
+        _turn: turn,
     };
     install.write(Phase::Handoff {
         applier: install.applier,
@@ -887,12 +906,13 @@ fn journal_reaches<T>(
 fn swap_leaves_no_instant_without_a_bundle() {
     let install = Install::new("swap");
     let (installed, stage) = (install.installed.clone(), install.stage());
-    let mut old = bt_platform::quiet_command(installed.join(EXE))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+    let mut old = crate::test_support::start_a_fixture(
+        bt_platform::quiet_command(installed.join(EXE))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
     let mut answers = BufReader::new(old.stdout.take().unwrap());
     let mut ask = |old: &mut Child, word: &str| {
         writeln!(old.stdin.as_mut().unwrap(), "{word}").unwrap();
@@ -4094,11 +4114,12 @@ fn a_trial_that_ends_before_it_is_seen_ends_the_wait_at_once() {
     let handed = Arc::clone(&pipes);
     let world = Fake {
         on_launch_held: Some(Box::new(move |_, _| {
-            let mut child = bt_platform::quiet_command("/bin/cat")
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null())
-                .spawn()?;
+            let mut child = crate::test_support::start_a_fixture(
+                bt_platform::quiet_command("/bin/cat")
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null()),
+            )?;
             let (Some(input), Some(output)) = (child.stdin.take(), child.stdout.take()) else {
                 panic!("the stand-in's pipes");
             };
@@ -4420,9 +4441,9 @@ fn a_trial_hands_back_only_to_a_rescue_build_that_knows_the_word() {
 #[cfg(target_os = "macos")]
 #[test]
 fn a_launch_ended_by_a_signal_is_unknown_not_over() {
-    let exited = bt_platform::quiet_command("/usr/bin/false")
-        .spawn()
-        .unwrap();
+    let exited =
+        crate::test_support::start_a_fixture(&mut bt_platform::quiet_command("/usr/bin/false"))
+            .unwrap();
     let mut launch = Launch::of(exited);
     let give_up = Instant::now() + Duration::from_secs(10);
     while !launch.over() {
@@ -4430,17 +4451,18 @@ fn a_launch_ended_by_a_signal_is_unknown_not_over() {
         std::thread::sleep(Duration::from_millis(10));
     }
 
-    let helper = bt_platform::quiet_command("/bin/sleep")
-        .arg("30")
-        .spawn()
-        .unwrap();
+    let helper =
+        crate::test_support::start_a_fixture(bt_platform::quiet_command("/bin/sleep").arg("30"))
+            .unwrap();
     let pid = helper.id();
     let mut launch = Launch::of(helper);
     assert!(!launch.over(), "still running");
-    let _ = bt_platform::quiet_command("/bin/kill")
-        .arg("-9")
-        .arg(pid.to_string())
-        .status();
+    let _ = crate::test_support::start_a_fixture(
+        bt_platform::quiet_command("/bin/kill")
+            .arg("-9")
+            .arg(pid.to_string()),
+    )
+    .and_then(|mut kill| kill.wait());
     std::thread::sleep(Duration::from_millis(300));
     for _ in 0..5 {
         assert!(!launch.over(), "a signal is unknown");

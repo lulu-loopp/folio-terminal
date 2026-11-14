@@ -16,8 +16,13 @@
 ## says how a site is recognised. This file only shrinks: a row goes when its site goes through a door (A2b-A2d); no
 ## ticket adds a site. A widened vocabulary adds the sites it reveals, which were already there, each listed under a
 ## dated `## Revealed <YYYY-MM-DD> ...` line below, one `##   crate | arm | item | entry` line per row
-## (`scripts/ci/check-window-waits.ps1` admits a new entry's rows against the merge base only so). At A2e the file is
-## proven empty and deleted, and the lint takes its place.
+## (`scripts/ci/check-window-waits.ps1` admits a new entry's rows against the merge base only so). A reader that learns
+## to read a receiver it read wrong or not at all reveals sites of an entry the vocabulary already had, which were there
+## too: each is listed under a reader block, `## Revealed <YYYY-MM-DD> by <ticket> (reader; ruling <ticket> <YYYY-MM-DD>):
+## ...`, naming the ruling that let it in, and the check admits a key's growth against the merge base only by the rows
+## a reader block lists that the merge base's does not (0.4.10 plan row 19, ruling R2). The calls the reader still
+## cannot read are listed in `docs/plans/WINDOW-WAITS-UNREAD-RECEIVERS.tsv`. At A2e the file is proven empty and
+## deleted, and the lint takes its place.
 ##
 ## Revealed 2026-11-02 by T-BARE-SITE-VOCABULARY-WAIT-WHILE-BLIND-SPOT (plan row 176): the waits of bt-source's request-door `BLOCKING` list the vocabulary lacked; sites that were there before it.
 ##   bt-app | - | crate::layout_tables::WorkerRoad::build | std::sync::mpsc::SyncSender::send
@@ -49,6 +54,8 @@
 ##   bt-platform | [windows] | crate::launch_pipe::read_reply | windows::Win32::System::IO::GetOverlappedResult
 ##   bt-platform | [windows] | crate::windows_impl::set_loop | windows::Win32::System::IO::GetOverlappedResult
 ##   bt-platform | [windows] | crate::windows_impl::set_loop | windows::Win32::System::IO::GetQueuedCompletionStatus
+## Revealed 2026-11-13 by T-WINDOW-WAITS-READER-SEES-MATCH-BOUND-HANDLES (reader; ruling T-WINDOW-WAITS-READER-SEES-MATCH-BOUND-HANDLES 2026-11-12): the inventory's reader types a name a pattern binds out of a first-party struct or enum by the member it binds, and reads it only in its own arm (0.4.10 plan row 19, rulings R1 and R2); a site that was there before the reader read it.
+##   bt-app | - | crate::git::GitChild::wait | std::process::Child::wait
 crate	arm	item	entry	count
 bt-app	-	crate::FolioApp::recovered_from_a_lost_device	std::thread::sleep	1
 bt-app	-	crate::animation::AnimationStamp::of	std::fs::metadata	1
@@ -73,6 +80,7 @@ bt-app	-	crate::files::read_directory	std::fs::metadata	1
 bt-app	-	crate::files::read_directory	std::fs::read_dir	1
 bt-app	-	crate::files::run_dir_worker	std::sync::mpsc::Receiver::recv	1
 bt-app	-	crate::git::<WallClock as GitClock>::pause	std::thread::sleep	1
+bt-app	-	crate::git::GitChild::wait	std::process::Child::wait	1
 bt-app	-	crate::git::run_git_with_input	std::thread::JoinHandle::join	2
 bt-app	-	crate::git::run_git_worker	std::sync::mpsc::Receiver::recv	1
 bt-app	-	crate::hang_watch::prune_reports	std::fs::read_dir	1
