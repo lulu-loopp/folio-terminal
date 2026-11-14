@@ -320,19 +320,30 @@ mod on_macos {
     use std::time::Instant;
 
     /// **A clock whose deadline never comes** (T-CODESIGN-CHILD-BOUND-ON-A-CLOCK): its reading is
-    /// pinned at the first one any test takes, and its rest is a real one, so the child runs. A
-    /// real `codesign` or `spctl` handed it is answered by its own exit, awaited as state, never
-    /// raced by its bound; one that never exits is the suite watchdog's to name.
-    struct ExitAwaited;
+    /// pinned where it was made, so the deadline a call sets on it is never reached, and its rest
+    /// is the product's own ([`WallLockClock`]'s), so the child runs. A real `codesign` or
+    /// `spctl` handed it is answered by its own exit, awaited as state, never raced by its bound;
+    /// one that never exits is the suite watchdog's to name. Each call is handed a clock of its
+    /// own, so no reading is shared between tests.
+    struct ExitAwaited {
+        pinned: Instant,
+    }
+
+    impl ExitAwaited {
+        fn new() -> Self {
+            Self {
+                pinned: Instant::now(),
+            }
+        }
+    }
 
     impl LockClock for ExitAwaited {
         fn now(&self) -> Instant {
-            static PINNED: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
-            *PINNED.get_or_init(Instant::now)
+            self.pinned
         }
 
         fn pause(&self, pause: Duration) {
-            std::thread::sleep(pause);
+            WallLockClock.pause(pause);
         }
     }
 
@@ -391,7 +402,7 @@ mod on_macos {
                 }
                 RestTurn::Await if self.awaited.get() < PATIENT_LOOKS => {
                     self.awaited.set(self.awaited.get() + 1);
-                    std::thread::sleep(pause);
+                    WallLockClock.pause(pause);
                 }
                 RestTurn::Await => {
                     self.gave_up.set(true);
@@ -464,17 +475,17 @@ mod on_macos {
         let root = scratch("ad-hoc");
         let bundle = ad_hoc_bundle(&root);
         let designated =
-            designated_requirement_of(&bundle.to_string_lossy(), &ExitAwaited).unwrap();
+            designated_requirement_of(&bundle.to_string_lossy(), &ExitAwaited::new()).unwrap();
         assert!(designated.starts_with("cdhash H\""), "{designated}");
 
         assert_eq!(
-            verify_against(&bundle, &designated, &ExitAwaited),
+            verify_against(&bundle, &designated, &ExitAwaited::new()),
             Ok(Verified(()))
         );
         let refusal = verify_bundle_on(
             &bundle,
             &Requirement::of_designated(designated),
-            &ExitAwaited,
+            &ExitAwaited::new(),
         )
         .unwrap_err();
         assert_eq!(
@@ -495,13 +506,13 @@ mod on_macos {
         let root = scratch("changed");
         let bundle = ad_hoc_bundle(&root);
         let designated =
-            designated_requirement_of(&bundle.to_string_lossy(), &ExitAwaited).unwrap();
+            designated_requirement_of(&bundle.to_string_lossy(), &ExitAwaited::new()).unwrap();
         let plist = bundle.join("Contents/Info.plist");
         let mut text = std::fs::read_to_string(&plist).unwrap();
         text.push('\n');
         std::fs::write(&plist, text).unwrap();
 
-        let refusal = verify_against(&bundle, &designated, &ExitAwaited).unwrap_err();
+        let refusal = verify_against(&bundle, &designated, &ExitAwaited::new()).unwrap_err();
         assert_eq!(
             (refusal.stage, refusal.why.clone()),
             (Stage::Validity, Why::Failed(Some(1))),
@@ -524,13 +535,13 @@ mod on_macos {
     /// designated half and `verify_against` refuses it.
     #[test]
     fn the_running_requirement_is_read_from_the_running_code() {
-        let running = running_requirement_on(&ExitAwaited).unwrap();
+        let running = running_requirement_on(&ExitAwaited::new()).unwrap();
         let executable = std::env::current_exe().unwrap();
         assert_eq!(
-            verify_against(&executable, running.designated(), &ExitAwaited),
+            verify_against(&executable, running.designated(), &ExitAwaited::new()),
             Ok(Verified(()))
         );
-        let refusal = verify_bundle_on(&executable, &running, &ExitAwaited).unwrap_err();
+        let refusal = verify_bundle_on(&executable, &running, &ExitAwaited::new()).unwrap_err();
         assert_eq!(
             (refusal.stage, refusal.why.clone()),
             (Stage::Requirement, Why::NotSatisfied),
@@ -549,7 +560,7 @@ mod on_macos {
     fn an_ad_hoc_bundle_is_never_accepted_by_spctl() {
         let root = scratch("assess");
         let bundle = ad_hoc_bundle(&root);
-        match assess_on(&bundle, &ExitAwaited).unwrap() {
+        match assess_on(&bundle, &ExitAwaited::new()).unwrap() {
             Assessment::Rejected { .. } | Assessment::Disabled => {}
             accepted @ Assessment::Accepted { .. } => panic!("{accepted:?}"),
         }
@@ -628,7 +639,7 @@ mod on_macos {
             SH,
             &["-c", "printf said; printf err >&2; exit 3"],
             DISPLAY_BOUND,
-            &ExitAwaited,
+            &ExitAwaited::new(),
         )
         .map(|answer| (answer.status, answer.stdout, answer.stderr));
         assert_eq!(answer, Ok((Some(3), "said".to_owned(), "err".to_owned())));
