@@ -3743,7 +3743,7 @@ impl Text {
             Self::DescStartAtSignInNotOurs => pick(
                 lang,
                 "Another program's startup entry is named Folio, and it is left as it is.",
-                "名为 Folio 的启动项属于另一个程序，保持原样。",
+                "名为 Folio 的启动项属于另一个程序，Folio 不改动它。",
             ),
             // **Advice, and the only line here that is.** Explorer was told the
             // moment the package was registered; what it does with that is not
@@ -3973,7 +3973,7 @@ impl Text {
             Self::SignInReadBackDiffers => pick(
                 lang,
                 "the entry read back is not the one written",
-                "读回的条目与写入的不一致",
+                "读回的内容与写入的不一致",
             ),
 
             // ── the first page of Windows 11's menu (§7.4a) ────────────────
