@@ -47,9 +47,6 @@ pub(crate) struct DoorValues {
     pub(crate) resize_trace: Option<OsString>,
     pub(crate) layout_events: Option<OsString>,
     pub(crate) git_trace: Option<OsString>,
-    /// `BT_UIA_SHAPE`: the E-1 candidate build's choice of what a terminal pane tells UI
-    /// Automation it is (T-UIA-SKELETON ruling R3; removed before landing).
-    pub(crate) uia_shape: Option<OsString>,
     /// Every variable of the environment whose name begins `BT_` (in any case), with its value —
     /// the two rules stated as a shape rather than a list read these
     /// ([`diagnostics::console_was_asked_for`], `trace_sink`'s sink).
@@ -80,9 +77,6 @@ pub(crate) struct EntryDoors {
     pub(crate) layout_events: bool,
     /// `BT_GIT_TRACE`.
     pub(crate) git: bool,
-    /// `BT_UIA_SHAPE` (`edit`, `document` or `text`); unset, empty or anything else is
-    /// [`bt_platform::uia::Shape::Text`], Windows Terminal's.
-    pub(crate) uia_shape: bt_platform::uia::Shape,
     /// The name of every `BT_` variable the environment held, whatever its value.
     pub(crate) named: Vec<OsString>,
     /// The name of every `BT_` variable the environment held with a value that is not empty.
@@ -113,7 +107,6 @@ static SHUT: EntryDoors = EntryDoors {
     resize: false,
     layout_events: false,
     git: false,
-    uia_shape: bt_platform::uia::Shape::Text,
     named: Vec::new(),
     named_with_a_value: Vec::new(),
 };
@@ -143,7 +136,6 @@ impl EntryDoors {
             resize_trace: std::env::var_os("BT_RESIZE_TRACE"),
             layout_events: std::env::var_os("BT_LAYOUT_EVENTS"),
             git_trace: std::env::var_os("BT_GIT_TRACE"),
-            uia_shape: std::env::var_os("BT_UIA_SHAPE"),
             named: std::env::vars_os()
                 .filter(|(name, _)| {
                     name.to_string_lossy()
@@ -182,12 +174,6 @@ impl EntryDoors {
             resize: diagnostics::switched_on(values.resize_trace),
             layout_events: diagnostics::switched_on(values.layout_events),
             git: diagnostics::switched_on(values.git_trace),
-            uia_shape: values
-                .uia_shape
-                .as_deref()
-                .and_then(std::ffi::OsStr::to_str)
-                .and_then(bt_platform::uia::Shape::named)
-                .unwrap_or_default(),
             named_with_a_value: values
                 .named
                 .iter()
@@ -248,7 +234,6 @@ mod tests {
             resize_trace: empty(),
             layout_events: empty(),
             git_trace: empty(),
-            uia_shape: empty(),
             named: vec![(OsString::from("BT_PTY_DUMP"), OsString::new())],
         });
         assert_eq!(
@@ -275,27 +260,6 @@ mod tests {
         assert_eq!(named.traces.card, Some(PathBuf::from("card.log")));
         assert!(named.perf, "any value is on");
         assert_eq!(named.named_with_a_value, [OsString::from("bt_card_trace")]);
-    }
-
-    /// RED (T-UIA-SKELETON, the E-1 candidate build) — **`BT_UIA_SHAPE` names the shape a
-    /// terminal pane tells UI Automation**, in any case; unset, empty or anything else is
-    /// Windows Terminal's `Text`.
-    ///
-    /// MUTATION: drop the `uia_shape` read in `EntryDoors::from_values`.
-    #[test]
-    fn the_candidate_builds_shape_is_read_at_the_entry() {
-        let shape = |value: &str| {
-            EntryDoors::from_values(DoorValues {
-                uia_shape: Some(OsString::from(value)),
-                ..DoorValues::default()
-            })
-            .uia_shape
-        };
-        assert_eq!(shape("Edit"), bt_platform::uia::Shape::Edit);
-        assert_eq!(shape("document"), bt_platform::uia::Shape::Document);
-        assert_eq!(shape("text"), bt_platform::uia::Shape::Text);
-        assert_eq!(shape(""), bt_platform::uia::Shape::Text);
-        assert_eq!(shape("button"), bt_platform::uia::Shape::Text);
     }
 
     /// The marker the two child-process tests below set on the copy of this test binary they run

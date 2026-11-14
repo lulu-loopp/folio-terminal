@@ -512,12 +512,3 @@ fn a_range_from_an_older_snapshot_is_clamped() {
         "a degenerate range at the end"
     );
 }
-
-/// PIN (the E-1 candidate build only, R3) — **`BT_UIA_SHAPE`'s three names**, in any case.
-#[test]
-fn the_candidate_shapes_are_named() {
-    assert_eq!(Shape::named("EDIT"), Some(Shape::Edit));
-    assert_eq!(Shape::named("document"), Some(Shape::Document));
-    assert_eq!(Shape::named("Text"), Some(Shape::Text));
-    assert_eq!(Shape::named("pane"), None);
-}

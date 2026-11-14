@@ -35257,7 +35257,7 @@ fn new_window_runtime<B: Backend>(parts: NewWindowParts<B>) -> WindowRuntime<B> 
     let uia = uia_report::UiaReport::new({
         let proxy = event_proxy.clone();
         window.answer_ui_automation(
-            entry_doors::installed().uia_shape,
+            bt_platform::uia::Shape::default(),
             Box::new(move || {
                 let _ = proxy.send_event(AppEvent::UiAutomationAsked);
             }),
