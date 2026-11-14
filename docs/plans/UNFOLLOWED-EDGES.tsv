@@ -4,7 +4,7 @@
 # name) with the number of calls behind it. Held equal to the tree by bt-source's call_graph test;
 # shrink-only against the merge base by scripts/ci/check-unfollowed-edges.ps1 - a key added or grown
 # carries a reason 'YYYY-MM-DD: <why>'. Never edit a key or a count by hand.
-# Ambiguous calls with exactly one candidate, not listed by site above or below (bt_source::call_graph::Unresolved::sole_candidate; a guard naming a callee's callers counts each as a call of its one candidate): 1810. A call whose name is renamed to one only one item declares leaves the list and is counted here.
+# Ambiguous calls with exactly one candidate, not listed by site above or below (bt_source::call_graph::Unresolved::sole_candidate; a guard naming a callee's callers counts each as a call of its one candidate): 1811. A call whose name is renamed to one only one item declares leaves the list and is counted here.
 file	item	kind	name	sites	reason
 crates/bt-app/src/agent_hooks_step.rs	bt-app crate::agent_hooks_step::AgentHooksStep::say_changed	Ambiguous	as_deref	1	2026-11-08: T-UPDATE-CARRIES-EVERYTHING-FOLIO-WROTE (0.4.10 plan row 68a, R-D); a family's line compared with the last one said for it in this process, under the memory's lock (Option::as_deref, String::as_str, clone, iter_mut, zip, the lock's unwrap_or_else for a poisoned lock); in-memory, no wait
 crates/bt-app/src/agent_hooks_step.rs	bt-app crate::agent_hooks_step::AgentHooksStep::say_changed	Ambiguous	as_str	1	2026-11-08: T-UPDATE-CARRIES-EVERYTHING-FOLIO-WROTE (0.4.10 plan row 68a, R-D); a family's line compared with the last one said for it in this process, under the memory's lock (Option::as_deref, String::as_str, clone, iter_mut, zip, the lock's unwrap_or_else for a poisoned lock); in-memory, no wait
@@ -1062,10 +1062,8 @@ crates/bt-app/src/entry_doors.rs	bt-app crate::entry_doors::EntryDoors::at_the_e
 crates/bt-app/src/entry_doors.rs	bt-app crate::entry_doors::EntryDoors::at_the_entry	Ambiguous	starts_with	1	2026-10-20: T-DIAGNOSTIC-DOORS-AT-THE-ENTRY; a standard-library method (Option, Iterator, OsStr, Path) on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/entry_doors.rs	bt-app crate::entry_doors::EntryDoors::at_the_entry	Ambiguous	to_ascii_uppercase	1	2026-10-20: T-DIAGNOSTIC-DOORS-AT-THE-ENTRY; a standard-library method (Option, Iterator, OsStr, Path) on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/entry_doors.rs	bt-app crate::entry_doors::EntryDoors::at_the_entry	Ambiguous	to_string_lossy	1	2026-10-20: T-DIAGNOSTIC-DOORS-AT-THE-ENTRY; a standard-library method (Option, Iterator, OsStr, Path) on a receiver the grammar does not type, which reaches no door
-crates/bt-app/src/entry_doors.rs	bt-app crate::entry_doors::EntryDoors::from_values	Ambiguous	and_then	2	2026-10-27: T-UIA-SKELETON: a standard-library method (Option, Result, Iterator, str, bool, pointer, Cell) on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/entry_doors.rs	bt-app crate::entry_doors::EntryDoors::from_values	Ambiguous	collect	1	2026-10-20: T-DIAGNOSTIC-DOORS-AT-THE-ENTRY; a standard-library method (Option, Iterator, OsStr, Path) on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/entry_doors.rs	bt-app crate::entry_doors::EntryDoors::from_values	Ambiguous	map	1	2026-10-20: T-DIAGNOSTIC-DOORS-AT-THE-ENTRY; a standard-library method (Option, Iterator, OsStr, Path) on a receiver the grammar does not type, which reaches no door
-crates/bt-app/src/entry_doors.rs	bt-app crate::entry_doors::EntryDoors::from_values	Ambiguous	unwrap_or_default	1	2026-10-27: T-UIA-SKELETON: a standard-library method (Option, Result, Iterator, str, bool, pointer, Cell) on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/entry_doors.rs	bt-app crate::entry_doors::installed	Ambiguous	unwrap_or	1	2026-10-20: T-DIAGNOSTIC-DOORS-AT-THE-ENTRY; a standard-library method (Option, Iterator, OsStr, Path) on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/exit_diagnostics.rs	bt-app crate::exit_diagnostics::cap_controlled_failure	Ambiguous	by_ref	1	
 crates/bt-app/src/exit_diagnostics.rs	bt-app crate::exit_diagnostics::cap_controlled_failure	Ambiguous	collect	1	
@@ -2631,7 +2629,7 @@ crates/bt-app/src/main.rs	bt-app crate::measure_markdown_local	Dynamic	measure	1
 crates/bt-app/src/main.rs	bt-app crate::native_window_of	Ambiguous	as_raw	1	
 crates/bt-app/src/main.rs	bt-app crate::native_window_of	Ambiguous	context	1	
 crates/bt-app/src/main.rs	bt-app crate::new_window_runtime	Ambiguous	is_ok	1	2026-11-03: T-SHUTDOWN-SAVE-LANDS-BEFORE-THE-END (plan row 201, re-ruling (A)+(C)); Result::is_ok on what EventLoopProxy::send_event returned for the question's wake, handed to session_end::posted; a value read, no door
-crates/bt-app/src/main.rs	bt-app crate::new_window_runtime	Ambiguous	send_event	2	
+crates/bt-app/src/main.rs	bt-app crate::new_window_runtime	Ambiguous	send_event	3	2026-10-27: T-UIA-SKELETON: the UI Automation wake sends AppEvent::UiAutomationAsked through the loop proxy, as the window's other wakes do: never waits
 crates/bt-app/src/main.rs	bt-app crate::new_window_runtime	Ambiguous	text	1	
 crates/bt-app/src/main.rs	bt-app crate::new_window_runtime	Ambiguous	to_owned	1	
 crates/bt-app/src/main.rs	bt-app crate::note_text_site	Ambiguous	len	1	
@@ -5146,7 +5144,6 @@ crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::fl
 crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::flush_uia	Ambiguous	take_focus_request	1	2026-10-27: T-UIA-SKELETON: the window's UiaDoor (UiaHook or the headless recorder) through its associated type: a lock held to swap one Arc, an atomic load, an atomic swap; no other door
 crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::flush_uia	Ambiguous	threads	1	2026-10-28: T-UIA-SKELETON (review fold): the window's UiaDoor (UiaHook or the headless recorder) through its associated type: an atomic load of the first client call's thread, no wait
 crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::flush_uia	Ambiguous	wanted	1	2026-10-27: T-UIA-SKELETON: the window's UiaDoor (UiaHook or the headless recorder) through its associated type: a lock held to swap one Arc, an atomic load, an atomic swap; no other door
-crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::follow_the_window_band	Ambiguous	context	1	
 crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::hand_over_across_windows	Ambiguous	unwrap_or_default	1	
 crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::open_window	Ambiguous	and_then	3	
 crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::open_window	Ambiguous	clone	2	
@@ -6479,7 +6476,6 @@ crates/bt-app/src/trace_sink.rs	bt-app crate::trace_sink::flush_sink	Ambiguous	t
 crates/bt-app/src/trace_sink.rs	bt-app crate::trace_sink::put	Dynamic	write_all	1	
 crates/bt-app/src/trace_sink.rs	bt-app crate::trace_sink::run_to	Dynamic	flush	1	
 crates/bt-app/src/trace_sink.rs	bt-app crate::trace_sink::sink	Ambiguous	and_then	1	
-crates/bt-app/src/uninstall.rs	bt-app crate::uninstall::Entry::line	Ambiguous	in_lang	8	2026-11-05: T-CODEX-NOTIFY-ALREADY-TAKEN-FOLIO-CHAINS-TO-IT (0.4.10 plan row 69, review fold); Fate::LeftUnread rendered as removed or not present with its reason (Text::in_lang, format!); an in-memory computation over values the call already holds, no wait
 crates/bt-app/src/uia_events.rs	bt-app crate::uia_events::UiaEventsLane::request	Ambiguous	is_ok	1	2026-10-27: T-UIA-SKELETON: a standard-library method (Option, Result, Iterator, str, bool, pointer, Cell) on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/uia_events.rs	bt-app crate::uia_events::run	Ambiguous	raise	1	2026-10-27: T-UIA-SKELETON: UiaEvents::raise on the bt-uia-events worker (its WorkerCtx): UiaRaiseAutomationEvent off the window thread (R6)
 crates/bt-app/src/uia_report.rs	bt-app crate::uia_report::UiaReport::due	Ambiguous	all	1	2026-10-28: T-UIA-SKELETON (review fold): a standard-library method (Option, Result, Iterator, str, bool, atomic) on a receiver the grammar does not type, which reaches no door
@@ -6490,6 +6486,7 @@ crates/bt-app/src/uia_report.rs	bt-app crate::uia_report::pane_text	Ambiguous	un
 crates/bt-app/src/uia_report.rs	bt-app crate::uia_report::pane_text	Ambiguous	zip	1	2026-10-27: T-UIA-SKELETON: a standard-library method (Option, Result, Iterator, str, bool, pointer, Cell) on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/uia_report.rs	bt-app crate::uia_report::says_the_same	Ambiguous	all	1	2026-10-28: T-UIA-SKELETON (review fold): a standard-library method (Option, Result, Iterator, str, bool, atomic) on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/uia_report.rs	bt-app crate::uia_report::says_the_same	Ambiguous	as_str	2	2026-10-28: T-UIA-SKELETON (review fold): a standard-library method (Option, Result, Iterator, str, bool, atomic) on a receiver the grammar does not type, which reaches no door
+crates/bt-app/src/uninstall.rs	bt-app crate::uninstall::Entry::line	Ambiguous	in_lang	8	2026-11-05: T-CODEX-NOTIFY-ALREADY-TAKEN-FOLIO-CHAINS-TO-IT (0.4.10 plan row 69, review fold); Fate::LeftUnread rendered as removed or not present with its reason (Text::in_lang, format!); an in-memory computation over values the call already holds, no wait
 crates/bt-app/src/uninstall.rs	bt-app crate::uninstall::Entry::line	Ambiguous	join	1	
 crates/bt-app/src/uninstall.rs	bt-app crate::uninstall::Entry::line	Ambiguous	to_owned	4	
 crates/bt-app/src/uninstall.rs	bt-app crate::uninstall::Entry::line	Ambiguous	to_string	1	
