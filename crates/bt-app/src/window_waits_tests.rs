@@ -9418,12 +9418,13 @@ fn method_arity(path: &str) -> Option<usize> {
 /// (T-WGPU-DEVICE-POLL-WAIT-IN-NEITHER-LIST, 0.4.10 plan row 11, ruling R4 and review N1). A
 /// receiver the reading types is not always typed right: a closure parameter handed to a
 /// first-party method is given that method's receiver's types, and a field whose declared type is
-/// its struct's generic parameter the struct's. A call of such an entry is read only when its
-/// receiver's types hold the entry's type (a site) or a first-party type that declares a method of
-/// the call's name (`HangWatch::poll`); any other is an [`UnreadCall`] ([`Reader::unaccounted`]),
-/// as an untyped receiver is. `poll` is the vocabulary method name a first-party type shares in the
-/// product, so `wgpu::Device::poll` is told only by its receiver. The same check for every method
-/// entry is plan row 93's cross-check of a receiver typed wrong.
+/// its struct's generic parameter is given the parameter's bare name. A call of such an entry is
+/// read only when its receiver's types hold the entry's type (a site) or a first-party type that
+/// declares a method of the call's name (`HangWatch::poll`); any other is an [`UnreadCall`]
+/// ([`Reader::unaccounted`]), as an untyped receiver is. `poll` is a vocabulary method name a
+/// first-party type shares (`HangWatch::poll`), and this row's entry is told by its receiver alone
+/// (rulings R4 and N1). Other shared names (`GitChild::wait` and `try_wait`, the lanes' `submit`,
+/// `send`, `present`, …) are plan row 93's cross-check of a receiver typed wrong.
 const ACCOUNTED_RECEIVERS: [&str; 1] = ["wgpu::Device::poll"];
 
 /// One site: its package, its offset, its entry.
@@ -11265,10 +11266,10 @@ let _ = holder.device.poll(p);
 /// no site and are one unread call each, of `wgpu::Device::poll`.
 ///
 /// MUTATION: delete the registry's `wgpu::Device::poll` line and every planted site leaves the
-/// inventory; match a method entry by its name alone (`receiver.contains(ty)` in [`Reader::read`]'s
-/// site loop, or `|| name == "poll"` beside it) and `its_own_poll` holds a site; read the receiver
-/// as accounted for whatever its types ([`Reader::unaccounted`] answering nothing) and
-/// `through_a_closure` and `through_a_generic_field` are unread no more.
+/// inventory; match a method entry by its name alone (drop `receiver.contains(ty)` in
+/// [`Reader::read`]'s site loop, or add `|| name == "poll"` beside it — P2) and `its_own_poll`
+/// holds a site; read the receiver as accounted for whatever its types ([`Reader::unaccounted`]
+/// answering nothing) and `through_a_closure` and `through_a_generic_field` are unread no more.
 #[test]
 fn a_gpu_wait_is_a_site_only_on_a_receiver_typed_wgpu_device() {
     let world = planted_world("ww-device-poll", PLANTED_DEVICE_POLL);
