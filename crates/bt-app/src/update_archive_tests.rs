@@ -1072,17 +1072,16 @@ fn this_builds_own_members_expand_whole_under_its_embedded_manifest() {
 /// manifest this build embedded.** The integration test that reads the real executable cannot
 /// see the product's private cap, so the cap is held to the embedded text here.
 ///
-/// MUTATION: set `MANIFEST_MAX_BYTES` to 64 and this is red on Windows.
+/// Windows only (0.4.10 plan row 12, review N1): only a Windows build embeds the release
+/// manifest (`build.rs` writes `FOLIO_RELEASE_MANIFEST` for a Windows target alone), so
+/// elsewhere there is no manifest to hold to the cap, and the test returned asserting only the
+/// host.
+///
+/// MUTATION: set `MANIFEST_MAX_BYTES` to 64 and this is red.
+#[cfg(windows)]
 #[test]
 fn the_product_cap_admits_this_builds_manifest() {
-    let Some(path) = option_env!("FOLIO_RELEASE_MANIFEST") else {
-        assert_ne!(
-            bt_platform::host_platform(),
-            bt_platform::HostPlatform::Windows,
-            "a Windows build always embeds the release manifest"
-        );
-        return;
-    };
+    let path = env!("FOLIO_RELEASE_MANIFEST");
     let embedded = std::fs::read(path).unwrap();
     assert!(
         embedded.len() <= super::MANIFEST_MAX_BYTES,
@@ -1098,17 +1097,14 @@ fn the_product_cap_admits_this_builds_manifest() {
 /// included, so this executable carries the block whatever else the run built: the door is held
 /// on a real executable here, and on the built `folio.exe` by `tests/built_folio_manifest.rs`.
 ///
-/// MUTATION: read under another resource name in `EmbeddedManifest` and this is red on Windows.
+/// Windows only (0.4.10 plan row 12, review N1): only a Windows build links the manifest's
+/// resource, so elsewhere there is none to read, and the test returned asserting only the host.
+///
+/// MUTATION: read under another resource name in `EmbeddedManifest` and this is red.
+#[cfg(windows)]
 #[test]
 fn the_product_door_reads_the_manifest_out_of_this_test_executable() {
-    let Some(path) = option_env!("FOLIO_RELEASE_MANIFEST") else {
-        assert_ne!(
-            bt_platform::host_platform(),
-            bt_platform::HostPlatform::Windows,
-            "a Windows build always embeds the release manifest"
-        );
-        return;
-    };
+    let path = env!("FOLIO_RELEASE_MANIFEST");
     let embedded = std::fs::read_to_string(path).unwrap();
     let this = std::env::current_exe().unwrap();
     assert_eq!(

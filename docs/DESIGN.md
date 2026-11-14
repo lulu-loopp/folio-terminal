@@ -16846,6 +16846,33 @@ The flags are a debt and never a liveness: `Runtime::turn_facts` counts them as 
 - the source pin `computation_lane::tests::the_product_lane_makes_the_desktop_formula_engine` (ruled R3);
 - the plants `plant-21-P1.py` (the product door's desktop engine handed back in `decorate`: the count reads 0), `plant-21-P2.py` (the fixture answers `MathEngine::new()`: the ideograph is drawn), `plant-21-P3.py` (the product lane on the suite's faces) and `plant-21-P4.py` (the headless lane back on `ComputationLane::new`).
 
+### 2026-11-13 — A test does not end passed before it asserts anything: what a host leaves out is a `#[cfg]`, and the early returns that remain stand in a register (T-INSTALL-TESTS-SILENT-PASS-OFF-WINDOWS, 0.4.10 plan row 12; 049 row 190; the coordinator's rulings R1–R11 of 2026-11-12 and N1–N11 of 2026-11-13)
+
+**What it met.** 84 tests of `update_apply_windows::tests` opened with `let Some(install) = Install::new(tag) else { return; };` (or reached that return later), over a test root only Windows signs with. On the Mac each returned before its first assertion and libtest counted it passed: the Windows applier's suite was green on macOS while asserting nothing there. The guard this row added found the same class in four more tests: one PSReadLine test, and three manifest tests whose only assertion before their road was "this is not Windows".
+
+**The rule, now.** What a host leaves out is said by `#[cfg]` (CONVENTIONS H1 rule 2), never by a return:
+- 64 of the 84 are `#[cfg(windows)]`, each with what ties it to Windows: a signed set, a started program, a held file, a PE version resource.
+- 20 run on every host over `Install::unsigned`. That installation has the signed one's layout in plain bytes, under the system's policy. Its tests reach no signature, start nothing and hold nothing.
+- The four found by the guard are `#[cfg(windows)]`.
+- `Install` keeps its fixture turn as its last field. Both constructors take the turn first (row 78's pin).
+
+**The guard.** `bt-source/tests/early_returns.rs` reads every test's own body in every first-party package (`docs/ARCHITECTURE-GUARDS.md` has the paragraph).
+- A road written after the test's first assertion is dropped (R). Each dropped road is a row of `docs/plans/EARLY-RETURN-DROPPED.tsv` with that assertion and a reason opening with its date (re-review F3), so a new one shows in a diff.
+- Every other road stands in a shape: G1 the else of a `let`, G2 an `if` with no `else`, G3 a `match` arm, G4 a child half over a variable its file sets on a command. A road in no shape is refused.
+- Each G1–G3 site is a row of `docs/plans/EARLY-RETURN-FIXTURES.tsv`. The row is keyed file-wide for a function named by its path, and on its one test otherwise (a method read on no call, a variable, a condition, a read of the environment G4 does not hold). Its hosts are spelled so that no row can name Windows or macOS.
+
+**What the register says that the spelling cannot.** The renderer's pixel tests ask `on_the_software_adapter`, which answers `None` in every macOS run (Metal has no fallback adapter). Their row stays, under an `environment:` spelling, with that fact in its reason. Plan row 94 decides between a gate and a fixture that answers there.
+
+**Not seen** (plan row 96):
+- a road inside a helper the test calls (four of the 84 were that shape);
+- a `continue`/`break` past every assertion.
+
+**Pinned by**
+- `early_returns::{no_test_returns_before_it_asserts_but_at_a_registered_fixture, the_grammar_reads_each_shape_and_refuses_a_road_in_none, a_row_naming_no_road_is_stale_and_an_unnamed_road_is_unlisted, a_row_naming_a_suite_host_is_refused}` in `bt-source`'s `real_tree`;
+- `platform_gate_tests::only_the_named_files_decide_what_platform_this_is`, which holds the gated files to the platform list;
+- the Mac list `row12-mac-list.txt`;
+- the plants `plant-12-*.py` in the row's report.
+
 ### 2026-11-13 — The bare-site inventory's reader types a name a pattern binds by the member it binds, carries a type through `std::mem::replace`/`take`, and lists the calls it cannot read (T-WINDOW-WAITS-READER-SEES-MATCH-BOUND-HANDLES, 0.4.10 plan row 19; the coordinator's rulings R1–R8 of 2026-11-12; extends the 2026-09-27 entry's bare-site inventory)
 
 **What it met.** `hang_watch::window_waits_tests`'s reader gave every name a pattern bound the types of the whole value the pattern was matched against. In `crate::git::GitChild::wait`, `match self { Self::Contained(child) => child.wait(), Self::HooksMayOutlive(child) => child.wait() }`, each `child` read as `GitChild`, so the second arm's `std::process::Child::wait` was no site: a wait on the window thread that the inventory did not count, read wrong rather than not at all. The same gap had made `FormulaEngine::engine` call its join by its path (`std::thread::JoinHandle::join(thread)`) only so the reader would see it. A name bound in one arm also stood for every other binding of the same name in the function, so a reader that typed the first arm's `child` would have typed the second's with it.

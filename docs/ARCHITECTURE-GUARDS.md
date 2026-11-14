@@ -1435,6 +1435,29 @@ functions; the walk ends there, as `timing.rs`'s does. The CJK probe's `i18n` sw
 one. `the_product_reach_of_the_tests_is_measured` prints `TEST_GLOBALS_PRODUCT_REACH` as
 a measure, not a gate.
 
+**A test does not end passed before it asserts anything** (T-INSTALL-TESTS-SILENT-PASS-OFF-WINDOWS,
+0.4.10 plan row 12, 2026-11-13). On the Mac, 84 of the Windows applier's tests opened with
+`let Some(install) = Install::new(tag) else { return; };` over a test root only Windows has, and
+libtest counted them passed. `crates/bt-source/tests/early_returns.rs` is the gate and
+`docs/plans/EARLY-RETURN-FIXTURES.tsv` its register. It reads every `#[test]` function's own body
+in every first-party package for a road out (`return;`, `return ();`, `return Ok(…);`). A road
+written after the test's first assertion is dropped (R: the test has checked something), and
+stands as a row of `docs/plans/EARLY-RETURN-DROPPED.tsv` with that assertion and a reason that
+opens with its date, so a new one lands in a diff where review reads what the assertion checks
+(one that checks only the host is the class, gated). Every other road stands in one of four
+shapes or is refused by name: G1 the else of a `let`, G2 an `if` with no `else`, G3 a `match` arm,
+each judged by the callee of its expression (or the expression's whole text), and G4 the child
+half, whose expression reads only variables its own file sets on a started command. A G1–G3
+site needs a row: file, test (`*` for a function named by its path, else the one test function,
+as for a read of the environment G4 does not hold), callee, hosts in one of five spellings
+(`other-unix`, `other-platform`, `environment: <fact>`, `parent-half`, `child-half`; never
+Windows or macOS, where every suite runs) and a reason. The rows equal the sites both ways. When
+red, gate the test with `#[cfg]` on the hosts it needs (CONVENTIONS H1 rule 2), make the fixture
+answer on every host the suite runs on, rewrite a refused road into a shape, or add the row with
+where the road is taken and why. **Not seen:** a road inside a helper the test calls (four of
+the 84 were that shape; plan row 96), a `continue`/`break` past every assertion, and, but for
+the dropped list's reasons, whether the assertion before a dropped road checks enough.
+
 ## Raw-effect and thread-door exceptions
 
 The rule: `bt-app` and `bt-platform` create workers through the admitted thread

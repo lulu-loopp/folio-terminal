@@ -20,9 +20,9 @@ use std::sync::mpsc;
 use bt_persist::UpdateCheckV1;
 use bt_platform::HostPlatform;
 #[cfg(windows)]
-use bt_platform::trust_harness::OTHER_IDENTITY;
-use bt_platform::trust_harness::{Behaviour, IDENTITY, SUBJECT, TestCa};
+use bt_platform::trust_harness::{Behaviour, IDENTITY, OTHER_IDENTITY, SUBJECT, TestCa};
 use bt_winres::digest::{hex, sha256};
+#[cfg(windows)]
 use bt_winres::release_manifest::{PROTOCOL, RESOURCE_NAME, archive_root};
 
 #[cfg(windows)]
@@ -51,6 +51,7 @@ const TAG: &str = "v0.4.7";
 const TO: &str = "0.4.7";
 
 /// The text members of a test release, after the two sidecars.
+#[cfg(windows)]
 const TEXT_MEMBERS: [&str; 3] = ["folio-here.cmd", "uninstall.cmd", "LICENSE-MIT"];
 
 /// The offer every test presses: `v0.4.7`, for Windows.
@@ -102,6 +103,7 @@ fn build(
 
 /// [`build`], whose `folio.exe` does what `behaviour` says when it is run —
 /// the Windows applier's tests start it (U-23).
+#[cfg(windows)]
 pub(crate) fn build_that(
     ca: &TestCa,
     folder: &Path,
@@ -123,6 +125,7 @@ pub(crate) fn build_that(
 }
 
 /// [`build_that`], whose manifest's `min_updater` is `needs` (U-42c).
+#[cfg(windows)]
 fn build_needing(
     ca: &TestCa,
     folder: &Path,

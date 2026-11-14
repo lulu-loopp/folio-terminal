@@ -334,7 +334,12 @@ three things:
    ticket lands.
 
 What `core-macos` leaves out of `bt-app`'s suite is said by `#[cfg]` on the tests (rule 2 above), not
-by a filter on the CI line. The one exception is named in the step and checked to match exactly one
+by a filter on the CI line, and not by a test that returns before it asserts anything where its
+fixture answers nothing: `bt-source`'s `early_returns` guard refuses such a road unless
+`docs/plans/EARLY-RETURN-FIXTURES.tsv` names it with where it is taken (a host no suite runs on,
+an environment fact, the parent or the child half of a test that starts itself) and why
+(`docs/ARCHITECTURE-GUARDS.md`, "A test does not end passed before it asserts anything"). The
+one exception is named in the step and checked to match exactly one
 test: `update_apply_macos::tests::the_trial_is_launched_through_launch_services_and_found_by_its_image`
 launches a real bundle through `/usr/bin/open`, so CI runs its fake-launch siblings and the real launch
 is run on the owner's Mac.
