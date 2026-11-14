@@ -24,6 +24,11 @@ pub fn ready() -> bool {
     false
 }
 
+/// An endpoint a test reads through `*`.
+pub fn shared_endpoint() -> &'static Option<u16> {
+    &None
+}
+
 /// Settings whose port a test reads through a field.
 pub struct Settings {
     pub port: Option<u16>,
@@ -122,6 +127,22 @@ mod tests {
     }
 
     #[test]
+    fn a_callee_through_a_deref() {
+        let Some(_) = *shared_endpoint() else {
+            return;
+        };
+        assert!(ready());
+    }
+
+    #[test]
+    fn a_callee_through_parentheses() {
+        if !(ready()) {
+            return;
+        }
+        assert!(ready());
+    }
+
+    #[test]
     fn a_bare_name_in_one_test() {
         let names = ["one"];
         let Some(_) = names.iter().next() else {
@@ -167,6 +188,24 @@ mod tests {
     #[test]
     fn an_expect_err_first_drops_the_road() {
         TestRoot::new().expect_err("no test root here");
+        let Some(_) = endpoint() else {
+            return;
+        };
+    }
+
+    #[test]
+    fn an_unreachable_first_drops_the_road() {
+        if ready() {
+            unreachable!("not ready yet");
+        }
+        let Some(_) = endpoint() else {
+            return;
+        };
+    }
+
+    #[test]
+    fn an_unwrap_err_first_drops_the_road() {
+        TestRoot::new().unwrap_err();
         let Some(_) = endpoint() else {
             return;
         };

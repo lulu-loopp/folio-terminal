@@ -38,10 +38,10 @@
 //!   the child's own assertions, the other host's half that asserts its refusal
 //!   (`if host != Windows { assert!(files.is_empty()); return; }`). The assertion counts
 //!   wherever it stands before the road, inside the road's own `else` block too, and what it
-//!   checks is not judged here (below). The dropped roads are measured, not registered: the
-//!   row's report names each one with the assertion before it, and review reads them; a test
-//!   whose only assertion before its road is the host itself is this guard's class and is gated
-//!   with `#[cfg]` (0.4.10 plan row 12 gated three).
+//!   checks is not judged here (below). The dropped roads stand in a list of their own (below),
+//!   so a new one lands in a diff with a dated reason and review reads what its assertion
+//!   checks; a test whose only assertion before its road is the host itself is this guard's
+//!   class and is gated with `#[cfg]` (0.4.10 plan row 12 gated three).
 //! * **G1 — the else of a `let`.** `let PAT = EXPR else { …; return; };`, the else block
 //!   ending in the road out. Judged by `EXPR`'s callee.
 //! * **G2 — an `if` with no `else`.** `if COND { …; return; }`, the block ending in the road
@@ -55,15 +55,17 @@
 //!   a started command** — `.env(NAME, …)`, its first argument spelled as the read's (whitespace
 //!   out) — is the child half: the test is a copy of its own binary, started by its parent half
 //!   with that variable, and the parent asserts. Accepted, with no row. A read of a variable
-//!   the file never sets on a command (an opt-in, a variable the person sets) is no child half:
-//!   the road is a G1–G3 site judged by its callee and keyed on its test (`env::var_os` names
-//!   the variable, not a fixture), and needs a row (`child-half` when another file's command
-//!   starts the child, otherwise where it is taken).
+//!   no command of the file sets under that spelling (an opt-in, a variable the person sets) is
+//!   no child half: the road is a G1–G3 site judged by its callee and keyed on its test
+//!   (`env::var_os` names the variable, not a fixture), and needs a row — `child-half` when a
+//!   command sets it under a spelling G4 cannot match (another file's, or a helper's parameter:
+//!   `.env(child, …)`), otherwise where it is taken.
 //!
 //! **The callee** of an expression is the path of the call it is, by its last two segments
 //! (`Install::new`, `launch_pipe::endpoint_for`), read through `&`, `!`, `*`, parentheses, `?`,
-//! `.await`, a field and a method's receiver (`TestCa::new().ok()` is `TestCa::new`); a method
-//! called on no call is its name (`install.home.journal().exists()` is `journal`). An
+//! a field and a method's receiver (`TestCa::new().ok()` is `TestCa::new`); a method
+//! called on no call is its name (`install.home.journal().exists()` is `journal`). (No
+//! `.await`: a `#[test]` function cannot be `async`, and an `async` block is not read.) An
 //! expression that is no call in that reading — a variable, a comparison, a `cfg!`, a `&&`
 //! chain — is judged by its whole text with the whitespace out
 //! (`crate::host_platform()==crate::HostPlatform::OtherUnix`, `cfg!(not(any(windows,unix)))`).
@@ -97,13 +99,26 @@
 //!   that child's verdict, and the child takes the other branch;
 //! * `child-half`: every host, in the suite's own run, where the test is the entry of a child
 //!   another test starts (its mode read from the arguments or standard input, or from a
-//!   variable its own file never sets, before the road: what G4 does not hold), and the
-//!   starting test asserts what the child did.
+//!   variable set under a spelling G4 cannot match, before the road), and the starting test
+//!   asserts what the child did.
 //!
 //! None names Windows or macOS, the hosts every suite of the workspace runs on: a road taken
 //! there is this guard's defect, never a row. The reason column is free, and says the whole
 //! fact where the spelling cannot (a fixture that answers nothing on a whole platform the
 //! suite runs on stands in the reason, with the plan row that decides it).
+//!
+//! # The dropped list
+//!
+//! Every road R drops stands as a row of `docs/plans/EARLY-RETURN-DROPPED.tsv` — the register's
+//! five columns and the assertion: file, test (always the test function's name), callee (as a
+//! site's key, or `-` for a road in no shape), hosts, reason, and the name of the first
+//! assertion written before the road (`assert!`, `expect_err`). The rows are an equality with
+//! the dropped roads, both ways, as the register's are with the sites. A road after an
+//! assertion may be taken on a suite host, so the hosts spellings here are `not-windows`,
+//! `other-unix`, `other-platform`, `neither-windows-nor-macos`, `parent-half`, `child-half`
+//! and `environment: <fact>`. **Every reason opens with the date its row was written**
+//! (`2026-11-13: …`): the list grows only with a dated reason that says what the assertion
+//! before the road checks, and one that checks only the host is this guard's class, gated.
 //!
 //! # What it does not see
 //!
@@ -154,6 +169,15 @@ const FILE_WIDE: &str = "*";
 /// The hosts every suite of the workspace runs on: a register row may not name them.
 const SUITE_HOSTS: [&str; 2] = ["windows", "macos"];
 
+/// The dropped list, from the workspace root: every road R drops, with its assertion.
+const DROPPED_LIST: &str = "docs/plans/EARLY-RETURN-DROPPED.tsv";
+
+/// The dropped list's column header: the register's five, and the assertion.
+const DROPPED_HEADER: &str = "file\ttest\tcallee\thosts\treason\tassertion";
+
+/// The callee column of a dropped road no shape holds.
+const NO_SHAPE: &str = "-";
+
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
 }
@@ -202,15 +226,40 @@ impl Site {
     }
 }
 
+/// One road out R dropped, which the dropped list must name: the file it stands in, its test
+/// function, its key (as a site's callee, or `-` for a road in no shape), the name of the first
+/// assertion written before it, and where both are.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct Dropped {
+    file: String,
+    test_fn: String,
+    callee: String,
+    assertion: String,
+    line: usize,
+    test: String,
+    assert_line: usize,
+}
+
+impl Dropped {
+    /// The dropped list's key this road needs: (file, test, callee, assertion).
+    fn key(&self) -> (String, String, String, String) {
+        (
+            self.file.clone(),
+            self.test_fn.clone(),
+            self.callee.clone(),
+            self.assertion.clone(),
+        )
+    }
+}
+
 /// What a scan found: the sites the register must name, the accepted child halves (G4), the
-/// roads out in no shape, each as `file:line test`, and the roads R dropped, each with the
-/// assertion written before it.
+/// roads out in no shape, each as `file:line test`, and the roads R dropped.
 #[derive(Debug, Default)]
 struct Found {
     sites: BTreeSet<Site>,
     children: BTreeSet<String>,
     refused: BTreeSet<String>,
-    dropped: BTreeSet<String>,
+    dropped: BTreeSet<Dropped>,
     /// How many tests were read.
     tests: usize,
 }
@@ -270,7 +319,6 @@ fn callee(expr: &Expr) -> Option<(String, bool)> {
         Expr::Unary(inner) => callee(&inner.expr),
         Expr::Paren(inner) => callee(&inner.expr),
         Expr::Try(inner) => callee(&inner.expr),
-        Expr::Await(inner) => callee(&inner.base),
         Expr::Field(inner) => callee(&inner.base),
         Expr::Let(inner) => callee(&inner.expr),
         _ => None,
@@ -318,23 +366,33 @@ fn environment_reads(expr: &Expr, text: &str) -> Vec<String> {
     reads.names
 }
 
-/// What a road a shape holds is judged by: the child half's dispatch (G4), or a callee or a
-/// condition with whether its row is keyed file-wide.
+/// How a road a shape holds is judged: the child half's dispatch (G4), or a site whose row is
+/// keyed file-wide or on its test.
 #[derive(Debug)]
 enum Judged {
     Child,
-    By { key: String, file_wide: bool },
+    Site { file_wide: bool },
+}
+
+/// A road out a shape holds: where, in which shape, how it is judged, and its key — the callee
+/// of the expression it hangs on, or that expression's whole text with the whitespace out.
+#[derive(Debug)]
+struct Held {
+    at: usize,
+    shape: &'static str,
+    judged: Judged,
+    key: String,
 }
 
 /// Where a road out stands in one test's own body: every road out by its offset in the test's
-/// text, and those a shape holds, each with its shape and what it is judged by.
+/// text, and those a shape holds.
 struct Roads<'t> {
     /// The test's whole text, which every offset is into.
     text: &'t str,
     /// The test's file with its whitespace out, where G4 looks for `.env(NAME,`.
     file: &'t str,
     out: Vec<usize>,
-    held: Vec<(usize, &'static str, Judged)>,
+    held: Vec<Held>,
     /// Where an assertion is written in the body, by its offset, with its name.
     asserts: Vec<(usize, String)>,
 }
@@ -358,24 +416,25 @@ impl Roads<'_> {
     /// the variable, not a fixture.
     fn hold(&mut self, ret: &syn::ExprReturn, shape: &'static str, expr: &Expr) {
         let reads = environment_reads(expr, self.text);
+        let (key, named) =
+            callee(expr).unwrap_or_else(|| (squeezed(&self.text[expr.span().byte_range()]), false));
         let judged = if !reads.is_empty()
             && reads
                 .iter()
                 .all(|name| self.file.contains(&format!(".env({name},")))
         {
             Judged::Child
-        } else if let Some((key, file_wide)) = callee(expr) {
-            Judged::By {
-                key,
-                file_wide: file_wide && reads.is_empty(),
-            }
         } else {
-            Judged::By {
-                key: squeezed(&self.text[expr.span().byte_range()]),
-                file_wide: false,
+            Judged::Site {
+                file_wide: named && reads.is_empty(),
             }
         };
-        self.held.push((offset(ret), shape, judged));
+        self.held.push(Held {
+            at: offset(ret),
+            shape,
+            judged,
+            key,
+        });
     }
 }
 
@@ -421,9 +480,7 @@ impl<'ast> Visit<'ast> for Roads<'_> {
         visit::visit_expr_match(self, choice);
     }
 
-    /// A macro's arguments are read as the test's own code when they are comma-separated
-    /// expressions (`assert!`, `format!`); in any other macro a `return` token is a road out
-    /// in no shape, since what it ends is the macro's to say.
+    /// A call named as an assertion (`assert_window_spent_by(…)`) is one.
     fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
         if let Expr::Path(path) = &*call.func
             && let Some(segment) = path.path.segments.last()
@@ -442,6 +499,9 @@ impl<'ast> Visit<'ast> for Roads<'_> {
         visit::visit_expr_method_call(self, call);
     }
 
+    /// A macro's arguments are read as the test's own code when they are comma-separated
+    /// expressions (`assert!`, `format!`); in any other macro a `return` token is a road out
+    /// in no shape, since what it ends is the macro's to say.
     fn visit_macro(&mut self, mac: &'ast syn::Macro) {
         if let Some(segment) = mac.path.segments.last()
             && asserts(&segment.ident.to_string())
@@ -541,33 +601,52 @@ fn scan(index: &Index, root: &Path, found: &mut Found) {
             asserts: Vec::new(),
         };
         roads.visit_block(&parsed.block);
+        let test_fn = parsed.sig.ident.to_string();
         // R: a road with an assertion written before it is no road of this class (the test has
-        // checked something on the way); it is dropped, and named with that assertion.
-        if let Some((first_assert, name)) = roads.asserts.iter().min().cloned() {
+        // checked something on the way); it is dropped, and recorded with that assertion for
+        // the dropped list.
+        if let Some((first_assert, assertion)) = roads.asserts.iter().min().cloned() {
             let (_, assert_line) = place(first_assert);
             for at in roads.out.iter().filter(|at| **at > first_assert) {
                 let (file, line) = place(*at);
-                found.dropped.insert(format!(
-                    "{file}:{line} {test} (after `{name}` at line {assert_line})"
-                ));
+                let callee = roads
+                    .held
+                    .iter()
+                    .find(|held| held.at == *at)
+                    .map_or_else(|| NO_SHAPE.to_owned(), |held| held.key.clone());
+                found.dropped.insert(Dropped {
+                    file,
+                    test_fn: test_fn.clone(),
+                    callee,
+                    assertion: assertion.clone(),
+                    line,
+                    test: test.clone(),
+                    assert_line,
+                });
             }
             roads.out.retain(|at| *at < first_assert);
-            roads.held.retain(|(at, _, _)| *at < first_assert);
+            roads.held.retain(|held| held.at < first_assert);
         }
-        let held: Vec<usize> = roads.held.iter().map(|(at, _, _)| *at).collect();
-        for (at, shape, judged) in roads.held.drain(..) {
+        let held: Vec<usize> = roads.held.iter().map(|held| held.at).collect();
+        for Held {
+            at,
+            shape,
+            judged,
+            key,
+        } in roads.held.drain(..)
+        {
             let (file, line) = place(at);
             match judged {
                 Judged::Child => {
                     found.children.insert(format!("{file}:{line} {test}"));
                 }
-                Judged::By { key, file_wide } => {
+                Judged::Site { file_wide } => {
                     found.sites.insert(Site {
                         file,
                         key_test: if file_wide {
                             FILE_WIDE.to_owned()
                         } else {
-                            parsed.sig.ident.to_string()
+                            test_fn.clone()
                         },
                         callee: key,
                         line,
@@ -613,42 +692,162 @@ fn hosts_are_spelled(hosts: &str) -> bool {
     spelled && !named
 }
 
-/// The rows of a register's text, refusing a malformed line, a hosts field in no spelling (or
-/// naming a host the suites run on), and a row listed twice, by number.
-fn rows_of(text: &str) -> BTreeSet<(String, String, String)> {
-    let mut rows = BTreeSet::new();
-    let mut header = false;
+/// The data lines of a list's text, each by its line number with its fields: comment and empty
+/// lines skipped, the header required first and equal to `header`, and every line as many
+/// tab-separated fields as the header has.
+fn lines_of<'t>(text: &'t str, list: &str, header: &str) -> Vec<(usize, Vec<&'t str>)> {
+    let columns = header.split('\t').count();
+    let mut lines = Vec::new();
+    let mut seen_header = false;
     for (number, line) in text.lines().enumerate() {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        if !header {
-            assert_eq!(line, HEADER, "{LIST}:{}: the header", number + 1);
-            header = true;
+        if !seen_header {
+            assert_eq!(line, header, "{list}:{}: the header", number + 1);
+            seen_header = true;
             continue;
         }
         let fields: Vec<&str> = line.split('\t').collect();
+        assert_eq!(
+            fields.len(),
+            columns,
+            "{list}:{}: {columns} tab-separated fields: {line}",
+            number + 1
+        );
+        lines.push((number + 1, fields));
+    }
+    assert!(seen_header, "{list} has its header");
+    lines
+}
+
+/// The rows of a register's text, refusing a malformed line, a hosts field in no spelling (or
+/// naming a host the suites run on), and a row listed twice, by number.
+fn rows_of(text: &str) -> BTreeSet<(String, String, String)> {
+    let mut rows = BTreeSet::new();
+    for (number, fields) in lines_of(text, LIST, HEADER) {
         let [file, test, callee, hosts, reason] = fields[..] else {
-            panic!("{LIST}:{}: five tab-separated fields: {line}", number + 1);
+            unreachable!("lines_of answers as many fields as the header has")
         };
         assert!(
             hosts_are_spelled(hosts),
-            "{LIST}:{}: hosts {hosts:?} is not `other-unix`, `other-platform`, `parent-half`, \
-             `child-half` or `environment: <fact>`, or names a host every suite runs on ({}): \
-             a road taken there is gated with `#[cfg]` (CONVENTIONS H1 rule 2), never a row",
-            number + 1,
+            "{LIST}:{number}: hosts {hosts:?} is not `other-unix`, `other-platform`, \
+             `parent-half`, `child-half` or `environment: <fact>`, or names a host every suite \
+             runs on ({}): a road taken there is gated with `#[cfg]` (CONVENTIONS H1 rule 2), \
+             never a row",
             SUITE_HOSTS.join(", ")
         );
-        assert!(
-            !reason.trim().is_empty(),
-            "{LIST}:{}: a row says why",
-            number + 1
-        );
+        assert!(!reason.trim().is_empty(), "{LIST}:{number}: a row says why");
         let fresh = rows.insert((file.to_owned(), test.to_owned(), callee.to_owned()));
-        assert!(fresh, "{LIST}:{}: listed twice: {line}", number + 1);
+        assert!(
+            fresh,
+            "{LIST}:{number}: listed twice: {}",
+            fields.join("\t")
+        );
     }
-    assert!(header, "{LIST} has its header");
     rows
+}
+
+/// The dropped list's rows, as (file, test, callee, assertion).
+fn dropped_list() -> BTreeSet<(String, String, String, String)> {
+    dropped_rows_of(
+        &std::fs::read_to_string(workspace_root().join(DROPPED_LIST)).expect("the dropped list"),
+    )
+}
+
+/// Whether a dropped road's hosts field is one of its spellings. A road after an assertion
+/// may be taken on a suite host, so `not-windows` (macOS among them) is one.
+fn dropped_hosts_are_spelled(hosts: &str) -> bool {
+    matches!(
+        hosts,
+        "not-windows"
+            | "other-unix"
+            | "other-platform"
+            | "neither-windows-nor-macos"
+            | "parent-half"
+            | "child-half"
+    ) || hosts
+        .strip_prefix("environment: ")
+        .is_some_and(|fact| !fact.trim().is_empty())
+}
+
+/// Whether a reason opens with the date its row was written: `YYYY-MM-DD: `.
+fn is_dated(reason: &str) -> bool {
+    let bytes = reason.as_bytes();
+    bytes.len() > 12
+        && bytes[..10].iter().enumerate().all(|(at, byte)| match at {
+            4 | 7 => *byte == b'-',
+            _ => byte.is_ascii_digit(),
+        })
+        && reason[10..].starts_with(": ")
+}
+
+/// The rows of a dropped list's text, refusing a malformed line, a hosts field in no spelling,
+/// a reason that does not open with its date, and a row listed twice, by number.
+fn dropped_rows_of(text: &str) -> BTreeSet<(String, String, String, String)> {
+    let mut rows = BTreeSet::new();
+    for (number, fields) in lines_of(text, DROPPED_LIST, DROPPED_HEADER) {
+        let [file, test, callee, hosts, reason, assertion] = fields[..] else {
+            unreachable!("lines_of answers as many fields as the header has")
+        };
+        assert!(
+            dropped_hosts_are_spelled(hosts),
+            "{DROPPED_LIST}:{number}: hosts {hosts:?} is not `not-windows`, `other-unix`, \
+             `other-platform`, `neither-windows-nor-macos`, `parent-half`, `child-half` or \
+             `environment: <fact>`"
+        );
+        assert!(
+            is_dated(reason),
+            "{DROPPED_LIST}:{number}: a row says when and why, its reason opening with \
+             `YYYY-MM-DD: `: {reason:?}"
+        );
+        let fresh = rows.insert((
+            file.to_owned(),
+            test.to_owned(),
+            callee.to_owned(),
+            assertion.to_owned(),
+        ));
+        assert!(
+            fresh,
+            "{DROPPED_LIST}:{number}: listed twice: {}",
+            fields.join("\t")
+        );
+    }
+    rows
+}
+
+/// The dropped roads no row names, each with the key its row needs, and the rows that name no
+/// dropped road.
+fn judged_dropped(
+    dropped: &BTreeSet<Dropped>,
+    rows: &BTreeSet<(String, String, String, String)>,
+) -> (Vec<String>, Vec<String>) {
+    let keys: BTreeSet<(String, String, String, String)> =
+        dropped.iter().map(Dropped::key).collect();
+    let unlisted = dropped
+        .iter()
+        .filter(|road| !rows.contains(&road.key()))
+        .map(|road| {
+            format!(
+                "{}:{} {} (`{}`, after `{}` at line {}; row key `{}\t{}\t{}\t…\t{}`)",
+                road.file,
+                road.line,
+                road.test,
+                road.callee,
+                road.assertion,
+                road.assert_line,
+                road.file,
+                road.test_fn,
+                road.callee,
+                road.assertion
+            )
+        })
+        .collect();
+    let stale = rows
+        .difference(&keys)
+        .map(|(file, test, callee, assertion)| format!("{file}\t{test}\t{callee}\t…\t{assertion}"))
+        .collect();
+    (unlisted, stale)
 }
 
 /// The sites no row names, each with the key its row needs, and the rows that name no site.
@@ -722,6 +921,30 @@ fn no_test_returns_before_it_asserts_but_at_a_registered_fixture() {
     );
 }
 
+/// RED (0.4.10 plan row 12, re-review F3) — **every road out R drops stands in the dropped
+/// list with the assertion before it, and every row still names one**: a road after an
+/// assertion lands in a diff with a dated reason, where review reads whether that assertion
+/// checks anything but the host (the class `#[cfg]` gates).
+///
+/// MUTATION: write `if cfg!(not(windows)) { return; }` after `assert_eq!(MODULE, MODULE_NAME);`
+/// in `psreadline::tests::the_shipped_version_is_the_package_the_manifest_and_the_directory`
+/// and this names it, unlisted (the plant `plant-12-a-dropped-road-without-a-row.py`).
+#[test]
+fn every_road_after_an_assertion_is_on_the_dropped_list() {
+    let found = workspace_found();
+    let (unlisted, stale) = judged_dropped(&found.dropped, &dropped_list());
+    assert!(
+        unlisted.is_empty() && stale.is_empty(),
+        "these tests take a road out after an assertion: add a row to {DROPPED_LIST} saying \
+         where the road is taken and, dated, why what the test asserted before it is enough — \
+         or, where that assertion checks only the host, gate the test with `#[cfg]` \
+         (CONVENTIONS H1 rule 2):\n  {}\n\
+         on {DROPPED_LIST} and naming no dropped road any more (remove the row):\n  {}",
+        unlisted.join("\n  "),
+        stale.join("\n  ")
+    );
+}
+
 /// The `early_returns` fixture, as an index, with its root.
 fn fixture() -> (Index, PathBuf) {
     let directory = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -755,13 +978,14 @@ fn fixture() -> (Index, PathBuf) {
 /// The fixture holds, for each line of the module doc: G1 over a fixture answering `Option`
 /// (with `return;`, `return ();` and, in a test returning `Result`, `return Ok(())`), G2 over a
 /// `cfg!`, an `if let` and the last arm of an `else if` chain, G3 over a call; the callee read
-/// through `!`, `&`, `?` and a field, a method on no call and a variable (both keyed on their
-/// test), the child half by an `if`, a `let` and a `match` (G4) and an opt-in read no command of
-/// the file sets (a site); a road out at the end of a loop, after a statement, in a branch with
-/// an `else` and among a macro's tokens (refused); a road after `assert!`, `panic!`,
-/// `expect_err` and an `assert…` helper (dropped); and a `return` in a closure (in a body and in
-/// an `assert!`'s argument), in an `async` block, in a nested function, a `return Err(…)` and a
-/// helper's own `return` (none read).
+/// through `!`, `&`, `*`, parentheses, `?` and a field, a method on no call and a variable (both
+/// keyed on their test), the child half by an `if`, a `let` and a `match` (G4) and an opt-in read
+/// no command of the file sets (a site); a road out at the end of a loop, after a statement, in a
+/// branch with an `else` and among a macro's tokens (refused); a road after `assert!`, `panic!`,
+/// `unreachable!`, `expect_err`, `unwrap_err` and an `assert…` helper (dropped, each with its
+/// callee and assertion); and a `return` in a closure (in a body and in an `assert!`'s
+/// argument), in an `async` block, in a nested function, a `return Err(…)` and a helper's own
+/// `return` (none read).
 ///
 /// MUTATION: descend into closures in `Roads` and `a_return_in_a_closure_is_not_the_tests` is
 /// refused; keep the roads after the first assertion and
@@ -796,7 +1020,9 @@ fn the_grammar_reads_each_shape_and_refuses_a_road_in_none() {
             "crate::tests::a_callee_through_a_reference G1 endpoint [*]",
             "crate::tests::an_endpoint_by_a_match G3 endpoint [*]",
             "crate::tests::a_callee_through_a_not G2 ready [*]",
+            "crate::tests::a_callee_through_parentheses G2 ready [*]",
             "crate::tests::an_else_if_last_arm_is_held_as_g2 G2 ready [*]",
+            "crate::tests::a_callee_through_a_deref G1 shared_endpoint [*]",
             "crate::tests::a_bare_name_in_another_test G1 iter [a_bare_name_in_another_test]",
             "crate::tests::a_bare_name_in_one_test G1 iter [a_bare_name_in_one_test]",
             "crate::tests::a_host_by_its_cfg G2 cfg!(not(windows)) [a_host_by_its_cfg]",
@@ -836,17 +1062,30 @@ fn the_grammar_reads_each_shape_and_refuses_a_road_in_none() {
         ],
         "{found:#?}"
     );
+    let mut dropped: Vec<String> = found
+        .dropped
+        .iter()
+        .map(|road| {
+            format!(
+                "{} {} after `{}` at line {}",
+                road.test, road.callee, road.assertion, road.assert_line
+            )
+        })
+        .collect();
+    dropped.sort();
     assert_eq!(
-        strip(&found.dropped),
+        dropped,
         [
-            "crate::tests::a_panic_first_drops_the_road (after `panic!` at line 160)",
-            "crate::tests::a_road_after_an_assertion_has_checked_something (after `assert!` at line 310)",
-            "crate::tests::an_assert_helper_first_drops_the_road (after `assert_nothing_moved` at line 177)",
-            "crate::tests::an_expect_err_first_drops_the_road (after `expect_err` at line 169)",
+            "crate::tests::a_panic_first_drops_the_road endpoint after `panic!` at line 181",
+            "crate::tests::a_road_after_an_assertion_has_checked_something endpoint after `assert!` at line 349",
+            "crate::tests::an_assert_helper_first_drops_the_road endpoint after `assert_nothing_moved` at line 216",
+            "crate::tests::an_expect_err_first_drops_the_road endpoint after `expect_err` at line 190",
+            "crate::tests::an_unreachable_first_drops_the_road endpoint after `unreachable!` at line 199",
+            "crate::tests::an_unwrap_err_first_drops_the_road endpoint after `unwrap_err` at line 208",
         ],
         "{found:#?}"
     );
-    assert_eq!(found.tests, 30, "{found:#?}");
+    assert_eq!(found.tests, 34, "{found:#?}");
 }
 
 /// RED (0.4.10 plan row 12) — **the register is an equality with the sites**: a site no row
@@ -870,19 +1109,88 @@ fn a_row_naming_no_road_is_stale_and_an_unnamed_road_is_unlisted() {
          lib.rs\t*\tgone::away\tother-unix\ta fixture no test calls any more\n"
     ));
     let (unlisted, stale) = judged(&found.sites, &rows);
-    let unlisted_tests: Vec<&str> = unlisted
+    let mut unlisted_tests: Vec<&str> = unlisted
         .iter()
         .filter_map(|entry| entry.split(' ').nth(1))
         .collect();
-    assert!(
-        unlisted_tests.contains(&"crate::tests::a_bare_name_in_another_test")
-            && !unlisted_tests.contains(&"crate::tests::a_bare_name_in_one_test")
-            && !unlisted_tests.contains(&"crate::tests::a_fixture_answering_none")
-            && !unlisted_tests.contains(&"crate::tests::a_host_by_its_cfg")
-            && unlisted_tests.contains(&"crate::tests::an_endpoint_by_a_match"),
+    unlisted_tests.sort_unstable();
+    assert_eq!(
+        unlisted_tests,
+        [
+            "crate::tests::a_bare_name_in_another_test",
+            "crate::tests::a_callee_through_a_deref",
+            "crate::tests::a_callee_through_a_field",
+            "crate::tests::a_callee_through_a_not",
+            "crate::tests::a_callee_through_a_reference",
+            "crate::tests::a_callee_through_parentheses",
+            "crate::tests::a_unit_return_is_a_road",
+            "crate::tests::a_variable_is_judged_by_its_name",
+            "crate::tests::an_else_if_last_arm_is_held_as_g2",
+            "crate::tests::an_endpoint_by_a_match",
+            "crate::tests::an_opt_in_is_no_child_half",
+        ],
         "{unlisted:#?}"
     );
     assert_eq!(stale, ["lib.rs\t*\tgone::away", "lib.rs\t*\titer"]);
+}
+
+/// RED (0.4.10 plan row 12, re-review F3) — **the dropped list is an equality with the roads R
+/// drops, keyed on the test, the road's callee (`-` in no shape) and the assertion before it**:
+/// a dropped road no row names is unlisted, and a row naming none is stale.
+///
+/// MUTATION: answer no stale rows from `judged_dropped` and `gone_away`'s row is not named;
+/// leave the assertion out of `Dropped::key` and the `assert!` row covers the `panic!` road.
+#[test]
+fn a_dropped_road_no_row_names_is_unlisted_and_a_row_naming_none_is_stale() {
+    let (index, directory) = fixture();
+    let mut found = Found::default();
+    scan(&index, &directory, &mut found);
+    let rows = dropped_rows_of(&format!(
+        "# a dropped list\n{DROPPED_HEADER}\n\
+         lib.rs\ta_road_after_an_assertion_has_checked_something\tendpoint\tenvironment: no \
+         endpoint\t2026-11-13: the endpoint was asserted absent first\tassert!\n\
+         lib.rs\ta_panic_first_drops_the_road\tendpoint\tenvironment: no endpoint\t2026-11-13: \
+         under another assertion than the road's\tassert!\n\
+         lib.rs\tgone_away\t-\tother-unix\t2026-11-13: a test no longer there\tassert!\n"
+    ));
+    let (unlisted, stale) = judged_dropped(&found.dropped, &rows);
+    let mut unlisted_tests: Vec<&str> = unlisted
+        .iter()
+        .filter_map(|entry| entry.split(' ').nth(1))
+        .collect();
+    unlisted_tests.sort_unstable();
+    assert_eq!(
+        unlisted_tests,
+        [
+            "crate::tests::a_panic_first_drops_the_road",
+            "crate::tests::an_assert_helper_first_drops_the_road",
+            "crate::tests::an_expect_err_first_drops_the_road",
+            "crate::tests::an_unreachable_first_drops_the_road",
+            "crate::tests::an_unwrap_err_first_drops_the_road",
+        ],
+        "{unlisted:#?}"
+    );
+    assert_eq!(
+        stale,
+        [
+            "lib.rs\ta_panic_first_drops_the_road\tendpoint\t…\tassert!",
+            "lib.rs\tgone_away\t-\t…\tassert!",
+        ]
+    );
+}
+
+/// RED (0.4.10 plan row 12, re-review F3) — **a dropped list row grows only with a dated
+/// reason**: a reason that does not open with `YYYY-MM-DD: ` is refused.
+///
+/// MUTATION: answer `true` from `is_dated` and the undated row is taken.
+#[test]
+#[should_panic(expected = "3: a row says when and why")]
+fn a_dropped_row_without_its_date_is_refused() {
+    let _ = dropped_rows_of(&format!(
+        "{DROPPED_HEADER}\n\
+         a.rs\tone\t-\tother-unix\t2026-11-13: dated\tassert!\n\
+         a.rs\ttwo\t-\tother-unix\tundated\tassert!\n"
+    ));
 }
 
 /// RED (0.4.10 plan row 12) — **a row may not name a host every suite runs on**: a road taken
