@@ -418,8 +418,11 @@ mod on_macos {
 
     /// **A child that answers only after its bound**: it says `standing`, marks `$1` so the test
     /// knows it has, then waits for `$2` — the test's late answer — and only then says `late`.
-    const LATE_CHILD: &str =
-        r#"printf standing; : > "$1"; while [ ! -e "$2" ]; do sleep 0.01; done; printf late"#;
+    /// It gives up waiting on its own after 1000 rests of its own (ten seconds or more) and says
+    /// `late` then too, so a call whose rests do not move the test's clock ends with the late
+    /// answer read, red by name, never a hang; on a clock that spends the bound's count, the child
+    /// is ended long before its own rests run out.
+    const LATE_CHILD: &str = r#"printf standing; : > "$1"; i=0; while [ ! -e "$2" ] && [ "$i" -lt 1000 ]; do sleep 0.01; i=$((i+1)); done; printf late"#;
 
     /// A fresh folder for one test, under the system's temporary folder.
     fn scratch(name: &str) -> PathBuf {
@@ -578,7 +581,11 @@ mod on_macos {
     ///
     /// MUTATION: in `arm::run`, read the deadline's check on `Instant::now()` (the real clock),
     /// delete the check, or set the deadline at twice the bound — each lets the late answer in,
-    /// and the call answers `Ok`.
+    /// and the call answers `Ok` (plants real-clock, deadline-removed, double-bound). Rest
+    /// between two looks off the clock (`clock.pause(POLL)` becomes
+    /// `crate::install_txn::WallLockClock.pause(POLL)`, plant rest-off-the-clock): the clock is
+    /// never asked, so its reading never moves and the deadline never comes; the child gives up
+    /// on its own and answers, and the call answers `Ok("standinglate")`.
     #[test]
     fn a_child_that_answers_past_its_bound_is_ended_and_quoted_at_its_count() {
         let root = scratch("late");
@@ -609,13 +616,13 @@ mod on_macos {
         )
         .map(|answer| answer.stdout)
         .unwrap_err();
+        assert!(!clock.gave_up.get(), "the child never said it stood");
         assert_eq!(
             (refusal.stage, refusal.why.clone()),
             (Stage::GatekeeperStatus, Why::TimedOut),
             "{refusal}"
         );
         assert_eq!(refusal.first_line.as_deref(), Some("standing"), "{refusal}");
-        assert!(!clock.gave_up.get(), "the child never said it stood");
         assert_eq!(
             (clock.spent.get(), clock.moved.get()),
             (in_bound, DISPLAY_BOUND)

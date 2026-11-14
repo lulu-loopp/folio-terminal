@@ -592,8 +592,10 @@ mod arm {
     /// ended by its own handle and the call refused at `stage` — one past its
     /// bound quoting the first line of what it had said by then. The bound is
     /// set and read on `clock` ([`crate::install_txn::LockClock`]: the public
-    /// doors hand [`crate::install_txn::WallLockClock`], a test a counted
-    /// clock), which also rests [`POLL`] between two looks.
+    /// doors hand [`crate::install_txn::WallLockClock`]; the tests hand a
+    /// pinned clock, whose deadline never comes, where a real tool's answer is
+    /// the subject, and a counted clock where the bound's end is), which also
+    /// rests [`POLL`] between two looks.
     pub(super) fn run(
         stage: Stage,
         program: &str,

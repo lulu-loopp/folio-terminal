@@ -852,10 +852,11 @@ pub fn hold_within(path: &Path, hold: Hold, wait: Duration) -> Result<Option<Hel
 /// every `codesign` and `spctl` run's bound is set on [`LockClock::now`] when
 /// the child has started and read on it after every look, and the rest
 /// between two looks is [`LockClock::pause`]; [`WallLockClock`] in the
-/// product, through that module's public doors, and a counted clock in its
-/// tests, so "the bound is spent" is a count of the test's and "the child
-/// answered" is the child's own exit, never a race between a real tool and a
-/// real bound.
+/// product, through that module's public doors; in its tests, a counted
+/// clock where the bound's end is the subject and a pinned clock (one whose
+/// deadline never comes) where a real tool's answer is, so "the bound is
+/// spent" is a count of the test's and "the child answered" is the child's
+/// own exit, never a race between a real tool and a real bound.
 pub trait LockClock {
     /// The monotonic reading the deadline is set and read on.
     fn now(&self) -> Instant;
