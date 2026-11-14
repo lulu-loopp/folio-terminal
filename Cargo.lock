@@ -295,6 +295,7 @@ dependencies = [
  "syntect",
  "toml_edit 0.22.27",
  "two-face",
+ "typst-assets",
  "unicode-properties",
  "unicode-script",
  "winit",

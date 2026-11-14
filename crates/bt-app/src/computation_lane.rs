@@ -358,27 +358,47 @@ pub(crate) struct ComputationLane {
     scale: ShareOf<ScaleWorkerRequest>,
     path: ShareOf<PathWorkerRequest>,
     executor: Executor,
+    /// What the decoration worker makes its formula engine with: the desktop engine
+    /// ([`MathEngine::new`], which scans the machine's fonts) in the product, and the faces Folio
+    /// ships with nothing of the machine's (`fixtures::engine_without_the_machine`) in the suite.
+    make_engine: fn() -> MathEngine,
+    /// How many engines this lane's factory has made, for a test to read.
+    #[cfg(test)]
+    engines_made: Arc<std::sync::atomic::AtomicUsize>,
     wake: Arc<dyn Fn() + Send + Sync>,
     sink: Sink,
 }
 
 impl ComputationLane {
     /// **The product's lane**: workers started through the thread door, below normal, by the
-    /// first request each share is asked; the ledgers' lines said in `diagnostics.log`; and the
-    /// sink that ignores what a gone asker is owed.
+    /// first request each share is asked; its formula engine the desktop's ([`MathEngine::new`]);
+    /// the ledgers' lines said in `diagnostics.log`; and the sink that ignores what a gone asker
+    /// is owed.
     pub(crate) fn new(wake: impl Fn() + Send + Sync + 'static) -> Self {
+        Self::making_engines_with(MathEngine::new, wake)
+    }
+
+    /// [`Self::new`], its formula engine made by `make_engine` instead: a headless window's lane
+    /// makes it from the faces Folio ships (T-FORMULA-TESTS-TYPESET-WITHOUT-THE-REAL-FONT-SCAN).
+    pub(crate) fn making_engines_with(
+        make_engine: fn() -> MathEngine,
+        wake: impl Fn() + Send + Sync + 'static,
+    ) -> Self {
         Self::start_with(
             Executor::thread_door(bt_platform::ThreadPriority::BelowNormal),
+            make_engine,
             wake,
             crate::diagnostics::note,
             |_, _| {},
         )
     }
 
-    /// The lane with its workers started by `executor`, waking through `wake`, saying its ledgers'
-    /// lines through `say`, and ending a gone asker's request in `sink`.
+    /// The lane with its workers started by `executor`, its formula engine made by
+    /// `make_engine`, waking through `wake`, saying its ledgers' lines through `say`, and ending a
+    /// gone asker's request in `sink`.
     pub(crate) fn start_with(
         executor: Executor,
+        make_engine: fn() -> MathEngine,
         wake: impl Fn() + Send + Sync + 'static,
         say: impl Fn(&str) + Send + Sync + 'static,
         sink: impl Fn(ComputationId, ComputationTerminal) + Send + Sync + 'static,
@@ -408,9 +428,38 @@ impl ComputationLane {
                 Arc::clone(&wake),
             ),
             executor,
+            make_engine,
+            #[cfg(test)]
+            engines_made: Arc::default(),
             wake,
             sink: Arc::new(sink),
         }
+    }
+
+    /// **What the decoration worker makes its engine factory from**: the lane's `make_engine` (a
+    /// `fn`, copied) and, under test, the lane's count. Taken only when a request starts the
+    /// worker; the factory itself is boxed on the worker's thread ([`EngineMaker::into_factory`]),
+    /// so a request on the window thread allocates nothing for it.
+    fn engine_maker(&self) -> EngineMaker {
+        EngineMaker {
+            make_engine: self.make_engine,
+            #[cfg(test)]
+            engines_made: Arc::clone(&self.engines_made),
+        }
+    }
+
+    /// **The engine this lane's decoration worker would make**, made here, on the caller's thread,
+    /// and counted.
+    #[cfg(test)]
+    pub(crate) fn make_an_engine(&self) -> MathEngine {
+        (self.engine_maker().into_factory())()
+    }
+
+    /// **How many formula engines this lane's factory has made.** Exact once a formula has been
+    /// answered: the arm that answered it waited for the making.
+    #[cfg(test)]
+    pub(crate) fn engines_made(&self) -> usize {
+        self.engines_made.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// **Ask for one formula, decode or glance** (C1): admitted and held for its asker — its
@@ -426,11 +475,12 @@ impl ComputationLane {
     }
 
     /// [`Self::decorate`], the formula share's worker — when this request is the one that starts
-    /// it — answering through the door `make` makes on its thread.
+    /// it — answering through the door `make` makes on its thread, handed the lane's formula
+    /// engine factory.
     pub(crate) fn decorate_through(
         &self,
         request: MathWorkerRequest,
-        make: impl FnOnce(&WorkerCtx) -> Door<MathWorkerRequest> + Send + 'static,
+        make: impl FnOnce(&WorkerCtx, EngineFactory) -> Door<MathWorkerRequest> + Send + 'static,
     ) -> Result<ComputationId, (Refused, MathWorkerRequest)> {
         let owner = request.owner();
         let asked = request.asked();
@@ -450,10 +500,12 @@ impl ComputationLane {
                 // overflow is not a panic and would take the window with it, so the depth that is
                 // refused and the stack it is refused against are chosen together, in `bt-math`,
                 // and this is where the second half of that pair is spent.
+                let maker = self.engine_maker();
                 self.executor
                     .with_stack(bt_math::MATH_WORKER_STACK_BYTES)
                     .start_worker("bt-math-worker", ran, move |ctx| {
-                        ShareOf::serve(&queue, ctx, make(ctx), &*wake);
+                        let make_engine = maker.into_factory();
+                        ShareOf::serve(&queue, ctx, make(ctx, make_engine), &*wake);
                     })
             },
         )
@@ -760,12 +812,14 @@ pub(crate) fn run_path_verify_worker(
 }
 
 /// **The formula and picture worker** (`computation_lane`, `bt-math-worker`): the product's door,
-/// [`run_decoration_worker_with`] with the desktop engine ([`MathEngine::new`]) made beside it —
-/// the production decoration work, also exercised without a window by regression tests.
+/// [`run_decoration_worker_with`] with the engine `make_engine` makes made beside it — the lane's
+/// factory, the desktop engine ([`MathEngine::new`]) in the product — the production decoration
+/// work, also exercised without a window by regression tests.
 pub(crate) fn run_decoration_worker(
     worker: &bt_platform::admission::WorkerCtx,
+    make_engine: EngineFactory,
 ) -> Door<MathWorkerRequest> {
-    run_decoration_worker_with(worker, FormulaEngine::beside(MathEngine::new))
+    run_decoration_worker_with(worker, FormulaEngine::beside(make_engine))
 }
 
 /// **The decoration worker, its formula engine `formulas`**: the decoder is made once, on the
@@ -884,7 +938,29 @@ pub(crate) fn run_decoration_worker_with(
 }
 
 /// The factory a [`FormulaEngine`] makes its engine with.
-type EngineFactory = Box<dyn FnOnce() -> MathEngine + Send>;
+pub(crate) type EngineFactory = Box<dyn FnOnce() -> MathEngine + Send>;
+
+/// **A lane's formula engine maker, on its way to the decoration worker**: the `fn` the lane was
+/// built with ([`MathEngine::new`] in the product) and, under test, the lane's count of engines
+/// made. [`ComputationLane::engine_maker`] takes it when a request starts the worker; the worker
+/// boxes it into its [`EngineFactory`] on its own thread.
+struct EngineMaker {
+    make_engine: fn() -> MathEngine,
+    #[cfg(test)]
+    engines_made: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl EngineMaker {
+    /// **The factory the decoration worker's door is handed**: `make_engine`, counted under test.
+    fn into_factory(self) -> EngineFactory {
+        Box::new(move || {
+            #[cfg(test)]
+            self.engines_made
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            (self.make_engine)()
+        })
+    }
+}
 
 /// **The decoration door's formula engine, made beside the worker.**
 ///
@@ -1044,7 +1120,24 @@ pub(crate) mod fixtures {
         taken: Vec<Ended>,
     }
 
-    /// A lane started by `executor`, watched.
+    /// **The suite's formula engine: the faces Folio ships, and nothing of the machine's**
+    /// (T-FORMULA-TESTS-TYPESET-WITHOUT-THE-REAL-FONT-SCAN).
+    ///
+    /// typst-assets' seventeen faces in that crate's order: the book [`MathEngine::new`] starts
+    /// with, without the scan of every font installed that follows them (bt-math's
+    /// `the_desktop_book_is_the_typst_assets_faces` holds the order, and `with_faces` keeps the
+    /// order it is handed). No lane-suite patience then holds a scan of the machine's font
+    /// folders, and a formula is set the same on every machine. A formula that needs a face the
+    /// machine has and Folio does not ship (an ideograph) is refused by name here, as in a browser
+    /// build; a test about the machine's faces makes `MathEngine::new()` itself, outside any
+    /// patience.
+    pub(crate) fn engine_without_the_machine() -> MathEngine {
+        MathEngine::with_faces(typst_assets::fonts().map(Arc::<[u8]>::from))
+            .expect("typst-assets carries the math face")
+    }
+
+    /// A lane started by `executor`, watched, its formula engine the suite's
+    /// ([`engine_without_the_machine`]).
     pub(crate) fn watched(executor: Executor) -> Watched {
         let (wake, wakes) = lane::wake_channel();
         let said = Arc::new(Mutex::new(Vec::new()));
@@ -1053,6 +1146,7 @@ pub(crate) mod fixtures {
         let sink = Arc::clone(&sunk);
         let lane = Arc::new(ComputationLane::start_with(
             executor,
+            engine_without_the_machine,
             wake,
             move |line| locked(&lines).push(line.to_owned()),
             move |id, terminal| locked(&sink).push((id, terminal)),
@@ -1140,12 +1234,12 @@ pub(crate) mod fixtures {
     }
 
     /// **The product's formula door, telling `heard` whom each request is for** before it runs
-    /// it — for [`ComputationLane::decorate_through`].
+    /// it — for [`ComputationLane::decorate_through`], with the lane's formula engine.
     pub(crate) fn recording(
         heard: mpsc::Sender<crate::ShellAddress>,
-    ) -> impl FnOnce(&WorkerCtx) -> Door<MathWorkerRequest> + Send + 'static {
-        move |ctx| {
-            let mut real = run_decoration_worker(ctx);
+    ) -> impl FnOnce(&WorkerCtx, EngineFactory) -> Door<MathWorkerRequest> + Send + 'static {
+        move |ctx, make_engine| {
+            let mut real = run_decoration_worker(ctx, make_engine);
             Box::new(move |ctx: &WorkerCtx, request: MathWorkerRequest| {
                 let leaf = match &request {
                     MathWorkerRequest::Math { leaf, .. }
@@ -1290,6 +1384,7 @@ pub(crate) mod contract_adapter {
         let sink = Arc::clone(&sunk);
         let lane = ComputationLane::start_with(
             Executor::scripted(Arc::clone(&gate)),
+            super::fixtures::engine_without_the_machine,
             move || heard.woke(),
             move |_| {
                 counted.fetch_add(1, Ordering::SeqCst);
@@ -1336,8 +1431,8 @@ pub(crate) mod contract_adapter {
                             source: bt_term::InlineImageSource::Osc1337(Vec::new()),
                         },
                     };
-                    let door = move |ctx: &WorkerCtx| -> Door<MathWorkerRequest> {
-                        let mut real = run_decoration_worker(ctx);
+                    let door = move |ctx: &WorkerCtx, make_engine| -> Door<MathWorkerRequest> {
+                        let mut real = run_decoration_worker(ctx, make_engine);
                         Box::new(move |ctx: &WorkerCtx, request: MathWorkerRequest| {
                             // The suite's file, held while the real work runs.
                             let held = match &request {
@@ -1819,6 +1914,12 @@ mod tests {
         );
         assert!(render("x+1").is_ok(), "the engine goes on");
         assert_eq!(lane.said(), Vec::<String>::new(), "no failure was said");
+        assert_eq!(
+            lane.lane.engines_made(),
+            1,
+            "the fixture's own precondition: the formula was typeset by an engine the lane's factory \
+             made, from the faces Folio ships, and the machine's fonts were never scanned"
+        );
     }
 
     /// RED (S-8; was the scale worker's drag storm) — **A drag runs the size it ends at; every
@@ -1890,9 +1991,10 @@ mod tests {
         );
     }
 
-    /// A formula door — the product's — whose first terminal formula's work panics.
-    fn formula_fails_once(ctx: &WorkerCtx) -> Door<MathWorkerRequest> {
-        let mut real = run_decoration_worker(ctx);
+    /// A formula door — the product's, with the lane's engine — whose first terminal formula's
+    /// work panics.
+    fn formula_fails_once(ctx: &WorkerCtx, make_engine: EngineFactory) -> Door<MathWorkerRequest> {
+        let mut real = run_decoration_worker(ctx, make_engine);
         let mut failed = false;
         Box::new(move |ctx: &WorkerCtx, request: MathWorkerRequest| {
             if !failed && matches!(request, MathWorkerRequest::Math { .. }) {
@@ -2065,6 +2167,94 @@ mod tests {
             ),
             "the formula asked again is typeset"
         );
+        assert_eq!(
+            lane.lane.engines_made(),
+            1,
+            "the fixture's own precondition: the formula was typeset by an engine the lane's factory \
+             made, from the faces Folio ships, and the machine's fonts were never scanned"
+        );
+    }
+
+    /// PIN (T-FORMULA-TESTS-TYPESET-WITHOUT-THE-REAL-FONT-SCAN) — **a lane the suite builds
+    /// typesets with the faces Folio ships, and scans no font folder of the machine's.**
+    ///
+    /// A terminal formula is typeset through the lane's own door, and the lane's factory has made
+    /// one engine: the one that set it. An ideograph is then refused by name
+    /// (`MathRenderError::MissingCjkGlyph`), because no face Folio ships draws one and the
+    /// engine's book holds none of the machine's; the desktop engine, which scans them, draws it
+    /// on every machine with a CJK face installed. So every formula test on a suite lane pins the
+    /// typesetting, not the fonts this machine, the Mac or a runner has, and no lane-suite
+    /// patience holds a scan of them.
+    ///
+    /// MUTATIONS: hand the door the desktop engine in `ComputationLane::decorate` instead of the
+    /// lane's factory (`Box::new(MathEngine::new)`) — the formula is typeset by an engine the
+    /// lane never made, and the count is 0 (here and in the seven formula tests' preconditions);
+    /// make `fixtures::engine_without_the_machine` answer `MathEngine::new()` — the ideograph is
+    /// drawn.
+    #[test]
+    fn a_suite_lane_typesets_with_the_faces_folio_ships_and_scans_no_font_folder() {
+        let (mut lane, _gate) = gated();
+        let mut session = a_pane_with_a_formula();
+        hand_out(&mut session, &lane.lane);
+        let (_, _, typeset, _) = lane.next_ended(Share::Decoration, nobody);
+        assert!(
+            matches!(
+                answer(typeset).map(|result| result.completion),
+                Some(DecorationWorkerCompletion::Math { result: Ok(_), .. })
+            ),
+            "the formula is typeset"
+        );
+        assert_eq!(
+            lane.lane.engines_made(),
+            1,
+            "the lane's factory made the engine that set it"
+        );
+        let ideograph = lane
+            .lane
+            .decorate(MathWorkerRequest::PreviewMath {
+                leaf: probe_leaf(),
+                key: Box::new(crate::PreviewMathKey {
+                    source: r"\text{中文}".to_owned(),
+                    mode: crate::MathMode::Display,
+                    em_milli_px: 16_000,
+                    foreground_rgb: [220, 220, 220],
+                }),
+            })
+            .ok()
+            .expect("admitted");
+        let refused = answer(lane.terminal(Share::Decoration, ideograph, nobody))
+            .expect("the formula is answered")
+            .completion;
+        assert!(
+            matches!(
+                refused,
+                DecorationWorkerCompletion::PreviewMath {
+                    result: Err(MathRenderError::MissingCjkGlyph),
+                    ..
+                }
+            ),
+            "no face Folio ships draws an ideograph, and the book holds none of the machine's"
+        );
+        assert_eq!(lane.lane.engines_made(), 1, "and the engine is kept");
+    }
+
+    /// PIN (T-FORMULA-TESTS-TYPESET-WITHOUT-THE-REAL-FONT-SCAN) — **the product's lane makes the
+    /// desktop formula engine**, which scans the machine's fonts behind the faces Folio ships: a
+    /// formula with an ideograph in it is drawn in the faces the reader has. The suite's lanes
+    /// make theirs without the machine (`fixtures::engine_without_the_machine`), so this is the
+    /// one place the product's choice is held; bt-math's own tests hold what the scan finds.
+    ///
+    /// MUTATION: build the product lane in `ComputationLane::new` with
+    /// `fixtures::engine_without_the_machine`'s faces — the source reads no `MathEngine::new`.
+    #[test]
+    fn the_product_lane_makes_the_desktop_formula_engine() {
+        let lane = crate::test_support::squeezed_body("ComputationLane", "new");
+        assert_eq!(
+            lane.matches("Self::making_engines_with(MathEngine::new,wake)")
+                .count(),
+            1,
+            "the product's lane hands its decoration worker the desktop engine:\n{lane}"
+        );
     }
 
     /// RED (T-LANE-SUITE-PATIENCE-UNDER-LOAD) — **the decoration worker answers every picture arm
@@ -2101,7 +2291,7 @@ mod tests {
                     leaf: probe_leaf(),
                     path: missing("先答图片 picture first.png"),
                 },
-                move |ctx: &WorkerCtx| {
+                move |ctx: &WorkerCtx, _lanes: EngineFactory| {
                     let formulas = FormulaEngine::beside(move || {
                         // Let go by the test's send, or by its end on a red.
                         let _ = held.recv();
@@ -2267,7 +2457,7 @@ mod tests {
                     leaf: probe_leaf(),
                     path: PathBuf::from("不在这里 not here/字体坏了 a bad font.png"),
                 },
-                move |ctx: &WorkerCtx| {
+                move |ctx: &WorkerCtx, _lanes: EngineFactory| {
                     let formulas = FormulaEngine::beside(|| -> MathEngine {
                         panic!("a font file the scan could not read (planted by the test)")
                     });
@@ -2393,7 +2583,7 @@ mod tests {
                     leaf: probe_leaf(),
                     path: path.clone(),
                 },
-                |ctx: &WorkerCtx| -> Door<MathWorkerRequest> {
+                |ctx: &WorkerCtx, _lanes: EngineFactory| -> Door<MathWorkerRequest> {
                     let _ = ctx;
                     Box::new(|_: &WorkerCtx, _: MathWorkerRequest| -> MathWorkerResult {
                         panic!("the suite fails this glance's decode on purpose")
