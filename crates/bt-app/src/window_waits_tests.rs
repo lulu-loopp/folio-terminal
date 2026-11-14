@@ -7290,9 +7290,12 @@ fn every_door_is_where_the_registry_says() {
 // What it cannot read is listed, not passed over: a method call whose name and argument count are a
 // vocabulary entry's (`METHOD_ARITIES`) on an untyped receiver, or on one that is not one chain, is a
 // row of `docs/plans/WINDOW-WAITS-UNREAD-RECEIVERS.tsv` (`Reader::read`, `UnreadCall`), which grows
-// only with a dated reason, until A2e's lint closes the gap. `write!`/`writeln!` are
-// `std::io::Write::write_fmt` when their first argument is an `io` writer by the same reading, and
-// a row of that list when it has no type.
+// only with a dated reason, until A2e's lint closes the gap. A `.poll(` is held further
+// (`ACCOUNTED_RECEIVERS`, 0.4.10 plan row 11): one whose receiver's types hold neither
+// `wgpu::Device` nor a first-party type declaring its own `poll` is a row of that list too, for a
+// receiver typed as the wrong value is read as no site as silently as an untyped one.
+// `write!`/`writeln!` are `std::io::Write::write_fmt` when their first argument is an `io` writer
+// by the same reading, and a row of that list when it has no type.
 //
 // The few standard-library signatures the vocabulary's receivers are made through are written out
 // below (`FOREIGN_FUNCTIONS`, `FOREIGN_METHODS`, `BUILDERS`, `PASSING_THROUGH`, `WRAPPERS`,
@@ -9411,6 +9414,18 @@ fn method_arity(path: &str) -> Option<usize> {
         .and_then(|(_, arity)| *arity)
 }
 
+/// **The method-shaped vocabulary entries whose call must be accounted for by its receiver's types**
+/// (T-WGPU-DEVICE-POLL-WAIT-IN-NEITHER-LIST, 0.4.10 plan row 11, ruling R4 and review N1). A
+/// receiver the reading types is not always typed right: a closure parameter handed to a
+/// first-party method is given that method's receiver's types, and a field whose declared type is
+/// its struct's generic parameter the struct's. A call of such an entry is read only when its
+/// receiver's types hold the entry's type (a site) or a first-party type that declares a method of
+/// the call's name (`HangWatch::poll`); any other is an [`UnreadCall`] ([`Reader::unaccounted`]),
+/// as an untyped receiver is. `poll` is the vocabulary method name a first-party type shares in the
+/// product, so `wgpu::Device::poll` is told only by its receiver. The same check for every method
+/// entry is plan row 93's cross-check of a receiver typed wrong.
+const ACCOUNTED_RECEIVERS: [&str; 1] = ["wgpu::Device::poll"];
+
 /// One site: its package, its offset, its entry.
 struct BareSite {
     at: usize,
@@ -9504,6 +9519,36 @@ impl Reader<'_> {
             .map(|(index, _)| index)
             .collect();
         (found, used)
+    }
+
+    /// The [`ACCOUNTED_RECEIVERS`] entries the method call `toks[name]`, on a receiver of the types
+    /// `receiver` (not empty), could be while those types account for neither the entry nor the
+    /// call: the call's name and argument count are the entry's ([`METHOD_ARITIES`]), no type in
+    /// the set is the entry's, and no first-party type in it declares a method of that name.
+    fn unaccounted(&self, s: &Src, toks: &[Tok], name: usize, receiver: &Ty) -> Vec<usize> {
+        let text = s.text(toks[name]);
+        let written = arguments_written(s, toks, name);
+        let its_own = receiver.iter().any(|ty| {
+            self.first_party(ty).is_some_and(|(package, type_name)| {
+                !self.callables(package, Some(type_name), text).is_empty()
+            })
+        });
+        if written.is_none() || its_own {
+            return Vec::new();
+        }
+        self.entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| {
+                ACCOUNTED_RECEIVERS.contains(&entry.path.as_str())
+                    && entry
+                        .method
+                        .as_ref()
+                        .is_some_and(|(ty, method)| method == text && !receiver.contains(ty))
+                    && method_arity(&entry.path) == written
+            })
+            .map(|(at, _)| at)
+            .collect()
     }
 
     /// Every site in one package's product files, with the callable each stands in, and every call
@@ -9684,6 +9729,15 @@ impl Reader<'_> {
                                 })
                                 .map(|(at, _)| at)
                                 .collect();
+                            if !entries.is_empty() {
+                                unread.push(UnreadCall {
+                                    at: tok.start,
+                                    owner: record,
+                                    entries,
+                                });
+                            }
+                        } else {
+                            let entries = self.unaccounted(s, &toks, index, &receiver);
                             if !entries.is_empty() {
                                 unread.push(UnreadCall {
                                     at: tok.start,
@@ -11134,13 +11188,21 @@ fn a_wait_neither_list_named_is_a_bare_site_whatever_its_flag() {
 /// A planted crate with a `wgpu::Device::poll` written on every receiver shape the inventory
 /// types: a field of a parameter (once with `PollType::Poll`, once with a handed poll type), a
 /// parameter (`PollType::Wait`), a parameter whose type an import names, a first-party function's
-/// declared return, and a field holding the device in an `Arc`; and two that it does not count:
-/// `its_own_poll`, a first-party `Watch::poll` on a receiver typed `Watch` (`HangWatch::poll`'s
-/// shape, the control), and `untyped`, a `.poll(` on a binding a foreign call made, which no type
-/// on its road names.
+/// declared return, a field holding the device in an `Arc`, and a name a `match` arm binds to a
+/// first-party variant's member (row 19's reading); `its_own_poll`, a first-party `Watch::poll` on
+/// a receiver typed `Watch` (`HangWatch::poll`'s shape, the control); and three it cannot read:
+/// `untyped`, a `.poll(` on a binding a foreign call made, which no type on its road names;
+/// `through_a_closure`, on a closure parameter handed to a first-party method, which the reading
+/// types as that method's receiver (`Gpu`); and `through_a_generic_field`, on a field whose
+/// declared type is its struct's generic parameter.
 const PLANTED_DEVICE_POLL: &str = "
 use wgpu::Device;
 pub struct Gpu { device: wgpu::Device, shared: std::sync::Arc<wgpu::Device> }
+impl Gpu {
+pub fn with_device(&self, f: impl FnOnce(&wgpu::Device)) { f(&self.device) }
+}
+pub struct Holder<D> { device: D }
+pub enum State { Ready(wgpu::Device), Lost }
 pub struct Watch;
 impl Watch {
 pub fn new() -> Self { Watch }
@@ -11163,6 +11225,14 @@ let _ = device_of(gpu).poll(p);
 pub fn through_a_wrapper(gpu: &Gpu, p: wgpu::PollType) {
 let _ = gpu.shared.poll(p);
 }
+pub fn through_a_match(state: &State, p: wgpu::PollType) {
+match state {
+State::Ready(device) => {
+let _ = device.poll(p);
+}
+State::Lost => {}
+}
+}
 pub fn its_own_poll() {
 let mut watch = Watch::new();
 watch.poll(1);
@@ -11171,20 +11241,34 @@ pub fn untyped(p: wgpu::PollType) {
 let device = foreign::make();
 let _ = device.poll(p);
 }
+pub fn through_a_closure(gpu: &Gpu, p: wgpu::PollType) {
+gpu.with_device(|d| {
+let _ = d.poll(p);
+});
+}
+pub fn through_a_generic_field(holder: &Holder<wgpu::Device>, p: wgpu::PollType) {
+let _ = holder.device.poll(p);
+}
 ";
 
 /// RED (T-WGPU-DEVICE-POLL-WAIT-IN-NEITHER-LIST, 0.4.10 plan row 11) — **`wgpu::Device::poll` is a
 /// bare site on every receiver the inventory types as a `wgpu::Device`, whatever the poll type
-/// (ruling R2), and on no other**: a first-party `poll` on a receiver typed as its own type is no
-/// site (`HangWatch::poll`'s shape), and a `.poll(` on a receiver no type names is no site either,
-/// but it is an unread call (row 19's reading, ruling R4) — never dropped without a word.
+/// (ruling R2), and on no other; a `.poll(` whose receiver's types account for neither the entry
+/// nor the call is an unread call, never dropped without a word** (ruling R4, review N1): a
+/// first-party `poll` on a receiver typed as its own type is no site and no unread call
+/// (`HangWatch::poll`'s shape); a `.poll(` on a receiver with no type is unread (row 19's reading),
+/// and so is one on a receiver typed as a value that is not the device ([`ACCOUNTED_RECEIVERS`]).
 ///
 /// Against the planted crate ([`PLANTED_DEVICE_POLL`]): `through_a_field` holds two sites, each
-/// other `through_…` one; `its_own_poll` and `untyped` hold none; `untyped` is the one unread call.
+/// other `through_…` that the reading types one, `through_a_match` among them; `its_own_poll`
+/// holds none and is not unread; `untyped`, `through_a_closure` and `through_a_generic_field` hold
+/// no site and are one unread call each, of `wgpu::Device::poll`.
 ///
 /// MUTATION: delete the registry's `wgpu::Device::poll` line and every planted site leaves the
-/// inventory; match a method entry by its name alone (`|| name == "poll"` beside
-/// `receiver.contains(ty)` in [`Reader::read`]'s site loop) and `its_own_poll` holds a site.
+/// inventory; match a method entry by its name alone (`receiver.contains(ty)` in [`Reader::read`]'s
+/// site loop, or `|| name == "poll"` beside it) and `its_own_poll` holds a site; read the receiver
+/// as accounted for whatever its types ([`Reader::unaccounted`] answering nothing) and
+/// `through_a_closure` and `through_a_generic_field` are unread no more.
 #[test]
 fn a_gpu_wait_is_a_site_only_on_a_receiver_typed_wgpu_device() {
     let world = planted_world("ww-device-poll", PLANTED_DEVICE_POLL);
@@ -11201,13 +11285,14 @@ fn a_gpu_wait_is_a_site_only_on_a_receiver_typed_wgpu_device() {
         (("crate::through_an_import", poll), 1),
         (("crate::through_a_return", poll), 1),
         (("crate::through_a_wrapper", poll), 1),
+        (("crate::through_a_match", poll), 1),
     ]
     .into_iter()
     .collect();
     assert_eq!(
         mine, wanted,
-        "the planted GPU waits are not the bare sites they are (and `its_own_poll` and `untyped` \
-         hold none)"
+        "the planted GPU waits are not the bare sites they are (and `its_own_poll`, `untyped`, \
+         `through_a_closure` and `through_a_generic_field` hold none)"
     );
     let observed = unread_calls_observed(&world);
     let unread: BTreeMap<(&str, &str), usize> = observed
@@ -11215,10 +11300,17 @@ fn a_gpu_wait_is_a_site_only_on_a_receiver_typed_wgpu_device() {
         .filter(|((package, _, _, _), _)| package == "planted")
         .map(|((_, _, item, entries), count)| ((item.as_str(), entries.as_str()), *count))
         .collect();
+    let wanted: BTreeMap<(&str, &str), usize> = [
+        (("crate::untyped", poll), 1),
+        (("crate::through_a_closure", poll), 1),
+        (("crate::through_a_generic_field", poll), 1),
+    ]
+    .into_iter()
+    .collect();
     assert_eq!(
-        unread,
-        BTreeMap::from([(("crate::untyped", poll), 1)]),
-        "the planted `.poll(` on an untyped receiver is the one unread call"
+        unread, wanted,
+        "the planted `.poll(` calls the reading cannot account for are not the unread calls they \
+         are (and `its_own_poll` is read)"
     );
 }
 
